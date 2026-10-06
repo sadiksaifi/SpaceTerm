@@ -18,7 +18,7 @@ fn density_preview_should_reposition_open_workspace_and_settings_traffic_lights(
     let mut wiring = parts(Rc::default(), Rc::default());
     wiring.window_frame = geometry;
     let host = HostComposition::new(wiring).unwrap().with_appearance(
-        Arc::new(EmptySettingsStorage),
+        Arc::new(crate::settings::storage::testing::MemoryStorage::default()),
         Rc::new(crate::platform::appearance::testing::RecordingAppearancePlatform::default()),
     );
     let workspace = cx.update(|cx| start_application(cx, &host).unwrap());

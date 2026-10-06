@@ -111,7 +111,7 @@ impl<A: SshProcessAdapter> StartupDependencies<A> {
 
     pub(crate) fn remote_backend_factory(
         &self,
-        askpass: Arc<dyn crate::platform::askpass::AskPassWindowFactory>,
+        askpass: Arc<dyn crate::ssh::askpass::AskPassWindowFactory>,
     ) -> Arc<dyn crate::ui::remote_workspace_flow::RemoteWorkspaceFlowBackendFactory> {
         Arc::new(NativeRemoteWorkspaceFlowBackendFactory::new(
             RemoteWorkspaceSshRuntime {
@@ -1472,38 +1472,12 @@ mod runtime_tests {
         );
     }
 
-    /// Settings storage for composition tests: nothing is retained and nothing is written.
-    struct EmptySettingsStorage;
-
-    impl crate::settings::storage::SettingsStorage for EmptySettingsStorage {
-        fn quarantine(&self) -> Result<(), crate::settings::storage::StorageError> {
-            Err(crate::settings::storage::StorageError::Unavailable)
-        }
-        fn read(
-            &self,
-        ) -> Result<
-            Option<crate::platform::secure_filesystem::PrivateFileSnapshot>,
-            crate::settings::storage::StorageError,
-        > {
-            Ok(None)
-        }
-
-        fn write(
-            &self,
-            _: &[u8],
-            _: Option<&crate::platform::secure_filesystem::SecureEntryIdentity>,
-        ) -> Result<crate::settings::storage::StorageCommit, crate::settings::storage::StorageError>
-        {
-            Err(crate::settings::storage::StorageError::Unavailable)
-        }
-    }
-
     fn host_with_settings() -> Rc<HostComposition> {
         Rc::new(
             HostComposition::new(parts(Rc::default(), Rc::default()))
                 .unwrap()
                 .with_appearance(
-                    Arc::new(EmptySettingsStorage),
+                    Arc::new(crate::settings::storage::testing::MemoryStorage::default()),
                     Rc::new(
                         crate::platform::appearance::testing::RecordingAppearancePlatform::default(
                         ),
@@ -1513,7 +1487,7 @@ mod runtime_tests {
     }
 
     fn host_with_storage(
-        storage: Arc<crate::ui::settings_window::test_support::MemoryStorage>,
+        storage: Arc<crate::settings::storage::testing::MemoryStorage>,
     ) -> HostComposition {
         HostComposition::new(parts(Rc::default(), Rc::default()))
             .unwrap()
@@ -1552,7 +1526,7 @@ mod runtime_tests {
 
     #[gpui::test]
     fn launch_offers_settings_recovery_once_for_malformed_settings(cx: &mut gpui::TestAppContext) {
-        let storage = Arc::new(crate::ui::settings_window::test_support::MemoryStorage::default());
+        let storage = Arc::new(crate::settings::storage::testing::MemoryStorage::default());
         storage.corrupt();
         let host = host_with_storage(storage.clone());
         let workspace = cx.update(|cx| start_application(cx, &host).unwrap());
@@ -1565,7 +1539,7 @@ mod runtime_tests {
         assert!(!cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
         assert_eq!(
             storage.backup().as_deref(),
-            Some(crate::ui::settings_window::test_support::CORRUPT_DOCUMENT)
+            Some(crate::settings::storage::testing::CORRUPT_DOCUMENT)
         );
         assert!(storage.document().is_some());
         let status = cx.update(|_, cx| {
@@ -1585,7 +1559,7 @@ mod runtime_tests {
     #[gpui::test]
     fn settings_recovery_can_be_declined_without_changing_the_file(cx: &mut gpui::TestAppContext) {
         use crate::settings::storage::SettingsStorage as _;
-        let storage = Arc::new(crate::ui::settings_window::test_support::MemoryStorage::default());
+        let storage = Arc::new(crate::settings::storage::testing::MemoryStorage::default());
         storage.corrupt();
         let host = host_with_storage(storage.clone());
         let workspace = cx.update(|cx| start_application(cx, &host).unwrap());
@@ -1598,7 +1572,7 @@ mod runtime_tests {
         assert_eq!(storage.backup(), None);
         assert_eq!(
             storage.read().unwrap().unwrap().bytes,
-            crate::ui::settings_window::test_support::CORRUPT_DOCUMENT
+            crate::settings::storage::testing::CORRUPT_DOCUMENT
         );
         assert_eq!(storage.writes(), 0);
         let status = cx.update(|_, cx| {
@@ -1614,7 +1588,7 @@ mod runtime_tests {
     fn launch_does_not_offer_recovery_for_settings_it_cannot_safely_replace(
         cx: &mut gpui::TestAppContext,
     ) {
-        let storage = Arc::new(crate::ui::settings_window::test_support::MemoryStorage::default());
+        let storage = Arc::new(crate::settings::storage::testing::MemoryStorage::default());
         storage.fail_reads(Some(crate::settings::storage::StorageError::Unsafe));
         let host = host_with_storage(storage);
         let workspace = cx.update(|cx| start_application(cx, &host).unwrap());
@@ -1829,7 +1803,7 @@ mod runtime_tests {
         let mut wiring = parts(Rc::default(), Rc::default());
         wiring.window_frame = geometry;
         let host = HostComposition::new(wiring).unwrap().with_appearance(
-            Arc::new(EmptySettingsStorage),
+            Arc::new(crate::settings::storage::testing::MemoryStorage::default()),
             Rc::new(crate::platform::appearance::testing::RecordingAppearancePlatform::default()),
         );
         let workspace = cx.update(|cx| start_application(cx, &host).unwrap());
@@ -2252,7 +2226,7 @@ mod runtime_tests {
     fn application_quit_revalidates_equal_count_window_replacement_after_settings_save(
         cx: &mut gpui::TestAppContext,
     ) {
-        use crate::ui::settings_window::test_support::MemoryStorage;
+        use crate::settings::storage::testing::MemoryStorage;
 
         let storage = MemoryStorage::with_document(&crate::settings::SettingsDocument::default());
         let application_quit = Rc::new(

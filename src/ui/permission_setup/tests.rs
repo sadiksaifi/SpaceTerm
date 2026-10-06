@@ -23,8 +23,8 @@ use crate::platform::permission_access::{
 use crate::platform::setup_guide_host::testing::ScriptedSetupGuideHost;
 use crate::platform::setup_guide_host::{SetupGuideHost as _, SystemSettingsWindow};
 use crate::settings::SettingsDocument;
+use crate::settings::storage::testing::MemoryStorage;
 use crate::ui::appearance_runtime;
-use crate::ui::settings_window::test_support::MemoryStorage;
 
 use PermissionAuthorization::{Granted, NotGranted};
 use SystemPermission::{Accessibility, ScreenRecording};

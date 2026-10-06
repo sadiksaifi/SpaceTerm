@@ -11,9 +11,9 @@ use crate::settings::SettingsDocument;
 use crate::ui::appearance_runtime;
 use crate::updates::policy::{CheckInterval, ReminderInterval, UpdatePreferences};
 
-use super::test_support::MemoryStorage;
 use super::updates::{CHECK_NOW_SELECTOR, DOWNLOAD_SELECTOR, RESTART_SELECTOR};
 use super::{SettingsSectionId, SettingsWindow};
+use crate::settings::storage::testing::MemoryStorage;
 
 fn open_updates(cx: &mut TestAppContext) -> (Entity<SettingsWindow>, &mut VisualTestContext) {
     let settings =

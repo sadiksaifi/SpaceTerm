@@ -239,18 +239,20 @@ mod tests {
 
     use super::*;
     use crate::settings::storage::StorageError;
-    use crate::ui::settings_window::test_support::MemoryStorage;
+    use crate::settings::storage::testing::MemoryStorage;
 
     fn preview() -> AppearancePreview {
         AppearancePreview::new(
-            Settings::load(Arc::new(super::super::tests::ReadOnlyStorage)),
+            Settings::load(Arc::new(MemoryStorage::default())),
             "Fixture Mono".into(),
         )
     }
 
     #[test]
     fn edits_open_one_preview_and_cancel_restores_the_saved_document() {
-        let mut preview = preview();
+        let storage = Arc::new(MemoryStorage::default());
+        let mut preview =
+            AppearancePreview::new(Settings::load(storage.clone()), "Fixture Mono".into());
         let saved = preview.document();
         assert!(!preview.is_open());
 
@@ -266,6 +268,7 @@ mod tests {
         preview.cancel().unwrap();
         assert!(!preview.is_open());
         assert_eq!(preview.document(), saved);
+        assert_eq!(storage.writes(), 0);
     }
 
     #[test]
@@ -378,7 +381,7 @@ mod tests {
 
     #[test]
     fn dropping_the_preview_releases_the_settings_document() {
-        let settings = Settings::load(Arc::new(super::super::tests::ReadOnlyStorage));
+        let settings = Settings::load(Arc::new(MemoryStorage::default()));
         let mut preview = AppearancePreview::new(settings.clone(), "Fixture Mono".into());
         preview.set_blur(false).unwrap();
         drop(preview);

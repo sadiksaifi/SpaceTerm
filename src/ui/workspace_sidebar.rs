@@ -27,7 +27,7 @@ use spaceterm_ui::{
     TextInputEvent, TextInputVariant, Tooltip, TooltipTargetVisibility, dismiss_active_menu,
 };
 
-const CHROME_DIVIDER_SIZE: f32 = super::resize_handle_theme::VISIBLE_THICKNESS;
+const CHROME_DIVIDER_SIZE: f32 = super::control_theme::resize_handle::VISIBLE_THICKNESS;
 const SIDEBAR_FOOTER_HORIZONTAL_PADDING: f32 = 4.0;
 
 #[derive(Clone)]

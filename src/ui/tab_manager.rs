@@ -1928,7 +1928,7 @@ impl TabManager {
         ))
         .status(self.window_drag_status.clone())
         .pointer_insets(Edges {
-            left: super::resize_handle_theme::spacious_target_half_thickness(cx),
+            left: super::control_theme::resize_handle::spacious_target_half_thickness(cx),
             ..Edges::default()
         })
         .debug_selector("tab-bar-drag-region")

@@ -8,33 +8,7 @@ use crate::platform::appearance::AppearancePlatform as _;
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
 use crate::settings::Settings;
-
-/// Storage with no settings file that fails every write, so a test proves a preview never saves.
-pub(super) struct ReadOnlyStorage;
-
-impl crate::settings::storage::SettingsStorage for ReadOnlyStorage {
-    fn quarantine(&self) -> Result<(), crate::settings::storage::StorageError> {
-        Err(crate::settings::storage::StorageError::Unavailable)
-    }
-
-    fn read(
-        &self,
-    ) -> Result<
-        Option<crate::platform::secure_filesystem::PrivateFileSnapshot>,
-        crate::settings::storage::StorageError,
-    > {
-        Ok(None)
-    }
-
-    fn write(
-        &self,
-        _: &[u8],
-        _: Option<&crate::platform::secure_filesystem::SecureEntryIdentity>,
-    ) -> Result<crate::settings::storage::StorageCommit, crate::settings::storage::StorageError>
-    {
-        panic!("a Developer Workbench preview must not write")
-    }
-}
+use crate::settings::storage::testing::MemoryStorage;
 
 #[derive(Default)]
 struct RecordingMovement(Rc<RecordingOperatingSystemWindowDragPlatform>);
@@ -45,9 +19,10 @@ impl WindowMovementFactory for RecordingMovement {
     }
 }
 
-/// Installs appearance over read-only settings, with the system in Dark.
-fn install(cx: &mut TestAppContext) -> (Settings, RecordingAppearancePlatform) {
-    let settings = Settings::load(Arc::new(ReadOnlyStorage));
+/// Installs appearance over empty settings, with the system in Dark.
+fn install(cx: &mut TestAppContext) -> (Settings, RecordingAppearancePlatform, Arc<MemoryStorage>) {
+    let storage = Arc::new(MemoryStorage::default());
+    let settings = Settings::load(storage.clone());
     let platform = RecordingAppearancePlatform::default();
     platform.set_system_appearance(Some(Appearance::Dark));
     platform.set_native_window_transparency_supported(true);
@@ -55,7 +30,7 @@ fn install(cx: &mut TestAppContext) -> (Settings, RecordingAppearancePlatform) {
         appearance_runtime::install(settings.clone(), Rc::new(platform.clone()), cx).unwrap();
         crate::ui::init(cx).unwrap();
     });
-    (settings, platform)
+    (settings, platform, storage)
 }
 
 fn open_workbench_window(
@@ -84,7 +59,7 @@ fn status(workbench: &Entity<DeveloperWorkbench>, cx: &mut VisualTestContext) ->
 
 #[gpui::test]
 fn unavailable_window_effects_show_defaults_and_refuse_preview_edits(cx: &mut TestAppContext) {
-    let (_, platform) = install(cx);
+    let (_, platform, _) = install(cx);
     let (workbench, cx) = open_workbench_window(cx);
     workbench.update(cx, |workbench, cx| {
         workbench.apply(
@@ -116,7 +91,7 @@ fn unavailable_window_effects_show_defaults_and_refuse_preview_edits(cx: &mut Te
             cx.update(|window, cx| {
                 let surface = crate::ui::appearance::settings::shared(cx);
                 let appearance = &surface.chrome;
-                let theme = crate::ui::segmented_control_theme::prepared(
+                let theme = crate::ui::control_theme::segmented_control::prepared(
                     &appearance.card_controls.segmented,
                     &appearance.typography,
                     appearance.capabilities.show_borders,
@@ -250,7 +225,7 @@ fn sections_present_their_own_fixtures(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn diagnostics_repaint_for_shared_system_changes(cx: &mut TestAppContext) {
-    let (settings, platform) = install(cx);
+    let (settings, platform, _) = install(cx);
     let (_, cx) = open_workbench_window(cx);
     assert!(
         cx.debug_bounds("workbench-diagnostics-generation-0")
@@ -283,7 +258,7 @@ fn diagnostics_repaint_for_shared_system_changes(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn toolbar_mode_previews_without_saving_and_cancel_restores(cx: &mut TestAppContext) {
-    let (settings, _) = install(cx);
+    let (settings, _, storage) = install(cx);
     let (workbench, cx) = open_workbench_window(cx);
     let saved = settings.snapshot().committed.clone();
 
@@ -308,6 +283,7 @@ fn toolbar_mode_previews_without_saving_and_cancel_restores(cx: &mut TestAppCont
         );
     });
     assert_eq!(status(&workbench, cx), "Preview cancelled.");
+    assert_eq!(storage.writes(), 0);
 }
 
 fn open_framed_workbench(
@@ -414,7 +390,7 @@ fn toolbar_and_window_controls_keep_separate_space_at_every_density(cx: &mut Tes
 
 #[gpui::test]
 fn simulations_apply_and_system_settings_ends_them(cx: &mut TestAppContext) {
-    let (_, platform) = install(cx);
+    let (_, platform, _) = install(cx);
     let (workbench, cx) = open_workbench_window(cx);
     let reduce_transparency = |cx: &mut VisualTestContext| {
         cx.update(|_, cx| {
@@ -494,7 +470,7 @@ fn differentiate_without_color_renders_two_status_cues_and_the_failed_glyph(
 
 #[gpui::test]
 fn closing_the_workbench_ends_its_preview_simulations_and_fixtures(cx: &mut TestAppContext) {
-    let (settings, _) = install(cx);
+    let (settings, _, _) = install(cx);
     let window = cx.add_window(DeveloperWorkbench::new);
     window
         .update(cx, |workbench, _, cx| {
@@ -534,7 +510,7 @@ fn closing_the_workbench_ends_its_preview_simulations_and_fixtures(cx: &mut Test
 fn clicking_client_close_ends_the_workbench_preview_simulations_and_fixtures(
     cx: &mut TestAppContext,
 ) {
-    let (settings, _) = install(cx);
+    let (settings, _, _) = install(cx);
     let movement = Rc::new(RecordingOperatingSystemWindowDragPlatform::default());
     let window = open_framed_workbench(movement.clone(), cx);
     window
@@ -747,7 +723,7 @@ fn cie_lightness(color: crate::appearance::Color) -> f64 {
 fn inactive_window_simulation_selects_inactive_control_states_without_editing_preferences(
     cx: &mut TestAppContext,
 ) {
-    let (settings, _) = install(cx);
+    let (settings, _, _) = install(cx);
     let (workbench, cx) = open_workbench_window(cx);
     click("workbench-navigation-workbench-section-controls", cx);
     let preferences = settings.snapshot().candidate.appearance.clone();

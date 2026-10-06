@@ -16,11 +16,11 @@ use super::remote_workspace_flow::{
 use super::ssh_host_form::ManagedHostFormBackendError;
 use crate::domain::{RemoteDirectory, RemoteDirectoryIdentity, SshDestination};
 use crate::platform::app_paths::AppPaths;
-use crate::platform::askpass::{
-    AskPassAttemptFactory, AskPassAttemptObservation, AskPassBrokerLease, AskPassWindowFactory,
-};
 use crate::platform::control_socket::ControlSocketProbe;
 use crate::ssh::alias_usage::{ActiveSshAliasLease, ActiveSshAliasRegistry};
+use crate::ssh::askpass::{
+    AskPassAttemptFactory, AskPassAttemptObservation, AskPassBrokerLease, AskPassWindowFactory,
+};
 use crate::ssh::cancellation::SshCancellationToken;
 use crate::ssh::command::{
     OpenSshExecutable, RemotePaneShellCommandBuilder, SshCapability, ValidatedRemoteLoginShell,
@@ -913,9 +913,9 @@ mod tests {
             &self,
             _: &Window,
             _: &mut App,
-        ) -> Result<Arc<dyn AskPassAttemptFactory>, crate::platform::askpass::AskPassUnavailable>
+        ) -> Result<Arc<dyn AskPassAttemptFactory>, crate::ssh::askpass::AskPassUnavailable>
         {
-            Err(crate::platform::askpass::AskPassUnavailable)
+            Err(crate::ssh::askpass::AskPassUnavailable)
         }
     }
 

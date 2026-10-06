@@ -5,7 +5,7 @@ use spaceterm_ui::{ResizeHandleMetrics, ResizeHandlePaint, ResizeHandleTarget, R
 use crate::appearance::ChromeColors;
 use crate::ui::chrome_geometry::HAIRLINE;
 
-pub(super) const VISIBLE_THICKNESS: f32 = HAIRLINE;
+pub(in crate::ui) const VISIBLE_THICKNESS: f32 = HAIRLINE;
 
 pub(super) fn theme(colors: &ChromeColors) -> ResizeHandleTheme {
     ResizeHandleTheme::new(
@@ -20,7 +20,7 @@ pub(super) fn theme(colors: &ChromeColors) -> ResizeHandleTheme {
     )
 }
 
-pub(super) fn spacious_target_half_thickness(cx: &gpui::App) -> Pixels {
+pub(in crate::ui) fn spacious_target_half_thickness(cx: &gpui::App) -> Pixels {
     let thickness = cx
         .global::<ResizeHandleTheme>()
         .pointer_target_thickness(ResizeHandleTarget::Spacious);

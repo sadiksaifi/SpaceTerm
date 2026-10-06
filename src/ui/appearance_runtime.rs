@@ -216,19 +216,19 @@ pub(crate) fn refresh(cx: &mut App) -> Result<(), SettingsError> {
         let (settings_prepared, settings_inactive) =
             settings::prepare_variants(&resolved.chrome, prepared.clone(), inactive.clone());
         let controls = Box::new(
-            super::control_theme_catalog::catalog(&prepared, control_motion)
+            super::control_theme::catalog(&prepared, control_motion)
                 .generation(spaceterm_ui::ControlThemeGeneration::new(generation.get())),
         );
         let inactive_controls = Box::new(
-            super::control_theme_catalog::catalog(&inactive, control_motion)
+            super::control_theme::catalog(&inactive, control_motion)
                 .generation(spaceterm_ui::ControlThemeGeneration::new(generation.get())),
         );
         let settings_controls = Box::new(
-            super::control_theme_catalog::catalog(&settings_prepared.chrome, control_motion)
+            super::control_theme::catalog(&settings_prepared.chrome, control_motion)
                 .generation(spaceterm_ui::ControlThemeGeneration::new(generation.get())),
         );
         let settings_inactive_controls = Box::new(
-            super::control_theme_catalog::catalog(&settings_inactive.chrome, control_motion)
+            super::control_theme::catalog(&settings_inactive.chrome, control_motion)
                 .generation(spaceterm_ui::ControlThemeGeneration::new(generation.get())),
         );
         if cx.has_global::<InstalledAppearance>() {

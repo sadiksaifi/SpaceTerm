@@ -13,7 +13,7 @@ use thiserror::Error;
 use super::cancellation::SshCancellationToken;
 use super::command::SshCommandSpec;
 use super::startup_environment::StartupSshEnvironment;
-use crate::platform::askpass::{AskPassBrokerLease, AskPassCapabilityCopy};
+use crate::ssh::askpass::{AskPassBrokerLease, AskPassCapabilityCopy};
 
 pub(crate) const MAXIMUM_TRANSIENT_SSH_ERROR_BYTES: usize = 8 * 1024;
 const TRANSIENT_SSH_ERROR_TRUNCATION_MARKER: &str = "[earlier OpenSSH output truncated] ";
@@ -1269,7 +1269,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use crate::platform::askpass::AskPassLease;
+    use crate::ssh::askpass::AskPassLease;
     use crate::ssh::command::SshCommandSpec;
     use zeroize::Zeroizing;
 

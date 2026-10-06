@@ -22,8 +22,8 @@ use crate::ui::appearance_runtime;
 use super::super::permission_access::{
     ACCESSIBILITY, PermissionAccessAction, PermissionAccessStatus, RecoveryNotice, SCREEN_RECORDING,
 };
-use super::super::test_support::MemoryStorage;
 use super::super::{PermissionCapabilities, SettingsRowId, SettingsSectionId, SettingsWindow};
+use crate::settings::storage::testing::MemoryStorage;
 
 use PermissionAuthorization::{Granted, NotGranted};
 use SystemPermission::{Accessibility, ScreenRecording};

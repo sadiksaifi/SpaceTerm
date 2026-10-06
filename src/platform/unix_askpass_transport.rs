@@ -4,16 +4,16 @@ use super::app_paths::{
     ASKPASS_RUNTIME_OWNER_KIND, ASKPASS_RUNTIME_SOCKET_NAME, AppPaths, RegisteredRuntimeSocket,
     RuntimeOwner,
 };
-use super::askpass::{
+#[cfg(target_os = "linux")]
+use super::linux_peer_credentials as peer_credentials;
+#[cfg(target_os = "macos")]
+use super::macos_peer_credentials as peer_credentials;
+use crate::ssh::askpass::{
     AskPassHelperConnector, AskPassLocalAccept, AskPassLocalIpc, AskPassLocalListener,
     AskPassUnavailable, BROKER_CANCELLATION_POLL_INTERVAL, BoundAskPassEndpoint,
     GpuiAskPassBrokerFactory as PortableAskPassBrokerFactory,
     dispatch_helper_from_environment as dispatch_portable_helper,
 };
-#[cfg(target_os = "linux")]
-use super::linux_peer_credentials as peer_credentials;
-#[cfg(target_os = "macos")]
-use super::macos_peer_credentials as peer_credentials;
 use gpui::{App, Window};
 use std::ffi::{OsStr, OsString};
 use std::io;
@@ -178,19 +178,19 @@ impl AskPassWindowFactory {
     }
 }
 
-impl super::askpass::AskPassWindowFactory for AskPassWindowFactory {
+impl crate::ssh::askpass::AskPassWindowFactory for AskPassWindowFactory {
     fn create(
         &self,
         window: &Window,
         cx: &mut App,
-    ) -> Result<Arc<dyn super::askpass::AskPassAttemptFactory>, AskPassUnavailable> {
+    ) -> Result<Arc<dyn crate::ssh::askpass::AskPassAttemptFactory>, AskPassUnavailable> {
         PortableAskPassBrokerFactory::new(
             window,
             cx,
             Arc::new(UnixAskPassLocalIpc),
             self.helper_path.clone().ok_or(AskPassUnavailable)?,
         )
-        .map(|factory| Arc::new(factory) as Arc<dyn super::askpass::AskPassAttemptFactory>)
+        .map(|factory| Arc::new(factory) as Arc<dyn crate::ssh::askpass::AskPassAttemptFactory>)
     }
 }
 
@@ -198,12 +198,12 @@ impl super::askpass::AskPassWindowFactory for AskPassWindowFactory {
 mod tests {
     use super::*;
     use crate::platform::app_directories::AppDirectoryEnvironment;
-    use crate::platform::askpass::{
+    use crate::platform::unix_secure_filesystem::UnixSecureFilesystem;
+    use crate::ssh::askpass::prompt::{AskPassPromptKind, AskPassRequest, AskPassSecret};
+    use crate::ssh::askpass::{
         AskPassHelperReply, AskPassPresentationFailure, AskPassPresenter, AskPassProtocolReply,
         CAPABILITY_ENV, ENDPOINT_ENV, read_reply, start_attempt_with_presenter, write_request,
     };
-    use crate::platform::ssh_askpass::{AskPassPromptKind, AskPassRequest, AskPassSecret};
-    use crate::platform::unix_secure_filesystem::UnixSecureFilesystem;
     use std::collections::VecDeque;
     use std::fs;
     use std::os::fd::AsRawFd;
@@ -288,7 +288,7 @@ mod tests {
         }
     }
 
-    fn lease_value(lease: &crate::platform::askpass::AskPassBrokerLease, name: &str) -> OsString {
+    fn lease_value(lease: &crate::ssh::askpass::AskPassBrokerLease, name: &str) -> OsString {
         lease
             .entries()
             .find(|(entry_name, _)| *entry_name == name)

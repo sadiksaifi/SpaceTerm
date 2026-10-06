@@ -4,7 +4,7 @@ use spaceterm_ui::{ModalMetrics, ModalPaint, ModalTheme};
 
 use crate::appearance::ChromeColors;
 
-pub(super) fn theme(colors: &ChromeColors) -> ModalTheme {
+pub(in crate::ui) fn theme(colors: &ChromeColors) -> ModalTheme {
     ModalTheme::new(
         paint(colors),
         ModalMetrics::new(px(360.0), px(480.0), px(640.0)),

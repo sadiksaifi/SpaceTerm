@@ -12,9 +12,9 @@ use crate::settings::SettingsDocument;
 use crate::settings::storage::StorageError;
 use crate::ui::appearance_runtime;
 
-use super::super::test_support::MemoryStorage;
 use super::super::{SettingsRowId, SettingsSectionId, SettingsWindow, control_selector};
 use super::ShortcutDescription;
+use crate::settings::storage::testing::MemoryStorage;
 use crate::ui::sidebar_window::form::CaptionTone;
 
 fn open_keybindings(

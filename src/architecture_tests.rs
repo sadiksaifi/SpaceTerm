@@ -221,8 +221,6 @@ fn portable_verification_cannot_select_native_adapters_or_host_mechanics() {
         root.join("platform/shell_integration.rs"),
         root.join("platform/shell_launch.rs"),
         root.join("platform/app_paths.rs"),
-        root.join("platform/askpass.rs"),
-        root.join("platform/ssh_askpass.rs"),
         root.join("ui/native_remote_workspace_flow_backend.rs"),
         root.join("ui/remote_workspace_flow.rs"),
     ];

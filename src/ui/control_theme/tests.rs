@@ -1,11 +1,913 @@
+use super::*;
 use crate::appearance::{
-    Appearance, AppearanceGeneration, AppearanceMode, AppearancePreferences, AvailableFonts,
-    ChromeDensity, Color, CompositionCapabilities, ResolvedAppearance, SystemAppearance,
-    ThemeCatalog, WindowBackgroundAppearance,
+    AppearanceGeneration, AppearanceMode, AppearancePreferences, AvailableFonts, ChromeColors,
+    ChromeDensity, CompositionCapabilities, FontStyle, ResolvedAppearance,
+    ResolvedChromeTypography, ResolvedFontDescriptor, SystemAppearance, ThemeCatalog,
+    WindowBackgroundAppearance,
 };
-use crate::ui::appearance::gpui_color;
 use crate::ui::appearance::{ChromeAppearance, DisabledControlDiagnostic, FloatingControlFamily};
 use spaceterm_ui::{FloatingRole, FloatingShell};
+
+struct ControlEdgeFixture(spaceterm_ui::ControlHost);
+
+impl gpui::Render for ControlEdgeFixture {
+    fn render(
+        &mut self,
+        _: &mut gpui::Window,
+        _: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
+        use gpui::{IntoElement as _, ParentElement as _, Styled as _, div};
+        use spaceterm_ui::{
+            Button, ButtonVariant, Checkbox, CheckboxState, ComboBox, ComboBoxItem, Icon,
+            IconButton, IconName, Menu, MenuEntry, Picker, PickerOption, SegmentedControl,
+            SegmentedOption, Switch,
+        };
+
+        self.0.mount(
+            div()
+                .flex()
+                .flex_col()
+                .items_start()
+                .p(px(20.0))
+                .gap(px(8.0))
+                .child(
+                    Button::new("edge-button", "Action")
+                        .variant(ButtonVariant::Secondary)
+                        .debug_selector("edge-button")
+                        .on_activate(|_, _, _| {}),
+                )
+                .child(
+                    IconButton::new("edge-icon", "Workspace", |color| {
+                        Icon::new(IconName::Plus, px(14.0), color).into_any_element()
+                    })
+                    .variant(ButtonVariant::Secondary)
+                    .debug_selector("edge-icon")
+                    .on_activate(|_, _, _| {}),
+                )
+                .child(
+                    ComboBox::new(
+                        "edge-combo",
+                        "Theme",
+                        Some(1),
+                        "Choose",
+                        vec![ComboBoxItem::new(1, "Theme")],
+                    )
+                    .debug_selector("edge-combo")
+                    .on_accept(|_, _, _| {}),
+                )
+                .child(
+                    ComboBox::new(
+                        "edge-icon-combo",
+                        "Workspace",
+                        Some(1),
+                        "Choose",
+                        vec![ComboBoxItem::new(1, "Workspace")],
+                    )
+                    .icon_trigger(|color, size| {
+                        Icon::new(IconName::Plus, size, color).into_any_element()
+                    })
+                    .debug_selector("edge-icon-combo")
+                    .on_accept(|_, _, _| {}),
+                )
+                .child(
+                    Menu::new("edge-menu", "Actions", vec![MenuEntry::action("Open", ())])
+                        .debug_selector("edge-menu")
+                        .on_activate(|_, _, _| {}),
+                )
+                .child(
+                    Picker::new(
+                        "edge-picker",
+                        "Theme",
+                        1,
+                        vec![PickerOption::new(1, "Theme")],
+                    )
+                    .unwrap()
+                    .debug_selector("edge-picker")
+                    .on_change(|_, _, _| {}),
+                )
+                .child(
+                    SegmentedControl::new(
+                        "edge-segmented",
+                        "Density",
+                        &false,
+                        vec![
+                            SegmentedOption::new(false, "Compact"),
+                            SegmentedOption::new(true, "Comfortable"),
+                        ],
+                    )
+                    .unwrap()
+                    .debug_selector("edge-segmented")
+                    .on_change(|_, _, _| {}),
+                )
+                .child(
+                    Checkbox::new("edge-checkbox", "Choice", CheckboxState::Unchecked)
+                        .debug_selector("edge-checkbox")
+                        .on_change(|_, _, _| {}),
+                )
+                .child(
+                    Switch::new("edge-switch", "Enabled", false)
+                        .debug_selector("edge-switch")
+                        .on_change(|_, _, _| {}),
+                ),
+        )
+    }
+}
+
+#[gpui::test]
+fn control_surfaces_do_not_paint_detached_bottom_hairlines(cx: &mut gpui::TestAppContext) {
+    use crate::appearance::{
+        AppearanceGeneration, AppearanceMode, AppearancePreferences, AvailableFonts,
+        CompositionCapabilities, SystemAppearance, ThemeCatalog,
+    };
+    use crate::ui::appearance::ChromeAppearance;
+    use spaceterm_ui::ControlHost;
+
+    cx.update(crate::ui::init).unwrap();
+    let mut violations = Vec::new();
+    for appearance in [Appearance::Light, Appearance::Dark] {
+        for (increase_contrast, show_borders) in [(false, false), (true, false), (false, true)] {
+            let resolved = ThemeCatalog::default()
+                .resolve(
+                    AppearanceGeneration::INITIAL,
+                    &AppearancePreferences {
+                        mode: match appearance {
+                            Appearance::Light => AppearanceMode::Light,
+                            Appearance::Dark => AppearanceMode::Dark,
+                        },
+                        ..AppearancePreferences::default()
+                    },
+                    SystemAppearance::available(appearance).with_composition(
+                        CompositionCapabilities {
+                            increase_contrast,
+                            show_borders,
+                            ..CompositionCapabilities::new(true, true)
+                        },
+                    ),
+                    &AvailableFonts::default(),
+                )
+                .unwrap();
+            for active in [true, false] {
+                let prepared = ChromeAppearance::prepare_for_activity(&resolved.chrome, active);
+                cx.update(|cx| replace_uniform_control_catalog(cx, &prepared).unwrap());
+                for host in [
+                    ControlHost::Window,
+                    ControlHost::TitleBar,
+                    ControlHost::Panel,
+                    ControlHost::Card,
+                    ControlHost::Floating,
+                ] {
+                    let (_, view) = cx.add_window_view(|_, _| ControlEdgeFixture(host));
+                    view.simulate_resize(gpui::size(px(640.0), px(640.0)));
+                    view.run_until_parked();
+                    for selector in [
+                        "edge-button",
+                        "edge-icon",
+                        "edge-combo",
+                        "edge-icon-combo",
+                        "edge-menu",
+                        "edge-picker",
+                        "edge-segmented",
+                        "edge-checkbox-indicator",
+                        "edge-switch-indicator",
+                    ] {
+                        let bounds = view
+                            .debug_bounds(selector)
+                            .unwrap_or_else(|| panic!("missing {selector}"));
+                        view.update(|window, _| {
+                            let bounds = bounds.scale(window.scale_factor());
+                            let hairline = px(1.0).scale(window.scale_factor());
+                            let quads = window.painted_quads();
+                            if quads.iter().any(|quad| {
+                                let line = quad.bounds.intersect(&quad.content_mask.bounds);
+                                line.size.height == hairline && line.size.width > hairline * 2.0
+                                    && line.left() > bounds.left() && line.right() < bounds.right()
+                                    && line.bottom() <= bounds.bottom()
+                                    && line.top() >= bounds.bottom() - hairline * 3.0
+                            }) {
+                                violations.push(format!("{appearance:?}/{host:?}/{selector}/active={active}/contrast={increase_contrast}/borders={show_borders}"));
+                            }
+                        });
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "detached bottom hairlines: {violations:?}"
+    );
+}
+
+#[test]
+fn control_catalog_preserves_exact_semantic_font_metadata() {
+    fn descriptor(
+        family: &str,
+        fallback: &str,
+        style: FontStyle,
+        feature: &str,
+    ) -> ResolvedFontDescriptor {
+        ResolvedFontDescriptor {
+            primary_family: family.to_owned(),
+            fallback_families: vec![fallback.to_owned()],
+            size: 13.0,
+            line_height: 13.0,
+            weight: 375,
+            style,
+            features: vec![feature.to_owned()],
+            resolution_identity: family.to_owned(),
+        }
+    }
+
+    let body = descriptor("Body Family", "Body Fallback", FontStyle::Italic, "+ss01");
+    let caption = descriptor(
+        "Caption Family",
+        "Caption Fallback",
+        FontStyle::Normal,
+        "+ss02",
+    );
+    let heading = descriptor(
+        "Heading Family",
+        "Heading Fallback",
+        FontStyle::Italic,
+        "+ss03",
+    );
+    let resolved = ResolvedChromeTypography {
+        body: body.clone(),
+        small: caption.clone(),
+        control: body.clone(),
+        navigation: body.clone(),
+        caption,
+        heading,
+        shortcut: body,
+    };
+    let typography = ChromeTypography::prepare(&resolved, ChromeDensity::Compact);
+    let controls = prepared_control_typography(&typography);
+
+    for (actual, role) in [
+        (controls.shortcut(), TextRole::Shortcut),
+        (controls.caption(), TextRole::Caption),
+        (controls.badge(), TextRole::Badge),
+    ] {
+        assert_eq!(actual, &typography.style(role).font);
+    }
+
+    let shortcut = controls.shortcut();
+    assert_eq!(shortcut.family.as_ref(), "Body Family");
+    assert_eq!(shortcut.style, gpui::FontStyle::Italic);
+    assert_eq!(shortcut.weight, gpui::FontWeight(375.0));
+    assert_eq!(
+        shortcut
+            .fallbacks
+            .as_ref()
+            .expect("shortcut fallbacks")
+            .0
+            .as_ref(),
+        &["Body Fallback".to_owned()]
+    );
+    assert!(
+        shortcut
+            .features
+            .tag_value_list()
+            .contains(&("ss01".to_owned(), 1))
+    );
+    assert!(
+        shortcut
+            .features
+            .tag_value_list()
+            .contains(&("tnum".to_owned(), 1))
+    );
+
+    let caption = controls.caption();
+    assert_eq!(caption.family.as_ref(), "Caption Family");
+    assert_eq!(caption.style, gpui::FontStyle::Normal);
+    assert_eq!(caption.weight, gpui::FontWeight(375.0));
+    assert_eq!(
+        caption
+            .fallbacks
+            .as_ref()
+            .expect("caption fallbacks")
+            .0
+            .as_ref(),
+        &["Caption Fallback".to_owned()]
+    );
+    assert_eq!(caption.features.tag_value_list(), &[("ss02".to_owned(), 1)]);
+
+    let badge = controls.badge();
+    assert_eq!(badge.family.as_ref(), "Caption Family");
+    assert_eq!(badge.style, gpui::FontStyle::Normal);
+    assert_eq!(badge.weight, gpui::FontWeight(375.0));
+    assert!(
+        badge
+            .features
+            .tag_value_list()
+            .contains(&("ss02".to_owned(), 1))
+    );
+    assert!(
+        badge
+            .features
+            .tag_value_list()
+            .contains(&("tnum".to_owned(), 1))
+    );
+}
+
+#[test]
+fn selected_rows_keep_their_fill_floor_after_material_compression() {
+    for (surface, state) in [
+        (Color::rgba(0x202020c0), Color::rgb(0x323232)),
+        (Color::rgba(0xf0f0f0c0), Color::rgb(0xdfdfdf)),
+    ] {
+        for (text_floor, selection_floor) in [(4.5, 1.25), (7.0, 1.40)] {
+            let fill = readable_selection_fill(
+                state.relative_overlay(surface.with_alpha(255)),
+                surface,
+                state,
+                text_floor,
+                selection_floor,
+            );
+            let backgrounds = row_backgrounds(fill, surface);
+            assert!(shared_neutral(backgrounds, text_floor).is_some());
+            for (background, host) in backgrounds
+                .into_iter()
+                .zip(row_backgrounds(Color::rgba(0), surface))
+            {
+                assert!(
+                    background.contrast_ratio(host) >= selection_floor,
+                    "{state:?}: {background:?} on {host:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn increased_contrast_row_content_meets_floors_on_final_material_endpoints() {
+    for (surface, material) in [
+        (Color::rgb(0x202020), Color::rgba(0x202020f3)),
+        (Color::rgb(0xf0f0f0), Color::rgba(0xf0f0f0f3)),
+    ] {
+        for state in [surface, Color::rgb(0x606060), Color::rgb(0xa0a0a0)] {
+            let floors = [7.0, 4.5, 7.0, 7.0];
+            let row = OverlayRow::resolve_with_floors(
+                (state, surface),
+                (state, material),
+                [Color::rgb(0x777777); 4],
+                Color::rgb(0x777777),
+                floors,
+                Some(3.0),
+                None,
+            );
+            for background in row_backgrounds(row.fill, material) {
+                for (foreground, minimum) in row.content.into_iter().zip(floors) {
+                    assert!(
+                        foreground
+                            .source_over(background)
+                            .contrast_ratio(background)
+                            >= minimum,
+                        "{state:?} over {background:?}"
+                    );
+                }
+                assert!(
+                    row.border
+                        .source_over(background)
+                        .contrast_ratio(background)
+                        >= 3.0
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn prepared_row_state_policy_keeps_disabled_selection_identical_across_activity() {
+    use crate::appearance::{
+        Appearance, AppearanceGeneration, AppearanceMode, AppearancePreferences, AvailableFonts,
+        CompositionCapabilities, SystemAppearance, ThemeCatalog,
+    };
+    use crate::ui::appearance::ChromeAppearance;
+    for appearance in [Appearance::Light, Appearance::Dark] {
+        for increase_contrast in [false, true] {
+            let resolved = ThemeCatalog::default()
+                .resolve(
+                    AppearanceGeneration::INITIAL,
+                    &AppearancePreferences {
+                        mode: if appearance == Appearance::Light {
+                            AppearanceMode::Light
+                        } else {
+                            AppearanceMode::Dark
+                        },
+                        ..AppearancePreferences::default()
+                    },
+                    SystemAppearance::available(appearance).with_composition(
+                        CompositionCapabilities {
+                            increase_contrast,
+                            ..CompositionCapabilities::new(true, true)
+                        },
+                    ),
+                    &AvailableFonts::default(),
+                )
+                .unwrap();
+            let rows = |active| {
+                let prepared = ChromeAppearance::prepare_for_activity(&resolved.chrome, active);
+                overlay_list_rows_with_policy(
+                    &prepared.floating_colors,
+                    &prepared.floating_colors,
+                    OverlayRowPolicy::prepared(&prepared),
+                )
+            };
+            assert_eq!(
+                rows(true).resolve(false, true, false),
+                rows(false).resolve(false, true, true),
+                "{appearance:?}, increase_contrast={increase_contrast}"
+            );
+        }
+    }
+}
+
+#[test]
+fn material_row_fill_reconstructs_the_authored_state_on_an_opaque_host() {
+    let surface = Color::rgb(0x202020);
+    let state = Color::rgb(0x262626);
+    let actual_host = Color::rgb(0x181818);
+    let fill = row_fill((state, surface), (state, actual_host));
+    let rendered = fill.source_over(actual_host);
+
+    assert_eq!(rendered, state);
+    assert!(
+        fill.a < 32,
+        "a small elevation step needs only a thin overlay"
+    );
+}
+
+#[test]
+fn dark_selected_row_lifts_from_its_semantic_host_even_when_material_rgb_is_lighter() {
+    let surface = Color::rgb(0x202020);
+    let selected = Color::rgb(0x262626);
+    let combined_material = Color::rgba(0x363636b9);
+    let fill = row_fill((selected, surface), (selected, combined_material));
+
+    assert!(fill.a > 0 && fill.a < 32);
+    assert!(
+        fill.r >= 250 && fill.g >= 250 && fill.b >= 250,
+        "selected must remain a lightening step over the native-backed host: {fill:?}"
+    );
+}
+
+#[test]
+fn row_with_no_shared_readable_foreground_falls_back_once_to_opaque_state() {
+    let middle = Color::rgb(0x808080);
+    let row = OverlayRow::resolve(
+        (middle, middle),
+        (Color::rgba(0), Color::rgba(0)),
+        [Color::rgb(0x777777); 4],
+        Color::rgba(0),
+    );
+
+    assert_eq!(row.fill, middle);
+    assert!(
+        row.content
+            .into_iter()
+            .all(|content| content.contrast_ratio(middle) >= 4.5)
+    );
+}
+
+#[test]
+fn nonzero_row_state_uses_fallback_when_no_nonzero_readable_alpha_exists() {
+    let surface = Color::rgba(0x00000089);
+    let fill = Color::rgba(0xffffff10);
+
+    assert!(shared_neutral(row_backgrounds(fill.with_alpha(0), surface), 4.5).is_some());
+    assert!(
+        readable_material_row_fill(fill, surface, 4.5).is_none(),
+        "a requested state must not disappear when its readable interval has zero width"
+    );
+}
+
+/// Built-in row content stays authored when possible and remains readable across materials.
+#[test]
+fn overlay_row_content_stays_readable_across_transparency_in_both_appearances() {
+    use crate::appearance::{
+        Appearance, AppearancePreferences, ResolvedWindowComposition, builtin_chrome_base,
+    };
+    for appearance in [Appearance::Light, Appearance::Dark] {
+        let reference = builtin_chrome_base(appearance).opaque_presentation();
+        let rows_at = |transparency: f32| {
+            let mut preferences = AppearancePreferences::default();
+            preferences.window.transparency = transparency;
+            let materials = ResolvedWindowComposition::resolve(
+                &preferences.window,
+                crate::appearance::CompositionCapabilities::new(true, true),
+                crate::appearance::ChromeTone::of(reference.background),
+            )
+            .materials;
+            let paint = reference.material_presentation(materials);
+            (overlay_list_rows(&reference, &paint), paint)
+        };
+        type RowColors = fn(&ChromeColors) -> [Color; 6];
+        let states: [(bool, bool, RowColors); 3] = [
+            (false, false, |c| {
+                [
+                    c.elevated_surface_background,
+                    c.row_foreground,
+                    c.row_secondary,
+                    c.row_icon,
+                    c.row_match,
+                    c.row_border,
+                ]
+            }),
+            (false, true, |c| {
+                [
+                    c.row_hover_background,
+                    c.row_hover_foreground,
+                    c.row_hover_secondary,
+                    c.row_hover_icon,
+                    c.row_hover_match,
+                    c.row_hover_border,
+                ]
+            }),
+            (true, false, |c| {
+                [
+                    c.row_selected_background,
+                    c.row_selected_foreground,
+                    c.row_selected_secondary,
+                    c.row_selected_icon,
+                    c.row_selected_match,
+                    c.row_selected_border,
+                ]
+            }),
+        ];
+        let (opaque_rows, _) = rows_at(0.0);
+        for transparency in [0.15, 1.0] {
+            let (rows, paint) = rows_at(transparency);
+            for (selected, hovered, pick) in states {
+                let [fill, foreground, secondary, icon, matched, border] = pick(&reference);
+                let opaque = OverlayRow::resolve(
+                    (fill, reference.elevated_surface_background),
+                    (fill, reference.elevated_surface_background),
+                    [foreground, secondary, icon, matched],
+                    border,
+                );
+                assert_eq!(
+                    opaque_rows.resolve(true, selected, hovered),
+                    opaque.paint(),
+                    "{appearance:?} opaque rows keep their composite paint"
+                );
+                let expected = OverlayRow::resolve(
+                    (fill, reference.elevated_surface_background),
+                    (pick(&paint)[0], paint.elevated_surface_background),
+                    [foreground, secondary, icon, matched],
+                    border,
+                );
+                assert_eq!(
+                    rows.resolve(true, selected, hovered),
+                    expected.paint(),
+                    "{appearance:?} at {transparency}: rows use the final material endpoints"
+                );
+                let backgrounds = if paint.elevated_surface_background.is_opaque() {
+                    [expected.fill.source_over(paint.elevated_surface_background); 2]
+                } else {
+                    [Color::BLACK, Color::WHITE].map(|underlay| {
+                        expected
+                            .fill
+                            .source_over(paint.elevated_surface_background.source_over(underlay))
+                    })
+                };
+                for (authored, resolved) in [foreground, secondary, icon, matched]
+                    .into_iter()
+                    .zip(expected.content)
+                {
+                    assert!(
+                        backgrounds.into_iter().all(|background| resolved
+                            .source_over(background)
+                            .contrast_ratio(background)
+                            >= 4.5),
+                        "{appearance:?} at {transparency}: {resolved:?} must read over {backgrounds:?}"
+                    );
+                    if backgrounds.into_iter().all(|background| {
+                        authored.source_over(background).contrast_ratio(background) >= 4.5
+                    }) {
+                        assert_eq!(
+                            resolved, authored,
+                            "{appearance:?} at {transparency}: readable authored content stays exact"
+                        );
+                    }
+                }
+                if transparency == 1.0 {
+                    // The maximum setting keeps a faint fill rather than none, so a row
+                    // that states a state still states it. A row that matches the surface
+                    // it rests on still paints nothing at all.
+                    assert!(
+                        expected.fill.a < 255,
+                        "{appearance:?}: a row state must still transmit its backing: {:?}",
+                        expected.fill
+                    );
+                    assert_eq!(
+                        fill != reference.elevated_surface_background,
+                        expected.fill.a > 0,
+                        "{appearance:?}: {:?}",
+                        expected.fill
+                    );
+                }
+            }
+        }
+        if appearance == Appearance::Light {
+            let [_, foreground, ..] = (states[0].2)(&reference);
+            let readable = readable_on(foreground, reference.elevated_surface_background, 4.5);
+            assert!(
+                readable.contrast_ratio(Color::BLACK) < readable.contrast_ratio(Color::WHITE),
+                "Light overlay text stays dark at every transparency"
+            );
+        }
+    }
+}
+
+#[test]
+fn built_in_floating_row_states_remain_distinct_translucent_and_readable_at_maximum_glass() {
+    use crate::appearance::{
+        Appearance, AppearanceGeneration, AppearanceMode, AppearancePreferences, AvailableFonts,
+        CompositionCapabilities, SystemAppearance, ThemeCatalog,
+    };
+    use crate::ui::appearance::ChromeAppearance;
+
+    for appearance in [Appearance::Light, Appearance::Dark] {
+        let mut preferences = AppearancePreferences {
+            mode: match appearance {
+                Appearance::Light => AppearanceMode::Light,
+                Appearance::Dark => AppearanceMode::Dark,
+            },
+            ..AppearancePreferences::default()
+        };
+        preferences.window.transparency = 1.0;
+        let resolved = ThemeCatalog::default()
+            .resolve(
+                AppearanceGeneration::INITIAL,
+                &preferences,
+                SystemAppearance::available(appearance)
+                    .with_composition(CompositionCapabilities::new(true, true)),
+                &AvailableFonts::default(),
+            )
+            .expect("built-in appearance should resolve");
+        let prepared = ChromeAppearance::prepare(&resolved.chrome);
+        let reference = &prepared.floating_colors;
+        let material =
+            prepared.floating_surface(prepared.floating_colors.elevated_surface_background);
+        let mut paint = reference.clone();
+        paint.elevated_surface_background = material;
+        type RowColors = fn(&ChromeColors) -> [Color; 6];
+        let states: [RowColors; 3] = [
+            |c| {
+                [
+                    c.row_hover_background,
+                    c.row_hover_foreground,
+                    c.row_hover_secondary,
+                    c.row_hover_icon,
+                    c.row_hover_match,
+                    c.row_hover_border,
+                ]
+            },
+            |c| {
+                [
+                    c.row_selected_background,
+                    c.row_selected_foreground,
+                    c.row_selected_secondary,
+                    c.row_selected_icon,
+                    c.row_selected_match,
+                    c.row_selected_border,
+                ]
+            },
+            |c| {
+                [
+                    c.row_selected_hover_background,
+                    c.row_selected_hover_foreground,
+                    c.row_selected_hover_secondary,
+                    c.row_selected_hover_icon,
+                    c.row_selected_hover_match,
+                    c.row_selected_hover_border,
+                ]
+            },
+        ];
+        let rows = states.map(|pick| {
+            let [fill, foreground, secondary, icon, matched, border] = pick(reference);
+            OverlayRow::resolve(
+                (fill, reference.elevated_surface_background),
+                (pick(&paint)[0], paint.elevated_surface_background),
+                [foreground, secondary, icon, matched],
+                border,
+            )
+        });
+
+        for row in rows {
+            assert!(
+                row.fill.a > 0 && row.fill.a < 255,
+                "{appearance:?} row state must remain a translucent material: {:?}",
+                row.fill
+            );
+            for underlay in [Color::BLACK, Color::WHITE] {
+                let background = row.fill.source_over(material.source_over(underlay));
+                assert!(
+                    row.content
+                        .into_iter()
+                        .all(|content| content.contrast_ratio(background) >= 4.5),
+                    "{appearance:?} row content must read over {background:?}"
+                );
+            }
+        }
+        let alphas = rows.map(|row| row.fill.a);
+        assert!(
+            alphas[0] < alphas[1],
+            "{appearance:?} selection must be stronger than hover: {alphas:?}"
+        );
+        if appearance == Appearance::Light {
+            assert_eq!(
+                rows[1].fill, rows[2].fill,
+                "selected Light hover keeps the raised surface"
+            );
+            assert_ne!(
+                rows[1].border, rows[2].border,
+                "selected Light hover strengthens the rim"
+            );
+        } else {
+            assert_ne!(
+                alphas[1], alphas[2],
+                "Dark retains its selected-hover fill change"
+            );
+        }
+    }
+}
+
+#[test]
+fn overlay_rows_preserve_interaction_states_but_inherit_the_elevated_idle_surface() {
+    use gpui::rgba;
+    use spaceterm_ui::ListRowPaint;
+    let colors = ChromeColors {
+        row_background: Color::rgba(0x10203040),
+        row_foreground: Color::rgba(0x14233142),
+        row_secondary: Color::rgba(0x18263244),
+        row_icon: Color::rgba(0x1c293346),
+        row_match: Color::rgba(0x202c3448),
+        row_border: Color::rgba(0x242f354a),
+        row_hover_background: Color::rgba(0x2832364c),
+        row_hover_foreground: Color::rgba(0x2c35374e),
+        row_hover_secondary: Color::rgba(0x30383850),
+        row_hover_icon: Color::rgba(0x343b3952),
+        row_hover_match: Color::rgba(0x383e3a54),
+        row_hover_border: Color::rgba(0x3c413b56),
+        row_selected_background: Color::rgba(0x40443c58),
+        row_selected_foreground: Color::rgba(0x44473d5a),
+        row_selected_secondary: Color::rgba(0x484a3e5c),
+        row_selected_icon: Color::rgba(0x4c4d3f5e),
+        row_selected_match: Color::rgba(0x50504060),
+        row_selected_border: Color::rgba(0x54534162),
+        row_selected_hover_background: Color::rgba(0x58564264),
+        row_selected_hover_foreground: Color::rgba(0x5c594366),
+        row_selected_hover_secondary: Color::rgba(0x605c4468),
+        row_selected_hover_icon: Color::rgba(0x645f456a),
+        row_selected_hover_match: Color::rgba(0x6862466c),
+        row_selected_hover_border: Color::rgba(0x6c65476e),
+        ..ChromeColors::default()
+    };
+    let rows = overlay_list_rows(&colors, &colors);
+    let expected = |background: Color,
+                    foreground: Color,
+                    secondary: Color,
+                    icon: Color,
+                    matched: Color,
+                    border: Color| {
+        let background = background.source_over(colors.elevated_surface_background);
+        ListRowPaint::new(
+            gpui_color(background),
+            rgba(
+                crate::ui::appearance::readable_on_backgrounds(foreground, [background; 2], 4.5)
+                    .rgba_hex(),
+            ),
+            rgba(
+                crate::ui::appearance::readable_on_backgrounds(secondary, [background; 2], 4.5)
+                    .rgba_hex(),
+            ),
+            rgba(
+                crate::ui::appearance::readable_on_backgrounds(icon, [background; 2], 4.5)
+                    .rgba_hex(),
+            ),
+            rgba(
+                crate::ui::appearance::readable_on_backgrounds(matched, [background; 2], 4.5)
+                    .rgba_hex(),
+            ),
+            gpui_color(border),
+        )
+    };
+    assert_eq!(
+        rows.resolve(true, false, false),
+        expected(
+            colors.elevated_surface_background,
+            colors.row_foreground,
+            colors.row_secondary,
+            colors.row_icon,
+            colors.row_match,
+            colors.row_border,
+        )
+    );
+    assert_eq!(
+        rows.resolve(true, false, true),
+        expected(
+            colors.row_hover_background,
+            colors.row_hover_foreground,
+            colors.row_hover_secondary,
+            colors.row_hover_icon,
+            colors.row_hover_match,
+            colors.row_hover_border,
+        )
+    );
+    assert_eq!(
+        rows.resolve(true, true, false),
+        expected(
+            colors.row_selected_background,
+            colors.row_selected_foreground,
+            colors.row_selected_secondary,
+            colors.row_selected_icon,
+            colors.row_selected_match,
+            colors.row_selected_border,
+        )
+    );
+    assert_eq!(
+        rows.resolve(true, true, true),
+        expected(
+            colors.row_selected_hover_background,
+            colors.row_selected_hover_foreground,
+            colors.row_selected_hover_secondary,
+            colors.row_selected_hover_icon,
+            colors.row_selected_hover_match,
+            colors.row_selected_hover_border,
+        )
+    );
+    assert_eq!(
+        rows.resolve(false, true, true),
+        expected(
+            colors.row_selected_background,
+            colors.text_disabled,
+            colors.text_disabled,
+            colors.icon_disabled,
+            colors.text_disabled,
+            colors.row_selected_border,
+        )
+    );
+}
+
+#[test]
+fn list_themes_should_consume_hover_and_selection_independently() {
+    let base = ChromeColors::default();
+    let hovered = ChromeColors {
+        row_hover_background: Color::rgb(0x123456),
+        ..base.clone()
+    };
+    let selected = ChromeColors {
+        row_selected_background: Color::rgb(0xabcdef),
+        ..base.clone()
+    };
+    let hover_foreground = ChromeColors {
+        row_hover_foreground: Color::rgb(0x123456),
+        ..base.clone()
+    };
+    let selected_foreground = ChromeColors {
+        row_selected_foreground: Color::rgb(0xabcdef),
+        ..base.clone()
+    };
+    for changed in [hovered, selected, hover_foreground, selected_foreground] {
+        assert_ne!(menu::theme(&base), menu::theme(&changed));
+        assert_ne!(combo_box::theme(&base), combo_box::theme(&changed));
+        assert_ne!(
+            command_palette::theme(&base),
+            command_palette::theme(&changed)
+        );
+    }
+}
+
+#[test]
+fn overlay_controls_keep_idle_rows_on_their_raised_panel() {
+    let base = ChromeColors::default().opaque_presentation();
+    let changed_shell_row = ChromeColors {
+        row_background: Color::rgb(0xff00ff),
+        ..base.clone()
+    };
+    let changed_overlay = ChromeColors {
+        elevated_surface_background: Color::rgb(0x004488),
+        ..base.clone()
+    };
+
+    assert_eq!(menu::theme(&base), menu::theme(&changed_shell_row));
+    assert_eq!(
+        combo_box::theme(&base),
+        combo_box::theme(&changed_shell_row)
+    );
+    assert_eq!(
+        command_palette::theme(&base),
+        command_palette::theme(&changed_shell_row)
+    );
+    assert_ne!(menu::theme(&base), menu::theme(&changed_overlay));
+    assert_ne!(combo_box::theme(&base), combo_box::theme(&changed_overlay));
+    assert_ne!(
+        command_palette::theme(&base),
+        command_palette::theme(&changed_overlay)
+    );
+}
 
 const FLOATING_ROLES: [FloatingRole; 6] = [
     FloatingRole::Popover,
@@ -90,10 +992,10 @@ fn light_selections_and_terminal_share_the_common_surface() {
     let mut popup = reference.clone();
     popup.elevated_surface_background =
         prepared.floating_surface(prepared.floating_colors.elevated_surface_background);
-    let rows = super::control_theme_catalog::overlay_list_rows_with_policy(
+    let rows = super::overlay_list_rows_with_policy(
         reference,
         &popup,
-        super::control_theme_catalog::OverlayRowPolicy::prepared(&prepared),
+        super::OverlayRowPolicy::prepared(&prepared),
     );
     let expected = [
         popup_selected,
@@ -145,7 +1047,7 @@ fn light_navigation_keeps_quiet_edges_and_uses_the_rim_for_selected_hover() {
                 colors.row_selected_hover_border,
             ),
         ] {
-            let paint = super::selection_chip::ChipPaint {
+            let paint = crate::ui::selection_chip::ChipPaint {
                 fill: Some(fill),
                 hover_fill: Some(hover),
                 rim: Some(rim),
@@ -174,7 +1076,7 @@ fn light_navigation_keeps_quiet_edges_and_uses_the_rim_for_selected_hover() {
 
 #[test]
 fn light_settings_grouping_uses_surface_separation_and_quiet_outer_edges() {
-    use super::appearance::settings::SettingsSurfaceRole::{Canvas, Card};
+    use crate::ui::appearance::settings::SettingsSurfaceRole::{Canvas, Card};
 
     for transparency in [0.0, 0.35, 1.0] {
         let (resolved, _) = resolve_case(
@@ -186,7 +1088,7 @@ fn light_settings_grouping_uses_surface_separation_and_quiet_outer_edges() {
         );
         let (active, inactive) = ChromeAppearance::prepare_variants(&resolved.chrome);
         let (settings, _) =
-            super::appearance::settings::prepare_variants(&resolved.chrome, active, inactive);
+            crate::ui::appearance::settings::prepare_variants(&resolved.chrome, active, inactive);
         let canvas = settings.surface(Canvas).background;
         let card = settings.surface(Card).background;
         let edge = settings.card_edge().source_over(card);
@@ -219,7 +1121,7 @@ fn dark_search_fields_separate_from_their_host_without_competing_with_selection(
         );
         let (active, inactive) = ChromeAppearance::prepare_variants(&resolved.chrome);
         let (settings, _) =
-            super::appearance::settings::prepare_variants(&resolved.chrome, active, inactive);
+            crate::ui::appearance::settings::prepare_variants(&resolved.chrome, active, inactive);
         let host = settings
             .chrome
             .control_host_background(spaceterm_ui::ControlHost::Panel);
@@ -256,7 +1158,7 @@ fn dark_search_fields_separate_from_their_host_without_competing_with_selection(
 
 #[test]
 fn dark_settings_sidebar_separates_from_canvas_without_changing_transmission() {
-    use super::appearance::settings::SettingsSurfaceRole::{Canvas, Sidebar};
+    use crate::ui::appearance::settings::SettingsSurfaceRole::{Canvas, Sidebar};
 
     for transparency in [0.0, 0.35] {
         for blur in [false, true] {
@@ -268,8 +1170,11 @@ fn dark_settings_sidebar_separates_from_canvas_without_changing_transmission() {
                 true,
             );
             let (active, inactive) = ChromeAppearance::prepare_variants(&resolved.chrome);
-            let (active, inactive) =
-                super::appearance::settings::prepare_variants(&resolved.chrome, active, inactive);
+            let (active, inactive) = crate::ui::appearance::settings::prepare_variants(
+                &resolved.chrome,
+                active,
+                inactive,
+            );
             for settings in [active, inactive] {
                 let sidebar = settings.surface(Sidebar);
                 let canvas = settings.surface(Canvas);
@@ -321,7 +1226,7 @@ fn dark_settings_sidebar_separates_from_canvas_without_changing_transmission() {
 
 #[test]
 fn settings_surfaces_follow_window_transparency_and_controls_use_their_actual_hosts() {
-    use super::appearance::settings::SettingsSurfaceRole::{Canvas, Card, Sidebar};
+    use crate::ui::appearance::settings::SettingsSurfaceRole::{Canvas, Card, Sidebar};
 
     let cumulative_alpha = |under: u8, over: u8| {
         let under = f64::from(under) / 255.0;
@@ -334,8 +1239,11 @@ fn settings_surfaces_follow_window_transparency_and_controls_use_their_actual_ho
                 resolve_case(appearance, ChromeDensity::Compact, transparency, true, true);
             let authored = resolved.chrome.colors.clone();
             let (active, inactive) = ChromeAppearance::prepare_variants(&resolved.chrome);
-            let (settings, _) =
-                super::appearance::settings::prepare_variants(&resolved.chrome, active, inactive);
+            let (settings, _) = crate::ui::appearance::settings::prepare_variants(
+                &resolved.chrome,
+                active,
+                inactive,
+            );
             let sidebar = settings.surface(Sidebar);
             let canvas = settings.surface(Canvas);
             let card = settings.surface(Card);
@@ -389,7 +1297,7 @@ fn settings_surfaces_follow_window_transparency_and_controls_use_their_actual_ho
         );
         let (active, inactive) = ChromeAppearance::prepare_variants(&resolved.chrome);
         let (settings, _) =
-            super::appearance::settings::prepare_variants(&resolved.chrome, active, inactive);
+            crate::ui::appearance::settings::prepare_variants(&resolved.chrome, active, inactive);
         assert_eq!(
             [
                 settings.surface(Sidebar).paint.a,
@@ -408,7 +1316,7 @@ fn settings_surfaces_follow_window_transparency_and_controls_use_their_actual_ho
         .panel_background = authored_panel;
     let (active, inactive) = ChromeAppearance::prepare_variants(&resolved.chrome);
     let (settings, _) =
-        super::appearance::settings::prepare_variants(&resolved.chrome, active, inactive);
+        crate::ui::appearance::settings::prepare_variants(&resolved.chrome, active, inactive);
     assert_eq!(settings.surface(Sidebar).semantic, authored_panel);
 }
 
@@ -432,7 +1340,7 @@ fn light_unfocused_navigation_and_segments_keep_translucent_raised_selections() 
             prepared.panel_controls.reference.row_selected_background,
             prepared.control_host_background(spaceterm_ui::ControlHost::Panel),
         );
-        let chip = super::selection_chip::ChipPaint {
+        let chip = crate::ui::selection_chip::ChipPaint {
             fill: Some(panel.row_selected_background),
             hover_fill: Some(panel.row_selected_hover_background),
             rim: Some(panel.row_selected_border),
@@ -706,7 +1614,7 @@ fn prepared_unfocused_collection_pairs_reach_every_final_host_floor() {
                 let secondary_floor = 4.5;
                 let icon_floor = if increase_contrast { 4.5 } else { 3.0 };
                 let selection_floor = if increase_contrast || appearance == Appearance::Dark {
-                    super::appearance::SUBDUED_SELECTION_CONTRAST
+                    crate::ui::appearance::SUBDUED_SELECTION_CONTRAST
                 } else {
                     1.12
                 };
@@ -3079,11 +3987,11 @@ fn unfocused_popup_selection_keeps_transmitting_the_material() {
             let mut popup = prepared.floating_colors.clone();
             popup.elevated_surface_background =
                 prepared.floating_surface(prepared.floating_colors.elevated_surface_background);
-            let unfocused = super::control_theme_catalog::popup_unfocused_rows(&prepared, &popup);
-            let rows = super::control_theme_catalog::overlay_list_rows_with_policy(
+            let unfocused = super::popup_unfocused_rows(&prepared, &popup);
+            let rows = super::overlay_list_rows_with_policy(
                 &unfocused.reference,
                 &unfocused.paint,
-                super::control_theme_catalog::OverlayRowPolicy::prepared(&prepared),
+                super::OverlayRowPolicy::prepared(&prepared),
             );
             let selected = rows.resolve_for_collection(true, true, false, false);
 
@@ -3129,73 +4037,61 @@ fn installed_floating_catalog_uses_the_material_control_presentation(
         )
     };
     let expected = spaceterm_ui::SurfaceControlThemes::new(
-        super::button_theme::prepared(
+        super::button::prepared(
             colors,
             &prepared.typography,
             &prepared.icons,
             prepared.capabilities.show_borders,
         ),
-        super::toggle_theme::prepared(colors, &prepared.typography),
-        super::progress_theme::theme(colors),
-        super::segmented_control_theme::prepared(
+        super::toggle::prepared(colors, &prepared.typography),
+        super::progress::theme(colors),
+        super::segmented_control::prepared(
             &prepared.floating_segmented_colors,
             &prepared.typography,
             prepared.capabilities.show_borders,
         ),
-        super::search_field_theme::prepared(
+        super::search_field::prepared(
             &prepared.floating_field_reference,
             field,
             &prepared.typography,
             &prepared.icons,
         ),
-        super::text_input_theme::themed(field, reference),
+        super::text_input::themed(field, reference),
     )
     .triggers(
-        super::menu_theme::prepared_with_rows(
+        super::menu::prepared_with_rows(
             reference,
             colors,
             &popup,
             Some((&unfocused_reference, &unfocused_popup)),
             &prepared.typography,
             &prepared.icons,
-            super::control_theme_catalog::OverlayRowPolicy::prepared(&prepared),
+            super::OverlayRowPolicy::prepared(&prepared),
         ),
-        super::combo_box_theme::prepared_with_rows(
+        super::combo_box::prepared_with_rows(
             reference,
             colors,
             &popup,
             Some((&unfocused_reference, &unfocused_popup)),
             &prepared.typography,
             &prepared.icons,
-            super::control_theme_catalog::OverlayRowPolicy::prepared(&prepared),
+            super::OverlayRowPolicy::prepared(&prepared),
         ),
     );
     let expected = with_elevation(expected);
-    let expected_panel = super::control_theme_catalog::surface_control_themes(
-        &prepared.panel_controls,
-        reference,
-        &popup,
-        &prepared,
-    );
-    let expected_title_bar = super::control_theme_catalog::surface_control_themes(
-        &prepared.title_bar_controls,
-        reference,
-        &popup,
-        &prepared,
-    );
-    let expected_card = super::control_theme_catalog::surface_control_themes(
-        &prepared.card_controls,
-        reference,
-        &popup,
-        &prepared,
-    );
+    let expected_panel =
+        super::surface_control_themes(&prepared.panel_controls, reference, &popup, &prepared);
+    let expected_title_bar =
+        super::surface_control_themes(&prepared.title_bar_controls, reference, &popup, &prepared);
+    let expected_card =
+        super::surface_control_themes(&prepared.card_controls, reference, &popup, &prepared);
     let expected_panel = with_elevation(expected_panel);
     let expected_title_bar = with_elevation(expected_title_bar);
     let expected_card = with_elevation(expected_card);
 
     cx.update(|cx| {
-        super::initialize_controls(cx).unwrap();
-        super::control_theme_catalog::replace_uniform_control_catalog(cx, &prepared)
+        crate::ui::initialize_controls(cx).unwrap();
+        super::replace_uniform_control_catalog(cx, &prepared)
             .expect("floating catalog should install");
         assert_eq!(
             cx.global::<spaceterm_ui::ControlThemeCatalog>()
@@ -3209,7 +4105,7 @@ fn installed_floating_catalog_uses_the_material_control_presentation(
         );
         assert_eq!(
             cx.global::<spaceterm_ui::ModalTheme>(),
-            &super::modal_theme::theme(colors),
+            &super::modal::theme(colors),
         );
         assert_eq!(
             cx.global::<spaceterm_ui::ControlThemeCatalog>()
@@ -3466,7 +4362,7 @@ fn floating_bare_editor_placeholders_stay_readable_over_extreme_content() {
 
 #[test]
 fn floating_row_content_is_readable_on_idle_hovered_and_selected_backgrounds() {
-    use super::control_theme_catalog::OverlayRow;
+    use super::OverlayRow;
 
     for appearance in [Appearance::Light, Appearance::Dark] {
         for transparency in [0.0, 0.15, 0.35, 0.7, 1.0] {
@@ -3595,8 +4491,8 @@ fn floating_standard_and_bare_inputs_resolve_against_their_actual_backgrounds() 
     );
     assert_ne!(standard.input_text, bare.input_text);
     assert_ne!(
-        super::text_input_theme::theme(bare),
-        super::text_input_theme::themed(standard, bare),
+        super::text_input::theme(bare),
+        super::text_input::themed(standard, bare),
         "floating Standard and Bare variants must keep distinct foregrounds"
     );
 
@@ -3605,11 +4501,7 @@ fn floating_standard_and_bare_inputs_resolve_against_their_actual_backgrounds() 
             .input_background
             .source_over(field_reference.panel_background),
     );
-    let clear_glyph = super::control_theme_catalog::readable_on(
-        field_reference.input_background,
-        resting_disc,
-        4.5,
-    );
+    let clear_glyph = super::readable_on(field_reference.input_background, resting_disc, 4.5);
     for disc in [
         standard.input_placeholder,
         standard.input_placeholder.mix(standard.input_text, 0.5),

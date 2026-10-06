@@ -90,7 +90,7 @@ use spaceterm_ui::{
 };
 
 #[cfg(test)]
-const CHROME_DIVIDER_SIZE: f32 = super::resize_handle_theme::VISIBLE_THICKNESS;
+const CHROME_DIVIDER_SIZE: f32 = super::control_theme::resize_handle::VISIBLE_THICKNESS;
 
 fn sidebar_toggle_presentation(sidebar_visible: bool) -> (CustomIconName, &'static str) {
     if sidebar_visible {
@@ -3251,7 +3251,7 @@ impl WorkspaceManager {
         ))
         .status(self.window_drag_status.clone())
         .pointer_insets(Edges {
-            right: super::resize_handle_theme::spacious_target_half_thickness(cx),
+            right: super::control_theme::resize_handle::spacious_target_half_thickness(cx),
             ..Edges::default()
         })
         .debug_selector("workspace-top-chrome-drag-region")

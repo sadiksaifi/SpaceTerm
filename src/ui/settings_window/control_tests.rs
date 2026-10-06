@@ -8,8 +8,8 @@ use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::settings::SettingsDocument;
 use crate::ui::appearance_runtime;
 
-use super::test_support::MemoryStorage;
 use super::{SettingsSectionId, SettingsWindow};
+use crate::settings::storage::testing::MemoryStorage;
 
 #[test]
 fn navigation_hover_changes_fill_without_adding_a_focus_like_rim() {
@@ -105,7 +105,7 @@ fn stepper_field_resolves_inside_its_rendered_card_host(cx: &mut TestAppContext)
     appearance.card_controls.colors.input_background = Color::rgb(0x228844);
     let expected = gpui_color(appearance.card_controls.colors.input_background);
     cx.update(|cx| {
-        crate::ui::control_theme_catalog::replace_uniform_control_catalog(cx, &appearance).unwrap()
+        crate::ui::control_theme::replace_uniform_control_catalog(cx, &appearance).unwrap()
     });
     let (_, cx) = cx.add_window_view(|_, _| StepperCard(SettingsAppearance::fallback(appearance)));
     cx.run_until_parked();

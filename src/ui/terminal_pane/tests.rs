@@ -41,11 +41,11 @@ fn pane_floating_shell_selects_the_window_activity_catalog(cx: &mut TestAppConte
     );
 
     cx.update(|cx| {
-        let active = Box::new(super::super::control_theme_catalog::catalog(
+        let active = Box::new(super::super::control_theme::catalog(
             &active,
             spaceterm_ui::ControlMotion::Standard,
         ));
-        let inactive = Box::new(super::super::control_theme_catalog::catalog(
+        let inactive = Box::new(super::super::control_theme::catalog(
             &inactive,
             spaceterm_ui::ControlMotion::Standard,
         ));
@@ -4774,7 +4774,7 @@ fn fullscreen_double_escape_exits_and_reaches_the_session(cx: &mut TestAppContex
 }
 
 fn install_uniform_chrome(chrome: super::super::appearance::ChromeAppearance, cx: &mut App) {
-    super::super::control_theme_catalog::replace_uniform_control_catalog(cx, &chrome).unwrap();
+    super::super::control_theme::replace_uniform_control_catalog(cx, &chrome).unwrap();
     cx.set_global(super::super::appearance::InstalledChrome::single(Arc::new(
         chrome,
     )));
@@ -7458,7 +7458,7 @@ fn error_notices_change_glyph_when_differentiate_without_color_turns_on(cx: &mut
     cx.update(|cx| {
         crate::ui::appearance_runtime::install(
             crate::settings::Settings::load(
-                crate::ui::settings_window::test_support::MemoryStorage::with_document(
+                crate::settings::storage::testing::MemoryStorage::with_document(
                     &crate::settings::SettingsDocument::default(),
                 ),
             ),

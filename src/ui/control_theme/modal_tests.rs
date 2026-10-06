@@ -77,7 +77,7 @@ fn replace_appearance(generation: u64, cx: &mut VisualTestContext) {
     };
     cx.update(|window, cx| {
         assert_eq!(
-            crate::ui::control_theme_catalog::replace_uniform_control_catalog(cx, &appearance),
+            super::replace_uniform_control_catalog(cx, &appearance),
             Ok(spaceterm_ui::ControlThemeReplacement::Applied)
         );
         cx.set_global(InstalledChrome::single(Arc::new(appearance)));

@@ -1,81 +1,6 @@
 use super::*;
 use crate::appearance::{AppearanceMode, TerminalColorOverrides, ZedExtension};
-use crate::platform::secure_filesystem::PrivateFileSnapshot;
-use storage::StorageCommit;
-
-#[derive(Default)]
-struct MemoryStorage(Mutex<MemoryState>);
-
-#[derive(Default)]
-struct MemoryState {
-    snapshot: Option<(Vec<u8>, u64)>,
-    writes: usize,
-    backup: Option<Vec<u8>>,
-    successor_after_quarantine: bool,
-    failure: Option<StorageError>,
-    unsynced: bool,
-    successor_after_commit: bool,
-}
-
-impl SettingsStorage for MemoryStorage {
-    fn quarantine(&self) -> Result<(), StorageError> {
-        let mut state = self.0.lock().unwrap();
-        if let Some(error) = state.failure {
-            return Err(error);
-        }
-        state.backup = Some(state.snapshot.take().ok_or(StorageError::Unavailable)?.0);
-        if state.successor_after_quarantine {
-            state.snapshot = Some((b"competing writer".to_vec(), 30));
-        }
-        Ok(())
-    }
-
-    fn read(&self) -> Result<Option<PrivateFileSnapshot>, StorageError> {
-        let state = self.0.lock().unwrap();
-        if let Some(error) = state.failure {
-            return Err(error);
-        }
-        Ok(state
-            .snapshot
-            .as_ref()
-            .map(|(bytes, identity)| PrivateFileSnapshot {
-                bytes: bytes.clone(),
-                identity: SecureEntryIdentity::from_opaque(*identity),
-            }))
-    }
-
-    fn write(
-        &self,
-        bytes: &[u8],
-        expected: Option<&SecureEntryIdentity>,
-    ) -> Result<StorageCommit, StorageError> {
-        let mut state = self.0.lock().unwrap();
-        if let Some(error) = state.failure {
-            return Err(error);
-        }
-        let expected = expected
-            .and_then(|identity| identity.opaque_ref::<u64>())
-            .copied();
-        if expected != state.snapshot.as_ref().map(|(_, identity)| *identity) {
-            return Err(StorageError::Conflict);
-        }
-        state.writes += 1;
-        let identity = expected.unwrap_or_default() + 1;
-        state.snapshot = Some((bytes.to_vec(), identity));
-        if state.successor_after_commit {
-            state.snapshot = Some((b"external successor".to_vec(), identity + 1));
-        }
-        Ok(StorageCommit {
-            durability: if state.unsynced {
-                Durability::Uncertain
-            } else {
-                Durability::Synchronized
-            },
-            identity: (!state.successor_after_commit)
-                .then(|| SecureEntryIdentity::from_opaque(identity)),
-        })
-    }
-}
+use storage::testing::MemoryStorage;
 
 fn setup() -> (Settings, Arc<MemoryStorage>) {
     let storage = Arc::new(MemoryStorage::default());
@@ -711,7 +636,7 @@ fn failed_commit_retains_editable_preview_when_owner_survives() {
     let original = settings.snapshot().committed;
     let token = settings.begin_preview(original.revision).unwrap();
     let job = settings.commit_preview(&token).unwrap();
-    storage.0.lock().unwrap().failure = Some(StorageError::Unavailable);
+    storage.fail_writes(Some(StorageError::Unavailable));
     assert_eq!(
         job.run(),
         Err(SettingsError::Storage(StorageError::Unavailable))
@@ -720,7 +645,7 @@ fn failed_commit_retains_editable_preview_when_owner_survives() {
     settings
         .update_preview(&token, (*original).clone())
         .unwrap();
-    storage.0.lock().unwrap().failure = None;
+    storage.fail_writes(None);
     settings.commit_preview(&token).unwrap().run().unwrap();
     assert_eq!(
         settings.snapshot().committed.revision,
@@ -735,7 +660,7 @@ fn failed_commit_after_owner_destruction_restores_committed_appearance() {
     let token = settings.begin_preview(original.revision).unwrap();
     let job = settings.commit_preview(&token).unwrap();
     drop(token);
-    storage.0.lock().unwrap().failure = Some(StorageError::Unavailable);
+    storage.fail_writes(Some(StorageError::Unavailable));
     assert!(job.run().is_err());
     assert_eq!(settings.snapshot().phase, PreviewPhase::Idle);
     assert_eq!(settings.snapshot().candidate.revision, original.revision);
@@ -790,7 +715,7 @@ fn competing_writer_is_preserved_and_requires_explicit_reload() {
 #[test]
 fn successor_installed_after_commit_does_not_authorize_next_overwrite() {
     let (settings, storage) = setup();
-    storage.0.lock().unwrap().successor_after_commit = true;
+    storage.drop_identity(true);
     let original = settings.snapshot().committed;
     let outcome = settings
         .update_committed(original.revision, (*original).clone())
@@ -798,6 +723,7 @@ fn successor_installed_after_commit_does_not_authorize_next_overwrite() {
         .run()
         .unwrap();
     assert!(outcome.reload_required);
+    storage.save_bytes_elsewhere(b"external successor".to_vec());
     let current = settings.snapshot().committed;
     assert_eq!(current.revision, original.revision + 1);
     assert!(
@@ -956,7 +882,7 @@ fn recovery_refuses_healthy_unsafe_and_busy_settings_without_quarantining() {
         settings.recover_by_reset(),
         Err(RecoveryError::NotMalformed)
     );
-    storage.0.lock().unwrap().failure = Some(StorageError::Unsafe);
+    storage.fail_reads(Some(StorageError::Unsafe));
     settings.reload().unwrap_err();
     assert!(!settings.snapshot().status.unwrap().is_malformed());
     assert_eq!(
@@ -965,7 +891,7 @@ fn recovery_refuses_healthy_unsafe_and_busy_settings_without_quarantining() {
     );
     {
         let mut state = storage.0.lock().unwrap();
-        state.failure = None;
+        state.read_failure = None;
         state.snapshot = Some((b"broken".to_vec(), 1));
     }
     settings.reload().unwrap_err();
@@ -1012,7 +938,7 @@ fn recovery_refuses_committing_and_storage_ready_settings() {
     let candidate = (*settings.snapshot().committed).clone();
     let job = settings.update_committed(0, candidate).unwrap();
     assert_eq!(settings.recover_by_reset(), Err(RecoveryError::Busy));
-    storage.0.lock().unwrap().failure = Some(StorageError::TooLarge);
+    storage.fail_writes(Some(StorageError::TooLarge));
     assert_eq!(
         job.run(),
         Err(SettingsError::Storage(StorageError::TooLarge))
@@ -1031,7 +957,7 @@ fn recovery_stops_on_quarantine_failure_without_writing_defaults() {
     let storage = Arc::new(MemoryStorage::default());
     storage.0.lock().unwrap().snapshot = Some((b"broken".to_vec(), 1));
     let settings = Settings::load(storage.clone());
-    storage.0.lock().unwrap().failure = Some(StorageError::Unsafe);
+    storage.fail_writes(Some(StorageError::Unsafe));
     assert_eq!(
         settings.recover_by_reset(),
         Err(RecoveryError::Storage(StorageError::Unsafe))

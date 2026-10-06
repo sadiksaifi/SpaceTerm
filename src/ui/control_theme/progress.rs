@@ -7,7 +7,7 @@ use spaceterm_ui::{ProgressMetrics, ProgressPaint, ProgressSizes, ProgressTheme}
 
 use crate::appearance::ChromeColors;
 
-pub(super) fn theme(colors: &ChromeColors) -> ProgressTheme {
+pub(in crate::ui) fn theme(colors: &ChromeColors) -> ProgressTheme {
     ProgressTheme::new(
         paint(colors),
         ProgressSizes::new(

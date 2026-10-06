@@ -26,7 +26,7 @@ pub(super) fn themed_with_rows(
         None,
         &ChromeTypography::default(),
         &ChromeIcons::default(),
-        super::control_theme_catalog::OverlayRowPolicy::default(),
+        super::OverlayRowPolicy::default(),
     )
 }
 
@@ -37,13 +37,11 @@ pub(super) fn prepared_with_rows(
     unfocused_rows: Option<(&ChromeColors, &ChromeColors)>,
     typography: &ChromeTypography,
     icons: &ChromeIcons,
-    row_policy: super::control_theme_catalog::OverlayRowPolicy,
+    row_policy: super::OverlayRowPolicy,
 ) -> MenuTheme {
-    let rows = super::control_theme_catalog::overlay_list_rows_with_policy(
-        reference, row_colors, row_policy,
-    );
+    let rows = super::overlay_list_rows_with_policy(reference, row_colors, row_policy);
     let rows = unfocused_rows.map_or(rows, |(unfocused_reference, unfocused_paint)| {
-        rows.unfocused_selection(super::control_theme_catalog::overlay_list_rows_with_policy(
+        rows.unfocused_selection(super::overlay_list_rows_with_policy(
             unfocused_reference,
             unfocused_paint,
             row_policy,
@@ -90,7 +88,7 @@ pub(super) fn prepared_with_rows(
 fn destructive_rows(
     reference: &ChromeColors,
     colors: &ChromeColors,
-    policy: super::control_theme_catalog::OverlayRowPolicy,
+    policy: super::OverlayRowPolicy,
 ) -> spaceterm_ui::ListRowPaints {
     let mut destructive = reference.clone();
     macro_rules! error_content {
@@ -114,7 +112,7 @@ fn destructive_rows(
         row_selected_hover_icon,
         row_selected_hover_match
     );
-    super::control_theme_catalog::overlay_list_rows_with_policy(&destructive, colors, policy)
+    super::overlay_list_rows_with_policy(&destructive, colors, policy)
 }
 
 fn metrics(width: f32, typography: &ChromeTypography, icons: &ChromeIcons) -> MenuMetrics {
@@ -214,9 +212,8 @@ mod tests {
         border: Color,
     ) -> ListRowPaint {
         let background = background.source_over(colors.elevated_surface_background);
-        let foreground =
-            super::super::control_theme_catalog::readable_on(foreground, background, 4.5);
-        let icon = super::super::control_theme_catalog::readable_on(icon, background, 4.5);
+        let foreground = super::super::readable_on(foreground, background, 4.5);
+        let icon = super::super::readable_on(icon, background, 4.5);
         ListRowPaint::new(
             gpui_color(background),
             gpui_color(foreground),
@@ -231,11 +228,8 @@ mod tests {
     fn destructive_menu_rows_use_neutral_overlay_surfaces_and_semantic_content() {
         for appearance in [Appearance::Dark, Appearance::Light] {
             let colors = builtin_chrome_base(appearance).opaque_presentation();
-            let rows = destructive_rows(
-                &colors,
-                &colors,
-                super::super::control_theme_catalog::OverlayRowPolicy::default(),
-            );
+            let rows =
+                destructive_rows(&colors, &colors, super::super::OverlayRowPolicy::default());
 
             assert_eq!(
                 rows.resolve(true, false, false),

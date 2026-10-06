@@ -5,7 +5,7 @@ use gpui::TestAppContext;
 use super::*;
 use crate::platform::settings_file::testing::RecordingSettingsFile;
 use crate::settings::SettingsDocument;
-use crate::ui::settings_window::test_support::MemoryStorage;
+use crate::settings::storage::testing::MemoryStorage;
 
 fn document_with_size(size: f32) -> SettingsDocument {
     let mut document = SettingsDocument::default();

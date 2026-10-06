@@ -1,6 +1,9 @@
 //! Portable AskPass protocol, presentation coordination, and lifetime authority.
-use super::app_paths::AppPaths;
-use crate::ui::ssh_askpass_dialog::GpuiAskPassPresenter;
+
+pub(crate) mod prompt;
+
+use crate::platform::app_paths::AppPaths;
+use crate::ui::askpass_dialog::GpuiAskPassPresenter;
 use gpui::{App, AppContext, Window};
 use std::cell::RefCell;
 use std::ffi::OsStr;
@@ -17,22 +20,22 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
-use super::ssh_askpass::{AskPassPromptKind, AskPassRequest, AskPassSecret};
+use prompt::{AskPassPromptKind, AskPassRequest, AskPassSecret};
 
 pub(super) const CAPABILITY_TEXT_BYTES: usize = 64;
 pub(super) const MAX_PROMPT_BYTES: usize = 4 * 1024;
 pub(super) const MAX_REQUEST_FRAME_BYTES: usize = CAPABILITY_TEXT_BYTES + MAX_PROMPT_BYTES + 8;
 pub(super) const MAX_REPLY_FRAME_BYTES: usize = 16 * 1024 + 1;
 pub(super) const HELPER_MODE_ENV: &str = "SPACETERM_SSH_ASKPASS_MODE";
-pub(super) const ENDPOINT_ENV: &str = "SPACETERM_SSH_ASKPASS_SOCKET";
-pub(super) const CAPABILITY_ENV: &str = "SPACETERM_SSH_ASKPASS_CAPABILITY";
+pub(crate) const ENDPOINT_ENV: &str = "SPACETERM_SSH_ASKPASS_SOCKET";
+pub(crate) const CAPABILITY_ENV: &str = "SPACETERM_SSH_ASKPASS_CAPABILITY";
 pub(super) const HELPER_MODE: &str = "broker-v1";
 pub(super) const DISPLAY_MARKER: &str = "spaceterm-askpass";
 const SSH_PROMPT_KIND_ENV: &str = "SSH_ASKPASS_PROMPT";
 const HELPER_SUCCESS: i32 = 0;
 const HELPER_CANCELLED: i32 = 1;
 const HELPER_FAILED: i32 = 2;
-pub(super) const BROKER_CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(15);
+pub(crate) const BROKER_CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(15);
 const REQUEST_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 const PRESENTATION_POLL_INTERVAL: Duration = Duration::from_millis(15);
 
@@ -113,7 +116,7 @@ impl AskPassCapability {
 }
 
 /// Validated presentation result before bounded protocol encoding.
-pub(super) enum AskPassProtocolReply {
+pub(crate) enum AskPassProtocolReply {
     Secret(AskPassSecret),
     Confirmation(bool),
     Cancelled,
@@ -121,7 +124,7 @@ pub(super) enum AskPassProtocolReply {
 }
 
 /// Validated helper-side reply. Secret bytes are zeroized on every exit path.
-pub(super) enum AskPassHelperReply {
+pub(crate) enum AskPassHelperReply {
     Secret(Zeroizing<Vec<u8>>),
     Confirmation(bool),
     Cancelled,
@@ -129,7 +132,7 @@ pub(super) enum AskPassHelperReply {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum AskPassProtocolError {
+pub(crate) enum AskPassProtocolError {
     TimedOut,
     Cancelled,
     Disconnected,
@@ -190,7 +193,7 @@ fn read_request_before<S: Read + ?Sized>(
     AskPassRequest::new(prompt, kind).map_err(|_| AskPassProtocolError::InvalidRequest)
 }
 
-pub(super) fn write_request<S: Write + ?Sized>(
+pub(crate) fn write_request<S: Write + ?Sized>(
     stream: &mut S,
     capability: &[u8],
     request: &AskPassRequest,
@@ -248,7 +251,7 @@ pub(super) fn write_reply<S: Write + ?Sized>(
     }
 }
 
-pub(super) fn read_reply<S: Read + ?Sized>(
+pub(crate) fn read_reply<S: Read + ?Sized>(
     stream: &mut S,
 ) -> Result<AskPassHelperReply, AskPassProtocolError> {
     let length = read_frame_length(stream, MAX_REPLY_FRAME_BYTES)?;
@@ -412,7 +415,7 @@ impl<'a> FrameCursor<'a> {
 ///
 /// Implementations must authenticate the expected broker process before returning a stream. The
 /// portable helper writes its capability and prompt immediately after this method succeeds.
-pub(super) trait AskPassHelperConnector {
+pub(crate) trait AskPassHelperConnector {
     type Stream: Read + Write;
 
     fn connect(&self, endpoint: &OsStr) -> Result<Self::Stream, AskPassUnavailable>;
@@ -427,7 +430,7 @@ struct HelperInvocation {
 }
 
 /// Dispatches the helper process role without constructing or entering GPUI.
-pub(super) fn dispatch_helper_from_environment(
+pub(crate) fn dispatch_helper_from_environment(
     connector: &impl AskPassHelperConnector,
 ) -> Option<i32> {
     dispatch_helper_role(std::env::var_os(HELPER_MODE_ENV), |mode| {
@@ -519,12 +522,12 @@ fn helper_request(invocation: &HelperInvocation) -> Option<AskPassRequest> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum AskPassPresentationFailure {
+pub(crate) enum AskPassPresentationFailure {
     Unavailable,
     Rejected,
 }
 
-pub(super) trait AskPassPresenter: Send + Sync {
+pub(crate) trait AskPassPresenter: Send + Sync {
     fn present(
         &self,
         request: AskPassRequest,
@@ -779,14 +782,14 @@ fn enqueue_cancel_without_blocking(commands: async_channel::Sender<AskPassUiComm
     }
 }
 
-fn map_presentation_result(result: super::ssh_askpass::AskPassResult) -> AskPassProtocolReply {
+fn map_presentation_result(result: prompt::AskPassResult) -> AskPassProtocolReply {
     match result {
-        super::ssh_askpass::AskPassResult::Secret(secret) => AskPassProtocolReply::Secret(secret),
-        super::ssh_askpass::AskPassResult::Confirmation(confirmed) => {
+        prompt::AskPassResult::Secret(secret) => AskPassProtocolReply::Secret(secret),
+        prompt::AskPassResult::Confirmation(confirmed) => {
             AskPassProtocolReply::Confirmation(confirmed)
         }
-        super::ssh_askpass::AskPassResult::Cancelled => AskPassProtocolReply::Cancelled,
-        super::ssh_askpass::AskPassResult::Failed(_) => AskPassProtocolReply::Failed,
+        prompt::AskPassResult::Cancelled => AskPassProtocolReply::Cancelled,
+        prompt::AskPassResult::Failed(_) => AskPassProtocolReply::Failed,
     }
 }
 
@@ -860,12 +863,12 @@ impl Drop for AskPassTeardown {
 ///
 /// Each read must settle within [`BROKER_CANCELLATION_POLL_INTERVAL`] so portable broker policy can
 /// observe its absolute request deadline and cancellation flag.
-pub(super) trait AskPassLocalStream: Read + Write + Send {}
+pub(crate) trait AskPassLocalStream: Read + Write + Send {}
 
 impl<T: Read + Write + Send> AskPassLocalStream for T {}
 
 /// Result of one nonblocking, peer-authenticated local endpoint poll.
-pub(super) enum AskPassLocalAccept {
+pub(crate) enum AskPassLocalAccept {
     Connected(Box<dyn AskPassLocalStream>),
     Pending,
     Rejected,
@@ -874,24 +877,24 @@ pub(super) enum AskPassLocalAccept {
 
 /// Listener mechanics and exact endpoint resources. Its implementation authenticates a peer
 /// before returning `Connected`, and its drop removes only the exact registered endpoint.
-pub(super) trait AskPassLocalListener: Send {
+pub(crate) trait AskPassLocalListener: Send {
     fn accept_authenticated(&self) -> AskPassLocalAccept;
 }
 
 /// Bound endpoint with its secret address intentionally excluded from `Debug` and errors.
-pub(super) struct BoundAskPassEndpoint {
+pub(crate) struct BoundAskPassEndpoint {
     address: OsString,
     listener: Box<dyn AskPassLocalListener>,
 }
 
 impl BoundAskPassEndpoint {
-    pub(super) fn new(address: OsString, listener: Box<dyn AskPassLocalListener>) -> Self {
+    pub(crate) fn new(address: OsString, listener: Box<dyn AskPassLocalListener>) -> Self {
         Self { address, listener }
     }
 }
 
 /// Narrow native listener creation mechanism selected by Host Composition.
-pub(super) trait AskPassLocalIpc: Send + Sync {
+pub(crate) trait AskPassLocalIpc: Send + Sync {
     fn bind(&self, paths: &AppPaths) -> Result<BoundAskPassEndpoint, AskPassUnavailable>;
 }
 
@@ -916,14 +919,14 @@ impl AskPassEnvironment {
 }
 
 /// Portable per-window factory for isolated AskPass attempts.
-pub(super) struct GpuiAskPassBrokerFactory {
+pub(crate) struct GpuiAskPassBrokerFactory {
     helper_path: PathBuf,
     bridge: GpuiAskPassBridge,
     local_ipc: Arc<dyn AskPassLocalIpc>,
 }
 
 impl GpuiAskPassBrokerFactory {
-    pub(super) fn new(
+    pub(crate) fn new(
         window: &Window,
         cx: &mut App,
         local_ipc: Arc<dyn AskPassLocalIpc>,
@@ -951,7 +954,7 @@ impl AskPassAttemptFactory for GpuiAskPassBrokerFactory {
     }
 }
 
-pub(super) fn start_attempt_with_presenter(
+pub(crate) fn start_attempt_with_presenter(
     paths: &AppPaths,
     helper_path: PathBuf,
     local_ipc: &dyn AskPassLocalIpc,

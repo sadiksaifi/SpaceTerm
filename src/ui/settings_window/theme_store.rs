@@ -716,28 +716,8 @@ fn installed_message(installed: usize) -> SharedString {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::secure_filesystem::{PrivateFileSnapshot, SecureEntryIdentity};
     use crate::settings::Settings;
-    use crate::settings::storage::{SettingsStorage, StorageCommit, StorageError};
-
-    struct EmptyStorage;
-
-    impl SettingsStorage for EmptyStorage {
-        fn quarantine(&self) -> Result<(), crate::settings::storage::StorageError> {
-            Err(crate::settings::storage::StorageError::Unavailable)
-        }
-        fn read(&self) -> Result<Option<PrivateFileSnapshot>, StorageError> {
-            Ok(None)
-        }
-
-        fn write(
-            &self,
-            _: &[u8],
-            _: Option<&SecureEntryIdentity>,
-        ) -> Result<StorageCommit, StorageError> {
-            panic!("importing a preview must not write settings");
-        }
-    }
+    use crate::settings::storage::testing::MemoryStorage;
 
     fn listed(version: &str) -> RegistryExtension {
         RegistryExtension {
@@ -784,7 +764,8 @@ mod tests {
 
     #[test]
     fn reimporting_a_zed_family_replaces_its_themes() {
-        let settings = Settings::load(std::sync::Arc::new(EmptyStorage));
+        let storage = std::sync::Arc::new(MemoryStorage::default());
+        let settings = Settings::load(storage.clone());
         let token = settings.begin_preview(0).unwrap();
         let bytes = br##"{"themes":[{"name":"Sample","appearance":"dark","style":{"terminal.foreground":"#abcdef"}}]}"##;
         let install = || {
@@ -796,11 +777,17 @@ mod tests {
         assert_eq!(install(), installed_message(1));
         assert_eq!(install(), installed_message(1));
         assert_eq!(settings.snapshot().candidate.terminal_themes.len(), 1);
+        assert_eq!(
+            storage.writes(),
+            0,
+            "importing a preview must not write settings"
+        );
     }
 
     #[test]
     fn a_malformed_zed_family_installs_nothing_and_a_corrected_retry_is_clean() {
-        let settings = Settings::load(std::sync::Arc::new(EmptyStorage));
+        let storage = std::sync::Arc::new(MemoryStorage::default());
+        let settings = Settings::load(storage.clone());
         let token = settings.begin_preview(0).unwrap();
         let invalid = br##"{"themes":[{"name":"First","appearance":"dark","style":{}},{"name":"Broken","appearance":"sepia","style":{}}]}"##;
         let corrected = br##"{"themes":[{"name":"First","appearance":"dark","style":{}},{"name":"Second","appearance":"light","style":{}}]}"##;
@@ -818,6 +805,11 @@ mod tests {
 
         assert_eq!(install(corrected), installed_message(2));
         assert_eq!(settings.snapshot().candidate.terminal_themes.len(), 2);
+        assert_eq!(
+            storage.writes(),
+            0,
+            "importing a preview must not write settings"
+        );
     }
 
     #[test]

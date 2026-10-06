@@ -178,8 +178,8 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::platform::askpass::AskPassCapabilityCopy;
     use crate::platform::unix_adapter_tests::short_temporary_root;
+    use crate::ssh::askpass::AskPassCapabilityCopy;
 
     fn shell_request(script: &str) -> SshProcessSpawnRequest {
         SshProcessSpawnRequest::new(

@@ -76,8 +76,6 @@ mod macos_accessibility;
 #[cfg(all(target_os = "macos", test))]
 pub(crate) mod macos_accessibility;
 
-pub(crate) mod ssh_askpass;
-
 #[cfg(all(target_os = "macos", not(test)))]
 mod macos_keyboard;
 #[cfg(all(target_os = "macos", test))]
@@ -155,7 +153,6 @@ pub(crate) mod launch_host;
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 compile_error!("SpaceTerm supports macOS and Linux only");
 
-pub(crate) mod askpass;
 #[cfg(target_os = "macos")]
 mod macos_composition;
 pub(crate) mod permission_recovery;

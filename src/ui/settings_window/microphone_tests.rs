@@ -19,8 +19,8 @@ use super::super::microphone::{
     CHECK_AGAIN_SELECTOR, CONTROL_SELECTOR, MicrophoneAccessAction, MicrophoneAccessStatus,
     OPEN_SETTINGS_SELECTOR, REQUEST_SELECTOR,
 };
-use super::super::test_support::MemoryStorage;
 use super::super::{SettingsRowId, SettingsSectionId, SettingsWindow};
+use crate::settings::storage::testing::MemoryStorage;
 
 const ROW_SELECTOR: &str = "settings-row-microphone-access";
 

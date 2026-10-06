@@ -1,12 +1,10 @@
-//! Shared storage Adapter for Settings draft and window tests.
-
 use std::{
     sync::{Arc, Condvar, Mutex},
     time::Duration,
 };
 
+use super::{Durability, SettingsStorage, StorageCommit, StorageError};
 use crate::platform::secure_filesystem::{PrivateFileSnapshot, SecureEntryIdentity};
-use crate::settings::storage::{Durability, SettingsStorage, StorageCommit, StorageError};
 use crate::settings::{SettingsDocument, export_settings};
 
 /// The bytes [`MemoryStorage::corrupt`] retains: not a Settings Document.
@@ -14,15 +12,20 @@ pub(crate) const CORRUPT_DOCUMENT: &[u8] = b"{ not settings";
 
 /// In-memory Settings storage that counts writes and can be made to fail on demand.
 #[derive(Default)]
-pub(crate) struct MemoryStorage(Mutex<MemoryState>, Mutex<Option<Arc<WriteGate>>>);
+pub(crate) struct MemoryStorage(
+    pub(in crate::settings) Mutex<MemoryState>,
+    Mutex<Option<Arc<WriteGate>>>,
+);
 
 #[derive(Default)]
-struct MemoryState {
-    snapshot: Option<(Vec<u8>, u64)>,
-    backup: Option<Vec<u8>>,
-    writes: usize,
-    write_failure: Option<StorageError>,
-    read_failure: Option<StorageError>,
+pub(in crate::settings) struct MemoryState {
+    pub(in crate::settings) snapshot: Option<(Vec<u8>, u64)>,
+    pub(in crate::settings) backup: Option<Vec<u8>>,
+    pub(in crate::settings) writes: usize,
+    pub(in crate::settings) write_failure: Option<StorageError>,
+    pub(in crate::settings) read_failure: Option<StorageError>,
+    pub(in crate::settings) successor_after_quarantine: bool,
+    pub(in crate::settings) unsynced: bool,
     /// Publishes without a verifiable identity, which forces a reload before the next write.
     drop_identity: bool,
 }
@@ -125,14 +128,14 @@ impl MemoryStorage {
         state.snapshot = Some((bytes, identity));
     }
 
-    pub(super) fn repair(&self) {
+    pub(crate) fn repair(&self) {
         let bytes = export_settings(&SettingsDocument::default())
             .expect("default document")
             .into_bytes();
         self.0.lock().unwrap().snapshot = Some((bytes, 2));
     }
 
-    pub(super) fn drop_identity(&self, drop: bool) {
+    pub(crate) fn drop_identity(&self, drop: bool) {
         self.0.lock().unwrap().drop_identity = drop;
     }
 }
@@ -144,6 +147,9 @@ impl SettingsStorage for MemoryStorage {
             return Err(error);
         }
         state.backup = Some(state.snapshot.take().ok_or(StorageError::Unavailable)?.0);
+        if state.successor_after_quarantine {
+            state.snapshot = Some((b"competing writer".to_vec(), 30));
+        }
         Ok(())
     }
     fn read(&self) -> Result<Option<PrivateFileSnapshot>, StorageError> {
@@ -187,7 +193,11 @@ impl SettingsStorage for MemoryStorage {
         state.snapshot = Some((bytes.to_vec(), identity));
         let drop_identity = state.drop_identity;
         Ok(StorageCommit {
-            durability: Durability::Synchronized,
+            durability: if state.unsynced {
+                Durability::Uncertain
+            } else {
+                Durability::Synchronized
+            },
             identity: (!drop_identity).then(|| SecureEntryIdentity::from_opaque(identity)),
         })
     }

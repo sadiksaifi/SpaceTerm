@@ -7,7 +7,7 @@ use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::window_movement::{
     OperatingSystemWindowDragPlatform, RecordingOperatingSystemWindowDragPlatform,
 };
-use crate::ui::settings_window::test_support::MemoryStorage;
+use crate::settings::storage::testing::MemoryStorage;
 
 struct RecordingMovement;
 

@@ -11,7 +11,7 @@ use spaceterm_ui::{
 };
 
 use super::chrome_typography::{ChromeTextStyleExt, TextRole};
-use crate::platform::ssh_askpass::{
+use crate::ssh::askpass::prompt::{
     AskPassCompletion, AskPassConfirmationPresentation, AskPassPresentationError, AskPassRequest,
     AskPassResponseError, AskPassResult, AskPassSecret, AskPassSecretPresentation,
 };
@@ -493,7 +493,7 @@ mod tests {
     use spaceterm_ui::{ModalLayer, ModalPresentationHandle};
 
     use super::*;
-    use crate::platform::ssh_askpass::AskPassPromptKind;
+    use crate::ssh::askpass::prompt::AskPassPromptKind;
 
     #[derive(Debug, Eq, PartialEq)]
     enum ObservedResult {

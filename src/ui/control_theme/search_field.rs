@@ -132,5 +132,5 @@ fn clear_glyph(reference: &ChromeColors) -> Color {
             .input_background
             .source_over(reference.panel_background),
     );
-    super::control_theme_catalog::readable_on(reference.input_background, disc, 4.5)
+    super::readable_on(reference.input_background, disc, 4.5)
 }

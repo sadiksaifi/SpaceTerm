@@ -2,9 +2,8 @@ use super::*;
 use crate::appearance::{Appearance, AppearanceMode};
 use crate::appearance::{ResolvedAppearance, SurfaceRole};
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
-use crate::platform::secure_filesystem::{PrivateFileSnapshot, SecureEntryIdentity};
 use crate::settings::SettingsDocument;
-use crate::settings::storage::{SettingsStorage, StorageCommit, StorageError};
+use crate::settings::storage::testing::MemoryStorage;
 use gpui::TestAppContext;
 
 fn shell(resolved: &ResolvedAppearance) -> u8 {
@@ -23,29 +22,8 @@ fn floating(resolved: &ResolvedAppearance) -> u8 {
         .alpha(SurfaceRole::Floating)
 }
 
-#[derive(Default)]
-struct PreviewStorage(Option<Vec<u8>>);
-impl SettingsStorage for PreviewStorage {
-    fn quarantine(&self) -> Result<(), crate::settings::storage::StorageError> {
-        Err(crate::settings::storage::StorageError::Unavailable)
-    }
-    fn read(&self) -> Result<Option<PrivateFileSnapshot>, StorageError> {
-        Ok(self.0.as_ref().map(|bytes| PrivateFileSnapshot {
-            bytes: bytes.clone(),
-            identity: SecureEntryIdentity::from_opaque(1_u64),
-        }))
-    }
-    fn write(
-        &self,
-        _: &[u8],
-        _: Option<&SecureEntryIdentity>,
-    ) -> Result<StorageCommit, StorageError> {
-        panic!("preview must not write settings")
-    }
-}
-
 fn start(cx: &mut TestAppContext) -> (Settings, RecordingAppearancePlatform) {
-    let settings = Settings::load(Arc::new(PreviewStorage::default()));
+    let settings = Settings::load(Arc::new(MemoryStorage::default()));
     let platform = RecordingAppearancePlatform::default();
     platform.set_system_appearance(Some(Appearance::Dark));
     cx.update(|cx| {
@@ -122,7 +100,7 @@ fn host_font_facts_survive_initial_resolution_catalog_completion_and_reload(
                 cx.global::<spaceterm_ui::ControlThemeCatalog>()
                     .clone()
                     .generation(unversioned),
-                super::super::control_theme_catalog::catalog(
+                super::super::control_theme::catalog(
                     crate::ui::appearance::chrome(cx),
                     cx.global::<AppearanceRuntime>().control_motion,
                 )
@@ -683,7 +661,7 @@ fn accessibility_preview_overrides_only_selected_facts_and_resets_to_live_values
 fn reduced_motion_updates_progress_at_startup_and_after_native_notification(
     cx: &mut TestAppContext,
 ) {
-    let settings = Settings::load(Arc::new(PreviewStorage::default()));
+    let settings = Settings::load(Arc::new(MemoryStorage::default()));
     let platform = RecordingAppearancePlatform::default();
     platform.set_system_appearance(Some(Appearance::Dark));
     platform.set_reduced_motion(true);
@@ -692,7 +670,7 @@ fn reduced_motion_updates_progress_at_startup_and_after_native_notification(
         crate::ui::initialize_controls(cx).unwrap();
         assert_eq!(
             cx.global::<spaceterm_ui::ProgressTheme>(),
-            &crate::ui::progress_theme::theme(&crate::ui::appearance::chrome(cx).colors)
+            &crate::ui::control_theme::progress::theme(&crate::ui::appearance::chrome(cx).colors)
         );
         assert_eq!(
             cx.global::<spaceterm_ui::ControlMotion>(),
@@ -707,7 +685,7 @@ fn reduced_motion_updates_progress_at_startup_and_after_native_notification(
     cx.update(|cx| {
         assert_eq!(
             cx.global::<spaceterm_ui::ProgressTheme>(),
-            &crate::ui::progress_theme::theme(&crate::ui::appearance::chrome(cx).colors)
+            &crate::ui::control_theme::progress::theme(&crate::ui::appearance::chrome(cx).colors)
         );
         assert_eq!(
             cx.global::<spaceterm_ui::ControlMotion>(),
@@ -787,7 +765,8 @@ fn cancelling_fixed_preview_resolves_committed_auto_mode_again(cx: &mut TestAppC
     let bytes = crate::settings::export_settings(&committed)
         .unwrap()
         .into_bytes();
-    let settings = Settings::load(Arc::new(PreviewStorage(Some(bytes))));
+    let storage = MemoryStorage::with_bytes(bytes);
+    let settings = Settings::load(storage.clone());
     let platform = RecordingAppearancePlatform::default();
     platform.set_system_appearance(Some(Appearance::Dark));
     cx.update(|cx| {
@@ -804,6 +783,7 @@ fn cancelling_fixed_preview_resolves_committed_auto_mode_again(cx: &mut TestAppC
     drop(token);
     cx.run_until_parked();
     cx.update(|cx| assert_eq!(current(cx).chrome.appearance, Appearance::Light));
+    assert_eq!(storage.writes(), 0);
 }
 
 /// Comfortable density grows the titlebar, so each window's native traffic lights must move down

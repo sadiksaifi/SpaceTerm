@@ -12,6 +12,9 @@ use crate::platform::secure_filesystem::{
 pub(super) use super::document::MAX_DOCUMENT_BYTES;
 const PREPARE_ATTEMPTS: usize = 16;
 
+#[cfg(test)]
+pub(crate) mod testing;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub(crate) enum StorageError {
     #[error("settings storage is unavailable")]

@@ -2,6 +2,8 @@
 
 mod document;
 #[cfg(test)]
+mod document_tests;
+#[cfg(test)]
 mod schema_tests;
 
 pub(crate) mod recovery;

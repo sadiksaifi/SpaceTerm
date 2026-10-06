@@ -26,7 +26,7 @@ pub(super) fn themed_with_rows(
         None,
         &ChromeTypography::default(),
         &ChromeIcons::default(),
-        super::control_theme_catalog::OverlayRowPolicy::default(),
+        super::OverlayRowPolicy::default(),
     )
 }
 
@@ -37,7 +37,7 @@ pub(super) fn prepared_with_rows(
     unfocused_rows: Option<(&ChromeColors, &ChromeColors)>,
     typography: &ChromeTypography,
     icons: &ChromeIcons,
-    row_policy: super::control_theme_catalog::OverlayRowPolicy,
+    row_policy: super::OverlayRowPolicy,
 ) -> ComboBoxTheme {
     let body = typography.style(TextRole::Body);
     let secondary = typography.style(TextRole::Secondary);
@@ -62,17 +62,13 @@ pub(super) fn prepared_with_rows(
             gpui_color(colors.element_disabled),
         )
         .rows({
-            let rows = super::control_theme_catalog::overlay_list_rows_with_policy(
-                reference, row_colors, row_policy,
-            );
+            let rows = super::overlay_list_rows_with_policy(reference, row_colors, row_policy);
             unfocused_rows.map_or(rows, |(unfocused_reference, unfocused_paint)| {
-                rows.unfocused_selection(
-                    super::control_theme_catalog::overlay_list_rows_with_policy(
-                        unfocused_reference,
-                        unfocused_paint,
-                        row_policy,
-                    ),
-                )
+                rows.unfocused_selection(super::overlay_list_rows_with_policy(
+                    unfocused_reference,
+                    unfocused_paint,
+                    row_policy,
+                ))
             })
         })
         .hover_background(gpui_color(colors.ghost_element_hover))

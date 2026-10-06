@@ -14,7 +14,7 @@ pub(super) fn theme(colors: &ChromeColors) -> SegmentedControlTheme {
     prepared(colors, &ChromeTypography::default(), false)
 }
 
-pub(super) fn prepared(
+pub(in crate::ui) fn prepared(
     colors: &ChromeColors,
     typography: &ChromeTypography,
     show_borders: bool,

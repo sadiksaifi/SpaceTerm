@@ -3,8 +3,8 @@ use std::sync::Arc;
 use crate::appearance::{ChromeDensity, ResetTarget};
 use crate::settings::SettingsDocument;
 use crate::settings::storage::StorageError;
+use crate::settings::storage::testing::MemoryStorage;
 use crate::settings::{PreviewPhase, Settings, SettingsError, ThemeImport};
-use crate::ui::settings_window::test_support::MemoryStorage;
 
 use super::{SaveStatus, SettingsDraft};
 

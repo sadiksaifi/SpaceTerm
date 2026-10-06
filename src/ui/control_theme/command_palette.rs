@@ -20,7 +20,7 @@ pub(super) fn themed(reference: &ChromeColors, colors: &ChromeColors) -> Command
         None,
         &ChromeTypography::default(),
         &ChromeIcons::default(),
-        super::control_theme_catalog::OverlayRowPolicy::default(),
+        super::OverlayRowPolicy::default(),
     )
 }
 
@@ -30,7 +30,7 @@ pub(super) fn prepared(
     unfocused_rows: Option<(&ChromeColors, &ChromeColors)>,
     typography: &ChromeTypography,
     icons: &ChromeIcons,
-    row_policy: super::control_theme_catalog::OverlayRowPolicy,
+    row_policy: super::OverlayRowPolicy,
 ) -> CommandPaletteTheme {
     let body = typography.style(TextRole::Body);
     let secondary = typography.style(TextRole::Secondary);
@@ -45,17 +45,13 @@ pub(super) fn prepared(
             gpui_color(colors.text_accent),
         )
         .rows({
-            let rows = super::control_theme_catalog::overlay_list_rows_with_policy(
-                reference, colors, row_policy,
-            );
+            let rows = super::overlay_list_rows_with_policy(reference, colors, row_policy);
             unfocused_rows.map_or(rows, |(unfocused_reference, unfocused_paint)| {
-                rows.unfocused_selection(
-                    super::control_theme_catalog::overlay_list_rows_with_policy(
-                        unfocused_reference,
-                        unfocused_paint,
-                        row_policy,
-                    ),
-                )
+                rows.unfocused_selection(super::overlay_list_rows_with_policy(
+                    unfocused_reference,
+                    unfocused_paint,
+                    row_policy,
+                ))
             })
         })
         .icons(gpui_color(colors.icon), gpui_color(colors.icon_disabled))

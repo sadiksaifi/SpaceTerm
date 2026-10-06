@@ -565,7 +565,7 @@ impl<'a, T: SidebarOwner> Sidebar<'a, T> {
                         .top_0()
                         .bottom_0()
                         .right_0()
-                        .w(px(super::resize_handle_theme::VISIBLE_THICKNESS))
+                        .w(px(super::control_theme::resize_handle::VISIBLE_THICKNESS))
                         .bg(gpui_color(edge)),
                 )
             })
@@ -945,7 +945,7 @@ impl<'a> DetailHeading<'a> {
                         .bottom_0()
                         .left_0()
                         .w_full()
-                        .h(px(super::resize_handle_theme::VISIBLE_THICKNESS))
+                        .h(px(super::control_theme::resize_handle::VISIBLE_THICKNESS))
                         .bg(gpui_color(surface.separator(SettingsSurfaceRole::Canvas))),
                 )
             })

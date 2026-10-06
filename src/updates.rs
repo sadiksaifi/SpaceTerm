@@ -937,7 +937,7 @@ mod tests {
             ..Default::default()
         };
         let settings = crate::settings::Settings::load(
-            crate::ui::settings_window::test_support::MemoryStorage::with_document(&document),
+            crate::settings::storage::testing::MemoryStorage::with_document(&document),
         );
         service.update(cx, |updates, _| updates.attach_settings(settings));
         adapter.emit(UpdateEvent::ReleaseMetadata {
@@ -1036,7 +1036,7 @@ mod tests {
             ..Default::default()
         };
         let settings = crate::settings::Settings::load(
-            crate::ui::settings_window::test_support::MemoryStorage::with_document(&document),
+            crate::settings::storage::testing::MemoryStorage::with_document(&document),
         );
         service.update(cx, |updates, _| updates.attach_settings(settings));
         adapter.emit(UpdateEvent::Available("0.1.1".into()));

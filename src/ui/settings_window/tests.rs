@@ -18,7 +18,7 @@ use super::editor::{COMMIT_DELAY, SaveStatus};
 use super::{SettingsRowId, SettingsSectionId, SettingsWindow};
 use crate::ui::sidebar_window::SidebarOwner as _;
 
-use super::test_support::MemoryStorage;
+use crate::settings::storage::testing::MemoryStorage;
 
 pub(super) struct Harness {
     storage: Arc<MemoryStorage>,
@@ -656,7 +656,7 @@ fn malformed_settings_reset_keeps_a_backup_and_resumes_editing(cx: &mut TestAppC
 
     assert_eq!(
         harness.storage.backup().as_deref(),
-        Some(super::test_support::CORRUPT_DOCUMENT)
+        Some(crate::settings::storage::testing::CORRUPT_DOCUMENT)
     );
     assert!(
         harness.storage.document().is_some(),
@@ -2979,7 +2979,7 @@ fn start_scheduled_write(
     window: &Entity<SettingsWindow>,
     storage: &MemoryStorage,
     cx: &mut VisualTestContext,
-) -> super::test_support::BlockedWrite {
+) -> crate::settings::storage::testing::BlockedWrite {
     let blocked = storage.block_next_write();
     // Advance time without draining the scheduled job into the blocked storage write.
     cx.cx

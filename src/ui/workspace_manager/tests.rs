@@ -485,8 +485,8 @@ type RemoteCompletionFixture = (
     async_channel::Sender<crate::ssh::live_connection::ControlConnectionTerminalState>,
 );
 use crate::directory_selection::ScriptedDirectorySelection;
-use crate::platform::ssh_askpass::{AskPassPromptKind, AskPassRequest, AskPassResult};
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
+use crate::ssh::askpass::prompt::{AskPassPromptKind, AskPassRequest, AskPassResult};
 use crate::ssh::command::ValidatedRemoteShellCommand;
 use crate::ssh::destination::SshHostAlias;
 use crate::ssh::host_config::HostDiscovery;
@@ -495,6 +495,7 @@ use crate::terminal::testing::{
     RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
 };
 use crate::terminal::{SessionEvent, SessionExit};
+use crate::ui::askpass_dialog::GpuiAskPassPresenter;
 use crate::ui::directory_picker::{
     DirectoryListing, ExactPathState, RemoteDirectoryProvider, RemoteDirectoryProviderError,
 };
@@ -502,7 +503,6 @@ use crate::ui::remote_workspace_flow::{
     RemoteWorkspaceAliasPin, RemoteWorkspaceAliasPinError, RemoteWorkspaceConnectContext,
     RemoteWorkspaceFlowBackendError, RemoteWorkspaceFlowStage, RemoteWorkspaceSessionOwner,
 };
-use crate::ui::ssh_askpass_dialog::GpuiAskPassPresenter;
 use crate::ui::ssh_host_form::ManagedHostFormBackendError;
 
 #[derive(Default)]
@@ -8482,7 +8482,7 @@ fn inline_rename_frame_should_resolve_inside_the_sidebar_control_host(cx: &mut T
     assert_ne!(window_background, panel_background);
     cx.update(|window, cx| {
         assert_eq!(
-            crate::ui::control_theme_catalog::replace_uniform_control_catalog(cx, &appearance),
+            crate::ui::control_theme::replace_uniform_control_catalog(cx, &appearance),
             Ok(spaceterm_ui::ControlThemeReplacement::Applied)
         );
         cx.set_global(crate::ui::appearance::InstalledChrome::single(Arc::new(
