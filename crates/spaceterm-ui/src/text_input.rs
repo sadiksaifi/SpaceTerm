@@ -614,6 +614,7 @@ pub struct TextInput {
     caret_task: Option<Task<()>>,
     context_menu_open: bool,
     paste_available: bool,
+    accessible_text: crate::accessible_text::AccessibleText,
     #[cfg(test)]
     shape_count: usize,
     #[cfg(test)]
@@ -691,6 +692,7 @@ impl TextInput {
             caret_task: None,
             context_menu_open: false,
             paste_available: false,
+            accessible_text: Default::default(),
             #[cfg(test)]
             shape_count: 0,
             #[cfg(test)]
@@ -995,6 +997,16 @@ impl TextInput {
     pub fn select_all(&mut self, cx: &mut Context<Self>) {
         self.commit_composition(cx);
         self.buffer.select_all();
+        self.restart_caret(cx);
+    }
+
+    /// Applies an assistive technology selection, with its anchor and active end in bytes.
+    fn select_from_accessibility(&mut self, anchor: usize, focus: usize, cx: &mut Context<Self>) {
+        if !self.enabled {
+            return;
+        }
+        self.commit_composition(cx);
+        self.buffer.select_from_anchor(anchor, focus);
         self.restart_caret(cx);
     }
 
@@ -2110,7 +2122,24 @@ impl Render for TextInput {
             })
             .aria_label(self.accessibility_name.clone())
             .when(exposes_content, |editor| {
-                editor.aria_value(SharedString::from(self.buffer.text.as_str().to_owned()))
+                let value = self.buffer.text.as_str().to_owned();
+                let published = self.accessible_text.clone();
+                let requested = self.accessible_text.clone();
+                let selection = &self.buffer.selection;
+                let (anchor, focus) = (selection.anchor(), selection.cursor());
+                let input = entity.downgrade();
+                editor
+                    .aria_value(SharedString::from(value.clone()))
+                    .a11y_synthetic_children(move |builder| {
+                        published.publish(builder, &value, anchor, focus);
+                    })
+                    .on_a11y_action(accesskit::Action::SetTextSelection, move |data, _, cx| {
+                        if let Some((anchor, focus)) = requested.requested_selection(data) {
+                            let _ = input.update(cx, |input, cx| {
+                                input.select_from_accessibility(anchor, focus, cx);
+                            });
+                        }
+                    })
             })
             .when(!self.placeholder.is_empty(), |editor| {
                 editor.aria_placeholder(self.placeholder.clone())

@@ -320,3 +320,45 @@ fn text_areas_publish_a_multiline_field_with_its_value(cx: &mut TestAppContext) 
         true
     );
 }
+
+#[gpui::test]
+fn text_areas_publish_one_text_run_per_line_and_accept_selection_requests(cx: &mut TestAppContext) {
+    use crate::a11y_testing::{A11yTree, node_id, perform_with};
+    use gpui::accesskit::{Action, ActionData, TextPosition, TextSelection};
+
+    let (area, cx) = area(cx, "first\nsecond", |area| area);
+    let tree = A11yTree::read(cx);
+    let field = tree.node("Test area");
+    let runs = tree.children(field);
+    let values = runs
+        .iter()
+        .map(|run| run["aria"]["value"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(values, ["first\n", "second"]);
+    assert_eq!(
+        field["aria"]["text_selection"]["focus"],
+        serde_json::json!({ "node": field["children"][0], "character_index": 0 })
+    );
+
+    let second = node_id(runs[1]);
+    let first = node_id(runs[0]);
+    perform_with(
+        cx,
+        field,
+        Action::SetTextSelection,
+        Some(ActionData::SetTextSelection(TextSelection {
+            anchor: TextPosition {
+                node: first,
+                character_index: 5,
+            },
+            focus: TextPosition {
+                node: second,
+                character_index: 3,
+            },
+        })),
+    );
+    assert_eq!(
+        cx.read(|cx| area.read(cx).buffer.selection.range.clone()),
+        5..9
+    );
+}

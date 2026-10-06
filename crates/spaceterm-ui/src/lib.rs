@@ -5,6 +5,7 @@
 
 #[cfg(test)]
 mod a11y_testing;
+mod accessible_text;
 mod anchored_placement;
 mod appearance;
 mod button;

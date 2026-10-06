@@ -1777,3 +1777,54 @@ fn obscured_inputs_publish_a_secure_field_without_their_value(cx: &mut TestAppCo
     let published = cx.update(|window, _| window.debug_a11y_tree_json().unwrap());
     assert!(!published.contains("hunter2"));
 }
+
+#[gpui::test]
+fn text_inputs_publish_their_caret_and_accept_selection_requests(cx: &mut TestAppContext) {
+    use crate::a11y_testing::{A11yTree, node_id, perform_with};
+    use gpui::accesskit::{Action, ActionData, TextPosition, TextSelection};
+
+    let (input, cx) = input(cx, "hello world");
+    let tree = A11yTree::read(cx);
+    let field = tree.node("Test input");
+    let runs = tree.children(field);
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0]["aria"]["role"], "TextRun");
+    assert_eq!(runs[0]["aria"]["value"], "hello world");
+    let caret = serde_json::json!({ "node": field["children"][0], "character_index": 11 });
+    assert_eq!(field["aria"]["text_selection"]["anchor"], caret);
+    assert_eq!(field["aria"]["text_selection"]["focus"], caret);
+
+    let run = node_id(runs[0]);
+    perform_with(
+        cx,
+        field,
+        Action::SetTextSelection,
+        Some(ActionData::SetTextSelection(TextSelection {
+            anchor: TextPosition {
+                node: run,
+                character_index: 6,
+            },
+            focus: TextPosition {
+                node: run,
+                character_index: 0,
+            },
+        })),
+    );
+    let selection = input.read_with(cx, |input, _| input.selection());
+    assert_eq!(selection.range(), 0..6);
+    assert_eq!(selection.anchor(), 6);
+    let tree = A11yTree::read(cx);
+    assert_eq!(
+        tree.node("Test input")["aria"]["text_selection"]["focus"]["character_index"],
+        0
+    );
+}
+
+#[gpui::test]
+fn obscured_inputs_publish_no_text_runs(cx: &mut TestAppContext) {
+    use crate::a11y_testing::A11yTree;
+
+    let (_, cx) = obscured_input(cx, "hunter2");
+    let tree = A11yTree::read(cx);
+    assert!(tree.children(tree.node("Secret")).is_empty());
+}

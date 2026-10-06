@@ -66,14 +66,31 @@ pub(crate) fn supports(node: &Value, action: accesskit::Action) -> bool {
 
 /// Sends an assistive technology action request to a published node.
 pub(crate) fn perform(cx: &mut VisualTestContext, node: &Value, action: accesskit::Action) {
-    let id = node["accesskit_id"]
-        .as_str()
-        .and_then(|id| id.parse().ok())
-        .expect("a published node id");
+    perform_with(cx, node, action, None);
+}
+
+/// Sends an assistive technology action request with data to a published node.
+pub(crate) fn perform_with(
+    cx: &mut VisualTestContext,
+    node: &Value,
+    action: accesskit::Action,
+    data: Option<accesskit::ActionData>,
+) {
+    let target_node = node_id(node);
     cx.simulate_accessibility_action(accesskit::ActionRequest {
         action,
         target_tree: accesskit::TreeId::ROOT,
-        target_node: accesskit::NodeId(id),
-        data: None,
+        target_node,
+        data,
     });
+}
+
+/// Returns a published node's AccessKit id.
+pub(crate) fn node_id(node: &Value) -> accesskit::NodeId {
+    accesskit::NodeId(
+        node["accesskit_id"]
+            .as_str()
+            .and_then(|id| id.parse().ok())
+            .expect("a published node id"),
+    )
 }
