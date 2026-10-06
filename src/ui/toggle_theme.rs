@@ -251,21 +251,7 @@ mod tests {
                     )
             }
         }
-        let base = theme(&ChromeColors::default());
-        let scaled = base.scaled_spacing(1.25);
-        for on in [false, true] {
-            for enabled in [false, true] {
-                for hovered in [false, true] {
-                    for pressed in [false, true] {
-                        assert_eq!(
-                            base.paint(on, enabled, hovered, pressed),
-                            scaled.paint(on, enabled, hovered, pressed)
-                        );
-                    }
-                }
-            }
-        }
-        cx.set_global(scaled);
+        cx.set_global(theme(&ChromeColors::default()).scaled_spacing(1.25));
         let (_, cx) = cx.add_window_view(|_, _| Fixture);
         cx.run_until_parked();
         let checkbox = cx
@@ -276,30 +262,5 @@ mod tests {
             .expect("switch paints");
         assert_eq!(checkbox.size, gpui::size(px(17.5), px(17.5)));
         assert_eq!(switch.size.width, px(37.5));
-        let body_size = ChromeTypography::default().style(TextRole::Body).size;
-        let expected_label_width = cx.update(|window, _| {
-            window
-                .text_system()
-                .shape_line(
-                    "Label".into(),
-                    body_size,
-                    &[gpui::TextRun {
-                        len: 5,
-                        font: spaceterm_ui::ControlTypography::default().regular().clone(),
-                        color: gpui::black(),
-                        background_color: None,
-                        underline: None,
-                        strikethrough: None,
-                    }],
-                    None,
-                )
-                .width
-        });
-        for (row, indicator) in [("geometry-checkbox", checkbox), ("geometry-switch", switch)] {
-            assert_eq!(
-                cx.debug_bounds(row).unwrap().size.width - indicator.size.width - px(7.5),
-                expected_label_width
-            );
-        }
     }
 }

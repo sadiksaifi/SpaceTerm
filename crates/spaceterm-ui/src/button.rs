@@ -2169,12 +2169,6 @@ mod tests {
 
     #[gpui::test]
     fn typed_tooltip_should_integrate_with_text_and_icon_buttons(cx: &mut TestAppContext) {
-        let button =
-            Button::new("button", "Button").tooltip(Tooltip::new("button-tooltip", "Button help"));
-        let icon = IconButton::new("icon", "Icon", |_| div().into_any_element())
-            .tooltip(Tooltip::new("icon-tooltip", "Icon help"));
-
-        assert!(button.core.tooltip.is_some() && icon.core.tooltip.is_some());
         cx.set_global(test_theme());
         cx.set_global(crate::TooltipTheme::new(
             crate::TooltipPaint::new(rgba(0xffffffff), rgba(0xaaaaaaff), rgba(0xccccccff)),
@@ -2240,12 +2234,6 @@ mod tests {
     fn icon_button_can_take_a_semantic_target_size_without_changing_its_size_role(
         cx: &mut TestAppContext,
     ) {
-        let icon = IconButton::new("icon", "Icon", |_| div().into_any_element())
-            .size(ButtonSize::Compact)
-            .target_size(px(28.0));
-
-        assert_eq!(icon.core.size, ButtonSize::Compact);
-        assert_eq!(icon.core.icon_button_size, Some(px(28.0)));
         struct IconTargetRoot;
         impl Render for IconTargetRoot {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {

@@ -168,9 +168,15 @@ mod tests {
     }
 
     impl TestStartupSshEnvironmentReader {
-        fn environment_variable(&mut self, key: &OsStr) -> Option<OsString> {
-            *self.reads.entry(key.to_os_string()).or_default() += 1;
-            self.environment.get(key).cloned()
+        fn capture(&mut self) -> StartupSshEnvironment {
+            StartupSshEnvironment::from_environment(
+                |key| {
+                    *self.reads.entry(key.to_os_string()).or_default() += 1;
+                    self.environment.get(key).cloned()
+                },
+                FALLBACK_PATH.into(),
+            )
+            .unwrap()
         }
     }
 
@@ -181,11 +187,7 @@ mod tests {
             "/private/tmp/ssh-agent.sock",
         );
 
-        let captured = StartupSshEnvironment::from_environment(
-            |key| reader.environment_variable(key),
-            FALLBACK_PATH.into(),
-        )
-        .unwrap();
+        let captured = reader.capture();
 
         assert_eq!(
             (
@@ -200,11 +202,7 @@ mod tests {
     fn capture_should_preserve_an_unset_agent_socket() {
         let mut reader = TestStartupSshEnvironmentReader::default();
 
-        let captured = StartupSshEnvironment::from_environment(
-            |key| reader.environment_variable(key),
-            FALLBACK_PATH.into(),
-        )
-        .unwrap();
+        let captured = reader.capture();
 
         assert_eq!(captured.agent_socket(), None);
     }
@@ -214,11 +212,7 @@ mod tests {
         let mut reader = TestStartupSshEnvironmentReader::default()
             .with_environment(SSH_AUTH_SOCK_ENVIRONMENT_VARIABLE, OsString::new());
 
-        let captured = StartupSshEnvironment::from_environment(
-            |key| reader.environment_variable(key),
-            FALLBACK_PATH.into(),
-        )
-        .unwrap();
+        let captured = reader.capture();
 
         assert_eq!(captured.agent_socket(), Some(OsStr::new("")));
     }
@@ -236,11 +230,7 @@ mod tests {
             .with_environment("LC_SECRET", "locale-shaped-secret")
             .with_environment("SPACETERM_UNRELATED_SECRET", "secret");
 
-        let captured = StartupSshEnvironment::from_environment(
-            |key| reader.environment_variable(key),
-            FALLBACK_PATH.into(),
-        )
-        .unwrap();
+        let captured = reader.capture();
 
         assert_eq!(
             captured.entries().collect::<Vec<_>>(),
@@ -277,11 +267,7 @@ mod tests {
             if let Some(path) = path {
                 reader = reader.with_environment(PATH_ENVIRONMENT_VARIABLE, path);
             }
-            let captured = StartupSshEnvironment::from_environment(
-                |key| reader.environment_variable(key),
-                FALLBACK_PATH.into(),
-            )
-            .unwrap();
+            let captured = reader.capture();
 
             assert_eq!(
                 captured.entries().next(),

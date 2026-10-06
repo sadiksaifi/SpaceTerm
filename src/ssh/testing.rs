@@ -38,18 +38,14 @@ impl SshConnectionFixture {
         startup: &StartupSshEnvironment,
     ) -> Self {
         let filesystem = Arc::new(RecordingFilesystem::default());
-        let root = PathBuf::from("/fixture/ssh");
         let environment = AppDirectoryEnvironment {
-            xdg_config_home: Some(root.join("config").into_os_string()),
-            xdg_data_home: Some(root.join("data").into_os_string()),
-            xdg_state_home: Some(root.join("state").into_os_string()),
-            xdg_cache_home: Some(root.join("cache").into_os_string()),
-            xdg_runtime_dir: Some(root.join("runtime").into_os_string()),
+            home: Some("/fixture/ssh".into()),
+            xdg_runtime_dir: Some("/fixture/ssh/runtime".into()),
             ..AppDirectoryEnvironment::default()
         };
         let paths = crate::platform::testing::resolve_app_paths(
             &environment,
-            Some(root.join("temporary")),
+            Some("/fixture/ssh/temporary".into()),
             103,
             filesystem.clone(),
         )

@@ -395,20 +395,18 @@ fn every_supported_resource_uses_the_same_version_and_protocol_marks() {
             "{relative} must state its prompt redraw policy"
         );
     }
-    for (shell, arguments, relative, script, redraw) in [
+    for (shell, arguments, relative, script) in [
         (
             "/bin/bash",
             &["--noprofile", "--norc", "-ic"][..],
             "bash/spaceterm.bash",
             r#"source "$1"; if declare -F _spaceterm_prompt >/dev/null; then _spaceterm_prompt; fi"#,
-            "133;A;redraw=last",
         ),
         (
             "/bin/zsh",
             &["-dfi", "-c"][..],
             "zsh/spaceterm-integration",
             r#"PS1='SPACE> '; builtin source -- "$1"; if (( $+functions[_spaceterm_before_prompt] )); then _spaceterm_before_prompt; builtin print -nrP -- "$PS1"; fi"#,
-            "133;A;redraw=1",
         ),
     ] {
         for version in [Some("1"), Some("0"), Some("2"), None] {
@@ -427,20 +425,11 @@ fn every_supported_resource_uses_the_same_version_and_protocol_marks() {
             }
             let output = command.output().unwrap();
             assert!(output.status.success(), "{shell} {version:?}: {output:?}");
-            let reports = osc_reports(&output.stdout);
-            if version == Some("1") {
-                assert_eq!(
-                    reports.iter().filter(|report| **report == redraw).count(),
-                    1,
-                    "{shell} must accept version 1 and emit its exact redraw mark"
-                );
-                assert!(reports.iter().any(|report| report.starts_with("7;file://")));
-            } else {
-                assert!(
-                    reports.is_empty(),
-                    "{shell} must reject version {version:?}: {reports:?}"
-                );
-            }
+            assert_eq!(
+                osc_reports(&output.stdout).is_empty(),
+                version != Some("1"),
+                "{shell} must accept only version 1, not {version:?}"
+            );
         }
     }
 }

@@ -435,6 +435,21 @@ mod tests {
     use crate::platform::app_directories::AppDirectoryEnvironment;
 
     use crate::platform::testing::RecordingFilesystem;
+    fn resolve(
+        environment: &AppDirectoryEnvironment,
+        runtime_fallback: Option<&str>,
+        local_ipc_path_maximum: usize,
+        filesystem: Arc<dyn SecureFilesystem>,
+    ) -> AppPaths {
+        crate::platform::testing::resolve_app_paths(
+            environment,
+            runtime_fallback.map(PathBuf::from),
+            local_ipc_path_maximum,
+            filesystem,
+        )
+        .unwrap()
+    }
+
     fn environment() -> AppDirectoryEnvironment {
         AppDirectoryEnvironment {
             home: Some("/home/test".into()),
@@ -448,13 +463,12 @@ mod tests {
             xdg_runtime_dir: Some("relative".into()),
             ..environment()
         };
-        let paths = crate::platform::testing::resolve_app_paths(
+        let paths = resolve(
             &environment,
-            Some("/runtime".into()),
+            Some("/runtime"),
             200,
             Arc::new(RecordingFilesystem::default()),
-        )
-        .unwrap();
+        );
         assert_eq!(
             paths.directories().config.as_path(),
             Path::new("/explicit/../config/spaceterm")
@@ -472,13 +486,12 @@ mod tests {
             ..environment()
         };
 
-        let paths = crate::platform::testing::resolve_app_paths(
+        let paths = resolve(
             &environment,
             None,
             200,
             Arc::new(RecordingFilesystem::default()),
-        )
-        .unwrap();
+        );
 
         assert_eq!(
             paths.directories().runtime.as_deref().unwrap().as_os_str(),
@@ -488,13 +501,12 @@ mod tests {
 
     #[test]
     fn runtime_owner_should_report_an_unavailable_runtime_directory() {
-        let paths = crate::platform::testing::resolve_app_paths(
+        let paths = resolve(
             &environment(),
             None,
             200,
             Arc::new(RecordingFilesystem::default()),
-        )
-        .unwrap();
+        );
 
         assert!(matches!(
             paths.create_runtime_owner("a"),
@@ -510,13 +522,7 @@ mod tests {
             .lock()
             .unwrap()
             .insert(PathBuf::from("/runtime/spaceterm"));
-        let paths = crate::platform::testing::resolve_app_paths(
-            &environment(),
-            Some("/runtime".into()),
-            200,
-            filesystem.clone(),
-        )
-        .unwrap();
+        let paths = resolve(&environment(), Some("/runtime"), 200, filesystem.clone());
 
         let first = paths.create_runtime_owner("a").unwrap();
         let second = paths.create_runtime_owner("c").unwrap();
@@ -542,13 +548,7 @@ mod tests {
             xdg_runtime_dir: Some("/run/user/1000".into()),
             ..environment()
         };
-        let paths = crate::platform::testing::resolve_app_paths(
-            &environment,
-            Some("/runtime".into()),
-            200,
-            filesystem,
-        )
-        .unwrap();
+        let paths = resolve(&environment, Some("/runtime"), 200, filesystem);
 
         assert!(matches!(
             paths.create_runtime_owner("a"),
@@ -574,13 +574,7 @@ mod tests {
     #[test]
     fn owner_policy_should_name_register_and_cleanup_in_order() {
         let filesystem = Arc::new(RecordingFilesystem::default());
-        let paths = crate::platform::testing::resolve_app_paths(
-            &environment(),
-            Some("/runtime".into()),
-            200,
-            filesystem.clone(),
-        )
-        .unwrap();
+        let paths = resolve(&environment(), Some("/runtime"), 200, filesystem.clone());
         let owner = paths
             .create_runtime_owner_with_identity("a", 35, 36)
             .unwrap();
@@ -606,13 +600,7 @@ mod tests {
     #[test]
     fn socket_path_should_use_injected_constraint() {
         let filesystem = Arc::new(RecordingFilesystem::default());
-        let paths = crate::platform::testing::resolve_app_paths(
-            &environment(),
-            Some("/runtime".into()),
-            4,
-            filesystem,
-        )
-        .unwrap();
+        let paths = resolve(&environment(), Some("/runtime"), 4, filesystem);
         let owner = paths.create_runtime_owner_with_identity("a", 1, 1).unwrap();
         assert!(matches!(
             owner.socket_path("a"),
@@ -622,13 +610,12 @@ mod tests {
 
     #[test]
     fn debug_output_should_not_expose_paths_or_native_details() {
-        let paths = crate::platform::testing::resolve_app_paths(
+        let paths = resolve(
             &environment(),
-            Some("/runtime".into()),
+            Some("/runtime"),
             200,
             Arc::new(RecordingFilesystem::default()),
-        )
-        .unwrap();
+        );
         assert_eq!(format!("{paths:?}"), "AppPaths(..)");
         assert_eq!(format!("{:?}", AppPathsError::UnsafePath), "UnsafePath");
     }

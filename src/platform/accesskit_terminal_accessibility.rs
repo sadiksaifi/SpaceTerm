@@ -1542,18 +1542,18 @@ mod tests {
             focus: published.position(5).unwrap(),
         });
         tree.select(Some(&selection));
-        let requests = receiver.drain();
-        assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].range, 1..5);
-        assert_eq!(requests, vec![model.selection_request(1..5).unwrap()]);
+        assert_eq!(
+            receiver.drain(),
+            vec![model.selection_request(1..5).unwrap()]
+        );
         tree.select(Some(&ActionData::SetTextSelection(TextSelection {
             anchor: published.position(5).unwrap(),
             focus: published.position(1).unwrap(),
         })));
-        let requests = receiver.drain();
-        assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].range, 1..5);
-        assert_eq!(requests, vec![model.selection_request(1..5).unwrap()]);
+        assert_eq!(
+            receiver.drain(),
+            vec![model.selection_request(1..5).unwrap()]
+        );
         for (anchor, focus) in [
             (
                 TextPosition {

@@ -409,6 +409,7 @@ mod tests {
     use super::*;
     use crate::domain::{RemoteDirectory, SshDestination};
     use crate::ssh::command::ValidatedRemoteShellCommand;
+    use crate::ssh::testing::SshConnectionFixture;
     use crate::terminal::geometry::{
         BackingScale, CellGridSize, LogicalCellSize, TerminalGeometry,
     };
@@ -419,32 +420,16 @@ mod tests {
         ready: AtomicBool,
         preparations: AtomicUsize,
         revalidations: Mutex<Vec<(RemoteDirectory, Option<RemoteDirectoryIdentity>)>>,
-        owners: Mutex<Vec<crate::ssh::testing::SshConnectionFixture>>,
-        results: Mutex<
-            VecDeque<
-                Result<
-                    (
-                        crate::ssh::testing::SshConnectionFixture,
-                        PreparedSshPaneChannelCommand,
-                    ),
-                    RemoteChannelUnavailable,
-                >,
-            >,
-        >,
+        owners: Mutex<Vec<SshConnectionFixture>>,
+        results: Mutex<VecDeque<Result<OwnedChannel, RemoteChannelUnavailable>>>,
     }
+
+    type OwnedChannel = (SshConnectionFixture, PreparedSshPaneChannelCommand);
 
     impl TestRemoteChannelProvider {
         fn new(
             ready: bool,
-            results: impl IntoIterator<
-                Item = Result<
-                    (
-                        crate::ssh::testing::SshConnectionFixture,
-                        PreparedSshPaneChannelCommand,
-                    ),
-                    RemoteChannelUnavailable,
-                >,
-            >,
+            results: impl IntoIterator<Item = Result<OwnedChannel, RemoteChannelUnavailable>>,
         ) -> Self {
             Self {
                 ready: AtomicBool::new(ready),
@@ -494,14 +479,8 @@ mod tests {
         }
     }
 
-    fn prepared_channel(
-        destination: &SshDestination,
-        command: &str,
-    ) -> (
-        crate::ssh::testing::SshConnectionFixture,
-        PreparedSshPaneChannelCommand,
-    ) {
-        let owner = crate::ssh::testing::SshConnectionFixture::new(destination.clone());
+    fn prepared_channel(destination: &SshDestination, command: &str) -> OwnedChannel {
+        let owner = SshConnectionFixture::new(destination.clone());
         let channel = owner
             .prepare_pane_channel(ValidatedRemoteShellCommand::new(command.to_owned()).unwrap());
         (owner, channel)

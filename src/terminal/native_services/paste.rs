@@ -277,10 +277,7 @@ mod tests {
 
     #[test]
     fn preparation_classifies_and_trusts_every_control_replaced_by_the_ghostty_encoder() {
-        for byte in [
-            0x00, 0x08, 0x05, 0x04, 0x1b, 0x7f, 0x03, 0x1c, 0x15, 0x1a, 0x11, 0x13, 0x17, 0x16,
-            0x12, 0x0f,
-        ] {
+        for byte in STRIPPED_CONTROLS {
             let prepared = PreparedPaste::prepare(String::from_utf8(vec![b'a', byte]).unwrap())
                 .expect("control-bearing input remains encodable after sanitization");
             assert!(prepared.risk.control_bytes, "control byte {byte:#04x}");

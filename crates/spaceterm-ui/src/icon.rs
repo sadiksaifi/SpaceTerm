@@ -505,118 +505,53 @@ mod tests {
 
     use gpui::{Context, InteractiveElement as _, Render, TestAppContext, Window, size};
 
-    type IconBounds = std::rc::Rc<
-        std::cell::RefCell<std::collections::HashMap<&'static str, gpui::Bounds<Pixels>>>,
-    >;
-
-    struct IconTestRoot(IconBounds);
-
-    struct MeasuredIcon {
-        icon: gpui::AnyElement,
-        id: &'static str,
-        path: &'static str,
-        artwork_size: Pixels,
-        bounds: IconBounds,
-    }
-
-    impl IntoElement for MeasuredIcon {
-        type Element = Self;
-        fn into_element(self) -> Self {
-            self
-        }
-    }
-
-    impl gpui::Element for MeasuredIcon {
-        type RequestLayoutState = ();
-        type PrepaintState = ();
-        fn id(&self) -> Option<gpui::ElementId> {
-            None
-        }
-        fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
-            None
-        }
-        fn request_layout(
-            &mut self,
-            _: Option<&gpui::GlobalElementId>,
-            _: Option<&gpui::InspectorElementId>,
-            window: &mut Window,
-            cx: &mut App,
-        ) -> (gpui::LayoutId, ()) {
-            (self.icon.request_layout(window, cx), ())
-        }
-        fn prepaint(
-            &mut self,
-            _: Option<&gpui::GlobalElementId>,
-            _: Option<&gpui::InspectorElementId>,
-            bounds: gpui::Bounds<Pixels>,
-            _: &mut (),
-            window: &mut Window,
-            cx: &mut App,
-        ) {
-            self.bounds.borrow_mut().insert(self.id, bounds);
-            self.icon.prepaint(window, cx);
-        }
-        fn paint(
-            &mut self,
-            _: Option<&gpui::GlobalElementId>,
-            _: Option<&gpui::InspectorElementId>,
-            bounds: gpui::Bounds<Pixels>,
-            _: &mut (),
-            _: &mut (),
-            window: &mut Window,
-            cx: &mut App,
-        ) {
-            // TestAppContext has an empty asset source. Supply the real embedded asset to its
-            // atlas with transparent paint; only the Icon's own paint can emit a visible sprite.
-            let bytes = EmbeddedAssets
-                .load(self.path)
-                .expect("asset lookup")
-                .expect("the fixture asset is embedded");
-            let extent = size(self.artwork_size, self.artwork_size);
-            window
-                .paint_svg(
-                    gpui::Bounds::new(
-                        bounds.center()
-                            - gpui::point(self.artwork_size / 2.0, self.artwork_size / 2.0),
-                        extent,
-                    ),
-                    self.path.into(),
-                    Some(&bytes),
-                    Default::default(),
-                    gpui::rgba(0).into(),
-                    cx,
-                )
-                .expect("the asset rasterizes");
-            self.icon.paint(window, cx);
-        }
-    }
+    struct IconTestRoot;
 
     impl Render for IconTestRoot {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            div().flex().children(
+            div().flex().items_start().children(
                 [
-                    ("icon-10", IconName::Pin, 10.0),
-                    ("icon-12", IconName::Search, 12.0),
-                    ("icon-14", IconName::Folder, 14.0),
-                    ("icon-pin-off", IconName::PinOff, 16.0),
+                    ("icon-10", IconName::Pin, 10.0, "pin/10", 10.0),
+                    ("icon-12", IconName::Search, 12.0, "search/12", 12.0),
+                    ("icon-14", IconName::Folder, 14.0, "folder/14", 14.0),
+                    ("icon-pin-off", IconName::PinOff, 16.0, "pin-off/14", 14.0),
                 ]
-                .map(|(id, name, logical_size)| {
+                .map(|(id, name, logical_size, asset, artwork_size)| {
                     let logical_size = gpui::px(logical_size);
-                    let (path, artwork_size) = match id {
-                        "icon-10" => ("spaceterm-ui/lucide/pin/10/1.svg", gpui::px(10.0)),
-                        "icon-12" => ("spaceterm-ui/lucide/search/12/1.svg", gpui::px(12.0)),
-                        "icon-14" => ("spaceterm-ui/lucide/folder/14/1.svg", gpui::px(14.0)),
-                        "icon-pin-off" => ("spaceterm-ui/lucide/pin-off/14/1.svg", gpui::px(14.0)),
-                        _ => unreachable!(),
-                    };
-                    MeasuredIcon {
-                        icon: Icon::new(name, logical_size, gpui::rgba(0x8f9aafff))
-                            .into_any_element(),
-                        id,
-                        path,
-                        artwork_size,
-                        bounds: std::rc::Rc::clone(&self.0),
-                    }
+                    let artwork_size = gpui::px(artwork_size);
+                    let path = format!("spaceterm-ui/lucide/{asset}/1.svg");
+                    // TestAppContext has an empty asset source. Supply the real embedded asset to
+                    // its atlas with transparent paint; only the Icon's own paint can emit a
+                    // visible sprite.
+                    let preload = gpui::canvas(
+                        |_, _, _| (),
+                        move |bounds, (), window, cx| {
+                            let bytes = EmbeddedAssets
+                                .load(&path)
+                                .expect("asset lookup")
+                                .expect("the fixture asset is embedded");
+                            window
+                                .paint_svg(
+                                    gpui::Bounds::new(
+                                        bounds.center()
+                                            - gpui::point(artwork_size / 2.0, artwork_size / 2.0),
+                                        size(artwork_size, artwork_size),
+                                    ),
+                                    path.into(),
+                                    Some(&bytes),
+                                    Default::default(),
+                                    gpui::rgba(0).into(),
+                                    cx,
+                                )
+                                .expect("the asset rasterizes");
+                        },
+                    );
+                    div()
+                        .id(id)
+                        .debug_selector(move || id.to_owned())
+                        .relative()
+                        .child(preload.absolute().size_full())
+                        .child(Icon::new(name, logical_size, gpui::rgba(0x8f9aafff)))
                 }),
             )
         }
@@ -1035,9 +970,7 @@ mod tests {
     fn representative_icons_should_render_at_compact_logical_sizes(cx: &mut TestAppContext) {
         cx.update(register_font)
             .expect("bundled Lucide font registration should succeed");
-        let observations = IconBounds::default();
-        let bounds = std::rc::Rc::clone(&observations);
-        let (_, cx) = cx.add_window_view(move |_, _| IconTestRoot(bounds));
+        let (_, cx) = cx.add_window_view(|_, _| IconTestRoot);
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
 
@@ -1047,9 +980,8 @@ mod tests {
             ("icon-14", 14.0),
             ("icon-pin-off", 16.0),
         ] {
-            let bounds = *observations
-                .borrow()
-                .get(id)
+            let bounds = cx
+                .debug_bounds(id)
                 .unwrap_or_else(|| panic!("{id} should be painted"));
             assert_eq!(
                 bounds.size,

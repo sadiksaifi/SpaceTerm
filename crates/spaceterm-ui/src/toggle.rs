@@ -1663,27 +1663,21 @@ mod tests {
             let outer = focus.scale(scale);
             assert!(!bands.is_empty(), "{selector} must paint a ring");
             assert!(bands.iter().all(|quad| quad.bounds == outer));
-            // GPUI may split a border into strips and clip edges outside the window.
-            let visible_bands = bands
+            let visible = bands
                 .iter()
                 .map(|quad| quad.bounds.intersect(&quad.content_mask.bounds))
                 .filter(|bounds| !bounds.is_empty())
                 .collect::<Vec<_>>();
-            assert!(!visible_bands.is_empty());
-            for visible in visible_bands {
-                let sample = visible.center();
-                assert_eq!(
-                    bands
+            assert!(!visible.is_empty(), "{selector} ring must be visible");
+            assert!(
+                visible
+                    .iter()
+                    .enumerate()
+                    .all(|(index, a)| visible[index + 1..]
                         .iter()
-                        .filter(|quad| {
-                            quad.bounds.contains(&sample)
-                                && quad.content_mask.bounds.contains(&sample)
-                        })
-                        .count(),
-                    1,
-                    "{selector} must paint one ring in each visible band"
-                );
-            }
+                        .all(|b| a.intersect(b).is_empty())),
+                "{selector} must paint one ring"
+            );
             cx.update(|window, cx| window.focus_next(cx));
             cx.run_until_parked();
         }

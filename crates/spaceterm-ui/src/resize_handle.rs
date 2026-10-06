@@ -1390,33 +1390,6 @@ mod tests {
                 },
             ]
         );
-        assert!(matches!(
-            events[0],
-            ResizeHandleEvent::InteractionStarted { .. }
-        ));
-        assert!(matches!(
-            events[1],
-            ResizeHandleEvent::ResizeRequested {
-                displacement: 12.0,
-                requested_value: 112.0,
-                ..
-            }
-        ));
-        assert!(matches!(
-            events[2],
-            ResizeHandleEvent::ResizeRequested {
-                displacement: 25.0,
-                requested_value: 125.0,
-                ..
-            }
-        ));
-        assert!(matches!(
-            events[3],
-            ResizeHandleEvent::InteractionFinished {
-                reason: ResizeFinishReason::Completed,
-                ..
-            }
-        ));
     }
 
     #[gpui::test]

@@ -249,33 +249,12 @@ mod tests {
             "/fixture/zsh".into(),
             "/fixture/resources".into(),
         ));
-        for name in [
-            "ALACRITTY_LOG",
-            "ALACRITTY_SOCKET",
-            "ALACRITTY_WINDOW_ID",
-            "DESKTOP_STARTUP_ID",
-            "GIO_LAUNCHED_DESKTOP_FILE",
-            "GIO_LAUNCHED_DESKTOP_FILE_PID",
-            "GNOME_TERMINAL_SCREEN",
-            "GNOME_TERMINAL_SERVICE",
-            "KITTY_INSTALLATION_DIR",
-            "KONSOLE_DBUS_SERVICE",
-            "KONSOLE_DBUS_SESSION",
-            "KONSOLE_DBUS_WINDOW",
-            "KONSOLE_VERSION",
-            "TERMINATOR_DBUS_NAME",
-            "TERMINATOR_DBUS_PATH",
-            "TERMINATOR_UUID",
-            "TILIX_ID",
-            "VTE_VERSION",
-            "WINDOWID",
-            "XDG_ACTIVATION_TOKEN",
-            "XTERM_LOCALE",
-            "XTERM_SHELL",
-            "XTERM_VERSION",
-        ] {
-            assert!(host.contains(&name.into()), "{name} reaches Linux shells");
-            assert!(!shared.contains(&name.into()), "{name} is shared policy");
+        for name in HOST_RUNTIME_ENVIRONMENT {
+            assert!(
+                host.contains(&(*name).into()),
+                "{name} reaches Linux shells"
+            );
+            assert!(!shared.contains(&(*name).into()), "{name} is shared policy");
         }
         assert!(shared.iter().all(|name| host.contains(name)));
     }

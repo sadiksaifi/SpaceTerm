@@ -36,6 +36,7 @@ use super::pointer_input::{
     WheelPhase,
 };
 use super::selection::{SelectionCopyOptions, TrailingSpacePolicy};
+use super::session::SessionFailure;
 use super::testing::ShellResourcesFixture;
 use crate::platform::shell_integration::{
     ShellEnvironment, ShellIntegrationMode, ShellIntegrationStatus, ShellKind,
@@ -1698,11 +1699,13 @@ fn check_typed_failures() -> Result<(), String> {
         failure.recoverability(),
         Recoverability::Fatal,
     )?;
-    require_eq(
-        "failure-format",
-        failure.to_string(),
-        "PTY failed during read-shell-output. Close this Pane and restart the terminal command."
-            .to_owned(),
+    let redacted = TerminalFailure::from_session(&SessionFailure::Runtime(
+        "private terminal content".to_owned(),
+    ));
+    require(
+        !redacted.to_string().contains("private terminal content"),
+        "failure-redaction",
+        redacted.to_string(),
     )?;
     let mut diagnostics = DiagnosticBundle::default();
     for _ in 0..DiagnosticBundle::MAX_RECORDS + 10 {

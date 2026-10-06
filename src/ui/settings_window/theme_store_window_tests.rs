@@ -1,18 +1,28 @@
-//! Theme store integration through its owning child fixture and actual Settings controls.
-
-use gpui::TestAppContext;
+use gpui::{Entity, SharedString, TestAppContext, VisualTestContext};
 
 use crate::appearance::Appearance;
 use crate::settings::SettingsDocument;
 
-use super::super::SettingsSectionId;
 use super::super::tests::{
     REGISTRY_LISTING, click, document_of, open_settings_with_registry, open_theme_store,
     sample_registry, select_section,
 };
+use super::super::{SettingsSectionId, SettingsWindow};
 use super::Listing;
 use crate::theme_registry::testing::MemoryTransport;
 use std::sync::Arc;
+
+fn listing(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> Listing {
+    window.read_with(cx, |settings, cx| {
+        settings.theme_store.read(cx).listing.clone()
+    })
+}
+
+fn status(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> Option<SharedString> {
+    window.read_with(cx, |settings, cx| {
+        settings.theme_store.read(cx).status.clone()
+    })
+}
 
 /// Opening Get More Themes is what contacts the registry, once; getting an extension adds its
 /// themes without selecting any, and its row then reads Installed.
@@ -24,10 +34,7 @@ fn get_more_themes_lists_the_registry_and_installs_without_selection(cx: &mut Te
     assert!(transport.requests().is_empty());
 
     open_theme_store(&window, cx);
-    assert!(matches!(
-        window.read_with(cx, |settings, cx| settings.theme_store.read(cx).listing.clone()),
-        Listing::Loaded(extensions) if extensions.len() == 2
-    ));
+    assert!(matches!(listing(&window, cx), Listing::Loaded(extensions) if extensions.len() == 2));
     let preferences = document_of(&window, cx).appearance;
 
     click("settings-zed-extension-action-sample-themes", cx);
@@ -42,13 +49,7 @@ fn get_more_themes_lists_the_registry_and_installs_without_selection(cx: &mut Te
     assert_eq!(names, ["Sample Dark", "Sample Light"]);
     assert_eq!(document.appearance, preferences);
     assert_eq!(
-        window
-            .read_with(cx, |settings, cx| settings
-                .theme_store
-                .read(cx)
-                .status
-                .clone())
-            .as_deref(),
+        status(&window, cx).as_deref(),
         Some("Installed 2 themes from Sample Themes.")
     );
     assert!(
@@ -106,13 +107,7 @@ fn removing_an_extension_from_the_sheet_removes_its_themes(cx: &mut TestAppConte
         SettingsDocument::default().appearance.terminal.themes.dark
     );
     assert_eq!(
-        window
-            .read_with(cx, |settings, cx| settings
-                .theme_store
-                .read(cx)
-                .status
-                .clone())
-            .as_deref(),
+        status(&window, cx).as_deref(),
         Some("Removed 2 themes from Sample Themes.")
     );
     assert!(
@@ -134,14 +129,7 @@ fn a_loading_registry_listing_shows_a_bar_above_its_caption(cx: &mut TestAppCont
             settings.open_theme_store(gpui_window, cx)
         });
     });
-    assert!(matches!(
-        window.read_with(cx, |settings, cx| settings
-            .theme_store
-            .read(cx)
-            .listing
-            .clone()),
-        Listing::Loading
-    ));
+    assert!(matches!(listing(&window, cx), Listing::Loading));
     let bar = cx
         .debug_bounds("settings-theme-store-loading-track")
         .expect("the loading listing shows a bar");
@@ -172,11 +160,7 @@ fn a_failed_registry_listing_offers_a_retry(cx: &mut TestAppContext) {
 
     open_theme_store(&window, cx);
     assert!(matches!(
-        window.read_with(cx, |settings, cx| settings
-            .theme_store
-            .read(cx)
-            .listing
-            .clone()),
+        listing(&window, cx),
         Listing::Failed(crate::theme_registry::RegistryError::Refused)
     ));
 

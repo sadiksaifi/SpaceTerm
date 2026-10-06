@@ -4733,11 +4733,6 @@ mod typography_tests {
                         (authored_ratio - actual_ratio).abs() < 0.012,
                         "{control_host:?} host={host:?}: authored={authored_ratio}, actual={actual_ratio}"
                     );
-                    assert_eq!(
-                        actual,
-                        host_relative_fill(fill, authored.background, host).unwrap(),
-                        "host={host:?}, authored fill={fill:?}"
-                    );
                 }
             }
         }

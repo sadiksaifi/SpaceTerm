@@ -909,12 +909,6 @@ mod tests {
 
             assert!(scrollbar.move_drag(px(80.0), cx));
         });
-        assert!(
-            events
-                .borrow()
-                .iter()
-                .any(|event| matches!(event, OverlayScrollbarEvent::OffsetRequested(_)))
-        );
         let before = events.borrow().clone();
         assert_eq!(
             before,
