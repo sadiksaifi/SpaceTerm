@@ -179,7 +179,6 @@ impl StatusIntent {
     pub(super) const ALL: [Self; 4] =
         [Self::Information, Self::Success, Self::Warning, Self::Error];
 
-    #[cfg(feature = "developer-tools")]
     pub(super) const fn label(self) -> &'static str {
         match self {
             Self::Information => "Information",
@@ -3817,6 +3816,8 @@ impl TerminalPane {
                 .mount(
                     div()
                         .id("terminal-find-bar")
+                        .role(gpui::accesskit::Role::Group)
+                        .aria_label("Terminal Find")
                         .chrome_text(appearance.typography.style(TextRole::Body))
                         .debug_selector(|| "terminal-find-bar".to_owned())
                         .absolute()
@@ -3851,6 +3852,10 @@ impl TerminalPane {
                         })
                         .child(
                             div()
+                                .id("terminal-find-results")
+                                .role(gpui::accesskit::Role::Status)
+                                .aria_label("Terminal Find results")
+                                .aria_value(SharedString::from(result_label.clone()))
                                 .debug_selector(|| "terminal-find-result-label".to_owned())
                                 .w(appearance.typography.measure(
                                     TextRole::Secondary,
@@ -4659,6 +4664,10 @@ impl Render for TerminalPane {
                     root.child(
                         notice_shell.mount(
                             div()
+                                .id("terminal-status")
+                                .role(gpui::accesskit::Role::Status)
+                                .aria_label("Terminal status")
+                                .aria_value(status_intent.map_or("Terminal Session exited", StatusIntent::label))
                                 .debug_selector(|| "terminal-status".to_owned())
                                 .absolute()
                                 .right(px(TERMINAL_SIDE_INSET))
@@ -4907,9 +4916,17 @@ fn render_permission_request(
         .collect::<Vec<_>>()
         .join(" and ");
     let application = crate::application_identity::ApplicationIdentity::current().display_name();
+    let message = format!(
+        "A program asked for {names} access, which lets programs you run in \
+         {application} {purposes}."
+    );
 
     shell.mount(
         div()
+            .id("permission-request")
+            .role(gpui::accesskit::Role::Group)
+            .aria_label("Permission Request")
+            .aria_description(SharedString::from(message.clone()))
             .debug_selector(|| "permission-request".to_owned())
             .chrome_text(appearance.typography.style(TextRole::Body))
             .absolute()
@@ -4932,10 +4949,7 @@ fn render_permission_request(
                     .debug_selector(|| "permission-request-message".to_owned())
                     .w_full()
                     .whitespace_normal()
-                    .child(format!(
-                        "A program asked for {names} access, which lets programs you run in \
-                         {application} {purposes}."
-                    )),
+                    .child(message),
             )
             .child(
                 div()

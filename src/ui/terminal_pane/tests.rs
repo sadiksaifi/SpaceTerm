@@ -6040,6 +6040,33 @@ fn terminal_context_menu_publishes_its_target_and_opens_from_accessibility(
 }
 
 #[gpui::test]
+fn terminal_notices_publish_bounded_status_classifications(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let (pane, cx, _) = connected_terminal_pane(cx);
+    for (intent, value) in [
+        (StatusIntent::Information, "Information"),
+        (StatusIntent::Success, "Success"),
+        (StatusIntent::Warning, "Warning"),
+        (StatusIntent::Error, "Error"),
+    ] {
+        pane.update(cx, |pane, cx| {
+            pane.status = Some("/private/terminal-result".into());
+            pane.status_intent = intent;
+            cx.notify();
+        });
+        let tree = A11yTree::read(cx);
+        assert_eq!(tree.node("Terminal status")["aria"]["role"], "Status");
+        assert_eq!(tree.node("Terminal status")["aria"]["value"], value);
+        assert!(tree.in_order().iter().all(|node| {
+            !node["aria"]
+                .to_string()
+                .contains("/private/terminal-result")
+        }));
+    }
+}
+
+#[gpui::test]
 fn file_preview_command_revalidates_then_calls_the_retained_presenter(cx: &mut TestAppContext) {
     let directory = std::env::temp_dir().join(format!(
         "spaceterm-context-file-preview-{}",

@@ -134,6 +134,24 @@ impl TerminalProgress {
             Self::Paused(_) => Some("paused"),
         }
     }
+
+    fn accessibility_value(self) -> gpui::SharedString {
+        match self {
+            Self::None => "Idle".into(),
+            Self::Normal(percent) => format!("Busy, {}%", percent.min(100)).into(),
+            Self::Indeterminate => "In progress".into(),
+            Self::TitleActivity => "Activity".into(),
+            Self::Error(percent) => format!("Error, {}%", percent.min(100)).into(),
+            Self::Paused(percent) => format!("Paused, {}%", percent.min(100)).into(),
+        }
+    }
+
+    const fn percent(self) -> Option<u8> {
+        match self {
+            Self::Normal(percent) | Self::Error(percent) | Self::Paused(percent) => Some(percent),
+            Self::None | Self::Indeterminate | Self::TitleActivity => None,
+        }
+    }
 }
 
 /// Status colors a host resolves for the surfaces its glyph rests on.
@@ -184,6 +202,20 @@ impl StatusGlyph {
             .name()
             .map(|name| format!("{selector_prefix}-{name}"));
         let glyph = div()
+            .id(ElementId::NamedChild(
+                std::sync::Arc::new(id.clone()),
+                "status".into(),
+            ))
+            .role(gpui::accesskit::Role::Status)
+            .aria_label("Terminal Session status")
+            .aria_value(progress.accessibility_value())
+            .when_some(progress.percent(), |glyph, percent| {
+                glyph
+                    .aria_numeric_value(f64::from(percent.min(100)))
+                    .aria_min_numeric_value(0.0)
+                    .aria_max_numeric_value(100.0)
+            })
+            .when(attention, |glyph| glyph.aria_description("Needs attention"))
             .when_some(state, |glyph, state| glyph.debug_selector(move || state))
             .size(size)
             .flex_shrink_0()
@@ -502,6 +534,74 @@ mod tests {
 
     use super::*;
     use crate::terminal::metadata::MetadataTracker;
+
+    #[gpui::test]
+    fn terminal_glyphs_publish_bounded_status_and_attention(cx: &mut gpui::TestAppContext) {
+        use spaceterm_ui::a11y_testing::{A11yTree, node_id};
+
+        struct Probe(TerminalProgress, bool);
+        impl gpui::Render for Probe {
+            fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+                StatusGlyph {
+                    icon: IconName::Terminal,
+                    reported: Some("private-terminal-glyph".into()),
+                    size: px(14.0),
+                    progress: self.0,
+                    attention: self.1,
+                    id: "status-probe".into(),
+                    selector_prefix: "status-probe".into(),
+                    colors: StatusColors {
+                        host: gpui::rgba(0x000000ff),
+                        attention: gpui::rgba(0xffcc00ff),
+                        busy: gpui::rgba(0x3399ffff),
+                        error: gpui::rgba(0xff3333ff),
+                        paused: gpui::rgba(0x888888ff),
+                    },
+                    differentiate_without_color: false,
+                }
+                .render()
+            }
+        }
+        cx.update(crate::ui::init).unwrap();
+        let (probe, cx) = cx.add_window_view(|_, _| Probe(TerminalProgress::None, false));
+        let tree = A11yTree::read(cx);
+        let status = tree.node("Terminal Session status");
+        assert_eq!(status["aria"]["role"], "Status");
+        let identity = node_id(status);
+        for (progress, value, percent) in [
+            (TerminalProgress::None, "Idle", None),
+            (TerminalProgress::Normal(42), "Busy, 42%", Some(42.0)),
+            (TerminalProgress::Indeterminate, "In progress", None),
+            (TerminalProgress::TitleActivity, "Activity", None),
+            (TerminalProgress::Error(30), "Error, 30%", Some(30.0)),
+            (TerminalProgress::Paused(70), "Paused, 70%", Some(70.0)),
+        ] {
+            probe.update(cx, |probe, cx| {
+                probe.0 = progress;
+                probe.1 = true;
+                cx.notify();
+            });
+            let tree = A11yTree::read(cx);
+            let status = tree.node("Terminal Session status");
+            assert_eq!(node_id(status), identity);
+            assert_eq!(tree.with_role("Status").len(), 1);
+            assert_eq!(status["aria"]["value"], value);
+            assert_eq!(status["aria"]["numeric_value"].as_f64(), percent);
+            assert_eq!(status["aria"]["description"], "Needs attention");
+            assert!(
+                tree.in_order()
+                    .iter()
+                    .all(|node| !node["aria"].to_string().contains("private-terminal-glyph"))
+            );
+        }
+        probe.update(cx, |probe, cx| {
+            probe.1 = false;
+            cx.notify();
+        });
+        assert!(
+            A11yTree::read(cx).node("Terminal Session status")["aria"]["description"].is_null()
+        );
+    }
 
     fn metadata(
         progress: ProgressMetadata,

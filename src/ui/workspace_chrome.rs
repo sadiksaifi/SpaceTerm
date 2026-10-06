@@ -290,7 +290,7 @@ impl WorkspaceChromeStatus {
         appearance: &ChromeAppearance,
         hosts: WorkspaceChromeStatusHosts,
         hover_group: &'static str,
-    ) -> gpui::Div {
+    ) -> gpui::Stateful<gpui::Div> {
         let paint = self.paint(appearance, hosts);
         let normal = gpui_color(paint.normal);
         let hovered = gpui_color(if appearance.active {
@@ -300,6 +300,10 @@ impl WorkspaceChromeStatus {
         });
         let size = status_mark_size(appearance);
         let mark = div()
+            .id(self.selector())
+            .role(gpui::accesskit::Role::Status)
+            .aria_label("Workspace status")
+            .aria_value(self.label())
             .debug_selector(move || self.selector().to_owned())
             .flex_none()
             .size(size);
