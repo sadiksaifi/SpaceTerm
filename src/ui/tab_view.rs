@@ -3870,7 +3870,12 @@ mod tests {
         let captions = tree
             .in_order()
             .into_iter()
-            .filter(|node| node["aria"]["role"] == "Group")
+            .filter(|node| {
+                node["aria"]["role"] == "Group"
+                    && node["aria"]["label"]
+                        .as_str()
+                        .is_some_and(|label| label.starts_with("Pane "))
+            })
             .map(|node| node["aria"]["label"].as_str().unwrap())
             .collect::<Vec<_>>();
         assert_eq!(

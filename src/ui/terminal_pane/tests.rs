@@ -6001,6 +6001,45 @@ fn context_menu_keys_never_reach_the_terminal_session(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn terminal_context_menu_publishes_its_target_and_opens_from_accessibility(
+    cx: &mut TestAppContext,
+) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, perform, supports};
+
+    let (pane, cx, records) = connected_terminal_pane(cx);
+    pane.update(cx, |pane, cx| {
+        pane.screen = context_action_screen(None, true);
+        cx.notify();
+    });
+    let tree = A11yTree::read(cx);
+    let target = tree.node("Terminal context actions");
+    assert_eq!(target["aria"]["role"], "Group");
+    assert!(supports(target, Action::ShowContextMenu));
+    perform(cx, target, Action::ShowContextMenu);
+    let tree = A11yTree::read(cx);
+    assert_eq!(tree.with_role("Menu").len(), 1);
+    assert_eq!(tree.focused().unwrap()["aria"]["label"], "Copy");
+    assert!(!cx.update(|window, cx| pane.read(cx).terminal_input_focused(window, cx)));
+    perform(cx, tree.node("Find"), Action::Click);
+    let tree = A11yTree::read(cx);
+    assert!(tree.with_role("Menu").is_empty());
+    assert_eq!(
+        tree.focused().unwrap()["aria"]["label"],
+        "Terminal Find query"
+    );
+    perform(cx, tree.node("Close Find"), Action::Click);
+    A11yTree::read(cx);
+    assert!(cx.update(|window, cx| pane.read(cx).terminal_input_focused(window, cx)));
+    assert!(records.commands().iter().all(|call| !matches!(
+        call.command,
+        RecordedCommand::Pointer(_)
+            | RecordedCommand::PointerAndCopySelection(_)
+            | RecordedCommand::Key(_)
+    )));
+}
+
+#[gpui::test]
 fn file_preview_command_revalidates_then_calls_the_retained_presenter(cx: &mut TestAppContext) {
     let directory = std::env::temp_dir().join(format!(
         "spaceterm-context-file-preview-{}",

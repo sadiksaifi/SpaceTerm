@@ -81,10 +81,10 @@ use gpui::{
     SharedString, Task, TextRun, UTF16Selection, Window, div, point, px, relative, size,
 };
 use spaceterm_ui::{
-    Button, ButtonRole, ButtonSize, ButtonVariant, ContextMenu, EditCopy, EditPaste, FloatingRole,
-    FloatingShell, Icon, IconButton, IconName, MenuLifecycleEvent, MenuSize, OverlayScrollbar,
-    OverlayScrollbarEvent, ScrollMetrics, TextInput, TextInputEvent, TextInputTabBehavior,
-    TextInputVariant, Tooltip, window_modal_is_open,
+    Button, ButtonRole, ButtonSize, ButtonVariant, ContextMenu, ContextMenuTarget, EditCopy,
+    EditPaste, FloatingRole, FloatingShell, Icon, IconButton, IconName, MenuLifecycleEvent,
+    MenuSize, OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics, TextInput, TextInputEvent,
+    TextInputTabBehavior, TextInputVariant, Tooltip, window_modal_is_open,
 };
 
 #[cfg(test)]
@@ -3179,9 +3179,16 @@ impl TerminalPane {
         ) {
             return false;
         }
-        let Some(position) = self.surface_position(request.position(), false) else {
+        let Some(mut position) = self.surface_position(request.position(), true) else {
             return false;
         };
+        // Keyboard and accessibility openings anchor below the trigger, outside the grid.
+        let Some(geometry) = self.last_geometry else {
+            return false;
+        };
+        let grid = geometry.backing_grid_size();
+        position.x = position.x.clamp(0.0, (grid.width as f32 - 1.0).max(0.0));
+        position.y = position.y.clamp(0.0, (grid.height as f32 - 1.0).max(0.0));
 
         self.pointer_modifiers = input_modifiers(modifiers);
         self.focus(window, cx);
@@ -4477,6 +4484,10 @@ impl Render for TerminalPane {
                 .h(context_target_size.height),
             context_menu_entries,
         )
+        .target(ContextMenuTarget::new(
+            gpui::accesskit::Role::Group,
+            "Terminal context actions",
+        ))
         .size(MenuSize::Wide)
         .preserve_trigger_cursor()
         .disabled(!context_menu_available)
