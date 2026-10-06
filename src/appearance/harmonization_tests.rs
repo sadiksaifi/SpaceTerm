@@ -154,10 +154,9 @@ fn text_colors(colors: &TerminalColors) -> Vec<(&'static str, Color)> {
 
 #[test]
 fn harmonized_backgrounds_keep_the_contrast_their_text_colors_were_authored_with() {
-    // GitHub Dark lifts above the root; its gray ANSI black and comment-like dim foreground lose
-    // contrast against the lighter background unless restored.
-    let theme = installed(
-        "dark",
+    let styles = [
+        // GitHub Dark lifts above the root; its gray ANSI black and comment-like dim foreground
+        // lose contrast against the lighter background unless restored.
         json!({
             "terminal.background": "#0d1117",
             "terminal.foreground": "#e6edf3",
@@ -166,21 +165,32 @@ fn harmonized_backgrounds_keep_the_contrast_their_text_colors_were_authored_with
             "terminal.ansi.bright_black": "#6e7681",
             "terminal.ansi.blue": "#2f81f7",
         }),
-    );
-    let mut authored = builtin_terminal_base(Appearance::Dark);
-    authored.apply(&theme.colors);
-    let resolved = resolve_theme(&theme);
-    let colors = &resolved.terminal.colors;
-    assert_ne!(colors.background, authored.background);
+        // A mid-gray background drops nearly onto its dark ANSI black, and no darker black can
+        // restore the authored contrast, so the black has to cross to the lighter side.
+        json!({
+            "terminal.background": "#444444",
+            "terminal.ansi.black": "#222222",
+        }),
+    ];
+    for style in styles {
+        let theme = installed("dark", style);
+        let mut authored = builtin_terminal_base(Appearance::Dark);
+        authored.apply(&theme.colors);
+        let resolved = resolve_theme(&theme);
+        let colors = &resolved.terminal.colors;
+        assert_ne!(colors.background, authored.background);
 
-    for ((role, before), (_, after)) in text_colors(&authored).into_iter().zip(text_colors(colors))
-    {
-        let required = before.contrast_ratio(authored.background).min(4.5);
-        let achieved = after.contrast_ratio(colors.background);
-        assert!(
-            achieved >= required - 0.01,
-            "{role} {before:?} keeps contrast {required}: now {after:?} at {achieved}",
-        );
+        for ((role, before), (_, after)) in
+            text_colors(&authored).into_iter().zip(text_colors(colors))
+        {
+            let required = before.contrast_ratio(authored.background).min(4.5);
+            let achieved = after.contrast_ratio(colors.background);
+            assert!(
+                achieved >= required - 0.01,
+                "{role} {before:?} on {:?} keeps contrast {required}: now {after:?} at {achieved}",
+                authored.background,
+            );
+        }
     }
 }
 

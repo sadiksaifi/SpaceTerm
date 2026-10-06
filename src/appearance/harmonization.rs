@@ -56,9 +56,12 @@ pub(super) fn harmonize(colors: &mut TerminalColors, appearance: Appearance) {
         if color.contrast_ratio(background) >= required {
             return;
         }
+        // Keep the side of the background the author chose. When that side has no room left,
+        // readability wins and the color crosses to the nearer readable side.
         let lighter = color.oklab_lightness() > authored.oklab_lightness();
-        if let Some(readable) =
-            color.readable_preserving_chroma_toward(&[background], required, lighter)
+        if let Some(readable) = color
+            .readable_preserving_chroma_toward(&[background], required, lighter)
+            .or_else(|| color.readable_preserving_chroma(&[background], required))
         {
             *color = readable;
         }
