@@ -536,7 +536,8 @@ pub(crate) struct ThemeSummary {
     pub(crate) family: Option<String>,
     /// The registry extension that installed this theme, when one did.
     pub(crate) package: Option<ThemePackage>,
-    /// The theme's complete palette, without the person's per-role overrides, for its preview.
+    /// The theme's complete harmonized palette, without the person's per-role overrides, for its
+    /// preview.
     pub(crate) colors: TerminalColors,
 }
 
@@ -598,6 +599,7 @@ impl ThemeCatalog {
             .map(|theme| {
                 let mut colors = builtin::terminal_base(theme.appearance);
                 colors.apply(&theme.colors);
+                super::harmonization::harmonize(&mut colors, theme.appearance);
                 let origin = theme.metadata.origin.as_ref();
                 ThemeSummary {
                     id: theme.id.clone(),

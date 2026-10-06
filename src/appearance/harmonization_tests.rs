@@ -207,3 +207,19 @@ fn a_background_override_is_used_as_authored() {
     assert_eq!(colors.background, Color::rgb(0x0d1117));
     assert_eq!(colors.dim_foreground, Color::rgb(0x6e7681));
 }
+
+#[test]
+fn gallery_previews_show_the_palette_the_pane_presents() {
+    let theme = installed("dark", json!({ "terminal.background": "#2e3440" }));
+    let catalog = ThemeCatalog::from_terminal_themes(std::slice::from_ref(&theme)).unwrap();
+    let summary = catalog
+        .summaries()
+        .into_iter()
+        .find(|summary| summary.id == theme.id)
+        .unwrap();
+
+    assert_eq!(
+        summary.colors,
+        resolve(&catalog, &preferences_for(&theme)).terminal.colors
+    );
+}
