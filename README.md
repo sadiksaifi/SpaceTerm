@@ -55,10 +55,7 @@ flowchart TB
     W3T2 --> W3T2P1["Pane"]
 ```
 
-SpaceTerm can own multiple Workspaces, each Workspace can own multiple Tabs, and each Tab presents
-one or more Panes through its Pane Layout.
+## For program authors
 
-## Documentation
-
-[Build from source](docs/development.md), [terminal clipboard integration](docs/terminal-clipboard.md),
-and [Permission Requests](docs/permission-request.md).
+A program running in SpaceTerm can offer macOS permission setup with a
+[Permission Request](docs/permission-request.md).

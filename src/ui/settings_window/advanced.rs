@@ -1,5 +1,5 @@
 //! The Advanced section: the settings file, Settings Document export and import, and Reset All.
-//! The settings file is read-only here because SpaceTerm follows external edits (ADR 0005).
+//! The settings file is read-only here because SpaceTerm follows external edits.
 
 use std::sync::Arc;
 

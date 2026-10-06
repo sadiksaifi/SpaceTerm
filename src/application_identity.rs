@@ -1,7 +1,7 @@
 /// Where an identity receives application updates.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum UpdateSource {
-    /// The signed release feed; see ADR 0009.
+    /// The signed release feed.
     SignedFeed,
     /// A scripted preview of the update interface that installs nothing.
     Simulation,
@@ -366,7 +366,7 @@ mod tests {
 
     #[test]
     fn preflight_bundle_template_should_differ_from_production_only_by_identity_and_updates() {
-        // Only release packages use the production template, and only they carry Sparkle (ADR 0009).
+        // Only release packages use the production template, and only they carry Sparkle.
         let without_identity = |plist| {
             plist_entries(plist)
                 .into_iter()

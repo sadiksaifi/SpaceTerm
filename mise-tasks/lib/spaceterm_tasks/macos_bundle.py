@@ -1,4 +1,4 @@
-"""Read application identities and compile their icons; see ADR 0012."""
+"""Read application identities and compile their icons."""
 
 import plistlib
 import shutil

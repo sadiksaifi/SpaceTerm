@@ -1,4 +1,4 @@
-//! Release identity rules in real, isolated Git repositories; see ADR 0012.
+//! Release identity rules in real, isolated Git repositories.
 
 #[path = "../build/identity.rs"]
 mod identity;
