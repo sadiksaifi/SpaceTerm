@@ -874,6 +874,7 @@ impl Render for UpdateControl {
         let command = presentation.command;
         let reminder = presentation.reminder;
         let button = Button::new("update-control", presentation.label)
+            .accessibility_description(tooltip.clone())
             .variant(if presentation.prominent {
                 ButtonVariant::Primary
             } else {
@@ -1345,6 +1346,54 @@ mod tests {
             presentation.tooltip.as_ref(),
             "Downloading SpaceTerm 0.4.2, 66%"
         );
+    }
+
+    #[gpui::test]
+    fn update_control_publishes_its_status_description(cx: &mut gpui::TestAppContext) {
+        use crate::settings::storage::testing::MemoryStorage;
+        use crate::updates::UpdateEvent;
+        use crate::updates::testing::RecordingAdapter;
+        use gpui::accesskit::Action;
+        use spaceterm_ui::a11y_testing::{A11yTree, node_id, perform};
+
+        let adapter = std::rc::Rc::new(RecordingAdapter::available());
+        cx.update(|cx| ApplicationUpdates::install(adapter.clone(), cx));
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
+        let updates = cx.update(|cx| service(cx).expect("the update service is installed"));
+        let mut document = crate::settings::SettingsDocument::default();
+        document.updates.automatic_downloads = false;
+        let settings = crate::settings::Settings::load(MemoryStorage::with_document(&document));
+        updates.update(cx, |updates, _| updates.attach_settings(settings));
+        updates.update(cx, |updates, cx| updates.check(false, cx));
+        adapter.emit(UpdateEvent::Available(version()));
+        cx.run_until_parked();
+        let (_, cx) = cx.add_window_view(|_, cx| UpdateControl::new(cx));
+        let tree = A11yTree::read(cx);
+        let button = tree.node("Download 0.4.2");
+        let id = node_id(button);
+        assert_eq!(button["aria"]["role"], "Button");
+        assert_eq!(button["aria"]["description"], "Download SpaceTerm 0.4.2");
+        assert!(cx.debug_bounds("update-control-tooltip").is_none());
+
+        perform(cx, button, Action::Click);
+        assert_eq!(adapter.downloads.get(), 1);
+        for (received, percent) in [(37, 37), (66, 66)] {
+            adapter.emit(UpdateEvent::Downloading { received, total: 100 });
+            cx.run_until_parked();
+            let tree = A11yTree::read(cx);
+            let button = tree.node("Downloading 0.4.2");
+            assert_eq!(node_id(button), id);
+            assert_eq!(button["aria"]["description"], format!("Downloading SpaceTerm 0.4.2, {percent}%"));
+            assert!(cx.debug_bounds("update-control-tooltip").is_none());
+        }
+
+        adapter.emit(UpdateEvent::Ready);
+        cx.run_until_parked();
+        let tree = A11yTree::read(cx);
+        let button = tree.node("Install 0.4.2");
+        assert_eq!(node_id(button), id);
+        assert_eq!(button["aria"]["description"], "Restart to Install SpaceTerm 0.4.2");
     }
 
     #[test]
