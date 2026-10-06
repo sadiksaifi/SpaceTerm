@@ -919,8 +919,12 @@ fn installed_themes_publish_a_list_of_named_themes_with_their_actions(cx: &mut T
     let (window, _, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
     select_section(SettingsSectionId::Themes, cx);
     let tree = A11yTree::read(cx);
-    let list = tree.node("Dark themes");
-    assert_eq!(list["aria"]["role"], "List");
+    // The group heading and the list it titles share a name.
+    let list = tree
+        .with_role("List")
+        .into_iter()
+        .find(|list| list["aria"]["label"] == "Dark themes")
+        .expect("the installed themes publish a list");
     let items = tree.children(list);
     assert!(items.iter().all(|item| item["aria"]["role"] == "ListItem"));
     let item = |name: &str| {
