@@ -1,3 +1,5 @@
+use std::{cell::Cell, rc::Rc};
+
 use gpui::{
     AnyElement, App, AppContext as _, Bounds, Context, Element, ElementId, Entity, FocusHandle,
     GlobalElementId, Hitbox, HitboxBehavior, ImageSource, InspectorElementId,
@@ -160,6 +162,7 @@ impl RenderOnce for ModalLayer {
             chrome_frame.pointer.set(None);
         }
         register_root_scope(&owner, &root_focus, cx);
+        let transient_presented = Rc::new(Cell::new(false));
 
         super::window_chrome::ChromeScope {
             frame: chrome_frame,
@@ -172,7 +175,8 @@ impl RenderOnce for ModalLayer {
                     .track_focus(&root_focus)
                     .child(
                         // Assistive technology reaches only the active modal, so the content
-                        // beneath it leaves the tree while the modal is presented.
+                        // beneath it leaves the tree while the modal is presented. A modal
+                        // transient hides only the ordinary content.
                         div()
                             .id("spaceterm-modal-underlay")
                             .relative()
@@ -180,8 +184,16 @@ impl RenderOnce for ModalLayer {
                             .when(modal_open, |underlay| {
                                 underlay.role(accesskit::Role::Group).aria_hidden(true)
                             })
-                            .child(self.content)
-                            .children(self.transients),
+                            .child(super::underlay::UnderlayContent {
+                                content: self.content,
+                                transient_presented: transient_presented.clone(),
+                            })
+                            .children(self.transients.into_iter().map(|content| {
+                                super::underlay::TransientScope {
+                                    content,
+                                    presented: transient_presented.clone(),
+                                }
+                            })),
                     )
                     .child(ModalOwnerView { owner }),
             )

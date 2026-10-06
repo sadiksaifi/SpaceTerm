@@ -2887,6 +2887,7 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
         {
             return div().into_any_element();
         }
+        crate::modal::present_modal_transient();
         // A disabled button gives up focus. The query takes it, so the palette's keys, such as
         // Escape during a cancellable operation, keep reaching the palette.
         if self
