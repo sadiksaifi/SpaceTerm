@@ -6073,6 +6073,31 @@ fn terminal_scrollback_publishes_a_named_scroll_bar_that_requests_rows(cx: &mut 
 }
 
 #[gpui::test]
+fn terminal_context_menu_accessibility_request_ignores_program_mouse_tracking(
+    cx: &mut TestAppContext,
+) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
+    let (pane, cx, records) = connected_terminal_pane(cx);
+    pane.update(cx, |pane, cx| {
+        let mut screen = context_action_screen(None, true);
+        Arc::make_mut(&mut screen).mouse_tracking = true;
+        pane.screen = screen;
+        cx.notify();
+    });
+    let tree = A11yTree::read(cx);
+    perform(cx, tree.node("Terminal context actions"), Action::ShowContextMenu);
+    let tree = A11yTree::read(cx);
+    assert_eq!(tree.with_role("Menu").len(), 1);
+    assert_eq!(tree.focused().unwrap()["aria"]["label"], "Copy");
+    assert!(records.commands().iter().all(|call| !matches!(
+        call.command,
+        RecordedCommand::Pointer(_) | RecordedCommand::PointerAndCopySelection(_)
+    )));
+}
+
+#[gpui::test]
 fn terminal_context_menu_without_pointer_does_not_target_the_bottom_left_link(
     cx: &mut TestAppContext,
 ) {

@@ -3170,7 +3170,9 @@ impl TerminalPane {
         cx: &mut Context<Self>,
     ) -> bool {
         let modifiers = window.modifiers();
-        if !opens_terminal_context_menu(
+        let pointer_position = self.surface_position(request.position(), false);
+        if pointer_position.is_some()
+            && !opens_terminal_context_menu(
             PointerButton::Right,
             self.screen.mouse_tracking,
             modifiers.shift,
@@ -3189,9 +3191,7 @@ impl TerminalPane {
             return false;
         }
 
-        let link = self
-            .surface_position(request.position(), false)
-            .and_then(|position| self.link_at(position));
+        let link = pointer_position.and_then(|position| self.link_at(position));
         let file_preview_eligible = NativeContextActions::from_presence(
             self.terminal_session.local_file_capabilities,
             false,
