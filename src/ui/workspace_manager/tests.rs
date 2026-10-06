@@ -10513,7 +10513,6 @@ fn sidebar_resize_handle_moves_to_the_width_assistive_technology_sets(cx: &mut T
 }
 
 #[gpui::test]
-#[gpui::test]
 fn tab_menu_opened_by_assistive_technology_returns_focus_to_its_tab(cx: &mut TestAppContext) {
     use gpui::accesskit::Action;
     use spaceterm_ui::a11y_testing::{A11yTree, node_id, perform};
@@ -10560,45 +10559,6 @@ fn tab_menu_opened_by_the_pointer_returns_focus_to_where_it_was(cx: &mut TestApp
     assert_eq!(tree.focused().map(node_id), Some(handle));
 }
 
-#[gpui::test]
-#[gpui::test]
-fn close_confirmation_publishes_text_before_actions_and_contains_accessibility(
-    cx: &mut TestAppContext,
-) {
-    use spaceterm_ui::a11y_testing::A11yTree;
-
-    let (_manager, _records, cx) = workspace_manager(cx);
-    cx.update(|window, _| window.activate_window());
-    A11yTree::read(cx);
-    click("tab-close-button-1", cx);
-    let tree = A11yTree::read(cx);
-    let dialog = tree.node("Close Tab?");
-    assert_eq!(dialog["aria"]["role"], "AlertDialog");
-    assert_eq!(dialog["aria"]["modal"], true);
-    let title = tree.text("Close Tab?");
-    let message = tree.text("Close 1 Pane? Running commands in these Panes will stop.");
-    let content = tree.descendants(dialog);
-    let position = |node: &serde_json::Value| {
-        content
-            .iter()
-            .position(|child| child["accesskit_id"] == node["accesskit_id"])
-            .expect("confirmation content belongs to the dialog")
-    };
-    assert!(position(title) < position(message));
-    for name in ["Cancel", "Close Tab"] {
-        let button = content
-            .iter()
-            .find(|node| node["aria"]["role"] == "Button" && node["aria"]["label"] == name)
-            .expect("a dialog action");
-        assert!(position(message) < position(button));
-        assert!(tree.exposed(button));
-    }
-    assert_eq!(tree.focused().unwrap()["aria"]["label"], "Cancel");
-    for name in ["Tabs", "Workspaces", "Terminal context actions"] {
-        assert!(!tree.exposed(tree.node(name)), "{name}");
-}
-
-#[gpui::test]
 /// Opens a Workspace whose Terminal Panes publish their accessibility nodes.
 fn workspace_manager_with_terminal_nodes(
     cx: &mut TestAppContext,
@@ -10690,41 +10650,10 @@ fn assert_closed_tab_left_focus_on_the_active_terminal(
     assert!(active_terminal_has_input_focus(manager, cx));
     let remaining = tree.in_order().into_iter().map(node_id).collect::<Vec<_>>();
     for node in closed {
-        assert!(!remaining.contains(node), "a node of the closed Tab remains");
-    }
-}
-
-#[gpui::test]
-fn close_confirmation_restores_accessibility_focus_after_escape_and_cancel(
-    cx: &mut TestAppContext,
-) {
-    use gpui::accesskit::Action;
-    use spaceterm_ui::a11y_testing::{A11yTree, perform};
-
-    let (manager, records, cx) = workspace_manager(cx);
-    cx.update(|window, _| window.activate_window());
-    for escape in [true, false] {
-        let tree = A11yTree::read(cx);
-        perform(cx, tree.node("Close Tab"), Action::Focus);
-        let tree = A11yTree::read(cx);
-        assert_eq!(tree.focused().unwrap()["aria"]["label"], "Close Tab");
-        perform(cx, tree.node("Close Tab"), Action::Click);
-        let tree = A11yTree::read(cx);
-        assert_eq!(tree.focused().unwrap()["aria"]["label"], "Cancel");
-        if escape {
-            cx.simulate_keystrokes("escape");
-        } else {
-            perform(cx, tree.node("Cancel"), Action::Click);
-        }
-        let tree = A11yTree::read(cx);
-        assert!(tree.with_role("AlertDialog").is_empty());
-        assert_eq!(tree.focused().unwrap()["aria"]["label"], "Close Tab");
-        assert!(tree.exposed(tree.focused().unwrap()));
-        assert!(tree.exposed(tree.node("Terminal context actions")));
-        assert!(manager.read_with(cx, |manager, _| {
-            manager.close_confirmation.pending().is_none()
-        }));
-        assert!(records.dropped_session_ids().is_empty());
+        assert!(
+            !remaining.contains(node),
+            "a node of the closed Tab remains"
+        );
     }
 }
 
@@ -10811,4 +10740,76 @@ fn cancelling_a_tab_close_pressed_by_assistive_technology_returns_focus_to_its_b
     assert_eq!(tree.with_role("Tab").len(), 2);
     assert!(records.dropped_session_ids().is_empty());
     assert_eq!(tree.focused().map(node_id), Some(button));
+}
+
+#[gpui::test]
+fn close_confirmation_publishes_text_before_actions_and_contains_accessibility(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let (_manager, _records, cx) = workspace_manager(cx);
+    cx.update(|window, _| window.activate_window());
+    A11yTree::read(cx);
+    click("tab-close-button-1", cx);
+    let tree = A11yTree::read(cx);
+    let dialog = tree.node("Close Tab?");
+    assert_eq!(dialog["aria"]["role"], "AlertDialog");
+    assert_eq!(dialog["aria"]["modal"], true);
+    let title = tree.text("Close Tab?");
+    let message = tree.text("Close 1 Pane? Running commands in these Panes will stop.");
+    let content = tree.descendants(dialog);
+    let position = |node: &serde_json::Value| {
+        content
+            .iter()
+            .position(|child| child["accesskit_id"] == node["accesskit_id"])
+            .expect("confirmation content belongs to the dialog")
+    };
+    assert!(position(title) < position(message));
+    for name in ["Cancel", "Close Tab"] {
+        let button = content
+            .iter()
+            .find(|node| node["aria"]["role"] == "Button" && node["aria"]["label"] == name)
+            .expect("a dialog action");
+        assert!(position(message) < position(button));
+        assert!(tree.exposed(button));
+    }
+    assert_eq!(tree.focused().unwrap()["aria"]["label"], "Cancel");
+    for name in ["Tabs", "Workspaces", "Terminal context actions"] {
+        assert!(!tree.exposed(tree.node(name)), "{name}");
+    }
+}
+
+#[gpui::test]
+fn close_confirmation_restores_accessibility_focus_after_escape_and_cancel(
+    cx: &mut TestAppContext,
+) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
+    let (manager, records, cx) = workspace_manager(cx);
+    cx.update(|window, _| window.activate_window());
+    for escape in [true, false] {
+        let tree = A11yTree::read(cx);
+        perform(cx, tree.node("Close Tab"), Action::Focus);
+        let tree = A11yTree::read(cx);
+        assert_eq!(tree.focused().unwrap()["aria"]["label"], "Close Tab");
+        perform(cx, tree.node("Close Tab"), Action::Click);
+        let tree = A11yTree::read(cx);
+        assert_eq!(tree.focused().unwrap()["aria"]["label"], "Cancel");
+        if escape {
+            cx.simulate_keystrokes("escape");
+        } else {
+            perform(cx, tree.node("Cancel"), Action::Click);
+        }
+        let tree = A11yTree::read(cx);
+        assert!(tree.with_role("AlertDialog").is_empty());
+        assert_eq!(tree.focused().unwrap()["aria"]["label"], "Close Tab");
+        assert!(tree.exposed(tree.focused().unwrap()));
+        assert!(tree.exposed(tree.node("Terminal context actions")));
+        assert!(manager.read_with(cx, |manager, _| {
+            manager.close_confirmation.pending().is_none()
+        }));
+        assert!(records.dropped_session_ids().is_empty());
+    }
 }
