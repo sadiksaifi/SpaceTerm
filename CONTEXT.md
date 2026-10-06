@@ -189,6 +189,8 @@ _Avoid_: session, terminal
 
 **Resolved Appearance**: The Application Chrome and terminal presentation resolved from Settings and the system appearance.
 
+**Theme Harmonization**: Fitting a Terminal Theme's background to the band SpaceTerm's own Panes rest in, keeping its hue and restoring the text contrast that move costs.
+
 **Theme Origin**: Source identity and attribution, distinct from the installed identifier and display name.
 
 **Window Background Appearance**: Native window presentation, independent of Light/Dark and color alpha.

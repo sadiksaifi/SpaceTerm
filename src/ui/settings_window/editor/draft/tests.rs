@@ -125,6 +125,7 @@ fn an_obsolete_completion_cannot_report_the_current_edit_saved() {
 fn import_and_removal_share_the_draft_without_selecting_a_theme() {
     let (mut draft, _, storage) = setup();
     let preferences = draft.document().appearance.clone();
+    let builtin = draft.theme_summaries().unwrap();
     let receipt = draft
         .import(ThemeImport::ZedFamily(IMPORTED_FAMILY))
         .unwrap();
@@ -152,6 +153,7 @@ fn import_and_removal_share_the_draft_without_selecting_a_theme() {
     assert_eq!(draft.status(), SaveStatus::Saved);
 
     draft.remove_themes(std::slice::from_ref(id)).unwrap();
+    assert_eq!(draft.theme_summaries().unwrap(), builtin);
     assert_eq!(draft.status(), SaveStatus::Saving);
     assert!(draft.has_unwritten_changes());
     let result = draft.prepare_commit().unwrap().run();

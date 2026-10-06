@@ -2,9 +2,10 @@
 //! The draft is authoritative because [`Settings`] refuses preview updates during a commit and
 //! retires tokens when the committed revision moves.
 
+use std::cell::RefCell;
 use std::sync::Arc;
 
-use crate::appearance::{ResetTarget, ThemeCatalog, ThemeId, ThemeSummary};
+use crate::appearance::{ResetTarget, TerminalTheme, ThemeCatalog, ThemeId, ThemeSummary};
 use crate::settings::SettingsDocument;
 use crate::settings::recovery::RecoveryError;
 use crate::settings::storage::StorageError;
@@ -33,6 +34,9 @@ pub(super) struct SettingsDraft {
     unwritten: bool,
     /// A draft change that could not reach the live preview and must be re-pushed.
     resync: bool,
+    /// The last theme list and its summaries. Every Settings render lists themes, and Theme
+    /// Harmonization makes each summary costly, so the list is rebuilt only when themes change.
+    summaries: RefCell<Option<(Vec<TerminalTheme>, Vec<ThemeSummary>)>>,
 }
 
 impl SettingsDraft {
@@ -49,6 +53,7 @@ impl SettingsDraft {
             status,
             unwritten: false,
             resync: false,
+            summaries: RefCell::default(),
         }
     }
 
@@ -172,7 +177,16 @@ impl SettingsDraft {
     /// Lists selectable themes from the draft, so a freshly imported theme appears
     /// before it has been written.
     pub(super) fn theme_summaries(&self) -> Result<Vec<ThemeSummary>, SettingsError> {
-        Ok(ThemeCatalog::from_terminal_themes(&self.draft.terminal_themes)?.summaries())
+        let themes = &self.draft.terminal_themes;
+        let mut cache = self.summaries.borrow_mut();
+        if let Some((cached, summaries)) = cache.as_ref()
+            && cached == themes
+        {
+            return Ok(summaries.clone());
+        }
+        let summaries = ThemeCatalog::from_terminal_themes(themes)?.summaries();
+        *cache = Some((themes.clone(), summaries.clone()));
+        Ok(summaries)
     }
 
     pub(super) fn export_document(&self) -> Result<String, SettingsError> {

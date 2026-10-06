@@ -184,6 +184,9 @@ mod catalog_tests;
 mod color;
 mod compiler;
 mod composition;
+mod harmonization;
+#[cfg(test)]
+mod harmonization_tests;
 mod preferences;
 mod resolution;
 mod terminal_theme;
