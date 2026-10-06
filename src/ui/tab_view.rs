@@ -3749,7 +3749,10 @@ mod tests {
             .detach();
         });
         let tree = A11yTree::read(cx);
-        assert_eq!(tree.node("Pane Caption, Primary shell")["aria"]["role"], "Group");
+        assert_eq!(
+            tree.node("Pane Caption, Primary shell")["aria"]["role"],
+            "Group"
+        );
         perform(cx, tree.node("Split Right"), Action::Click);
         assert_eq!(view.read_with(cx, |view, _| view.pane_count()), 2);
 
@@ -3895,7 +3898,11 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             captions,
-            ["Pane Caption, Left upper", "Pane Caption, Left lower", "Pane Caption, Right"]
+            [
+                "Pane Caption, Left upper",
+                "Pane Caption, Left lower",
+                "Pane Caption, Right"
+            ]
         );
         assert_eq!(node_id(tree.focused().unwrap()), node_id(panes[1]));
 

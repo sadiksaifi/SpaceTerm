@@ -1628,6 +1628,22 @@ fn accesskit_terminal_pane_activation_publishes_text_focus_and_retires_hidden_pa
         .collect();
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0]["aria"]["value"], "update-42x");
+    let focus_requests = Rc::new(Cell::new(0));
+    let observed_requests = focus_requests.clone();
+    pane.update(cx, |_, cx| {
+        cx.subscribe(&pane, move |_, _, event: &TerminalPaneEvent, _| {
+            if matches!(event, TerminalPaneEvent::FocusRequested) {
+                observed_requests.set(observed_requests.get() + 1);
+            }
+        })
+        .detach();
+    });
+    cx.update(|window, cx| window.blur(cx));
+    cx.run_until_parked();
+    pane.read_with(cx, |pane, _| pane.accessibility_focus_sender.request());
+    let tree = spaceterm_ui::a11y_testing::A11yTree::read(cx);
+    assert_eq!(tree.focused().unwrap()["aria"]["role"], "Terminal");
+    assert_eq!(focus_requests.get(), 1);
     pane.update(cx, |pane, cx| {
         pane.set_accessibility_hierarchy(false);
         cx.notify();
@@ -6087,7 +6103,11 @@ fn terminal_context_menu_accessibility_request_ignores_program_mouse_tracking(
         cx.notify();
     });
     let tree = A11yTree::read(cx);
-    perform(cx, tree.node("Terminal context actions"), Action::ShowContextMenu);
+    perform(
+        cx,
+        tree.node("Terminal context actions"),
+        Action::ShowContextMenu,
+    );
     let tree = A11yTree::read(cx);
     assert_eq!(tree.with_role("Menu").len(), 1);
     assert_eq!(tree.focused().unwrap()["aria"]["label"], "Copy");
@@ -6105,10 +6125,8 @@ fn terminal_context_menu_without_pointer_does_not_target_the_bottom_left_link(
     use spaceterm_ui::a11y_testing::{A11yTree, perform};
 
     let (pane, cx, _) = connected_terminal_pane(cx);
-    let directory = std::env::temp_dir().join(format!(
-        "spaceterm-context-anchor-{}",
-        std::process::id()
-    ));
+    let directory =
+        std::env::temp_dir().join(format!("spaceterm-context-anchor-{}", std::process::id()));
     std::fs::create_dir_all(&directory).unwrap();
     std::fs::write(directory.join("preview.txt"), b"preview").unwrap();
     let link = crate::terminal::HyperlinkTarget::osc8(
@@ -6130,12 +6148,18 @@ fn terminal_context_menu_without_pointer_does_not_target_the_bottom_left_link(
         cx.notify();
     });
     let tree = A11yTree::read(cx);
-    perform(cx, tree.node("Terminal context actions"), Action::ShowContextMenu);
+    perform(
+        cx,
+        tree.node("Terminal context actions"),
+        Action::ShowContextMenu,
+    );
     let tree = A11yTree::read(cx);
     assert_eq!(tree.with_role("Menu").len(), 1);
     assert_eq!(tree.node("Open Link")["aria"]["disabled"], true);
     let preview_name = cx.update(|_, cx| {
-        crate::desktop_profile::DesktopPresentation::get(cx).wording().file_preview
+        crate::desktop_profile::DesktopPresentation::get(cx)
+            .wording()
+            .file_preview
     });
     assert_eq!(tree.node(preview_name)["aria"]["disabled"], true);
     cx.simulate_keystrokes("escape");
@@ -6143,7 +6167,10 @@ fn terminal_context_menu_without_pointer_does_not_target_the_bottom_left_link(
     let bottom_left = pane.read_with(cx, |pane, _| {
         let bounds = pane.grid_bounds.unwrap();
         let cell = pane.last_geometry.unwrap().logical_cell_size();
-        point(bounds.left() + px(cell.width / 2.0), bounds.bottom() - px(cell.height / 2.0))
+        point(
+            bounds.left() + px(cell.width / 2.0),
+            bounds.bottom() - px(cell.height / 2.0),
+        )
     });
     cx.simulate_mouse_down(bottom_left, MouseButton::Right, Modifiers::none());
     cx.simulate_mouse_up(bottom_left, MouseButton::Right, Modifiers::none());

@@ -953,10 +953,13 @@ impl TerminalPane {
         self.focus_handle.focus(window, cx);
     }
 
-    /// Focuses this Pane and asks its Tab to make it the focused Pane.
     fn request_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let focus_changes = !self.focus_handle.is_focused(window);
         self.focus(window, cx);
-        cx.emit(TerminalPaneEvent::FocusRequested);
+        // GPUI delivers focus callbacks only for active windows and changed focus.
+        if !focus_changes || !window.is_window_active() {
+            cx.emit(TerminalPaneEvent::FocusRequested);
+        }
     }
 
     fn focus_find(&mut self, window: &mut Window, cx: &mut App) {
@@ -3173,11 +3176,12 @@ impl TerminalPane {
         let pointer_position = self.surface_position(request.position(), false);
         if pointer_position.is_some()
             && !opens_terminal_context_menu(
-            PointerButton::Right,
-            self.screen.mouse_tracking,
-            modifiers.shift,
-            self.shift_selection,
-        ) {
+                PointerButton::Right,
+                self.screen.mouse_tracking,
+                modifiers.shift,
+                self.shift_selection,
+            )
+        {
             return false;
         }
         let Some(position) = self.surface_position(request.position(), true) else {
