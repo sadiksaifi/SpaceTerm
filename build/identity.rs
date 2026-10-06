@@ -1,4 +1,4 @@
-//! Application build identity from Git; see ADR 0012.
+//! Application build identity from Git.
 //!
 //! build.rs and tests/build_identity.rs include this file, so it uses only the standard library.
 

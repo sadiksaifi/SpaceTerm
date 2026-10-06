@@ -1,5 +1,3 @@
 # Let OpenSSH own remote authentication
 
-Remote Workspaces use OpenSSH authentication, configured destinations, and host verification so
-user SSH configuration, credentials, and trust policy remain consistent. SpaceTerm owns the
-Control Connection lifecycle and presents OpenSSH's Authentication Prompts.
+Remote Workspaces use OpenSSH authentication, configured destinations, and host verification. A person's SSH configuration, credentials, and trust policy then stay the same inside and outside SpaceTerm.

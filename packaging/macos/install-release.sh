@@ -3,8 +3,8 @@
 #
 #   curl -fsSL https://github.com/sadiksaifi/SpaceTerm/releases/latest/download/install.sh | sh
 #
-# curl does not quarantine downloads, so Gatekeeper does not block the ad hoc signed app; see
-# ADR 0009. SPACETERM_INSTALL_DIR selects a directory other than /Applications.
+# curl does not quarantine downloads, so Gatekeeper does not block the ad hoc signed app.
+# SPACETERM_INSTALL_DIR selects a directory other than /Applications.
 
 set -eu
 

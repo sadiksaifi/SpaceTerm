@@ -16,14 +16,14 @@ SpaceTerm organizes terminal work into Workspaces, Tabs, Pane Layouts, and Pane-
 
 **Starting Directory**: The directory selected when creating a Terminal Session.
 
-**Pinned Directory**: An explicitly selected directory used for a Workspace's identity and future Terminal Sessions.
+**Pinned Directory**: An explicitly selected directory that sets a Workspace's identity and the directory of its new Terminal Sessions.
 
 **Tab**: An ordered work area belonging to one Workspace and owning one Pane Layout.
 _Avoid_: Window, Terminal Session
 
 **Pane Layout**: The recursive arrangement of Panes and Splits in a Tab.
 
-**Split**: A Pane Layout node with two children and a constrained ratio.
+**Split**: A Pane Layout node dividing its space between two children.
 
 **Pane**: A leaf of a Tab's Pane Layout that owns one Terminal Session.
 
@@ -33,7 +33,7 @@ _Avoid_: Window, Terminal Session
 
 **Pane Caption**: The header naming a Pane and carrying its direct controls.
 
-**Pane Origin**: The account and machine where a Pane's Terminal Session runs, classified by that Terminal Session as Local or Remote.
+**Pane Origin**: The account and machine where a Pane's Terminal Session runs, which make the Pane Local or Remote.
 
 **Operating-System Window**: A native window that presents SpaceTerm.
 
@@ -45,7 +45,7 @@ _Avoid_: Window, Terminal Session
 
 **Settings Document**: The retained Settings and installed Terminal Themes.
 
-**Settings Window**: The modeless Operating-System Window presenting application Settings independently of Workspaces.
+**Settings Window**: The Operating-System Window presenting Settings.
 
 **Settings Section**: A named group of Settings presented together.
 
@@ -57,11 +57,11 @@ _Avoid_: Window, Terminal Session
 
 **Malformed Settings**: Retained data that cannot be read as a valid Settings Document. Storage failures are a distinct condition.
 
-**Settings Recovery**: Replacing Malformed Settings with defaults while retaining the unreadable file as a backup.
+**Settings Recovery**: Replacing Malformed Settings with defaults.
 
 ## Keybindings
 
-**Command**: A SpaceTerm operation with a configurable Shortcut. Standard application operations such as Copy and Quit remain outside this set.
+**Command**: A SpaceTerm operation with a configurable Shortcut. Standard application operations are not Commands.
 
 **Shortcut**: One key chord with any combination of the host modifiers.
 _Avoid_: Hotkey, key equivalent
@@ -84,7 +84,7 @@ _Avoid_: Hotkey, key equivalent
 
 ## Updates
 
-**Overdue Update**: An available update released at least two days ago. A fresh launch that finds one requires it before opening.
+**Overdue Update**: An available update that a fresh launch requires before opening.
 
 **Update Reminder**: A deferrable notice about an outstanding update.
 
@@ -100,7 +100,7 @@ _Avoid_: Hotkey, key equivalent
 
 **Focused Pane**: The Pane selected by a Tab for Pane actions and focus restoration.
 
-**Terminal Input Focus**: A Pane's transient eligibility to accept terminal input within the active application, window, Workspace, and Tab.
+**Terminal Input Focus**: A Pane's current eligibility to accept terminal input.
 
 **Zoomed Pane**: The Focused Pane presented alone while its Pane Layout remains intact.
 
@@ -118,11 +118,11 @@ _Avoid_: Hotkey, key equivalent
 
 **Workspace Location**: Where a Workspace runs: Local or Remote. Pinning is independent of it.
 
-**SSH Destination**: The validated OpenSSH destination token selected for a Remote Workspace. Distinct aliases retain distinct identities.
+**SSH Destination**: The OpenSSH destination token selected for a Remote Workspace. Distinct aliases are distinct destinations.
 
-**Remote Directory**: An absolute or home-relative directory value on a remote machine, carrying no local filesystem authority.
+**Remote Directory**: An absolute or home-relative directory value on a remote machine.
 
-**Remote Directory Identity**: The physical absolute directory that the remote `pwd -P` validation returns for a Remote Directory, used to validate an explicit pin.
+**Remote Directory Identity**: The physical absolute path of a Remote Directory on its machine.
 
 **Control Connection**: The Workspace-owned OpenSSH transport shared by its Remote Panes.
 _Avoid_: Remote Workspace Session, SSH session
@@ -139,57 +139,55 @@ _Avoid_: session, terminal
 
 **Terminal Emulator**: The state machine interpreting terminal output and owning screen state.
 
-**Terminal Metadata**: Sanitized facts associated with terminal screen state, including title, Current Directory, command, progress, and prompt zone.
+**Terminal Metadata**: Sanitized facts about terminal screen state, such as its title and Current Directory.
 
 ## Terminal interaction and safety
 
-**Selection**: A terminal-owned logical content range retained across Scrollback movement, output, and reflow.
+**Selection**: A logical range of terminal content.
 
-**Terminal Find**: Literal search owned by one Pane over its screen and available Scrollback.
+**Terminal Find**: Search within one Pane's screen and Scrollback.
 
 **Scroll Commands**: The Commands moving the Focused Pane's view through Scrollback.
 
-**Hyperlink Target**: A validated target attached to terminal cells for activation.
+**Hyperlink Target**: A target attached to terminal cells for activation.
 
 **File Preview**: A host preview of a local file.
 
-**Paste Payload**: A bounded text insertion candidate retained until accepted or cancelled.
+**Paste Payload**: Text waiting for insertion until accepted or cancelled.
 
 **Paste Selection**: The Linux operation inserting PRIMARY Selection as a Paste Payload.
 
-**Paste Confirmation**: Time-bounded authorization for one unsafe Paste Payload under Terminal Input Focus.
+**Paste Confirmation**: Authorization for one unsafe Paste Payload.
 
-**OSC 52 Filter**: The Terminal Session stage recognizing terminal clipboard escape sequences before the Terminal Emulator, producing ordered plain-text requests.
+**Clipboard Authority**: A Terminal Session's grant to complete OSC 52 clipboard requests.
 
-**Clipboard Authority**: A Terminal Session's grant to complete OSC 52 clipboard requests, valid only during the Terminal Input Focus period that issued them and limited by the clipboard Settings.
+**System Permission**: An operating-system privacy grant that programs in a Terminal Session inherit.
 
-**System Permission**: A Screen Recording or Accessibility grant inherited by programs in a Terminal Session and granted through System Settings.
-
-**Permission Request**: A terminal-output request offering Permission Setup for missing System Permissions, carrying no claim about its originating program.
+**Permission Request**: A terminal-output request offering Permission Setup for missing System Permissions.
 
 **Permission Setup**: A user-initiated guided pass through System Settings to grant a System Permission.
 
-**Setup Guide**: The non-activating panel accompanying Permission Setup on the System Settings window.
+**Setup Guide**: The panel accompanying Permission Setup.
 
 **Terminal Local File Capabilities**: Terminal Session-scoped authority for local path actions in a Local Pane.
 
-**Terminal Failure**: A typed terminal fault with an explicit recovery class.
+**Terminal Failure**: A terminal fault with an explicit recovery class.
 
-**Terminal Diagnostics**: Bounded content-free failure and unhandled-key metadata exported by the Export Terminal Diagnostics command.
+**Terminal Diagnostics**: Terminal fault metadata exported by the Export Terminal Diagnostics command.
 
 **Close Confirmation**: Authorization for an exact user-requested close that may discard running work.
 
 ## Appearance
 
-**Application Chrome**: SpaceTerm's built-in interface around terminal output: windows, sidebars, tabs, controls, menus, and dialogs.
+**Application Chrome**: SpaceTerm's built-in interface around terminal output.
 
 **Terminal Theme**: The identifying metadata and colors of terminal output in Panes.
 
-**Zed Theme**: A named Light or Dark theme in Zed's family format, supplying terminal and relevant editor color roles.
+**Zed Theme**: A named Light or Dark theme in Zed's theme family format.
 
 **Zed Extension**: A package in Zed's extension registry that can contribute Zed Theme family documents.
 
-**Resolved Appearance**: The validated Application Chrome and terminal presentation, including colors, typography, and window composition, resolved from Settings and the system appearance.
+**Resolved Appearance**: The Application Chrome and terminal presentation resolved from Settings and the system appearance.
 
 **Theme Origin**: Source identity and attribution, distinct from the installed identifier and display name.
 
@@ -203,4 +201,4 @@ _Avoid_: session, terminal
 
 **Surface Material**: The translucency and neutral shading of a background fill.
 
-**Developer Workbench**: The SpaceTerm Development window for previewing Appearance and interface controls before committing Settings changes.
+**Developer Workbench**: The Development window for previewing appearance and interface controls.

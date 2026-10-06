@@ -22,7 +22,7 @@ zig = "0.16.0"
 "cargo:cargo-sweep" = "0.8.0"
 "npm:skills" = "1.7.0"
 "npm:tagsmith" = "1.2.0"
-# The signed updater framework and its signing tools; see ADR 0009.
+# The signed updater framework and its signing tools.
 "github:sparkle-project/Sparkle" = { version = "2.10.0", asset_pattern = "Sparkle-2.10.0.tar.xz", os = ["macos"] }
 
 [doctor.checks.xcode]
@@ -81,7 +81,16 @@ hint = "Run mise run setup:packages"
 "apt:python3-gi" = { os = "linux" }
 "apt:gir1.2-glib-2.0" = { os = "linux" }
 
-# Task names follow the rules in AGENTS.md. Tasks with logic are Python file tasks in mise-tasks/.
+# Task conventions:
+# - Name tasks <entry>[:<narrowing>...][:<platform>] from CONTEXT.md terms or the wrapped tool's
+#   name. Create no aliases.
+# - Keep single-tool tasks here. Put other task logic in standard-library Python under mise-tasks/,
+#   with shared code and unittest tests in mise-tasks/lib. Prefer maintained external tools.
+# - Give each Development launch mode its own task. Use usage arguments or flags for other choices.
+# - End platform-only tasks with the platform segment. Shared names dispatch to <task>:{{ os() }}
+#   when implementations differ.
+# - Set environment variables with env, guard destructive tasks with confirm, and hide only
+#   internal tasks.
 
 [tasks.setup]
 description = "Prepare the development environment and run its checks"

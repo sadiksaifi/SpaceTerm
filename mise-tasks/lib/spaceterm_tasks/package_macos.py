@@ -1,7 +1,7 @@
 """Package and verify the Preflight or release application bundle and disk image.
 
 Only a release tag selects the SpaceTerm identity; every other package is SpaceTerm
-Preflight. See ADR 0012.
+Preflight.
 """
 
 import filecmp
@@ -86,7 +86,7 @@ def package(release_tag=None):
         for key, value in os.environ.items()
         if key not in ("SPACETERM_RELEASE_TAG", "SPACETERM_SPARKLE_DIR")
     }
-    # Leaves the SpaceTerm Development identity; see ADR 0012.
+    # Leaves the SpaceTerm Development identity.
     environment.update(MACOSX_DEPLOYMENT_TARGET=MINIMUM_MACOS, SPACETERM_PACKAGED="1")
     config = tomllib.loads((identity_directory(name) / "Packager.toml").read_text())
     if release_tag:

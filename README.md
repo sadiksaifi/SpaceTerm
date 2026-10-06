@@ -25,8 +25,6 @@ Or install with Homebrew:
 brew install --cask sadiksaifi/tap/spaceterm
 ```
 
-On Linux, [build from source](docs/development.md). SpaceTerm provides no Linux packages or updates.
-
 ## Workspace hierarchy
 
 ```mermaid
@@ -55,10 +53,12 @@ flowchart TB
     W3T2 --> W3T2P1["Pane"]
 ```
 
-SpaceTerm can own multiple Workspaces, each Workspace can own multiple Tabs, and each Tab presents
-one or more Panes through its Pane Layout.
+## Copy and paste over SSH and tmux
 
-## Documentation
+Programs can copy to your clipboard even when they run on another machine.
+Neovim and tmux each need a setting first. See [terminal clipboard setup](docs/terminal-clipboard.md).
 
-[Build from source](docs/development.md), [terminal clipboard integration](docs/terminal-clipboard.md),
-and [Permission Requests](docs/permission-request.md).
+## For program authors
+
+A program running in SpaceTerm can offer macOS permission setup with a
+[Permission Request](docs/permission-request.md).

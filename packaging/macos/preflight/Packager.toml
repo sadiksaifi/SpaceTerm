@@ -1,4 +1,4 @@
-# cargo-packager configuration for the SpaceTerm Preflight identity; see ADR 0012.
+# cargo-packager configuration for the SpaceTerm Preflight identity.
 # Packaging adds the tag-derived version, the Info.plist with that version, and the build's
 # binaries directory.
 product-name = "SpaceTerm Preflight"

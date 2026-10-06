@@ -1,4 +1,4 @@
-"""Create signed GitHub Releases assets and update the Homebrew cask; see ADR 0009."""
+"""Create signed GitHub Releases assets and update the Homebrew cask."""
 
 import base64
 import hashlib

@@ -13,7 +13,7 @@ from spaceterm_tasks.cargo import build_executable
 from spaceterm_tasks.macos_bundle import ICON_NAME, compile_icon, identity, identity_directory
 
 IDENTITY = "development"
-# Development builds are never releases; see ADR 0012.
+# Development builds are never releases.
 BUNDLE_VERSION = "0.0.0"
 
 

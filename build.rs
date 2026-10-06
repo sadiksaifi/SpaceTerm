@@ -26,7 +26,7 @@ fn main() {
         "cargo:rustc-env=SPACETERM_BUNDLE_VERSION={}",
         identity.bundle_version
     );
-    // The application identity follows these inputs; see ADR 0012.
+    // The application identity follows these inputs.
     let packaged = env::var("SPACETERM_PACKAGED").as_deref() == Ok("1");
     if packaged {
         assert!(

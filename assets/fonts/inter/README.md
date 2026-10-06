@@ -1,7 +1,6 @@
 # Inter
 
-Source: [Inter 4.1](https://github.com/rsms/inter/releases/tag/v4.1),
-[Inter-4.1.zip](https://github.com/rsms/inter/releases/download/v4.1/Inter-4.1.zip).
+Source: [Inter-4.1.zip](https://github.com/rsms/inter/releases/download/v4.1/Inter-4.1.zip)
+from the Inter 4.1 release. License: [OFL.txt](OFL.txt).
 
-SpaceTerm privately names the bundled faces `SpaceTerm UI` to avoid collisions with installed
-Inter versions. The upstream license is retained in [OFL.txt](OFL.txt).
+SpaceTerm renames the bundled faces so they do not collide with installed Inter versions.
