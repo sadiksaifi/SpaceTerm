@@ -56,5 +56,35 @@ mod tests {
             _ => None,
         };
         assert_eq!(preferred_languages(read), ["ar", "en", "fr_FR.UTF-8"]);
+        for (values, expected) in [
+            (
+                [
+                    Some("ar:en"),
+                    Some("de_DE.UTF-8"),
+                    Some("fr_FR.UTF-8"),
+                    Some("en_US"),
+                ],
+                vec!["ar", "en", "de_DE.UTF-8"],
+            ),
+            (
+                [Some(""), Some(""), Some("fr_FR.UTF-8"), Some("en_US")],
+                vec!["fr_FR.UTF-8"],
+            ),
+            ([Some(""), Some(""), Some(""), Some("en_US")], vec!["en_US"]),
+            ([None, None, None, Some("en_US")], vec!["en_US"]),
+            ([None, None, None, None], vec!["en"]),
+            (
+                [Some("ar:en"), Some("POSIX"), None, Some("ar_EG.UTF-8")],
+                vec!["en"],
+            ),
+        ] {
+            let read = |key: &str| {
+                ["LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG"]
+                    .into_iter()
+                    .position(|candidate| candidate == key)
+                    .and_then(|index| values[index].map(str::to_owned))
+            };
+            assert_eq!(preferred_languages(read), expected, "{values:?}");
+        }
     }
 }

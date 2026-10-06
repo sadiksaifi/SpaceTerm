@@ -1,9 +1,7 @@
 //! Permission Request filtering: a program in a Terminal Session asks SpaceTerm to set up System
 //! Permissions with `OSC 7701 ; permissions=<list> ST`.
 //!
-//! `<list>` is a comma-separated set of `screen-recording` and `accessibility`. The filter removes
-//! every Permission Request from the output before the Terminal Emulator sees it. A request only
-//! offers a Permission Setup; the person decides whether to start one.
+//! `<list>` is a comma-separated set of `screen-recording` and `accessibility`.
 
 use std::mem;
 
@@ -199,8 +197,7 @@ impl PermissionRequestFilter {
     }
 }
 
-/// Reads `permissions=<list>`. Unknown permission names are ignored, so a newer tool can ask an
-/// older SpaceTerm for what it supports; a request that names nothing supported is dropped.
+/// Reads `permissions=<list>`. Unknown names are ignored; a request with no supported names is dropped.
 fn parse(body: &[u8]) -> Option<PermissionRequest> {
     let list = body.strip_prefix(b"permissions=")?;
     let mut permissions = Vec::new();
@@ -337,10 +334,15 @@ mod tests {
 
     #[test]
     fn a_cancelled_request_is_removed() {
-        assert_eq!(
-            filter(&[b"x\x1b]7701;permissions=accessibility\x18y"]),
-            [terminal(b"x\x1b\\y")]
-        );
+        for cancellation in [0x18, 0x1a] {
+            let raw = [
+                b"x\x1b]7701;permissions=accessibility".as_slice(),
+                &[cancellation],
+                b"y",
+            ]
+            .concat();
+            assert_eq!(filter(&[&raw]), [terminal(b"x\x1b\\y")]);
+        }
     }
 
     #[test]
@@ -354,27 +356,24 @@ mod tests {
     #[test]
     fn a_body_at_the_limit_is_parsed() {
         let mut body = b"permissions=accessibility,".to_vec();
-        body.resize(MAX_BODY_BYTES, b'a');
-        let mut raw = PREFIX.to_vec();
+        body.resize(256, b'a');
+        let mut raw = b"\x1b]7701;".to_vec();
         raw.extend_from_slice(&body);
         raw.push(0x07);
         assert_eq!(
             filter(&[&raw]),
-            [
-                terminal(REMOVED_REQUEST),
-                Output::Request(vec![Accessibility])
-            ]
+            [terminal(b"\x1b\\"), Output::Request(vec![Accessibility])]
         );
     }
 
     #[test]
     fn a_body_past_the_limit_is_discarded() {
         let mut body = b"permissions=accessibility,".to_vec();
-        body.resize(MAX_BODY_BYTES + 1, b'a');
-        let mut raw = PREFIX.to_vec();
+        body.resize(257, b'a');
+        let mut raw = b"\x1b]7701;".to_vec();
         raw.extend_from_slice(&body);
         raw.push(0x07);
-        assert_eq!(filter(&[&raw]), [terminal(REMOVED_REQUEST)]);
+        assert_eq!(filter(&[&raw]), [terminal(b"\x1b\\")]);
     }
 
     /// An unterminated request must not hide the output after it: the next ESC abandons it, as it
@@ -432,7 +431,7 @@ mod tests {
     }
 
     #[test]
-    fn output_between_requests_reaches_the_terminal_in_one_call() {
+    fn unrelated_output_block_reaches_terminal_in_one_call() {
         let raw = b"\x1b[31mred\x1b[0m \x1b]7;file://host/tmp\x07\x1b[1mbold\x1b[0m".repeat(50);
         let mut filter = PermissionRequestFilter::default();
         let mut calls = 0;

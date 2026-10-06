@@ -1,9 +1,9 @@
 //! Handling OSC (Operating System Command) escape sequences.
 
-use std::{marker::PhantomData, mem::MaybeUninit};
+use std::{ffi::CStr, marker::PhantomData};
 
 use crate::{
-    alloc::{Allocator, Object},
+    alloc::{Allocator, Object, Ref},
     error::{Result, from_result},
     ffi,
 };
@@ -76,11 +76,10 @@ impl<'alloc> Parser<'alloc> {
     /// calling program. For commands that do not require a response, this
     /// parameter is ignored and the resulting command will not retain the
     /// terminator information.
-    #[expect(clippy::missing_panics_doc, reason = "internal invariant")]
     pub fn end<'p>(&'p mut self, terminator: u8) -> Command<'p, 'alloc> {
         let raw = unsafe { ffi::ghostty_osc_end(self.0.as_raw(), terminator) };
         Command {
-            inner: Object::new(raw).expect("command must not be null"),
+            inner: Ref::new(raw).ok(),
             _parser: PhantomData,
         }
     }
@@ -97,7 +96,7 @@ impl Drop for Parser<'_> {
 /// The command can be queried for its type and associated data.
 #[derive(Debug)]
 pub struct Command<'p, 'alloc> {
-    inner: Object<'alloc, ffi::OscCommandImpl>,
+    inner: Option<Ref<'p, ffi::OscCommandImpl>>,
     _parser: PhantomData<&'p Parser<'alloc>>,
 }
 
@@ -112,13 +111,13 @@ impl<'p> Command<'p, '_> {
     }
 
     fn command_type_inner(&self) -> Option<CommandType<'p>> {
-        use ffi::OscCommandData as Data;
         use ffi::OscCommandType as Type;
 
-        let raw_type = unsafe { ffi::ghostty_osc_command_type(self.inner.as_raw()) };
+        let inner = self.inner.as_ref()?;
+        let raw_type = unsafe { ffi::ghostty_osc_command_type(inner.as_raw()) };
         Some(match raw_type {
             Type::CHANGE_WINDOW_TITLE => CommandType::ChangeWindowTitle {
-                title: self.get(Data::CHANGE_WINDOW_TITLE_STR)?,
+                title: self.window_title()?,
             },
             Type::CHANGE_WINDOW_ICON => CommandType::ChangeWindowIcon,
             Type::SEMANTIC_PROMPT => CommandType::SemanticPrompt,
@@ -148,18 +147,22 @@ impl<'p> Command<'p, '_> {
         })
     }
 
-    fn get<T>(&self, tag: ffi::OscCommandData::Type) -> Option<T> {
-        let mut value = MaybeUninit::<T>::zeroed();
+    fn window_title(&self) -> Option<&'p str> {
+        let inner = self.inner.as_ref()?;
+        let mut value: *const std::ffi::c_char = std::ptr::null();
+        // SAFETY: This tag writes a const char pointer into the output.
         let result = unsafe {
-            ffi::ghostty_osc_command_data(self.inner.as_raw(), tag, value.as_mut_ptr().cast())
+            ffi::ghostty_osc_command_data(
+                inner.as_raw(),
+                ffi::OscCommandData::CHANGE_WINDOW_TITLE_STR,
+                std::ptr::from_mut(&mut value).cast(),
+            )
         };
-
-        if result {
-            // SAFETY: Value should be initialized after successful call.
-            Some(unsafe { value.assume_init() })
-        } else {
-            None
+        if !result || value.is_null() {
+            return None;
         }
+        // SAFETY: The native title is NUL-terminated and valid for the parser borrow 'p.
+        unsafe { CStr::from_ptr(value) }.to_str().ok()
     }
 }
 
@@ -195,4 +198,35 @@ pub enum CommandType<'p> {
     ConemuXtermEmulation,
     ConemuComment,
     KittyTextSizing,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn window_title_validates_utf8_and_borrows_exact_text() {
+        let mut parser = Parser::new().unwrap();
+        for title in ["SpaceTerm café 終端", ""] {
+            parser.reset();
+            for byte in b"2;".iter().copied().chain(title.bytes()) {
+                parser.next_byte(byte);
+            }
+            let CommandType::ChangeWindowTitle { title: actual } = parser.end(7).command_type()
+            else {
+                panic!("expected a window title");
+            };
+            assert_eq!(actual, title);
+        }
+        parser.reset();
+        for byte in b"2;\xff" {
+            parser.next_byte(*byte);
+        }
+        assert!(matches!(parser.end(7).command_type(), CommandType::Invalid));
+        parser.reset();
+        for byte in b"not-an-osc-command" {
+            parser.next_byte(*byte);
+        }
+        assert!(matches!(parser.end(7).command_type(), CommandType::Invalid));
+    }
 }

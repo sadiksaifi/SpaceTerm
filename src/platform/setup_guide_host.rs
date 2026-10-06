@@ -1,7 +1,6 @@
 //! Portable seam for the native pieces a Setup Guide presents on System Settings.
 //!
-//! The guide follows System Settings' window and offers SpaceTerm itself for a person to drag into
-//! a privacy list. Locating the window reads only window geometry and owners, which needs no
+//! Locating System Settings' window reads only window geometry and owners, which needs no
 //! permission.
 
 use std::path::PathBuf;
@@ -38,7 +37,6 @@ pub(crate) struct ApplicationBundle {
     /// The running application's bundle. It is only dragged, so it carries no authority for any
     /// other file action.
     pub(crate) path: PathBuf,
-    /// The application's icon as the system presents it.
     pub(crate) icon: Arc<gpui::Image>,
 }
 
@@ -115,12 +113,10 @@ pub(crate) mod testing {
             *self.window.lock().expect("window lock") = window;
         }
 
-        /// How many guide windows asked for glass.
         pub(crate) fn glass_requests(&self) -> usize {
             self.glass.load(Ordering::Relaxed)
         }
 
-        /// Every row a drag asked the host to draw.
         pub(crate) fn drawn_rows(&self) -> Vec<ApplicationRowImage> {
             self.rows.lock().expect("rows lock").clone()
         }

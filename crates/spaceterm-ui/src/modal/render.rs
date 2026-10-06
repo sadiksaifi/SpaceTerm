@@ -41,7 +41,7 @@ actions!(
     ]
 );
 
-/// Platform-specific modal key equivalents layered over the portable modal bindings.
+/// Platform-specific modal bindings layered over the portable modal bindings.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModalKeybindingProfile {
     /// Conventional macOS Command-Period cancellation. Selecting this profile is explicit and
@@ -51,10 +51,10 @@ pub enum ModalKeybindingProfile {
     Linux,
 }
 
-/// Installs the platform-specific key equivalents for `profile`.
+/// Installs the platform-specific bindings for `profile`.
 ///
 /// Applications explicitly install portable Tab, Shift-Tab, Return, and Escape behavior before
-/// calling this function to opt into desktop-specific equivalents. Neither installation requires
+/// calling this function to opt into desktop-specific bindings. Neither installation requires
 /// host-platform detection in the reusable library.
 pub fn install_modal_keybindings(cx: &mut App, profile: ModalKeybindingProfile) {
     match profile {
@@ -84,17 +84,9 @@ pub(super) fn init(cx: &mut App) {
 
 /// Final Operating-System Window layer for shared window-modal controls.
 ///
-/// Place it around the complete root content. Tooltip dismissal is included. Supply complete
-/// CommandPalette owners through [`Self::transient`] so the layer owns their placement above
-/// ordinary content. The active modal is painted as the final normal
-/// child rather than a deferred draw, allowing a modal-owned deferred Menu to remain above it. The
-/// scrim blocks application pointer press, release, move, and wheel input without outside
-/// dismissal or click-through. The modal key context blocks underlay keyboard routing while the
-/// leading and trailing sentinels contain the complete current-frame GPUI tab-stop order.
-///
-/// This layer does not yet exclude the underlay from native accessibility traversal. Private
-/// logical semantic snapshots and debug selectors test retained facts and observable modality;
-/// they provide no native accessibility evidence.
+/// Place it around the complete root content and pass CommandPalette owners through
+/// [`Self::transient`]. The active modal paints as the final normal child rather than a deferred
+/// draw, so a modal-owned deferred Menu stays above it.
 #[derive(IntoElement)]
 pub struct ModalLayer {
     content: AnyElement,
@@ -1412,7 +1404,6 @@ fn render_footer(
     let ActionArrangement {
         physical,
         traversal,
-        help,
     } = arrangement;
     let decisions_are_reversed = axis == ActionAxis::Horizontal && physical != traversal;
     if decisions_are_reversed {
@@ -1450,36 +1441,6 @@ fn render_footer(
             policy.default_action_presentation(action),
         ));
     }
-    let has_help = !help.is_empty();
-    let mut help_actions = div()
-        .flex()
-        .when(axis == ActionAxis::Horizontal, |actions| {
-            actions
-                .flex_row()
-                .when(direction == TextDirection::RightToLeft, |actions| {
-                    actions.flex_row_reverse()
-                })
-                .items_center()
-        })
-        .when(axis == ActionAxis::Vertical, |actions| actions.flex_col())
-        .gap(metrics.action_gap)
-        .min_w_0();
-    for index in help {
-        let Some(action) = snapshot.actions.get(index) else {
-            continue;
-        };
-        help_actions = help_actions.child(render_action(
-            action,
-            index,
-            presentation,
-            owner.clone(),
-            action_focus.get(index).cloned(),
-            button_press_owner.clone(),
-            axis == ActionAxis::Vertical,
-            policy.default_action_presentation(action),
-        ));
-    }
-
     let footer = div()
         .id(("modal-footer", snapshot.presentation.value()))
         .debug_selector(move || format!("modal-footer-{}", presentation.value()))
@@ -1501,14 +1462,12 @@ fn render_footer(
                     footer.flex_row_reverse()
                 })
                 .items_center()
-                .when(has_help, |footer| footer.justify_between())
         })
         .when(axis == ActionAxis::Vertical, |footer| footer.flex_col())
         .gap(metrics.action_gap)
-        .when(axis == ActionAxis::Horizontal && !has_help, |footer| {
+        .when(axis == ActionAxis::Horizontal, |footer| {
             footer.child(div().flex_grow(1.0))
         })
-        .when(has_help, |footer| footer.child(help_actions))
         .child(decisions)
         .into_any_element();
     ModalControlScopeElement {
@@ -1540,8 +1499,6 @@ fn render_action(
         || action.emphasis == ModalActionEmphasis::Prominent
     {
         ButtonVariant::Primary
-    } else if action.role == ModalActionRole::Help {
-        ButtonVariant::Link
     } else {
         ButtonVariant::Secondary
     };

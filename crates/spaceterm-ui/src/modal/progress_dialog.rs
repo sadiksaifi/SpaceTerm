@@ -32,7 +32,6 @@ pub enum ProgressCancellation<A> {
 }
 
 impl<A> ProgressCancellation<A> {
-    /// Creates bounded programmatic-only mode.
     pub fn programmatic_only(deadline: Duration) -> Self {
         Self::ProgrammaticOnly { deadline }
     }
@@ -98,12 +97,10 @@ pub struct ProgressDialogUpdate {
 }
 
 impl ProgressDialogUpdate {
-    /// Creates an update with no changed fields.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Replaces the succinct status text.
     pub fn status(mut self, status: impl Into<SharedString>) -> Self {
         self.status = Some(status.into());
         self
@@ -115,7 +112,6 @@ impl ProgressDialogUpdate {
         self
     }
 
-    /// Replaces or clears concise secondary detail.
     pub fn detail(mut self, detail: Option<impl Into<SharedString>>) -> Self {
         self.detail = Some(detail.map(Into::into));
         self
@@ -151,18 +147,8 @@ impl ProgressDialogUpdate {
 
 /// A specialized window-modal surface for bounded work.
 ///
-/// Status and progress remain stable on one shared modal surface across updates. A cancellable
-/// action's enabled state establishes initial availability, while retained updates may later enable
-/// or disable that immutable capability. Cancellable mode enters focus on the currently enabled
-/// Cancel action; programmatic-only mode enters on the modal surface and requires a nonzero
-/// installed-policy deadline. Escape reaches cancellation only after the
-/// focused child declines it and only while cancellation is enabled. Cancellation may allow, deny,
-/// or become pending, with duplicate requests blocked until authoritative completion. The opaque
-/// completion retains the original activation source, so delayed cancellation cannot relabel it.
-///
-/// Progress reaches a terminal state only through explicit completion, failure, dismissal, allowed
-/// cancellation, owner removal, replacement, or deadline expiry. Every terminal outcome is
-/// content-free and delivered exactly once after the invoking GPUI update unwinds.
+/// Determinate progress at its maximum never closes the dialog. Only an explicit or teardown
+/// terminal outcome closes it, and that outcome is delivered exactly once.
 ///
 /// # Example
 ///
@@ -216,7 +202,6 @@ impl<A> ProgressDialog<A> {
         }
     }
 
-    /// Sets concise secondary detail.
     pub fn detail(mut self, detail: impl Into<SharedString>) -> Self {
         self.detail = Some(detail.into());
         self
@@ -368,8 +353,6 @@ impl<A> ProgressDialog<A> {
             ModalKind::Progress,
             PreparedModalRequest::erase_actions(actions),
             PreparedModalSemantics::Progress {
-                #[cfg(test)]
-                accessibility_title: self.accessibility_title,
                 visible_title: self.title,
                 status: self.status,
                 detail: self.detail,

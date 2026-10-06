@@ -1,7 +1,5 @@
 //! Schedules instant-apply Settings edits on the Settings Window's GPUI executor.
-//!
-//! Draft and preview ownership live in the framework-independent draft Module. This Adapter owns
-//! debounce cancellation, retained background execution, close/quit flushing, and view notification.
+//! The executor-independent `draft` Module owns the draft and preview transaction.
 
 mod draft;
 
@@ -15,21 +13,18 @@ use std::{
 
 use gpui::{Context, Task};
 
-use crate::appearance::{ResetTarget, SettingsDocument, ThemeId, ThemeSummary};
-#[cfg(test)]
-use crate::settings::CommitJob;
+use crate::appearance::{ResetTarget, ThemeId, ThemeSummary};
+use crate::settings::SettingsDocument;
 use crate::settings::recovery::RecoveryError;
 use crate::settings::storage::StorageError;
-use crate::settings::{CommitOutcome, ImportReceipt, SettingsError, ThemeImport, UserSettings};
+use crate::settings::{CommitOutcome, ImportReceipt, Settings, SettingsError, ThemeImport};
 
 use super::SettingsWindow;
 pub(super) use draft::SaveStatus;
 use draft::SettingsDraft;
 
-/// How long the editor waits for the next change before writing.
-///
-/// Long enough that holding a stepper or dragging through a list produces one write, short enough
-/// that a change feels saved by the time attention moves elsewhere.
+/// How long the editor waits for the next change before writing, so holding a stepper produces one
+/// write.
 pub(super) const COMMIT_DELAY: Duration = Duration::from_millis(500);
 
 pub(super) struct SettingsEditor {
@@ -66,7 +61,7 @@ impl CommitCompletion {
 }
 
 impl SettingsEditor {
-    pub(super) fn new(settings: UserSettings) -> Self {
+    pub(super) fn new(settings: Settings) -> Self {
         Self {
             draft: SettingsDraft::new(settings),
             pending: None,
@@ -144,10 +139,9 @@ impl SettingsEditor {
         self.draft.export_document()
     }
 
-    /// Attempts to save before closing, keeping a running write and any failed draft alive.
-    ///
-    /// A running write completes through its retained callback. Otherwise the final small document
-    /// is written synchronously, so a successful close never depends on a task owned by the window.
+    /// Attempts to save before closing, keeping a running write and any failed draft alive. The
+    /// final document is written synchronously so a close never depends on a task owned by the
+    /// window.
     pub(super) fn flush(&mut self, cx: &mut Context<SettingsWindow>) -> bool {
         self.pending = None;
         if self.in_flight.is_some() {
@@ -170,11 +164,8 @@ impl SettingsEditor {
         !self.draft.has_unwritten_changes()
     }
 
-    /// Writes pending changes, then the document itself if no file holds it yet, so another
-    /// program can open the file.
-    ///
-    /// Both writes are small and run synchronously, as [`Self::flush`] does, so the file exists
-    /// when this returns unless a write failed or one is still running.
+    /// Writes pending changes, then the document itself if no file holds it yet, so another program
+    /// can open the file.
     pub(super) fn write_file(&mut self, cx: &mut Context<SettingsWindow>) {
         if !self.flush(cx) {
             return;
@@ -194,11 +185,8 @@ impl SettingsEditor {
         }
     }
 
-    /// Reads the settings file again, as another program left it.
-    ///
-    /// A change this window can still write is written first, so reloading loses nothing the
-    /// person made here. A change that cannot be written because the file changed underneath it
-    /// is discarded, as the explicit reload after a conflict discards it.
+    /// Reads the settings file again, as another program left it. A change this window can still
+    /// write is written first.
     pub(super) fn reload_file(&mut self, cx: &mut Context<SettingsWindow>) {
         if self.draft.editable() && !self.flush(cx) {
             return;
@@ -240,7 +228,6 @@ impl SettingsEditor {
         self.flush(cx)
     }
 
-    /// Writes a change that a previous attempt could not.
     pub(super) fn retry(&mut self, cx: &mut Context<SettingsWindow>) {
         self.pending = None;
         self.start_commit(self.generation, cx);
@@ -306,24 +293,6 @@ impl SettingsEditor {
                 cx.notify();
             }
         }
-    }
-
-    #[cfg(test)]
-    pub(super) fn start_deferred_commit(
-        &mut self,
-        cx: &mut Context<SettingsWindow>,
-    ) -> (
-        CommitJob,
-        async_channel::Sender<Result<CommitOutcome, SettingsError>>,
-    ) {
-        self.pending = None;
-        let job = self.draft.prepare_commit().unwrap();
-        let (sender, receiver) = async_channel::bounded(1);
-        let result = cx
-            .background_executor()
-            .spawn(async move { receiver.recv().await.unwrap() });
-        self.track_commit(self.generation, result, cx);
-        (job, sender)
     }
 
     fn track_commit(
@@ -394,7 +363,6 @@ impl SaveStatus {
         }
     }
 
-    /// Whether Settings Recovery can replace the retained document.
     pub(super) fn recoverable(self) -> bool {
         matches!(self, Self::Unavailable(error) if error.is_malformed())
     }

@@ -39,14 +39,12 @@ pub enum AlertIntent {
 pub enum AlertAccessory {
     /// A compact symbolic icon with a mandatory logical name.
     Icon {
-        /// Logical name retained for future native accessibility publication.
         accessibility_name: SharedString,
         /// Optional caller-owned image rendered inside the bounded accessory slot.
         image: Option<Arc<RenderImage>>,
     },
     /// Bounded noninteractive media with a mandatory logical name.
     Media {
-        /// Logical name retained for future native accessibility publication.
         accessibility_name: SharedString,
         /// Caller-owned image rendered inside the bounded accessory slot.
         image: Arc<RenderImage>,
@@ -101,7 +99,6 @@ impl AlertSuppression {
         }
     }
 
-    /// Returns the localized visible label.
     pub fn label(&self) -> &str {
         self.label.as_ref()
     }
@@ -115,7 +112,7 @@ impl AlertSuppression {
 /// Typed terminal result delivered exactly once for an Alert presentation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AlertOutcome<A> {
-    /// An enabled typed decision or Help action was activated.
+    /// An enabled typed decision was activated.
     Activated {
         /// Stable caller-owned action identity.
         action_id: A,
@@ -133,20 +130,10 @@ pub enum AlertOutcome<A> {
     },
 }
 
-/// A concise, window-modal desktop decision or acknowledgement.
+/// A concise, window-modal desktop decision or acknowledgement with one to three actions.
 ///
-/// Alert accepts one to three decision actions plus an optional separate Help action. It never
-/// dismisses from an outside press. Initial focus prefers an explicit default or sole ordinary
-/// acknowledgement, but a destructive Alert enters on the enabled safe Cancel path. Return
-/// activates the enabled focused action first, then only an explicit enabled default after a
-/// focused body control declines it. Escape and an installed platform cancellation equivalent use
-/// only the enabled Cancel action.
-/// Caller action order is preserved as logical identity while [`ModalDesktopPolicy`] owns physical
-/// placement and the renderer traverses the complete current-frame GPUI tab-stop order.
-///
-/// Presentations share the Operating-System Window's one active slot and eight-entry waiting FIFO.
-/// Results and lifecycle closure are delivered exactly once, including queued dismissal, caller
-/// owner removal, Operating-System Window removal, and reentrant result callbacks.
+/// A destructive Alert enters focus on the enabled safe Cancel action. An outside press never
+/// dismisses it.
 #[derive(Clone)]
 pub struct Alert<A> {
     pub(super) id: ModalId,
@@ -157,7 +144,6 @@ pub struct Alert<A> {
     pub(super) actions: Vec<ModalAction<A>>,
     pub(super) detail: Option<SharedString>,
     pub(super) accessory: Option<AlertAccessory>,
-    pub(super) help: Option<ModalAction<A>>,
     pub(super) suppression: Option<AlertSuppression>,
 }
 
@@ -179,7 +165,6 @@ impl<A> Alert<A> {
             actions,
             detail: None,
             accessory: None,
-            help: None,
             suppression: None,
         }
     }
@@ -190,25 +175,16 @@ impl<A> Alert<A> {
         self
     }
 
-    /// Sets bounded secondary detail.
     pub fn detail(mut self, detail: impl Into<SharedString>) -> Self {
         self.detail = Some(detail.into());
         self
     }
 
-    /// Sets the single bounded noninteractive accessory.
     pub fn accessory(mut self, accessory: AlertAccessory) -> Self {
         self.accessory = Some(accessory);
         self
     }
 
-    /// Sets a separately rendered Help action.
-    pub fn help_action(mut self, help: ModalAction<A>) -> Self {
-        self.help = Some(help);
-        self
-    }
-
-    /// Sets the caller-owned suppression choice.
     pub fn suppression(mut self, suppression: AlertSuppression) -> Self {
         self.suppression = Some(suppression);
         self
@@ -336,10 +312,7 @@ impl<A> Alert<A> {
             .as_ref()
             .map(|(_, selected)| Rc::new(Cell::new(*selected)));
         let result_suppression_flag = suppression_flag.clone();
-        let mut actions = self.actions;
-        if let Some(help) = self.help {
-            actions.push(help);
-        }
+        let actions = self.actions;
         let action_ids = actions
             .iter()
             .map(|action| action.id().clone())
@@ -349,8 +322,6 @@ impl<A> Alert<A> {
             ModalKind::Alert,
             PreparedModalRequest::erase_actions(actions),
             PreparedModalSemantics::Alert {
-                #[cfg(test)]
-                accessibility_title: self.accessibility_title,
                 visible_title: self.title,
                 message: self.message,
                 detail: self.detail,

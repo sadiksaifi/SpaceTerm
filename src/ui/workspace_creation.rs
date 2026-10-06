@@ -1,8 +1,4 @@
-//! Canonical descriptors for the Workspace creation rows.
-//!
-//! The sidebar footer menu and the Workspace Switcher offer the same rows in the same order:
-//! the two New rows, then the two Open rows as a separate group. Labels, icons, selectors, and
-//! Commands shared here cannot drift apart when one surface changes.
+//! Canonical Workspace creation rows shared by the sidebar footer menu and the Workspace Switcher.
 
 use gpui::{Action, SharedString};
 use spaceterm_ui::CustomIconName;
@@ -50,7 +46,6 @@ impl WorkspaceCreation {
         }
     }
 
-    /// Whether the row needs the Remote Workspace backend.
     pub(crate) const fn is_remote(self) -> bool {
         matches!(self, Self::Remote | Self::OpenRemoteDirectory)
     }
@@ -70,7 +65,6 @@ impl WorkspaceCreation {
         }
     }
 
-    /// The displayed Shortcut of the Command that runs this row.
     pub(crate) fn shortcut(self, presentation: &DesktopPresentation) -> Option<SharedString> {
         presentation.shortcut(self.action().as_ref())
     }
@@ -85,11 +79,8 @@ impl WorkspaceCreation {
     }
 }
 
-/// Trigger tooltip for the sidebar creation menu.
-///
-/// The menu trigger stays enabled while Remote creation is unavailable (Local
-/// creation still works), so the tooltip keeps the trigger name and appends
-/// the backend reason instead of replacing it.
+/// Trigger tooltip for the sidebar creation menu. The trigger stays enabled while Remote creation
+/// is unavailable, so the tooltip appends the reason.
 pub(crate) fn new_workspace_trigger_tooltip(remote_unavailable: Option<&str>) -> SharedString {
     match remote_unavailable {
         Some(reason) => format!("New Workspace: {reason}").into(),

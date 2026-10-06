@@ -41,18 +41,31 @@ pub(crate) fn lock_real_pty_test() -> std::sync::MutexGuard<'static, ()> {
 pub(crate) fn isolate_real_pty_test(test_name: &str) -> bool {
     const CHILD_TEST: &str = "SPACETERM_ISOLATED_REAL_PTY_TEST";
     if std::env::var(CHILD_TEST).as_deref() == Ok(test_name) {
+        eprintln!("SPACETERM_PTY_TEST_ENTERED={test_name}");
         return false;
     }
 
     // portable-pty forks before exec. The parallel native test process also runs Foundation
     // code, which can leave a forked child with corrupt os_once state. Run the PTY case in a
     // fresh test process before that process starts unrelated test threads.
-    let status = std::process::Command::new(std::env::current_exe().unwrap())
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", test_name, "--test-threads=1", "--nocapture"])
         .env(CHILD_TEST, test_name)
-        .status()
+        .output()
         .expect("failed to start isolated real PTY test");
-    assert!(status.success(), "isolated real PTY test failed: {status}");
+    assert!(
+        output.status.success(),
+        "isolated real PTY test failed: {}\n{}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .any(|line| line == format!("SPACETERM_PTY_TEST_ENTERED={test_name}")),
+        "isolated real PTY test body did not execute: {test_name}"
+    );
     true
 }
 
@@ -73,7 +86,6 @@ struct TerminationTarget {
     host: Arc<dyn UnixPtyHost>,
     process_group: Option<i32>,
     session: Option<ProcessSessionIdentity>,
-    known_processes: Vec<ProcessIdentity>,
     fallback: Box<dyn ChildKiller + Send + Sync>,
 }
 
@@ -92,7 +104,6 @@ pub(super) trait UnixPtyHost: Send + Sync + 'static {
     /// List every process identifier currently visible to this user.
     fn process_ids(&self) -> io::Result<Vec<i32>>;
 
-    /// Classify a PTY master read failure.
     fn master_read_error(&self, error: &io::Error) -> MasterReadError;
 }
 
@@ -152,7 +163,6 @@ impl TerminationTarget {
             return signal_process_group(owner_group, signal);
         };
         let mut process_groups = process_groups_in_session(self.host.as_ref(), &session)?;
-        self.remember_processes(&process_groups);
         let owner_members = process_groups.remove(&owner_group).unwrap_or_default();
         let mut first_error = None;
         for (process_group, members) in process_groups {
@@ -181,14 +191,6 @@ impl TerminationTarget {
         }
     }
 
-    fn remember_processes(&mut self, process_groups: &BTreeMap<i32, Vec<ProcessIdentity>>) {
-        for identity in process_groups.values().flatten() {
-            if !self.known_processes.contains(identity) {
-                self.known_processes.push(*identity);
-            }
-        }
-    }
-
     fn is_alive(&mut self) -> io::Result<bool> {
         let Some(process_group) = self.process_group else {
             return Ok(true);
@@ -196,7 +198,6 @@ impl TerminationTarget {
         match self.session {
             Some(session) => {
                 let process_groups = process_groups_in_session(self.host.as_ref(), &session)?;
-                self.remember_processes(&process_groups);
                 Ok(!process_groups.is_empty())
             }
             None => process_group_is_alive(process_group),
@@ -222,7 +223,6 @@ impl ChildTermination {
                 host,
                 process_group,
                 session: None,
-                known_processes: Vec::new(),
                 fallback,
             })),
             requested: AtomicBool::new(false),
@@ -241,7 +241,6 @@ impl ChildTermination {
                 host,
                 process_group: Some(process_group),
                 session: Some(session),
-                known_processes: vec![session.leader],
                 fallback,
             })),
             requested: AtomicBool::new(false),
@@ -996,83 +995,6 @@ fn command_from_launch(launch: &PreparedShellLaunch) -> CommandBuilder {
 }
 
 #[cfg(all(test, feature = "native-tests"))]
-pub(crate) fn conformance_initialization_observation() -> String {
-    let launch = ShellLaunchPlanner::for_test(
-        "/bin/zsh".into(),
-        "/spaceterm-conformance-missing-resources".into(),
-    )
-    .local(Path::new("/tmp"))
-    .unwrap();
-    let command = command_from_launch(&launch);
-    format!(
-        "argv={:?} cwd={} term={} colorterm={} program={} version={} spaceterm={} controlling-tty={}",
-        command.get_argv(),
-        command
-            .get_cwd()
-            .and_then(|path| path.to_str())
-            .unwrap_or("missing"),
-        command
-            .get_env("TERM")
-            .and_then(std::ffi::OsStr::to_str)
-            .unwrap_or("missing"),
-        command
-            .get_env("COLORTERM")
-            .and_then(std::ffi::OsStr::to_str)
-            .unwrap_or("missing"),
-        command
-            .get_env("TERM_PROGRAM")
-            .and_then(std::ffi::OsStr::to_str)
-            .unwrap_or("missing"),
-        command
-            .get_env("TERM_PROGRAM_VERSION")
-            .and_then(std::ffi::OsStr::to_str)
-            .unwrap_or("missing"),
-        command
-            .get_env("SPACETERM")
-            .and_then(std::ffi::OsStr::to_str)
-            .unwrap_or("missing"),
-        command.get_controlling_tty(),
-    )
-}
-
-#[cfg(all(test, feature = "native-tests"))]
-pub(crate) fn conformance_shutdown_observation() -> String {
-    use std::sync::atomic::AtomicUsize;
-
-    #[derive(Debug)]
-    struct CountingKiller(Arc<AtomicUsize>);
-
-    impl ChildKiller for CountingKiller {
-        fn kill(&mut self) -> io::Result<()> {
-            self.0.fetch_add(1, Ordering::Relaxed);
-            Ok(())
-        }
-
-        fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
-            Box::new(Self(Arc::clone(&self.0)))
-        }
-    }
-
-    let kills = Arc::new(AtomicUsize::new(0));
-    let termination = ChildTermination::new(
-        test_host(),
-        None,
-        Box::new(CountingKiller(Arc::clone(&kills))),
-    );
-    let first = termination.signal().is_ok();
-    let second = termination.signal().is_ok();
-    let disposition = termination
-        .complete_process_group(Instant::now())
-        .expect("the fake child killer should complete shutdown");
-    format!(
-        "first={first} duplicate={second} signals={} disposition={disposition:?} revoked={}",
-        kills.load(Ordering::Relaxed),
-        termination.lock_target().is_none(),
-    )
-}
-
-/// The factory the running Operating System composes, for OS-backed verification.
-#[cfg(all(test, feature = "native-tests"))]
 pub(crate) fn test_factory() -> UnixNativePtyAdapterFactory {
     UnixNativePtyAdapterFactory::new(test_host())
 }
@@ -1119,6 +1041,38 @@ mod tests {
     use portable_pty::{ChildKiller, ExitStatus};
 
     use super::*;
+
+    #[test]
+    fn launch_command_preserves_arguments_directory_environment_and_controlling_terminal() {
+        let launch = ShellLaunchPlanner::for_test(
+            "/bin/zsh".into(),
+            "/spaceterm-conformance-missing-resources".into(),
+        )
+        .local(Path::new("/tmp"))
+        .unwrap();
+        let command = command_from_launch(&launch);
+        assert_eq!(
+            command.get_argv(),
+            &[std::ffi::OsString::from("/bin/zsh"), "-l".into()]
+        );
+        assert_eq!(
+            command.get_cwd().map(std::ffi::OsString::as_os_str),
+            Some(std::ffi::OsStr::new("/tmp"))
+        );
+        for (name, value) in [
+            ("TERM", "xterm-256color"),
+            ("COLORTERM", "truecolor"),
+            ("TERM_PROGRAM", "ghostty"),
+            ("SPACETERM", "1"),
+        ] {
+            assert_eq!(
+                command.get_env(name),
+                Some(std::ffi::OsStr::new(value)),
+                "{name}"
+            );
+        }
+        assert!(command.get_controlling_tty());
+    }
 
     #[test]
     fn platform_neutral_size_preserves_rows_columns_and_pixels() {
@@ -2395,13 +2349,10 @@ mod tests {
     }
 
     #[test]
-    fn spawned_pty_should_expose_single_owner_io_operations() {
+    fn spawned_pty_reader_can_be_taken_only_once() {
         let cleanup = CleanupCounts::default();
         let (mut pty, _terminator) = spawned_pty(Box::new(ExitedChild { cleanup }));
 
-        pty.resize(PtySize::default()).unwrap();
-        pty.write_all(b"input").unwrap();
-        pty.flush().unwrap();
         drop(pty.take_reader().unwrap());
         let error = pty.take_reader().err().unwrap();
 
@@ -2655,6 +2606,13 @@ mod tests {
 
         terminator.terminate().unwrap();
         terminator.terminate().unwrap();
+        assert_eq!(
+            pty.termination
+                .complete_process_group(Instant::now())
+                .unwrap(),
+            ShutdownDisposition::Graceful,
+        );
+        assert!(pty.termination.lock_target().is_none());
         drop(pty);
 
         assert_eq!(

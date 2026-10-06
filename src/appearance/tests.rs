@@ -133,11 +133,7 @@ fn prepared_appearance(mode: AppearanceMode, transparency: f32) -> ResolvedAppea
         .unwrap()
 }
 
-/// A Dark Pane reads as the window's own surface, one quiet step above the window root.
-///
-/// The step is measured against the opaque theme reference, which every material derives from,
-/// so it holds whatever the desktop behind the window happens to be. The material keeps the step
-/// subtle as the window transmits.
+/// A Dark Pane sits one quiet step above the window root, measured against the opaque reference.
 #[test]
 fn dark_pane_rests_one_subtle_step_above_the_window_root() {
     for transparency in [0.0, 0.05, 0.15, 0.35, 0.7, 1.0] {
@@ -162,11 +158,7 @@ fn dark_pane_rests_one_subtle_step_above_the_window_root() {
     }
 }
 
-/// The Transparency Setting owns the Terminal surface as much as it owns the chrome.
-///
-/// A Pane covers the largest part of the window, so a Pane that held its own backing would answer
-/// the Setting with a slab the reader never asked for. It transmits with the window instead, and
-/// keeps only the sliver of ink its step below the root costs.
+/// A Dark Pane transmits with the window and keeps only the ink its step below the root costs.
 #[test]
 fn dark_pane_transmits_what_the_transparency_setting_asks() {
     let settings = [0.0_f32, 0.15, 0.35, 0.7, 1.0];
@@ -397,13 +389,8 @@ fn light_navigation_selections_share_one_contrast_direction_across_material_sett
     }
 }
 
-/// A Light Pane reads as the window's own surface, one quiet step above the chrome around it.
-///
-/// The step is measured against the opaque theme reference, which every material derives from.
-/// It is the full authored 1.21 while the window is opaque and narrows as glass engages, because
-/// a bright rung may spend no more than the ladder ceiling once the window transmits. Over a real
-/// desktop darker than the theme, the same overlay covers more distance and the step widens
-/// again, so the narrowed reference figure is the floor rather than the typical case.
+/// A Light Pane sits one quiet step above the chrome: the authored 1.21 while opaque, narrowing
+/// to the ladder ceiling as glass engages.
 #[test]
 fn light_pane_rests_one_subtle_step_above_the_window_root() {
     for transparency in [0.0, 0.05, 0.15, 0.35, 0.7, 1.0] {
@@ -428,14 +415,8 @@ fn light_pane_rests_one_subtle_step_above_the_window_root() {
     }
 }
 
-/// The Transparency Setting owns the Light Terminal surface as much as it owns the chrome.
-///
-/// A Pane covers the largest part of the window. Holding its authored step against the opaque
-/// host would cost an almost opaque white that the Setting never reaches, which is the slab the
-/// Light window used to paint. It transmits with the window instead and keeps only the overlay
-/// its step above the root costs. That overlay is wider than a Dark Pane's, because a bright
-/// theme needs more ink to say the same thing, so a Light Pane admits a smaller share of what
-/// the chrome admits.
+/// A Light Pane transmits with the window and keeps only the overlay its step above the root
+/// costs, which is wider than a Dark Pane's.
 #[test]
 fn light_pane_transmits_what_the_transparency_setting_asks() {
     let settings = [0.0_f32, 0.15, 0.35, 0.7, 1.0];
@@ -456,9 +437,7 @@ fn light_pane_transmits_what_the_transparency_setting_asks() {
             );
         }
         previous = Some(terminal);
-        // Bright Chrome reconstructs its Pane with near-white ink over a near-white root, which
-        // costs more coverage than a dark rung's sliver, so this bound sits below the Dark one
-        // rather than sharing it.
+        // Near-white ink over a near-white root costs more coverage, so this bound is below Dark's.
         assert!(
             terminal >= chrome * 0.6,
             "a Light Pane admits nearly what the chrome admits at transparency {transparency}: terminal={terminal}, chrome={chrome}",
@@ -470,17 +449,8 @@ fn light_pane_transmits_what_the_transparency_setting_asks() {
     }
 }
 
-/// A Light selected chip spends one overlay for its step and transmits the rest.
-///
-/// This is the shape of the bug it guards: a chip that holds its step against the opaque host
-/// keeps its ink while the shell under it goes on fading, so what it renders climbs with the
-/// Setting until the chip is the loudest thing in a window that was asked for glass. The same
-/// chip painted as a resting surface thins as the Setting rises and stays within reach of the
-/// authored 1.21. It does drift upward over a desktop darker than the theme, because equal ink
-/// buys a wider luminance ratio the darker its backing is, but it drifts within a band instead
-/// of leaving one: over this desktop the pinned chip reached 2.0 at the default Setting and 4.0
-/// above it, where a chip now reads 1.92 at that Setting and peaks at 2.31 with the shell most of
-/// the way cleared.
+/// A Light selected chip spends one overlay for its step and transmits the rest, so its contrast
+/// stays within a band as the Setting rises.
 #[test]
 fn light_selected_navigation_keeps_one_step_across_the_setting() {
     use spaceterm_ui::ControlHost;
@@ -530,7 +500,7 @@ fn light_selected_navigation_keeps_one_step_across_the_setting() {
     }
 }
 
-/// The Light Terminal backing is the Terminal's own color under the window material, with no
+/// The Light Terminal backing is the Pane's own color under the window material, with no
 /// elevation rung of its own, and window activation does not change it.
 #[test]
 fn light_terminal_backing_applies_transparency_without_an_elevation_tint() {
@@ -609,9 +579,7 @@ fn selected_surfaces_follow_transparency_in_both_appearances() {
                     selected.a > 0 && selected.a < 255,
                     "{mode:?} selected surface must transmit its backdrop at {transparency}: {selected:?}"
                 );
-                // A transmitting selection is read against the shell the window actually
-                // renders, not against the opaque reference it was solved from, so the bound it
-                // can promise there is the ink it spends rather than a fixed ratio.
+                // Against the rendered shell, the promised bound is the ink spent, not a ratio.
                 let host = prepared.colors.panel_background;
                 assert!(
                     selected.source_over(host).contrast_ratio(host) > 1.0,
@@ -1072,65 +1040,6 @@ fn proportional_terminal_font_request_falls_back_to_monospace_without_reordering
     );
 }
 
-#[test]
-fn a_terminal_theme_must_match_its_slot_appearance() {
-    let mut document = SettingsDocument::default();
-    document.preferences.terminal.themes.light = super::builtin::dark_terminal_id();
-    document.preferences.mode = AppearanceMode::Light;
-    assert_eq!(
-        document.validate(),
-        Err(SettingsDocumentError::InvalidPreferences)
-    );
-    assert!(matches!(
-        ThemeCatalog::default().resolve(
-            AppearanceGeneration::INITIAL,
-            &document.preferences,
-            SystemAppearance::unavailable(),
-            &AvailableFonts::default()
-        ),
-        Err(ResolutionError::AppearanceMismatch)
-    ));
-}
-
-fn reset_fixture() -> SettingsDocument {
-    let mut document = SettingsDocument::default();
-    document.preferences.mode = AppearanceMode::Light;
-    document.preferences.window.density = ChromeDensity::Comfortable;
-    document.preferences.window.transparency = 0.8;
-    document.preferences.window.blur = false;
-    document.preferences.terminal.themes.light = ThemeId::new("custom.reset-light").unwrap();
-    document.preferences.terminal.typography.family = TerminalFontFamily::Named {
-        family: String::from("Menlo"),
-    };
-    document.preferences.terminal.typography.base_size = 32.0;
-    document.preferences.terminal.typography.regular_weight = 800;
-    document.preferences.terminal.typography.bold_weight = 900;
-    document.preferences.terminal.typography.line_height = 2.0;
-    document.preferences.terminal.typography.italic = false;
-    document.preferences.terminal.rendering.bold_as_bright = false;
-    document.preferences.terminal.overrides.insert(
-        ThemeId::builtin("builtin.spaceterm.light"),
-        TerminalColorOverrides::complete(&TerminalColors::default()),
-    );
-
-    document.terminal_themes.push(TerminalTheme {
-        id: ThemeId::new("custom.reset-fixture").unwrap(),
-        name: String::from("Reset Fixture"),
-        appearance: Appearance::Dark,
-        metadata: ThemeMetadata::default(),
-        colors: TerminalColorOverrides::default(),
-    });
-    document.terminal_themes.push(TerminalTheme {
-        id: ThemeId::new("custom.reset-light").unwrap(),
-        name: String::from("Reset Light"),
-        appearance: Appearance::Light,
-        metadata: ThemeMetadata::default(),
-        colors: TerminalColorOverrides::default(),
-    });
-    document.validate().unwrap();
-    document
-}
-
 /// Resetting a Terminal slot preserves Appearance Mode and the other slot.
 #[test]
 fn resetting_a_theme_slot_keeps_the_mode_and_other_slots() {
@@ -1166,348 +1075,7 @@ fn resetting_the_mode_preserves_every_theme_slot() {
 }
 
 #[test]
-fn every_individual_preference_reset_changes_only_its_field() {
-    type ExpectedEdit = fn(&mut AppearancePreferences);
-    let defaults = AppearancePreferences::default();
-    let cases: Vec<(ResetTarget, ExpectedEdit)> = vec![
-        (ResetTarget::AppearanceMode, |value| {
-            value.mode = AppearancePreferences::default().mode;
-        }),
-        (ResetTarget::Density, |value| {
-            value.window.density = ChromeDensity::Compact
-        }),
-        (ResetTarget::Transparency, |value| {
-            value.window.transparency = 0.35
-        }),
-        (ResetTarget::Blur, |value| value.window.blur = true),
-        (ResetTarget::TerminalTheme(Appearance::Light), |value| {
-            value.terminal.themes.light = AppearancePreferences::default().terminal.themes.light;
-        }),
-        (ResetTarget::TerminalFontFamily, |value| {
-            value.terminal.typography.family =
-                AppearancePreferences::default().terminal.typography.family;
-        }),
-        (ResetTarget::TerminalBaseSize, |value| {
-            value.terminal.typography.base_size = AppearancePreferences::default()
-                .terminal
-                .typography
-                .base_size;
-        }),
-        (ResetTarget::TerminalRegularWeight, |value| {
-            value.terminal.typography.regular_weight = AppearancePreferences::default()
-                .terminal
-                .typography
-                .regular_weight;
-        }),
-        (ResetTarget::TerminalBoldWeight, |value| {
-            value.terminal.typography.bold_weight = AppearancePreferences::default()
-                .terminal
-                .typography
-                .bold_weight;
-        }),
-        (ResetTarget::TerminalLineHeight, |value| {
-            value.terminal.typography.line_height = AppearancePreferences::default()
-                .terminal
-                .typography
-                .line_height;
-        }),
-        (ResetTarget::TerminalItalic, |value| {
-            value.terminal.typography.italic =
-                AppearancePreferences::default().terminal.typography.italic;
-        }),
-        (ResetTarget::TerminalBoldAsBright, |value| {
-            value.terminal.rendering.bold_as_bright = AppearancePreferences::default()
-                .terminal
-                .rendering
-                .bold_as_bright;
-        }),
-    ];
-    assert_eq!(cases.len(), 12);
-
-    for (target, expected_edit) in cases {
-        let mut actual = reset_fixture();
-        let retained_themes = actual.terminal_themes.clone();
-        let mut expected = actual.preferences.clone();
-        expected_edit(&mut expected);
-        actual.reset(target.clone()).unwrap();
-        assert_eq!(actual.preferences, expected, "{target:?}");
-        assert_eq!(actual.terminal_themes, retained_themes, "{target:?}");
-    }
-
-    assert_ne!(reset_fixture().preferences, defaults);
-}
-
-#[test]
-fn group_and_all_resets_have_exact_scope_and_retain_color_themes() {
-    type ExpectedEdit = fn(&mut AppearancePreferences);
-    let cases: Vec<(ResetTarget, ExpectedEdit)> = vec![
-        (ResetTarget::Density, |value| {
-            value.window.density = AppearancePreferences::default().window.density;
-        }),
-        (ResetTarget::TerminalColors, |value| {
-            let defaults = AppearancePreferences::default();
-            value.terminal.themes = defaults.terminal.themes;
-            value.terminal.overrides.clear();
-        }),
-        (ResetTarget::TerminalTypography, |value| {
-            value.terminal.typography = AppearancePreferences::default().terminal.typography;
-        }),
-        (ResetTarget::TerminalRendering, |value| {
-            value.terminal.rendering = AppearancePreferences::default().terminal.rendering;
-        }),
-        (ResetTarget::AllAppearance, |value| {
-            *value = AppearancePreferences::default();
-        }),
-    ];
-
-    for (target, expected_edit) in cases {
-        let mut actual = reset_fixture();
-        let retained_themes = actual.terminal_themes.clone();
-        let mut expected = actual.preferences.clone();
-        expected_edit(&mut expected);
-        actual.reset(target.clone()).unwrap();
-        assert_eq!(actual.preferences, expected, "{target:?}");
-        assert_eq!(actual.terminal_themes, retained_themes, "{target:?}");
-    }
-}
-
-/// `reset_all` is the document's factory reset, so it goes further than any [`ResetTarget`]: the
-/// imported catalog empties with the preferences, and the identity fields that order the write
-/// against concurrent editors carry forward untouched.
-#[test]
-fn resetting_the_whole_document_empties_the_catalog_and_keeps_its_identity() {
-    let mut document = reset_fixture();
-    document.keybindings = serde_json::from_value(serde_json::json!({
-        "close_tab": null,
-        "new_workspace": "shift-cmd-t"
-    }))
-    .unwrap();
-    document.revision = 17;
-    let schema_version = document.schema_version;
-    assert!(
-        !document.terminal_themes.is_empty(),
-        "the fixture should install themes"
-    );
-
-    document.reset_all();
-
-    assert_eq!(
-        document.preferences,
-        AppearancePreferences::default(),
-        "every preference should return to its default"
-    );
-    assert!(
-        document.terminal_themes.is_empty(),
-        "the imported catalog should empty"
-    );
-    assert_eq!(document.keybindings, Default::default());
-    assert_eq!(
-        document.revision, 17,
-        "the write order should carry forward"
-    );
-    assert_eq!(document.schema_version, schema_version);
-    document.validate().unwrap();
-}
-
-/// A selection naming an imported theme is valid only while that theme is installed, so
-/// emptying the catalog and defaulting the preferences have to land in the same edit.
-#[test]
-fn resetting_the_whole_document_releases_a_selected_imported_theme() {
-    let mut document = reset_fixture();
-    let imported = document.terminal_themes[0].id.clone();
-    document.preferences.terminal.themes.dark = imported.clone();
-    document.validate().unwrap();
-
-    document.reset_all();
-
-    assert_ne!(document.preferences.terminal.themes.dark, imported);
-    document.validate().unwrap();
-}
-
-#[test]
-fn every_color_role_can_be_removed_without_changing_other_overrides() {
-    let terminal_roles: &[&'static str] = &[
-        "foreground",
-        "background",
-        "normal",
-        "bright",
-        "dim",
-        "bright_foreground",
-        "dim_foreground",
-        "cursor",
-        "cursor_text",
-        "selection_background",
-        "selection_foreground",
-        "find_match_background",
-        "find_match_foreground",
-        "find_active_match_background",
-        "find_active_match_foreground",
-        "hyperlink",
-        "visual_bell",
-    ];
-    let terminal_id = ThemeId::builtin("builtin.spaceterm.light");
-
-    for role in terminal_roles {
-        let mut actual = reset_fixture();
-        let retained_themes = actual.terminal_themes.clone();
-        let before_window = actual.preferences.window.clone();
-        let mut expected = serde_json::to_value(
-            actual
-                .preferences
-                .terminal
-                .overrides
-                .get(&terminal_id)
-                .unwrap(),
-        )
-        .unwrap();
-        expected.as_object_mut().unwrap().remove(*role);
-        actual
-            .reset(ResetTarget::terminal_color_override(terminal_id.clone(), role).unwrap())
-            .unwrap();
-        assert_eq!(
-            serde_json::to_value(
-                actual
-                    .preferences
-                    .terminal
-                    .overrides
-                    .get(&terminal_id)
-                    .unwrap()
-            )
-            .unwrap(),
-            expected,
-            "terminal role {role}"
-        );
-        assert_eq!(
-            actual.preferences.window, before_window,
-            "terminal role {role}"
-        );
-        assert_eq!(
-            actual.terminal_themes, retained_themes,
-            "terminal role {role}"
-        );
-    }
-
-    assert!(ResetTarget::terminal_color_override(terminal_id, "not_a_role").is_none());
-
-    let mut sparse = SettingsDocument::default();
-    let terminal_id = ThemeId::builtin("builtin.spaceterm.dark");
-    sparse.preferences.terminal.overrides.insert(
-        terminal_id.clone(),
-        TerminalColorOverrides {
-            cursor_text: OptionalColorOverride::None,
-            ..TerminalColorOverrides::default()
-        },
-    );
-    sparse
-        .reset(ResetTarget::terminal_color_override(terminal_id.clone(), "cursor_text").unwrap())
-        .unwrap();
-    assert!(
-        !sparse
-            .preferences
-            .terminal
-            .overrides
-            .contains_key(&terminal_id)
-    );
-}
-
-/// A Settings file that selects an uninstalled theme reads with that slot on the built-in theme
-/// for its appearance, and the other slot keeps its choice.
-#[test]
-fn reading_a_missing_theme_selection_returns_the_slot_to_the_builtin_theme() {
-    let mut document = SettingsDocument::default();
-    document.terminal_themes.push(TerminalTheme {
-        id: ThemeId::new("custom.kept-dark").unwrap(),
-        name: String::from("Kept Dark"),
-        appearance: Appearance::Dark,
-        metadata: ThemeMetadata::default(),
-        colors: TerminalColorOverrides::default(),
-    });
-    document.preferences.terminal.themes.dark = ThemeId::new("custom.kept-dark").unwrap();
-    let encoded = export_settings(&document)
-        .unwrap()
-        .replace("builtin.spaceterm.light", "custom.removed-light");
-
-    let read = parse_settings(encoded.as_bytes()).unwrap();
-
-    assert_eq!(
-        read.preferences.terminal.themes.light,
-        ThemeId::builtin("builtin.spaceterm.light")
-    );
-    assert_eq!(
-        read.preferences.terminal.themes.dark,
-        ThemeId::new("custom.kept-dark").unwrap()
-    );
-}
-
-#[test]
-fn native_settings_are_canonical_strict_and_round_trip() {
-    let mut document = SettingsDocument::default();
-    document.preferences.mode = AppearanceMode::Auto;
-    document.preferences.terminal.themes.light = ThemeId::builtin("builtin.spaceterm.dark");
-    assert!(
-        export_settings(&document).is_err(),
-        "a slot should name a theme of its own appearance"
-    );
-    document.preferences.terminal.themes.light = ThemeId::new("missing.terminal.light").unwrap();
-    assert!(
-        export_settings(&document).is_err(),
-        "a slot should name an installed theme"
-    );
-    document.preferences.terminal.themes.light = ThemeId::builtin("builtin.spaceterm.light");
-    let encoded = export_settings(&document).unwrap();
-    let encoded_value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
-    assert_eq!(encoded_value["schema_version"], 3);
-    assert_eq!(parse_settings(encoded.as_bytes()).unwrap(), document);
-    let unsupported = encoded.replacen("\"schema_version\": 3", "\"schema_version\": 2", 1);
-    assert!(matches!(
-        parse_settings(unsupported.as_bytes()),
-        Err(SettingsDocumentError::UnsupportedVersion)
-    ));
-    assert!(matches!(parse_settings(br#"{"schema_version":3,"schema_version":3,"revision":0,"preferences":{},"terminal_themes":[]}"#),
-        Err(SettingsDocumentError::DuplicateKey)));
-
-    let unknown = encoded.replacen(
-        "\"revision\": 0,",
-        "\"revision\": 0,\n  \"unknown\": true,",
-        1,
-    );
-    assert!(matches!(
-        parse_settings(unknown.as_bytes()),
-        Err(SettingsDocumentError::InvalidJson)
-    ));
-}
-
-#[test]
-fn invalid_bounds_and_protocol_alpha_are_rejected() {
-    let mut document = SettingsDocument::default();
-    document.preferences.terminal.typography.base_size = f32::NAN;
-    assert!(matches!(
-        export_settings(&document),
-        Err(SettingsDocumentError::InvalidPreferences)
-    ));
-
-    let custom = TerminalTheme {
-        id: ThemeId::new("custom.alpha").unwrap(),
-        name: String::from("Alpha"),
-        appearance: Appearance::Dark,
-        metadata: ThemeMetadata::default(),
-        colors: TerminalColorOverrides {
-            foreground: Some(Color::rgba(0xffffff80)),
-            ..Default::default()
-        },
-    };
-    let document = SettingsDocument {
-        terminal_themes: vec![custom],
-        ..SettingsDocument::default()
-    };
-    assert!(matches!(
-        export_settings(&document),
-        Err(SettingsDocumentError::InvalidCatalog)
-    ));
-}
-
-#[test]
-fn catalog_batch_install_is_atomic_and_revision_checked() {
+fn successful_catalog_install_advances_revision_and_rejects_stale_revision() {
     let theme = TerminalTheme {
         id: ThemeId::new("custom.blue").unwrap(),
         name: String::from("Blue"),
@@ -1534,90 +1102,6 @@ fn color_encoding_accepts_short_forms_and_exports_long_rgba() {
     let color: Color = serde_json::from_str("\"#abc\"").unwrap();
     assert_eq!(color, Color::rgb(0xaabbcc));
     assert_eq!(serde_json::to_string(&color).unwrap(), "\"#aabbccff\"");
-}
-
-#[test]
-fn update_preferences_round_trip_and_reset_with_the_settings_document() {
-    use crate::updates::policy::{CheckInterval, ReminderInterval, UpdatePreferences};
-    let document = SettingsDocument {
-        updates: UpdatePreferences {
-            automatic_downloads: false,
-            check_interval: CheckInterval::Hourly,
-            reminder_interval: ReminderInterval::EightHours,
-        },
-        ..Default::default()
-    };
-    let encoded = export_settings(&document).unwrap();
-    let mut restored = parse_settings(encoded.as_bytes()).unwrap();
-    assert_eq!(restored.updates, document.updates);
-    restored.reset_all();
-    assert_eq!(restored.updates, UpdatePreferences::default());
-}
-
-#[test]
-fn keybinding_overrides_round_trip_as_a_sparse_map() {
-    let document = SettingsDocument {
-        keybindings: serde_json::from_value(serde_json::json!({
-            "close_tab": null,
-            "new_workspace": "shift-cmd-t"
-        }))
-        .unwrap(),
-        ..Default::default()
-    };
-
-    let encoded = export_settings(&document).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
-    assert_eq!(
-        value["keybindings"],
-        serde_json::json!({"close_tab": null, "new_workspace": "shift-cmd-t"})
-    );
-    assert_eq!(parse_settings(encoded.as_bytes()).unwrap(), document);
-    assert!(encoded.find("\"updates\"").unwrap() < encoded.find("\"keybindings\"").unwrap());
-    assert!(encoded.find("\"keybindings\"").unwrap() < encoded.find("\"preferences\"").unwrap());
-
-    let mut without_overrides = value;
-    without_overrides
-        .as_object_mut()
-        .unwrap()
-        .remove("keybindings");
-    assert_eq!(
-        parse_settings(&serde_json::to_vec(&without_overrides).unwrap())
-            .unwrap()
-            .keybindings,
-        Default::default()
-    );
-}
-
-#[test]
-fn invalid_keybinding_overrides_are_rejected_by_the_settings_document() {
-    let mut value = serde_json::to_value(SettingsDocument::default()).unwrap();
-    value["keybindings"] = serde_json::json!({
-        "close_tab": "shift-cmd-t",
-        "new_workspace": "shift-cmd-t"
-    });
-    let bytes = serde_json::to_vec(&value).unwrap();
-    assert_eq!(
-        parse_settings(&bytes),
-        Err(SettingsDocumentError::InvalidKeybindings)
-    );
-    let invalid: SettingsDocument = serde_json::from_value(value.clone()).unwrap();
-    assert_eq!(
-        export_settings(&invalid),
-        Err(SettingsDocumentError::InvalidKeybindings)
-    );
-
-    value["keybindings"] = serde_json::json!({"unknown_command": "shift-cmd-t"});
-    assert_eq!(
-        parse_settings(&serde_json::to_vec(&value).unwrap()),
-        Err(SettingsDocumentError::InvalidJson)
-    );
-
-    value["keybindings"] = serde_json::json!({"close_tab": "ctrl-c"});
-    let parsed = parse_settings(&serde_json::to_vec(&value).unwrap()).unwrap();
-    assert_eq!(
-        serde_json::to_value(parsed).unwrap()["keybindings"],
-        value["keybindings"]
-    );
 }
 
 #[test]
@@ -1670,34 +1154,4 @@ fn bundled_default_preserves_a_named_system_font_choice() {
         resolved.terminal.typography.regular.resolution_identity,
         "system-installed"
     );
-}
-
-#[test]
-fn replacing_settings_takes_the_imported_catalog_and_keeps_identity() {
-    let imported = reset_fixture();
-    let mut document = SettingsDocument {
-        revision: 4,
-        ..SettingsDocument::default()
-    };
-
-    document.replace_settings(imported.clone());
-
-    assert_eq!(document.preferences, imported.preferences);
-    assert_eq!(document.terminal_themes, imported.terminal_themes);
-    assert_eq!(document.revision, 4);
-    document.validate().unwrap();
-}
-
-#[test]
-fn clipboard_settings_round_trip_import_and_reset() {
-    let mut document = SettingsDocument::default();
-    document.clipboard.allow_write = false;
-    document.clipboard.allow_read = true;
-    let restored = parse_settings(export_settings(&document).unwrap().as_bytes()).unwrap();
-    assert_eq!(restored.clipboard, document.clipboard);
-    let mut imported = SettingsDocument::default();
-    imported.replace_settings(restored);
-    assert_eq!(imported.clipboard, document.clipboard);
-    imported.reset_all();
-    assert_eq!(imported.clipboard, Default::default());
 }

@@ -841,7 +841,7 @@ mod tests {
         let before_deadline = coordinator.driver.deliveries.clone();
         let _ = coordinator.reconcile_scheduled(schedule, schedule.deadline, false);
 
-        assert_eq!(schedule.deadline, epoch + NOTIFICATION_AGGREGATION);
+        assert_eq!(schedule.deadline, epoch + Duration::from_secs(5));
         assert_eq!(second_schedule, None);
         assert_eq!(before_deadline, Vec::new());
         assert_eq!(
@@ -946,7 +946,7 @@ mod tests {
     }
 
     #[test]
-    fn focus_input_or_teardown_removes_only_the_owning_pane_contribution() {
+    fn clearing_pending_pane_removes_only_its_contribution() {
         let epoch = Instant::now();
         let first = AttentionPaneId::test(1);
         let second = AttentionPaneId::test(2);
@@ -984,7 +984,7 @@ mod tests {
     }
 
     #[test]
-    fn focus_input_or_teardown_clears_an_already_delivered_native_notification() {
+    fn clearing_delivered_pane_clears_notification() {
         let epoch = Instant::now();
         let pane = AttentionPaneId::test(1);
         let mut coordinator = NotificationCoordinator::new(RecordingNotificationDriver::default());
@@ -1167,7 +1167,7 @@ mod tests {
     }
 
     #[test]
-    fn closing_one_window_keeps_other_window_attention_and_deadline() {
+    fn dropping_one_runtime_handle_preserves_other_pane_demand() {
         let epoch = Instant::now();
         let (first_window, effects) = recording_runtime();
         let second_window = first_window.clone();

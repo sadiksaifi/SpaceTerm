@@ -1,9 +1,5 @@
-//! Get More Themes: a sheet that finds Zed extensions and installs their themes, or imports a Zed
-//! theme file.
-//!
-//! SpaceTerm contacts the registry only when the sheet opens, and only once per window: the
-//! listing is small, searched locally, and discarded with the window. Installing downloads one
-//! extension, translates its themes, and adds them to the installed themes without applying any.
+//! Get More Themes: a sheet that installs themes from Zed extensions or imports a Zed theme file.
+//! SpaceTerm contacts the registry only when the sheet opens, once per window.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -112,16 +108,6 @@ impl ThemeStore {
             search,
             query: SharedString::default(),
         }
-    }
-
-    #[cfg(test)]
-    pub(super) fn listing(&self) -> &Listing {
-        &self.listing
-    }
-
-    #[cfg(test)]
-    pub(super) fn status(&self) -> Option<&str> {
-        self.status.as_deref()
     }
 
     fn search_focus(&self, cx: &App) -> FocusHandle {
@@ -726,28 +712,8 @@ fn installed_message(installed: usize) -> SharedString {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::secure_filesystem::{PrivateFileSnapshot, SecureEntryIdentity};
-    use crate::settings::UserSettings;
-    use crate::settings::storage::{SettingsStorage, StorageCommit, StorageError};
-
-    struct EmptyStorage;
-
-    impl SettingsStorage for EmptyStorage {
-        fn quarantine(&self) -> Result<(), crate::settings::storage::StorageError> {
-            Err(crate::settings::storage::StorageError::Unavailable)
-        }
-        fn read(&self) -> Result<Option<PrivateFileSnapshot>, StorageError> {
-            Ok(None)
-        }
-
-        fn write(
-            &self,
-            _: &[u8],
-            _: Option<&SecureEntryIdentity>,
-        ) -> Result<StorageCommit, StorageError> {
-            panic!("importing a preview must not write settings");
-        }
-    }
+    use crate::settings::Settings;
+    use crate::settings::storage::testing::MemoryStorage;
 
     fn listed(version: &str) -> RegistryExtension {
         RegistryExtension {
@@ -794,7 +760,8 @@ mod tests {
 
     #[test]
     fn reimporting_a_zed_family_replaces_its_themes() {
-        let settings = UserSettings::load(std::sync::Arc::new(EmptyStorage));
+        let storage = std::sync::Arc::new(MemoryStorage::default());
+        let settings = Settings::load(storage.clone());
         let token = settings.begin_preview(0).unwrap();
         let bytes = br##"{"themes":[{"name":"Sample","appearance":"dark","style":{"terminal.foreground":"#abcdef"}}]}"##;
         let install = || {
@@ -806,11 +773,17 @@ mod tests {
         assert_eq!(install(), installed_message(1));
         assert_eq!(install(), installed_message(1));
         assert_eq!(settings.snapshot().candidate.terminal_themes.len(), 1);
+        assert_eq!(
+            storage.writes(),
+            0,
+            "importing a preview must not write settings"
+        );
     }
 
     #[test]
     fn a_malformed_zed_family_installs_nothing_and_a_corrected_retry_is_clean() {
-        let settings = UserSettings::load(std::sync::Arc::new(EmptyStorage));
+        let storage = std::sync::Arc::new(MemoryStorage::default());
+        let settings = Settings::load(storage.clone());
         let token = settings.begin_preview(0).unwrap();
         let invalid = br##"{"themes":[{"name":"First","appearance":"dark","style":{}},{"name":"Broken","appearance":"sepia","style":{}}]}"##;
         let corrected = br##"{"themes":[{"name":"First","appearance":"dark","style":{}},{"name":"Second","appearance":"light","style":{}}]}"##;
@@ -828,6 +801,11 @@ mod tests {
 
         assert_eq!(install(corrected), installed_message(2));
         assert_eq!(settings.snapshot().candidate.terminal_themes.len(), 2);
+        assert_eq!(
+            storage.writes(),
+            0,
+            "importing a preview must not write settings"
+        );
     }
 
     #[test]
@@ -857,3 +835,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "theme_store_window_tests.rs"]
+mod window_tests;

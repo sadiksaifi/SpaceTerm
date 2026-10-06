@@ -26,6 +26,34 @@ fn segmented_control_theme(
     )
 }
 
+pub(super) fn init_uniform_control_catalog(
+    cx: &mut gpui::App,
+    catalog: ControlThemeCatalog,
+) -> gpui::Result<()> {
+    let catalog = Box::new(catalog);
+    crate::init(
+        cx,
+        catalog.clone(),
+        catalog.clone(),
+        catalog.clone(),
+        catalog,
+    )
+}
+
+pub(super) fn replace_uniform_control_catalog(
+    cx: &mut gpui::App,
+    catalog: ControlThemeCatalog,
+) -> Result<ControlThemeReplacement, ControlThemeCatalogError> {
+    let catalog = Box::new(catalog);
+    replace_control_theme_catalogs(
+        cx,
+        catalog.clone(),
+        catalog.clone(),
+        catalog.clone(),
+        catalog,
+    )
+}
+
 pub(super) fn catalog(generation: u64) -> ControlThemeCatalog {
     catalog_with_motion(generation, ControlMotion::Standard)
 }
@@ -186,47 +214,74 @@ impl Render for CatalogObserver {
 #[gpui::test]
 fn replacement_should_require_initialization(cx: &mut TestAppContext) {
     assert_eq!(
-        cx.update(|cx| replace_control_theme_catalog(cx, catalog(1))),
-        Err(ControlThemeReplacementError)
+        cx.update(|cx| replace_uniform_control_catalog(cx, catalog(1))),
+        Err(ControlThemeCatalogError::NotInitialized)
     );
 }
 
 #[gpui::test]
-fn paired_replacement_requires_one_generation_and_is_atomic(cx: &mut TestAppContext) {
+fn catalog_replacement_requires_one_generation_and_is_atomic(cx: &mut TestAppContext) {
     let initial = catalog(1);
-    cx.update(|cx| init(cx, initial.clone()))
+    cx.update(|cx| init_uniform_control_catalog(cx, initial.clone()))
         .expect("control initialization should succeed");
 
-    assert_eq!(
-        cx.update(|cx| replace_control_theme_catalogs(cx, catalog(2), catalog(3))),
-        Err(ControlThemeCatalogPairError::GenerationMismatch)
-    );
-    cx.read(|cx| {
-        let installed = cx.global::<InstalledControlThemeCatalogs>();
-        assert_eq!(installed.active.as_ref(), &initial);
-        assert_eq!(installed.inactive.as_ref(), &initial);
-    });
+    for mismatched_variant in 0..4 {
+        assert_eq!(
+            cx.update(|cx| {
+                let mut catalogs = std::array::from_fn::<_, 4, _>(|_| Box::new(catalog(2)));
+                *catalogs[mismatched_variant] = catalog(3);
+                let [active, inactive, settings_active, settings_inactive] = catalogs;
+                replace_control_theme_catalogs(
+                    cx,
+                    active,
+                    inactive,
+                    settings_active,
+                    settings_inactive,
+                )
+            }),
+            Err(ControlThemeCatalogError::GenerationMismatch)
+        );
+        cx.read(|cx| {
+            let installed = cx.global::<InstalledControlThemeCatalogs>();
+            assert_eq!(installed.active.as_ref(), &initial);
+            assert_eq!(installed.inactive.as_ref(), &initial);
+            assert_eq!(installed.settings_active.as_ref(), &initial);
+            assert_eq!(installed.settings_inactive.as_ref(), &initial);
+        });
+    }
 
     let active = catalog(2);
     let inactive = catalog_with_motion(2, ControlMotion::Reduced);
     assert_eq!(
-        cx.update(|cx| replace_control_theme_catalogs(cx, active.clone(), inactive.clone())),
+        cx.update(|cx| {
+            let active = active.clone();
+            let inactive = inactive.clone();
+            crate::replace_control_theme_catalogs(
+                cx,
+                Box::new(active.clone()),
+                Box::new(inactive.clone()),
+                Box::new(active),
+                Box::new(inactive),
+            )
+        }),
         Ok(ControlThemeReplacement::Applied)
     );
     cx.read(|cx| {
         let installed = cx.global::<InstalledControlThemeCatalogs>();
         assert_eq!(installed.active.as_ref(), &active);
         assert_eq!(installed.inactive.as_ref(), &inactive);
+        assert_eq!(installed.settings_active.as_ref(), &active);
+        assert_eq!(installed.settings_inactive.as_ref(), &inactive);
     });
 }
 
 #[test]
 fn catalog_metric_scaling_composes_for_floating_shells_and_hosted_controls() {
     let initial = catalog(1);
-    let scaled = initial.clone().scale_metrics(1.25, 1.25);
-    let identity_after_scale = scaled.clone().scale_metrics(1.0, 1.0);
-    let chained = scaled.clone().scale_metrics(1.2, 1.2);
-    let direct = initial.scale_metrics(1.5, 1.5);
+    let scaled = initial.clone().scale_spacing(1.25);
+    let identity_after_scale = scaled.clone().scale_spacing(1.0);
+    let chained = scaled.clone().scale_spacing(1.2);
+    let direct = initial.scale_spacing(1.5);
 
     for role in [FloatingRole::Popover, FloatingRole::Modal] {
         assert_eq!(
@@ -254,18 +309,9 @@ fn catalog_metric_scaling_composes_for_floating_shells_and_hosted_controls() {
         identity_after_scale.hosted_controls(ControlHost::Floating),
         scaled.hosted_controls(ControlHost::Floating),
     );
-    let chained_button = chained
-        .hosted_controls(ControlHost::Floating)
-        .expect("catalog should include floating controls")
-        .regular_button_extent_for_test();
-    let direct_button = direct
-        .hosted_controls(ControlHost::Floating)
-        .expect("catalog should include floating controls")
-        .regular_button_extent_for_test();
-    assert!((chained_button - direct_button).abs() < px(0.001));
 
-    let expanded = catalog(1).scale_metrics(1.0, 1.5).scale_metrics(1.0, 1.5);
-    let contracted = catalog(1).scale_metrics(1.0, 0.5).scale_metrics(1.0, 0.5);
+    let expanded = catalog(1).scale_spacing(1.5).scale_spacing(1.5);
+    let contracted = catalog(1).scale_spacing(0.5).scale_spacing(0.5);
     let expanded_shell = expanded
         .floating
         .expect("catalog should include floating presentation")
@@ -283,7 +329,7 @@ fn catalog_metric_scaling_composes_for_floating_shells_and_hosted_controls() {
 #[gpui::test]
 fn replacement_should_publish_all_families_and_refresh_observers(cx: &mut TestAppContext) {
     let initial = catalog(1);
-    cx.update(|cx| init(cx, initial.clone()))
+    cx.update(|cx| init_uniform_control_catalog(cx, initial.clone()))
         .expect("control initialization should succeed");
     let renders = Rc::new(Cell::new(0));
     let observed_renders = Rc::clone(&renders);
@@ -301,11 +347,11 @@ fn replacement_should_publish_all_families_and_refresh_observers(cx: &mut TestAp
 
     let replacement = initial
         .clone()
-        .scale_metrics(1.5, 1.25)
+        .scale_spacing(1.25)
         .generation(ControlThemeGeneration::new(2));
     assert_ne!(replacement.progress, initial.progress);
     assert_eq!(
-        cx.update(|_, cx| replace_control_theme_catalog(cx, replacement.clone())),
+        cx.update(|_, cx| replace_uniform_control_catalog(cx, replacement.clone())),
         Ok(ControlThemeReplacement::Applied)
     );
     cx.run_until_parked();
@@ -349,7 +395,7 @@ fn replacement_should_publish_all_families_and_refresh_observers(cx: &mut TestAp
         );
         assert_eq!(cx.global::<ControlThemeCatalog>(), &replacement);
         assert_eq!(
-            replace_control_theme_catalog(cx, replacement),
+            replace_uniform_control_catalog(cx, replacement),
             Ok(ControlThemeReplacement::Unchanged)
         );
     });

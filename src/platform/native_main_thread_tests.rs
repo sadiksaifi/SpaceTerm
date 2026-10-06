@@ -45,7 +45,7 @@ pub(crate) fn run() {
     gpui_test!(
         macos_appearance::tests::native_observer_coalesces_wakeups_and_closes_with_its_owner
     );
-    gpui_test!(macos_appearance::tests::native_observer_coalesces_show_borders_notifications_and_removes_registration);
+    gpui_test!(macos_appearance::tests::native_observer_coalesces_show_borders_notifications_and_closes_subscription);
     gpui_test!(
         macos_window_backdrop::tests::backdrop_installation_is_ordered_idempotent_and_reversible
     );
@@ -57,10 +57,10 @@ pub(crate) fn run() {
         macos_application_quit::tests::native_hook_cancels_policy_then_consumes_one_confirmation
     );
     gpui_test!(macos_services::tests::service_type_classifies_nil_and_empty_nsstring_as_absent);
-    gpui_test!(macos_services::tests::nsstring_decode_enforces_the_paste_limit_before_copying);
+    gpui_test!(macos_services::tests::nsstring_decode_enforces_the_paste_byte_limit);
     gpui_test!(macos_services::tests::nsstring_decode_rejects_embedded_nul_without_truncation);
     gpui_test!(macos_services::tests::nsstring_decode_rejects_nonempty_failed_utf8_conversion);
-    gpui_test!(macos_services::tests::service_pasteboard_round_trip_uses_only_public_utf8_text);
+    gpui_test!(macos_services::tests::service_pasteboard_round_trips_public_utf8_text);
     gpui_test!(
         macos_services::tests::native_selectors_publish_selection_and_accept_exactly_one_return
     );

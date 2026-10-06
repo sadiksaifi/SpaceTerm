@@ -625,13 +625,6 @@ impl ThemeCatalog {
         summaries
     }
 
-    pub(crate) fn themes(&self) -> Vec<TerminalTheme> {
-        self.themes
-            .values()
-            .map(|theme| theme.as_ref().clone())
-            .collect()
-    }
-
     pub(crate) fn contains(&self, id: &ThemeId) -> bool {
         self.themes.contains_key(id)
     }

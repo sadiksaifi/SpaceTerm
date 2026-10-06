@@ -120,10 +120,6 @@ pub(crate) struct ChromeAppearance {
     /// Standard field fills and content resolved against their material frame on a floating host.
     pub(crate) floating_field_colors: ChromeColors,
     /// Content-free families whose authored constraints required a safe fallback.
-    ///
-    /// Most families use opaque state fills when no translucent solution exists. An
-    /// unrepresentable host-relative step can instead retain the safe presentation, which
-    /// may remain translucent.
     pub(crate) floating_fallbacks: Vec<FloatingControlFamily>,
     /// Content-free disabled-state failures collected across every prepared host.
     pub(crate) disabled_diagnostics: Vec<DisabledControlDiagnostic>,
@@ -564,22 +560,6 @@ fn readable_toward_endpoint<const N: usize>(
         .readable_preserving_chroma_toward(&backgrounds, minimum, endpoint_is_lighter)
         .unwrap_or(endpoint)
 }
-
-#[cfg(test)]
-fn resolve_floating_field_colors(
-    authored: &ChromeColors,
-    floors: FloatingContrastFloors,
-    reference: ChromeColors,
-    paint: ChromeColors,
-    material: Color,
-    wash: Color,
-) -> (ChromeColors, ChromeColors) {
-    let resolved =
-        resolve_floating_field_colors_detailed(authored, floors, reference, paint, material, wash);
-    let _pending_diagnostics = resolved.fallback_families;
-    (resolved.reference, resolved.colors)
-}
-
 fn resolve_floating_field_colors_detailed(
     authored: &ChromeColors,
     floors: FloatingContrastFloors,
@@ -871,11 +851,9 @@ fn relative_luminance(color: Color) -> f64 {
         + 0.0722 * linear_channel(color.b)
 }
 
-/// Reapplies an authored fill's luminance step from the definition root to an immediate host.
-///
-/// The returned color is an opaque semantic target. Transparent fills remain unpainted at the
-/// caller. A target outside the displayable luminance interval is reported instead of clamped,
-/// because clamping would claim to preserve a relationship that the color gamut cannot represent.
+/// Reapplies an authored fill's luminance step from the definition root to an immediate host. A
+/// target outside the displayable luminance interval returns `None` instead of clamping, because
+/// clamping would claim a relationship the gamut cannot represent.
 fn host_relative_fill(authored: Color, root: Color, host: Color) -> Option<Color> {
     let root = root.with_alpha(255);
     let host = host.with_alpha(255);
@@ -1181,23 +1159,6 @@ fn resolve_floating_family_for_presentation<const N: usize>(
         host_backgrounds[0] != host_backgrounds[1] || used_content_fallback,
     ))
 }
-
-#[cfg(test)]
-fn resolve_floating_control_colors(
-    authored: &ChromeColors,
-    floors: FloatingContrastFloors,
-    reference: &ChromeColors,
-    paint: ChromeColors,
-    material: Color,
-    wash: Color,
-) -> ChromeColors {
-    let resolved = resolve_floating_control_colors_detailed(
-        authored, floors, reference, paint, material, wash,
-    );
-    let _pending_diagnostics = resolved.fallback_families;
-    resolved.colors
-}
-
 fn resolve_floating_control_colors_detailed(
     authored: &ChromeColors,
     floors: FloatingContrastFloors,
@@ -2128,10 +2089,7 @@ fn resolve_floating_progress_accent(
 }
 
 /// Resolves controls after their material fills have been expressed as overlays on a known host.
-///
-/// The opaque reference remains the safe fallback. A prepared overlay that already carries every
-/// required content color is retained byte-for-byte; otherwise only the prepared presentation is
-/// made opaque enough to carry that content.
+/// The opaque reference remains the safe fallback.
 fn resolve_material_control_colors(
     reference: &ChromeColors,
     mut paint: ChromeColors,
@@ -2877,8 +2835,7 @@ fn non_floating_control_host_background(
 }
 
 /// Moves one prepared semantic target only when its modeled material composite cannot carry the
-/// requested contrast floor. The compiled colors remain untouched, and rendering consumes the
-/// returned target through the ordinary material path.
+/// requested contrast floor.
 fn feasible_non_floating_material_target(
     materials: SurfaceMaterials,
     role: SurfaceRole,
@@ -2970,10 +2927,6 @@ struct PreparedAppState<const N: usize> {
 }
 
 /// Resolves one app-drawn row or Tab state on the material it will actually paint.
-///
-/// The returned fill remains a semantic material target; renderers still apply the material once.
-/// Candidate search prefers retaining authored RGB and increasing prepared opacity, then makes the
-/// smallest endpoint move that can carry every content floor and any persistent-selection step.
 fn prepare_app_state<const N: usize>(
     materials: SurfaceMaterials,
     semantic_host: Color,
@@ -3044,9 +2997,8 @@ fn prepare_app_state<const N: usize>(
     })
 }
 
-/// Resolves a selected-state rim against the surrounding material host. Explicitly absent optional
-/// edges remain absent; the Increase Contrast policy has already made required selection rims
-/// nontransparent before this seam.
+/// Resolves a selected-state rim against the surrounding material host. Increase Contrast has
+/// already made required selection rims nontransparent before this point.
 fn prepare_app_state_boundary<const N: usize>(
     materials: SurfaceMaterials,
     semantic_host: Color,
@@ -3088,12 +3040,8 @@ fn prepare_app_state_boundary<const N: usize>(
     proposed
 }
 
-/// The separation a chip rim must reach, or `None` to keep the authored one as painted.
-///
-/// A chip rim is a lift, not a boundary: it catches the light a raised edge would so a Tab or a
-/// selected row reads as sitting above the strip behind it, and both built-in appearances author it
-/// well under the Pane rim that does state a boundary. Raising it to the boundary floor would
-/// draw an outline around every chip. Increase Contrast applies the stronger boundary floor.
+/// The separation a chip rim must reach, or `None` to keep the authored one as painted. A chip rim
+/// is a lift, not a boundary; raising it to the boundary floor would outline every chip.
 const fn app_owned_hairline(increase_contrast: bool) -> Option<f64> {
     if !increase_contrast {
         None
@@ -3253,11 +3201,6 @@ fn prepare_app_owned_tabs(
         [tab_active_hover_foreground, tab_active_hover_icon],
         Some(1.4)
     );
-    tab!(
-        tab_inactive_selected_background,
-        [tab_inactive_selected_foreground, tab_inactive_selected_icon],
-        Some(1.4)
-    );
     let Some(minimum) = hairline else {
         return;
     };
@@ -3270,14 +3213,6 @@ fn prepare_app_owned_tabs(
             colors.tab_active_hover_background,
         ],
         colors.tab_active_border,
-        minimum,
-    );
-    colors.tab_inactive_selected_border = prepare_app_state_boundary(
-        materials,
-        semantic_host,
-        final_host,
-        [colors.tab_inactive_selected_background],
-        colors.tab_inactive_selected_border,
         minimum,
     );
 }
@@ -3427,23 +3362,6 @@ fn state_floating_material(
         (tone, wash)
     }
 }
-
-#[cfg(test)]
-fn resolve_floating_segmented_colors(
-    authored: &ChromeColors,
-    floors: FloatingContrastFloors,
-    reference: &ChromeColors,
-    paint: ChromeColors,
-    material: Color,
-    wash: Color,
-) -> ChromeColors {
-    let resolved = resolve_floating_segmented_colors_detailed(
-        authored, floors, reference, paint, material, wash, false,
-    );
-    let _pending_diagnostics = resolved.fallback_families;
-    resolved.colors
-}
-
 fn resolve_floating_segmented_colors_detailed(
     authored: &ChromeColors,
     floors: FloatingContrastFloors,
@@ -3826,25 +3744,15 @@ impl ChromeAppearance {
         }
     }
 
-    /// Persistent selection paints its difference from its host, like any other resting surface.
-    ///
-    /// A selected chip is read against the surface it sits on, so what it owes the reader is its
-    /// authored step from that host, not a fixed density. Holding the step against the opaque
-    /// host instead pins a bright chip near opacity, and a pinned chip keeps its ink while the
-    /// shell under it goes on fading: a step authored at 1.21 then renders at 2.0 and then 4.0 as
-    /// the Setting rises, until the chip is the loudest thing in a window that was asked for
-    /// glass. Dark always spent less ink than that bound asked for, so this is what a Dark chip
-    /// has painted all along.
+    /// Persistent selection paints its authored step from its host, like any other resting surface.
+    /// Holding the step against the opaque host would pin the chip near opacity as the shell fades.
     pub(crate) fn selection_surface(&self, host: Color, color: Color) -> Color {
         self.materials
             .paint_compact(SurfaceRole::Surface, host, color)
     }
 
-    /// The fill an unselected chip takes under the pointer.
-    ///
-    /// Hover is the same kind of small surface as a selection and takes the same material, so the
-    /// two keep the order their authored tones set: a hovered row can never overtake the selected
-    /// row beside it, whatever the window transmits.
+    /// The fill an unselected chip takes under the pointer. It shares the selection material so a
+    /// hovered row never overtakes the selected row beside it.
     pub(crate) fn hover_surface(&self, host: Color, color: Color) -> Color {
         self.selection_surface(host, color)
     }
@@ -3888,20 +3796,14 @@ impl ChromeAppearance {
         self.materials.edge(host, toward(amount))
     }
 
-    /// Applies the window's material for one surface role to an authored background color.
-    ///
-    /// Only the owner of a painted background calls this, once. Authored translucency is scaled
-    /// rather than replaced, so a theme that authored a translucent surface keeps its intent.
+    /// Applies the window's material for one surface role to an authored background color. Only the
+    /// owner of a painted background calls this, once.
     pub(crate) fn surface(&self, role: SurfaceRole, color: Color) -> Color {
         self.materials.paint(role, self.colors.background, color)
     }
 
-    /// The deterministic in-window backdrop beneath controls on a host.
-    ///
-    /// The native desktop is intentionally outside this contract. The opaque color reference
-    /// backs the same Sheet, Base and Surface paints that the corresponding window roots render.
-    /// Floating callers that need transmission bounds use the shell's two endpoint backgrounds;
-    /// its value here is the opaque semantic reference only.
+    /// The deterministic in-window backdrop beneath controls on a host. The native desktop is
+    /// outside this contract.
     pub(crate) fn control_host_background(&self, host: spaceterm_ui::ControlHost) -> Color {
         if let Some(settings) = self.settings_hosts
             && let Some(background) = settings.background(host)
@@ -4029,14 +3931,7 @@ impl ChromeAppearance {
         wash.source_over(tone)
     }
 
-    /// The backdrop a Pane paints beneath its Terminal.
-    ///
-    /// A Pane is an ordinary resting surface in both appearances: it paints only its difference
-    /// from the window sheet, so it transmits what the Transparency Setting asks of every other
-    /// resting surface and keeps its authored step from the chrome around it. Light authors that
-    /// step upward and Dark downward, and the same overlay carries either direction, so neither
-    /// appearance needs a backing of its own, and neither does a chip or a row resting beside it.
-    /// Explicit cell backgrounds are separate.
+    /// The backdrop a Pane paints beneath its Terminal. Explicit cell backgrounds are separate.
     pub(crate) fn pane_surface(&self, terminal_background: Color) -> Color {
         self.surface(SurfaceRole::Surface, terminal_background)
     }
@@ -4480,500 +4375,6 @@ impl ChromeAppearance {
     }
 }
 
-#[cfg(test)]
-mod typography_tests {
-    use super::{
-        FloatingContrastFloors, floating_constraint, floating_host_constraint, floating_state,
-        host_relative_fill, relative_luminance, resolve_floating_control_colors,
-        resolve_floating_field_colors, resolve_floating_frame, resolve_floating_segmented_colors,
-        resolve_floating_state_at_alpha, resolve_material_control_colors,
-    };
-
-    #[test]
-    fn material_frame_strengthens_the_fill_before_changing_authored_content_polarity() {
-        use crate::appearance::Color;
-
-        let host = Color::WHITE;
-        let opaque_seed = Color::rgb(0x0055aa);
-        let translucent_fill = Color::rgba(0x0055aa80);
-        let authored_content = Color::WHITE;
-        let (fill, [content]) = resolve_floating_frame(
-            opaque_seed,
-            translucent_fill,
-            host,
-            [host; 2],
-            [(authored_content, 4.5)],
-        );
-        let background = fill.source_over(host);
-
-        assert_eq!(
-            content, authored_content,
-            "a representable opaque seed must preserve authored content polarity"
-        );
-        assert_ne!(
-            fill, translucent_fill,
-            "the prepared fill must strengthen before content changes"
-        );
-        assert!(content.contrast_ratio(background) >= 4.5);
-    }
-
-    #[test]
-    fn nonfloating_filled_polarity_flip_is_coherent_and_diagnosed() {
-        use crate::appearance::{ChromeColors, Color};
-
-        let host = Color::WHITE;
-        let reference = ChromeColors {
-            background: host,
-            primary_background: Color::rgb(0xaaaaaa),
-            primary_foreground: Color::WHITE,
-            primary_icon: Color::rgb(0x111111),
-            ..ChromeColors::default()
-        };
-        let resolved = resolve_material_control_colors(
-            &reference,
-            reference.clone(),
-            host,
-            host,
-            FloatingContrastFloors::STANDARD,
-            false,
-        );
-        let background = resolved.primary_background.source_over(host);
-
-        for content in [resolved.primary_foreground, resolved.primary_icon] {
-            assert!(relative_luminance(content) < relative_luminance(background));
-            assert!(content.contrast_ratio(background) >= 4.5);
-        }
-        assert!(
-            super::material_content_polarity_fallbacks(&reference, &resolved, host)
-                .contains(&super::FloatingControlFamily::Element)
-        );
-    }
-
-    #[test]
-    fn material_control_resolution_escapes_an_infeasible_increased_contrast_fill() {
-        use crate::appearance::{ChromeColors, Color};
-        let host = Color::WHITE;
-        let reference = ChromeColors {
-            background: host,
-            primary_background: Color::rgb(0x767676),
-            primary_foreground: Color::WHITE,
-            primary_icon: Color::WHITE,
-            ..ChromeColors::default()
-        };
-        let paint = ChromeColors {
-            primary_background: Color::rgba(0x00000089),
-            ..reference.clone()
-        };
-
-        let resolved = resolve_material_control_colors(
-            &reference,
-            paint,
-            host,
-            host,
-            FloatingContrastFloors::INCREASED,
-            true,
-        );
-        let background = resolved.primary_background.source_over(host);
-
-        assert!(
-            resolved
-                .primary_foreground
-                .source_over(background)
-                .contrast_ratio(background)
-                >= 7.0
-        );
-        assert!(
-            resolved
-                .primary_icon
-                .source_over(background)
-                .contrast_ratio(background)
-                >= 7.0
-        );
-        assert_ne!(
-            background,
-            Color::rgb(0x767676),
-            "an opaque midtone reference cannot carry 7:1 content"
-        );
-    }
-
-    #[test]
-    fn inactive_material_resolution_keeps_focus_absent_and_collapses_the_field_frame() {
-        use crate::appearance::{ChromeColors, Color};
-        let host = Color::WHITE;
-        let reference = ChromeColors {
-            background: host,
-            focus_ring: Color::rgba(0),
-            input_border: Color::rgba(0x10101080),
-            input_invalid_border: Color::rgb(0xaa0000),
-            ..ChromeColors::default()
-        };
-        let mut floors = FloatingContrastFloors::STANDARD;
-        floors.interactive = false;
-        let resolved = resolve_material_control_colors(
-            &reference,
-            reference.clone(),
-            host,
-            host,
-            floors,
-            false,
-        );
-
-        assert_eq!(resolved.focus_ring.a, 0);
-        assert_ne!(
-            resolved.input_invalid_border.a, 0,
-            "invalid state remains independently visible while inactive"
-        );
-    }
-
-    #[test]
-    fn active_material_resolution_preserves_explicitly_absent_state_edges() {
-        use crate::appearance::{ChromeColors, Color};
-        let host = Color::WHITE;
-        let absent = Color::rgba(0x12345600);
-        let reference = ChromeColors {
-            background: host,
-            focus_ring: absent,
-            input_invalid_border: absent,
-            ..ChromeColors::default()
-        };
-
-        for floors in [
-            FloatingContrastFloors::STANDARD,
-            FloatingContrastFloors::INCREASED,
-        ] {
-            let resolved = resolve_material_control_colors(
-                &reference,
-                reference.clone(),
-                host,
-                host,
-                floors,
-                floors.focus.is_some(),
-            );
-
-            assert_eq!(resolved.focus_ring, absent);
-            assert_eq!(resolved.input_invalid_border, absent);
-        }
-    }
-
-    #[test]
-    fn floating_constraints_distinguish_inside_content_from_host_adjacent_paint() {
-        use crate::appearance::Color;
-
-        let white = Color::WHITE;
-        let resolved = resolve_floating_state_at_alpha(
-            floating_state(
-                Color::BLACK,
-                Color::BLACK,
-                white,
-                [
-                    floating_constraint(white, 4.5),
-                    floating_host_constraint(white, 4.5),
-                    None,
-                    None,
-                ],
-            ),
-            255,
-            [white; 2],
-        )
-        .expect("opposite inside and outside paints are jointly representable");
-
-        assert_eq!(
-            resolved.content[0], white,
-            "inside content reads on the fill"
-        );
-        assert!(
-            resolved.content[1].source_over(white).contrast_ratio(white) >= 4.5,
-            "adjacent labels and perimeter strokes read on the host"
-        );
-    }
-
-    #[test]
-    fn unpainted_floating_content_resolves_on_the_host_without_forcing_family_opacity() {
-        use crate::appearance::Color;
-
-        let host = Color::WHITE;
-        let proposed = Color::rgb(0x999999);
-        let resolved = resolve_floating_state_at_alpha(
-            floating_state(
-                Color::rgba(0),
-                Color::rgba(0),
-                host,
-                [floating_constraint(proposed, 4.5), None, None, None],
-            ),
-            0,
-            [host; 2],
-        )
-        .expect("unpainted content can move on its actual host without changing the fill");
-
-        assert_eq!(resolved.fill.a, 0);
-        assert!(resolved.content[0].contrast_ratio(host) >= 4.5);
-    }
-
-    #[test]
-    fn filled_fallback_keeps_label_and_icon_on_one_readable_polarity() {
-        use crate::appearance::Color;
-
-        let fill = Color::rgb(0x333333);
-        let states = [floating_state(
-            fill,
-            fill,
-            fill,
-            [
-                floating_constraint(Color::WHITE, 4.5),
-                floating_constraint(Color::rgb(0x222222), 4.5),
-                None,
-                None,
-            ],
-        )];
-        let (resolved, used_fallback) =
-            super::resolve_floating_family_for_presentation(Ok(states), [fill; 2], &[])
-                .expect("the opaque fill has a coherent readable endpoint");
-
-        assert!(used_fallback);
-        for content in [resolved[0].content[0], resolved[0].content[1]] {
-            assert!(relative_luminance(content) > relative_luminance(fill));
-            assert!(content.contrast_ratio(fill) >= 4.5);
-        }
-    }
-
-    #[test]
-    fn fixed_polarity_readability_moves_an_already_readable_opposite_ink() {
-        use crate::appearance::Color;
-
-        let fill = Color::rgb(0x757575);
-        let opposite = Color::BLACK;
-        assert!(opposite.contrast_ratio(fill) >= 4.5);
-
-        let resolved = super::readable_toward_endpoint(opposite, Color::WHITE, [fill], 4.5);
-
-        assert!(relative_luminance(resolved) > relative_luminance(fill));
-        assert!(resolved.contrast_ratio(fill) >= 4.5);
-    }
-
-    #[test]
-    fn panel_and_card_controls_preserve_the_authored_root_relative_step() {
-        use crate::appearance::{ChromeColors, Color, CompositionCapabilities, SurfaceMaterials};
-        let authored = ChromeColors::default();
-        for host in [
-            authored.background,
-            Color::rgb(0x202020),
-            Color::rgb(0x303030),
-        ] {
-            let prepared = super::prepare_state_control_host(
-                &authored,
-                (host, host),
-                spaceterm_ui::ControlHost::Panel,
-                SurfaceMaterials::OPAQUE,
-                super::ChromeStatePolicy {
-                    active: true,
-                    capabilities: CompositionCapabilities::default(),
-                },
-                super::FloatingContrastFloors::STANDARD,
-                false,
-            );
-            for (fill, actual) in [
-                (
-                    authored.element_background,
-                    prepared.reference.element_background,
-                ),
-                (authored.element_hover, prepared.reference.element_hover),
-                (authored.element_active, prepared.reference.element_active),
-            ] {
-                assert_eq!(
-                    actual,
-                    host_relative_fill(fill, authored.background, host).unwrap(),
-                    "host={host:?}, authored fill={fill:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn host_relative_fill_preserves_identity_and_mixed_direction_relationships() {
-        use crate::appearance::Color;
-
-        let root = Color::rgb(0x151515);
-        let host = Color::rgb(0x202020);
-        let authored = [
-            Color::rgb(0x202020),
-            Color::rgb(0x1d1d1d),
-            Color::rgb(0x242424),
-        ];
-        assert_eq!(
-            authored.map(|fill| host_relative_fill(fill, root, root).unwrap()),
-            authored,
-        );
-
-        let rehosted = authored.map(|fill| host_relative_fill(fill, root, host).unwrap());
-        for (left, right) in [(0, 1), (0, 2), (1, 2)] {
-            assert_eq!(
-                relative_luminance(authored[left])
-                    .partial_cmp(&relative_luminance(authored[right])),
-                relative_luminance(rehosted[left])
-                    .partial_cmp(&relative_luminance(rehosted[right])),
-            );
-            let authored_ratio = (relative_luminance(authored[left]) + 0.05)
-                / (relative_luminance(authored[right]) + 0.05);
-            let rehosted_ratio = (relative_luminance(rehosted[left]) + 0.05)
-                / (relative_luminance(rehosted[right]) + 0.05);
-            assert!(
-                (authored_ratio - rehosted_ratio).abs() < 0.012,
-                "pair {left}-{right}: authored={authored_ratio}, rehosted={rehosted_ratio}, colors={rehosted:?}",
-            );
-        }
-    }
-
-    #[test]
-    fn host_relative_fill_handles_black_and_reports_out_of_gamut_steps() {
-        use crate::appearance::Color;
-
-        assert_eq!(
-            host_relative_fill(Color::BLACK, Color::BLACK, Color::rgb(0x202020),),
-            Some(Color::rgb(0x202020)),
-        );
-        assert_eq!(
-            host_relative_fill(Color::WHITE, Color::BLACK, Color::WHITE,),
-            None,
-        );
-    }
-
-    #[test]
-    fn floating_fields_use_the_opaque_frame_when_shifted_endpoints_have_no_readable_foreground() {
-        use crate::appearance::{ChromeColors, Color};
-
-        let reference = ChromeColors {
-            elevated_surface_background: Color::rgb(0x202020),
-            input_background: Color::rgb(0x767676),
-            input_text: Color::WHITE,
-            input_placeholder: Color::WHITE,
-            ..ChromeColors::default()
-        };
-        let paint = ChromeColors {
-            input_background: Color::rgba(0x737373e7),
-            ..reference.clone()
-        };
-        let (_, resolved) = resolve_floating_field_colors(
-            &reference,
-            FloatingContrastFloors::STANDARD,
-            reference.clone(),
-            paint,
-            Color::rgba(0),
-            Color::rgba(0),
-        );
-
-        for underlay in [Color::BLACK, Color::WHITE] {
-            let background = resolved.input_background.source_over(underlay);
-            assert!(
-                resolved
-                    .input_text
-                    .source_over(background)
-                    .contrast_ratio(background)
-                    >= 4.5,
-                "field text must read over {background:?}",
-            );
-        }
-    }
-
-    #[test]
-    fn floating_segment_labels_use_the_opaque_track_when_shifted_endpoints_are_unreadable() {
-        use crate::appearance::{ChromeColors, Color};
-
-        let reference = ChromeColors {
-            elevated_surface_background: Color::rgb(0x202020),
-            element_background: Color::rgb(0x767676),
-            text_secondary: Color::WHITE,
-            ..ChromeColors::default()
-        };
-        let paint = ChromeColors {
-            element_background: Color::rgba(0x737373e7),
-            ..reference.clone()
-        };
-        let resolved = resolve_floating_segmented_colors(
-            &reference,
-            FloatingContrastFloors::STANDARD,
-            &reference,
-            paint,
-            Color::rgba(0),
-            Color::rgba(0),
-        );
-
-        for underlay in [Color::BLACK, Color::WHITE] {
-            let background = resolved.element_background.source_over(underlay);
-            assert!(
-                resolved
-                    .text_secondary
-                    .source_over(background)
-                    .contrast_ratio(background)
-                    >= 4.5,
-                "segment label must read over {background:?}",
-            );
-        }
-    }
-
-    #[test]
-    fn floating_progress_accent_uses_the_opaque_track_when_shifted_endpoints_are_unreadable() {
-        use crate::appearance::{ChromeColors, Color};
-
-        let reference = ChromeColors {
-            elevated_surface_background: Color::rgb(0x606060),
-            toggle_off_background: Color::rgb(0x767676),
-            toggle_off_mark: Color::WHITE,
-            text_accent: Color::WHITE,
-            ..ChromeColors::default()
-        };
-        let paint = ChromeColors {
-            toggle_off_background: Color::rgba(0xffffff1a),
-            ..reference.clone()
-        };
-        let material = Color::rgba(0x666666ef);
-        let resolved = resolve_floating_control_colors(
-            &reference,
-            FloatingContrastFloors::STANDARD,
-            &reference,
-            paint,
-            material,
-            Color::rgba(0),
-        );
-
-        for underlay in [Color::BLACK, Color::WHITE] {
-            let host = material.source_over(underlay);
-            let track = resolved.toggle_off_background.source_over(host);
-            for background in [host, track] {
-                assert!(
-                    resolved
-                        .text_accent
-                        .source_over(background)
-                        .contrast_ratio(background)
-                        >= 4.5,
-                    "progress accent must read over {background:?}",
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn floating_warning_border_keeps_its_role_and_resolves_against_the_host() {
-        use crate::appearance::{ChromeColors, Color};
-
-        let reference = ChromeColors {
-            warning: Color::rgb(0xd02020),
-            warning_border: Color::rgb(0xf0f0f0),
-            ..ChromeColors::default()
-        };
-        let resolved = resolve_floating_control_colors(
-            &reference,
-            FloatingContrastFloors::STANDARD,
-            &reference,
-            reference.clone(),
-            Color::rgba(0),
-            Color::WHITE,
-        );
-
-        assert_ne!(resolved.warning_border, resolved.warning);
-        assert!(resolved.warning_border.contrast_ratio(Color::WHITE) >= 3.0,);
-    }
-}
-
 #[derive(Clone)]
 pub(crate) struct InstalledChrome {
     pub(crate) active: Arc<ChromeAppearance>,
@@ -5036,3 +4437,6 @@ pub(crate) fn initialize(cx: &mut App) {
         cx.set_global(settings::InstalledSettingsChrome::single(chrome));
     }
 }
+
+#[cfg(test)]
+mod tests;

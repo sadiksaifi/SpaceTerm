@@ -62,12 +62,10 @@ impl CheckboxChange {
         self.previous
     }
 
-    /// Returns the next state requested by the user.
     pub const fn requested(self) -> CheckboxState {
         self.requested
     }
 
-    /// Returns the input path that requested the change.
     pub const fn source(self) -> ToggleActivationSource {
         self.source
     }
@@ -87,12 +85,10 @@ impl SwitchChange {
         self.previous
     }
 
-    /// Returns the next on/off value requested by the user.
     pub const fn requested(self) -> bool {
         self.requested
     }
 
-    /// Returns the input path that requested the change.
     pub const fn source(self) -> ToggleActivationSource {
         self.source
     }
@@ -149,7 +145,6 @@ impl TogglePaint {
         self.border
     }
 
-    /// Returns the visible label color.
     pub const fn label(self) -> Rgba {
         self.label
     }
@@ -253,54 +248,45 @@ impl ToggleMetrics {
         }
     }
 
-    /// Sets the spacing between the indicator and visible label.
     pub fn label_gap(mut self, gap: Pixels) -> Self {
         self.label_gap = gap;
         self
     }
 
-    /// Sets checkbox corner rounding independently from the pill-shaped switch.
     pub fn checkbox_radius(mut self, radius: Pixels) -> Self {
         self.checkbox_radius = radius;
         self
     }
 
-    /// Sets the switch thumb inset from the inside of its track.
     pub fn switch_inset(mut self, inset: Pixels) -> Self {
         self.switch_inset = inset;
         self
     }
 
-    /// Sets the stable indicator border width used in every visual state.
     pub fn border_width(mut self, width: Pixels) -> Self {
         self.border_width = width;
         self
     }
 
-    /// Sets visible-label typography.
     pub fn typography(mut self, font_size: Pixels, line_height: f32) -> Self {
         self.font_size = font_size;
         self.line_height = line_height.clamp(1.0, 2.0);
         self
     }
 
-    fn scaled(self, text_scale: f32, spacing_scale: f32) -> Self {
+    fn scaled(self, spacing_scale: f32) -> Self {
         Self {
             row_height: crate::appearance::scale_line_box(
                 self.row_height,
                 self.font_size,
-                text_scale,
                 spacing_scale,
             ),
             checkbox_extent: crate::appearance::scale_metric(self.checkbox_extent, spacing_scale),
             switch_width: crate::appearance::scale_metric(self.switch_width, spacing_scale),
             switch_height: crate::appearance::scale_metric(self.switch_height, spacing_scale),
             label_gap: crate::appearance::scale_metric(self.label_gap, spacing_scale),
-            checkbox_radius: self.checkbox_radius,
             switch_inset: crate::appearance::scale_metric(self.switch_inset, spacing_scale),
-            border_width: self.border_width,
-            font_size: crate::appearance::scale_metric(self.font_size, text_scale),
-            line_height: self.line_height,
+            ..self
         }
     }
 }
@@ -313,7 +299,6 @@ pub struct ToggleSizes {
 }
 
 impl ToggleSizes {
-    /// Creates a complete size catalog.
     pub const fn new(compact: ToggleMetrics, regular: ToggleMetrics) -> Self {
         Self { compact, regular }
     }
@@ -325,10 +310,10 @@ impl ToggleSizes {
         }
     }
 
-    fn scaled(self, text_scale: f32, spacing_scale: f32) -> Self {
+    fn scaled(self, spacing_scale: f32) -> Self {
         Self {
-            compact: self.compact.scaled(text_scale, spacing_scale),
-            regular: self.regular.scaled(text_scale, spacing_scale),
+            compact: self.compact.scaled(spacing_scale),
+            regular: self.regular.scaled(spacing_scale),
         }
     }
 }
@@ -387,10 +372,10 @@ impl ToggleTheme {
         self
     }
 
-    /// Returns a copy with text and spacing metrics scaled independently.
-    pub fn scaled_metrics(self, text_scale: f32, spacing_scale: f32) -> Self {
+    /// Returns a copy with spacing metrics scaled.
+    pub fn scaled_spacing(self, spacing_scale: f32) -> Self {
         Self {
-            sizes: self.sizes.scaled(text_scale, spacing_scale),
+            sizes: self.sizes.scaled(spacing_scale),
             ..self
         }
     }
@@ -409,7 +394,6 @@ impl ToggleTheme {
         paints.resolve(on)
     }
 
-    /// Returns the independent keyboard focus outline color.
     pub fn focus_border(self) -> Rgba {
         self.focus_border
     }
@@ -457,19 +441,16 @@ impl Checkbox {
         }
     }
 
-    /// Selects a standard desktop control size.
     pub fn size(mut self, size: ToggleSize) -> Self {
         self.core.size = size;
         self
     }
 
-    /// Controls whether the checkbox can request a state change.
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.core.disabled = disabled;
         self
     }
 
-    /// Controls whether keyboard traversal may stop on the checkbox.
     pub fn tab_stop(mut self, tab_stop: bool) -> Self {
         self.core.tab_stop = tab_stop;
         self
@@ -484,25 +465,21 @@ impl Checkbox {
         self
     }
 
-    /// Makes the labeled hit target fill the available width.
     pub fn full_width(mut self, full_width: bool) -> Self {
         self.core.full_width = full_width;
         self
     }
 
-    /// Mirrors indicator placement for a right-to-left surrounding layout.
     pub fn right_to_left(mut self, right_to_left: bool) -> Self {
         self.core.right_to_left = right_to_left;
         self
     }
 
-    /// Adds a stable selector used by GPUI interaction tests.
     pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
         self.core.debug_selector = Some(selector.into());
         self
     }
 
-    /// Attaches bounded semantic tooltip content.
     pub fn tooltip(mut self, tooltip: Tooltip) -> Self {
         self.core.tooltip = Some(tooltip);
         self
@@ -567,19 +544,16 @@ impl Switch {
         }
     }
 
-    /// Selects a standard desktop control size.
     pub fn size(mut self, size: ToggleSize) -> Self {
         self.core.size = size;
         self
     }
 
-    /// Controls whether the switch can request a state change.
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.core.disabled = disabled;
         self
     }
 
-    /// Controls whether keyboard traversal may stop on the switch.
     pub fn tab_stop(mut self, tab_stop: bool) -> Self {
         self.core.tab_stop = tab_stop;
         self
@@ -594,7 +568,6 @@ impl Switch {
         self
     }
 
-    /// Makes the label and trailing switch fill the available width.
     pub fn full_width(mut self, full_width: bool) -> Self {
         self.core.full_width = full_width;
         self
@@ -606,13 +579,11 @@ impl Switch {
         self
     }
 
-    /// Adds a stable selector used by GPUI interaction tests.
     pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
         self.core.debug_selector = Some(selector.into());
         self
     }
 
-    /// Attaches bounded semantic tooltip content.
     pub fn tooltip(mut self, tooltip: Tooltip) -> Self {
         self.core.tooltip = Some(tooltip);
         self
@@ -1245,7 +1216,7 @@ mod tests {
 
     #[test]
     fn density_scales_toggle_bounds_but_not_checkbox_radius() {
-        let scaled = test_theme().scaled_metrics(1.0, 1.25);
+        let scaled = test_theme().scaled_spacing(1.25);
         let original = test_theme().resolve(ToggleSize::Regular, false).metrics;
         let comfortable = scaled.resolve(ToggleSize::Regular, false).metrics;
 
@@ -1546,12 +1517,24 @@ mod tests {
         });
         let enter = Keystroke::parse("enter").expect("enter should parse");
 
-        cx.simulate_event(KeyDownEvent {
-            keystroke: enter.clone(),
-            prefer_character_input: false,
-            is_held: false,
-        });
-        cx.simulate_event(KeyUpEvent { keystroke: enter });
+        for selector in ["test-checkbox-keyboard-focus", "test-switch-keyboard-focus"] {
+            cx.run_until_parked();
+            assert!(
+                cx.debug_bounds(selector).is_some(),
+                "{selector} must own focus"
+            );
+            cx.simulate_event(KeyDownEvent {
+                keystroke: enter.clone(),
+                prefer_character_input: false,
+                is_held: false,
+            });
+            cx.simulate_event(KeyUpEvent {
+                keystroke: enter.clone(),
+            });
+            assert_eq!(checkbox_changes.get(), 0);
+            assert_eq!(switch_changes.get(), 0);
+            cx.update(|window, cx| window.focus_next(cx));
+        }
 
         assert_eq!(checkbox_changes.get(), 0);
         assert_eq!(switch_changes.get(), 0);
@@ -1565,6 +1548,14 @@ mod tests {
             window.focus_next(cx);
         });
         assert!(cx.update(|window, _| other.is_focused(window)));
+
+        for _ in 0..3 {
+            cx.update(|window, cx| window.focus_next(cx));
+            cx.run_until_parked();
+            assert!(cx.update(|window, _| other.is_focused(window)));
+            assert!(cx.debug_bounds("test-checkbox-keyboard-focus").is_none());
+            assert!(cx.debug_bounds("test-switch-keyboard-focus").is_none());
+        }
 
         for selector in ["test-checkbox", "test-switch"] {
             let bounds = cx.debug_bounds(selector).expect("toggle should render");
@@ -1615,14 +1606,56 @@ mod tests {
         });
         cx.run_until_parked();
 
-        let indicator = cx
-            .debug_bounds("test-checkbox-indicator")
-            .expect("checkbox indicator should render");
-        let focus = cx
-            .debug_bounds("test-checkbox-keyboard-focus")
-            .expect("checkbox focus outline should render");
-
-        assert!(focus.left() < indicator.left() && focus.right() > indicator.right());
+        for (selector, indicator_selector, focus_selector) in [
+            (
+                "test-checkbox",
+                "test-checkbox-indicator",
+                "test-checkbox-keyboard-focus",
+            ),
+            (
+                "test-switch",
+                "test-switch-indicator",
+                "test-switch-keyboard-focus",
+            ),
+        ] {
+            crate::focus_ring::settle(cx);
+            let indicator = cx
+                .debug_bounds(indicator_selector)
+                .expect("toggle indicator should render");
+            let focus = cx
+                .debug_bounds(focus_selector)
+                .expect("toggle focus outline should render");
+            assert!(focus.left() < indicator.left() && focus.right() > indicator.right());
+            assert_eq!(focus, indicator.dilate(px(2.0)));
+            let scale = cx.update(|window, _| window.scale_factor());
+            let bands = cx.update(|window, _| {
+                window
+                    .painted_quads()
+                    .into_iter()
+                    .filter(|quad| quad.border_color == gpui::Hsla::from(rgba(0x00aaffff)))
+                    .collect::<Vec<_>>()
+            });
+            let outer = focus.scale(scale);
+            assert!(!bands.is_empty(), "{selector} must paint a ring");
+            assert!(bands.iter().all(|quad| quad.bounds == outer));
+            let visible = bands
+                .iter()
+                .map(|quad| quad.bounds.intersect(&quad.content_mask.bounds))
+                .filter(|bounds| !bounds.is_empty())
+                .collect::<Vec<_>>();
+            assert!(!visible.is_empty(), "{selector} ring must be visible");
+            assert!(
+                visible
+                    .iter()
+                    .enumerate()
+                    .all(|(index, a)| visible[index + 1..]
+                        .iter()
+                        .all(|b| a.intersect(b).is_empty())),
+                "{selector} must paint one ring"
+            );
+            cx.update(|window, cx| window.focus_next(cx));
+            cx.run_until_parked();
+        }
     }
 
     #[gpui::test]
@@ -1672,10 +1705,11 @@ mod tests {
         assert!(rtl_thumb.center().x < rtl_track.center().x);
     }
 
-    struct HiddenLabelRoot;
+    struct HiddenLabelRoot(Rc<std::cell::RefCell<Vec<SwitchChange>>>);
 
     impl Render for HiddenLabelRoot {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let changes = Rc::clone(&self.0);
             div()
                 .flex()
                 .flex_row()
@@ -1689,7 +1723,7 @@ mod tests {
                     Switch::new("unlabeled-switch", "Italic text", true)
                         .label_hidden(true)
                         .debug_selector("unlabeled-switch")
-                        .on_change(|_, _, _| {}),
+                        .on_change(move |change, _, _| changes.borrow_mut().push(*change)),
                 )
         }
     }
@@ -1697,7 +1731,10 @@ mod tests {
     #[gpui::test]
     fn a_hidden_label_should_leave_only_the_indicator_and_still_activate(cx: &mut TestAppContext) {
         cx.set_global(test_theme());
-        let (_, cx) = cx.add_window_view(|_, _| HiddenLabelRoot);
+        let changes = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let observed = Rc::clone(&changes);
+        let (_, cx) = cx.add_window_view(move |_, _| HiddenLabelRoot(observed));
+        cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
 
         let labeled = cx.debug_bounds("labeled-switch").expect("switch renders");
@@ -1708,6 +1745,12 @@ mod tests {
 
         assert!(unlabeled.size.width < labeled.size.width);
         assert_eq!(unlabeled.size.width, indicator.size.width);
+        cx.simulate_click(indicator.center(), Modifiers::none());
+        let requests = changes.borrow();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].previous());
+        assert!(!requests[0].requested());
+        assert_eq!(requests[0].source(), ToggleActivationSource::Pointer);
     }
 
     struct ControlledGeometryRoot {
@@ -1745,25 +1788,32 @@ mod tests {
         }
     }
 
-    fn geometry_window(cx: &mut TestAppContext) -> &mut VisualTestContext {
+    fn geometry_window(
+        cx: &mut TestAppContext,
+    ) -> (Entity<ControlledGeometryRoot>, &mut VisualTestContext) {
         cx.set_global(test_theme());
-        let (_, cx) = cx.add_window_view(|_, _| ControlledGeometryRoot {
+        let (root, cx) = cx.add_window_view(|_, _| ControlledGeometryRoot {
             checkbox_state: CheckboxState::Mixed,
             switch_on: false,
         });
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
-        cx
+        (root, cx)
     }
 
     #[gpui::test]
     fn checkbox_activation_should_not_reflow_row_or_indicator(cx: &mut TestAppContext) {
-        let cx = geometry_window(cx);
+        let (root, cx) = geometry_window(cx);
         let row_before = cx.debug_bounds("geometry-checkbox").unwrap();
         let indicator_before = cx.debug_bounds("geometry-checkbox-indicator").unwrap();
 
         cx.simulate_click(row_before.center(), Modifiers::none());
         cx.run_until_parked();
+
+        assert_eq!(
+            root.read_with(cx, |root, _| root.checkbox_state),
+            CheckboxState::Checked
+        );
 
         assert_eq!(cx.debug_bounds("geometry-checkbox"), Some(row_before));
         assert_eq!(
@@ -1774,12 +1824,17 @@ mod tests {
 
     #[gpui::test]
     fn switch_activation_should_not_reflow_row_or_track(cx: &mut TestAppContext) {
-        let cx = geometry_window(cx);
+        let (root, cx) = geometry_window(cx);
         let row_before = cx.debug_bounds("geometry-switch").unwrap();
         let track_before = cx.debug_bounds("geometry-switch-indicator").unwrap();
+        let thumb_before = cx.debug_bounds("geometry-switch-thumb").unwrap();
 
         cx.simulate_click(row_before.center(), Modifiers::none());
         cx.run_until_parked();
+
+        assert!(root.read_with(cx, |root, _| root.switch_on));
+        let thumb_after = cx.debug_bounds("geometry-switch-thumb").unwrap();
+        assert!(thumb_after.left() > thumb_before.left());
 
         assert_eq!(cx.debug_bounds("geometry-switch"), Some(row_before));
         assert_eq!(
@@ -1790,7 +1845,7 @@ mod tests {
 
     #[gpui::test]
     fn switch_thumb_should_be_vertically_centered_in_track(cx: &mut TestAppContext) {
-        let cx = geometry_window(cx);
+        let (_, cx) = geometry_window(cx);
         let track = cx.debug_bounds("geometry-switch-indicator").unwrap();
         let thumb = cx.debug_bounds("geometry-switch-thumb").unwrap();
 

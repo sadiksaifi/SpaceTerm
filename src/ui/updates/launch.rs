@@ -1,8 +1,5 @@
 //! The launch view: a small window shown while a fresh launch waits on an update.
-//!
-//! The service owns the launch gate and releases it on success, failure, or timeout. This view
-//! only reports progress. It offers no action and constructs no Workspace, and it closes itself
-//! once the gate opens.
+//! The service owns the launch gate; this view only reports progress and closes when it opens.
 
 use std::time::Duration;
 
@@ -27,10 +24,8 @@ struct OpenLaunchWindow(WindowHandle<LaunchView>);
 
 impl Global for OpenLaunchWindow {}
 
-/// Presents the launch view for the gate the service holds, and closes it once the gate opens.
-///
-/// A check alone is shown only if it outlasts a short delay. If the window cannot be shown, the
-/// gate is released so a launch never waits on a view nobody can see.
+/// Presents the launch view for the gate the service holds, and closes it once the gate opens. If
+/// the window cannot be shown, the gate is released.
 pub(crate) fn show_launch(cx: &mut App) {
     let Some(updates) = service(cx) else { return };
     match updates.read(cx).launch_state() {
@@ -373,6 +368,23 @@ mod tests {
         ] {
             let presentation =
                 resolve(LaunchState::Required, state.clone()).expect("a held launch is presented");
+            assert_eq!(presentation.title, "Updating SpaceTerm");
+            assert_eq!(presentation.message.as_deref(), Some(format!(
+                "SpaceTerm {CURRENT_VERSION} is out of date. The update installs before SpaceTerm opens."
+            ).as_str()));
+            let (status, detail) = match state {
+                UpdateState::Available { .. }
+                | UpdateState::Verifying { .. }
+                | UpdateState::Ready { .. } => ("Preparing SpaceTerm 0.4.2…", None),
+                UpdateState::Installing { .. } => (
+                    "Installing SpaceTerm 0.4.2…",
+                    Some("SpaceTerm reopens when it’s done."),
+                ),
+                _ => ("Preparing the update…", None),
+            };
+            assert_eq!(presentation.status.as_ref(), status);
+            assert_eq!(presentation.detail.as_deref(), detail);
+            assert_eq!(presentation.progress, None);
             let text = format!(
                 "{} {:?} {} {:?}",
                 presentation.title, presentation.message, presentation.status, presentation.detail

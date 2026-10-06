@@ -1,19 +1,15 @@
 //! Owns the Settings Window draft and preview transaction independently of its task executor.
-//!
-//! The scheduling Adapter supplies commit completion and whether it still belongs to the current
-//! edit. This Module retains the draft, token, resynchronization policy, and save classification.
-//!
-//! The draft is authoritative because [`UserSettings`] refuses preview updates during a commit
-//! and retires tokens when the committed revision moves. Edits remain here until they can reach
-//! the preview transaction again.
+//! The draft is authoritative because [`Settings`] refuses preview updates during a commit and
+//! retires tokens when the committed revision moves.
 
 use std::sync::Arc;
 
-use crate::appearance::{ResetTarget, SettingsDocument, ThemeCatalog, ThemeId, ThemeSummary};
+use crate::appearance::{ResetTarget, ThemeCatalog, ThemeId, ThemeSummary};
+use crate::settings::SettingsDocument;
 use crate::settings::recovery::RecoveryError;
 use crate::settings::storage::StorageError;
 use crate::settings::{
-    CommitOutcome, ImportReceipt, PreviewToken, SettingsError, ThemeImport, UserSettings,
+    CommitOutcome, ImportReceipt, PreviewToken, Settings, SettingsError, ThemeImport,
 };
 
 /// What the Settings Window reports about the retained document.
@@ -30,7 +26,7 @@ pub(in crate::ui::settings_window) enum SaveStatus {
 }
 
 pub(super) struct SettingsDraft {
-    settings: UserSettings,
+    settings: Settings,
     draft: Arc<SettingsDocument>,
     preview: Option<PreviewToken>,
     status: SaveStatus,
@@ -40,7 +36,7 @@ pub(super) struct SettingsDraft {
 }
 
 impl SettingsDraft {
-    pub(super) fn new(settings: UserSettings) -> Self {
+    pub(super) fn new(settings: Settings) -> Self {
         let snapshot = settings.snapshot();
         let status = match snapshot.status {
             Some(error) => SaveStatus::Unavailable(error),
@@ -56,7 +52,6 @@ impl SettingsDraft {
         }
     }
 
-    /// The values every control renders from.
     pub(super) fn document(&self) -> &SettingsDocument {
         &self.draft
     }
@@ -72,10 +67,9 @@ impl SettingsDraft {
         self.settings.ensure_file()
     }
 
-    /// Whether controls may request changes.
-    ///
-    /// A document that could not be read or that changed underneath SpaceTerm is not editable: the
-    /// first write would replace content this session never saw.
+    /// Whether controls may request changes. A document that could not be read or changed
+    /// underneath SpaceTerm is not editable, because the first write would replace content this
+    /// session never saw.
     pub(super) fn editable(&self) -> bool {
         !matches!(self.status, SaveStatus::Unavailable(_))
     }
@@ -110,10 +104,6 @@ impl SettingsDraft {
         })
     }
 
-    /// Restores every Setting, including the imported theme catalog, to its default.
-    ///
-    /// This goes through `edit` rather than `edit_catalog`: emptying the catalog cannot strand a
-    /// selection, because the same edit returns the selections to built-in themes.
     pub(super) fn reset_all(&mut self) -> bool {
         self.edit(SettingsDocument::reset_all)
     }
@@ -138,7 +128,7 @@ impl SettingsDraft {
 
     fn edit_catalog<T>(
         &mut self,
-        edit: impl FnOnce(&UserSettings, &PreviewToken, u64) -> Result<T, SettingsError>,
+        edit: impl FnOnce(&Settings, &PreviewToken, u64) -> Result<T, SettingsError>,
     ) -> Result<T, SettingsError> {
         if !self.editable() {
             return Err(SettingsError::Busy);
@@ -186,7 +176,7 @@ impl SettingsDraft {
     }
 
     pub(super) fn export_document(&self) -> Result<String, SettingsError> {
-        Ok(crate::appearance::export_settings(&self.draft)?)
+        Ok(crate::settings::export_settings(&self.draft)?)
     }
 
     /// Re-reads the retained document, discarding any live preview.
@@ -206,9 +196,6 @@ impl SettingsDraft {
     }
 
     /// Replaces Malformed Settings with defaults, keeping the unreadable file as a backup.
-    ///
-    /// The draft adopts whatever the owner retains afterwards, so a reset that another surface
-    /// finished first also resumes editing here.
     pub(super) fn recover_by_reset(&mut self) -> Result<(), RecoveryError> {
         let result = self.settings.recover_by_reset().map(|_| ());
         self.adopt_retained();
@@ -218,11 +205,8 @@ impl SettingsDraft {
         }
     }
 
-    /// Adopts a committed document this editor did not write.
-    ///
-    /// Another surface may commit, and an outside editor may change the settings file, while the
-    /// window is open. With nothing of its own outstanding, the window presents what is retained
-    /// and whether it can be written, rather than a stale draft.
+    /// Adopts a committed document this editor did not write, when nothing of its own is
+    /// outstanding.
     pub(super) fn synchronize(&mut self) {
         if self.has_unwritten_changes() || self.preview.is_some() {
             return;

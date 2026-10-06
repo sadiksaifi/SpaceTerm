@@ -1,8 +1,5 @@
-//! The Floating Surfaces section: menus, pickers, the command palette, and tooltips over
-//! controlled backdrop content.
-//!
-//! The backdrop is deliberately hostile synthetic content rather than another themed surface, so
-//! a capture shows whether floating material, text, and edges stay legible over detail.
+//! The Floating Surfaces section: menus, pickers, the command palette, and tooltips over hostile
+//! synthetic backdrop content, so a capture shows whether they stay legible.
 
 use std::sync::Arc;
 

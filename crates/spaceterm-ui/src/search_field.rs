@@ -30,13 +30,9 @@ pub struct SearchFieldPaint {
 impl SearchFieldPaint {
     /// Creates the complete bounded search-field paint catalog.
     ///
-    /// The clear mark is a filled disc struck through by a glyph, and the pointer target around it
-    /// stays invisible, so `clear` supplies the disc fill for every interactive state through each
-    /// state's icon foreground rather than a target surface. `clear_glyph` is the contrasting glyph
-    /// struck through that disc.
-    ///
-    /// A [`SearchFieldToggle`] paints its target and glyph from `toggle_off` while off and from
-    /// `toggle_on` while on, so an active search mode reads from the field at a glance.
+    /// `clear` supplies the clear disc fill through each state's icon foreground, and `clear_glyph`
+    /// is the glyph struck through it. A [`SearchFieldToggle`] paints from `toggle_off` or
+    /// `toggle_on`.
     pub fn new(
         icon: Rgba,
         clear: ButtonVariantStyle,
@@ -125,13 +121,10 @@ impl SearchFieldMetrics {
         self
     }
 
-    /// Sets the visible clear mark: the disc diameter, the glyph struck through it, and the space
-    /// the field keeps between its own trailing edge and the mark's pointer target.
+    /// Sets the clear mark's disc diameter, glyph size, pointer target size, and trailing inset.
     ///
-    /// The mark stays smaller than the pointer target it is centered in, so the field keeps a
-    /// comfortable target for a small affordance. The trailing inset therefore replaces the
-    /// field's own trailing padding while the mark is present: the target already carries the air
-    /// around the mark, and counting both would push the mark away from the edge it belongs to.
+    /// The trailing inset replaces the field's trailing padding while the mark is present, because
+    /// the pointer target already carries the space around the mark.
     pub fn clear_mark(
         mut self,
         diameter: Pixels,
@@ -164,35 +157,20 @@ impl SearchFieldMetrics {
         (self.corner_radius - self.toggle_inset).max(px(0.0))
     }
 
-    fn scaled(self, text_scale: f32, spacing_scale: f32) -> Self {
+    fn scaled(self, spacing_scale: f32) -> Self {
         Self {
-            height: crate::appearance::scale_line_box(
-                self.height,
-                self.line_height,
-                text_scale,
-                spacing_scale,
-            ),
+            height: crate::appearance::scale_line_box(self.height, self.line_height, spacing_scale),
             horizontal_padding: crate::appearance::scale_metric(
                 self.horizontal_padding,
                 spacing_scale,
             ),
             gap: crate::appearance::scale_metric(self.gap, spacing_scale),
-            corner_radius: self.corner_radius,
-            label_size: crate::appearance::scale_metric(self.label_size, text_scale),
-            line_height: crate::appearance::scale_metric(self.line_height, text_scale),
-            icon_size: crate::appearance::scale_metric(self.icon_size, text_scale),
-            icon_baseline_center: crate::appearance::scale_metric(
-                self.icon_baseline_center,
-                text_scale,
-            ),
-            clear_mark_size: crate::appearance::scale_metric(self.clear_mark_size, text_scale),
-            clear_glyph_size: crate::appearance::scale_metric(self.clear_glyph_size, text_scale),
-            clear_target_size: self.clear_target_size,
             clear_trailing_inset: crate::appearance::scale_metric(
                 self.clear_trailing_inset,
                 spacing_scale,
             ),
             toggle_inset: crate::appearance::scale_metric(self.toggle_inset, spacing_scale),
+            ..self
         }
     }
 }
@@ -220,9 +198,9 @@ impl SearchFieldTheme {
         }
     }
 
-    pub(crate) fn scaled_metrics(self, text_scale: f32, spacing_scale: f32) -> Self {
+    pub(crate) fn scaled_spacing(self, spacing_scale: f32) -> Self {
         Self {
-            metrics: self.metrics.scaled(text_scale, spacing_scale),
+            metrics: self.metrics.scaled(spacing_scale),
             ..self
         }
     }
@@ -258,19 +236,10 @@ impl gpui::Global for SearchFieldTheme {}
 /// A standard search field: a leading search glyph, one editor, a trailing clear action, and an
 /// optional trailing [`SearchFieldToggle`].
 ///
-/// The field owns presentation and the clear interaction. Its consumer owns the query and every
-/// search semantic: it creates and retains the [`TextInput`], subscribes to
-/// [`TextInputEvent::ValueChanged`](crate::TextInputEvent::ValueChanged), and updates results from
-/// the editor's current value as that value changes. The field never reports query contents of its
-/// own, so an editor built with
-/// [`emit_programmatic_changes(true)`](TextInput::emit_programmatic_changes) reports the clear
-/// through the same event as typing, and one subscription answers both.
-///
-/// The trailing action appears only while the value is nonempty, clears the editor through its
-/// public Interface, and returns keyboard focus to it, so clearing leaves the reader where they
-/// were typing. Configure the editor itself for search: a
-/// [`Bare`](crate::TextInputVariant::Bare) variant, because the field paints the surrounding
-/// surface, and a placeholder.
+/// The consumer creates the [`TextInput`] and owns the query; the field reports nothing itself.
+/// Build the editor with [`emit_programmatic_changes(true)`](TextInput::emit_programmatic_changes)
+/// so a clear arrives through the same `ValueChanged` event as typing, and use the
+/// [`Bare`](crate::TextInputVariant::Bare) variant because the field paints the surface.
 #[derive(IntoElement)]
 pub struct SearchField {
     id: ElementId,
@@ -286,10 +255,7 @@ type ToggleHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 /// A trailing toggle inside a [`SearchField`] that switches how the field searches, such as
 /// searching by a recorded shortcut rather than by text.
 ///
-/// The consumer owns the mode: it passes whether the toggle is on and switches the mode when the
-/// toggle activates. The toggle sits at the field's trailing edge, after the clear action, and is
-/// painted from the installed theme's off or on paints. Unlike the clear action, it switches a
-/// mode nothing else reaches, so it takes the keyboard traversal stop after the editor.
+/// The consumer owns the mode. The toggle takes the keyboard traversal stop after the editor.
 pub struct SearchFieldToggle {
     icon: IconName,
     accessibility_name: SharedString,
@@ -315,7 +281,6 @@ impl SearchFieldToggle {
         }
     }
 
-    /// Adds a stable selector used by GPUI interaction tests.
     pub fn debug_selector(mut self, selector: impl Into<SharedString>) -> Self {
         self.debug_selector = Some(selector.into());
         self
@@ -334,7 +299,6 @@ impl SearchField {
         }
     }
 
-    /// Places a toggle at the field's trailing edge.
     pub fn toggle(mut self, toggle: SearchFieldToggle) -> Self {
         self.toggle = Some(toggle);
         self
@@ -516,7 +480,7 @@ mod tests {
     #[test]
     fn density_scales_field_bounds_but_not_radius() {
         let metrics = SearchFieldMetrics::new(px(28.0)).spacing(px(8.0), px(7.0), px(6.0));
-        let comfortable = metrics.scaled(1.0, 1.25);
+        let comfortable = metrics.scaled(1.25);
 
         assert!(comfortable.height > metrics.height);
         assert_eq!(comfortable.corner_radius, metrics.corner_radius);
@@ -527,7 +491,7 @@ mod tests {
         let metrics = SearchFieldMetrics::new(px(28.0))
             .spacing(px(8.0), px(7.0), px(6.0))
             .toggle_inset(px(3.0));
-        let comfortable = metrics.scaled(1.0, 1.25);
+        let comfortable = metrics.scaled(1.25);
 
         assert_eq!(metrics.toggle_target_size(), px(22.0));
         assert_eq!(metrics.toggle_corner_radius(), px(3.0));
@@ -539,6 +503,6 @@ mod tests {
         let metrics =
             SearchFieldMetrics::new(px(28.0)).clear_mark(px(13.0), px(8.0), px(28.0), px(2.0));
 
-        assert_eq!(metrics.scaled(1.5, 1.25).clear_target_size, px(28.0));
+        assert_eq!(metrics.scaled(1.25).clear_target_size, px(28.0));
     }
 }

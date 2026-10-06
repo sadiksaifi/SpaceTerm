@@ -95,7 +95,7 @@ impl SecureInputPane {
         }
     }
 
-    /// Session completion and hierarchy removal permanently revoke this lease.
+    /// Terminal Session completion and hierarchy removal permanently revoke this lease.
     pub(crate) fn retire(&self) {
         if let Some(id) = self.id.take() {
             let mut coordinator = self.coordinator.0.borrow_mut();
@@ -228,23 +228,6 @@ impl SecureInputAdapter for RecordingAdapter {
 }
 
 #[cfg(test)]
-pub(crate) fn conformance_secure_input_observation() -> String {
-    let recording = Rc::new(RefCell::new(RecordingState::default()));
-    let handle = SecureInputHandle::new(Box::new(RecordingAdapter(recording.clone())));
-    let pane = handle.register_pane();
-    handle.update_application_activation(true);
-    pane.update(true, true);
-    pane.update(true, false);
-    pane.update(true, true);
-    handle.update_application_activation(false);
-    format!(
-        "transitions={:?} enabled={}",
-        recording.borrow().calls,
-        handle.0.borrow().enabled
-    )
-}
-
-#[cfg(test)]
 impl SecureInputHandle {
     pub(crate) fn same_coordinator(&self, other: &Self) -> bool {
         Rc::ptr_eq(&self.0, &other.0)
@@ -282,7 +265,7 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_input_focus_loss_deactivation_and_session_completion_release() {
+    fn ordinary_input_focus_loss_deactivation_and_retirement_release() {
         let (handle, recording) = recording();
         let pane = handle.register_pane();
         handle.update_application_activation(true);

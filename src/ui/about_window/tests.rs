@@ -7,7 +7,7 @@ use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::window_movement::{
     OperatingSystemWindowDragPlatform, RecordingOperatingSystemWindowDragPlatform,
 };
-use crate::ui::settings_window::test_support::MemoryStorage;
+use crate::settings::storage::testing::MemoryStorage;
 
 struct RecordingMovement;
 
@@ -18,8 +18,8 @@ impl WindowMovementFactory for RecordingMovement {
 }
 
 fn install(cx: &mut TestAppContext) {
-    let settings = crate::settings::UserSettings::load(MemoryStorage::with_document(
-        &crate::appearance::SettingsDocument::default(),
+    let settings = crate::settings::Settings::load(MemoryStorage::with_document(
+        &crate::settings::SettingsDocument::default(),
     ));
     cx.update(|cx| {
         crate::ui::appearance_runtime::install(
@@ -50,7 +50,7 @@ fn open(cx: &mut TestAppContext) -> WindowHandle<AboutWindow> {
 }
 
 #[gpui::test]
-fn a_second_request_activates_the_open_about_window(cx: &mut TestAppContext) {
+fn repeated_about_requests_reuse_the_open_window(cx: &mut TestAppContext) {
     install(cx);
     let opened = open(cx);
 

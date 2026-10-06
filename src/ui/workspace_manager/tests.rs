@@ -1,10 +1,11 @@
+use crate::directory_selection::GpuiDirectorySelection;
 use crate::domain::RemoteConnectionPhase;
 use crate::ssh::remote_account::RemoteWorkspaceAccount;
+use crate::terminal::GpuiTerminalKeyInputAdapterFactory;
 use crate::ui::workspace_frame::WorkspaceFrame;
 use crate::ui::workspace_sidebar::SIDEBAR_ROW_SELECTION_INSET_Y;
 use crate::ui::{TOP_CHROME_HEIGHT, WORKSPACE_SIDEBAR_MINIMUM_WIDTH};
 use gpui::MouseButton;
-use spaceterm_ui::MenuLifecycleEvent;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::fs;
@@ -26,12 +27,10 @@ use spaceterm_ui::{
 use super::*;
 use crate::domain::{PaneId, TabId};
 
-/// The resolved Workspace frame for the installed Chrome appearance.
 fn workspace_frame(cx: &mut VisualTestContext) -> WorkspaceFrame {
     cx.update(|_, cx| WorkspaceFrame::for_appearance(crate::ui::appearance::chrome(cx), cx))
 }
 
-/// The one measurement every visible gap in the Workspace uses.
 fn frame_space(cx: &mut VisualTestContext) -> Pixels {
     workspace_frame(cx).space()
 }
@@ -111,7 +110,7 @@ fn sidebar_should_follow_the_local_root_in_background_and_promote_on_close(
     records
         .event_sender(1)
         .unwrap()
-        .try_send(SessionEvent::Exited(SessionExit::Success))
+        .try_send(TerminalSessionEvent::Exited(TerminalSessionExit::Success))
         .unwrap();
     cx.run_until_parked();
     let identity = manager.read_with(cx, |manager, _| {
@@ -213,7 +212,7 @@ fn sidebar_should_follow_remote_root_across_tabs_pins_and_custom_names(cx: &mut 
     records
         .event_sender(2)
         .unwrap()
-        .try_send(SessionEvent::Exited(SessionExit::Success))
+        .try_send(TerminalSessionEvent::Exited(TerminalSessionExit::Success))
         .unwrap();
     cx.run_until_parked();
     let identity = manager.read_with(cx, |manager, _| {
@@ -452,7 +451,7 @@ fn sidebar_toggle_should_describe_the_action_for_each_visibility_state() {
 }
 
 #[test]
-fn remote_connection_status_should_only_replace_the_path_while_unhealthy() {
+fn remote_connection_phases_have_expected_status_labels() {
     assert_eq!(
         remote_connection_status(RemoteConnectionPhase::Connected),
         None
@@ -484,32 +483,30 @@ type RemoteCompletionFixture = (
     async_channel::Sender<crate::ssh::live_connection::ControlConnectionTerminalState>,
 );
 use crate::directory_selection::ScriptedDirectorySelection;
-use crate::platform::ssh_askpass::{AskPassPromptKind, AskPassRequest, AskPassResult};
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
-use crate::ssh::command::{SshCommandContext, ValidatedRemoteShellCommand};
+use crate::ssh::askpass::prompt::{AskPassPromptKind, AskPassRequest, AskPassResult};
+use crate::ssh::command::ValidatedRemoteShellCommand;
 use crate::ssh::destination::SshHostAlias;
 use crate::ssh::host_config::HostDiscovery;
 use crate::ssh::managed_hosts::ManagedSshHost;
 use crate::terminal::testing::{
-    RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
+    RecordedCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
 };
-use crate::terminal::{SessionEvent, SessionExit};
+use crate::terminal::{TerminalSessionEvent, TerminalSessionExit};
+use crate::ui::askpass_dialog::GpuiAskPassPresenter;
 use crate::ui::directory_picker::{
     DirectoryListing, ExactPathState, RemoteDirectoryProvider, RemoteDirectoryProviderError,
 };
 use crate::ui::remote_workspace_flow::{
-    RemoteWorkspaceAliasPin, RemoteWorkspaceAliasPinError, RemoteWorkspaceConnectContext,
-    RemoteWorkspaceFlowBackendError, RemoteWorkspaceFlowStage, RemoteWorkspaceSessionOwner,
+    ControlConnectionOwner, RemoteWorkspaceAliasPin, RemoteWorkspaceAliasPinError,
+    RemoteWorkspaceConnectContext, RemoteWorkspaceFlowBackendError, RemoteWorkspaceFlowStage,
 };
-use crate::ui::ssh_askpass_dialog::GpuiAskPassPresenter;
 use crate::ui::ssh_host_form::ManagedHostFormBackendError;
 
 #[derive(Default)]
 struct TestRemoteWorkspaceFlowBackend {
     connections: Mutex<
-        VecDeque<
-            gpui::Task<Result<RemoteWorkspaceConnectedSession, RemoteWorkspaceFlowBackendError>>,
-        >,
+        VecDeque<gpui::Task<Result<ConnectedControlConnection, RemoteWorkspaceFlowBackendError>>>,
     >,
     connect_calls: AtomicUsize,
 }
@@ -517,9 +514,7 @@ struct TestRemoteWorkspaceFlowBackend {
 impl TestRemoteWorkspaceFlowBackend {
     fn with_connections(
         connections: impl IntoIterator<
-            Item = gpui::Task<
-                Result<RemoteWorkspaceConnectedSession, RemoteWorkspaceFlowBackendError>,
-            >,
+            Item = gpui::Task<Result<ConnectedControlConnection, RemoteWorkspaceFlowBackendError>>,
         >,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -545,7 +540,7 @@ impl RemoteWorkspaceFlowBackend for TestRemoteWorkspaceFlowBackend {
         &self,
         _: crate::domain::SshDestination,
         _: RemoteWorkspaceConnectContext,
-    ) -> gpui::Task<Result<RemoteWorkspaceConnectedSession, RemoteWorkspaceFlowBackendError>> {
+    ) -> gpui::Task<Result<ConnectedControlConnection, RemoteWorkspaceFlowBackendError>> {
         self.connect_calls.fetch_add(1, Ordering::AcqRel);
         self.connections
             .lock()
@@ -646,14 +641,7 @@ impl RemoteDirectoryProvider for TestRemoteProvider {
         if !self.account_available {
             return gpui::Task::ready(Err(RemoteDirectoryProviderError::Other));
         }
-        gpui::Task::ready(
-            RemoteWorkspaceAccount::new(
-                "tester".to_owned(),
-                crate::domain::RemoteDirectoryIdentity::new("/home/tester".to_owned()).unwrap(),
-                "/bin/zsh".to_owned(),
-            )
-            .map_err(|_| RemoteDirectoryProviderError::InvalidResponse),
-        )
+        gpui::Task::ready(Ok(test_remote_account()))
     }
 
     fn list_directories(
@@ -748,24 +736,25 @@ impl RemoteDirectoryProvider for BlockingRemoteProvider {
 }
 
 fn test_remote_account() -> RemoteWorkspaceAccount {
-    RemoteWorkspaceAccount::new(
+    RemoteWorkspaceAccount::from_validated_login_shell(
         "tester".to_owned(),
         crate::domain::RemoteDirectoryIdentity::new("/home/tester".to_owned()).unwrap(),
-        "/bin/zsh".to_owned(),
+        crate::ssh::command::ValidatedRemoteLoginShell::new("/bin/zsh".to_owned()).unwrap(),
     )
     .unwrap()
 }
 
-struct TestRemoteChannelProvider {
+struct TestTerminalSessionChannelProvider {
+    connection: crate::ssh::testing::SshConnectionFixture,
     preparations: Arc<AtomicUsize>,
     revalidations: Arc<AtomicUsize>,
-    revalidation_tasks:
-        Mutex<VecDeque<gpui::Task<Result<(), crate::terminal::RemoteChannelRevalidationError>>>>,
+    revalidation_tasks: Mutex<
+        VecDeque<gpui::Task<Result<(), crate::terminal::TerminalSessionChannelRevalidationError>>>,
+    >,
     available: Arc<AtomicBool>,
-    destination: crate::domain::SshDestination,
 }
 
-impl crate::terminal::RemoteTerminalChannelProvider for TestRemoteChannelProvider {
+impl crate::terminal::TerminalSessionChannelProvider for TestTerminalSessionChannelProvider {
     fn is_ready(&self) -> bool {
         self.available.load(Ordering::Acquire)
     }
@@ -774,7 +763,7 @@ impl crate::terminal::RemoteTerminalChannelProvider for TestRemoteChannelProvide
         &self,
         _: RemoteDirectory,
         _: Option<crate::domain::RemoteDirectoryIdentity>,
-    ) -> gpui::Task<Result<(), crate::terminal::RemoteChannelRevalidationError>> {
+    ) -> gpui::Task<Result<(), crate::terminal::TerminalSessionChannelRevalidationError>> {
         self.revalidations.fetch_add(1, Ordering::AcqRel);
         self.revalidation_tasks
             .lock()
@@ -787,29 +776,22 @@ impl crate::terminal::RemoteTerminalChannelProvider for TestRemoteChannelProvide
         &self,
         _: &RemoteDirectory,
     ) -> Result<
-        crate::ssh::command::PreparedSshPaneChannelCommand,
-        crate::terminal::RemoteChannelUnavailable,
+        crate::ssh::command::PreparedSshTerminalSessionChannelCommand,
+        crate::terminal::TerminalSessionChannelUnavailable,
     > {
         self.preparations.fetch_add(1, Ordering::AcqRel);
         if !self.available.load(Ordering::Acquire) {
-            return Err(crate::terminal::RemoteChannelUnavailable);
+            return Err(crate::terminal::TerminalSessionChannelUnavailable);
         }
-        Ok(SshCommandContext::new(
-            crate::ssh::command::OpenSshExecutable::for_test(),
-            PathBuf::from("/private/config/spaceterm/ssh_config"),
-            self.destination.clone(),
-            PathBuf::from("/private/runtime/spaceterm/master.sock"),
-        )
-        .unwrap()
-        .prepare_pane_channel(
+        Ok(self.connection.prepare_terminal_session_channel(
             ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
         ))
     }
 }
 
-struct TestRemoteSessionOwner {
+struct TestControlConnectionOwner {
     closes: Arc<AtomicUsize>,
-    channels: Arc<dyn crate::terminal::RemoteTerminalChannelProvider>,
+    channels: Arc<dyn crate::terminal::TerminalSessionChannelProvider>,
     lifecycle: Option<crate::ssh::live_connection::ControlConnectionObserver>,
     _lifecycle_senders:
         Vec<async_channel::Sender<crate::ssh::live_connection::ControlConnectionTerminalState>>,
@@ -817,7 +799,7 @@ struct TestRemoteSessionOwner {
     alias_pin_error: bool,
 }
 
-impl RemoteWorkspaceSessionOwner for TestRemoteSessionOwner {
+impl ControlConnectionOwner for TestControlConnectionOwner {
     fn acquire_workspace_alias_pin(
         &self,
     ) -> Result<Option<RemoteWorkspaceAliasPin>, RemoteWorkspaceAliasPinError> {
@@ -835,11 +817,11 @@ impl RemoteWorkspaceSessionOwner for TestRemoteSessionOwner {
             .transpose()
     }
 
-    fn bind_terminal_channels(
+    fn bind_terminal_session_channels(
         &self,
         _: &crate::ssh::command::ValidatedRemoteLoginShell,
     ) -> Result<
-        Arc<dyn crate::terminal::RemoteTerminalChannelProvider>,
+        Arc<dyn crate::terminal::TerminalSessionChannelProvider>,
         RemoteWorkspaceFlowBackendError,
     > {
         Ok(Arc::clone(&self.channels))
@@ -884,7 +866,7 @@ fn remote_completion_with_revalidation(
     directory: &str,
     physical: &str,
     available: bool,
-    revalidation: gpui::Task<Result<(), crate::terminal::RemoteChannelRevalidationError>>,
+    revalidation: gpui::Task<Result<(), crate::terminal::TerminalSessionChannelRevalidationError>>,
 ) -> RemoteCompletionFixture {
     remote_completion_with_provider(
         destination,
@@ -901,45 +883,46 @@ fn remote_completion_with_provider(
     directory: &str,
     physical: &str,
     available: bool,
-    revalidation: gpui::Task<Result<(), crate::terminal::RemoteChannelRevalidationError>>,
+    revalidation: gpui::Task<Result<(), crate::terminal::TerminalSessionChannelRevalidationError>>,
     provider: Arc<dyn RemoteDirectoryProvider>,
 ) -> RemoteCompletionFixture {
     let destination = crate::domain::SshDestination::new(destination.to_owned()).unwrap();
     let directory = RemoteDirectory::new(directory.to_owned()).unwrap();
     let physical = crate::domain::RemoteDirectoryIdentity::new(physical.to_owned()).unwrap();
-    let home = crate::domain::RemoteDirectoryIdentity::new("/home/tester".to_owned()).unwrap();
     let preparations = Arc::new(AtomicUsize::new(0));
     let revalidations = Arc::new(AtomicUsize::new(0));
     let availability = Arc::new(AtomicBool::new(available));
-    let channels: Arc<dyn crate::terminal::RemoteTerminalChannelProvider> =
-        Arc::new(TestRemoteChannelProvider {
+    let channels: Arc<dyn crate::terminal::TerminalSessionChannelProvider> =
+        Arc::new(TestTerminalSessionChannelProvider {
+            connection: crate::ssh::testing::SshConnectionFixture::new(destination.clone()),
             preparations: Arc::clone(&preparations),
             revalidations: Arc::clone(&revalidations),
             revalidation_tasks: Mutex::new(VecDeque::from([revalidation])),
             available: Arc::clone(&availability),
-            destination: destination.clone(),
         });
     let closes = Arc::new(AtomicUsize::new(0));
     let (runtime_lifecycle_sender, runtime_lifecycle) =
         crate::ssh::live_connection::ControlConnectionObserver::controlled();
-    let (session_lifecycle_sender, session_lifecycle) =
+    let (control_connection_lifecycle_sender, control_connection_lifecycle) =
         crate::ssh::live_connection::ControlConnectionObserver::controlled();
-    let session = RemoteWorkspaceConnectedSession::new(
-        Box::new(TestRemoteSessionOwner {
+    let control_connection = ConnectedControlConnection::new(
+        Box::new(TestControlConnectionOwner {
             closes: Arc::clone(&closes),
             channels: Arc::clone(&channels),
-            lifecycle: Some(session_lifecycle),
-            _lifecycle_senders: vec![runtime_lifecycle_sender.clone(), session_lifecycle_sender],
+            lifecycle: Some(control_connection_lifecycle),
+            _lifecycle_senders: vec![
+                runtime_lifecycle_sender.clone(),
+                control_connection_lifecycle_sender,
+            ],
             alias: None,
             alias_pin_error: false,
         }),
         provider,
     );
-    let account =
-        RemoteWorkspaceAccount::new("tester".to_owned(), home, "/bin/zsh".to_owned()).unwrap();
+    let account = test_remote_account();
     (
-        RemoteWorkspaceFlowCompletion::for_test(
-            session,
+        crate::ui::remote_workspace_flow::completion(
+            control_connection,
             destination,
             directory,
             physical,
@@ -981,38 +964,39 @@ fn remote_completion_with_active_alias_pin_failure(
     let directory = RemoteDirectory::new("~/src".to_owned()).unwrap();
     let physical =
         crate::domain::RemoteDirectoryIdentity::new("/home/tester/src".to_owned()).unwrap();
-    let home = crate::domain::RemoteDirectoryIdentity::new("/home/tester".to_owned()).unwrap();
     let preparations = Arc::new(AtomicUsize::new(0));
     let revalidations = Arc::new(AtomicUsize::new(0));
-    let channels: Arc<dyn crate::terminal::RemoteTerminalChannelProvider> =
-        Arc::new(TestRemoteChannelProvider {
+    let channels: Arc<dyn crate::terminal::TerminalSessionChannelProvider> =
+        Arc::new(TestTerminalSessionChannelProvider {
+            connection: crate::ssh::testing::SshConnectionFixture::new(destination.clone()),
             preparations,
             revalidations,
             revalidation_tasks: Mutex::new(VecDeque::from([gpui::Task::ready(Ok(()))])),
             available: Arc::new(AtomicBool::new(true)),
-            destination: destination.clone(),
         });
     let closes = Arc::new(AtomicUsize::new(0));
     let (runtime_lifecycle_sender, runtime_lifecycle) =
         crate::ssh::live_connection::ControlConnectionObserver::controlled();
-    let (session_lifecycle_sender, session_lifecycle) =
+    let (control_connection_lifecycle_sender, control_connection_lifecycle) =
         crate::ssh::live_connection::ControlConnectionObserver::controlled();
-    let session = RemoteWorkspaceConnectedSession::new(
-        Box::new(TestRemoteSessionOwner {
+    let control_connection = ConnectedControlConnection::new(
+        Box::new(TestControlConnectionOwner {
             closes: Arc::clone(&closes),
             channels: Arc::clone(&channels),
-            lifecycle: Some(session_lifecycle),
-            _lifecycle_senders: vec![runtime_lifecycle_sender.clone(), session_lifecycle_sender],
+            lifecycle: Some(control_connection_lifecycle),
+            _lifecycle_senders: vec![
+                runtime_lifecycle_sender.clone(),
+                control_connection_lifecycle_sender,
+            ],
             alias: Some(lease),
             alias_pin_error,
         }),
         Arc::new(TestRemoteProvider::failing()),
     );
-    let account =
-        RemoteWorkspaceAccount::new("tester".to_owned(), home, "/bin/zsh".to_owned()).unwrap();
+    let account = test_remote_account();
     (
-        RemoteWorkspaceFlowCompletion::for_test(
-            session,
+        crate::ui::remote_workspace_flow::completion(
+            control_connection,
             destination,
             directory,
             physical,
@@ -1058,14 +1042,8 @@ fn native_service_factory_reaches_initial_new_and_replacement_hierarchy(cx: &mut
             session_factory,
             std::env::temp_dir(),
             WorkspaceManagerAdapters {
-                local_filesystem: LocalFilesystemAuthority::testing(),
-                key_input: Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
-                accessibility: Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default()),
                 native_services,
-                lifecycle: PaneLifecycleDependencies::testing(),
-                directory_selection: Rc::new(GpuiDirectorySelection),
-                window_drag: Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
-                remote_workspace: test_remote_backend_factory(),
+                ..workspace_adapters(test_remote_backend_factory())
             },
             window,
             cx,
@@ -1107,14 +1085,8 @@ fn accessibility_factory_reaches_initial_and_new_workspaces_tabs_and_split_panes
             session_factory,
             std::env::temp_dir(),
             WorkspaceManagerAdapters {
-                local_filesystem: LocalFilesystemAuthority::testing(),
-                key_input: Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
                 accessibility: factory.clone(),
-                native_services: crate::terminal::native_services::testing::adapters(),
-                lifecycle: PaneLifecycleDependencies::testing(),
-                directory_selection: Rc::new(GpuiDirectorySelection),
-                window_drag: Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
-                remote_workspace: test_remote_backend_factory(),
+                ..workspace_adapters(test_remote_backend_factory())
             },
             window,
             cx,
@@ -1145,6 +1117,23 @@ fn accessibility_factory_reaches_initial_and_new_workspaces_tabs_and_split_panes
     );
 }
 
+fn workspace_adapters(
+    remote_workspace: Arc<dyn RemoteWorkspaceFlowBackendFactory>,
+) -> WorkspaceManagerAdapters {
+    WorkspaceManagerAdapters {
+        local_filesystem: LocalFilesystemAuthority::testing(),
+        key_input: Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
+        accessibility: Rc::new(
+            crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default(),
+        ),
+        native_services: crate::terminal::native_services::testing::adapters(),
+        lifecycle: PaneLifecycleDependencies::testing(),
+        directory_selection: Rc::new(GpuiDirectorySelection),
+        window_drag: Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
+        remote_workspace,
+    }
+}
+
 fn workspace_manager(
     cx: &mut TestAppContext,
 ) -> (
@@ -1158,10 +1147,10 @@ fn workspace_manager(
     let session_factory: Rc<dyn TerminalSessionFactory> =
         Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
     let (manager, cx) = cx.add_window_view(|window, cx| {
-        WorkspaceManager::new_with_remote_workspace_backend_factory(
+        WorkspaceManager::new_with_adapters(
             session_factory,
             std::env::temp_dir(),
-            test_remote_backend_factory(),
+            workspace_adapters(test_remote_backend_factory()),
             window,
             cx,
         )
@@ -1206,10 +1195,10 @@ fn workspace_manager_with_application_actions(
     let session_factory: Rc<dyn TerminalSessionFactory> =
         Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
     let (manager, cx) = cx.add_window_view(|window, cx| {
-        WorkspaceManager::new_with_remote_workspace_backend_factory(
+        WorkspaceManager::new_with_adapters(
             session_factory,
             std::env::temp_dir(),
-            test_remote_backend_factory(),
+            workspace_adapters(test_remote_backend_factory()),
             window,
             cx,
         )
@@ -1238,10 +1227,10 @@ fn workspace_manager_with_remote_backend(
     let factory: Arc<dyn RemoteWorkspaceFlowBackendFactory> =
         Arc::new(TestRemoteWorkspaceFlowBackendFactory { backend });
     let (manager, cx) = cx.add_window_view(move |window, cx| {
-        WorkspaceManager::new_with_remote_workspace_backend_factory(
+        WorkspaceManager::new_with_adapters(
             session_factory,
             std::env::temp_dir(),
-            factory,
+            workspace_adapters(factory),
             window,
             cx,
         )
@@ -1253,44 +1242,48 @@ fn workspace_manager_with_remote_backend(
     (manager, records, cx)
 }
 
-fn reconnect_session(
+fn reconnect_control_connection(
     destination: &str,
     physical: &str,
 ) -> (
-    RemoteWorkspaceConnectedSession,
+    ConnectedControlConnection,
     Arc<AtomicUsize>,
     Arc<AtomicUsize>,
     Arc<AtomicUsize>,
     async_channel::Sender<crate::ssh::live_connection::ControlConnectionTerminalState>,
 ) {
     let physical = crate::domain::RemoteDirectoryIdentity::new(physical.to_owned()).unwrap();
-    reconnect_session_with_provider(
+    reconnect_control_connection_with_provider(
         destination,
         Arc::new(TestRemoteProvider::connected(physical)),
     )
 }
 
-fn reconnect_session_with_provider(
+fn reconnect_control_connection_with_provider(
     destination: &str,
     provider: Arc<dyn RemoteDirectoryProvider>,
 ) -> (
-    RemoteWorkspaceConnectedSession,
+    ConnectedControlConnection,
     Arc<AtomicUsize>,
     Arc<AtomicUsize>,
     Arc<AtomicUsize>,
     async_channel::Sender<crate::ssh::live_connection::ControlConnectionTerminalState>,
 ) {
-    reconnect_session_with_provider_and_revalidation(destination, provider, VecDeque::new())
+    reconnect_control_connection_with_provider_and_revalidation(
+        destination,
+        provider,
+        VecDeque::new(),
+    )
 }
 
-fn reconnect_session_with_provider_and_revalidation(
+fn reconnect_control_connection_with_provider_and_revalidation(
     destination: &str,
     provider: Arc<dyn RemoteDirectoryProvider>,
     revalidation_tasks: VecDeque<
-        gpui::Task<Result<(), crate::terminal::RemoteChannelRevalidationError>>,
+        gpui::Task<Result<(), crate::terminal::TerminalSessionChannelRevalidationError>>,
     >,
 ) -> (
-    RemoteWorkspaceConnectedSession,
+    ConnectedControlConnection,
     Arc<AtomicUsize>,
     Arc<AtomicUsize>,
     Arc<AtomicUsize>,
@@ -1299,20 +1292,20 @@ fn reconnect_session_with_provider_and_revalidation(
     let destination = crate::domain::SshDestination::new(destination.to_owned()).unwrap();
     let preparations = Arc::new(AtomicUsize::new(0));
     let revalidations = Arc::new(AtomicUsize::new(0));
-    let channels: Arc<dyn crate::terminal::RemoteTerminalChannelProvider> =
-        Arc::new(TestRemoteChannelProvider {
+    let channels: Arc<dyn crate::terminal::TerminalSessionChannelProvider> =
+        Arc::new(TestTerminalSessionChannelProvider {
+            connection: crate::ssh::testing::SshConnectionFixture::new(destination.clone()),
             preparations: Arc::clone(&preparations),
             revalidations: Arc::clone(&revalidations),
             revalidation_tasks: Mutex::new(revalidation_tasks),
             available: Arc::new(AtomicBool::new(true)),
-            destination,
         });
     let closes = Arc::new(AtomicUsize::new(0));
     let (lifecycle_sender, lifecycle) =
         crate::ssh::live_connection::ControlConnectionObserver::controlled();
     (
-        RemoteWorkspaceConnectedSession::new(
-            Box::new(TestRemoteSessionOwner {
+        ConnectedControlConnection::new(
+            Box::new(TestControlConnectionOwner {
                 closes: Arc::clone(&closes),
                 channels,
                 lifecycle: Some(lifecycle),
@@ -1344,11 +1337,13 @@ fn workspace_manager_with_operating_system_window_drag_platform(
     let platform = Rc::new(RecordingOperatingSystemWindowDragPlatform::default());
     let injected_platform = Rc::clone(&platform);
     let (manager, cx) = cx.add_window_view(move |window, cx| {
-        WorkspaceManager::new_with_operating_system_window_drag_platform(
+        WorkspaceManager::new_with_adapters(
             session_factory,
             std::env::temp_dir(),
-            injected_platform,
-            test_remote_backend_factory(),
+            WorkspaceManagerAdapters {
+                window_drag: injected_platform,
+                ..workspace_adapters(test_remote_backend_factory())
+            },
             window,
             cx,
         )
@@ -1378,11 +1373,13 @@ fn workspace_manager_with_directory_selection(
     let directory_selection: Rc<dyn SystemDirectorySelection> =
         Rc::new(ScriptedDirectorySelection::new(selections));
     let (manager, cx) = cx.add_window_view(|window, cx| {
-        WorkspaceManager::new_with_directory_selection(
+        WorkspaceManager::new_with_adapters(
             session_factory,
             std::env::temp_dir(),
-            directory_selection,
-            test_remote_backend_factory(),
+            WorkspaceManagerAdapters {
+                directory_selection,
+                ..workspace_adapters(test_remote_backend_factory())
+            },
             window,
             cx,
         )
@@ -1486,7 +1483,9 @@ fn emit_remote_workspace_completion(
     cx: &mut VisualTestContext,
 ) {
     cx.update(|_, cx| {
-        flow.update(cx, |flow, cx| flow.emit_completion_for_test(completion, cx));
+        flow.update(cx, |flow, cx| {
+            crate::ui::remote_workspace_flow::emit_completion(flow, completion, cx);
+        });
     });
     cx.run_until_parked();
 }
@@ -1532,7 +1531,7 @@ fn install_remote_completion_directly(
                 .with_machine(remote_machine(completion.account())),
                 completion.physical_directory().clone(),
                 completion.account().login_shell().name().to_owned(),
-                completion.terminal_channels(),
+                completion.terminal_session_channels(),
             );
             let prepared = terminal_factory.prepare_child_launch().unwrap();
             manager
@@ -1553,10 +1552,10 @@ fn application_rtl_locale_installation_should_mirror_production_modal_footer(
     let session_factory: Rc<dyn TerminalSessionFactory> =
         Rc::new(TestTerminalSessionFactory::new(records).with_fallback_title("zsh"));
     let (manager, cx) = cx.add_window_view(|window, cx| {
-        WorkspaceManager::new_with_remote_workspace_backend_factory(
+        WorkspaceManager::new_with_adapters(
             session_factory,
             std::env::temp_dir(),
-            test_remote_backend_factory(),
+            workspace_adapters(test_remote_backend_factory()),
             window,
             cx,
         )
@@ -1573,12 +1572,6 @@ fn application_rtl_locale_installation_should_mirror_production_modal_footer(
                 "rtl-application-save",
             )
             .default_action(true),
-            ModalAction::new(
-                "help",
-                "Help",
-                ModalActionRole::Help,
-                "rtl-application-help",
-            ),
             ModalAction::new(
                 "cancel",
                 "Cancel",
@@ -1612,9 +1605,6 @@ fn application_rtl_locale_installation_should_mirror_production_modal_footer(
     let cancel = cx
         .debug_bounds("modal-action-rtl-application-cancel")
         .expect("Cancel should render");
-    let help = cx
-        .debug_bounds("modal-action-rtl-application-help")
-        .expect("Help should render");
     let policy_is_rtl = cx.update(|_, cx| {
         *cx.global::<spaceterm_ui::ModalDesktopPolicy>()
             == spaceterm_ui::ModalDesktopPolicy::mac_os()
@@ -1622,44 +1612,42 @@ fn application_rtl_locale_installation_should_mirror_production_modal_footer(
     });
 
     assert!(
-        policy_is_rtl && save.left() < cancel.left() && cancel.right() < help.left(),
-        "RTL production bounds were save={save:?}, cancel={cancel:?}, help={help:?}"
+        policy_is_rtl && save.left() < cancel.left(),
+        "RTL production bounds were save={save:?}, cancel={cancel:?}"
     );
 }
 
 #[gpui::test]
-fn workspace_root_should_render_modal_outside_tooltip_content(cx: &mut TestAppContext) {
+fn workspace_modal_mount_blocks_and_restores_terminal_input(cx: &mut TestAppContext) {
     let (manager, _, cx) = workspace_manager(cx);
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
-    let pane_host = manager.read_with(cx, |manager, cx| {
+    let view = manager.read_with(cx, |manager, cx| {
         manager
             .workspaces
             .active_workspace()
             .payload()
             .read(cx)
-            .active_pane_host()
+            .active_tab_view()
     });
-    let focused_pane = pane_host.read_with(cx, |pane_host, _| pane_host.focused_pane_id());
-    let focused_before = cx.update(|window, cx| {
-        pane_host
-            .read(cx)
-            .focused_terminal_has_input_focus(window, cx)
-    });
+    let focused_pane = view.read_with(cx, |view, _| view.focused_pane_id());
+    let focused_before =
+        cx.update(|window, cx| view.read(cx).focused_terminal_has_input_focus(window, cx));
 
     let presentation = present_test_alert(&manager, "root-layer-alert", cx);
     cx.run_until_parked();
     let modal_state = cx.update(|window, cx| {
-        let pane_host = pane_host.read(cx);
+        let view = view.read(cx);
         (
-            pane_host.focused_pane_id(),
-            pane_host.focused_terminal_has_input_focus(window, cx),
+            view.focused_pane_id(),
+            view.focused_terminal_has_input_focus(window, cx),
         )
     });
 
     assert!(cx.debug_bounds("spaceterm-modal-root").is_some());
-    assert_eq!(presentation.presentation_id().value(), 1);
-    assert!(cx.debug_bounds("modal-surface-1").is_some());
+    let selector: &'static str =
+        format!("modal-surface-{}", presentation.presentation_id().value()).leak();
+    assert!(cx.debug_bounds(selector).is_some());
     assert_eq!((focused_before, modal_state), (true, (focused_pane, false)));
 
     cx.update(|window, cx| {
@@ -1669,10 +1657,10 @@ fn workspace_root_should_render_modal_outside_tooltip_content(cx: &mut TestAppCo
     });
     cx.run_until_parked();
     let restored = cx.update(|window, cx| {
-        let pane_host = pane_host.read(cx);
+        let view = view.read(cx);
         (
-            pane_host.focused_pane_id(),
-            pane_host.focused_terminal_has_input_focus(window, cx),
+            view.focused_pane_id(),
+            view.focused_terminal_has_input_focus(window, cx),
         )
     });
 
@@ -1696,6 +1684,10 @@ fn workspace_switcher_reentry_should_not_steal_focus_from_an_active_modal(cx: &m
     cx.run_until_parked();
     assert!(cx.update(|window, cx| window_modal_is_open(window, cx)));
     assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
+    assert!(
+        cx.debug_bounds("modal-action-acknowledge-keyboard-focus")
+            .is_some()
+    );
     cx.update(|window, cx| presentation.dismiss(window, cx).unwrap());
     cx.run_until_parked();
     assert!(!cx.update(|window, cx| window_modal_is_open(window, cx)));
@@ -1708,21 +1700,19 @@ fn queued_modals_should_preserve_focused_pane_and_restore_terminal_input_focus(
     let (manager, records, cx) = workspace_manager(cx);
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
-    let pane_host = manager.read_with(cx, |manager, cx| {
+    let view = manager.read_with(cx, |manager, cx| {
         manager
             .workspaces
             .active_workspace()
             .payload()
             .read(cx)
-            .active_pane_host()
+            .active_tab_view()
     });
-    let focused_pane = pane_host.read_with(cx, |pane_host, _| pane_host.focused_pane_id());
+    let focused_pane = view.read_with(cx, |view, _| view.focused_pane_id());
     let before = cx.update(|window, cx| {
         (
-            pane_host.read(cx).focused_pane_id(),
-            pane_host
-                .read(cx)
-                .focused_terminal_has_input_focus(window, cx),
+            view.read(cx).focused_pane_id(),
+            view.read(cx).focused_terminal_has_input_focus(window, cx),
         )
     });
     let command_count = records.commands().len();
@@ -1731,20 +1721,16 @@ fn queued_modals_should_preserve_focused_pane_and_restore_terminal_input_focus(
     cx.run_until_parked();
     let active = cx.update(|window, cx| {
         (
-            pane_host.read(cx).focused_pane_id(),
-            pane_host
-                .read(cx)
-                .focused_terminal_has_input_focus(window, cx),
+            view.read(cx).focused_pane_id(),
+            view.read(cx).focused_terminal_has_input_focus(window, cx),
         )
     });
     let second = present_test_alert(&manager, "queued-modal-second", cx);
     cx.run_until_parked();
     let queued = cx.update(|window, cx| {
         (
-            pane_host.read(cx).focused_pane_id(),
-            pane_host
-                .read(cx)
-                .focused_terminal_has_input_focus(window, cx),
+            view.read(cx).focused_pane_id(),
+            view.read(cx).focused_terminal_has_input_focus(window, cx),
         )
     });
 
@@ -1756,10 +1742,8 @@ fn queued_modals_should_preserve_focused_pane_and_restore_terminal_input_focus(
     cx.run_until_parked();
     let promoted = cx.update(|window, cx| {
         (
-            pane_host.read(cx).focused_pane_id(),
-            pane_host
-                .read(cx)
-                .focused_terminal_has_input_focus(window, cx),
+            view.read(cx).focused_pane_id(),
+            view.read(cx).focused_terminal_has_input_focus(window, cx),
         )
     });
 
@@ -1771,10 +1755,8 @@ fn queued_modals_should_preserve_focused_pane_and_restore_terminal_input_focus(
     cx.run_until_parked();
     let restored = cx.update(|window, cx| {
         (
-            pane_host.read(cx).focused_pane_id(),
-            pane_host
-                .read(cx)
-                .focused_terminal_has_input_focus(window, cx),
+            view.read(cx).focused_pane_id(),
+            view.read(cx).focused_terminal_has_input_focus(window, cx),
         )
     });
     let focus_reports = records
@@ -1782,7 +1764,7 @@ fn queued_modals_should_preserve_focused_pane_and_restore_terminal_input_focus(
         .into_iter()
         .skip(command_count)
         .filter_map(|call| match call.command {
-            RecordedSessionCommand::Focus(focused) => Some(focused),
+            RecordedCommand::Focus(focused) => Some(focused),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -1813,25 +1795,25 @@ fn simultaneous_modals_should_block_and_restore_terminal_input_focus_per_operati
     let second_factory: Rc<dyn TerminalSessionFactory> =
         Rc::new(TestTerminalSessionFactory::new(second_records.clone()).with_fallback_title("zsh"));
     let first = cx.add_window(|window, cx| {
-        WorkspaceManager::new_with_remote_workspace_backend_factory(
+        WorkspaceManager::new_with_adapters(
             first_factory,
             PathBuf::from("/Users/first"),
-            test_remote_backend_factory(),
+            workspace_adapters(test_remote_backend_factory()),
             window,
             cx,
         )
     });
     let second = cx.add_window(|window, cx| {
-        WorkspaceManager::new_with_remote_workspace_backend_factory(
+        WorkspaceManager::new_with_adapters(
             second_factory,
             PathBuf::from("/Users/second"),
-            test_remote_backend_factory(),
+            workspace_adapters(test_remote_backend_factory()),
             window,
             cx,
         )
     });
 
-    let first_pane_host = first
+    let first_view = first
         .update(cx, |manager, window, cx| {
             window.activate_window();
             manager.focus(window, cx);
@@ -1840,15 +1822,14 @@ fn simultaneous_modals_should_block_and_restore_terminal_input_focus_per_operati
                 .active_workspace()
                 .payload()
                 .read(cx)
-                .active_pane_host()
+                .active_tab_view()
         })
         .expect("first Operating-System Window should remain available");
     cx.run_until_parked();
-    let first_focused_pane =
-        first_pane_host.read_with(cx, |pane_host, _| pane_host.focused_pane_id());
+    let first_focused_pane = first_view.read_with(cx, |view, _| view.focused_pane_id());
     let first_before = first
         .update(cx, |_, window, cx| {
-            first_pane_host
+            first_view
                 .read(cx)
                 .focused_terminal_has_input_focus(window, cx)
         })
@@ -1862,7 +1843,7 @@ fn simultaneous_modals_should_block_and_restore_terminal_input_focus_per_operati
         .expect("first Operating-System Window should present its modal");
     cx.run_until_parked();
 
-    let second_pane_host = second
+    let second_view = second
         .update(cx, |manager, window, cx| {
             window.activate_window();
             manager.focus(window, cx);
@@ -1871,15 +1852,14 @@ fn simultaneous_modals_should_block_and_restore_terminal_input_focus_per_operati
                 .active_workspace()
                 .payload()
                 .read(cx)
-                .active_pane_host()
+                .active_tab_view()
         })
         .expect("second Operating-System Window should remain available");
     cx.run_until_parked();
-    let second_focused_pane =
-        second_pane_host.read_with(cx, |pane_host, _| pane_host.focused_pane_id());
+    let second_focused_pane = second_view.read_with(cx, |view, _| view.focused_pane_id());
     let second_before = second
         .update(cx, |_, window, cx| {
-            second_pane_host
+            second_view
                 .read(cx)
                 .focused_terminal_has_input_focus(window, cx)
         })
@@ -1895,19 +1875,19 @@ fn simultaneous_modals_should_block_and_restore_terminal_input_focus_per_operati
 
     let first_blocked = first
         .update(cx, |_, window, cx| {
-            let pane_host = first_pane_host.read(cx);
+            let view = first_view.read(cx);
             (
-                pane_host.focused_pane_id(),
-                pane_host.focused_terminal_has_input_focus(window, cx),
+                view.focused_pane_id(),
+                view.focused_terminal_has_input_focus(window, cx),
             )
         })
         .expect("first Operating-System Window should remain available");
     let second_blocked = second
         .update(cx, |_, window, cx| {
-            let pane_host = second_pane_host.read(cx);
+            let view = second_view.read(cx);
             (
-                pane_host.focused_pane_id(),
-                pane_host.focused_terminal_has_input_focus(window, cx),
+                view.focused_pane_id(),
+                view.focused_terminal_has_input_focus(window, cx),
             )
         })
         .expect("second Operating-System Window should remain available");
@@ -1922,19 +1902,19 @@ fn simultaneous_modals_should_block_and_restore_terminal_input_focus_per_operati
     cx.run_until_parked();
     let first_restored = first
         .update(cx, |_, window, cx| {
-            let pane_host = first_pane_host.read(cx);
+            let view = first_view.read(cx);
             (
-                pane_host.focused_pane_id(),
-                pane_host.focused_terminal_has_input_focus(window, cx),
+                view.focused_pane_id(),
+                view.focused_terminal_has_input_focus(window, cx),
             )
         })
         .expect("first Operating-System Window should remain available");
     let second_still_blocked = second
         .update(cx, |_, window, cx| {
-            let pane_host = second_pane_host.read(cx);
+            let view = second_view.read(cx);
             (
-                pane_host.focused_pane_id(),
-                pane_host.focused_terminal_has_input_focus(window, cx),
+                view.focused_pane_id(),
+                view.focused_terminal_has_input_focus(window, cx),
             )
         })
         .expect("second Operating-System Window should remain available");
@@ -1943,7 +1923,7 @@ fn simultaneous_modals_should_block_and_restore_terminal_input_focus_per_operati
         .into_iter()
         .skip(first_command_count)
         .filter_map(|call| match call.command {
-            RecordedSessionCommand::Focus(focused) => Some(focused),
+            RecordedCommand::Focus(focused) => Some(focused),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -1952,7 +1932,7 @@ fn simultaneous_modals_should_block_and_restore_terminal_input_focus_per_operati
         .into_iter()
         .skip(second_command_count)
         .filter_map(|call| match call.command {
-            RecordedSessionCommand::Focus(focused) => Some(focused),
+            RecordedCommand::Focus(focused) => Some(focused),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -1990,10 +1970,10 @@ fn simultaneous_modals_should_block_and_restore_terminal_input_focus_per_operati
     cx.run_until_parked();
     let second_restored = second
         .update(cx, |_, window, cx| {
-            let pane_host = second_pane_host.read(cx);
+            let view = second_view.read(cx);
             (
-                pane_host.focused_pane_id(),
-                pane_host.focused_terminal_has_input_focus(window, cx),
+                view.focused_pane_id(),
+                view.focused_terminal_has_input_focus(window, cx),
             )
         })
         .expect("second Operating-System Window should remain available");
@@ -2002,7 +1982,7 @@ fn simultaneous_modals_should_block_and_restore_terminal_input_focus_per_operati
         .into_iter()
         .skip(second_command_count)
         .filter_map(|call| match call.command {
-            RecordedSessionCommand::Focus(focused) => Some(focused),
+            RecordedCommand::Focus(focused) => Some(focused),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -2020,20 +2000,16 @@ fn cancelled_directory_selection_fallback_should_leave_hierarchy_unchanged(
     let (manager, records, cx) = workspace_manager_with_directory_selection([Ok(None)], cx);
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
-    let pane_host = manager.read_with(cx, |manager, cx| {
+    let view = manager.read_with(cx, |manager, cx| {
         manager
             .workspaces
             .active_workspace()
             .payload()
             .read(cx)
-            .active_pane_host()
+            .active_tab_view()
     });
     let terminal_focused = |cx: &mut VisualTestContext| {
-        cx.update(|window, cx| {
-            pane_host
-                .read(cx)
-                .focused_terminal_has_input_focus(window, cx)
-        })
+        cx.update(|window, cx| view.read(cx).focused_terminal_has_input_focus(window, cx))
     };
     assert!(terminal_focused(cx));
 
@@ -2116,6 +2092,7 @@ fn top_combo_box_local_choice_should_create_without_a_directory_picker(cx: &mut 
         }),
         (false, None, true, 2, 2)
     );
+    assert!(manager.read_with(cx, |manager, _| manager.pin_picker.is_none()));
 }
 
 #[gpui::test]
@@ -2229,10 +2206,10 @@ fn top_combo_box_unavailable_remote_should_reject_acceptance_and_keep_terminal_i
             create_calls: Arc::clone(&create_calls),
         });
     let (manager, cx) = cx.add_window_view(move |window, cx| {
-        WorkspaceManager::new_with_remote_workspace_backend_factory(
+        WorkspaceManager::new_with_adapters(
             session_factory,
             std::env::temp_dir(),
-            factory,
+            workspace_adapters(factory),
             window,
             cx,
         )
@@ -2386,15 +2363,7 @@ fn replacing_the_ssh_host_picker_should_release_terminal_input_and_allow_reopeni
     cx.simulate_keystrokes("cmd-shift-k cmd-shift-n cmd-shift-k");
     cx.run_until_parked();
     assert!(cx.update(|window, cx| window_combo_box_is_open(window, cx)));
-    assert!(!cx.update(|window, cx| {
-        manager
-            .read(cx)
-            .workspaces
-            .active_workspace()
-            .payload()
-            .read(cx)
-            .focused_terminal_has_input_focus(window, cx)
-    }));
+    assert!(!active_terminal_has_input_focus(&manager, cx));
 
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
@@ -2405,7 +2374,7 @@ fn replacing_the_ssh_host_picker_should_release_terminal_input_and_allow_reopeni
         records
             .commands()
             .iter()
-            .any(|call| matches!(call.command, RecordedSessionCommand::Key(_))),
+            .any(|call| matches!(call.command, RecordedCommand::Key(_))),
         "the terminal must accept input after the replacement switcher closes"
     );
 
@@ -2432,16 +2401,19 @@ fn deactivated_remote_creation_should_restore_actions_after_releasing_its_flow(
         account_calls: Arc::new(AtomicUsize::new(0)),
         identity_calls: Arc::new(AtomicUsize::new(0)),
     });
-    let (session, closes, _, _, _) = reconnect_session_with_provider("work", provider);
-    let backend =
-        TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(session))]);
+    let (control_connection, closes, _, _, _) =
+        reconnect_control_connection_with_provider("work", provider);
+    let backend = TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(
+        control_connection,
+    ))]);
     let (manager, _, cx) = workspace_manager_with_remote_backend(backend, cx);
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
     let flow = open_remote_workspace_flow(&manager, cx);
     cx.update(|window, cx| {
         flow.update(cx, |flow, cx| {
-            flow.select_destination_for_test(
+            crate::ui::remote_workspace_flow::select_host_destination(
+                flow,
                 crate::domain::SshDestination::new("work".to_owned()).unwrap(),
                 window,
                 cx,
@@ -2535,10 +2507,10 @@ fn backend_construction_failure_should_disable_remote_instead_of_leaving_an_iner
             create_calls: Arc::clone(&create_calls),
         });
     let (manager, cx) = cx.add_window_view(move |window, cx| {
-        WorkspaceManager::new_with_remote_workspace_backend_factory(
+        WorkspaceManager::new_with_adapters(
             session_factory,
             std::env::temp_dir(),
-            factory,
+            workspace_adapters(factory),
             window,
             cx,
         )
@@ -2689,11 +2661,11 @@ fn closed_remote_control_connection_should_preserve_workspace_and_block_its_pane
         gpui::Task::ready(Ok(())),
     );
     emit_remote_workspace_completion(&flow, completion, cx);
-    let (workspace_id, tab_manager, pane_host) = manager.read_with(cx, |manager, cx| {
+    let (workspace_id, tab_manager, view) = manager.read_with(cx, |manager, cx| {
         let workspace = manager.workspaces.active_workspace();
         let tab_manager = workspace.payload().clone();
-        let pane_host = tab_manager.read(cx).active_pane_host();
-        (workspace.id(), tab_manager, pane_host)
+        let view = tab_manager.read(cx).active_tab_view();
+        (workspace.id(), tab_manager, view)
     });
     let starts_before_disconnect = records.starts().len();
 
@@ -2723,11 +2695,11 @@ fn closed_remote_control_connection_should_preserve_workspace_and_block_its_pane
         tab_manager.entity_id()
     );
     assert_eq!(
-        tab_manager.read_with(cx, |manager, _| manager.active_pane_host().entity_id()),
-        pane_host.entity_id()
+        tab_manager.read_with(cx, |manager, _| manager.active_tab_view().entity_id()),
+        view.entity_id()
     );
     assert_eq!(
-        pane_host.read_with(cx, |host, cx| (
+        view.read_with(cx, |host, cx| (
             host.remote_disconnected_generation(),
             host.focused_terminal_remote_state(cx),
             host.pane_count(),
@@ -2768,7 +2740,7 @@ fn closed_remote_control_connection_should_preserve_workspace_and_block_its_pane
     cx.simulate_keystrokes("cmd-t");
     cx.run_until_parked();
     assert_eq!(records.starts().len(), starts_before_disconnect);
-    assert_eq!(pane_host.read_with(cx, |host, _| host.pane_count()), 1);
+    assert_eq!(view.read_with(cx, |host, _| host.pane_count()), 1);
 }
 
 #[gpui::test]
@@ -2943,10 +2915,11 @@ fn reconnect_authentication_should_promote_queued_askpass_and_restore_progress_a
 
 #[gpui::test]
 fn reconnect_should_atomically_restart_the_same_workspace_tab_and_pane(cx: &mut TestAppContext) {
-    let (new_session, new_closes, new_preparations, new_revalidations, _new_lifecycle) =
-        reconnect_session("work", "/home/tester/src");
-    let backend =
-        TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(new_session))]);
+    let (new_control_connection, new_closes, new_preparations, new_revalidations, _new_lifecycle) =
+        reconnect_control_connection("work", "/home/tester/src");
+    let backend = TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(
+        new_control_connection,
+    ))]);
     let (manager, records, cx) = workspace_manager_with_remote_backend(backend.clone(), cx);
     let flow = open_remote_workspace_flow(&manager, cx);
     let (completion, old_closes, _, _, _, old_lifecycle) = remote_completion_with_revalidation(
@@ -2957,17 +2930,12 @@ fn reconnect_should_atomically_restart_the_same_workspace_tab_and_pane(cx: &mut 
         gpui::Task::ready(Ok(())),
     );
     emit_remote_workspace_completion(&flow, completion, cx);
-    let (workspace_id, tab_manager, pane_host, starts_before_reconnect) =
+    let (workspace_id, tab_manager, view, starts_before_reconnect) =
         manager.read_with(cx, |manager, cx| {
             let workspace = manager.workspaces.active_workspace();
             let tab_manager = workspace.payload().clone();
-            let pane_host = tab_manager.read(cx).active_pane_host();
-            (
-                workspace.id(),
-                tab_manager,
-                pane_host,
-                records.starts().len(),
-            )
+            let view = tab_manager.read(cx).active_tab_view();
+            (workspace.id(), tab_manager, view, records.starts().len())
         });
 
     old_lifecycle
@@ -3005,11 +2973,11 @@ fn reconnect_should_atomically_restart_the_same_workspace_tab_and_pane(cx: &mut 
         tab_manager.entity_id()
     );
     assert_eq!(
-        tab_manager.read_with(cx, |manager, _| manager.active_pane_host().entity_id()),
-        pane_host.entity_id()
+        tab_manager.read_with(cx, |manager, _| manager.active_tab_view().entity_id()),
+        view.entity_id()
     );
     assert_eq!(
-        pane_host.read_with(cx, |host, cx| (
+        view.read_with(cx, |host, cx| (
             host.remote_disconnected_generation(),
             host.focused_terminal_remote_state(cx),
             host.pane_count(),
@@ -3041,13 +3009,14 @@ fn reconnect_should_atomically_restart_the_same_workspace_tab_and_pane(cx: &mut 
 fn reconnect_should_consume_a_terminal_state_published_before_observer_installation(
     cx: &mut TestAppContext,
 ) {
-    let (new_session, new_closes, _, _, new_lifecycle) =
-        reconnect_session("work", "/home/tester/src");
+    let (new_control_connection, new_closes, _, _, new_lifecycle) =
+        reconnect_control_connection("work", "/home/tester/src");
     new_lifecycle
         .try_send(ControlConnectionTerminalState::Failed)
         .unwrap();
-    let backend =
-        TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(new_session))]);
+    let backend = TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(
+        new_control_connection,
+    ))]);
     let (manager, _, cx) = workspace_manager_with_remote_backend(backend, cx);
     let flow = open_remote_workspace_flow(&manager, cx);
     let (completion, _, _, _, _, old_lifecycle) = remote_completion_with_revalidation(
@@ -3086,10 +3055,13 @@ fn reconnect_should_consume_a_terminal_state_published_before_observer_installat
 fn reconnect_identity_change_should_keep_final_presentation_and_show_typed_alert(
     cx: &mut TestAppContext,
 ) {
-    let (new_session, new_closes, new_preparations, new_revalidations, _) =
-        reconnect_session("work", "/home/tester/replaced");
-    let backend =
-        TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(new_session))]);
+    let (mut text_context, rendered_text) = RecordingRenderedText::context(cx);
+    let cx = &mut text_context;
+    let (new_control_connection, new_closes, new_preparations, new_revalidations, _) =
+        reconnect_control_connection("work", "/home/tester/replaced");
+    let backend = TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(
+        new_control_connection,
+    ))]);
     let (manager, records, cx) = workspace_manager_with_remote_backend(backend, cx);
     let flow = open_remote_workspace_flow(&manager, cx);
     let (completion, _, _, _, _, old_lifecycle) = remote_completion_with_revalidation(
@@ -3100,11 +3072,11 @@ fn reconnect_identity_change_should_keep_final_presentation_and_show_typed_alert
         gpui::Task::ready(Ok(())),
     );
     emit_remote_workspace_completion(&flow, completion, cx);
-    let (workspace_id, pane_host, starts) = manager.read_with(cx, |manager, cx| {
+    let (workspace_id, view, starts) = manager.read_with(cx, |manager, cx| {
         let workspace = manager.workspaces.active_workspace();
         (
             workspace.id(),
-            workspace.payload().read(cx).active_pane_host(),
+            workspace.payload().read(cx).active_tab_view(),
             records.starts().len(),
         )
     });
@@ -3134,7 +3106,7 @@ fn reconnect_identity_change_should_keep_final_presentation_and_show_typed_alert
     assert_eq!(new_revalidations.load(Ordering::Acquire), 0);
     assert_eq!(records.starts().len(), starts);
     assert_eq!(
-        pane_host.read_with(cx, |host, cx| host.focused_terminal_remote_state(cx)),
+        view.read_with(cx, |host, cx| host.focused_terminal_remote_state(cx)),
         (true, true)
     );
     assert!(
@@ -3150,18 +3122,27 @@ fn reconnect_identity_change_should_keep_final_presentation_and_show_typed_alert
             "The selected remote path now resolves to a different directory. Reopen the Remote Workspace to review it.".to_owned()
         ))
     );
+    assert_rendered_text(
+        "modal-header-title",
+        "Remote Directory Changed",
+        &rendered_text,
+        cx,
+    );
 }
 
 #[gpui::test]
 fn reconnect_directory_unavailable_should_remain_disconnected_with_actionable_alert(
     cx: &mut TestAppContext,
 ) {
-    let (new_session, new_closes, _, _, _) = reconnect_session_with_provider(
+    let (mut text_context, rendered_text) = RecordingRenderedText::context(cx);
+    let cx = &mut text_context;
+    let (new_control_connection, new_closes, _, _, _) = reconnect_control_connection_with_provider(
         "work",
         Arc::new(TestRemoteProvider::directory_unavailable()),
     );
-    let backend =
-        TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(new_session))]);
+    let backend = TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(
+        new_control_connection,
+    ))]);
     let (manager, _, cx) = workspace_manager_with_remote_backend(backend, cx);
     let flow = open_remote_workspace_flow(&manager, cx);
     let (completion, _, _, _, _, old_lifecycle) = remote_completion_with_revalidation(
@@ -3208,6 +3189,12 @@ fn reconnect_directory_unavailable_should_remain_disconnected_with_actionable_al
             "SpaceTerm can’t access the selected remote directory. Check its permissions or reopen the Remote Workspace.".to_owned()
         ))
     );
+    assert_rendered_text(
+        "modal-header-title",
+        "Remote Directory Unavailable",
+        &rendered_text,
+        cx,
+    );
 }
 
 #[test]
@@ -3236,9 +3223,14 @@ fn reconnect_connection_detail_should_reach_the_transient_alert_content() {
 fn hierarchy_change_between_restart_prepare_and_commit_should_fail_with_typed_alert(
     cx: &mut TestAppContext,
 ) {
-    let (new_session, new_closes, _, _, _) = reconnect_session("work", "/home/tester/src");
-    let backend =
-        TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(new_session))]);
+    let (mut new_control_connection, new_closes, _, _, _) =
+        reconnect_control_connection("work", "/home/tester/src");
+    let (pending_sender, pending_receiver) = async_channel::bounded(1);
+    let pending = cx.update(|cx| {
+        cx.background_executor()
+            .spawn(async move { pending_receiver.recv().await.unwrap() })
+    });
+    let backend = TestRemoteWorkspaceFlowBackend::with_connections([pending]);
     let (manager, records, cx) = workspace_manager_with_remote_backend(backend, cx);
     let flow = open_remote_workspace_flow(&manager, cx);
     let (completion, _, _, _, _, lifecycle) = remote_completion_with_revalidation(
@@ -3269,14 +3261,81 @@ fn hierarchy_change_between_restart_prepare_and_commit_should_fail_with_typed_al
         .try_send(ControlConnectionTerminalState::Closed)
         .unwrap();
     cx.run_until_parked();
-    manager.update(cx, |manager, _| {
-        manager.close_focused_pane_before_reconnect_commit = true;
-    });
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
             manager.start_remote_workspace_reconnect(workspace_id, window, cx)
         });
     });
+    cx.run_until_parked();
+    let account = test_remote_account();
+    let channels = new_control_connection
+        .bind_terminal_session_channels(account.login_shell())
+        .unwrap();
+    let prepared_lifecycle = new_control_connection.take_lifecycle_observer().unwrap();
+    let factory = manager.read_with(cx, |manager, _| {
+        WorkspaceTerminalSessionFactory::new_remote(
+            Rc::clone(&manager.session_factory),
+            ValidatedLocalDirectory::new(
+                manager.local_home_directory_path.clone(),
+                manager.local_home_identity.clone(),
+            ),
+            RemoteTerminalMetadataContext::new(
+                crate::domain::SshDestination::new("work".into()).unwrap(),
+                RemoteDirectory::new("~/src".into()).unwrap(),
+            )
+            .with_machine(remote_machine(&account)),
+            crate::domain::RemoteDirectoryIdentity::new("/home/tester/src".into()).unwrap(),
+            account.login_shell().name().to_owned(),
+            channels,
+        )
+    });
+    let preparation = tab_manager.update(cx, |manager, cx| {
+        manager.prepare_remote_restart(factory, 2, cx)
+    });
+    let prepared = Rc::new(RefCell::new(None));
+    let result = prepared.clone();
+    cx.update(|_, cx| {
+        cx.spawn(async move |_| {
+            *result.borrow_mut() = Some(preparation.await);
+        })
+        .detach()
+    });
+    cx.run_until_parked();
+    let restart = prepared
+        .borrow_mut()
+        .take()
+        .expect("real restart preparation must complete")
+        .unwrap();
+    assert_eq!(
+        tab_manager.read_with(cx, |manager, cx| manager.aggregate_counts(cx)),
+        (1, 2)
+    );
+    cx.update(|window, cx| {
+        tab_manager
+            .read(cx)
+            .active_tab_view()
+            .update(cx, |host, cx| {
+                host.close_pane_authorized(host.focused_pane_id(), window, cx);
+            })
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.finish_remote_workspace_reconnect(
+                workspace_id,
+                2,
+                Ok(PreparedRemoteWorkspaceReconnect {
+                    control_connection: new_control_connection,
+                    lifecycle: prepared_lifecycle,
+                    restart,
+                    remote_user: account.remote_user().clone(),
+                }),
+                window,
+                cx,
+            )
+        })
+    });
+    drop(pending_sender);
     cx.run_until_parked();
     redraw(cx);
 
@@ -3304,7 +3363,8 @@ fn hierarchy_change_between_restart_prepare_and_commit_should_fail_with_typed_al
 fn reconnect_cancel_should_be_single_flight_and_close_late_success_without_resurrection(
     cx: &mut TestAppContext,
 ) {
-    let (late_session, late_closes, _, _, _) = reconnect_session("work", "/home/tester/src");
+    let (late_control_connection, late_closes, _, _, _) =
+        reconnect_control_connection("work", "/home/tester/src");
     let (sender, receiver) = async_channel::bounded(1);
     let pending = cx.update(|cx| {
         cx.background_executor()
@@ -3358,7 +3418,7 @@ fn reconnect_cancel_should_be_single_flight_and_close_late_success_without_resur
         manager.remote_workspace_reconnect.is_none()
     }));
 
-    assert!(sender.try_send(Ok(late_session)).is_err());
+    assert!(sender.try_send(Ok(late_control_connection)).is_err());
     cx.run_until_parked();
     assert_eq!(late_closes.load(Ordering::Acquire), 1);
     assert_eq!(
@@ -3372,7 +3432,7 @@ fn reconnect_cancel_should_be_single_flight_and_close_late_success_without_resur
 }
 
 #[gpui::test]
-fn cancelling_while_account_discovery_is_blocked_should_close_connected_session_immediately(
+fn cancelling_while_account_discovery_is_blocked_should_close_control_connection_immediately(
     cx: &mut TestAppContext,
 ) {
     let (account_sender, account_receiver) = async_channel::bounded(1);
@@ -3389,9 +3449,11 @@ fn cancelling_while_account_discovery_is_blocked_should_close_connected_session_
         account_calls: Arc::clone(&account_calls),
         identity_calls: Arc::new(AtomicUsize::new(0)),
     });
-    let (session, closes, _, _, _) = reconnect_session_with_provider("work", provider);
-    let backend =
-        TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(session))]);
+    let (control_connection, closes, _, _, _) =
+        reconnect_control_connection_with_provider("work", provider);
+    let backend = TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(
+        control_connection,
+    ))]);
     let (manager, _, cx) = workspace_manager_with_remote_backend(backend, cx);
     let workspace_id = create_disconnected_remote_workspace(&manager, cx);
 
@@ -3420,7 +3482,7 @@ fn cancelling_while_account_discovery_is_blocked_should_close_connected_session_
 }
 
 #[gpui::test]
-fn closing_workspace_while_identity_validation_is_blocked_should_close_session_immediately(
+fn closing_workspace_while_identity_validation_is_blocked_should_close_control_connection_immediately(
     cx: &mut TestAppContext,
 ) {
     let (identity_sender, identity_receiver) = async_channel::bounded(1);
@@ -3435,9 +3497,11 @@ fn closing_workspace_while_identity_validation_is_blocked_should_close_session_i
         account_calls: Arc::new(AtomicUsize::new(0)),
         identity_calls: Arc::clone(&identity_calls),
     });
-    let (session, closes, _, _, _) = reconnect_session_with_provider("work", provider);
-    let backend =
-        TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(session))]);
+    let (control_connection, closes, _, _, _) =
+        reconnect_control_connection_with_provider("work", provider);
+    let backend = TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(
+        control_connection,
+    ))]);
     let (manager, _, cx) = workspace_manager_with_remote_backend(backend, cx);
     let workspace_id = create_disconnected_remote_workspace(&manager, cx);
     cx.update(|window, cx| {
@@ -3464,7 +3528,7 @@ fn closing_workspace_while_identity_validation_is_blocked_should_close_session_i
 }
 
 #[gpui::test]
-fn application_cleanup_while_restart_preparation_is_blocked_should_abort_and_close_session(
+fn application_cleanup_while_restart_preparation_is_blocked_should_abort_and_close_control_connection(
     cx: &mut TestAppContext,
 ) {
     let (revalidation_sender, revalidation_receiver) = async_channel::bounded(1);
@@ -3475,13 +3539,15 @@ fn application_cleanup_while_restart_preparation_is_blocked_should_abort_and_clo
     let provider: Arc<dyn RemoteDirectoryProvider> = Arc::new(TestRemoteProvider::connected(
         crate::domain::RemoteDirectoryIdentity::new("/home/tester/src".to_owned()).unwrap(),
     ));
-    let (session, closes, _, revalidations, _) = reconnect_session_with_provider_and_revalidation(
-        "work",
-        provider,
-        VecDeque::from([revalidation_task]),
-    );
-    let backend =
-        TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(session))]);
+    let (control_connection, closes, _, revalidations, _) =
+        reconnect_control_connection_with_provider_and_revalidation(
+            "work",
+            provider,
+            VecDeque::from([revalidation_task]),
+        );
+    let backend = TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(
+        control_connection,
+    ))]);
     let (manager, _, cx) = workspace_manager_with_remote_backend(backend, cx);
     let workspace_id = create_disconnected_remote_workspace(&manager, cx);
     cx.update(|window, cx| {
@@ -3560,6 +3626,8 @@ fn authentication_cancelled_reconnect_should_return_to_disconnected_without_erro
 fn bounded_connection_detail_should_survive_reconnect_into_the_failure_alert(
     cx: &mut TestAppContext,
 ) {
+    let (mut text_context, rendered_text) = RecordingRenderedText::context(cx);
+    let cx = &mut text_context;
     let detail = crate::ssh::process::TransientSshErrorOutput::from_untrusted_bytes(
         b"ssh: Permission denied (publickey).",
     )
@@ -3590,13 +3658,20 @@ fn bounded_connection_detail_should_survive_reconnect_into_the_failure_alert(
         cx.debug_bounds("modal-action-remote-workspace-reconnect-error-ok")
             .is_some()
     );
+    assert_rendered_text(
+        "modal-alert-message",
+        "SpaceTerm couldn’t restore the remote connection. OpenSSH reported:\n\nssh: Permission denied (publickey).",
+        &rendered_text,
+        cx,
+    );
 }
 
 #[gpui::test]
-fn closing_workspace_during_reconnect_should_close_late_session_and_prevent_resurrection(
+fn closing_workspace_during_reconnect_should_close_late_control_connection_and_prevent_resurrection(
     cx: &mut TestAppContext,
 ) {
-    let (late_session, late_closes, _, _, _) = reconnect_session("work", "/home/tester/src");
+    let (late_control_connection, late_closes, _, _, _) =
+        reconnect_control_connection("work", "/home/tester/src");
     let (sender, receiver) = async_channel::bounded(1);
     let pending = cx.update(|cx| {
         cx.background_executor()
@@ -3629,7 +3704,7 @@ fn closing_workspace_during_reconnect_should_close_late_session_and_prevent_resu
         manager.workspaces.workspace(workspace_id).is_none()
     }));
 
-    assert!(sender.try_send(Ok(late_session)).is_err());
+    assert!(sender.try_send(Ok(late_control_connection)).is_err());
     cx.run_until_parked();
     assert_eq!(late_closes.load(Ordering::Acquire), 1);
     assert!(manager.read_with(cx, |manager, _| {
@@ -3638,7 +3713,7 @@ fn closing_workspace_during_reconnect_should_close_late_session_and_prevent_resu
 }
 
 #[gpui::test]
-fn remote_child_identity_failure_should_show_alert_without_changing_connection_or_focus(
+fn remote_child_identity_failure_preserves_connection_and_restores_focus_after_alert(
     cx: &mut TestAppContext,
 ) {
     let (manager, _, cx) = workspace_manager(cx);
@@ -3718,9 +3793,9 @@ fn remote_revalidation_failures_should_close_completion_without_mutation(cx: &mu
     let (manager, records, cx) = workspace_manager(cx);
 
     for error in [
-        crate::terminal::RemoteChannelRevalidationError::ConnectionUnavailable,
-        crate::terminal::RemoteChannelRevalidationError::DirectoryUnavailable,
-        crate::terminal::RemoteChannelRevalidationError::IdentityChanged,
+        crate::terminal::TerminalSessionChannelRevalidationError::ConnectionUnavailable,
+        crate::terminal::TerminalSessionChannelRevalidationError::DirectoryUnavailable,
+        crate::terminal::TerminalSessionChannelRevalidationError::IdentityChanged,
     ] {
         let flow = open_remote_workspace_flow(&manager, cx);
         let (completion, closes, preparations, revalidations, _, _) =
@@ -3751,7 +3826,9 @@ fn remote_revalidation_failures_should_close_completion_without_mutation(cx: &mu
         );
 
         cx.update(|window, cx| {
-            flow.update(cx, |flow, cx| flow.cancel_for_test(window, cx));
+            flow.update(cx, |flow, cx| {
+                crate::ui::remote_workspace_flow::cancel(flow, window, cx);
+            });
         });
         cx.run_until_parked();
         assert_eq!(closes.load(Ordering::Acquire), 1);
@@ -3781,7 +3858,9 @@ fn cancelled_initial_revalidation_should_close_immediately_without_late_resurrec
     assert_eq!(stale_revalidations.load(Ordering::Acquire), 1);
 
     cx.update(|window, cx| {
-        first_flow.update(cx, |flow, cx| flow.cancel_for_test(window, cx));
+        first_flow.update(cx, |flow, cx| {
+            crate::ui::remote_workspace_flow::cancel(flow, window, cx);
+        });
     });
     cx.run_until_parked();
     assert_eq!(
@@ -4011,7 +4090,9 @@ fn failed_workspace_alias_pin_should_return_activation_without_leaking_authority
     );
 
     cx.update(|window, cx| {
-        flow.update(cx, |flow, cx| flow.cancel_for_test(window, cx));
+        flow.update(cx, |flow, cx| {
+            crate::ui::remote_workspace_flow::cancel(flow, window, cx);
+        });
     });
     cx.run_until_parked();
 
@@ -4021,7 +4102,7 @@ fn failed_workspace_alias_pin_should_return_activation_without_leaking_authority
 }
 
 #[gpui::test]
-fn application_teardown_hook_should_close_remote_runtime_exactly_once(cx: &mut TestAppContext) {
+fn repeated_remote_runtime_cleanup_closes_once(cx: &mut TestAppContext) {
     let (manager, _, cx) = workspace_manager(cx);
     let (completion, closes, _, _) = remote_completion("work", "~/src", "/home/tester/src", true);
     let flow = open_remote_workspace_flow(&manager, cx);
@@ -4034,7 +4115,7 @@ fn application_teardown_hook_should_close_remote_runtime_exactly_once(cx: &mut T
 }
 
 #[gpui::test]
-fn unavailable_initial_remote_channel_should_close_completion_and_offer_retry(
+fn unavailable_initial_terminal_session_channel_should_close_completion_and_offer_retry(
     cx: &mut TestAppContext,
 ) {
     let (manager, records, cx) = workspace_manager(cx);
@@ -4240,7 +4321,7 @@ fn open_local_directory_should_keep_the_picker_usable_after_a_failed_creation(
     fs::create_dir_all(&project).unwrap();
     let (manager, _, cx) = workspace_manager_with_directory_selection([], cx);
     manager.update(cx, |manager, _| {
-        manager.workspaces.set_next_workspace_id_for_test(u64::MAX);
+        crate::domain::set_next_workspace_id(&mut manager.workspaces, u64::MAX);
     });
     cx.simulate_keystrokes("cmd-o");
     cx.run_until_parked();
@@ -4251,7 +4332,7 @@ fn open_local_directory_should_keep_the_picker_usable_after_a_failed_creation(
     });
 
     manager.update(cx, |manager, _| {
-        manager.workspaces.set_next_workspace_id_for_test(2);
+        crate::domain::set_next_workspace_id(&mut manager.workspaces, 2);
     });
     confirm_directory_picker_path(&format!("{}/", project.to_str().unwrap()), cx);
 
@@ -4408,7 +4489,10 @@ fn open_remote_directory_should_start_the_remote_flow_at_a_chosen_directory(
         .read_with(cx, |manager, _| manager.remote_workspace_flow.clone())
         .expect("Open Remote Directory should present the Remote Workspace flow");
     assert_eq!(
-        flow.read_with(cx, |flow, _| (flow.stage(), flow.start())),
+        flow.read_with(cx, |flow, _| (
+            flow.stage(),
+            crate::ui::remote_workspace_flow::start(flow)
+        )),
         (
             RemoteWorkspaceFlowStage::HostSelection,
             RemoteWorkspaceStart::ChosenDirectory
@@ -4423,15 +4507,17 @@ fn open_remote_directory_should_return_to_the_picker_after_a_failed_launch_and_t
     let provider = Arc::new(TestRemoteProvider::connected(
         crate::domain::RemoteDirectoryIdentity::new("/home/tester/src".to_owned()).unwrap(),
     ));
-    let (session, closes, _, _, _) = reconnect_session_with_provider_and_revalidation(
-        "work",
-        provider,
-        VecDeque::from([gpui::Task::ready(Err(
-            crate::terminal::RemoteChannelRevalidationError::DirectoryUnavailable,
-        ))]),
-    );
-    let backend =
-        TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(session))]);
+    let (control_connection, closes, _, _, _) =
+        reconnect_control_connection_with_provider_and_revalidation(
+            "work",
+            provider,
+            VecDeque::from([gpui::Task::ready(Err(
+                crate::terminal::TerminalSessionChannelRevalidationError::DirectoryUnavailable,
+            ))]),
+        );
+    let backend = TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(
+        control_connection,
+    ))]);
     let (manager, records, cx) = workspace_manager_with_remote_backend(backend, cx);
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
@@ -4442,7 +4528,8 @@ fn open_remote_directory_should_return_to_the_picker_after_a_failed_launch_and_t
     });
     cx.update(|window, cx| {
         flow.update(cx, |flow, cx| {
-            flow.select_destination_for_test(
+            crate::ui::remote_workspace_flow::select_host_destination(
+                flow,
                 crate::domain::SshDestination::new("work".to_owned()).unwrap(),
                 window,
                 cx,
@@ -4513,7 +4600,11 @@ fn open_remote_directory_should_pin_the_new_workspace_and_reuse_it_for_the_same_
         let flow = open_remote_workspace_flow(&manager, cx);
         let (completion, completion_closes, _, _) =
             remote_completion("work", "~/src", "/home/tester/src", true);
-        emit_remote_workspace_completion(&flow, completion.pinned_for_test(), cx);
+        emit_remote_workspace_completion(
+            &flow,
+            crate::ui::remote_workspace_flow::pinned(completion),
+            cx,
+        );
         closes.push(completion_closes);
     }
 
@@ -4616,6 +4707,17 @@ fn unusable_directory_selection_should_not_pin_the_workspace(cx: &mut TestAppCon
         1
     );
     assert_eq!(records.starts().len(), 1);
+    assert!(manager.read_with(cx, |manager, _| {
+        manager
+            .workspaces
+            .active_workspace()
+            .pinned_directory()
+            .is_none()
+    }));
+    assert!(
+        cx.debug_bounds("modal-action-workspace-pin-error-ok")
+            .is_some()
+    );
 }
 
 #[gpui::test]
@@ -4744,13 +4846,13 @@ fn workspace_switcher_escape_should_restore_terminal_focus(cx: &mut TestAppConte
 }
 
 #[gpui::test]
-fn open_workspace_switcher_should_remove_a_workspace_after_its_final_session_exits(
+fn open_workspace_switcher_should_remove_a_workspace_after_its_final_terminal_session_exits(
     cx: &mut TestAppContext,
 ) {
     let (manager, records, cx) = workspace_manager(cx);
     let inactive_sender = records
         .event_sender(1)
-        .expect("the initial Workspace terminal session must have started");
+        .expect("the initial Workspace Terminal Session must have started");
     cx.simulate_keystrokes("cmd-n");
     cx.run_until_parked();
     manager.update(cx, |manager, cx| {
@@ -4767,7 +4869,7 @@ fn open_workspace_switcher_should_remove_a_workspace_after_its_final_session_exi
     assert!(cx.debug_bounds("workspace-switcher-result-1").is_some());
 
     inactive_sender
-        .try_send(SessionEvent::Exited(SessionExit::Success))
+        .try_send(TerminalSessionEvent::Exited(TerminalSessionExit::Success))
         .expect("the inactive shell exit must be delivered");
     cx.run_until_parked();
     cx.simulate_keystrokes("enter");
@@ -4865,12 +4967,6 @@ fn sidebar_should_keep_creation_actions_at_the_bottom_without_a_header(cx: &mut 
     }
 }
 
-/// The workspace chooser's glyph is one size in both of its states.
-///
-/// Open, the chooser is an icon beside the sidebar toggle; closed, it widens into the chip naming
-/// the active Workspace. It is the same control and the same glyph either way, so taking the
-/// selector's generic icon size in one state and the top chrome's in the other made it change size
-/// as the sidebar came and went.
 #[gpui::test]
 fn the_workspace_chooser_glyph_should_keep_one_size_across_sidebar_states(cx: &mut TestAppContext) {
     let (manager, _, cx) = workspace_manager(cx);
@@ -4898,10 +4994,6 @@ fn the_workspace_chooser_glyph_should_keep_one_size_across_sidebar_states(cx: &m
     );
 }
 
-/// The sidebar's cog asks for Settings the same way the menu item and the keyboard equivalent do.
-///
-/// It dispatches the application action rather than opening a window itself, so the one Settings
-/// Window, and the decision to activate it when it already exists, stay in one place.
 #[gpui::test]
 fn sidebar_settings_button_should_request_the_application_settings_action(cx: &mut TestAppContext) {
     let (_, _, cx) = workspace_manager(cx);
@@ -5005,8 +5097,7 @@ fn caption_close_should_confirm_its_owning_pane_and_restore_focus_after_cancel(
         records
             .commands()
             .iter()
-            .any(|call| call.session_id == 1
-                && matches!(call.command, RecordedSessionCommand::Key(_)))
+            .any(|call| call.session_id == 1 && matches!(call.command, RecordedCommand::Key(_)))
     );
     click("pane-close-1", cx);
     redraw(cx);
@@ -5127,8 +5218,8 @@ fn prompt_metadata_should_close_a_pane_without_confirmation(cx: &mut TestAppCont
     screen.metadata = metadata.snapshot();
     records
         .event_sender(2)
-        .expect("the focused split Pane session was not started")
-        .try_send(SessionEvent::Screen(Arc::new(screen)))
+        .expect("the focused split Pane's Terminal Session was not started")
+        .try_send(TerminalSessionEvent::Screen(Arc::new(screen)))
         .unwrap();
     cx.run_until_parked();
 
@@ -5155,8 +5246,8 @@ fn automatic_terminal_exit_should_bypass_close_confirmation(cx: &mut TestAppCont
 
     records
         .event_sender(2)
-        .expect("the focused split Pane session was not started")
-        .try_send(SessionEvent::Exited(SessionExit::Success))
+        .expect("the focused split Pane's Terminal Session was not started")
+        .try_send(TerminalSessionEvent::Exited(TerminalSessionExit::Success))
         .unwrap();
     cx.run_until_parked();
 
@@ -5524,7 +5615,14 @@ fn workspace_chrome_should_forward_threshold_crossing_and_double_activation_to_p
         click_count: 2,
     });
 
-    assert_eq!(platform.counts(), (1, 1, 1, 0));
+    assert_eq!(platform.counts(), (1, 1, 1));
+    assert_eq!(
+        cx.window_requests(),
+        vec![gpui::TestWindowRequest::TitlebarDoubleClick {
+            is_resizable: true,
+            is_minimizable: true
+        }]
+    );
 }
 
 #[gpui::test]
@@ -5567,7 +5665,7 @@ fn workspace_top_chrome_should_restore_after_release_outside_its_hitbox(cx: &mut
         .into_iter()
         .skip(command_count)
         .filter_map(|call| match call.command {
-            RecordedSessionCommand::Focus(focused) => Some((call.session_id, focused)),
+            RecordedCommand::Focus(focused) => Some((call.session_id, focused)),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -5722,7 +5820,7 @@ fn sidebar_resize_should_reveal_its_paintless_handle_to_keyboard_focus(cx: &mut 
 }
 
 #[gpui::test]
-fn workspace_frame_should_paint_no_structural_separators(cx: &mut TestAppContext) {
+fn workspace_frame_omits_structural_divider_elements(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
 
     for selector in [
@@ -5749,12 +5847,7 @@ fn workspace_frame_should_paint_no_structural_separators(cx: &mut TestAppContext
     );
 }
 
-/// Every visible gap around the Pane stage measures one frame space from surface to surface.
-///
-/// The distances are taken between painted bounds, not between layout properties: beside a sidebar
-/// the gap is painted once, by the sidebar chip's own margin, and the stage adds nothing that would
-/// double it. The stage has no top gap at all, because the chrome above already carries that space
-/// in its own height.
+/// The distances are taken between painted bounds, not between layout properties.
 #[gpui::test]
 fn content_stage_should_space_the_active_pane_with_one_measurement(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
@@ -5787,9 +5880,6 @@ fn content_stage_should_space_the_active_pane_with_one_measurement(cx: &mut Test
             root.origin.x
         };
 
-        // The Pane's leading neighbour is the sidebar chip when the sidebar is shown and the window
-        // edge when it is hidden. Either way exactly one space is painted between them; the window
-        // paints its own edge inside the window-facing insets.
         let (leading_neighbour, leading_inset) = if sidebar_visible {
             (
                 cx.debug_bounds("workspace-row-selection-1")
@@ -5822,10 +5912,6 @@ fn content_stage_should_space_the_active_pane_with_one_measurement(cx: &mut Test
     }
 }
 
-/// The first Tab keeps one visible space from the Workspace identity beside it.
-///
-/// A chip is inset inside its item, so the strip pulls that inset back: the identity's own trailing
-/// margin is then the whole gap, and the first Tab's paint lands on the Pane's leading vertical.
 #[gpui::test]
 fn first_tab_chip_should_keep_one_space_from_the_workspace_identity(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
@@ -6054,7 +6140,7 @@ fn dragging_sidebar_divider_at_top_chrome_edges_should_not_move_window(cx: &mut 
             manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).layout().width),
             platform.counts(),
         ),
-        (px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH + 80.0), (0, 0, 0, 0),)
+        (px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH + 80.0), (0, 0, 0),)
     );
 }
 
@@ -6463,9 +6549,6 @@ fn selected_workspace_should_use_an_inset_chip_without_row_separators(cx: &mut T
         ),
         "the selected Workspace material should float inside its row"
     );
-    // The chip's two margins are the frame's one measurement, and each is measured to the surface
-    // actually beside it: the window's own painted edge on one side, the floating Pane on the
-    // other.
     let pane = cx
         .debug_bounds("pane-surface-1")
         .expect("the floating Pane surface was rendered");
@@ -6522,7 +6605,7 @@ fn top_workspace_chooser_should_open_below_its_icon_without_dragging_the_window(
         1
     );
     assert!(cx.update(|window, cx| window_combo_box_is_open(window, cx)));
-    assert_eq!(platform.counts(), (0, 0, 0, 0));
+    assert_eq!(platform.counts(), (0, 0, 0));
 }
 
 #[gpui::test]
@@ -6547,13 +6630,8 @@ fn top_workspace_chooser_should_remain_available_with_the_sidebar_collapsed(
     assert_eq!(panel.top(), chooser.bottom() + px(4.0));
 }
 
-/// The footer plus menu mirrors the switcher's creation rows.
-///
-/// It opens as a button-triggered menu (not a filterable combo box) with the same rows in the same
-/// order the switcher offers, so the two creation paths cannot drift apart. Both surfaces build
-/// from the shared creation descriptors; disabled parity while Remote is unavailable is exercised
-/// by `top_combo_box_unavailable_remote_should_reject_acceptance_and_keep_terminal_input_blocked`,
-/// which rejects both remote rows and their Shortcuts on each surface.
+/// Disabled parity while Remote is unavailable is covered by
+/// `top_combo_box_unavailable_remote_should_reject_acceptance_and_keep_terminal_input_blocked`.
 #[gpui::test]
 fn sidebar_new_workspace_menu_should_mirror_switcher_creation_rows(cx: &mut TestAppContext) {
     use crate::desktop_profile::testing_presentation;
@@ -6760,10 +6838,19 @@ fn the_workspace_chip_should_appear_only_while_the_sidebar_is_hidden(cx: &mut Te
 
 #[gpui::test]
 fn the_workspace_chip_should_follow_the_active_workspace(cx: &mut TestAppContext) {
+    let (mut text_context, rendered_text) = RecordingRenderedText::context(cx);
+    let cx = &mut text_context;
     let (manager, _, cx) = workspace_manager(cx);
 
     click("toggle-sidebar-button", cx);
     cx.simulate_keystrokes("cmd-n");
+    manager.update(cx, |manager, cx| {
+        manager
+            .workspaces
+            .rename_workspace(WorkspaceId::new(2), "New Active Workspace".into())
+            .unwrap();
+        cx.notify();
+    });
     redraw(cx);
 
     let chip = cx
@@ -6780,6 +6867,12 @@ fn the_workspace_chip_should_follow_the_active_workspace(cx: &mut TestAppContext
     assert!(
         chooser.left() <= chip.left() && chip.right() <= chooser.right(),
         "the chip escaped the Workspace chooser: {chip:?} {chooser:?}"
+    );
+    assert_rendered_text(
+        "workspace-chip-label",
+        "New Active Workspace",
+        &rendered_text,
+        cx,
     );
 }
 
@@ -7081,7 +7174,7 @@ fn collapsed_workspace_switcher_should_open_from_each_part_without_dragging(
                 .focused_terminal_is_focused(window, cx)
         }));
     }
-    assert_eq!(platform.counts(), (0, 0, 0, 0));
+    assert_eq!(platform.counts(), (0, 0, 0));
 }
 
 #[gpui::test]
@@ -7112,9 +7205,7 @@ fn collapsed_remote_switcher_should_show_the_name_without_a_workspace_icon(
 }
 
 #[gpui::test]
-fn collapsed_chrome_should_keep_the_shared_switcher_border_after_theme_replacement(
-    cx: &mut TestAppContext,
-) {
+fn collapsed_chrome_geometry_survives_combo_box_theme_replacement(cx: &mut TestAppContext) {
     use spaceterm_ui::{ComboBoxMetrics, ComboBoxPaint, ComboBoxTheme};
 
     let (manager, _, cx) = workspace_manager(cx);
@@ -7253,16 +7344,25 @@ fn collapsed_top_chrome_should_fit_after_pinning_changes_name(cx: &mut TestAppCo
 
 #[gpui::test]
 fn collapsed_top_chrome_should_preserve_name_after_inactive_shell_exit(cx: &mut TestAppContext) {
+    let (mut text_context, rendered_text) = RecordingRenderedText::context(cx);
+    let cx = &mut text_context;
     let (manager, records, cx) = workspace_manager(cx);
     let inactive_sender = records
         .event_sender(1)
-        .expect("the initial Workspace terminal session must have started");
+        .expect("the initial Workspace Terminal Session must have started");
     cx.simulate_keystrokes("cmd-n");
+    manager.update(cx, |manager, cx| {
+        manager
+            .workspaces
+            .rename_workspace(WorkspaceId::new(2), "Surviving Active Workspace".into())
+            .unwrap();
+        cx.notify();
+    });
     cx.run_until_parked();
     click("toggle-sidebar-button", cx);
 
     inactive_sender
-        .try_send(SessionEvent::Exited(SessionExit::Success))
+        .try_send(TerminalSessionEvent::Exited(TerminalSessionExit::Success))
         .expect("the inactive shell exit must be delivered");
     cx.run_until_parked();
 
@@ -7278,6 +7378,12 @@ fn collapsed_top_chrome_should_preserve_name_after_inactive_shell_exit(cx: &mut 
             spacer.size.width,
         ),
         (WorkspaceId::new(2), chrome.size.width)
+    );
+    assert_rendered_text(
+        "workspace-chip-label",
+        "Surviving Active Workspace",
+        &rendered_text,
+        cx,
     );
 }
 
@@ -7298,16 +7404,6 @@ fn cmd_n_should_create_a_local_workspace_without_the_panel(cx: &mut TestAppConte
             )
         }),
         (2, WorkspaceId::new(2), false)
-    );
-}
-
-#[gpui::test]
-fn sidebar_footer_should_have_no_top_divider(cx: &mut TestAppContext) {
-    let (_, _, cx) = workspace_manager(cx);
-    assert!(cx.debug_bounds("workspace-sidebar-footer").is_some());
-    assert!(
-        cx.debug_bounds("workspace-sidebar-footer-divider")
-            .is_none()
     );
 }
 
@@ -7653,6 +7749,9 @@ fn workspace_scrollbar_thumb_should_drag_the_list(cx: &mut TestAppContext) {
     let list = cx
         .debug_bounds("workspace-list")
         .expect("the Workspace list was not rendered");
+    let before = manager.read_with(cx, |manager, cx| {
+        manager.sidebar.read(cx).scroll_handle().offset().y
+    });
     let start = thumb.center();
     let destination = point(start.x, list.bottom() - thumb.size.height / 2.0);
     cx.simulate_mouse_move(start, None, Modifiers::none());
@@ -7670,7 +7769,7 @@ fn workspace_scrollbar_thumb_should_drag_the_list(cx: &mut TestAppContext) {
         manager.sidebar.read(cx).scroll_handle().offset().y
     });
     assert!(
-        state < px(0.0),
+        state < before,
         "the Workspace list did not finish a scrollbar drag: {state:?}"
     );
 }
@@ -7693,6 +7792,13 @@ fn creating_workspaces_should_scroll_the_active_workspace_into_view(cx: &mut Tes
         state.0 == 25 && state.1 == WorkspaceId::new(25) && state.2 < px(0.0),
         "the Active Workspace was not revealed; state was {state:?}"
     );
+    redraw(cx);
+    let viewport = cx.debug_bounds("workspace-list").unwrap();
+    let active = cx
+        .debug_bounds("workspace-row-25-active")
+        .expect("the new active row must be mounted");
+    assert!(active.top() >= viewport.top() && active.bottom() <= viewport.bottom());
+    assert!(active.left() >= viewport.left() && active.right() <= viewport.right());
 }
 
 #[gpui::test]
@@ -7862,7 +7968,7 @@ fn a_secondary_click_does_not_emphasize_the_sidebar_it_focuses(cx: &mut TestAppC
 }
 
 #[gpui::test]
-fn command_n_and_local_choice_should_create_and_activate_a_home_workspace(cx: &mut TestAppContext) {
+fn command_n_creates_and_activates_a_home_workspace(cx: &mut TestAppContext) {
     let (manager, records, cx) = workspace_manager(cx);
 
     cx.simulate_keystrokes("cmd-n");
@@ -8047,39 +8153,29 @@ fn workspace_menu_closure_recomputes_remaining_focus_owners(cx: &mut TestAppCont
     let (manager, _records, cx) = workspace_manager(cx);
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
-    for resizing in [true, false] {
+    right_click("workspace-row-1-active", cx);
+    assert!(manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).menu_open()));
+    assert!(!active_terminal_has_input_focus(&manager, cx));
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(!manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).menu_open()));
+    assert_eq!(
         cx.update(|window, cx| {
-            manager.update(cx, |manager, cx| {
-                let workspace_id = manager.workspaces.active_workspace_id();
-                manager.sidebar.update(cx, |sidebar, cx| {
-                    sidebar.set_resizing_for_test(resizing);
-                    sidebar.handle_menu_lifecycle(
-                        workspace_id,
-                        MenuLifecycleEvent::Opened,
-                        window,
-                        cx,
-                    );
-                    sidebar.handle_menu_lifecycle(
-                        workspace_id,
-                        MenuLifecycleEvent::Closed(spaceterm_ui::MenuCloseReason::Escape),
-                        window,
-                        cx,
-                    );
-                });
-            });
-        });
-        cx.run_until_parked();
-        assert_eq!(
-            cx.update(|window, cx| manager
-                .read(cx)
-                .workspaces
-                .active_workspace()
-                .payload()
-                .read(cx)
-                .focused_terminal_has_input_focus(window, cx)),
-            !resizing
-        );
-    }
+            let manager = manager.read(cx);
+            (
+                manager.sidebar.read(cx).is_focused(window),
+                manager.terminal_focus_blocker(window, cx),
+                manager.workspaces.active_workspace_id(),
+            )
+        }),
+        (
+            true,
+            Some(TerminalFocusBlocker::Sidebar),
+            WorkspaceId::new(1)
+        )
+    );
+    click("workspace-row-1-active", cx);
+    assert!(active_terminal_has_input_focus(&manager, cx));
 }
 
 #[gpui::test]
@@ -8211,12 +8307,12 @@ pub(crate) fn assert_scroll_shortcuts_from_sidebar_focus(
         let calls = records.commands();
         let calls = calls[before..]
             .iter()
-            .filter(|call| !matches!(call.command, RecordedSessionCommand::Focus(_)))
+            .filter(|call| !matches!(call.command, RecordedCommand::Focus(_)))
             .map(|call| (call.session_id, &call.command))
             .collect::<Vec<_>>();
         assert_eq!(
             calls,
-            vec![(3, &RecordedSessionCommand::ScrollScrollback(movement))],
+            vec![(3, &RecordedCommand::ScrollScrollback(movement))],
             "{command:?} must move only the Active Tab's Focused Pane and send no terminal input"
         );
         assert!(cx.update(|window, cx| !manager.read(cx).sidebar.read(cx).is_focused(window)));
@@ -8375,14 +8471,9 @@ fn inline_rename_frame_should_resolve_inside_the_sidebar_control_host(cx: &mut T
     let window_background = gpui_color(appearance.control_colors.input_background);
     let panel_background = gpui_color(appearance.panel_controls.colors.input_background);
     assert_ne!(window_background, panel_background);
-    let catalog = crate::ui::control_theme_catalog::catalog(
-        &appearance,
-        spaceterm_ui::ControlMotion::Standard,
-    )
-    .generation(spaceterm_ui::ControlThemeGeneration::new(u64::MAX));
     cx.update(|window, cx| {
         assert_eq!(
-            spaceterm_ui::replace_control_theme_catalog(cx, catalog),
+            crate::ui::control_theme::replace_uniform_control_catalog(cx, &appearance),
             Ok(spaceterm_ui::ControlThemeReplacement::Applied)
         );
         cx.set_global(crate::ui::appearance::InstalledChrome::single(Arc::new(
@@ -8639,16 +8730,23 @@ fn inactive_shell_exit_should_close_its_workspace_without_stealing_activation(
     cx: &mut TestAppContext,
 ) {
     let (manager, records, cx) = workspace_manager(cx);
+    cx.update(|window, _| window.activate_window());
     let inactive_sender = records
         .event_sender(1)
-        .expect("the initial Workspace terminal session must have started");
+        .expect("the initial Workspace Terminal Session must have started");
     cx.simulate_keystrokes("cmd-n");
     cx.run_until_parked();
 
+    assert!(active_terminal_has_input_focus(&manager, cx));
     inactive_sender
-        .try_send(SessionEvent::Exited(SessionExit::Success))
+        .try_send(TerminalSessionEvent::Exited(TerminalSessionExit::Success))
         .expect("the inactive shell exit must be delivered");
     cx.run_until_parked();
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id()),
+        WorkspaceId::new(2)
+    );
+    assert!(active_terminal_has_input_focus(&manager, cx));
     cx.simulate_keystrokes("cmd-n");
     cx.run_until_parked();
 
@@ -8745,7 +8843,7 @@ fn pin_change_and_unpin_should_only_affect_future_terminal_starts(cx: &mut TestA
 }
 
 #[gpui::test]
-fn remote_pin_change_and_unpin_should_preserve_sessions_and_source_directory(
+fn remote_pin_change_and_unpin_should_preserve_terminal_sessions_and_source_directory(
     cx: &mut TestAppContext,
 ) {
     let (manager, records, cx) = workspace_manager(cx);
@@ -9114,15 +9212,6 @@ fn workspace_switcher_menu_sizes_to_its_rows_and_keeps_shortcuts_clear(cx: &mut 
 }
 
 #[gpui::test]
-fn command_p_should_no_longer_open_workspace_search(cx: &mut TestAppContext) {
-    let (_, _, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-p");
-    cx.run_until_parked();
-    assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
-    assert!(cx.debug_bounds("command-palette-panel").is_none());
-}
-
-#[gpui::test]
 fn sidebar_remote_creation_should_open_host_selection_and_restore_focus_on_cancel(
     cx: &mut TestAppContext,
 ) {
@@ -9210,6 +9299,15 @@ fn creation_shortcut_should_accept_remote_switcher_name_instead_of_highlight(
 ) {
     let (manager, records, cx) = workspace_manager(cx);
     open_workspace_switcher_for_creation(cx);
+    cx.simulate_keystrokes("end home");
+    cx.run_until_parked();
+    let local_row = cx.debug_bounds("workspace-switcher-create-local").unwrap();
+    let remote_row = cx.debug_bounds("workspace-switcher-create-remote").unwrap();
+    cx.update(|window, _| {
+        let quads = window.painted_quads();
+        let background = |bounds: gpui::Bounds<Pixels>| quads.iter().find(|quad| quad.bounds == bounds.scale(window.scale_factor())).map(|quad| quad.background);
+        assert_ne!(background(local_row), background(remote_row), "keyboard highlight must visibly distinguish the Local creation row before the Remote shortcut");
+    });
     cx.simulate_keystrokes("cmd-shift-n");
     cx.run_until_parked();
     let flow = manager
@@ -9542,28 +9640,45 @@ fn workspace_activation_hints_should_follow_sidebar_order_after_closing(cx: &mut
         cx.simulate_keystrokes("cmd-n");
     }
     cx.run_until_parked();
-    manager.read_with(cx, |manager, cx| {
-        let items = manager.workspace_switcher_items(cx);
-        for (index, item) in items.iter().take(9).enumerate() {
-            assert_eq!(
-                item.shortcut_text(),
-                Some(format!("Ctrl+{}", index + 1).as_str())
-            );
-        }
-        assert_eq!(items[9].shortcut_text(), None);
+    let hints = cx.update(|_, cx| {
+        let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
+        [0, 8, 9].map(|index| workspace_activation_shortcut(index, presentation))
     });
+    assert_eq!(hints, [Some("Ctrl+1".into()), Some("Ctrl+9".into()), None]);
+    open_workspace_switcher(cx);
+    assert_eq!(switcher_shortcut_row(9, cx), Some(8));
+    assert_eq!(switcher_shortcut_row(10, cx), None);
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
             manager.close_workspace(WorkspaceId::new(1), window, cx)
         })
     });
+    cx.simulate_keystrokes("ctrl-1");
     cx.run_until_parked();
-    manager.read_with(cx, |manager, cx| {
-        let items = manager.workspace_switcher_items(cx);
-        assert_eq!(items[0].id(), &WorkspaceId::new(2));
-        assert_eq!(items[0].shortcut_text(), Some("Ctrl+1"));
-        assert_eq!(items[8].shortcut_text(), Some("Ctrl+9"));
-    });
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id()),
+        WorkspaceId::new(2)
+    );
+    open_workspace_switcher(cx);
+    assert_eq!(switcher_shortcut_row(2, cx), Some(0));
+    assert_eq!(switcher_shortcut_row(9, cx), Some(7));
+    cx.simulate_keystrokes("end");
+    cx.run_until_parked();
+    assert_eq!(switcher_shortcut_row(10, cx), Some(8));
+}
+
+fn switcher_shortcut_row(workspace: u64, cx: &mut VisualTestContext) -> Option<usize> {
+    let row = cx
+        .debug_bounds(format!("workspace-switcher-result-{workspace}").leak())
+        .expect("the Workspace switcher row should render");
+    (0..12).find(|position| {
+        cx.debug_bounds(format!("combo-box-row-{position}-shortcut").leak())
+            .is_some_and(|shortcut| {
+                row.top() <= shortcut.center().y && shortcut.center().y <= row.bottom()
+            })
+    })
 }
 
 #[gpui::test]
@@ -9592,7 +9707,7 @@ fn workspace_creation_and_switcher_buttons_should_show_hover_tooltips(cx: &mut T
 }
 
 #[gpui::test]
-fn collapsed_sidebar_toggle_should_show_its_tooltip_over_the_icon(cx: &mut TestAppContext) {
+fn collapsed_sidebar_toggle_shows_hover_tooltip(cx: &mut TestAppContext) {
     let (_, _, cx) = workspace_manager(cx);
     cx.update(|window, _| window.activate_window());
     click("toggle-sidebar-button", cx);
@@ -9721,7 +9836,7 @@ fn sidebar_keyboard_should_navigate_reveal_and_stop_at_both_ends(cx: &mut TestAp
         !records
             .commands()
             .iter()
-            .any(|call| matches!(call.command, RecordedSessionCommand::Key(_)))
+            .any(|call| matches!(call.command, RecordedCommand::Key(_)))
     );
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
@@ -9750,21 +9865,13 @@ fn hiding_sidebar_with_its_menu_open_should_restore_terminal_input(cx: &mut Test
     cx.run_until_parked();
     assert!(!manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).layout().visible));
     assert!(!cx.update(|window, cx| spaceterm_ui::window_menu_is_open(window, cx)));
-    assert!(cx.update(|window, cx| {
-        manager
-            .read(cx)
-            .workspaces
-            .active_workspace()
-            .payload()
-            .read(cx)
-            .focused_terminal_has_input_focus(window, cx)
-    }));
+    assert!(active_terminal_has_input_focus(&manager, cx));
     cx.simulate_keystrokes("x");
     assert!(
         records
             .commands()
             .iter()
-            .any(|call| matches!(call.command, RecordedSessionCommand::Key(_)))
+            .any(|call| matches!(call.command, RecordedCommand::Key(_)))
     );
 }
 
@@ -9782,21 +9889,13 @@ fn hiding_sidebar_with_new_workspace_menu_open_should_restore_terminal_input(
     cx.run_until_parked();
     assert!(!manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).layout().visible));
     assert!(!cx.update(|window, cx| spaceterm_ui::window_menu_is_open(window, cx)));
-    assert!(cx.update(|window, cx| {
-        manager
-            .read(cx)
-            .workspaces
-            .active_workspace()
-            .payload()
-            .read(cx)
-            .focused_terminal_has_input_focus(window, cx)
-    }));
+    assert!(active_terminal_has_input_focus(&manager, cx));
     cx.simulate_keystrokes("x");
     assert!(
         records
             .commands()
             .iter()
-            .any(|call| matches!(call.command, RecordedSessionCommand::Key(_)))
+            .any(|call| matches!(call.command, RecordedCommand::Key(_)))
     );
 }
 
@@ -9839,20 +9938,12 @@ fn sidebar_keyboard_rename_cancel_should_preserve_name_and_restore_sidebar_focus
         !records
             .commands()
             .iter()
-            .any(|call| matches!(call.command, RecordedSessionCommand::Key(_)))
+            .any(|call| matches!(call.command, RecordedCommand::Key(_)))
     );
 
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
-    assert!(cx.update(|window, cx| {
-        manager
-            .read(cx)
-            .workspaces
-            .active_workspace()
-            .payload()
-            .read(cx)
-            .focused_terminal_has_input_focus(window, cx)
-    }));
+    assert!(active_terminal_has_input_focus(&manager, cx));
 }
 
 #[gpui::test]
@@ -9921,8 +10012,7 @@ fn sidebar_keyboard_menu_should_rename_and_restore_focus(cx: &mut TestAppContext
 }
 
 /// The first Tab's leading inset reaches under the top-left chrome, so the mark before an inactive
-/// first Tab paints in the chrome's bounds. An opaque material gives the chrome an opaque title-bar
-/// surface, and nothing the Workspace paints afterwards may cover the mark.
+/// first Tab paints in the chrome's bounds.
 #[gpui::test]
 fn tab_strip_start_mark_should_stay_visible_beside_the_opaque_top_chrome(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
@@ -9974,7 +10064,9 @@ fn tab_strip_start_mark_should_stay_visible_beside_the_opaque_top_chrome(cx: &mu
 }
 
 #[gpui::test]
-fn native_controls_follow_live_layout_on_both_sides_of_the_sidebar_toggle(cx: &mut TestAppContext) {
+fn client_window_controls_follow_live_layout_on_both_sides_of_the_sidebar_toggle(
+    cx: &mut TestAppContext,
+) {
     let (_, _, cx) = workspace_manager(cx);
     cx.simulate_decorations(gpui::Decorations::Client {
         tiling: gpui::Tiling::default(),
@@ -10046,5 +10138,110 @@ fn native_controls_follow_live_layout_on_both_sides_of_the_sidebar_toggle(cx: &m
                 }
             }
         }
+    }
+}
+
+fn active_terminal_has_input_focus(
+    manager: &Entity<WorkspaceManager>,
+    cx: &mut VisualTestContext,
+) -> bool {
+    cx.update(|window, cx| {
+        manager
+            .read(cx)
+            .workspaces
+            .active_workspace()
+            .payload()
+            .read(cx)
+            .focused_terminal_has_input_focus(window, cx)
+    })
+}
+
+#[derive(Default)]
+struct RecordingRenderedText(Mutex<Vec<String>>);
+
+impl RecordingRenderedText {
+    fn context(cx: &TestAppContext) -> (TestAppContext, Arc<Self>) {
+        let text = Arc::new(Self::default());
+        let context = TestAppContext::build_with_text_system(
+            cx.dispatcher.clone(),
+            cx.test_function_name(),
+            text.clone(),
+        );
+        (context, text)
+    }
+}
+
+impl gpui::PlatformTextSystem for RecordingRenderedText {
+    fn add_fonts(&self, fonts: Vec<std::borrow::Cow<'static, [u8]>>) -> anyhow::Result<()> {
+        gpui::NoopTextSystem.add_fonts(fonts)
+    }
+    fn all_font_names(&self) -> Vec<String> {
+        gpui::NoopTextSystem.all_font_names()
+    }
+    fn font_id(&self, font: &gpui::Font) -> anyhow::Result<gpui::FontId> {
+        gpui::NoopTextSystem.font_id(font)
+    }
+    fn font_metrics(&self, id: gpui::FontId) -> gpui::FontMetrics {
+        gpui::NoopTextSystem.font_metrics(id)
+    }
+    fn typographic_bounds(
+        &self,
+        id: gpui::FontId,
+        glyph: gpui::GlyphId,
+    ) -> anyhow::Result<gpui::Bounds<f32>> {
+        gpui::NoopTextSystem.typographic_bounds(id, glyph)
+    }
+    fn advance(&self, id: gpui::FontId, glyph: gpui::GlyphId) -> anyhow::Result<gpui::Size<f32>> {
+        gpui::NoopTextSystem.advance(id, glyph)
+    }
+    fn glyph_for_char(&self, id: gpui::FontId, c: char) -> Option<gpui::GlyphId> {
+        gpui::NoopTextSystem.glyph_for_char(id, c)
+    }
+    fn glyph_raster_bounds(
+        &self,
+        params: &gpui::RenderGlyphParams,
+    ) -> anyhow::Result<gpui::Bounds<gpui::DevicePixels>> {
+        gpui::NoopTextSystem.glyph_raster_bounds(params)
+    }
+    fn rasterize_glyph(
+        &self,
+        params: &gpui::RenderGlyphParams,
+        bounds: gpui::Bounds<gpui::DevicePixels>,
+    ) -> anyhow::Result<(gpui::Size<gpui::DevicePixels>, Vec<u8>)> {
+        gpui::NoopTextSystem.rasterize_glyph(params, bounds)
+    }
+    fn layout_line(&self, text: &str, size: Pixels, runs: &[gpui::FontRun]) -> gpui::LineLayout {
+        self.0.lock().unwrap().push(text.to_owned());
+        gpui::NoopTextSystem.layout_line(text, size, runs)
+    }
+    fn recommended_rendering_mode(
+        &self,
+        id: gpui::FontId,
+        size: Pixels,
+    ) -> gpui::TextRenderingMode {
+        gpui::NoopTextSystem.recommended_rendering_mode(id, size)
+    }
+}
+
+fn assert_rendered_text(
+    selector: &'static str,
+    expected: &str,
+    text: &RecordingRenderedText,
+    cx: &mut VisualTestContext,
+) {
+    text.0.lock().unwrap().clear();
+    // A font reload invalidates GPUI's line cache so this observation belongs to the current mount.
+    cx.update(|_, cx| cx.text_system().add_fonts(Vec::new()).unwrap());
+    redraw(cx);
+    assert!(
+        cx.debug_bounds(selector).is_some(),
+        "the expected text element must be mounted"
+    );
+    let lines = text.0.lock().unwrap();
+    for line in expected.lines().filter(|line| !line.is_empty()) {
+        assert!(
+            lines.iter().any(|rendered| rendered == line),
+            "the current mount must shape the exact expected text: {line:?}"
+        );
     }
 }

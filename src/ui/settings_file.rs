@@ -1,8 +1,5 @@
 //! Follows the Settings Document file while another program edits it.
-//!
-//! A person edits settings.json in their own editor. Every save SpaceTerm did not make is adopted
-//! the way an explicit reload adopts it, so every window follows the file and a malformed save
-//! keeps the last valid settings until a valid one arrives.
+//! A malformed save keeps the last valid settings until a valid one arrives.
 
 #[cfg(test)]
 #[path = "settings_file_tests.rs"]
@@ -13,7 +10,7 @@ use std::{rc::Rc, time::Duration};
 use gpui::{App, AsyncApp, BorrowAppContext as _, Global, SharedString, Task};
 
 use crate::platform::settings_file::{SettingsFileAccess, SettingsFileWatch};
-use crate::settings::{SettingsError, UserSettings};
+use crate::settings::{Settings, SettingsError};
 
 /// How long the file stays quiet before SpaceTerm reads it, because editors often save in steps.
 pub(crate) const SETTLE_DELAY: Duration = Duration::from_millis(100);
@@ -32,11 +29,7 @@ impl Global for SettingsFile {}
 
 impl SettingsFile {
     /// Starts following the file for the application's life.
-    pub(crate) fn install(
-        settings: UserSettings,
-        access: Rc<dyn SettingsFileAccess>,
-        cx: &mut App,
-    ) {
+    pub(crate) fn install(settings: Settings, access: Rc<dyn SettingsFileAccess>, cx: &mut App) {
         let (changes, received) = async_channel::bounded(1);
         let settings_changed = settings.subscribe();
         let follow = cx.spawn(async move |cx| follow(settings, received, cx).await);
@@ -68,10 +61,8 @@ impl SettingsFile {
         cx.try_global::<Self>().map(|file| file.access.location())
     }
 
-    /// Opens the file in the program the Operating System assigns to it.
-    ///
-    /// The file must already exist. Its directory exists by then too, so a watch that could not
-    /// start at launch starts here.
+    /// Opens the file in the program the Operating System assigns to it. The file must already
+    /// exist.
     pub(crate) fn open(cx: &mut App) -> bool {
         let Some(access) = cx.try_global::<Self>().map(|file| Rc::clone(&file.access)) else {
             return false;
@@ -98,7 +89,7 @@ impl SettingsFile {
     }
 }
 
-async fn follow(settings: UserSettings, changes: async_channel::Receiver<()>, cx: &mut AsyncApp) {
+async fn follow(settings: Settings, changes: async_channel::Receiver<()>, cx: &mut AsyncApp) {
     let settings_changed = settings.subscribe();
     while changes.recv().await.is_ok() {
         cx.background_executor().timer(SETTLE_DELAY).await;

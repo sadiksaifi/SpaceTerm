@@ -22,8 +22,8 @@ use super::terminal_status::{StatusColors, StatusGlyph};
 use super::{
     ActivateTab1, ActivateTab2, ActivateTab3, ActivateTab4, ActivateTab5, ActivateTab6,
     ActivateTab7, ActivateTab8, ActivateTab9, CloseTab, CreateTab, MoveTabLeft, MoveTabRight,
-    NextTab, PaneHost, PaneHostEvent, PreparedPaneHostRemoteRestart, PreviousTab,
-    RemoteChildLaunchUnavailable, RemotePaneHostLifecycleError, TERMINAL_KEY_CONTEXT, TabIdentity,
+    NextTab, PreparedTabViewRemoteRestart, PreviousTab, RemoteChildLaunchUnavailable,
+    RemoteTabViewLifecycleError, TERMINAL_KEY_CONTEXT, TabIdentity, TabView, TabViewEvent,
     WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
 };
 #[cfg(test)]
@@ -33,16 +33,16 @@ use super::{TOP_CHROME_HEIGHT, WORKSPACE_SIDEBAR_MINIMUM_WIDTH};
 /// A typed rejection while coordinating Remote lifecycle across the Workspace's Tab hierarchy.
 pub(crate) enum RemoteTabManagerLifecycleError {
     #[error(transparent)]
-    Revalidation(#[from] RemoteChannelRevalidationError),
+    Revalidation(#[from] TerminalSessionChannelRevalidationError),
     #[error(transparent)]
-    ChannelUnavailable(#[from] RemoteChannelUnavailable),
+    ChannelUnavailable(#[from] TerminalSessionChannelUnavailable),
     #[error("remote restart preparation was superseded")]
     PreparationSuperseded,
-    #[error("Tab {tab_id} cannot change remote session lifecycle: {source}")]
+    #[error("Tab {tab_id} cannot change remote Terminal Session lifecycle: {source}")]
     Tab {
         tab_id: TabId,
         #[source]
-        source: RemotePaneHostLifecycleError,
+        source: RemoteTabViewLifecycleError,
     },
     #[error("Tab {0} changed after remote restart preparation")]
     TabChanged(TabId),
@@ -53,7 +53,7 @@ pub(crate) enum RemoteTabManagerLifecycleError {
 /// No Tab or Pane is mutated until the complete token has been prepared and revalidated.
 pub(crate) struct PreparedTabManagerRemoteRestart {
     session_factory: WorkspaceTerminalSessionFactory,
-    tabs: RemoteRestartBatch<(TabId, Entity<PaneHost>, PreparedPaneHostRemoteRestart)>,
+    tabs: RemoteRestartBatch<(TabId, Entity<TabView>, PreparedTabViewRemoteRestart)>,
 }
 use crate::appearance::ChromeColors;
 use crate::appearance::Color;
@@ -67,7 +67,8 @@ use crate::platform::window_movement::{
 };
 use crate::terminal::{
     NativeServiceOrigin, NativeServiceStatus, PreparedWorkspaceTerminalLaunch,
-    RemoteChannelRevalidationError, RemoteChannelUnavailable, WorkspaceTerminalSessionFactory,
+    TerminalSessionChannelRevalidationError, TerminalSessionChannelUnavailable,
+    WorkspaceTerminalSessionFactory,
 };
 use gpui::prelude::*;
 use gpui::{
@@ -86,21 +87,11 @@ const TAB_ITEM_WIDTH: f32 = 178.2;
 const TAB_ITEM_MINIMUM_WIDTH: f32 = 159.3;
 pub(super) const TAB_ITEM_MAXIMUM_WIDTH: f32 = 216.0;
 /// The title starts as far inside the chip as a Settings navigation label does inside its own, and
-/// Close keeps the same air to the chip's right edge as it keeps above and below.
+/// Close uses the same inset at the chip's right, top, and bottom edges.
 const TAB_ITEM_LEFT_PADDING: f32 = 11.0;
 const TAB_ITEM_RIGHT_PADDING: f32 = 7.0;
 /// The geometry of the chip carrying one Tab's material, resolved from the Workspace frame.
-///
-/// A Tab keeps the full height of the title bar as its hit target and its hover region; only the
-/// paint moves inward. The insets are what the eye actually measures:
-///
-/// - vertically the chip faces the window's top edge and, below the strip, the Pane's own surface,
-///   so it carries a whole frame space on each side of the band beneath the window's edge;
-/// - horizontally it faces another chip, so each side carries a share and the visible gap between
-///   two Tabs is one frame space again.
-///
-/// The radius comes from the frame's one radius family, so a Tab, a selected sidebar row, and a
-/// floating Pane read as the same shape at three sizes rather than as cousins.
+/// A Tab keeps the full title-bar height as its hit target; only the paint moves inward.
 fn tab_chip_shape(appearance: &super::appearance::ChromeAppearance, cx: &App) -> ChipShape {
     let frame = super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
     ChipShape {
@@ -111,30 +102,17 @@ fn tab_chip_shape(appearance: &super::appearance::ChromeAppearance, cx: &App) ->
     }
 }
 
-/// The leading Terminal glyph every Tab carries, and the air between it and the Tab's identity.
+/// The leading Terminal glyph every Tab carries, and its gap to the Tab's identity.
 const TAB_ORIGIN_GAP: f32 = 6.0;
-/// The air after the status glyph, and before the close control.
+/// The gap between the status glyph and close control.
 const TAB_TRAILING_GAP: f32 = 4.0;
-/// How much of a Tab's identity the activity may claim when a place beside it needs a share.
-///
-/// The place yields all the room a narrowing Tab needs, so a short activity stays whole. A long
-/// one is capped here instead, so a wordy title never pushes the directory leaf out of the Tab.
+/// The share of a Tab's identity the activity may claim, so a wordy title never pushes the
+/// directory leaf out of the Tab.
 const TAB_ACTIVITY_MAXIMUM_SHARE: f32 = 0.6;
-/// The Compact-density length of the quiet mark at a Tab-strip boundary that no chip touches.
-///
-/// Inactive Tabs rest as text on the bar, so a short hairline is enough to say where one title
-/// ends: between two inactive Tabs, after an inactive last Tab, and before an inactive first Tab
-/// beside the sidebar's edge. The Active Tab's chip and the collapsed Workspace Switcher's chip
-/// already have an edge, so no mark touches either of them. Like the chip insets,
-/// the length is a density baseline: 18 points at Compact and 22.5 at Comfortable, so the mark
-/// keeps its proportion to a Tab that grows with density.
+/// The Compact-density length of the hairline at a Tab-strip boundary that no chip touches.
 const TAB_SEPARATOR_LENGTH: f32 = 18.0;
-/// The mark's thickness: one logical point at every density, the same hairline as the chip rim.
-///
-/// Density lengthens the mark but never thickens it. A whole point covers at least one whole device
-/// pixel at every supported display scale, so the mark stays thin on a 1x display without ever
-/// dropping below a pixel on a fractional one, and a width derived from the scale would leave
-/// layout rounding to decide which side of an edge it lands on.
+/// One logical point at every density. It covers at least one device pixel at every supported
+/// scale, where a scale-derived width would leave layout rounding to pick a side of the edge.
 const TAB_SEPARATOR_WIDTH: f32 = 1.0;
 
 /// The selected Tab material shared by the collapsed Workspace Switcher.
@@ -200,8 +178,7 @@ impl TabChromePresentation {
                 window_active,
                 show_borders,
                 background: colors.title_bar_inactive_background,
-                // ChromeAppearance has already prepared the common active-state roles for an
-                // inactive window. Keep the legacy inactive-selected aliases out of rendering.
+                // ChromeAppearance has already prepared the active-state roles for an inactive window.
                 active_tab_background: colors.tab_active_background,
                 active_tab_border: colors.tab_active_border,
                 active_tab_hover_background: colors.tab_active_hover_background,
@@ -222,15 +199,7 @@ impl TabChromePresentation {
     }
 
     /// The material one Tab rests on, as an inset chip within the title-bar surface.
-    ///
-    /// The Active Tab uses an inset selection fill tuned to the title bar, with a stronger fill
-    /// under the pointer. Built-in appearances omit decorative outlines; custom Tab edges remain
-    /// supported.
-    ///
-    /// An inactive Tab paints its own fill rather than nothing at all, so a scheme that authors a
-    /// distinct inactive Tab color still gets it. The built-in palette resolves that color to the
-    /// title bar itself, which leaves an inactive Tab as text on the bar and the Active Tab as the
-    /// one shape on it.
+    /// An inactive Tab paints its own fill so a scheme's distinct inactive Tab color still shows.
     fn tab_chip(
         &self,
         active: bool,
@@ -415,7 +384,7 @@ struct DraggedTab {
 }
 
 pub(crate) struct TabManager {
-    tabs: TabCollection<Entity<PaneHost>>,
+    tabs: TabCollection<Entity<TabView>>,
     session_factory: WorkspaceTerminalSessionFactory,
     pane_construction: PaneConstruction,
     active: bool,
@@ -470,7 +439,7 @@ impl TabManager {
         operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Result<Self, RemoteChannelUnavailable> {
+    ) -> Result<Self, TerminalSessionChannelUnavailable> {
         let prepared_launch = session_factory.prepare_child_launch()?;
         Ok(Self::new_with_prepared_initial_launch(
             session_factory,
@@ -491,7 +460,7 @@ impl TabManager {
         cx: &mut Context<Self>,
     ) -> Self {
         let tabs = TabCollection::new(|tab_id| {
-            Self::create_pane_host(
+            Self::create_tab_view(
                 tab_id,
                 session_factory.clone(),
                 prepared_launch,
@@ -529,16 +498,16 @@ impl TabManager {
         }
     }
 
-    fn create_pane_host(
+    fn create_tab_view(
         tab_id: TabId,
         session_factory: WorkspaceTerminalSessionFactory,
         prepared_launch: PreparedWorkspaceTerminalLaunch,
         pane_construction: PaneConstruction,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Entity<PaneHost> {
-        let pane_host = cx.new(|cx| {
-            PaneHost::new_with_prepared_launch(
+    ) -> Entity<TabView> {
+        let view = cx.new(|cx| {
+            TabView::new_with_prepared_launch(
                 tab_id,
                 session_factory,
                 prepared_launch,
@@ -547,35 +516,32 @@ impl TabManager {
                 cx,
             )
         });
-        debug_assert_eq!(pane_host.read(cx).tab_id(), tab_id);
+        debug_assert_eq!(view.read(cx).tab_id(), tab_id);
         cx.subscribe_in(
-            &pane_host,
+            &view,
             window,
-            |manager, _, event: &PaneHostEvent, window, cx| match event {
-                PaneHostEvent::UserClosePaneRequested { tab_id, pane_id } => {
+            |manager, _, event: &TabViewEvent, window, cx| match event {
+                TabViewEvent::UserClosePaneRequested { tab_id, pane_id } => {
                     cx.emit(TabManagerEvent::ClosePaneRequested {
                         tab_id: *tab_id,
                         pane_id: *pane_id,
                     });
                 }
-                PaneHostEvent::CloseTabRequested { tab_id } => {
+                TabViewEvent::CloseTabRequested { tab_id } => {
                     manager.close_tab(*tab_id, window, cx);
                 }
-                PaneHostEvent::PresentationChanged { .. } => {
+                TabViewEvent::PresentationChanged { .. } => {
                     cx.emit(TabManagerEvent::PresentationChanged);
                     cx.notify();
                 }
             },
         )
         .detach();
-        cx.subscribe(
-            &pane_host,
-            |_, _, event: &RemoteChildLaunchUnavailable, cx| {
-                cx.emit(*event);
-            },
-        )
+        cx.subscribe(&view, |_, _, event: &RemoteChildLaunchUnavailable, cx| {
+            cx.emit(*event);
+        })
         .detach();
-        pane_host
+        view
     }
 
     pub(crate) fn focus(&self, window: &mut Window, cx: &mut App) {
@@ -603,9 +569,9 @@ impl TabManager {
             return NativeServiceStatus::default();
         }
         let blocker = self.terminal_focus_blocker();
-        self.tabs.active_tab().update(cx, |pane_host, cx| {
-            pane_host.set_focus_branch(true, blocker, cx);
-            pane_host.native_service_status(workspace_id, window, cx)
+        self.tabs.active_tab().update(cx, |view, cx| {
+            view.set_focus_branch(true, blocker, cx);
+            view.native_service_status(workspace_id, window, cx)
         })
     }
 
@@ -639,7 +605,7 @@ impl TabManager {
         self.active = true;
         self.tabs
             .active_tab()
-            .update(cx, |pane_host, cx| pane_host.activate_without_focus(cx));
+            .update(cx, |view, cx| view.activate_without_focus(cx));
         self.sync_terminal_focus_blocker(cx);
     }
 
@@ -647,14 +613,14 @@ impl TabManager {
         self.active = false;
         self.tabs
             .active_tab()
-            .update(cx, |pane_host, cx| pane_host.deactivate(cx));
+            .update(cx, |view, cx| view.deactivate(cx));
         self.tab_selector_pressed = None;
         self.sync_terminal_focus_blocker(cx);
     }
 
     pub(crate) fn close_all(&self, cx: &mut App) {
-        for (_, pane_host) in self.tabs.iter() {
-            pane_host.update(cx, |pane_host, cx| pane_host.close_all(cx));
+        for (_, view) in self.tabs.iter() {
+            view.update(cx, |view, cx| view.close_all(cx));
         }
     }
 
@@ -662,8 +628,8 @@ impl TabManager {
         &'a self,
         cx: &'a App,
     ) -> impl Iterator<Item = (TabId, PaneId, &'a super::terminal_pane::TerminalPane)> {
-        self.tabs.iter().flat_map(move |(tab, host)| {
-            host.read(cx)
+        self.tabs.iter().flat_map(move |(tab, view)| {
+            view.read(cx)
                 .terminal_panes(cx)
                 .map(move |(pane, terminal)| (tab, pane, terminal))
         })
@@ -676,11 +642,11 @@ impl TabManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(host) = self.tabs.tab(tab_id).cloned() else {
+        let Some(view) = self.tabs.tab(tab_id).cloned() else {
             return;
         };
-        host.update(cx, |host, cx| {
-            host.close_pane_authorized(pane_id, window, cx)
+        view.update(cx, |view, cx| {
+            view.close_pane_authorized(pane_id, window, cx)
         });
     }
 
@@ -694,25 +660,20 @@ impl TabManager {
     }
 
     /// Atomically disconnects every Tab and Pane for the authoritative connection generation.
-    ///
-    /// The complete hierarchy is prevalidated before mutation. Tab IDs, Pane layouts, active and
-    /// focused identities, zoom, and final presentations remain intact while input and new Remote
-    /// child launches are blocked.
+    /// The whole hierarchy is prevalidated before mutation.
     pub(crate) fn disconnect_remote(
         &mut self,
         generation: u64,
         cx: &mut Context<Self>,
     ) -> Result<(), RemoteTabManagerLifecycleError> {
-        for (tab_id, pane_host) in self.tabs.iter() {
-            pane_host
-                .read(cx)
+        for (tab_id, view) in self.tabs.iter() {
+            view.read(cx)
                 .can_disconnect_remote(generation, cx)
                 .map_err(|source| RemoteTabManagerLifecycleError::Tab { tab_id, source })?;
         }
-        for (_, pane_host) in self.tabs.iter() {
-            pane_host.update(cx, |pane_host, cx| {
-                pane_host
-                    .disconnect_remote(generation, cx)
+        for (_, view) in self.tabs.iter() {
+            view.update(cx, |view, cx| {
+                view.disconnect_remote(generation, cx)
                     .expect("prevalidated Tab disconnect must remain legal")
             });
         }
@@ -722,11 +683,8 @@ impl TabManager {
         Ok(())
     }
 
-    /// Revalidates and reserves one fresh Remote channel for every preserved Pane.
-    ///
-    /// Reservation is asynchronous and completes before hierarchy mutation. Each channel requires
-    /// its own current physical-identity grant. Cancellation, stale generation, directory change,
-    /// or any reservation failure drops all prepared tokens and leaves the hierarchy disconnected.
+    /// Revalidates and reserves one fresh Terminal Session Channel for every preserved Pane.
+    /// Any failure drops all prepared tokens and leaves the hierarchy disconnected.
     pub(crate) fn prepare_remote_restart(
         &mut self,
         session_factory: WorkspaceTerminalSessionFactory,
@@ -737,8 +695,8 @@ impl TabManager {
         let sources: Vec<_> = self
             .tabs
             .iter()
-            .flat_map(|(_, host)| {
-                host.read(cx)
+            .flat_map(|(_, view)| {
+                view.read(cx)
                     .terminal_panes(cx)
                     .map(|(_, terminal)| terminal.current_directory())
             })
@@ -754,7 +712,7 @@ impl TabManager {
             Ok(factories) => factories,
             Err(_) => {
                 return Task::ready(Err(
-                    RemoteChannelRevalidationError::DirectoryUnavailable.into()
+                    TerminalSessionChannelRevalidationError::DirectoryUnavailable.into(),
                 ));
             }
         };
@@ -795,17 +753,17 @@ impl TabManager {
     ) -> Result<PreparedTabManagerRemoteRestart, RemoteTabManagerLifecycleError> {
         let mut prepared_launches = prepared_launches.into_iter();
         let mut tabs = Vec::with_capacity(self.tabs.len());
-        for (tab_id, pane_host) in self.tabs.iter() {
-            let pane_count = pane_host.read(cx).pane_count();
+        for (tab_id, view) in self.tabs.iter() {
+            let pane_count = view.read(cx).pane_count();
             let launches: Vec<_> = prepared_launches.by_ref().take(pane_count).collect();
             if launches.len() != pane_count {
                 return Err(RemoteTabManagerLifecycleError::TabChanged(tab_id));
             }
-            let prepared = pane_host
+            let prepared = view
                 .read(cx)
                 .prepare_remote_restart(session_factory.clone(), generation, launches, cx)
                 .map_err(|source| RemoteTabManagerLifecycleError::Tab { tab_id, source })?;
-            tabs.push((tab_id, pane_host.clone(), prepared));
+            tabs.push((tab_id, view.clone(), prepared));
         }
         if prepared_launches.next().is_some() {
             return Err(RemoteTabManagerLifecycleError::PreparationSuperseded);
@@ -817,9 +775,7 @@ impl TabManager {
     }
 
     /// Commits a fully prepared Remote restart across the existing Tab hierarchy.
-    ///
-    /// The method revalidates all Tab and Pane identities before the first commit, then replaces
-    /// Terminal Sessions in place. Post-commit session startup failures remain local to each Pane.
+    /// Terminal Session startup failures after the commit stay local to each Pane.
     pub(crate) fn commit_remote_restart(
         &mut self,
         prepared: PreparedTabManagerRemoteRestart,
@@ -831,15 +787,14 @@ impl TabManager {
             self.tabs.len(),
             || RemoteTabManagerLifecycleError::TabChanged(self.tabs.active_tab_id()),
             cx,
-            |(tab_id, pane_host, host_restart), cx| {
+            |(tab_id, view, host_restart), cx| {
                 let Some(current) = self.tabs.tab(*tab_id) else {
                     return Err(RemoteTabManagerLifecycleError::TabChanged(*tab_id));
                 };
-                if current.entity_id() != pane_host.entity_id() {
+                if current.entity_id() != view.entity_id() {
                     return Err(RemoteTabManagerLifecycleError::TabChanged(*tab_id));
                 }
-                pane_host
-                    .read(cx)
+                view.read(cx)
                     .can_commit_remote_restart(host_restart, cx)
                     .map_err(|source| RemoteTabManagerLifecycleError::Tab {
                         tab_id: *tab_id,
@@ -847,10 +802,9 @@ impl TabManager {
                     })?;
                 Ok(())
             },
-            |(tab_id, pane_host, host_restart), cx| {
-                pane_host.update(cx, |pane_host, cx| {
-                    pane_host
-                        .commit_remote_restart(host_restart, session_factory.clone(), window, cx)
+            |(tab_id, view, host_restart), cx| {
+                view.update(cx, |view, cx| {
+                    view.commit_remote_restart(host_restart, session_factory.clone(), window, cx)
                         .unwrap_or_else(|error| {
                             panic!("prevalidated Tab {tab_id} restart commit failed: {error}")
                         })
@@ -869,7 +823,7 @@ impl TabManager {
         let panes = self
             .tabs
             .iter()
-            .map(|(_, pane_host)| pane_host.read(cx).pane_count())
+            .map(|(_, view)| view.read(cx).pane_count())
             .sum();
         (self.tabs.len(), panes)
     }
@@ -891,10 +845,8 @@ impl TabManager {
         cx: &mut Context<Self>,
     ) {
         self.session_factory.set_pinned_directory(directory.clone());
-        for (_, pane_host) in self.tabs.iter() {
-            pane_host.update(cx, |pane_host, _| {
-                pane_host.set_pinned_directory(directory.clone())
-            });
+        for (_, view) in self.tabs.iter() {
+            view.update(cx, |view, _| view.set_pinned_directory(directory.clone()));
         }
     }
 
@@ -917,8 +869,6 @@ impl TabManager {
     }
 
     /// Places the Operating-System Window's own control at the trailing end of the Tab bar.
-    ///
-    /// The Workspace manager owns one per window and hands it to whichever Tab manager is active.
     pub(crate) fn set_window_close_handler(&mut self, handler: spaceterm_ui::WindowCloseHandler) {
         self.window_close_handler = Some(handler);
     }
@@ -962,10 +912,10 @@ impl TabManager {
     fn sync_terminal_focus_blocker(&self, cx: &mut Context<Self>) {
         let blocker = self.terminal_focus_blocker();
         let active_tab_id = self.tabs.active_tab_id();
-        for (tab_id, pane_host) in self.tabs.iter() {
+        for (tab_id, view) in self.tabs.iter() {
             let active = self.active && tab_id == active_tab_id;
-            pane_host.update(cx, |pane_host, cx| {
-                pane_host.set_focus_branch(active, blocker, cx);
+            view.update(cx, |view, cx| {
+                view.set_focus_branch(active, blocker, cx);
             });
         }
     }
@@ -1054,10 +1004,7 @@ impl TabManager {
     }
 
     /// Lifts a Tab to move it in the Tab bar. A press that becomes a drag never selects its Tab.
-    ///
-    /// The Tab keeps its place until release, and an exact copy of it follows the pointer. The
-    /// motion that starts the drag already marks a slot, so a quick drag released on its first move
-    /// still lands.
+    /// The starting motion already marks a slot, so a drag released on its first move still lands.
     fn begin_tab_drag(
         &mut self,
         tab_id: TabId,
@@ -1149,7 +1096,7 @@ impl TabManager {
     }
 
     #[cfg(test)]
-    pub(crate) fn active_pane_host(&self) -> Entity<PaneHost> {
+    pub(crate) fn active_tab_view(&self) -> Entity<TabView> {
         self.tabs.active_tab().clone()
     }
 
@@ -1274,7 +1221,7 @@ impl TabManager {
         let session_factory = self.session_factory.clone();
         let pane_construction = self.pane_construction.clone();
         let result = self.tabs.create_tab(|tab_id| {
-            Self::create_pane_host(
+            Self::create_tab_view(
                 tab_id,
                 session_factory,
                 prepared_launch,
@@ -1290,15 +1237,15 @@ impl TabManager {
                 return;
             }
         };
-        let Some(pane_host) = self.tabs.tab(tab_id).cloned() else {
+        let Some(view) = self.tabs.tab(tab_id).cloned() else {
             unreachable!("a newly created Tab must remain owned by its collection")
         };
 
-        previous_tab.update(cx, |pane_host, cx| pane_host.deactivate(cx));
+        previous_tab.update(cx, |view, cx| view.deactivate(cx));
         if self.active {
-            pane_host.update(cx, |pane_host, cx| pane_host.activate(window, cx));
+            view.update(cx, |view, cx| view.activate(window, cx));
         } else {
-            pane_host.update(cx, |pane_host, cx| pane_host.deactivate(cx));
+            view.update(cx, |view, cx| view.deactivate(cx));
         }
         self.sync_terminal_focus_blocker(cx);
         self.scroll_active_tab_into_view();
@@ -1319,16 +1266,16 @@ impl TabManager {
         }
 
         if previous_tab_id != tab_id {
-            previous_tab.update(cx, |pane_host, cx| pane_host.deactivate(cx));
+            previous_tab.update(cx, |view, cx| view.deactivate(cx));
         }
         let blocker = self.terminal_focus_blocker();
-        next_tab.update(cx, |pane_host, cx| {
-            pane_host.set_focus_branch(self.active, blocker, cx);
+        next_tab.update(cx, |view, cx| {
+            view.set_focus_branch(self.active, blocker, cx);
         });
         if self.active {
-            next_tab.update(cx, |pane_host, cx| pane_host.activate(window, cx));
+            next_tab.update(cx, |view, cx| view.activate(window, cx));
         } else {
-            next_tab.update(cx, |pane_host, cx| pane_host.deactivate(cx));
+            next_tab.update(cx, |view, cx| view.deactivate(cx));
         }
         self.sync_terminal_focus_blocker(cx);
         self.scroll_active_tab_into_view();
@@ -1372,13 +1319,13 @@ impl TabManager {
                 active_tab_id,
             }) => {
                 debug_assert_eq!(closed_tab_id, tab_id);
-                payload.update(cx, |pane_host, cx| pane_host.close_all(cx));
+                payload.update(cx, |view, cx| view.close_all(cx));
                 if was_active {
                     let active_tab = self.tabs.active_tab().clone();
                     if self.active {
-                        active_tab.update(cx, |pane_host, cx| pane_host.activate(window, cx));
+                        active_tab.update(cx, |view, cx| view.activate(window, cx));
                     } else {
-                        active_tab.update(cx, |pane_host, cx| pane_host.deactivate(cx));
+                        active_tab.update(cx, |view, cx| view.deactivate(cx));
                     }
                 }
                 self.tab_selector_pressed = None;
@@ -1477,7 +1424,7 @@ impl TabManager {
         window: &Window,
         cx: &App,
     ) -> AnyElement {
-        let Some(pane_host) = self.tabs.tab(tab_id) else {
+        let Some(view) = self.tabs.tab(tab_id) else {
             return div().into_any_element();
         };
         let appearance = super::appearance::chrome(cx);
@@ -1488,7 +1435,7 @@ impl TabManager {
         );
         self.render_tab_item(
             tab_id,
-            pane_host.read(cx).tab_identity(),
+            view.read(cx).tab_identity(),
             tab_id == self.tabs.active_tab_id(),
             TabItemRole::Lifted,
             TabHover {
@@ -1512,11 +1459,8 @@ impl TabManager {
         .into_any_element()
     }
 
-    /// One Tab in the Tab bar, or the lifted copy of it that follows the pointer during a drag.
-    ///
-    /// Both paint the same face, so a lifted Tab looks exactly like the Tab it lifts. The copy is
-    /// always under the pointer, so it keeps the paint a Tab has there, and it claims no pointer
-    /// input because it lies over every drop target.
+    /// One Tab in the Tab bar, or the lifted copy that follows the pointer during a drag.
+    /// The copy claims no pointer input because it lies over every drop target.
     #[expect(
         clippy::too_many_arguments,
         reason = "one Tab render step needs its identity, role, hover, presentation, owner, appearance, and host geometry"
@@ -1573,7 +1517,7 @@ impl TabManager {
         let text_style = appearance.typography.style(TextRole::Navigation);
         let mut identity = identity;
         identity.glyph =
-            super::pane_host::drawable_reported_glyph(identity.glyph.as_ref(), |glyph| {
+            super::tab_view::drawable_reported_glyph(identity.glyph.as_ref(), |glyph| {
                 super::terminal_status::reported_glyph_is_drawable(
                     glyph,
                     &text_style.font,
@@ -1733,10 +1677,8 @@ impl TabManager {
         let active_tab_id = self.tabs.active_tab_id();
         let background = presentation.background;
         let create_icon_size = appearance.icons.metrics(IconRole::Chrome).glyph_size;
-        // A chip is inset inside its item, which would add to the gap the Workspace identity before
-        // the strip already leaves. The strip pulls that inset back, so the visible distance from
-        // the identity to the first Tab is one frame space and the first Tab's paint lines up with
-        // the Pane beneath it.
+        // The strip pulls back the chip inset so the first Tab sits one frame space from the
+        // identity.
         let leading_alignment =
             super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx)
                 .chip_strip_leading_offset();
@@ -1767,13 +1709,8 @@ impl TabManager {
         let insertion = self.tab_reorder.insertion(self.tabs.len());
         let marker_inset = tab_chip_shape(appearance, cx).inset_y;
         let mut previous_inactive_tab = None;
-        for (index, ((tab_id, pane_host), (fade, hover))) in
-            self.tabs.iter().zip(hovers).enumerate()
-        {
+        for (index, ((tab_id, view), (fade, hover))) in self.tabs.iter().zip(hovers).enumerate() {
             let active = tab_id == active_tab_id;
-            // The strip's leading neighbour is the sidebar's edge while the sidebar is visible,
-            // and the Workspace Switcher's chip while it is collapsed. Its trailing neighbour is
-            // the bare Create Tab glyph.
             let leading_boundary = if index == 0 {
                 (self.sidebar_visible && !active).then_some(TabBoundary::StripStart(tab_id))
             } else {
@@ -1809,7 +1746,7 @@ impl TabManager {
             items = items.child(
                 self.render_tab_item(
                     tab_id,
-                    pane_host.read(cx).tab_identity(),
+                    view.read(cx).tab_identity(),
                     active,
                     TabItemRole::InBar,
                     hover,
@@ -1877,7 +1814,7 @@ impl TabManager {
                         .debug_selector("create-tab-button")
                         .tooltip(
                             Tooltip::new("create-tab-tooltip", "Create Tab")
-                                .keyboard_equivalent(
+                                .shortcut(
                                     create_tab_shortcut(
                                         crate::desktop_profile::DesktopPresentation::get(cx),
                                     )
@@ -1894,9 +1831,6 @@ impl TabManager {
             )
             .child(div().flex_1().min_w_0())
             .when_some(self.trailing_accessory.clone(), |content, accessory| {
-                // The Tabs give up room to the accessory rather than scrolling beneath it, and the
-                // space between them stays draggable. The accessory owns its own edge spacing, so
-                // an empty accessory reserves nothing.
                 content.child(
                     div()
                         .debug_selector(|| "tab-bar-trailing-accessory".to_owned())
@@ -1941,7 +1875,7 @@ impl TabManager {
         ))
         .status(self.window_drag_status.clone())
         .pointer_insets(Edges {
-            left: super::resize_handle_theme::spacious_target_half_thickness(cx),
+            left: super::control_theme::resize_handle::spacious_target_half_thickness(cx),
             ..Edges::default()
         })
         .debug_selector("tab-bar-drag-region")
@@ -2054,12 +1988,8 @@ impl Render for TabManager {
                     .relative()
                     .overflow_hidden()
                     .when(self.sidebar_visible, |body| body.ml(self.sidebar_width))
-                    // The content stage is base surface, and every gap it paints is measured to the
-                    // next painted surface rather than counted in layout properties. It has no top
-                    // edge: the chrome above already carries that space in its own height. Beside a
-                    // sidebar it has no leading edge either, because the sidebar chip's own trailing
-                    // margin is already that gap and two insets of one continuous surface would read
-                    // as a gap of twice the size.
+                    // No top edge: the chrome above carries that space. No leading edge beside a
+                    // sidebar: the sidebar chip's trailing margin is already that gap.
                     .border_color(gpui_color(
                         appearance.surface(crate::appearance::SurfaceRole::Base, stage_surface),
                     ))
@@ -2109,16 +2039,8 @@ impl TabBoundary {
 }
 
 /// The quiet mark at one boundary of the Tab strip whose Tabs are all inactive.
-///
-/// The Tab after the boundary carries the mark as paint just inside its own leading edge; at the
-/// strip's end the last Tab carries it just inside its trailing edge. The row keeps one scroll
-/// child per Tab and every Tab keeps its spacing, hit target, and hover region. Staying inside the
-/// Tab's bounds and on whole points leaves layout rounding nothing to move, and the chip inset
-/// keeps hover paint clear of it.
-///
-/// The mark paints its own `tab_separator` role. `border` describes full-length structure and is
-/// too close to the bar to show on a mark this short, and an outlined control's ring is a separate
-/// decision a scheme must be able to retune without moving the Tab strip.
+/// It paints inside the Tab on whole points so layout rounding cannot move it. It uses its own
+/// `tab_separator` role because `border` is too close to the bar to show on a mark this short.
 fn render_tab_separator(
     boundary: TabBoundary,
     presentation: &TabChromePresentation,
@@ -2149,10 +2071,7 @@ fn render_tab_separator(
         .into_any_element()
 }
 
-/// One Tab's identity: `<status glyph> <activity> · <place>`.
-///
-/// The status glyph is the segment a Tab never gives up. Only the words after it narrow: the
-/// activity first, then the place.
+/// One Tab's identity: `<status glyph> <activity> · <place>`. The status glyph never narrows.
 fn render_tab_identity(
     tab_id: TabId,
     identity: TabIdentity,
@@ -2360,7 +2279,7 @@ mod tests {
     }
 
     #[test]
-    fn active_window_tab_chrome_should_preserve_the_existing_presentation() {
+    fn active_window_tab_chrome_should_resolve_authored_semantic_roles() {
         let colors = ChromeColors::default();
         let presentation = TabChromePresentation::resolve(true, false, &colors);
 
@@ -2427,9 +2346,6 @@ mod tests {
             tab_active_hover_background: Color::rgb(0x2a3b4c),
             tab_active_hover_foreground: Color::rgb(0xeef0ff),
             tab_active_foreground: Color::rgb(0xddeeff),
-            tab_inactive_selected_background: Color::rgb(0x334455),
-            tab_inactive_selected_border: Color::rgb(0x3a4b5c),
-            tab_inactive_selected_foreground: Color::rgb(0xbbccdd),
             tab_hover_background: Color::rgb(0x556677),
             tab_hover_foreground: Color::rgb(0x99aabb),
             tab_hover_icon: Color::rgb(0x778899),
@@ -2528,11 +2444,6 @@ mod tests {
         assert_eq!(inactive.hover_rim, None);
     }
 
-    /// The Active Tab carries selected-row content on a material tuned for the title bar.
-    ///
-    /// The Workspace sidebar and Settings navigation need a fill that works on shell and raised
-    /// surfaces. The Active Tab has one title-bar host, so it keeps the shared text hierarchy while
-    /// using its own borderless fill and hover response.
     #[test]
     fn built_in_active_tab_should_use_its_authored_chip_material_and_edge() {
         use crate::appearance::{Appearance, builtin_chrome_base};
@@ -2588,10 +2499,6 @@ mod tests {
         }
     }
 
-    /// A separator is a short hairline, so it needs more contrast than a full-length divider to be
-    /// seen at all, yet it must stay a step quieter than the titles it sits between. The mark rests
-    /// on the title bar in a focused window and on the inactive title bar in an unfocused one, so
-    /// both surfaces are held to the same band.
     #[test]
     fn built_in_tab_separator_should_be_visible_but_quiet_on_both_title_bar_surfaces() {
         use crate::appearance::{Appearance, builtin_chrome_base};
@@ -2628,9 +2535,6 @@ mod tests {
         }
     }
 
-    /// The separator keeps one logical point at every supported display scale, which never
-    /// rasterises below one whole device pixel: a single crisp pixel at 1x and more on denser
-    /// displays, so the mark stays thin without disappearing.
     #[test]
     fn tab_separator_width_should_cover_at_least_one_device_pixel_at_every_display_scale() {
         for scale in [1.0_f32, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0] {
@@ -2646,11 +2550,9 @@ mod tests {
     fn tab_close_control_should_share_parent_at_rest_and_keep_direct_interaction_states() {
         let colors = ChromeColors {
             tab_active_background: Color::rgb(0x445566),
-            tab_inactive_selected_background: Color::rgb(0x556677),
             tab_active_hover_background: Color::rgb(0x667788),
             tab_hover_background: Color::rgb(0x778899),
             tab_active_icon: Color::rgb(0x112233),
-            tab_inactive_selected_icon: Color::rgb(0x223344),
             tab_hover_icon: Color::rgb(0x334455),
             ..ChromeColors::default()
         };
@@ -2950,13 +2852,13 @@ mod tests {
     use crate::domain::PaneId;
     use crate::domain::ZoomState;
     use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
-    use crate::ssh::command::{SshCommandContext, ValidatedRemoteShellCommand};
+    use crate::ssh::command::ValidatedRemoteShellCommand;
     use crate::terminal::testing::{
-        RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
+        RecordedCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
     };
     use crate::terminal::{
-        RemoteChannelUnavailable, RemoteTerminalChannelProvider, SessionEvent, SessionExit,
-        SessionFailure, TerminalSessionFactory,
+        TerminalSessionChannelProvider, TerminalSessionChannelUnavailable, TerminalSessionEvent,
+        TerminalSessionExit, TerminalSessionFactory, TerminalSessionFailure,
     };
     use crate::ui::TogglePaneZoom;
 
@@ -2981,18 +2883,18 @@ mod tests {
         }
     }
 
-    struct SequencedRemoteChannelProvider {
+    struct SequencedTerminalSessionChannelProvider {
         ready: AtomicBool,
         grant: AtomicBool,
         preparations: AtomicUsize,
         revalidations: AtomicUsize,
         fail_at: Mutex<Option<usize>>,
-        revalidation_error: Mutex<Option<RemoteChannelRevalidationError>>,
+        revalidation_error: Mutex<Option<TerminalSessionChannelRevalidationError>>,
         invalidate_grant_after_revalidation: AtomicBool,
-        command_context: SshCommandContext,
+        command_context: crate::ssh::testing::SshConnectionFixture,
     }
 
-    impl SequencedRemoteChannelProvider {
+    impl SequencedTerminalSessionChannelProvider {
         fn new(destination: crate::domain::SshDestination) -> Self {
             Self {
                 ready: AtomicBool::new(true),
@@ -3002,13 +2904,7 @@ mod tests {
                 fail_at: Mutex::new(None),
                 revalidation_error: Mutex::new(None),
                 invalidate_grant_after_revalidation: AtomicBool::new(false),
-                command_context: SshCommandContext::new(
-                    crate::ssh::command::OpenSshExecutable::for_test(),
-                    PathBuf::from("/private/config/spaceterm/ssh_config"),
-                    destination,
-                    PathBuf::from("/private/runtime/spaceterm/master.sock"),
-                )
-                .unwrap(),
+                command_context: crate::ssh::testing::SshConnectionFixture::new(destination),
             }
         }
 
@@ -3028,7 +2924,7 @@ mod tests {
             self.revalidations.load(Ordering::Acquire)
         }
 
-        fn fail_revalidation_with(&self, error: Option<RemoteChannelRevalidationError>) {
+        fn fail_revalidation_with(&self, error: Option<TerminalSessionChannelRevalidationError>) {
             *self.revalidation_error.lock().unwrap() = error;
         }
 
@@ -3038,7 +2934,7 @@ mod tests {
         }
     }
 
-    impl RemoteTerminalChannelProvider for SequencedRemoteChannelProvider {
+    impl TerminalSessionChannelProvider for SequencedTerminalSessionChannelProvider {
         fn is_ready(&self) -> bool {
             self.ready.load(Ordering::Acquire)
         }
@@ -3047,7 +2943,7 @@ mod tests {
             &self,
             _directory: crate::domain::RemoteDirectory,
             _expected_identity: Option<crate::domain::RemoteDirectoryIdentity>,
-        ) -> Task<Result<(), crate::terminal::RemoteChannelRevalidationError>> {
+        ) -> Task<Result<(), crate::terminal::TerminalSessionChannelRevalidationError>> {
             self.revalidations.fetch_add(1, Ordering::AcqRel);
             self.grant.store(false, Ordering::Release);
             let result = self.revalidation_error.lock().unwrap().map_or(Ok(()), Err);
@@ -3064,16 +2960,18 @@ mod tests {
         fn prepare(
             &self,
             _directory: &crate::domain::RemoteDirectory,
-        ) -> Result<crate::ssh::command::PreparedSshPaneChannelCommand, RemoteChannelUnavailable>
-        {
+        ) -> Result<
+            crate::ssh::command::PreparedSshTerminalSessionChannelCommand,
+            TerminalSessionChannelUnavailable,
+        > {
             if !self.grant.swap(false, Ordering::AcqRel) {
-                return Err(RemoteChannelUnavailable);
+                return Err(TerminalSessionChannelUnavailable);
             }
             let preparation = self.preparations.fetch_add(1, Ordering::AcqRel) + 1;
             if *self.fail_at.lock().unwrap() == Some(preparation) {
-                return Err(RemoteChannelUnavailable);
+                return Err(TerminalSessionChannelUnavailable);
             }
-            Ok(self.command_context.prepare_pane_channel(
+            Ok(self.command_context.prepare_terminal_session_channel(
                 ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
             ))
         }
@@ -3081,7 +2979,7 @@ mod tests {
 
     fn remote_tab_manager_with_provider(
         cx: &mut TestAppContext,
-        provider: Arc<SequencedRemoteChannelProvider>,
+        provider: Arc<SequencedTerminalSessionChannelProvider>,
     ) -> (
         Entity<TabManager>,
         TestTerminalSessionRecords,
@@ -3105,7 +3003,7 @@ mod tests {
 
     fn remote_tab_manager_with_provider_and_events(
         cx: &mut TestAppContext,
-        provider: Arc<SequencedRemoteChannelProvider>,
+        provider: Arc<SequencedTerminalSessionChannelProvider>,
     ) -> (
         Entity<TabManager>,
         TestTerminalSessionRecords,
@@ -3148,22 +3046,23 @@ mod tests {
             manager
                 .tabs
                 .iter()
-                .map(|(tab_id, pane_host)| {
-                    let host = pane_host.read(cx);
+                .map(|(tab_id, view)| {
+                    let entity_id = view.entity_id();
+                    let view = view.read(cx);
                     (
                         tab_id,
-                        pane_host.entity_id(),
-                        host.pane_entity_ids(),
-                        host.layout_signature(),
-                        host.focused_pane_id(),
-                        host.zoom_state(),
+                        entity_id,
+                        view.pane_entity_ids(),
+                        view.layout_signature(),
+                        view.focused_pane_id(),
+                        view.zoom_state(),
                     )
                 })
                 .collect(),
         )
     }
 
-    fn prepare_remote_restart_for_test(
+    fn await_remote_restart_preparation(
         manager: &Entity<TabManager>,
         session_factory: WorkspaceTerminalSessionFactory,
         generation: u64,
@@ -3265,20 +3164,14 @@ mod tests {
             .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
-        let command_context = Arc::new(
-            SshCommandContext::new(
-                crate::ssh::command::OpenSshExecutable::for_test(),
-                PathBuf::from("/private/config/spaceterm/ssh_config"),
-                destination.clone(),
-                PathBuf::from("/private/runtime/spaceterm/master.sock"),
-            )
-            .unwrap(),
-        );
+        let command_context = Arc::new(crate::ssh::testing::SshConnectionFixture::new(
+            destination.clone(),
+        ));
         let session_factory = remote_session_factory_with_provider(
             records.clone(),
             destination,
             Arc::new(move || {
-                Ok(command_context.prepare_pane_channel(
+                Ok(command_context.prepare_terminal_session_channel(
                     ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
                 ))
             }),
@@ -3296,7 +3189,7 @@ mod tests {
     fn remote_session_factory_with_provider(
         records: TestTerminalSessionRecords,
         destination: crate::domain::SshDestination,
-        provider: Arc<dyn RemoteTerminalChannelProvider>,
+        provider: Arc<dyn TerminalSessionChannelProvider>,
     ) -> WorkspaceTerminalSessionFactory {
         remote_session_factory_with_terminal_factory(
             Rc::new(TestTerminalSessionFactory::new(records)),
@@ -3308,7 +3201,7 @@ mod tests {
     fn remote_session_factory_with_terminal_factory(
         terminal_factory: Rc<dyn TerminalSessionFactory>,
         destination: crate::domain::SshDestination,
-        provider: Arc<dyn RemoteTerminalChannelProvider>,
+        provider: Arc<dyn TerminalSessionChannelProvider>,
     ) -> WorkspaceTerminalSessionFactory {
         WorkspaceTerminalSessionFactory::new_remote(
             terminal_factory,
@@ -3406,12 +3299,6 @@ mod tests {
         assert_eq!(records.commands().len(), commands_before);
     }
 
-    /// Tabs read as shapes resting inside the title bar rather than as a strip cut into it.
-    ///
-    /// The chip is what carries that reading, and it only works while it keeps air on every side:
-    /// against its own item, against the chip beside it, and against the bar's lower edge, which
-    /// meets the base surface without a seam. The item itself keeps the full height of the bar,
-    /// because the inset is paint and must never shrink what a pointer can hit.
     #[gpui::test]
     fn every_tab_should_float_as_an_inset_chip_without_a_bar_seam(cx: &mut TestAppContext) {
         let (_manager, _records, cx) = tab_manager(cx);
@@ -3508,21 +3395,8 @@ mod tests {
         Box::leak(selector.into_boxed_str())
     }
 
-    /// Opens a fresh four-Tab row for each density, sidebar visibility, and selected position, and
-    /// checks every boundary of the strip.
-    ///
-    /// Each position gets its own window because rendered debug bounds outlive the frame that drew
-    /// them, so a mark that disappears could not otherwise be told apart from one still drawn.
-    ///
-    /// A boundary between two Tabs is marked only while both Tabs are inactive. The strip's start
-    /// is marked only while the sidebar is visible and the first Tab is inactive, because the
-    /// collapsed Workspace Switcher is a chip. The strip's end is marked while the last Tab is
-    /// inactive. The mark is a hairline one logical point wide at every density, whose length
-    /// scales with density from its 18-point Compact baseline to 22.5 points at Comfortable. It is
-    /// laid out on whole device pixels, painted entirely inside a Tab against the boundary's edge
-    /// and clear of the chips beside it, so neither layout rounding, an ancestor's clip, nor a
-    /// neighbour's paint can take it away. It carries no hit target of its own. Every edge is found
-    /// from the rendered items rather than assumed to run left to right.
+    /// Opens a fresh four-Tab row for each density, sidebar visibility, and selected position. Each
+    /// position gets its own window because rendered debug bounds outlive the frame that drew them.
     fn assert_separators_mark_only_inactive_neighbours(
         cx: &mut TestAppContext,
         direction: spaceterm_ui::TextDirection,
@@ -3894,32 +3768,26 @@ mod tests {
     }
 
     #[gpui::test]
-    fn remote_tab_creation_should_leave_hierarchy_unchanged_when_channel_reservation_fails(
+    fn remote_tab_creation_should_leave_hierarchy_unchanged_when_terminal_session_channel_reservation_fails(
         cx: &mut TestAppContext,
     ) {
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
-        let command_context = Arc::new(
-            SshCommandContext::new(
-                crate::ssh::command::OpenSshExecutable::for_test(),
-                PathBuf::from("/private/config/spaceterm/ssh_config"),
-                destination.clone(),
-                PathBuf::from("/private/runtime/spaceterm/master.sock"),
-            )
-            .unwrap(),
-        );
+        let command_context = Arc::new(crate::ssh::testing::SshConnectionFixture::new(
+            destination.clone(),
+        ));
         let preparations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let provider = {
             let preparations = Arc::clone(&preparations);
             Arc::new(move || {
                 if preparations.fetch_add(1, std::sync::atomic::Ordering::AcqRel) == 0 {
-                    Ok(command_context.prepare_pane_channel(
+                    Ok(command_context.prepare_terminal_session_channel(
                         ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
                     ))
                 } else {
-                    Err(RemoteChannelUnavailable)
+                    Err(TerminalSessionChannelUnavailable)
                 }
             })
         };
@@ -3998,7 +3866,7 @@ mod tests {
             records
                 .commands()
                 .into_iter()
-                .filter(|call| matches!(call.command, RecordedSessionCommand::Key(_)))
+                .filter(|call| matches!(call.command, RecordedCommand::Key(_)))
                 .count()
         };
         let before = key_inputs(&records);
@@ -4266,8 +4134,8 @@ mod tests {
         cx.simulate_keystrokes("cmd-alt-left");
         cx.run_until_parked();
         manager.update(cx, |manager, cx| {
-            manager.tabs.active_tab().update(cx, |host, cx| {
-                host.set_test_attention(PaneId::new(2), 1, cx);
+            manager.tabs.active_tab().update(cx, |view, cx| {
+                view.set_test_attention(PaneId::new(2), 1, cx);
             });
         });
         cx.run_until_parked();
@@ -4310,8 +4178,8 @@ mod tests {
         cx.simulate_keystrokes("cmd-w");
         cx.run_until_parked();
         manager.update(cx, |manager, cx| {
-            manager.tabs.active_tab().update(cx, |host, cx| {
-                host.set_test_attention(PaneId::new(1), 1, cx);
+            manager.tabs.active_tab().update(cx, |view, cx| {
+                view.set_test_attention(PaneId::new(1), 1, cx);
             });
         });
         cx.run_until_parked();
@@ -4319,15 +4187,15 @@ mod tests {
         assert!(cx.debug_bounds("pane-status-1-attention").is_some());
     }
 
-    /// A program that draws its own glyph gets that glyph in the Session's slot, not beside it.
+    /// A program's own glyph takes the Terminal Session's slot rather than sitting beside it.
     #[gpui::test]
-    fn local_reported_glyph_should_take_the_session_glyph(cx: &mut TestAppContext) {
+    fn local_reported_glyph_should_take_the_terminal_session_glyph(cx: &mut TestAppContext) {
         let (manager, records, cx) = tab_manager(cx);
         assert_reported_glyph(&manager, &records, false, cx);
     }
 
     #[gpui::test]
-    fn remote_reported_glyph_should_take_the_session_glyph(cx: &mut TestAppContext) {
+    fn remote_reported_glyph_should_take_the_terminal_session_glyph(cx: &mut TestAppContext) {
         let (manager, records, cx) = remote_tab_manager(cx);
         assert_reported_glyph(&manager, &records, true, cx);
     }
@@ -4350,8 +4218,8 @@ mod tests {
 
         assert_eq!(
             manager.read_with(cx, |manager, cx| {
-                let host = manager.tabs.active_tab().read(cx);
-                (host.cached_focused_progress(), host.tab_identity().progress)
+                let view = manager.tabs.active_tab().read(cx);
+                (view.cached_focused_progress(), view.tab_identity().progress)
             }),
             (TerminalProgress::None, TerminalProgress::None)
         );
@@ -4370,16 +4238,16 @@ mod tests {
         records
             .event_sender(1)
             .unwrap()
-            .try_send(SessionEvent::Failed(SessionFailure::Runtime(
-                "worker stopped".to_owned(),
-            )))
+            .try_send(TerminalSessionEvent::Failed(
+                TerminalSessionFailure::Runtime("worker stopped".to_owned()),
+            ))
             .unwrap();
         cx.run_until_parked();
 
         assert_eq!(
             manager.read_with(cx, |manager, cx| {
-                let host = manager.tabs.active_tab().read(cx);
-                (host.cached_focused_progress(), host.tab_identity().progress)
+                let view = manager.tabs.active_tab().read(cx);
+                (view.cached_focused_progress(), view.tab_identity().progress)
             }),
             (TerminalProgress::None, TerminalProgress::None)
         );
@@ -4422,7 +4290,7 @@ mod tests {
             ),
             (remote, Some("\u{2733}"), "Claude Code")
         );
-        // The Tab carries one glyph, in the slot the Session's own glyph would have taken.
+        // The Tab carries one glyph, in the slot the Terminal Session's own glyph would have taken.
         let origin = if remote {
             "tab-origin-1-remote"
         } else {
@@ -4441,7 +4309,7 @@ mod tests {
             gpui::size(glyph, glyph)
         );
 
-        // A title without a glyph leaves the Session with its own.
+        // A title without a glyph leaves the Terminal Session with its own.
         report(records, 2, "cargo test", cx);
         let plain = identity(cx);
         assert_eq!(
@@ -4453,8 +4321,8 @@ mod tests {
         );
     }
 
-    /// Local and Remote Sessions present every OSC 9;4 state the same way in the Tab and the Pane
-    /// Caption, independently of the title, and removing the status leaves no mark.
+    /// Local and Remote Terminal Sessions present every OSC 9;4 state the same way in the Tab and
+    /// the Pane Caption, independently of the title, and removing the status leaves no mark.
     #[gpui::test]
     fn local_progress_should_present_each_state_in_tab_and_caption(cx: &mut TestAppContext) {
         let (manager, records, cx) = tab_manager(cx);
@@ -4650,7 +4518,7 @@ mod tests {
         assert_eq!(next.progress, TerminalProgress::None);
     }
 
-    /// A hidden Tab receives no Screens, yet its item follows the Session's title and progress.
+    /// A hidden Tab gets no Screens, yet its item tracks the Terminal Session's title and progress.
     #[gpui::test]
     fn background_tab_should_follow_retained_title_and_progress(cx: &mut TestAppContext) {
         use super::super::terminal_status::TerminalProgress;
@@ -4669,7 +4537,7 @@ mod tests {
                 .tabs
                 .iter()
                 .find(|(tab_id, _)| *tab_id == TabId::new(1))
-                .map(|(_, host)| host.read(cx).tab_identity())
+                .map(|(_, view)| view.read(cx).tab_identity())
                 .unwrap()
         });
         assert_eq!(
@@ -4681,9 +4549,9 @@ mod tests {
     }
 
     /// A narrow Tab gives up its words before it gives up its status glyph or its close control,
-    /// so every Tab stays identifiable and closable at the narrowest width.
+    /// keeping both controls inside the item bounds at the narrowest width.
     #[gpui::test]
-    fn narrow_tabs_should_keep_status_glyph_and_close_reachable(cx: &mut TestAppContext) {
+    fn narrow_tabs_should_keep_status_glyph_and_close_within_item_bounds(cx: &mut TestAppContext) {
         use crate::terminal::metadata::{ProgressMetadata, TitleProvenance};
         let (_manager, records, cx) = tab_manager(cx);
         report_metadata(&records, 1, 1, |metadata| {
@@ -5233,22 +5101,6 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_single_motion_should_move_a_tab_on_release(cx: &mut TestAppContext) {
-        let (manager, _records, cx) = tab_manager(cx);
-        click("create-tab-button", cx);
-        click("create-tab-button", cx);
-        let first = cx.debug_bounds("tab-item-1-inactive").unwrap();
-        let third = cx.debug_bounds("tab-item-3-active").unwrap();
-        let release = third.center() + point(px(4.0), px(0.0));
-
-        drag_tab(first.center(), &[release], cx);
-        cx.simulate_mouse_up(release, MouseButton::Left, Modifiers::none());
-        cx.run_until_parked();
-
-        assert_eq!(tab_order(&manager, cx), vec![2, 3, 1]);
-    }
-
-    #[gpui::test]
     fn a_tab_drag_should_end_on_a_release_of_any_button(cx: &mut TestAppContext) {
         let (manager, _records, cx) = tab_manager(cx);
         click("create-tab-button", cx);
@@ -5324,11 +5176,11 @@ mod tests {
                 .expect("Tab 1 must remain owned")
         });
         let state = cx.update(|window, cx| {
-            let pane_host = first_tab.read(cx);
+            let view = first_tab.read(cx);
             (
                 manager.read(cx).tabs.active_tab_id(),
-                pane_host.focused_pane_id(),
-                pane_host.focused_terminal_is_focused(window, cx),
+                view.focused_pane_id(),
+                view.focused_terminal_is_focused(window, cx),
             )
         });
         assert_eq!(state, (TabId::new(1), PaneId::new(2), true));
@@ -5375,7 +5227,7 @@ mod tests {
             click_count: 2,
         });
 
-        assert_eq!(platform.counts(), (1, 1, 1, 0));
+        assert_eq!(platform.counts(), (1, 1, 1));
     }
 
     #[gpui::test]
@@ -5444,7 +5296,7 @@ mod tests {
             .into_iter()
             .skip(command_count)
             .filter_map(|call| match call.command {
-                RecordedSessionCommand::Focus(focused) => Some((call.session_id, focused)),
+                RecordedCommand::Focus(focused) => Some((call.session_id, focused)),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -5497,7 +5349,7 @@ mod tests {
             .into_iter()
             .skip(command_count)
             .filter_map(|call| match call.command {
-                RecordedSessionCommand::Focus(focused) => Some((call.session_id, focused)),
+                RecordedCommand::Focus(focused) => Some((call.session_id, focused)),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -5531,10 +5383,10 @@ mod tests {
         click("create-tab-button", cx);
         let first_sender = records
             .event_sender(1)
-            .expect("Tab 1 session must have started");
+            .expect("Tab 1 Terminal Session must have started");
 
         first_sender
-            .try_send(SessionEvent::Exited(SessionExit::Success))
+            .try_send(TerminalSessionEvent::Exited(TerminalSessionExit::Success))
             .unwrap();
         cx.run_until_parked();
 
@@ -5557,14 +5409,14 @@ mod tests {
         click("create-tab-button", cx);
         let active_sender = records
             .event_sender(2)
-            .expect("Tab 2 session must have started");
+            .expect("Tab 2 Terminal Session must have started");
         cx.update(|window, cx| {
             manager.update(cx, |manager, cx| manager.deactivate(cx));
             window.blur(cx);
         });
 
         active_sender
-            .try_send(SessionEvent::Exited(SessionExit::Success))
+            .try_send(TerminalSessionEvent::Exited(TerminalSessionExit::Success))
             .unwrap();
         cx.run_until_parked();
 
@@ -5588,10 +5440,10 @@ mod tests {
         click("create-tab-button", cx);
         let active_sender = records
             .event_sender(2)
-            .expect("Tab 2 session must have started");
+            .expect("Tab 2 Terminal Session must have started");
 
         active_sender
-            .try_send(SessionEvent::Exited(SessionExit::Success))
+            .try_send(TerminalSessionEvent::Exited(TerminalSessionExit::Success))
             .unwrap();
         cx.run_until_parked();
 
@@ -5603,16 +5455,23 @@ mod tests {
             )
         });
         assert_eq!(state, (1, TabId::new(1), vec![2]));
+        assert!(cx.update(|window, cx| {
+            manager
+                .read(cx)
+                .focused_terminal_has_input_focus(window, cx)
+        }));
     }
 
     #[gpui::test]
     fn remote_create_tab_should_revalidate_before_mutating_the_hierarchy(cx: &mut TestAppContext) {
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
-        let provider = Arc::new(SequencedRemoteChannelProvider::new(destination));
+        let provider = Arc::new(SequencedTerminalSessionChannelProvider::new(destination));
         let (manager, records, cx) = remote_tab_manager_with_provider(cx, Arc::clone(&provider));
         let before = manager.read_with(cx, hierarchy_identity);
 
-        provider.fail_revalidation_with(Some(RemoteChannelRevalidationError::IdentityChanged));
+        provider.fail_revalidation_with(Some(
+            TerminalSessionChannelRevalidationError::IdentityChanged,
+        ));
         cx.update(|window, cx| {
             manager.update(cx, |manager, cx| manager.create_tab(window, cx));
         });
@@ -5640,15 +5499,15 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
-        let provider = Arc::new(SequencedRemoteChannelProvider::new(destination));
+        let provider = Arc::new(SequencedTerminalSessionChannelProvider::new(destination));
         let (manager, records, events, cx) =
             remote_tab_manager_with_provider_and_events(cx, Arc::clone(&provider));
         let before = manager.read_with(cx, hierarchy_identity);
 
         for error in [
-            RemoteChannelRevalidationError::ConnectionUnavailable,
-            RemoteChannelRevalidationError::DirectoryUnavailable,
-            RemoteChannelRevalidationError::IdentityChanged,
+            TerminalSessionChannelRevalidationError::ConnectionUnavailable,
+            TerminalSessionChannelRevalidationError::DirectoryUnavailable,
+            TerminalSessionChannelRevalidationError::IdentityChanged,
         ] {
             provider.fail_revalidation_with(Some(error));
             cx.update(|window, cx| {
@@ -5675,7 +5534,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
-        let provider = Arc::new(SequencedRemoteChannelProvider::new(destination));
+        let provider = Arc::new(SequencedTerminalSessionChannelProvider::new(destination));
         let (manager, records, events, cx) =
             remote_tab_manager_with_provider_and_events(cx, Arc::clone(&provider));
         let before = manager.read_with(cx, hierarchy_identity);
@@ -5685,6 +5544,10 @@ mod tests {
             manager.update(cx, |manager, cx| manager.create_tab(window, cx));
         });
         cx.run_until_parked();
+        assert_eq!(provider.preparation_count(), 1);
+        assert_eq!(provider.revalidation_count(), 1);
+        assert_eq!(manager.read_with(cx, hierarchy_identity), before);
+        assert_eq!(records.starts().len(), 1);
 
         cx.update(|window, cx| {
             manager.update(cx, |manager, cx| {
@@ -5717,11 +5580,13 @@ mod tests {
     #[gpui::test]
     fn remote_split_failure_should_be_forwarded_once_by_tab_manager(cx: &mut TestAppContext) {
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
-        let provider = Arc::new(SequencedRemoteChannelProvider::new(destination));
+        let provider = Arc::new(SequencedTerminalSessionChannelProvider::new(destination));
         let (manager, records, events, cx) =
             remote_tab_manager_with_provider_and_events(cx, Arc::clone(&provider));
         let before = manager.read_with(cx, hierarchy_identity);
-        provider.fail_revalidation_with(Some(RemoteChannelRevalidationError::IdentityChanged));
+        provider.fail_revalidation_with(Some(
+            TerminalSessionChannelRevalidationError::IdentityChanged,
+        ));
 
         cx.simulate_keystrokes("cmd-d");
         cx.run_until_parked();
@@ -5735,32 +5600,11 @@ mod tests {
     }
 
     #[gpui::test]
-    fn remote_create_tab_should_not_mutate_when_generation_changes_after_revalidation(
+    fn remote_restart_reserves_all_terminal_session_channels_before_preserving_and_restarting_hierarchy(
         cx: &mut TestAppContext,
     ) {
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
-        let provider = Arc::new(SequencedRemoteChannelProvider::new(destination));
-        let (manager, records, cx) = remote_tab_manager_with_provider(cx, Arc::clone(&provider));
-        let before = manager.read_with(cx, hierarchy_identity);
-        provider.invalidate_next_grant();
-
-        cx.update(|window, cx| {
-            manager.update(cx, |manager, cx| manager.create_tab(window, cx));
-        });
-        cx.run_until_parked();
-
-        assert_eq!(manager.read_with(cx, hierarchy_identity), before);
-        assert_eq!(records.starts().len(), 1);
-        assert_eq!(provider.preparation_count(), 1);
-        assert_eq!(provider.revalidation_count(), 1);
-    }
-
-    #[gpui::test]
-    fn remote_restart_reserves_all_channels_before_preserving_and_restarting_hierarchy(
-        cx: &mut TestAppContext,
-    ) {
-        let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
-        let provider = Arc::new(SequencedRemoteChannelProvider::new(destination));
+        let provider = Arc::new(SequencedTerminalSessionChannelProvider::new(destination));
         let (manager, records, cx) = remote_tab_manager_with_provider(cx, Arc::clone(&provider));
         cx.simulate_keystrokes("cmd-d");
         cx.dispatch_action(TogglePaneZoom);
@@ -5782,13 +5626,15 @@ mod tests {
         );
         let before = manager.read_with(cx, hierarchy_identity);
 
-        provider.fail_revalidation_with(Some(RemoteChannelRevalidationError::IdentityChanged));
+        provider.fail_revalidation_with(Some(
+            TerminalSessionChannelRevalidationError::IdentityChanged,
+        ));
         let factory = manager.read_with(cx, |manager, _| manager.session_factory.clone());
-        let identity_changed = prepare_remote_restart_for_test(&manager, factory, 5, cx);
+        let identity_changed = await_remote_restart_preparation(&manager, factory, 5, cx);
         assert!(matches!(
             identity_changed,
             Err(RemoteTabManagerLifecycleError::Revalidation(
-                RemoteChannelRevalidationError::IdentityChanged
+                TerminalSessionChannelRevalidationError::IdentityChanged
             ))
         ));
         assert_eq!(records.starts().len(), 3);
@@ -5797,13 +5643,13 @@ mod tests {
             manager
                 .tabs
                 .iter()
-                .all(|(_, host)| host.read(cx).remote_disconnected_generation() == Some(4))
+                .all(|(_, view)| view.read(cx).remote_disconnected_generation() == Some(4))
         }));
 
         provider.fail_revalidation_with(None);
         provider.fail_at(Some(provider.preparation_count() + 2));
         let factory = manager.read_with(cx, |manager, _| manager.session_factory.clone());
-        let failed = prepare_remote_restart_for_test(&manager, factory, 5, cx);
+        let failed = await_remote_restart_preparation(&manager, factory, 5, cx);
         assert!(matches!(
             failed,
             Err(RemoteTabManagerLifecycleError::ChannelUnavailable(_))
@@ -5815,12 +5661,12 @@ mod tests {
             manager
                 .tabs
                 .iter()
-                .all(|(_, host)| host.read(cx).remote_disconnected_generation() == Some(4))
+                .all(|(_, view)| view.read(cx).remote_disconnected_generation() == Some(4))
         }));
 
         provider.fail_at(None);
         let factory = manager.read_with(cx, |manager, _| manager.session_factory.clone());
-        let prepared = prepare_remote_restart_for_test(&manager, factory, 5, cx).unwrap();
+        let prepared = await_remote_restart_preparation(&manager, factory, 5, cx).unwrap();
         cx.update(|window, cx| {
             manager
                 .update(cx, |manager, cx| {
@@ -5836,9 +5682,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn cancelled_remote_restart_preparation_should_not_reserve_or_mutate(cx: &mut TestAppContext) {
+    fn dropping_unpolled_remote_restart_task_should_not_reserve_or_mutate(cx: &mut TestAppContext) {
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
-        let provider = Arc::new(SequencedRemoteChannelProvider::new(destination));
+        let provider = Arc::new(SequencedTerminalSessionChannelProvider::new(destination));
         let (manager, records, cx) = remote_tab_manager_with_provider(cx, Arc::clone(&provider));
         manager
             .update(cx, |manager, cx| manager.disconnect_remote(4, cx))
@@ -5867,15 +5713,19 @@ mod tests {
     }
 
     #[gpui::test]
-    fn known_remote_master_failure_keeps_pane_and_blocks_new_children(cx: &mut TestAppContext) {
+    fn unavailable_terminal_session_channel_keeps_pane_and_blocks_new_children(
+        cx: &mut TestAppContext,
+    ) {
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
-        let provider = Arc::new(SequencedRemoteChannelProvider::new(destination));
+        let provider = Arc::new(SequencedTerminalSessionChannelProvider::new(destination));
         let (manager, records, cx) = remote_tab_manager_with_provider(cx, Arc::clone(&provider));
         provider.set_ready(false);
         records
             .event_sender(1)
             .unwrap()
-            .try_send(SessionEvent::Exited(SessionExit::ExitCode(255)))
+            .try_send(TerminalSessionEvent::Exited(TerminalSessionExit::ExitCode(
+                255,
+            )))
             .unwrap();
         cx.run_until_parked();
 
@@ -5886,11 +5736,11 @@ mod tests {
         cx.run_until_parked();
 
         let state = manager.read_with(cx, |manager, cx| {
-            let host = manager.tabs.active_tab().read(cx);
-            let remote_state = host.focused_terminal_remote_state(cx);
+            let view = manager.tabs.active_tab().read(cx);
+            let remote_state = view.focused_terminal_remote_state(cx);
             (
                 manager.tabs.len(),
-                host.pane_count(),
+                view.pane_count(),
                 remote_state.0,
                 remote_state.1,
             )
@@ -5902,7 +5752,9 @@ mod tests {
     #[gpui::test]
     fn post_commit_start_failure_is_scoped_to_the_failed_remote_pane(cx: &mut TestAppContext) {
         let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
-        let provider = Arc::new(SequencedRemoteChannelProvider::new(destination.clone()));
+        let provider = Arc::new(SequencedTerminalSessionChannelProvider::new(
+            destination.clone(),
+        ));
         let (manager, records, cx) = remote_tab_manager_with_provider(cx, Arc::clone(&provider));
         cx.simulate_keystrokes("cmd-d");
         cx.run_until_parked();
@@ -5917,7 +5769,7 @@ mod tests {
             destination,
             provider,
         );
-        let prepared = prepare_remote_restart_for_test(&manager, restart_factory, 11, cx).unwrap();
+        let prepared = await_remote_restart_preparation(&manager, restart_factory, 11, cx).unwrap();
         cx.update(|window, cx| {
             manager
                 .update(cx, |manager, cx| {
@@ -5938,7 +5790,11 @@ mod tests {
             states,
             vec![
                 (PaneId::new(1), true, None),
-                (PaneId::new(2), false, Some("restart-remote-session")),
+                (
+                    PaneId::new(2),
+                    false,
+                    Some("restart-remote-terminal-session")
+                ),
             ]
         );
         assert_eq!(records.starts().len(), 4);
@@ -5949,13 +5805,13 @@ mod tests {
     }
 
     #[gpui::test]
-    fn healthy_remote_shell_exit_keeps_existing_hierarchy_close_behavior(cx: &mut TestAppContext) {
+    fn healthy_remote_shell_exit_should_close_its_tab_and_select_neighbor(cx: &mut TestAppContext) {
         let (manager, records, cx) = remote_tab_manager(cx);
         click("create-tab-button", cx);
         records
             .event_sender(2)
             .unwrap()
-            .try_send(SessionEvent::Exited(SessionExit::Success))
+            .try_send(TerminalSessionEvent::Exited(TerminalSessionExit::Success))
             .unwrap();
         cx.run_until_parked();
         assert_eq!(
@@ -5967,7 +5823,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn closing_a_multi_pane_tab_should_close_every_owned_session_exactly_once(
+    fn closing_a_multi_pane_tab_should_close_every_owned_terminal_session_exactly_once(
         cx: &mut TestAppContext,
     ) {
         let (manager, records, cx) = tab_manager(cx);
@@ -6115,7 +5971,7 @@ mod tests {
         records
             .event_sender(session)
             .unwrap()
-            .try_send(SessionEvent::Screen(screen))
+            .try_send(TerminalSessionEvent::Screen(screen))
             .unwrap();
     }
 
@@ -6215,7 +6071,7 @@ mod tests {
             .update(cx, |manager, cx| manager.disconnect_remote(4, cx))
             .unwrap();
         let factory = manager.read_with(cx, |manager, _| manager.session_factory.clone());
-        let prepared = prepare_remote_restart_for_test(&manager, factory, 5, cx).unwrap();
+        let prepared = await_remote_restart_preparation(&manager, factory, 5, cx).unwrap();
         cx.update(|window, cx| {
             manager.update(cx, |manager, cx| {
                 manager.commit_remote_restart(prepared, window, cx)

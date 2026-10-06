@@ -483,10 +483,11 @@ mod tests {
     #[cfg(feature = "developer-tools")]
     #[gpui::test]
     fn developer_chords_are_refused_by_the_shortcut_recorder(cx: &mut gpui::TestAppContext) {
-        use crate::appearance::SettingsDocument;
         use crate::keybindings::{Command, Shortcut};
-        use crate::ui::settings_window::{SettingsWindow, test_support::MemoryStorage};
-        let settings = crate::settings::UserSettings::load(MemoryStorage::with_document(
+        use crate::settings::SettingsDocument;
+        use crate::settings::storage::testing::MemoryStorage;
+        use crate::ui::settings_window::SettingsWindow;
+        let settings = crate::settings::Settings::load(MemoryStorage::with_document(
             &SettingsDocument::default(),
         ));
         struct RecordingMovement;
@@ -577,7 +578,7 @@ mod tests {
     fn linux_function_keys_reach_terminal_unless_find_owns_navigation(
         cx: &mut gpui::TestAppContext,
     ) {
-        use crate::terminal::testing::{RecordedSessionCommand, TerminalEmulator};
+        use crate::terminal::testing::{RecordedCommand, TerminalEmulator};
         use crate::terminal::{FindDirection, KeyAction, PhysicalKey};
         let (_pane, cx, records) = linux_terminal_pane(cx);
         cx.simulate_keystrokes("f3 shift-f3 f9");
@@ -585,7 +586,7 @@ mod tests {
             .commands()
             .into_iter()
             .filter_map(|call| match call.command {
-                RecordedSessionCommand::Key(key) if key.action == KeyAction::Press => {
+                RecordedCommand::Key(key) if key.action == KeyAction::Press => {
                     Some((key.physical_key, key.modifiers.shift))
                 }
                 _ => None,
@@ -609,7 +610,7 @@ mod tests {
             .commands()
             .into_iter()
             .filter_map(|call| match call.command {
-                RecordedSessionCommand::Key(key) => Some(emulator.key(key).unwrap().bytes),
+                RecordedCommand::Key(key) => Some(emulator.key(key).unwrap().bytes),
                 _ => None,
             })
             .flatten()
@@ -627,7 +628,7 @@ mod tests {
             .commands()
             .into_iter()
             .filter_map(|call| match call.command {
-                RecordedSessionCommand::NavigateFind(_, direction) => Some(direction),
+                RecordedCommand::NavigateFind(_, direction) => Some(direction),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -639,7 +640,7 @@ mod tests {
                 .commands()
                 .into_iter()
                 .filter(|call| matches!(&call.command,
-            RecordedSessionCommand::Key(key) if key.action == KeyAction::Press))
+            RecordedCommand::Key(key) if key.action == KeyAction::Press))
                 .count(),
             4
         );
@@ -647,7 +648,7 @@ mod tests {
 
     #[gpui::test]
     fn linux_installed_copy_binding_forwards_host_modifiers(cx: &mut gpui::TestAppContext) {
-        use crate::terminal::testing::RecordedSessionCommand;
+        use crate::terminal::testing::RecordedCommand;
         let (_pane, cx, records) = linux_terminal_pane(cx);
         cx.simulate_keystrokes("ctrl-shift-c");
         cx.run_until_parked();
@@ -655,7 +656,7 @@ mod tests {
             .commands()
             .into_iter()
             .filter_map(|call| {
-                if let RecordedSessionCommand::CopyOrForward(modifiers) = call.command {
+                if let RecordedCommand::CopyOrForward(modifiers) = call.command {
                     Some(modifiers)
                 } else {
                     None
@@ -678,8 +679,8 @@ mod tests {
     ) {
         use crate::platform::permission_access::SystemPermission;
         use crate::terminal::permission_request::PermissionRequest;
-        use crate::terminal::testing::RecordedSessionCommand;
-        use crate::terminal::{ScreenSnapshot, ScrollbarSnapshot, SessionEvent};
+        use crate::terminal::testing::RecordedCommand;
+        use crate::terminal::{ScreenSnapshot, ScrollbarSnapshot, TerminalSessionEvent};
         let (_pane, cx, records) = linux_terminal_pane(cx);
         let session_id = records.starts().last().unwrap().session_id;
         let events = records.last_event_sender().unwrap();
@@ -691,16 +692,18 @@ mod tests {
             if retained {
                 records.retain_permission_request(session_id, request);
                 events
-                    .try_send(SessionEvent::Screen(ScreenSnapshot::from_test_parts_at(
-                        vec![vec![].into()].into(),
-                        ScrollbarSnapshot::default(),
-                        "permission request test",
-                        1,
-                    )))
+                    .try_send(TerminalSessionEvent::Screen(
+                        ScreenSnapshot::from_test_parts_at(
+                            vec![vec![].into()].into(),
+                            ScrollbarSnapshot::default(),
+                            "permission request test",
+                            1,
+                        ),
+                    ))
                     .unwrap();
             } else {
                 events
-                    .try_send(SessionEvent::PermissionRequested(request))
+                    .try_send(TerminalSessionEvent::PermissionRequested(request))
                     .unwrap();
             }
             cx.run_until_parked();
@@ -722,7 +725,7 @@ mod tests {
                 .commands()
                 .into_iter()
                 .skip(before)
-                .filter(|call| matches!(call.command, RecordedSessionCommand::Key(_)))
+                .filter(|call| matches!(call.command, RecordedCommand::Key(_)))
                 .count();
             assert_eq!(
                 inputs, 2,
@@ -735,7 +738,7 @@ mod tests {
     fn linux_installed_keymap_preserves_unshifted_xterm_control_forms(
         cx: &mut gpui::TestAppContext,
     ) {
-        use crate::terminal::testing::{RecordedSessionCommand, TerminalEmulator};
+        use crate::terminal::testing::{RecordedCommand, TerminalEmulator};
         let (_pane, cx, records) = linux_terminal_pane(cx);
         let geometry = crate::terminal::geometry::TerminalGeometry::from_grid(
             crate::terminal::geometry::CellGridSize::new(80, 30),
@@ -778,7 +781,7 @@ mod tests {
                     .into_iter()
                     .skip(before)
                     .filter_map(|call| {
-                        if let RecordedSessionCommand::Key(input) = call.command {
+                        if let RecordedCommand::Key(input) = call.command {
                             Some(input)
                         } else {
                             None

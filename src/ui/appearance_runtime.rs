@@ -19,7 +19,7 @@ use crate::appearance::{
     TerminalFontFamily, ThemeCatalog,
 };
 use crate::platform::appearance::{AppearancePlatform, SystemAppearanceSubscription};
-use crate::settings::{SettingsError, UserSettings};
+use crate::settings::{Settings, SettingsError};
 
 use super::appearance::{ChromeAppearance, InstalledChrome, settings};
 
@@ -79,7 +79,7 @@ impl AccessibilityPreviewOverride {
 }
 
 pub(crate) struct AppearanceRuntime {
-    pub(crate) settings: UserSettings,
+    pub(crate) settings: Settings,
     platform: Rc<dyn AppearancePlatform>,
     fonts: AvailableFonts,
     pending_font_names: Option<Vec<String>>,
@@ -104,13 +104,13 @@ pub(crate) fn register_fonts(cx: &App) -> gpui::Result<()> {
 }
 
 pub(crate) fn install(
-    settings: UserSettings,
+    settings: Settings,
     platform: Rc<dyn AppearancePlatform>,
     cx: &mut App,
 ) -> Result<(), SettingsError> {
     let changed = settings.subscribe();
     let (fonts, pending_font_names) =
-        capture_initial_fonts(cx, &settings.snapshot().candidate.preferences);
+        capture_initial_fonts(cx, &settings.snapshot().candidate.appearance);
     let observation = platform.observe();
     let mut tasks = vec![cx.spawn(async move |cx| {
         while changed.recv().await.is_ok() {
@@ -154,7 +154,7 @@ pub(crate) fn refresh(cx: &mut App) -> Result<(), SettingsError> {
             runtime.control_motion,
         )
     };
-    ensure_selected_fonts(&candidate.preferences, cx);
+    ensure_selected_fonts(&candidate.appearance, cx);
     let fonts = cx.global::<AppearanceRuntime>().fonts.clone();
     let catalog = ThemeCatalog::from_terminal_themes(&candidate.terminal_themes)
         .map_err(|_| SettingsError::Invalid)?;
@@ -183,7 +183,7 @@ pub(crate) fn refresh(cx: &mut App) -> Result<(), SettingsError> {
     let resolved = catalog
         .resolve(
             generation,
-            &candidate.preferences,
+            &candidate.appearance,
             SystemAppearance::from(platform.system_appearance()).with_composition(capabilities),
             &fonts,
         )
@@ -216,23 +216,23 @@ pub(crate) fn refresh(cx: &mut App) -> Result<(), SettingsError> {
         let (settings_prepared, settings_inactive) =
             settings::prepare_variants(&resolved.chrome, prepared.clone(), inactive.clone());
         let controls = Box::new(
-            super::control_theme_catalog::catalog(&prepared, control_motion)
+            super::control_theme::catalog(&prepared, control_motion)
                 .generation(spaceterm_ui::ControlThemeGeneration::new(generation.get())),
         );
         let inactive_controls = Box::new(
-            super::control_theme_catalog::catalog(&inactive, control_motion)
+            super::control_theme::catalog(&inactive, control_motion)
                 .generation(spaceterm_ui::ControlThemeGeneration::new(generation.get())),
         );
         let settings_controls = Box::new(
-            super::control_theme_catalog::catalog(&settings_prepared.chrome, control_motion)
+            super::control_theme::catalog(&settings_prepared.chrome, control_motion)
                 .generation(spaceterm_ui::ControlThemeGeneration::new(generation.get())),
         );
         let settings_inactive_controls = Box::new(
-            super::control_theme_catalog::catalog(&settings_inactive.chrome, control_motion)
+            super::control_theme::catalog(&settings_inactive.chrome, control_motion)
                 .generation(spaceterm_ui::ControlThemeGeneration::new(generation.get())),
         );
         if cx.has_global::<InstalledAppearance>() {
-            spaceterm_ui::replace_scoped_control_theme_catalogs(
+            spaceterm_ui::replace_control_theme_catalogs(
                 cx,
                 controls,
                 inactive_controls,
@@ -464,9 +464,6 @@ pub(crate) fn reload_fonts(cx: &mut App) -> Result<(), SettingsError> {
 }
 
 /// The font availability captured at startup or at the last explicit font reload.
-///
-/// Settings presents only families the resolver can actually use, so an unavailable choice cannot
-/// be made from the interface in the first place.
 pub(crate) fn available_fonts(cx: &App) -> AvailableFonts {
     cx.try_global::<AppearanceRuntime>()
         .map(|runtime| runtime.fonts.clone())
@@ -491,21 +488,14 @@ pub(crate) fn current(cx: &App) -> Arc<ResolvedAppearance> {
 }
 
 /// Which client titlebar height anchors one window's native traffic lights.
-///
-/// Workspace chrome absorbs the frame's top space while Settings chrome does not, so each
-/// window keeps its own anchor against the same host geometry facts.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TrafficLightChrome {
     Workspace,
     SidebarWindow,
 }
 
-/// Owns one Operating-System Window's native traffic-light position across density changes.
-///
-/// The native position is fixed at window open while Comfortable density grows the titlebar,
-/// so stored buttons would otherwise ride high above centered Tabs and headings. Re-applying
-/// the geometry-anchored position keeps their center aligned with the taller chrome. Repeat
-/// applies with an unchanged position cost no native work.
+/// Owns one Operating-System Window's native traffic-light position across density changes. The
+/// native position is fixed at window open, so Comfortable density would otherwise leave it high.
 pub(crate) struct WindowTrafficLightOwner {
     role: TrafficLightChrome,
     applied: Option<gpui::Point<gpui::Pixels>>,
@@ -585,14 +575,8 @@ impl WindowAppearanceOwner {
     }
 }
 
-/// What must sit behind this window's content.
-///
-/// The Chrome tone travels with the request because the material behind the window is what the
-/// reader sees the desktop through, and Chrome only shows the desktop through a material its own
-/// paint does not match. The tone is read from the compiled window root rather than from the
-/// Light or Dark slot, so a definition filed under Light that paints a near-black root asks for
-/// the material its own paint can show. Deciding that here keeps the choice one piece of product
-/// policy rather than an assumption inside the platform Adapter.
+/// What must sit behind this window's content. The Chrome tone is read from the compiled window
+/// root rather than the Light or Dark slot, so the material matches the paint.
 fn requested_backdrop(
     effective: crate::appearance::WindowBackgroundAppearance,
     tone: crate::appearance::ChromeTone,
@@ -609,12 +593,9 @@ pub(crate) fn window_background(cx: &App) -> gpui::WindowBackgroundAppearance {
     native_background(current(cx).chrome.composition.effective)
 }
 
-/// A blurred window asks the framework for a transparent one.
-///
-/// SpaceTerm owns the blurred backdrop itself through `AppearancePlatform`, because GPUI's own
-/// blurred background rewrites the native material's private layers and leaves the desktop
-/// showing through unblurred. Asking for transparency is exactly the part of the framework's
-/// behavior SpaceTerm still wants: a non-opaque window whose renderer composites straight alpha.
+/// A blurred window asks the framework for a transparent one. SpaceTerm owns the blurred backdrop
+/// through `AppearancePlatform` because GPUI's blurred background rewrites the native material's
+/// private layers and leaves the desktop unblurred.
 fn native_background(
     appearance: crate::appearance::WindowBackgroundAppearance,
 ) -> gpui::WindowBackgroundAppearance {

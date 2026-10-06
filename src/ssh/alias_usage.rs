@@ -168,19 +168,6 @@ mod tests {
     }
 
     #[test]
-    fn duplicated_lease_should_keep_the_alias_active_after_the_connection_releases() {
-        let registry = ActiveSshAliasRegistry::default();
-        let alias = alias();
-        let connection = registry.acquire(alias.clone()).unwrap();
-        let workspace = connection.try_duplicate().unwrap();
-
-        drop(connection);
-        assert!(registry.is_active(&alias));
-        drop(workspace);
-        assert!(!registry.is_active(&alias));
-    }
-
-    #[test]
     fn duplicate_workspace_pins_should_release_only_after_the_final_owner() {
         let registry = ActiveSshAliasRegistry::default();
         let alias = alias();

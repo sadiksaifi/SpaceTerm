@@ -79,7 +79,7 @@ pub(crate) enum ProgressMetadata {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-/// The local account, machine, and home facts a Local Terminal presents as its origin.
+/// The local account, machine, and home facts a Local Terminal Session presents as its origin.
 ///
 /// Composition captures these once from the host. They are presentation identity only and carry
 /// no filesystem authority; `home` is a spelling used to abbreviate displayed directories.
@@ -116,7 +116,7 @@ impl LocalMachine {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-/// The remote account facts a Remote Terminal presents, captured when its account was discovered.
+/// The remote account facts a Remote Terminal Session presents, captured at account discovery.
 ///
 /// These are remote strings kept for presentation. They are never local filesystem authority, and
 /// `home` is used only to abbreviate a displayed remote directory.
@@ -150,10 +150,7 @@ fn retain_machine_value(value: Option<&str>) -> Option<Arc<str>> {
         .map(Arc::from)
 }
 
-/// The account and machine one Terminal Session runs on, as its Pane presents it.
-///
-/// Local and Remote are distinct so a caption can tell a local shell from a remote one without
-/// reinterpreting either side's strings.
+/// The Local or Remote account and machine presented by one Pane's Terminal Session.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TerminalOrigin<'a> {
     Local {
@@ -207,7 +204,6 @@ impl RemoteTerminalMetadataContext {
         &self.initial_directory
     }
 
-    /// Changes the Starting Directory while retaining the discovered account and machine facts.
     pub(crate) fn set_initial_directory(&mut self, directory: RemoteDirectory) {
         self.initial_directory = directory;
     }
@@ -225,10 +221,8 @@ impl RemoteTerminalMetadataContext {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-/// The typed location context from which terminal metadata derives its path authority.
-///
-/// Local context may classify and validate local paths. Remote context preserves remote strings
-/// only and disables every feature that would interpret them through the local filesystem.
+/// Local metadata may authorize local path actions. Remote directory strings carry no local
+/// filesystem authority.
 pub(crate) enum TerminalMetadataContext {
     Local {
         paths: LocalPathSemantics,
@@ -348,7 +342,7 @@ impl TerminalMetadataContext {
         }
     }
 
-    /// The account and machine this Terminal runs on, for presentation only.
+    /// The account and machine this Terminal Session runs on, for presentation only.
     pub(crate) fn origin(&self) -> TerminalOrigin<'_> {
         match self {
             Self::Local { machine, .. } => TerminalOrigin::Local {
@@ -865,7 +859,7 @@ mod tests {
         assert!(!title.chars().any(char::is_control));
         assert!(!title.starts_with(char::is_whitespace));
         assert!(!title.ends_with(char::is_whitespace));
-        assert_eq!(title.chars().count(), MAX_TITLE_CHARS);
+        assert_eq!(title.chars().count(), 256);
     }
 
     #[test]
@@ -1112,13 +1106,21 @@ mod tests {
         );
 
         assert!(tracker.apply_progress_report(3, None, epoch));
+        assert_eq!(
+            tracker.status_deadline(),
+            Some(epoch + Duration::from_secs(30))
+        );
         let revision = tracker.snapshot().revision;
         let keepalive = epoch + Duration::from_secs(20);
         assert!(!tracker.apply_progress_report(3, None, keepalive));
         assert_eq!(tracker.snapshot().revision, revision);
-        assert!(!tracker.advance_status(epoch + PROGRESS_INACTIVITY_TIMEOUT));
+        assert_eq!(
+            tracker.status_deadline(),
+            Some(keepalive + Duration::from_secs(30))
+        );
+        assert!(!tracker.advance_status(epoch + Duration::from_secs(30)));
         assert_eq!(tracker.snapshot().progress, ProgressMetadata::Indeterminate);
-        assert!(tracker.advance_status(keepalive + PROGRESS_INACTIVITY_TIMEOUT));
+        assert!(tracker.advance_status(keepalive + Duration::from_secs(30)));
         assert_eq!(tracker.snapshot().progress, ProgressMetadata::None);
     }
 
@@ -1134,6 +1136,11 @@ mod tests {
         );
         assert!(tracker.apply_semantic_prompt("C", epoch));
         assert!(tracker.apply_progress_report(4, Some(70), epoch));
+        tracker.set_reported_title("◐ agent", epoch);
+        tracker.set_reported_title("◑ agent", epoch + Duration::from_millis(100));
+        tracker.advance_status(epoch + Duration::from_millis(200));
+        assert!(tracker.snapshot().title_activity);
+        assert!(tracker.status_deadline().is_some());
 
         assert!(tracker.mark_stale());
 

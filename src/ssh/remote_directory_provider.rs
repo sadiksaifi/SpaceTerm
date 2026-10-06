@@ -41,7 +41,6 @@ pub(crate) struct SshRemoteDirectoryProvider<R: SshRemoteUtilityRunner> {
 }
 
 impl<R: SshRemoteUtilityRunner> SshRemoteDirectoryProvider<R> {
-    /// Binds provider operations to one prepared live command and session cancellation scope.
     pub(crate) fn new(
         command: PreparedSshRemoteUtilityCommand,
         runner: Arc<R>,
@@ -537,7 +536,14 @@ mod tests {
             .block_test(provider.list_directories(directory("/srv")))
             .unwrap();
 
-        assert_eq!(listing.rows()[0].name(), "safe");
+        assert_eq!(
+            listing
+                .rows()
+                .iter()
+                .map(|row| row.name())
+                .collect::<Vec<_>>(),
+            ["safe"]
+        );
         assert!(listing.is_truncated());
     }
 

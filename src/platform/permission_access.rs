@@ -1,8 +1,5 @@
 //! Portable authorization seam for the System Permissions that programs in a Terminal Session
 //! inherit from SpaceTerm.
-//!
-//! A program running in a Terminal Session takes screenshots and sends input through SpaceTerm's
-//! grants, so SpaceTerm reads, sets up, and recovers them for the program.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -230,6 +227,8 @@ pub(crate) mod testing {
         screen_recording: Cell<Authorization>,
         accessibility: Cell<Authorization>,
         pub(crate) setup_failure: Cell<Option<PermissionAccessError>>,
+        pub(crate) defer_preparation: Cell<bool>,
+        pending_preparations: RefCell<Vec<PermissionSetupCompletion>>,
         pub(crate) open_failure: Cell<Option<PermissionAccessError>>,
         pub(crate) resettable: Cell<bool>,
         pub(crate) reset_failure: Cell<Option<PermissionAccessError>>,
@@ -266,6 +265,8 @@ pub(crate) mod testing {
                 screen_recording: Cell::new(screen_recording),
                 accessibility: Cell::new(accessibility),
                 setup_failure: Cell::new(None),
+                defer_preparation: Cell::new(false),
+                pending_preparations: RefCell::default(),
                 open_failure: Cell::new(None),
                 resettable: Cell::new(true),
                 reset_failure: Cell::new(None),
@@ -281,12 +282,10 @@ pub(crate) mod testing {
             })
         }
 
-        /// How many authorization reads were made. A native read can start a verification.
         pub(crate) fn reads(&self) -> usize {
             self.reads.get()
         }
 
-        /// How many observations are alive.
         pub(crate) fn observers(&self) -> usize {
             self.observers.get()
         }
@@ -305,6 +304,13 @@ pub(crate) mod testing {
                 SystemPermission::ScreenRecording => self.screen_recording.set(authorization),
                 SystemPermission::Accessibility => self.accessibility.set(authorization),
             }
+        }
+
+        pub(crate) fn take_preparation(&self) -> PermissionSetupCompletion {
+            self.pending_preparations
+                .borrow_mut()
+                .pop()
+                .expect("a preparation is pending")
         }
 
         pub(crate) fn take_reset(&self) -> PermissionResetCompletion {
@@ -336,7 +342,7 @@ pub(crate) mod testing {
             })
         }
 
-        /// Completes at once with what the scripted authorization reports.
+        /// Completes with scripted authorization unless the test defers completion.
         fn prepare_setup(
             &self,
             permission: SystemPermission,
@@ -348,6 +354,10 @@ pub(crate) mod testing {
             }
             let (preparation, cancellation) = PermissionSetupPreparation::new();
             self.preparations.borrow_mut().push(cancellation);
+            if self.defer_preparation.get() {
+                self.pending_preparations.borrow_mut().push(completion);
+                return Ok(preparation);
+            }
             completion(
                 self.authorization(permission)
                     .map(|authorization| match authorization {

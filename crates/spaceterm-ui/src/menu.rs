@@ -42,7 +42,7 @@ actions!(
     ]
 );
 
-/// Platform-specific Menu key equivalents layered over the portable bindings.
+/// Platform-specific Menu bindings layered over the portable bindings.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MenuKeybindingProfile {
     /// Conventional macOS Control-N and Control-P navigation. Selecting this profile is explicit
@@ -52,7 +52,7 @@ pub enum MenuKeybindingProfile {
     Linux,
 }
 
-/// Installs the platform-specific key equivalents for `profile`.
+/// Installs the platform-specific bindings for `profile`.
 pub fn install_menu_keybindings(cx: &mut App, profile: MenuKeybindingProfile) {
     match profile {
         MenuKeybindingProfile::MacOs | MenuKeybindingProfile::Linux => cx.bind_keys([
@@ -139,15 +139,6 @@ impl<A> MenuActivation<A> {
             | Self::Radio { source, .. } => *source,
         }
     }
-
-    /// Consumes the event and returns the caller-owned action identity.
-    pub fn into_action(self) -> A {
-        match self {
-            Self::Action { action, .. }
-            | Self::Checkbox { action, .. }
-            | Self::Radio { action, .. } => action,
-        }
-    }
 }
 
 /// Why an open menu chain closed.
@@ -187,7 +178,6 @@ pub struct ContextMenuOpenRequest {
 }
 
 impl ContextMenuOpenRequest {
-    /// Returns the window-relative pointer position requested by the context gesture.
     pub fn position(self) -> Point<Pixels> {
         self.position
     }
@@ -201,19 +191,12 @@ pub struct PickerChange<T> {
 }
 
 impl<T> PickerChange<T> {
-    /// Returns the selected value.
     pub fn value(&self) -> &T {
         &self.value
     }
 
-    /// Returns the input path that selected the value.
     pub fn source(&self) -> MenuActivationSource {
         self.source
-    }
-
-    /// Consumes the event and returns the selected value.
-    pub fn into_value(self) -> T {
-        self.value
     }
 }
 
@@ -283,25 +266,21 @@ impl MenuPaint {
         }
     }
 
-    /// Installs complete semantic list row states.
     pub fn rows(mut self, rows: crate::ListRowPaints) -> Self {
         self.rows = Some(rows);
         self
     }
 
-    /// Supplies destructive action row states independently from ordinary navigation rows.
     pub fn destructive_rows(mut self, rows: crate::ListRowPaints) -> Self {
         self.destructive_rows = Some(rows);
         self
     }
 
-    /// Sets row hover independently of keyboard selection.
     pub fn hover_background(mut self, color: Rgba) -> Self {
         self.hover_background = color;
         self
     }
 
-    /// Sets the foreground paired with the row hover background.
     pub fn hover_foreground(mut self, color: Rgba) -> Self {
         self.hover_foreground = color;
         self
@@ -316,7 +295,7 @@ impl MenuPaint {
     }
 
     /// Sets the keyboard focus border color used by menu and picker triggers.
-    /// A transparent border uses the trigger's hover fill for focus feedback instead.
+    /// A transparent border omits the focus ring.
     pub fn focus_border(mut self, color: Rgba) -> Self {
         self.focus_border = color;
         self
@@ -390,13 +369,11 @@ impl MenuMetrics {
         }
     }
 
-    /// Sets the menu trigger height.
     pub fn trigger_height(mut self, height: Pixels) -> Self {
         self.trigger_height = height;
         self
     }
 
-    /// Sets horizontal row and trigger padding.
     pub fn horizontal_padding(mut self, padding: Pixels) -> Self {
         self.horizontal_padding = padding;
         self
@@ -417,45 +394,38 @@ impl MenuMetrics {
         self
     }
 
-    /// Sets the gap between the leading columns, the label, and the trailing content.
     pub fn gap(mut self, gap: Pixels) -> Self {
         self.gap = gap;
         self
     }
 
-    /// Sets the corner radius of the trigger that opens the menu.
     pub fn trigger_corner_radius(mut self, radius: Pixels) -> Self {
         self.trigger_corner_radius = radius;
         self
     }
 
-    /// Sets menu label and shortcut font sizes.
     pub fn font_sizes(mut self, label: Pixels, shortcut: Pixels) -> Self {
         self.font_size = label;
         self.shortcut_font_size = shortcut;
         self
     }
 
-    /// Sets the font size for group headings independently from shortcut columns.
     pub fn section_font_size(mut self, size: Pixels) -> Self {
         self.section_font_size = size;
         self
     }
 
-    /// Sets the horizontal gap between a panel and the submenu it opens.
     pub fn submenu_gap(mut self, gap: Pixels) -> Self {
         self.submenu_gap = gap;
         self
     }
 
-    /// Sets the shared glyph size and visible separator thickness.
     pub fn decoration_metrics(mut self, icon_size: Pixels, separator_thickness: Pixels) -> Self {
         self.icon_size = icon_size;
         self.separator_thickness = separator_thickness;
         self
     }
 
-    /// Sets disclosure glyph size for the interactive trigger independently from row glyphs.
     pub fn trigger_icon_size(mut self, size: Pixels) -> Self {
         self.trigger_icon_size = size.max(px(0.0));
         self
@@ -485,30 +455,24 @@ impl MenuMetrics {
         }
     }
 
-    fn scaled(self, text_scale: f32, spacing_scale: f32) -> Self {
-        let width_scale = crate::appearance::normalized_scale(text_scale)
-            .max(crate::appearance::normalized_scale(spacing_scale));
-        let icon_size = crate::appearance::scale_metric(self.icon_size, text_scale);
-        let trigger_icon_size = crate::appearance::scale_metric(self.trigger_icon_size, text_scale);
+    fn scaled(self, spacing_scale: f32) -> Self {
+        let width_scale = crate::appearance::normalized_scale(spacing_scale).max(1.0);
         Self {
             panel_width: self.panel_width * width_scale,
             row_height: crate::appearance::scale_line_box(
                 self.row_height,
                 self.label_line_height.max(self.shortcut_line_height),
-                text_scale,
                 spacing_scale,
             ),
             section_height: crate::appearance::scale_line_box(
                 self.section_height,
                 self.section_line_height,
-                text_scale,
                 spacing_scale,
             ),
             separator_height: crate::appearance::scale_metric(self.separator_height, spacing_scale),
             trigger_height: crate::appearance::scale_line_box(
                 self.trigger_height,
                 self.label_line_height,
-                text_scale,
                 spacing_scale,
             ),
             horizontal_padding: crate::appearance::scale_metric(
@@ -519,41 +483,16 @@ impl MenuMetrics {
                 self.state_column_width,
                 spacing_scale,
             )
-            .max(icon_size),
+            .max(self.icon_size),
             icon_column_width: crate::appearance::scale_metric(
                 self.icon_column_width,
                 spacing_scale,
             )
-            .max(icon_size),
+            .max(self.icon_size),
             column_gap: crate::appearance::scale_metric(self.column_gap, spacing_scale),
             gap: crate::appearance::scale_metric(self.gap, spacing_scale),
-            trigger_corner_radius: self.trigger_corner_radius,
-            corner_radius: self.corner_radius,
-            border_width: self.border_width,
-            font_size: crate::appearance::scale_metric(self.font_size, text_scale),
-            shortcut_font_size: crate::appearance::scale_metric(
-                self.shortcut_font_size,
-                text_scale,
-            ),
-            section_font_size: crate::appearance::scale_metric(self.section_font_size, text_scale),
-            label_line_height: crate::appearance::scale_metric(self.label_line_height, text_scale),
-            shortcut_line_height: crate::appearance::scale_metric(
-                self.shortcut_line_height,
-                text_scale,
-            ),
-            section_line_height: crate::appearance::scale_metric(
-                self.section_line_height,
-                text_scale,
-            ),
-            panel_padding: self.panel_padding,
             submenu_gap: crate::appearance::scale_metric(self.submenu_gap, spacing_scale),
-            icon_size,
-            trigger_icon_size,
-            icon_baseline_center: crate::appearance::scale_metric(
-                self.icon_baseline_center,
-                text_scale,
-            ),
-            separator_thickness: self.separator_thickness,
+            ..self
         }
     }
 }
@@ -584,11 +523,11 @@ impl MenuSizes {
         }
     }
 
-    fn scaled(self, text_scale: f32, spacing_scale: f32) -> Self {
+    fn scaled(self, spacing_scale: f32) -> Self {
         Self {
-            small: self.small.scaled(text_scale, spacing_scale),
-            regular: self.regular.scaled(text_scale, spacing_scale),
-            wide: self.wide.scaled(text_scale, spacing_scale),
+            small: self.small.scaled(spacing_scale),
+            regular: self.regular.scaled(spacing_scale),
+            wide: self.wide.scaled(spacing_scale),
         }
     }
 }
@@ -604,14 +543,13 @@ pub struct MenuTheme {
 }
 
 impl MenuTheme {
-    /// Creates a complete theme for the menu family.
     pub fn new(paint: MenuPaint, sizes: MenuSizes) -> Self {
         Self { paint, sizes }
     }
 
-    pub(crate) fn scaled_metrics(self, text_scale: f32, spacing_scale: f32) -> Self {
+    pub(crate) fn scaled_spacing(self, spacing_scale: f32) -> Self {
         Self {
-            sizes: self.sizes.scaled(text_scale, spacing_scale),
+            sizes: self.sizes.scaled(spacing_scale),
             ..self
         }
     }
@@ -646,7 +584,6 @@ fn trigger_edges(paint: MenuPaint, enabled: bool, focused: bool) -> (Rgba, Optio
     )
 }
 
-/// Resolves the installed menu theme against the shared anchored-popup surface.
 fn menu_style(size: MenuSize, cx: &App) -> MenuStyle {
     crate::control_theme_catalog(cx)
         .map_or_else(|| cx.global::<MenuTheme>(), |catalog| &catalog.menu)
@@ -713,62 +650,6 @@ struct MenuItem<A> {
     debug_selector: Option<String>,
 }
 
-/// One configurable option in a semantic radio group.
-pub struct MenuRadioOption<A> {
-    item: MenuItem<A>,
-}
-
-impl<A> MenuRadioOption<A> {
-    /// Creates an enabled radio option.
-    pub fn new(label: impl Into<SharedString>, action: A) -> Self {
-        Self {
-            item: MenuItem {
-                label: label.into(),
-                action,
-                disabled: false,
-                destructive: false,
-                shortcut: None,
-                icon: None,
-                mark: EntryMark::None,
-                debug_selector: None,
-            },
-        }
-    }
-
-    /// Controls whether navigation and activation may reach this option.
-    pub fn disabled(mut self, disabled: bool) -> Self {
-        self.item.disabled = disabled;
-        self
-    }
-
-    /// Marks the option as destructive.
-    pub fn destructive(mut self, destructive: bool) -> Self {
-        self.item.destructive = destructive;
-        self
-    }
-
-    /// Adds a display-only shortcut hint.
-    pub fn shortcut(mut self, shortcut: impl Into<SharedString>) -> Self {
-        self.item.shortcut = Some(shortcut.into());
-        self
-    }
-
-    /// Adds a leading icon built with the resolved row foreground color and live glyph size.
-    ///
-    /// The icon sits after the radio mark. Every row in the panel reserves the icon column when one
-    /// entry has an icon.
-    pub fn icon(mut self, build: impl Fn(Rgba, Pixels) -> AnyElement + 'static) -> Self {
-        self.item.icon = Some(Rc::new(build));
-        self
-    }
-
-    /// Adds a stable selector used by GPUI interaction tests.
-    pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
-        self.item.debug_selector = Some(selector.into());
-        self
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum EntryMark {
     #[default]
@@ -786,7 +667,6 @@ impl<A> MenuEntry<A> {
         Self::item(label.into(), action, EntryMark::None)
     }
 
-    /// Creates a checkbox action entry.
     pub fn checkbox(label: impl Into<SharedString>, checked: bool, action: A) -> Self {
         Self::item(label.into(), action, EntryMark::Checkbox(checked))
     }
@@ -806,7 +686,6 @@ impl<A> MenuEntry<A> {
         }
     }
 
-    /// Creates a separator.
     pub fn separator() -> Self {
         Self {
             kind: MenuEntryKind::Separator,
@@ -831,30 +710,6 @@ impl<A> MenuEntry<A> {
                 entries,
             },
         }
-    }
-
-    /// Creates a radio group with at most one selected option.
-    ///
-    /// Selection state remains caller-owned. A nonempty group falls back to its first option when
-    /// the selected index is absent or out of range.
-    pub fn radio_group(selected: Option<usize>, options: Vec<MenuRadioOption<A>>) -> Self {
-        let normalized = (!options.is_empty())
-            .then(|| selected.filter(|index| *index < options.len()).unwrap_or(0));
-        Self::group(
-            options
-                .into_iter()
-                .enumerate()
-                .map(|(index, mut option)| {
-                    option.item.mark = EntryMark::Radio {
-                        selected: normalized == Some(index),
-                        index,
-                    };
-                    Self {
-                        kind: MenuEntryKind::Item(option.item),
-                    }
-                })
-                .collect(),
-        )
     }
 
     /// Creates a submenu entry.
@@ -955,7 +810,6 @@ impl<A: Clone + 'static> Menu<A> {
         }
     }
 
-    /// Adds a leading trigger icon built with the resolved foreground color.
     pub fn leading_icon(mut self, build: impl Fn(Rgba) -> AnyElement + 'static) -> Self {
         self.leading_icon = Some(Rc::new(build));
         self
@@ -1111,7 +965,6 @@ impl<T> PickerOption<T> {
         }
     }
 
-    /// Controls whether navigation and activation may reach this option.
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
         self
@@ -1119,13 +972,12 @@ impl<T> PickerOption<T> {
 
     /// Adds a leading icon built with the resolved row foreground color and live glyph size.
     ///
-    /// The selected option mark replaces the icon within the shared leading slot.
+    /// The icon occupies a separate column beside the selected option mark.
     pub fn icon(mut self, build: impl Fn(Rgba, Pixels) -> AnyElement + 'static) -> Self {
         self.icon = Some(Rc::new(build));
         self
     }
 
-    /// Adds a stable selector used by GPUI interaction tests.
     pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
         self.debug_selector = Some(selector.into());
         self
@@ -1218,7 +1070,6 @@ impl<T: Clone + PartialEq + 'static> Picker<T> {
         })
     }
 
-    /// Adds a leading trigger icon built with the resolved foreground color.
     pub fn leading_icon(mut self, build: impl Fn(Rgba) -> AnyElement + 'static) -> Self {
         self.leading_icon = Some(Rc::new(build));
         self
@@ -1331,21 +1182,18 @@ impl<A: Clone + 'static> ComboButton<A> {
         }
     }
 
-    /// Selects a bounded visual treatment from the installed button theme.
     pub fn variant(mut self, variant: ButtonVariant) -> Self {
         self.variant = variant;
         self.button = self.button.variant(variant);
         self
     }
 
-    /// Selects a standard native control size.
     pub fn size(mut self, size: ButtonSize) -> Self {
         self.size = size;
         self.button = self.button.size(size);
         self
     }
 
-    /// Selects the outer silhouette the two segments share.
     pub fn shape(mut self, shape: ButtonShape) -> Self {
         self.shape = shape;
         self.button = self.button.shape(shape);
@@ -1358,13 +1206,11 @@ impl<A: Clone + 'static> ComboButton<A> {
         self
     }
 
-    /// Shows the displayed Shortcut that runs the primary command after its label.
     pub fn shortcut(mut self, shortcut: impl Into<SharedString>) -> Self {
         self.button = self.button.shortcut(shortcut);
         self
     }
 
-    /// Controls whether the menu segment can open, independently of the primary command.
     pub fn menu_disabled(mut self, disabled: bool) -> Self {
         self.menu.disabled = disabled;
         self
@@ -1377,13 +1223,11 @@ impl<A: Clone + 'static> ComboButton<A> {
         self
     }
 
-    /// Controls whether keyboard traversal may stop on the primary segment.
     pub fn tab_stop(mut self, tab_stop: bool) -> Self {
         self.button = self.button.tab_stop(tab_stop);
         self
     }
 
-    /// Selects where the menu opens relative to its segment.
     pub fn placement(mut self, placement: MenuPlacementConfig) -> Self {
         self.menu.placement = placement;
         self
@@ -1434,7 +1278,6 @@ impl<A: Clone + 'static> RenderOnce for ComboButton<A> {
             style.disabled
         };
         let icon_size = menu_style(self.menu.size, cx).metrics.trigger_icon_size;
-        // The divider sits on the segment's leading edge, marking the seam between the segments.
         let content = div()
             .relative()
             .size_full()
@@ -1523,25 +1366,21 @@ macro_rules! lifecycle_builders {
             self
         }
 
-        /// Selects a standard bounded menu width.
         pub fn size(mut self, size: MenuSize) -> Self {
             self.core.size = size;
             self
         }
 
-        /// Selects root menu placement.
         pub fn placement(mut self, placement: MenuPlacementConfig) -> Self {
             self.core.placement = placement;
             self
         }
 
-        /// Controls whether the control can open.
         pub fn disabled(mut self, disabled: bool) -> Self {
             self.core.disabled = disabled;
             self
         }
 
-        /// Adds a stable selector used by GPUI interaction tests.
         pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
             self.core.debug_selector = Some(selector.into());
             self
@@ -3142,7 +2981,7 @@ fn render_overlay_root(state: Entity<MenuState>, window: &mut Window, cx: &mut A
             menu.trigger_bounds,
         )
     };
-    let root_size = constrain_panel_size(
+    let root_size = constrain_anchored_size(
         panel_size(&entries, style.metrics),
         viewport,
         placement.viewport_margin,
@@ -3155,7 +2994,7 @@ fn render_overlay_root(state: Entity<MenuState>, window: &mut Window, cx: &mut A
         window,
     );
     let local_anchor = Bounds::new(anchor.origin - content.origin, anchor.size);
-    let root_bounds = place_root(local_anchor, root_size, viewport, placement);
+    let root_bounds = place_anchored(local_anchor, root_size, viewport, placement);
     let root_highlighted = highlighted.first().copied().flatten();
     let root_scroll = state.update(cx, |state, _| {
         state.prepare_panel_scroll(0, root_bounds.size, &entries, root_highlighted)
@@ -3182,12 +3021,12 @@ fn render_overlay_root(state: Entity<MenuState>, window: &mut Window, cx: &mut A
             + style.metrics.panel_padding
             + parent_scroll_offset
             + entry_offset(parent_entries, index, style.metrics);
-        let child_size = constrain_panel_size(
+        let child_size = constrain_anchored_size(
             panel_size(children, style.metrics),
             viewport,
             placement.viewport_margin,
         );
-        let child_bounds = place_submenu(
+        let child_bounds = place_adjacent(
             parent_bounds,
             row_top,
             child_size,
@@ -3815,14 +3654,6 @@ fn panel_size(entries: &[InternalEntry], metrics: MenuMetrics) -> gpui::Size<Pix
     )
 }
 
-fn constrain_panel_size(
-    panel: gpui::Size<Pixels>,
-    viewport: gpui::Size<Pixels>,
-    margin: Pixels,
-) -> gpui::Size<Pixels> {
-    constrain_anchored_size(panel, viewport, margin)
-}
-
 fn entry_offset(entries: &[InternalEntry], index: usize, metrics: MenuMetrics) -> Pixels {
     entries.iter().take(index).fold(px(0.0), |height, entry| {
         height
@@ -3834,26 +3665,6 @@ fn entry_offset(entries: &[InternalEntry], index: usize, metrics: MenuMetrics) -
                 }
             }
     })
-}
-
-fn place_root(
-    anchor: Bounds<Pixels>,
-    panel: gpui::Size<Pixels>,
-    viewport: gpui::Size<Pixels>,
-    config: MenuPlacementConfig,
-) -> Bounds<Pixels> {
-    place_anchored(anchor, panel, viewport, config)
-}
-
-fn place_submenu(
-    parent: Bounds<Pixels>,
-    row_top: Pixels,
-    panel: gpui::Size<Pixels>,
-    viewport: gpui::Size<Pixels>,
-    margin: Pixels,
-    gap: Pixels,
-) -> Bounds<Pixels> {
-    place_adjacent(parent, row_top, panel, viewport, margin, gap)
 }
 
 #[cfg(test)]
@@ -4152,19 +3963,72 @@ mod tests {
         )
     }
 
-    #[test]
-    fn renderer_should_reach_selected_hovered_row_paint() {
+    #[gpui::test]
+    fn renderer_should_reach_selected_hovered_row_paint(cx: &mut TestAppContext) {
         let normal = row_paint(10);
         let hovered = row_paint(20);
         let selected = row_paint(30);
         let selected_hovered = row_paint(40);
         let disabled = row_paint(50);
-        let rows = crate::ListRowPaints::new(normal, hovered, selected, selected_hovered, disabled);
+        let rows = crate::ListRowPaints::new(
+            normal,
+            hovered,
+            selected,
+            selected_hovered,
+            disabled,
+            disabled,
+        );
 
         assert_eq!(
             resolve_row_paint(Some(rows), true, true, true, true),
             Some(selected_hovered)
         );
+
+        let (_root, _events, cx) = menu_window(cx);
+        let mut theme = test_theme();
+        theme.paint = theme.paint.rows(rows);
+        cx.update(|window, cx| {
+            cx.set_global(theme);
+            window.refresh();
+        });
+        cx.run_until_parked();
+        let trigger = cx
+            .debug_bounds("menu-trigger")
+            .expect("mounted menu trigger");
+        cx.simulate_click(trigger.center(), Modifiers::none());
+        cx.run_until_parked();
+        let row = cx.debug_bounds("open-entry").expect("mounted selected row");
+        let assert_row_paint = |expected: crate::ListRowPaint,
+                                row: Bounds<Pixels>,
+                                cx: &mut VisualTestContext| {
+            cx.update(|window, _| {
+                let quads = window.painted_quads();
+                let background = quads
+                    .iter()
+                    .filter(|quad| quad.background == gpui::Background::from(expected.background))
+                    .map(|quad| quad.bounds.intersect(&quad.content_mask.bounds))
+                    .reduce(|bounds, next| bounds.union(&next));
+                let border = quads
+                    .iter()
+                    .filter(|quad| quad.border_color == expected.border.into())
+                    .map(|quad| quad.bounds.intersect(&quad.content_mask.bounds))
+                    .reduce(|bounds, next| bounds.union(&next));
+                let painted_row = Some(row.scale(window.scale_factor()));
+                assert_eq!(
+                    background, painted_row,
+                    "the mounted row must paint the authored background"
+                );
+                assert_eq!(
+                    border, painted_row,
+                    "the mounted row must paint the authored border"
+                );
+            });
+        };
+        assert_row_paint(selected, row, cx);
+
+        cx.simulate_mouse_move(row.center(), None, Modifiers::none());
+        cx.run_until_parked();
+        assert_row_paint(selected_hovered, row, cx);
     }
 
     #[test]
@@ -4213,34 +4077,6 @@ mod tests {
         assert_eq!(first_selectable(&entries), Some(2));
         assert_eq!(adjacent_selectable(&entries, Some(3), 1), Some(2));
         assert_eq!(adjacent_selectable(&entries, Some(2), -1), Some(3));
-    }
-
-    #[test]
-    fn default_placement_margin_should_preserve_the_panel_shadow() {
-        assert_eq!(MenuPlacementConfig::default().viewport_margin, px(12.0));
-    }
-
-    #[test]
-    fn root_placement_should_flip_above_when_below_overflows() {
-        let anchor = Bounds::new(point(px(20.0), px(170.0)), size(px(40.0), px(20.0)));
-        let placed = place_root(
-            anchor,
-            size(px(100.0), px(80.0)),
-            size(px(240.0), px(200.0)),
-            MenuPlacementConfig::default(),
-        );
-        assert_eq!(placed.origin, point(px(20.0), px(86.0)));
-    }
-
-    #[test]
-    fn oversized_panel_should_be_constrained_inside_the_viewport_margin() {
-        let constrained = constrain_panel_size(
-            size(px(300.0), px(400.0)),
-            size(px(200.0), px(100.0)),
-            px(8.0),
-        );
-
-        assert_eq!(constrained, size(px(184.0), px(84.0)));
     }
 
     #[test]
@@ -4299,83 +4135,6 @@ mod tests {
     }
 
     #[test]
-    fn radio_group_should_normalize_nonempty_selection_to_exactly_one() {
-        let group = MenuEntry::radio_group(
-            Some(99),
-            vec![
-                MenuRadioOption::new("One", 1),
-                MenuRadioOption::new("Two", 2),
-            ],
-        );
-        let MenuEntryKind::Section { entries, .. } = group.kind else {
-            panic!("radio group did not create a section");
-        };
-        let selected = entries
-            .iter()
-            .filter(|entry| {
-                matches!(
-                    entry.kind,
-                    MenuEntryKind::Item(MenuItem {
-                        mark: EntryMark::Radio { selected: true, .. },
-                        ..
-                    })
-                )
-            })
-            .count();
-
-        assert_eq!(selected, 1);
-    }
-
-    #[test]
-    fn root_placement_should_support_horizontal_sides_and_center_alignment() {
-        let anchor = Bounds::new(point(px(100.0), px(80.0)), size(px(40.0), px(40.0)));
-        let viewport = size(px(400.0), px(260.0));
-        let panel = size(px(80.0), px(60.0));
-        let right = place_root(
-            anchor,
-            panel,
-            viewport,
-            MenuPlacementConfig::new(MenuPlacement::Right, MenuAlignment::Center),
-        );
-        let left = place_root(
-            anchor,
-            panel,
-            viewport,
-            MenuPlacementConfig::new(MenuPlacement::Left, MenuAlignment::End),
-        );
-        let top = place_root(
-            anchor,
-            panel,
-            viewport,
-            MenuPlacementConfig::new(MenuPlacement::Top, MenuAlignment::End),
-        );
-        let bottom = place_root(
-            anchor,
-            panel,
-            viewport,
-            MenuPlacementConfig::new(MenuPlacement::Bottom, MenuAlignment::Center),
-        );
-
-        assert_eq!(right.origin, point(px(144.0), px(70.0)));
-        assert_eq!(left.origin, point(px(16.0), px(60.0)));
-        assert_eq!(top.origin, point(px(60.0), px(16.0)));
-        assert_eq!(bottom.origin, point(px(80.0), px(124.0)));
-    }
-
-    #[test]
-    fn root_placement_should_flip_a_horizontal_side_before_clamping() {
-        let anchor = Bounds::new(point(px(350.0), px(40.0)), size(px(30.0), px(30.0)));
-        let placed = place_root(
-            anchor,
-            size(px(100.0), px(50.0)),
-            size(px(400.0), px(200.0)),
-            MenuPlacementConfig::new(MenuPlacement::Right, MenuAlignment::Start),
-        );
-
-        assert_eq!(placed.origin.x, px(246.0));
-    }
-
-    #[test]
     fn size_catalog_should_preserve_three_bounded_widths() {
         let paint = test_theme().paint;
         let sizes = MenuSizes::new(
@@ -4409,13 +4168,13 @@ mod tests {
     }
 
     #[test]
-    fn rows_should_use_one_leading_slot_and_leave_unselected_icons_visible() {
+    fn selected_checkbox_and_radio_marks_use_check() {
         assert!(mark_icon(EntryMark::None).is_none());
         assert!(mark_icon(EntryMark::Checkbox(false)).is_none());
-        assert_eq!(
-            mark_icon(EntryMark::Checkbox(true)).map(IconName::unicode),
-            Some(IconName::Check.unicode())
-        );
+        assert!(matches!(
+            mark_icon(EntryMark::Checkbox(true)),
+            Some(IconName::Check)
+        ));
         assert!(
             mark_icon(EntryMark::Radio {
                 selected: false,
@@ -4423,19 +4182,20 @@ mod tests {
             })
             .is_none()
         );
-        assert_eq!(
+        assert!(matches!(
             mark_icon(EntryMark::Radio {
                 selected: true,
                 index: 0,
-            })
-            .map(IconName::unicode),
-            Some(IconName::Check.unicode())
-        );
+            }),
+            Some(IconName::Check)
+        ));
     }
 
     #[test]
-    fn controls_and_rows_should_share_resolved_icon_and_text_foregrounds() {
-        let paint = test_theme().paint;
+    fn trigger_and_row_fallback_foregrounds_follow_state() {
+        let mut paint = test_theme().paint;
+        paint.foreground = rgba(0x112233ff);
+        paint.selected_foreground = rgba(0xaabbccff);
 
         assert_eq!(
             trigger_foregrounds(paint, true),
@@ -4463,7 +4223,7 @@ mod tests {
     }
 
     #[test]
-    fn row_and_separator_geometry_should_follow_the_panel_content_grid() {
+    fn panel_metrics_inherit_shell_geometry_and_entry_extents() {
         let base = MenuMetrics::new(px(196.0), px(26.0))
             .horizontal_padding(px(6.0))
             .leading_columns(px(16.0), px(18.0), px(4.0))
@@ -4496,22 +4256,7 @@ mod tests {
     }
 
     #[test]
-    fn role_line_boxes_scale_independently_from_fixed_menu_extents() {
-        let metrics = MenuMetrics::new(px(196.0), px(26.0))
-            .trigger_height(px(28.0))
-            .text_geometry(px(18.0), px(15.0), px(21.0), px(4.0))
-            .scaled(1.5, 1.0);
-
-        assert_eq!(metrics.label_line_height, px(27.0));
-        assert_eq!(metrics.shortcut_line_height, px(22.5));
-        assert_eq!(metrics.section_line_height, px(31.5));
-        assert_eq!(metrics.row_height, px(35.0));
-        assert_eq!(metrics.section_height, px(32.5));
-        assert_eq!(metrics.trigger_height, px(37.0));
-    }
-
-    #[test]
-    fn menu_shortcuts_use_the_shortcut_font_slot() {
+    fn menu_shortcut_font_selects_the_shortcut_slot() {
         let regular = gpui::font("Regular");
         let shortcut = gpui::font("Shortcut");
         let typography =
@@ -4549,6 +4294,20 @@ mod tests {
             .count();
 
         assert_eq!((picker.selected_label.as_ref(), selected), ("First Two", 1));
+        let rows: Vec<_> = picker
+            .core
+            .entries
+            .iter()
+            .map(|entry| match &entry.kind {
+                MenuEntryKind::Item(MenuItem {
+                    label,
+                    mark: EntryMark::Radio { selected, index },
+                    ..
+                }) => (label.as_ref(), *selected, *index),
+                _ => panic!("picker did not create a radio row"),
+            })
+            .collect();
+        assert_eq!(rows, [("First Two", true, 0), ("Second Two", false, 1)]);
     }
 
     #[test]
@@ -4556,20 +4315,6 @@ mod tests {
         let result = Picker::new("picker", "Picker", 1_u8, Vec::new());
 
         assert!(matches!(result, Err(PickerBuildError::EmptyOptions)));
-    }
-
-    #[test]
-    fn submenu_placement_should_flip_to_the_left() {
-        let parent = Bounds::new(point(px(140.0), px(20.0)), size(px(100.0), px(80.0)));
-        let placed = place_submenu(
-            parent,
-            px(30.0),
-            size(px(100.0), px(60.0)),
-            size(px(260.0), px(160.0)),
-            px(8.0),
-            px(2.0),
-        );
-        assert_eq!(placed.origin.x, px(38.0));
     }
 
     struct TestRoot {
@@ -4687,7 +4432,8 @@ mod tests {
             root.read_with(cx, |root, _| root.icon_color.get()),
             rgba(0x004400ff)
         );
-        theme = theme.scaled_metrics(2.0, 2.0);
+        let moved = MenuMetrics::new(px(320.0), px(56.0));
+        theme.sizes = MenuSizes::new(moved, moved, moved);
         cx.update(|window, cx| {
             cx.set_global(theme);
             window.refresh();
@@ -4729,7 +4475,12 @@ mod tests {
             .debug_bounds("open-entry-icon")
             .expect("the default custom row icon was not rendered");
 
-        let theme = test_theme().scaled_metrics(2.0, 1.25);
+        let metrics =
+            MenuMetrics::new(px(160.0), px(28.0)).decoration_metrics(default_size * 2.0, px(1.0));
+        let theme = MenuTheme::new(
+            test_theme().paint,
+            MenuSizes::new(metrics, metrics, metrics),
+        );
         let expected_size = theme
             .resolve(MenuSize::Regular, test_shell())
             .metrics
@@ -4861,7 +4612,7 @@ mod tests {
             .resolve(MenuSize::Regular, test_shell())
             .metrics;
         let comfortable = test_theme()
-            .scaled_metrics(1.0, 1.25)
+            .scaled_spacing(1.25)
             .resolve(MenuSize::Regular, test_shell())
             .metrics;
 
@@ -5065,6 +4816,22 @@ mod tests {
             .expect("scrolled parent row");
         let child = cx.debug_bounds("menu-panel-1").expect("child menu");
         assert!(child.top() <= row.bottom() && child.bottom() >= row.top());
+        let parent = cx.debug_bounds("menu-panel-0").expect("parent menu");
+        let viewport = cx.update(|window, _| crate::content_viewport(window));
+        assert!(row.top() >= parent.top() && row.bottom() <= parent.bottom());
+        let expected_top = row
+            .top()
+            .max(viewport.top() + px(12.0))
+            .min((viewport.bottom() - px(12.0) - child.size.height).max(viewport.top() + px(12.0)));
+        assert_eq!(child.top(), expected_top);
+        let gap = px(2.0);
+        let expected_left =
+            if parent.right() + gap + child.size.width <= viewport.right() - px(12.0) {
+                parent.right() + gap
+            } else {
+                parent.left() - gap - child.size.width
+            };
+        assert_eq!(child.left(), expected_left);
     }
 
     #[gpui::test]
@@ -5212,16 +4979,7 @@ mod tests {
             Menu::new(
                 "semantic-menu",
                 "Semantic",
-                vec![
-                    MenuEntry::checkbox("Flag", false, "flag").debug_selector("checkbox-entry"),
-                    MenuEntry::radio_group(
-                        Some(99),
-                        vec![
-                            MenuRadioOption::new("One", "one"),
-                            MenuRadioOption::new("Two", "two"),
-                        ],
-                    ),
-                ],
+                vec![MenuEntry::checkbox("Flag", false, "flag").debug_selector("checkbox-entry")],
             )
             .debug_selector("semantic-trigger")
             .on_activate(move |event, _, _| events.borrow_mut().push(event.clone()))
@@ -5229,7 +4987,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn checkbox_and_radio_should_emit_typed_proposals(cx: &mut TestAppContext) {
+    fn checkbox_should_emit_typed_proposal(cx: &mut TestAppContext) {
         cx.update(super::init);
         cx.set_global(test_theme());
         let events = Rc::new(RefCell::new(Vec::new()));
@@ -5251,28 +5009,13 @@ mod tests {
         cx.simulate_click(checkbox.center(), Modifiers::none());
         cx.run_until_parked();
 
-        cx.simulate_click(trigger.center(), Modifiers::none());
-        cx.run_until_parked();
-        let radio = cx
-            .debug_bounds("One")
-            .unwrap_or_else(|| panic!("radio option not painted"));
-        cx.simulate_click(radio.center(), Modifiers::none());
-        cx.run_until_parked();
-
         assert_eq!(
             events.borrow().as_slice(),
-            [
-                MenuActivation::Checkbox {
-                    action: "flag",
-                    checked: true,
-                    source: MenuActivationSource::Pointer,
-                },
-                MenuActivation::Radio {
-                    action: "one",
-                    index: 0,
-                    source: MenuActivationSource::Pointer,
-                },
-            ]
+            [MenuActivation::Checkbox {
+                action: "flag",
+                checked: true,
+                source: MenuActivationSource::Pointer,
+            },]
         );
     }
 
@@ -5301,7 +5044,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn picker_should_represent_current_value_and_skip_disabled_options(cx: &mut TestAppContext) {
+    fn picker_keyboard_activation_skips_a_disabled_current_option(cx: &mut TestAppContext) {
         cx.update(super::init);
         cx.set_global(test_theme());
         let changes = Rc::new(RefCell::new(Vec::new()));
@@ -5359,6 +5102,7 @@ mod tests {
     struct ActivationOrderRoot {
         events: Rc<RefCell<Vec<ActivationOrderEvent>>>,
         callback_had_focus: Rc<Cell<bool>>,
+        predecessor: FocusHandle,
     }
 
     impl Render for ActivationOrderRoot {
@@ -5366,23 +5110,28 @@ mod tests {
             let activation_events = self.events.clone();
             let lifecycle_events = self.events.clone();
             let callback_had_focus = self.callback_had_focus.clone();
-            Menu::new(
-                "activation-order-menu",
-                "Activation order",
-                vec![MenuEntry::action("Run", ())],
-            )
-            .debug_selector("activation-order-trigger")
-            .on_activate(move |_, window, cx| {
-                callback_had_focus.set(window.focused(cx).is_some());
-                activation_events
-                    .borrow_mut()
-                    .push(ActivationOrderEvent::Activation);
-            })
-            .on_lifecycle(move |event, _| {
-                lifecycle_events
-                    .borrow_mut()
-                    .push(ActivationOrderEvent::Lifecycle(*event));
-            })
+            let predecessor = self.predecessor.clone();
+            div()
+                .child(div().track_focus(&self.predecessor).child("Predecessor"))
+                .child(
+                    Menu::new(
+                        "activation-order-menu",
+                        "Activation order",
+                        vec![MenuEntry::action("Run", ())],
+                    )
+                    .debug_selector("activation-order-trigger")
+                    .on_activate(move |_, window, cx| {
+                        callback_had_focus.set(window.focused(cx).as_ref() == Some(&predecessor));
+                        activation_events
+                            .borrow_mut()
+                            .push(ActivationOrderEvent::Activation);
+                    })
+                    .on_lifecycle(move |event, _| {
+                        lifecycle_events
+                            .borrow_mut()
+                            .push(ActivationOrderEvent::Lifecycle(*event));
+                    }),
+                )
         }
     }
 
@@ -5396,9 +5145,10 @@ mod tests {
         let callback_had_focus = Rc::new(Cell::new(false));
         let root_events = events.clone();
         let root_callback_had_focus = callback_had_focus.clone();
-        let (_, cx) = cx.add_window_view(move |_, _| ActivationOrderRoot {
+        let (root, cx) = cx.add_window_view(move |_, cx| ActivationOrderRoot {
             events: root_events,
             callback_had_focus: root_callback_had_focus,
+            predecessor: cx.focus_handle(),
         });
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
@@ -5407,7 +5157,8 @@ mod tests {
             .debug_bounds("activation-order-trigger")
             .unwrap_or_else(|| panic!("activation-order trigger not painted"));
         // This case exercises restoration to an existing keyboard target before activation.
-        cx.update(|window, cx| window.focus_next(cx));
+        let predecessor = root.read_with(cx, |root, _| root.predecessor.clone());
+        cx.update(|window, cx| predecessor.focus(window, cx));
         cx.simulate_click(trigger.center(), Modifiers::none());
         cx.run_until_parked();
         cx.simulate_keystrokes("enter");
@@ -5596,6 +5347,9 @@ mod tests {
         cx.run_until_parked();
 
         assert!(dismissed.is_some());
+        assert_eq!(dismissed.expect("replaced menu").0, Some(focus.downgrade()));
+        assert!(cx.debug_bounds("menu-panel-0").is_none());
+        assert!(!cx.update(|window, cx| window_menu_is_open(window, cx)));
         assert!(!cx.update(|window, _| focus.is_focused(window)));
         assert_eq!(
             lifecycle.borrow().as_slice(),
@@ -5995,26 +5749,36 @@ mod tests {
     struct ContextRequestRoot {
         accept: Rc<Cell<bool>>,
         requests: Rc<RefCell<Vec<Point<Pixels>>>>,
+        secondary_presses: Rc<Cell<usize>>,
+        predecessor: FocusHandle,
     }
 
     impl Render for ContextRequestRoot {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             let accept = self.accept.clone();
             let requests = self.requests.clone();
-            ContextMenu::new(
-                "request-context",
-                "Requested context",
-                div()
-                    .debug_selector(|| "request-target".into())
-                    .w(px(80.0))
-                    .h(px(40.0)),
-                vec![MenuEntry::action("Inspect", ())],
-            )
-            .on_open_request(move |request, _, _| {
-                requests.borrow_mut().push(request.position());
-                accept.get()
-            })
-            .on_activate(|_, _, _| {})
+            let secondary_presses = self.secondary_presses.clone();
+            div()
+                .on_mouse_down(MouseButton::Right, move |_, _, _| {
+                    secondary_presses.set(secondary_presses.get() + 1);
+                })
+                .child(div().track_focus(&self.predecessor).child("Predecessor"))
+                .child(
+                    ContextMenu::new(
+                        "request-context",
+                        "Requested context",
+                        div()
+                            .debug_selector(|| "request-target".into())
+                            .w(px(80.0))
+                            .h(px(40.0)),
+                        vec![MenuEntry::action("Inspect", ())],
+                    )
+                    .on_open_request(move |request, _, _| {
+                        requests.borrow_mut().push(request.position());
+                        accept.get()
+                    })
+                    .on_activate(|_, _, _| {}),
+                )
         }
     }
 
@@ -6026,34 +5790,49 @@ mod tests {
         let requests = Rc::new(RefCell::new(Vec::new()));
         let root_accept = accept.clone();
         let root_requests = requests.clone();
-        let (_, cx) = cx.add_window_view(move |_, _| ContextRequestRoot {
+        let secondary_presses = Rc::new(Cell::new(0));
+        let root_secondary_presses = secondary_presses.clone();
+        let (root, cx) = cx.add_window_view(move |_, cx| ContextRequestRoot {
             accept: root_accept,
             requests: root_requests,
+            secondary_presses: root_secondary_presses,
+            predecessor: cx.focus_handle(),
         });
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
         let target = cx
             .debug_bounds("request-target")
             .unwrap_or_else(|| panic!("request target not painted"));
+        let predecessor = root.read_with(cx, |root, _| root.predecessor.clone());
+        cx.update(|window, cx| predecessor.focus(window, cx));
+        assert!(cx.update(|window, _| predecessor.is_focused(window)));
 
         cx.simulate_mouse_down(target.center(), MouseButton::Right, Modifiers::none());
         cx.simulate_mouse_up(target.center(), MouseButton::Right, Modifiers::none());
         cx.run_until_parked();
         assert_eq!(requests.borrow().as_slice(), [target.center()]);
         assert!(cx.debug_bounds("Inspect").is_none());
+        assert!(cx.update(|window, _| predecessor.is_focused(window)));
+        assert_eq!(secondary_presses.get(), 1);
 
         accept.set(true);
-        cx.simulate_mouse_down(target.center(), MouseButton::Right, Modifiers::none());
-        cx.simulate_mouse_up(target.center(), MouseButton::Right, Modifiers::none());
+        let accepted_position = target.center() + point(px(3.0), px(2.0));
+        cx.simulate_mouse_down(accepted_position, MouseButton::Right, Modifiers::none());
+        cx.simulate_mouse_up(accepted_position, MouseButton::Right, Modifiers::none());
         cx.run_until_parked();
         assert!(cx.debug_bounds("Inspect").is_some());
+        assert_eq!(
+            requests.borrow().as_slice(),
+            [target.center(), accepted_position]
+        );
+        assert_eq!(secondary_presses.get(), 1);
     }
 
     struct KeyboardContextRoot {
         focus: FocusHandle,
         accept: Rc<Cell<bool>>,
         requests: Rc<Cell<usize>>,
-        activations: Rc<RefCell<Vec<MenuActivationSource>>>,
+        activations: Rc<RefCell<Vec<MenuActivation<&'static str>>>>,
         disabled: bool,
     }
 
@@ -6067,8 +5846,8 @@ mod tests {
                 "Workspace actions",
                 div().w(px(100.0)).h(px(40.0)),
                 vec![
-                    MenuEntry::action("Unavailable", ()).disabled(true),
-                    MenuEntry::action("Inspect", ()),
+                    MenuEntry::action("Unavailable", "unavailable").disabled(true),
+                    MenuEntry::action("Inspect", "inspect"),
                 ],
             )
             .keyboard_trigger(&self.focus)
@@ -6077,7 +5856,7 @@ mod tests {
                 requests.set(requests.get() + 1);
                 accept.get()
             })
-            .on_activate(move |activation, _, _| activations.borrow_mut().push(activation.source()))
+            .on_activate(move |activation, _, _| activations.borrow_mut().push(activation.clone()))
         }
     }
 
@@ -6189,7 +5968,10 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(
             activations.borrow().as_slice(),
-            [MenuActivationSource::Keyboard]
+            [MenuActivation::Action {
+                action: "inspect",
+                source: MenuActivationSource::Keyboard
+            }]
         );
         assert!(cx.update(|window, cx| root.read(cx).focus.is_focused(window)));
 
@@ -6212,17 +5994,23 @@ mod tests {
         assert_eq!(requests.get(), 3);
     }
 
-    struct ContextRoot;
+    struct ContextRoot {
+        primary_presses: Rc<Cell<usize>>,
+    }
 
     impl Render for ContextRoot {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let primary_presses = self.primary_presses.clone();
             ContextMenu::new(
                 "context",
                 "Context actions",
                 div()
                     .debug_selector(|| "context-target".into())
                     .w(px(80.0))
-                    .h(px(40.0)),
+                    .h(px(40.0))
+                    .on_mouse_down(MouseButton::Left, move |_, _, _| {
+                        primary_presses.set(primary_presses.get() + 1);
+                    }),
                 vec![MenuEntry::action("Inspect", ())],
             )
             .on_activate(|_, _, _| {})
@@ -6230,7 +6018,7 @@ mod tests {
     }
 
     #[test]
-    fn context_menu_can_preserve_the_surrounding_cursor_without_changing_the_default() {
+    fn context_cursor_preservation_is_opt_in() {
         let default_menu = ContextMenu::new(
             "default-context-cursor",
             "Default context cursor",
@@ -6307,7 +6095,9 @@ mod tests {
     fn context_menu_should_open_for_control_primary_click(cx: &mut TestAppContext) {
         cx.update(super::init);
         cx.set_global(test_theme());
-        let (_, cx) = cx.add_window_view(|_, _| ContextRoot);
+        let (_, cx) = cx.add_window_view(|_, _| ContextRoot {
+            primary_presses: Rc::new(Cell::new(0)),
+        });
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
         let target = cx
@@ -6331,15 +6121,20 @@ mod tests {
         cx.update(|cx| {
             crate::install_pointer_conventions(cx, crate::PointerConventions::SecondaryButton)
         });
-        let (_, cx) = cx.add_window_view(|_, _| ContextRoot);
+        let primary_presses = Rc::new(Cell::new(0));
+        let (_, cx) = cx.add_window_view(|_, _| ContextRoot {
+            primary_presses: primary_presses.clone(),
+        });
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
         let target = cx.debug_bounds("context-target").expect("target painted");
         cx.simulate_click(target.center(), Modifiers::control());
         cx.run_until_parked();
         assert!(cx.debug_bounds("Inspect").is_none());
+        assert_eq!(primary_presses.get(), 1);
         cx.simulate_mouse_down(target.center(), MouseButton::Right, Modifiers::none());
         cx.run_until_parked();
         assert!(cx.debug_bounds("Inspect").is_some());
+        assert_eq!(primary_presses.get(), 1);
     }
 }

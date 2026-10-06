@@ -20,20 +20,6 @@ impl SshHostAlias {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn new_bounded(
-        value: String,
-        maximum_bytes: usize,
-    ) -> Result<Self, SshHostAliasError> {
-        if value.len() > maximum_bytes {
-            return Err(SshHostAliasError::TooLong {
-                actual: value.len(),
-                maximum: maximum_bytes,
-            });
-        }
-        Self::new(value)
-    }
-
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
@@ -69,11 +55,6 @@ impl DestinationQueryResolution {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum SshHostAliasError {
     Invalid,
-    #[cfg(test)]
-    TooLong {
-        actual: usize,
-        maximum: usize,
-    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -189,17 +170,6 @@ mod tests {
                 "unexpectedly accepted {value:?}"
             );
         }
-    }
-
-    #[test]
-    fn alias_should_enforce_the_injected_token_bound() {
-        assert_eq!(
-            SshHostAlias::new_bounded("alias".to_owned(), 4),
-            Err(SshHostAliasError::TooLong {
-                actual: 5,
-                maximum: 4,
-            })
-        );
     }
 
     #[test]

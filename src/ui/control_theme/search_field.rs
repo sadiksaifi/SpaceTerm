@@ -1,0 +1,122 @@
+use crate::ui::appearance::gpui_color;
+use gpui::{px, rgba};
+use spaceterm_ui::{
+    ButtonPaint, ButtonVariantStyle, FieldFrameTheme, SearchFieldMetrics, SearchFieldPaint,
+    SearchFieldTheme,
+};
+
+use crate::appearance::{ChromeColors, Color};
+use crate::ui::chrome_geometry::RadiusRole;
+use crate::ui::chrome_icons::{ChromeIcons, IconRole, MarkRole};
+use crate::ui::chrome_typography::{ChromeTypography, TextRole};
+
+/// The height of one search field, matching the navigation entries a sidebar field sits above so
+/// the column runs on one rhythm from its first row to its last.
+const FIELD_HEIGHT: f32 = 28.0;
+/// The ordinary control radius, which the sidebar chip this field shares its column with also
+/// takes. It is named through the shared scale so the two cannot drift apart by one point.
+const FIELD_RADIUS: f32 = RadiusRole::Control.points();
+/// The clear mark's inset, measured to its larger invisible pointer target rather than to the mark.
+const CLEAR_TRAILING_INSET: f32 = 2.0;
+
+pub(super) fn prepared(
+    reference: &ChromeColors,
+    colors: &ChromeColors,
+    typography: &ChromeTypography,
+    icons: &ChromeIcons,
+) -> SearchFieldTheme {
+    let body = typography.style(TextRole::Body);
+    let clear = icons.mark_metrics(MarkRole::Clear);
+    SearchFieldTheme::new(
+        FieldFrameTheme::new(
+            gpui_color(colors.input_background),
+            gpui_color(colors.input_border),
+            gpui_color(colors.input_invalid_border),
+            gpui_color(colors.input_disabled_background),
+            gpui_color(colors.input_disabled_border),
+            gpui_color(colors.focus_ring),
+        ),
+        SearchFieldPaint::new(
+            // The glyph reads as part of the prompt the placeholder states, not as a control.
+            gpui_color(colors.input_placeholder),
+            clear_mark_fills(colors),
+            gpui_color(clear_glyph(reference)),
+            toggle_off(colors),
+            toggle_on(colors),
+        ),
+        SearchFieldMetrics::new(px(FIELD_HEIGHT))
+            .spacing(px(8.0), px(7.0), px(FIELD_RADIUS))
+            .text_geometry(
+                body.size,
+                body.line_height,
+                icons.metrics(IconRole::Row).glyph_size,
+            )
+            .icon_baseline_center(icons.metrics(IconRole::Row).baseline_center)
+            .clear_mark(
+                clear.disc_diameter,
+                clear.glyph_size,
+                clear.target_size,
+                px(CLEAR_TRAILING_INSET),
+            ),
+    )
+}
+
+/// The disc fill for every state of the clear mark.
+fn clear_mark_fills(colors: &ChromeColors) -> ButtonVariantStyle {
+    let fill = |color: Color| ButtonPaint::new(rgba(0), gpui_color(color), rgba(0));
+    ButtonVariantStyle::new(
+        fill(colors.input_placeholder),
+        fill(colors.input_placeholder.mix(colors.input_text, 0.5)),
+        fill(colors.input_text),
+        fill(colors.input_disabled_text),
+    )
+}
+
+/// A trailing toggle while off: a glyph at the search glyph's neutral weight on no surface of its
+/// own, which gains the ghost fill only while pointed at or pressed.
+fn toggle_off(colors: &ChromeColors) -> ButtonVariantStyle {
+    let paint = |background: Color, glyph: Color| {
+        ButtonPaint::new(gpui_color(background), gpui_color(glyph), rgba(0))
+    };
+    ButtonVariantStyle::new(
+        ButtonPaint::new(rgba(0), gpui_color(colors.input_placeholder), rgba(0)),
+        paint(
+            colors.ghost_element_hover,
+            colors.ghost_element_hover_foreground,
+        ),
+        paint(
+            colors.ghost_element_active,
+            colors.ghost_element_active_foreground,
+        ),
+        ButtonPaint::new(rgba(0), gpui_color(colors.input_disabled_text), rgba(0)),
+    )
+}
+
+/// A trailing toggle while on: the selected ghost fill behind an accent glyph, so the active
+/// search mode reads from the field without looking at the placeholder.
+fn toggle_on(colors: &ChromeColors) -> ButtonVariantStyle {
+    let paint = |background: Color| {
+        ButtonPaint::new(
+            gpui_color(background),
+            gpui_color(colors.text_accent),
+            rgba(0),
+        )
+    };
+    ButtonVariantStyle::new(
+        paint(colors.ghost_element_selected),
+        paint(colors.ghost_element_hover),
+        paint(colors.ghost_element_active),
+        ButtonPaint::new(rgba(0), gpui_color(colors.input_disabled_text), rgba(0)),
+    )
+}
+
+/// The glyph struck through the clear mark, resolved against the opaque presentation so it stays
+/// legible on the disc in every state.
+fn clear_glyph(reference: &ChromeColors) -> Color {
+    let disc = reference.input_placeholder.source_over(
+        reference
+            .input_background
+            .source_over(reference.panel_background),
+    );
+    super::readable_on(reference.input_background, disc, 4.5)
+}

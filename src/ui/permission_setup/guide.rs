@@ -1,11 +1,5 @@
 //! The Setup Guide: a panel docked on System Settings' window that offers SpaceTerm to drag into a
-//! privacy list.
-//!
-//! The guide says one thing and offers one thing: an instruction that points at the list above it,
-//! and SpaceTerm shaped like a row of that list. The drag is the action, so the guide shows a
-//! button only when another permission waits. It floats above System Settings without activating
-//! SpaceTerm, so System Settings stays the application a person works in. It never takes keyboard
-//! focus; every action is a click.
+//! privacy list. It never activates SpaceTerm or takes keyboard focus.
 
 use std::cell::{Cell, RefCell};
 use std::ops::Range;
@@ -538,9 +532,7 @@ impl SetupGuide {
             .gap(appearance.spacing(8.0))
             .p(px(PADDING))
             .rounded(RadiusRole::SurfaceLarge.pixels())
-            // Glass draws its own edge and surface. Without it, the guide floats over another
-            // application's window with no blur, so its surface is opaque; the rows behind it would
-            // otherwise show through.
+            // Without glass the guide has no blur, so its surface is opaque.
             .when(!self.glass, |panel| {
                 let base = colors.elevated_surface_background;
                 let surface = appearance

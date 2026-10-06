@@ -202,7 +202,7 @@ mod tests {
         let mut tabs = TabCollection::new(|_| "initial");
         let second = tabs.create_tab(|_| "second").unwrap();
         tabs.create_tab(|_| "third").unwrap();
-        tabs.tabs.swap(0, 1);
+        assert!(tabs.move_tab(TabId::new(1), 1).unwrap());
         assert_eq!(tabs.root_tab(), &"initial");
         tabs.close_tab(TabId::new(1)).unwrap();
         assert_eq!(tabs.root_tab(), &"second");

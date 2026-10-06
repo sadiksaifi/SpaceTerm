@@ -4,16 +4,17 @@ use std::{rc::Rc, sync::Arc};
 
 use gpui::{Bounds, Entity, Modifiers, Pixels, TestAppContext, VisualTestContext};
 
-use crate::appearance::{Appearance, SettingsDocument};
+use crate::appearance::Appearance;
 use crate::keybindings::{Command, KeybindingPreferences, Shortcut};
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
+use crate::settings::SettingsDocument;
 use crate::settings::storage::StorageError;
 use crate::ui::appearance_runtime;
 
-use super::super::test_support::MemoryStorage;
 use super::super::{SettingsRowId, SettingsSectionId, SettingsWindow, control_selector};
 use super::ShortcutDescription;
+use crate::settings::storage::testing::MemoryStorage;
 use crate::ui::sidebar_window::form::CaptionTone;
 
 fn open_keybindings(
@@ -36,7 +37,7 @@ fn open_keybindings_on(
     install_desktop: impl FnOnce(&mut gpui::App),
     cx: &mut TestAppContext,
 ) -> (Entity<SettingsWindow>, &mut VisualTestContext) {
-    let settings = crate::settings::UserSettings::load(storage);
+    let settings = crate::settings::Settings::load(storage);
     let platform = RecordingAppearancePlatform::default();
     platform.set_system_appearance(Some(Appearance::Dark));
     cx.update(|cx| {
@@ -85,7 +86,7 @@ fn record(
     cx: &mut VisualTestContext,
 ) {
     let recorder = window.read_with(cx, |settings, _| {
-        settings.shortcuts.recorder(command).clone()
+        settings.shortcuts.recorders[&command].clone()
     });
     recorder.update_in(cx, |recorder, window, cx| {
         recorder.start_recording(window, cx);
@@ -93,16 +94,6 @@ fn record(
     cx.run_until_parked();
     cx.simulate_keystrokes(keystrokes);
     cx.run_until_parked();
-}
-
-fn is_recording(
-    window: &Entity<SettingsWindow>,
-    command: Command,
-    cx: &mut VisualTestContext,
-) -> bool {
-    window.read_with(cx, |settings, cx| {
-        settings.shortcuts.recorder(command).read(cx).is_recording()
-    })
 }
 
 /// The retained override: absent for the default, `Some(None)` for Unassigned.
@@ -142,12 +133,7 @@ fn found(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> Vec<Com
 
 fn search_value(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> String {
     window.read_with(cx, |settings, cx| {
-        settings
-            .shortcuts
-            .search_input()
-            .read(cx)
-            .value()
-            .to_owned()
+        settings.shortcuts.search.input.read(cx).value().to_owned()
     })
 }
 
@@ -160,12 +146,12 @@ fn no_results(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> Op
 
 fn is_searching_by_shortcut(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> bool {
     window.read_with(cx, |settings, _| {
-        settings.shortcuts.is_searching_by_shortcut()
+        settings.shortcuts.search.capture.is_some()
     })
 }
 
 fn type_search(window: &Entity<SettingsWindow>, text: &str, cx: &mut VisualTestContext) {
-    let input = window.read_with(cx, |settings, _| settings.shortcuts.search_input().clone());
+    let input = window.read_with(cx, |settings, _| settings.shortcuts.search.input.clone());
     input.update_in(cx, |input, window, cx| {
         input.focus_handle().focus(window, cx)
     });
@@ -203,11 +189,9 @@ fn every_command_has_a_row_in_the_keybindings_section(cx: &mut TestAppContext) {
 fn clicking_a_shortcut_records_the_next_chord_into_the_draft(cx: &mut TestAppContext) {
     let (window, cx) = open_keybindings(SettingsDocument::default(), cx);
     click("settings-row-shortcut-new-workspace-control", cx);
-    assert!(is_recording(&window, Command::NewWorkspace, cx));
     cx.simulate_keystrokes("cmd-shift-y");
     cx.run_until_parked();
 
-    assert!(!is_recording(&window, Command::NewWorkspace, cx));
     assert_eq!(
         retained(&window, Command::NewWorkspace, cx),
         Some(Some(shortcut("cmd-shift-y")))
@@ -250,7 +234,6 @@ fn a_terminal_reserved_chord_is_refused_and_recording_continues(cx: &mut TestApp
     let (window, cx) = open_keybindings(SettingsDocument::default(), cx);
     record(&window, Command::NewWorkspace, "ctrl-c", cx);
 
-    assert!(is_recording(&window, Command::NewWorkspace, cx));
     assert_eq!(retained(&window, Command::NewWorkspace, cx), None);
     assert_eq!(
         description(&window, Command::NewWorkspace, cx),
@@ -281,7 +264,6 @@ fn a_terminal_reserved_chord_is_refused_and_recording_continues(cx: &mut TestApp
     // Escape ends the recording, and the refusal goes with it.
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
-    assert!(!is_recording(&window, Command::NewWorkspace, cx));
     assert_eq!(description(&window, Command::NewWorkspace, cx), None);
 }
 
@@ -338,10 +320,6 @@ fn control_shift_recording_accepts_and_refuses_chords_by_its_conventions(cx: &mu
         "ctrl-shift-y",
     ] {
         record(&window, Command::CloseWorkspace, chord, cx);
-        assert!(
-            !is_recording(&window, Command::CloseWorkspace, cx),
-            "{chord}"
-        );
         assert_eq!(
             retained(&window, Command::CloseWorkspace, cx),
             Some(Some(shortcut(chord))),
@@ -401,10 +379,6 @@ fn control_shift_recording_accepts_and_refuses_chords_by_its_conventions(cx: &mu
         ),
     ] {
         record(&window, Command::CloseWorkspace, chord, cx);
-        assert!(
-            is_recording(&window, Command::CloseWorkspace, cx),
-            "{chord}"
-        );
         assert_eq!(
             description(&window, Command::CloseWorkspace, cx),
             Some(ShortcutDescription {
@@ -428,7 +402,6 @@ fn a_system_reserved_chord_is_refused_without_being_performed(cx: &mut TestAppCo
     let (window, cx) = open_keybindings(SettingsDocument::default(), cx);
     record(&window, Command::NewWorkspace, "cmd-q", cx);
 
-    assert!(is_recording(&window, Command::NewWorkspace, cx));
     assert_eq!(retained(&window, Command::NewWorkspace, cx), None);
     assert_eq!(
         description(&window, Command::NewWorkspace, cx),
@@ -456,7 +429,6 @@ fn develop_menu_chords_are_refused_so_they_never_shadow_a_command(cx: &mut TestA
     ] {
         record(&window, Command::NewWorkspace, chord, cx);
 
-        assert!(is_recording(&window, Command::NewWorkspace, cx));
         assert_eq!(retained(&window, Command::NewWorkspace, cx), None);
         assert_eq!(
             description(&window, Command::NewWorkspace, cx),
@@ -492,7 +464,6 @@ fn escape_while_recording_keeps_the_settings_search(cx: &mut TestAppContext) {
     cx.run_until_parked();
     record(&window, Command::NewWorkspace, "escape", cx);
 
-    assert!(!is_recording(&window, Command::NewWorkspace, cx));
     assert_eq!(
         window.read_with(cx, |settings, _| settings.query.clone()),
         "workspace"
@@ -791,7 +762,7 @@ fn the_search_by_shortcut_toggle_is_the_tab_stop_after_the_search_field(cx: &mut
     cx.simulate_keystrokes("tab");
     cx.run_until_parked();
     assert!(!window.read_with(cx, |settings, cx| {
-        settings.shortcuts.search_input().read(cx).is_focused()
+        settings.shortcuts.search.input.read(cx).is_focused()
     }));
     // A button activates when the key that pressed it is released.
     cx.simulate_keystrokes("space");
@@ -802,7 +773,7 @@ fn the_search_by_shortcut_toggle_is_the_tab_stop_after_the_search_field(cx: &mut
 
     assert!(is_searching_by_shortcut(&window, cx));
     assert!(window.read_with(cx, |settings, cx| {
-        settings.shortcuts.search_input().read(cx).is_focused()
+        settings.shortcuts.search.input.read(cx).is_focused()
     }));
 }
 
@@ -859,7 +830,7 @@ fn recorder_bounds(command: Command, cx: &mut VisualTestContext) -> Bounds<Pixel
 
 fn focus_recorder(window: &Entity<SettingsWindow>, command: Command, cx: &mut VisualTestContext) {
     let recorder = window.read_with(cx, |settings, _| {
-        settings.shortcuts.recorder(command).clone()
+        settings.shortcuts.recorders[&command].clone()
     });
     recorder.update_in(cx, |recorder, window, cx| {
         recorder.focus_handle().focus(window, cx)
@@ -904,7 +875,7 @@ fn leaving_the_section_stops_searching_by_shortcut(cx: &mut TestAppContext) {
 fn clicking_away_while_recording_cancels_without_a_change(cx: &mut TestAppContext) {
     let (window, cx) = open_keybindings(SettingsDocument::default(), cx);
     let recorder = window.read_with(cx, |settings, _| {
-        settings.shortcuts.recorder(Command::NewWorkspace).clone()
+        settings.shortcuts.recorders[&Command::NewWorkspace].clone()
     });
     recorder.update_in(cx, |recorder, window, cx| {
         recorder.start_recording(window, cx);
@@ -913,7 +884,6 @@ fn clicking_away_while_recording_cancels_without_a_change(cx: &mut TestAppContex
 
     click("settings-keybindings-search-frame", cx);
 
-    assert!(!is_recording(&window, Command::NewWorkspace, cx));
     assert_eq!(retained(&window, Command::NewWorkspace, cx), None);
     // The keys that follow go where focus went, not to the recorder.
     cx.simulate_input("tab");

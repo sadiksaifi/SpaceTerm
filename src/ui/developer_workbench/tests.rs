@@ -7,34 +7,8 @@ use crate::appearance::{Appearance, AppearanceMode, ChromeDensity};
 use crate::platform::appearance::AppearancePlatform as _;
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
-use crate::settings::UserSettings;
-
-/// Storage with no settings file that fails every write, so a test proves a preview never saves.
-pub(super) struct ReadOnlyStorage;
-
-impl crate::settings::storage::SettingsStorage for ReadOnlyStorage {
-    fn quarantine(&self) -> Result<(), crate::settings::storage::StorageError> {
-        Err(crate::settings::storage::StorageError::Unavailable)
-    }
-
-    fn read(
-        &self,
-    ) -> Result<
-        Option<crate::platform::secure_filesystem::PrivateFileSnapshot>,
-        crate::settings::storage::StorageError,
-    > {
-        Ok(None)
-    }
-
-    fn write(
-        &self,
-        _: &[u8],
-        _: Option<&crate::platform::secure_filesystem::SecureEntryIdentity>,
-    ) -> Result<crate::settings::storage::StorageCommit, crate::settings::storage::StorageError>
-    {
-        panic!("a Developer Workbench preview must not write")
-    }
-}
+use crate::settings::Settings;
+use crate::settings::storage::testing::MemoryStorage;
 
 #[derive(Default)]
 struct RecordingMovement(Rc<RecordingOperatingSystemWindowDragPlatform>);
@@ -45,9 +19,10 @@ impl WindowMovementFactory for RecordingMovement {
     }
 }
 
-/// Installs appearance over read-only settings, with the system in Dark.
-fn install(cx: &mut TestAppContext) -> (UserSettings, RecordingAppearancePlatform) {
-    let settings = UserSettings::load(Arc::new(ReadOnlyStorage));
+/// Installs appearance over empty settings, with the system in Dark.
+fn install(cx: &mut TestAppContext) -> (Settings, RecordingAppearancePlatform, Arc<MemoryStorage>) {
+    let storage = Arc::new(MemoryStorage::default());
+    let settings = Settings::load(storage.clone());
     let platform = RecordingAppearancePlatform::default();
     platform.set_system_appearance(Some(Appearance::Dark));
     platform.set_native_window_transparency_supported(true);
@@ -55,7 +30,7 @@ fn install(cx: &mut TestAppContext) -> (UserSettings, RecordingAppearancePlatfor
         appearance_runtime::install(settings.clone(), Rc::new(platform.clone()), cx).unwrap();
         crate::ui::init(cx).unwrap();
     });
-    (settings, platform)
+    (settings, platform, storage)
 }
 
 fn open_workbench_window(
@@ -84,7 +59,7 @@ fn status(workbench: &Entity<DeveloperWorkbench>, cx: &mut VisualTestContext) ->
 
 #[gpui::test]
 fn unavailable_window_effects_show_defaults_and_refuse_preview_edits(cx: &mut TestAppContext) {
-    let (_, platform) = install(cx);
+    let (_, platform, _) = install(cx);
     let (workbench, cx) = open_workbench_window(cx);
     workbench.update(cx, |workbench, cx| {
         workbench.apply(
@@ -95,47 +70,61 @@ fn unavailable_window_effects_show_defaults_and_refuse_preview_edits(cx: &mut Te
         workbench.apply(|preview| preview.set_blur(false), "Fixture blur", cx);
     });
     cx.run_until_parked();
-    for (transparency, blur) in [(false, false), (true, false), (false, true)] {
-        platform.set_native_window_transparency_supported(transparency);
-        platform.set_native_window_blur_supported(blur);
+    for show_borders in [false, true] {
+        platform.set_show_borders(show_borders);
         cx.run_until_parked();
-        let before = workbench.read_with(cx, |workbench, _| workbench.preview.document());
-        let before_status = status(&workbench, cx);
-        let track = cx.debug_bounds("workbench-blur-indicator").unwrap();
-        let thumb = cx.debug_bounds("workbench-blur-thumb").unwrap();
-        assert!(
-            thumb.center().x > track.center().x,
-            "Blur must show its effective default"
-        );
-        // The disabled selected segment still presents the effective Default stop.
-        let default_bounds = cx.debug_bounds("workbench-transparency-default").unwrap();
-        let maximum_bounds = cx.debug_bounds("workbench-transparency-maximum").unwrap();
-        cx.update(|window, _| {
-            let fill = |bounds: gpui::Bounds<gpui::Pixels>| {
-                window
-                    .painted_quads()
-                    .iter()
-                    .find(|quad| quad.bounds == bounds.scale(window.scale_factor()))
-                    .map(|quad| quad.background)
-            };
-            assert_ne!(
-                fill(default_bounds),
-                fill(maximum_bounds),
-                "Default must be the selected stop"
+        for (transparency, blur) in [(false, false), (true, false), (false, true)] {
+            platform.set_native_window_transparency_supported(transparency);
+            platform.set_native_window_blur_supported(blur);
+            cx.run_until_parked();
+            let before = workbench.read_with(cx, |workbench, _| workbench.preview.document());
+            let before_status = status(&workbench, cx);
+            let track = cx.debug_bounds("workbench-blur-indicator").unwrap();
+            let thumb = cx.debug_bounds("workbench-blur-thumb").unwrap();
+            assert!(
+                thumb.center().x > track.center().x,
+                "Blur must show its effective default"
             );
-        });
-        for selector in [
-            "workbench-transparency-opaque",
-            "workbench-transparency-maximum",
-            "workbench-blur",
-        ] {
-            click(selector, cx);
+            // The disabled selected segment still presents the effective Default stop.
+            let default_bounds = cx.debug_bounds("workbench-transparency-default").unwrap();
+            let maximum_bounds = cx.debug_bounds("workbench-transparency-maximum").unwrap();
+            cx.update(|window, cx| {
+                let surface = crate::ui::appearance::settings::shared(cx);
+                let appearance = &surface.chrome;
+                let theme = crate::ui::control_theme::segmented_control::prepared(
+                    &appearance.card_controls.segmented,
+                    &appearance.typography,
+                    appearance.capabilities.show_borders,
+                );
+                let fill = |bounds: gpui::Bounds<gpui::Pixels>| {
+                    window
+                        .painted_quads()
+                        .iter()
+                        .find(|quad| quad.bounds == bounds.scale(window.scale_factor()))
+                        .map(|quad| quad.background)
+                };
+                assert_eq!(
+                    fill(default_bounds).expect("the selected segment must paint"),
+                    theme.paint(true, false, false, false).background().into()
+                );
+                assert_eq!(
+                    fill(maximum_bounds).map(|fill| gpui::Rgba::from(fill.as_solid().unwrap()).a),
+                    show_borders.then(|| theme.paint(false, false, false, false).background().a)
+                );
+            });
+            for selector in [
+                "workbench-transparency-opaque",
+                "workbench-transparency-maximum",
+                "workbench-blur",
+            ] {
+                click(selector, cx);
+            }
+            assert_eq!(
+                workbench.read_with(cx, |workbench, _| workbench.preview.document()),
+                before
+            );
+            assert_eq!(status(&workbench, cx), before_status);
         }
-        assert_eq!(
-            workbench.read_with(cx, |workbench, _| workbench.preview.document()),
-            before
-        );
-        assert_eq!(status(&workbench, cx), before_status);
     }
     // Once both effects return, the controls present and edit the retained choices again.
     platform.set_native_window_transparency_supported(true);
@@ -147,7 +136,7 @@ fn unavailable_window_effects_show_defaults_and_refuse_preview_edits(cx: &mut Te
     click("workbench-transparency-maximum", cx);
     click("workbench-blur", cx);
     let preferences = workbench.read_with(cx, |workbench, _| {
-        workbench.preview.document().preferences.window
+        workbench.preview.document().appearance.window
     });
     assert_eq!(preferences.transparency, 1.0);
     assert!(preferences.blur);
@@ -236,7 +225,7 @@ fn sections_present_their_own_fixtures(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn diagnostics_repaint_for_shared_system_changes(cx: &mut TestAppContext) {
-    let (settings, platform) = install(cx);
+    let (settings, platform, _) = install(cx);
     let (_, cx) = open_workbench_window(cx);
     assert!(
         cx.debug_bounds("workbench-diagnostics-generation-0")
@@ -244,8 +233,8 @@ fn diagnostics_repaint_for_shared_system_changes(cx: &mut TestAppContext) {
     );
 
     let token = settings.begin_preview(0).unwrap();
-    let mut candidate = crate::appearance::SettingsDocument::default();
-    candidate.preferences.mode = AppearanceMode::Auto;
+    let mut candidate = crate::settings::SettingsDocument::default();
+    candidate.appearance.mode = AppearanceMode::Auto;
     settings.update_preview(&token, candidate).unwrap();
     cx.run_until_parked();
     platform.set_system_appearance(Some(Appearance::Light));
@@ -269,7 +258,7 @@ fn diagnostics_repaint_for_shared_system_changes(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn toolbar_mode_previews_without_saving_and_cancel_restores(cx: &mut TestAppContext) {
-    let (settings, _) = install(cx);
+    let (settings, _, storage) = install(cx);
     let (workbench, cx) = open_workbench_window(cx);
     let saved = settings.snapshot().committed.clone();
 
@@ -294,6 +283,7 @@ fn toolbar_mode_previews_without_saving_and_cancel_restores(cx: &mut TestAppCont
         );
     });
     assert_eq!(status(&workbench, cx), "Preview cancelled.");
+    assert_eq!(storage.writes(), 0);
 }
 
 fn open_framed_workbench(
@@ -391,7 +381,7 @@ fn toolbar_and_window_controls_keep_separate_space_at_every_density(cx: &mut Tes
             });
             assert_eq!(
                 movement.counts(),
-                (0, 0, 0, 0),
+                (0, 0, 0),
                 "toolbar clicks must not move the window"
             );
         }
@@ -400,7 +390,7 @@ fn toolbar_and_window_controls_keep_separate_space_at_every_density(cx: &mut Tes
 
 #[gpui::test]
 fn simulations_apply_and_system_settings_ends_them(cx: &mut TestAppContext) {
-    let (_, platform) = install(cx);
+    let (_, platform, _) = install(cx);
     let (workbench, cx) = open_workbench_window(cx);
     let reduce_transparency = |cx: &mut VisualTestContext| {
         cx.update(|_, cx| {
@@ -439,7 +429,7 @@ fn simulations_apply_and_system_settings_ends_them(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn simulating_differentiate_without_color_gives_status_fixtures_their_shapes(
+fn differentiate_without_color_renders_two_status_cues_and_the_failed_glyph(
     cx: &mut TestAppContext,
 ) {
     install(cx);
@@ -480,7 +470,7 @@ fn simulating_differentiate_without_color_gives_status_fixtures_their_shapes(
 
 #[gpui::test]
 fn closing_the_workbench_ends_its_preview_simulations_and_fixtures(cx: &mut TestAppContext) {
-    let (settings, _) = install(cx);
+    let (settings, _, _) = install(cx);
     let window = cx.add_window(DeveloperWorkbench::new);
     window
         .update(cx, |workbench, _, cx| {
@@ -520,7 +510,7 @@ fn closing_the_workbench_ends_its_preview_simulations_and_fixtures(cx: &mut Test
 fn clicking_client_close_ends_the_workbench_preview_simulations_and_fixtures(
     cx: &mut TestAppContext,
 ) {
-    let (settings, _) = install(cx);
+    let (settings, _, _) = install(cx);
     let movement = Rc::new(RecordingOperatingSystemWindowDragPlatform::default());
     let window = open_framed_workbench(movement.clone(), cx);
     window
@@ -562,7 +552,7 @@ fn clicking_client_close_ends_the_workbench_preview_simulations_and_fixtures(
     }
 
     assert!(!cx.windows().contains(&window.into()));
-    assert_eq!(movement.counts(), (0, 0, 0, 0));
+    assert_eq!(movement.counts(), (0, 0, 0));
     cx.update(|cx| {
         let current = appearance_runtime::current(cx);
         assert_eq!(current.chrome.appearance, Appearance::Dark);
@@ -599,7 +589,6 @@ fn toggle_shortcut_previews_the_mode_while_the_palette_keeps_focus_and_query(
     click("workbench-open-palette", cx);
     let palette = workbench.read_with(cx, |workbench, _| workbench.palette.clone());
     assert!(palette.read_with(cx, |palette, _| palette.is_open()));
-    assert!(cx.update(|window, cx| palette.read(cx).editor_is_focused(window, cx)));
 
     for expected in [Appearance::Light, Appearance::Dark] {
         cx.simulate_keystrokes("cmd-alt-c");
@@ -614,7 +603,12 @@ fn toggle_shortcut_previews_the_mode_while_the_palette_keeps_focus_and_query(
             assert!(palette.read(cx).is_open());
             assert_eq!(palette.read(cx).query(), "Open");
         });
-        assert!(cx.update(|window, cx| palette.read(cx).editor_is_focused(window, cx)));
+        cx.simulate_input("!");
+        assert_eq!(
+            palette.read_with(cx, |palette, _| palette.query().to_owned()),
+            "Open!"
+        );
+        cx.simulate_keystrokes("backspace");
     }
 }
 
@@ -729,10 +723,10 @@ fn cie_lightness(color: crate::appearance::Color) -> f64 {
 fn inactive_window_simulation_selects_inactive_control_states_without_editing_preferences(
     cx: &mut TestAppContext,
 ) {
-    let (settings, _) = install(cx);
+    let (settings, _, _) = install(cx);
     let (workbench, cx) = open_workbench_window(cx);
     click("workbench-navigation-workbench-section-controls", cx);
-    let preferences = settings.snapshot().candidate.preferences.clone();
+    let preferences = settings.snapshot().candidate.appearance.clone();
 
     // The pinned hover column's fill, which the active and inactive catalogs paint differently.
     let hover_fill = |cx: &mut VisualTestContext| {
@@ -783,14 +777,14 @@ fn inactive_window_simulation_selects_inactive_control_states_without_editing_pr
 
     assert_ne!(hover_fill(cx), active_fill);
     assert!(!paints_focus_ring(cx));
-    assert_eq!(settings.snapshot().candidate.preferences, preferences);
+    assert_eq!(settings.snapshot().candidate.appearance, preferences);
 
     simulate_inactive(cx);
     settle_focus_rings(cx);
 
     assert_eq!(hover_fill(cx), active_fill);
     assert!(paints_focus_ring(cx));
-    assert_eq!(settings.snapshot().candidate.preferences, preferences);
+    assert_eq!(settings.snapshot().candidate.appearance, preferences);
 }
 
 #[gpui::test]
@@ -816,8 +810,16 @@ fn default_window_separates_groups_and_keeps_row_labels_on_one_line(cx: &mut Tes
     let picker = cx
         .debug_bounds("workbench-row-surfaces-picker-label")
         .unwrap();
+    let line_height = cx.update(|_, cx| {
+        crate::ui::appearance::settings::shared(cx)
+            .chrome
+            .typography
+            .style(crate::ui::chrome_typography::TextRole::Body)
+            .line_height
+    });
     assert_eq!(
-        menus.size.height, picker.size.height,
+        (menus.size.height, picker.size.height),
+        (line_height, line_height),
         "the menu fixtures must leave their row label one line"
     );
 }

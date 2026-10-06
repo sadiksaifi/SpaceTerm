@@ -1,85 +1,10 @@
 use super::*;
 use crate::appearance::{AppearanceMode, TerminalColorOverrides, ZedExtension};
-use crate::platform::secure_filesystem::PrivateFileSnapshot;
-use storage::StorageCommit;
+use storage::testing::MemoryStorage;
 
-#[derive(Default)]
-struct MemoryStorage(Mutex<MemoryState>);
-
-#[derive(Default)]
-struct MemoryState {
-    snapshot: Option<(Vec<u8>, u64)>,
-    writes: usize,
-    backup: Option<Vec<u8>>,
-    successor_after_quarantine: bool,
-    failure: Option<StorageError>,
-    unsynced: bool,
-    successor_after_commit: bool,
-}
-
-impl SettingsStorage for MemoryStorage {
-    fn quarantine(&self) -> Result<(), StorageError> {
-        let mut state = self.0.lock().unwrap();
-        if let Some(error) = state.failure {
-            return Err(error);
-        }
-        state.backup = Some(state.snapshot.take().ok_or(StorageError::Unavailable)?.0);
-        if state.successor_after_quarantine {
-            state.snapshot = Some((b"competing writer".to_vec(), 30));
-        }
-        Ok(())
-    }
-
-    fn read(&self) -> Result<Option<PrivateFileSnapshot>, StorageError> {
-        let state = self.0.lock().unwrap();
-        if let Some(error) = state.failure {
-            return Err(error);
-        }
-        Ok(state
-            .snapshot
-            .as_ref()
-            .map(|(bytes, identity)| PrivateFileSnapshot {
-                bytes: bytes.clone(),
-                identity: SecureEntryIdentity::from_opaque(*identity),
-            }))
-    }
-
-    fn write(
-        &self,
-        bytes: &[u8],
-        expected: Option<&SecureEntryIdentity>,
-    ) -> Result<StorageCommit, StorageError> {
-        let mut state = self.0.lock().unwrap();
-        if let Some(error) = state.failure {
-            return Err(error);
-        }
-        let expected = expected
-            .and_then(|identity| identity.opaque_ref::<u64>())
-            .copied();
-        if expected != state.snapshot.as_ref().map(|(_, identity)| *identity) {
-            return Err(StorageError::Conflict);
-        }
-        state.writes += 1;
-        let identity = expected.unwrap_or_default() + 1;
-        state.snapshot = Some((bytes.to_vec(), identity));
-        if state.successor_after_commit {
-            state.snapshot = Some((b"external successor".to_vec(), identity + 1));
-        }
-        Ok(StorageCommit {
-            durability: if state.unsynced {
-                Durability::Uncertain
-            } else {
-                Durability::Synchronized
-            },
-            identity: (!state.successor_after_commit)
-                .then(|| SecureEntryIdentity::from_opaque(identity)),
-        })
-    }
-}
-
-fn setup() -> (UserSettings, Arc<MemoryStorage>) {
+fn setup() -> (Settings, Arc<MemoryStorage>) {
     let storage = Arc::new(MemoryStorage::default());
-    let settings = UserSettings::load(storage.clone());
+    let settings = Settings::load(storage.clone());
     (settings, storage)
 }
 
@@ -99,7 +24,7 @@ fn zed_extension(version: &str, names: &[&str]) -> ZedExtension {
     }
 }
 
-fn installed_names(settings: &UserSettings) -> Vec<String> {
+fn installed_names(settings: &Settings) -> Vec<String> {
     let mut names = settings
         .snapshot()
         .candidate
@@ -123,19 +48,22 @@ fn settings_owner_imports_reinstalls_resets_and_exports_without_implicit_selecti
     let imported = settings.snapshot();
     assert_eq!(receipt.installed.len(), 1);
     assert_eq!(receipt.catalog_revision, imported.catalog_revision);
-    assert_eq!(
-        imported.candidate.preferences,
-        initial.committed.preferences
-    );
+    assert_eq!(imported.candidate.appearance, initial.committed.appearance);
     assert_eq!(imported.candidate.terminal_themes.len(), 1);
     assert_eq!(storage.0.lock().unwrap().writes, 0);
-    assert_eq!(settings.list_themes().unwrap().len(), 3);
+    assert_eq!(
+        ThemeCatalog::from_terminal_themes(&settings.snapshot().candidate.terminal_themes)
+            .unwrap()
+            .summaries()
+            .len(),
+        3
+    );
     assert_eq!(
         settings.import_preview(&token, before_import, ThemeImport::ZedFamily(ZED_FAMILY)),
         Err(SettingsError::Stale)
     );
     let exported = settings.export_document().unwrap();
-    let copy = crate::appearance::parse_settings(exported.as_bytes()).unwrap();
+    let copy = crate::settings::parse_settings(exported.as_bytes()).unwrap();
     assert_eq!(&copy, imported.candidate.as_ref());
     let reinstalled = settings
         .import_preview(
@@ -164,7 +92,7 @@ fn settings_owner_imports_reinstalls_resets_and_exports_without_implicit_selecti
         Err(SettingsError::Busy)
     );
     job.run().unwrap();
-    let restarted = UserSettings::load(storage);
+    let restarted = Settings::load(storage);
     assert_eq!(
         restarted.export_document().unwrap(),
         settings.export_document().unwrap()
@@ -172,30 +100,37 @@ fn settings_owner_imports_reinstalls_resets_and_exports_without_implicit_selecti
 }
 
 #[test]
-fn direct_import_and_reset_use_the_same_serialized_commit_owner() {
+fn preview_import_and_reset_use_the_same_serialized_commit_owner() {
     let (settings, storage) = setup();
     let initial = settings.snapshot();
-    let (receipt, job) = settings
-        .import_committed(
-            initial.committed.revision,
-            initial.catalog_revision,
-            ThemeImport::ZedFamily(ZED_FAMILY),
-        )
+    let token = settings.begin_preview(initial.committed.revision).unwrap();
+    let before_import = settings.snapshot().catalog_revision;
+    let receipt = settings
+        .import_preview(&token, before_import, ThemeImport::ZedFamily(ZED_FAMILY))
         .unwrap();
     assert_eq!(receipt.installed.len(), 1);
-    assert_eq!(receipt.catalog_revision, initial.catalog_revision + 1);
-    assert!(settings.snapshot().candidate.terminal_themes.is_empty());
-    job.run().unwrap();
+    assert_eq!(receipt.catalog_revision, before_import + 1);
+    assert!(settings.snapshot().committed.terminal_themes.is_empty());
+    settings.commit_preview(&token).unwrap().run().unwrap();
+    assert_eq!(settings.snapshot().committed.terminal_themes.len(), 1);
     assert_eq!(
         settings.snapshot().catalog_revision,
-        receipt.catalog_revision
+        receipt.catalog_revision + 1
     );
-    let revision = settings.snapshot().committed.revision;
-    settings
-        .reset_committed(revision, ResetTarget::AllAppearance)
-        .unwrap()
-        .run()
+    let token = settings
+        .begin_preview(settings.snapshot().committed.revision)
         .unwrap();
+    let mut candidate = (*settings.snapshot().candidate).clone();
+    candidate.appearance.mode = AppearanceMode::Light;
+    settings.update_preview(&token, candidate).unwrap();
+    settings
+        .reset_preview(&token, ResetTarget::AllAppearance)
+        .unwrap();
+    assert_eq!(
+        settings.snapshot().candidate.appearance,
+        SettingsDocument::default().appearance
+    );
+    settings.commit_preview(&token).unwrap().run().unwrap();
     assert_eq!(settings.snapshot().committed.terminal_themes.len(), 1);
     assert_eq!(storage.0.lock().unwrap().writes, 2);
 }
@@ -222,8 +157,8 @@ fn a_zed_family_installs_without_changing_any_selection() {
         .unwrap();
     assert_eq!(settings.snapshot().candidate.terminal_themes.len(), 1);
     assert_eq!(
-        settings.snapshot().candidate.preferences,
-        SettingsDocument::default().preferences
+        settings.snapshot().candidate.appearance,
+        SettingsDocument::default().appearance
     );
 }
 
@@ -286,7 +221,7 @@ fn updating_an_extension_replaces_its_themes_and_keeps_surviving_selections() {
         .unwrap()
         .clone();
     let mut candidate = (*settings.snapshot().candidate).clone();
-    candidate.preferences.terminal.themes.dark = kept.clone();
+    candidate.appearance.terminal.themes.dark = kept.clone();
     settings.update_preview(&token, candidate).unwrap();
 
     let second = settings
@@ -300,7 +235,7 @@ fn updating_an_extension_replaces_its_themes_and_keeps_surviving_selections() {
     assert!(second.installed.contains(&kept));
     assert_eq!(installed_names(&settings), ["Added", "Kept", "Sample"]);
     let snapshot = settings.snapshot();
-    assert_eq!(snapshot.candidate.preferences.terminal.themes.dark, kept);
+    assert_eq!(snapshot.candidate.appearance.terminal.themes.dark, kept);
     let versions = snapshot
         .candidate
         .terminal_themes
@@ -323,7 +258,7 @@ fn updating_an_extension_without_the_selected_theme_selects_the_builtin_theme() 
         )
         .unwrap();
     let mut candidate = (*settings.snapshot().candidate).clone();
-    candidate.preferences.terminal.themes.dark = first.installed[0].clone();
+    candidate.appearance.terminal.themes.dark = first.installed[0].clone();
     settings.update_preview(&token, candidate).unwrap();
 
     settings
@@ -339,7 +274,7 @@ fn updating_an_extension_without_the_selected_theme_selects_the_builtin_theme() 
         settings
             .snapshot()
             .candidate
-            .preferences
+            .appearance
             .terminal
             .themes
             .dark,
@@ -396,17 +331,17 @@ fn preview_deletion_returns_the_selected_slot_to_its_builtin_theme() {
         .unwrap();
     let selected = imported.installed[0].clone();
     let mut candidate = (*settings.snapshot().candidate).clone();
-    candidate.preferences.mode = AppearanceMode::Light;
-    candidate.preferences.terminal.themes.light = selected.clone();
+    candidate.appearance.mode = AppearanceMode::Light;
+    candidate.appearance.terminal.themes.light = selected.clone();
     candidate
-        .preferences
+        .appearance
         .terminal
         .overrides
         .insert(selected.clone(), TerminalColorOverrides::default());
     settings.update_preview(&token, candidate).unwrap();
 
     let catalog_revision = settings.snapshot().catalog_revision;
-    let mut expected = settings.snapshot().candidate.preferences.clone();
+    let mut expected = settings.snapshot().candidate.appearance.clone();
     expected.terminal.themes.light = ThemeId::builtin("builtin.spaceterm.light");
     let removed_revision = settings
         .remove_themes_preview(&token, catalog_revision, std::slice::from_ref(&selected))
@@ -414,7 +349,7 @@ fn preview_deletion_returns_the_selected_slot_to_its_builtin_theme() {
     let snapshot = settings.snapshot();
     assert_eq!(removed_revision, snapshot.catalog_revision);
     assert!(snapshot.candidate.terminal_themes.is_empty());
-    assert_eq!(snapshot.candidate.preferences, expected);
+    assert_eq!(snapshot.candidate.appearance, expected);
     assert_eq!(storage.0.lock().unwrap().writes, 0);
 }
 
@@ -424,7 +359,7 @@ fn preview_rejects_a_missing_theme_selection() {
     let (settings, _storage) = setup();
     let token = settings.begin_preview(0).unwrap();
     let mut candidate = (*settings.snapshot().candidate).clone();
-    candidate.preferences.terminal.themes.dark = ThemeId::new("custom.missing").unwrap();
+    candidate.appearance.terminal.themes.dark = ThemeId::new("custom.missing").unwrap();
 
     assert!(settings.update_preview(&token, candidate).is_err());
 }
@@ -528,40 +463,45 @@ fn deletion_rejects_stale_and_busy_operations_without_removing_the_theme() {
         settings.remove_themes_preview(&token, current_catalog_revision, std::slice::from_ref(&id)),
         Err(SettingsError::Busy)
     );
-    assert!(matches!(
-        settings.remove_themes_committed(0, current_catalog_revision, std::slice::from_ref(&id)),
-        Err(SettingsError::Busy)
-    ));
     assert_eq!(settings.snapshot().candidate.terminal_themes.len(), 1);
     drop(job);
 }
 
 #[test]
-fn direct_deletion_commits_only_the_named_custom_theme() {
+fn preview_deletion_commits_only_the_named_custom_theme() {
     let (settings, storage) = setup();
-    let initial = settings.snapshot();
-    let (receipt, job) = settings
-        .import_committed(
-            initial.committed.revision,
-            initial.catalog_revision,
+    let token = settings.begin_preview(0).unwrap();
+    let receipt = settings
+        .import_preview(
+            &token,
+            settings.snapshot().catalog_revision,
             ThemeImport::ZedFamily(ZED_FAMILY),
         )
         .unwrap();
     let id = receipt.installed[0].clone();
-    job.run().unwrap();
+    settings.commit_preview(&token).unwrap().run().unwrap();
     let installed = settings.snapshot();
-
-    let deletion = settings
-        .remove_themes_committed(
-            installed.committed.revision,
-            installed.catalog_revision,
+    let token = settings
+        .begin_preview(installed.committed.revision)
+        .unwrap();
+    settings
+        .remove_themes_preview(
+            &token,
+            settings.snapshot().catalog_revision,
             std::slice::from_ref(&id),
         )
         .unwrap();
+    let deletion = settings.commit_preview(&token).unwrap();
     assert_eq!(settings.snapshot().committed.terminal_themes.len(), 1);
     deletion.run().unwrap();
     assert!(settings.snapshot().committed.terminal_themes.is_empty());
-    assert_eq!(settings.list_themes().unwrap().len(), 2);
+    assert_eq!(
+        ThemeCatalog::from_terminal_themes(&settings.snapshot().candidate.terminal_themes)
+            .unwrap()
+            .summaries()
+            .len(),
+        2
+    );
     assert_eq!(storage.0.lock().unwrap().writes, 2);
 }
 
@@ -569,7 +509,7 @@ fn direct_deletion_commits_only_the_named_custom_theme() {
 fn invalid_reload_preserves_valid_settings_until_a_later_valid_reload() {
     let (settings, storage) = setup();
     let mut first = SettingsDocument::default();
-    first.preferences.terminal.typography.base_size = 20.0;
+    first.appearance.terminal.typography.base_size = 20.0;
     settings.update_committed(0, first).unwrap().run().unwrap();
     let committed = settings.snapshot().committed;
     storage.0.lock().unwrap().snapshot = Some((b"invalid document".to_vec(), 50));
@@ -580,12 +520,12 @@ fn invalid_reload_preserves_valid_settings_until_a_later_valid_reload() {
         b"invalid document"
     );
     let mut second = (*committed).clone();
-    second.preferences.terminal.typography.base_size = 30.0;
+    second.appearance.terminal.typography.base_size = 30.0;
     storage.0.lock().unwrap().snapshot = Some((export_settings(&second).unwrap().into_bytes(), 51));
     settings.reload().unwrap();
     let loaded = settings.snapshot();
     assert!(loaded.committed.revision > committed.revision);
-    assert_eq!(loaded.committed.preferences, second.preferences);
+    assert_eq!(loaded.committed.appearance, second.appearance);
     assert_eq!(loaded.status, None);
 }
 
@@ -594,7 +534,7 @@ fn failed_direct_save_preserves_local_candidate_without_publishing_it() {
     let (settings, storage) = setup();
     let original = settings.snapshot().committed;
     let mut candidate = (*original).clone();
-    candidate.preferences.terminal.typography.base_size = 24.0;
+    candidate.appearance.terminal.typography.base_size = 24.0;
     let job = settings
         .update_committed(original.revision, candidate.clone())
         .unwrap();
@@ -624,7 +564,7 @@ fn failed_direct_save_preserves_local_candidate_without_publishing_it() {
         settings
             .snapshot()
             .committed
-            .preferences
+            .appearance
             .terminal
             .typography
             .base_size,
@@ -683,7 +623,7 @@ fn commit_captures_one_candidate_and_rejects_conflicting_edits() {
     let outcome = job.run().unwrap();
     assert_eq!(outcome.revision, original.revision + 1);
     assert_eq!(settings.snapshot().phase, PreviewPhase::Idle);
-    let restarted = UserSettings::load(storage);
+    let restarted = Settings::load(storage);
     assert_eq!(
         export_settings(&settings.snapshot().committed).unwrap(),
         export_settings(&restarted.snapshot().committed).unwrap()
@@ -696,7 +636,7 @@ fn failed_commit_retains_editable_preview_when_owner_survives() {
     let original = settings.snapshot().committed;
     let token = settings.begin_preview(original.revision).unwrap();
     let job = settings.commit_preview(&token).unwrap();
-    storage.0.lock().unwrap().failure = Some(StorageError::Unavailable);
+    storage.fail_writes(Some(StorageError::Unavailable));
     assert_eq!(
         job.run(),
         Err(SettingsError::Storage(StorageError::Unavailable))
@@ -705,7 +645,7 @@ fn failed_commit_retains_editable_preview_when_owner_survives() {
     settings
         .update_preview(&token, (*original).clone())
         .unwrap();
-    storage.0.lock().unwrap().failure = None;
+    storage.fail_writes(None);
     settings.commit_preview(&token).unwrap().run().unwrap();
     assert_eq!(
         settings.snapshot().committed.revision,
@@ -720,7 +660,7 @@ fn failed_commit_after_owner_destruction_restores_committed_appearance() {
     let token = settings.begin_preview(original.revision).unwrap();
     let job = settings.commit_preview(&token).unwrap();
     drop(token);
-    storage.0.lock().unwrap().failure = Some(StorageError::Unavailable);
+    storage.fail_writes(Some(StorageError::Unavailable));
     assert!(job.run().is_err());
     assert_eq!(settings.snapshot().phase, PreviewPhase::Idle);
     assert_eq!(settings.snapshot().candidate.revision, original.revision);
@@ -775,7 +715,7 @@ fn competing_writer_is_preserved_and_requires_explicit_reload() {
 #[test]
 fn successor_installed_after_commit_does_not_authorize_next_overwrite() {
     let (settings, storage) = setup();
-    storage.0.lock().unwrap().successor_after_commit = true;
+    storage.drop_identity(true);
     let original = settings.snapshot().committed;
     let outcome = settings
         .update_committed(original.revision, (*original).clone())
@@ -783,6 +723,7 @@ fn successor_installed_after_commit_does_not_authorize_next_overwrite() {
         .run()
         .unwrap();
     assert!(outcome.reload_required);
+    storage.save_bytes_elsewhere(b"external successor".to_vec());
     let current = settings.snapshot().committed;
     assert_eq!(current.revision, original.revision + 1);
     assert!(
@@ -826,7 +767,7 @@ fn uncertain_durability_is_committed_and_identity_is_reconciled() {
 fn invalid_startup_document_is_retained_and_cannot_be_overwritten() {
     let storage = Arc::new(MemoryStorage::default());
     storage.0.lock().unwrap().snapshot = Some((b"invalid document".to_vec(), 1));
-    let settings = UserSettings::load(storage.clone());
+    let settings = Settings::load(storage.clone());
     assert_eq!(settings.snapshot().status, Some(SettingsError::Invalid));
     let current = settings.snapshot().committed;
     assert!(
@@ -876,7 +817,7 @@ fn subscribers_receive_coalesced_changes_and_closed_subscribers_are_pruned() {
 fn recovery_keeps_exact_bytes_replaces_backup_and_retires_edits() {
     let (settings, storage) = setup();
     let mut document = (*settings.snapshot().committed).clone();
-    document.preferences.mode = AppearanceMode::Light;
+    document.appearance.mode = AppearanceMode::Light;
     settings
         .update_committed(0, document)
         .unwrap()
@@ -903,8 +844,8 @@ fn recovery_keeps_exact_bytes_replaces_backup_and_retires_edits() {
     assert_eq!(recovered.status, None);
     assert_eq!(recovered.phase, PreviewPhase::Idle);
     assert_eq!(
-        recovered.committed.preferences,
-        SettingsDocument::default().preferences
+        recovered.committed.appearance,
+        SettingsDocument::default().appearance
     );
     assert!(recovered.recoverable_candidate.is_none());
     assert!(recovered.committed.revision > before.committed.revision);
@@ -941,7 +882,7 @@ fn recovery_refuses_healthy_unsafe_and_busy_settings_without_quarantining() {
         settings.recover_by_reset(),
         Err(RecoveryError::NotMalformed)
     );
-    storage.0.lock().unwrap().failure = Some(StorageError::Unsafe);
+    storage.fail_reads(Some(StorageError::Unsafe));
     settings.reload().unwrap_err();
     assert!(!settings.snapshot().status.unwrap().is_malformed());
     assert_eq!(
@@ -950,7 +891,7 @@ fn recovery_refuses_healthy_unsafe_and_busy_settings_without_quarantining() {
     );
     {
         let mut state = storage.0.lock().unwrap();
-        state.failure = None;
+        state.read_failure = None;
         state.snapshot = Some((b"broken".to_vec(), 1));
     }
     settings.reload().unwrap_err();
@@ -970,7 +911,7 @@ fn recovery_preserves_backup_and_competing_file_on_conflict() {
         state.snapshot = Some((b"broken".to_vec(), 1));
         state.successor_after_quarantine = true;
     }
-    let settings = UserSettings::load(storage.clone());
+    let settings = Settings::load(storage.clone());
     assert_eq!(
         settings.recover_by_reset(),
         Err(RecoveryError::Storage(StorageError::Conflict))
@@ -997,7 +938,7 @@ fn recovery_refuses_committing_and_storage_ready_settings() {
     let candidate = (*settings.snapshot().committed).clone();
     let job = settings.update_committed(0, candidate).unwrap();
     assert_eq!(settings.recover_by_reset(), Err(RecoveryError::Busy));
-    storage.0.lock().unwrap().failure = Some(StorageError::TooLarge);
+    storage.fail_writes(Some(StorageError::TooLarge));
     assert_eq!(
         job.run(),
         Err(SettingsError::Storage(StorageError::TooLarge))
@@ -1015,8 +956,8 @@ fn recovery_stops_on_quarantine_failure_without_writing_defaults() {
     use super::recovery::RecoveryError;
     let storage = Arc::new(MemoryStorage::default());
     storage.0.lock().unwrap().snapshot = Some((b"broken".to_vec(), 1));
-    let settings = UserSettings::load(storage.clone());
-    storage.0.lock().unwrap().failure = Some(StorageError::Unsafe);
+    let settings = Settings::load(storage.clone());
+    storage.fail_writes(Some(StorageError::Unsafe));
     assert_eq!(
         settings.recover_by_reset(),
         Err(RecoveryError::Storage(StorageError::Unsafe))
@@ -1040,13 +981,13 @@ fn following_the_file_adopts_an_outside_change_once() {
     let before = settings.snapshot();
 
     let mut outside = SettingsDocument::default();
-    outside.preferences.terminal.typography.base_size = 21.0;
+    outside.appearance.terminal.typography.base_size = 21.0;
     storage.0.lock().unwrap().snapshot =
         Some((export_settings(&outside).unwrap().into_bytes(), 40));
 
     assert_eq!(settings.follow_file(), Ok(true));
     let after = settings.snapshot();
-    assert_eq!(after.committed.preferences, outside.preferences);
+    assert_eq!(after.committed.appearance, outside.appearance);
     assert!(after.committed.revision > before.committed.revision);
     assert!(after.catalog_revision > before.catalog_revision);
     assert_eq!(settings.follow_file(), Ok(false));
@@ -1074,11 +1015,11 @@ fn following_a_malformed_file_keeps_the_settings_until_a_valid_one_arrives() {
     );
 
     let mut fixed = SettingsDocument::default();
-    fixed.preferences.terminal.typography.base_size = 19.0;
+    fixed.appearance.terminal.typography.base_size = 19.0;
     storage.0.lock().unwrap().snapshot = Some((export_settings(&fixed).unwrap().into_bytes(), 41));
     assert_eq!(settings.follow_file(), Ok(true));
     assert_eq!(settings.snapshot().status, None);
-    assert_eq!(settings.snapshot().committed.preferences, fixed.preferences);
+    assert_eq!(settings.snapshot().committed.appearance, fixed.appearance);
 }
 
 #[test]
@@ -1115,10 +1056,10 @@ fn ensuring_the_file_writes_only_a_document_no_file_holds() {
         .clone()
         .expect("the file");
     assert_eq!(
-        crate::appearance::parse_settings(&written.0)
+        crate::settings::parse_settings(&written.0)
             .unwrap()
-            .preferences,
-        SettingsDocument::default().preferences
+            .appearance,
+        SettingsDocument::default().appearance
     );
 
     assert!(settings.ensure_file().unwrap().is_none());
@@ -1129,7 +1070,7 @@ fn ensuring_the_file_writes_only_a_document_no_file_holds() {
 fn ensuring_the_file_leaves_an_unreadable_file_alone() {
     let storage = Arc::new(MemoryStorage::default());
     storage.0.lock().unwrap().snapshot = Some((b"{ broken".to_vec(), 7));
-    let settings = UserSettings::load(storage.clone());
+    let settings = Settings::load(storage.clone());
 
     assert!(settings.ensure_file().unwrap().is_none());
     assert_eq!(

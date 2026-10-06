@@ -989,7 +989,14 @@ impl TerminalEmulator {
         terminal.resize(grid.cols, grid.rows, cell.width, cell.height)?;
         terminal.on_pty_write({
             let pty_responses = Rc::clone(&pty_responses);
-            move |_, data| pty_responses.borrow_mut().extend_from_slice(data)
+            move |_, data| {
+                // SpaceTerm answers XTGETTCAP with its bounded capability profile.
+                // Native replies would duplicate those frames or expose a different profile.
+                if data.starts_with(b"\x1bP1+r") || data.starts_with(b"\x1bP0+r") {
+                    return;
+                }
+                pty_responses.borrow_mut().extend_from_slice(data);
+            }
         })?;
         // Image clients need the engine's integer cell geometry. Deriving cells
         // by dividing the fractional PTY pixel extent can underestimate their size
@@ -2119,11 +2126,6 @@ impl TerminalEmulator {
             .set_selection(selection.as_ref())
             .map_err(|error| format!("failed to install autoscrolled selection: {error}"))?;
         Ok(EmulatorAction::screen_changed())
-    }
-
-    #[cfg(test)]
-    fn set_gesture_time_for_test(&mut self, elapsed: Duration) {
-        self.gesture_clock = GestureClock::Manual(elapsed);
     }
 
     fn selection_viewport_point(

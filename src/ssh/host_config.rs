@@ -1107,7 +1107,7 @@ mod tests {
     }
 
     #[test]
-    fn discovery_should_exclude_patterns_negations_malformed_match_and_system_candidates() {
+    fn discovery_should_exclude_patterns_negations_and_system_candidates() {
         let filesystem = MemoryFilesystem::default()
             .file(
                 "/managed/ssh_config",
@@ -1390,8 +1390,6 @@ mod tests {
                 "Include alias.conf\nHost included\n",
             )
             .canonical("/home/test/.ssh/alias.conf", "/canonical/shared")
-            .canonical("/managed/ssh_config", "/canonical/root")
-            .canonical("/managed/ssh_config", "/canonical/root")
             .canonical("/managed/ssh_config", "/canonical/root");
 
         let discovery = discover_ssh_hosts(&filesystem, &roots(), HostDiscoveryLimits::default());

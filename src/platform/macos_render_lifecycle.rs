@@ -106,6 +106,23 @@ mod tests {
             from_native(false, NSWindowOcclusionState::Visible.bits() as u64, false),
             WindowVisibility::default()
         );
+        for (minimized, bits, live_resize, occluded) in [
+            (true, 2, false, false),
+            (false, 0, true, true),
+            (false, 2, true, false),
+            (true, 0, false, true),
+            (false, 1, false, true),
+            (false, 3, false, false),
+        ] {
+            assert_eq!(
+                from_native(minimized, bits, live_resize),
+                WindowVisibility {
+                    minimized,
+                    occluded,
+                    live_resize
+                }
+            );
+        }
         assert_eq!(
             from_native(true, 0, true),
             WindowVisibility {

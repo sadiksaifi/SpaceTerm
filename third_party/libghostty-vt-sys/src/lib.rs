@@ -82,8 +82,7 @@ mod abi_tests {
         assert_eq!(HyperlinkResolution::PASSTHROUGH, 0);
         assert_eq!(HyperlinkResolution::REPLACE, 1);
         assert_eq!(HyperlinkResolution::SUPPRESS, 2);
-        let callback: TerminalHyperlinkResolveFn = Some(resolve);
-        assert!(callback.is_some());
+        let _: TerminalHyperlinkResolveFn = Some(resolve);
         let _: unsafe extern "C" fn(*const GridRef, *mut u8, usize, *mut usize) -> Result::Type =
             ghostty_grid_ref_hyperlink_userdata;
         assert_eq!(

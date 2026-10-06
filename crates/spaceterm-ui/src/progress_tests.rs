@@ -349,7 +349,7 @@ fn frame_spinner_paints_only_with_the_inherited_foreground(cx: &mut TestAppConte
 }
 
 #[test]
-fn frame_spinner_advances_and_wraps_at_bounded_intervals() {
+fn frame_spinner_selects_bounded_frames_at_intervals() {
     assert_eq!(spinner_frame_index(0.0), 0);
     assert_eq!(spinner_frame_index(0.099), 0);
     assert_eq!(spinner_frame_index(0.1), 1);

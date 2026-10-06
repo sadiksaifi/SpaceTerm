@@ -1027,11 +1027,18 @@ mod tests {
     fn prepared_graphics_clones_share_the_geometry_cache() {
         let prepared = prepared_graphics();
 
-        assert!(prepared.shares_identity_with(&prepared.clone()));
+        let clone = prepared.clone();
+        assert!(prepared.shares_identity_with(&clone));
+        let (bounds, cell_width, line_height) = geometry();
+        let original_plan = prepared.paint_plan(bounds, cell_width, line_height, 2.0);
+        let clone_plan = clone.paint_plan(bounds, cell_width, line_height, 2.0);
+        assert!(original_plan.shares_paints_with(&clone_plan));
+        assert_eq!(prepared.paint_plan_builds(), 1);
+        assert_eq!(clone.paint_plan_builds(), 1);
     }
 
     #[test]
-    fn upload_converts_rgba_to_gpui_bgra_once() {
+    fn upload_converts_rgba_to_gpui_bgra() {
         let snapshot = Arc::new(ImageSnapshot {
             key: ImageKey {
                 image_id: 1,
@@ -1064,6 +1071,11 @@ mod tests {
                 ..Default::default()
             };
 
+            assert!(!cache.rollback(token(1), None, cx));
+            assert_eq!(
+                cache.staged.as_ref().map(|staged| staged.token),
+                Some(token(2))
+            );
             assert!(!cache.mark_presented(token(1), cx));
             assert_eq!(
                 cache.staged.as_ref().map(|staged| staged.token),

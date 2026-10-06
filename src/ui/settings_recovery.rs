@@ -1,8 +1,5 @@
 //! Settings Recovery prompts: the launch offer and the Settings window's confirmation.
-//!
-//! [`crate::settings::recovery`] owns the reset and its backup. This module asks once per launch,
-//! in the first Workspace window, when the retained document is Malformed Settings, and reports a
-//! reset that could not finish.
+//! [`crate::settings::recovery`] owns the reset and its backup.
 
 use gpui::{App, WindowHandle};
 use spaceterm_ui::{

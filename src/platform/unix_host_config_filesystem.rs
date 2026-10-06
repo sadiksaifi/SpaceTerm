@@ -105,7 +105,7 @@ mod tests {
                 .unwrap();
         });
         let discovered = receiver.recv_timeout(Duration::from_secs(2));
-        // Unblock the old blocking implementation on failure so the regression leaves no worker.
+        // Unblock a blocking open on failure so the test leaves no worker.
         if discovered.is_err() {
             use std::os::unix::fs::OpenOptionsExt;
             let _ = std::fs::OpenOptions::new()

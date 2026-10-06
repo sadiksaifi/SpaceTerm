@@ -397,7 +397,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn clipboard_requests_use_host_targets_without_unavailable_primary_fallback(
+    fn clipboard_requests_use_injected_target_resolution_without_unavailable_selection_fallback(
         cx: &mut gpui::TestAppContext,
     ) {
         for primary_available in [true, false] {
@@ -733,7 +733,7 @@ mod tests {
         worker.begin(read(), worker.authority.grant());
         let request = requests.try_recv().unwrap();
         let effect = cx.update(|cx| request.perform(ALLOW_READ, &clipboard, true, cx));
-        // The terminal or Session that awaited the read closed.
+        // The terminal or Terminal Session that awaited the read closed.
         drop(effect);
         cx.run_until_parked();
         assert!(
@@ -746,7 +746,7 @@ mod tests {
         );
         assert!(commands.try_recv().is_err());
 
-        // A Session that closed first receives nothing at all.
+        // A Terminal Session that closed first receives nothing at all.
         worker.begin(read(), worker.authority.grant());
         let request = requests.try_recv().unwrap();
         drop((worker, commands));

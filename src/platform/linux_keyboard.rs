@@ -348,6 +348,22 @@ mod tests {
             adapter.modifiers_changed_with_native(
                 &ModifiersChangedEvent {
                     modifiers: Modifiers::shift(),
+                    capslock: gpui::Capslock::default(),
+                },
+                Some(NativeKeyEvent {
+                    scancode: 54,
+                    modifiers: Modifiers::shift(),
+                    modifier_key: Some((54, true)),
+                    modifier_role: right_shift,
+                    ..Default::default()
+                }),
+            ),
+            None
+        );
+        assert_eq!(
+            adapter.modifiers_changed_with_native(
+                &ModifiersChangedEvent {
+                    modifiers: Modifiers::shift(),
                     capslock: gpui::Capslock::default()
                 },
                 None
@@ -473,9 +489,11 @@ mod tests {
             kitty_modifier_report(56, ModifierRole::ControlLeft, control),
             left_control
         );
+        let left_alt = kitty_modifier_report(56, ModifierRole::AltLeft, Modifiers::alt());
+        assert_eq!(left_alt, b"\x1b[57443;3u\x1b[57443;1:3u");
         assert_eq!(
             kitty_modifier_report(29, ModifierRole::AltLeft, Modifiers::alt()),
-            kitty_modifier_report(56, ModifierRole::AltLeft, Modifiers::alt())
+            left_alt
         );
     }
 
@@ -515,7 +533,7 @@ mod tests {
     #[gpui::test]
     fn native_window_facts_reach_the_pane_owned_terminal_session(cx: &mut gpui::TestAppContext) {
         use crate::terminal::testing::{
-            RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
+            RecordedCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
             test_local_directory,
         };
         use crate::terminal::{TerminalSessionFactory, WorkspaceTerminalSessionFactory};
@@ -562,7 +580,7 @@ mod tests {
             .commands()
             .into_iter()
             .filter_map(|command| match command.command {
-                RecordedSessionCommand::Key(input) => Some(input),
+                RecordedCommand::Key(input) => Some(input),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -835,8 +853,8 @@ mod native_compose_tests {
     use super::*;
     use crate::terminal::WorkspaceTerminalSessionFactory;
     use crate::terminal::testing::{
-        RecordedSessionCommand, TerminalEmulator, TestTerminalSessionFactory,
-        TestTerminalSessionRecords, test_local_directory,
+        RecordedCommand, TerminalEmulator, TestTerminalSessionFactory, TestTerminalSessionRecords,
+        test_local_directory,
     };
     use gpui::AppContext as _;
     use std::{path::PathBuf, rc::Rc, time::Duration};
@@ -1037,7 +1055,7 @@ mod native_compose_tests {
         emulator.feed(b"\x1b[>11u");
         let mut bytes = Vec::new();
         for command in records.commands().into_iter().skip(first_command.get()) {
-            if let RecordedSessionCommand::Key(input) = command.command {
+            if let RecordedCommand::Key(input) = command.command {
                 bytes.extend(emulator.key(input).unwrap().bytes);
             }
         }

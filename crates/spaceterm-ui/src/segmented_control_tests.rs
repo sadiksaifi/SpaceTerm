@@ -10,7 +10,7 @@ use super::*;
 fn density_scales_segment_bounds_but_not_radius() {
     let original = test_theme().resolve(SegmentedSize::Regular).metrics;
     let comfortable = test_theme()
-        .scaled_metrics(1.0, 1.25)
+        .scaled_spacing(1.25)
         .resolve(SegmentedSize::Regular)
         .metrics;
 
@@ -121,7 +121,7 @@ impl Render for SizingRoot {
 #[gpui::test]
 fn intrinsic_track_hugs_options_in_every_parent_layout(cx: &mut TestAppContext) {
     for scale in [1.0, 1.25] {
-        cx.set_global(test_theme().scaled_metrics(1.0, scale));
+        cx.set_global(test_theme().scaled_spacing(scale));
         for host in [SizingHost::Block, SizingHost::Row, SizingHost::Column] {
             for size in [SegmentedSize::Regular, SegmentedSize::Card] {
                 for right_to_left in [false, true] {
@@ -157,7 +157,7 @@ fn intrinsic_track_hugs_options_in_every_parent_layout(cx: &mut TestAppContext) 
 #[gpui::test]
 fn full_width_track_distributes_all_available_width_between_options(cx: &mut TestAppContext) {
     for scale in [1.0, 1.25] {
-        cx.set_global(test_theme().scaled_metrics(1.0, scale));
+        cx.set_global(test_theme().scaled_spacing(scale));
         for host in [SizingHost::Block, SizingHost::Row, SizingHost::Column] {
             for size in [SegmentedSize::Regular, SegmentedSize::Card] {
                 for right_to_left in [false, true] {
@@ -239,6 +239,7 @@ struct TestRoot {
     size: SegmentedSize,
     disabled: bool,
     disable_auto: bool,
+    disable_dark: bool,
     omit_auto: bool,
     right_to_left: bool,
     changes: Rc<RefCell<Vec<SegmentedChange<Mode>>>>,
@@ -260,6 +261,7 @@ impl Render for TestRoot {
                     .preview(move |color, extent| {
                         let preview_font = Rc::clone(&preview_font);
                         div()
+                            .debug_selector(|| "test-segmented-light-preview".to_owned())
                             .w(extent)
                             .h(extent)
                             .bg(color)
@@ -275,7 +277,9 @@ impl Render for TestRoot {
                             )
                             .into_any_element()
                     }),
-                SegmentedOption::new(Mode::Dark, "Dark").debug_selector("test-segmented-dark"),
+                SegmentedOption::new(Mode::Dark, "Dark")
+                    .debug_selector("test-segmented-dark")
+                    .disabled(self.disable_dark),
             ]
             .into_iter()
             .chain((!self.omit_auto).then(|| {
@@ -314,6 +318,7 @@ fn segmented_window(cx: &mut TestAppContext) -> SegmentedWindow<'_> {
         size: SegmentedSize::Regular,
         disabled: false,
         disable_auto: false,
+        disable_dark: false,
         omit_auto: false,
         right_to_left: false,
         changes: root_changes,
@@ -537,6 +542,14 @@ fn arrow_keys_move_the_selection_and_stop_at_both_ends(cx: &mut TestAppContext) 
     cx.run_until_parked();
 
     assert!(changes.borrow().is_empty());
+    root.update(cx, |root, cx| {
+        root.current = Mode::Auto;
+        cx.notify();
+    });
+    cx.run_until_parked();
+    cx.simulate_keystrokes("right");
+    cx.run_until_parked();
+    assert!(changes.borrow().is_empty());
 }
 
 #[gpui::test]
@@ -573,6 +586,28 @@ fn arrow_keys_skip_a_disabled_option(cx: &mut TestAppContext) {
     cx.run_until_parked();
 
     assert!(changes.borrow().is_empty());
+    root.update(cx, |root, cx| {
+        root.disable_auto = false;
+        root.disable_dark = true;
+        root.current = Mode::Light;
+        cx.notify();
+    });
+    cx.run_until_parked();
+    cx.simulate_keystrokes("right");
+    cx.run_until_parked();
+    root.update(cx, |root, cx| {
+        root.current = Mode::Auto;
+        cx.notify();
+    });
+    cx.run_until_parked();
+    cx.simulate_keystrokes("left");
+    cx.run_until_parked();
+    let requests = changes.borrow();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].requested(), &Mode::Auto);
+    assert_eq!(requests[0].source(), SegmentedActivationSource::Arrow);
+    assert_eq!(requests[1].requested(), &Mode::Light);
+    assert_eq!(requests[1].source(), SegmentedActivationSource::Arrow);
 }
 
 #[gpui::test]
@@ -614,6 +649,8 @@ fn a_right_to_left_layout_mirrors_arrow_direction(cx: &mut TestAppContext) {
 #[gpui::test]
 fn a_disabled_control_refuses_pointer_and_keyboard_activation(cx: &mut TestAppContext) {
     let (root, changes, cx) = segmented_window(cx);
+    focus_control(cx);
+    assert!(cx.debug_bounds("test-segmented-keyboard-focus").is_some());
     cx.update(|_, cx| {
         root.update(cx, |root, cx| {
             root.disabled = true;
@@ -621,6 +658,12 @@ fn a_disabled_control_refuses_pointer_and_keyboard_activation(cx: &mut TestAppCo
         })
     });
     cx.run_until_parked();
+    assert!(cx.update(|window, cx| window.focused(cx).is_none()));
+    let other = root.read_with(cx, |root, _| root.other_focus.clone());
+    for _ in 0..3 {
+        cx.update(|window, cx| window.focus_next(cx));
+        assert!(cx.update(|window, _| other.is_focused(window)));
+    }
 
     click("test-segmented-light", cx);
     cx.simulate_keystrokes("right");
@@ -700,14 +743,13 @@ fn pointer_activation_does_not_draw_the_keyboard_focus_ring(cx: &mut TestAppCont
 
     click("test-segmented-light", cx);
 
-    // GPUI retains debug bounds across frames, so this can only assert that the ring was never
-    // painted. A pointer press therefore must not paint it even once.
     assert_eq!(cx.debug_bounds("test-segmented-keyboard-focus"), None);
 }
 
 #[gpui::test]
 fn card_presentation_draws_every_option_and_its_preview(cx: &mut TestAppContext) {
     let (root, _changes, cx) = segmented_window(cx);
+    assert!(cx.debug_bounds("test-segmented-light-preview").is_none());
     cx.update(|_, cx| {
         root.update(cx, |root, cx| {
             root.size = SegmentedSize::Card;
@@ -728,6 +770,10 @@ fn card_presentation_draws_every_option_and_its_preview(cx: &mut TestAppContext)
     }
     let light = cx.debug_bounds("test-segmented-light").unwrap();
     let dark = cx.debug_bounds("test-segmented-dark").unwrap();
+    let preview = cx
+        .debug_bounds("test-segmented-light-preview")
+        .expect("the Card preview renders");
+    assert!(light.contains(&preview.center()));
     assert!(
         light.size.height > px(52.0),
         "a card option should reserve space for its preview"
@@ -751,6 +797,7 @@ fn a_value_matching_no_option_requests_the_chosen_value_without_a_previous(
         size: SegmentedSize::Regular,
         disabled: false,
         disable_auto: false,
+        disable_dark: false,
         omit_auto: true,
         right_to_left: false,
         changes: root_changes,
@@ -769,15 +816,14 @@ fn a_value_matching_no_option_requests_the_chosen_value_without_a_previous(
 }
 
 #[test]
-fn scaling_metrics_grows_text_and_spacing_independently() {
+fn spacing_scale_grows_option_height_but_not_text() {
     let theme = test_theme();
 
-    let scaled = theme.scaled_metrics(2.0, 1.0);
+    let scaled = theme.scaled_spacing(2.0);
 
     let base = theme.sizes.resolve(SegmentedSize::Card);
     let grown = scaled.sizes.resolve(SegmentedSize::Card);
-    assert_eq!(grown.font_size, base.font_size * 2.0);
-    assert_eq!(grown.preview_height, base.preview_height);
+    assert_eq!(grown.font_size, base.font_size);
     assert!(grown.option_height > base.option_height);
     assert_eq!(grown.border_width, base.border_width);
 }

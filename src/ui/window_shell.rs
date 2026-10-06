@@ -370,7 +370,7 @@ mod tests {
     }
 
     #[test]
-    fn native_frame_geometry_removes_radii_padding_and_resize_on_tiled_edges() {
+    fn frame_geometry_removes_radii_and_padding_on_tiled_edges() {
         for style in [
             spaceterm_ui::DesktopWindowStyle::Adwaita,
             spaceterm_ui::DesktopWindowStyle::Breeze,

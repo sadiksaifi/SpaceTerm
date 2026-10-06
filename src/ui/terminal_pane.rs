@@ -4,7 +4,7 @@ use super::terminal_focus::TerminalFocusBlocker;
 pub(crate) use crate::domain::remote_workspace::RemotePaneLifecycleError;
 use crate::domain::remote_workspace::{RemotePaneFacts, RemoteRestartAuthority};
 #[cfg(test)]
-use crate::terminal::RemoteChannelUnavailable;
+use crate::terminal::TerminalSessionChannelUnavailable;
 use crate::ui::appearance::gpui_color;
 use std::cell::Cell;
 use std::ops::Range;
@@ -19,8 +19,6 @@ use super::chrome_icons::IconRole;
 use super::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use super::render_lifecycle::{RenderLifecycle, ScaleChange, SurfaceVisibility};
 use super::terminal_context_menu::{TerminalContextMenuCommand, terminal_context_menu_entries};
-#[cfg(test)]
-use super::terminal_element::PaintPreflightFault;
 use super::terminal_element::{
     TerminalGridCache, TerminalGridConfiguration, TerminalGridPresentation, TerminalPadding,
 };
@@ -66,9 +64,9 @@ use crate::terminal::{
     NativeServiceCapabilities, NativeServiceOrigin, NativeServiceStatus, PaneTerminalState,
     PasteConfirmation, PasteDecision, PastePayload, PasteRequestOutcome, PasteResolution,
     PhysicalKey, PointerButton, PointerInput, PointerPhase, PreparedWorkspaceTerminalLaunch,
-    ScreenSnapshot, ScrollbackMovement, SelectionCopy, SelectionCopyError, SessionEvent,
-    ShiftSelectionPolicy, SurfacePosition, TerminalAccessibilityModel, TerminalFailure,
-    TerminalKeyInputAdapter, TerminalKeyInputEventKind, TerminalLocalFileCapabilities,
+    ScreenSnapshot, ScrollbackMovement, SelectionCopy, SelectionCopyError, ShiftSelectionPolicy,
+    SurfacePosition, TerminalAccessibilityModel, TerminalFailure, TerminalKeyInputAdapter,
+    TerminalKeyInputEventKind, TerminalLocalFileCapabilities, TerminalSessionEvent,
     TerminalSessionHandle, UnhandledKeyDiagnostic, WheelInput, WheelPhase,
     WorkspaceTerminalSessionFactory,
 };
@@ -103,10 +101,8 @@ const MIN_ROWS: u16 = 2;
 const MAX_PANE_TITLE_CHARACTERS: usize = 256;
 const PRESENTATION_BLINK_INTERVAL: Duration = Duration::from_millis(600);
 const VISUAL_BELL_DURATION: Duration = Duration::from_millis(120);
-/// Gap within which two Escape presses leave Operating-System Window fullscreen.
-///
-/// A single Escape is terminal input, so only a deliberate pair exits; held repeats never count
-/// because the caller filters those out before recording.
+/// Gap within which two Escape presses leave Operating-System Window fullscreen. A single Escape is
+/// terminal input, so only a deliberate pair exits.
 const DOUBLE_ESCAPE_FULLSCREEN_WINDOW: Duration = Duration::from_millis(500);
 /// How long a Permission Request notice shows an offer before it accepts an answer. Any key can
 /// reach a program in an enhanced keyboard mode, so without the delay a program could raise a
@@ -135,12 +131,9 @@ impl FullscreenEscapeSequence {
     }
 }
 
-/// The physical keys a Terminal Session received a press for but no release yet.
-///
-/// A program reporting key events must only see releases of presses it received. Presses that a
-/// Command, an IME composition, or another surface consumed keep their releases out of the
-/// session. The record outlives Terminal Input Focus changes, so a key held across one still
-/// releases exactly what the program saw pressed.
+/// The physical keys a Terminal Session received a press for but no release yet. A program
+/// reporting key events must only see releases of presses it received, across Terminal Input Focus
+/// changes.
 #[derive(Default)]
 struct DeliveredKeyPresses {
     session_identity: u64,
@@ -206,9 +199,6 @@ impl StatusIntent {
     }
 
     /// The glyph that leads a notice of this intent.
-    ///
-    /// Warnings and errors share the triangle and differ by color. Under Differentiate Without
-    /// Color an error takes the circle a critical Alert uses.
     pub(super) const fn glyph(self, differentiate_without_color: bool) -> IconName {
         match self {
             Self::Information => IconName::Info,
@@ -301,9 +291,7 @@ pub(super) struct OperationToken {
     recovery: Option<RecoveryToken>,
 }
 
-/// A move-only restart token bound to one Pane session epoch and successor generation.
-///
-/// Preparation reserves a fresh channel but does not replace the current Terminal Session.
+/// A move-only restart token bound to one Pane's Terminal Session epoch and successor generation.
 pub(crate) struct PreparedRemotePaneRestart {
     session_factory: WorkspaceTerminalSessionFactory,
     prepared_launch: PreparedWorkspaceTerminalLaunch,
@@ -311,18 +299,18 @@ pub(crate) struct PreparedRemotePaneRestart {
 }
 
 #[derive(Clone, Copy)]
-enum PaneSessionStartFailure {
+enum PaneTerminalSessionStartFailure {
     Preparation,
     Worker,
     RemoteRestart,
 }
 
-impl PaneSessionStartFailure {
+impl PaneTerminalSessionStartFailure {
     fn terminal_failure(self) -> TerminalFailure {
         TerminalFailure::platform(match self {
-            Self::Preparation => "prepare-session-channel",
-            Self::Worker => "start-session-worker",
-            Self::RemoteRestart => "restart-remote-session",
+            Self::Preparation => "prepare-terminal-session-channel",
+            Self::Worker => "start-terminal-session-worker",
+            Self::RemoteRestart => "restart-remote-terminal-session",
         })
     }
 
@@ -332,7 +320,7 @@ impl PaneSessionStartFailure {
 }
 
 /// Owns a Pane's Terminal Session, launch authority and event task retirement.
-struct PaneSessionLifecycle {
+struct PaneTerminalSessionLifecycle {
     session_factory: WorkspaceTerminalSessionFactory,
     prepared_launch: Option<PreparedWorkspaceTerminalLaunch>,
     current_directory: Option<crate::terminal::metadata::CurrentDirectory>,
@@ -341,7 +329,7 @@ struct PaneSessionLifecycle {
     session_start_attempted: bool,
     session_epoch: u64,
     accepted_screen_generation: Option<crate::terminal::PresentationGeneration>,
-    /// The newest Terminal Metadata accepted from Screens or the Session's retained snapshot.
+    /// The newest Terminal Metadata from Screens or the Terminal Session's retained snapshot.
     metadata: Option<Arc<crate::terminal::metadata::TerminalMetadataSnapshot>>,
     remote_connection_generation: Option<u64>,
     remote_input_blocked: bool,
@@ -352,7 +340,7 @@ struct PaneSessionLifecycle {
     _clipboard_task: Option<Task<()>>,
 }
 
-impl PaneSessionLifecycle {
+impl PaneTerminalSessionLifecycle {
     fn new(
         session_factory: WorkspaceTerminalSessionFactory,
         prepared_launch: Option<PreparedWorkspaceTerminalLaunch>,
@@ -512,7 +500,8 @@ impl PaneSessionLifecycle {
         &mut self,
         geometry: TerminalGeometry,
         appearance: crate::terminal::TerminalAppearanceUpdate,
-    ) -> Option<Result<crate::terminal::StartedTerminalSession, PaneSessionStartFailure>> {
+    ) -> Option<Result<crate::terminal::StartedTerminalSession, PaneTerminalSessionStartFailure>>
+    {
         if self.session_start_attempted {
             return None;
         }
@@ -523,12 +512,12 @@ impl PaneSessionLifecycle {
                 .flatten()
         });
         let Some(prepared) = prepared else {
-            return Some(Err(PaneSessionStartFailure::Preparation));
+            return Some(Err(PaneTerminalSessionStartFailure::Preparation));
         };
         let operation = if self.remote_restart_start_pending {
-            PaneSessionStartFailure::RemoteRestart
+            PaneTerminalSessionStartFailure::RemoteRestart
         } else {
-            PaneSessionStartFailure::Worker
+            PaneTerminalSessionStartFailure::Worker
         };
         let result = self
             .session_factory
@@ -539,14 +528,14 @@ impl PaneSessionLifecycle {
     }
 }
 
-impl Drop for PaneSessionLifecycle {
+impl Drop for PaneTerminalSessionLifecycle {
     fn drop(&mut self) {
         self.close();
     }
 }
 
 pub(crate) struct TerminalPane {
-    terminal_session: PaneSessionLifecycle,
+    terminal_session: PaneTerminalSessionLifecycle,
     window_handle: gpui::AnyWindowHandle,
     text_clipboard: Rc<dyn crate::terminal::native_services::clipboard::TextClipboard>,
     native_service_focus_epoch: Cell<u64>,
@@ -568,8 +557,6 @@ pub(crate) struct TerminalPane {
     next_operation_id: u64,
     latest_presentation_operation: Option<u64>,
     latest_export_operation: Option<u64>,
-    #[cfg(test)]
-    scene_submission_attempts: Vec<crate::terminal::PresentationGeneration>,
     diagnostics: DiagnosticBundle,
     status: Option<String>,
     status_intent: StatusIntent,
@@ -612,8 +599,6 @@ pub(crate) struct TerminalPane {
     render_cache: Entity<TerminalGridCache>,
     fallback_render_cache: Entity<TerminalGridCache>,
     grid_presentation: TerminalGridPresentation,
-    #[cfg(test)]
-    paint_fault: Option<PaintPreflightFault>,
     graphics_cache: Entity<TerminalGraphicsCache>,
     selection_pasteboard: SelectionPublication,
     file_insertion: crate::terminal::native_services::file_insertion::FileInsertionPolicy,
@@ -844,7 +829,7 @@ impl TerminalPane {
         .detach();
 
         Self {
-            terminal_session: PaneSessionLifecycle::new(session_factory, prepared_launch),
+            terminal_session: PaneTerminalSessionLifecycle::new(session_factory, prepared_launch),
             window_handle: window.window_handle(),
             text_clipboard: native_service_adapters.text_clipboard,
             native_service_focus_epoch: Cell::new(0),
@@ -867,8 +852,6 @@ impl TerminalPane {
             next_operation_id: 0,
             latest_presentation_operation: None,
             latest_export_operation: None,
-            #[cfg(test)]
-            scene_submission_attempts: Vec::new(),
             diagnostics: DiagnosticBundle::default(),
             status: None,
             status_intent: StatusIntent::Information,
@@ -914,8 +897,6 @@ impl TerminalPane {
             render_cache,
             fallback_render_cache,
             grid_presentation: TerminalGridPresentation::new(),
-            #[cfg(test)]
-            paint_fault: None,
             graphics_cache,
             selection_pasteboard: SelectionPublication::new(
                 native_service_adapters.selection_clipboard,
@@ -1364,12 +1345,6 @@ impl TerminalPane {
         self.preedit_layout.clone()
     }
 
-    #[cfg(test)]
-    fn mark_for_preedit_cache_test(&mut self, text: &str, selected_utf16: Range<usize>) {
-        self.ime.replace_and_mark(None, text, Some(selected_utf16));
-        self.invalidate_preedit_layout();
-    }
-
     fn invalidate_preedit_layout(&mut self) {
         self.marked_revision = self.marked_revision.wrapping_add(1);
         self.preedit_layout = None;
@@ -1525,11 +1500,8 @@ impl TerminalPane {
         self.validate_remote_generation(generation)
     }
 
-    /// Suspends a Remote Pane for an authoritative Control Connection loss.
-    ///
-    /// The final screen, title, selection, and Find presentation remain owned by the Pane. Terminal
-    /// input is blocked, prior-session event tasks are retired, and repeated notification for the
-    /// same generation is idempotent. Stale generations and Local Panes are rejected unchanged.
+    /// Suspends a Remote Pane for an authoritative Control Connection loss. Repeated notification
+    /// for one generation is idempotent; stale generations and Local Panes are rejected unchanged.
     pub(crate) fn disconnect_remote(
         &mut self,
         generation: u64,
@@ -1562,11 +1534,11 @@ impl TerminalPane {
         cx.notify();
     }
 
-    fn suspend_if_remote_channel_unavailable(&mut self, cx: &mut Context<Self>) -> bool {
+    fn suspend_if_terminal_session_channel_unavailable(&mut self, cx: &mut Context<Self>) -> bool {
         if self
             .terminal_session
             .session_factory
-            .remote_channel_is_ready()
+            .terminal_session_channel_is_ready()
             != Some(false)
         {
             return false;
@@ -1575,10 +1547,9 @@ impl TerminalPane {
         true
     }
 
-    /// Binds one prepared channel to this disconnected Pane without mutating its session.
-    ///
-    /// The generation must advance and the token captures the current session epoch so delayed
-    /// preparation cannot replace a successor. Dropping the token abandons the reserved launch.
+    /// Binds one prepared channel to this disconnected Pane without mutating its session. The token
+    /// captures the current Terminal Session epoch so delayed preparation cannot replace a
+    /// successor.
     pub(crate) fn prepare_remote_restart(
         &self,
         session_factory: WorkspaceTerminalSessionFactory,
@@ -1606,11 +1577,8 @@ impl TerminalPane {
             .validate(self.terminal_session.remote_facts())
     }
 
-    /// Commits a prevalidated successor Terminal Session in the existing Pane entity.
-    ///
-    /// The Pane and layout identities remain unchanged. Prior-session event and accessibility
-    /// tasks are retired, generation caches reset, and the retained presentation remains visible
-    /// until the successor publishes its first snapshot. Later startup failure is Pane-local.
+    /// Commits a prevalidated successor Terminal Session in the existing Pane entity. The retained
+    /// presentation stays visible until the successor publishes its first snapshot.
     pub(crate) fn commit_remote_restart(
         &mut self,
         prepared: PreparedRemotePaneRestart,
@@ -1826,16 +1794,6 @@ impl TerminalPane {
             PaneTerminalState::Exited(exit) => Some(exit.to_string()),
             PaneTerminalState::Failed { failure, .. } => Some(failure.to_string()),
         }
-    }
-
-    pub(super) fn record_scene_submission_attempt(
-        &mut self,
-        generation: crate::terminal::PresentationGeneration,
-    ) {
-        #[cfg(test)]
-        self.scene_submission_attempts.push(generation);
-        #[cfg(not(test))]
-        let _ = generation;
     }
 
     pub(super) fn presentation_succeeded(
@@ -2148,9 +2106,8 @@ impl TerminalPane {
         request.is_some_and(|request| self.offer_permission_setup(request.permissions(), cx))
     }
 
-    /// Accepts metadata no older than what this Pane already presents.
-    ///
-    /// Returns whether any presented fact changed.
+    /// Accepts metadata no older than what this Pane already presents. Returns whether any
+    /// presented fact changed.
     fn accept_metadata(
         &mut self,
         snapshot: Arc<crate::terminal::metadata::TerminalMetadataSnapshot>,
@@ -2168,10 +2125,10 @@ impl TerminalPane {
         presentation_changed || directory_changed
     }
 
-    fn handle_event(&mut self, event: SessionEvent, cx: &mut Context<Self>) -> bool {
+    fn handle_event(&mut self, event: TerminalSessionEvent, cx: &mut Context<Self>) -> bool {
         match event {
-            SessionEvent::MetadataChanged(wakeup) => drop(wakeup),
-            SessionEvent::Screen(screen) => {
+            TerminalSessionEvent::MetadataChanged(wakeup) => drop(wakeup),
+            TerminalSessionEvent::Screen(screen) => {
                 if screen.appearance_generation < self.requested_terminal_generation
                     || self
                         .terminal_session
@@ -2196,7 +2153,7 @@ impl TerminalPane {
                 self.reconcile_pending_accessibility();
                 self.sync_scrollbar(cx);
             }
-            SessionEvent::Attention(event) => {
+            TerminalSessionEvent::Attention(event) => {
                 let effects = self.attention.observe(
                     event,
                     AttentionFacts {
@@ -2215,15 +2172,15 @@ impl TerminalPane {
                 }
                 cx.emit(TerminalPaneEvent::AttentionChanged { unread_count });
             }
-            SessionEvent::HiddenInputChanged(hidden_input) => {
+            TerminalSessionEvent::HiddenInputChanged(hidden_input) => {
                 self.hidden_input = hidden_input;
                 self.sync_secure_input();
             }
-            SessionEvent::PermissionRequested(request) => {
+            TerminalSessionEvent::PermissionRequested(request) => {
                 return self.offer_permission_setup(request.permissions(), cx);
             }
-            SessionEvent::Exited(status) => {
-                if self.suspend_if_remote_channel_unavailable(cx) {
+            TerminalSessionEvent::Exited(status) => {
+                if self.suspend_if_terminal_session_channel_unavailable(cx) {
                     return false;
                 }
                 self.context_menu = None;
@@ -2247,8 +2204,8 @@ impl TerminalPane {
                 self.pane_state = PaneTerminalState::exited(status);
                 cx.emit(TerminalPaneEvent::Exited);
             }
-            SessionEvent::Failed(failure) => {
-                if self.suspend_if_remote_channel_unavailable(cx) {
+            TerminalSessionEvent::Failed(failure) => {
+                if self.suspend_if_terminal_session_channel_unavailable(cx) {
                     return false;
                 }
                 let was_available = self.terminal_session_available();
@@ -2272,7 +2229,7 @@ impl TerminalPane {
     fn handle_session_event(
         &mut self,
         session_epoch: u64,
-        event: SessionEvent,
+        event: TerminalSessionEvent,
         cx: &mut Context<Self>,
     ) -> bool {
         self.terminal_session.session_epoch == session_epoch && self.handle_event(event, cx)
@@ -2351,9 +2308,8 @@ impl TerminalPane {
         if !self.synchronize_terminal_input_focus(window, cx) {
             return;
         }
-        // A bare Escape pair leaves Operating-System Window fullscreen without stealing terminal
-        // input: each press still reaches the session below. Presses an overlay owns (find, paste
-        // confirmation) or an IME composition owns never count, and any other key breaks the pair.
+        // A bare Escape pair leaves fullscreen while each press still reaches the session. Presses
+        // an overlay or IME composition owns never count.
         let bare_escape = event.keystroke.key == "escape"
             && !event.is_held
             && !event.keystroke.modifiers.modified();
@@ -2751,7 +2707,7 @@ impl TerminalPane {
             cx.stop_propagation();
             return;
         }
-        // Motion with a button this Terminal never received pressed belongs to the element that
+        // Motion with a button this Pane never received pressed belongs to the element that
         // received the press, such as a Pane Caption starting a Pane drag, not to the program.
         if event.pressed_button.is_some()
             && self.pressed_button.is_none()
@@ -3157,16 +3113,6 @@ impl TerminalPane {
         cx.notify();
     }
 
-    #[cfg(test)]
-    pub(crate) fn insert_dropped_file_paths_for_test(
-        &mut self,
-        paths: &[PathBuf],
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.insert_dropped_file_paths(paths, window, cx);
-    }
-
     fn flush_pending_file_insertion(&mut self, cx: &mut Context<Self>) {
         if !self.terminal_input_focus || self.terminal_session.session.is_none() {
             return;
@@ -3532,13 +3478,9 @@ impl TerminalPane {
         cx.notify();
     }
 
-    /// Offers a Permission Setup for the ungranted permissions a Permission Request asked for.
-    ///
-    /// Only a Local Pane offers one, because a Remote Pane's programs run on another computer.
-    /// Any output a Local Pane shows can carry a request, including output a remote shell or a
-    /// file relays, so the offer names no program and starts nothing until the person chooses Set
-    /// Up. A permission already requested or declined adds nothing, so repeated requests read no
-    /// authorization.
+    /// Offers a Permission Setup for the ungranted permissions a Permission Request asked for. Only
+    /// a Local Pane offers one. Any output can carry a request, so the offer names no program and
+    /// starts nothing until the person chooses Set Up.
     fn offer_permission_setup(
         &mut self,
         permissions: &[SystemPermission],
@@ -3597,10 +3539,8 @@ impl TerminalPane {
     }
 
     /// Records when the notice began showing its offer at `edge`, and reports whether it accepts
-    /// answers. An offer that gains a permission starts the delay again; one that loses a
-    /// permission keeps it. Moving to the other edge also starts it again, because the program
-    /// moves the cursor that picks the edge and could otherwise slide an answering button under
-    /// the pointer.
+    /// answers. Gaining a permission or moving edge restarts the delay, because the program moves
+    /// the cursor that picks the edge and could slide a button under the pointer.
     fn show_permission_request(
         &mut self,
         edge: Option<NoticeEdge>,
@@ -3938,12 +3878,6 @@ impl TerminalPane {
     }
 }
 
-/// Resolves the shared treatment for one Pane-local floating surface.
-///
-/// Every surface a Pane raises over terminal content covers cells that are already painted, so its
-/// material, edge, corners, and elevation come from the window's one floating catalog rather than
-/// from this renderer. The bounded library fallback keeps fixtures legible before a window installs
-/// its resolved catalog.
 fn floating_shell(role: FloatingRole, cx: &App) -> FloatingShell {
     spaceterm_ui::floating_surface_theme(cx).shell(role)
 }
@@ -4493,16 +4427,6 @@ impl Render for TerminalPane {
                         fallback_graphics,
                     )
                 }),
-                paint_fault: {
-                    #[cfg(test)]
-                    {
-                        self.paint_fault.take()
-                    }
-                    #[cfg(not(test))]
-                    {
-                        None
-                    }
-                },
             },
             cx,
         );
@@ -4713,9 +4637,6 @@ impl Render for TerminalPane {
                                 .chrome_text(appearance.typography.style(TextRole::Body))
                                 .flex()
                                 .flex_row()
-                                // The surface edge now belongs to the shared role, so the status
-                                // intent reads from a leading rail alongside its glyph rather than
-                                // from a tinted border that looked like ordinary chrome.
                                 .child(
                                     div()
                                         .debug_selector(|| "terminal-status-intent".to_owned())
@@ -4815,10 +4736,8 @@ impl Render for TerminalPane {
     }
 }
 
-/// Presents the Pane-local unsafe-paste confirmation on the shared Notice surface.
-///
-/// The caller resolves the shell, because this surface is raised beside the Pane's other notices and
-/// must sit at exactly their elevation.
+/// Presents the Pane-local unsafe-paste confirmation on the shared Notice surface. The caller
+/// resolves the shell so it sits at the elevation of the Pane's other notices.
 fn render_paste_confirmation(
     confirmation: PasteConfirmation,
     pane: gpui::WeakEntity<TerminalPane>,
@@ -4833,8 +4752,15 @@ fn render_paste_confirmation(
         "Pasting multiple lines may execute commands in your shell."
     };
 
+    let prompt = format!(
+        "Paste {} bytes across {} lines? {explanation}",
+        confirmation.byte_len, confirmation.line_count
+    );
     shell.mount(
         div()
+            .id("unsafe-paste-confirmation")
+            .role(gpui::Role::Group)
+            .aria_label(prompt.clone())
             .debug_selector(|| "unsafe-paste-confirmation".to_owned())
             .chrome_text(appearance.typography.style(TextRole::Body))
             .absolute()
@@ -4866,10 +4792,7 @@ fn render_paste_confirmation(
                     .gap(appearance.spacing(10.0))
                     .px(appearance.spacing(12.0))
                     .py(appearance.spacing(10.0))
-                    .child(div().w_full().whitespace_normal().child(format!(
-                        "Paste {} bytes across {} lines? {explanation}",
-                        confirmation.byte_len, confirmation.line_count
-                    )))
+                    .child(div().w_full().whitespace_normal().child(prompt))
                     .child(
                         div()
                             .w_full()
@@ -4928,12 +4851,9 @@ enum NoticeEdge {
     Bottom,
 }
 
-/// Presents a Permission Request on the shared Notice surface.
-///
-/// The notice never takes keyboard focus, so terminal input still reaches the program. Its answers
-/// are clicks and shortcuts, which a program cannot produce by writing to the terminal. They stay
-/// off until the notice is `armed`, so a program cannot redirect a click or keystroke by timing a
-/// request just before it.
+/// Presents a Permission Request on the shared Notice surface. It never takes keyboard focus, and
+/// its answers stay off until `armed`, so a program cannot redirect a click or keystroke by timing
+/// a request.
 fn render_permission_request(
     copies: Vec<&'static super::permission_setup::PermissionCopy>,
     edge: NoticeEdge,
@@ -5070,26 +4990,21 @@ fn ime_candidate_bounds(
     )
 }
 
-/// The identity one Pane caption presents: where its Terminal runs, where it is, what it runs, and
-/// how far along it reports being.
-///
-/// This is the one presentation boundary between a Pane's sanitized Terminal Metadata and the
-/// chrome that describes it. The Pane Caption and the Tab item both read these facts, so neither
-/// parses terminal controls or interprets title text on its own.
+/// The identity one Pane caption presents: where its Terminal Session runs, where it is, what it
+/// runs, and how far along it reports being. The Pane Caption and the Tab item both read these
+/// sanitized facts.
 pub(crate) struct PaneCaptionFacts {
     pub(crate) origin: PaneOrigin,
     pub(crate) directory: SharedString,
     pub(crate) label: SharedString,
-    /// The glyph the program reported for itself, which takes the place of the Session's own.
+    /// The glyph the program reported for itself, replacing the Terminal Session's own.
     pub(crate) glyph: Option<SharedString>,
     pub(crate) running: bool,
     pub(crate) progress: super::terminal_status::TerminalProgress,
 }
 
-/// The account and machine one Pane runs on, split so a caption can emphasize each part.
-///
-/// `remote` is the Local or Remote classification itself, never inferred from the spelling of
-/// `host`. A Remote destination that names no account leaves `user` empty.
+/// The account and machine one Pane runs on. `remote` is the Local or Remote classification, never
+/// inferred from the spelling of `host`.
 #[derive(Clone, Default, Eq, PartialEq)]
 pub(crate) struct PaneOrigin {
     pub(crate) user: SharedString,
@@ -5117,18 +5032,13 @@ impl PaneOrigin {
 }
 
 /// Drops the multicast DNS suffix a host may append to a machine name.
-///
-/// Every other spelling, including an address, is presented exactly as reported.
 fn short_hostname(host: &str) -> &str {
     host.strip_suffix(".local")
         .filter(|short| !short.is_empty())
         .unwrap_or(host)
 }
 
-/// Abbreviates a displayed directory against its own side's home spelling.
-///
-/// The caller supplies the home belonging to the same Local or Remote context as the directory,
-/// so a path is never shortened against the other side's home.
+/// Abbreviates a displayed directory against the home of its own Local or Remote side.
 fn compact_home_directory(directory: &str, home: Option<&str>) -> String {
     let Some(home) = home
         .map(|home| home.trim_end_matches('/'))

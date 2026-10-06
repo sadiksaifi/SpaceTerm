@@ -17,7 +17,6 @@ const MAXIMUM_POINTER_INSET: f32 = 4096.0;
 pub struct WindowDragInteractionId(u64);
 
 impl WindowDragInteractionId {
-    /// Returns the monotonic numeric identity.
     pub fn get(self) -> u64 {
         self.0
     }
@@ -33,17 +32,14 @@ pub struct WindowDragRegionStatus {
 }
 
 impl WindowDragRegionStatus {
-    /// Creates an idle status handle.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Returns the currently owned interaction, if any.
     pub fn active_interaction(&self) -> Option<WindowDragInteractionId> {
         self.active_interaction.get()
     }
 
-    /// Returns whether the region currently owns a primary-pointer interaction.
     pub fn is_active(&self) -> bool {
         self.active_interaction().is_some()
     }
@@ -143,27 +139,9 @@ type WindowDragHandler =
 
 /// A platform-neutral interaction region for requesting an Operating-System Window move.
 ///
-/// The control owns primary-button eligibility, pointer capture, logical-coordinate threshold
-/// detection, exactly-once move requests, double activation, cancellation, and propagation for an
-/// owned gesture. The application owns top-chrome layout and paint, terminal focus coordination,
-/// actual Operating-System Window movement, and double-activation policy.
-///
-/// The pointer hitbox is painted below `content`, may be inset to reserve neighboring controls,
-/// and claims primary down in the bubble phase only after frontmost capture handlers have had an
-/// opportunity to consume it. Interactive
-/// children follow the normal GPUI contract of stopping handled events or installing a blocking
-/// hitbox; SpaceTerm Buttons, Menu triggers, selectors, and Resize Handles do so. Occluding and
-/// capture-owning overlays therefore retain their behavior, while uncovered space remains
-/// draggable. Once the region owns a press, its move and release events are captured even outside
-/// the original bounds and do not propagate to parent or terminal pointer handlers.
-///
-/// Events are ordered as `InteractionStarted`, an optional `MoveRequested`, then
-/// `InteractionFinished`. A double activation emits only `DoubleActivationRequested`. The drag
-/// threshold is measured in GPUI logical coordinates and defaults to a bounded compact-desktop
-/// value of four logical pixels.
-///
-/// A logical accessibility name is mandatory. It provides the default debug selector and keeps
-/// the control named for a future native accessibility node.
+/// The application owns the actual window movement and double-activation policy. The hitbox paints
+/// below `content` and claims a primary press only in the bubble phase, so interactive children
+/// that stop handled events or install a blocking hitbox keep their behavior.
 #[derive(IntoElement)]
 pub struct WindowDragRegion {
     id: ElementId,
@@ -245,7 +223,6 @@ impl WindowDragRegion {
         self
     }
 
-    /// Adds a stable root debug selector.
     pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
         self.debug_selector = Some(selector.into());
         self
@@ -753,13 +730,20 @@ mod tests {
     fn lost_primary_button_should_cancel_and_allow_a_clean_later_generation() {
         let mut state = state();
         let first = state.pointer_down(point(px(10.0), px(10.0)))[0];
-        state.pointer_move(point(px(12.0), px(10.0)), None);
+        let cancelled = state.pointer_move(point(px(12.0), px(10.0)), None);
         let second = state.pointer_down(point(px(20.0), px(20.0)))[0];
 
         let interaction = |event| match event {
             WindowDragRegionEvent::InteractionStarted { interaction } => interaction,
             _ => panic!("expected an interaction-start event"),
         };
+        assert_eq!(
+            cancelled,
+            [WindowDragRegionEvent::InteractionFinished {
+                interaction: interaction(first),
+                reason: WindowDragFinishReason::PointerButtonLost,
+            }]
+        );
         assert_ne!(interaction(first), interaction(second));
     }
 
@@ -1073,6 +1057,7 @@ mod tests {
         let DragWindow {
             events,
             parent_events,
+            parent_moves,
             cx,
             ..
         } = drag_window(cx);
@@ -1104,6 +1089,7 @@ mod tests {
             ]
         ));
         assert!(parent_events.borrow().is_empty());
+        assert_eq!(*parent_moves.borrow(), 0);
     }
 
     #[gpui::test]

@@ -1,12 +1,5 @@
-//! Permission Setup: one guided pass through System Settings that adds SpaceTerm to the privacy
-//! lists of the System Permissions programs in a Terminal Session need.
-//!
-//! A setup starts only when someone asks for it: a person choosing Set Up in Settings, or
-//! accepting a Permission Request from a tool in a Terminal Session. It verifies the permission,
-//! clears an entry that does not grant it, opens System Settings at the permission's list, and
-//! docks the Setup Guide on System Settings' window while that window is in front. The guide offers SpaceTerm itself
-//! to drag into the list and reports the grant as soon as a tool started now would receive it.
-//! Closing System Settings ends the setup.
+//! Permission Setup: one guided pass through System Settings that adds SpaceTerm to a privacy list.
+//! A setup starts only on request, and closing System Settings ends it.
 
 mod guide;
 mod placement;
@@ -35,9 +28,8 @@ const COVERED_TRACKING_INTERVAL: Duration = Duration::from_millis(250);
 /// How long System Settings may keep showing the previous list after it is asked for another.
 /// The guide waits this long after opening a list, so it never points at the wrong one.
 const OPENING_SETTLE: Duration = Duration::from_millis(250);
-/// How many tracking intervals in front pass between authorization reads. System Settings reports
-/// no Screen Recording change, so the setup reads it about once a second while the person works
-/// in System Settings.
+/// How many tracking intervals in front pass between authorization reads, about once a second.
+/// System Settings reports no Screen Recording change.
 const AUTHORIZATION_INTERVALS: u32 = 30;
 /// How long System Settings may take to come forward before the setup reports it did not.
 const OPENING_TIMEOUT: Duration = Duration::from_secs(10);
@@ -243,7 +235,6 @@ impl PermissionSetup {
             .collect()
     }
 
-    /// The permission being set up now and its step.
     pub(crate) fn current(&self) -> Option<(SystemPermission, SetupStep)> {
         self.run.as_ref().map(|run| (run.permission, run.step))
     }

@@ -2,50 +2,32 @@ pub(crate) mod about_window;
 pub(crate) mod appearance;
 pub(crate) mod appearance_runtime;
 pub(crate) mod application_prompt;
-mod button_theme;
+pub(crate) mod askpass_dialog;
 pub(crate) mod chrome_geometry;
 pub(crate) mod chrome_icons;
 mod chrome_semantic_pairs;
 mod chrome_state;
 pub(crate) mod chrome_typography;
-mod combo_box_theme;
-mod command_palette_theme;
-mod control_theme_catalog;
+mod control_theme;
 #[cfg(feature = "developer-tools")]
 pub(crate) mod developer_workbench;
 pub(crate) mod directory_picker;
 mod drag_and_drop;
-#[cfg(test)]
-mod floating_surface_tests;
-#[cfg(test)]
-mod light_hover_tests;
-#[cfg(test)]
-mod light_inactive_tests;
-mod menu_theme;
-#[cfg(test)]
-mod modal_appearance_tests;
-mod modal_theme;
 mod native_remote_workspace_flow_backend;
-mod pane_host;
 pub(crate) mod pane_lifecycle;
 pub(crate) mod permission_setup;
-mod progress_theme;
 mod remote_child_launch;
 pub(crate) mod remote_workspace_flow;
 mod render_lifecycle;
-mod resize_handle_theme;
-mod scrollbar_theme;
-mod search_field_theme;
-mod segmented_control_theme;
 mod selection_chip;
 pub(crate) mod settings_file;
 pub(crate) mod settings_recovery;
 pub(crate) mod settings_window;
 mod sidebar_window;
-pub(crate) mod ssh_askpass_dialog;
 mod ssh_host_form;
 mod ssh_host_picker;
 mod tab_manager;
+mod tab_view;
 mod terminal_context_menu;
 mod terminal_element;
 mod terminal_focus;
@@ -54,9 +36,6 @@ mod terminal_ime;
 mod terminal_pane;
 mod terminal_status;
 mod terminal_symbols;
-mod text_input_theme;
-mod toggle_theme;
-mod tooltip_theme;
 pub(crate) mod updates;
 mod window_shell;
 mod workspace_chrome;
@@ -71,20 +50,17 @@ use gpui::{App, actions};
 pub(crate) use native_remote_workspace_flow_backend::{
     NativeRemoteWorkspaceFlowBackendFactory, RemoteWorkspaceSshRuntime,
 };
-pub(crate) use pane_host::{
-    PaneHost, PaneHostEvent, PreparedPaneHostRemoteRestart, RemotePaneHostLifecycleError,
-    TabIdentity,
-};
 pub(crate) use remote_child_launch::RemoteChildLaunchUnavailable;
 #[cfg(test)]
 pub(crate) use render_lifecycle::{RenderLifecycle, ScaleChange, SurfaceVisibility};
 pub(crate) use tab_manager::{TabManager, TabManagerEvent};
+pub(crate) use tab_view::{
+    PreparedTabViewRemoteRestart, RemoteTabViewLifecycleError, TabIdentity, TabView, TabViewEvent,
+};
 #[cfg(test)]
 pub(crate) use terminal_focus::{
     TerminalFocusBlocker, TerminalFocusCoordinator, TerminalFocusFacts,
 };
-#[cfg(test)]
-pub(crate) use terminal_ime::conformance_ime_observation;
 pub(crate) use terminal_pane::{
     PaneOrigin, PreparedRemotePaneRestart, RemotePaneLifecycleError, TerminalPane,
     TerminalPaneEvent,
@@ -98,7 +74,8 @@ pub(crate) use workspace_manager::{WorkspaceManager, WorkspaceManagerAdapters};
 #[cfg(test)]
 pub(crate) fn settle_hover(cx: &mut gpui::VisualTestContext) {
     cx.run_until_parked();
-    cx.executor().advance_clock(spaceterm_ui::HoverFade::SETTLE);
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(220));
     cx.update(|window, cx| window.simulate_next_frame(cx));
     cx.run_until_parked();
 }
@@ -187,24 +164,12 @@ pub(crate) fn initialize_controls(cx: &mut App) -> gpui::Result<()> {
     appearance::initialize(cx);
     let installed = cx.global::<appearance::InstalledChrome>();
     let motion = appearance_runtime::control_motion(cx);
-    let active = Box::new(control_theme_catalog::catalog(&installed.active, motion));
-    let inactive = Box::new(control_theme_catalog::catalog(&installed.inactive, motion));
+    let active = Box::new(control_theme::catalog(&installed.active, motion));
+    let inactive = Box::new(control_theme::catalog(&installed.inactive, motion));
     let settings = cx.global::<appearance::settings::InstalledSettingsChrome>();
-    let settings_active = Box::new(control_theme_catalog::catalog(
-        &settings.active.chrome,
-        motion,
-    ));
-    let settings_inactive = Box::new(control_theme_catalog::catalog(
-        &settings.inactive.chrome,
-        motion,
-    ));
-    spaceterm_ui::init_scoped_control_theme_catalogs(
-        cx,
-        active,
-        inactive,
-        settings_active,
-        settings_inactive,
-    )?;
+    let settings_active = Box::new(control_theme::catalog(&settings.active.chrome, motion));
+    let settings_inactive = Box::new(control_theme::catalog(&settings.inactive.chrome, motion));
+    spaceterm_ui::init(cx, active, inactive, settings_active, settings_inactive)?;
     Ok(())
 }
 
@@ -263,10 +228,10 @@ mod tests {
                 && cx.has_global::<spaceterm_ui::TooltipTheme>()
                 && cx.has_global::<spaceterm_ui::ModalTheme>()
                 && *cx.global::<spaceterm_ui::ProgressTheme>()
-                    == progress_theme::theme(&appearance::chrome(cx).colors)
+                    == control_theme::progress::theme(&appearance::chrome(cx).colors)
                 && *cx.global::<spaceterm_ui::ControlMotion>()
                     == spaceterm_ui::ControlMotion::Standard
-                && *cx.global::<spaceterm_ui::ModalTheme>() == modal_theme::theme(floating)
+                && *cx.global::<spaceterm_ui::ModalTheme>() == control_theme::modal::theme(floating)
                 && cx.has_global::<spaceterm_ui::ModalDesktopPolicy>()
                 && *cx.global::<spaceterm_ui::ModalDesktopPolicy>()
                     == spaceterm_ui::ModalDesktopPolicy::mac_os()
@@ -276,10 +241,19 @@ mod tests {
     #[gpui::test]
     fn ui_init_should_install_explicit_modal_command_period_binding(cx: &mut TestAppContext) {
         cx.update(|cx| init(cx).expect("UI initialization should succeed"));
-        let command_period =
-            Keystroke::parse("cmd-.").expect("macOS modal key equivalent should parse");
+        let command_period = Keystroke::parse("cmd-.").expect("macOS modal Shortcut should parse");
 
-        let has_binding = cx.update(|cx| !cx.all_bindings_for_input(&[command_period]).is_empty());
+        let has_binding = cx.update(|cx| {
+            cx.all_bindings_for_input(&[command_period])
+                .iter()
+                .any(|binding| {
+                    binding.action().name() == "spaceterm_modal::ActivatePlatformCancel"
+                        && binding.predicate().is_some_and(|predicate| {
+                            predicate.eval(&[gpui::KeyContext::parse("SpaceTermModal").unwrap()])
+                                && !predicate.eval(&[gpui::KeyContext::parse("Terminal").unwrap()])
+                        })
+                })
+        });
 
         assert!(has_binding);
     }
@@ -366,6 +340,8 @@ mod tests {
                         panic!("invalid test shortcut {shortcut}: {error}")
                     });
                     let bindings = cx.all_bindings_for_input(&[keystroke]);
+                    let binding = bindings.last().expect("the command has a binding");
+                    assert!(binding.predicate().is_none(), "{shortcut} must be global");
                     (
                         *shortcut,
                         bindings

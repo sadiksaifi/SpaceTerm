@@ -33,8 +33,6 @@ struct NotificationState {
     request: Option<Request>,
     /// A delivery job is queued or running and applies `request` before it finishes.
     delivering: bool,
-    /// The last local delivery diagnostic, with no native error or desktop content retained.
-    failure: Option<AttentionFailure>,
 }
 
 impl NotificationState {
@@ -376,8 +374,8 @@ fn deliver(
             Ok(())
         })();
         let mut state = lock(state);
-        state.failure = result.err().map(failure);
-        if state.failure.is_some() {
+        let failure = result.err().map(failure);
+        if failure.is_some() {
             // A rejected replaces_id supplies no authority for the next request.
             state.id = None;
             state.token = None;
@@ -450,9 +448,11 @@ mod tests {
         state.set_owner(None);
         assert_eq!((state.id, state.token.as_deref()), (None, None));
         assert_ne!(state.generation, generation);
+        let departed_generation = state.generation;
         state.set_owner(Some(owner));
+        assert_ne!(state.generation, generation);
         assert_ne!(
-            state.generation, generation,
+            state.generation, departed_generation,
             "reacquisition has a new owner generation"
         );
         state.id = Some(42);

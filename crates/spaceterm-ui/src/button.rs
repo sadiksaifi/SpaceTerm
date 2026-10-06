@@ -54,12 +54,10 @@ pub struct ButtonActivation {
 }
 
 impl ButtonActivation {
-    /// Returns the input path that activated the button.
     pub fn source(self) -> ButtonActivationSource {
         self.source
     }
 
-    /// Returns the semantic role assigned to the button.
     pub fn role(self) -> ButtonRole {
         self.role
     }
@@ -165,28 +163,23 @@ impl ButtonPaint {
         }
     }
 
-    /// Returns the state's background color.
     pub fn background(self) -> Rgba {
         self.background
     }
 
-    /// Returns the state's foreground color.
     pub fn foreground(self) -> Rgba {
         self.foreground
     }
 
-    /// Sets the foreground for icon-only controls independently of text buttons.
     pub fn icon_foreground(mut self, foreground: Rgba) -> Self {
         self.icon_foreground = foreground;
         self
     }
 
-    /// Returns the state's icon foreground.
     pub fn icon_color(self) -> Rgba {
         self.icon_foreground
     }
 
-    /// Returns the state's border color.
     pub fn border(self) -> Rgba {
         self.border
     }
@@ -235,22 +228,18 @@ impl ButtonVariantStyle {
         }
     }
 
-    /// Returns the normal-state paint.
     pub fn normal(self) -> ButtonPaint {
         self.normal
     }
 
-    /// Returns the hover-state paint.
     pub fn hovered(self) -> ButtonPaint {
         self.hovered
     }
 
-    /// Returns the pressed-state paint.
     pub fn pressed(self) -> ButtonPaint {
         self.pressed
     }
 
-    /// Returns the disabled-state paint.
     pub fn disabled(self) -> ButtonPaint {
         self.disabled
     }
@@ -304,65 +293,46 @@ impl ButtonMetrics {
         self
     }
 
-    /// Sets horizontal padding for text buttons.
     pub fn horizontal_padding(mut self, padding: Pixels) -> Self {
         self.horizontal_padding = padding;
         self
     }
 
-    /// Sets spacing between a text button's label and decorations.
     pub fn gap(mut self, gap: Pixels) -> Self {
         self.gap = gap;
         self
     }
 
-    /// Sets the rounded shape's corner radius.
     pub fn corner_radius(mut self, radius: Pixels) -> Self {
         self.corner_radius = radius;
         self
     }
 
-    /// Sets the stable border width used in every visual state.
     pub fn border_width(mut self, width: Pixels) -> Self {
         self.border_width = width;
         self
     }
 
-    /// Sets the text label size.
     pub fn font_size(mut self, size: Pixels) -> Self {
         self.font_size = size;
         self
     }
 
-    /// Sets relative line heights for single-line and multiline labels.
     pub fn line_heights(mut self, single_line: f32, multiline: f32) -> Self {
         self.single_line_height = single_line.clamp(1.0, 2.0);
         self.multiline_line_height = multiline.clamp(1.0, 2.0);
         self
     }
 
-    fn scaled(self, text_scale: f32, spacing_scale: f32) -> Self {
+    fn scaled(self, spacing_scale: f32) -> Self {
         Self {
-            height: crate::appearance::scale_line_box(
-                self.height,
-                self.font_size,
-                text_scale,
-                spacing_scale,
-            ),
-            icon_button_size: self.icon_button_size,
-            icon_baseline_center: self
-                .icon_baseline_center
-                .map(|center| crate::appearance::scale_metric(center, text_scale)),
+            height: crate::appearance::scale_line_box(self.height, self.font_size, spacing_scale),
             horizontal_padding: crate::appearance::scale_metric(
                 self.horizontal_padding,
                 spacing_scale,
             ),
             gap: crate::appearance::scale_metric(self.gap, spacing_scale),
-            corner_radius: self.corner_radius,
-            border_width: self.border_width,
-            font_size: crate::appearance::scale_metric(self.font_size, text_scale),
-            single_line_height: self.single_line_height,
-            multiline_line_height: self.multiline_line_height,
+            ..self
         }
     }
 }
@@ -448,12 +418,12 @@ impl ButtonSizes {
         }
     }
 
-    fn scaled(self, text_scale: f32, spacing_scale: f32) -> Self {
+    fn scaled(self, spacing_scale: f32) -> Self {
         Self {
-            compact: self.compact.scaled(text_scale, spacing_scale),
-            small: self.small.scaled(text_scale, spacing_scale),
-            regular: self.regular.scaled(text_scale, spacing_scale),
-            large: self.large.scaled(text_scale, spacing_scale),
+            compact: self.compact.scaled(spacing_scale),
+            small: self.small.scaled(spacing_scale),
+            regular: self.regular.scaled(spacing_scale),
+            large: self.large.scaled(spacing_scale),
         }
     }
 }
@@ -479,7 +449,6 @@ impl ButtonTheme {
         }
     }
 
-    /// Returns the resolved state paints for a semantic variant.
     pub fn paints(self, variant: ButtonVariant) -> ButtonVariantStyle {
         self.variants.resolve(variant)
     }
@@ -516,26 +485,23 @@ impl ButtonTheme {
         self
     }
 
-    /// Returns the outer side length of an icon button in this theme.
     pub fn icon_button_size(self, size: ButtonSize) -> Pixels {
         let metrics = self.sizes.resolve(size);
         metrics.icon_button_size.unwrap_or(metrics.height)
     }
 
-    /// Returns the outer height of a text button in this theme.
     pub fn control_height(self, size: ButtonSize) -> Pixels {
         self.sizes.resolve(size).height
     }
 
-    /// Returns the keyboard focus-ring paint.
     #[cfg(test)]
     pub(crate) fn focus_border(self) -> Rgba {
         self.focus_border
     }
 
-    pub(crate) fn scaled_metrics(self, text_scale: f32, spacing_scale: f32) -> Self {
+    pub(crate) fn scaled_spacing(self, spacing_scale: f32) -> Self {
         Self {
-            sizes: self.sizes.scaled(text_scale, spacing_scale),
+            sizes: self.sizes.scaled(spacing_scale),
             ..self
         }
     }
@@ -1024,7 +990,6 @@ impl Button {
         self
     }
 
-    /// Makes the button fill the available width.
     pub fn full_width(mut self, full_width: bool) -> Self {
         self.full_width = full_width;
         self
@@ -1037,31 +1002,26 @@ impl Button {
         self
     }
 
-    /// Selects a bounded visual treatment from the installed button theme.
     pub fn variant(mut self, variant: ButtonVariant) -> Self {
         self.core.variant = variant;
         self
     }
 
-    /// Selects a standard native control size.
     pub fn size(mut self, size: ButtonSize) -> Self {
         self.core.size = size;
         self
     }
 
-    /// Selects the outer silhouette independently from visual emphasis.
     pub fn shape(mut self, shape: ButtonShape) -> Self {
         self.core.shape = shape;
         self
     }
 
-    /// Assigns the semantic intent of the action.
     pub fn role(mut self, role: ButtonRole) -> Self {
         self.core.role = role;
         self
     }
 
-    /// Controls whether the button can activate.
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.core.disabled = disabled;
         self
@@ -1076,13 +1036,11 @@ impl Button {
         self
     }
 
-    /// Adds a stable selector used by GPUI interaction tests.
     pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
         self.core.debug_selector = Some(selector.into());
         self
     }
 
-    /// Attaches bounded semantic tooltip content.
     pub fn tooltip(mut self, tooltip: Tooltip) -> Self {
         self.core.tooltip = Some(tooltip);
         self
@@ -1208,8 +1166,7 @@ impl RenderOnce for Button {
 
 /// A reusable icon-only action button.
 ///
-/// The logical accessibility name is mandatory for this icon-only control. It prevents unnamed
-/// actions and remains available when the control publishes a native accessibility node.
+/// The logical accessibility name is mandatory, so no icon-only action is unnamed.
 #[derive(IntoElement)]
 pub struct IconButton {
     core: ButtonCore,
@@ -1243,13 +1200,11 @@ impl IconButton {
         }
     }
 
-    /// Selects a bounded visual treatment from the installed button theme.
     pub fn variant(mut self, variant: ButtonVariant) -> Self {
         self.core.variant = variant;
         self
     }
 
-    /// Selects a standard native control size.
     pub fn size(mut self, size: ButtonSize) -> Self {
         self.core.size = size;
         self
@@ -1261,7 +1216,6 @@ impl IconButton {
         self
     }
 
-    /// Fits the control's rounded shape to its host's corner geometry.
     pub fn corner_radius(mut self, radius: Pixels) -> Self {
         self.core.corner_radius = Some(radius.max(px(0.0)));
         self
@@ -1273,7 +1227,6 @@ impl IconButton {
         self
     }
 
-    /// Overrides the border independently from the pointer target and visual fill.
     pub fn border_width(mut self, width: Pixels) -> Self {
         self.core.border_width = Some(width.max(px(0.0)));
         self
@@ -1285,25 +1238,21 @@ impl IconButton {
         self
     }
 
-    /// Selects the outer silhouette independently from visual emphasis.
     pub fn shape(mut self, shape: ButtonShape) -> Self {
         self.core.shape = shape;
         self
     }
 
-    /// Assigns the semantic intent of the action.
     pub fn role(mut self, role: ButtonRole) -> Self {
         self.core.role = role;
         self
     }
 
-    /// Controls whether the button can activate.
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.core.disabled = disabled;
         self
     }
 
-    /// Controls whether keyboard traversal may stop on this button.
     pub fn tab_stop(mut self, tab_stop: bool) -> Self {
         self.core.tab_stop = tab_stop;
         self
@@ -1324,13 +1273,11 @@ impl IconButton {
         self
     }
 
-    /// Adds a stable selector used by GPUI interaction tests.
     pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
         self.core.debug_selector = Some(selector.into());
         self
     }
 
-    /// Attaches bounded semantic tooltip content.
     pub fn tooltip(mut self, tooltip: Tooltip) -> Self {
         self.core.tooltip = Some(tooltip);
         self
@@ -2126,7 +2073,7 @@ mod tests {
             ButtonSizes::new(metrics, metrics, metrics, metrics),
             rgba(0x00aaffff),
         )
-        .scaled_metrics(1.0, 1.25);
+        .scaled_spacing(1.25);
         let style = theme.resolve(
             ButtonVariant::Secondary,
             ButtonSize::Compact,
@@ -2139,43 +2086,153 @@ mod tests {
         assert_eq!(theme.icon_button_size(ButtonSize::Compact), px(28.0));
     }
 
-    #[test]
-    fn typed_tooltip_should_integrate_with_text_and_icon_buttons() {
-        let button =
-            Button::new("button", "Button").tooltip(Tooltip::new("button-tooltip", "Button help"));
-        let icon = IconButton::new("icon", "Icon", |_| div().into_any_element())
-            .tooltip(Tooltip::new("icon-tooltip", "Icon help"));
-
-        assert!(button.core.tooltip.is_some() && icon.core.tooltip.is_some());
+    struct TooltipButtonsRoot {
+        disabled: bool,
+        activations: Rc<Cell<usize>>,
     }
 
-    #[test]
-    fn icon_button_can_take_a_semantic_target_size_without_changing_its_size_role() {
-        let icon = IconButton::new("icon", "Icon", |_| div().into_any_element())
-            .size(ButtonSize::Compact)
-            .target_size(px(28.0));
-
-        assert_eq!(icon.core.size, ButtonSize::Compact);
-        assert_eq!(icon.core.icon_button_size, Some(px(28.0)));
+    impl Render for TooltipButtonsRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let text_activations = self.activations.clone();
+            let icon_activations = self.activations.clone();
+            crate::TooltipLayer::new(
+                div()
+                    .flex()
+                    .gap(px(24.0))
+                    .child(
+                        Button::new("button", "Button")
+                            .debug_selector("tooltip-text-button")
+                            .disabled(self.disabled)
+                            .tooltip(
+                                Tooltip::new("button-tooltip", "Button help")
+                                    .debug_selector("button-help"),
+                            )
+                            .on_activate(move |_, _, _| {
+                                text_activations.set(text_activations.get() + 1);
+                            }),
+                    )
+                    .child(
+                        IconButton::new("icon", "Icon", |_| div().into_any_element())
+                            .debug_selector("tooltip-icon-button")
+                            .disabled(self.disabled)
+                            .tooltip(
+                                Tooltip::new("icon-tooltip", "Icon help")
+                                    .debug_selector("icon-help"),
+                            )
+                            .on_activate(move |_, _, _| {
+                                icon_activations.set(icon_activations.get() + 1);
+                            }),
+                    ),
+            )
+        }
     }
 
-    #[test]
-    fn pointer_release_inside_should_activate() {
-        let mut state = ButtonInteraction::default();
-
-        state.pointer_down();
-
-        assert!(state.pointer_up(true));
+    #[gpui::test]
+    fn typed_tooltip_should_integrate_with_text_and_icon_buttons(cx: &mut TestAppContext) {
+        cx.set_global(test_theme());
+        cx.set_global(crate::TooltipTheme::new(
+            crate::TooltipPaint::new(rgba(0xffffffff), rgba(0xaaaaaaff), rgba(0xccccccff)),
+            crate::TooltipMetrics::new(px(320.0)),
+        ));
+        cx.update(crate::tooltip::init);
+        let activations = Rc::new(Cell::new(0));
+        let root_activations = activations.clone();
+        let (root, cx) = cx.add_window_view(move |_, _| TooltipButtonsRoot {
+            disabled: false,
+            activations: root_activations,
+        });
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        for (button, tooltip) in [
+            ("tooltip-text-button", "button-help"),
+            ("tooltip-icon-button", "icon-help"),
+        ] {
+            let center = cx
+                .debug_bounds(button)
+                .expect("the button renders")
+                .center();
+            cx.simulate_mouse_move(center, None, Modifiers::none());
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(500));
+            cx.run_until_parked();
+            assert!(cx.debug_bounds(tooltip).is_some(), "{tooltip} opens");
+            let previous_activations = activations.get();
+            cx.simulate_click(center, Modifiers::none());
+            cx.run_until_parked();
+            assert_eq!(activations.get(), previous_activations + 1);
+            assert!(
+                cx.debug_bounds(tooltip).is_none(),
+                "activation dismisses {tooltip}"
+            );
+        }
+        root.update(cx, |root, cx| {
+            root.disabled = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        for (button, tooltip) in [
+            ("tooltip-text-button", "button-help"),
+            ("tooltip-icon-button", "icon-help"),
+        ] {
+            cx.simulate_mouse_move(point(px(400.0), px(400.0)), None, Modifiers::none());
+            let center = cx
+                .debug_bounds(button)
+                .expect("the disabled button renders")
+                .center();
+            cx.simulate_mouse_move(center, None, Modifiers::none());
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(500));
+            cx.run_until_parked();
+            assert!(
+                cx.debug_bounds(tooltip).is_none(),
+                "disabled {button} refuses hover"
+            );
+        }
     }
 
-    #[test]
-    fn pointer_release_outside_should_cancel() {
-        let mut state = ButtonInteraction::default();
-
-        state.pointer_down();
-        state.pointer_move(false, true);
-
-        assert!(!state.pointer_up(false));
+    #[gpui::test]
+    fn icon_button_can_take_a_semantic_target_size_without_changing_its_size_role(
+        cx: &mut TestAppContext,
+    ) {
+        struct IconTargetRoot;
+        impl Render for IconTargetRoot {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                IconButton::new("icon", "Icon", |_| div().into_any_element())
+                    .debug_selector("semantic-icon-target")
+                    .size(ButtonSize::Compact)
+                    .target_size(px(28.0))
+            }
+        }
+        let variant = test_variant_style();
+        let compact = ButtonMetrics::new(px(18.0)).corner_radius(px(3.0));
+        let other = ButtonMetrics::new(px(40.0)).corner_radius(px(9.0));
+        cx.set_global(ButtonTheme::new(
+            ButtonVariants::new(
+                variant, variant, variant, variant, variant, variant, variant,
+            ),
+            ButtonSizes::new(compact, other, other, other),
+            rgba(0x00aaffff),
+        ));
+        let (_, cx) = cx.add_window_view(|_, _| IconTargetRoot);
+        cx.run_until_parked();
+        let bounds = cx
+            .debug_bounds("semantic-icon-target")
+            .expect("the icon target renders");
+        assert_eq!(bounds.size, gpui::size(px(28.0), px(28.0)));
+        let scale = cx.update(|window, _| window.scale_factor());
+        let painted = cx.update(|window, _| {
+            window
+                .painted_quads()
+                .into_iter()
+                .find(|quad| {
+                    quad.bounds == bounds.scale(scale) && !quad.background.is_transparent()
+                })
+                .expect("the icon target background paints")
+        });
+        assert_eq!(
+            painted.corner_radii,
+            gpui::Corners::all(px(3.0).scale(scale))
+        );
     }
 
     #[test]
@@ -2749,7 +2806,13 @@ mod tests {
 
     #[gpui::test]
     fn disabled_focused_button_should_not_arm_return(cx: &mut TestAppContext) {
-        let (_, activations, _, cx) = button_window(cx, true, true);
+        let (root, activations, _, cx) = button_window(cx, false, true);
+        cx.update(|window, cx| {
+            window.focus_next(cx);
+            window.focus_next(cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("test-button-keyboard-focus").is_some());
         let enter = Keystroke::parse("enter").unwrap_or_default();
 
         cx.simulate_event(KeyDownEvent {
@@ -2757,6 +2820,26 @@ mod tests {
             prefer_character_input: false,
             is_held: false,
         });
+        root.update(cx, |root, cx| {
+            root.disabled = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.update(|window, cx| window.focused(cx).is_none()));
+        cx.simulate_event(KeyUpEvent {
+            keystroke: enter.clone(),
+        });
+        root.update(cx, |root, cx| {
+            root.disabled = false;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.focus_next(cx);
+            window.focus_next(cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("test-button-keyboard-focus").is_some());
         cx.simulate_event(KeyUpEvent { keystroke: enter });
 
         assert_eq!(activations.get(), 0);
@@ -2829,9 +2912,17 @@ mod tests {
         });
         cx.run_until_parked();
 
+        root.update(cx, |root, cx| {
+            root.disabled = false;
+            cx.notify();
+        });
+        cx.run_until_parked();
+
         cx.simulate_mouse_up(center, MouseButton::Left, Modifiers::default());
 
         assert_eq!(activations.get(), 0);
+        cx.simulate_click(center, Modifiers::default());
+        assert_eq!(activations.get(), 1);
     }
 
     #[gpui::test]

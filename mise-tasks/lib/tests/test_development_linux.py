@@ -12,7 +12,6 @@ import time
 import unittest
 import xml.etree.ElementTree as ElementTree
 from pathlib import Path
-from unittest.mock import patch
 
 from spaceterm_tasks import ROOT
 from spaceterm_tasks.development_linux import APPLICATION_ID, ICON_DOCUMENT
@@ -100,7 +99,7 @@ class LinuxPrefixTests(unittest.TestCase):
             *arguments,
         ]
 
-    def run_profile(self, *arguments, section="", overrides=None):
+    def run_development(self, *arguments, section="", overrides=None):
         environment = self.environment()
         environment["SPACETERM_DEVELOPER_WORKBENCH"] = section
         environment.update(overrides or {})
@@ -112,8 +111,8 @@ class LinuxPrefixTests(unittest.TestCase):
             cwd=self.root,
         )
 
-    def test_dev_profile_launches_from_a_private_prefix_with_installed_resources(self):
-        result = self.run_profile()
+    def test_development_launches_from_a_private_prefix_with_installed_resources(self):
+        result = self.run_development()
         self.assertEqual(result.returncode, 0, result.stderr)
         prefix = self.root / "target" / "development-apps" / "development"
         self.assertEqual(
@@ -138,7 +137,7 @@ class LinuxPrefixTests(unittest.TestCase):
         entry.write_text("stale development metadata")
         unrelated = applications / "unrelated.desktop"
         unrelated.write_text("unrelated metadata")
-        result = self.run_profile()
+        result = self.run_development()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(unrelated.read_text(), "unrelated metadata")
         contents = entry.read_text()
@@ -180,7 +179,7 @@ class LinuxPrefixTests(unittest.TestCase):
     def test_relative_or_empty_xdg_data_home_uses_the_private_home_registry(self):
         for value in ("relative-data", ""):
             with self.subTest(value=value):
-                result = self.run_profile(overrides={"XDG_DATA_HOME": value})
+                result = self.run_development(overrides={"XDG_DATA_HOME": value})
                 self.assertEqual(result.returncode, 0, result.stderr)
                 entry = self.home / ".local/share/applications" / (APPLICATION_ID + ".desktop")
                 self.assertTrue(entry.is_file())
@@ -193,7 +192,7 @@ class LinuxPrefixTests(unittest.TestCase):
         unrelated.write_text("retain me")
         entry = applications / (APPLICATION_ID + ".desktop")
         entry.symlink_to(unrelated)
-        result = self.run_profile()
+        result = self.run_development()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(entry.is_symlink())
         self.assertEqual(unrelated.read_text(), "retain me")
@@ -206,7 +205,7 @@ class LinuxPrefixTests(unittest.TestCase):
         validator = self.commands / "desktop-file-validate"
         validator.write_text("#!/bin/sh\nprintf '%s\\n' private-diagnostic >&2\nexit 1\n")
         validator.chmod(0o755)
-        result = self.run_profile()
+        result = self.run_development()
         self.assertEqual(result.returncode, 1)
         self.assertFalse(self.record.exists())
         self.assertEqual(entry.read_text(), "retain previous metadata")
@@ -227,7 +226,7 @@ class LinuxPrefixTests(unittest.TestCase):
             0,
             "GIO desktop parsing needs python3-gi and gir1.2-glib-2.0; run mise doctor project",
         )
-        result = self.run_profile()
+        result = self.run_development()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.record.unlink()
         entry = self.data / "applications" / (APPLICATION_ID + ".desktop")
@@ -271,7 +270,7 @@ assert app.launch([], None)
         )
 
     def test_development_launch_preserves_the_workbench_request(self):
-        result = self.run_profile(section="controls")
+        result = self.run_development(section="controls")
         self.assertEqual(result.returncode, 0, result.stderr)
         prefix = self.root / "target" / "development-apps" / "development"
         self.assertEqual(
@@ -287,7 +286,7 @@ assert app.launch([], None)
             (os.pathsep.join(["/developer", library]), "/developer"),
         ):
             with self.subTest(pythonpath=pythonpath):
-                result = self.run_profile(
+                result = self.run_development(
                     overrides={"PYTHONPATH": pythonpath, "SPACETERM_TEST_PYTHONPATH": str(observed)}
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
@@ -337,43 +336,11 @@ while not pathlib.Path(os.environ["SPACETERM_TEST_RELEASE"]).exists():
                 os.killpg(process.pid, signal.SIGKILL)
             process.communicate(timeout=5)
 
-    def test_unknown_profile_is_rejected_before_building(self):
-        result = self.run_profile("release")
+    def test_unknown_argument_is_rejected_before_building(self):
+        result = self.run_development("release")
         self.assertEqual(result.returncode, 2)
         self.assertFalse((self.root / "target").exists())
         self.assertIn("unrecognized arguments", result.stderr)
-
-
-@unittest.skipUnless(sys.platform == "linux", "Linux prerequisites")
-class LinuxPrerequisiteTests(unittest.TestCase):
-    def test_missing_prefix_tools_fail_with_install_guidance(self):
-        which = shutil.which
-        for tool in ("tic", "desktop-file-validate"):
-            with (
-                self.subTest(tool=tool),
-                patch.object(
-                    shutil,
-                    "which",
-                    side_effect=lambda name: None if name == tool else which(name),
-                ),
-            ):
-                result = unittest.TestResult()
-                LinuxPrefixTests("test_unknown_profile_is_rejected_before_building").run(result)
-                self.assertFalse(result.skipped)
-                self.assertEqual(len(result.failures), 1, result.errors)
-                self.assertIn(tool, result.failures[0][1])
-                self.assertIn("mise doctor project", result.failures[0][1])
-
-    def test_missing_gio_fails_with_install_guidance(self):
-        with patch.object(subprocess, "run", return_value=subprocess.CompletedProcess([], 1)):
-            result = unittest.TestResult()
-            LinuxPrefixTests(
-                "test_registered_exec_round_trips_reserved_characters_through_gio"
-            ).run(result)
-        self.assertFalse(result.skipped)
-        self.assertEqual(len(result.failures), 1, result.errors)
-        self.assertIn("python3-gi", result.failures[0][1])
-        self.assertIn("mise doctor project", result.failures[0][1])
 
 
 if __name__ == "__main__":

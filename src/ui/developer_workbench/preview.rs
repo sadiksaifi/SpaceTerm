@@ -1,15 +1,9 @@
-//! The Developer Workbench's appearance preview.
-//!
-//! A preview is an uncommitted Settings Document that every window renders until the developer
-//! cancels or commits it. It never writes the settings file on its own. The Settings Document
-//! allows one preview at a time, so while this one is open the Settings Window cannot save, and
-//! closing the Developer Workbench cancels it.
+//! The Developer Workbench's uncommitted Settings Document preview. The Settings Document allows
+//! one preview at a time, so the Settings Window cannot save while this one is open.
 
-use crate::appearance::{
-    AppearanceMode, ChromeDensity, ResetTarget, SettingsDocument, TerminalFontFamily,
-    parse_settings,
-};
-use crate::settings::{CommitOutcome, PreviewToken, ThemeImport, UserSettings};
+use crate::appearance::{AppearanceMode, ChromeDensity, ResetTarget, TerminalFontFamily};
+use crate::settings::{CommitOutcome, PreviewToken, Settings, ThemeImport};
+use crate::settings::{SettingsDocument, parse_settings};
 
 /// The terminal typography the alternate-typography switch previews.
 const ALTERNATE_BASE_SIZE: f32 = 22.0;
@@ -53,13 +47,13 @@ impl PreviewError {
 }
 
 pub(super) struct AppearancePreview {
-    settings: UserSettings,
+    settings: Settings,
     alternate_font_family: String,
     token: Option<PreviewToken>,
 }
 
 impl AppearancePreview {
-    pub(super) fn new(settings: UserSettings, alternate_font_family: String) -> Self {
+    pub(super) fn new(settings: Settings, alternate_font_family: String) -> Self {
         Self {
             settings,
             alternate_font_family,
@@ -106,12 +100,12 @@ impl AppearancePreview {
     }
 
     pub(super) fn set_mode(&mut self, mode: AppearanceMode) -> Result<(), PreviewError> {
-        self.edit(|document| document.preferences.mode = mode)
+        self.edit(|document| document.appearance.mode = mode)
     }
 
     /// Light becomes Dark; Dark and Auto become Light.
     pub(super) fn toggle_mode(&mut self) -> Result<AppearanceMode, PreviewError> {
-        let mode = match self.document().preferences.mode {
+        let mode = match self.document().appearance.mode {
             AppearanceMode::Light => AppearanceMode::Dark,
             AppearanceMode::Dark | AppearanceMode::Auto => AppearanceMode::Light,
         };
@@ -119,25 +113,25 @@ impl AppearancePreview {
     }
 
     pub(super) fn set_density(&mut self, density: ChromeDensity) -> Result<(), PreviewError> {
-        self.edit(|document| document.preferences.window.density = density)
+        self.edit(|document| document.appearance.window.density = density)
     }
 
     pub(super) fn set_transparency(&mut self, transparency: f32) -> Result<(), PreviewError> {
-        self.edit(|document| document.preferences.window.transparency = transparency)
+        self.edit(|document| document.appearance.window.transparency = transparency)
     }
 
     pub(super) fn set_blur(&mut self, blur: bool) -> Result<(), PreviewError> {
-        self.edit(|document| document.preferences.window.blur = blur)
+        self.edit(|document| document.appearance.window.blur = blur)
     }
 
     pub(super) fn set_bold_as_bright(&mut self, enabled: bool) -> Result<(), PreviewError> {
-        self.edit(|document| document.preferences.terminal.rendering.bold_as_bright = enabled)
+        self.edit(|document| document.appearance.terminal.rendering.bold_as_bright = enabled)
     }
 
     /// Whether the terminal typography is the alternate one this preview offers.
     pub(super) fn alternate_typography(&self, document: &SettingsDocument) -> bool {
         matches!(
-            &document.preferences.terminal.typography.family,
+            &document.appearance.terminal.typography.family,
             TerminalFontFamily::Named { family } if family == &self.alternate_font_family
         )
     }
@@ -145,10 +139,10 @@ impl AppearancePreview {
     /// Switches the terminal between its default typography and a larger, looser alternate, so
     /// a capture shows metrics changing without a font install.
     pub(super) fn set_alternate_typography(&mut self, alternate: bool) -> Result<(), PreviewError> {
-        let defaults = SettingsDocument::default().preferences.terminal.typography;
+        let defaults = SettingsDocument::default().appearance.terminal.typography;
         let alternate_font_family = self.alternate_font_family.clone();
         self.edit(|document| {
-            let typography = &mut document.preferences.terminal.typography;
+            let typography = &mut document.appearance.terminal.typography;
             if alternate {
                 typography.family = TerminalFontFamily::Named {
                     family: alternate_font_family,
@@ -241,18 +235,20 @@ mod tests {
 
     use super::*;
     use crate::settings::storage::StorageError;
-    use crate::ui::settings_window::test_support::MemoryStorage;
+    use crate::settings::storage::testing::MemoryStorage;
 
     fn preview() -> AppearancePreview {
         AppearancePreview::new(
-            UserSettings::load(Arc::new(super::super::tests::ReadOnlyStorage)),
+            Settings::load(Arc::new(MemoryStorage::default())),
             "Fixture Mono".into(),
         )
     }
 
     #[test]
     fn edits_open_one_preview_and_cancel_restores_the_saved_document() {
-        let mut preview = preview();
+        let storage = Arc::new(MemoryStorage::default());
+        let mut preview =
+            AppearancePreview::new(Settings::load(storage.clone()), "Fixture Mono".into());
         let saved = preview.document();
         assert!(!preview.is_open());
 
@@ -260,14 +256,15 @@ mod tests {
         preview.set_density(ChromeDensity::Comfortable).unwrap();
 
         assert!(preview.is_open());
-        assert_eq!(preview.document().preferences.mode, AppearanceMode::Light);
+        assert_eq!(preview.document().appearance.mode, AppearanceMode::Light);
         assert_eq!(
-            preview.document().preferences.window.density,
+            preview.document().appearance.window.density,
             ChromeDensity::Comfortable
         );
         preview.cancel().unwrap();
         assert!(!preview.is_open());
         assert_eq!(preview.document(), saved);
+        assert_eq!(storage.writes(), 0);
     }
 
     #[test]
@@ -283,20 +280,33 @@ mod tests {
     #[test]
     fn alternate_typography_round_trips_to_the_defaults() {
         let mut preview = preview();
-        let defaults = SettingsDocument::default().preferences.terminal.typography;
+        let defaults = SettingsDocument::default().appearance.terminal.typography;
 
         preview.set_alternate_typography(true).unwrap();
         assert!(preview.alternate_typography(&preview.document()));
         assert_eq!(
-            preview.document().preferences.terminal.typography.family,
+            preview.document().appearance.terminal.typography.family,
             TerminalFontFamily::Named {
                 family: "Fixture Mono".into()
             },
         );
+        assert_eq!(
+            preview.document().appearance.terminal.typography.base_size,
+            22.0
+        );
+        assert_eq!(
+            preview
+                .document()
+                .appearance
+                .terminal
+                .typography
+                .line_height,
+            1.35
+        );
         preview.set_alternate_typography(false).unwrap();
 
         assert!(!preview.alternate_typography(&preview.document()));
-        assert_eq!(preview.document().preferences.terminal.typography, defaults);
+        assert_eq!(preview.document().appearance.terminal.typography, defaults);
     }
 
     #[test]
@@ -315,7 +325,7 @@ mod tests {
     fn commit_saves_the_preview_and_closes_it() {
         let storage = MemoryStorage::with_document(&SettingsDocument::default());
         let mut preview =
-            AppearancePreview::new(UserSettings::load(storage.clone()), "Fixture Mono".into());
+            AppearancePreview::new(Settings::load(storage.clone()), "Fixture Mono".into());
         preview.set_mode(AppearanceMode::Light).unwrap();
 
         assert!(preview.commit().is_ok());
@@ -323,7 +333,7 @@ mod tests {
         assert!(!preview.is_open());
         assert_eq!(storage.writes(), 1);
         assert_eq!(
-            storage.document().unwrap().preferences.mode,
+            storage.document().unwrap().appearance.mode,
             AppearanceMode::Light
         );
     }
@@ -332,14 +342,14 @@ mod tests {
     fn a_failed_commit_keeps_the_preview_open() {
         let storage = MemoryStorage::with_document(&SettingsDocument::default());
         let mut preview =
-            AppearancePreview::new(UserSettings::load(storage.clone()), "Fixture Mono".into());
+            AppearancePreview::new(Settings::load(storage.clone()), "Fixture Mono".into());
         preview.set_mode(AppearanceMode::Light).unwrap();
         storage.fail_writes(Some(StorageError::Unavailable));
 
         assert_eq!(preview.commit().err(), Some(PreviewError::SaveFailed));
 
         assert!(preview.is_open());
-        assert_eq!(preview.document().preferences.mode, AppearanceMode::Light);
+        assert_eq!(preview.document().appearance.mode, AppearanceMode::Light);
         storage.fail_writes(None);
         assert!(preview.commit().is_ok());
         assert!(!preview.is_open());
@@ -367,7 +377,7 @@ mod tests {
 
     #[test]
     fn dropping_the_preview_releases_the_settings_document() {
-        let settings = UserSettings::load(Arc::new(super::super::tests::ReadOnlyStorage));
+        let settings = Settings::load(Arc::new(MemoryStorage::default()));
         let mut preview = AppearancePreview::new(settings.clone(), "Fixture Mono".into());
         preview.set_blur(false).unwrap();
         drop(preview);

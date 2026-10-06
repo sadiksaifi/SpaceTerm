@@ -232,93 +232,6 @@ impl PasteConfirmationSchedule {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn prepared_paste_debug_never_exposes_payload_contents() {
-        let paste = PreparedPaste::prepare("private clipboard content".to_owned()).unwrap();
-        assert_eq!(
-            format!("{paste:?}"),
-            "PreparedPaste { byte_len: 25, risk: PasteRisk { multiline: false, control_bytes: false, closing_fence: false }, .. }",
-        );
-    }
-
-    #[test]
-    fn paste_confirmation_schedule_expires_without_exposing_payload() {
-        let now = Instant::now();
-        let mut schedule = PasteConfirmationSchedule::default();
-        let payload = PreparedPaste::prepare("first\nsecond".to_owned()).unwrap();
-        let confirmation = schedule.create(payload, now).unwrap();
-
-        assert!(schedule.expire(now + PASTE_CONFIRMATION_TIMEOUT));
-        assert_eq!(schedule.take(confirmation.id, now), None);
-    }
-
-    #[test]
-    fn preparation_normalizes_newlines_and_classifies_multiline_input() {
-        let prepared = PreparedPaste::prepare("one\r\ntwo\rthree".to_owned()).unwrap();
-
-        assert_eq!(prepared.text, "one\ntwo\nthree");
-        assert_eq!(
-            prepared.risk,
-            PasteRisk {
-                multiline: true,
-                control_bytes: false,
-                closing_fence: false,
-            }
-        );
-        assert!(prepared.requires_confirmation(false));
-        assert!(!prepared.requires_confirmation(true));
-    }
-
-    #[test]
-    fn preparation_classifies_and_trusts_every_control_replaced_by_the_ghostty_encoder() {
-        for byte in STRIPPED_CONTROLS {
-            let prepared = PreparedPaste::prepare(String::from_utf8(vec![b'a', byte]).unwrap())
-                .expect("control-bearing input remains encodable after sanitization");
-            assert!(prepared.risk.control_bytes, "control byte {byte:#04x}");
-            assert!(!prepared.requires_confirmation(false));
-        }
-    }
-
-    #[test]
-    fn closing_fence_is_unsafe_even_before_bracketed_mode_is_known() {
-        let prepared = PreparedPaste::prepare("safe\x1b[201~unsafe".to_owned()).unwrap();
-
-        assert!(prepared.risk.closing_fence);
-        assert!(prepared.requires_confirmation(false));
-        assert!(prepared.requires_confirmation(true));
-    }
-
-    #[test]
-    fn oversized_and_empty_payloads_are_rejected_without_retaining_content() {
-        assert_eq!(
-            PreparedPaste::prepare(String::new()),
-            Err(PasteRejection::Empty)
-        );
-        assert_eq!(
-            PreparedPaste::prepare("x".repeat(MAX_PASTE_BYTES + 1)),
-            Err(PasteRejection::TooLarge {
-                limit: MAX_PASTE_BYTES,
-            })
-        );
-    }
-
-    #[test]
-    fn converted_file_paths_still_require_the_unified_unsafe_paste_policy() {
-        let insertion = crate::terminal::file_insertion::prepare_file_insertion(
-            crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),
-            &[std::path::PathBuf::from("/tmp/line\nbreak")],
-        )
-        .unwrap();
-        let prepared = PreparedPaste::prepare(insertion.text).unwrap();
-        assert!(prepared.requires_confirmation(false));
-        assert!(prepared.risk.multiline);
-    }
-}
-
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) struct PastePayload {
     pub(super) text: String,
@@ -339,23 +252,6 @@ impl PastePayload {
             return Err(PasteIntakeError::TerminalUnfocused);
         }
         Ok(Self { text: text.into() })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn dropped_files(
-        policy: file_insertion::FileInsertionPolicy,
-        paths: &[PathBuf],
-        terminal_input_focused: bool,
-        local_file_capabilities: TerminalLocalFileCapabilities,
-    ) -> Result<Self, PasteIntakeError> {
-        if !terminal_input_focused {
-            return Err(PasteIntakeError::TerminalUnfocused);
-        }
-        Self::prepare_dropped_files(policy, paths, local_file_capabilities)
-            .and_then(|payload| {
-                payload.ok_or("local file insertion is disabled for this Terminal Session")
-            })
-            .map_err(PasteIntakeError::InvalidFiles)
     }
 
     pub(crate) fn prepare_dropped_files(
@@ -396,5 +292,108 @@ impl From<String> for PastePayload {
 impl PastePayload {
     pub(in crate::terminal) fn prepare(self) -> Result<PreparedPaste, PasteRejection> {
         PreparedPaste::prepare(self.text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prepared_paste_debug_never_exposes_payload_contents() {
+        let paste = PreparedPaste::prepare("private clipboard content".to_owned()).unwrap();
+        assert_eq!(
+            format!("{paste:?}"),
+            "PreparedPaste { byte_len: 25, risk: PasteRisk { multiline: false, control_bytes: false, closing_fence: false }, .. }",
+        );
+    }
+
+    #[test]
+    fn confirmation_expiry_consumes_pending_payload() {
+        let now = Instant::now();
+        let mut schedule = PasteConfirmationSchedule::default();
+        let payload = PreparedPaste::prepare("first\nsecond".to_owned()).unwrap();
+        let confirmation = schedule.create(payload, now).unwrap();
+        let deadline = now + Duration::from_secs(30);
+        assert_eq!(schedule.deadline(), Some(deadline));
+        assert!(!schedule.expire(deadline - Duration::from_nanos(1)));
+        assert!(schedule.expire(deadline));
+        assert_eq!(schedule.take(confirmation.id, now), None);
+    }
+
+    #[test]
+    fn preparation_normalizes_newlines_and_classifies_multiline_input() {
+        let prepared = PreparedPaste::prepare("one\r\ntwo\rthree".to_owned()).unwrap();
+
+        assert_eq!(prepared.text, "one\ntwo\nthree");
+        assert_eq!(
+            prepared.risk,
+            PasteRisk {
+                multiline: true,
+                control_bytes: false,
+                closing_fence: false,
+            }
+        );
+        assert!(prepared.requires_confirmation(false));
+        assert!(!prepared.requires_confirmation(true));
+    }
+
+    #[test]
+    fn preparation_classifies_and_trusts_every_control_replaced_by_the_ghostty_encoder() {
+        for byte in STRIPPED_CONTROLS {
+            let prepared = PreparedPaste::prepare(String::from_utf8(vec![b'a', byte]).unwrap())
+                .expect("control-bearing input remains encodable after sanitization");
+            assert!(prepared.risk.control_bytes, "control byte {byte:#04x}");
+            assert!(!prepared.requires_confirmation(false));
+            assert!(!prepared.requires_confirmation(true));
+            for (bracketed, expected) in [
+                (false, b"a ".as_slice()),
+                (true, b"\x1b[200~a \x1b[201~".as_slice()),
+            ] {
+                let mut source = prepared.clone().into_text().into_bytes();
+                let mut output = [0; 32];
+                let written = paste::encode(&mut source, bracketed, &mut output).unwrap();
+                assert_eq!(&output[..written], expected, "control byte {byte:#04x}");
+            }
+        }
+    }
+
+    #[test]
+    fn closing_fence_is_unsafe_even_before_bracketed_mode_is_known() {
+        let prepared = PreparedPaste::prepare("safe\x1b[201~unsafe".to_owned()).unwrap();
+
+        assert!(prepared.risk.closing_fence);
+        assert!(prepared.requires_confirmation(false));
+        assert!(prepared.requires_confirmation(true));
+    }
+
+    #[test]
+    fn empty_and_oversized_paste_payloads_are_rejected() {
+        assert_eq!(
+            PreparedPaste::prepare(String::new()),
+            Err(PasteRejection::Empty)
+        );
+        assert_eq!(
+            PreparedPaste::prepare("x".repeat(1_048_576))
+                .unwrap()
+                .into_text(),
+            "x".repeat(1_048_576)
+        );
+        assert_eq!(
+            PreparedPaste::prepare("x".repeat(1_048_577)),
+            Err(PasteRejection::TooLarge { limit: 1_048_576 })
+        );
+    }
+
+    #[test]
+    fn converted_file_paths_still_require_the_unified_unsafe_paste_policy() {
+        let insertion = crate::terminal::file_insertion::prepare_file_insertion(
+            crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),
+            &[std::path::PathBuf::from("/tmp/line\nbreak")],
+        )
+        .unwrap();
+        let prepared = PreparedPaste::prepare(insertion.text).unwrap();
+        assert!(prepared.requires_confirmation(false));
+        assert!(prepared.risk.multiline);
     }
 }

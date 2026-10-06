@@ -3,12 +3,13 @@ use std::rc::Rc;
 
 use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
 
-use crate::appearance::{Appearance, AppearanceMode, SettingsDocument, TerminalFontFamily};
+use crate::appearance::{Appearance, AppearanceMode, TerminalFontFamily};
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
+use crate::settings::SettingsDocument;
 use crate::ui::appearance_runtime;
 
-use super::test_support::MemoryStorage;
 use super::{SettingsSectionId, SettingsWindow};
+use crate::settings::storage::testing::MemoryStorage;
 
 #[test]
 fn navigation_hover_changes_fill_without_adding_a_focus_like_rim() {
@@ -104,14 +105,7 @@ fn stepper_field_resolves_inside_its_rendered_card_host(cx: &mut TestAppContext)
     appearance.card_controls.colors.input_background = Color::rgb(0x228844);
     let expected = gpui_color(appearance.card_controls.colors.input_background);
     cx.update(|cx| {
-        spaceterm_ui::replace_control_theme_catalog(
-            cx,
-            crate::ui::control_theme_catalog::catalog(
-                &appearance,
-                spaceterm_ui::ControlMotion::Standard,
-            ),
-        )
-        .unwrap()
+        crate::ui::control_theme::replace_uniform_control_catalog(cx, &appearance).unwrap()
     });
     let (_, cx) = cx.add_window_view(|_, _| StepperCard(SettingsAppearance::fallback(appearance)));
     cx.run_until_parked();
@@ -184,7 +178,7 @@ fn open_settings<'a>(
     document: &SettingsDocument,
     cx: &'a mut TestAppContext,
 ) -> (Entity<SettingsWindow>, &'a mut VisualTestContext) {
-    let settings = crate::settings::UserSettings::load(MemoryStorage::with_document(document));
+    let settings = crate::settings::Settings::load(MemoryStorage::with_document(document));
     let platform = RecordingAppearancePlatform::default();
     platform.set_system_appearance(Some(Appearance::Dark));
     cx.update(|cx| {
@@ -214,10 +208,6 @@ fn click(selector: &'static str, cx: &mut VisualTestContext) {
     cx.run_until_parked();
 }
 
-/// The navigation list is one keyboard stop whose arrows move between sections.
-///
-/// Tab reaching every entry in turn would make the keyboard walk the sidebar before it could reach
-/// a setting, and it is what gave an ordinary pointer click somewhere to leave a focus ring.
 #[gpui::test]
 fn tab_reaches_the_navigation_list_and_arrows_move_through_its_sections(cx: &mut TestAppContext) {
     let (settings, cx) = open_settings(&SettingsDocument::default(), cx);
@@ -356,7 +346,7 @@ fn light_navigation_pointer_selection_survives_focus_changes_during_a_click(
     cx: &mut TestAppContext,
 ) {
     let mut document = SettingsDocument::default();
-    document.preferences.mode = AppearanceMode::Light;
+    document.appearance.mode = AppearanceMode::Light;
     let (settings, cx) = open_settings(&document, cx);
     cx.simulate_keystrokes("tab tab");
     cx.run_until_parked();
@@ -471,7 +461,7 @@ fn navigation_skips_sections_without_search_matches(cx: &mut TestAppContext) {
 fn non_preset_weights_remain_selected_when_the_picker_is_accepted(cx: &mut TestAppContext) {
     let mut document = SettingsDocument::default();
 
-    document.preferences.terminal.typography.regular_weight = 450;
+    document.appearance.terminal.typography.regular_weight = 450;
     let (settings, cx) = open_settings(&document, cx);
 
     click("settings-navigation-settings-section-font", cx);
@@ -500,7 +490,7 @@ fn non_preset_weights_remain_selected_when_the_picker_is_accepted(cx: &mut TestA
 #[gpui::test]
 fn unavailable_terminal_font_remains_selected(cx: &mut TestAppContext) {
     let mut document = SettingsDocument::default();
-    document.preferences.terminal.typography.family = TerminalFontFamily::Named {
+    document.appearance.terminal.typography.family = TerminalFontFamily::Named {
         family: "Unavailable Settings Test Monospace".to_owned(),
     };
     let (settings, cx) = open_settings(&document, cx);
@@ -525,12 +515,12 @@ fn unavailable_terminal_font_remains_selected(cx: &mut TestAppContext) {
 #[gpui::test]
 fn a_missing_theme_selection_opens_on_the_builtin_theme(cx: &mut TestAppContext) {
     let mut document = SettingsDocument::default();
-    document.preferences.mode = crate::appearance::AppearanceMode::Dark;
-    let bytes = crate::appearance::export_settings(&document)
+    document.appearance.mode = crate::appearance::AppearanceMode::Dark;
+    let bytes = crate::settings::export_settings(&document)
         .unwrap()
         .replace("builtin.spaceterm.dark", "user.missing-terminal")
         .into_bytes();
-    let settings = crate::settings::UserSettings::load(MemoryStorage::with_bytes(bytes));
+    let settings = crate::settings::Settings::load(MemoryStorage::with_bytes(bytes));
     let platform = RecordingAppearancePlatform::default();
     platform.set_system_appearance(Some(Appearance::Dark));
     cx.update(|cx| {

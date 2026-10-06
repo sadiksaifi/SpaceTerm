@@ -357,7 +357,7 @@ pub(crate) struct ApplicationUpdates {
     pending_quit: Option<ResumeQuit>,
     launch: LaunchState,
     resume_launch: Option<ResumeQuit>,
-    settings: Option<crate::settings::UserSettings>,
+    settings: Option<crate::settings::Settings>,
     history: UpdateHistory,
     stage: UpdateStage,
     reminder: Option<UpdateStage>,
@@ -433,7 +433,7 @@ impl ApplicationUpdates {
         cx.set_global(UpdateService(entity));
     }
 
-    pub(crate) fn attach_settings(&mut self, settings: crate::settings::UserSettings) {
+    pub(crate) fn attach_settings(&mut self, settings: crate::settings::Settings) {
         self.settings = Some(settings);
     }
 
@@ -929,15 +929,15 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         let (adapter, service, opened) = launch_fixture(cx);
-        let document = crate::appearance::SettingsDocument {
+        let document = crate::settings::SettingsDocument {
             updates: UpdatePreferences {
                 automatic_downloads: false,
                 ..Default::default()
             },
             ..Default::default()
         };
-        let settings = crate::settings::UserSettings::load(
-            crate::ui::settings_window::test_support::MemoryStorage::with_document(&document),
+        let settings = crate::settings::Settings::load(
+            crate::settings::storage::testing::MemoryStorage::with_document(&document),
         );
         service.update(cx, |updates, _| updates.attach_settings(settings));
         adapter.emit(UpdateEvent::ReleaseMetadata {
@@ -1028,15 +1028,15 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         let (adapter, service, opened) = launch_fixture(cx);
-        let document = crate::appearance::SettingsDocument {
+        let document = crate::settings::SettingsDocument {
             updates: UpdatePreferences {
                 automatic_downloads: false,
                 ..Default::default()
             },
             ..Default::default()
         };
-        let settings = crate::settings::UserSettings::load(
-            crate::ui::settings_window::test_support::MemoryStorage::with_document(&document),
+        let settings = crate::settings::Settings::load(
+            crate::settings::storage::testing::MemoryStorage::with_document(&document),
         );
         service.update(cx, |updates, _| updates.attach_settings(settings));
         adapter.emit(UpdateEvent::Available("0.1.1".into()));

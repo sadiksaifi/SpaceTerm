@@ -80,20 +80,21 @@ pub(crate) use paste::{
 pub(crate) use paste::{PasteConfirmationId, PasteRisk};
 pub(crate) use selection::SelectionCopy;
 #[cfg(test)]
-pub(crate) use session::SessionFailure;
+pub(crate) use session::TerminalSessionFailure;
 pub(crate) use session::{AccessibilityDemandSender, AccessibilitySelectionSender};
 #[cfg(test)]
 pub(crate) use session::{
-    LocalTerminalLaunchPlan, RemoteTerminalLaunchPlan, SessionError, SessionExit,
-    TerminalLaunchPlan, test_terminal_appearance_update,
+    LocalTerminalLaunchPlan, RemoteTerminalLaunchPlan, TerminalLaunchPlan, TerminalSessionError,
+    TerminalSessionExit, test_terminal_appearance_update,
 };
 pub(crate) use session::{
-    NativeTerminalSessionFactory, SelectionCopyError, SessionEvent, StartedTerminalSession,
-    TerminalAppearanceUpdate, TerminalSessionFactory, TerminalSessionHandle,
+    NativeTerminalSessionFactory, SelectionCopyError, StartedTerminalSession,
+    TerminalAppearanceUpdate, TerminalSessionEvent, TerminalSessionFactory, TerminalSessionHandle,
 };
 pub(crate) use workspace_terminal_session_factory::{
-    PreparedWorkspaceTerminalLaunch, RemoteChannelRevalidationError, RemoteChannelUnavailable,
-    RemoteTerminalChannelProvider, WorkspaceTerminalSessionFactory,
+    PreparedWorkspaceTerminalLaunch, TerminalSessionChannelProvider,
+    TerminalSessionChannelRevalidationError, TerminalSessionChannelUnavailable,
+    WorkspaceTerminalSessionFactory,
 };
 
 pub(crate) use pointer_input::{

@@ -10,10 +10,10 @@ use gpui::{
     VisualTestContext, Window, div, px, rgba,
 };
 
-use crate::shortcut_recorder::ShortcutTone;
+use super::ShortcutTone;
 use crate::*;
 
-gpui::actions!(shortcut_recorder_tests, [CloseProbe]);
+gpui::actions!(shortcut_recorder_tests, [CloseProbe, Traverse]);
 
 struct Root {
     recorder: Entity<ShortcutRecorder>,
@@ -27,6 +27,7 @@ impl Render for Root {
         div()
             .size_full()
             .on_action(move |_: &CloseProbe, _, _| closes.set(closes.get() + 1))
+            .on_action(|_: &Traverse, window, cx| window.focus_next(cx))
             .child(self.recorder.clone())
             .child(div().track_focus(&self.other_focus).child("Other"))
     }
@@ -53,7 +54,7 @@ fn install_theme(cx: &mut TestAppContext) {
     let button_paint = ButtonPaint::new(surface, text, rgba(0x00000000));
     let buttons = ButtonVariantStyle::new(button_paint, button_paint, button_paint, button_paint);
     cx.set_global(SearchFieldTheme::new(
-        FieldFrameTheme::new(surface, muted, accent, accent, surface, muted),
+        FieldFrameTheme::new(surface, muted, rgba(0xdd3344ff), accent, surface, muted),
         SearchFieldPaint::new(muted, buttons, accent, buttons, buttons),
         SearchFieldMetrics::new(px(28.0)),
     ));
@@ -62,7 +63,12 @@ fn install_theme(cx: &mut TestAppContext) {
 /// Opens a window with a focused recorder that refuses bare `x` and names held modifiers.
 fn harness(cx: &mut TestAppContext) -> Harness<'_> {
     install_theme(cx);
-    cx.update(|cx| cx.bind_keys([KeyBinding::new("cmd-w", CloseProbe, None)]));
+    cx.update(|cx| {
+        cx.bind_keys([
+            KeyBinding::new("cmd-w", CloseProbe, None),
+            KeyBinding::new("tab", Traverse, None),
+        ])
+    });
     let events = Rc::new(RefCell::new(Vec::new()));
     let recorded = events.clone();
     let closes = Rc::new(Cell::new(0));
@@ -95,7 +101,7 @@ fn harness(cx: &mut TestAppContext) -> Harness<'_> {
         .detach();
         Root {
             recorder,
-            other_focus: cx.focus_handle(),
+            other_focus: cx.focus_handle().tab_stop(true),
             closes: root_closes,
         }
     });
@@ -126,7 +132,7 @@ impl Harness<'_> {
 
     fn recording(&mut self) -> bool {
         self.recorder
-            .read_with(self.cx, |recorder, _| recorder.is_recording())
+            .read_with(self.cx, |recorder, _| recorder.recording.is_some())
     }
 
     fn presentation(&mut self) -> (SharedString, ShortcutTone) {
@@ -214,6 +220,18 @@ fn a_refused_chord_marks_the_field_and_keeps_recording(cx: &mut TestAppContext) 
         harness.take_events(),
         [ShortcutRecorderEvent::Rejected("Use a modifier.".into())]
     );
+    harness.cx.run_until_parked();
+    let bounds = harness
+        .cx
+        .debug_bounds("recorder")
+        .expect("the rejected field renders");
+    let scale = harness.cx.update(|window, _| window.scale_factor());
+    assert!(harness.cx.update(|window, _| {
+        window.painted_quads().iter().any(|quad| {
+            quad.bounds == bounds.scale(scale)
+                && quad.border_color == gpui::Hsla::from(rgba(0xdd3344ff))
+        })
+    }));
     harness.cx.simulate_keystrokes("cmd-x");
     assert!(!harness.recording());
     assert_eq!(harness.take_events(), [recorded("cmd-x")]);
@@ -307,9 +325,15 @@ fn held_modifiers_are_presented_while_recording(cx: &mut TestAppContext) {
 fn tab_cancels_and_leaves_traversal_to_the_window(cx: &mut TestAppContext) {
     let mut harness = harness(cx);
     harness.start();
+    assert!(harness.recording());
     harness.cx.simulate_keystrokes("tab");
     assert!(!harness.recording());
     assert_eq!(harness.take_events(), [ShortcutRecorderEvent::Cancelled]);
+    let other = harness.other_focus.clone();
+    assert!(harness.cx.update(|window, _| other.is_focused(window)));
+    harness.cx.simulate_keystrokes("cmd-w");
+    assert_eq!(harness.closes.get(), 1);
+    assert!(harness.take_events().is_empty());
 }
 
 #[gpui::test]

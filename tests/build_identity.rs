@@ -4,6 +4,7 @@
 mod identity;
 
 use std::{
+    collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
     process::{self, Command},
@@ -143,4 +144,17 @@ fn watched_paths_exist_in_a_linked_worktree() {
         "index",
     ]));
     assert!(paths.contains(&index), "{paths:?}");
+
+    let git_file = fs::read_to_string(worktree.join(".git")).unwrap();
+    let git_directory = PathBuf::from(git_file.trim().strip_prefix("gitdir: ").unwrap());
+    let common_directory = repository.path().join(".git").canonicalize().unwrap();
+    assert_eq!(
+        paths.into_iter().collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            git_directory.join("HEAD"),
+            common_directory.join("refs"),
+            index,
+            common_directory.join("packed-refs"),
+        ])
+    );
 }

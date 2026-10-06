@@ -2,8 +2,8 @@
 use super::*;
 use crate::platform::unix_adapter_tests::short_temporary_root;
 use crate::platform::unix_ssh_process::UnixSshProcessAdapter;
+use crate::ssh::cancellation::SshCancellationToken;
 use crate::ssh::command::SshCommandSpec;
-use crate::ssh::control_connection::SshCancellationToken;
 use crate::ssh::process::SshProcessEnvironment;
 use std::fs;
 use std::future::Future;
@@ -531,9 +531,15 @@ fn generated_probe_should_report_an_inaccessible_ancestor_without_claiming_missi
 
 #[test]
 fn native_utility_should_force_cleanup_at_its_wall_clock_deadline() {
+    let pid_file = short_temporary_root().join(format!(
+        "spaceterm-utility-deadline-{}.pid",
+        std::process::id()
+    ));
+    let _ = fs::remove_file(&pid_file);
+    let script = format!("echo $$ > '{}'; exec sleep 30", pid_file.display());
     let command = Arc::new(SshCommandSpec::for_test(
         PathBuf::from("/bin/sh"),
-        vec!["-c".into(), "sleep 30".into()],
+        vec!["-c".into(), script.into()],
     ));
     let environment = SshProcessEnvironment::new_without_authentication_from_startup(
         short_temporary_root().to_path_buf(),
@@ -547,19 +553,43 @@ fn native_utility_should_force_cleanup_at_its_wall_clock_deadline() {
     let runner = SshRemoteUtilityProcessRunner::with_timeout(
         UnixSshProcessAdapter,
         environment,
-        Duration::from_millis(20),
+        Duration::from_millis(500),
     );
 
+    let sessions = RemoteUtilitySessionLimit::new(1);
+    let started = Instant::now();
     let error = block_on_external(runner.run(
         command,
         Vec::new(),
         MAXIMUM_REMOTE_UTILITY_OUTPUT_BYTES,
         SshCancellationToken::default(),
-        block_on_external(RemoteUtilitySessionLimit::new(1).acquire()),
+        block_on_external(sessions.acquire()),
     ))
     .unwrap_err();
 
     assert!(matches!(error, RemoteUtilityRunError::TimedOut));
+    let process: libc::pid_t = fs::read_to_string(&pid_file)
+        .expect("the actual child must execute before its deadline")
+        .trim()
+        .parse()
+        .unwrap();
+    let released = (0..100).any(|_| {
+        let released = !sessions.available.is_empty();
+        if !released {
+            thread::sleep(PROCESS_POLL_INTERVAL);
+        }
+        released
+    });
+    // SAFETY: signal zero checks process existence and dereferences no pointers.
+    let terminated = unsafe { libc::kill(process, 0) } == -1
+        && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+    fs::remove_file(pid_file).unwrap();
+    assert!(released, "the session permit must recover after cleanup");
+    assert!(terminated, "the actual process must be killed and reaped");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the 500 ms deadline must force cleanup before the child finishes its 30 second sleep"
+    );
 }
 
 struct ThreadWake(std::thread::Thread);

@@ -55,16 +55,11 @@ pub(crate) enum ShortcutTone {
 
 /// A compact field that shows one shortcut and records a replacement.
 ///
-/// The recorder owns capture only. Its consumer owns the shortcut: it supplies the formatted value
-/// through [`set_value`](Self::set_value), decides which chords are acceptable through
-/// [`validator`](Self::validator), and applies [`ShortcutRecorderEvent`]s to its own model.
-///
-/// A click, or Return or Space while the field is focused, starts recording. While recording, the
-/// recorder intercepts every keystroke in its window before key bindings and menu key equivalents
-/// resolve, so a chord that already means something, such as closing the window, is captured
-/// rather than performed, and its auto-repeat stays held back until the chord is let go. Escape
-/// cancels, Delete or Backspace clears, and Tab cancels and moves focus on. Losing focus, the window
-/// becoming inactive, or a second click also cancels.
+/// The recorder owns capture only. Its consumer supplies the value through
+/// [`set_value`](Self::set_value), accepts chords through [`validator`](Self::validator), and
+/// applies [`ShortcutRecorderEvent`]s. While recording, it captures every keystroke ahead of key
+/// bindings and menu Shortcuts, so a chord such as closing the window is recorded rather than
+/// performed.
 pub struct ShortcutRecorder {
     id: ElementId,
     accessibility_name: SharedString,
@@ -120,7 +115,6 @@ impl ShortcutRecorder {
         }
     }
 
-    /// Sets the text shown when there is no shortcut.
     pub fn empty_label(mut self, label: impl Into<SharedString>) -> Self {
         self.empty_label = label.into();
         self
@@ -150,7 +144,6 @@ impl ShortcutRecorder {
         self
     }
 
-    /// Sets the stable selector used by GPUI interaction tests for the field.
     pub fn debug_selector(mut self, selector: impl Into<SharedString>) -> Self {
         self.debug_selector = Some(selector.into());
         self
@@ -182,10 +175,6 @@ impl ShortcutRecorder {
         cx.notify();
     }
 
-    pub fn is_recording(&self) -> bool {
-        self.recording.is_some()
-    }
-
     pub fn focus_handle(&self) -> FocusHandle {
         self.focus_handle.clone()
     }
@@ -206,7 +195,6 @@ impl ShortcutRecorder {
         cx.notify();
     }
 
-    /// Ends a recording in progress without a change.
     pub fn cancel_recording(&mut self, cx: &mut Context<Self>) {
         self.release = None;
         self.finish(ShortcutRecorderEvent::Cancelled, cx);
@@ -359,3 +347,7 @@ impl Render for ShortcutRecorder {
         .child(div().min_w_0().truncate().child(text))
     }
 }
+
+#[cfg(test)]
+#[path = "shortcut_recorder_tests.rs"]
+mod tests;

@@ -111,7 +111,7 @@ impl<A: SshProcessAdapter> StartupDependencies<A> {
 
     pub(crate) fn remote_backend_factory(
         &self,
-        askpass: Arc<dyn crate::platform::askpass::AskPassWindowFactory>,
+        askpass: Arc<dyn crate::ssh::askpass::AskPassWindowFactory>,
     ) -> Arc<dyn crate::ui::remote_workspace_flow::RemoteWorkspaceFlowBackendFactory> {
         Arc::new(NativeRemoteWorkspaceFlowBackendFactory::new(
             RemoteWorkspaceSshRuntime {
@@ -623,10 +623,8 @@ fn workspace_window_options(host: &HostComposition, cx: &App) -> WindowOptions {
         cx,
     )
 }
-/// Every live Workspace window, resolved at call time from GPUI's own registry.
-///
-/// A Settings window is not a Workspace window: it presents no Workspace, cannot host one, and must
-/// never be counted as one when SpaceTerm decides whether a Workspace still exists.
+/// Every live Workspace window, resolved at call time from GPUI's own registry. A Settings window
+/// is never counted.
 fn workspace_windows(cx: &App) -> Vec<gpui::WindowHandle<WorkspaceManager>> {
     cx.windows()
         .into_iter()
@@ -679,168 +677,6 @@ fn install_headless_window_actions(cx: &mut App, host: Rc<HostComposition>) {
             eprintln!("failed to restore the default SpaceTerm window: {error}");
         }
     });
-}
-
-#[cfg(test)]
-mod tests {
-    use gpui::{Action, ClipboardItem, Keystroke, TestAppContext};
-
-    use super::*;
-    use crate::terminal::testing::{TestTerminalSessionFactory, TestTerminalSessionRecords};
-    use crate::terminal::{SelectionCopy, WorkspaceTerminalSessionFactory};
-    use crate::ui::TerminalPane;
-
-    fn application_menu() -> Rc<dyn ApplicationMenuAdapter> {
-        Rc::new(
-            crate::platform::application_menu::testing::RecordingApplicationMenuAdapter::default(),
-        )
-    }
-
-    fn application_quit() -> Rc<dyn ApplicationQuitAdapter> {
-        Rc::new(
-            crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
-        )
-    }
-
-    #[gpui::test]
-    fn last_window_policy_waits_for_all_windows_and_requests_quit_once(cx: &mut TestAppContext) {
-        struct Quit(std::cell::Cell<usize>);
-        impl ApplicationQuitAdapter for Quit {
-            fn last_window_policy(&self) -> crate::platform::application_quit::LastWindowPolicy {
-                crate::platform::application_quit::LastWindowPolicy::Quit
-            }
-            fn install(
-                &self,
-                _: ApplicationQuitHandler,
-            ) -> Result<(), crate::platform::application_quit::ApplicationQuitError> {
-                Ok(())
-            }
-            fn request_quit(&self, _: &mut App) {
-                self.0.set(self.0.get() + 1);
-            }
-            fn confirm_quit(&self, _: &mut App) {}
-        }
-        let quit = Rc::new(Quit(std::cell::Cell::new(0)));
-        cx.update(crate::ui::init).unwrap();
-        cx.update(|cx| init(cx, application_menu(), quit.clone()).unwrap());
-        let first = cx.add_window(|_, _| gpui::EmptyView);
-        let second = cx.add_window(|_, _| gpui::EmptyView);
-        cx.update(|cx| {
-            first
-                .update(cx, |_, window, _| window.remove_window())
-                .unwrap();
-        });
-        cx.run_until_parked();
-        assert_eq!(quit.0.get(), 0);
-        cx.update(|cx| {
-            second
-                .update(cx, |_, window, _| window.remove_window())
-                .unwrap();
-        });
-        cx.run_until_parked();
-        assert_eq!(quit.0.get(), 1);
-    }
-
-    #[gpui::test]
-    fn configured_shortcuts_should_bind_global_application_actions(cx: &mut TestAppContext) {
-        cx.update(crate::ui::init).expect("UI initialization");
-        cx.update(|cx| init(cx, application_menu(), application_quit()).unwrap());
-        let expected = [
-            ("cmd-q", QuitApplication.name()),
-            ("cmd-h", HideApplication.name()),
-            ("alt-cmd-h", HideOtherApplications.name()),
-            ("cmd-m", MinimizeWindow.name()),
-            ("ctrl-cmd-f", ToggleFullScreen.name()),
-            ("fn-f", ToggleFullScreen.name()),
-        ];
-        let actual = cx.update(|cx| {
-            expected
-                .iter()
-                .map(|(shortcut, _)| {
-                    let keystroke = Keystroke::parse(shortcut).unwrap_or_else(|error| {
-                        panic!("invalid test shortcut {shortcut}: {error}")
-                    });
-                    let bindings = cx.all_bindings_for_input(&[keystroke]);
-                    (
-                        *shortcut,
-                        bindings
-                            .last()
-                            .map(|binding| binding.action().name())
-                            .unwrap_or(""),
-                    )
-                })
-                .collect::<Vec<_>>()
-        });
-
-        assert_eq!(actual.as_slice(), expected);
-    }
-
-    #[gpui::test]
-    fn native_copy_command_dispatches_semantic_copy_to_the_terminal(cx: &mut TestAppContext) {
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
-        cx.update(|cx| init(cx, application_menu(), application_quit()).unwrap());
-        let records = TestTerminalSessionRecords::default();
-        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
-            TestTerminalSessionFactory::new(records.clone()).with_selection_copy_response(Ok(
-                Some(SelectionCopy {
-                    plain_text: "native command copy".to_owned(),
-                    html: None,
-                }),
-            )),
-        );
-        let session_factory = WorkspaceTerminalSessionFactory::new_local(
-            session_factory,
-            crate::terminal::testing::test_local_directory(PathBuf::from(
-                "/tmp/spaceterm-native-copy-command-test",
-            )),
-        );
-        let (pane, cx) =
-            cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
-        cx.update(|window, cx| {
-            window.activate_window();
-            pane.update(cx, |pane, cx| pane.focus(window, cx));
-        });
-        cx.run_until_parked();
-        cx.write_to_clipboard(ClipboardItem::new_string("stale clipboard".to_owned()));
-
-        cx.simulate_keystrokes("cmd-c");
-        cx.run_until_parked();
-
-        assert_eq!(
-            cx.read_from_clipboard().and_then(|item| item.text()),
-            Some("native command copy".to_owned())
-        );
-    }
-
-    #[gpui::test]
-    fn native_application_actions_should_dispatch_through_the_application_menu_adapter(
-        cx: &mut TestAppContext,
-    ) {
-        let menu = Rc::new(
-            crate::platform::application_menu::testing::RecordingApplicationMenuAdapter::default(),
-        );
-        let adapter: Rc<dyn ApplicationMenuAdapter> = menu.clone();
-        cx.update(crate::ui::init).unwrap();
-        cx.update(|cx| init(cx, adapter, application_quit()).unwrap());
-
-        cx.update(|cx| {
-            cx.dispatch_action(&ShowAboutApplication);
-            cx.dispatch_action(&OpenApplicationHelp);
-            cx.dispatch_action(&ZoomActiveWindow);
-            cx.dispatch_action(&BringAllWindowsToFront);
-        });
-
-        assert_eq!(
-            menu.commands(),
-            [
-                ApplicationMenuCommand::ShowAbout,
-                ApplicationMenuCommand::OpenHelp,
-                ApplicationMenuCommand::ZoomActiveWindow,
-                ApplicationMenuCommand::BringAllWindowsToFront,
-            ]
-        );
-    }
 }
 
 #[cfg_attr(
@@ -1172,7 +1008,7 @@ pub(crate) fn initialize_application(
     .map_err(|_| RuntimeError::Initialization)?;
     crate::ui::appearance_runtime::register_fonts(cx).map_err(|_| RuntimeError::Initialization)?;
     if let Some((storage, platform)) = &host.appearance {
-        let settings = crate::settings::UserSettings::load(Arc::clone(storage));
+        let settings = crate::settings::Settings::load(Arc::clone(storage));
         let service = cx.global::<crate::updates::UpdateService>().0.clone();
         service.update(cx, |updates, _| updates.attach_settings(settings.clone()));
         crate::ui::appearance_runtime::install(settings.clone(), Rc::clone(platform), cx)
@@ -1204,6 +1040,168 @@ fn open_initial_workspace(
     #[cfg(feature = "developer-tools")]
     crate::ui::developer_workbench::open_at_launch(cx);
     Ok(workspace)
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{Action, ClipboardItem, Keystroke, TestAppContext};
+
+    use super::*;
+    use crate::terminal::testing::{TestTerminalSessionFactory, TestTerminalSessionRecords};
+    use crate::terminal::{SelectionCopy, WorkspaceTerminalSessionFactory};
+    use crate::ui::TerminalPane;
+
+    fn application_menu() -> Rc<dyn ApplicationMenuAdapter> {
+        Rc::new(
+            crate::platform::application_menu::testing::RecordingApplicationMenuAdapter::default(),
+        )
+    }
+
+    fn application_quit() -> Rc<dyn ApplicationQuitAdapter> {
+        Rc::new(
+            crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
+        )
+    }
+
+    #[gpui::test]
+    fn last_window_policy_waits_for_all_windows_and_requests_quit_once(cx: &mut TestAppContext) {
+        struct Quit(std::cell::Cell<usize>);
+        impl ApplicationQuitAdapter for Quit {
+            fn last_window_policy(&self) -> crate::platform::application_quit::LastWindowPolicy {
+                crate::platform::application_quit::LastWindowPolicy::Quit
+            }
+            fn install(
+                &self,
+                _: ApplicationQuitHandler,
+            ) -> Result<(), crate::platform::application_quit::ApplicationQuitError> {
+                Ok(())
+            }
+            fn request_quit(&self, _: &mut App) {
+                self.0.set(self.0.get() + 1);
+            }
+            fn confirm_quit(&self, _: &mut App) {}
+        }
+        let quit = Rc::new(Quit(std::cell::Cell::new(0)));
+        cx.update(crate::ui::init).unwrap();
+        cx.update(|cx| init(cx, application_menu(), quit.clone()).unwrap());
+        let first = cx.add_window(|_, _| gpui::EmptyView);
+        let second = cx.add_window(|_, _| gpui::EmptyView);
+        cx.update(|cx| {
+            first
+                .update(cx, |_, window, _| window.remove_window())
+                .unwrap();
+        });
+        cx.run_until_parked();
+        assert_eq!(quit.0.get(), 0);
+        cx.update(|cx| {
+            second
+                .update(cx, |_, window, _| window.remove_window())
+                .unwrap();
+        });
+        cx.run_until_parked();
+        assert_eq!(quit.0.get(), 1);
+    }
+
+    #[gpui::test]
+    fn configured_shortcuts_should_bind_global_application_actions(cx: &mut TestAppContext) {
+        cx.update(crate::ui::init).expect("UI initialization");
+        cx.update(|cx| init(cx, application_menu(), application_quit()).unwrap());
+        let expected = [
+            ("cmd-q", QuitApplication.name()),
+            ("cmd-h", HideApplication.name()),
+            ("alt-cmd-h", HideOtherApplications.name()),
+            ("cmd-m", MinimizeWindow.name()),
+            ("ctrl-cmd-f", ToggleFullScreen.name()),
+            ("fn-f", ToggleFullScreen.name()),
+        ];
+        let actual = cx.update(|cx| {
+            expected
+                .iter()
+                .map(|(shortcut, _)| {
+                    let keystroke = Keystroke::parse(shortcut).unwrap_or_else(|error| {
+                        panic!("invalid test shortcut {shortcut}: {error}")
+                    });
+                    let bindings = cx.all_bindings_for_input(&[keystroke]);
+                    (
+                        *shortcut,
+                        bindings
+                            .last()
+                            .map(|binding| binding.action().name())
+                            .unwrap_or(""),
+                    )
+                })
+                .collect::<Vec<_>>()
+        });
+
+        assert_eq!(actual.as_slice(), expected);
+    }
+
+    #[gpui::test]
+    fn native_copy_command_dispatches_semantic_copy_to_the_terminal(cx: &mut TestAppContext) {
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
+        cx.update(|cx| init(cx, application_menu(), application_quit()).unwrap());
+        let records = TestTerminalSessionRecords::default();
+        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
+            TestTerminalSessionFactory::new(records.clone()).with_selection_copy_response(Ok(
+                Some(SelectionCopy {
+                    plain_text: "native command copy".to_owned(),
+                    html: None,
+                }),
+            )),
+        );
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            session_factory,
+            crate::terminal::testing::test_local_directory(PathBuf::from(
+                "/tmp/spaceterm-native-copy-command-test",
+            )),
+        );
+        let (pane, cx) =
+            cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
+        cx.update(|window, cx| {
+            window.activate_window();
+            pane.update(cx, |pane, cx| pane.focus(window, cx));
+        });
+        cx.run_until_parked();
+        cx.write_to_clipboard(ClipboardItem::new_string("stale clipboard".to_owned()));
+
+        cx.simulate_keystrokes("cmd-c");
+        cx.run_until_parked();
+
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("native command copy".to_owned())
+        );
+    }
+
+    #[gpui::test]
+    fn native_application_actions_should_dispatch_through_the_application_menu_adapter(
+        cx: &mut TestAppContext,
+    ) {
+        let menu = Rc::new(
+            crate::platform::application_menu::testing::RecordingApplicationMenuAdapter::default(),
+        );
+        let adapter: Rc<dyn ApplicationMenuAdapter> = menu.clone();
+        cx.update(crate::ui::init).unwrap();
+        cx.update(|cx| init(cx, adapter, application_quit()).unwrap());
+
+        cx.update(|cx| {
+            cx.dispatch_action(&ShowAboutApplication);
+            cx.dispatch_action(&OpenApplicationHelp);
+            cx.dispatch_action(&ZoomActiveWindow);
+            cx.dispatch_action(&BringAllWindowsToFront);
+        });
+
+        assert_eq!(
+            menu.commands(),
+            [
+                ApplicationMenuCommand::ShowAbout,
+                ApplicationMenuCommand::OpenHelp,
+                ApplicationMenuCommand::ZoomActiveWindow,
+                ApplicationMenuCommand::BringAllWindowsToFront,
+            ]
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1305,13 +1303,26 @@ mod runtime_tests {
     }
     #[test]
     fn invalid_composition_has_only_closed_failure_classification() {
-        let mut parts = parts(Rc::default(), Rc::default());
-        parts.home_directory = "sensitive-relative-value".into();
-        let error = HostComposition::new(parts).err().unwrap();
-        assert_eq!(
-            error.to_string(),
-            "desktop policy and capabilities disagree"
-        );
+        let mut invalid_directory = parts(Rc::default(), Rc::default());
+        invalid_directory.home_directory = "sensitive-relative-value".into();
+        let mut invalid_titlebar = parts(Rc::default(), Rc::default());
+        invalid_titlebar.window_chrome =
+            crate::platform::window_chrome::WindowChrome::native(Some(gpui::TitlebarOptions {
+                traffic_light_position: Some(gpui::point(gpui::px(1.0), gpui::px(1.0))),
+                appears_transparent: false,
+                ..gpui::TitlebarOptions::default()
+            }));
+        for parts in [invalid_directory, invalid_titlebar] {
+            let error = HostComposition::new(parts).err().unwrap();
+            assert_eq!(
+                error,
+                crate::desktop_profile::DesktopProfileError::InvalidCombination
+            );
+            assert_eq!(
+                error.to_string(),
+                "desktop policy and capabilities disagree"
+            );
+        }
     }
     #[gpui::test]
     fn runtime_registers_once_and_installs_distinct_exact_window_endpoints(
@@ -1413,6 +1424,7 @@ mod runtime_tests {
         });
         cx.run_until_parked();
 
+        assert!(cx.update(|cx| cx.is_action_available(&NewWorkspace)));
         cx.update(|cx| cx.dispatch_action(&NewWorkspace));
         cx.run_until_parked();
 
@@ -1429,27 +1441,6 @@ mod runtime_tests {
             ),
             (1, 2, vec!["register", "install", "install"])
         );
-    }
-
-    #[gpui::test]
-    fn new_workspace_menu_actions_should_remain_available_when_headless(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let host = Rc::new(HostComposition::new(parts(Rc::default(), Rc::default())).unwrap());
-        let original = cx.update(|cx| {
-            let original = start_application(cx, &host).unwrap();
-            install_headless_window_actions(cx, Rc::clone(&host));
-            original
-        });
-        cx.run_until_parked();
-        cx.update(|cx| {
-            original
-                .update(cx, |_, window, _| window.remove_window())
-                .unwrap();
-        });
-        cx.run_until_parked();
-
-        assert!(cx.update(|cx| cx.is_action_available(&NewWorkspace)));
     }
 
     #[gpui::test]
@@ -1479,38 +1470,12 @@ mod runtime_tests {
         );
     }
 
-    /// Settings storage for composition tests: nothing is retained and nothing is written.
-    struct EmptySettingsStorage;
-
-    impl crate::settings::storage::SettingsStorage for EmptySettingsStorage {
-        fn quarantine(&self) -> Result<(), crate::settings::storage::StorageError> {
-            Err(crate::settings::storage::StorageError::Unavailable)
-        }
-        fn read(
-            &self,
-        ) -> Result<
-            Option<crate::platform::secure_filesystem::PrivateFileSnapshot>,
-            crate::settings::storage::StorageError,
-        > {
-            Ok(None)
-        }
-
-        fn write(
-            &self,
-            _: &[u8],
-            _: Option<&crate::platform::secure_filesystem::SecureEntryIdentity>,
-        ) -> Result<crate::settings::storage::StorageCommit, crate::settings::storage::StorageError>
-        {
-            Err(crate::settings::storage::StorageError::Unavailable)
-        }
-    }
-
     fn host_with_settings() -> Rc<HostComposition> {
         Rc::new(
             HostComposition::new(parts(Rc::default(), Rc::default()))
                 .unwrap()
                 .with_appearance(
-                    Arc::new(EmptySettingsStorage),
+                    Arc::new(crate::settings::storage::testing::MemoryStorage::default()),
                     Rc::new(
                         crate::platform::appearance::testing::RecordingAppearancePlatform::default(
                         ),
@@ -1520,7 +1485,7 @@ mod runtime_tests {
     }
 
     fn host_with_storage(
-        storage: Arc<crate::ui::settings_window::test_support::MemoryStorage>,
+        storage: Arc<crate::settings::storage::testing::MemoryStorage>,
     ) -> HostComposition {
         HostComposition::new(parts(Rc::default(), Rc::default()))
             .unwrap()
@@ -1559,7 +1524,7 @@ mod runtime_tests {
 
     #[gpui::test]
     fn launch_offers_settings_recovery_once_for_malformed_settings(cx: &mut gpui::TestAppContext) {
-        let storage = Arc::new(crate::ui::settings_window::test_support::MemoryStorage::default());
+        let storage = Arc::new(crate::settings::storage::testing::MemoryStorage::default());
         storage.corrupt();
         let host = host_with_storage(storage.clone());
         let workspace = cx.update(|cx| start_application(cx, &host).unwrap());
@@ -1572,7 +1537,7 @@ mod runtime_tests {
         assert!(!cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
         assert_eq!(
             storage.backup().as_deref(),
-            Some(crate::ui::settings_window::test_support::CORRUPT_DOCUMENT)
+            Some(crate::settings::storage::testing::CORRUPT_DOCUMENT)
         );
         assert!(storage.document().is_some());
         let status = cx.update(|_, cx| {
@@ -1591,7 +1556,8 @@ mod runtime_tests {
 
     #[gpui::test]
     fn settings_recovery_can_be_declined_without_changing_the_file(cx: &mut gpui::TestAppContext) {
-        let storage = Arc::new(crate::ui::settings_window::test_support::MemoryStorage::default());
+        use crate::settings::storage::SettingsStorage as _;
+        let storage = Arc::new(crate::settings::storage::testing::MemoryStorage::default());
         storage.corrupt();
         let host = host_with_storage(storage.clone());
         let workspace = cx.update(|cx| start_application(cx, &host).unwrap());
@@ -1602,6 +1568,11 @@ mod runtime_tests {
 
         assert!(!cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
         assert_eq!(storage.backup(), None);
+        assert_eq!(
+            storage.read().unwrap().unwrap().bytes,
+            crate::settings::storage::testing::CORRUPT_DOCUMENT
+        );
+        assert_eq!(storage.writes(), 0);
         let status = cx.update(|_, cx| {
             cx.global::<crate::ui::appearance_runtime::AppearanceRuntime>()
                 .settings
@@ -1615,7 +1586,7 @@ mod runtime_tests {
     fn launch_does_not_offer_recovery_for_settings_it_cannot_safely_replace(
         cx: &mut gpui::TestAppContext,
     ) {
-        let storage = Arc::new(crate::ui::settings_window::test_support::MemoryStorage::default());
+        let storage = Arc::new(crate::settings::storage::testing::MemoryStorage::default());
         storage.fail_reads(Some(crate::settings::storage::StorageError::Unsafe));
         let host = host_with_storage(storage);
         let workspace = cx.update(|cx| start_application(cx, &host).unwrap());
@@ -1798,13 +1769,13 @@ mod runtime_tests {
 
         assert_eq!(cx.update(|cx| cx.windows().len()), 2);
         assert_eq!(cx.update(|cx| workspace_windows(cx).len()), 1);
-        let settings = cx.update(|cx| {
+        let settings_window = cx.update(|cx| {
             cx.windows()
                 .into_iter()
                 .find_map(|window| window.downcast::<crate::ui::settings_window::SettingsWindow>())
                 .expect("Settings window")
         });
-        let mut settings_cx = gpui::VisualTestContext::from_window(settings.into(), cx);
+        let mut settings_cx = gpui::VisualTestContext::from_window(settings_window.into(), cx);
         assert_eq!(
             settings_cx.window_title().as_deref(),
             Some("Settings"),
@@ -1816,8 +1787,9 @@ mod runtime_tests {
     fn density_preview_should_reposition_open_workspace_and_settings_traffic_lights(
         cx: &mut gpui::TestAppContext,
     ) {
-        use crate::appearance::{ChromeDensity, SettingsDocument};
+        use crate::appearance::ChromeDensity;
         use crate::platform::window_frame::{TrafficLightPlacement, WindowFrameGeometry};
+        use crate::settings::SettingsDocument;
         use gpui::{point, px};
 
         let geometry = WindowFrameGeometry::new(Some(16.0))
@@ -1829,14 +1801,14 @@ mod runtime_tests {
         let mut wiring = parts(Rc::default(), Rc::default());
         wiring.window_frame = geometry;
         let host = HostComposition::new(wiring).unwrap().with_appearance(
-            Arc::new(EmptySettingsStorage),
+            Arc::new(crate::settings::storage::testing::MemoryStorage::default()),
             Rc::new(crate::platform::appearance::testing::RecordingAppearancePlatform::default()),
         );
         let workspace = cx.update(|cx| start_application(cx, &host).unwrap());
         cx.run_until_parked();
         cx.update(|cx| cx.dispatch_action(&crate::ui::settings_window::OpenSettings));
         cx.run_until_parked();
-        let settings = cx.update(|cx| {
+        let settings_window = cx.update(|cx| {
             cx.windows()
                 .into_iter()
                 .find_map(|window| window.downcast::<crate::ui::settings_window::SettingsWindow>())
@@ -1846,7 +1818,7 @@ mod runtime_tests {
         assert_eq!(
             (
                 cx.traffic_light_position_updates(workspace.into()),
-                cx.traffic_light_position_updates(settings.into()),
+                cx.traffic_light_position_updates(settings_window.into()),
             ),
             (
                 vec![point(px(15.5), px(14.0))],
@@ -1854,15 +1826,15 @@ mod runtime_tests {
             )
         );
 
-        let user_settings = cx.update(|cx| {
+        let settings = cx.update(|cx| {
             cx.global::<crate::ui::appearance_runtime::AppearanceRuntime>()
                 .settings
                 .clone()
         });
-        let token = user_settings.begin_preview(0).unwrap();
+        let token = settings.begin_preview(0).unwrap();
         let mut candidate = SettingsDocument::default();
-        candidate.preferences.window.density = ChromeDensity::Comfortable;
-        user_settings.update_preview(&token, candidate).unwrap();
+        candidate.appearance.window.density = ChromeDensity::Comfortable;
+        settings.update_preview(&token, candidate).unwrap();
         cx.run_until_parked();
         let (workspace_expected, settings_expected) = cx.update(|cx| {
             let appearance = crate::ui::appearance::chrome(cx);
@@ -1881,7 +1853,7 @@ mod runtime_tests {
         assert_eq!(
             (
                 cx.traffic_light_position_updates(workspace.into()),
-                cx.traffic_light_position_updates(settings.into()),
+                cx.traffic_light_position_updates(settings_window.into()),
             ),
             (
                 vec![point(px(15.5), px(14.0)), workspace_expected],
@@ -2047,7 +2019,11 @@ mod runtime_tests {
 
     #[gpui::test]
     fn a_settings_only_window_leaves_application_quit_unblocked(cx: &mut gpui::TestAppContext) {
-        let host = host_with_settings();
+        let quit = Rc::new(
+            crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
+        );
+        let mut host = host_with_settings();
+        Rc::get_mut(&mut host).unwrap().adapters.application_quit = quit.clone();
         let workspace = cx.update(|cx| start_application(cx, &host).unwrap());
         cx.run_until_parked();
         cx.update(|cx| cx.dispatch_action(&crate::ui::settings_window::OpenSettings));
@@ -2057,6 +2033,7 @@ mod runtime_tests {
         assert!(cx.has_pending_prompt());
         cx.simulate_prompt_answer("Cancel");
         cx.run_until_parked();
+        assert_eq!(quit.confirmations(), 0);
 
         cx.update(|cx| {
             workspace
@@ -2068,9 +2045,16 @@ mod runtime_tests {
         // Only Settings remains. A window that presents no Workspace has no work to confirm, so
         // quit must proceed rather than wait on it.
         assert_eq!(cx.update(|cx| cx.windows().len()), 1);
-        cx.update(|cx| cx.dispatch_action(&QuitApplication));
+        // TestAppContext does not deliver another App action with only Settings open. The native
+        // adapter invokes the same installed quit coordinator and records its deferred decision.
+        assert_eq!(
+            quit.simulate_native_request(),
+            ApplicationQuitDecision::Cancel
+        );
         cx.run_until_parked();
         assert!(!cx.has_pending_prompt());
+        assert_eq!(quit.requests(), 2);
+        assert_eq!(quit.confirmations(), 1);
     }
 
     #[gpui::test]
@@ -2165,7 +2149,7 @@ mod runtime_tests {
     }
 
     #[gpui::test]
-    fn application_quit_checks_inactive_windows_and_discards_removed_roots(
+    fn application_quit_counts_inactive_windows_and_discards_removed_roots(
         cx: &mut gpui::TestAppContext,
     ) {
         use crate::terminal::testing::{TestTerminalSessionFactory, TestTerminalSessionRecords};
@@ -2203,7 +2187,9 @@ mod runtime_tests {
             records
                 .event_sender(session_id)
                 .unwrap()
-                .try_send(crate::terminal::SessionEvent::Screen(Arc::clone(&screen)))
+                .try_send(crate::terminal::TerminalSessionEvent::Screen(Arc::clone(
+                    &screen,
+                )))
                 .unwrap();
         }
         cx.run_until_parked();
@@ -2240,9 +2226,9 @@ mod runtime_tests {
     fn application_quit_revalidates_equal_count_window_replacement_after_settings_save(
         cx: &mut gpui::TestAppContext,
     ) {
-        use crate::ui::settings_window::test_support::MemoryStorage;
+        use crate::settings::storage::testing::MemoryStorage;
 
-        let storage = MemoryStorage::with_document(&crate::appearance::SettingsDocument::default());
+        let storage = MemoryStorage::with_document(&crate::settings::SettingsDocument::default());
         let application_quit = Rc::new(
             crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
         );
@@ -2256,13 +2242,13 @@ mod runtime_tests {
         cx.run_until_parked();
         cx.update(|cx| cx.dispatch_action(&crate::ui::settings_window::OpenSettings));
         cx.run_until_parked();
-        let settings = cx.update(|cx| {
+        let settings_window = cx.update(|cx| {
             cx.windows()
                 .into_iter()
                 .find_map(|window| window.downcast::<crate::ui::settings_window::SettingsWindow>())
                 .expect("Settings window")
         });
-        let mut settings_cx = gpui::VisualTestContext::from_window(settings.into(), cx);
+        let mut settings_cx = gpui::VisualTestContext::from_window(settings_window.into(), cx);
         let edit = settings_cx
             .debug_bounds("settings-density-comfortable")
             .expect("Settings control")

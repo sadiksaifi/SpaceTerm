@@ -1,8 +1,5 @@
-//! The Advanced section: the settings file, export and import of the Settings Document, and Reset
-//! All.
-//!
-//! The settings file shows read-only. A person edits it in their own editor, and SpaceTerm follows
-//! each save (ADR 0005), so every change still reaches SpaceTerm through the Settings Document.
+//! The Advanced section: the settings file, Settings Document export and import, and Reset All.
+//! The settings file is read-only here because SpaceTerm follows external edits (ADR 0005).
 
 use std::sync::Arc;
 
@@ -13,7 +10,7 @@ use spaceterm_ui::{
     ModalActionRole, ModalId, TextArea,
 };
 
-use crate::appearance::{SettingsDocument, SettingsDocumentError, export_settings, parse_settings};
+use crate::settings::{SettingsDocument, SettingsDocumentError, export_settings, parse_settings};
 use crate::ui::appearance::{ChromeAppearance, gpui_color};
 use crate::ui::chrome_geometry::RadiusRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};

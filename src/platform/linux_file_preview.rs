@@ -711,7 +711,6 @@ mod linux_adapter_tests {
     }
     struct Sushi {
         answer: Answer,
-        close_gated: bool,
         shown: mpsc::Sender<(String, String, bool)>,
         closed: mpsc::Sender<()>,
         release: Mutex<mpsc::Receiver<()>>,
@@ -738,9 +737,6 @@ mod linux_adapter_tests {
         }
         fn close(&self) {
             self.closed.send(()).unwrap();
-            if self.close_gated {
-                let _ = self.release.lock().unwrap().recv_timeout(WAIT);
-            }
         }
     }
 
@@ -784,15 +780,10 @@ mod linux_adapter_tests {
         }
     }
     impl Fixture {
-        fn new(name: &str, answer: Answer, close_gated: bool) -> Self {
-            Self::with_activation(name, answer, close_gated, false)
+        fn new(name: &str, answer: Answer) -> Self {
+            Self::with_activation(name, answer, false)
         }
-        fn with_activation(
-            name: &str,
-            answer: Answer,
-            close_gated: bool,
-            activation: bool,
-        ) -> Self {
+        fn with_activation(name: &str, answer: Answer, activation: bool) -> Self {
             let mut process = Command::new("dbus-daemon")
                 .args(["--session", "--nofork", "--print-address=1"])
                 .stdout(Stdio::piped())
@@ -810,7 +801,6 @@ mod linux_adapter_tests {
             let (tokens, token_receiver) = mpsc::channel();
             let sushi = Sushi {
                 answer,
-                close_gated,
                 shown,
                 closed,
                 release: Mutex::new(proceed),
@@ -851,7 +841,6 @@ mod linux_adapter_tests {
             let (tokens, token_receiver) = mpsc::channel();
             let sushi = Sushi {
                 answer: Answer::Immediate,
-                close_gated: false,
                 shown,
                 closed,
                 release: Mutex::new(proceed),
@@ -957,7 +946,7 @@ mod linux_adapter_tests {
 
     #[test]
     fn linux_desktop_sushi_discovers_three_and_four_argument_interfaces() {
-        let mut fixture = Fixture::new("signatures-and-restarts", Answer::Immediate, false);
+        let mut fixture = Fixture::new("signatures-and-restarts", Answer::Immediate);
         let factory = LinuxFilePreviewFactory::new(Some(fixture.client()));
         let panel = factory.panel();
         let service = panel.service.clone().unwrap();
@@ -985,7 +974,7 @@ mod linux_adapter_tests {
 
     #[test]
     fn linux_desktop_sushi_teardown_releases_parent_without_closing_shared_preview() {
-        let fixture = Fixture::new("foreign-before-signal", Answer::Immediate, false);
+        let fixture = Fixture::new("foreign-before-signal", Answer::Immediate);
         let factory = LinuxFilePreviewFactory::new(Some(fixture.client()));
         let mut panel = factory.panel();
         let service = panel.service.clone().unwrap();
@@ -1021,7 +1010,7 @@ mod linux_adapter_tests {
 
     #[test]
     fn linux_desktop_sushi_keeps_latest_request_and_parent_until_show_finishes() {
-        let fixture = Fixture::new("lifetime", Answer::Gated, true);
+        let fixture = Fixture::new("lifetime", Answer::Gated);
         let shared = fixture.client();
         let factory = LinuxFilePreviewFactory::new(Some(shared.clone()));
         assert!(factory.is_available());
@@ -1071,7 +1060,7 @@ mod linux_adapter_tests {
         assert!(fixture.closes.try_recv().is_err());
         assert!(fixture.shows.try_recv().is_err());
 
-        // Retirement must release the parent even when shared work is full.
+        // The dedicated preview worker retires parents despite a full shared queue.
         let (queued_parent, retired_parent) = parent("wayland:queue-saturated");
         let _queued = request(
             &service,
@@ -1130,7 +1119,7 @@ mod linux_adapter_tests {
 
     #[test]
     fn linux_desktop_sushi_keeps_an_unanswered_request_until_retirement_without_closing() {
-        let fixture = Fixture::new("unanswered", Answer::Gated, false);
+        let fixture = Fixture::new("unanswered", Answer::Gated);
         // A short reply wait stands in for the retained wait expiring.
         let factory = LinuxFilePreviewFactory::with_service_bus(Some(fixture.client()));
         let mut panel = factory.panel();
@@ -1157,7 +1146,7 @@ mod linux_adapter_tests {
 
     #[test]
     fn linux_desktop_sushi_unanswered_request_yields_to_another_clients_preview() {
-        let fixture = Fixture::new("unanswered-foreign", Answer::Gated, false);
+        let fixture = Fixture::new("unanswered-foreign", Answer::Gated);
         // A short reply wait stands in for the retained wait expiring.
         let factory = LinuxFilePreviewFactory::with_service_bus(Some(fixture.client()));
         let mut panel = factory.panel();
@@ -1188,7 +1177,7 @@ mod linux_adapter_tests {
 
     #[test]
     fn linux_desktop_sushi_rejection_fails_the_request_and_owns_nothing() {
-        let fixture = Fixture::new("rejection", Answer::Reject, false);
+        let fixture = Fixture::new("rejection", Answer::Reject);
         let factory = LinuxFilePreviewFactory::new(Some(fixture.client()));
         let mut panel = factory.panel();
         let service = panel.service.clone().unwrap();
@@ -1215,7 +1204,7 @@ mod linux_adapter_tests {
 
     #[test]
     fn linux_desktop_sushi_relinquishes_a_window_that_closed_or_moved_to_another_client() {
-        let fixture = Fixture::new("relinquish", Answer::Immediate, false);
+        let fixture = Fixture::new("relinquish", Answer::Immediate);
         let factory = LinuxFilePreviewFactory::new(Some(fixture.client()));
         let mut panel = factory.panel();
         let service = panel.service.clone().unwrap();
@@ -1291,7 +1280,7 @@ mod linux_adapter_tests {
                 self.inner.dismiss();
             }
         }
-        let fixture = Fixture::new("authority", Answer::Immediate, true);
+        let fixture = Fixture::new("authority", Answer::Immediate);
         let factory = LinuxFilePreviewFactory::new(Some(fixture.client()));
         let authority = crate::platform::local_filesystem::LocalFilesystemAuthority::new(
             crate::local_path::LocalPathSemantics::Posix,

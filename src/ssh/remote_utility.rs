@@ -354,7 +354,7 @@ pub(crate) enum RemoteDirectoryProbe {
 /// Remote paths remain validated remote-domain strings and never reach local filesystem APIs.
 /// Each operation validates live control authority, request size, output size, UTF-8, frame
 /// version, field lengths, row counts, and operation kind. Raw output is never retained in errors.
-/// Session and request cancellation are linked before the runner receives process ownership.
+/// Control Connection and request cancellation are linked before the runner owns the process.
 /// Requests beyond [`MAXIMUM_REMOTE_UTILITY_SESSIONS`] wait for an earlier process to exit.
 pub(crate) struct SshRemoteUtilityClient<R: SshRemoteUtilityRunner> {
     command: PreparedSshRemoteUtilityCommand,
@@ -364,7 +364,6 @@ pub(crate) struct SshRemoteUtilityClient<R: SshRemoteUtilityRunner> {
 }
 
 impl<R: SshRemoteUtilityRunner> SshRemoteUtilityClient<R> {
-    /// Creates a client bound to one prepared command and session cancellation scope.
     pub(crate) fn new(
         command: PreparedSshRemoteUtilityCommand,
         runner: Arc<R>,
@@ -378,29 +377,12 @@ impl<R: SshRemoteUtilityRunner> SshRemoteUtilityClient<R> {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) async fn discover_account(
-        &self,
-    ) -> Result<RemoteAccountMetadata, RemoteUtilityError> {
-        self.discover_account_with_cancellation(SshCancellationToken::default())
-            .await
-    }
-
     pub(crate) async fn discover_account_with_cancellation(
         &self,
         cancellation: SshCancellationToken,
     ) -> Result<RemoteAccountMetadata, RemoteUtilityError> {
         let output = self.execute(build_account_script(), cancellation).await?;
         parse_account(&output)
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn list_directories(
-        &self,
-        directory: RemoteDirectory,
-    ) -> Result<RemoteUtilityDirectoryListing, RemoteUtilityError> {
-        self.list_directories_with_cancellation(directory, SshCancellationToken::default())
-            .await
     }
 
     pub(crate) async fn list_directories_with_cancellation(
@@ -412,15 +394,6 @@ impl<R: SshRemoteUtilityRunner> SshRemoteUtilityClient<R> {
             .execute(build_path_script("list", directory.as_str())?, cancellation)
             .await?;
         parse_listing(&output)
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn probe_exact_path(
-        &self,
-        directory: RemoteDirectory,
-    ) -> Result<RemoteDirectoryProbe, RemoteUtilityError> {
-        self.probe_exact_path_with_cancellation(directory, SshCancellationToken::default())
-            .await
     }
 
     pub(crate) async fn probe_exact_path_with_cancellation(
@@ -437,18 +410,6 @@ impl<R: SshRemoteUtilityRunner> SshRemoteUtilityClient<R> {
         parse_probe(&output)
     }
 
-    #[cfg(test)]
-    pub(crate) async fn create_directory_recursively(
-        &self,
-        directory: RemoteDirectory,
-    ) -> Result<(), RemoteUtilityError> {
-        self.create_directory_recursively_with_cancellation(
-            directory,
-            SshCancellationToken::default(),
-        )
-        .await
-    }
-
     pub(crate) async fn create_directory_recursively_with_cancellation(
         &self,
         directory: RemoteDirectory,
@@ -461,18 +422,6 @@ impl<R: SshRemoteUtilityRunner> SshRemoteUtilityClient<R> {
             )
             .await?;
         parse_empty_success(&output, "mkdir")
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn resolve_physical_directory(
-        &self,
-        directory: RemoteDirectory,
-    ) -> Result<String, RemoteUtilityError> {
-        self.resolve_physical_directory_with_cancellation(
-            directory,
-            SshCancellationToken::default(),
-        )
-        .await
     }
 
     pub(crate) async fn resolve_physical_directory_with_cancellation(
@@ -1074,8 +1023,8 @@ mod tests {
 
     use super::*;
     use crate::domain::{RemoteDirectory, SshDestination};
+    use crate::ssh::cancellation::SshCancellationToken;
     use crate::ssh::command::{OpenSshExecutable, SshCommandContext, SshCommandSpec};
-    use crate::ssh::control_connection::SshCancellationToken;
     use crate::ssh::process::ProcessExit;
 
     #[test]
@@ -1184,7 +1133,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn account_metadata_should_validate_all_versioned_fields(cx: &mut TestAppContext) {
+    fn account_metadata_should_decode_versioned_fields(cx: &mut TestAppContext) {
         let (client, _) = client([success(response(
             "account",
             "ok",
@@ -1201,7 +1150,7 @@ mod tests {
 
         let metadata = cx
             .foreground_executor()
-            .block_test(client.discover_account())
+            .block_test(client.discover_account_with_cancellation(SshCancellationToken::default()))
             .unwrap();
 
         assert_eq!(metadata.user(), "tester");
@@ -1235,7 +1184,7 @@ mod tests {
 
         let metadata = cx
             .foreground_executor()
-            .block_test(client.discover_account())
+            .block_test(client.discover_account_with_cancellation(SshCancellationToken::default()))
             .unwrap();
 
         assert_eq!(
@@ -1255,7 +1204,9 @@ mod tests {
 
         assert_eq!(
             cx.foreground_executor()
-                .block_test(client.discover_account())
+                .block_test(
+                    client.discover_account_with_cancellation(SshCancellationToken::default())
+                )
                 .unwrap_err(),
             RemoteUtilityError::UnsupportedLoginShell
         );
@@ -1275,7 +1226,10 @@ mod tests {
 
         let listing = cx
             .foreground_executor()
-            .block_test(client.list_directories(remote_directory("/srv/projects")))
+            .block_test(client.list_directories_with_cancellation(
+                remote_directory("/srv/projects"),
+                SshCancellationToken::default(),
+            ))
             .unwrap();
 
         assert_eq!(listing.names(), ["Space Term", "after hostile"]);
@@ -1289,7 +1243,10 @@ mod tests {
 
         let state = cx
             .foreground_executor()
-            .block_test(client.probe_exact_path(remote_directory(path)))
+            .block_test(client.probe_exact_path_with_cancellation(
+                remote_directory(path),
+                SshCancellationToken::default(),
+            ))
             .unwrap();
 
         assert_eq!(state, RemoteDirectoryProbe::Missing);
@@ -1305,7 +1262,10 @@ mod tests {
 
         assert_eq!(
             cx.foreground_executor()
-                .block_test(client.probe_exact_path(remote_directory(&accepted)))
+                .block_test(client.probe_exact_path_with_cancellation(
+                    remote_directory(&accepted),
+                    SshCancellationToken::default()
+                ))
                 .unwrap(),
             RemoteDirectoryProbe::Missing
         );
@@ -1315,7 +1275,10 @@ mod tests {
         let rejected = format!("/{}", "'".repeat(MAXIMUM_REMOTE_PATH_BYTES));
         assert_eq!(
             cx.foreground_executor()
-                .block_test(client.probe_exact_path(remote_directory(&rejected)))
+                .block_test(client.probe_exact_path_with_cancellation(
+                    remote_directory(&rejected),
+                    SshCancellationToken::default()
+                ))
                 .unwrap_err(),
             RemoteUtilityError::RequestTooLarge
         );
@@ -1337,7 +1300,7 @@ mod tests {
     }
 
     #[test]
-    fn ambiguous_physical_path_failure_should_not_claim_permission_denied() {
+    fn physical_failed_response_maps_to_remote_failure() {
         assert!(PHYSICAL_SCRIPT.contains("emit_empty physical failed"));
         assert_eq!(
             parse_physical(&response("physical", "failed", &[], "")).unwrap_err(),
@@ -1356,16 +1319,25 @@ mod tests {
 
         assert_eq!(
             cx.foreground_executor()
-                .block_test(client.probe_exact_path(directory.clone()))
+                .block_test(client.probe_exact_path_with_cancellation(
+                    directory.clone(),
+                    SshCancellationToken::default()
+                ))
                 .unwrap(),
             RemoteDirectoryProbe::ReadableDirectory
         );
         cx.foreground_executor()
-            .block_test(client.create_directory_recursively(directory.clone()))
+            .block_test(client.create_directory_recursively_with_cancellation(
+                directory.clone(),
+                SshCancellationToken::default(),
+            ))
             .unwrap();
         assert_eq!(
             cx.foreground_executor()
-                .block_test(client.resolve_physical_directory(directory))
+                .block_test(client.resolve_physical_directory_with_cancellation(
+                    directory,
+                    SshCancellationToken::default()
+                ))
                 .unwrap(),
             "/srv/real project"
         );
@@ -1381,19 +1353,28 @@ mod tests {
 
         assert_eq!(
             cx.foreground_executor()
-                .block_test(client.probe_exact_path(remote_directory("/srv/missing")))
+                .block_test(client.probe_exact_path_with_cancellation(
+                    remote_directory("/srv/missing"),
+                    SshCancellationToken::default()
+                ))
                 .unwrap(),
             RemoteDirectoryProbe::Missing
         );
         assert_eq!(
             cx.foreground_executor()
-                .block_test(client.probe_exact_path(remote_directory("/srv/file/child")))
+                .block_test(client.probe_exact_path_with_cancellation(
+                    remote_directory("/srv/file/child"),
+                    SshCancellationToken::default()
+                ))
                 .unwrap_err(),
             RemoteUtilityError::NotDirectory
         );
         assert_eq!(
             cx.foreground_executor()
-                .block_test(client.probe_exact_path(remote_directory("/srv/private/child")))
+                .block_test(client.probe_exact_path_with_cancellation(
+                    remote_directory("/srv/private/child"),
+                    SshCancellationToken::default()
+                ))
                 .unwrap_err(),
             RemoteUtilityError::PermissionDenied
         );
@@ -1409,19 +1390,28 @@ mod tests {
 
         assert_eq!(
             cx.foreground_executor()
-                .block_test(client.probe_exact_path(remote_directory("/one")))
+                .block_test(client.probe_exact_path_with_cancellation(
+                    remote_directory("/one"),
+                    SshCancellationToken::default()
+                ))
                 .unwrap_err(),
             RemoteUtilityError::InvalidResponse
         );
         assert_eq!(
             cx.foreground_executor()
-                .block_test(client.resolve_physical_directory(remote_directory("/two")))
+                .block_test(client.resolve_physical_directory_with_cancellation(
+                    remote_directory("/two"),
+                    SshCancellationToken::default()
+                ))
                 .unwrap_err(),
             RemoteUtilityError::InvalidResponse
         );
         assert_eq!(
             cx.foreground_executor()
-                .block_test(client.probe_exact_path(remote_directory("/three")))
+                .block_test(client.probe_exact_path_with_cancellation(
+                    remote_directory("/three"),
+                    SshCancellationToken::default()
+                ))
                 .unwrap_err(),
             RemoteUtilityError::OutputTooLarge
         );
@@ -1434,7 +1424,10 @@ mod tests {
         ))]);
         assert_eq!(
             cx.foreground_executor()
-                .block_test(failed.probe_exact_path(remote_directory("/srv")))
+                .block_test(failed.probe_exact_path_with_cancellation(
+                    remote_directory("/srv"),
+                    SshCancellationToken::default()
+                ))
                 .unwrap_err(),
             RemoteUtilityError::CommandFailed(Some(1))
         );
@@ -1445,7 +1438,10 @@ mod tests {
         ))]);
         assert_eq!(
             cx.foreground_executor()
-                .block_test(refused.probe_exact_path(remote_directory("/srv")))
+                .block_test(refused.probe_exact_path_with_cancellation(
+                    remote_directory("/srv"),
+                    SshCancellationToken::default()
+                ))
                 .unwrap_err(),
             RemoteUtilityError::SessionUnavailable
         );
@@ -1469,7 +1465,9 @@ mod tests {
 
         assert_eq!(
             cx.foreground_executor()
-                .block_test(cancelled.discover_account())
+                .block_test(
+                    cancelled.discover_account_with_cancellation(SshCancellationToken::default())
+                )
                 .unwrap_err(),
             RemoteUtilityError::Cancelled
         );
@@ -1478,7 +1476,10 @@ mod tests {
         let (cancelled_by_runner, _) = client([Err(RemoteUtilityRunError::Cancelled)]);
         assert_eq!(
             cx.foreground_executor()
-                .block_test(cancelled_by_runner.discover_account())
+                .block_test(
+                    cancelled_by_runner
+                        .discover_account_with_cancellation(SshCancellationToken::default())
+                )
                 .unwrap_err(),
             RemoteUtilityError::Cancelled
         );

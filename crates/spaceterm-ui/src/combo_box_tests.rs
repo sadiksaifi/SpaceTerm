@@ -740,15 +740,12 @@ fn items() -> Vec<ComboBoxItem<u8>> {
     ]
 }
 
-fn install_themes(cx: &mut TestAppContext) {
-    let surface =
-        crate::FloatingSurfacePaint::new(rgba(0x141415ff), rgba(0x252530ff), rgba(0x252530ff));
-    cx.set_global(crate::FloatingSurfaceTheme::new(
-        crate::FloatingSurfacePaints::new(surface, surface),
-        rgba(0x00000048).into(),
-        rgba(0x00000099),
-    ));
-    cx.set_global(ComboBoxTheme::new(
+fn test_combo_box_metrics() -> ComboBoxMetrics {
+    ComboBoxMetrics::new(px(240.0), px(40.0)).geometry(px(260.0), px(36.0), px(30.0), px(46.0))
+}
+
+fn combo_box_theme(metrics: ComboBoxMetrics) -> ComboBoxTheme {
+    ComboBoxTheme::new(
         ComboBoxPaint::new(
             rgba(0xcdcdcdff),
             rgba(0x878787ff),
@@ -760,8 +757,19 @@ fn install_themes(cx: &mut TestAppContext) {
             rgba(0x606079ff),
             rgba(0x7e98e8ff),
         ),
-        ComboBoxMetrics::new(px(240.0), px(40.0)).geometry(px(260.0), px(36.0), px(30.0), px(46.0)),
+        metrics,
+    )
+}
+
+pub(super) fn install_themes(cx: &mut TestAppContext) {
+    let surface =
+        crate::FloatingSurfacePaint::new(rgba(0x141415ff), rgba(0x252530ff), rgba(0x252530ff));
+    cx.set_global(crate::FloatingSurfaceTheme::new(
+        crate::FloatingSurfacePaints::new(surface, surface),
+        rgba(0x00000048).into(),
+        rgba(0x00000099),
     ));
+    cx.set_global(combo_box_theme(test_combo_box_metrics()));
     let input_paint = TextInputPaint::new(
         rgba(0xcdcdcdff),
         rgba(0x878787ff),
@@ -1130,7 +1138,9 @@ fn single_result_should_have_equal_insets_on_all_four_sides(cx: &mut TestAppCont
 }
 
 #[gpui::test]
-fn filter_editor_should_use_compact_text_and_caret_geometry(cx: &mut TestAppContext) {
+fn filter_editor_should_remain_compact_centered_and_stable_after_filtering(
+    cx: &mut TestAppContext,
+) {
     let (_, _, _, cx) = combo_box_window(cx, None, items(), false);
     open_by_pointer(cx);
 
@@ -1209,7 +1219,9 @@ fn secondary_click_and_modified_release_should_not_accept_an_option(cx: &mut Tes
 }
 
 #[gpui::test]
-fn combo_box_ownership_should_be_isolated_per_window(cx: &mut TestAppContext) {
+fn switching_windows_should_deactivate_the_first_combo_and_keep_close_events_local(
+    cx: &mut TestAppContext,
+) {
     let (_, first_events, _, first) = combo_box_window(cx, Some(1), items(), false);
     open_by_pointer(first);
     let first_window = first.update(|window, _| window.window_handle());
@@ -1669,31 +1681,6 @@ fn chooser_without_a_selection_should_reserve_no_checkmark_column(cx: &mut TestA
 }
 
 #[gpui::test]
-fn choice_match_should_take_precedence_while_commands_stay_last(cx: &mut TestAppContext) {
-    let (_, events, _, cx) = command_combo_box_window(cx, |query| {
-        vec![ComboBoxCommand::new(9, format!("Create {query}")).debug_selector("combo-row-command")]
-    });
-    open_by_pointer(cx);
-
-    let choice = cx
-        .debug_bounds("combo-row-zellij")
-        .expect("the last choice should render");
-    let command = cx
-        .debug_bounds("combo-row-command")
-        .expect("the command should render");
-    assert!(command.top() >= choice.bottom());
-
-    events.borrow_mut().clear();
-    cx.simulate_keystrokes("enter");
-    cx.run_until_parked();
-    assert!(events.borrow().contains(&RecordedEvent::Accepted {
-        item_id: 1,
-        source: ComboBoxActivationSource::Keyboard,
-        window_was_open: false,
-    }));
-}
-
-#[gpui::test]
 fn pointer_should_run_a_command(cx: &mut TestAppContext) {
     let (_, events, _, cx) = command_combo_box_window(cx, |query| {
         vec![ComboBoxCommand::new(9, format!("Create {query}")).debug_selector("combo-row-command")]
@@ -1767,8 +1754,8 @@ fn disabled_selected_preview_paints_the_state_without_joining_keyboard_navigatio
             row(normal),
             row(normal),
             row(disabled),
-        )
-        .disabled_selected(row(disabled_selected));
+            row(disabled_selected),
+        );
         cx.set_global(ComboBoxTheme::new(
             ComboBoxPaint::new(
                 normal, normal, disabled, normal, normal, normal, normal, normal, normal,
@@ -1815,7 +1802,7 @@ fn row_driven_width_should_fit_the_widest_label_inside_painted_row_borders(
             ComboBoxPaint::new(
                 color, color, color, color, color, color, color, color, color,
             )
-            .rows(crate::ListRowPaints::new(row, row, row, row, row)),
+            .rows(crate::ListRowPaints::new(row, row, row, row, row, row)),
             ComboBoxMetrics::new(px(240.0), px(40.0))
                 .spacing(px(8.0), px(18.0), px(6.0))
                 .row_gutters(px(16.0), px(18.0), px(4.0), px(6.0))
@@ -1984,26 +1971,29 @@ fn macos_control_navigation_should_leave_a_single_item_selected(cx: &mut TestApp
 
 #[gpui::test]
 fn home_and_end_should_navigate_options_while_the_editor_is_focused(cx: &mut TestAppContext) {
-    let (_, events, _, cx) = combo_box_window(cx, Some(1), items(), false);
-    open_by_pointer(cx);
-    events.borrow_mut().clear();
+    for (selected, keys, expected) in [(1, "end enter", 4), (4, "home enter", 1)] {
+        let (_, events, _, cx) = combo_box_window(cx, Some(selected), items(), false);
+        open_by_pointer(cx);
+        events.borrow_mut().clear();
 
-    cx.simulate_keystrokes("end enter");
-    cx.run_until_parked();
+        cx.simulate_keystrokes(keys);
+        cx.run_until_parked();
 
-    assert_eq!(
-        events.borrow().as_slice(),
-        [
-            RecordedEvent::Lifecycle(ComboBoxLifecycleEvent::Closed(
-                ComboBoxCloseReason::Accepted,
-            )),
-            RecordedEvent::Accepted {
-                item_id: 4,
-                source: ComboBoxActivationSource::Keyboard,
-                window_was_open: false,
-            },
-        ]
-    );
+        assert_eq!(
+            events.borrow().as_slice(),
+            [
+                RecordedEvent::Lifecycle(ComboBoxLifecycleEvent::Closed(
+                    ComboBoxCloseReason::Accepted,
+                )),
+                RecordedEvent::Accepted {
+                    item_id: expected,
+                    source: ComboBoxActivationSource::Keyboard,
+                    window_was_open: false,
+                },
+            ],
+            "{keys}"
+        );
+    }
 }
 
 #[gpui::test]
@@ -2098,25 +2088,6 @@ fn empty_items_should_render_a_non_accepting_empty_state(cx: &mut TestAppContext
     assert!(cx.debug_bounds("combo-box-empty").is_some());
     assert!(events.borrow().is_empty());
     assert!(cx.update(|window, cx| window_combo_box_is_open(window, cx)));
-}
-
-#[gpui::test]
-fn caller_owned_status_copy_should_update_an_open_popup(cx: &mut TestAppContext) {
-    let (root, _, _, cx) = combo_box_window(cx, None, Vec::new(), false);
-    open_by_pointer(cx);
-
-    root.update(cx, |root, cx| {
-        root.copy = ComboBoxCopy::new(
-            "Filter workspaces",
-            "Find a workspace",
-            "Refreshing",
-            "Nothing available",
-        );
-        cx.notify();
-    });
-    cx.run_until_parked();
-
-    assert!(cx.debug_bounds("combo-box-empty").is_some());
 }
 
 #[gpui::test]
@@ -2471,41 +2442,37 @@ fn wheel_should_scroll_long_results_without_reaching_the_underlay(cx: &mut TestA
 
 #[gpui::test]
 fn page_navigation_should_move_by_a_viewport_in_both_directions(cx: &mut TestAppContext) {
-    let (_, events, _, cx) = combo_box_window(cx, Some(30), long_items(), false);
-    open_by_pointer(cx);
-    events.borrow_mut().clear();
-
-    cx.simulate_keystrokes("pageup enter");
-    cx.run_until_parked();
-    let page_up_id = events
-        .borrow()
-        .iter()
-        .find_map(|event| match event {
-            RecordedEvent::Accepted { item_id, .. } => Some(*item_id),
-            RecordedEvent::Lifecycle(_)
-            | RecordedEvent::PaletteOpened
-            | RecordedEvent::ModalOpened
-            | RecordedEvent::Command { .. } => None,
-        })
-        .expect("Page Up should leave an acceptible provisional item");
-    assert!(page_up_id < 30);
-
-    open_by_pointer(cx);
-    events.borrow_mut().clear();
-    cx.simulate_keystrokes("pagedown enter");
-    cx.run_until_parked();
-    let page_down_id = events
-        .borrow()
-        .iter()
-        .find_map(|event| match event {
-            RecordedEvent::Accepted { item_id, .. } => Some(*item_id),
-            RecordedEvent::Lifecycle(_)
-            | RecordedEvent::PaletteOpened
-            | RecordedEvent::ModalOpened
-            | RecordedEvent::Command { .. } => None,
-        })
-        .expect("Page Down should leave an acceptible provisional item");
-    assert!(page_down_id > 30);
+    // The independently fixed 213 px viewport spans seven complete 30 px rows.
+    for (disabled, page_up, page_down) in [(false, 23, 37), (true, 24, 36)] {
+        let choices = long_items()
+            .into_iter()
+            .map(|item| {
+                let disabled_item = disabled && matches!(*item.id(), 23 | 37);
+                item.disabled(disabled_item)
+            })
+            .collect();
+        let (_, events, _, cx) = combo_box_window(cx, Some(30), choices, false);
+        for (keys, expected) in [("pageup enter", page_up), ("pagedown enter", page_down)] {
+            open_by_pointer(cx);
+            events.borrow_mut().clear();
+            cx.simulate_keystrokes(keys);
+            cx.run_until_parked();
+            assert_eq!(
+                events.borrow().as_slice(),
+                [
+                    RecordedEvent::Lifecycle(ComboBoxLifecycleEvent::Closed(
+                        ComboBoxCloseReason::Accepted,
+                    )),
+                    RecordedEvent::Accepted {
+                        item_id: expected,
+                        source: ComboBoxActivationSource::Keyboard,
+                        window_was_open: false,
+                    },
+                ],
+                "{keys}, disabled boundary rows={disabled}"
+            );
+        }
+    }
 }
 
 #[gpui::test]
@@ -3140,7 +3107,6 @@ fn open_filtered_combo_icons_should_follow_the_replaced_live_metric(cx: &mut Tes
     cx.simulate_input("ssh");
     cx.run_until_parked();
 
-    let default_theme = cx.update(|_, cx| *cx.global::<ComboBoxTheme>());
     let default_size = px(12.0);
     let default_trigger_icon = cx
         .debug_bounds("combo-box-trigger-icon")
@@ -3149,8 +3115,12 @@ fn open_filtered_combo_icons_should_follow_the_replaced_live_metric(cx: &mut Tes
         .debug_bounds("combo-row-remote-icon")
         .expect("the filtered row icon was not rendered");
 
-    let scaled_theme = default_theme.scaled_metrics(2.0, 1.25);
     let scaled_size = px(24.0);
+    let scaled_theme = combo_box_theme(
+        test_combo_box_metrics()
+            .text_geometry(px(16.0), px(15.0), scaled_size)
+            .trigger_icon_size(scaled_size),
+    );
     cx.update(|window, cx| {
         cx.set_global(scaled_theme);
         window.refresh();

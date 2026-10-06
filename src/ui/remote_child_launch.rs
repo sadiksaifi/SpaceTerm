@@ -1,6 +1,6 @@
-use crate::terminal::RemoteChannelRevalidationError;
+use crate::terminal::TerminalSessionChannelRevalidationError;
 
-/// A content-free reason that a requested Remote child Terminal could not be launched.
+/// A content-free reason that a requested Remote child Terminal Session could not be launched.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RemoteChildLaunchUnavailable {
     ConnectionUnavailable,
@@ -10,12 +10,16 @@ pub(crate) enum RemoteChildLaunchUnavailable {
     Stale,
 }
 
-impl From<RemoteChannelRevalidationError> for RemoteChildLaunchUnavailable {
-    fn from(error: RemoteChannelRevalidationError) -> Self {
+impl From<TerminalSessionChannelRevalidationError> for RemoteChildLaunchUnavailable {
+    fn from(error: TerminalSessionChannelRevalidationError) -> Self {
         match error {
-            RemoteChannelRevalidationError::ConnectionUnavailable => Self::ConnectionUnavailable,
-            RemoteChannelRevalidationError::DirectoryUnavailable => Self::DirectoryUnavailable,
-            RemoteChannelRevalidationError::IdentityChanged => Self::IdentityChanged,
+            TerminalSessionChannelRevalidationError::ConnectionUnavailable => {
+                Self::ConnectionUnavailable
+            }
+            TerminalSessionChannelRevalidationError::DirectoryUnavailable => {
+                Self::DirectoryUnavailable
+            }
+            TerminalSessionChannelRevalidationError::IdentityChanged => Self::IdentityChanged,
         }
     }
 }

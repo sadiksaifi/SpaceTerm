@@ -11,6 +11,7 @@ use gpui::{
     rgba,
 };
 
+use crate::catalog_tests::{init_uniform_control_catalog, replace_uniform_control_catalog};
 use crate::*;
 
 const ROOT_FIELD: gpui::Rgba = gpui::Rgba {
@@ -276,15 +277,18 @@ struct ActivityFixture {
 
 struct ThemeScopeFixture {
     scope: ControlThemeScope,
+    activity: ControlWindowActivity,
     observations: PhaseObservations,
 }
 
 impl Render for ThemeScopeFixture {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         self.scope.with_scope(|| {
-            self.scope.mount(PhaseField {
-                content: div().size_full().into_any_element(),
-                observations: Rc::clone(&self.observations),
+            self.activity.with_scope(|| {
+                self.scope.mount(self.activity.mount(PhaseField {
+                    content: div().size_full().into_any_element(),
+                    observations: Rc::clone(&self.observations),
+                }))
             })
         })
     }
@@ -603,58 +607,52 @@ fn control_theme_scope_is_reentrant_and_restores_its_caller() {
 fn settings_catalog_scope_is_isolated_and_retained_in_every_rendering_phase(
     cx: &mut TestAppContext,
 ) {
-    let application = activity_catalog(
-        1, ROOT_FIELD, ROOT_FIELD, ROOT_FIELD, ROOT_FIELD, ROOT_FIELD,
-    );
-    let settings = activity_catalog(
-        1,
-        SETTINGS_FIELD,
-        SETTINGS_FIELD,
-        SETTINGS_FIELD,
-        SETTINGS_FIELD,
-        SETTINGS_FIELD,
-    );
-    cx.update(|cx| init(cx, application.clone())).unwrap();
+    use ControlThemeScope::{Application, Settings};
+    use ControlWindowActivity::{Active, Inactive};
+    let settings_inactive_field = rgba(0x112233ff);
+    let variants = [
+        (Application, Active, ROOT_FIELD),
+        (Application, Inactive, HOST_FIELD),
+        (Settings, Active, SETTINGS_FIELD),
+        (Settings, Inactive, settings_inactive_field),
+    ];
+    let [
+        application,
+        application_inactive,
+        settings,
+        settings_inactive,
+    ] = variants
+        .map(|(_, _, field)| Box::new(activity_catalog(1, field, field, field, field, field)));
     cx.update(|cx| {
-        replace_scoped_control_theme_catalogs(
+        crate::init(
             cx,
-            Box::new(application.clone()),
-            Box::new(application),
-            Box::new(settings.clone()),
-            Box::new(settings),
+            application,
+            application_inactive,
+            settings,
+            settings_inactive,
         )
     })
     .unwrap();
-
-    let application_observations = PhaseObservations::default();
-    let settings_observations = PhaseObservations::default();
-    let _application_window = cx.add_window({
-        let observations = Rc::clone(&application_observations);
-        move |_, _| ThemeScopeFixture {
-            scope: ControlThemeScope::Application,
-            observations,
-        }
-    });
-    let _settings_window = cx.add_window({
-        let observations = Rc::clone(&settings_observations);
-        move |_, _| ThemeScopeFixture {
-            scope: ControlThemeScope::Settings,
-            observations,
-        }
+    let observations = variants.map(|(scope, activity, _)| {
+        let observations = PhaseObservations::default();
+        let window_observations = Rc::clone(&observations);
+        cx.add_window(move |_, _| ThemeScopeFixture {
+            scope,
+            activity,
+            observations: window_observations,
+        });
+        observations
     });
     cx.run_until_parked();
 
-    for phase in [Phase::Layout, Phase::Prepaint, Phase::Paint] {
-        assert!(
-            application_observations
-                .borrow()
-                .contains(&(phase, Some(ROOT_FIELD.into())))
-        );
-        assert!(
-            settings_observations
-                .borrow()
-                .contains(&(phase, Some(SETTINGS_FIELD.into())))
-        );
+    for ((_, _, expected), observations) in variants.into_iter().zip(&observations) {
+        for phase in [Phase::Layout, Phase::Prepaint, Phase::Paint] {
+            assert!(
+                observations
+                    .borrow()
+                    .contains(&(phase, Some(expected.into())))
+            );
+        }
     }
 }
 
@@ -684,10 +682,18 @@ fn two_windows_keep_activity_catalogs_isolated_in_every_rendering_phase(cx: &mut
         disabled,
         no_focus,
     );
-    cx.update(|cx| init(cx, active.clone()))
+    cx.update(|cx| init_uniform_control_catalog(cx, active.clone()))
         .expect("catalog should initialize");
     assert_eq!(
-        cx.update(|cx| replace_control_theme_catalogs(cx, active, inactive)),
+        cx.update(|cx| {
+            crate::replace_control_theme_catalogs(
+                cx,
+                Box::new(active.clone()),
+                Box::new(inactive.clone()),
+                Box::new(active),
+                Box::new(inactive),
+            )
+        }),
         Ok(ControlThemeReplacement::Applied)
     );
 
@@ -821,7 +827,7 @@ fn cached_view_debug_bounds_should_survive_reused_paint_and_clear_after_unmount(
 fn mounted_surface_should_resolve_retained_fields_and_all_phases_against_its_host(
     cx: &mut TestAppContext,
 ) {
-    cx.update(|cx| init(cx, test_catalog(true, 1, HOST_FIELD)))
+    cx.update(|cx| init_uniform_control_catalog(cx, test_catalog(true, 1, HOST_FIELD)))
         .expect("catalog should initialize");
     let fields = FieldObservations::default();
     let phases = PhaseObservations::default();
@@ -874,8 +880,8 @@ fn mounted_surface_should_resolve_retained_fields_and_all_phases_against_its_hos
 fn mounted_surface_without_host_catalog_should_keep_root_control_presentation(
     cx: &mut TestAppContext,
 ) {
-    cx.update(|cx| init(cx, test_catalog(false, 1, HOST_FIELD)))
-        .expect("legacy catalog should initialize");
+    cx.update(|cx| init_uniform_control_catalog(cx, test_catalog(false, 1, HOST_FIELD)))
+        .expect("catalog should initialize");
     let fields = FieldObservations::default();
     let phases = PhaseObservations::default();
     let (_, cx) = cx.add_window_view(|window, cx| {
@@ -895,13 +901,16 @@ fn mounted_surface_without_host_catalog_should_keep_root_control_presentation(
             .iter()
             .all(|(_, fill)| *fill == Some(ROOT_FIELD.into()))
     );
+    for phase in [Phase::Layout, Phase::Prepaint, Phase::Paint] {
+        assert!(phases.borrow().contains(&(phase, Some(ROOT_FIELD.into()))));
+    }
 }
 
 #[gpui::test]
 fn replacing_catalog_should_refresh_retained_host_fields_without_leaking_to_root(
     cx: &mut TestAppContext,
 ) {
-    cx.update(|cx| init(cx, test_catalog(true, 1, HOST_FIELD)))
+    cx.update(|cx| init_uniform_control_catalog(cx, test_catalog(true, 1, HOST_FIELD)))
         .expect("catalog should initialize");
     let fields = FieldObservations::default();
     let phases = PhaseObservations::default();
@@ -912,7 +921,7 @@ fn replacing_catalog_should_refresh_retained_host_fields_without_leaking_to_root
     fields.borrow_mut().clear();
     let replacement = rgba(0x8c357aff);
     cx.update(|_, cx| {
-        replace_control_theme_catalog(cx, test_catalog(true, 2, replacement))
+        replace_uniform_control_catalog(cx, test_catalog(true, 2, replacement))
             .expect("catalog replacement should succeed");
     });
     cx.run_until_parked();
@@ -943,7 +952,7 @@ fn replacing_catalog_without_floating_overrides_should_remove_stale_host_present
         rgba(0x00000088).into(),
         rgba(0x00000044),
     ));
-    cx.update(|cx| init(cx, initial))
+    cx.update(|cx| init_uniform_control_catalog(cx, initial))
         .expect("catalog should initialize");
     let fields = FieldObservations::default();
     let phases = PhaseObservations::default();
@@ -953,7 +962,7 @@ fn replacing_catalog_without_floating_overrides_should_remove_stale_host_present
     cx.run_until_parked();
     fields.borrow_mut().clear();
     cx.update(|_, cx| {
-        replace_control_theme_catalog(cx, test_catalog(false, 2, HOST_FIELD))
+        replace_uniform_control_catalog(cx, test_catalog(false, 2, HOST_FIELD))
             .expect("catalog replacement should succeed");
     });
     cx.run_until_parked();
@@ -981,14 +990,14 @@ fn scaling_catalog_preserves_role_materials_radii_and_hairlines_while_growing_in
     cx: &mut TestAppContext,
 ) {
     let initial = test_catalog(true, 1, HOST_FIELD);
-    cx.update(|cx| init(cx, initial.clone()))
+    cx.update(|cx| init_uniform_control_catalog(cx, initial.clone()))
         .expect("catalog should initialize");
     let before = cx.update(|cx| *cx.global::<FloatingSurfaceTheme>());
     cx.update(|cx| {
-        replace_control_theme_catalog(
+        replace_uniform_control_catalog(
             cx,
             initial
-                .scale_metrics(1.5, 1.25)
+                .scale_spacing(1.25)
                 .generation(ControlThemeGeneration::new(2)),
         )
         .expect("scaled catalog should replace");
@@ -1142,8 +1151,10 @@ impl Render for NestedHostFixture {
 fn control_hosts_resolve_nearest_material_in_all_phases_and_restore_siblings(
     cx: &mut TestAppContext,
 ) {
-    cx.update(|cx| init(cx, surface_host_catalog(1, PANEL_FIELD, CARD_FIELD)))
-        .unwrap();
+    cx.update(|cx| {
+        init_uniform_control_catalog(cx, surface_host_catalog(1, PANEL_FIELD, CARD_FIELD))
+    })
+    .unwrap();
     let observations = FieldObservations::default();
     let (root, cx) = cx
         .add_window_view(|window, cx| NestedHostFixture::new(Rc::clone(&observations), window, cx));
@@ -1185,15 +1196,18 @@ fn control_hosts_resolve_nearest_material_in_all_phases_and_restore_siblings(
 fn replacing_resting_host_catalog_refreshes_retained_fields_and_removes_omitted_hosts(
     cx: &mut TestAppContext,
 ) {
-    cx.update(|cx| init(cx, surface_host_catalog(1, PANEL_FIELD, CARD_FIELD)))
-        .unwrap();
+    cx.update(|cx| {
+        init_uniform_control_catalog(cx, surface_host_catalog(1, PANEL_FIELD, CARD_FIELD))
+    })
+    .unwrap();
     let observations = FieldObservations::default();
     let (_, cx) = cx
         .add_window_view(|window, cx| NestedHostFixture::new(Rc::clone(&observations), window, cx));
     cx.run_until_parked();
     observations.borrow_mut().clear();
     cx.update(|_, cx| {
-        replace_control_theme_catalog(cx, surface_host_catalog(2, CARD_FIELD, PANEL_FIELD)).unwrap()
+        replace_uniform_control_catalog(cx, surface_host_catalog(2, CARD_FIELD, PANEL_FIELD))
+            .unwrap()
     });
     cx.run_until_parked();
     for (id, expected) in [
@@ -1214,7 +1228,7 @@ fn replacing_resting_host_catalog_refreshes_retained_fields_and_removes_omitted_
 
     observations.borrow_mut().clear();
     cx.update(|_, cx| {
-        replace_control_theme_catalog(cx, test_catalog(true, 3, HOST_FIELD)).unwrap()
+        replace_uniform_control_catalog(cx, test_catalog(true, 3, HOST_FIELD)).unwrap()
     });
     cx.run_until_parked();
     for id in ["title-bar", "panel", "card", "panel-after"] {
@@ -1261,7 +1275,7 @@ fn control_host_wrappers_do_not_paint_another_surface(cx: &mut TestAppContext) {
 #[test]
 fn resting_host_metrics_scale_once_with_the_complete_catalog() {
     let initial = surface_host_catalog(1, PANEL_FIELD, CARD_FIELD);
-    let scaled = initial.clone().scale_metrics(1.5, 1.25);
+    let scaled = initial.clone().scale_spacing(1.25);
     for host in [
         ControlHost::TitleBar,
         ControlHost::Panel,
@@ -1272,12 +1286,9 @@ fn resting_host_metrics_scale_once_with_the_complete_catalog() {
         assert_ne!(scaled.hosted_controls(host), Some(original));
         assert_eq!(
             scaled.hosted_controls(host),
-            Some(&original.clone().scale_metrics(1.5, 1.25))
+            Some(&original.clone().scale_spacing(1.25))
         );
     }
     assert!(scaled.hosted_controls(ControlHost::Window).is_none());
-    assert_eq!(
-        scaled.installed_generation(),
-        initial.installed_generation()
-    );
+    assert_eq!(scaled.generation, initial.generation);
 }

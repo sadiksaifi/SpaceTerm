@@ -1,7 +1,6 @@
 //! AppKit Services responder registration and native pasteboard conversion.
 //!
-//! Request policy and lifetime authority live in the portable Services owner. This adapter
-//! connects those operations to AppKit's responder chain and supplied pasteboard.
+//! Request policy and lifetime authority live in the portable Services owner.
 
 use std::ffi::c_void;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -320,7 +319,7 @@ pub(in crate::platform) mod tests {
         });
     }
 
-    pub(in crate::platform) fn nsstring_decode_enforces_the_paste_limit_before_copying(
+    pub(in crate::platform) fn nsstring_decode_enforces_the_paste_byte_limit(
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(|_| {
@@ -360,7 +359,7 @@ pub(in crate::platform) mod tests {
         });
     }
 
-    pub(in crate::platform) fn service_pasteboard_round_trip_uses_only_public_utf8_text(
+    pub(in crate::platform) fn service_pasteboard_round_trips_public_utf8_text(
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(|_| {

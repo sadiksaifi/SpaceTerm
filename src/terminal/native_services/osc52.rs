@@ -442,8 +442,14 @@ mod tests {
     fn unrelated_empty_osc_does_not_hide_next_clipboard_operation() {
         let mut filter = Osc52Filter::default();
         assert_eq!(
-            operations(&filter.feed(b"\x1b]\x07\x1b]52;c;?\x07")).len(),
-            1
+            filter.feed(b"\x1b]\x07\x1b]52;c;?\x07"),
+            vec![
+                Osc52Effect::Terminal(b"\x1b]\x07".to_vec()),
+                Osc52Effect::Operation(Osc52Operation::Read {
+                    target: Osc52Target::Standard,
+                    terminator: Osc52Terminator::Bell,
+                }),
+            ]
         );
     }
 
@@ -458,15 +464,28 @@ mod tests {
 
     #[test]
     fn every_selector_and_terminator_round_trips_unicode_and_base64_padding() {
-        for target in [
-            Osc52Target::Default,
-            Osc52Target::Standard,
-            Osc52Target::Primary,
-            Osc52Target::Selection,
+        for (target, selector) in [
+            (Osc52Target::Default, b"".as_slice()),
+            (Osc52Target::Standard, b"c"),
+            (Osc52Target::Primary, b"p"),
+            (Osc52Target::Selection, b"s"),
         ] {
-            for terminator in [Osc52Terminator::Bell, Osc52Terminator::StringTerminator] {
-                for text in ["", "a", "ab", "abc", "😀 text"] {
+            for (terminator, ending) in [
+                (Osc52Terminator::Bell, b"\x07".as_slice()),
+                (Osc52Terminator::StringTerminator, b"\x1b\\"),
+            ] {
+                for (text, base64) in [
+                    ("", b"".as_slice()),
+                    ("a", b"YQ=="),
+                    ("ab", b"YWI="),
+                    ("abc", b"YWJj"),
+                    ("😀 text", b"8J+YgCB0ZXh0"),
+                ] {
                     let response = read_response(target, terminator, text);
+                    assert_eq!(
+                        response,
+                        [b"\x1b]52;".as_slice(), selector, b";", base64, ending].concat()
+                    );
                     assert_eq!(
                         parse_osc52(&response),
                         Ok(Osc52Operation::Write {
@@ -481,10 +500,7 @@ mod tests {
 
     #[test]
     fn decoded_text_limit_accepts_boundary_and_rejects_next_byte() {
-        for (size, accepted) in [
-            (MAX_OSC52_CONTENT_BYTES, true),
-            (MAX_OSC52_CONTENT_BYTES + 1, false),
-        ] {
+        for (size, accepted) in [(1_048_576, true), (1_048_577, false)] {
             let sequence = read_response(
                 Osc52Target::Standard,
                 Osc52Terminator::Bell,
@@ -493,7 +509,13 @@ mod tests {
             let mut filter = Osc52Filter::default();
             let effects = filter.feed(&sequence);
             if accepted {
-                assert_eq!(operations(&effects)[0].byte_len(), size);
+                assert_eq!(
+                    effects,
+                    vec![Osc52Effect::Operation(Osc52Operation::Write {
+                        target: Osc52Target::Standard,
+                        text: "x".repeat(size),
+                    })]
+                );
             } else {
                 assert_eq!(
                     effects,

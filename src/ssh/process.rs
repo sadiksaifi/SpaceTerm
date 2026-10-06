@@ -13,7 +13,7 @@ use thiserror::Error;
 use super::cancellation::SshCancellationToken;
 use super::command::SshCommandSpec;
 use super::startup_environment::StartupSshEnvironment;
-use crate::platform::askpass::{AskPassBrokerLease, AskPassCapabilityCopy};
+use crate::ssh::askpass::{AskPassBrokerLease, AskPassCapabilityCopy};
 
 pub(crate) const MAXIMUM_TRANSIENT_SSH_ERROR_BYTES: usize = 8 * 1024;
 const TRANSIENT_SSH_ERROR_TRUNCATION_MARKER: &str = "[earlier OpenSSH output truncated] ";
@@ -155,7 +155,6 @@ pub(crate) trait SshProcessBackend: Send + Sync + 'static {
         None
     }
 
-    /// Signals the private process group owned by `child`.
     fn signal_process_group(
         &self,
         child: &mut Self::Child,
@@ -571,7 +570,7 @@ impl SshProcessEnvironment {
         (self.home.clone(), entries, askpass_capability)
     }
 
-    /// Builds the environment for an already-authorized pane channel.
+    /// Builds the environment for an already-authorized Terminal Session Channel.
     ///
     /// Pane commands must use their live control connection and never receive AskPass transport
     /// state. If that connection is unavailable, OpenSSH must fail instead of re-authenticating.
@@ -866,11 +865,6 @@ fn read_final_error_tail(mut stderr: impl Read) -> io::Result<Vec<u8>> {
         let read = stderr.read(&mut chunk)?;
         if read == 0 {
             return Ok(tail);
-        }
-        if read >= MAXIMUM_TRANSIENT_SSH_ERROR_BYTES {
-            tail.clear();
-            tail.extend_from_slice(&chunk[read - MAXIMUM_TRANSIENT_SSH_ERROR_BYTES..read]);
-            continue;
         }
         let excess = tail
             .len()
@@ -1274,7 +1268,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use crate::platform::askpass::AskPassLease;
+    use crate::ssh::askpass::AskPassLease;
     use crate::ssh::command::SshCommandSpec;
     use zeroize::Zeroizing;
 
@@ -1359,7 +1353,7 @@ mod tests {
     }
 
     #[test]
-    fn launch_environment_should_clear_unknown_variables_and_use_captured_home_as_cwd() {
+    fn captured_launch_environment_uses_home_and_startup_entries() {
         let home = PathBuf::from("/captured/home");
         let agent_socket = OsString::from("/captured/agent.sock");
         let environment = SshProcessEnvironment::new_without_authentication(
@@ -1388,7 +1382,7 @@ mod tests {
     }
 
     #[test]
-    fn launch_environment_should_preserve_captured_path_for_openssh_proxy_commands_only() {
+    fn launch_environment_preserves_captured_path() {
         let home = PathBuf::from("/captured/home");
         let startup = StartupSshEnvironment::for_test_with_path(
             OsString::from("/captured/bin:/usr/bin:/bin"),
@@ -1448,7 +1442,7 @@ mod tests {
     }
 
     #[test]
-    fn pane_environment_should_clear_ambient_values_and_use_captured_home() {
+    fn pane_environment_uses_captured_home_and_startup_entries() {
         let home = PathBuf::from("/private/tmp");
         let environment = SshProcessEnvironment::new_without_authentication(
             home.clone(),
@@ -1660,7 +1654,7 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_completion_should_follow_process_reap_readers_and_callback() {
+    fn cleanup_completion_follows_process_reap_and_callback() {
         let adapter = RecordingAdapter::default();
         let request = process_request(
             &test_spec(),

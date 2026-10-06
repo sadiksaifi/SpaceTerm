@@ -326,17 +326,6 @@ impl DirectoryRow {
     }
 }
 
-#[cfg(test)]
-pub(super) fn filter_directory_rows(
-    parsed: &ParsedPickerPath,
-    entries: &[DirectoryRow],
-) -> Vec<DirectoryRow> {
-    match_directory_rows(parsed, entries)
-        .into_iter()
-        .map(|matched| matched.row)
-        .collect()
-}
-
 #[derive(Clone)]
 struct DirectoryRowMatch {
     row: DirectoryRow,
@@ -379,9 +368,6 @@ pub(super) fn descend_query(
 }
 
 /// Returns the path that lists the directory enclosing the one `parsed` lists.
-///
-/// The home spells its enclosing directory from the physical home, so `~/` leads to the absolute
-/// directory that contains it.
 fn enclosing_directory_query(parsed: &ParsedPickerPath, home: &PickerPath) -> Option<String> {
     let listed = parsed
         .enumeration_directory()
@@ -553,7 +539,6 @@ impl DirectoryPicker {
         }
     }
 
-    /// Offers System Directory Selection, labeled `label`, beside the confirm action.
     pub(super) fn with_system_selection(mut self, label: SharedString) -> Self {
         self.system_selection = Some(label);
         self
@@ -608,11 +593,6 @@ impl DirectoryPicker {
 
     pub(super) const fn blocks_terminal_input(&self) -> bool {
         self.open || self.opening
-    }
-
-    #[cfg(test)]
-    pub(super) fn path_input_is_focused(&self, window: &Window, cx: &App) -> bool {
-        self.palette.read(cx).editor_is_focused(window, cx)
     }
 
     pub(super) fn refocus_path(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -691,7 +671,7 @@ impl DirectoryPicker {
                 self.finish_close(*reason, cx);
             }
             CommandPaletteEvent::QueryChanged(query) => {
-                self.refresh_for_input(query.text().to_owned(), window, cx);
+                self.refresh_for_input(query.clone(), window, cx);
             }
             CommandPaletteEvent::Activated(activation) => match activation.item_id() {
                 DirectoryPickerItemId::Enclosing {
@@ -1177,9 +1157,6 @@ impl DirectoryPicker {
     }
 
     /// Returns the listed rows: the enclosing directory, then the matching children.
-    ///
-    /// The enclosing row accompanies a readable listing, so an unusable or missing path presents
-    /// its notice instead.
     fn palette_items(&self) -> Vec<CommandPaletteItem<DirectoryPickerItemId>> {
         let Some(directory) = self.rows_directory.as_ref() else {
             return Vec::new();
@@ -1347,10 +1324,8 @@ impl PickerPathError {
     }
 }
 
-/// Keeps a hierarchy shortcut from mutating Workspaces, Tabs, or Panes behind the open picker.
-///
-/// The Command Palette owns focus, pointer, and dismissal isolation, but the application's
-/// hierarchy actions are registered above it and would otherwise still fire.
+/// Keeps a hierarchy shortcut from mutating Workspaces, Tabs, or Panes behind the open picker. The
+/// application's hierarchy actions are registered above the Command Palette.
 fn block_parent_action<A: Action>(_: &A, _: &mut Window, cx: &mut App) {
     cx.stop_propagation();
 }
@@ -1482,10 +1457,10 @@ mod tests {
         let parsed = parse_picker_path("/sensitive/project").unwrap();
         let row = DirectoryRow::new("sensitive-child".to_owned()).unwrap();
         let listing = DirectoryListing::new(vec![row.clone()]);
-        let account = RemoteWorkspaceAccount::new(
+        let account = RemoteWorkspaceAccount::from_validated_login_shell(
             "sensitive-user".to_owned(),
             RemoteDirectoryIdentity::new("/sensitive/home".to_owned()).unwrap(),
-            "/bin/zsh".to_owned(),
+            crate::ssh::command::ValidatedRemoteLoginShell::new("/bin/zsh".to_owned()).unwrap(),
         )
         .unwrap();
         let pinned = PinnedDirectory::Remote {
@@ -1657,10 +1632,10 @@ mod tests {
     }
 
     fn remote_account() -> RemoteWorkspaceAccount {
-        RemoteWorkspaceAccount::new(
+        RemoteWorkspaceAccount::from_validated_login_shell(
             "tester".to_owned(),
             RemoteDirectoryIdentity::new("/home/tester".to_owned()).unwrap(),
-            "/bin/zsh".to_owned(),
+            crate::ssh::command::ValidatedRemoteLoginShell::new("/bin/zsh".to_owned()).unwrap(),
         )
         .unwrap()
     }
@@ -2039,12 +2014,25 @@ mod tests {
         );
     }
 
-    #[test]
-    fn unsupported_login_shell_should_have_an_actionable_account_status() {
+    #[gpui::test]
+    fn unsupported_login_shell_should_have_an_actionable_account_status(cx: &mut TestAppContext) {
         assert_eq!(
             status_for_source_error(DirectorySourceError::UnsupportedLoginShell),
             DirectoryPickerStatus::UnsupportedLoginShell
         );
+        let provider = scripted_provider([], [], [], []);
+        provider.state.lock().unwrap().accounts = [Task::ready(Err(
+            RemoteDirectoryProviderError::UnsupportedLoginShell,
+        ))]
+        .into();
+        let (picker, _, cx) = directory_picker(provider, cx);
+        let empty = picker.read_with(cx, |picker, _| picker.empty_state());
+        assert_eq!(empty.title(), "Unsupported login shell");
+        assert_eq!(
+            empty.description_text(),
+            Some(UNSUPPORTED_LOGIN_SHELL_MESSAGE)
+        );
+        assert!(cx.debug_bounds("command-palette-empty").is_some());
         assert_eq!(
             UNSUPPORTED_LOGIN_SHELL_MESSAGE,
             "The remote login shell does not support login mode. Choose another account or shell."
@@ -2416,7 +2404,6 @@ mod tests {
         );
         let (picker, events, cx) = directory_picker(provider, cx);
         assert!(picker.read_with(cx, |picker, _| picker.blocks_terminal_input()));
-        assert!(cx.update(|window, cx| picker.read(cx).path_input_is_focused(window, cx)));
 
         cx.update(|window, cx| {
             window.dispatch_keystroke(Keystroke::parse("escape").unwrap(), cx);
@@ -2472,7 +2459,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn the_open_action_should_show_the_confirm_shortcut(cx: &mut TestAppContext) {
+    fn the_open_action_should_expose_a_shortcut_element(cx: &mut TestAppContext) {
         let provider = scripted_provider(
             [Ok(Vec::new())],
             [Ok(ExactPathState::ReadableDirectory)],
@@ -2576,7 +2563,34 @@ mod tests {
         cx.update(|window, cx| picker.update(cx, |picker, cx| picker.confirm_current(window, cx)));
         cx.run_until_parked();
         assert!(picker.read_with(cx, |picker, _| picker.busy.is_some()));
+        let (lifecycle_generation, operation_generation, directory) =
+            picker.read_with(cx, |picker, _| {
+                (
+                    picker.lifecycle_generation,
+                    picker.operation_generation,
+                    picker.parsed.as_ref().unwrap().exact_directory().clone(),
+                )
+            });
         cx.update(|window, cx| picker.update(cx, |picker, cx| picker.cancel(window, cx)));
+        cx.update(|window, cx| {
+            picker.update(cx, |picker, cx| {
+                picker.finish_validation(
+                    ValidationCompletion {
+                        lifecycle_generation,
+                        operation_generation,
+                        directory,
+                        result: Ok(PinnedDirectory::Remote {
+                            directory: crate::domain::RemoteDirectory::new("~/".to_owned())
+                                .unwrap(),
+                            identity: RemoteDirectoryIdentity::new("/home/tester".to_owned())
+                                .unwrap(),
+                        }),
+                    },
+                    window,
+                    cx,
+                );
+            })
+        });
         cx.run_until_parked();
         assert_eq!(dropped.load(AtomicOrdering::SeqCst), 1);
         assert!(!picker.read_with(cx, |picker, _| picker.blocks_terminal_input()));
@@ -2750,11 +2764,11 @@ mod tests {
         let entries = remote_rows([".config", "SpaceTerm", ".ssh"]);
 
         assert_eq!(
-            row_names(filter_directory_rows(&ordinary, &entries)),
+            row_names(match_directory_rows(&ordinary, &entries)),
             vec!["SpaceTerm"]
         );
         assert_eq!(
-            row_names(filter_directory_rows(&dotted, &entries)),
+            row_names(match_directory_rows(&dotted, &entries)),
             vec![".config", ".ssh"]
         );
     }
@@ -2765,7 +2779,7 @@ mod tests {
         let entries = remote_rows(["spaceTerm", "Spatial", "SpaceTerm", "tools"]);
 
         assert_eq!(
-            row_names(filter_directory_rows(&parsed, &entries)),
+            row_names(match_directory_rows(&parsed, &entries)),
             vec!["SpaceTerm", "spaceTerm", "Spatial"]
         );
     }
@@ -2787,7 +2801,7 @@ mod tests {
         let entries = remote_rows(["Zulu", "Alpha"]);
 
         assert_eq!(
-            row_names(filter_directory_rows(&parsed, &entries)),
+            row_names(match_directory_rows(&parsed, &entries)),
             vec!["Alpha", "Zulu"]
         );
     }
@@ -2817,7 +2831,9 @@ mod tests {
             .collect()
     }
 
-    fn row_names(rows: Vec<DirectoryRow>) -> Vec<String> {
-        rows.into_iter().map(|row| row.name().to_owned()).collect()
+    fn row_names(rows: Vec<DirectoryRowMatch>) -> Vec<String> {
+        rows.into_iter()
+            .map(|matched| matched.row.name().to_owned())
+            .collect()
     }
 }

@@ -60,7 +60,6 @@ impl KeyboardLayout {
 }
 
 impl KeyboardLayout {
-    /// Whether the key is a symbol this layout produces only with Shift.
     pub(crate) fn is_shifted_symbol(&self, command: bool, key: &str) -> bool {
         !self.shifted[usize::from(command)].contains_key(key)
             && self.unshifted(command, key).is_some()

@@ -395,6 +395,43 @@ fn every_supported_resource_uses_the_same_version_and_protocol_marks() {
             "{relative} must state its prompt redraw policy"
         );
     }
+    for (shell, arguments, relative, script) in [
+        (
+            "/bin/bash",
+            &["--noprofile", "--norc", "-ic"][..],
+            "bash/spaceterm.bash",
+            r#"source "$1"; if declare -F _spaceterm_prompt >/dev/null; then _spaceterm_prompt; fi"#,
+        ),
+        (
+            "/bin/zsh",
+            &["-dfi", "-c"][..],
+            "zsh/spaceterm-integration",
+            r#"PS1='SPACE> '; builtin source -- "$1"; if (( $+functions[_spaceterm_before_prompt] )); then _spaceterm_before_prompt; builtin print -nrP -- "$PS1"; fi"#,
+        ),
+    ] {
+        for version in [Some("1"), Some("0"), Some("2"), None] {
+            let fixture = DirectoryFixture::new();
+            let mut command = Command::new(shell);
+            command
+                .args(arguments)
+                .arg(script)
+                .arg("spaceterm")
+                .arg(root.join(relative))
+                .env_clear()
+                .env("HOME", fixture.path())
+                .env("PATH", "/usr/bin:/bin");
+            if let Some(version) = version {
+                command.env("SPACETERM_SHELL_INTEGRATION_VERSION", version);
+            }
+            let output = command.output().unwrap();
+            assert!(output.status.success(), "{shell} {version:?}: {output:?}");
+            assert_eq!(
+                osc_reports(&output.stdout).is_empty(),
+                version != Some("1"),
+                "{shell} must accept only version 1, not {version:?}"
+            );
+        }
+    }
 }
 
 #[test]

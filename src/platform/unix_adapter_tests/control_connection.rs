@@ -17,7 +17,7 @@ use gpui::TestAppContext;
 use super::*;
 use crate::domain::SshDestination;
 use crate::platform::app_directories::AppDirectoryEnvironment;
-use crate::platform::app_paths::{AppPathHostFacts, AppPaths};
+use crate::platform::app_paths::AppPaths;
 use crate::platform::unix_adapter_tests::short_temporary_root;
 use crate::platform::unix_local_socket::UnixControlSocketProbe;
 use crate::platform::unix_secure_filesystem::UnixSecureFilesystem;
@@ -46,8 +46,13 @@ impl TestDirectory {
             xdg_cache_home: Some(self.0.join("cache").into_os_string()),
             xdg_runtime_dir: Some(self.0.join("runtime").into_os_string()),
         };
-        let host = AppPathHostFacts::new(self.0.join("temporary"), 103).unwrap();
-        AppPaths::resolve(&environment, &host, Arc::new(UnixSecureFilesystem)).unwrap()
+        crate::platform::testing::resolve_app_paths(
+            &environment,
+            Some(self.0.join("temporary")),
+            103,
+            Arc::new(UnixSecureFilesystem),
+        )
+        .unwrap()
     }
 }
 
@@ -307,7 +312,11 @@ fn destination() -> SshDestination {
 }
 
 fn timing() -> ControlConnectionTiming {
-    ControlConnectionTiming::new(Duration::from_millis(100), Duration::from_millis(50)).unwrap()
+    ControlConnectionTiming {
+        timeout: Some(Duration::from_millis(100)),
+        poll_interval: Duration::from_millis(50),
+        readiness_check_timeout: Duration::from_millis(100),
+    }
 }
 
 #[gpui::test]
@@ -398,7 +407,7 @@ fn ready_connection_should_prepare_utility_and_single_use_pane_commands(cx: &mut
 
     assert!(connection.remote_utility_command().is_ok());
     let pane = connection
-        .prepare_pane_channel(
+        .prepare_terminal_session_channel(
             ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
         )
         .unwrap();
@@ -414,7 +423,7 @@ fn ready_connection_should_prepare_utility_and_single_use_pane_commands(cx: &mut
         Err(ControlConnectionError::NotReady)
     ));
     assert!(matches!(
-        connection.prepare_pane_channel(
+        connection.prepare_terminal_session_channel(
             ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap()
         ),
         Err(ControlConnectionError::NotReady)
@@ -422,7 +431,7 @@ fn ready_connection_should_prepare_utility_and_single_use_pane_commands(cx: &mut
 }
 
 #[gpui::test]
-fn shell_launch_should_preserve_prepared_environment_and_reject_revoked_channel(
+fn shell_launch_should_preserve_prepared_environment_and_reject_revoked_terminal_session_channel(
     cx: &mut TestAppContext,
 ) {
     use crate::platform::shell_launch::{PreparedShellLaunch, ShellLaunchFailure};
@@ -443,7 +452,7 @@ fn shell_launch_should_preserve_prepared_environment_and_reject_revoked_channel(
         .unwrap();
     let prepare = || {
         connection
-            .prepare_pane_channel(
+            .prepare_terminal_session_channel(
                 ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
             )
             .unwrap()
@@ -472,7 +481,7 @@ fn shell_launch_should_preserve_prepared_environment_and_reject_revoked_channel(
         .unwrap()
         .transition(LiveConnectionState::ShuttingDown);
     let error = PreparedShellLaunch::remote(Path::new("/tmp"), command).unwrap_err();
-    assert_eq!(error, ShellLaunchFailure::RemoteChannelUnavailable);
+    assert_eq!(error, ShellLaunchFailure::TerminalSessionChannelUnavailable);
     assert!(
         !format!("{launch:?} {error:?} {error}").contains(short_temporary_root().to_str().unwrap())
     );
@@ -543,6 +552,7 @@ fn connect_should_report_an_early_master_exit_as_reaped(cx: &mut TestAppContext)
                 && output.as_str() == "bad  config"
                 && !format!("{error:?}").contains("bad")
     ));
+    assert_eq!(backend.reap_count(), 1);
 }
 
 #[gpui::test]
@@ -666,7 +676,7 @@ fn shutdown_should_send_one_exact_exit_then_reap_and_cleanup(cx: &mut TestAppCon
 }
 
 #[gpui::test]
-fn hanging_readiness_check_should_obey_the_wall_clock_deadline_and_reap(cx: &mut TestAppContext) {
+fn hanging_readiness_check_should_obey_the_injected_deadline_and_reap(cx: &mut TestAppContext) {
     let directory = TestDirectory::new();
     let paths = directory.paths();
     let backend = Arc::new(FakeBackend::default());
@@ -729,7 +739,7 @@ fn hanging_exit_command_should_retain_ready_master_ownership(cx: &mut TestAppCon
 }
 
 #[gpui::test]
-fn shutdown_should_grace_then_terminate_then_force_the_owned_group(cx: &mut TestAppContext) {
+fn shutdown_should_escalate_from_terminate_to_kill_for_the_owned_group(cx: &mut TestAppContext) {
     let directory = TestDirectory::new();
     let paths = directory.paths();
     let backend = Arc::new(FakeBackend::with_readiness([ProcessExit::successful()]));
@@ -779,7 +789,7 @@ fn master_death_should_invalidate_stale_pane_and_utility_commands(cx: &mut TestA
         ))
         .unwrap();
     let pane = connection
-        .prepare_pane_channel(
+        .prepare_terminal_session_channel(
             ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
         )
         .unwrap();
@@ -806,7 +816,7 @@ fn master_death_should_invalidate_stale_pane_and_utility_commands(cx: &mut TestA
     );
     assert!(matches!(
         pane.take(),
-        Err(crate::ssh::command::PreparedSshPaneChannelError::Unavailable)
+        Err(crate::ssh::command::PreparedSshTerminalSessionChannelError::Unavailable)
     ));
     assert!(
         utility
@@ -816,7 +826,7 @@ fn master_death_should_invalidate_stale_pane_and_utility_commands(cx: &mut TestA
 }
 
 #[gpui::test]
-fn dropping_a_ready_connection_should_publish_closed_once(cx: &mut TestAppContext) {
+fn dropping_a_ready_connection_should_publish_closed(cx: &mut TestAppContext) {
     let directory = TestDirectory::new();
     let paths = directory.paths();
     let backend = Arc::new(FakeBackend::with_readiness([ProcessExit::successful()]));
@@ -860,7 +870,7 @@ fn socket_replacement_should_block_command_use_and_never_be_unlinked(cx: &mut Te
         ))
         .unwrap();
     let pane = connection
-        .prepare_pane_channel(
+        .prepare_terminal_session_channel(
             ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
         )
         .unwrap();
@@ -879,7 +889,7 @@ fn socket_replacement_should_block_command_use_and_never_be_unlinked(cx: &mut Te
 
     assert!(matches!(
         command.into_pane_launch_parts(),
-        Err(crate::ssh::command::PreparedSshPaneChannelError::Unavailable)
+        Err(crate::ssh::command::PreparedSshTerminalSessionChannelError::Unavailable)
     ));
     drop(connection);
     assert!(socket_path.exists());
@@ -914,14 +924,6 @@ fn dropping_a_pending_connect_future_should_reap_and_preserve_unregistered_socke
 
     let socket_path = backend.socket_path();
     assert!(backend.reap_count() == 1 && socket_path.exists());
-}
-
-#[test]
-fn timing_should_reject_unbounded_or_zero_polling() {
-    assert!(
-        ControlConnectionTiming::new(Duration::from_secs(61), Duration::from_millis(10)).is_err()
-            && ControlConnectionTiming::new(Duration::from_secs(1), Duration::ZERO).is_err()
-    );
 }
 
 #[test]

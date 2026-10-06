@@ -235,7 +235,6 @@ impl ScrollbarMetrics {
         self
     }
 
-    /// Sets the minimum thumb height and idle hide delay.
     pub fn behavior(mut self, minimum_height: Pixels, hide_delay: Duration) -> Self {
         self.minimum_thumb_height = minimum_height.max(px(1.0));
         self.hide_delay = hide_delay;
@@ -292,19 +291,17 @@ impl ScrollbarTheme {
         self
     }
 
-    /// Sets the track fill independently of its border and the scrolling thumb.
     pub fn track_background(mut self, color: Rgba) -> Self {
         self.track_background = color;
         self
     }
 
-    /// Sets complete bounded scrollbar geometry and lifecycle timing.
     pub fn metrics(mut self, metrics: ScrollbarMetrics) -> Self {
         self.metrics = metrics;
         self
     }
 
-    pub(crate) fn scaled_metrics(self, _text_scale: f32, spacing_scale: f32) -> Self {
+    pub(crate) fn scaled_spacing(self, spacing_scale: f32) -> Self {
         let spacing_scale = crate::appearance::normalized_scale(spacing_scale);
         Self {
             metrics: ScrollbarMetrics {
@@ -878,8 +875,19 @@ mod tests {
     }
 
     #[gpui::test]
-    fn changed_scroll_range_should_cancel_an_active_drag(cx: &mut TestAppContext) {
+    fn changed_scroll_range_invalidates_offsets_until_release(cx: &mut TestAppContext) {
         let scrollbar = cx.new(|_| OverlayScrollbar::<u64>::new("test-scrollbar"));
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let recorded_events = Rc::clone(&events);
+        scrollbar.update(cx, |_, cx| {
+            cx.subscribe(
+                &scrollbar,
+                move |_, _, event: &OverlayScrollbarEvent<u64>, _| {
+                    recorded_events.borrow_mut().push(*event)
+                },
+            )
+            .detach();
+        });
         scrollbar.update(cx, |scrollbar, cx| {
             let initial = ScrollMetrics::for_rows(0.0, 200.0, 100, 20, 0);
             scrollbar.reveal(initial, cx);
@@ -896,12 +904,24 @@ mod tests {
                 "offset updates must preserve the drag"
             );
 
+            assert!(scrollbar.move_drag(px(80.0), cx));
+        });
+        let before = events.borrow().clone();
+        assert_eq!(
+            before,
+            [
+                OverlayScrollbarEvent::InteractionStarted,
+                OverlayScrollbarEvent::OffsetRequested(35),
+            ]
+        );
+        scrollbar.update(cx, |scrollbar, cx| {
             scrollbar.sync(ScrollMetrics::for_rows(0.0, 240.0, 100, 20, 10), cx);
             assert!(scrollbar.drag.is_some_and(|drag| !drag.offset_valid));
             assert!(scrollbar.move_drag(px(120.0), cx));
             assert!(scrollbar.finish_drag(cx));
             assert!(scrollbar.drag.is_none());
         });
+        assert_eq!(*events.borrow(), before);
     }
 
     #[gpui::test]
@@ -1015,6 +1035,10 @@ mod tests {
         cx.run_until_parked();
 
         assert!(scrollbar.read_with(cx, |scrollbar, _| scrollbar.visible));
+        cx.executor()
+            .advance_clock(OVERLAY_SCROLLBAR_HIDE_DELAY / 2);
+        cx.run_until_parked();
+        assert!(!scrollbar.read_with(cx, |scrollbar, _| scrollbar.visible));
     }
 
     #[gpui::test]

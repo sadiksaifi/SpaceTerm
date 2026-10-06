@@ -1,4 +1,4 @@
-use crate::terminal::RemoteChannelUnavailable;
+use crate::terminal::TerminalSessionChannelUnavailable;
 use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -165,120 +165,10 @@ impl<T> RemoteRestartBatch<T> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn remote_restart_authority_rechecks_session_epoch_and_disconnection() {
-        let facts = RemotePaneFacts {
-            remote: true,
-            generation: Some(7),
-            disconnected: true,
-            epoch: 2,
-        };
-        let authority = RemoteRestartAuthority::prepare(facts, 8).unwrap();
-        assert!(authority.validate(facts).is_ok());
-        assert_eq!(
-            authority.validate(RemotePaneFacts { epoch: 3, ..facts }),
-            Err(RemotePaneLifecycleError::SessionChanged)
-        );
-        assert_eq!(
-            authority.validate(RemotePaneFacts {
-                disconnected: false,
-                ..facts
-            }),
-            Err(RemotePaneLifecycleError::NotDisconnected)
-        );
-        assert!(matches!(
-            RemoteRestartAuthority::prepare(facts, 7),
-            Err(RemotePaneLifecycleError::StaleGeneration { .. })
-        ));
-        assert!(matches!(
-            RemoteRestartAuthority::prepare(
-                RemotePaneFacts {
-                    remote: false,
-                    ..facts
-                },
-                8
-            ),
-            Err(RemotePaneLifecycleError::LocalPane)
-        ));
-    }
-
-    #[test]
-    fn remote_restart_validates_every_child_before_effects() {
-        let mut events = Vec::new();
-        let batch = RemoteRestartBatch::new(vec![1, 2, 3]);
-        let result = batch.commit(
-            3,
-            || "membership",
-            &mut events,
-            |child, _| {
-                if *child == 3 {
-                    Err("stale session")
-                } else {
-                    Ok(())
-                }
-            },
-            |child, events| events.push(child),
-        );
-        assert_eq!((result, events), (Err("stale session"), vec![]));
-    }
-
-    #[test]
-    fn remote_restart_preserves_order_and_rejects_membership_change() {
-        let mut events = Vec::new();
-        RemoteRestartBatch::new(vec![3, 1, 2])
-            .commit(
-                3,
-                || (),
-                &mut events,
-                |_, _| Ok(()),
-                |child, events| events.push(child),
-            )
-            .unwrap();
-        assert_eq!(events, vec![3, 1, 2]);
-        assert!(
-            RemoteRestartBatch::new(vec![4])
-                .commit(
-                    2,
-                    || (),
-                    &mut events,
-                    |_, _| panic!("membership before validation"),
-                    |_, _| panic!("membership before restart")
-                )
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn remote_generation_rejects_old_completion_and_close_is_terminal() {
-        let mut state = RemoteConnectionState::disconnected(3);
-        assert_eq!(
-            state.begin_reconnect(),
-            Some(RemoteConnectionReduction::Applied)
-        );
-        assert_eq!(
-            state.reduce(RemoteConnectionState::connected(3)),
-            RemoteConnectionReduction::Stale
-        );
-        assert_eq!(state.begin_close(), RemoteConnectionReduction::Applied);
-        assert_eq!(
-            state.reduce(RemoteConnectionState::connected(4)),
-            RemoteConnectionReduction::Illegal
-        );
-        assert_eq!(
-            state.begin_reconnect(),
-            Some(RemoteConnectionReduction::Illegal)
-        );
-    }
-}
-
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
 /// A typed rejection of a Remote Pane disconnect or restart lifecycle operation.
 ///
-/// Errors leave the Pane's session epoch, presentation, and input state unchanged.
+/// Errors leave the Pane's Terminal Session epoch, presentation, and input state unchanged.
 pub(crate) enum RemotePaneLifecycleError {
     #[error("the Pane does not own a remote Terminal Session")]
     LocalPane,
@@ -286,10 +176,10 @@ pub(crate) enum RemotePaneLifecycleError {
     StaleGeneration { current: u64, received: u64 },
     #[error("the remote Pane is not disconnected")]
     NotDisconnected,
-    #[error("the prepared remote restart no longer matches the Pane session epoch")]
-    SessionChanged,
+    #[error("the prepared remote restart no longer matches the Pane's Terminal Session epoch")]
+    TerminalSessionChanged,
     #[error(transparent)]
-    ChannelUnavailable(#[from] RemoteChannelUnavailable),
+    ChannelUnavailable(#[from] TerminalSessionChannelUnavailable),
 }
 
 #[derive(Clone, Copy)]
@@ -356,12 +246,122 @@ impl RemoteRestartAuthority {
 
     pub(crate) fn validate(&self, facts: RemotePaneFacts) -> Result<(), RemotePaneLifecycleError> {
         if facts.epoch != self.expected_epoch {
-            return Err(RemotePaneLifecycleError::SessionChanged);
+            return Err(RemotePaneLifecycleError::TerminalSessionChanged);
         }
         facts.validate_successor(self.generation)
     }
 
     pub(crate) const fn generation(&self) -> u64 {
         self.generation
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_restart_authority_rechecks_terminal_session_epoch_and_disconnection() {
+        let facts = RemotePaneFacts {
+            remote: true,
+            generation: Some(7),
+            disconnected: true,
+            epoch: 2,
+        };
+        let authority = RemoteRestartAuthority::prepare(facts, 8).unwrap();
+        assert!(authority.validate(facts).is_ok());
+        assert_eq!(
+            authority.validate(RemotePaneFacts { epoch: 3, ..facts }),
+            Err(RemotePaneLifecycleError::TerminalSessionChanged)
+        );
+        assert_eq!(
+            authority.validate(RemotePaneFacts {
+                disconnected: false,
+                ..facts
+            }),
+            Err(RemotePaneLifecycleError::NotDisconnected)
+        );
+        assert!(matches!(
+            RemoteRestartAuthority::prepare(facts, 7),
+            Err(RemotePaneLifecycleError::StaleGeneration { .. })
+        ));
+        assert!(matches!(
+            RemoteRestartAuthority::prepare(
+                RemotePaneFacts {
+                    remote: false,
+                    ..facts
+                },
+                8
+            ),
+            Err(RemotePaneLifecycleError::LocalPane)
+        ));
+    }
+
+    #[test]
+    fn remote_restart_validates_every_child_before_effects() {
+        let mut events = Vec::new();
+        let batch = RemoteRestartBatch::new(vec![1, 2, 3]);
+        let result = batch.commit(
+            3,
+            || "membership",
+            &mut events,
+            |child, _| {
+                if *child == 3 {
+                    Err("stale Terminal Session")
+                } else {
+                    Ok(())
+                }
+            },
+            |child, events| events.push(child),
+        );
+        assert_eq!((result, events), (Err("stale Terminal Session"), vec![]));
+    }
+
+    #[test]
+    fn remote_restart_preserves_order_and_rejects_membership_change() {
+        let mut events = Vec::new();
+        RemoteRestartBatch::new(vec![3, 1, 2])
+            .commit(
+                3,
+                || (),
+                &mut events,
+                |_, _| Ok(()),
+                |child, events| events.push(child),
+            )
+            .unwrap();
+        assert_eq!(events, vec![3, 1, 2]);
+        assert!(
+            RemoteRestartBatch::new(vec![4])
+                .commit(
+                    2,
+                    || (),
+                    &mut events,
+                    |_, _| panic!("membership before validation"),
+                    |_, _| panic!("membership before restart")
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn remote_generation_rejects_old_completion_and_close_is_terminal() {
+        let mut state = RemoteConnectionState::disconnected(3);
+        assert_eq!(
+            state.begin_reconnect(),
+            Some(RemoteConnectionReduction::Applied)
+        );
+        assert_eq!(
+            state.reduce(RemoteConnectionState::connected(3)),
+            RemoteConnectionReduction::Stale
+        );
+        assert_eq!(state.begin_close(), RemoteConnectionReduction::Applied);
+        assert_eq!(
+            state.reduce(RemoteConnectionState::connected(4)),
+            RemoteConnectionReduction::Illegal
+        );
+        assert_eq!(
+            state.begin_reconnect(),
+            Some(RemoteConnectionReduction::Illegal)
+        );
     }
 }

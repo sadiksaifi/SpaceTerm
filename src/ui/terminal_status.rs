@@ -1,15 +1,5 @@
-//! The Terminal glyph a Pane Caption and a Tab item present beside a Terminal's title.
-//!
-//! Both surfaces describe the same Terminal Session, so the glyph's status treatment is decided
-//! here once. The glyph slot carries the status: reported work with a known percentage keeps the
-//! glyph and takes the busy color, work whose completion is unknown takes the frame spinner, other
-//! work states use distinct shapes and semantic colors, and attention blinks the mark in the
-//! warning color. Each state comes from sanitized Terminal Metadata. The metadata owner observes
-//! reported title animation; loaders drawn inside terminal cells remain terminal content.
-//!
-//! Every mark inherits its color rather than taking the installed progress accent, because the
-//! status color is resolved here against the exact Pane Caption or Tab surface the glyph rests on
-//! and a Pane Caption's surface can be colored by the program running in it.
+//! The Terminal glyph and status treatment shared by a Pane Caption and a Tab item.
+//! Marks inherit their color because a running program can color the Pane Caption surface beneath.
 
 use std::time::Duration;
 
@@ -31,21 +21,12 @@ pub(crate) use crate::terminal::title::reported_title;
 /// How long an attention blink holds each of its two colors.
 const BLINK_STEP: Duration = Duration::from_millis(500);
 /// How many times the glyph blinks before it rests with an additive unread badge.
-///
-/// Blinking draws the eye when attention arrives. The settled badge keeps unread state present
-/// without replacing the underlying work-state shape.
 const BLINKS: u32 = 4;
-/// Names the Session's reported work for the frame spinner.
-///
-/// The spinner never paints this, and it stays content-free: nothing a program reported reaches it.
+/// Names the Terminal Session's reported work for the frame spinner. It stays content-free.
 const PROGRESS_NAME: &str = "terminal progress";
 
 /// Whether the active Chrome typography and its selected fallbacks can draw every base in a
-/// reported glyph.
-///
-/// Shape first so the text system chooses the same fallback run painting will use. Then ask the
-/// selected fonts for each base character; an unassigned or unsupported scalar has no glyph and
-/// leaves the Session's own icon in the slot.
+/// reported glyph. Shaping first makes the text system choose the fallback run painting will use.
 pub(crate) fn reported_glyph_is_drawable(
     glyph: &str,
     font: &gpui::Font,
@@ -106,10 +87,8 @@ fn reported_glyph(glyph: &str, size: Pixels) -> AnyElement {
         .into_any_element()
 }
 
-/// The OSC 9;4 status a Terminal Session last reported, as host chrome presents it.
-///
-/// A Session whose metadata has gone stale reports nothing, so an exited program never leaves a
-/// loader behind in its Pane or Tab.
+/// The OSC 9;4 status a Terminal Session last reported, as host chrome presents it. Stale metadata
+/// reports nothing, so an exited program never leaves a loader behind.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum TerminalProgress {
     #[default]
@@ -187,14 +166,8 @@ pub(crate) struct StatusGlyph {
 }
 
 impl StatusGlyph {
-    /// Draws the glyph in a square of its size.
-    ///
-    /// A glyph with no status inherits the surrounding text color, so it keeps following the host's
-    /// active, inactive, and hovered paints. Work states use distinct shapes and semantic colors:
-    /// work with a known percentage keeps the glyph in the busy color, and work whose completion is
-    /// unknown takes the frame spinner. Attention blinks the mark, then settles as an additive badge
-    /// so the work shape remains. Under Differentiate Without Color, known-percentage work takes the
-    /// determinate ring and the attention badge shows from the first blink.
+    /// Draws the glyph in a square of its size. Under Differentiate Without Color, known-percentage
+    /// work takes the determinate ring and the attention badge shows from the first blink.
     pub(crate) fn render(self) -> AnyElement {
         let Self {
             icon,
@@ -224,8 +197,8 @@ impl StatusGlyph {
             progress,
             colors,
             differentiate_without_color,
-            // The animation hangs off this Session's own glyph identity, so one spinner never
-            // shares its frame state with another Session's.
+            // The animation hangs off this Terminal Session's own glyph identity, so one spinner
+            // never shares its frame state with another Terminal Session's.
             id: ElementId::NamedChild(std::sync::Arc::new(id.clone()), "progress".into()),
             selector: format!("{selector_prefix}-progress"),
         };
@@ -313,9 +286,6 @@ fn treatment(progress: TerminalProgress, blinked: bool) -> (Tint, f32) {
 }
 
 /// Everything the glyph's one slot draws, apart from the blink phase.
-///
-/// The blink rebuilds the mark twice a second, so what survives a blink is held here and only the
-/// phase is passed in.
 struct Mark {
     icon: IconName,
     /// The glyph the program reported for itself, which takes the place of `icon`.
@@ -332,7 +302,7 @@ struct Mark {
 
 impl Mark {
     /// The mark for this status: the frame spinner, a distinct semantic shape, the program's
-    /// reported glyph, or the Session's own glyph, all within the same slot.
+    /// reported glyph, or the Terminal Session's own glyph, all within the same slot.
     fn render(self, blinked: bool) -> AnyElement {
         let Self {
             icon,
@@ -408,11 +378,8 @@ fn status_shape(progress: TerminalProgress, differentiate_without_color: bool) -
     }
 }
 
-/// Rebuilds its child from a step that advances on a coarse clock while it stays on screen.
-///
-/// Only the owning view is notified on each step, at the step's pace rather than the display's.
-/// The clock stops after `limit` steps and then renders `None`, so a settled animation costs
-/// nothing more. The clock restarts when the element leaves the screen and returns.
+/// Rebuilds its child from a step that advances on a coarse clock while it stays on screen. The
+/// clock stops after `limit` steps and restarts when the element leaves the screen and returns.
 struct Stepped {
     id: ElementId,
     interval: Duration,
@@ -615,7 +582,7 @@ mod tests {
         assert!(cx.debug_bounds("shape-attention-badge").is_some());
     }
 
-    /// A program's own glyph leaves the title and takes the Session's glyph slot instead.
+    /// A program's own glyph leaves the title and takes the Terminal Session's glyph slot instead.
     #[test]
     fn a_title_should_give_up_the_glyph_the_program_draws_at_its_front() {
         for (reported, glyph, words) in [
@@ -639,7 +606,7 @@ mod tests {
                 "Claude Code",
             ),
             ("🇺🇸 build", Some("🇺🇸"), "build"),
-            // A Private-Use glyph would paint as a box, so the Session keeps its own.
+            // A Private-Use glyph would paint as a box, so the Terminal Session keeps its own.
             ("\u{f0316} nvim", None, "nvim"),
             // Structural candidates are retained until the active font's shaper decides whether
             // they occupy one glyph slot.
@@ -648,7 +615,7 @@ mod tests {
                 Some("\u{2726}\u{2726}"),
                 "two frames",
             ),
-            // Nothing a Session would be named after is a glyph.
+            // Nothing a Terminal Session would be named after is a glyph.
             ("zsh", None, "zsh"),
             ("~ zsh", None, "~ zsh"),
             ("~/Projects/api", None, "~/Projects/api"),
@@ -683,7 +650,7 @@ mod tests {
         ));
     }
 
-    /// Each status recolors the glyph, a paused one dims it, and a blink shows attention over all.
+    /// Each status recolors the glyph, and a blink shows attention over all.
     #[test]
     fn glyph_should_take_the_color_of_its_status() {
         for (progress, resting) in [

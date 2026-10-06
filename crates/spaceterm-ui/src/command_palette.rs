@@ -58,7 +58,7 @@ pub enum CommandPaletteKeybindingProfile {
     Linux,
 }
 
-/// Installs the platform-specific key equivalents for `profile`.
+/// Installs the platform-specific bindings for `profile`.
 pub fn install_command_palette_keybindings(cx: &mut App, profile: CommandPaletteKeybindingProfile) {
     match profile {
         CommandPaletteKeybindingProfile::MacOs => cx.bind_keys([
@@ -463,17 +463,14 @@ pub struct CommandPaletteActivation<I> {
 }
 
 impl<I> CommandPaletteActivation<I> {
-    /// Returns the caller-owned item identity.
     pub fn item_id(&self) -> &I {
         &self.item_id
     }
 
-    /// Returns the input path that activated the item.
     pub fn source(&self) -> CommandPaletteActivationSource {
         self.source
     }
 
-    /// Consumes the activation and returns its caller-owned item identity.
     pub fn into_item_id(self) -> I {
         self.item_id
     }
@@ -535,36 +532,6 @@ struct PendingCommandPaletteOpen {
     transferred_focus: bool,
 }
 
-/// Monotonic identity for the current command-palette query.
-#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
-pub struct CommandPaletteGeneration(u64);
-
-impl CommandPaletteGeneration {
-    /// Returns the opaque generation as a diagnostic integer.
-    pub fn value(self) -> u64 {
-        self.0
-    }
-}
-
-/// A query snapshot that callers may use to feed asynchronous results back to the palette.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CommandPaletteQuery {
-    text: String,
-    generation: CommandPaletteGeneration,
-}
-
-impl CommandPaletteQuery {
-    /// Returns the complete single-line query.
-    pub fn text(&self) -> &str {
-        &self.text
-    }
-
-    /// Returns the generation that results must match.
-    pub fn generation(&self) -> CommandPaletteGeneration {
-        self.generation
-    }
-}
-
 /// Typed events emitted by a [`CommandPalette`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CommandPaletteEvent<I> {
@@ -572,8 +539,8 @@ pub enum CommandPaletteEvent<I> {
     Lifecycle(CommandPaletteLifecycleEvent),
     /// An enabled semantic item was activated.
     Activated(CommandPaletteActivation<I>),
-    /// The query changed or a refresh was explicitly requested.
-    QueryChanged(CommandPaletteQuery),
+    /// The query changed.
+    QueryChanged(String),
     /// A search-line control was activated.
     HeaderAction(SharedString),
     /// An empty-state action was activated by pointer, Return, or its own keyboard focus.
@@ -625,19 +592,16 @@ impl CommandPaletteAction {
         }
     }
 
-    /// Controls whether the control can activate.
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
         self
     }
 
-    /// Adds a stable selector used by GPUI interaction tests.
     pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
         self.debug_selector = Some(selector.into());
         self
     }
 
-    /// Returns the caller-owned identity reported on activation.
     pub fn id(&self) -> &SharedString {
         &self.id
     }
@@ -645,11 +609,8 @@ impl CommandPaletteAction {
 
 /// The search line's primary command, presented as a labeled button at its trailing edge.
 ///
-/// The confirm key activates it while it is enabled, and so does Return while no result is
-/// presented. Related commands join the button as a menu segment, which stays available while the
-/// action is disabled. Activating the action or a menu item emits
-/// [`CommandPaletteEvent::HeaderAction`] with the caller's identity and leaves the palette open;
-/// the caller decides what follows.
+/// Activating it or one of its menu items emits [`CommandPaletteEvent::HeaderAction`] and leaves
+/// the palette open.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommandPalettePrimaryAction {
     id: SharedString,
@@ -682,7 +643,6 @@ impl CommandPalettePrimaryAction {
         self
     }
 
-    /// Controls whether the action can activate.
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
         self
@@ -698,13 +658,11 @@ impl CommandPalettePrimaryAction {
         self
     }
 
-    /// Controls whether the action's menu can open, independently of the action itself.
     pub fn menu_disabled(mut self, disabled: bool) -> Self {
         self.menu_disabled = disabled;
         self
     }
 
-    /// Adds a stable selector used by GPUI interaction tests.
     pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
         self.debug_selector = Some(selector.into());
         self
@@ -734,19 +692,16 @@ impl CommandPaletteEmptyAction {
         }
     }
 
-    /// Controls whether the action can activate.
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
         self
     }
 
-    /// Adds a stable selector used by GPUI interaction tests.
     pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
         self.debug_selector = Some(selector.into());
         self
     }
 
-    /// Returns the caller-owned identity reported on activation.
     pub fn id(&self) -> &SharedString {
         &self.id
     }
@@ -794,12 +749,10 @@ impl CommandPaletteEmpty {
         self
     }
 
-    /// Returns the title.
     pub fn title(&self) -> &str {
         &self.title
     }
 
-    /// Returns the optional description.
     pub fn description_text(&self) -> Option<&str> {
         self.description.as_deref()
     }
@@ -854,26 +807,6 @@ pub struct CommandPaletteItem<I> {
     debug_selector: Option<String>,
 }
 
-/// A query-aware provider for the command palette's pinned fallback row.
-///
-/// The provider receives the exact editor text. Its typed item is appended after ordinary matches
-/// without participating in filtering or scoring.
-#[derive(Clone)]
-pub struct CommandPaletteFallback<I>(CommandPaletteFallbackProvider<I>);
-
-type CommandPaletteFallbackProvider<I> = Rc<dyn Fn(&str) -> CommandPaletteItem<I>>;
-
-impl<I> CommandPaletteFallback<I> {
-    /// Creates a provider whose row is rebuilt whenever the accepted query changes.
-    pub fn new(provider: impl Fn(&str) -> CommandPaletteItem<I> + 'static) -> Self {
-        Self(Rc::new(provider))
-    }
-
-    fn item(&self, query: &str) -> CommandPaletteItem<I> {
-        (self.0)(query)
-    }
-}
-
 impl<I> CommandPaletteItem<I> {
     /// Creates an enabled item. The label is also its logical accessibility name.
     pub fn new(id: I, label: impl Into<SharedString>) -> Self {
@@ -893,7 +826,6 @@ impl<I> CommandPaletteItem<I> {
         }
     }
 
-    /// Adds one line of secondary descriptive text.
     pub fn description(mut self, value: impl Into<SharedString>) -> Self {
         self.description = Some(value.into());
         self
@@ -926,7 +858,6 @@ impl<I> CommandPaletteItem<I> {
         self
     }
 
-    /// Controls whether navigation and activation may reach this item.
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
         self
@@ -946,39 +877,28 @@ impl<I> CommandPaletteItem<I> {
         self
     }
 
-    /// Adds one standardized trailing accessory.
     pub fn trailing(mut self, accessory: CommandPaletteAccessory) -> Self {
         self.trailing = Some(accessory);
         self
     }
 
-    /// Adds a stable selector used by GPUI interaction tests.
     pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
         self.debug_selector = Some(selector.into());
         self
     }
 
-    /// Returns the caller-owned identity.
     pub fn id(&self) -> &I {
         &self.id
     }
 
-    /// Returns the primary label.
     pub fn label(&self) -> &str {
         self.label.as_ref()
     }
 
-    /// Returns the optional description.
     pub fn description_text(&self) -> Option<&str> {
         self.description.as_ref().map(AsRef::as_ref)
     }
 
-    /// Returns the optional grouping section.
-    pub fn section_text(&self) -> Option<&str> {
-        self.section.as_ref().map(AsRef::as_ref)
-    }
-
-    /// Returns whether navigation and activation skip this item.
     pub fn is_disabled(&self) -> bool {
         self.disabled
     }
@@ -1096,7 +1016,6 @@ impl CommandPalettePaint {
         }
     }
 
-    /// Installs complete semantic row states.
     pub fn rows(mut self, rows: crate::ListRowPaints) -> Self {
         self.rows = Some(rows);
         self
@@ -1160,7 +1079,6 @@ impl CommandPalettePaint {
         )
     }
 
-    /// Sets normal and disabled icon colors independently of result text.
     pub fn icons(mut self, normal: Rgba, disabled: Rgba) -> Self {
         self.icon_foreground = normal;
         self.disabled_icon_foreground = disabled;
@@ -1173,13 +1091,11 @@ impl CommandPalettePaint {
         self
     }
 
-    /// Sets the foreground of a pointer-highlighted result independently of keyboard selection.
     pub fn hover_foreground(mut self, color: Rgba) -> Self {
         self.hover_foreground = color;
         self
     }
 
-    /// Sets the section heading foreground.
     pub fn section_foreground(mut self, color: Rgba) -> Self {
         self.section_foreground = color;
         self
@@ -1278,20 +1194,17 @@ impl CommandPaletteMetrics {
         self
     }
 
-    /// Sets the maximum panel height and top offset.
     pub fn panel_geometry(mut self, maximum_height: Pixels, top_offset: Pixels) -> Self {
         self.maximum_height = maximum_height;
         self.top_offset = top_offset;
         self
     }
 
-    /// Sets the minimum panel distance from viewport edges.
     pub fn viewport_margin(mut self, margin: Pixels) -> Self {
         self.viewport_margin = margin;
         self
     }
 
-    /// Sets the editor height.
     pub fn editor_height(mut self, input_height: Pixels) -> Self {
         self.input_height = input_height;
         self
@@ -1310,24 +1223,14 @@ impl CommandPaletteMetrics {
         self
     }
 
-    /// Sets the gap between a row's label line and its description line.
     pub fn row_line_gap(mut self, gap: Pixels) -> Self {
         self.row_line_gap = gap;
         self
     }
 
-    /// Sets section heading and section separator heights.
     pub fn section_spacing(mut self, section_height: Pixels, separator_height: Pixels) -> Self {
         self.section_height = section_height;
         self.separator_height = separator_height;
-        self
-    }
-
-    /// Sets the empty state's vertical padding, title-to-description gap, and text-to-actions gap.
-    pub fn empty_spacing(mut self, padding: Pixels, line_gap: Pixels, actions_gap: Pixels) -> Self {
-        self.empty_padding = padding;
-        self.empty_line_gap = line_gap;
-        self.empty_actions_gap = actions_gap;
         self
     }
 
@@ -1339,22 +1242,8 @@ impl CommandPaletteMetrics {
         self
     }
 
-    /// Sets the group-heading size independently from row descriptions.
     pub fn section_font_size(mut self, size: Pixels) -> Self {
         self.section_size = size;
-        self
-    }
-
-    /// Sets the padded status accessory shape.
-    pub fn accessory_shape(
-        mut self,
-        padding: Pixels,
-        line_padding: Pixels,
-        radius: Pixels,
-    ) -> Self {
-        self.accessory_padding = padding;
-        self.accessory_line_padding = line_padding;
-        self.accessory_radius = radius;
         self
     }
 
@@ -1379,45 +1268,37 @@ impl CommandPaletteMetrics {
         self
     }
 
-    /// Sets the search-line glyph size independently of result-row icons.
     pub fn input_icon_size(mut self, size: Pixels) -> Self {
         self.input_icon_size = size;
         self
     }
 
-    fn scaled(self, text_scale: f32, spacing_scale: f32) -> Self {
-        let width_scale = crate::appearance::normalized_scale(text_scale)
-            .max(crate::appearance::normalized_scale(spacing_scale));
-        let icon_size = crate::appearance::scale_metric(self.icon_size, text_scale);
+    fn scaled(self, spacing_scale: f32) -> Self {
+        let width_scale = crate::appearance::normalized_scale(spacing_scale).max(1.0);
         Self {
             panel_width: self.panel_width * width_scale,
             maximum_height: crate::appearance::scale_metric(self.maximum_height, spacing_scale),
             top_offset: crate::appearance::scale_metric(self.top_offset, spacing_scale),
             viewport_margin: crate::appearance::scale_metric(self.viewport_margin, spacing_scale),
-            panel_padding: self.panel_padding,
             input_height: crate::appearance::scale_line_box(
                 self.input_height,
                 self.body_line_height,
-                text_scale,
                 spacing_scale,
             ),
             row_height: crate::appearance::scale_line_box(
                 self.row_height,
                 self.body_line_height + self.secondary_line_height,
-                text_scale,
                 spacing_scale,
             ),
             single_line_row_height: crate::appearance::scale_line_box(
                 self.single_line_row_height,
                 self.body_line_height,
-                text_scale,
                 spacing_scale,
             ),
             row_line_gap: crate::appearance::scale_metric(self.row_line_gap, spacing_scale),
             section_height: crate::appearance::scale_line_box(
                 self.section_height,
                 self.section_line_height,
-                text_scale,
                 spacing_scale,
             ),
             separator_height: crate::appearance::scale_metric(self.separator_height, spacing_scale),
@@ -1436,15 +1317,8 @@ impl CommandPaletteMetrics {
                 spacing_scale,
             ),
             leading_width: crate::appearance::scale_metric(self.leading_width, spacing_scale)
-                .max(icon_size),
+                .max(self.icon_size),
             gap: crate::appearance::scale_metric(self.gap, spacing_scale),
-            corner_radius: self.corner_radius,
-            border_width: self.border_width,
-            input_size: crate::appearance::scale_metric(self.input_size, text_scale),
-            input_icon_size: crate::appearance::scale_metric(self.input_icon_size, text_scale),
-            label_size: crate::appearance::scale_metric(self.label_size, text_scale),
-            secondary_size: crate::appearance::scale_metric(self.secondary_size, text_scale),
-            section_size: crate::appearance::scale_metric(self.section_size, text_scale),
             accessory_padding: crate::appearance::scale_metric(
                 self.accessory_padding,
                 spacing_scale,
@@ -1453,21 +1327,7 @@ impl CommandPaletteMetrics {
                 self.accessory_line_padding,
                 spacing_scale,
             ),
-            accessory_radius: self.accessory_radius,
-            body_line_height: crate::appearance::scale_metric(self.body_line_height, text_scale),
-            secondary_line_height: crate::appearance::scale_metric(
-                self.secondary_line_height,
-                text_scale,
-            ),
-            section_line_height: crate::appearance::scale_metric(
-                self.section_line_height,
-                text_scale,
-            ),
-            icon_size,
-            icon_baseline_center: crate::appearance::scale_metric(
-                self.icon_baseline_center,
-                text_scale,
-            ),
+            ..self
         }
     }
 
@@ -1479,7 +1339,6 @@ impl CommandPaletteMetrics {
         }
     }
 
-    /// Returns the empty state's icon size, which leads the title as its most prominent element.
     fn empty_icon_size(&self) -> Pixels {
         self.body_line_height * 2.0
     }
@@ -1493,7 +1352,6 @@ impl CommandPaletteMetrics {
         self.panel_padding + self.horizontal_padding
     }
 
-    /// Returns the concentric radius for an inset row inside the outer panel.
     fn row_corner_radius(&self) -> Pixels {
         (self.corner_radius - self.panel_padding).max(px(0.0))
     }
@@ -1521,9 +1379,9 @@ impl CommandPaletteTheme {
         }
     }
 
-    pub(crate) fn scaled_metrics(self, text_scale: f32, spacing_scale: f32) -> Self {
+    pub(crate) fn scaled_spacing(self, spacing_scale: f32) -> Self {
         Self {
-            metrics: self.metrics.scaled(text_scale, spacing_scale),
+            metrics: self.metrics.scaled(spacing_scale),
             ..self
         }
     }
@@ -1546,17 +1404,9 @@ fn command_palette_theme(cx: &App) -> CommandPaletteTheme {
 }
 
 /// A reusable entity-backed command palette with typed semantic items.
-///
-/// Its [`TextInput`] supplies native editable-text semantics. The API requires logical row labels
-/// and keeps arbitrary row painting outside the accessibility seam. Result rows do not yet publish
-/// listbox and option nodes to the native accessibility tree.
 pub struct CommandPalette<I: Clone + Eq + 'static> {
     empty: CommandPaletteEmpty,
     items: Rc<[CommandPaletteItem<I>]>,
-    presented_items: Rc<[CommandPaletteItem<I>]>,
-    fallback: Option<CommandPaletteFallback<I>>,
-    fallback_item_id: Option<I>,
-    ordinary_match_count: usize,
     matches: Rc<[CommandPaletteMatch]>,
     presented_results: Rc<PresentedResults>,
     leading_columns: LeadingColumns,
@@ -1571,7 +1421,6 @@ pub struct CommandPalette<I: Clone + Eq + 'static> {
     selected: Option<I>,
     preferred: Option<I>,
     query: String,
-    generation: CommandPaletteGeneration,
     /// Whether the caller's results are still arriving.
     loading: bool,
     loading_presentation: LoadingPresentation,
@@ -1756,33 +1605,6 @@ mod presented_results {
             self.rows
                 .iter()
                 .position(|row| row.item_position() == Some(position))
-        }
-
-        #[cfg(test)]
-        pub(super) fn row_at_y(
-            &self,
-            content_y: Pixels,
-            metrics: CommandPaletteMetrics,
-        ) -> Option<(usize, &PaletteRow)> {
-            if content_y < px(0.0) {
-                return None;
-            }
-            let mut row_top = px(0.0);
-            self.rows.iter().enumerate().find(|(_, row)| {
-                let row_bottom = row_top + row.height(metrics);
-                let contains = content_y >= row_top && content_y < row_bottom;
-                row_top = row_bottom;
-                contains
-            })
-        }
-
-        #[cfg(test)]
-        pub(super) fn item_at_y(
-            &self,
-            content_y: Pixels,
-            metrics: CommandPaletteMetrics,
-        ) -> Option<usize> {
-            self.row_at_y(content_y, metrics)?.1.item_position()
         }
 
         pub(super) fn page_target(
@@ -1997,11 +1819,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             ListState::new(presented_results.len(), ListAlignment::Top, px(0.0)).measure_all();
         let mut palette = Self {
             empty: CommandPaletteEmpty::new("No matching items"),
-            presented_items: Rc::clone(&items),
             items,
-            fallback: None,
-            fallback_item_id: None,
-            ordinary_match_count: matches.len(),
             matches,
             presented_results,
             leading_columns,
@@ -2016,7 +1834,6 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             selected,
             preferred: None,
             query: String::new(),
-            generation: CommandPaletteGeneration::default(),
             loading: false,
             loading_presentation: LoadingPresentation::Settled,
             loading_timer: None,
@@ -2100,20 +1917,6 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         cx: &mut gpui::Context<Self>,
     ) {
         self.primary_action = action;
-        cx.notify();
-    }
-
-    /// Pins one query-aware item after all ordinary matches.
-    ///
-    /// The fallback remains present for every query. Ordinary matches retain initial-selection
-    /// precedence; with no ordinary match, an enabled fallback becomes selected.
-    pub fn set_fallback(
-        &mut self,
-        fallback: Option<CommandPaletteFallback<I>>,
-        cx: &mut gpui::Context<Self>,
-    ) {
-        self.fallback = fallback;
-        self.recompute_matches();
         cx.notify();
     }
 
@@ -2307,7 +2110,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
                 CommandPaletteLifecycleEvent::Opened,
             ));
         }
-        self.request_refresh(cx);
+        self.emit_query(cx);
         cx.notify();
         true
     }
@@ -2341,11 +2144,6 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         {
             self.input.read(cx).focus_handle().focus(window, cx);
         }
-    }
-
-    /// Returns whether the query editor currently holds keyboard focus.
-    pub fn editor_is_focused(&self, window: &Window, cx: &gpui::App) -> bool {
-        self.input.read(cx).focus_handle().is_focused(window)
     }
 
     /// Returns whether [`Self::set_query`] would preserve `query` byte-for-byte.
@@ -2385,27 +2183,18 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         Some(CommandPaletteReplacementFocus { restore_focus })
     }
 
-    /// Returns whether the transient overlay is open.
     pub fn is_open(&self) -> bool {
         self.open
     }
 
-    /// Returns the current editor query.
     pub fn query(&self) -> &str {
         &self.query
     }
 
-    /// Returns the current query generation.
-    pub fn generation(&self) -> CommandPaletteGeneration {
-        self.generation
-    }
-
-    /// Returns the selected enabled item identity, if any.
     pub fn selected_item_id(&self) -> Option<&I> {
         self.selected.as_ref()
     }
 
-    /// Returns the caption presented after the last result, if any.
     pub fn results_note(&self) -> Option<&SharedString> {
         self.results_note.as_ref()
     }
@@ -2424,7 +2213,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         cx.notify();
     }
 
-    /// Sets the current loading presentation without changing items or generation.
+    /// Sets the current loading presentation without changing items.
     pub fn set_loading(&mut self, loading: bool, cx: &mut gpui::Context<Self>) {
         if self.loading != loading {
             self.set_loading_state(loading, cx);
@@ -2510,45 +2299,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             .update(cx, |input, cx| input.set_editable(editable, cx));
     }
 
-    /// Requests a refresh for the current query and returns its new generation.
-    pub fn refresh(&mut self, cx: &mut gpui::Context<Self>) -> CommandPaletteGeneration {
-        self.set_loading_state(true, cx);
-        let generation = self.request_refresh(cx);
-        cx.notify();
-        generation
-    }
-
-    /// Applies items only when `generation` still describes the current query.
-    ///
-    /// Returns `false` without changing state for a stale asynchronous result.
-    pub fn apply_items(
-        &mut self,
-        generation: CommandPaletteGeneration,
-        items: Vec<CommandPaletteItem<I>>,
-        cx: &mut gpui::Context<Self>,
-    ) -> bool {
-        if generation != self.generation {
-            return false;
-        }
-        self.set_items(items, cx);
-        true
-    }
-
-    /// Sets loading only when `generation` still describes the current query.
-    pub fn set_loading_for_generation(
-        &mut self,
-        generation: CommandPaletteGeneration,
-        loading: bool,
-        cx: &mut gpui::Context<Self>,
-    ) -> bool {
-        if generation != self.generation {
-            return false;
-        }
-        self.set_loading(loading, cx);
-        true
-    }
-
-    /// Replaces the editor query and emits one generation-bearing query event.
+    /// Replaces the editor query and emits one query event.
     pub fn set_query(&mut self, query: impl Into<String>, cx: &mut gpui::Context<Self>) {
         self.input
             .update(cx, |input, cx| input.set_value(query.into(), cx));
@@ -2563,53 +2314,18 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         self.query = query;
         self.set_loading_state(false, cx);
         self.recompute_matches();
-        self.request_refresh(cx);
+        self.emit_query(cx);
         cx.notify();
     }
 
-    fn request_refresh(&mut self, cx: &mut gpui::Context<Self>) -> CommandPaletteGeneration {
-        self.generation.0 = self.generation.0.wrapping_add(1);
-        let generation = self.generation;
-        cx.emit(CommandPaletteEvent::QueryChanged(CommandPaletteQuery {
-            text: self.query.clone(),
-            generation,
-        }));
-        generation
+    fn emit_query(&self, cx: &mut gpui::Context<Self>) {
+        cx.emit(CommandPaletteEvent::QueryChanged(self.query.clone()));
     }
 
     fn recompute_matches(&mut self) {
         self.pointer_press = None;
-        let selected_was_fallback = self
-            .fallback_item_id
-            .as_ref()
-            .is_some_and(|id| self.selected.as_ref() == Some(id));
-        let mut presented = self.items.to_vec();
-        let mut matches = match_command_palette_items(&self.items, &self.query, self.matching);
-        self.ordinary_match_count = matches.len();
-        if let Some(item) = self
-            .fallback
-            .as_ref()
-            .map(|fallback| fallback.item(&self.query))
-            && !presented.iter().any(|existing| existing.id == item.id)
-        {
-            let item_index = presented.len();
-            self.fallback_item_id = Some(item.id.clone());
-            presented.push(item);
-            matches.push(CommandPaletteMatch {
-                item_index,
-                score: i64::MIN,
-                label_highlights: Vec::new(),
-                description_highlights: Vec::new(),
-            });
-        } else {
-            self.fallback_item_id = None;
-        }
-        self.presented_items = presented.into();
-        self.matches = matches.into();
-        self.leading_columns = palette_leading_columns(&self.presented_items);
-        if selected_was_fallback && self.ordinary_match_count > 0 {
-            self.selected = None;
-        }
+        self.matches = match_command_palette_items(&self.items, &self.query, self.matching).into();
+        self.leading_columns = palette_leading_columns(&self.items);
         self.present_results();
         self.repair_selection();
         self.selection_reveal_pending = true;
@@ -2617,7 +2333,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
 
     fn present_results(&mut self) {
         self.presented_results = Rc::new(PresentedResults::new(
-            &self.presented_items,
+            &self.items,
             &self.matches,
             self.results_note.as_ref(),
         ));
@@ -2646,7 +2362,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
     fn repair_selection(&mut self) {
         let stable = self.selected.as_ref().is_some_and(|selected| {
             self.matches.iter().any(|matched| {
-                self.presented_items
+                self.items
                     .get(matched.item_index)
                     .is_some_and(|item| !item.disabled && item.id == *selected)
             })
@@ -2656,15 +2372,13 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         }
         self.selected = self.preferred.as_ref().and_then(|preferred| {
             self.matches.iter().find_map(|matched| {
-                self.presented_items
-                    .get(matched.item_index)
-                    .and_then(|item| {
-                        (!item.disabled && item.id == *preferred).then(|| item.id.clone())
-                    })
+                self.items.get(matched.item_index).and_then(|item| {
+                    (!item.disabled && item.id == *preferred).then(|| item.id.clone())
+                })
             })
         });
         if self.selected.is_none() {
-            self.selected = first_enabled_id(&self.presented_items, &self.matches);
+            self.selected = first_enabled_id(&self.items, &self.matches);
         }
     }
 
@@ -2751,7 +2465,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             .iter()
             .enumerate()
             .filter_map(|(position, matched)| {
-                self.presented_items
+                self.items
                     .get(matched.item_index)
                     .is_some_and(|item| !item.disabled)
                     .then_some(position)
@@ -2762,7 +2476,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
     fn selected_match_position(&self) -> Option<usize> {
         let selected = self.selected.as_ref()?;
         self.matches.iter().position(|matched| {
-            self.presented_items
+            self.items
                 .get(matched.item_index)
                 .is_some_and(|item| item.id == *selected)
         })
@@ -2772,7 +2486,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         let next = self
             .matches
             .get(position)
-            .and_then(|matched| self.presented_items.get(matched.item_index))
+            .and_then(|matched| self.items.get(matched.item_index))
             .filter(|item| !item.disabled)
             .map(|item| item.id.clone());
         if next.is_some() && self.selected != next {
@@ -2851,7 +2565,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             return;
         }
         let position = self.matches.iter().position(|matched| {
-            self.presented_items
+            self.items
                 .get(matched.item_index)
                 .is_some_and(|item| !item.disabled && item.id == *id)
         });
@@ -2872,7 +2586,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         self.pointer_press = None;
         inside
             && self.matches.iter().any(|matched| {
-                self.presented_items
+                self.items
                     .get(matched.item_index)
                     .is_some_and(|item| !item.disabled && item.id == *id)
             })
@@ -2958,7 +2672,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         cx: &mut gpui::Context<Self>,
     ) {
         let enabled = self.matches.iter().any(|matched| {
-            self.presented_items
+            self.items
                 .get(matched.item_index)
                 .is_some_and(|item| item.id == item_id && !item.disabled)
         });
@@ -3105,7 +2819,6 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         self.settle_loading_presentation();
         self.presented = false;
         self.results_height = None;
-        self.generation.0 = self.generation.0.wrapping_add(1);
         self.pointer_press = None;
         self.pointer_suppressed = false;
         self.hover_suppressed = false;
@@ -3691,7 +3404,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         collection_focused: bool,
         cx: &mut gpui::Context<Self>,
     ) -> AnyElement {
-        let items = Rc::clone(&self.presented_items);
+        let items = Rc::clone(&self.items);
         let matches = Rc::clone(&self.matches);
         let presented_results = Rc::clone(&self.presented_results);
         let selected = self.selected.clone();
@@ -4162,7 +3875,8 @@ fn render_row<I: Clone + Eq + 'static>(
                     let down_hitbox = hitbox.clone();
                     window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
                         if !phase.capture()
-                            || event.button != MouseButton::Left
+                            || !crate::PointerConventions::get(cx)
+                                .primary(event.button, event.modifiers)
                             || !down_hitbox.is_hovered(window)
                         {
                             return;
@@ -4179,8 +3893,12 @@ fn render_row<I: Clone + Eq + 'static>(
                             return;
                         }
                         let inside = up_hitbox.is_hovered(window);
+                        let primary = crate::PointerConventions::get(cx)
+                            .primary(event.button, event.modifiers);
                         let activate = up_palette
-                            .update(cx, |palette, _| palette.pointer_up(&up_id, inside))
+                            .update(cx, |palette, _| {
+                                palette.pointer_up(&up_id, primary && inside)
+                            })
                             .unwrap_or(false);
                         if activate {
                             window.prevent_default();

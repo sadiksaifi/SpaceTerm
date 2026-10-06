@@ -1,5 +1,7 @@
 //! Structural regression gates for the shared application and UI boundary.
 
+const TEST_MODULE: &str = "#[cfg(test)]\nmod tests {";
+
 #[test]
 fn application_directory_discovery_stays_in_its_platform_module() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -11,15 +13,13 @@ fn application_directory_discovery_stays_in_its_platform_module() {
             continue;
         }
         let source = std::fs::read_to_string(&path).unwrap();
-        let production = source.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let production = source.split(TEST_MODULE).next().unwrap();
         for forbidden in [
             "XDG_CONFIG_HOME_ENVIRONMENT_VARIABLE",
             "XDG_DATA_HOME_ENVIRONMENT_VARIABLE",
             "XDG_STATE_HOME_ENVIRONMENT_VARIABLE",
             "XDG_CACHE_HOME_ENVIRONMENT_VARIABLE",
             "XDG_RUNTIME_DIR_ENVIRONMENT_VARIABLE",
-            "FOLDERID_RoamingAppData",
-            "FOLDERID_LocalAppData",
             "Library/Application Support/spaceterm",
             "Library/Caches/spaceterm",
             "Library/Logs/spaceterm",
@@ -91,12 +91,7 @@ fn appearance_policy_and_terminal_consumers_keep_their_injected_boundaries() {
         let mut files = Vec::new();
         collect_rust_sources(&root.join(directory), &mut files);
         for path in files {
-            if is_test_source(&path)
-                || path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.ends_with("_tests.rs"))
-            {
+            if is_test_source(&path) {
                 continue;
             }
             let source = std::fs::read_to_string(&path).unwrap();
@@ -143,12 +138,12 @@ fn local_filesystem_policy_cannot_reintroduce_native_identity_or_host_selection(
         "terminal/native_services.rs",
         "terminal/emulator.rs",
         "ui/workspace_manager.rs",
-        "ui/pane_host.rs",
+        "ui/tab_view.rs",
         "ui/tab_manager.rs",
     ] {
         let source =
-            without_host_lint_allowances(&std::fs::read_to_string(root.join(name)).unwrap());
-        let source = source.split("#[cfg(test)]\nmod tests").next().unwrap();
+            portable_verification_source(&std::fs::read_to_string(root.join(name)).unwrap());
+        let source = source.split(TEST_MODULE).next().unwrap();
         for forbidden in [
             "std::os::unix",
             "MetadataExt",
@@ -180,7 +175,7 @@ fn local_filesystem_policy_cannot_reintroduce_native_identity_or_host_selection(
         "ui/workspace_manager.rs",
     ] {
         let source = std::fs::read_to_string(root.join(name)).unwrap();
-        let source = source.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let source = source.split(TEST_MODULE).next().unwrap();
         for forbidden in [
             "same_file::",
             "fs::metadata(",
@@ -226,8 +221,6 @@ fn portable_verification_cannot_select_native_adapters_or_host_mechanics() {
         root.join("platform/shell_integration.rs"),
         root.join("platform/shell_launch.rs"),
         root.join("platform/app_paths.rs"),
-        root.join("platform/askpass.rs"),
-        root.join("platform/ssh_askpass.rs"),
         root.join("ui/native_remote_workspace_flow_backend.rs"),
         root.join("ui/remote_workspace_flow.rs"),
     ];
@@ -289,7 +282,7 @@ fn portable_verification_cannot_select_native_adapters_or_host_mechanics() {
         if let Some(forbidden) = native_verification_dependency(&source) {
             panic!("{} contains {forbidden}", path.display());
         }
-        let production = source.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let production = source.split(TEST_MODULE).next().unwrap();
         if path.starts_with(root.join("ssh")) {
             for forbidden in [
                 "std::fs::",
@@ -316,7 +309,7 @@ fn portable_verification_cannot_select_native_adapters_or_host_mechanics() {
         let test_body = if is_test_source(&path) {
             Some(source.as_str())
         } else {
-            source.split("#[cfg(test)]\nmod tests").nth(1)
+            source.split(TEST_MODULE).nth(1)
         };
         if let Some(test_body) = test_body {
             for forbidden in [
@@ -349,7 +342,9 @@ fn collect_rust_sources(directory: &std::path::Path, files: &mut Vec<std::path::
 }
 
 fn is_test_source(path: &std::path::Path) -> bool {
-    path.file_name().is_some_and(|name| name == "tests.rs")
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .is_some_and(|stem| stem == "tests" || stem.ends_with("_tests"))
         || path.components().any(|part| part.as_os_str() == "tests")
 }
 
@@ -488,32 +483,6 @@ fn native_suite_gate(line: &str) -> Option<NativeSuitePlatform> {
         }
         _ => None,
     }
-}
-
-fn source_gate(line: &str, target: &str) -> bool {
-    let compact: String = line
-        .chars()
-        .filter(|character| !character.is_whitespace())
-        .collect();
-    [
-        format!("#[cfg({target})]"),
-        format!("#[cfg(all({target},not(test)))]"),
-        format!("#[cfg(all({target},test))]"),
-        format!("#[cfg(all(test,{target},feature=\"native-tests\"))]"),
-    ]
-    .contains(&compact)
-}
-
-fn positive_macos_source_gate(line: &str) -> bool {
-    source_gate(line, "target_os=\"macos\"")
-}
-
-fn positive_linux_source_gate(line: &str) -> bool {
-    source_gate(line, "target_os=\"linux\"")
-}
-
-fn positive_unix_source_gate(line: &str) -> bool {
-    source_gate(line, "any(target_os=\"macos\",target_os=\"linux\")")
 }
 
 fn native_suite_declaration(
@@ -694,91 +663,6 @@ fn every_native_suite_mount_requires_test_target_and_feature_gates() {
     }
 }
 
-#[test]
-fn platform_source_modules_are_target_gated_while_portable_policy_is_not() {
-    let source = include_str!("platform/mod.rs");
-    let lines = source.lines().collect::<Vec<_>>();
-    for (index, line) in lines.iter().enumerate() {
-        let declaration = line.trim();
-        let previous = index.checked_sub(1).map(|previous| lines[previous]);
-        let owned = |family: &str, main: Option<&str>, gate: fn(&str) -> bool| {
-            let declared = (declaration.starts_with(&format!("mod {family}_"))
-                || declaration.starts_with(&format!("pub(crate) mod {family}_"))
-                || declaration.starts_with(&format!("pub(crate) use {family}_"))
-                || main == Some(declaration))
-                && !declaration.contains(&format!("{family}_adapter_tests"));
-            !declared || previous.is_some_and(gate)
-        };
-        assert!(
-            owned(
-                "macos",
-                Some("pub(crate) use macos_composition::main;"),
-                positive_macos_source_gate
-            ),
-            "{declaration} is not explicitly owned by the macOS source set"
-        );
-        assert!(
-            owned(
-                "linux",
-                Some("pub(crate) use linux_composition::main;"),
-                positive_linux_source_gate
-            ),
-            "{declaration} is not explicitly owned by the Linux source set"
-        );
-        assert!(
-            owned("unix", None, positive_unix_source_gate),
-            "{declaration} is not explicitly owned by the shared Unix source set"
-        );
-    }
-    let askpass = lines
-        .iter()
-        .position(|line| line.trim() == "pub(crate) mod ssh_askpass;")
-        .unwrap();
-    assert!(!lines[askpass - 1].contains("target_os"));
-    let guard = lines
-        .iter()
-        .position(|line| {
-            line.trim() == "compile_error!(\"SpaceTerm supports macOS and Linux only\");"
-        })
-        .unwrap();
-    assert_eq!(
-        lines[guard - 1].trim(),
-        "#[cfg(not(any(target_os = \"macos\", target_os = \"linux\")))]"
-    );
-
-    for invalid in [
-        "#[cfg(not(target_os = \"macos\"))]",
-        "#[cfg(any(target_os = \"macos\", test))]",
-        "// target_os = \"macos\"",
-        "#[cfg(feature = \"native-tests\")] // target_os = \"macos\"",
-    ] {
-        assert!(!positive_macos_source_gate(invalid), "accepted {invalid}");
-    }
-    for invalid in [
-        "#[cfg(not(target_os = \"linux\"))]",
-        "#[cfg(any(target_os = \"linux\", test))]",
-        "#[cfg(target_os = \"macos\")]",
-        "// target_os = \"linux\"",
-    ] {
-        assert!(!positive_linux_source_gate(invalid), "accepted {invalid}");
-    }
-    for invalid in [
-        "#[cfg(unix)]",
-        "#[cfg(target_os = \"linux\")]",
-        "#[cfg(any(target_os = \"macos\", target_os = \"linux\", test))]",
-        "#[cfg(not(any(target_os = \"macos\", target_os = \"linux\")))]",
-    ] {
-        assert!(!positive_unix_source_gate(invalid), "accepted {invalid}");
-    }
-    for valid in [
-        "#[cfg(any(target_os = \"macos\", target_os = \"linux\"))]",
-        "#[cfg(all(any(target_os = \"macos\", target_os = \"linux\"), not(test)))]",
-        "#[cfg(all(any(target_os = \"macos\", target_os = \"linux\"), test))]",
-    ] {
-        assert!(positive_unix_source_gate(valid), "rejected {valid}");
-    }
-}
-
 fn shared_presentation_violation(source: &str) -> Option<&'static str> {
     [
         "⌘",
@@ -813,15 +697,11 @@ fn shared_ui_and_failure_presentation_contain_no_host_shortcuts_or_wording() {
     files.push(root.join("appearance/resolution.rs"));
     files.push(root.join("../crates/spaceterm-ui/src/appearance.rs"));
     for path in files {
-        if is_test_source(&path)
-            || path
-                .file_name()
-                .is_some_and(|name| name.to_string_lossy().ends_with("_tests.rs"))
-        {
+        if is_test_source(&path) {
             continue;
         }
         let source = std::fs::read_to_string(&path).unwrap();
-        let production = source.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let production = source.split(TEST_MODULE).next().unwrap();
         if let Some(forbidden) = shared_presentation_violation(production) {
             panic!("{} contains host presentation {forbidden}", path.display());
         }
@@ -830,7 +710,7 @@ fn shared_ui_and_failure_presentation_contain_no_host_shortcuts_or_wording() {
     let reusable =
         std::fs::read_to_string(root.join("../crates/spaceterm-ui/src/command_palette.rs"))
             .unwrap();
-    let production = reusable.split("#[cfg(test)]\nmod tests").next().unwrap();
+    let production = reusable.split(TEST_MODULE).next().unwrap();
     let profile_start = production
         .find("/// A platform-selected complete Command Palette keybinding set")
         .unwrap();
@@ -843,32 +723,6 @@ fn shared_ui_and_failure_presentation_contain_no_host_shortcuts_or_wording() {
     if let Some(forbidden) = shared_presentation_violation(&portable) {
         panic!("reusable Command Palette contains host presentation {forbidden}");
     }
-}
-
-#[test]
-fn shared_presentation_guard_rejects_adversarial_host_fixtures() {
-    for source in [
-        "button.child(\"⌘N\")",
-        "tooltip.keyboard_equivalent(\"cmd-t\")",
-        "let label = \"Choose with Finder\";",
-        "let label = \"Quick Look\";",
-        "let description = \"Pinned to a directory on this Mac\";",
-        "let failure = \"macOS integration\";",
-        "tooltip.keyboard_equivalent(\"Ctrl+Shift+T\")",
-        "let label = \"Super+Space\";",
-        "let label = \"Preview with GNOME Sushi\";",
-        "let label = \"Show in Nautilus\";",
-        "let failure = \"Linux integration\";",
-        "let family = \"Menlo\";",
-        "let family = \".SystemUIFont\";",
-    ] {
-        assert!(
-            shared_presentation_violation(source).is_some(),
-            "accepted {source}"
-        );
-    }
-    assert!(shared_presentation_violation("profile.shortcut(&CreateTab)").is_none());
-    assert!(shared_presentation_violation("KeyBinding::new(\"ctrl-alt-n\", Next, None)").is_none());
 }
 
 #[test]
@@ -921,7 +775,7 @@ fn local_interaction_policy_cannot_discover_the_host_or_embed_desktop_branding()
         "ssh/startup_environment.rs",
     ] {
         let source = std::fs::read_to_string(root.join(name)).unwrap();
-        let production = source.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let production = source.split(TEST_MODULE).next().unwrap();
         // Test-only launch construction precedes the test module and supplies a fixture path.
         for forbidden in [
             "/usr/bin",

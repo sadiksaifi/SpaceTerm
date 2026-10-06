@@ -25,12 +25,8 @@ use crate::application_identity::ApplicationIdentity;
 
 const SCREEN_RECORDING_SETTINGS_URI: &str =
     "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_ScreenCapture";
-const LEGACY_SCREEN_RECORDING_SETTINGS_URI: &str =
-    "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
 const ACCESSIBILITY_SETTINGS_URI: &str =
     "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Accessibility";
-const LEGACY_ACCESSIBILITY_SETTINGS_URI: &str =
-    "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility";
 
 /// The distributed notification the system posts when an application's Accessibility grant
 /// changes. HIServices observes it to clear the trust value `AXIsProcessTrusted` caches.
@@ -83,12 +79,10 @@ impl MacosPermissionAccess {
             screen_recording_settings: PermissionRecovery::new(
                 Box::new(super::macos_system_settings::NsWorkspaceUrlLauncher::default()),
                 SCREEN_RECORDING_SETTINGS_URI,
-                LEGACY_SCREEN_RECORDING_SETTINGS_URI,
             ),
             accessibility_settings: PermissionRecovery::new(
                 Box::new(super::macos_system_settings::NsWorkspaceUrlLauncher::default()),
                 ACCESSIBILITY_SETTINGS_URI,
-                LEGACY_ACCESSIBILITY_SETTINGS_URI,
             ),
             reset_bundle_identifier: reset_bundle_identifier(
                 running.as_deref(),
@@ -601,19 +595,26 @@ mod tests {
     #[test]
     fn a_failed_reset_clears_nothing() {
         let (_preparation, cancellation) = PermissionSetupPreparation::new();
+        let published = std::cell::Cell::new(None);
+        let mut resets = Vec::new();
         let readiness = prepare(
             SystemPermission::ScreenRecording,
             Some(BUNDLE),
             &cancellation,
             || Ok(report(false)),
-            |_, _| Err(PermissionAccessError::PlatformRejected),
-            |_| {},
+            |permission, bundle| {
+                assert_eq!(published.get(), Some(report(false)));
+                resets.push((permission, bundle));
+                Err(PermissionAccessError::PlatformRejected)
+            },
+            |report| published.set(Some(report)),
         );
-
         assert_eq!(
             readiness,
             PermissionSetupReadiness::Ready { cleared: false }
         );
+        assert_eq!(resets, [(SystemPermission::ScreenRecording, BUNDLE)]);
+        assert_eq!(published.get(), Some(report(false)));
     }
 
     #[test]
@@ -645,39 +646,70 @@ mod tests {
 
     #[test]
     fn a_preparation_waits_for_a_running_probe() {
-        let verification = Arc::new(Verification::default());
-        let probing = verification.probing();
-        let (preparation, cancellation) = PermissionSetupPreparation::new();
-        let (sender, probed) = std::sync::mpsc::channel();
-        let waiting = std::thread::spawn({
-            let verification = Arc::clone(&verification);
-            move || {
-                prepare_exclusively(
-                    &verification,
-                    SystemPermission::ScreenRecording,
-                    Some(BUNDLE),
-                    &cancellation,
-                    || {
-                        let _ = sender.send(());
-                        Ok(report(false))
-                    },
-                    |_, _| Ok(()),
-                )
+        for cancelled in [true, false] {
+            let verification = Arc::new(Verification::default());
+            let probing = verification.probing();
+            let (preparation, cancellation) = PermissionSetupPreparation::new();
+            let (sender, probed) = std::sync::mpsc::channel();
+            let (started_sender, started) = std::sync::mpsc::channel();
+            let resets = Arc::new(Mutex::new(Vec::new()));
+            let waiting = std::thread::spawn({
+                let verification = Arc::clone(&verification);
+                let resets = Arc::clone(&resets);
+                move || {
+                    started_sender.send(()).unwrap();
+                    prepare_exclusively(
+                        &verification,
+                        SystemPermission::ScreenRecording,
+                        Some(BUNDLE),
+                        &cancellation,
+                        || {
+                            sender.send(()).unwrap();
+                            Ok(report(false))
+                        },
+                        |permission, bundle| {
+                            resets.lock().unwrap().push((permission, bundle));
+                            Ok(())
+                        },
+                    )
+                }
+            });
+            started
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the preparation worker started");
+            let ran_while_locked = probed.recv_timeout(Duration::from_millis(100)).is_ok();
+            let preparation = (!cancelled).then_some(preparation);
+            drop(probing);
+            let result = waiting.join().expect("the preparation");
+            assert!(
+                !ran_while_locked,
+                "a preparation does not probe beside a running probe"
+            );
+            if cancelled {
+                assert_eq!(result, None);
+                assert!(
+                    probed.try_recv().is_err(),
+                    "a preparation cancelled while it waits neither probes nor resets"
+                );
+                assert!(resets.lock().unwrap().is_empty());
+                assert_eq!(verification.latest(), None);
+            } else {
+                assert!(
+                    probed.try_recv().is_ok(),
+                    "an uncancelled preparation probes after lock release"
+                );
+                assert_eq!(
+                    result,
+                    Some(PermissionSetupReadiness::Ready { cleared: true })
+                );
+                assert_eq!(
+                    *resets.lock().unwrap(),
+                    [(SystemPermission::ScreenRecording, BUNDLE)]
+                );
+                assert_eq!(verification.latest(), Some(report(false)));
             }
-        });
-
-        assert!(
-            probed.recv_timeout(Duration::from_millis(100)).is_err(),
-            "a preparation does not probe beside a running probe"
-        );
-        drop(preparation);
-        drop(probing);
-
-        assert_eq!(waiting.join().expect("the preparation"), None);
-        assert!(
-            probed.try_recv().is_err(),
-            "a preparation cancelled while it waits neither probes nor resets"
-        );
+            drop(preparation);
+        }
     }
 
     #[test]
@@ -700,15 +732,20 @@ mod tests {
             .expect("the older probe finished reading");
 
         let (sender, newer_probed) = std::sync::mpsc::channel();
+        let (started_sender, started) = std::sync::mpsc::channel();
         let newer = std::thread::spawn({
             let verification = Arc::clone(&verification);
             move || {
+                started_sender.send(()).unwrap();
                 verification.verify(|| {
                     sender.send(()).expect("the newer probe");
                     Ok(report(false))
                 });
             }
         });
+        started
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the newer worker started");
         let overtook_publication = newer_probed
             .recv_timeout(Duration::from_millis(100))
             .is_ok();
@@ -845,6 +882,7 @@ mod tests {
         let verification = Arc::new(Verification::default());
         let (sender, probed) = std::sync::mpsc::channel();
         let mut competing = None;
+        let (started_sender, started) = std::sync::mpsc::channel();
 
         let result = reset_and_verify(
             &verification,
@@ -853,19 +891,29 @@ mod tests {
                 competing = Some(std::thread::spawn({
                     let verification = Arc::clone(&verification);
                     move || {
+                        started_sender.send(()).unwrap();
                         verification.verify(|| {
                             sender.send(()).expect("the competing probe");
                             Ok(both_granted())
                         });
                     }
                 }));
+                started
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("the competing worker started");
                 assert!(
                     probed.recv_timeout(Duration::from_millis(100)).is_err(),
                     "a probe must wait for the reset's verification"
                 );
                 Ok(())
             },
-            || Ok(report(false)),
+            || {
+                assert!(
+                    probed.recv_timeout(Duration::from_millis(100)).is_err(),
+                    "a competing probe does not run during verification"
+                );
+                Ok(report(false))
+            },
         );
         competing
             .expect("the competing probe started")
@@ -898,19 +946,52 @@ mod tests {
 
     #[test]
     fn permission_settings_routes_are_exact() {
-        assert_eq!(
-            [
-                SCREEN_RECORDING_SETTINGS_URI,
-                LEGACY_SCREEN_RECORDING_SETTINGS_URI,
-                ACCESSIBILITY_SETTINGS_URI,
-                LEGACY_ACCESSIBILITY_SETTINGS_URI,
-            ],
-            [
+        use super::super::permission_recovery::{UrlLaunchError, UrlLauncher};
+        use std::cell::RefCell;
+
+        struct Launcher {
+            attempts: Rc<RefCell<Vec<&'static str>>>,
+        }
+        impl UrlLauncher for Launcher {
+            fn open_url(&self, uri: &'static str) -> Result<(), UrlLaunchError> {
+                self.attempts.borrow_mut().push(uri);
+                Err(UrlLaunchError::Rejected)
+            }
+        }
+        for (permission, uri) in [
+            (
+                SystemPermission::ScreenRecording,
                 "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_ScreenCapture",
-                "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+            ),
+            (
+                SystemPermission::Accessibility,
                 "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Accessibility",
-                "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
-            ]
-        );
+            ),
+        ] {
+            let attempts = Rc::new(RefCell::new(Vec::new()));
+            let launcher = || {
+                Box::new(Launcher {
+                    attempts: Rc::clone(&attempts),
+                }) as Box<dyn UrlLauncher>
+            };
+            let access = MacosPermissionAccess {
+                screen_recording_settings: PermissionRecovery::new(
+                    launcher(),
+                    SCREEN_RECORDING_SETTINGS_URI,
+                ),
+                accessibility_settings: PermissionRecovery::new(
+                    launcher(),
+                    ACCESSIBILITY_SETTINGS_URI,
+                ),
+                reset_bundle_identifier: None,
+                verification: Arc::default(),
+                _not_send_or_sync: PhantomData,
+            };
+            assert_eq!(
+                access.open_settings(permission),
+                Err(PermissionAccessError::PlatformRejected)
+            );
+            assert_eq!(*attempts.borrow(), [uri]);
+        }
     }
 }

@@ -1,18 +1,7 @@
 //! One presentation system for every surface that floats over window content.
 //!
-//! A floating surface sits over content that is already painted. Its shared shell filters spatial
-//! detail when requested, constrains the backdrop's straight color, admits the native window
-//! backing when available, and adds a small host-relative elevation wash. Every floating family
-//! selects a semantic [`FloatingRole`] and receives the complete treatment for it: backdrop tone,
-//! coverage limit, wash, filter, outer edge, internal divider, corner geometry, content inset,
-//! elevation, clipping, and window layer. No call site chooses its own alpha, blur, radius, border,
-//! separator, or shadow.
-//!
-//! Controls nested inside a floating surface resolve against that surface rather than against the
-//! window root. [`FloatingShell::mount`] enters a host scope for the complete lifetime of the
-//! surface's descendants, covering layout, prepaint, and paint, so retained entities and custom
-//! elements resolve their own presentation correctly rather than depending on a render-time swap.
-//! Content that defers carries its own surface, which re-enters the scope inside the deferred draw.
+//! Each floating family selects a [`FloatingRole`] and receives the complete treatment for it; no
+//! call site chooses its own alpha, blur, radius, border, separator, or shadow.
 
 use std::cell::Cell;
 
@@ -71,7 +60,6 @@ impl FloatingRole {
         }
     }
 
-    /// Whether this role paints the window's raised material or its quiet readout material.
     const fn quiet_material(self) -> bool {
         matches!(self, Self::Readout)
     }
@@ -189,7 +177,6 @@ pub struct FloatingSurfacePaints {
 }
 
 impl FloatingSurfacePaints {
-    /// Creates the complete bounded material catalog.
     pub fn new(raised: FloatingSurfacePaint, readout: FloatingSurfacePaint) -> Self {
         Self { raised, readout }
     }
@@ -251,7 +238,6 @@ impl FloatingSurfaceTheme {
         self
     }
 
-    /// The scrim painted beneath a window-modal surface.
     pub fn scrim(&self) -> Rgba {
         self.scrim
     }
@@ -281,7 +267,7 @@ impl FloatingSurfaceTheme {
         }
     }
 
-    pub(crate) fn scaled_metrics(self, _text_scale: f32, spacing_scale: f32) -> Self {
+    pub(crate) fn scaled_spacing(self, spacing_scale: f32) -> Self {
         Self {
             spacing_scale: self.spacing_scale * normalized_scale(spacing_scale),
             ..self
@@ -314,7 +300,6 @@ pub fn floating_surface_theme(cx: &App) -> FloatingSurfaceTheme {
         .unwrap_or_default()
 }
 
-/// Returns the complete resolved presentation of one role.
 pub(crate) fn shell(role: FloatingRole, cx: &App) -> FloatingShell {
     floating_surface_theme(cx).shell(role)
 }
@@ -332,12 +317,10 @@ pub struct FloatingShell {
 }
 
 impl FloatingShell {
-    /// The semantic role this shell resolves.
     pub fn role(&self) -> FloatingRole {
         self.role
     }
 
-    /// The surface's outer corner radius.
     pub fn corner_radius(&self) -> Pixels {
         self.corner_radius
     }
@@ -347,17 +330,11 @@ impl FloatingShell {
         self.content_inset
     }
 
-    /// The Gaussian sigma used to filter already-painted content beneath this shell.
-    pub fn backdrop_blur_radius(&self) -> Pixels {
-        self.backdrop_blur
-    }
-
     /// Maximum framebuffer coverage retained beneath this shell.
     pub fn backdrop_alpha_limit(&self) -> f32 {
         self.backdrop_alpha_limit
     }
 
-    /// The concentric radius of a row or control inset directly inside this surface.
     pub fn nested_radius(&self) -> Pixels {
         (self.corner_radius - self.content_inset).max(px(4.0))
     }
@@ -390,7 +367,6 @@ impl FloatingShell {
         self.paint.divider
     }
 
-    /// The window layer this surface reaches.
     pub fn layer(&self, hosts_nested_surface: bool) -> FloatingLayer {
         self.role.layer(hosts_nested_surface)
     }
@@ -931,29 +907,18 @@ impl SurfaceControlThemes {
         self
     }
 
-    pub(crate) fn scale_metrics(mut self, text_scale: f32, spacing_scale: f32) -> Self {
-        self.button = self.button.scaled_metrics(text_scale, spacing_scale);
-        self.toggle = self.toggle.scaled_metrics(text_scale, spacing_scale);
-        self.progress = self.progress.scaled_metrics(text_scale, spacing_scale);
-        self.segmented_control = self
-            .segmented_control
-            .scaled_metrics(text_scale, spacing_scale);
-        self.search_field = self.search_field.scaled_metrics(text_scale, spacing_scale);
-        self.text_input = self.text_input.scaled_metrics(text_scale, spacing_scale);
-        self.menu = self
-            .menu
-            .map(|theme| theme.scaled_metrics(text_scale, spacing_scale));
+    pub(crate) fn scale_spacing(mut self, spacing_scale: f32) -> Self {
+        self.button = self.button.scaled_spacing(spacing_scale);
+        self.toggle = self.toggle.scaled_spacing(spacing_scale);
+        self.progress = self.progress.scaled_spacing(spacing_scale);
+        self.segmented_control = self.segmented_control.scaled_spacing(spacing_scale);
+        self.search_field = self.search_field.scaled_spacing(spacing_scale);
+        self.text_input = self.text_input.scaled_spacing(spacing_scale);
+        self.menu = self.menu.map(|theme| theme.scaled_spacing(spacing_scale));
         self.combo_box = self
             .combo_box
-            .map(|theme| theme.scaled_metrics(text_scale, spacing_scale));
+            .map(|theme| theme.scaled_spacing(spacing_scale));
         self
-    }
-}
-
-#[cfg(test)]
-impl SurfaceControlThemes {
-    pub(crate) fn regular_button_extent_for_test(&self) -> Pixels {
-        self.button.icon_button_size(crate::ButtonSize::Regular)
     }
 }
 
@@ -1036,7 +1001,7 @@ mod tests {
     #[test]
     fn role_geometry_and_blur_do_not_scale_with_layout_density() {
         let theme = FloatingSurfaceTheme::default().backdrop_blur(px(20.0));
-        let scaled = theme.scaled_metrics(1.5, 1.25);
+        let scaled = theme.scaled_spacing(1.25);
         for (role, radius, blur) in [
             (FloatingRole::Popover, 10.0, 20.0),
             (FloatingRole::Command, 12.0, 20.0),
@@ -1047,22 +1012,38 @@ mod tests {
         ] {
             assert_eq!(theme.shell(role).corner_radius(), px(radius));
             assert_eq!(scaled.shell(role).corner_radius(), px(radius));
-            assert_eq!(theme.shell(role).backdrop_blur_radius(), px(blur));
-            assert_eq!(scaled.shell(role).backdrop_blur_radius(), px(blur));
+            assert_eq!(theme.shell(role).backdrop_blur, px(blur));
+            assert_eq!(scaled.shell(role).backdrop_blur, px(blur));
         }
     }
 
     #[test]
     fn spacing_scale_composes_across_catalog_scaling() {
         let theme = FloatingSurfaceTheme::default();
-        let scaled = theme.scaled_metrics(1.0, 1.25);
-        let identity_after_scale = scaled.scaled_metrics(1.0, 1.0);
-        let composed = scaled.scaled_metrics(1.0, 1.2);
-        let direct = theme.scaled_metrics(1.0, 1.5);
+        let scaled = theme.scaled_spacing(1.25);
+        let identity_after_scale = scaled.scaled_spacing(1.0);
+        let composed = scaled.scaled_spacing(1.2);
+        let direct = theme.scaled_spacing(1.5);
 
         for role in [FloatingRole::Popover, FloatingRole::Modal] {
             assert_eq!(identity_after_scale.shell(role), scaled.shell(role));
             assert_eq!(composed.shell(role), direct.shell(role));
         }
+    }
+
+    #[test]
+    fn hosted_button_extent_scales_once_and_composes() {
+        let regular_button = |catalog: &crate::ControlThemeCatalog| {
+            catalog
+                .hosted_controls(ControlHost::Floating)
+                .expect("catalog should include floating controls")
+                .button
+                .icon_button_size(crate::ButtonSize::Regular)
+        };
+        let scaled = crate::catalog_tests::catalog(1).scale_spacing(1.25);
+        let chained = scaled.clone().scale_spacing(1.2);
+        let direct = crate::catalog_tests::catalog(1).scale_spacing(1.5);
+        assert_eq!(regular_button(&scaled), px(32.0));
+        assert!((regular_button(&chained) - regular_button(&direct)).abs() < px(0.001));
     }
 }

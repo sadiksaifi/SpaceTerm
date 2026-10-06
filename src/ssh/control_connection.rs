@@ -8,14 +8,13 @@ use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
-pub(crate) use super::cancellation::SshCancellationToken;
+use super::cancellation::SshCancellationToken;
 use super::command::{
-    OpenSshExecutable, PreparedSshPaneChannelCommand, SshCommandContext, SshCommandContextError,
-    ValidatedRemoteShellCommand,
+    OpenSshExecutable, PreparedSshTerminalSessionChannelCommand, SshCommandContext,
+    SshCommandContextError, ValidatedRemoteShellCommand,
 };
 use super::live_connection::{
-    ControlConnectionLifecycleObserver, LiveConnectionAuthority, LiveConnectionBinding,
-    LiveConnectionState,
+    ControlConnectionObserver, LiveConnectionAuthority, LiveConnectionBinding, LiveConnectionState,
 };
 use super::process::{
     ProcessCleanupCallback, ProcessExit, ProcessRunError, ProcessSignal, SshProcessBackend,
@@ -28,23 +27,11 @@ use crate::platform::app_paths::{
     RegisteredRuntimeSocket, RuntimeOwner,
 };
 use crate::platform::control_socket::{ControlSocketProbe, ControlSocketUnavailable};
-#[cfg(test)]
-const MAXIMUM_READINESS_TIMEOUT: Duration = Duration::from_secs(60);
 const SHUTDOWN_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
 const SHUTDOWN_MASTER_GRACE: Duration = Duration::from_secs(2);
 const SHUTDOWN_TERMINATE_GRACE: Duration = Duration::from_secs(1);
 const SHUTDOWN_KILL_DEADLINE: Duration = Duration::from_secs(1);
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
-
-#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-/// Invalid bounded readiness timing supplied to a control connection.
-#[cfg(test)]
-pub(crate) enum ControlConnectionTimingError {
-    #[error("SSH readiness timeout must be between one nanosecond and 60 seconds")]
-    InvalidTimeout,
-    #[error("SSH readiness polling interval must be nonzero and no longer than the timeout")]
-    InvalidPollInterval,
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// Readiness polling policy for one control-master launch.
@@ -55,26 +42,6 @@ pub(crate) struct ControlConnectionTiming {
     timeout: Option<Duration>,
     poll_interval: Duration,
     readiness_check_timeout: Duration,
-}
-
-impl ControlConnectionTiming {
-    #[cfg(test)]
-    pub(crate) fn new(
-        timeout: Duration,
-        poll_interval: Duration,
-    ) -> Result<Self, ControlConnectionTimingError> {
-        if timeout.is_zero() || timeout > MAXIMUM_READINESS_TIMEOUT {
-            return Err(ControlConnectionTimingError::InvalidTimeout);
-        }
-        if poll_interval.is_zero() || poll_interval > timeout {
-            return Err(ControlConnectionTimingError::InvalidPollInterval);
-        }
-        Ok(Self {
-            timeout: Some(timeout),
-            poll_interval,
-            readiness_check_timeout: timeout,
-        })
-    }
 }
 
 impl Default for ControlConnectionTiming {
@@ -159,8 +126,8 @@ pub(crate) enum ControlConnectionError {
 /// Singular owner of one workspace-scoped OpenSSH control master.
 ///
 /// The connection owns the child process group, private runtime directory, registered socket,
-/// live authority, and supervisor. It is intentionally non-clone. Child commands are authorized
-/// only while the exact socket identity and live connection instance and generation remain ready.
+/// live authority, and supervisor. Child commands are authorized only while the exact socket
+/// identity and live connection instance and generation remain ready.
 /// Drop performs exact owned-process cleanup and removes only registered runtime artifacts.
 pub(crate) struct OpenSshControlConnection<B: SshProcessBackend> {
     backend: Arc<B>,
@@ -260,7 +227,7 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
     /// Creates a content-free observer for the first terminal `Failed` or `Closed` transition.
     pub(crate) fn lifecycle_observer(
         &self,
-    ) -> Result<ControlConnectionLifecycleObserver, ControlConnectionError> {
+    ) -> Result<ControlConnectionObserver, ControlConnectionError> {
         self.authority
             .as_ref()
             .map(|authority| authority.observe_lifecycle())
@@ -377,7 +344,6 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
         }
     }
 
-    /// Returns the current state without transferring live authority.
     pub(crate) fn state(&self) -> ControlConnectionState {
         match self.authority.as_ref().map(|authority| authority.state()) {
             Some(LiveConnectionState::Ready) => ControlConnectionState::Ready,
@@ -387,7 +353,6 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
         }
     }
 
-    /// Borrows the bounded private socket path owned by this connection.
     #[cfg(test)]
     pub(crate) fn control_path(&self) -> &Path {
         &self.control_path
@@ -415,10 +380,10 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
     }
 
     /// Prepares a pane command bound to the current live authority and sanitized environment.
-    pub(crate) fn prepare_pane_channel(
+    pub(crate) fn prepare_terminal_session_channel(
         &self,
         command: ValidatedRemoteShellCommand,
-    ) -> Result<PreparedSshPaneChannelCommand, ControlConnectionError> {
+    ) -> Result<PreparedSshTerminalSessionChannelCommand, ControlConnectionError> {
         if self.state() != ControlConnectionState::Ready {
             return Err(ControlConnectionError::NotReady);
         }
@@ -430,10 +395,10 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
         capability
             .authorize()
             .map_err(|_| ControlConnectionError::NotReady)?;
-        Ok(PreparedSshPaneChannelCommand::new(
-            self.commands.pane_channel(command),
-            Some(capability),
-            Some(self.backend.environment().clone()),
+        Ok(PreparedSshTerminalSessionChannelCommand::new(
+            self.commands.terminal_session_channel(command),
+            capability,
+            self.backend.environment().clone(),
         ))
     }
 
@@ -862,7 +827,7 @@ mod tests {
     use super::*;
     use crate::domain::SshDestination;
     use crate::platform::app_directories::AppDirectoryEnvironment;
-    use crate::platform::app_paths::{AppPathHostFacts, AppPaths};
+    use crate::platform::app_paths::AppPaths;
     use crate::platform::testing::{RecordingControlSocketProbe, RecordingFilesystem};
     use crate::ssh::command::{OpenSshExecutable, SshCommandSpec};
     use crate::ssh::process::{ProcessExit, ProcessRunError, ProcessSignal, SshProcessBackend};
@@ -888,8 +853,13 @@ mod tests {
                 xdg_cache_home: Some(self.0.join("cache").into_os_string()),
                 xdg_runtime_dir: Some(self.0.join("runtime").into_os_string()),
             };
-            let host = AppPathHostFacts::new(self.0.join("temporary"), 103).unwrap();
-            AppPaths::resolve(&environment, &host, self.1.clone()).unwrap()
+            crate::platform::testing::resolve_app_paths(
+                &environment,
+                Some(self.0.join("temporary")),
+                103,
+                self.1.clone(),
+            )
+            .unwrap()
         }
     }
 
@@ -1082,7 +1052,7 @@ mod tests {
         let checks = observed.backend.state.lock().unwrap().status_checks;
         let pane = observed
             .connection
-            .prepare_pane_channel(
+            .prepare_terminal_session_channel(
                 ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
             )
             .unwrap();
@@ -1107,7 +1077,7 @@ mod tests {
         assert_eq!(observed.backend.reap_count(), 1);
         assert!(matches!(
             pane.take(),
-            Err(crate::ssh::command::PreparedSshPaneChannelError::Unavailable)
+            Err(crate::ssh::command::PreparedSshTerminalSessionChannelError::Unavailable)
         ));
         assert!(
             utility
@@ -1363,7 +1333,11 @@ mod tests {
     }
 
     fn timing() -> ControlConnectionTiming {
-        ControlConnectionTiming::new(Duration::from_millis(100), Duration::from_millis(50)).unwrap()
+        ControlConnectionTiming {
+            timeout: Some(Duration::from_millis(100)),
+            poll_interval: Duration::from_millis(50),
+            readiness_check_timeout: Duration::from_millis(100),
+        }
     }
 
     #[gpui::test]
@@ -1437,9 +1411,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn ready_connection_should_prepare_utility_and_single_use_pane_commands(
-        cx: &mut TestAppContext,
-    ) {
+    fn ready_connection_prepares_commands_and_rejects_shutting_down(cx: &mut TestAppContext) {
         let directory = TestDirectory::new();
         let paths = directory.paths();
         let backend = Arc::new(FakeBackend::with_readiness(
@@ -1462,7 +1434,7 @@ mod tests {
 
         assert!(connection.remote_utility_command().is_ok());
         let pane = connection
-            .prepare_pane_channel(
+            .prepare_terminal_session_channel(
                 ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
             )
             .unwrap();
@@ -1478,7 +1450,7 @@ mod tests {
             Err(ControlConnectionError::NotReady)
         ));
         assert!(matches!(
-            connection.prepare_pane_channel(
+            connection.prepare_terminal_session_channel(
                 ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap()
             ),
             Err(ControlConnectionError::NotReady)
@@ -1486,7 +1458,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn shell_launch_should_preserve_prepared_environment_and_reject_revoked_channel(
+    fn shell_launch_should_preserve_prepared_environment_and_reject_revoked_terminal_session_channel(
         cx: &mut TestAppContext,
     ) {
         use crate::platform::shell_launch::{PreparedShellLaunch, ShellLaunchFailure};
@@ -1510,7 +1482,7 @@ mod tests {
             .unwrap();
         let prepare = || {
             connection
-                .prepare_pane_channel(
+                .prepare_terminal_session_channel(
                     ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
                 )
                 .unwrap()
@@ -1537,7 +1509,7 @@ mod tests {
             .unwrap()
             .transition(LiveConnectionState::ShuttingDown);
         let error = PreparedShellLaunch::remote(Path::new("/tmp"), command).unwrap_err();
-        assert_eq!(error, ShellLaunchFailure::RemoteChannelUnavailable);
+        assert_eq!(error, ShellLaunchFailure::TerminalSessionChannelUnavailable);
         assert!(!format!("{launch:?} {error:?} {error}").contains("/private/tmp"));
     }
 
@@ -1606,6 +1578,7 @@ mod tests {
                     && output.as_str() == "bad  config"
                     && !format!("{error:?}").contains("bad")
         ));
+        assert_eq!(backend.reap_count(), 1);
     }
 
     #[gpui::test]
@@ -1855,7 +1828,7 @@ mod tests {
             ))
             .unwrap();
         let pane = connection
-            .prepare_pane_channel(
+            .prepare_terminal_session_channel(
                 ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
             )
             .unwrap();
@@ -1882,7 +1855,7 @@ mod tests {
         );
         assert!(matches!(
             pane.take(),
-            Err(crate::ssh::command::PreparedSshPaneChannelError::Unavailable)
+            Err(crate::ssh::command::PreparedSshTerminalSessionChannelError::Unavailable)
         ));
         assert!(
             utility
@@ -1942,7 +1915,7 @@ mod tests {
             ))
             .unwrap();
         let pane = connection
-            .prepare_pane_channel(
+            .prepare_terminal_session_channel(
                 ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
             )
             .unwrap();
@@ -1961,7 +1934,7 @@ mod tests {
 
         assert!(matches!(
             command.into_pane_launch_parts(),
-            Err(crate::ssh::command::PreparedSshPaneChannelError::Unavailable)
+            Err(crate::ssh::command::PreparedSshTerminalSessionChannelError::Unavailable)
         ));
         drop(connection);
         assert!(directory.1.has_socket(&socket_path));

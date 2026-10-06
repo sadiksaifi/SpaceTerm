@@ -45,8 +45,7 @@ impl TitleActivity {
         };
         let previous = reported_title(previous);
         let previous_frame = previous.glyph.and_then(activity_frame);
-        // Once an unchanged candidate expires, identical reports must not repeatedly hide a
-        // static icon behind another confirmation interval.
+        // Identical reports must not hide a static icon after confirmation expires.
         if self.animation.is_none() && previous_frame == Some(next_frame) {
             return;
         }
@@ -61,8 +60,7 @@ impl TitleActivity {
                 animation.changed = true;
             }
         } else {
-            // A title rename may restart confirmation while its loader is already visible in
-            // the raw title. Carry the original stable icon across that restart.
+            // Retain the stable icon when a title rename restarts confirmation.
             let stable_glyph = self.animation.as_ref().map_or_else(
                 || previous.glyph.or(next.glyph).map(Arc::from),
                 |animation| animation.stable_glyph.clone(),
@@ -135,7 +133,7 @@ const ACTIVITY_FRAME_FAMILIES: [&str; 6] =
 /// How many characters the first word of a title can hold and still be a glyph rather than a word.
 const MAXIMUM_GLYPH_CHARS: usize = 2;
 
-/// Characters a title keeps, because a Session can be named after them.
+/// Characters a title keeps, because a Terminal Session can be named after them.
 const TITLE_WORD_CHARS: &str = "~/\\._-:@$#([{'\"";
 
 /// Characters that separate a program's glyph from the words after it.
@@ -150,14 +148,8 @@ pub(crate) struct ReportedTitle<'a> {
     pub(crate) words: &'a str,
 }
 
-/// Splits the glyph a program draws at the front of its own title from the words after it.
-///
-/// Programs often open the title they report with their own icon or a spinner frame. One Session
-/// gets one glyph, so the program's takes the place of the glyph host chrome would draw rather than
-/// sitting beside it, and never appears twice. Only a first word that names nothing on its own is
-/// taken: a short decorative sequence that is not a word a Session could be named after. No glyph
-/// is recognised by name, so this stays the same for every program. The active chrome font's
-/// shaper decides whether the candidate occupies the Session's one glyph slot.
+/// Splits a decorative title prefix from its words. The chrome font's shaper decides whether
+/// the candidate can occupy the Terminal Session's glyph slot.
 pub(crate) fn reported_title(title: &str) -> ReportedTitle<'_> {
     let title = title.trim();
     let plain = ReportedTitle {
@@ -201,7 +193,7 @@ fn title_words_after_glyph(rest: &str) -> &str {
     }
 }
 
-/// Whether the first word of a title decorates it rather than naming what the Session is doing.
+/// Whether the first word of a title decorates it rather than naming what the Terminal Session is doing.
 fn is_glyph_word(word: &str) -> bool {
     let bases = word
         .chars()
@@ -230,7 +222,7 @@ pub(crate) fn is_glyph_mark(character: char) -> bool {
 ///
 /// A Private-Use character is drawn by the font a program expects rather than by the font the host
 /// paints its chrome in, so it would paint as a missing-glyph box. An ASCII one says less than the
-/// Session's own glyph does. Actual Chrome-font support is checked after shaping.
+/// Terminal Session's own glyph does. Actual Chrome-font support is checked after shaping.
 fn is_glyph_candidate(glyph: &str) -> bool {
     glyph.chars().all(|character| {
         !character.is_ascii()
@@ -247,7 +239,7 @@ mod tests {
 
     #[test]
     fn activity_frames_exclude_meaningful_and_unlisted_braille_glyphs() {
-        for frame in ACTIVITY_FRAME_FAMILIES
+        for frame in ["⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏", "⣾⣽⣻⢿⡿⣟⣯⣷", "⢹⢺⢼⣸⣇⡧⡗⡏", "◐◓◑◒", "◰◳◲◱", "◴◷◶◵"]
             .iter()
             .flat_map(|family| family.chars())
         {

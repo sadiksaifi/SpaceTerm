@@ -92,8 +92,6 @@ pub(super) enum PreparedFocusIntent {
 #[derive(Clone)]
 pub(super) enum PreparedModalSemantics {
     Alert {
-        #[cfg(test)]
-        accessibility_title: SharedString,
         visible_title: SharedString,
         message: SharedString,
         detail: Option<SharedString>,
@@ -104,16 +102,12 @@ pub(super) enum PreparedModalSemantics {
         cancel_action: Option<usize>,
     },
     Dialog {
-        #[cfg(test)]
-        accessibility_title: SharedString,
         visible_title: SharedString,
         description: Option<SharedString>,
         default_action: Option<usize>,
         cancel_action: Option<usize>,
     },
     Progress {
-        #[cfg(test)]
-        accessibility_title: SharedString,
         visible_title: SharedString,
         status: SharedString,
         detail: Option<SharedString>,
@@ -564,232 +558,6 @@ pub(super) struct ModalRenderAction {
     pub(super) debug_identity: SharedString,
 }
 
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum LogicalModalRole {
-    Alert,
-    Dialog,
-    Progress,
-}
-
-#[cfg(test)]
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct LogicalActionSemanticSnapshot {
-    name: SharedString,
-    role: ModalActionRole,
-    intent: ModalActionIntent,
-    emphasis: ModalActionEmphasis,
-    enabled: bool,
-    is_default: bool,
-    debug_identity: SharedString,
-}
-
-#[cfg(test)]
-#[derive(Clone, Debug, PartialEq)]
-struct LogicalProgressSemanticSnapshot {
-    status: SharedString,
-    value: Option<f32>,
-    indeterminate: bool,
-    cancellation_available: bool,
-}
-
-#[cfg(test)]
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum LogicalFocusEntry {
-    Action(SharedString),
-    Body,
-    Surface,
-}
-
-#[cfg(test)]
-/// Logical facts retained for deterministic modal behavior tests.
-///
-/// This private value and the renderer's debug selectors support deterministic tests only. They
-/// are not VoiceOver, Narrator, Orca, or native accessibility-tree evidence.
-#[derive(Clone, Debug, PartialEq)]
-struct LogicalModalSemanticSnapshot {
-    id: ModalId,
-    role: LogicalModalRole,
-    modal: bool,
-    accessibility_title: SharedString,
-    visible_title: SharedString,
-    description: Option<SharedString>,
-    secondary_detail: Option<SharedString>,
-    alert_intent: Option<AlertIntent>,
-    accessory_name: Option<SharedString>,
-    suppression_label: Option<SharedString>,
-    actions: Vec<LogicalActionSemanticSnapshot>,
-    default_action: Option<SharedString>,
-    cancel_action: Option<SharedString>,
-    progress: Option<LogicalProgressSemanticSnapshot>,
-    focus_entry: LogicalFocusEntry,
-    focus_contained: bool,
-    underlay_excluded: bool,
-}
-
-impl ActivePresentation {
-    #[cfg(test)]
-    fn logical_semantic_snapshot(&self) -> LogicalModalSemanticSnapshot {
-        let (
-            role,
-            accessibility_title,
-            visible_title,
-            description,
-            secondary_detail,
-            alert_intent,
-            accessory_name,
-            suppression_label,
-            progress,
-        ) = match (&self.request.semantics, &self.progress) {
-            (
-                PreparedModalSemantics::Alert {
-                    accessibility_title,
-                    visible_title,
-                    message,
-                    detail,
-                    intent,
-                    accessory,
-                    suppression,
-                    ..
-                },
-                _,
-            ) => (
-                LogicalModalRole::Alert,
-                accessibility_title.clone(),
-                visible_title.clone(),
-                Some(message.clone()),
-                detail.clone(),
-                Some(*intent),
-                accessory.as_ref().map(|accessory| match accessory {
-                    AlertAccessory::Icon {
-                        accessibility_name, ..
-                    }
-                    | AlertAccessory::Media {
-                        accessibility_name, ..
-                    } => accessibility_name.clone(),
-                }),
-                suppression.as_ref().map(|(label, _)| label.clone()),
-                None,
-            ),
-            (
-                PreparedModalSemantics::Dialog {
-                    accessibility_title,
-                    visible_title,
-                    description,
-                    ..
-                },
-                _,
-            ) => (
-                LogicalModalRole::Dialog,
-                accessibility_title.clone(),
-                visible_title.clone(),
-                description.clone(),
-                None,
-                None,
-                None,
-                None,
-                None,
-            ),
-            (
-                PreparedModalSemantics::Progress {
-                    accessibility_title,
-                    visible_title,
-                    ..
-                },
-                Some(progress),
-            ) => {
-                let (value, indeterminate) = match progress.progress {
-                    ProgressState::Determinate(value) => (Some(value.value()), false),
-                    ProgressState::Indeterminate => (None, true),
-                };
-                (
-                    LogicalModalRole::Progress,
-                    accessibility_title.clone(),
-                    visible_title.clone(),
-                    Some(progress.status.clone()),
-                    progress.detail.clone(),
-                    None,
-                    None,
-                    None,
-                    Some(LogicalProgressSemanticSnapshot {
-                        status: progress.status.clone(),
-                        value,
-                        indeterminate,
-                        cancellation_available: progress.cancellation_available(),
-                    }),
-                )
-            }
-            (PreparedModalSemantics::Progress { .. }, None) => unreachable!(
-                "validated ProgressDialog presentations always own progress runtime state"
-            ),
-        };
-        let actions = self
-            .request
-            .actions
-            .iter()
-            .enumerate()
-            .map(|(index, action)| LogicalActionSemanticSnapshot {
-                name: action.label.clone(),
-                role: action.role,
-                intent: action.intent,
-                emphasis: action.emphasis,
-                enabled: self.may_request_action(index),
-                is_default: action.is_default,
-                debug_identity: action.debug_identity.clone(),
-            })
-            .collect::<Vec<_>>();
-        let action_identity = |index: usize| {
-            actions
-                .get(index)
-                .map(|action| action.debug_identity.clone())
-        };
-        let (default_index, cancel_index) = match &self.request.semantics {
-            PreparedModalSemantics::Alert {
-                default_action,
-                cancel_action,
-                ..
-            }
-            | PreparedModalSemantics::Dialog {
-                default_action,
-                cancel_action,
-                ..
-            } => (*default_action, *cancel_action),
-            PreparedModalSemantics::Progress { .. } => {
-                (None, self.progress_cancellation_action_index())
-            }
-        };
-        let default_action = default_index.and_then(action_identity);
-        let cancel_action = cancel_index.and_then(action_identity);
-        let focus_intent = self.current_focus_intent();
-        let focus_entry = match &focus_intent {
-            PreparedFocusIntent::Action(index) => action_identity(*index)
-                .map(LogicalFocusEntry::Action)
-                .unwrap_or(LogicalFocusEntry::Surface),
-            PreparedFocusIntent::Body(_) => LogicalFocusEntry::Body,
-            PreparedFocusIntent::Surface => LogicalFocusEntry::Surface,
-        };
-        LogicalModalSemanticSnapshot {
-            id: self.request.id.clone(),
-            role,
-            modal: true,
-            accessibility_title,
-            visible_title,
-            description,
-            secondary_detail,
-            alert_intent,
-            accessory_name,
-            suppression_label,
-            actions,
-            default_action,
-            cancel_action,
-            progress,
-            focus_entry,
-            focus_contained: true,
-            underlay_excluded: true,
-        }
-    }
-}
-
 #[derive(Clone)]
 pub(super) struct ModalRenderSnapshot {
     pub(super) id: ModalId,
@@ -805,8 +573,6 @@ pub(super) struct ModalRenderSnapshot {
     pub(super) default_action: Option<usize>,
     pub(super) cancel_action: Option<usize>,
     pub(super) progress: Option<ProgressRuntime>,
-    #[cfg(test)]
-    semantic_snapshot: LogicalModalSemanticSnapshot,
 }
 
 pub(super) struct ModalWindowOwner {
@@ -854,6 +620,10 @@ impl ModalWindowOwner {
             defer_released_owner_effects(effects, cx);
         })
         .detach();
+        Self::detached(window_id)
+    }
+
+    fn detached(window_id: WindowId) -> Self {
         Self {
             window_id,
             next_presentation_generation: 0,
@@ -869,26 +639,6 @@ impl ModalWindowOwner {
             transients_active: false,
             press_owner: ModalPressOwner::default(),
             #[cfg(test)]
-            caller_release_callbacks: 0,
-        }
-    }
-
-    #[cfg(test)]
-    fn new_for_test(window_id: WindowId) -> Self {
-        Self {
-            window_id,
-            next_presentation_generation: 0,
-            active: None,
-            queue: VecDeque::new(),
-            settlement: SettlementState::Idle,
-            effect_pump: EffectPumpState::Idle,
-            deferred_effects: VecDeque::new(),
-            reentrant_effects: VecDeque::new(),
-            focus_chain: FocusChain::default(),
-            window_available: true,
-            palette_suspension: None,
-            transients_active: false,
-            press_owner: ModalPressOwner::default(),
             caller_release_callbacks: 0,
         }
     }
@@ -1495,8 +1245,6 @@ impl ModalWindowOwner {
 
     fn render_snapshot(&self) -> Option<ModalRenderSnapshot> {
         let active = self.active.as_ref()?;
-        #[cfg(test)]
-        let semantic_snapshot = active.logical_semantic_snapshot();
         let (default_action, cancel_action) = match &active.request.semantics {
             PreparedModalSemantics::Alert {
                 default_action,
@@ -1540,8 +1288,6 @@ impl ModalWindowOwner {
             default_action,
             cancel_action,
             progress: active.progress.clone(),
-            #[cfg(test)]
-            semantic_snapshot,
         })
     }
 
@@ -2378,7 +2124,6 @@ pub struct ModalPresentationHandle {
 }
 
 impl ModalPresentationHandle {
-    /// Returns the monotonic presentation identity carried by retained operations.
     pub const fn presentation_id(&self) -> ModalPresentationId {
         self.presentation
     }
@@ -2441,7 +2186,6 @@ impl DialogCompletion {
         Self { presentation }
     }
 
-    /// Returns the exact presentation identity this operation may complete.
     pub const fn presentation_id(&self) -> ModalPresentationId {
         self.presentation.presentation_id()
     }
@@ -2679,13 +2423,8 @@ impl ProgressCancellationCompletion {
 
 /// Retained authority for bounded updates and terminal completion of one ProgressDialog.
 ///
-/// Each clone retains its observed update generation while all clones share exactly-once terminal
-/// authority. Updates and terminal methods target this exact active or queued generation. Queued
-/// status, detail, progress, cancellation availability, and update generation transfer unchanged
-/// when the presentation is promoted. A clone whose generation was superseded receives a
-/// stale-update error instead of overwriting newer status. Updates mutate one stable surface and
-/// never auto-close at determinate maximum. Terminal methods are mutually exclusive:
-/// the first accepted completion, failure, dismissal, cancellation, deadline, or teardown wins.
+/// Clones share exactly-once terminal authority. A clone whose update generation was superseded
+/// receives a stale-update error. The first accepted terminal outcome wins.
 #[derive(Clone)]
 pub struct ProgressDialogHandle {
     presentation: ModalPresentationHandle,
@@ -2700,7 +2439,6 @@ impl ProgressDialogHandle {
         }
     }
 
-    /// Returns the exact presentation identity this handle may update.
     pub const fn presentation_id(&self) -> ModalPresentationId {
         self.presentation.presentation_id()
     }
@@ -3069,68 +2807,5 @@ pub(super) fn window_modal_is_open(window: &Window, cx: &App) -> bool {
 }
 
 #[cfg(test)]
-pub(super) fn retire_modal_owner_for_test(window: &Window, cx: &mut App) -> bool {
-    let Some(owner) = modal_owner_for_render(window, cx) else {
-        return true;
-    };
-    let press_owner = owner.read_with(cx, |owner, _| owner.press_owner());
-    retire_window_owner(&owner, cx);
-    press_owner.controls_are_idle(cx)
-}
-
-#[cfg(test)]
-pub(super) fn modal_controls_are_idle_for_test(window: &Window, cx: &App) -> bool {
-    modal_owner_for_render(window, cx)
-        .is_none_or(|owner| owner.read(cx).press_owner.controls_are_idle(cx))
-}
-
-#[cfg(test)]
-pub(super) fn modal_button_controls_are_idle_for_test(window: &Window, cx: &App) -> bool {
-    modal_controls_are_idle_for_test(window, cx)
-}
-
-#[cfg(test)]
-pub(super) fn close_attempt_generation_for_test(window: &Window, cx: &App) -> Option<u64> {
-    modal_owner_for_render(window, cx)?
-        .read(cx)
-        .active
-        .as_ref()
-        .map(|active| active.close_attempt_generation)
-}
-
-#[cfg(test)]
-pub(super) fn active_progress_for_test(
-    window: &Window,
-    cx: &App,
-) -> Option<(ModalPresentationId, ProgressRuntime, u64)> {
-    modal_owner_for_render(window, cx)?
-        .read(cx)
-        .active
-        .as_ref()
-        .and_then(|active| {
-            Some((
-                active.id,
-                active.progress.clone()?,
-                active.update_generation,
-            ))
-        })
-}
-
-#[cfg(test)]
-pub(super) fn active_progress_presentation_facts_for_test(
-    window: &Window,
-    cx: &App,
-) -> Option<(bool, usize)> {
-    let owner = modal_owner_for_render(window, cx)?;
-    let owner_state = owner.read(cx);
-    let active = owner_state.active.as_ref()?;
-    let semantics = active.logical_semantic_snapshot();
-    Some((
-        semantics.progress?.cancellation_available,
-        active.request.actions.len(),
-    ))
-}
-
-#[cfg(test)]
 #[path = "core_tests.rs"]
-mod tests;
+pub(super) mod tests;

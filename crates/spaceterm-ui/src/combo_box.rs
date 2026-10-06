@@ -1,9 +1,6 @@
 //! A controlled, searchable, single-value selector with an anchored popup.
 //!
-//! The Module owns provisional navigation and popup lifecycle. Callers own the committed value and
-//! receive acceptance only after the popup has closed. [`TextInput`] owns editing, clipboard,
-//! grapheme, and input-method behavior. This control retains selection and active-option facts for
-//! its own behavior. It does not yet publish listbox nodes to the native accessibility tree.
+//! Callers own the committed value and receive acceptance only after the popup has closed.
 
 use std::{cell::RefCell, collections::HashMap, ops::Range, rc::Rc};
 
@@ -49,7 +46,7 @@ actions!(
     ]
 );
 
-/// Platform-specific ComboBox key equivalents layered over the portable bindings.
+/// Platform-specific ComboBox bindings layered over the portable bindings.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ComboBoxKeybindingProfile {
     /// Conventional macOS Control-N and Control-P navigation. Selecting this profile is explicit
@@ -59,7 +56,7 @@ pub enum ComboBoxKeybindingProfile {
     Linux,
 }
 
-/// Installs the platform-specific key equivalents for `profile`.
+/// Installs the platform-specific bindings for `profile`.
 ///
 /// Applications explicitly install the portable navigation, acceptance, and dismissal bindings
 /// before calling this function. Both sets remain scoped to an open ComboBox.
@@ -109,17 +106,14 @@ pub struct ComboBoxAcceptance<I> {
 }
 
 impl<I> ComboBoxAcceptance<I> {
-    /// Returns the caller-owned stable item identity.
     pub fn item_id(&self) -> &I {
         &self.item_id
     }
 
-    /// Returns the input path that accepted the item.
     pub fn source(&self) -> ComboBoxActivationSource {
         self.source
     }
 
-    /// Consumes the event and returns its caller-owned identity.
     pub fn into_item_id(self) -> I {
         self.item_id
     }
@@ -166,7 +160,7 @@ pub enum ComboBoxAccessory {
     Text(SharedString),
     /// Compact status text such as `Unavailable`.
     Status(SharedString),
-    /// A display-only keyboard equivalent.
+    /// A display-only Shortcut.
     Shortcut(SharedString),
 }
 
@@ -252,7 +246,6 @@ impl<I> ComboBoxItem<I> {
         }
     }
 
-    /// Adds one line of secondary descriptive text.
     pub fn description(mut self, value: impl Into<SharedString>) -> Self {
         self.description = Some(value.into());
         self
@@ -285,45 +278,34 @@ impl<I> ComboBoxItem<I> {
         self
     }
 
-    /// Adds standardized semantic content at the trailing edge.
     pub fn trailing(mut self, accessory: ComboBoxAccessory) -> Self {
         self.trailing = Some(accessory);
         self
     }
 
-    /// Adds a display-only keyboard equivalent after any trailing accessory.
+    /// Adds a display-only Shortcut after any trailing accessory.
     pub fn shortcut(mut self, shortcut: impl Into<SharedString>) -> Self {
         self.shortcut = Some(shortcut.into());
         self
     }
 
-    /// Adds a stable selector used by GPUI interaction tests.
     pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
         self.debug_selector = Some(selector.into());
         self
     }
 
-    /// Returns the stable caller-owned identity.
     pub fn id(&self) -> &I {
         &self.id
     }
 
-    /// Returns the primary label.
     pub fn label(&self) -> &str {
         &self.label
     }
 
-    /// Returns the secondary description, when present.
     pub fn description_text(&self) -> Option<&str> {
         self.description.as_ref().map(AsRef::as_ref)
     }
 
-    /// Returns the display-only keyboard equivalent, when present.
-    pub fn shortcut_text(&self) -> Option<&str> {
-        self.shortcut.as_ref().map(AsRef::as_ref)
-    }
-
-    /// Returns whether the item is visible but inert.
     pub const fn is_disabled(&self) -> bool {
         self.disabled
     }
@@ -368,7 +350,6 @@ impl<C> ComboBoxCommand<C> {
         Self(ComboBoxItem::new(id, label))
     }
 
-    /// Adds one line of secondary descriptive text.
     pub fn description(self, value: impl Into<SharedString>) -> Self {
         Self(self.0.description(value))
     }
@@ -383,23 +364,20 @@ impl<C> ComboBoxCommand<C> {
         Self(self.0.leading_icon(build))
     }
 
-    /// Adds standardized semantic content at the trailing edge.
     pub fn trailing(self, accessory: ComboBoxAccessory) -> Self {
         Self(self.0.trailing(accessory))
     }
 
-    /// Adds a display-only keyboard equivalent after any trailing accessory.
+    /// Adds a display-only Shortcut after any trailing accessory.
     pub fn shortcut(self, shortcut: impl Into<SharedString>) -> Self {
         Self(self.0.shortcut(shortcut))
     }
 
-    /// Starts a new command group, separated from the commands before it.
     pub fn starts_group(mut self) -> Self {
         self.0.starts_group = true;
         self
     }
 
-    /// Adds a stable selector used by GPUI interaction tests.
     pub fn debug_selector(self, selector: impl Into<String>) -> Self {
         Self(self.0.debug_selector(selector))
     }
@@ -414,7 +392,6 @@ pub struct ComboBoxCommandActivation<C> {
 }
 
 impl<C> ComboBoxCommandActivation<C> {
-    /// Returns the caller-owned command identity.
     pub fn command(&self) -> &C {
         &self.command
     }
@@ -424,7 +401,6 @@ impl<C> ComboBoxCommandActivation<C> {
         &self.query
     }
 
-    /// Returns the input path that ran the command.
     pub fn source(&self) -> ComboBoxActivationSource {
         self.source
     }
@@ -630,32 +606,27 @@ impl ComboBoxPaint {
         }
     }
 
-    /// Installs complete semantic list row states.
     pub fn rows(mut self, rows: crate::ListRowPaints) -> Self {
         self.rows = Some(rows);
         self
     }
 
-    /// Sets row hover independently of the provisional selection.
     pub fn hover_background(mut self, color: Rgba) -> Self {
         self.hover_background = color;
         self
     }
 
-    /// Sets the foreground paired with the row hover background.
     pub fn hover_foreground(mut self, color: Rgba) -> Self {
         self.hover_foreground = color;
         self
     }
 
-    /// Sets icon-only trigger colors independently of text and popup row foregrounds.
     pub fn trigger_icon_colors(mut self, normal: Rgba, disabled: Rgba) -> Self {
         self.trigger_icon_foreground = normal;
         self.trigger_icon_disabled = disabled;
         self
     }
 
-    /// Sets the pressed and disabled fills for the trigger independently from hover.
     pub fn trigger_state_backgrounds(mut self, pressed: Rgba, disabled: Rgba) -> Self {
         self.trigger_pressed_background = pressed;
         self.trigger_disabled_background = disabled;
@@ -770,7 +741,6 @@ impl ComboBoxMetrics {
         }
     }
 
-    /// Sets the square target size used by icon-only triggers.
     pub fn icon_trigger_size(mut self, size: Pixels) -> Self {
         self.icon_trigger_size = size.max(px(0.0));
         self
@@ -819,13 +789,11 @@ impl ComboBoxMetrics {
         self
     }
 
-    /// Sets the corner radius of the trigger that opens the popup.
     pub fn trigger_shape(mut self, corner_radius: Pixels) -> Self {
         self.trigger_corner_radius = corner_radius;
         self
     }
 
-    /// Sets primary and secondary font sizes.
     pub fn font_sizes(mut self, label: Pixels, secondary: Pixels) -> Self {
         self.label_size = label;
         self.secondary_size = secondary;
@@ -858,12 +826,8 @@ impl ComboBoxMetrics {
         self
     }
 
-    fn scaled(self, text_scale: f32, spacing_scale: f32) -> Self {
-        let width_scale = crate::appearance::normalized_scale(text_scale)
-            .max(crate::appearance::normalized_scale(spacing_scale));
-        let label_size = crate::appearance::scale_metric(self.label_size, text_scale);
-        let icon_size = crate::appearance::scale_metric(self.icon_size, text_scale);
-        let trigger_icon_size = crate::appearance::scale_metric(self.trigger_icon_size, text_scale);
+    fn scaled(self, spacing_scale: f32) -> Self {
+        let width_scale = crate::appearance::normalized_scale(spacing_scale).max(1.0);
         let density_step = (crate::appearance::normalized_scale(spacing_scale) - 1.0).max(0.0);
         Self {
             panel_width: self.panel_width * width_scale,
@@ -871,62 +835,40 @@ impl ComboBoxMetrics {
             trigger_height: crate::appearance::scale_line_box(
                 self.trigger_height,
                 self.label_size,
-                text_scale,
                 spacing_scale,
             ),
             icon_trigger_size: crate::appearance::scale_line_box(
                 self.icon_trigger_size,
                 self.icon_size,
-                text_scale,
                 spacing_scale,
             ),
             input_height: crate::appearance::scale_line_box(
                 self.input_height,
                 self.label_line_height,
-                text_scale,
                 spacing_scale,
             ),
             row_height: crate::appearance::scale_line_box(
                 self.row_height,
                 self.label_line_height,
-                text_scale,
                 spacing_scale,
             ),
             described_row_height: crate::appearance::scale_line_box(
                 self.described_row_height,
                 self.label_line_height + self.secondary_line_height,
-                text_scale,
                 spacing_scale,
             ),
-            panel_padding: self.panel_padding,
             horizontal_padding: crate::appearance::scale_metric(
                 self.horizontal_padding,
                 spacing_scale,
             ),
-            leading_width: (self.leading_width + px(8.0) * density_step).max(icon_size),
-            identity_icon_width: (self.identity_icon_width + px(8.0) * density_step).max(icon_size),
-            state_icon_gap: self.state_icon_gap,
-            gap: self.gap,
-            trigger_corner_radius: self.trigger_corner_radius,
-            corner_radius: self.corner_radius,
-            border_width: self.border_width,
-            label_size,
-            secondary_size: crate::appearance::scale_metric(self.secondary_size, text_scale),
-            label_line_height: crate::appearance::scale_metric(self.label_line_height, text_scale),
-            secondary_line_height: crate::appearance::scale_metric(
-                self.secondary_line_height,
-                text_scale,
-            ),
-            icon_size,
-            trigger_icon_size,
-            icon_baseline_center: crate::appearance::scale_metric(
-                self.icon_baseline_center,
-                text_scale,
-            ),
+            leading_width: (self.leading_width + px(8.0) * density_step).max(self.icon_size),
+            identity_icon_width: (self.identity_icon_width + px(8.0) * density_step)
+                .max(self.icon_size),
             group_separator_height: crate::appearance::scale_metric(
                 self.group_separator_height,
                 spacing_scale,
             ),
+            ..self
         }
     }
 
@@ -981,9 +923,9 @@ impl ComboBoxTheme {
         }
     }
 
-    pub(crate) fn scaled_metrics(self, text_scale: f32, spacing_scale: f32) -> Self {
+    pub(crate) fn scaled_spacing(self, spacing_scale: f32) -> Self {
         Self {
-            metrics: self.metrics.scaled(text_scale, spacing_scale),
+            metrics: self.metrics.scaled(spacing_scale),
             ..self
         }
     }
@@ -994,7 +936,6 @@ impl ComboBoxTheme {
         content_width + self.metrics.border_width * 2.0
     }
 
-    /// Sets interaction-state borders for non-custom triggers.
     pub fn ordinary_borders(mut self, borders: crate::ControlBorderStates) -> Self {
         self.paint.trigger_state_borders = Some(borders);
         self
@@ -1193,7 +1134,6 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> ComboBox<I, C> {
         self
     }
 
-    /// Controls whether the complete selector is inert.
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
         self
@@ -1211,7 +1151,6 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> ComboBox<I, C> {
         self
     }
 
-    /// Selects the shared anchored placement policy.
     pub fn placement(mut self, placement: AnchoredPlacementConfig) -> Self {
         self.placement = placement;
         self
@@ -1226,7 +1165,7 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> ComboBox<I, C> {
     }
 
     /// Uses the menu-with-filter grammar: row-driven width, a 240-point minimum, a 420-point
-    /// truncation cap, and a 24-point minimum gap before keyboard equivalents.
+    /// truncation cap, and a 24-point minimum gap before Shortcuts.
     pub fn menu_with_filter_header(mut self) -> Self {
         self.menu_with_filter_header = true;
         self
@@ -1326,7 +1265,6 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> ComboBox<I, C> {
         self
     }
 
-    /// Adds a stable selector used by GPUI interaction tests.
     pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
         self.debug_selector = Some(selector.into());
         self
@@ -3375,7 +3313,7 @@ fn row_border_width(theme: ComboBoxTheme) -> Pixels {
     }
 }
 
-/// The font rows render keyboard equivalents in, shared with the width measurement so a
+/// The font rows render Shortcuts in, shared with the width measurement so a
 /// row-driven panel is exactly as wide as its widest rendered row.
 fn combo_box_shortcut_font(typography: &crate::ControlTypography) -> &gpui::Font {
     typography.shortcut()
@@ -3511,7 +3449,7 @@ mod tests {
             paint,
             ComboBoxMetrics::new(px(240.0), px(28.0)).trigger_shape(px(6.0)),
         );
-        let comfortable = theme.scaled_metrics(1.0, 1.25);
+        let comfortable = theme.scaled_spacing(1.25);
 
         assert!(comfortable.metrics.trigger_height > theme.metrics.trigger_height);
         assert_eq!(
@@ -3527,7 +3465,14 @@ mod tests {
         let selected = row_paint(30);
         let selected_hovered = row_paint(40);
         let disabled = row_paint(50);
-        let rows = crate::ListRowPaints::new(normal, hovered, selected, selected_hovered, disabled);
+        let rows = crate::ListRowPaints::new(
+            normal,
+            hovered,
+            selected,
+            selected_hovered,
+            disabled,
+            disabled,
+        );
 
         assert_eq!(
             resolve_row_paint(Some(rows), true, true, true, true),
@@ -3666,20 +3611,6 @@ mod tests {
     }
 
     #[test]
-    fn role_line_boxes_scale_independently_from_fixed_combo_extents() {
-        let metrics = ComboBoxMetrics::new(px(240.0), px(28.0))
-            .geometry(px(260.0), px(28.0), px(28.0), px(40.0))
-            .text_geometry(px(18.0), px(15.0), px(14.0))
-            .scaled(1.5, 1.0);
-
-        assert_eq!(metrics.label_line_height, px(27.0));
-        assert_eq!(metrics.secondary_line_height, px(22.5));
-        assert_eq!(metrics.input_height, px(37.0));
-        assert_eq!(metrics.row_height, px(37.0));
-        assert_eq!(metrics.described_row_height, px(56.5));
-    }
-
-    #[test]
     fn filtering_should_match_unicode_case_without_slicing_text() {
         let items = vec![
             ComboBoxItem::new(1, "Ångström").keywords(["measurement"]),
@@ -3710,6 +3641,7 @@ mod tests {
         ];
 
         assert_eq!(match_items(&items, "mac home workspace")[0].0, 0);
+        assert!(match_items(&items, "mac home server").is_empty());
     }
 
     #[test]
@@ -3739,9 +3671,70 @@ mod tests {
     fn duplicate_identities_should_keep_only_the_first_item() {
         let items = unique_items(vec![
             ComboBoxItem::new(1, "First"),
-            ComboBoxItem::new(1, "Later"),
+            ComboBoxItem::new(1, "Later").disabled(true),
         ]);
 
+        assert_eq!(items.len(), 1);
         assert_eq!(items[0].label(), "First");
+        assert!(!items[0].disabled);
+    }
+
+    #[gpui::test]
+    fn caller_owned_status_copy_should_update_an_open_popup(cx: &mut gpui::TestAppContext) {
+        struct StatusCopyRoot {
+            handle: ComboBoxHandle<u8>,
+            copy: ComboBoxCopy,
+        }
+
+        impl gpui::Render for StatusCopyRoot {
+            fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+                div().size_full().child(
+                    ComboBox::new("status-copy-combo", "Workspace", None, "Choose", Vec::new())
+                        .handle(self.handle.clone())
+                        .copy(self.copy.clone())
+                        .debug_selector("status-copy-trigger")
+                        .on_accept(|_, _, _| {}),
+                )
+            }
+        }
+
+        crate::combo_box_tests::install_themes(cx);
+        let (root, cx) = cx.add_window_view(|_, _| StatusCopyRoot {
+            handle: ComboBoxHandle::default(),
+            copy: ComboBoxCopy::default(),
+        });
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        let trigger = cx
+            .debug_bounds("status-copy-trigger")
+            .expect("the trigger should render");
+        cx.simulate_click(trigger.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("combo-box-empty").is_some());
+
+        root.update(cx, |root, cx| {
+            root.copy = ComboBoxCopy::new(
+                "Filter workspaces",
+                "Find a workspace",
+                "Refreshing",
+                "Nothing available",
+            );
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let handle = root.read_with(cx, |root, _| root.handle.clone());
+        let state = handle
+            .state
+            .borrow()
+            .as_ref()
+            .and_then(WeakEntity::upgrade)
+            .expect("the mounted control should retain its state");
+        let copy = state.read_with(cx, |state, _| state.copy.clone());
+        assert_eq!(copy.filter_name, "Filter workspaces");
+        assert_eq!(copy.filter_placeholder, "Find a workspace");
+        assert_eq!(copy.busy_status, "Refreshing");
+        assert_eq!(copy.empty_status, "Nothing available");
+        assert!(cx.debug_bounds("combo-box-empty").is_some());
+        assert!(cx.update(|window, cx| crate::window_combo_box_is_open(window, cx)));
     }
 }

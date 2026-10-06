@@ -1,9 +1,9 @@
 use super::*;
-use crate::appearance::{Appearance, AppearanceMode, SettingsDocument};
+use crate::appearance::{Appearance, AppearanceMode};
 use crate::appearance::{ResolvedAppearance, SurfaceRole};
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
-use crate::platform::secure_filesystem::{PrivateFileSnapshot, SecureEntryIdentity};
-use crate::settings::storage::{SettingsStorage, StorageCommit, StorageError};
+use crate::settings::SettingsDocument;
+use crate::settings::storage::testing::MemoryStorage;
 use gpui::TestAppContext;
 
 fn shell(resolved: &ResolvedAppearance) -> u8 {
@@ -22,29 +22,8 @@ fn floating(resolved: &ResolvedAppearance) -> u8 {
         .alpha(SurfaceRole::Floating)
 }
 
-#[derive(Default)]
-struct PreviewStorage(Option<Vec<u8>>);
-impl SettingsStorage for PreviewStorage {
-    fn quarantine(&self) -> Result<(), crate::settings::storage::StorageError> {
-        Err(crate::settings::storage::StorageError::Unavailable)
-    }
-    fn read(&self) -> Result<Option<PrivateFileSnapshot>, StorageError> {
-        Ok(self.0.as_ref().map(|bytes| PrivateFileSnapshot {
-            bytes: bytes.clone(),
-            identity: SecureEntryIdentity::from_opaque(1_u64),
-        }))
-    }
-    fn write(
-        &self,
-        _: &[u8],
-        _: Option<&SecureEntryIdentity>,
-    ) -> Result<StorageCommit, StorageError> {
-        panic!("preview must not write settings")
-    }
-}
-
-fn start(cx: &mut TestAppContext) -> (UserSettings, RecordingAppearancePlatform) {
-    let settings = UserSettings::load(Arc::new(PreviewStorage::default()));
+fn start(cx: &mut TestAppContext) -> (Settings, RecordingAppearancePlatform) {
+    let settings = Settings::load(Arc::new(MemoryStorage::default()));
     let platform = RecordingAppearancePlatform::default();
     platform.set_system_appearance(Some(Appearance::Dark));
     cx.update(|cx| {
@@ -116,13 +95,16 @@ fn host_font_facts_survive_initial_resolution_catalog_completion_and_reload(
                     .as_ref(),
                 "Chrome Test"
             );
+            let unversioned = spaceterm_ui::ControlThemeGeneration::new(0);
             assert_eq!(
                 cx.global::<spaceterm_ui::ControlThemeCatalog>()
-                    .installed_typography()
-                    .regular()
-                    .family
-                    .as_ref(),
-                "Chrome Test"
+                    .clone()
+                    .generation(unversioned),
+                super::super::control_theme::catalog(
+                    crate::ui::appearance::chrome(cx),
+                    cx.global::<AppearanceRuntime>().control_motion,
+                )
+                .generation(unversioned)
             );
         }
     });
@@ -240,7 +222,10 @@ fn initial_fonts_match_the_complete_catalog_when_settings_requests_it() {
         let initial = cx.global::<AppearanceRuntime>().fonts.clone();
         complete_font_catalog(cx);
         let complete = available_fonts(cx);
-        assert!(initial.installed.len() < complete.installed.len());
+        for family in ["Arial", "lucide"] {
+            assert!(!initial.installed.iter().any(|font| font.family == family));
+            assert!(complete.installed.iter().any(|font| font.family == family));
+        }
         assert_eq!(complete, capture_fonts(cx));
         assert!(Arc::ptr_eq(&before, &current(cx)));
     });
@@ -252,7 +237,7 @@ fn a_new_named_font_is_classified_before_appearance_resolution() {
     let (settings, _) = start(&mut cx);
     let token = settings.begin_preview(0).unwrap();
     let mut document = SettingsDocument::default();
-    document.preferences.terminal.typography.family = TerminalFontFamily::Named {
+    document.appearance.terminal.typography.family = TerminalFontFamily::Named {
         family: "Arial".to_owned(),
     };
     settings.update_preview(&token, document).unwrap();
@@ -266,6 +251,14 @@ fn a_new_named_font_is_classified_before_appearance_resolution() {
                 .iter()
                 .any(|font| font.family == "Arial")
         );
+        let fonts = &cx.global::<AppearanceRuntime>().fonts;
+        let selected = fonts
+            .installed
+            .iter()
+            .find(|font| font.family == "Arial")
+            .unwrap();
+        assert_eq!(selected.class, crate::appearance::FontClass::Monospace);
+        assert_eq!(before.terminal.typography.regular.primary_family, "Arial");
         complete_font_catalog(cx);
         let complete = available_fonts(cx);
         assert_eq!(complete, capture_fonts(cx));
@@ -327,7 +320,7 @@ fn the_backdrop_request_follows_the_chrome_appearance(cx: &mut TestAppContext) {
     platform.set_native_window_transparency_supported(true);
     let token = settings.begin_preview(0).unwrap();
     let mut candidate = SettingsDocument::default();
-    candidate.preferences.mode = AppearanceMode::Auto;
+    candidate.appearance.mode = AppearanceMode::Auto;
     settings.update_preview(&token, candidate).unwrap();
     cx.run_until_parked();
     let test_window = cx.add_window(|_, _| gpui::EmptyView);
@@ -377,8 +370,8 @@ fn transparency_updates_surfaces_and_capability_fallback_without_terminal_protoc
     );
     let token = settings.begin_preview(0).unwrap();
     let mut document = SettingsDocument::default();
-    document.preferences.window.transparency = 0.5;
-    document.preferences.window.blur = false;
+    document.appearance.window.transparency = 0.5;
+    document.appearance.window.blur = false;
     settings.update_preview(&token, document).unwrap();
     cx.run_until_parked();
     cx.update(|cx| {
@@ -668,7 +661,7 @@ fn accessibility_preview_overrides_only_selected_facts_and_resets_to_live_values
 fn reduced_motion_updates_progress_at_startup_and_after_native_notification(
     cx: &mut TestAppContext,
 ) {
-    let settings = UserSettings::load(Arc::new(PreviewStorage::default()));
+    let settings = Settings::load(Arc::new(MemoryStorage::default()));
     let platform = RecordingAppearancePlatform::default();
     platform.set_system_appearance(Some(Appearance::Dark));
     platform.set_reduced_motion(true);
@@ -677,7 +670,7 @@ fn reduced_motion_updates_progress_at_startup_and_after_native_notification(
         crate::ui::initialize_controls(cx).unwrap();
         assert_eq!(
             cx.global::<spaceterm_ui::ProgressTheme>(),
-            &crate::ui::progress_theme::theme(&crate::ui::appearance::chrome(cx).colors)
+            &crate::ui::control_theme::progress::theme(&crate::ui::appearance::chrome(cx).colors)
         );
         assert_eq!(
             cx.global::<spaceterm_ui::ControlMotion>(),
@@ -692,7 +685,7 @@ fn reduced_motion_updates_progress_at_startup_and_after_native_notification(
     cx.update(|cx| {
         assert_eq!(
             cx.global::<spaceterm_ui::ProgressTheme>(),
-            &crate::ui::progress_theme::theme(&crate::ui::appearance::chrome(cx).colors)
+            &crate::ui::control_theme::progress::theme(&crate::ui::appearance::chrome(cx).colors)
         );
         assert_eq!(
             cx.global::<spaceterm_ui::ControlMotion>(),
@@ -707,7 +700,7 @@ fn preview_cancel_restores_the_committed_mode_using_current_system_fact(cx: &mut
     let (settings, platform) = start(cx);
     let token = settings.begin_preview(0).unwrap();
     let mut candidate = SettingsDocument::default();
-    candidate.preferences.mode = AppearanceMode::Auto;
+    candidate.appearance.mode = AppearanceMode::Auto;
     settings.update_preview(&token, candidate).unwrap();
     platform.set_system_appearance(Some(Appearance::Light));
     cx.run_until_parked();
@@ -731,14 +724,13 @@ fn terminal_only_preview_does_not_replace_control_catalog_or_force_native_chrome
     let (chrome_before, controls_before) = cx.update(|cx| {
         (
             Arc::clone(&cx.global::<InstalledChrome>().active),
-            cx.global::<spaceterm_ui::ControlThemeCatalog>()
-                .installed_generation(),
+            Box::new(cx.global::<spaceterm_ui::ControlThemeCatalog>().clone()),
         )
     });
     let native_calls = platform.applied.borrow().len();
     let token = settings.begin_preview(0).unwrap();
     let mut candidate = SettingsDocument::default();
-    candidate.preferences.terminal.typography.base_size = 24.0;
+    candidate.appearance.terminal.typography.base_size = 24.0;
     settings.update_preview(&token, candidate).unwrap();
     cx.run_until_parked();
     cx.update(|cx| {
@@ -747,9 +739,8 @@ fn terminal_only_preview_does_not_replace_control_catalog_or_force_native_chrome
             &cx.global::<InstalledChrome>().active
         ));
         assert_eq!(
-            cx.global::<spaceterm_ui::ControlThemeCatalog>()
-                .installed_generation(),
-            controls_before
+            cx.global::<spaceterm_ui::ControlThemeCatalog>(),
+            controls_before.as_ref()
         );
         assert_eq!(current(cx).terminal.typography.cell_size, 24.0);
     });
@@ -770,11 +761,12 @@ fn repeated_system_notifications_without_effective_change_do_not_publish(cx: &mu
 #[gpui::test]
 fn cancelling_fixed_preview_resolves_committed_auto_mode_again(cx: &mut TestAppContext) {
     let mut committed = SettingsDocument::default();
-    committed.preferences.mode = AppearanceMode::Auto;
-    let bytes = crate::appearance::export_settings(&committed)
+    committed.appearance.mode = AppearanceMode::Auto;
+    let bytes = crate::settings::export_settings(&committed)
         .unwrap()
         .into_bytes();
-    let settings = UserSettings::load(Arc::new(PreviewStorage(Some(bytes))));
+    let storage = MemoryStorage::with_bytes(bytes);
+    let settings = Settings::load(storage.clone());
     let platform = RecordingAppearancePlatform::default();
     platform.set_system_appearance(Some(Appearance::Dark));
     cx.update(|cx| {
@@ -791,6 +783,7 @@ fn cancelling_fixed_preview_resolves_committed_auto_mode_again(cx: &mut TestAppC
     drop(token);
     cx.run_until_parked();
     cx.update(|cx| assert_eq!(current(cx).chrome.appearance, Appearance::Light));
+    assert_eq!(storage.writes(), 0);
 }
 
 /// Comfortable density grows the titlebar, so each window's native traffic lights must move down
@@ -812,6 +805,7 @@ fn traffic_light_positions_should_track_density_growth_to_stay_centered(cx: &mut
         );
     });
 
+    let mut comfortable_positions = Vec::new();
     for (role, owner, compact_height) in [
         ("workspace", WindowTrafficLightOwner::workspace(), px(41.0)),
         (
@@ -876,6 +870,7 @@ fn traffic_light_positions_should_track_density_growth_to_stay_centered(cx: &mut
             compact.expect("compact anchor"),
             comfortable.expect("comfortable position"),
         );
+        comfortable_positions.push(comfortable_point);
         assert_eq!(
             comfortable_point.x, compact_point.x,
             "{role} growth must not drift sideways"
@@ -886,44 +881,10 @@ fn traffic_light_positions_should_track_density_growth_to_stay_centered(cx: &mut
             "{role} traffic lights should move by half the height delta, got {compact_point:?} to {comfortable_point:?} for {compact_height:?} to {comfortable_height:?}"
         );
     }
-}
 
-/// The workspace anchor carries the window's own edge above its band while the settings anchor
-/// does not, so the two windows keep distinct rows at every density.
-#[gpui::test]
-fn workspace_and_settings_traffic_lights_should_keep_their_own_anchors(cx: &mut TestAppContext) {
-    use crate::platform::window_frame::{TrafficLightPlacement, WindowFrameGeometry};
-    use gpui::{point, px};
-
-    let _ = start(cx);
-    cx.update(|cx| {
-        cx.set_global(
-            WindowFrameGeometry::new(Some(16.0))
-                .with_outer_edge_width(1.0)
-                .with_traffic_lights(
-                    TrafficLightPlacement::new(point(px(15.5), px(14.0)), px(41.0), px(78.0)),
-                    TrafficLightPlacement::new(point(px(12.0), px(11.0)), px(36.0), px(78.0)),
-                ),
-        );
-        cx.set_global(InstalledChrome::single(std::sync::Arc::new(
-            crate::ui::appearance::ChromeAppearance {
-                spacing_scale: crate::ui::appearance::ChromeAppearance::density_spacing_scale(
-                    crate::appearance::ChromeDensity::Comfortable,
-                ),
-                ..crate::ui::appearance::ChromeAppearance::default()
-            },
-        )));
-    });
-    let (workspace, settings) = cx.update(|cx| {
-        (
-            WindowTrafficLightOwner::workspace().desired_position(cx),
-            WindowTrafficLightOwner::sidebar_window().desired_position(cx),
-        )
-    });
-    let (workspace, settings) = (
-        workspace.expect("workspace anchor"),
-        settings.expect("settings anchor"),
-    );
+    let [workspace, settings] = comfortable_positions.as_slice() else {
+        panic!("both window positions are required")
+    };
     assert_ne!(
         workspace, settings,
         "the two windows must not share one traffic-light row"
@@ -933,7 +894,6 @@ fn workspace_and_settings_traffic_lights_should_keep_their_own_anchors(cx: &mut 
         "workspace chrome carries the window edge, got {workspace:?} and {settings:?}"
     );
 }
-
 #[cfg(all(test, target_os = "macos", feature = "native-tests"))]
 mod macos_adapter_tests {
     include!("../platform/macos_adapter_tests/appearance_runtime.rs");

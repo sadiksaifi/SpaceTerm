@@ -160,26 +160,19 @@ mod tests {
 
     #[test]
     fn a_report_round_trips_through_its_exact_encoding() {
-        for screen_recording in [false, true] {
-            for accessibility in [false, true] {
-                let report = ProbeReport {
-                    screen_recording,
-                    accessibility,
-                };
-                assert_eq!(
-                    ProbeReport::decode(report.encode().as_bytes()),
-                    Some(report)
-                );
-            }
+        for (screen_recording, accessibility, bytes) in [
+            (false, false, "screen-recording=0 accessibility=0\n"),
+            (false, true, "screen-recording=0 accessibility=1\n"),
+            (true, false, "screen-recording=1 accessibility=0\n"),
+            (true, true, "screen-recording=1 accessibility=1\n"),
+        ] {
+            let report = ProbeReport {
+                screen_recording,
+                accessibility,
+            };
+            assert_eq!(report.encode().as_bytes(), bytes.as_bytes());
+            assert_eq!(ProbeReport::decode(bytes.as_bytes()), Some(report));
         }
-        assert_eq!(
-            ProbeReport {
-                screen_recording: true,
-                accessibility: false,
-            }
-            .encode(),
-            "screen-recording=1 accessibility=0\n"
-        );
     }
 
     #[test]

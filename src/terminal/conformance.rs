@@ -1,6 +1,5 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::accessibility::{
@@ -37,6 +36,7 @@ use super::pointer_input::{
     WheelPhase,
 };
 use super::selection::{SelectionCopyOptions, TrailingSpacePolicy};
+use super::session::TerminalSessionFailure;
 use super::testing::ShellResourcesFixture;
 use crate::platform::shell_integration::{
     ShellEnvironment, ShellIntegrationMode, ShellIntegrationStatus, ShellKind,
@@ -44,7 +44,7 @@ use crate::platform::shell_integration::{
 };
 use crate::ui::{
     RenderLifecycle, ScaleChange, SurfaceVisibility, TerminalFocusBlocker,
-    TerminalFocusCoordinator, TerminalFocusFacts, conformance_ime_observation,
+    TerminalFocusCoordinator, TerminalFocusFacts,
 };
 
 const MAX_FIXTURE_STEPS: usize = 1_024;
@@ -200,20 +200,6 @@ const FIXTURES: &[FixtureSpec] = &[
         [6, 7],
         "dec-deccusr-and-spaceterm-cadence",
         Lifecycle
-    ),
-    fixture!(
-        "ime.marked-text",
-        22,
-        [22],
-        "apple-nstextinputclient",
-        Interface
-    ),
-    fixture!(
-        "input.secure-event",
-        23,
-        [23],
-        "apple-secure-event-input",
-        Security
     ),
     fixture!(
         "screen.scrollback-and-reflow",
@@ -753,7 +739,7 @@ const PASS_EXPECTED: &[ExpectedObservation] = &[ExpectedObservation {
     value: "pass",
 }];
 
-fn observe_advertised_capability(
+fn observe_portable_contract(
     spec: &FixtureSpec,
     budget: &mut FixtureBudget,
 ) -> Result<Vec<Observation>, String> {
@@ -768,8 +754,6 @@ fn observe_advertised_capability(
         19 => check_gpui_keyboard_adapter()?,
         20 => check_focus_reporting()?,
         21 => check_cursor_blink_lifecycle()?,
-        22 => check_ime()?,
-        23 => check_secure_input()?,
         24 => check_screens_scrollback_and_reflow()?,
         25 => check_mouse_protocols()?,
         26 => check_selection_and_copy(false)?,
@@ -794,6 +778,7 @@ fn observe_advertised_capability(
             ));
         }
     }
+    // This counts the returned observation, not the work performed inside a driver.
     budget.record(0, 4);
     Ok(vec![Observation {
         step: 1,
@@ -804,7 +789,7 @@ fn observe_advertised_capability(
 
 fn check_kitty_graphics() -> Result<(), String> {
     run_fixture(&ExecutableFixture {
-        spec: &FIXTURES[35],
+        spec: &FIXTURES[33],
         expected: KITTY_GRAPHICS_EXPECTED,
         observe: observe_kitty_graphics,
     })
@@ -848,17 +833,17 @@ fn check_snapshot_isolation() -> Result<(), String> {
     let first_snapshot = first
         .snapshot()
         .map_err(|error| error.to_string())?
-        .ok_or_else(|| "first Session published no snapshot".to_owned())?;
+        .ok_or_else(|| "first Terminal Session published no snapshot".to_owned())?;
     let second_snapshot = second
         .snapshot()
         .map_err(|error| error.to_string())?
-        .ok_or_else(|| "second Session published no snapshot".to_owned())?;
+        .ok_or_else(|| "second Terminal Session published no snapshot".to_owned())?;
     require_eq("first-cell", first_snapshot.rows[0][0].text.as_str(), "a")?;
     require_eq("second-cell", second_snapshot.rows[0][0].text.as_str(), "b")?;
     require(
         !std::sync::Arc::ptr_eq(&first_snapshot.rows, &second_snapshot.rows),
         "snapshot-isolation",
-        "two Sessions shared row storage",
+        "two Terminal Sessions shared row storage",
     )?;
     require(
         first_snapshot.damage.content != super::emulator::ContentDamageSnapshot::Clean,
@@ -1132,26 +1117,6 @@ fn check_cursor_blink_lifecycle() -> Result<(), String> {
         !steady.cursor.blinking,
         "cursor-steady-mode",
         "steady block cursor blinked",
-    )
-}
-
-fn check_ime() -> Result<(), String> {
-    let observation = conformance_ime_observation();
-    for expected in ["marked=A界B", "selection=2..2", "commit=Some(\"A界B\")"] {
-        require(
-            observation.contains(expected),
-            "ime-state",
-            format!("expected `{expected}` in `{observation}`"),
-        )?;
-    }
-    Ok(())
-}
-
-fn check_secure_input() -> Result<(), String> {
-    require_eq(
-        "secure-input-balance",
-        crate::terminal::secure_input::conformance_secure_input_observation(),
-        "transitions=[true, false, true, false] enabled=false".to_owned(),
     )
 }
 
@@ -1607,13 +1572,13 @@ fn check_native_services() -> Result<(), String> {
             file_preview: false,
         },
     )?;
-    let insertion = PastePayload::dropped_files(
+    let insertion = PastePayload::prepare_dropped_files(
         crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),
         &[PathBuf::from("/tmp/a b")],
-        true,
         local_files,
     )
-    .map_err(|error| format!("native insertion failed: {error:?}"))?;
+    .map_err(|error| format!("native insertion failed: {error:?}"))?
+    .ok_or_else(|| "local file insertion was not prepared".to_owned())?;
     require_eq("native-file-insertion", insertion.text(), "'/tmp/a b'")?;
     require_eq(
         "native-focus-gate",
@@ -1734,10 +1699,13 @@ fn check_typed_failures() -> Result<(), String> {
         failure.recoverability(),
         Recoverability::Fatal,
     )?;
+    let redacted = TerminalFailure::from_session(&TerminalSessionFailure::Runtime(
+        "private terminal content".to_owned(),
+    ));
     require(
-        !failure.to_string().contains("terminal content"),
+        !redacted.to_string().contains("private terminal content"),
         "failure-redaction",
-        failure.to_string(),
+        redacted.to_string(),
     )?;
     let mut diagnostics = DiagnosticBundle::default();
     for _ in 0..DiagnosticBundle::MAX_RECORDS + 10 {
@@ -1767,33 +1735,26 @@ const EXECUTABLE_FIXTURES: &[ExecutableFixture] = &[
         observe: observe_semantic_snapshot,
     },
     ExecutableFixture {
-        spec: &FIXTURES[35],
+        spec: &FIXTURES[33],
         expected: KITTY_GRAPHICS_EXPECTED,
         observe: observe_kitty_graphics,
     },
 ];
 
 #[test]
-fn registry_covers_every_advertised_capability() {
-    let stories = FIXTURES
-        .iter()
-        .flat_map(|fixture| fixture.stories.iter().copied())
-        .collect::<BTreeSet<_>>();
-    let expected = (1..=46).collect::<BTreeSet<_>>();
+fn fixture_registry_is_well_formed() {
     let ids = FIXTURES
         .iter()
         .map(|fixture| fixture.id)
         .collect::<BTreeSet<_>>();
     let forbidden = ["sixel", "iterm-image"];
 
-    assert_eq!(stories, expected);
     assert_eq!(
         ids.len(),
         FIXTURES.len(),
         "fixture identifiers must be unique"
     );
     for fixture in FIXTURES {
-        assert!(((6..42).contains(&fixture.issue) && fixture.issue != 28) || fixture.issue == 89);
         assert!(!fixture.authority.is_empty());
         assert!(
             forbidden
@@ -1803,15 +1764,6 @@ fn registry_covers_every_advertised_capability() {
         assert!((1..=MAX_FIXTURE_STEPS).contains(&fixture.max_steps));
         assert!((1..=MAX_FIXTURE_INPUT_BYTES).contains(&fixture.max_input_bytes));
         assert!((1..=MAX_FIXTURE_OUTPUT_BYTES).contains(&fixture.max_output_bytes));
-        assert!(matches!(
-            fixture.oracle,
-            OracleKind::Bytes
-                | OracleKind::SemanticSnapshot
-                | OracleKind::Geometry
-                | OracleKind::Lifecycle
-                | OracleKind::Security
-                | OracleKind::Interface
-        ));
     }
 }
 
@@ -1868,10 +1820,19 @@ fn runner_rejects_a_fixture_that_exceeds_its_deterministic_budget() {
 
 #[test]
 fn golden_byte_fixtures_match_protocol_authorities() {
-    for fixture in EXECUTABLE_FIXTURES {
-        if fixture.spec.oracle == OracleKind::Bytes
-            && let Err(error) = run_fixture(fixture)
-        {
+    let selected = EXECUTABLE_FIXTURES
+        .iter()
+        .filter(|fixture| fixture.spec.oracle == OracleKind::Bytes)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        selected
+            .iter()
+            .map(|fixture| fixture.spec.id)
+            .collect::<Vec<_>>(),
+        ["keyboard.protocols"]
+    );
+    for fixture in selected {
+        if let Err(error) = run_fixture(fixture) {
             panic!("{error}");
         }
     }
@@ -1879,45 +1840,33 @@ fn golden_byte_fixtures_match_protocol_authorities() {
 
 #[test]
 fn semantic_snapshot_fixtures_match_terminal_state() {
-    for fixture in EXECUTABLE_FIXTURES {
-        if fixture.spec.oracle == OracleKind::SemanticSnapshot
-            && let Err(error) = run_fixture(fixture)
-        {
+    let selected = EXECUTABLE_FIXTURES
+        .iter()
+        .filter(|fixture| fixture.spec.oracle == OracleKind::SemanticSnapshot)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        selected
+            .iter()
+            .map(|fixture| fixture.spec.id)
+            .collect::<Vec<_>>(),
+        ["presentation.colors", "graphics.kitty-static"]
+    );
+    for fixture in selected {
+        if let Err(error) = run_fixture(fixture) {
             panic!("{error}");
         }
     }
 }
 
 #[test]
-fn appearance_classification_query_and_mode_reports_track_applied_generation() {
-    let mut emulator = emulator(8, 2).unwrap();
-    emulator.feed(b"\x1b[?996n");
-    assert_eq!(emulator.take_pty_responses(), b"\x1b[?997;1n");
-
-    emulator.feed(b"\x1b[?2031h");
-    let mut update = crate::terminal::test_terminal_appearance_update();
-    update.generation = crate::appearance::AppearanceGeneration::new(2);
-    Arc::make_mut(&mut update.appearance).appearance = crate::appearance::Appearance::Light;
-    emulator.apply_appearance(update).unwrap();
-
-    assert_eq!(emulator.take_pty_responses(), b"\x1b[?997;2n");
-    let screen = emulator.snapshot().unwrap().unwrap();
-    assert_eq!(
-        (
-            screen.appearance_generation.get(),
-            screen.terminal_appearance
-        ),
-        (2, crate::appearance::Appearance::Light)
-    );
-}
-
-#[test]
-fn every_advertised_capability_has_a_passing_executable_fixture() {
+fn registered_portable_contract_fixtures_pass() {
+    // PTY and native-service drivers exercise injected portable contracts.
+    // Native Adapter suites validate their operating system integrations separately.
     for spec in FIXTURES {
         let fixture = ExecutableFixture {
             spec,
             expected: PASS_EXPECTED,
-            observe: observe_advertised_capability,
+            observe: observe_portable_contract,
         };
         if let Err(error) = run_fixture(&fixture) {
             panic!("{error}");

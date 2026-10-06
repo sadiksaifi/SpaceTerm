@@ -1,6 +1,5 @@
 //! Shared inset selection and hover geometry for Workspace rows, Tabs, and Settings navigation.
-//! Callers supply prepared state paints and semantic geometry. Collection focus changes the
-//! selection paint; it never adds a row focus ring.
+//! Collection focus changes the selection paint; it never adds a row focus ring.
 
 use crate::ui::appearance::gpui_color;
 use gpui::prelude::*;
@@ -9,12 +8,8 @@ use gpui::{AnyElement, Pixels, div, px};
 use crate::appearance::{Appearance, Color};
 use crate::ui::chrome_geometry::HAIRLINE;
 
-/// Where a chip sits inside the item that owns it.
-///
-/// The item keeps its own bounds, so hit target, hover region, and keyboard target are unchanged
-/// by the inset: only the paint moves inward. The two horizontal insets are separate because a
-/// strip can meet a window edge on one side and a floating surface on the other, where equal
-/// insets would read as unequal air.
+/// Where a chip sits inside the item that owns it. The item keeps its own bounds; only the paint
+/// moves inward.
 #[derive(Clone, Copy)]
 pub(crate) struct ChipShape {
     pub(crate) inset_leading: Pixels,
@@ -35,11 +30,7 @@ impl ChipShape {
     }
 }
 
-/// What a chip paints at rest and under the pointer.
-///
-/// Every paint is optional. A rim earns its place only where the fill alone is too close to the
-/// surface under it to describe an edge, and an item that cannot be chosen leaves the hover paints
-/// out entirely rather than lighting under a pointer that can do nothing with it.
+/// What a chip paints at rest and under the pointer. Every paint is optional.
 #[derive(Clone, Copy)]
 pub(crate) struct ChipPaint {
     pub(crate) fill: Option<Color>,
@@ -77,9 +68,7 @@ impl ChipPaint {
         paint
     }
 
-    /// Ties a chip to a translucent window without giving up what it describes.
-    ///
-    /// Each fill is relative to its host. Custom rims are relative to their state fill, so their
+    /// Ties a chip to a translucent window. Custom rims are relative to their state fill, so their
     /// contrast direction survives changes in the native backing.
     pub(crate) fn raised_on(
         self,
@@ -113,11 +102,8 @@ impl ChipPaint {
     }
 }
 
-/// The selection paints of a collection with keyboard focus in an active window.
-///
-/// AppKit draws no focus ring around a focused list. It paints the selection in the accent color
-/// with the accent's foreground on all of the item's text and icons instead. The accent is opaque, so a
-/// chip painted from these colors skips the window's material.
+/// The selection paints of a collection with keyboard focus in an active window. The accent is
+/// opaque, so a chip painted from these colors skips the window's material.
 pub(crate) fn emphasized_selection_colors(
     colors: &crate::appearance::ChromeColors,
 ) -> crate::appearance::ChromeColors {
@@ -160,11 +146,8 @@ impl SelectionChip {
             .rounded(shape.radius)
     }
 
-    /// The chip itself, painted under the item's own content.
-    ///
-    /// `hover` is how far the owning item has eased toward its hovered look, so pointing anywhere
-    /// in the item lights the one shape that item presents. A lifted copy of an item is always
-    /// under the pointer and paints fully hovered.
+    /// The chip itself, painted under the item's own content. `hover` is how far the owning item
+    /// has eased toward its hovered look.
     pub(crate) fn render(self, selector: String, hover: f32) -> AnyElement {
         let paint = self.paint;
         let fill = hovered_paint(paint.fill, paint.hover_fill.or(paint.fill), hover);
@@ -184,8 +167,6 @@ impl SelectionChip {
 }
 
 /// A paint `hover` of the way from its resting to its hovered color.
-///
-/// A paint that appears only on hover fades in from transparent, keeping its own color.
 pub(crate) fn hovered_paint(
     rest: Option<Color>,
     hovered: Option<Color>,

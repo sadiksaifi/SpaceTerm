@@ -1,7 +1,5 @@
 //! The Controls section: every production control family pinned in each interaction state.
-//!
-//! Columns pin visual states only; focus and drag handlers stay unarmed, so a capture shows the
-//! paint of a state without the pointer or keyboard producing it.
+//! Focus and drag handlers stay unarmed so a capture shows a state's paint without input.
 
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Div, Entity, SharedString, Window, div, px};
@@ -835,6 +833,13 @@ mod tests {
             "Disabled contrast floor unmet: Element; Disabled separation target unmet: Toggle; Disabled shared paint unmet: Input; Disabled selected step unmet: Segmented"
         );
         assert!(control_diagnostic_lines(&appearance)[0].1);
+        assert_eq!(
+            control_diagnostic_lines(&appearance)
+                .iter()
+                .map(|line| line.1)
+                .collect::<Vec<_>>(),
+            [true, false, false, false]
+        );
     }
 
     struct DiagnosticsFixture;

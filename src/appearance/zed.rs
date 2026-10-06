@@ -1,10 +1,5 @@
-//! Translates Zed theme families into Terminal Themes.
-//!
-//! A Zed theme styles a whole editor. SpaceTerm reads only the terminal roles and the few editor
-//! roles a terminal needs (cursor, selection, search, and links), and none of them reach Chrome.
-//! Translation is as lenient as Zed's own loader: a color that does not parse is absent. An absent
-//! role derives from the theme's own colors first and from the built-in palette of the theme's
-//! appearance last, so every installed theme resolves to a complete, opaque protocol palette.
+//! Translates Zed theme families into Terminal Themes, reading only terminal, cursor, selection,
+//! search, and link roles. Absent roles derive from the theme, then from the built-in palette.
 
 use std::collections::BTreeSet;
 
@@ -19,7 +14,7 @@ use super::terminal_theme::{
 use super::{Appearance, Color, TerminalColors, TerminalTheme, ThemeId, builtin};
 
 /// The largest Zed family document SpaceTerm reads.
-pub(crate) const MAX_FAMILY_BYTES: usize = super::document::MAX_DOCUMENT_BYTES;
+pub(crate) const MAX_FAMILY_BYTES: usize = 4 * 1024 * 1024;
 /// The most themes one Zed family document may contain.
 pub(crate) const MAX_FAMILY_THEMES: usize = 256;
 /// The most family documents one Zed extension may contribute. Every family holds at least one

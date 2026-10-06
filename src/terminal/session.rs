@@ -82,7 +82,7 @@ fn pty_size(geometry: TerminalGeometry) -> NativePtySize {
 // Screen events may supersede older screens. Failed and Exited are final events,
 // so the worker must not publish another screen after either one.
 #[derive(Debug)]
-pub(crate) enum SessionEvent {
+pub(crate) enum TerminalSessionEvent {
     Screen(Arc<ScreenSnapshot>),
     /// Retained Terminal Metadata changed; read it from the retained snapshot.
     MetadataChanged(MetadataWakeup),
@@ -90,8 +90,8 @@ pub(crate) enum SessionEvent {
     HiddenInputChanged(bool),
     /// A program asked for a Permission Setup.
     PermissionRequested(PermissionRequest),
-    Exited(SessionExit),
-    Failed(SessionFailure),
+    Exited(TerminalSessionExit),
+    Failed(TerminalSessionFailure),
 }
 
 #[derive(Debug)]
@@ -108,14 +108,6 @@ impl MetadataWakeup {
 impl Drop for MetadataWakeup {
     fn drop(&mut self) {
         self.queued.store(false, Ordering::Release);
-    }
-}
-
-#[cfg(test)]
-impl SessionEvent {
-    pub(crate) fn metadata_changed_for_test() -> Self {
-        let queued = Arc::new(AtomicBool::new(true));
-        Self::MetadataChanged(MetadataWakeup::new(queued))
     }
 }
 
@@ -155,7 +147,7 @@ impl TerminalAppearanceUpdate {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum SessionExit {
+pub(crate) enum TerminalSessionExit {
     Success,
     ExitCode(u32),
     Signal(String),
@@ -163,7 +155,7 @@ pub(crate) enum SessionExit {
     ForcedShutdown,
 }
 
-impl fmt::Display for SessionExit {
+impl fmt::Display for TerminalSessionExit {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Success => formatter.write_str("Shell exited successfully"),
@@ -176,9 +168,9 @@ impl fmt::Display for SessionExit {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum SessionFailure {
+pub(crate) enum TerminalSessionFailure {
     Startup {
-        stage: SessionStartupStage,
+        stage: TerminalSessionStartupStage,
         message: String,
     },
     Runtime(String),
@@ -193,14 +185,14 @@ pub(crate) enum SessionFailure {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum SessionStartupStage {
+pub(crate) enum TerminalSessionStartupStage {
     Pty,
     Reader,
     ReaderThread,
     Emulator,
 }
 
-impl fmt::Display for SessionFailure {
+impl fmt::Display for TerminalSessionFailure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Startup { stage, message } => {
@@ -235,9 +227,9 @@ impl fmt::Display for SessionFailure {
     }
 }
 
-impl std::error::Error for SessionFailure {}
+impl std::error::Error for TerminalSessionFailure {}
 
-impl fmt::Display for SessionStartupStage {
+impl fmt::Display for TerminalSessionStartupStage {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Pty => formatter.write_str("PTY creation"),
@@ -249,22 +241,27 @@ impl fmt::Display for SessionStartupStage {
 }
 
 #[derive(Debug, Error)]
-pub(crate) enum SessionError {
-    #[error("failed to start the terminal worker thread: {0}")]
-    SpawnWorker(#[source] std::io::Error),
+pub(crate) enum TerminalSessionError {
+    #[error("failed to start the terminal worker thread: {0:?}")]
+    SpawnWorker(std::io::ErrorKind),
     #[error(transparent)]
-    PreparedSshPaneChannel(#[from] crate::ssh::command::PreparedSshPaneChannelError),
-    #[cfg(test)]
-    #[error("terminal worker stopped before initialization completed")]
-    StartupChannelClosed,
+    PreparedSshTerminalSessionChannel(
+        #[from] crate::ssh::command::PreparedSshTerminalSessionChannelError,
+    ),
     #[cfg(test)]
     #[error("terminal emulator initialization failed: {0}")]
     EmulatorStartup(String),
 }
 
+impl From<std::io::Error> for TerminalSessionError {
+    fn from(error: std::io::Error) -> Self {
+        Self::SpawnWorker(error.kind())
+    }
+}
+
 pub(crate) struct StartedTerminalSession {
     pub(crate) handle: Box<dyn TerminalSessionHandle>,
-    pub(crate) events: async_channel::Receiver<SessionEvent>,
+    pub(crate) events: async_channel::Receiver<TerminalSessionEvent>,
     pub(crate) accessibility: async_channel::Receiver<Arc<TerminalAccessibilityModel>>,
     pub(crate) clipboard: async_channel::Receiver<ClipboardRequest>,
 }
@@ -380,9 +377,9 @@ impl RecordingAccessibilitySelectionReceiver {
 /// Presentation events may evict any earlier queue entry, and a hidden Pane receives no Screens at
 /// all, yet its Pane and Workspace still need current presentation and close-confirmation facts.
 #[derive(Clone, Default)]
-struct SessionMetadataState(Arc<Mutex<Option<Arc<TerminalMetadataSnapshot>>>>);
+struct TerminalSessionMetadataState(Arc<Mutex<Option<Arc<TerminalMetadataSnapshot>>>>);
 
-impl SessionMetadataState {
+impl TerminalSessionMetadataState {
     fn snapshot(&self) -> Option<Arc<TerminalMetadataSnapshot>> {
         self.0
             .lock()
@@ -397,9 +394,9 @@ impl SessionMetadataState {
 
 /// Requests are a bounded set of supported permissions, retained independently of UI wakeups.
 #[derive(Clone, Default)]
-struct SessionPermissionRequestState(Arc<Mutex<Option<PermissionRequest>>>);
+struct TerminalSessionPermissionRequestState(Arc<Mutex<Option<PermissionRequest>>>);
 
-impl SessionPermissionRequestState {
+impl TerminalSessionPermissionRequestState {
     fn snapshot(&self) -> Option<PermissionRequest> {
         self.0
             .lock()
@@ -417,7 +414,7 @@ impl SessionPermissionRequestState {
 }
 
 pub(crate) trait TerminalSessionHandle {
-    /// The newest Terminal Metadata the Session has retained, whether or not it is presentable.
+    /// The newest Terminal Metadata the Terminal Session retained, presentable or not.
     fn metadata_snapshot(&self) -> Option<Arc<TerminalMetadataSnapshot>> {
         None
     }
@@ -475,7 +472,7 @@ pub(crate) trait TerminalSessionHandle {
 
 /// Starts one Terminal Session by consuming typed Local or Remote launch authority.
 pub(crate) trait TerminalSessionFactory {
-    /// Starts a session without reparsing or weakening the supplied launch plan.
+    /// Starts a Terminal Session without reparsing or weakening the supplied launch plan.
     ///
     /// Remote implementations consume the prepared OpenSSH command exactly once and use only the
     /// plan's validated local home as local process working-directory authority.
@@ -484,7 +481,7 @@ pub(crate) trait TerminalSessionFactory {
         geometry: TerminalGeometry,
         launch_plan: TerminalLaunchPlan,
         initial_appearance: TerminalAppearanceUpdate,
-    ) -> Result<StartedTerminalSession, SessionError>;
+    ) -> Result<StartedTerminalSession, TerminalSessionError>;
 
     fn fallback_title(&self) -> String {
         "Terminal".to_owned()
@@ -492,8 +489,8 @@ pub(crate) trait TerminalSessionFactory {
 }
 
 pub(crate) struct TerminalSession {
-    metadata_state: SessionMetadataState,
-    permission_request_state: SessionPermissionRequestState,
+    metadata_state: TerminalSessionMetadataState,
+    permission_request_state: TerminalSessionPermissionRequestState,
     commands: Option<CommandSender<Command>>,
     worker: Option<JoinHandle<()>>,
     native_pty_close: Option<NativePtyCloseHandle>,
@@ -502,9 +499,9 @@ pub(crate) struct TerminalSession {
     clipboard_authority: Arc<ClipboardAuthority>,
 }
 
-type StartedSession = (
+type StartedTerminalSessionParts = (
     TerminalSession,
-    async_channel::Receiver<SessionEvent>,
+    async_channel::Receiver<TerminalSessionEvent>,
     async_channel::Receiver<Arc<TerminalAccessibilityModel>>,
 );
 
@@ -801,7 +798,7 @@ impl Drop for TerminalSession {
 }
 
 struct ReaderTransport {
-    output: Arc<SessionNativePtyOutputSink>,
+    output: Arc<TerminalSessionNativePtyOutputSink>,
     event_rx: mpsc::Receiver<NativePtyOutput>,
 }
 
@@ -809,7 +806,7 @@ impl ReaderTransport {
     fn new(commands: CommandSender<Command>, clipboard_authority: Arc<ClipboardAuthority>) -> Self {
         let (events, event_rx) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
         Self {
-            output: Arc::new(SessionNativePtyOutputSink {
+            output: Arc::new(TerminalSessionNativePtyOutputSink {
                 commands,
                 events,
                 clipboard_authority,
@@ -823,13 +820,13 @@ impl ReaderTransport {
     }
 }
 
-struct SessionNativePtyOutputSink {
+struct TerminalSessionNativePtyOutputSink {
     clipboard_authority: Arc<ClipboardAuthority>,
     commands: CommandSender<Command>,
     events: mpsc::SyncSender<NativePtyOutput>,
 }
 
-impl NativePtyOutputSink for SessionNativePtyOutputSink {
+impl NativePtyOutputSink for TerminalSessionNativePtyOutputSink {
     fn publish(&self, output: NativePtyOutput) -> bool {
         // ReaderReady orders bounded PTY output against the reliable control command lane.
         let epoch = self.clipboard_authority.grant();
@@ -970,14 +967,14 @@ impl fmt::Debug for Command {
 }
 
 struct TerminalWorker {
-    metadata_state: SessionMetadataState,
-    permission_request_state: SessionPermissionRequestState,
+    metadata_state: TerminalSessionMetadataState,
+    permission_request_state: TerminalSessionPermissionRequestState,
     native_pty: NativePtyOwner,
     input: PtyInput,
     emulator: TerminalEmulator,
     commands: CommandReceiver<Command>,
     reader_events: mpsc::Receiver<NativePtyOutput>,
-    events: async_channel::Sender<SessionEvent>,
+    events: async_channel::Sender<TerminalSessionEvent>,
     accessibility: async_channel::Sender<Arc<TerminalAccessibilityModel>>,
     pending_command: Option<Command>,
     terminal_input_focused: bool,
@@ -1000,9 +997,9 @@ struct TerminalWorkerContext {
 
 struct TerminalWorkerPublishers {
     clipboard: WorkerClipboard,
-    metadata_state: SessionMetadataState,
-    permission_request_state: SessionPermissionRequestState,
-    events: async_channel::Sender<SessionEvent>,
+    metadata_state: TerminalSessionMetadataState,
+    permission_request_state: TerminalSessionPermissionRequestState,
+    events: async_channel::Sender<TerminalSessionEvent>,
     accessibility: async_channel::Sender<Arc<TerminalAccessibilityModel>>,
 }
 
@@ -1090,37 +1087,6 @@ impl HeldKeys {
     }
 }
 
-enum StartupReporter {
-    #[cfg(test)]
-    Blocking(mpsc::SyncSender<Result<(), String>>),
-    Events(async_channel::Sender<SessionEvent>),
-}
-
-impl StartupReporter {
-    fn failed(&self, stage: SessionStartupStage, message: String) {
-        match self {
-            #[cfg(test)]
-            Self::Blocking(startup) => {
-                let _ = startup.send(Err(message));
-            }
-            Self::Events(events) => {
-                send_session_event(
-                    events,
-                    SessionEvent::Failed(SessionFailure::Startup { stage, message }),
-                );
-            }
-        }
-    }
-
-    fn succeeded(&self) -> bool {
-        match self {
-            #[cfg(test)]
-            Self::Blocking(startup) => startup.send(Ok(())).is_ok(),
-            Self::Events(_) => true,
-        }
-    }
-}
-
 impl TerminalWorker {
     fn run(
         native_pty: NativePtyOwner,
@@ -1129,7 +1095,6 @@ impl TerminalWorker {
         reader_transport: ReaderTransport,
         schedule_input: ScheduleInput,
         publishers: TerminalWorkerPublishers,
-        startup: StartupReporter,
     ) {
         let TerminalWorkerContext {
             initial_geometry,
@@ -1162,7 +1127,13 @@ impl TerminalWorker {
         ) {
             Ok(emulator) => emulator,
             Err(error) => {
-                startup.failed(SessionStartupStage::Emulator, error.to_string());
+                send_session_event(
+                    &events,
+                    TerminalSessionEvent::Failed(TerminalSessionFailure::Startup {
+                        stage: TerminalSessionStartupStage::Emulator,
+                        message: error.to_string(),
+                    }),
+                );
                 drop(reader_event_rx);
                 drop(native_pty);
                 return;
@@ -1193,11 +1164,6 @@ impl TerminalWorker {
             permission_requests: PermissionRequestFilter::default(),
             clipboard,
         };
-
-        if !startup.succeeded() {
-            worker.finish();
-            return;
-        }
 
         worker.run_commands();
         worker.finish();
@@ -1631,7 +1597,10 @@ impl TerminalWorker {
             .schedules
             .update_hidden_input(Instant::now(), self.native_pty.hidden_input())
         {
-            send_session_event(&self.events, SessionEvent::HiddenInputChanged(active))
+            send_session_event(
+                &self.events,
+                TerminalSessionEvent::HiddenInputChanged(active),
+            )
         } else {
             true
         }
@@ -1887,7 +1856,7 @@ impl TerminalWorker {
         }
         if let Some(request) = requested {
             self.permission_request_state.publish(&request);
-            if !self.send_terminal_event(SessionEvent::PermissionRequested(request)) {
+            if !self.send_terminal_event(TerminalSessionEvent::PermissionRequested(request)) {
                 return false;
             }
         }
@@ -1904,9 +1873,9 @@ impl TerminalWorker {
             {
                 return false;
             }
-            // A presentable Session's next Screen carries the retained metadata wakeup. Publishing
-            // a separate event first can evict lossless attention when that Screen replaces an
-            // older queue entry. Hidden Sessions receive no Screens, so they still need the wakeup.
+            // A presentable Terminal Session's next Screen carries the metadata wakeup. A separate
+            // event first can evict lossless attention when that Screen replaces an older queue
+            // entry. Hidden Terminal Sessions receive no Screens, so they still need the wakeup.
             if metadata_revised
                 && !self.schedules.is_presentable()
                 && !self.publish_metadata_changed()
@@ -1964,7 +1933,7 @@ impl TerminalWorker {
             return false;
         }
         for event in self.emulator.take_attention_events() {
-            if !self.send_terminal_event(SessionEvent::Attention(event)) {
+            if !self.send_terminal_event(TerminalSessionEvent::Attention(event)) {
                 return false;
             }
         }
@@ -2007,7 +1976,7 @@ impl TerminalWorker {
     }
 
     fn process_shortcut(&mut self, mut input: KeyInput) -> bool {
-        // Menu key equivalents may never deliver a physical key-up event.
+        // Menu Shortcuts may never deliver a physical key-up event.
         // Complete the semantic gesture and suppress any later physical release.
         if !self.process_key(input.clone()) {
             return false;
@@ -2131,7 +2100,7 @@ impl TerminalWorker {
             Ok(Some(snapshot)) => {
                 let result = self
                     .events
-                    .force_send(SessionEvent::Screen(snapshot))
+                    .force_send(TerminalSessionEvent::Screen(snapshot))
                     .is_ok();
                 if result {
                     let now = Instant::now();
@@ -2174,7 +2143,10 @@ impl TerminalWorker {
         let Some(wakeup) = self.schedules.take_metadata_presentation() else {
             return true;
         };
-        match self.events.try_send(SessionEvent::MetadataChanged(wakeup)) {
+        match self
+            .events
+            .try_send(TerminalSessionEvent::MetadataChanged(wakeup))
+        {
             Ok(()) | Err(async_channel::TrySendError::Full(_)) => true,
             Err(async_channel::TrySendError::Closed(_)) => false,
         }
@@ -2283,10 +2255,12 @@ impl TerminalWorker {
     }
 
     fn send_runtime_failure(&self, message: String) -> bool {
-        self.send_terminal_event(SessionEvent::Failed(SessionFailure::Runtime(message)))
+        self.send_terminal_event(TerminalSessionEvent::Failed(
+            TerminalSessionFailure::Runtime(message),
+        ))
     }
 
-    fn send_terminal_event(&self, event: SessionEvent) -> bool {
+    fn send_terminal_event(&self, event: TerminalSessionEvent) -> bool {
         send_session_event(&self.events, event)
     }
 
@@ -2312,31 +2286,38 @@ impl TerminalWorker {
 fn classify_reader_stop(
     read_error: Option<crate::platform::native_pty::NativePtyReadFailure>,
     wait_result: Result<NativePtyExit, NativePtyWaitFailure>,
-) -> SessionEvent {
+) -> TerminalSessionEvent {
     match (read_error, wait_result) {
-        (None, Ok(exit)) => SessionEvent::Exited(classify_native_pty_exit(exit)),
-        (Some(read_error), Ok(exit)) => SessionEvent::Failed(SessionFailure::PtyRead {
-            read_error: read_error.to_string(),
-            exit_status: classify_native_pty_exit(exit).to_string(),
-        }),
-        (read_error, Err(wait_error)) => SessionEvent::Failed(SessionFailure::ShellWait {
-            read_error: read_error.map(|error| error.to_string()),
-            wait_error: wait_error.to_string(),
-        }),
+        (None, Ok(exit)) => TerminalSessionEvent::Exited(classify_native_pty_exit(exit)),
+        (Some(read_error), Ok(exit)) => {
+            TerminalSessionEvent::Failed(TerminalSessionFailure::PtyRead {
+                read_error: read_error.to_string(),
+                exit_status: classify_native_pty_exit(exit).to_string(),
+            })
+        }
+        (read_error, Err(wait_error)) => {
+            TerminalSessionEvent::Failed(TerminalSessionFailure::ShellWait {
+                read_error: read_error.map(|error| error.to_string()),
+                wait_error: wait_error.to_string(),
+            })
+        }
     }
 }
 
-fn classify_native_pty_exit(exit: NativePtyExit) -> SessionExit {
+fn classify_native_pty_exit(exit: NativePtyExit) -> TerminalSessionExit {
     match exit {
-        NativePtyExit::Success => SessionExit::Success,
-        NativePtyExit::ExitCode(code) => SessionExit::ExitCode(code),
-        NativePtyExit::Signal(signal) => SessionExit::Signal(signal),
-        NativePtyExit::GracefulShutdown => SessionExit::GracefulShutdown,
-        NativePtyExit::ForcedShutdown => SessionExit::ForcedShutdown,
+        NativePtyExit::Success => TerminalSessionExit::Success,
+        NativePtyExit::ExitCode(code) => TerminalSessionExit::ExitCode(code),
+        NativePtyExit::Signal(signal) => TerminalSessionExit::Signal(signal),
+        NativePtyExit::GracefulShutdown => TerminalSessionExit::GracefulShutdown,
+        NativePtyExit::ForcedShutdown => TerminalSessionExit::ForcedShutdown,
     }
 }
 
-fn send_session_event(events: &async_channel::Sender<SessionEvent>, event: SessionEvent) -> bool {
+fn send_session_event(
+    events: &async_channel::Sender<TerminalSessionEvent>,
+    event: TerminalSessionEvent,
+) -> bool {
     match events.try_send(event) {
         Ok(()) => true,
         Err(async_channel::TrySendError::Full(event)) => events.force_send(event).is_ok(),
@@ -2353,7 +2334,7 @@ fn join_worker(worker: JoinHandle<()>) {
 
 #[cfg(test)]
 #[path = "session/tests.rs"]
-mod tests;
+pub(super) mod tests;
 
 #[cfg(all(
     test,

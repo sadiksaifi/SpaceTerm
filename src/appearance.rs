@@ -1,8 +1,5 @@
-//! Portable appearance policy, Zed terminal theme translation, and pure resolution.
-//!
-//! This Module deliberately contains no GPUI, terminal-engine, filesystem, or
-//! native platform types. Callers supply catalogs and availability facts, then
-//! receive immutable requested-versus-effective rendering specifications.
+//! Portable appearance policy, Zed terminal theme translation, and pure resolution, free of GPUI,
+//! terminal-engine, filesystem, and native platform types.
 
 macro_rules! chrome_color_fields {
     ($macro:ident) => {
@@ -160,8 +157,7 @@ macro_rules! chrome_color_fields {
             preview_foreground,
             tab_active_foreground,
             tab_inactive_foreground,
-            tab_inactive_selected_background,
-            tab_inactive_selected_foreground,
+            inactive_selection_background,
             scrollbar_thumb_active_background,
             success_background,
             success_border,
@@ -175,9 +171,9 @@ macro_rules! chrome_color_fields {
             ghost_element_active_border,
             ghost_element_disabled_border,
             outline_border, outline_hover_border, outline_pressed_border, outline_disabled_border,
-            tab_hover_background, tab_hover_foreground, tab_hover_icon, tab_active_icon, tab_inactive_icon, tab_inactive_selected_icon,
+            tab_hover_background, tab_hover_foreground, tab_hover_icon, tab_active_icon, tab_inactive_icon,
             tab_active_border, tab_active_hover_background, tab_active_hover_foreground, tab_active_hover_icon,
-            tab_inactive_selected_border, tab_separator
+            inactive_selection_border, tab_separator
         }
     };
 }
@@ -185,13 +181,11 @@ macro_rules! chrome_color_fields {
 mod builtin;
 #[cfg(test)]
 mod catalog_tests;
+mod color;
 mod compiler;
 mod composition;
-mod document;
 mod preferences;
 mod resolution;
-#[cfg(test)]
-mod schema_tests;
 mod terminal_theme;
 #[cfg(test)]
 mod tests;
@@ -199,14 +193,11 @@ mod zed;
 #[cfg(test)]
 mod zed_tests;
 
-pub(crate) use crate::theme::Color;
+pub(crate) use color::Color;
 pub(crate) use compiler::{CaptionPaint, SemanticPaint, StatusPaint};
 pub(crate) use composition::{
     ChromeTone, CompositionCapabilities, ResolvedWindowComposition, SurfaceMaterials, SurfaceRole,
     UnavailableWindowEffect, WindowBackgroundAppearance, WindowBackgroundChoices,
-};
-pub(crate) use document::{
-    SettingsDocument, SettingsDocumentError, export_settings, parse_settings,
 };
 pub(crate) use preferences::{
     AppearanceMode, AppearancePreferences, ChromeDensity, ResetTarget, TerminalFontFamily,

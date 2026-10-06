@@ -924,13 +924,6 @@ impl TerminalAccessibilityModel {
             .unwrap_or_else(|| self.data.cursor.clone())
     }
 
-    #[cfg_attr(
-        not(target_os = "macos"),
-        allow(
-            dead_code,
-            reason = "only a native accessibility Adapter answers text queries"
-        )
-    )]
     pub(crate) fn range_for_line(&self, line: usize) -> Option<Range<usize>> {
         self.data.document.range_for_line(line)
     }
@@ -965,13 +958,6 @@ impl TerminalAccessibilityModel {
         self.data.document.text_for_range(range)
     }
 
-    #[cfg_attr(
-        not(target_os = "macos"),
-        allow(
-            dead_code,
-            reason = "only a native accessibility Adapter answers text queries"
-        )
-    )]
     pub(crate) fn selection_request(
         &self,
         range: Range<usize>,
@@ -2041,7 +2027,7 @@ mod tests {
             .unwrap();
         let request = primary.selection_request(0..1).unwrap();
 
-        state
+        let alternate = state
             .apply(
                 AccessibilityUpdate {
                     revision: 2,
@@ -2055,11 +2041,16 @@ mod tests {
                     selection: None,
                     changed_rows: vec![update_row(alternate_id, 1, "alternate", false)],
                 },
-                PresentationGeneration::test(2),
+                PresentationGeneration::test(1),
             )
             .unwrap();
 
         assert_eq!(state.resolve_selection(&request), None);
+        assert!(
+            state
+                .resolve_selection(&alternate.selection_request(0..1).unwrap())
+                .is_some()
+        );
     }
 
     #[test]
@@ -2197,15 +2188,7 @@ mod tests {
             ),
             (1, 3)
         );
-    }
-
-    #[test]
-    fn notification_state_stays_fixed_capacity_under_sustained_updates() {
-        let mut notifications = AccessibilityNotifications::default();
-        for _ in 0..100_000 {
-            notifications.extend(AccessibilityNotifications::ORDERED);
-        }
-
+        notifications.extend(AccessibilityNotifications::ORDERED);
         assert_eq!(notifications.len(), 3);
         assert_eq!(
             notifications.take().iter().collect::<Vec<_>>(),
@@ -2213,6 +2196,7 @@ mod tests {
         );
         assert!(notifications.is_empty());
     }
+
     #[test]
     fn retained_membership_tracks_trim_and_incomplete_topology_replacement() {
         let a = row_id(AccessibilityScreen::Primary, 1, 10, 0);

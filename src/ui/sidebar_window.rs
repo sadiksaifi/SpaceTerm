@@ -1,13 +1,5 @@
 //! The sidebar window layout shared by the Settings Window and the Developer Workbench.
-//!
-//! A sidebar window is a fixed-size, modeless Operating-System Window. Its sidebar lists sections,
-//! and its content column presents one section at a time under a fixed heading. Both columns run
-//! beneath the titlebar, so this module also owns its client surface: the window-control space and
-//! the window-movement regions.
-//!
-//! The owner keeps its sections, its content, and its policy. This module keeps the geometry, the
-//! navigation list's keyboard and pointer behavior, and window movement, so every sidebar window
-//! reads and behaves as one convention.
+//! It owns geometry, navigation, and window movement; the owner keeps sections and policy.
 
 pub(crate) mod form;
 
@@ -43,9 +35,6 @@ const FOOTER_HEIGHT: f32 = 40.0;
 const NAVIGATION_ROW_HEIGHT: f32 = 28.0;
 
 /// The space between the content column's edge and the text inside it.
-///
-/// Rows carry part of it themselves so a card's own edge clears the text it holds, and the column
-/// gives back the rest. The two together are what a reader sees as the content's left edge.
 pub(crate) const CONTENT_GUTTER: f32 = 26.0;
 
 /// The space between consecutive groups in the content column.
@@ -58,33 +47,20 @@ fn client_control_row_height(appearance: &ChromeAppearance) -> Pixels {
 }
 
 /// The heading's distance from the window's top edge, which it shares with the traffic lights.
-///
-/// The title's line box begins just under the controls' top edge, so the large title reads as the
-/// window's own name without crowding the native controls in the neighbouring column.
 const HEADING_TOP_INSET: f32 = 20.0;
 
-/// The space between the content column's edge and the cards standing in it.
-///
-/// It is the content gutter less the inset a row carries, so a card's edge stands outside the text
-/// it holds by exactly that inset and a row's own fill can reach that edge. A card is a container
-/// rather than something to read, so this line belongs to the cards alone: everything a reader
-/// tracks down the page stays on [`CONTENT_GUTTER`].
+/// The space between the content column's edge and the cards standing in it: the content gutter
+/// less the inset a row carries.
 pub(crate) fn card_gutter(appearance: &ChromeAppearance) -> Pixels {
     appearance.spacing(CONTENT_GUTTER) - form::row_horizontal_inset(appearance)
 }
 
-/// The space separating one group's card from the next group's heading.
 pub(crate) fn group_spacing(appearance: &ChromeAppearance) -> Pixels {
     appearance.spacing(GROUP_SPACING)
 }
 
-/// The options every sidebar window opens with.
-///
-/// A sidebar window stays ordinary and modeless: the normal window level and the ordinary window
-/// class, with only tabbing, resizing, and minimizing withheld. It never orders itself above other
-/// applications, so a system permission prompt a row raises appears above it.
-///
-/// A sidebar window does not resize, so content scrolls inside a stable frame of `size`.
+/// The options every sidebar window opens with. It never orders itself above other applications, so
+/// a system permission prompt a row raises appears above it.
 pub(crate) fn window_options(title: &'static str, size: Size<Pixels>, cx: &App) -> WindowOptions {
     let titlebar_height = crate::ui::appearance::chrome(cx).top_height();
     let traffic_light_position = cx
@@ -143,11 +119,8 @@ pub(crate) trait SidebarOwner: Sized + 'static {
     fn select_section(&mut self, section: Self::Section, cx: &mut Context<Self>);
 }
 
-/// Keyboard state of the sidebar's navigation list.
-///
-/// The list is one keyboard stop whose arrows move between sections. Keyboard traversal shows its
-/// focus; pointer selection returns focus to the window and withdraws the focus emphasis, so an
-/// ordinary click leaves no focus-like state behind it.
+/// Keyboard state of the sidebar's navigation list. Pointer selection withdraws the focus emphasis
+/// so a click leaves no focus-like state behind.
 pub(crate) struct SidebarNavigation {
     list_focus: FocusHandle,
     window_focus: FocusHandle,
@@ -211,10 +184,8 @@ pub(crate) struct NavigationEntry<S> {
     pub(crate) available: bool,
 }
 
-/// Moves the navigation selection with the keyboard, skipping unavailable sections.
-///
-/// The list activates as it moves, the way the Workspace sidebar does: each section is a view
-/// rather than a destination to confirm, so a separate commit step would say nothing.
+/// Moves the navigation selection with the keyboard, skipping unavailable sections. The list
+/// activates as it moves.
 fn navigate<T: SidebarOwner>(
     owner: &mut T,
     event: &gpui::KeyDownEvent,
@@ -245,11 +216,8 @@ fn navigate<T: SidebarOwner>(
     cx.notify();
 }
 
-/// Gives a sidebar window's root surface its Tab traversal.
-///
-/// Unbound Tab is recorded before child key handlers so keyboard modality comes from the key
-/// itself. Inputs and popups handle their own traversal first; other controls delegate an
-/// unhandled Tab to the window's registered focus order.
+/// Gives a sidebar window's root surface its Tab traversal. Unbound Tab is recorded before child
+/// key handlers so keyboard modality comes from the key itself.
 pub(crate) fn tab_traversal<T: SidebarOwner>(surface: Div, cx: &mut Context<T>) -> Div {
     surface
         .capture_key_down(
@@ -283,11 +251,8 @@ fn is_plain_tab(event: &gpui::KeyDownEvent) -> bool {
         && !modifiers.function
 }
 
-/// Native window movement from a sidebar window's client chrome.
-///
-/// The sidebar's traffic-light strip and the content column's heading are separate regions, so
-/// Search, toolbars, and every other control stay outside drag ownership while the uncovered space
-/// in both behaves as the titlebar, including double-click.
+/// Native window movement from a sidebar window's client chrome. Search, toolbars, and other
+/// controls stay outside drag ownership.
 #[derive(Clone)]
 pub(crate) struct WindowMovement {
     platform: Rc<dyn OperatingSystemWindowDragPlatform>,
@@ -387,10 +352,6 @@ impl WindowMovement {
 }
 
 /// The chip a navigation entry rests its hover and its current-section state on.
-///
-/// It fills the entry rather than insetting further: the sidebar's own padding and the space
-/// between entries are already the air around it, and a second inset would narrow the chip against
-/// a search field above the list.
 fn navigation_chip(
     selected: bool,
     available: bool,
@@ -565,7 +526,7 @@ impl<'a, T: SidebarOwner> Sidebar<'a, T> {
                         .top_0()
                         .bottom_0()
                         .right_0()
-                        .w(px(super::resize_handle_theme::VISIBLE_THICKNESS))
+                        .w(px(super::control_theme::resize_handle::VISIBLE_THICKNESS))
                         .bg(gpui_color(edge)),
                 )
             })
@@ -604,11 +565,8 @@ impl<'a, T: SidebarOwner> Sidebar<'a, T> {
     }
 }
 
-/// A quiet command at the foot of the sidebar, such as About. It shares a section row's shape and
-/// hover but reads in secondary text, and it dispatches its action instead of selecting a section.
-///
-/// It is the shared button in a row's geometry, so it is a keyboard stop after the section list
-/// that Space and Return activate, and assistive technology reads it as a named button.
+/// A quiet command at the foot of the sidebar, such as About. It dispatches its action instead of
+/// selecting a section.
 pub(crate) fn render_footer_action(
     selector: String,
     label: SharedString,
@@ -748,8 +706,6 @@ fn render_navigation_list<T: SidebarOwner>(
                     colors.row_hover_icon,
                 )
             };
-            // The same chip the Workspace sidebar rests its current row on, so the two navigation
-            // surfaces read as one material rather than as two conventions.
             let chip = navigation_chip(
                 selected,
                 available,
@@ -833,11 +789,6 @@ fn render_navigation_list<T: SidebarOwner>(
 
 /// The active section's large title and description at the head of the content column, with an
 /// optional trailing toolbar for window-wide controls.
-///
-/// The heading stays fixed while content scrolls beneath it, the way a native Settings pane keeps
-/// its identity in view. Its top edge shares the traffic-light row, and the heading is
-/// window-movement space; the toolbar stands beside it, outside drag ownership. A hairline appears
-/// only once content has scrolled under the heading.
 pub(crate) struct DetailHeading<'a> {
     prefix: &'static str,
     heading: AnyElement,
@@ -945,7 +896,7 @@ impl<'a> DetailHeading<'a> {
                         .bottom_0()
                         .left_0()
                         .w_full()
-                        .h(px(super::resize_handle_theme::VISIBLE_THICKNESS))
+                        .h(px(super::control_theme::resize_handle::VISIBLE_THICKNESS))
                         .bg(gpui_color(surface.separator(SettingsSurfaceRole::Canvas))),
                 )
             })
@@ -961,10 +912,6 @@ fn footer_height(appearance: &ChromeAppearance) -> Pixels {
 }
 
 /// The content column's closing strip.
-///
-/// The strip belongs to the content column alone, so the sidebar runs unbroken to the window's
-/// bottom edge. Its content ends on the content gutter, the line the title, the group headings, and
-/// every row label already sit on.
 pub(crate) fn render_footer(
     prefix: &'static str,
     surface: &SettingsAppearance,

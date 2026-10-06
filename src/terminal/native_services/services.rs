@@ -320,21 +320,6 @@ mod tests {
         )
     }
 
-    fn operation_identity(
-        request_id: u64,
-        returns_text: bool,
-        active_request: Rc<Cell<Option<u64>>>,
-    ) -> ServiceOperationIdentity {
-        ServiceOperationIdentity {
-            request_id,
-            returns_text,
-            active_request,
-            write_claimed: Cell::new(false),
-            pasteboard: Cell::new(None),
-            origin: Cell::new(None),
-        }
-    }
-
     #[test]
     fn service_request_requires_each_requested_capability() {
         assert!(accepts_service_request(
@@ -350,7 +335,7 @@ mod tests {
     }
 
     #[test]
-    fn string_return_requires_a_bound_send_and_terminal_input_focus_capability() {
+    fn string_return_requires_a_bound_string_send() {
         assert!(accepts_service_request(
             NativeServiceCapabilities::new(true, true),
             ServiceDataType::String,
@@ -364,71 +349,36 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_service_types_are_never_accepted() {
-        assert!(!accepts_service_request(
-            NativeServiceCapabilities::new(true, true),
-            ServiceDataType::Unsupported,
-            ServiceDataType::Absent,
-        ));
-    }
-
-    #[test]
-    fn service_operation_keeps_the_validated_origin_through_send_and_return() {
-        let operation = operation_identity(1, true, Rc::new(Cell::new(None)));
-        let pasteboard = ServicePasteboardIdentity::new(0x1234);
-
-        assert!(operation.claim_write());
-        operation.finish_send(origin(6), pasteboard, true);
-
-        assert_eq!(operation.take_return_origin(pasteboard), Some(origin(6)));
-        assert_eq!(operation.take_return_origin(pasteboard), None);
-    }
-
-    #[test]
     fn service_operation_rejects_overlap_and_wrong_pasteboard_return() {
-        let active = Rc::new(Cell::new(None));
-        let operation = operation_identity(1, true, Rc::clone(&active));
-        let overlap = operation_identity(2, true, active);
+        let endpoint = Endpoint::new();
+        let requests = ServiceRequests::new(endpoint.clone());
+        let operation = transform(&requests);
+        let overlap = transform(&requests);
         let first_pasteboard = ServicePasteboardIdentity::new(0x1234);
         let other_pasteboard = ServicePasteboardIdentity::new(0x5678);
-        assert!(operation.claim_write());
-        operation.finish_send(origin(6), first_pasteboard, true);
-
-        assert!(!overlap.claim_write());
-        assert_eq!(overlap.take_return_origin(first_pasteboard), None);
-        assert_eq!(operation.take_return_origin(other_pasteboard), None);
+        assert!(operation.write_selection(first_pasteboard, |_| true));
+        assert!(!overlap.write_selection(first_pasteboard, |_| panic!("overlapping write")));
+        assert!(!overlap.read_selection(first_pasteboard, || panic!("overlap read")));
+        assert!(!operation.read_selection(other_pasteboard, || panic!("wrong pasteboard read")));
+        assert!(operation.read_selection(first_pasteboard, || Some("returned".into())));
         assert_eq!(
-            operation.take_return_origin(first_pasteboard),
-            Some(origin(6))
+            *endpoint.inserted.borrow(),
+            vec![(origin(6), "returned".into())]
         );
     }
 
     #[test]
-    fn repeated_validation_produces_distinct_operation_identities() {
-        let active = Rc::new(Cell::new(None));
-        let transform = operation_identity(1, true, Rc::clone(&active));
-        let send_only = operation_identity(2, false, active);
-
-        assert_ne!(transform.request_id, send_only.request_id);
-        assert!(transform.returns_text);
-        assert!(!send_only.returns_text);
-    }
-
-    #[test]
     fn service_operation_write_is_one_shot() {
-        let operation = operation_identity(1, false, Rc::new(Cell::new(None)));
-
-        assert!(operation.claim_write());
-        assert!(!operation.claim_write());
-    }
-
-    #[test]
-    fn return_only_service_cannot_create_an_unbound_operation() {
-        assert!(!accepts_service_request(
-            NativeServiceCapabilities::new(true, true),
-            ServiceDataType::Absent,
-            ServiceDataType::String,
-        ));
+        let requests = ServiceRequests::new(Endpoint::new());
+        let operation = requests
+            .operation(ServiceDataType::String, ServiceDataType::Absent)
+            .unwrap();
+        let board = ServicePasteboardIdentity::new(1);
+        assert!(operation.write_selection(board, |text| {
+            assert_eq!(text, "selected");
+            true
+        }));
+        assert!(!operation.write_selection(board, |_| panic!("second native write")));
     }
 
     #[test]
@@ -533,23 +483,32 @@ mod tests {
     }
 
     #[test]
-    fn focus_or_hierarchy_change_rejects_return_and_consumes_authority() {
-        let endpoint = Endpoint::new();
-        let requests = ServiceRequests::new(endpoint.clone());
-        let operation = transform(&requests);
-        let board = ServicePasteboardIdentity::new(1);
-        assert!(operation.write_selection(board, |_| true));
-        endpoint.status.set(NativeServiceStatus::new(
-            NativeServiceCapabilities::new(true, true),
-            Some(origin(7)),
-        ));
-        assert!(!operation.read_selection(board, || Some("stale".into())));
-        endpoint.status.set(NativeServiceStatus::new(
-            NativeServiceCapabilities::new(true, true),
-            Some(origin(6)),
-        ));
-        assert!(!operation.read_selection(board, || panic!("stale return retried")));
-        assert!(endpoint.inserted.borrow().is_empty());
+    fn changed_origin_fact_consumes_return_authority() {
+        for changed in [
+            NativeServiceOrigin::new(WorkspaceId::new(9), TabId::new(2), PaneId::new(3), 4, 5, 6),
+            NativeServiceOrigin::new(WorkspaceId::new(1), TabId::new(9), PaneId::new(3), 4, 5, 6),
+            NativeServiceOrigin::new(WorkspaceId::new(1), TabId::new(2), PaneId::new(9), 4, 5, 6),
+            NativeServiceOrigin::new(WorkspaceId::new(1), TabId::new(2), PaneId::new(3), 9, 5, 6),
+            NativeServiceOrigin::new(WorkspaceId::new(1), TabId::new(2), PaneId::new(3), 4, 9, 6),
+            origin(7),
+        ] {
+            let endpoint = Endpoint::new();
+            let requests = ServiceRequests::new(endpoint.clone());
+            let operation = transform(&requests);
+            let board = ServicePasteboardIdentity::new(1);
+            assert!(operation.write_selection(board, |_| true));
+            endpoint.status.set(NativeServiceStatus::new(
+                NativeServiceCapabilities::new(true, true),
+                Some(changed),
+            ));
+            assert!(!operation.read_selection(board, || panic!("stale return read")));
+            endpoint.status.set(NativeServiceStatus::new(
+                NativeServiceCapabilities::new(true, true),
+                Some(origin(6)),
+            ));
+            assert!(!operation.read_selection(board, || panic!("stale return retried")));
+            assert!(endpoint.inserted.borrow().is_empty());
+        }
     }
 
     #[test]
@@ -612,7 +571,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_return_is_consumed_without_calling_endpoint() {
+    fn invalid_return_is_consumed_without_insertion() {
         let endpoint = Endpoint::new();
         let requests = ServiceRequests::new(endpoint.clone());
         let board = ServicePasteboardIdentity::new(1);

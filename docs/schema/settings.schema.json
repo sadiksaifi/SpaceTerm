@@ -1,0 +1,656 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://spaceterm.dev/schema/settings-v3.json",
+  "title": "SpaceTerm Settings",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "revision",
+    "appearance",
+    "terminal_themes"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 3
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "appearance": {
+      "$ref": "#/$defs/appearancePreferences"
+    },
+    "terminal_themes": {
+      "type": "array",
+      "maxItems": 512,
+      "items": {
+        "$ref": "#/$defs/terminalTheme"
+      }
+    },
+    "updates": {
+      "$ref": "#/$defs/updates"
+    },
+    "keybindings": {
+      "$ref": "#/$defs/keybindings"
+    },
+    "clipboard": {
+      "$ref": "#/$defs/clipboard"
+    }
+  },
+  "$defs": {
+    "appearanceMode": {
+      "enum": [
+        "light",
+        "dark",
+        "auto"
+      ]
+    },
+    "terminalTypography": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "family",
+        "base_size",
+        "regular_weight",
+        "bold_weight",
+        "line_height",
+        "italic"
+      ],
+      "properties": {
+        "family": {
+          "$ref": "#/$defs/terminalFamily"
+        },
+        "base_size": {
+          "type": "number",
+          "minimum": 8,
+          "maximum": 32
+        },
+        "regular_weight": {
+          "$ref": "#/$defs/weight"
+        },
+        "bold_weight": {
+          "$ref": "#/$defs/weight"
+        },
+        "line_height": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 2
+        },
+        "italic": {
+          "type": "boolean"
+        }
+      }
+    },
+    "terminalFamily": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "source"
+          ],
+          "properties": {
+            "source": {
+              "const": "default_monospace"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "source",
+            "family"
+          ],
+          "properties": {
+            "source": {
+              "const": "named"
+            },
+            "family": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+            }
+          }
+        }
+      ]
+    },
+    "weight": {
+      "type": "integer",
+      "minimum": 100,
+      "maximum": 900
+    },
+    "appearancePreferences": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "terminal",
+        "window"
+      ],
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/appearanceMode"
+        },
+        "terminal": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "themes",
+            "typography",
+            "rendering",
+            "overrides"
+          ],
+          "properties": {
+            "themes": {
+              "$ref": "#/$defs/themeSlots"
+            },
+            "typography": {
+              "$ref": "#/$defs/terminalTypography"
+            },
+            "rendering": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "bold_as_bright"
+              ],
+              "properties": {
+                "bold_as_bright": {
+                  "type": "boolean"
+                }
+              }
+            },
+            "overrides": {
+              "type": "object",
+              "maxProperties": 128,
+              "propertyNames": {
+                "$ref": "#/$defs/themeId"
+              },
+              "additionalProperties": {
+                "$ref": "#/$defs/terminalColors"
+              }
+            }
+          }
+        },
+        "window": {
+          "$ref": "#/$defs/window"
+        }
+      }
+    },
+    "window": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "transparency": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.35
+        },
+        "blur": {
+          "type": "boolean",
+          "default": true
+        },
+        "density": {
+          "enum": [
+            "compact",
+            "comfortable"
+          ]
+        }
+      },
+      "required": [
+        "density",
+        "transparency",
+        "blur"
+      ]
+    },
+    "themeSlots": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "light",
+        "dark"
+      ],
+      "properties": {
+        "light": {
+          "$ref": "#/$defs/themeId"
+        },
+        "dark": {
+          "$ref": "#/$defs/themeId"
+        }
+      }
+    },
+    "themeId": {
+      "type": "string",
+      "maxLength": 128,
+      "pattern": "^[a-z][a-z0-9]*([._-][a-z0-9]+)*$"
+    },
+    "importedThemeId": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/themeId"
+        },
+        {
+          "not": {
+            "pattern": "^builtin\\."
+          }
+        }
+      ]
+    },
+    "color": {
+      "type": "string",
+      "pattern": "^#(?:[0-9A-Fa-f]{3}|[0-9A-Fa-f]{4}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$"
+    },
+    "appearance": {
+      "enum": [
+        "light",
+        "dark"
+      ]
+    },
+    "terminalColors": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "foreground": {
+          "$ref": "#/$defs/opaqueColor"
+        },
+        "background": {
+          "$ref": "#/$defs/opaqueColor"
+        },
+        "normal": {
+          "$ref": "#/$defs/palette"
+        },
+        "bright": {
+          "$ref": "#/$defs/palette"
+        },
+        "dim": {
+          "$ref": "#/$defs/palette"
+        },
+        "bright_foreground": {
+          "$ref": "#/$defs/opaqueColor"
+        },
+        "dim_foreground": {
+          "$ref": "#/$defs/opaqueColor"
+        },
+        "cursor": {
+          "$ref": "#/$defs/opaqueColor"
+        },
+        "cursor_text": {
+          "$ref": "#/$defs/nullableOpaqueColor"
+        },
+        "selection_background": {
+          "$ref": "#/$defs/color"
+        },
+        "selection_foreground": {
+          "$ref": "#/$defs/nullableOpaqueColor"
+        },
+        "find_match_background": {
+          "$ref": "#/$defs/color"
+        },
+        "find_match_foreground": {
+          "$ref": "#/$defs/nullableOpaqueColor"
+        },
+        "find_active_match_background": {
+          "$ref": "#/$defs/color"
+        },
+        "find_active_match_foreground": {
+          "$ref": "#/$defs/nullableOpaqueColor"
+        },
+        "hyperlink": {
+          "$ref": "#/$defs/color"
+        },
+        "visual_bell": {
+          "$ref": "#/$defs/color"
+        }
+      }
+    },
+    "palette": {
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 8,
+      "items": {
+        "oneOf": [
+          {
+            "$ref": "#/$defs/opaqueColor"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "opaqueColor": {
+      "type": "string",
+      "pattern": "^#(?:[0-9A-Fa-f]{3}|[0-9A-Fa-f]{3}[fF]|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{6}[fF]{2})$"
+    },
+    "nullableOpaqueColor": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/opaqueColor"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "themeOrigin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "format",
+        "family",
+        "theme",
+        "fingerprint"
+      ],
+      "properties": {
+        "format": {
+          "const": "zed"
+        },
+        "package_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+        },
+        "package_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+        },
+        "family": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+        },
+        "theme": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+        },
+        "fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
+        }
+      }
+    },
+    "terminalTheme": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "appearance",
+        "colors"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/importedThemeId"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+        },
+        "appearance": {
+          "$ref": "#/$defs/appearance"
+        },
+        "author": {
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+        },
+        "license": {
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 1024,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+        },
+        "colors": {
+          "$ref": "#/$defs/terminalColors"
+        },
+        "origin": {
+          "$ref": "#/$defs/themeOrigin"
+        }
+      }
+    },
+    "shortcut": {
+      "type": "string",
+      "description": "One key chord in SpaceTerm shortcut spelling."
+    },
+    "shortcutOverride": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/shortcut"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "keybindings": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "switch_workspace": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "new_workspace": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "new_remote_workspace": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "open_local_directory": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "open_remote_directory": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "close_workspace": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "activate_workspace1": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "activate_workspace2": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "activate_workspace3": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "activate_workspace4": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "activate_workspace5": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "activate_workspace6": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "activate_workspace7": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "activate_workspace8": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "activate_workspace9": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "create_tab": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "close_tab": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "activate_tab1": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "activate_tab2": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "activate_tab3": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "activate_tab4": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "activate_tab5": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "activate_tab6": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "activate_tab7": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "activate_tab8": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "activate_tab9": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "next_tab": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "previous_tab": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "move_tab_right": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "move_tab_left": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "close_pane": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "split_right": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "split_down": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "focus_pane_left": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "focus_pane_right": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "focus_pane_up": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "focus_pane_down": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "focus_previous_pane": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "focus_next_pane": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "toggle_pane_zoom": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "open_terminal_find": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "find_next": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "find_previous": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "clear_terminal_screen_and_scrollback": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "scroll_page_up": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "scroll_page_down": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "scroll_to_top": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "scroll_to_bottom": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "increase_terminal_font_size": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "decrease_terminal_font_size": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "reset_terminal_font_size": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "toggle_sidebar": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "toggle_sidebar_focus": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "keyboard_shortcuts": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "about": {
+          "$ref": "#/$defs/shortcutOverride"
+        }
+      }
+    },
+    "updates": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "automatic_downloads": {
+          "type": "boolean",
+          "default": true
+        },
+        "check_interval": {
+          "enum": [
+            "hourly",
+            "every_six_hours",
+            "daily"
+          ],
+          "default": "daily"
+        },
+        "reminder_interval": {
+          "enum": [
+            "two_hours",
+            "four_hours",
+            "eight_hours",
+            "daily"
+          ],
+          "default": "two_hours"
+        }
+      }
+    },
+    "clipboard": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "allow_write": {
+          "type": "boolean",
+          "default": true
+        },
+        "allow_read": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    }
+  }
+}

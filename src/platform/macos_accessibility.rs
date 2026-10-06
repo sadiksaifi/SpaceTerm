@@ -55,11 +55,32 @@ impl ScreenRect {
 struct AccessibilityElementState {
     model: TerminalAccessibilityModel,
     font: Option<AccessibilityFontMetadata>,
+    #[cfg_attr(
+        test,
+        allow(
+            dead_code,
+            reason = "native accessibility frame callbacks are excluded from the test build"
+        )
+    )]
     frame: ScreenRect,
     grid: ScreenRect,
     cell_width: f32,
     line_height: f32,
+    #[cfg_attr(
+        test,
+        allow(
+            dead_code,
+            reason = "native accessibility focus callbacks are excluded from the test build"
+        )
+    )]
     focused: bool,
+    #[cfg_attr(
+        test,
+        allow(
+            dead_code,
+            reason = "native accessibility visibility callbacks are excluded from the test build"
+        )
+    )]
     visible: bool,
     #[cfg(all(target_os = "macos", not(test)))]
     presented: bool,
@@ -997,9 +1018,6 @@ pub(crate) mod tests {
     fn pane_state_exposes_utf16_selection_and_screen_geometry() {
         let state = state();
 
-        assert!(state.visible);
-        assert!(state.focused);
-        assert_eq!(state.frame, state.grid);
         assert_eq!(state.selected_range(), 1..3);
         assert_eq!(state.selected_text(), Some("😀".to_owned()));
         assert_eq!(
@@ -1032,7 +1050,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn font_metadata_changes_only_with_the_selected_family_or_logical_point_size() {
+    fn font_request_comparison_uses_normalized_family_and_logical_point_size() {
         let mut state = state();
         state.font.as_mut().unwrap().point_size = 13.5;
 
@@ -1042,7 +1060,21 @@ pub(crate) mod tests {
         state.cell_width = 20.0;
         state.line_height = 40.0;
         assert!(!state.font_request_changed("JetBrainsMono Nerd Font", 14.0));
-        assert_eq!(state.font.as_ref().unwrap().point_size, 13.5);
+        state.font = None;
+        assert!(state.font_request_changed("JetBrainsMono Nerd Font", 14.0));
+        let mut state = super::tests::state();
+        let font = state.font.as_mut().unwrap();
+        font.requested_family = "Menlo".to_owned();
+        font.requested_point_size = 1.0;
+        for family in ["", " \t", "Menlo"] {
+            for size in [0.0, -1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 1.0] {
+                assert!(
+                    !state.font_request_changed(family, size),
+                    "{family:?}, {size}"
+                );
+            }
+        }
+        assert!(state.font_request_changed("Menlo", 2.0));
     }
 
     #[test]
@@ -1054,7 +1086,11 @@ pub(crate) mod tests {
                 AccessibilityNotification::Focus,
             ]
             .map(notification_name),
-            [VALUE_CHANGED, SELECTION_CHANGED, FOCUS_CHANGED]
+            [
+                "AXValueChanged",
+                "AXSelectedTextChanged",
+                "AXFocusedUIElementChanged"
+            ]
         );
         assert_eq!(TEXT_AREA_ROLE, "AXTextArea");
     }

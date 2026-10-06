@@ -127,7 +127,7 @@ fn replaced_pinned_directory_is_rejected_between_picker_validation_and_activatio
 }
 
 #[gpui::test]
-fn replaced_pinned_directory_blocks_both_child_actions_without_closing_sessions(
+fn replaced_pinned_directory_blocks_both_child_actions_without_closing_terminal_sessions(
     cx: &mut TestAppContext,
 ) {
     let root = temporary_directory("child-replacement");

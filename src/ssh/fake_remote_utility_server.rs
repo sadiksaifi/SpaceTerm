@@ -1,9 +1,7 @@
 //! A fake SSH server that enforces a session limit on one Control Connection.
 //!
-//! Each remote utility request becomes a simulated `ssh` process that occupies one server session
-//! from start until exit. Like a supervised process, it outlives a dropped request until it
-//! observes cancellation on its next poll. A process started while every session is occupied exits
-//! with 255, as OpenSSH does when the server refuses a multiplexed session.
+//! A process started while every session is occupied exits with 255, as OpenSSH does when the
+//! server refuses a multiplexed session.
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -57,7 +55,6 @@ pub(crate) struct FakeRemoteUtilityServer {
 }
 
 impl FakeRemoteUtilityServer {
-    /// Creates a server that accepts at most `maximum_sessions` sessions on the connection.
     pub(crate) fn new(executor: BackgroundExecutor, maximum_sessions: usize) -> Self {
         Self {
             executor,
@@ -74,7 +71,7 @@ impl FakeRemoteUtilityServer {
         self.state.lock().unwrap().terminal_session_channels = count;
     }
 
-    /// Ends the Control Connection, which revokes the provider's session scope.
+    /// Ends the Control Connection, which revokes the provider's cancellation scope.
     pub(crate) fn end_connection(&self) {
         self.connection.cancel();
     }

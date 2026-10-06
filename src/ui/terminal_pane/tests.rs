@@ -11,33 +11,19 @@ use gpui::{
 
 use super::*;
 use crate::appearance::{Color, TerminalColors};
-use crate::ssh::command::{SshCommandContext, ValidatedRemoteShellCommand};
-use crate::terminal::native_services::clipboard::ClipboardRead;
+use crate::ssh::command::ValidatedRemoteShellCommand;
+use crate::terminal::native_services::clipboard::{
+    ClipboardError, ClipboardRead, SelectionClipboard,
+};
 use crate::terminal::native_services::file_preview::{FilePreviewError, FilePreviewSubmission};
 use crate::terminal::testing::{
-    RecordedSessionCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
-    test_local_directory,
+    RecordedCommand, TestTerminalSessionFactory, TestTerminalSessionRecords, test_local_directory,
 };
 use crate::terminal::{
-    LocalTerminalLaunchPlan, RemoteTerminalChannelProvider, ScrollbarSnapshot, SessionExit,
-    SessionFailure, TerminalLaunchPlan, TerminalSessionFactory,
+    LocalTerminalLaunchPlan, ScrollbarSnapshot, TerminalLaunchPlan, TerminalSessionChannelProvider,
+    TerminalSessionExit, TerminalSessionFactory, TerminalSessionFailure,
 };
-
-pub(super) fn select_terminal_font(font_names: &[String]) -> &'static str {
-    [
-        "JetBrainsMono Nerd Font",
-        "JetBrainsMono Nerd Font Mono",
-        "JetBrains Mono",
-        "Menlo",
-    ]
-    .into_iter()
-    .find(|candidate| {
-        font_names
-            .iter()
-            .any(|available| available.eq_ignore_ascii_case(candidate))
-    })
-    .unwrap_or("Menlo")
-}
+use crate::ui::appearance::TerminalFonts;
 
 #[gpui::test]
 fn pane_floating_shell_selects_the_window_activity_catalog(cx: &mut TestAppContext) {
@@ -54,18 +40,22 @@ fn pane_floating_shell_selects_the_window_activity_catalog(cx: &mut TestAppConte
     );
 
     cx.update(|cx| {
+        let active = Box::new(super::super::control_theme::catalog(
+            &active,
+            spaceterm_ui::ControlMotion::Standard,
+        ));
+        let inactive = Box::new(super::super::control_theme::catalog(
+            &inactive,
+            spaceterm_ui::ControlMotion::Standard,
+        ));
         spaceterm_ui::replace_control_theme_catalogs(
             cx,
-            super::super::control_theme_catalog::catalog(
-                &active,
-                spaceterm_ui::ControlMotion::Standard,
-            ),
-            super::super::control_theme_catalog::catalog(
-                &inactive,
-                spaceterm_ui::ControlMotion::Standard,
-            ),
+            active.clone(),
+            inactive.clone(),
+            active,
+            inactive,
         )
-        .expect("paired control catalogs should replace atomically");
+        .expect("control catalogs should replace atomically");
 
         assert_eq!(
             spaceterm_ui::ControlWindowActivity::Active
@@ -377,17 +367,22 @@ fn text_screen(generation: u64, rows: &[&str]) -> Arc<ScreenSnapshot> {
 }
 
 fn terminal_pane(cx: &mut TestAppContext) -> (Entity<TerminalPane>, &mut VisualTestContext) {
-    cx.update(crate::ui::init)
-        .expect("UI initialization should succeed");
-    let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
+    focused_pane(
+        cx,
         TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
             .with_start_failure("terminal session unavailable in UI test"),
-    );
+    )
+}
+
+fn focused_pane(
+    cx: &mut TestAppContext,
+    sessions: TestTerminalSessionFactory,
+) -> (Entity<TerminalPane>, &mut VisualTestContext) {
+    cx.update(crate::ui::init)
+        .expect("UI initialization should succeed");
     let session_factory = WorkspaceTerminalSessionFactory::new_local(
-        session_factory,
-        crate::terminal::testing::test_local_directory(PathBuf::from(
-            "/tmp/spaceterm-terminal-pane-test",
-        )),
+        Rc::new(sessions),
+        test_local_directory(PathBuf::from("/tmp/spaceterm-terminal-pane-test")),
     );
     let (pane, cx) =
         cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
@@ -426,7 +421,7 @@ fn latest_recorded_presentability(records: &TestTerminalSessionRecords) -> Optio
         .into_iter()
         .rev()
         .find_map(|call| match call.command {
-            RecordedSessionCommand::SetPresentable(presentable) => Some(presentable),
+            RecordedCommand::SetPresentable(presentable) => Some(presentable),
             _ => None,
         })
 }
@@ -461,7 +456,7 @@ fn visibility_subscription_coalesces_hidden_receivers_and_retires_without_pollin
     assert_eq!(factory.captured_windows(), vec![window_id]);
     let sender = records.last_event_sender().unwrap();
     sender
-        .try_send(SessionEvent::Screen(text_screen(1, &["fixture"])))
+        .try_send(TerminalSessionEvent::Screen(text_screen(1, &["fixture"])))
         .unwrap();
     cx.run_until_parked();
     pane.update(cx, |pane, cx| {
@@ -493,7 +488,10 @@ fn visibility_subscription_coalesces_hidden_receivers_and_retires_without_pollin
     });
     for generation in 2..=12 {
         sender
-            .try_send(SessionEvent::Screen(text_screen(generation, &["fixture"])))
+            .try_send(TerminalSessionEvent::Screen(text_screen(
+                generation,
+                &["fixture"],
+            )))
             .unwrap();
     }
     records
@@ -643,7 +641,7 @@ fn retained_directory_metadata_should_reject_older_screens_and_clear_stale_direc
         assert!(pane.accept_metadata(retained(20, MetadataFreshness::Live)));
         let mut old_screen = directory_screen(2, "/projects/old", MetadataFreshness::Live);
         Arc::make_mut(&mut Arc::make_mut(&mut old_screen).metadata).revision = 10;
-        pane.handle_event(SessionEvent::Screen(old_screen), cx);
+        pane.handle_event(TerminalSessionEvent::Screen(old_screen), cx);
         assert_eq!(pane.current_directory(), Some(latest.clone()));
         assert_eq!(pane.caption().directory.as_ref(), "/projects/latest");
         assert!(pane.accept_metadata(retained(21, MetadataFreshness::Stale)));
@@ -669,7 +667,7 @@ fn current_directory_preserves_machine_and_rejects_stale_or_relative_metadata(
     ] {
         pane.update(cx, |pane, cx| {
             pane.handle_event(
-                SessionEvent::Screen(directory_screen(generation, path, freshness)),
+                TerminalSessionEvent::Screen(directory_screen(generation, path, freshness)),
                 cx,
             );
         });
@@ -680,7 +678,7 @@ fn current_directory_preserves_machine_and_rejects_stale_or_relative_metadata(
     }
     pane.update(cx, |pane, cx| {
         pane.handle_event(
-            SessionEvent::Screen(remote_directory_screen(4, "/srv/app")),
+            TerminalSessionEvent::Screen(remote_directory_screen(4, "/srv/app")),
             cx,
         );
     });
@@ -694,18 +692,31 @@ fn current_directory_preserves_machine_and_rejects_stale_or_relative_metadata(
 
 #[gpui::test]
 fn visual_bell_presentation_state_clears_on_focus_or_input(cx: &mut TestAppContext) {
-    let (pane, cx) = terminal_pane(cx);
+    let (pane, cx, _) = connected_terminal_pane(cx);
 
     pane.update(cx, |pane, cx| {
-        pane.terminal_input_focus = true;
+        pane.set_product_focus(
+            TerminalProductFocus {
+                focused_pane: false,
+                ..TerminalProductFocus::default()
+            },
+            cx,
+        );
         pane.handle_event(
-            SessionEvent::Attention(crate::terminal::attention::AttentionEvent::Bell),
+            TerminalSessionEvent::Attention(crate::terminal::attention::AttentionEvent::Bell),
             cx,
         );
     });
     assert!(pane.read_with(cx, |pane, _| pane.attention_visual));
 
-    pane.update(cx, |pane, cx| pane.clear_attention(cx));
+    cx.update(|window, cx| {
+        pane.update(cx, |pane, cx| {
+            pane.set_product_focus(TerminalProductFocus::default(), cx);
+            pane.focus(window, cx);
+            cx.notify();
+        });
+    });
+    cx.run_until_parked();
     assert!(!pane.read_with(cx, |pane, _| pane.attention_visual));
 }
 
@@ -715,7 +726,7 @@ fn accepted_input_method_commit_clears_pending_attention(cx: &mut TestAppContext
     pane.update(cx, |pane, cx| {
         pane.terminal_input_focus = false;
         pane.handle_event(
-            SessionEvent::Attention(crate::terminal::attention::AttentionEvent::Bell),
+            TerminalSessionEvent::Attention(crate::terminal::attention::AttentionEvent::Bell),
             cx,
         );
         pane.terminal_input_focus = true;
@@ -748,7 +759,7 @@ fn accepted_paste_clears_pending_attention(cx: &mut TestAppContext) {
     pane.update(cx, |pane, cx| {
         pane.terminal_input_focus = false;
         pane.handle_event(
-            SessionEvent::Attention(crate::terminal::attention::AttentionEvent::Bell),
+            TerminalSessionEvent::Attention(crate::terminal::attention::AttentionEvent::Bell),
             cx,
         );
         pane.terminal_input_focus = true;
@@ -766,19 +777,27 @@ fn accepted_paste_clears_pending_attention(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn stale_guarded_written_paste_does_not_clear_newer_attention(cx: &mut TestAppContext) {
-    let (pane, cx, _records) = terminal_pane_with_paste_response(
+    let records = TestTerminalSessionRecords::default();
+    let (reply, receiver) = async_channel::bounded(1);
+    let (pane, cx) = focused_pane(
         cx,
-        Ok(PasteRequestOutcome::Written),
-        Ok(PasteResolution::Cancelled),
+        TestTerminalSessionFactory::new(records.clone())
+            .with_pending_paste_response(receiver)
+            .with_paste_resolution(Ok(PasteResolution::Cancelled)),
     );
     cx.write_to_clipboard(ClipboardItem::new_string("stale paste".to_owned()));
 
     cx.dispatch_action(PasteClipboard);
+    cx.run_until_parked();
+    assert_eq!(
+        requested_pastes(&records),
+        [RecordedCommand::RequestPaste("stale paste".to_owned())]
+    );
     pane.update(cx, |pane, cx| {
         pane.advance_native_service_focus_epoch();
         pane.terminal_input_focus = false;
         pane.handle_event(
-            SessionEvent::Attention(
+            TerminalSessionEvent::Attention(
                 crate::terminal::attention::AttentionEvent::CommandFinished {
                     exit_status: Some(0),
                     duration: Duration::from_secs(1),
@@ -793,6 +812,7 @@ fn stale_guarded_written_paste_does_not_clear_newer_attention(cx: &mut TestAppCo
         1
     );
 
+    reply.try_send(Ok(PasteRequestOutcome::Written)).unwrap();
     cx.run_until_parked();
 
     assert_eq!(
@@ -808,24 +828,8 @@ fn connected_terminal_pane(
     &mut VisualTestContext,
     TestTerminalSessionRecords,
 ) {
-    cx.update(crate::ui::init)
-        .expect("UI initialization should succeed");
     let records = TestTerminalSessionRecords::default();
-    let session_factory: Rc<dyn TerminalSessionFactory> =
-        Rc::new(TestTerminalSessionFactory::new(records.clone()));
-    let session_factory = WorkspaceTerminalSessionFactory::new_local(
-        session_factory,
-        crate::terminal::testing::test_local_directory(PathBuf::from(
-            "/tmp/spaceterm-terminal-pane-keyboard-test",
-        )),
-    );
-    let (pane, cx) =
-        cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
-    cx.update(|window, cx| {
-        window.activate_window();
-        pane.update(cx, |pane, cx| pane.focus(window, cx));
-    });
-    cx.run_until_parked();
+    let (pane, cx) = focused_pane(cx, TestTerminalSessionFactory::new(records.clone()));
     (pane, cx, records)
 }
 
@@ -835,12 +839,12 @@ fn remote_workspace_session_factory(
     remote_workspace_session_factory_with_readiness(records, Arc::new(AtomicBool::new(true)))
 }
 
-struct ToggleRemoteChannelProvider {
+struct ToggleTerminalSessionChannelProvider {
     ready: Arc<AtomicBool>,
-    command_context: Arc<SshCommandContext>,
+    command_context: Arc<crate::ssh::testing::SshConnectionFixture>,
 }
 
-impl RemoteTerminalChannelProvider for ToggleRemoteChannelProvider {
+impl TerminalSessionChannelProvider for ToggleTerminalSessionChannelProvider {
     fn is_ready(&self) -> bool {
         self.ready.load(Ordering::SeqCst)
     }
@@ -849,12 +853,12 @@ impl RemoteTerminalChannelProvider for ToggleRemoteChannelProvider {
         &self,
         _directory: crate::domain::RemoteDirectory,
         _identity: Option<crate::domain::RemoteDirectoryIdentity>,
-    ) -> gpui::Task<Result<(), crate::terminal::RemoteChannelRevalidationError>> {
+    ) -> gpui::Task<Result<(), crate::terminal::TerminalSessionChannelRevalidationError>> {
         if self.is_ready() {
             gpui::Task::ready(Ok(()))
         } else {
             gpui::Task::ready(Err(
-                crate::terminal::RemoteChannelRevalidationError::ConnectionUnavailable,
+                crate::terminal::TerminalSessionChannelRevalidationError::ConnectionUnavailable,
             ))
         }
     }
@@ -862,11 +866,14 @@ impl RemoteTerminalChannelProvider for ToggleRemoteChannelProvider {
     fn prepare(
         &self,
         _directory: &crate::domain::RemoteDirectory,
-    ) -> Result<crate::ssh::command::PreparedSshPaneChannelCommand, RemoteChannelUnavailable> {
+    ) -> Result<
+        crate::ssh::command::PreparedSshTerminalSessionChannelCommand,
+        TerminalSessionChannelUnavailable,
+    > {
         if !self.is_ready() {
-            return Err(RemoteChannelUnavailable);
+            return Err(TerminalSessionChannelUnavailable);
         }
-        Ok(self.command_context.prepare_pane_channel(
+        Ok(self.command_context.prepare_terminal_session_channel(
             ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
         ))
     }
@@ -877,16 +884,10 @@ fn remote_workspace_session_factory_with_readiness(
     ready: Arc<AtomicBool>,
 ) -> WorkspaceTerminalSessionFactory {
     let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
-    let command_context = Arc::new(
-        SshCommandContext::new(
-            crate::ssh::command::OpenSshExecutable::for_test(),
-            PathBuf::from("/private/config/spaceterm/ssh_config"),
-            destination.clone(),
-            PathBuf::from("/private/runtime/spaceterm/master.sock"),
-        )
-        .unwrap(),
-    );
-    let channel_provider = Arc::new(ToggleRemoteChannelProvider {
+    let command_context = Arc::new(crate::ssh::testing::SshConnectionFixture::new(
+        destination.clone(),
+    ));
+    let channel_provider = Arc::new(ToggleTerminalSessionChannelProvider {
         ready,
         command_context,
     });
@@ -985,9 +986,9 @@ fn runtime_failure_clears_live_terminal_progress(cx: &mut TestAppContext) {
     records
         .event_sender(session_id)
         .unwrap()
-        .try_send(SessionEvent::Failed(SessionFailure::Runtime(
-            "worker stopped".to_owned(),
-        )))
+        .try_send(TerminalSessionEvent::Failed(
+            TerminalSessionFailure::Runtime("worker stopped".to_owned()),
+        ))
         .unwrap();
     cx.run_until_parked();
 
@@ -1013,7 +1014,7 @@ fn remote_restart_resets_caption_before_successor_output_and_preserves_screen(
     records
         .event_sender(session_id)
         .unwrap()
-        .try_send(SessionEvent::Screen(Arc::clone(&old_screen)))
+        .try_send(TerminalSessionEvent::Screen(Arc::clone(&old_screen)))
         .unwrap();
     cx.run_until_parked();
 
@@ -1087,7 +1088,7 @@ fn remote_restart_ignores_prior_epoch_events_and_accepts_fresh_generation_one(
         let old_epoch = pane.terminal_session.session_epoch;
         pane.handle_session_event(
             old_epoch,
-            SessionEvent::Screen(text_screen(90, &["old"])),
+            TerminalSessionEvent::Screen(text_screen(90, &["old"])),
             cx,
         );
         pane.record_successfully_presented_screen(Arc::clone(&pane.screen));
@@ -1137,10 +1138,14 @@ fn remote_restart_ignores_prior_epoch_events_and_accepts_fresh_generation_one(
     pane.update(cx, |pane, cx| {
         pane.handle_session_event(
             old_epoch,
-            SessionEvent::Screen(text_screen(99, &["stale"])),
+            TerminalSessionEvent::Screen(text_screen(99, &["stale"])),
             cx,
         );
-        pane.handle_session_event(old_epoch, SessionEvent::Exited(SessionExit::Success), cx);
+        pane.handle_session_event(
+            old_epoch,
+            TerminalSessionEvent::Exited(TerminalSessionExit::Success),
+            cx,
+        );
         pane.handle_session_accessibility(
             old_epoch,
             Arc::new(TerminalAccessibilityModel::from_screen(&text_screen(
@@ -1151,7 +1156,7 @@ fn remote_restart_ignores_prior_epoch_events_and_accepts_fresh_generation_one(
         let current_epoch = pane.terminal_session.session_epoch;
         pane.handle_session_event(
             current_epoch,
-            SessionEvent::Screen(text_screen(1, &["fresh"])),
+            TerminalSessionEvent::Screen(text_screen(1, &["fresh"])),
             cx,
         );
         pane.record_successfully_presented_screen(Arc::clone(&pane.screen));
@@ -1201,7 +1206,10 @@ fn disconnected_remote_pane_blocks_input_but_preserves_copy_selection_and_find(
     });
     cx.update(|window, cx| {
         pane.update(cx, |pane, cx| {
-            pane.handle_event(SessionEvent::Screen(context_action_screen(None, true)), cx);
+            pane.handle_event(
+                TerminalSessionEvent::Screen(context_action_screen(None, true)),
+                cx,
+            );
             pane.open_find(&OpenTerminalFind, window, cx);
             pane.disconnect_remote(3, cx).unwrap();
             pane.copy_selection(&CopySelection, window, cx);
@@ -1232,14 +1240,14 @@ fn disconnected_remote_pane_blocks_input_but_preserves_copy_selection_and_find(
         records
             .commands()
             .iter()
-            .any(|call| { matches!(call.command, RecordedSessionCommand::RequestSelectionCopy) })
+            .any(|call| { matches!(call.command, RecordedCommand::RequestSelectionCopy) })
     );
     assert!(!records.commands().iter().any(|call| matches!(
         call.command,
-        RecordedSessionCommand::Key(_)
-            | RecordedSessionCommand::Pointer(_)
-            | RecordedSessionCommand::PointerAndCopySelection(_)
-            | RecordedSessionCommand::Wheel(_)
+        RecordedCommand::Key(_)
+            | RecordedCommand::Pointer(_)
+            | RecordedCommand::PointerAndCopySelection(_)
+            | RecordedCommand::Wheel(_)
     )));
 }
 
@@ -1253,7 +1261,9 @@ fn failed_master_event_before_disconnect_retains_remote_pane(cx: &mut TestAppCon
         let epoch = pane.terminal_session.session_epoch;
         pane.handle_session_event(
             epoch,
-            SessionEvent::Failed(SessionFailure::Runtime("master exited".to_owned())),
+            TerminalSessionEvent::Failed(TerminalSessionFailure::Runtime(
+                "master exited".to_owned(),
+            )),
             cx,
         );
         pane.disconnect_remote(7, cx).unwrap();
@@ -1284,7 +1294,11 @@ fn exited_master_event_before_disconnect_retains_remote_pane(cx: &mut TestAppCon
 
     pane.update(cx, |pane, cx| {
         let epoch = pane.terminal_session.session_epoch;
-        pane.handle_session_event(epoch, SessionEvent::Exited(SessionExit::Success), cx);
+        pane.handle_session_event(
+            epoch,
+            TerminalSessionEvent::Exited(TerminalSessionExit::Success),
+            cx,
+        );
         pane.disconnect_remote(7, cx).unwrap();
     });
 
@@ -1319,12 +1333,14 @@ fn authoritative_disconnect_before_terminal_events_ignores_exit_and_failure(
         pane.disconnect_remote(7, cx).unwrap();
         pane.handle_session_event(
             old_epoch,
-            SessionEvent::Failed(SessionFailure::Runtime("late failure".to_owned())),
+            TerminalSessionEvent::Failed(TerminalSessionFailure::Runtime(
+                "late failure".to_owned(),
+            )),
             cx,
         );
         pane.handle_session_event(
             old_epoch,
-            SessionEvent::Exited(SessionExit::ExitCode(255)),
+            TerminalSessionEvent::Exited(TerminalSessionExit::ExitCode(255)),
             cx,
         );
     });
@@ -1339,7 +1355,7 @@ fn authoritative_disconnect_before_terminal_events_ignores_exit_and_failure(
 fn disconnect_and_restart_clear_hidden_input_before_successor_focus(cx: &mut TestAppContext) {
     let (pane, cx, _) = connected_remote_terminal_pane(cx);
     pane.update(cx, |pane, cx| {
-        pane.handle_event(SessionEvent::HiddenInputChanged(true), cx);
+        pane.handle_event(TerminalSessionEvent::HiddenInputChanged(true), cx);
     });
     assert!(pane.read_with(cx, |pane, _| pane.hidden_input && pane.terminal_input_focus));
 
@@ -1439,10 +1455,11 @@ fn remote_pane_disables_local_file_actions_but_preserves_text_services_and_web_l
                 window,
                 cx,
             );
-            pane.insert_dropped_file_paths_for_test(std::slice::from_ref(&file), window, cx);
         });
     });
     cx.run_until_parked();
+    let position = pane.read_with(cx, |pane, _| pane.grid_bounds.unwrap().center());
+    drop_file_paths(cx, position, vec![file.clone()]);
     cx.write_to_clipboard(ClipboardItem::new_string("clipboard text".to_owned()));
     cx.update(|window, cx| {
         pane.update(cx, |pane, cx| {
@@ -1478,16 +1495,18 @@ fn remote_pane_disables_local_file_actions_but_preserves_text_services_and_web_l
         ),
         Some("https://example.test".to_owned())
     );
+    assert!(
+        records.commands().iter().any(|call| {
+            call.command == RecordedCommand::RequestPaste("ordinary text".to_owned())
+        })
+    );
     assert!(records.commands().iter().any(|call| {
-        call.command == RecordedSessionCommand::RequestPaste("ordinary text".to_owned())
-    }));
-    assert!(records.commands().iter().any(|call| {
-        call.command == RecordedSessionCommand::RequestPaste("clipboard text".to_owned())
+        call.command == RecordedCommand::RequestPaste("clipboard text".to_owned())
     }));
     assert!(records.commands().iter().all(|call| {
         !matches!(
             &call.command,
-            RecordedSessionCommand::RequestPaste(text)
+            RecordedCommand::RequestPaste(text)
                 if text.contains(file.to_string_lossy().as_ref())
         )
     }));
@@ -1500,7 +1519,7 @@ fn accessibility_uses_its_bounded_latest_lane_instead_of_screen_rows(cx: &mut Te
     records
         .last_event_sender()
         .unwrap()
-        .send_blocking(SessionEvent::Screen(blinking_screen()))
+        .send_blocking(TerminalSessionEvent::Screen(blinking_screen()))
         .unwrap();
     cx.run_until_parked();
     assert!(pane.read_with(cx, |pane, _| pane.accessibility.text().is_empty()));
@@ -1535,14 +1554,14 @@ fn accessibility_models_are_applied_only_with_their_matching_screen_generation(
     let ahead = Arc::new(TerminalAccessibilityModel::from_screen(&ahead_screen));
 
     pane.update(cx, |pane, cx| {
-        assert!(pane.handle_event(SessionEvent::Screen(current_screen), cx));
+        assert!(pane.handle_event(TerminalSessionEvent::Screen(current_screen), cx));
         let epoch = pane.terminal_session.session_epoch;
         pane.handle_session_accessibility(epoch, Arc::clone(&stale));
         assert!(!pane.accessibility.shares_snapshot(&stale));
 
         pane.handle_session_accessibility(epoch, Arc::clone(&ahead));
         assert!(!pane.accessibility.shares_snapshot(&ahead));
-        assert!(pane.handle_event(SessionEvent::Screen(ahead_screen), cx));
+        assert!(pane.handle_event(TerminalSessionEvent::Screen(ahead_screen), cx));
         assert!(pane.accessibility.shares_snapshot(&ahead));
     });
 }
@@ -1804,282 +1823,159 @@ fn visible_surface() -> SurfaceVisibility {
 
 #[gpui::test]
 fn minimized_pane_coalesces_sustained_accessibility_updates_until_restore(cx: &mut TestAppContext) {
-    let (pane, cx) = terminal_pane(cx);
-    let accessibility_record = prepare_accessibility_presentation(&pane, cx);
-    pane.update(cx, |pane, _| {
-        pane.render_lifecycle.update_visibility(SurfaceVisibility {
+    for hidden in [
+        SurfaceVisibility {
             minimized: true,
             ..visible_surface()
-        });
-        for index in 0..4_096 {
-            pane.handle_accessibility(accessibility_model(index));
-        }
-    });
-
-    assert_eq!(
-        pane.read_with(cx, |pane, _| {
-            (
-                pane.pending_accessibility_notifications.len(),
-                pane.pending_accessibility_notifications
-                    .contains(AccessibilityNotification::Value),
-                pane.pending_accessibility_notifications
-                    .contains(AccessibilityNotification::Selection),
-                pane.accessibility.text().to_owned(),
-            )
-        }),
-        (2, true, true, "update-4095x".to_owned())
-    );
-
-    cx.update(|window, cx| {
-        pane.update(cx, |pane, _| {
-            pane.render_lifecycle.update_visibility(visible_surface());
-            pane.sync_native_accessibility(window, false);
-        });
-    });
-    assert_eq!(
-        pane.read_with(cx, |pane, _| {
-            (
-                pane.pending_accessibility_notifications.is_empty(),
-                accessibility_record
-                    .borrow()
-                    .delivered
-                    .iter()
-                    .collect::<Vec<_>>(),
-                accessibility_record.borrow().model.text().to_owned(),
-            )
-        }),
-        (
-            true,
-            vec![
-                AccessibilityNotification::Value,
-                AccessibilityNotification::Selection,
-            ],
-            "update-4095x".to_owned(),
-        )
-    );
-}
-
-#[gpui::test]
-fn occluded_pane_coalesces_sustained_accessibility_updates_until_restore(cx: &mut TestAppContext) {
-    let (pane, cx) = terminal_pane(cx);
-    let accessibility_record = prepare_accessibility_presentation(&pane, cx);
-    pane.update(cx, |pane, _| {
-        pane.render_lifecycle.update_visibility(SurfaceVisibility {
+        },
+        SurfaceVisibility {
             occluded: true,
             ..visible_surface()
-        });
-        for index in 0..4_096 {
-            pane.handle_accessibility(accessibility_model(index));
-        }
-    });
-
-    assert_eq!(
-        pane.read_with(cx, |pane, _| {
-            (
-                pane.pending_accessibility_notifications.len(),
-                pane.accessibility.text().to_owned(),
-            )
-        }),
-        (2, "update-4095x".to_owned())
-    );
-
-    cx.update(|window, cx| {
+        },
+    ] {
+        let (pane, cx) = terminal_pane(cx);
+        let accessibility_record = prepare_accessibility_presentation(&pane, cx);
         pane.update(cx, |pane, _| {
-            pane.render_lifecycle.update_visibility(visible_surface());
-            pane.sync_native_accessibility(window, false);
+            pane.render_lifecycle.update_visibility(hidden);
+            for index in 0..4_096 {
+                pane.handle_accessibility(accessibility_model(index));
+            }
         });
-    });
-    assert_eq!(
-        pane.read_with(cx, |pane, _| {
+
+        assert_eq!(
+            pane.read_with(cx, |pane, _| {
+                (
+                    pane.pending_accessibility_notifications.len(),
+                    pane.pending_accessibility_notifications
+                        .contains(AccessibilityNotification::Value),
+                    pane.pending_accessibility_notifications
+                        .contains(AccessibilityNotification::Selection),
+                    pane.accessibility.text().to_owned(),
+                )
+            }),
+            (2, true, true, "update-4095x".to_owned())
+        );
+
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, _| {
+                pane.render_lifecycle.update_visibility(visible_surface());
+                pane.sync_native_accessibility(window, false);
+            });
+        });
+        assert_eq!(
+            pane.read_with(cx, |pane, _| {
+                (
+                    pane.pending_accessibility_notifications.is_empty(),
+                    accessibility_record
+                        .borrow()
+                        .delivered
+                        .iter()
+                        .collect::<Vec<_>>(),
+                    accessibility_record.borrow().model.text().to_owned(),
+                )
+            }),
             (
-                pane.pending_accessibility_notifications.is_empty(),
-                accessibility_record
-                    .borrow()
-                    .delivered
-                    .iter()
-                    .collect::<Vec<_>>(),
-                accessibility_record.borrow().model.text().to_owned(),
+                true,
+                vec![
+                    AccessibilityNotification::Value,
+                    AccessibilityNotification::Selection,
+                ],
+                "update-4095x".to_owned(),
             )
-        }),
-        (
-            true,
-            vec![
-                AccessibilityNotification::Value,
-                AccessibilityNotification::Selection,
-            ],
-            "update-4095x".to_owned(),
-        )
-    );
+        );
+    }
 }
 
 #[gpui::test]
 fn zoom_hidden_pane_retains_only_bounded_accessibility_state_until_restore(
     cx: &mut TestAppContext,
 ) {
-    let (pane, cx) = terminal_pane(cx);
-    let accessibility_record = prepare_accessibility_presentation(&pane, cx);
-    let layout_bounds = pane.read_with(cx, |pane, _| {
-        pane.grid_bounds.expect("initial presentation has geometry")
-    });
-    pane.update(cx, |pane, cx| {
-        pane.set_product_focus(
-            TerminalProductFocus {
-                pane_visible: false,
-                focused_pane: false,
-                ..TerminalProductFocus::default()
-            },
-            cx,
-        );
-        pane.set_accessibility_hierarchy(false, usize::MAX);
-        for index in 0..4_096 {
-            pane.handle_accessibility(accessibility_model(index));
-        }
-    });
-    cx.update(|window, cx| {
-        pane.update(cx, |pane, _| pane.sync_native_accessibility(window, false));
-    });
-
-    assert_eq!(
-        pane.read_with(cx, |pane, _| {
-            (
-                pane.pending_accessibility_notifications.len(),
-                accessibility_record.borrow().delivered.is_empty(),
-                pane.accessibility.text().to_owned(),
-            )
-        }),
-        (2, true, "update-4095x".to_owned())
-    );
-
-    pane.update(cx, |pane, cx| {
-        pane.set_product_focus(TerminalProductFocus::default(), cx);
-        pane.set_accessibility_hierarchy(true, 0);
-    });
-    cx.update(|window, cx| {
-        pane.update(cx, |pane, _| pane.sync_native_accessibility(window, false));
-    });
-    assert!(pane.read_with(cx, |pane, _| {
-        pane.grid_bounds.is_none()
-            && pane.pending_accessibility_notifications.len() == 2
-            && !accessibility_record.borrow().visible
-            && accessibility_record.borrow().delivered.is_empty()
-            && accessibility_record.borrow().model.text() == "update-4095x"
-    }));
-    // Production restores geometry in on_children_prepainted before publishing
-    // native accessibility. Exercise that order instead of using hidden bounds.
-    cx.update(|window, cx| {
-        pane.update(cx, |pane, cx| {
-            pane.update_grid_bounds(layout_bounds, cx);
-            pane.sync_native_accessibility(window, false);
+    for hidden in [
+        TerminalProductFocus {
+            pane_visible: false,
+            focused_pane: false,
+            ..TerminalProductFocus::default()
+        },
+        TerminalProductFocus {
+            active_workspace: false,
+            active_tab: false,
+            pane_visible: false,
+            focused_pane: false,
+            blocker: None,
+        },
+    ] {
+        let (pane, cx) = terminal_pane(cx);
+        let accessibility_record = prepare_accessibility_presentation(&pane, cx);
+        let layout_bounds = pane.read_with(cx, |pane, _| {
+            pane.grid_bounds.expect("initial presentation has geometry")
         });
-    });
-    assert!(accessibility_record.borrow().visible);
-    assert_eq!(
-        pane.read_with(cx, |pane, _| {
-            (
-                pane.pending_accessibility_notifications.is_empty(),
-                accessibility_record
-                    .borrow()
-                    .delivered
-                    .iter()
-                    .collect::<Vec<_>>(),
-                accessibility_record.borrow().model.text().to_owned(),
-            )
-        }),
-        (
-            true,
-            vec![
-                AccessibilityNotification::Value,
-                AccessibilityNotification::Selection,
-            ],
-            "update-4095x".to_owned(),
-        )
-    );
-}
-
-#[gpui::test]
-fn inactive_workspace_retains_only_bounded_accessibility_state_until_restore(
-    cx: &mut TestAppContext,
-) {
-    let (pane, cx) = terminal_pane(cx);
-    let accessibility_record = prepare_accessibility_presentation(&pane, cx);
-    let layout_bounds = pane.read_with(cx, |pane, _| {
-        pane.grid_bounds.expect("initial presentation has geometry")
-    });
-    pane.update(cx, |pane, cx| {
-        pane.set_product_focus(
-            TerminalProductFocus {
-                active_workspace: false,
-                active_tab: false,
-                pane_visible: false,
-                focused_pane: false,
-                blocker: None,
-            },
-            cx,
-        );
-        pane.set_accessibility_hierarchy(false, usize::MAX);
-        for index in 0..4_096 {
-            pane.handle_accessibility(accessibility_model(index));
-        }
-    });
-    cx.update(|window, cx| {
-        pane.update(cx, |pane, _| pane.sync_native_accessibility(window, false));
-    });
-
-    assert_eq!(
-        pane.read_with(cx, |pane, _| {
-            (
-                pane.pending_accessibility_notifications.len(),
-                accessibility_record.borrow().delivered.is_empty(),
-                pane.accessibility.text().to_owned(),
-            )
-        }),
-        (2, true, "update-4095x".to_owned())
-    );
-
-    pane.update(cx, |pane, cx| {
-        pane.set_product_focus(TerminalProductFocus::default(), cx);
-        pane.set_accessibility_hierarchy(true, 0);
-    });
-    cx.update(|window, cx| {
-        pane.update(cx, |pane, _| pane.sync_native_accessibility(window, false));
-    });
-    assert!(pane.read_with(cx, |pane, _| {
-        pane.grid_bounds.is_none()
-            && pane.pending_accessibility_notifications.len() == 2
-            && !accessibility_record.borrow().visible
-            && accessibility_record.borrow().delivered.is_empty()
-            && accessibility_record.borrow().model.text() == "update-4095x"
-    }));
-    // Production restores geometry in on_children_prepainted before publishing
-    // native accessibility. Exercise that order instead of using hidden bounds.
-    cx.update(|window, cx| {
         pane.update(cx, |pane, cx| {
-            pane.update_grid_bounds(layout_bounds, cx);
-            pane.sync_native_accessibility(window, false);
+            pane.set_product_focus(hidden, cx);
+            pane.set_accessibility_hierarchy(false, usize::MAX);
+            for index in 0..4_096 {
+                pane.handle_accessibility(accessibility_model(index));
+            }
         });
-    });
-    assert!(accessibility_record.borrow().visible);
-    assert_eq!(
-        pane.read_with(cx, |pane, _| {
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, _| pane.sync_native_accessibility(window, false));
+        });
+
+        assert_eq!(
+            pane.read_with(cx, |pane, _| {
+                (
+                    pane.pending_accessibility_notifications.len(),
+                    accessibility_record.borrow().delivered.is_empty(),
+                    pane.accessibility.text().to_owned(),
+                )
+            }),
+            (2, true, "update-4095x".to_owned())
+        );
+
+        pane.update(cx, |pane, cx| {
+            pane.set_product_focus(TerminalProductFocus::default(), cx);
+            pane.set_accessibility_hierarchy(true, 0);
+        });
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, _| pane.sync_native_accessibility(window, false));
+        });
+        assert!(pane.read_with(cx, |pane, _| {
+            pane.grid_bounds.is_none()
+                && pane.pending_accessibility_notifications.len() == 2
+                && !accessibility_record.borrow().visible
+                && accessibility_record.borrow().delivered.is_empty()
+                && accessibility_record.borrow().model.text() == "update-4095x"
+        }));
+        // Production restores geometry in on_children_prepainted before publishing
+        // native accessibility. Exercise that order instead of using hidden bounds.
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.update_grid_bounds(layout_bounds, cx);
+                pane.sync_native_accessibility(window, false);
+            });
+        });
+        assert!(accessibility_record.borrow().visible);
+        assert_eq!(
+            pane.read_with(cx, |pane, _| {
+                (
+                    pane.pending_accessibility_notifications.is_empty(),
+                    accessibility_record
+                        .borrow()
+                        .delivered
+                        .iter()
+                        .collect::<Vec<_>>(),
+                    accessibility_record.borrow().model.text().to_owned(),
+                )
+            }),
             (
-                pane.pending_accessibility_notifications.is_empty(),
-                accessibility_record
-                    .borrow()
-                    .delivered
-                    .iter()
-                    .collect::<Vec<_>>(),
-                accessibility_record.borrow().model.text().to_owned(),
+                true,
+                vec![
+                    AccessibilityNotification::Value,
+                    AccessibilityNotification::Selection,
+                ],
+                "update-4095x".to_owned(),
             )
-        }),
-        (
-            true,
-            vec![
-                AccessibilityNotification::Value,
-                AccessibilityNotification::Selection,
-            ],
-            "update-4095x".to_owned(),
-        )
-    );
+        );
+    }
 }
 
 #[gpui::test]
@@ -2200,6 +2096,18 @@ fn connected_terminal_pane_with_key_propagation(
     (pane, cx, records, propagated_key_downs)
 }
 
+struct FailOnceSelectionClipboard(Cell<bool>);
+
+impl SelectionClipboard for FailOnceSelectionClipboard {
+    fn publish(&self, copy: &SelectionCopy, cx: &mut App) -> Result<(), ClipboardError> {
+        if self.0.replace(false) {
+            return Err(ClipboardError::Unavailable);
+        }
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy.plain_text.clone()));
+        Ok(())
+    }
+}
+
 fn terminal_pane_with_selection_copy(
     cx: &mut TestAppContext,
     copy: SelectionCopy,
@@ -2208,26 +2116,12 @@ fn terminal_pane_with_selection_copy(
     &mut VisualTestContext,
     TestTerminalSessionRecords,
 ) {
-    cx.update(crate::ui::init)
-        .expect("UI initialization should succeed");
     let records = TestTerminalSessionRecords::default();
-    let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
+    let (pane, cx) = focused_pane(
+        cx,
         TestTerminalSessionFactory::new(records.clone())
             .with_selection_copy_response(Ok(Some(copy))),
     );
-    let session_factory = WorkspaceTerminalSessionFactory::new_local(
-        session_factory,
-        crate::terminal::testing::test_local_directory(PathBuf::from(
-            "/tmp/spaceterm-terminal-pane-copy-test",
-        )),
-    );
-    let (pane, cx) =
-        cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
-    cx.update(|window, cx| {
-        window.activate_window();
-        pane.update(cx, |pane, cx| pane.focus(window, cx));
-    });
-    cx.run_until_parked();
     (pane, cx, records)
 }
 
@@ -2240,27 +2134,13 @@ fn terminal_pane_with_paste_response(
     &mut VisualTestContext,
     TestTerminalSessionRecords,
 ) {
-    cx.update(crate::ui::init)
-        .expect("UI initialization should succeed");
     let records = TestTerminalSessionRecords::default();
-    let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
+    let (pane, cx) = focused_pane(
+        cx,
         TestTerminalSessionFactory::new(records.clone())
             .with_paste_response(response)
             .with_paste_resolution(resolution),
     );
-    let session_factory = WorkspaceTerminalSessionFactory::new_local(
-        session_factory,
-        crate::terminal::testing::test_local_directory(PathBuf::from(
-            "/tmp/spaceterm-terminal-pane-paste-test",
-        )),
-    );
-    let (pane, cx) =
-        cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
-    cx.update(|window, cx| {
-        window.activate_window();
-        pane.update(cx, |pane, cx| pane.focus(window, cx));
-    });
-    cx.run_until_parked();
     (pane, cx, records)
 }
 
@@ -2301,10 +2181,12 @@ fn command_k_should_clear_the_terminal_screen_and_scrollback(cx: &mut TestAppCon
 
     cx.simulate_keystrokes("cmd-k");
 
-    assert!(records.commands().iter().any(|call| matches!(
-        call.command,
-        RecordedSessionCommand::ClearScreenAndScrollback
-    )));
+    assert!(
+        records
+            .commands()
+            .iter()
+            .any(|call| matches!(call.command, RecordedCommand::ClearScreenAndScrollback))
+    );
 }
 
 #[gpui::test]
@@ -2322,7 +2204,7 @@ fn scroll_shortcuts_move_scrollback_without_sending_keys(cx: &mut TestAppContext
         commands[before..]
             .iter()
             .map(|call| &call.command)
-            .filter(|command| !matches!(command, RecordedSessionCommand::Focus(_)))
+            .filter(|command| !matches!(command, RecordedCommand::Focus(_)))
             .collect::<Vec<_>>(),
         [
             ScrollbackMovement::PageUp,
@@ -2330,7 +2212,7 @@ fn scroll_shortcuts_move_scrollback_without_sending_keys(cx: &mut TestAppContext
             ScrollbackMovement::Top,
             ScrollbackMovement::Bottom,
         ]
-        .map(RecordedSessionCommand::ScrollScrollback)
+        .map(RecordedCommand::ScrollScrollback)
         .iter()
         .collect::<Vec<_>>(),
         "Scroll Commands move the viewport and send the terminal no key"
@@ -2410,11 +2292,11 @@ fn queued_appearance_screens_cannot_revert_the_latest_terminal_request(cx: &mut 
             pane.refresh_appearance(window, cx);
             let mut stale = (*graphics_screen(100, 1)).clone();
             stale.appearance_generation = intermediate;
-            assert!(!pane.handle_event(SessionEvent::Screen(Arc::new(stale)), cx));
+            assert!(!pane.handle_event(TerminalSessionEvent::Screen(Arc::new(stale)), cx));
             assert!(pane.screen.generation < crate::terminal::PresentationGeneration::test(100));
             let mut latest = (*graphics_screen(101, 1)).clone();
             latest.appearance_generation = pane.requested_terminal_generation;
-            assert!(pane.handle_event(SessionEvent::Screen(Arc::new(latest)), cx));
+            assert!(pane.handle_event(TerminalSessionEvent::Screen(Arc::new(latest)), cx));
         });
         let terminal_generation = pane.read_with(cx, |pane, _| pane.requested_terminal_generation);
 
@@ -2425,7 +2307,7 @@ fn queued_appearance_screens_cannot_revert_the_latest_terminal_request(cx: &mut 
             assert_eq!(pane.requested_terminal_generation, terminal_generation);
             let mut next = (*graphics_screen(102, 1)).clone();
             next.appearance_generation = terminal_generation;
-            assert!(pane.handle_event(SessionEvent::Screen(Arc::new(next)), cx));
+            assert!(pane.handle_event(TerminalSessionEvent::Screen(Arc::new(next)), cx));
         });
     });
 }
@@ -2510,16 +2392,16 @@ fn terminal_find_open_edit_navigate_and_close_are_pane_scoped(cx: &mut TestAppCo
         .commands()
         .into_iter()
         .filter_map(|call| match call.command {
-            RecordedSessionCommand::SetFindQuery(generation, query) => {
+            RecordedCommand::SetFindQuery(generation, query) => {
                 Some((format!("set:{query}"), generation))
             }
-            RecordedSessionCommand::NavigateFind(generation, FindDirection::Next) => {
+            RecordedCommand::NavigateFind(generation, FindDirection::Next) => {
                 Some(("next".to_owned(), generation))
             }
-            RecordedSessionCommand::NavigateFind(generation, FindDirection::Previous) => {
+            RecordedCommand::NavigateFind(generation, FindDirection::Previous) => {
                 Some(("previous".to_owned(), generation))
             }
-            RecordedSessionCommand::EndFind(generation) => Some(("end".to_owned(), generation)),
+            RecordedCommand::EndFind(generation) => Some(("end".to_owned(), generation)),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -2560,7 +2442,7 @@ fn terminal_find_should_handle_native_select_all_and_cut(cx: &mut TestAppContext
             .commands()
             .into_iter()
             .skip(command_count)
-            .all(|call| !matches!(call.command, RecordedSessionCommand::RequestSelectionCopy))
+            .all(|call| !matches!(call.command, RecordedCommand::RequestSelectionCopy))
     );
 
     cx.dispatch_action(spaceterm_ui::EditCut);
@@ -2610,7 +2492,7 @@ fn repeated_terminal_find_selects_and_refocuses_the_existing_query(cx: &mut Test
         records
             .commands()
             .iter()
-            .filter(|call| matches!(call.command, RecordedSessionCommand::SetFindQuery(_, _)))
+            .filter(|call| matches!(call.command, RecordedCommand::SetFindQuery(_, _)))
             .count(),
         2
     );
@@ -2669,7 +2551,7 @@ fn losing_focused_pane_status_closes_terminal_find(cx: &mut TestAppContext) {
         records
             .commands()
             .iter()
-            .any(|call| matches!(call.command, RecordedSessionCommand::EndFind(_)))
+            .any(|call| matches!(call.command, RecordedCommand::EndFind(_)))
     );
 }
 
@@ -2685,17 +2567,7 @@ fn terminal_find_reflows_all_actions_inside_a_narrow_pane_with_fixed_chrome_type
         publish_terminal_preferences(preferences, cx);
         let resolved = super::super::appearance_runtime::current(cx);
         let chrome = super::super::appearance::ChromeAppearance::prepare(&resolved.chrome);
-        spaceterm_ui::replace_control_theme_catalog(
-            cx,
-            super::super::control_theme_catalog::catalog(
-                &chrome,
-                spaceterm_ui::ControlMotion::Standard,
-            ),
-        )
-        .unwrap();
-        cx.set_global(super::super::appearance::InstalledChrome::single(Arc::new(
-            chrome,
-        )));
+        install_uniform_chrome(chrome, cx);
     });
     cx.simulate_resize(gpui::size(px(130.0), px(420.0)));
     cx.dispatch_action(OpenTerminalFind);
@@ -2753,17 +2625,7 @@ fn terminal_find_field_contains_fixed_chrome_line_height_in_both_densities(
                 .typography
                 .style(crate::ui::chrome_typography::TextRole::Body)
                 .line_height;
-            spaceterm_ui::replace_control_theme_catalog(
-                cx,
-                super::super::control_theme_catalog::catalog(
-                    &chrome,
-                    spaceterm_ui::ControlMotion::Standard,
-                ),
-            )
-            .unwrap();
-            cx.set_global(super::super::appearance::InstalledChrome::single(Arc::new(
-                chrome,
-            )));
+            install_uniform_chrome(chrome, cx);
             window.refresh();
             line_height
         });
@@ -2816,16 +2678,14 @@ fn terminal_find_renders_shared_input_and_moves_responder_focus(cx: &mut TestApp
         .into_iter()
         .skip(command_count)
         .filter_map(|call| match call.command {
-            command @ (RecordedSessionCommand::Focus(_) | RecordedSessionCommand::Key(_)) => {
-                Some(command)
-            }
+            command @ (RecordedCommand::Focus(_) | RecordedCommand::Key(_)) => Some(command),
             _ => None,
         })
         .collect::<Vec<_>>();
 
-    assert!(matches!(commands[0], RecordedSessionCommand::Focus(false)));
-    assert!(matches!(commands[1], RecordedSessionCommand::Focus(true)));
-    assert!(matches!(commands[2], RecordedSessionCommand::Key(_)));
+    assert!(matches!(commands[0], RecordedCommand::Focus(false)));
+    assert!(matches!(commands[1], RecordedCommand::Focus(true)));
+    assert!(matches!(commands[2], RecordedCommand::Key(_)));
 }
 
 #[gpui::test]
@@ -2863,13 +2723,13 @@ fn terminal_find_submit_navigates_and_escape_cancels(cx: &mut TestAppContext) {
     }));
     assert!(records.commands().iter().any(|call| matches!(
         call.command,
-        RecordedSessionCommand::NavigateFind(_, FindDirection::Next)
+        RecordedCommand::NavigateFind(_, FindDirection::Next)
     )));
     assert!(
         records
             .commands()
             .iter()
-            .any(|call| matches!(call.command, RecordedSessionCommand::EndFind(_)))
+            .any(|call| matches!(call.command, RecordedCommand::EndFind(_)))
     );
 }
 
@@ -2892,7 +2752,7 @@ fn one_escape_closes_terminal_find_during_active_composition(cx: &mut TestAppCon
         records
             .commands()
             .iter()
-            .any(|call| matches!(call.command, RecordedSessionCommand::EndFind(_)))
+            .any(|call| matches!(call.command, RecordedCommand::EndFind(_)))
     );
 }
 
@@ -2944,7 +2804,7 @@ fn terminal_find_return_activates_each_focused_button(cx: &mut TestAppContext) {
             assert!(
                 commands.iter().skip(command_count).any(|call| matches!(
                     call.command,
-                    RecordedSessionCommand::NavigateFind(_, direction)
+                    RecordedCommand::NavigateFind(_, direction)
                         if direction == expected_direction
                 )),
                 "Return did not activate focused Find button {tab_count}"
@@ -2954,7 +2814,7 @@ fn terminal_find_return_activates_each_focused_button(cx: &mut TestAppContext) {
             commands
                 .iter()
                 .skip(command_count)
-                .any(|call| matches!(call.command, RecordedSessionCommand::EndFind(_))),
+                .any(|call| matches!(call.command, RecordedCommand::EndFind(_))),
             "focused Close or Escape did not end Find after button {tab_count}"
         );
     }
@@ -2981,7 +2841,7 @@ fn terminal_find_tab_delegates_to_its_composite_controls(cx: &mut TestAppContext
     );
     assert!(records.commands().iter().any(|call| matches!(
         &call.command,
-        RecordedSessionCommand::SetFindQuery(_, query) if query == "x"
+        RecordedCommand::SetFindQuery(_, query) if query == "x"
     )));
 }
 
@@ -3038,7 +2898,7 @@ fn terminal_find_buttons_should_disable_navigation_without_results_and_close_fin
             .commands()
             .into_iter()
             .skip(command_count)
-            .all(|call| !matches!(call.command, RecordedSessionCommand::NavigateFind(_, _)))
+            .all(|call| !matches!(call.command, RecordedCommand::NavigateFind(_, _)))
     );
 }
 
@@ -3075,11 +2935,11 @@ fn pointer_press_should_follow_synchronous_terminal_focus_admission(cx: &mut Tes
         .map(|call| call.command)
         .collect::<Vec<_>>();
 
-    assert!(matches!(commands[0], RecordedSessionCommand::Focus(false)));
-    assert!(matches!(commands[1], RecordedSessionCommand::Focus(true)));
+    assert!(matches!(commands[0], RecordedCommand::Focus(false)));
+    assert!(matches!(commands[1], RecordedCommand::Focus(true)));
     assert!(matches!(
         commands[2],
-        RecordedSessionCommand::Pointer(PointerInput {
+        RecordedCommand::Pointer(PointerInput {
             phase: PointerPhase::Press,
             ..
         })
@@ -3101,7 +2961,7 @@ fn text_blink_uses_an_injected_clock_only_while_visible_content_demands_it(
                 },
                 cx,
             );
-            pane.handle_event(SessionEvent::Screen(blinking_screen()), cx);
+            pane.handle_event(TerminalSessionEvent::Screen(blinking_screen()), cx);
             cx.notify();
         });
     });
@@ -3151,7 +3011,10 @@ fn focused_cursor_blink_uses_the_injected_pane_clock(cx: &mut TestAppContext) {
                 },
                 cx,
             );
-            pane.handle_event(SessionEvent::Screen(blinking_cursor_screen(true, true)), cx);
+            pane.handle_event(
+                TerminalSessionEvent::Screen(blinking_cursor_screen(true, true)),
+                cx,
+            );
             cx.notify();
         });
     });
@@ -3211,7 +3074,10 @@ fn cursor_blink_retains_the_fitted_grid_line_height(cx: &mut TestAppContext) {
             },
             cx,
         );
-        pane.handle_event(SessionEvent::Screen(blinking_cursor_screen(true, true)), cx);
+        pane.handle_event(
+            TerminalSessionEvent::Screen(blinking_cursor_screen(true, true)),
+            cx,
+        );
         cx.notify();
     });
     cx.run_until_parked();
@@ -3245,18 +3111,34 @@ fn cursor_blink_retains_the_fitted_grid_line_height(cx: &mut TestAppContext) {
 fn cursor_layer_refresh_does_not_repeat_a_completed_presentation(cx: &mut TestAppContext) {
     let (pane, cx, _records) = connected_terminal_pane(cx);
     pane.update(cx, |pane, cx| {
-        pane.handle_event(SessionEvent::Screen(blinking_cursor_screen(true, true)), cx);
+        pane.handle_event(
+            TerminalSessionEvent::Screen(blinking_cursor_screen(true, true)),
+            cx,
+        );
         cx.notify();
     });
     cx.run_until_parked();
     assert!(pane.read_with(cx, |pane, _| {
         pane.grid_presentation.cursor_storage().is_some()
     }));
+    let completed = pane.read_with(cx, |pane, _| {
+        (
+            pane.latest_presentation_operation,
+            pane.last_valid_screen.generation,
+        )
+    });
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
     assert_eq!(
         pane.read_with(cx, |pane, _| pane.pane_state.clone()),
         PaneTerminalState::Running
+    );
+    assert_eq!(
+        pane.read_with(cx, |pane, _| (
+            pane.latest_presentation_operation,
+            pane.last_valid_screen.generation
+        )),
+        completed
     );
 }
 
@@ -3266,7 +3148,10 @@ fn product_hiding_releases_cursor_resources_before_redraw_and_restores_latest_sc
 ) {
     let (pane, cx, _records) = connected_terminal_pane(cx);
     pane.update(cx, |pane, cx| {
-        pane.handle_event(SessionEvent::Screen(blinking_cursor_screen(true, true)), cx);
+        pane.handle_event(
+            TerminalSessionEvent::Screen(blinking_cursor_screen(true, true)),
+            cx,
+        );
         cx.notify();
     });
     cx.run_until_parked();
@@ -3306,7 +3191,7 @@ fn product_hiding_releases_cursor_resources_before_redraw_and_restores_latest_sc
         Arc::make_mut(&mut latest).generation =
             crate::terminal::PresentationGeneration::test(42 + index as u64);
         pane.update(cx, |pane, cx| {
-            pane.handle_event(SessionEvent::Screen(Arc::clone(&latest)), cx);
+            pane.handle_event(TerminalSessionEvent::Screen(Arc::clone(&latest)), cx);
             pane.set_product_focus(visible, cx);
             cx.notify();
         });
@@ -3322,7 +3207,10 @@ fn product_hiding_releases_cursor_resources_before_redraw_and_restores_latest_sc
 fn occlusion_releases_the_cursor_batch_before_another_frame(cx: &mut TestAppContext) {
     let (pane, cx, _records) = connected_terminal_pane(cx);
     pane.update(cx, |pane, cx| {
-        pane.handle_event(SessionEvent::Screen(blinking_cursor_screen(true, true)), cx);
+        pane.handle_event(
+            TerminalSessionEvent::Screen(blinking_cursor_screen(true, true)),
+            cx,
+        );
         cx.notify();
     });
     cx.run_until_parked();
@@ -3346,55 +3234,100 @@ fn occlusion_releases_the_cursor_batch_before_another_frame(cx: &mut TestAppCont
 }
 
 #[gpui::test]
-fn cursor_layer_rebuilds_for_output_selection_and_font_changes(cx: &mut TestAppContext) {
+fn grid_rebuilds_for_output_selection_and_font_changes_and_composes_the_cursor(
+    cx: &mut TestAppContext,
+) {
     let (pane, cx, _records) = connected_terminal_pane(cx);
     let mut screen = text_screen(10, &["first row", "cursor row", "last row"]);
     Arc::make_mut(&mut screen).cursor = blinking_cursor_screen(true, true).cursor;
+    cx.simulate_resize(gpui::size(px(324.0), px(162.0)));
     pane.update(cx, |pane, cx| {
-        pane.handle_event(SessionEvent::Screen(screen.clone()), cx);
+        let colors = &mut Arc::make_mut(&mut Arc::make_mut(&mut pane.appearance).terminal).colors;
+        colors.selection_background = Color::rgb(0x11_dd_77);
+        colors.cursor = Color::rgb(0xff_00_00);
+        pane.cell_width = px(8.0);
+        pane.line_height = 16.0;
+        pane.last_geometry = Some(TerminalGeometry::from_grid(
+            CellGridSize::new(40, 10),
+            LogicalCellSize::new(8.0, 16.0),
+            BackingScale::ONE,
+        ));
+        pane.handle_event(TerminalSessionEvent::Screen(screen.clone()), cx);
         cx.notify();
     });
     cx.run_until_parked();
-    let mut paints = pane.read_with(cx, |pane, _| pane.grid_presentation.paint_counts().0);
-    assert!(paints > 0);
+    let assert_composition = |cx: &mut VisualTestContext, cursor_visible: bool| {
+        cx.update(|window, _| {
+            let quads = window.painted_quads();
+            let selected: Vec<_> = quads
+                .iter()
+                .filter(|quad| quad.background == gpui::rgba(0x11_dd_77_ff).into())
+                .collect();
+            let cursor: Vec<_> = quads
+                .iter()
+                .filter(|quad| quad.background == gpui::rgba(0xff_00_00_ff).into())
+                .collect();
+            let cell_bounds = Bounds::new(point(px(2.0), px(0.0)), gpui::size(px(8.0), px(16.0)))
+                .scale(window.scale_factor());
+            assert_eq!(selected.len(), if cursor_visible { 2 } else { 1 });
+            for quad in &selected {
+                assert_eq!(quad.bounds, cell_bounds);
+            }
+            assert_eq!(cursor.len(), usize::from(cursor_visible));
+            if cursor_visible {
+                assert_eq!(cursor[0].bounds, cell_bounds);
+                assert!(selected[0].order < selected[1].order);
+                assert!(
+                    selected[1].order < cursor[0].order,
+                    "cursor must compose over Selection"
+                );
+            }
+        });
+    };
+    let grid_paints = |cx: &mut VisualTestContext| {
+        pane.read_with(cx, |pane, _| pane.grid_presentation.paint_counts().0)
+    };
+    let initial = grid_paints(cx);
+    assert!(initial > 0);
 
-    // A new Selection and output arrive in the same frame as a blink. Snapshot
-    // identity must win over the otherwise reusable cursor phase.
+    // Output and Selection change in separate frames so each invalidation is observed.
     let changed = Arc::make_mut(&mut screen);
     changed.generation = crate::terminal::PresentationGeneration::test(11);
-    let rows = Arc::make_mut(&mut changed.rows);
-    Arc::make_mut(&mut rows[0])[0].selected = true;
-    Arc::make_mut(&mut rows[2])[0].text = "changed".to_owned();
+    Arc::make_mut(&mut Arc::make_mut(&mut changed.rows)[2])[0].text = "changed".to_owned();
     pane.update(cx, |pane, cx| {
         pane.blink_phase_visible = !pane.blink_phase_visible;
-        pane.handle_event(SessionEvent::Screen(screen), cx);
+        pane.handle_event(TerminalSessionEvent::Screen(screen.clone()), cx);
         cx.notify();
     });
     cx.run_until_parked();
-    let after_output = pane.read_with(cx, |pane, _| pane.grid_presentation.paint_counts().0);
-    assert!(
-        after_output > paints,
-        "{:?}",
-        pane.read_with(cx, |pane, _| (
-            pane.screen.generation,
-            pane.last_valid_screen.generation,
-            pane.pane_state.clone(),
-            pane.grid_presentation.cursor_storage(),
-            pane.terminal_input_focus
-        ))
-    );
-    paints = after_output;
+    let after_output = grid_paints(cx);
+    assert!(after_output > initial);
+    let changed = Arc::make_mut(&mut screen);
+    changed.generation = crate::terminal::PresentationGeneration::test(12);
+    Arc::make_mut(&mut Arc::make_mut(&mut changed.rows)[0])[0].selected = true;
+    pane.update(cx, |pane, cx| {
+        pane.blink_phase_visible = true;
+        pane.handle_event(TerminalSessionEvent::Screen(screen), cx);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let after_selection = grid_paints(cx);
+    assert!(after_selection > after_output);
+    assert_composition(cx, true);
+    for phase in [false, true] {
+        cx.executor().advance_clock(PRESENTATION_BLINK_INTERVAL);
+        cx.run_until_parked();
+        assert_composition(cx, phase);
+        assert_eq!(grid_paints(cx), after_selection);
+    }
 
     cx.simulate_keystrokes("cmd-=");
     cx.run_until_parked();
-    assert!(pane.read_with(cx, |pane, _| pane.grid_presentation.paint_counts().0) > paints);
-    let after_resize = pane.read_with(cx, |pane, _| pane.grid_presentation.paint_counts().0);
+    let after_resize = grid_paints(cx);
+    assert!(after_resize > after_selection);
     cx.executor().advance_clock(PRESENTATION_BLINK_INTERVAL);
     cx.run_until_parked();
-    assert_eq!(
-        pane.read_with(cx, |pane, _| pane.grid_presentation.paint_counts().0),
-        after_resize
-    );
+    assert_eq!(grid_paints(cx), after_resize);
 }
 
 #[gpui::test]
@@ -3409,7 +3342,7 @@ fn cursor_layer_retires_for_graphics_text_blink_and_preedit(cx: &mut TestAppCont
             let mut idle = blinking_cursor_screen(true, true);
             Arc::make_mut(&mut idle).generation =
                 crate::terminal::PresentationGeneration::test(20 + index as u64 * 2);
-            pane.handle_event(SessionEvent::Screen(idle), cx);
+            pane.handle_event(TerminalSessionEvent::Screen(idle), cx);
             cx.notify();
         });
         cx.run_until_parked();
@@ -3420,7 +3353,7 @@ fn cursor_layer_retires_for_graphics_text_blink_and_preedit(cx: &mut TestAppCont
         changed.cursor = cursor;
         changed.generation = crate::terminal::PresentationGeneration::test(21 + index as u64 * 2);
         pane.update(cx, |pane, cx| {
-            pane.handle_event(SessionEvent::Screen(screen), cx);
+            pane.handle_event(TerminalSessionEvent::Screen(screen), cx);
             cx.notify();
         });
         cx.run_until_parked();
@@ -3431,16 +3364,18 @@ fn cursor_layer_retires_for_graphics_text_blink_and_preedit(cx: &mut TestAppCont
     pane.update(cx, |pane, cx| {
         let mut idle = blinking_cursor_screen(true, true);
         Arc::make_mut(&mut idle).generation = crate::terminal::PresentationGeneration::test(30);
-        pane.handle_event(SessionEvent::Screen(idle), cx);
+        pane.handle_event(TerminalSessionEvent::Screen(idle), cx);
         cx.notify();
     });
     cx.run_until_parked();
     assert!(pane.read_with(cx, |pane, _| {
         pane.grid_presentation.cursor_storage().is_some()
     }));
-    pane.update(cx, |pane, cx| {
-        pane.mark_for_preedit_cache_test("かな", 2..2);
-        cx.notify();
+    cx.update(|window, cx| {
+        pane.update(cx, |pane, cx| {
+            pane.replace_and_mark_text_in_range(None, "かな", Some(2..2), window, cx);
+            cx.notify();
+        });
     });
     cx.run_until_parked();
     assert!(pane.read_with(cx, |pane, _| {
@@ -3462,7 +3397,10 @@ fn cursor_blink_resets_on_accepted_input_and_focus_gain(cx: &mut TestAppContext)
                 },
                 cx,
             );
-            pane.handle_event(SessionEvent::Screen(blinking_cursor_screen(true, true)), cx);
+            pane.handle_event(
+                TerminalSessionEvent::Screen(blinking_cursor_screen(true, true)),
+                cx,
+            );
             cx.notify();
         });
     });
@@ -3550,7 +3488,7 @@ fn cursor_blink_has_no_task_when_steady_hidden_or_unfocused_and_close_cancels(
         pane.update(cx, |pane, cx| {
             pane.set_product_focus(focused, cx);
             pane.handle_event(
-                SessionEvent::Screen(blinking_cursor_screen(true, false)),
+                TerminalSessionEvent::Screen(blinking_cursor_screen(true, false)),
                 cx,
             );
             cx.notify();
@@ -3564,7 +3502,7 @@ fn cursor_blink_has_no_task_when_steady_hidden_or_unfocused_and_close_cancels(
             let mut screen = blinking_cursor_screen(false, true);
             Arc::make_mut(&mut screen).generation =
                 crate::terminal::PresentationGeneration::test(2);
-            pane.handle_event(SessionEvent::Screen(screen), cx);
+            pane.handle_event(TerminalSessionEvent::Screen(screen), cx);
             cx.notify();
         });
     });
@@ -3576,7 +3514,7 @@ fn cursor_blink_has_no_task_when_steady_hidden_or_unfocused_and_close_cancels(
             let mut screen = blinking_cursor_screen(true, true);
             Arc::make_mut(&mut screen).generation =
                 crate::terminal::PresentationGeneration::test(3);
-            pane.handle_event(SessionEvent::Screen(screen), cx);
+            pane.handle_event(TerminalSessionEvent::Screen(screen), cx);
             cx.notify();
         });
     });
@@ -3714,7 +3652,7 @@ fn command_actions_resolve_before_the_raw_terminal_key_handler(cx: &mut TestAppC
         records
             .commands()
             .iter()
-            .all(|call| !matches!(call.command, RecordedSessionCommand::Key(_)))
+            .all(|call| !matches!(call.command, RecordedCommand::Key(_)))
     );
 }
 
@@ -3740,7 +3678,7 @@ fn copy_action_requests_semantic_selection_and_writes_plain_text_pasteboard(
         records
             .commands()
             .iter()
-            .any(|call| { matches!(call.command, RecordedSessionCommand::RequestSelectionCopy) })
+            .any(|call| { matches!(call.command, RecordedCommand::RequestSelectionCopy) })
     );
 }
 
@@ -3758,7 +3696,7 @@ fn selection_drag_delivers_motion_and_release_outside_the_pane(cx: &mut TestAppC
             .into_iter()
             .skip(before)
             .filter_map(|call| match call.command {
-                RecordedSessionCommand::Pointer(input) if input.phase == PointerPhase::Motion => {
+                RecordedCommand::Pointer(input) if input.phase == PointerPhase::Motion => {
                     Some(input)
                 }
                 _ => None,
@@ -3774,7 +3712,7 @@ fn selection_drag_delivers_motion_and_release_outside_the_pane(cx: &mut TestAppC
         let before = records.commands().len();
         cx.simulate_mouse_up(outside, MouseButton::Left, Modifiers::none());
         assert!(records.commands().into_iter().skip(before).any(|call| {
-            matches!(call.command, RecordedSessionCommand::PointerAndCopySelection(input) if input.phase == PointerPhase::Release && input.position == expected)
+            matches!(call.command, RecordedCommand::PointerAndCopySelection(input) if input.phase == PointerPhase::Release && input.position == expected)
         }));
         let after_release = records.commands().len();
         cx.simulate_mouse_move(outside, None, Modifiers::none());
@@ -3783,7 +3721,7 @@ fn selection_drag_delivers_motion_and_release_outside_the_pane(cx: &mut TestAppC
                 .commands()
                 .into_iter()
                 .skip(after_release)
-                .all(|call| { !matches!(call.command, RecordedSessionCommand::Pointer(_)) })
+                .all(|call| { !matches!(call.command, RecordedCommand::Pointer(_)) })
         );
     }
 }
@@ -3814,8 +3752,7 @@ fn completed_local_selection_copies_to_the_pasteboard_after_release(cx: &mut Tes
         .filter(|call| {
             matches!(
                 call.command,
-                RecordedSessionCommand::Pointer(_)
-                    | RecordedSessionCommand::PointerAndCopySelection(_)
+                RecordedCommand::Pointer(_) | RecordedCommand::PointerAndCopySelection(_)
             )
         })
         .map(|call| call.command)
@@ -3827,11 +3764,11 @@ fn completed_local_selection_copies_to_the_pasteboard_after_release(cx: &mut Tes
     assert!(matches!(
         commands.as_slice(),
         [
-            RecordedSessionCommand::Pointer(PointerInput {
+            RecordedCommand::Pointer(PointerInput {
                 phase: PointerPhase::Press,
                 ..
             }),
-            RecordedSessionCommand::PointerAndCopySelection(PointerInput {
+            RecordedCommand::PointerAndCopySelection(PointerInput {
                 phase: PointerPhase::Release,
                 ..
             }),
@@ -3873,10 +3810,7 @@ fn application_mouse_release_does_not_copy_the_existing_selection(cx: &mut TestA
             .commands()
             .into_iter()
             .skip(command_count)
-            .all(|call| !matches!(
-                call.command,
-                RecordedSessionCommand::PointerAndCopySelection(_)
-            ))
+            .all(|call| !matches!(call.command, RecordedCommand::PointerAndCopySelection(_)))
     );
 }
 
@@ -3919,10 +3853,7 @@ fn shift_override_selection_copies_while_application_mouse_tracking_is_active(
             .commands()
             .into_iter()
             .skip(command_count)
-            .any(|call| matches!(
-                call.command,
-                RecordedSessionCommand::PointerAndCopySelection(_)
-            ))
+            .any(|call| matches!(call.command, RecordedCommand::PointerAndCopySelection(_)))
     );
 }
 
@@ -3993,7 +3924,7 @@ fn native_service_selection_uses_the_ordered_terminal_selection_query(cx: &mut T
     let requested_selection = records
         .commands()
         .iter()
-        .any(|call| matches!(call.command, RecordedSessionCommand::RequestSelectionCopy));
+        .any(|call| matches!(call.command, RecordedCommand::RequestSelectionCopy));
 
     assert_eq!(
         (selection.map(|copy| copy.plain_text), requested_selection),
@@ -4028,12 +3959,12 @@ fn native_service_return_routes_through_paste_payload_instead_of_ime(cx: &mut Te
     cx.run_until_parked();
     let commands = records.commands();
     let paste_payload = commands.iter().find_map(|call| match &call.command {
-        RecordedSessionCommand::RequestPaste(text) => Some(text.clone()),
+        RecordedCommand::RequestPaste(text) => Some(text.clone()),
         _ => None,
     });
     let ime_input = commands
         .iter()
-        .any(|call| matches!(call.command, RecordedSessionCommand::Key(_)));
+        .any(|call| matches!(call.command, RecordedCommand::Key(_)));
     let pending_confirmation = pane.read_with(cx, |pane, _| pane.pending_paste);
 
     assert_eq!(
@@ -4079,7 +4010,7 @@ fn focus_loss_before_paste_reply_cancels_stale_confirmation(cx: &mut TestAppCont
     assert!(accepted);
     assert_eq!(pane.read_with(cx, |pane, _| pane.pending_paste), None);
     assert!(records.commands().iter().any(|call| {
-        call.command == RecordedSessionCommand::ResolvePaste(confirmation.id, PasteDecision::Cancel)
+        call.command == RecordedCommand::ResolvePaste(confirmation.id, PasteDecision::Cancel)
     }));
 }
 
@@ -4117,7 +4048,7 @@ fn hierarchy_change_before_paste_reply_cancels_stale_confirmation(cx: &mut TestA
     assert!(accepted);
     assert_eq!(pane.read_with(cx, |pane, _| pane.pending_paste), None);
     assert!(records.commands().iter().any(|call| {
-        call.command == RecordedSessionCommand::ResolvePaste(confirmation.id, PasteDecision::Cancel)
+        call.command == RecordedCommand::ResolvePaste(confirmation.id, PasteDecision::Cancel)
     }));
 }
 
@@ -4143,7 +4074,7 @@ fn responder_focus_away_and_back_invalidates_the_previous_service_origin(cx: &mu
         !records
             .commands()
             .iter()
-            .any(|call| { matches!(call.command, RecordedSessionCommand::RequestPaste(_)) })
+            .any(|call| { matches!(call.command, RecordedCommand::RequestPaste(_)) })
     );
 }
 
@@ -4173,7 +4104,7 @@ fn native_service_return_is_rejected_without_terminal_input_focus(cx: &mut TestA
     let requested_paste = records
         .commands()
         .iter()
-        .any(|call| matches!(call.command, RecordedSessionCommand::RequestPaste(_)));
+        .any(|call| matches!(call.command, RecordedCommand::RequestPaste(_)));
 
     assert_eq!((accepted, requested_paste), (false, false));
 }
@@ -4350,11 +4281,10 @@ fn unsafe_paste_cancel_button_cancels_without_writing_terminal_input(cx: &mut Te
     assert!(pane.read_with(cx, |pane, _| pane.pending_paste.is_none()));
     assert!(cx.debug_bounds("unsafe-paste-confirmation").is_none());
     assert!(records.commands().iter().any(|call| {
-        call.command == RecordedSessionCommand::ResolvePaste(confirmation.id, PasteDecision::Cancel)
+        call.command == RecordedCommand::ResolvePaste(confirmation.id, PasteDecision::Cancel)
     }));
     assert!(!records.commands().iter().any(|call| {
-        call.command
-            == RecordedSessionCommand::ResolvePaste(confirmation.id, PasteDecision::Confirm)
+        call.command == RecordedCommand::ResolvePaste(confirmation.id, PasteDecision::Confirm)
     }));
     assert!(cx.update(|window, cx| pane.read(cx).terminal_input_focused(window, cx)));
 }
@@ -4386,17 +4316,7 @@ fn paste_notice_spacing_tracks_density_without_resizing_terminal_grid(cx: &mut T
     cx.update(|_, cx| {
         let mut appearance = chrome(cx).clone();
         appearance.spacing_scale *= 1.25;
-        spaceterm_ui::replace_control_theme_catalog(
-            cx,
-            super::super::control_theme_catalog::catalog(
-                &appearance,
-                spaceterm_ui::ControlMotion::Standard,
-            ),
-        )
-        .unwrap();
-        cx.set_global(super::super::appearance::InstalledChrome::single(Arc::new(
-            appearance,
-        )));
+        install_uniform_chrome(appearance, cx);
     });
     cx.run_until_parked();
 
@@ -4460,7 +4380,10 @@ fn unsafe_paste_cancel_after_terminal_selection_survives_frame_separated_pointer
             },
             cx,
         );
-        pane.handle_event(SessionEvent::Screen(blinking_cursor_screen(true, true)), cx);
+        pane.handle_event(
+            TerminalSessionEvent::Screen(blinking_cursor_screen(true, true)),
+            cx,
+        );
         cx.notify();
     });
     cx.run_until_parked();
@@ -4491,7 +4414,7 @@ fn unsafe_paste_cancel_after_terminal_selection_survives_frame_separated_pointer
 
     assert!(pane.read_with(cx, |pane, _| pane.pending_paste.is_none()));
     assert!(records.commands().iter().any(|call| {
-        call.command == RecordedSessionCommand::ResolvePaste(confirmation.id, PasteDecision::Cancel)
+        call.command == RecordedCommand::ResolvePaste(confirmation.id, PasteDecision::Cancel)
     }));
 }
 
@@ -4514,8 +4437,9 @@ fn unsafe_paste_confirmation_retains_terminal_focus_and_keeps_only_metadata_in_u
         Ok(PasteRequestOutcome::ConfirmationRequired(confirmation)),
         Ok(PasteResolution::Written),
     );
-    cx.write_to_clipboard(ClipboardItem::new_string("first\nsecond".to_owned()));
+    cx.write_to_clipboard(ClipboardItem::new_string("q9!w2\nz7@r4x".to_owned()));
 
+    cx.activate_accessibility();
     cx.dispatch_action(PasteClipboard);
     cx.run_until_parked();
 
@@ -4528,8 +4452,16 @@ fn unsafe_paste_confirmation_retains_terminal_focus_and_keeps_only_metadata_in_u
         records
             .commands()
             .iter()
-            .any(|call| { matches!(call.command, RecordedSessionCommand::RequestPaste(_)) })
+            .any(|call| { matches!(call.command, RecordedCommand::RequestPaste(_)) })
     );
+
+    let tree = cx.update(|window, _| {
+        window
+            .debug_a11y_tree_json()
+            .expect("rendered notice accessibility tree")
+    });
+    assert!(tree.contains("Paste 12 bytes across 2 lines?"));
+    assert!(!tree.contains("q9!w2") && !tree.contains("z7@r4x"));
 
     let confirm = cx
         .debug_bounds("confirm-unsafe-paste")
@@ -4537,8 +4469,7 @@ fn unsafe_paste_confirmation_retains_terminal_focus_and_keeps_only_metadata_in_u
     cx.simulate_click(confirm.center(), Modifiers::none());
     cx.run_until_parked();
     assert!(records.commands().iter().any(|call| {
-        call.command
-            == RecordedSessionCommand::ResolvePaste(confirmation.id, PasteDecision::Confirm)
+        call.command == RecordedCommand::ResolvePaste(confirmation.id, PasteDecision::Confirm)
     }));
     assert!(cx.update(|window, cx| pane.read(cx).terminal_input_focused(window, cx)));
 }
@@ -4570,8 +4501,7 @@ fn unsafe_paste_prompt_enter_should_confirm_without_moving_responder_focus(
     cx.run_until_parked();
 
     assert!(records.commands().iter().any(|call| {
-        call.command
-            == RecordedSessionCommand::ResolvePaste(confirmation.id, PasteDecision::Confirm)
+        call.command == RecordedCommand::ResolvePaste(confirmation.id, PasteDecision::Confirm)
     }));
     assert!(cx.update(|window, cx| pane.read(cx).terminal_input_focused(window, cx)));
 }
@@ -4590,7 +4520,7 @@ fn unsafe_paste_prompt_escape_should_cancel_without_moving_responder_focus(
             closing_fence: false,
         },
     };
-    let (_pane, cx, records) = terminal_pane_with_paste_response(
+    let (pane, cx, records) = terminal_pane_with_paste_response(
         cx,
         Ok(PasteRequestOutcome::ConfirmationRequired(confirmation)),
         Ok(PasteResolution::Cancelled),
@@ -4599,12 +4529,26 @@ fn unsafe_paste_prompt_escape_should_cancel_without_moving_responder_focus(
     cx.dispatch_action(PasteClipboard);
     cx.run_until_parked();
 
+    assert!(cx.update(|window, cx| pane.read(cx).terminal_input_focused(window, cx)));
+    let command_start = records.commands().len();
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
 
-    assert!(records.commands().iter().any(|call| {
-        call.command == RecordedSessionCommand::ResolvePaste(confirmation.id, PasteDecision::Cancel)
-    }));
+    assert!(cx.update(|window, cx| pane.read(cx).terminal_input_focused(window, cx)));
+    assert_eq!(
+        records.commands()[command_start..]
+            .iter()
+            .map(|call| &call.command)
+            .filter(|command| matches!(
+                command,
+                RecordedCommand::ResolvePaste(..) | RecordedCommand::Key(_)
+            ))
+            .collect::<Vec<_>>(),
+        [&RecordedCommand::ResolvePaste(
+            confirmation.id,
+            PasteDecision::Cancel
+        )]
+    );
 }
 
 #[gpui::test]
@@ -4628,6 +4572,7 @@ fn losing_product_focus_cancels_pending_paste_without_confirming_it(cx: &mut Tes
     cx.dispatch_action(PasteClipboard);
     cx.run_until_parked();
 
+    let command_start = records.commands().len();
     pane.update(cx, |pane, cx| {
         pane.set_product_focus(
             TerminalProductFocus {
@@ -4640,13 +4585,25 @@ fn losing_product_focus_cancels_pending_paste_without_confirming_it(cx: &mut Tes
     cx.run_until_parked();
 
     assert!(pane.read_with(cx, |pane, _| pane.pending_paste.is_none()));
-    assert!(records.commands().iter().any(|call| {
-        call.command == RecordedSessionCommand::ResolvePaste(confirmation.id, PasteDecision::Cancel)
-    }));
+    assert!(!cx.update(|window, cx| pane.read(cx).terminal_input_focused(window, cx)));
+    assert_eq!(
+        records.commands()[command_start..]
+            .iter()
+            .map(|call| &call.command)
+            .filter(|command| matches!(
+                command,
+                RecordedCommand::ResolvePaste(..) | RecordedCommand::Key(_)
+            ))
+            .collect::<Vec<_>>(),
+        [&RecordedCommand::ResolvePaste(
+            confirmation.id,
+            PasteDecision::Cancel
+        )]
+    );
 }
 
 #[gpui::test]
-fn raw_key_down_and_key_up_reach_the_session_as_distinct_actions(cx: &mut TestAppContext) {
+fn raw_key_down_and_key_up_reach_the_terminal_session_as_distinct_actions(cx: &mut TestAppContext) {
     let (_pane, cx, records) = connected_terminal_pane(cx);
     let keystroke = Keystroke {
         key: "a".to_owned(),
@@ -4665,7 +4622,7 @@ fn raw_key_down_and_key_up_reach_the_session_as_distinct_actions(cx: &mut TestAp
         .commands()
         .into_iter()
         .filter_map(|call| match call.command {
-            RecordedSessionCommand::Key(input) => Some(input.action),
+            RecordedCommand::Key(input) => Some(input.action),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -4724,8 +4681,10 @@ fn kitty_event_reports_receive_only_releases_of_delivered_presses(cx: &mut TestA
 
     let commands = records.commands();
     assert!(
-        commands[before..].iter().any(|call| call.command
-            == RecordedSessionCommand::ScrollScrollback(ScrollbackMovement::PageUp))
+        commands[before..]
+            .iter()
+            .any(|call| call.command
+                == RecordedCommand::ScrollScrollback(ScrollbackMovement::PageUp))
     );
     let mut emulator =
         crate::terminal::testing::TerminalEmulator::new(TerminalGeometry::from_grid(
@@ -4737,7 +4696,7 @@ fn kitty_event_reports_receive_only_releases_of_delivered_presses(cx: &mut TestA
     emulator.feed(b"\x1b[>11u");
     let mut bytes = Vec::new();
     for call in &commands[before..] {
-        if let RecordedSessionCommand::Key(input) = &call.command {
+        if let RecordedCommand::Key(input) = &call.command {
             bytes.extend(emulator.key(input.clone()).unwrap().bytes);
         }
     }
@@ -4801,45 +4760,75 @@ fn completed_and_reset_escape_sequences_start_over() {
 }
 
 #[gpui::test]
-fn windowed_double_escape_still_reaches_the_session(cx: &mut TestAppContext) {
+fn windowed_double_escape_still_reaches_the_terminal_session(cx: &mut TestAppContext) {
     let (_pane, cx, records) = connected_terminal_pane(cx);
-    let key_count_before = records
-        .commands()
-        .iter()
-        .filter(|call| matches!(call.command, RecordedSessionCommand::Key(_)))
-        .count();
+    let command_start = records.commands().len();
 
     cx.simulate_keystrokes("escape escape");
     cx.run_until_parked();
 
-    let key_count_after = records
-        .commands()
-        .iter()
-        .filter(|call| matches!(call.command, RecordedSessionCommand::Key(_)))
-        .count();
-    assert_eq!(key_count_after, key_count_before + 2);
+    assert!(!cx.update(|window, _| window.is_fullscreen()));
+    assert_eq!(
+        key_presses_since(&records, command_start),
+        vec![
+            (
+                "escape".to_owned(),
+                PhysicalKey::Escape,
+                KeyAction::Press,
+                false
+            );
+            2
+        ]
+    );
 }
 
 #[gpui::test]
-fn fullscreen_double_escape_exits_and_reaches_the_session(cx: &mut TestAppContext) {
+fn fullscreen_double_escape_exits_and_reaches_the_terminal_session(cx: &mut TestAppContext) {
     let (_pane, cx, records) = connected_terminal_pane(cx);
-    let key_count_before = records
-        .commands()
-        .iter()
-        .filter(|call| matches!(call.command, RecordedSessionCommand::Key(_)))
-        .count();
+    let command_start = records.commands().len();
     cx.update(|window, _| window.toggle_fullscreen());
 
     cx.simulate_keystrokes("escape escape");
     cx.run_until_parked();
 
-    let key_count_after = records
-        .commands()
-        .iter()
-        .filter(|call| matches!(call.command, RecordedSessionCommand::Key(_)))
-        .count();
     assert!(!cx.update(|window, _| window.is_fullscreen()));
-    assert_eq!(key_count_after, key_count_before + 2);
+    assert_eq!(
+        key_presses_since(&records, command_start),
+        vec![
+            (
+                "escape".to_owned(),
+                PhysicalKey::Escape,
+                KeyAction::Press,
+                false
+            );
+            2
+        ]
+    );
+}
+
+fn install_uniform_chrome(chrome: super::super::appearance::ChromeAppearance, cx: &mut App) {
+    super::super::control_theme::replace_uniform_control_catalog(cx, &chrome).unwrap();
+    cx.set_global(super::super::appearance::InstalledChrome::single(Arc::new(
+        chrome,
+    )));
+}
+
+fn key_presses_since(
+    records: &TestTerminalSessionRecords,
+    start: usize,
+) -> Vec<(String, PhysicalKey, KeyAction, bool)> {
+    records.commands()[start..]
+        .iter()
+        .filter_map(|call| match &call.command {
+            RecordedCommand::Key(key) => Some((
+                key.logical_key.clone(),
+                key.physical_key,
+                key.action,
+                key.modifiers.platform,
+            )),
+            _ => None,
+        })
+        .collect()
 }
 
 #[gpui::test]
@@ -4896,7 +4885,7 @@ fn paste_owned_escape_should_break_fullscreen_exit_pair(cx: &mut TestAppContext)
 
     assert!(cx.update(|window, _| window.is_fullscreen()));
     assert!(records.commands().iter().any(|call| {
-        call.command == RecordedSessionCommand::ResolvePaste(confirmation.id, PasteDecision::Cancel)
+        call.command == RecordedCommand::ResolvePaste(confirmation.id, PasteDecision::Cancel)
     }));
 }
 
@@ -4933,7 +4922,7 @@ fn closed_combo_box_control_navigation_bindings_reach_terminal_input(cx: &mut Te
     let key_count_before = records
         .commands()
         .iter()
-        .filter(|call| matches!(call.command, RecordedSessionCommand::Key(_)))
+        .filter(|call| matches!(call.command, RecordedCommand::Key(_)))
         .count();
 
     cx.simulate_keystrokes("ctrl-n ctrl-p");
@@ -4942,16 +4931,21 @@ fn closed_combo_box_control_navigation_bindings_reach_terminal_input(cx: &mut Te
     let key_count_after = records
         .commands()
         .iter()
-        .filter(|call| matches!(call.command, RecordedSessionCommand::Key(_)))
+        .filter(|call| matches!(call.command, RecordedCommand::Key(_)))
         .count();
     assert_eq!(key_count_after, key_count_before + 2);
 }
 
 #[gpui::test]
-fn unhandled_key_translation_preserves_pane_presentation_and_propagates(cx: &mut TestAppContext) {
+fn unhandled_key_translation_returns_unconsumed_and_preserves_presentation(
+    cx: &mut TestAppContext,
+) {
     let (pane, cx, records) = connected_terminal_pane(cx);
     pane.update(cx, |pane, cx| {
-        pane.handle_event(SessionEvent::Screen(blinking_cursor_screen(true, true)), cx);
+        pane.handle_event(
+            TerminalSessionEvent::Screen(blinking_cursor_screen(true, true)),
+            cx,
+        );
         pane.blink_phase_visible = false;
     });
     cx.run_until_parked();
@@ -4973,7 +4967,7 @@ fn unhandled_key_translation_preserves_pane_presentation_and_propagates(cx: &mut
     let key_count_before = records
         .commands()
         .iter()
-        .filter(|call| matches!(call.command, RecordedSessionCommand::Key(_)))
+        .filter(|call| matches!(call.command, RecordedCommand::Key(_)))
         .count();
 
     let handled = pane.update(cx, |pane, cx| {
@@ -4990,7 +4984,7 @@ fn unhandled_key_translation_preserves_pane_presentation_and_propagates(cx: &mut
     let key_count_after = records
         .commands()
         .iter()
-        .filter(|call| matches!(call.command, RecordedSessionCommand::Key(_)))
+        .filter(|call| matches!(call.command, RecordedCommand::Key(_)))
         .count();
     let after = pane.read_with(cx, |pane, _| {
         (
@@ -5046,7 +5040,7 @@ fn unhandled_key_down_preserves_attention_and_propagates(cx: &mut TestAppContext
     pane.update(cx, |pane, cx| {
         pane.terminal_input_focus = false;
         pane.handle_event(
-            SessionEvent::Attention(crate::terminal::attention::AttentionEvent::Bell),
+            TerminalSessionEvent::Attention(crate::terminal::attention::AttentionEvent::Bell),
             cx,
         );
         pane.terminal_input_focus = true;
@@ -5103,7 +5097,7 @@ fn printable_text_without_physical_identity_reaches_the_terminal_session(cx: &mu
         .commands()
         .into_iter()
         .filter_map(|call| match call.command {
-            RecordedSessionCommand::Key(input) => Some(input),
+            RecordedCommand::Key(input) => Some(input),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -5111,14 +5105,16 @@ fn printable_text_without_physical_identity_reaches_the_terminal_session(cx: &mu
 }
 
 #[gpui::test]
-fn authoritative_focus_transitions_share_one_deduplicated_session_path(cx: &mut TestAppContext) {
+fn authoritative_focus_transitions_share_one_deduplicated_terminal_session_path(
+    cx: &mut TestAppContext,
+) {
     let (pane, cx, records) = connected_terminal_pane(cx);
     let focus_commands = || {
         records
             .commands()
             .into_iter()
             .filter_map(|call| match call.command {
-                RecordedSessionCommand::Focus(focused) => Some(focused),
+                RecordedCommand::Focus(focused) => Some(focused),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -5194,7 +5190,7 @@ fn non_key_operating_system_window_should_remain_distinct_from_active_applicatio
         .into_iter()
         .skip(command_count)
         .filter_map(|call| match call.command {
-            RecordedSessionCommand::Focus(focused) => Some((call.session_id, focused)),
+            RecordedCommand::Focus(focused) => Some((call.session_id, focused)),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -5241,7 +5237,7 @@ fn native_save_panel_should_block_before_prompt_and_restore_after_cancel(cx: &mu
         .into_iter()
         .skip(command_count)
         .filter_map(|call| match call.command {
-            RecordedSessionCommand::Focus(focused) => Some(focused),
+            RecordedCommand::Focus(focused) => Some(focused),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -5253,25 +5249,16 @@ fn file_drop_from_inactive_app_focuses_before_requesting_paste(cx: &mut TestAppC
     let (pane, cx, records) = connected_terminal_pane(cx);
     cx.deactivate_window();
 
-    cx.update(|window, cx| {
-        pane.update(cx, |pane, cx| {
-            pane.insert_dropped_file_paths_for_test(
-                &[PathBuf::from("/tmp/a dropped file")],
-                window,
-                cx,
-            );
-        });
-    });
+    let position = pane.read_with(cx, |pane, _| pane.grid_bounds.unwrap().center());
+    drop_file_paths(cx, position, vec![PathBuf::from("/tmp/a dropped file")]);
     cx.run_until_parked();
 
     let mut relevant = records
         .commands()
         .into_iter()
         .filter_map(|call| match call.command {
-            RecordedSessionCommand::Focus(true) => Some(RecordedSessionCommand::Focus(true)),
-            RecordedSessionCommand::RequestPaste(text) => {
-                Some(RecordedSessionCommand::RequestPaste(text))
-            }
+            RecordedCommand::Focus(true) => Some(RecordedCommand::Focus(true)),
+            RecordedCommand::RequestPaste(text) => Some(RecordedCommand::RequestPaste(text)),
             _ => None,
         })
         .rev()
@@ -5281,8 +5268,8 @@ fn file_drop_from_inactive_app_focuses_before_requesting_paste(cx: &mut TestAppC
     assert_eq!(
         relevant,
         vec![
-            RecordedSessionCommand::Focus(true),
-            RecordedSessionCommand::RequestPaste("'/tmp/a dropped file'".to_owned()),
+            RecordedCommand::Focus(true),
+            RecordedCommand::RequestPaste("'/tmp/a dropped file'".to_owned()),
         ]
     );
 }
@@ -5308,20 +5295,6 @@ fn reported_terminal_title_should_replace_the_shell_fallback() {
 }
 
 #[test]
-fn preferred_terminal_font_is_selected_when_present() {
-    let available = vec!["Menlo".to_owned(), "JetBrains Mono".to_owned()];
-
-    assert_eq!(select_terminal_font(&available), "JetBrains Mono");
-}
-
-#[test]
-fn system_monospace_font_is_selected_when_preferred_fonts_are_absent() {
-    let available = vec!["Helvetica".to_owned(), "Menlo".to_owned()];
-
-    assert_eq!(select_terminal_font(&available), "Menlo");
-}
-
-#[test]
 fn ime_candidate_bounds_follow_wrapped_wide_preedit_caret() {
     let element_bounds = Bounds::new(point(px(10.0), px(20.0)), size(px(50.0), px(60.0)));
     let layout = layout_preedit("界", 0, 4, 5, 1);
@@ -5334,10 +5307,12 @@ fn ime_candidate_bounds_follow_wrapped_wide_preedit_caret() {
 
 #[gpui::test]
 fn unchanged_marked_text_reuses_logical_preedit_clusters(cx: &mut TestAppContext) {
-    let (pane, cx) = terminal_pane(cx);
-    pane.update(cx, |pane, _| {
-        pane.screen = blinking_cursor_screen(true, false);
-        pane.mark_for_preedit_cache_test("かな", 2..2);
+    let (pane, cx, _) = connected_terminal_pane(cx);
+    cx.update(|window, cx| {
+        pane.update(cx, |pane, cx| {
+            pane.screen = blinking_cursor_screen(true, false);
+            pane.replace_and_mark_text_in_range(None, "かな", Some(2..2), window, cx);
+        });
     });
 
     let first = pane.update(cx, |pane, _| pane.preedit_layout().unwrap());
@@ -5348,28 +5323,51 @@ fn unchanged_marked_text_reuses_logical_preedit_clusters(cx: &mut TestAppContext
 
 #[gpui::test]
 fn marked_text_edit_replaces_logical_preedit_clusters(cx: &mut TestAppContext) {
-    let (pane, cx) = terminal_pane(cx);
-    pane.update(cx, |pane, _| {
-        pane.screen = blinking_cursor_screen(true, false);
-        pane.mark_for_preedit_cache_test("か", 1..1);
+    let (pane, cx, _) = connected_terminal_pane(cx);
+    cx.update(|window, cx| {
+        pane.update(cx, |pane, cx| {
+            pane.screen = blinking_cursor_screen(true, false);
+            pane.replace_and_mark_text_in_range(None, "か", Some(1..1), window, cx);
+        });
     });
     let first = pane.update(cx, |pane, _| pane.preedit_layout().unwrap());
-    pane.update(cx, |pane, _| pane.mark_for_preedit_cache_test("かな", 2..2));
+    cx.update(|window, cx| {
+        pane.update(cx, |pane, cx| {
+            pane.replace_and_mark_text_in_range(None, "かな", Some(2..2), window, cx)
+        });
+    });
 
     let second = pane.update(cx, |pane, _| pane.preedit_layout().unwrap());
 
-    assert!(!Arc::ptr_eq(&first.clusters, &second.clusters));
+    let text = |layout: &PreeditLayout| {
+        layout
+            .clusters
+            .iter()
+            .map(|cluster| cluster.text.as_str())
+            .collect::<String>()
+    };
+    assert_eq!(
+        (text(&first), first.caret),
+        ("か".to_owned(), PreeditPosition { row: 1, column: 0 })
+    );
+    assert_eq!(
+        (text(&second), second.caret),
+        ("かな".to_owned(), PreeditPosition { row: 2, column: 0 })
+    );
 }
 
 #[gpui::test]
-fn native_shaper_resolves_emoji_through_terminal_fallbacks(cx: &mut TestAppContext) {
-    let (_pane, cx) = terminal_pane(cx);
+fn headless_shaper_preserves_emoji_run_routing(cx: &mut TestAppContext) {
+    let (pane, cx) = terminal_pane(cx);
+    let fonts = pane.read_with(cx, |pane, _| {
+        TerminalFonts::prepare(&pane.appearance.terminal.typography)
+    });
 
     cx.update(|window, _cx| {
         let text = "👩\u{200d}💻";
         let run = TextRun {
             len: text.len(),
-            font: crate::ui::terminal_element::terminal_cell_font(&"Menlo".into(), false, false),
+            font: fonts.regular.clone(),
             color: gpui_color(TerminalColors::default().foreground).into(),
             background_color: None,
             underline: None,
@@ -5424,7 +5422,7 @@ fn marked_text_stays_local_and_commits_each_input_method_once(cx: &mut TestAppCo
         let key_count_before_mark = records
             .commands()
             .iter()
-            .filter(|call| matches!(call.command, RecordedSessionCommand::Key(_)))
+            .filter(|call| matches!(call.command, RecordedCommand::Key(_)))
             .count();
         cx.update(|window, app| {
             pane.update(app, |pane, pane_cx| {
@@ -5441,7 +5439,7 @@ fn marked_text_stays_local_and_commits_each_input_method_once(cx: &mut TestAppCo
             records
                 .commands()
                 .iter()
-                .filter(|call| matches!(call.command, RecordedSessionCommand::Key(_)))
+                .filter(|call| matches!(call.command, RecordedCommand::Key(_)))
                 .count(),
             key_count_before_mark
         );
@@ -5457,7 +5455,7 @@ fn marked_text_stays_local_and_commits_each_input_method_once(cx: &mut TestAppCo
         .commands()
         .into_iter()
         .filter_map(|call| match call.command {
-            RecordedSessionCommand::Key(input) if input.is_input_method_commit() => input.text,
+            RecordedCommand::Key(input) if input.is_input_method_commit() => input.text,
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -5501,7 +5499,7 @@ fn cancellation_and_focus_loss_discard_marked_text_without_bytes(cx: &mut TestAp
         records
             .commands()
             .iter()
-            .all(|call| !matches!(call.command, RecordedSessionCommand::Key(_)))
+            .all(|call| !matches!(call.command, RecordedCommand::Key(_)))
     );
 }
 
@@ -5520,7 +5518,7 @@ fn raw_key_callbacks_are_suppressed_while_marked_text_is_active(cx: &mut TestApp
         records
             .commands()
             .iter()
-            .all(|call| !matches!(call.command, RecordedSessionCommand::Key(_)))
+            .all(|call| !matches!(call.command, RecordedCommand::Key(_)))
     );
 
     cx.update(|window, app| {
@@ -5540,7 +5538,7 @@ fn raw_key_callbacks_are_suppressed_while_marked_text_is_active(cx: &mut TestApp
         .commands()
         .into_iter()
         .filter_map(|call| match call.command {
-            RecordedSessionCommand::Key(input) => Some(input),
+            RecordedCommand::Key(input) => Some(input),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -5883,7 +5881,7 @@ fn context_menu_focus_blocker_reports_focus_out_before_focus_in(cx: &mut TestApp
         .commands()
         .into_iter()
         .filter_map(|call| match call.command {
-            RecordedSessionCommand::Focus(focused) => Some(focused),
+            RecordedCommand::Focus(focused) => Some(focused),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -5939,9 +5937,9 @@ fn local_right_click_opens_the_packaged_menu_and_copy_revalidates_selection(
     );
     assert!(records.commands().iter().all(|call| !matches!(
         call.command,
-        RecordedSessionCommand::Pointer(_)
-            | RecordedSessionCommand::PointerAndCopySelection(_)
-            | RecordedSessionCommand::Wheel(_)
+        RecordedCommand::Pointer(_)
+            | RecordedCommand::PointerAndCopySelection(_)
+            | RecordedCommand::Wheel(_)
     )));
 
     let copy = cx
@@ -5957,9 +5955,9 @@ fn local_right_click_opens_the_packaged_menu_and_copy_revalidates_selection(
         .commands()
         .into_iter()
         .filter_map(|call| match call.command {
-            RecordedSessionCommand::Focus(focused) => Some(RecordedSessionCommand::Focus(focused)),
-            RecordedSessionCommand::RequestSelectionCopyAt(generation) => {
-                Some(RecordedSessionCommand::RequestSelectionCopyAt(generation))
+            RecordedCommand::Focus(focused) => Some(RecordedCommand::Focus(focused)),
+            RecordedCommand::RequestSelectionCopyAt(generation) => {
+                Some(RecordedCommand::RequestSelectionCopyAt(generation))
             }
             _ => None,
         })
@@ -5967,9 +5965,9 @@ fn local_right_click_opens_the_packaged_menu_and_copy_revalidates_selection(
     assert_eq!(
         &relevant[relevant.len() - 3..],
         [
-            RecordedSessionCommand::Focus(false),
-            RecordedSessionCommand::Focus(true),
-            RecordedSessionCommand::RequestSelectionCopyAt(
+            RecordedCommand::Focus(false),
+            RecordedCommand::Focus(true),
+            RecordedCommand::RequestSelectionCopyAt(
                 pane.read_with(cx, |pane, _| pane.screen.generation)
             ),
         ]
@@ -6002,7 +6000,7 @@ fn context_menu_keys_never_reach_the_terminal_session(cx: &mut TestAppContext) {
         records
             .commands()
             .iter()
-            .all(|call| !matches!(call.command, RecordedSessionCommand::Key(_)))
+            .all(|call| !matches!(call.command, RecordedCommand::Key(_)))
     );
 }
 
@@ -6125,6 +6123,9 @@ fn deferred_file_preview_failure_reaches_the_pane_unless_superseded(cx: &mut Tes
 
     preview(cx);
     pane.update(cx, |pane, _| pane.file_preview.dismiss());
+    let dismissed_state = pane.read_with(cx, |pane, _| {
+        (pane.pane_state.failure().cloned(), pane.status.clone())
+    });
     pending.borrow()[2]
         .try_send(FilePreviewError::PlatformUnavailable)
         .unwrap();
@@ -6133,6 +6134,13 @@ fn deferred_file_preview_failure_reaches_the_pane_unless_superseded(cx: &mut Tes
         dismissals.get(),
         2,
         "only the explicit dismissal releases it"
+    );
+    assert_eq!(
+        pane.read_with(cx, |pane, _| (
+            pane.pane_state.failure().cloned(),
+            pane.status.clone()
+        )),
+        dismissed_state
     );
     std::fs::remove_dir_all(directory).unwrap();
 }
@@ -6201,7 +6209,7 @@ fn stale_context_generation_never_reaches_the_presenter(cx: &mut TestAppContext)
 }
 
 #[gpui::test]
-fn session_exit_dismisses_file_preview_and_the_context_menu(cx: &mut TestAppContext) {
+fn terminal_session_exit_dismisses_file_preview_and_the_context_menu(cx: &mut TestAppContext) {
     let (pane, cx) = terminal_pane(cx);
     let dismissals = Rc::new(Cell::new(0));
 
@@ -6218,7 +6226,7 @@ fn session_exit_dismisses_file_preview_and_the_context_menu(cx: &mut TestAppCont
             file_preview_eligible: false,
         });
         pane.handle_event(
-            SessionEvent::Exited(crate::terminal::SessionExit::Success),
+            TerminalSessionEvent::Exited(crate::terminal::TerminalSessionExit::Success),
             cx,
         );
     });
@@ -6300,7 +6308,7 @@ fn terminal_scrollbar_should_request_exact_row_offsets(cx: &mut TestAppContext) 
 
     assert_eq!(
         records.commands().last().map(|input| &input.command),
-        Some(&RecordedSessionCommand::ScrollTo(u64::MAX - 1, generation,))
+        Some(&RecordedCommand::ScrollTo(u64::MAX - 1, generation,))
     );
 }
 
@@ -6309,21 +6317,25 @@ fn terminal_pane_should_ignore_an_older_screen_presentation(cx: &mut TestAppCont
     let (pane, cx, records) = connected_terminal_pane(cx);
     let events = records.last_event_sender().unwrap();
     events
-        .try_send(SessionEvent::Screen(ScreenSnapshot::from_test_parts_at(
-            Arc::from([]),
-            ScrollbarSnapshot::default(),
-            "newest",
-            2,
-        )))
+        .try_send(TerminalSessionEvent::Screen(
+            ScreenSnapshot::from_test_parts_at(
+                Arc::from([]),
+                ScrollbarSnapshot::default(),
+                "newest",
+                2,
+            ),
+        ))
         .unwrap();
     cx.run_until_parked();
     events
-        .try_send(SessionEvent::Screen(ScreenSnapshot::from_test_parts_at(
-            Arc::from([]),
-            ScrollbarSnapshot::default(),
-            "stale",
-            1,
-        )))
+        .try_send(TerminalSessionEvent::Screen(
+            ScreenSnapshot::from_test_parts_at(
+                Arc::from([]),
+                ScrollbarSnapshot::default(),
+                "stale",
+                1,
+            ),
+        ))
         .unwrap();
     cx.run_until_parked();
 
@@ -6368,7 +6380,7 @@ fn backing_scale_change_should_preserve_the_grid_and_resize_backing_pixels(
         .commands()
         .into_iter()
         .find_map(|call| match call.command {
-            RecordedSessionCommand::Resize(geometry) => Some(geometry),
+            RecordedCommand::Resize(geometry) => Some(geometry),
             _ => None,
         })
         .expect("a backing-scale change should resize the Terminal Session");
@@ -6390,21 +6402,10 @@ fn backing_scale_change_should_preserve_the_grid_and_resize_backing_pixels(
 }
 
 #[gpui::test]
-fn terminal_pane_close_should_drop_its_session_once_when_repeated(cx: &mut TestAppContext) {
-    cx.update(crate::ui::init)
-        .expect("UI initialization should succeed");
-    let records = TestTerminalSessionRecords::default();
-    let session_factory: Rc<dyn TerminalSessionFactory> =
-        Rc::new(TestTerminalSessionFactory::new(records.clone()));
-    let session_factory = WorkspaceTerminalSessionFactory::new_local(
-        session_factory,
-        crate::terminal::testing::test_local_directory(PathBuf::from(
-            "/tmp/spaceterm-terminal-pane-test",
-        )),
-    );
-    let (pane, cx) =
-        cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
-    cx.run_until_parked();
+fn terminal_pane_close_should_drop_its_terminal_session_once_when_repeated(
+    cx: &mut TestAppContext,
+) {
+    let (pane, cx, records) = connected_terminal_pane(cx);
 
     pane.update(cx, |pane, _| {
         pane.close();
@@ -6463,68 +6464,14 @@ fn presentation_failure_retry_preserves_and_restores_the_current_presentation(
 }
 
 #[gpui::test]
-fn second_row_preflight_failure_submits_only_the_last_valid_generation(cx: &mut TestAppContext) {
-    let (pane, cx, records) = connected_terminal_pane(cx);
-    let events = records.last_event_sender().unwrap();
-    events
-        .try_send(SessionEvent::Screen(text_screen(1, &["old", "frame"])))
-        .unwrap();
-    cx.run_until_parked();
-    let submissions_before = pane.read_with(cx, |pane, _| pane.scene_submission_attempts.len());
-
-    pane.update(cx, |pane, _| {
-        pane.paint_fault = Some(PaintPreflightFault::Row(1));
-    });
-    events
-        .try_send(SessionEvent::Screen(text_screen(2, &["new", "frame"])))
-        .unwrap();
-    cx.run_until_parked();
-
-    assert_eq!(
-        pane.read_with(cx, |pane, _| (
-            pane.screen.generation,
-            pane.last_valid_screen.generation,
-            pane.pane_state.last_valid_frame(),
-            pane.pane_state.failure().map(TerminalFailure::class),
-        )),
-        (
-            crate::terminal::PresentationGeneration::test(2),
-            crate::terminal::PresentationGeneration::test(1),
-            Some(crate::terminal::PresentationGeneration::test(1)),
-            Some(crate::terminal::FailureClass::Presentation),
-        )
-    );
-    let submissions = pane.read_with(cx, |pane, _| {
-        pane.scene_submission_attempts[submissions_before..].to_vec()
-    });
-    assert!(!submissions.contains(&crate::terminal::PresentationGeneration::test(2)));
-    assert_eq!(
-        submissions.last(),
-        Some(&crate::terminal::PresentationGeneration::test(1))
-    );
-}
-
-#[gpui::test]
-fn candidate_and_fallback_use_isolated_render_caches(cx: &mut TestAppContext) {
-    let (pane, cx, _records) = connected_terminal_pane(cx);
-
-    let (candidate, fallback) = pane.read_with(cx, |pane, _| {
-        (
-            pane.render_cache.entity_id(),
-            pane.fallback_render_cache.entity_id(),
-        )
-    });
-
-    assert_ne!(candidate, fallback);
-}
-
-#[gpui::test]
 fn retained_recovery_surface_follows_the_current_terminal_appearance(cx: &mut TestAppContext) {
     let (pane, cx, records) = connected_terminal_pane(cx);
     let events = records.last_event_sender().unwrap();
     let mut retained = blinking_cursor_screen(true, true);
     Arc::make_mut(&mut retained).generation = crate::terminal::PresentationGeneration::test(1);
-    events.try_send(SessionEvent::Screen(retained)).unwrap();
+    events
+        .try_send(TerminalSessionEvent::Screen(retained))
+        .unwrap();
     cx.run_until_parked();
 
     let paints_before = pane.read_with(cx, |pane, _| pane.grid_presentation.paint_counts().0);
@@ -6575,45 +6522,92 @@ fn retained_recovery_surface_follows_the_current_terminal_appearance(cx: &mut Te
     );
 }
 
-#[gpui::test]
-fn second_glyph_preflight_failure_submits_only_the_last_valid_generation(cx: &mut TestAppContext) {
-    let (pane, cx, records) = connected_terminal_pane(cx);
+#[test]
+fn second_row_preflight_failure_submits_only_the_last_valid_generation() {
+    let lookups =
+        glyph_failure_presents_the_last_valid_frame(&["old", "frame"], &["new", "frame"], 'f');
+    assert!(lookups.starts_with(&['n', 'e', 'w', 'f'].map(|glyph| gpui::GlyphId(glyph as u32))));
+}
+
+#[test]
+fn second_glyph_preflight_failure_submits_only_the_last_valid_generation() {
+    let lookups = glyph_failure_presents_the_last_valid_frame(&["old"], &["new"], 'e');
+    assert!(lookups.starts_with(&['n', 'e'].map(|glyph| gpui::GlyphId(glyph as u32))));
+}
+
+fn glyph_failure_presents_the_last_valid_frame(
+    old: &[&str],
+    new: &[&str],
+    failing: char,
+) -> Vec<gpui::GlyphId> {
+    let (handle, mut cx, records, atlas) = headless_pane();
     let events = records.last_event_sender().unwrap();
     events
-        .try_send(SessionEvent::Screen(text_screen(1, &["old"])))
+        .try_send(TerminalSessionEvent::Screen(text_screen(1, old)))
         .unwrap();
     cx.run_until_parked();
-    let submissions_before = pane.read_with(cx, |pane, _| pane.scene_submission_attempts.len());
-
-    pane.update(cx, |pane, _| {
-        pane.paint_fault = Some(PaintPreflightFault::Glyph(1));
-    });
+    let retained = drawn_sprites(handle, &mut cx, false);
+    atlas.glyph_lookups.lock().unwrap().clear();
+    *atlas.fail_glyph.lock().unwrap() = Some(gpui::GlyphId(failing as u32));
     events
-        .try_send(SessionEvent::Screen(text_screen(2, &["new"])))
+        .try_send(TerminalSessionEvent::Screen(text_screen(2, new)))
         .unwrap();
     cx.run_until_parked();
-
+    let bottom = retained.last().unwrap().1.bottom();
+    let mut submitted = drawn_sprites(handle, &mut cx, false);
+    submitted.retain(|(_, bounds)| bounds.origin.y < bottom);
+    assert_eq!(submitted, retained);
     assert_eq!(
-        pane.read_with(cx, |pane, _| (
-            pane.screen.generation,
-            pane.last_valid_screen.generation,
-            pane.pane_state.failure().map(TerminalFailure::class),
-        )),
+        handle
+            .read_with(&cx, |pane, _| (
+                pane.screen.generation,
+                pane.last_valid_screen.generation,
+                pane.pane_state.last_valid_frame(),
+                pane.pane_state.failure().map(TerminalFailure::class),
+                pane.render_cache.entity_id() != pane.fallback_render_cache.entity_id(),
+            ))
+            .unwrap(),
         (
             crate::terminal::PresentationGeneration::test(2),
             crate::terminal::PresentationGeneration::test(1),
+            Some(crate::terminal::PresentationGeneration::test(1)),
             Some(crate::terminal::FailureClass::Presentation),
+            true,
         )
     );
-    let submissions = pane.read_with(cx, |pane, _| {
-        pane.scene_submission_attempts[submissions_before..].to_vec()
-    });
-    assert!(!submissions.contains(&crate::terminal::PresentationGeneration::test(2)));
+    atlas.glyph_lookups.lock().unwrap().clone()
 }
 
+fn drawn_sprites(
+    handle: gpui::WindowHandle<TerminalPane>,
+    cx: &mut gpui::HeadlessAppContext,
+    polychrome: bool,
+) -> Vec<(gpui::TileId, Bounds<gpui::ScaledPixels>)> {
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+        if polychrome {
+            window
+                .painted_polychrome_sprites()
+                .iter()
+                .map(|sprite| (sprite.tile.tile_id, sprite.bounds))
+                .collect()
+        } else {
+            window
+                .painted_monochrome_sprites()
+                .iter()
+                .map(|sprite| (sprite.tile.tile_id, sprite.bounds))
+                .collect()
+        }
+    })
+    .unwrap()
+}
+
+#[derive(Default)]
 struct FailImageAtlas {
     inner: gpui::HeadlessAtlas,
     image_lookups: AtomicUsize,
+    glyph_lookups: std::sync::Mutex<Vec<gpui::GlyphId>>,
+    fail_glyph: std::sync::Mutex<Option<gpui::GlyphId>>,
     fail_at_lookup: AtomicUsize,
 }
 
@@ -6625,6 +6619,14 @@ impl gpui::PlatformAtlas for FailImageAtlas {
             Option<(gpui::Size<gpui::DevicePixels>, Cow<'a, [u8]>)>,
         >,
     ) -> anyhow::Result<Option<gpui::AtlasTile>> {
+        if let gpui::AtlasKey::Glyph(params) = &key {
+            self.glyph_lookups.lock().unwrap().push(params.glyph_id);
+            let mut failure = self.fail_glyph.lock().unwrap();
+            if failure.as_ref() == Some(&params.glyph_id) {
+                *failure = None;
+                anyhow::bail!("injected glyph atlas failure");
+            }
+        }
         if matches!(key, gpui::AtlasKey::Image(_)) {
             let lookup = self.image_lookups.fetch_add(1, Ordering::Relaxed) + 1;
             if lookup == self.fail_at_lookup.load(Ordering::Relaxed) {
@@ -6669,64 +6671,30 @@ impl gpui::PlatformHeadlessRenderer for FailImageRenderer {
 
 #[test]
 fn second_image_atlas_failure_rolls_back_the_unpresented_generation() {
-    let atlas = Arc::new(FailImageAtlas {
-        inner: gpui::HeadlessAtlas::default(),
-        image_lookups: AtomicUsize::new(0),
-        fail_at_lookup: AtomicUsize::new(0),
-    });
-    let mut cx =
-        gpui::HeadlessAppContext::with_platform(Arc::new(gpui::NoopTextSystem), Arc::new(()), {
-            let atlas = Arc::clone(&atlas);
-            move || Ok(Some(Box::new(FailImageRenderer(Arc::clone(&atlas)))))
-        });
-    cx.update(crate::ui::init).unwrap();
-    let records = TestTerminalSessionRecords::default();
-    let session_factory: Rc<dyn TerminalSessionFactory> =
-        Rc::new(TestTerminalSessionFactory::new(records.clone()));
-    let session_factory = WorkspaceTerminalSessionFactory::new_local(
-        session_factory,
-        test_local_directory(PathBuf::from("/tmp/spaceterm-terminal-pane-image-test")),
-    );
-    let handle = cx
-        .open_window(
-            gpui::size(gpui::px(800.0), gpui::px(600.0)),
-            move |window, cx| cx.new(|cx| TerminalPane::new(session_factory, window, cx)),
-        )
-        .unwrap();
-    handle
-        .update(&mut cx, |pane, window, cx| {
-            window.activate_window();
-            pane.focus(window, cx);
-        })
-        .unwrap();
-    cx.run_until_parked();
+    let (handle, mut cx, records, atlas) = headless_pane();
     let events = records.last_event_sender().unwrap();
     events
-        .try_send(SessionEvent::Screen(graphics_screen(1, 1)))
+        .try_send(TerminalSessionEvent::Screen(graphics_screen(1, 1)))
         .unwrap();
     cx.run_until_parked();
-    cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear(cx))
-        .unwrap();
-    let submissions_before = handle
-        .read_with(&cx, |pane, _| pane.scene_submission_attempts.len())
-        .unwrap();
+    let retained_sprites = drawn_sprites(handle, &mut cx, true);
+    assert!(!retained_sprites.is_empty());
 
     let lookups_before = atlas.image_lookups.load(Ordering::Relaxed);
     atlas
         .fail_at_lookup
         .store(lookups_before + 2, Ordering::Relaxed);
     events
-        .try_send(SessionEvent::Screen(graphics_screen_with_images(
+        .try_send(TerminalSessionEvent::Screen(graphics_screen_with_images(
             2,
             &[2, 3],
         )))
         .unwrap();
     cx.run_until_parked();
-    cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear(cx))
-        .unwrap();
 
+    assert_eq!(drawn_sprites(handle, &mut cx, true), retained_sprites);
     assert!(atlas.image_lookups.load(Ordering::Relaxed) >= lookups_before + 2);
-    let (last_valid, failure, cached, staged, submissions) = handle
+    let (last_valid, failure, cached, staged) = handle
         .read_with(&cx, |pane, cx| {
             (
                 pane.last_valid_screen.generation,
@@ -6735,7 +6703,6 @@ fn second_image_atlas_failure_rolls_back_the_unpresented_generation() {
                     .read_with(cx, |cache, _| cache.cached_image_keys()),
                 pane.graphics_cache
                     .read_with(cx, |cache, _| cache.staged_image_keys()),
-                pane.scene_submission_attempts[submissions_before..].to_vec(),
             )
         })
         .unwrap();
@@ -6749,11 +6716,6 @@ fn second_image_atlas_failure_rolls_back_the_unpresented_generation() {
         }]
     );
     assert!(staged.is_empty());
-    assert!(!submissions.contains(&crate::terminal::PresentationGeneration::test(2)));
-    assert_eq!(
-        submissions.last(),
-        Some(&crate::terminal::PresentationGeneration::test(1))
-    );
 }
 
 #[gpui::test]
@@ -6762,7 +6724,7 @@ fn graphics_post_mutation_failures_remain_quota_bounded_for_changing_keys(cx: &m
     records
         .last_event_sender()
         .unwrap()
-        .try_send(SessionEvent::Screen(graphics_screen(1, 1)))
+        .try_send(TerminalSessionEvent::Screen(graphics_screen(1, 1)))
         .unwrap();
     cx.run_until_parked();
     let cache = pane.read_with(cx, |pane, _| pane.graphics_cache.clone());
@@ -6801,7 +6763,7 @@ fn stale_graphics_attempt_cannot_roll_back_a_newer_same_generation_stage(cx: &mu
     records
         .last_event_sender()
         .unwrap()
-        .try_send(SessionEvent::Screen(graphics_screen(1, 1)))
+        .try_send(TerminalSessionEvent::Screen(graphics_screen(1, 1)))
         .unwrap();
     cx.run_until_parked();
     let cache = pane.read_with(cx, |pane, _| pane.graphics_cache.clone());
@@ -6860,7 +6822,7 @@ fn stale_recoverable_and_export_completions_cannot_mask_a_fatal_failure(cx: &mut
     });
     pane.update(cx, |pane, cx| {
         pane.handle_event(
-            SessionEvent::Failed(SessionFailure::PtyRead {
+            TerminalSessionEvent::Failed(TerminalSessionFailure::PtyRead {
                 read_error: "unavailable".to_owned(),
                 exit_status: "exit code 7".to_owned(),
             }),
@@ -6875,7 +6837,7 @@ fn stale_recoverable_and_export_completions_cannot_mask_a_fatal_failure(cx: &mut
             cx,
         );
         pane.handle_event(
-            SessionEvent::Exited(crate::terminal::SessionExit::Success),
+            TerminalSessionEvent::Exited(crate::terminal::TerminalSessionExit::Success),
             cx,
         );
     });
@@ -6940,7 +6902,7 @@ fn normal_exit_remains_distinct_from_stale_failures(cx: &mut TestAppContext) {
     let (pane, cx, _records) = connected_terminal_pane(cx);
     pane.update(cx, |pane, cx| {
         pane.handle_event(
-            SessionEvent::Exited(crate::terminal::SessionExit::Success),
+            TerminalSessionEvent::Exited(crate::terminal::TerminalSessionExit::Success),
             cx,
         );
         pane.present_failure(
@@ -6949,7 +6911,7 @@ fn normal_exit_remains_distinct_from_stale_failures(cx: &mut TestAppContext) {
             Some(RecoveryAction::RendererResources),
         );
         pane.handle_event(
-            SessionEvent::Failed(SessionFailure::Runtime("stale fatal".to_owned())),
+            TerminalSessionEvent::Failed(TerminalSessionFailure::Runtime("stale fatal".to_owned())),
             cx,
         );
     });
@@ -6960,7 +6922,7 @@ fn normal_exit_remains_distinct_from_stale_failures(cx: &mut TestAppContext) {
             pane.authoritative_status(),
         )),
         (
-            PaneTerminalState::exited(crate::terminal::SessionExit::Success),
+            PaneTerminalState::exited(crate::terminal::TerminalSessionExit::Success),
             None,
             Some("Shell exited successfully".to_owned()),
         )
@@ -6974,7 +6936,7 @@ fn renderer_resource_retry_retains_the_previous_gpu_cache_until_success(cx: &mut
         .last_event_sender()
         .expect("the connected Pane should own a Terminal Session");
     events
-        .try_send(SessionEvent::Screen(graphics_screen(1, 1)))
+        .try_send(TerminalSessionEvent::Screen(graphics_screen(1, 1)))
         .unwrap();
     cx.run_until_parked();
 
@@ -6983,7 +6945,7 @@ fn renderer_resource_retry_retains_the_previous_gpu_cache_until_success(cx: &mut
             .update(cx, |cache, _| cache.fail_next_sync());
     });
     events
-        .try_send(SessionEvent::Screen(graphics_screen(2, 2)))
+        .try_send(TerminalSessionEvent::Screen(graphics_screen(2, 2)))
         .unwrap();
     cx.run_until_parked();
 
@@ -7034,7 +6996,7 @@ fn renderer_resource_retry_retains_the_previous_gpu_cache_until_success(cx: &mut
 }
 
 #[gpui::test]
-fn native_platform_retry_keeps_the_session_usable_and_clears_transient_failure(
+fn native_platform_retry_keeps_the_terminal_session_usable_and_clears_transient_failure(
     cx: &mut TestAppContext,
 ) {
     let (pane, cx, records) = terminal_pane_with_selection_copy(
@@ -7045,7 +7007,8 @@ fn native_platform_retry_keeps_the_session_usable_and_clears_transient_failure(
         },
     );
     pane.update(cx, |pane, _| {
-        pane.selection_pasteboard.fail_next_write();
+        pane.selection_pasteboard =
+            SelectionPublication::new(Rc::new(FailOnceSelectionClipboard(Cell::new(true))));
     });
 
     cx.simulate_keystrokes("cmd-c");
@@ -7069,7 +7032,7 @@ fn native_platform_retry_keeps_the_session_usable_and_clears_transient_failure(
     let copy_requests = records
         .commands()
         .iter()
-        .filter(|call| matches!(call.command, RecordedSessionCommand::RequestSelectionCopy))
+        .filter(|call| matches!(call.command, RecordedCommand::RequestSelectionCopy))
         .count();
     assert_eq!(
         (
@@ -7101,7 +7064,8 @@ fn native_platform_retry_requires_a_successful_selection_write_to_clear_failure(
         },
     );
     pane.update(cx, |pane, _| {
-        pane.selection_pasteboard.fail_next_write();
+        pane.selection_pasteboard =
+            SelectionPublication::new(Rc::new(FailOnceSelectionClipboard(Cell::new(true))));
     });
     cx.simulate_keystrokes("cmd-c");
     cx.run_until_parked();
@@ -7141,19 +7105,7 @@ fn native_platform_retry_requires_a_successful_selection_write_to_clear_failure(
 
 #[gpui::test]
 fn terminal_failure_should_keep_the_pane_visible_with_a_failure_status(cx: &mut TestAppContext) {
-    cx.update(crate::ui::init)
-        .expect("UI initialization should succeed");
-    let records = TestTerminalSessionRecords::default();
-    let session_factory: Rc<dyn TerminalSessionFactory> =
-        Rc::new(TestTerminalSessionFactory::new(records.clone()));
-    let session_factory = WorkspaceTerminalSessionFactory::new_local(
-        session_factory,
-        crate::terminal::testing::test_local_directory(PathBuf::from(
-            "/tmp/spaceterm-terminal-pane-test",
-        )),
-    );
-    let (pane, cx) =
-        cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
+    let (pane, cx, records) = connected_terminal_pane(cx);
     let exits = Rc::new(Cell::new(0));
     let exits_for_subscription = Rc::clone(&exits);
     pane.update(cx, |_, cx| {
@@ -7170,10 +7122,12 @@ fn terminal_failure_should_keep_the_pane_visible_with_a_failure_status(cx: &mut 
         .expect("rendering the Pane must start its Terminal Session");
 
     sender
-        .try_send(SessionEvent::Failed(SessionFailure::PtyRead {
-            read_error: "read unavailable".to_owned(),
-            exit_status: "exit code 7".to_owned(),
-        }))
+        .try_send(TerminalSessionEvent::Failed(
+            TerminalSessionFailure::PtyRead {
+                read_error: "read unavailable".to_owned(),
+                exit_status: "exit code 7".to_owned(),
+            },
+        ))
         .unwrap();
     cx.run_until_parked();
 
@@ -7229,21 +7183,23 @@ fn repeated_same_generation_delivery_preserves_snapshot_identity_and_does_not_su
     let events = records.last_event_sender().unwrap();
     let original = text_screen(1, &["stable"]);
     events
-        .try_send(SessionEvent::Screen(Arc::clone(&original)))
+        .try_send(TerminalSessionEvent::Screen(Arc::clone(&original)))
         .unwrap();
     cx.run_until_parked();
-    let submissions = pane.read_with(cx, |pane, _| pane.scene_submission_attempts.len());
+    let paints = pane.read_with(cx, |pane, _| pane.grid_presentation.paint_counts().0);
     for _ in 0..16 {
         let redundant = Arc::new((*original).clone());
         let released = Arc::downgrade(&redundant);
-        events.try_send(SessionEvent::Screen(redundant)).unwrap();
+        events
+            .try_send(TerminalSessionEvent::Screen(redundant))
+            .unwrap();
         cx.run_until_parked();
         assert!(released.upgrade().is_none());
     }
     assert!(pane.read_with(cx, |pane, _| Arc::ptr_eq(&pane.screen, &original)));
     assert_eq!(
-        pane.read_with(cx, |pane, _| pane.scene_submission_attempts.len()),
-        submissions
+        pane.read_with(cx, |pane, _| pane.grid_presentation.paint_counts().0),
+        paints
     );
 }
 
@@ -7254,7 +7210,7 @@ fn occlusion_evicts_image_resources_and_restore_reuploads_without_new_output(
     let (pane, cx, records) = connected_terminal_pane(cx);
     let events = records.last_event_sender().unwrap();
     events
-        .try_send(SessionEvent::Screen(graphics_screen(1, 1)))
+        .try_send(TerminalSessionEvent::Screen(graphics_screen(1, 1)))
         .unwrap();
     cx.run_until_parked();
     let cache = pane.read_with(cx, |pane, _| pane.graphics_cache.clone());
@@ -7299,7 +7255,7 @@ fn visible_focus_changes_preserve_graphics_resources_and_geometry(cx: &mut TestA
     records
         .last_event_sender()
         .unwrap()
-        .try_send(SessionEvent::Screen(graphics_screen(1, 1)))
+        .try_send(TerminalSessionEvent::Screen(graphics_screen(1, 1)))
         .unwrap();
     cx.run_until_parked();
     let cache = pane.read_with(cx, |pane, _| pane.graphics_cache.clone());
@@ -7348,7 +7304,7 @@ fn product_hiding_releases_graphics_before_redraw_and_restores_without_output(
     records
         .last_event_sender()
         .unwrap()
-        .try_send(SessionEvent::Screen(graphics_screen(1, 1)))
+        .try_send(TerminalSessionEvent::Screen(graphics_screen(1, 1)))
         .unwrap();
     cx.run_until_parked();
     let cache = pane.read_with(cx, |pane, _| pane.graphics_cache.clone());
@@ -7400,7 +7356,7 @@ fn graphics_without_presented_images_reserves_zero_bytes_and_releases_previous_i
     let (pane, cx, records) = connected_terminal_pane(cx);
     let events = records.last_event_sender().unwrap();
     events
-        .try_send(SessionEvent::Screen(graphics_screen(1, 1)))
+        .try_send(TerminalSessionEvent::Screen(graphics_screen(1, 1)))
         .unwrap();
     cx.run_until_parked();
     let cache = pane.read_with(cx, |pane, _| pane.graphics_cache.clone());
@@ -7409,7 +7365,7 @@ fn graphics_without_presented_images_reserves_zero_bytes_and_releases_previous_i
     no_placements.graphics.placements = Arc::from([]);
     no_placements.graphics.placement_generation += 1;
     events
-        .try_send(SessionEvent::Screen(Arc::new(no_placements)))
+        .try_send(TerminalSessionEvent::Screen(Arc::new(no_placements)))
         .unwrap();
     cx.run_until_parked();
     assert_eq!(cache.read_with(cx, |cache, _| cache.retained_bytes()), 0);
@@ -7549,9 +7505,9 @@ fn error_notices_change_glyph_when_differentiate_without_color_turns_on(cx: &mut
     let platform = crate::platform::appearance::testing::RecordingAppearancePlatform::default();
     cx.update(|cx| {
         crate::ui::appearance_runtime::install(
-            crate::settings::UserSettings::load(
-                crate::ui::settings_window::test_support::MemoryStorage::with_document(
-                    &crate::appearance::SettingsDocument::default(),
+            crate::settings::Settings::load(
+                crate::settings::storage::testing::MemoryStorage::with_document(
+                    &crate::settings::SettingsDocument::default(),
                 ),
             ),
             Rc::new(platform.clone()),
@@ -7623,7 +7579,7 @@ fn primary_selection_publishes_selection_and_middle_click_obeys_terminal_mouse_t
             .iter()
             .skip(before)
             .any(|record| record.command
-                == RecordedSessionCommand::RequestPaste("primary selection".into()))
+                == RecordedCommand::RequestPaste("primary selection".into()))
     );
     pane.update(cx, |pane, _| {
         Arc::make_mut(&mut pane.screen).mouse_tracking = true
@@ -7636,7 +7592,7 @@ fn primary_selection_publishes_selection_and_middle_click_obeys_terminal_mouse_t
             .commands()
             .iter()
             .skip(before)
-            .any(|record| matches!(record.command, RecordedSessionCommand::RequestPaste(_)))
+            .any(|record| matches!(record.command, RecordedCommand::RequestPaste(_)))
     );
     assert!(
         records
@@ -7645,7 +7601,7 @@ fn primary_selection_publishes_selection_and_middle_click_obeys_terminal_mouse_t
             .skip(before)
             .any(|record| matches!(
                 record.command,
-                RecordedSessionCommand::Pointer(PointerInput {
+                RecordedCommand::Pointer(PointerInput {
                     button: Some(PointerButton::Middle),
                     ..
                 })
@@ -7680,7 +7636,7 @@ fn paste_selection_pastes_primary_through_the_paste_path_like_middle_click(
             .into_iter()
             .skip(before)
             .map(|record| record.command)
-            .filter(|command| !matches!(command, RecordedSessionCommand::Focus(_)))
+            .filter(|command| !matches!(command, RecordedCommand::Focus(_)))
             .collect::<Vec<_>>()
     };
 
@@ -7696,9 +7652,7 @@ fn paste_selection_pastes_primary_through_the_paste_path_like_middle_click(
     });
     assert_eq!(
         paste_selection(cx),
-        [RecordedSessionCommand::RequestPaste(
-            "primary selection".into()
-        )]
+        [RecordedCommand::RequestPaste("primary selection".into())]
     );
 }
 
@@ -7731,12 +7685,12 @@ fn shift_middle_click_pastes_primary_under_mouse_tracking_when_shift_overrides_i
         cx.simulate_mouse_up(position, MouseButton::Middle, Modifiers::shift());
         let commands = records.commands();
         let pasted = commands.iter().skip(before).any(|record| {
-            record.command == RecordedSessionCommand::RequestPaste("primary selection".into())
+            record.command == RecordedCommand::RequestPaste("primary selection".into())
         });
         let reported = commands.iter().skip(before).any(|record| {
             matches!(
                 record.command,
-                RecordedSessionCommand::Pointer(PointerInput {
+                RecordedCommand::Pointer(PointerInput {
                     button: Some(PointerButton::Middle),
                     ..
                 })
@@ -7789,12 +7743,12 @@ fn terminal_pane_with_slow_primary(
     (pane, cx, records, owner)
 }
 
-fn requested_pastes(records: &TestTerminalSessionRecords) -> Vec<RecordedSessionCommand> {
+fn requested_pastes(records: &TestTerminalSessionRecords) -> Vec<RecordedCommand> {
     records
         .commands()
         .into_iter()
         .map(|record| record.command)
-        .filter(|command| matches!(command, RecordedSessionCommand::RequestPaste(_)))
+        .filter(|command| matches!(command, RecordedCommand::RequestPaste(_)))
         .collect()
 }
 
@@ -7814,14 +7768,12 @@ fn paste_selection_from_a_slow_owner_leaves_the_pane_free_and_pastes_when_answer
 
     assert_eq!(
         requested_pastes(&records),
-        [RecordedSessionCommand::RequestPaste(
-            "primary selection".into()
-        )]
+        [RecordedCommand::RequestPaste("primary selection".into())]
     );
 }
 
 #[gpui::test]
-fn paste_reads_completing_after_focus_moved_or_the_session_closed_are_discarded(
+fn paste_reads_completing_after_focus_moved_or_the_terminal_session_closed_are_discarded(
     cx: &mut TestAppContext,
 ) {
     let (pane, cx, records, owner) = terminal_pane_with_slow_primary(cx);
@@ -7855,7 +7807,7 @@ fn a_newer_paste_discards_the_read_it_replaces(cx: &mut TestAppContext) {
 
     assert_eq!(
         requested_pastes(&records),
-        [RecordedSessionCommand::RequestPaste("newest".into())]
+        [RecordedCommand::RequestPaste("newest".into())]
     );
     assert_eq!(
         owner.len(),
@@ -7913,7 +7865,7 @@ mod permission_requests {
     ) {
         pane.update(cx, |pane, cx| {
             if pane.handle_event(
-                SessionEvent::PermissionRequested(PermissionRequest::for_test(permissions)),
+                TerminalSessionEvent::PermissionRequested(PermissionRequest::for_test(permissions)),
                 cx,
             ) {
                 cx.notify();
@@ -7923,7 +7875,7 @@ mod permission_requests {
     }
 
     #[gpui::test]
-    fn a_retained_request_survives_its_wakeup_only_while_the_session_is_live(
+    fn a_retained_request_survives_its_wakeup_only_while_the_terminal_session_is_live(
         cx: &mut TestAppContext,
     ) {
         let (pane, cx, records) = connected_terminal_pane(cx);
@@ -7939,7 +7891,7 @@ mod permission_requests {
         let events = records.last_event_sender().unwrap();
         // The request's event was replaced by a Screen before the Pane consumed it.
         events
-            .try_send(SessionEvent::Screen(text_screen(1, &["prompt"])))
+            .try_send(TerminalSessionEvent::Screen(text_screen(1, &["prompt"])))
             .unwrap();
         cx.run_until_parked();
         assert!(cx.debug_bounds("permission-request").is_some());
@@ -7949,7 +7901,7 @@ mod permission_requests {
         );
 
         events
-            .try_send(SessionEvent::Exited(SessionExit::Success))
+            .try_send(TerminalSessionEvent::Exited(TerminalSessionExit::Success))
             .unwrap();
         cx.run_until_parked();
         assert!(cx.debug_bounds("permission-request").is_none());
@@ -8051,7 +8003,25 @@ mod permission_requests {
         assert!(access.prepared.borrow().is_empty());
 
         request(&pane, &[ScreenRecording], cx);
+        let sent = records.commands().len();
         cx.simulate_keystrokes("enter escape");
+        assert_eq!(
+            key_presses_since(&records, sent),
+            [
+                (
+                    "enter".to_owned(),
+                    PhysicalKey::Enter,
+                    KeyAction::Press,
+                    false
+                ),
+                (
+                    "escape".to_owned(),
+                    PhysicalKey::Escape,
+                    KeyAction::Press,
+                    false
+                ),
+            ]
+        );
         assert!(
             cx.debug_bounds("permission-request").is_some(),
             "terminal input never answers the notice"
@@ -8080,6 +8050,15 @@ mod permission_requests {
         raise_request(&pane, &[ScreenRecording], cx);
         let sent = records.commands().len();
         cx.simulate_keystrokes("cmd-enter");
+        assert_eq!(
+            key_presses_since(&records, sent),
+            [(
+                "enter".to_owned(),
+                PhysicalKey::Enter,
+                KeyAction::Press,
+                true
+            )]
+        );
         let set_up = cx.debug_bounds("permission-request-set-up").unwrap();
         cx.simulate_click(set_up.center(), Modifiers::none());
         let not_now = cx.debug_bounds("permission-request-not-now").unwrap();
@@ -8244,7 +8223,7 @@ mod permission_requests {
     }
 
     #[gpui::test]
-    fn a_session_exit_withdraws_the_notice(cx: &mut TestAppContext) {
+    fn a_terminal_session_exit_withdraws_the_notice(cx: &mut TestAppContext) {
         let (pane, cx, _) = connected_terminal_pane(cx);
         install_setup(
             &pane,
@@ -8255,7 +8234,10 @@ mod permission_requests {
 
         request(&pane, &[ScreenRecording], cx);
         pane.update(cx, |pane, cx| {
-            pane.handle_event(SessionEvent::Exited(SessionExit::Success), cx);
+            pane.handle_event(
+                TerminalSessionEvent::Exited(TerminalSessionExit::Success),
+                cx,
+            );
             cx.notify();
         });
         cx.run_until_parked();
@@ -8388,4 +8370,100 @@ mod permission_requests {
         cx.run_until_parked();
         assert_eq!(offered(&pane, cx), [ScreenRecording]);
     }
+}
+
+fn drop_file_paths(
+    cx: &mut VisualTestContext,
+    position: gpui::Point<gpui::Pixels>,
+    paths: Vec<PathBuf>,
+) {
+    cx.simulate_event(gpui::FileDropEvent::Entered {
+        position,
+        paths: gpui::ExternalPaths(paths.into()),
+    });
+    cx.run_until_parked();
+    cx.simulate_event(gpui::FileDropEvent::Submit { position });
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn blink_frames_reuse_stable_geometry_and_decorations_through_the_pane_clock(
+    cx: &mut TestAppContext,
+) {
+    let (pane, cx, _) = connected_terminal_pane(cx);
+    let marker = Color::rgb(0x11_dd_77);
+    let mut screen = blinking_screen();
+    let cell = &mut Arc::make_mut(&mut Arc::make_mut(&mut Arc::make_mut(&mut screen).rows)[0])[0];
+    cell.text = "a".to_owned();
+    cell.underline = crate::terminal::TerminalUnderlineSnapshot::Single;
+    cell.underline_source = crate::terminal::TerminalColor::Rgb(marker);
+    pane.update(cx, |pane, cx| {
+        pane.handle_event(TerminalSessionEvent::Screen(screen), cx);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let assert_reused = pane.read_with(cx, |pane, cx| {
+        crate::ui::terminal_element::assert_geometry_reused(pane.render_cache.read(cx), 1)
+    });
+    let decoration_count = |cx: &mut VisualTestContext| {
+        cx.update(|window, _| {
+            window
+                .painted_quads()
+                .iter()
+                .filter(|quad| quad.background == gpui::rgba(0x11_dd_77_ff).into())
+                .count()
+        })
+    };
+    assert!(pane.read_with(cx, |pane, _| pane.blink_phase_visible));
+    assert_eq!(decoration_count(cx), 1);
+    for phase in [false, true] {
+        cx.executor().advance_clock(PRESENTATION_BLINK_INTERVAL);
+        cx.run_until_parked();
+        assert_eq!(
+            pane.read_with(cx, |pane, _| pane.blink_phase_visible),
+            phase
+        );
+        pane.read_with(cx, |pane, cx| assert_reused(pane.render_cache.read(cx)));
+        assert_eq!(decoration_count(cx), usize::from(phase));
+    }
+}
+
+fn headless_pane() -> (
+    gpui::WindowHandle<TerminalPane>,
+    gpui::HeadlessAppContext,
+    TestTerminalSessionRecords,
+    Arc<FailImageAtlas>,
+) {
+    let atlas = Arc::new(FailImageAtlas::default());
+    let text_system = Arc::new(crate::ui::terminal_element::RasterTextSystem {
+        base: gpui::NoopTextSystem,
+        bounds: Bounds::new(
+            point(gpui::DevicePixels(0), gpui::DevicePixels(0)),
+            size(gpui::DevicePixels(8), gpui::DevicePixels(16)),
+        ),
+        observation: None,
+    });
+    let mut cx = gpui::HeadlessAppContext::with_platform(text_system, Arc::new(()), {
+        let atlas = Arc::clone(&atlas);
+        move || Ok(Some(Box::new(FailImageRenderer(Arc::clone(&atlas)))))
+    });
+    cx.update(crate::ui::init).unwrap();
+    let records = TestTerminalSessionRecords::default();
+    let factory = WorkspaceTerminalSessionFactory::new_local(
+        Rc::new(TestTerminalSessionFactory::new(records.clone())),
+        test_local_directory(PathBuf::from("/tmp/spaceterm-glyph-failure-test")),
+    );
+    let handle = cx
+        .open_window(size(px(800.0), px(600.0)), move |window, cx| {
+            cx.new(|cx| TerminalPane::new(factory, window, cx))
+        })
+        .unwrap();
+    handle
+        .update(&mut cx, |pane, window, cx| {
+            window.activate_window();
+            pane.focus(window, cx);
+        })
+        .unwrap();
+    cx.run_until_parked();
+    (handle, cx, records, atlas)
 }

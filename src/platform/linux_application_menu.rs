@@ -31,9 +31,9 @@ mod tests {
 
     #[gpui::test]
     fn about_opens_spaceterms_own_window_and_help_stays_unavailable(cx: &mut gpui::TestAppContext) {
-        let settings = crate::settings::UserSettings::load(
-            crate::ui::settings_window::test_support::MemoryStorage::with_document(
-                &crate::appearance::SettingsDocument::default(),
+        let settings = crate::settings::Settings::load(
+            crate::settings::storage::testing::MemoryStorage::with_document(
+                &crate::settings::SettingsDocument::default(),
             ),
         );
         cx.update(|cx| {

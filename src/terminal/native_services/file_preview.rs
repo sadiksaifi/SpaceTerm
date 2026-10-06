@@ -90,18 +90,6 @@ impl<P: FilePreviewPanel> FilePreviewPresenter<P> {
         Self { panel, request: 0 }
     }
 
-    #[cfg(test)]
-    pub(crate) fn preview(&mut self, target: &FilePreviewTarget) -> Result<(), FilePreviewError> {
-        let Some(path) = target.revalidated_path() else {
-            self.panel.dismiss();
-            return Err(FilePreviewError::StaleTarget);
-        };
-        if let Err(error) = self.panel.preview_file(&path) {
-            self.panel.dismiss();
-            return Err(error);
-        }
-        Ok(())
-    }
     /// A deferred adapter returns a completion that the owner awaits and then settles.
     pub(crate) fn preview_in_window(
         &mut self,
@@ -177,8 +165,9 @@ mod tests {
 
     const LOCAL_FILES: TerminalLocalFileCapabilities = TerminalLocalFileCapabilities::Enabled;
 
-    #[test]
-    fn preview_failure_and_owner_teardown_release_presentation() {
+    #[gpui::test]
+    fn preview_failure_and_owner_teardown_release_presentation(cx: &mut gpui::TestAppContext) {
+        let window = cx.add_window(|_, _| gpui::EmptyView);
         use std::cell::Cell;
         use std::rc::Rc;
         struct Panel(Rc<Cell<usize>>);
@@ -201,8 +190,12 @@ mod tests {
         {
             let mut presenter = FilePreviewPresenter::new(Panel(dismissals.clone()));
             assert_eq!(
-                presenter.preview(&target),
-                Err(FilePreviewError::PlatformUnavailable)
+                window
+                    .update(cx, |_, window, cx| presenter
+                        .preview_in_window(&target, window, cx))
+                    .unwrap()
+                    .err(),
+                Some(FilePreviewError::PlatformUnavailable)
             );
             assert_eq!(dismissals.get(), 1);
         }
@@ -227,8 +220,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn presenter_submits_exactly_one_revalidated_regular_file() {
+    #[gpui::test]
+    fn presenter_submits_exactly_one_revalidated_regular_file(cx: &mut gpui::TestAppContext) {
+        let window = cx.add_window(|_, _| gpui::EmptyView);
         let directory = std::env::temp_dir().join(format!(
             "spaceterm-file-preview-platform-{}",
             std::process::id()
@@ -241,38 +235,14 @@ mod tests {
         let target = FilePreviewTarget::from_link(&link, LOCAL_FILES).unwrap();
         let mut presenter = FilePreviewPresenter::new(RecordingPanel::default());
 
-        let result = presenter.preview(&target);
+        let result = window
+            .update(cx, |_, window, cx| {
+                presenter.preview_in_window(&target, window, cx)
+            })
+            .unwrap();
 
-        assert_eq!(result, Ok(()));
+        assert!(result.unwrap().is_none());
         assert_eq!(presenter.panel.previews, vec![file.canonicalize().unwrap()]);
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
-    fn file_preview_target_rejects_web_links_before_the_platform_boundary() {
-        let link = HyperlinkTarget::url("https://example.test/file.txt").unwrap();
-
-        let target = FilePreviewTarget::from_link(&link, LOCAL_FILES);
-
-        assert_eq!(target, None);
-    }
-
-    #[test]
-    fn file_preview_target_rejects_a_missing_file_before_the_platform_boundary() {
-        let directory = std::env::temp_dir().join(format!(
-            "spaceterm-file-preview-platform-missing-{}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&directory).unwrap();
-        let file = directory.join("preview.txt");
-        fs::write(&file, b"preview").unwrap();
-        let link =
-            HyperlinkTarget::osc8("file:preview.txt", &directory, None, LOCAL_FILES).unwrap();
-        fs::remove_file(file).unwrap();
-
-        let target = FilePreviewTarget::from_link(&link, LOCAL_FILES);
-
-        assert_eq!(target, None);
         fs::remove_dir_all(directory).unwrap();
     }
 

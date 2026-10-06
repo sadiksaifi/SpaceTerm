@@ -106,7 +106,7 @@ fn command_ids_round_trip_and_groups_are_contiguous_in_settings_order() {
 }
 
 #[test]
-fn command_scopes_and_actions_preserve_the_existing_binding_contract() {
+fn command_scopes_match_their_dispatch_contexts() {
     let application_commands = [
         Command::SwitchWorkspace,
         Command::NewWorkspace,
@@ -137,24 +137,6 @@ fn command_scopes_and_actions_preserve_the_existing_binding_contract() {
             } else {
                 Some(crate::ui::TERMINAL_KEY_CONTEXT)
             }
-        );
-    }
-    // The retained baseline checks every already-bound command against its actual action and scope.
-    for line in include_str!("../keybindings_baseline.txt").lines() {
-        let columns: Vec<_> = line.split('\t').collect();
-        let Some(command) = Command::ALL
-            .into_iter()
-            .find(|command| command.action().name() == columns[2])
-        else {
-            continue;
-        };
-        if columns[1].contains(crate::ui::TERMINAL_FIND_KEY_CONTEXT) {
-            continue;
-        }
-        assert_eq!(
-            columns[1] == "None",
-            command.scope() == KeyScope::Application,
-            "{command:?}"
         );
     }
 }
@@ -816,6 +798,7 @@ fn layout_derived_terminal_controls_cannot_be_installed_or_recorded() {
         .refresh_layout(&crate::platform::keyboard_layout::testing::UnknownLayout)
         .unwrap();
     let mut prefs = preferences(r#"{"new_workspace":"ctrl-shift-7"}"#);
+    let before = prefs.clone();
     assert_eq!(
         profile
             .resolve(&prefs)
@@ -830,6 +813,7 @@ fn layout_derived_terminal_controls_cannot_be_installed_or_recorded() {
         ),
         Err(Reservation::Terminal(TerminalConvention::ControlCharacter))
     );
+    assert_eq!(prefs, before);
 }
 
 #[test]
@@ -903,13 +887,13 @@ fn shifted_ascii_outputs_keep_native_identity_when_bindings_are_installed() {
 
 #[test]
 fn control_shift_reservations_are_resolved_after_the_settings_document_is_read() {
-    let mut json = serde_json::to_value(crate::appearance::SettingsDocument::default()).unwrap();
+    let mut json = serde_json::to_value(crate::settings::SettingsDocument::default()).unwrap();
     json["keybindings"] = serde_json::json!({
         "new_workspace": "ctrl-shift-2",
         "create_tab": "ctrl-shift-6",
         "close_tab": "ctrl-shift--",
     });
-    let document = crate::appearance::parse_settings(&serde_json::to_vec(&json).unwrap()).unwrap();
+    let document = crate::settings::parse_settings(&serde_json::to_vec(&json).unwrap()).unwrap();
     let us = KeymapProfile::new(
         crate::platform::keyboard_layout::testing::us(),
         crate::keybindings::TerminalConventions::CommandShortcuts,

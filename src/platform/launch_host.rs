@@ -125,7 +125,7 @@ fn shell_integration_supported(_shell: &Path) -> bool {
     true
 }
 
-/// The account name shown as the Local Terminal origin, from the login environment.
+/// The account name shown as a Local Pane Origin, from the login environment.
 pub(crate) fn local_user() -> Option<String> {
     ["USER", "LOGNAME"].into_iter().find_map(|key| {
         std::env::var(key)

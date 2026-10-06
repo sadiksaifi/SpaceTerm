@@ -270,7 +270,7 @@ pub(crate) enum ClosePaneOutcome<T> {
     PaneClosed {
         closed_pane_id: PaneId,
         focused_pane_id: PaneId,
-        closed_terminal: T,
+        closed_pane: T,
     },
     CloseTab {
         tab_id: TabId,
@@ -360,7 +360,7 @@ mod tests {
         let screen =
             crate::terminal::ScreenSnapshot::empty(crate::local_path::LocalPathSemantics::Posix);
         let running = PaneTerminalState::Running;
-        let exited = PaneTerminalState::exited(crate::terminal::SessionExit::Success);
+        let exited = PaneTerminalState::exited(crate::terminal::TerminalSessionExit::Success);
         let failed = PaneTerminalState::failed(crate::terminal::TerminalFailure::pty("read"), None);
         for (live, disconnected, state, freshness, zone, expected) in [
             (

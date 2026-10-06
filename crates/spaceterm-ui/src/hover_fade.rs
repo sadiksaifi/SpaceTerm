@@ -1,11 +1,4 @@
-//! Hover that eases in and out.
-//!
-//! GPUI hover styles switch in a single frame. A [`HoverFade`] tracks the pointer over one region
-//! and reports how far the region has eased toward its hovered look, so the owner paints each
-//! hover-dependent color between its resting and hovered value. Entering eases in quickly and
-//! leaving eases out more slowly, so a pointer sweeping across a list leaves a short trail instead
-//! of a flicker. A reversal mid-transition continues from the current level. Reduced motion
-//! switches at once. Hover never shows during a drag, as with GPUI hover styles.
+//! Hover that eases in and out, because GPUI hover styles switch in a single frame.
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
@@ -33,13 +26,6 @@ pub struct HoverFade {
 }
 
 impl HoverFade {
-    /// The longest any hover change takes to finish.
-    pub const SETTLE: Duration = if ENTER.as_nanos() > EXIT.as_nanos() {
-        ENTER
-    } else {
-        EXIT
-    };
-
     pub fn new(key: impl Into<ElementId>, window: &mut Window, cx: &mut App) -> Self {
         Self {
             state: window.use_keyed_state(key, cx, |_, _| HoverRegion::default()),
@@ -112,7 +98,7 @@ impl HoverFade {
 #[cfg(test)]
 pub(crate) fn settle(cx: &mut gpui::VisualTestContext) {
     cx.run_until_parked();
-    cx.executor().advance_clock(HoverFade::SETTLE);
+    cx.executor().advance_clock(ENTER.max(EXIT));
     cx.update(|window, cx| window.simulate_next_frame(cx));
     cx.run_until_parked();
 }

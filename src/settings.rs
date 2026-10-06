@@ -1,12 +1,10 @@
 //! Owns committed preferences, preview lifetime, and serialized identity-aware writes.
 
-#![cfg_attr(
-    not(any(test, feature = "developer-tools")),
-    allow(
-        dead_code,
-        reason = "the Settings Window edits through a draft and the preview transaction, so the direct-commit, field-reset, and recoverable-candidate operations remain available but unused"
-    )
-)]
+mod document;
+#[cfg(test)]
+mod document_tests;
+#[cfg(test)]
+mod schema_tests;
 
 pub(crate) mod recovery;
 pub(crate) mod storage;
@@ -20,23 +18,27 @@ use std::{
     sync::{Arc, Mutex, MutexGuard, Weak},
 };
 
+#[cfg(any(test, feature = "developer-tools"))]
+use crate::appearance::ResetTarget;
 use crate::appearance::{
-    CatalogError, ImportError, ResetTarget, SettingsDocument, SettingsDocumentError, TerminalTheme,
-    ThemeCatalog, ThemeId, ZedExtension, export_settings, parse_settings, translate_zed_extension,
-    translate_zed_family,
+    CatalogError, ImportError, TerminalTheme, ThemeCatalog, ThemeId, ZedExtension,
+    translate_zed_extension, translate_zed_family,
 };
 use crate::platform::secure_filesystem::SecureEntryIdentity;
+pub(crate) use document::{
+    SettingsDocument, SettingsDocumentError, export_settings, parse_settings,
+};
 use storage::{Durability, SettingsStorage, StorageError};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub(crate) enum SettingsError {
-    #[error("appearance settings are busy")]
+    #[error("settings are busy")]
     Busy,
-    #[error("appearance settings revision is stale")]
+    #[error("settings revision is stale")]
     Stale,
-    #[error("appearance settings revision is exhausted")]
+    #[error("settings revision is exhausted")]
     RevisionExhausted,
-    #[error("appearance settings are invalid")]
+    #[error("settings are invalid")]
     Invalid,
     #[error(transparent)]
     Import(#[from] ImportError),
@@ -58,6 +60,7 @@ impl From<SettingsDocumentError> for SettingsError {
     }
 }
 
+#[cfg(any(test, feature = "developer-tools"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PreviewPhase {
     Idle,
@@ -70,9 +73,11 @@ pub(crate) struct SettingsSnapshot {
     pub(crate) committed: Arc<SettingsDocument>,
     pub(crate) candidate: Arc<SettingsDocument>,
     /// A failed direct save remains recoverable without applying it as a live preview.
+    #[cfg(any(test, feature = "developer-tools"))]
     pub(crate) recoverable_candidate: Option<Arc<SettingsDocument>>,
     /// Retires import/replacement plans whenever the live editing state changes.
     pub(crate) catalog_revision: u64,
+    #[cfg(any(test, feature = "developer-tools"))]
     pub(crate) phase: PreviewPhase,
     pub(crate) status: Option<SettingsError>,
 }
@@ -92,7 +97,7 @@ pub(crate) struct ImportReceipt {
 
 /// Clones share the same transaction and storage authority.
 #[derive(Clone)]
-pub(crate) struct UserSettings(Arc<SettingsInner>);
+pub(crate) struct Settings(Arc<SettingsInner>);
 
 struct SettingsInner {
     state: Mutex<State>,
@@ -211,7 +216,7 @@ impl SettingsInner {
     }
 }
 
-impl UserSettings {
+impl Settings {
     /// Loads without creating a missing file or replacing an invalid one.
     pub(crate) fn load(storage: Arc<dyn SettingsStorage>) -> Self {
         let mut state = State {
@@ -251,26 +256,29 @@ impl UserSettings {
 
     pub(crate) fn snapshot(&self) -> SettingsSnapshot {
         let state = self.0.lock();
-        let (candidate, phase) = match &state.transaction {
-            Transaction::Idle => (Arc::clone(&state.committed), PreviewPhase::Idle),
-            Transaction::Preview { candidate, .. } => {
-                (Arc::clone(candidate), PreviewPhase::Previewing)
-            }
-            Transaction::Committing { id, candidate, .. } => (
+        let candidate = match &state.transaction {
+            Transaction::Idle => Arc::clone(&state.committed),
+            Transaction::Preview { candidate, .. } => Arc::clone(candidate),
+            Transaction::Committing { id, candidate, .. } => {
                 if id.is_some() {
                     Arc::clone(candidate)
                 } else {
                     Arc::clone(&state.committed)
-                },
-                PreviewPhase::Committing,
-            ),
+                }
+            }
         };
         SettingsSnapshot {
             committed: Arc::clone(&state.committed),
             candidate,
+            #[cfg(any(test, feature = "developer-tools"))]
             recoverable_candidate: state.recoverable_candidate.clone(),
             catalog_revision: state.catalog_revision,
-            phase,
+            #[cfg(any(test, feature = "developer-tools"))]
+            phase: match state.transaction {
+                Transaction::Idle => PreviewPhase::Idle,
+                Transaction::Preview { .. } => PreviewPhase::Previewing,
+                Transaction::Committing { .. } => PreviewPhase::Committing,
+            },
             status: state.status,
         }
     }
@@ -345,6 +353,7 @@ impl UserSettings {
         self.prepare_direct_commit(&mut state, candidate)
     }
 
+    #[cfg(any(test, feature = "developer-tools"))]
     pub(crate) fn reset_preview(
         &self,
         token: &PreviewToken,
@@ -354,22 +363,6 @@ impl UserSettings {
             document.reset(target)?;
             Ok(())
         })
-    }
-
-    #[allow(
-        dead_code,
-        reason = "direct settings operations are available without a preview UI"
-    )]
-    pub(crate) fn reset_committed(
-        &self,
-        revision: u64,
-        target: ResetTarget,
-    ) -> Result<CommitJob, SettingsError> {
-        let mut state = self.0.lock();
-        state.require_idle(revision)?;
-        let mut candidate = (*state.committed).clone();
-        candidate.reset(target)?;
-        self.prepare_direct_commit(&mut state, candidate)
     }
 
     pub(crate) fn import_preview(
@@ -398,36 +391,6 @@ impl UserSettings {
         Ok(receipt)
     }
 
-    /// The receipt describes the installed candidate and becomes authoritative only if the
-    /// paired commit job succeeds.
-    #[allow(
-        dead_code,
-        reason = "direct settings operations are available without a preview UI"
-    )]
-    pub(crate) fn import_committed(
-        &self,
-        revision: u64,
-        catalog_revision: u64,
-        source: ThemeImport<'_>,
-    ) -> Result<(ImportReceipt, CommitJob), SettingsError> {
-        let mut state = self.0.lock();
-        state.require_idle(revision)?;
-        state.require_catalog_revision(catalog_revision)?;
-        let (candidate, installed) = install_themes(&state.committed, source)?;
-        let resulting_catalog_revision = state
-            .catalog_revision
-            .checked_add(1)
-            .ok_or(SettingsError::RevisionExhausted)?;
-        let job = self.prepare_direct_commit(&mut state, candidate)?;
-        Ok((
-            ImportReceipt {
-                installed,
-                catalog_revision: resulting_catalog_revision,
-            },
-            job,
-        ))
-    }
-
     /// Removes installed themes together, so one extension leaves the catalog in one step.
     pub(crate) fn remove_themes_preview(
         &self,
@@ -452,36 +415,12 @@ impl UserSettings {
         Ok(catalog_revision)
     }
 
-    #[allow(
-        dead_code,
-        reason = "direct imported theme deletion is available without a preview UI"
-    )]
-    pub(crate) fn remove_themes_committed(
-        &self,
-        revision: u64,
-        catalog_revision: u64,
-        ids: &[ThemeId],
-    ) -> Result<CommitJob, SettingsError> {
-        let mut state = self.0.lock();
-        state.require_idle(revision)?;
-        state.require_catalog_revision(catalog_revision)?;
-        let candidate = remove_themes(&state.committed, ids)?;
-        self.prepare_direct_commit(&mut state, candidate)
-    }
-
-    #[allow(
-        dead_code,
-        reason = "complete theme listing remains available to interchange surfaces"
-    )]
-    pub(crate) fn list_themes(&self) -> Result<Vec<TerminalTheme>, SettingsError> {
-        let snapshot = self.snapshot();
-        Ok(ThemeCatalog::from_terminal_themes(&snapshot.candidate.terminal_themes)?.themes())
-    }
-
+    #[cfg(any(test, feature = "developer-tools"))]
     pub(crate) fn export_document(&self) -> Result<String, SettingsError> {
         Ok(export_settings(&self.snapshot().candidate)?)
     }
 
+    #[cfg(any(test, feature = "developer-tools"))]
     fn edit_preview(
         &self,
         token: &PreviewToken,
@@ -530,11 +469,7 @@ impl UserSettings {
     }
 
     /// Adopts the file another program changed, returning whether SpaceTerm read a new document.
-    ///
-    /// A file SpaceTerm last read or wrote is left alone. Any other file is adopted as an explicit
-    /// reload adopts it, so a malformed or unsafe file keeps the committed state and pauses writes
-    /// until a valid file arrives. A live preview or write owns the transaction, so the caller
-    /// retries once it ends.
+    /// A live preview or write owns the transaction, so the caller retries once it ends.
     pub(crate) fn follow_file(&self) -> Result<bool, SettingsError> {
         let mut state = self.0.lock();
         if !matches!(state.transaction, Transaction::Idle) {
@@ -561,10 +496,8 @@ impl UserSettings {
         self.adopt(&mut state, read).map(|()| true)
     }
 
-    /// Returns the write that creates the settings file when none holds the document yet.
-    ///
-    /// Another program can open only a file that exists. An existing file, including one SpaceTerm
-    /// cannot read, is left as it is.
+    /// Returns the write that creates the settings file when none exists. An existing unreadable
+    /// file is left as it is.
     pub(crate) fn ensure_file(&self) -> Result<Option<CommitJob>, SettingsError> {
         let mut state = self.0.lock();
         if !matches!(state.transaction, Transaction::Idle) {

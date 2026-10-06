@@ -119,7 +119,7 @@ impl GraphicsReservation {
         bytes: &[u8],
     ) -> Result<(), Error> {
         // A feed can decode images or change either screen. Serialize this bounded
-        // operation so temporary capacity never causes another Session to evict live
+        // operation so temporary capacity never causes another Terminal Session to evict live
         // images. Retain only actual residency after the feed has completed.
         let mut budget = DECODED_BUDGET
             .lock()
@@ -454,7 +454,7 @@ mod tests {
     }
 
     #[test]
-    fn decoded_budget_is_bounded_across_sessions() {
+    fn decoded_budget_is_bounded_across_terminal_sessions() {
         let _guard = test_lock();
         let first = GraphicsReservation::try_acquire(APPLICATION_DECODED_LIMIT - 16).unwrap();
         let second = GraphicsReservation::try_acquire(16).unwrap();
@@ -514,7 +514,7 @@ mod tests {
     }
 
     #[test]
-    fn storage_growth_never_evicts_live_images_when_screens_have_unequal_usage() {
+    fn storage_limits_preserve_residency_and_bound_growth() {
         assert_eq!(storage_limits([100, 4], 0), [100, 4]);
         assert_eq!(storage_limits([100, 4], 16), [108, 12]);
         assert_eq!(storage_limits([0, 0], 0), [1, 1]);

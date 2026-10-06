@@ -62,7 +62,15 @@ fn caret(area: &Entity<TextArea>, cx: &mut VisualTestContext) -> usize {
 }
 
 fn place_caret(area: &Entity<TextArea>, line: usize, column: usize, cx: &mut VisualTestContext) {
-    area.update(cx, |area, cx| area.move_caret_to_position(line, column, cx));
+    area.update(cx, |area, cx| {
+        let range = area.lines[line - 1].clone();
+        let offset = area.buffer.text[range.clone()]
+            .char_indices()
+            .nth(column - 1)
+            .map_or(range.end, |(offset, _)| range.start + offset);
+        area.buffer.move_to(offset);
+        area.restart_caret(cx);
+    });
     cx.run_until_parked();
 }
 
@@ -246,20 +254,6 @@ fn delete_to_line_start_joins_lines_at_the_start_of_a_line(cx: &mut TestAppConte
 
     cx.simulate_keystrokes("cmd-backspace");
     assert_eq!(value(&area, cx), "abd");
-}
-
-#[gpui::test]
-fn caret_positions_count_characters_and_clamp_to_the_line(cx: &mut TestAppContext) {
-    let (area, cx) = area(cx, "é1\nabc", |area| area);
-
-    place_caret(&area, 1, 2, cx);
-    assert_eq!(caret(&area, cx), "é".len());
-
-    place_caret(&area, 2, 99, cx);
-    assert_eq!(caret(&area, cx), "é1\nabc".len());
-
-    place_caret(&area, 9, 1, cx);
-    assert_eq!(caret(&area, cx), "é1\n".len());
 }
 
 #[gpui::test]

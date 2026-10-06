@@ -223,7 +223,7 @@ impl MacosKeyboardBridge {
             action: event.action,
             native_key_code: Some(event.native_key_code),
         };
-        // Let AppKit process its Help key equivalent after GPUI's responder declines it.
+        // Let AppKit process its Help Shortcut after GPUI's responder declines it.
         // Matching the character preserves Command-? on non-US keyboard layouts.
         if event.modifiers.platform
             && !event.modifiers.control
@@ -739,6 +739,59 @@ mod tests {
                 Some((PhysicalKey::ShiftRight, KeyAction::Release)),
             ]
         );
+
+        for (code, key) in [
+            (59, PhysicalKey::ControlLeft),
+            (62, PhysicalKey::ControlRight),
+            (58, PhysicalKey::AltLeft),
+            (61, PhysicalKey::AltRight),
+            (55, PhysicalKey::MetaLeft),
+            (54, PhysicalKey::MetaRight),
+            (57, PhysicalKey::CapsLock),
+            (63, PhysicalKey::Fn),
+        ] {
+            let event = |active| NativeKeyEvent {
+                action: KeyAction::Press,
+                native_key_code: code,
+                characters: None,
+                characters_ignoring_modifiers: None,
+                unmodified_characters: None,
+                characters_without_option: None,
+                modifiers: NativeModifiers {
+                    control: active && matches!(code, 59 | 62),
+                    control_left: active && code == 59,
+                    control_right: active && code == 62,
+                    alt: active && matches!(code, 58 | 61),
+                    alt_left: active && code == 58,
+                    alt_right: active && code == 61,
+                    platform: active && matches!(code, 55 | 54),
+                    platform_left: active && code == 55,
+                    platform_right: active && code == 54,
+                    caps_lock: active && code == 57,
+                    function: active && code == 63,
+                    ..NativeModifiers::default()
+                },
+            };
+            assert!(matches!(
+                bridge.modifier_transition(event(false)),
+                KeyTranslation::Unhandled(_)
+            ));
+            let press = encoded(bridge.modifier_transition(event(true)));
+            assert_eq!((press.physical_key, press.action), (key, KeyAction::Press));
+            assert!(matches!(
+                bridge.modifier_transition(event(true)),
+                KeyTranslation::Unhandled(_)
+            ));
+            let release = encoded(bridge.modifier_transition(event(false)));
+            assert_eq!(
+                (release.physical_key, release.action),
+                (key, KeyAction::Release)
+            );
+            assert!(matches!(
+                bridge.modifier_transition(event(false)),
+                KeyTranslation::Unhandled(_)
+            ));
+        }
     }
 
     #[test]
@@ -847,15 +900,18 @@ mod tests {
     #[test]
     fn option_policy_selects_layout_text_and_consumption() {
         let cases = [
-            (OptionAsAltPolicy::None, false, "å", true),
-            (OptionAsAltPolicy::Both, false, "a", false),
-            (OptionAsAltPolicy::None, true, "å", true),
-            (OptionAsAltPolicy::Both, true, "a", false),
+            (OptionAsAltPolicy::None, false, "å", true, "å"),
+            (OptionAsAltPolicy::Both, false, "a", false, "å"),
+            (OptionAsAltPolicy::None, true, "å", true, "å"),
+            (OptionAsAltPolicy::Both, true, "a", false, "å"),
+            (OptionAsAltPolicy::Both, false, "a", false, "a"),
         ];
 
-        for (policy, alt_right, expected_text, consumed_alt) in cases {
+        for (policy, alt_right, expected_text, consumed_alt, unmodified_text) in cases {
             let bridge = MacosKeyboardBridge::new(policy);
             let mut event = native(0, "å");
+            event.characters_ignoring_modifiers = Some(unmodified_text.to_owned());
+            event.unmodified_characters = Some(unmodified_text.to_owned());
             event.characters_without_option = Some("a".to_owned());
             event.modifiers = NativeModifiers {
                 alt: true,
@@ -865,8 +921,24 @@ mod tests {
             };
 
             let input = encoded(bridge.translate(event));
+            assert_eq!(input.physical_key, PhysicalKey::A, "{policy:?}");
+            assert!(input.modifiers.alt, "{policy:?}");
+            assert_eq!(
+                input.modifiers,
+                InputModifiers {
+                    alt: true,
+                    alt_right,
+                    ..InputModifiers::default()
+                },
+                "{policy:?}"
+            );
             assert_eq!(input.text.as_deref(), Some(expected_text), "{policy:?}");
             assert_eq!(input.consumed_modifiers.alt, consumed_alt, "{policy:?}");
+            assert_eq!(
+                input.consumed_modifiers.alt_right,
+                consumed_alt && alt_right,
+                "{policy:?}"
+            );
         }
     }
 }

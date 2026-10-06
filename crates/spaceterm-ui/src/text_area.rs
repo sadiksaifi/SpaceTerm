@@ -1,14 +1,7 @@
 //! A bounded, content-safe, multi-line GPUI text editor for editable source such as JSON.
 //!
-//! The editor shares its buffer, selection, and bounded undo history with [`crate::TextInput`].
-//! It keeps line breaks, converts pasted carriage returns and Unicode line separators to `\n`,
-//! and replaces a tab with the indent unit, so every line it lays out is one shaped line without
-//! control characters. The default value limit is 256 KiB and the absolute limit is 1 MiB.
-//!
-//! The editor inherits its font from the surrounding text style, so a caller chooses the typeface
-//! and size, and it sizes itself to a fixed number of visible rows. Rows beyond them scroll.
-//! Lines do not wrap; a line wider than the viewport scrolls horizontally. Only the rows in view
-//! are shaped. Read-only content stays focusable, selectable, and copyable.
+//! It shares its buffer, selection, and undo history with [`crate::TextInput`], converts line
+//! separators to `\n` and tabs to the indent unit, and shapes only the rows in view.
 
 use std::{collections::HashMap, ops::Range, time::Duration};
 
@@ -331,7 +324,6 @@ impl TextArea {
         }
     }
 
-    /// Sets the placeholder shown when the value is empty.
     pub fn placeholder(mut self, placeholder: impl Into<SharedString>) -> Self {
         self.placeholder = placeholder.into();
         self
@@ -370,23 +362,15 @@ impl TextArea {
         self
     }
 
-    /// Returns the current value.
     pub fn value(&self) -> &str {
         &self.buffer.text
     }
-    /// Returns the monotonic content revision.
     pub fn revision(&self) -> u64 {
         self.revision
     }
-    /// Returns whether the editor currently owns responder focus.
     pub fn is_focused(&self) -> bool {
         self.focused
     }
-    /// Returns whether keyboard and pointer editing may change the value.
-    pub fn is_editable(&self) -> bool {
-        self.editable
-    }
-    /// Returns the focus handle used by a containing composite for explicit focus transfer.
     pub fn focus_handle(&self) -> FocusHandle {
         self.focus_handle.clone()
     }
@@ -437,24 +421,6 @@ impl TextArea {
         self.commit_composition();
         self.buffer.select_all();
         self.goal_x = None;
-        self.restart_caret(cx);
-    }
-
-    /// Places the caret at a one-based line and column and scrolls it into view.
-    ///
-    /// Columns count characters, the way a JSON parser reports a position. A position past the
-    /// end of its line or of the value lands on the nearest end.
-    pub fn move_caret_to_position(&mut self, line: usize, column: usize, cx: &mut Context<Self>) {
-        self.commit_composition();
-        let index = line.saturating_sub(1).min(self.lines.len() - 1);
-        let range = self.lines[index].clone();
-        let offset = self.buffer.text[range.clone()]
-            .char_indices()
-            .nth(column.saturating_sub(1))
-            .map_or(range.end, |(offset, _)| range.start + offset);
-        self.buffer.move_to(offset);
-        self.goal_x = None;
-        self.reveal_caret = true;
         self.restart_caret(cx);
     }
 
@@ -1952,7 +1918,6 @@ fn line_ranges(text: &str) -> Vec<Range<usize>> {
     lines
 }
 
-/// The spaces a line starts with.
 fn leading_indentation(line: &str) -> &str {
     &line[..line.len() - line.trim_start_matches(' ').len()]
 }

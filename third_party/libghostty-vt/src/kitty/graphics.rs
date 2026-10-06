@@ -191,6 +191,7 @@
 
 use std::{
     cell::RefCell,
+    marker::PhantomData,
     mem::{ManuallyDrop, MaybeUninit},
 };
 
@@ -258,7 +259,10 @@ pub struct PlacementIterator<'alloc> {
 /// borrowed from the storage with lifetime `'t` and remains valid until
 /// the next mutating terminal call.
 #[derive(Debug)]
-pub struct PlacementIteration<'t, 'alloc>(&'t mut PlacementIterator<'alloc>);
+pub struct PlacementIteration<'t, 'alloc>(
+    &'t mut PlacementIterator<'alloc>,
+    PhantomData<&'t Graphics<'t>>,
+);
 
 /// Methods related to the [Kitty graphics protocol](crate::kitty::graphics).
 impl Terminal<'_, '_> {
@@ -590,16 +594,44 @@ impl<'alloc> PlacementIterator<'alloc> {
 
     /// Update the placement iterator with the given graphics storage,
     /// returning a new placement iteration.
-    pub fn update(&mut self, graphics: &Graphics<'_>) -> Result<PlacementIteration<'_, 'alloc>> {
+    ///
+    /// Terminal mutation cannot invalidate an active placement iteration.
+    ///
+    /// ```compile_fail,E0502
+    /// use libghostty_vt::{Terminal, kitty::graphics::PlacementIterator};
+    /// fn invalid(mut terminal: Terminal<'static, 'static>, iter: &mut PlacementIterator<'static>) {
+    ///     let graphics = terminal.kitty_graphics().unwrap();
+    ///     let mut iteration = iter.update(&graphics).unwrap();
+    ///     terminal.vt_write(b"changed");
+    ///     iteration.next();
+    /// }
+    /// ```
+    ///
+    /// The terminal cannot be dropped during placement iteration.
+    ///
+    /// ```compile_fail,E0505
+    /// use libghostty_vt::{Terminal, kitty::graphics::PlacementIterator};
+    /// fn invalid(mut terminal: Terminal<'static, 'static>, iter: &mut PlacementIterator<'static>) {
+    ///     let graphics = terminal.kitty_graphics().unwrap();
+    ///     let mut iteration = iter.update(&graphics).unwrap();
+    ///     drop(terminal);
+    ///     iteration.next();
+    /// }
+    /// ```
+    ///
+    pub fn update<'t>(
+        &'t mut self,
+        graphics: &'t Graphics<'_>,
+    ) -> Result<PlacementIteration<'t, 'alloc>> {
         let result = unsafe {
             ffi::ghostty_kitty_graphics_get(
                 graphics.inner.as_raw(),
                 ffi::KittyGraphicsData::PLACEMENT_ITERATOR,
-                (&raw mut self.inner).cast(),
+                std::ptr::from_mut(&mut self.inner.ptr).cast(),
             )
         };
         from_result(result)?;
-        Ok(PlacementIteration(self))
+        Ok(PlacementIteration(self, PhantomData))
     }
 }
 
@@ -1039,9 +1071,9 @@ pub trait DecodePng: 'static {
 /// A PNG decoder for [`set_png_decoder`] using the [`png`] crate.
 ///
 /// ```rust
-/// use ghostty::kitty::graphics;
+/// use libghostty_vt::kitty::graphics::{self, RustPngDecoder};
 ///
-/// graphics::set_png_decoder(RustPngDecoder::new());
+/// graphics::set_png_decoder(Some(Box::new(RustPngDecoder::new()))).unwrap();
 /// ```
 #[cfg(all(feature = "kitty-graphics", feature = "png"))]
 #[derive(Clone, Copy, Debug)]
@@ -1168,6 +1200,18 @@ mod tests {
             writer.write_image_data(data).unwrap();
         }
         bytes
+    }
+
+    #[test]
+    fn placement_iteration_reads_live_graphics_storage() {
+        let mut terminal = terminal();
+        terminal.set_kitty_image_storage_limit(4096).unwrap();
+        terminal.vt_write(b"\x1b_Ga=T,f=32,s=1,v=1,i=7,p=3,c=1,r=1;/wAA/w==\x1b\\");
+        let graphics = terminal.kitty_graphics().unwrap();
+        let mut iter = PlacementIterator::new().unwrap();
+        let mut iteration = iter.update(&graphics).unwrap();
+        assert_eq!(iteration.next().unwrap().image_id().unwrap(), 7);
+        assert!(iteration.next().is_none());
     }
 
     #[cfg(feature = "png")]

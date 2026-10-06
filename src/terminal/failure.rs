@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::emulator::PresentationGeneration;
 use super::key::KeyAction;
-use super::session::{SessionExit, SessionFailure, SessionStartupStage};
+use super::session::{TerminalSessionExit, TerminalSessionFailure, TerminalSessionStartupStage};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FailureClass {
@@ -85,17 +85,17 @@ impl TerminalFailure {
         }
     }
 
-    pub(crate) fn from_session(failure: &SessionFailure) -> Self {
+    pub(crate) fn from_session(failure: &TerminalSessionFailure) -> Self {
         match failure {
-            SessionFailure::Startup { stage, .. } => match stage {
-                SessionStartupStage::Pty
-                | SessionStartupStage::Reader
-                | SessionStartupStage::ReaderThread => Self::pty("session-startup"),
-                SessionStartupStage::Emulator => Self::emulator("session-startup"),
+            TerminalSessionFailure::Startup { stage, .. } => match stage {
+                TerminalSessionStartupStage::Pty
+                | TerminalSessionStartupStage::Reader
+                | TerminalSessionStartupStage::ReaderThread => Self::pty("session-startup"),
+                TerminalSessionStartupStage::Emulator => Self::emulator("session-startup"),
             },
-            SessionFailure::Runtime(_) => Self::emulator("session-runtime"),
-            SessionFailure::PtyRead { .. } => Self::pty("read-shell-output"),
-            SessionFailure::ShellWait { .. } => Self::pty("reap-shell-process"),
+            TerminalSessionFailure::Runtime(_) => Self::emulator("session-runtime"),
+            TerminalSessionFailure::PtyRead { .. } => Self::pty("read-shell-output"),
+            TerminalSessionFailure::ShellWait { .. } => Self::pty("reap-shell-process"),
         }
     }
 
@@ -134,7 +134,7 @@ impl fmt::Display for TerminalFailure {
 pub(crate) enum PaneTerminalState {
     #[default]
     Running,
-    Exited(SessionExit),
+    Exited(TerminalSessionExit),
     Failed {
         failure: TerminalFailure,
         last_valid_frame: Option<PresentationGeneration>,
@@ -142,7 +142,7 @@ pub(crate) enum PaneTerminalState {
 }
 
 impl PaneTerminalState {
-    pub(crate) const fn exited(exit: SessionExit) -> Self {
+    pub(crate) const fn exited(exit: TerminalSessionExit) -> Self {
         Self::Exited(exit)
     }
 
@@ -295,12 +295,12 @@ mod tests {
     use std::fs;
 
     use super::*;
-    use crate::terminal::{PresentationGeneration, SessionFailure};
+    use crate::terminal::{PresentationGeneration, TerminalSessionFailure};
 
     #[test]
     fn normal_exit_and_every_failure_class_are_distinguishable() {
         let states = [
-            PaneTerminalState::exited(crate::terminal::SessionExit::Success),
+            PaneTerminalState::exited(crate::terminal::TerminalSessionExit::Success),
             PaneTerminalState::failed(TerminalFailure::pty("read"), None),
             PaneTerminalState::failed(TerminalFailure::emulator("feed"), None),
             PaneTerminalState::failed(TerminalFailure::presentation("prepare"), None),
@@ -326,7 +326,7 @@ mod tests {
 
     #[test]
     fn session_mapping_redacts_raw_terminal_content_and_secrets() {
-        let failure = TerminalFailure::from_session(&SessionFailure::Runtime(
+        let failure = TerminalFailure::from_session(&TerminalSessionFailure::Runtime(
             "password=hunter2 output=private terminal text".to_owned(),
         ));
         let rendered = failure.to_string();
@@ -337,7 +337,7 @@ mod tests {
     }
 
     #[test]
-    fn renderer_failure_keeps_last_valid_generation() {
+    fn resource_failure_state_retains_generation_and_recovery_guidance() {
         let state = PaneTerminalState::failed(
             TerminalFailure::resource("atlas"),
             Some(PresentationGeneration::test(42)),
@@ -365,23 +365,53 @@ mod tests {
     }
 
     #[test]
-    fn diagnostics_are_bounded_local_and_exported_only_explicitly() {
+    fn diagnostic_ring_is_bounded_and_export_writes_schema() {
         let mut bundle = DiagnosticBundle::default();
         for _ in 0..200 {
             bundle.record(&TerminalFailure::platform("native-event"));
         }
-        assert!(bundle.record_count() <= DiagnosticBundle::MAX_RECORDS);
-        assert!(bundle.encoded_len() <= DiagnosticBundle::MAX_BYTES);
-
-        let directory =
-            std::env::temp_dir().join(format!("spaceterm-diagnostics-{}", std::process::id()));
-        fs::create_dir_all(&directory).unwrap();
+        assert_eq!(bundle.record_count(), 128);
+        assert!(bundle.encoded_len() <= 65_536);
+        let directory = std::env::temp_dir().join(format!(
+            "spaceterm-diagnostics-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&directory).unwrap();
         let path = directory.join("diagnostics.txt");
         assert!(!path.exists());
         bundle.export(&path).unwrap();
         let exported = fs::read_to_string(&path).unwrap();
-        assert!(exported.contains("network_telemetry=false"));
-        assert!(!exported.contains("terminal text"));
+        let header = "SpaceTerm diagnostics\nnetwork_telemetry=false\nterminal_content=false\n";
+        let record = "class=Platform recoverability=Recoverable operation=native-event\n";
+        assert_eq!(exported, format!("{header}{}", record.repeat(128)));
+
+        static LONG_OPERATION: [u8; 1024] = [b'x'; 1024];
+        let long_operation = std::str::from_utf8(&LONG_OPERATION).unwrap();
+        let mut bytes = DiagnosticBundle::default();
+        for _ in 0..128 {
+            bytes.record(&TerminalFailure::platform(long_operation));
+        }
+        let long_record = format!(
+            "class=Platform recoverability=Recoverable operation={}\n",
+            "x".repeat(1024)
+        );
+        let retained = (65_536 - header.len()) / long_record.len();
+        assert!(retained < 128);
+        assert_eq!(bytes.record_count(), retained);
+        assert_eq!(
+            bytes.encoded_len(),
+            header.len() + retained * long_record.len()
+        );
+        assert!(bytes.encoded_len() <= 65_536);
+        bytes.export(&path).unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            format!("{header}{}", long_record.repeat(retained))
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 

@@ -40,12 +40,6 @@ pub enum AnchoredTextDirection {
 }
 
 /// Placement preferences shared by anchored transient controls.
-///
-/// Surfaces keep the preferred side when they fit, then try the opposite side.
-/// If neither side fits, they shrink to the side with more room. Alignment can
-/// flip or shift along the other axis to keep the surface inside the viewport.
-/// When the target leaves no space on either preferred-axis side, placement
-/// falls back to the perpendicular axis if it has any room.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AnchoredPlacementConfig {
     pub(crate) placement: AnchoredPlacement,
@@ -73,13 +67,11 @@ impl AnchoredPlacementConfig {
         self
     }
 
-    /// Sets the gap between the target and surface.
     pub fn offset(mut self, offset: Pixels) -> Self {
         self.offset = offset.max(px(0.0));
         self
     }
 
-    /// Sets the minimum distance from the viewport edge.
     pub fn viewport_margin(mut self, margin: Pixels) -> Self {
         self.viewport_margin = margin.max(px(0.0));
         self
@@ -297,6 +289,21 @@ mod tests {
 
     #[test]
     fn placement_should_flip_before_clamping() {
+        {
+            let anchor = Bounds::new(point(px(20.0), px(170.0)), size(px(40.0), px(20.0)));
+            let placed = place_anchored(
+                anchor,
+                size(px(100.0), px(80.0)),
+                size(px(240.0), px(200.0)),
+                AnchoredPlacementConfig::default(),
+            );
+            assert_eq!(placed.origin, point(px(20.0), px(86.0)));
+        }
+
+        {
+            assert_eq!(AnchoredPlacementConfig::default().viewport_margin, px(12.0));
+        }
+
         let bounds = place_anchored(
             Bounds::new(point(px(40.0), px(90.0)), size(px(20.0), px(10.0))),
             size(px(60.0), px(40.0)),
@@ -309,6 +316,18 @@ mod tests {
 
     #[test]
     fn every_side_should_flip_when_only_the_opposite_side_fits() {
+        {
+            let anchor = Bounds::new(point(px(350.0), px(40.0)), size(px(30.0), px(30.0)));
+            let placed = place_anchored(
+                anchor,
+                size(px(100.0), px(50.0)),
+                size(px(400.0), px(200.0)),
+                AnchoredPlacementConfig::new(AnchoredPlacement::Right, AnchoredAlignment::Start),
+            );
+
+            assert_eq!(placed.origin.x, px(246.0));
+        }
+
         for (placement, target_origin, expected_origin) in [
             (AnchoredPlacement::Left, (8.0, 50.0), (32.0, 50.0)),
             (AnchoredPlacement::Right, (172.0, 50.0), (108.0, 50.0)),
@@ -339,6 +358,41 @@ mod tests {
 
     #[test]
     fn preferred_side_should_remain_stable_when_both_sides_fit() {
+        {
+            let anchor = Bounds::new(point(px(100.0), px(80.0)), size(px(40.0), px(40.0)));
+            let viewport = size(px(400.0), px(260.0));
+            let panel = size(px(80.0), px(60.0));
+            let right = place_anchored(
+                anchor,
+                panel,
+                viewport,
+                AnchoredPlacementConfig::new(AnchoredPlacement::Right, AnchoredAlignment::Center),
+            );
+            let left = place_anchored(
+                anchor,
+                panel,
+                viewport,
+                AnchoredPlacementConfig::new(AnchoredPlacement::Left, AnchoredAlignment::End),
+            );
+            let top = place_anchored(
+                anchor,
+                panel,
+                viewport,
+                AnchoredPlacementConfig::new(AnchoredPlacement::Top, AnchoredAlignment::End),
+            );
+            let bottom = place_anchored(
+                anchor,
+                panel,
+                viewport,
+                AnchoredPlacementConfig::new(AnchoredPlacement::Bottom, AnchoredAlignment::Center),
+            );
+
+            assert_eq!(right.origin, point(px(144.0), px(70.0)));
+            assert_eq!(left.origin, point(px(16.0), px(60.0)));
+            assert_eq!(top.origin, point(px(60.0), px(16.0)));
+            assert_eq!(bottom.origin, point(px(80.0), px(124.0)));
+        }
+
         for (placement, expected_origin) in [
             (AnchoredPlacement::Left, (36.0, 80.0)),
             (AnchoredPlacement::Right, (104.0, 80.0)),
@@ -591,6 +645,16 @@ mod tests {
 
     #[test]
     fn placement_should_remain_inside_a_viewport_smaller_than_two_margins() {
+        {
+            let constrained = constrain_anchored_size(
+                size(px(300.0), px(400.0)),
+                size(px(200.0), px(100.0)),
+                px(8.0),
+            );
+
+            assert_eq!(constrained, size(px(184.0), px(84.0)));
+        }
+
         let viewport = size(px(10.0), px(8.0));
         let panel = constrain_anchored_size(size(px(90.0), px(70.0)), viewport, px(12.0));
         let bounds = place_anchored(
@@ -644,6 +708,19 @@ mod tests {
 
     #[test]
     fn adjacent_placement_should_remain_inside_a_tiny_viewport() {
+        {
+            let parent = Bounds::new(point(px(140.0), px(20.0)), size(px(100.0), px(80.0)));
+            let placed = place_adjacent(
+                parent,
+                px(30.0),
+                size(px(100.0), px(60.0)),
+                size(px(260.0), px(160.0)),
+                px(8.0),
+                px(2.0),
+            );
+            assert_eq!(placed.origin.x, px(38.0));
+        }
+
         let viewport = size(px(10.0), px(8.0));
         let panel = constrain_anchored_size(size(px(90.0), px(70.0)), viewport, px(12.0));
         let bounds = place_adjacent(

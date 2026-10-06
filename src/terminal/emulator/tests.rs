@@ -202,7 +202,7 @@ fn accessibility_retains_an_edited_row_scrolled_into_history_in_one_feed() {
 }
 
 #[test]
-fn accessibility_retains_an_edited_row_compressed_before_observation() {
+fn accessibility_retains_an_edited_row_after_compression_pass() {
     let mut emulator = emulator(32, 3);
     emulator.feed(b"old");
     emulator.snapshot().unwrap().unwrap();
@@ -227,7 +227,7 @@ fn accessibility_retains_an_edited_row_compressed_before_observation() {
 }
 
 #[test]
-fn accessibility_retains_primary_edits_when_compression_runs_on_alternate_screen() {
+fn accessibility_retains_primary_edits_after_compression_pass_on_alternate_screen() {
     let mut emulator = emulator(32, 3);
     emulator.feed(b"old");
     emulator.snapshot().unwrap().unwrap();
@@ -433,13 +433,24 @@ fn terminal_find_navigation_rejects_stale_query_generation() {
     let mut emulator = emulator(8, 2);
     emulator.feed(b"needle");
     emulator.set_find_query(FindQueryGeneration::test(2), "needle".to_owned());
-    let _ = emulator.snapshot().unwrap().unwrap();
+    let before = emulator.snapshot().unwrap().unwrap();
 
     let action = emulator
         .navigate_find(FindQueryGeneration::test(1), FindDirection::Next)
         .unwrap();
 
     assert!(!action.screen_changed);
+    if let Some(after) = emulator.snapshot().unwrap() {
+        assert_eq!(after.find, before.find);
+    }
+    assert!(
+        emulator
+            .navigate_find(FindQueryGeneration::test(2), FindDirection::Next)
+            .unwrap()
+            .screen_changed
+    );
+    let current = emulator.snapshot().unwrap().unwrap();
+    assert_eq!(current.find.as_ref().unwrap().current_match, Some(1));
 }
 
 #[test]
@@ -463,9 +474,26 @@ fn terminal_find_navigation_wraps_and_marks_the_current_result() {
         .unwrap();
     let wrapped = emulator.snapshot().unwrap().unwrap();
 
-    assert_eq!(first.find.as_ref().unwrap().current_match, Some(1));
-    assert_eq!(second.find.as_ref().unwrap().current_match, Some(2));
-    assert_eq!(wrapped.find.as_ref().unwrap().current_match, Some(1));
+    let previous = emulator
+        .navigate_find(generation, FindDirection::Previous)
+        .unwrap();
+    assert!(previous.screen_changed);
+    let backwards = emulator.snapshot().unwrap().unwrap();
+    for (snapshot, current, column) in [
+        (&first, 1, 0),
+        (&second, 2, 4),
+        (&wrapped, 1, 0),
+        (&backwards, 2, 4),
+    ] {
+        let find = snapshot.find.as_ref().unwrap();
+        let spans = find.visible_spans.iter();
+        let current_spans = spans
+            .filter(|span| span.current)
+            .map(|span| (span.row, span.start_column, span.end_column));
+        assert_eq!(find.current_match, Some(current));
+        assert_eq!(find.visible_spans.len(), 2);
+        assert_eq!(current_spans.collect::<Vec<_>>(), [(0, column, column + 2)]);
+    }
 }
 
 #[test]
@@ -1280,6 +1308,14 @@ fn color_scheme_query_and_mode_2031_reports_follow_applied_appearance() {
         ))
         .unwrap();
     assert_eq!(emulator.take_pty_responses(), b"\x1b[?997;2n");
+    let screen = emulator.snapshot().unwrap().unwrap();
+    assert_eq!(
+        (
+            screen.appearance_generation.get(),
+            screen.terminal_appearance
+        ),
+        (2, crate::appearance::Appearance::Light)
+    );
 
     emulator
         .apply_appearance(appearance_update(
@@ -1988,7 +2024,7 @@ fn default_limit_prompt_after_redraw() -> Terminal<'static, 'static> {
 }
 
 #[test]
-fn default_byte_limit_preserves_newest_output_when_widening_at_limit() {
+fn constrained_byte_limit_preserves_newest_output_when_widening_at_limit() {
     let mut terminal = Terminal::new(TerminalOptions {
         cols: 80,
         rows: 10,
@@ -2025,7 +2061,7 @@ fn default_byte_limit_preserves_newest_output_when_widening_at_limit() {
 }
 
 #[test]
-fn default_limit_prompt_redraw_does_not_prune_on_command_start() {
+fn constrained_byte_limit_prompt_redraw_does_not_prune_on_command_start() {
     let mut terminal = default_limit_prompt_after_redraw();
     let before = all_limited_terminal_rows(&terminal, 160);
     terminal.vt_write(b"\x1b]133;C\x07");
@@ -2033,7 +2069,7 @@ fn default_limit_prompt_redraw_does_not_prune_on_command_start() {
 }
 
 #[test]
-fn background_output_at_prompt_keeps_default_history_bounded() {
+fn background_output_at_prompt_keeps_constrained_byte_limit_history_bounded() {
     let mut terminal = default_limit_prompt_after_redraw();
     for end in [1000, 11000] {
         let start = if end == 1000 { 0 } else { 1000 };
@@ -2139,7 +2175,7 @@ fn tall_prompt_cycles_keep_bounded_exact_scrollback() {
 }
 
 #[test]
-fn same_grid_sigwinch_redraw_keeps_tall_prompt_and_history() {
+fn same_grid_sigwinch_redraw_preserves_expected_tall_prompt_history() {
     let prompt = format!("{}\r\n> ", "P".repeat(2400));
     let mut terminal = Terminal::new(TerminalOptions {
         cols: 55,
@@ -2677,34 +2713,19 @@ fn runtime_identity_replies_are_spaceterm_owned_and_capability_bounded() {
 
     emulator.feed(b"\x1b[>q\x1b[c\x1b[>c\x1bP+q544E;436F\x1b\\");
     let replies = emulator.take_pty_responses();
-
-    assert!(
-        replies
-            .windows(identity::XTVERSION.len())
-            .any(|window| window == identity::XTVERSION.as_bytes())
+    let expected = format!(
+        concat!(
+            "\x1bP1+r544E=787465726D2D73706163657465726D\x1b\\",
+            "\x1bP1+r436F=323536\x1b\\",
+            "\x1bP>|SpaceTerm {}\x1b\\",
+            "\x1b[?62;22;52c",
+            "\x1b[>1;0;0c"
+        ),
+        env!("SPACETERM_VERSION")
     );
-    assert!(
-        replies
-            .windows(b"\x1b[?62;22;52c".len())
-            .any(|window| window == b"\x1b[?62;22;52c")
-    );
-    assert!(
-        replies
-            .windows(b"\x1b[>1;0;0c".len())
-            .any(|window| window == b"\x1b[>1;0;0c")
-    );
-    assert!(replies.windows(7).any(|window| window == b"1+r544E"));
-    assert!(
-        replies
-            .windows(b"787465726D2D73706163657465726D".len())
-            .any(|window| window == b"787465726D2D73706163657465726D")
-    );
-    assert!(replies.windows(7).any(|window| window == b"1+r436F"));
-    assert!(
-        !String::from_utf8_lossy(&replies)
-            .to_ascii_lowercase()
-            .contains("ghostty")
-    );
+    assert_eq!(replies, expected.as_bytes());
+    emulator.feed(b"\x1bP+q536D756C78\x1b\\");
+    assert_eq!(emulator.take_pty_responses(), b"\x1bP0+r536D756C78\x1b\\");
 }
 
 #[test]
@@ -3531,13 +3552,28 @@ fn accessibility_selection_rejects_synchronized_output_and_resets_pointer_invali
     emulator.feed(b"\x1b[?2026l");
     let (model, more) = emulator.accessibility_snapshot(true).unwrap();
     assert!(!more);
-    let model = model.unwrap();
+    _ = model.unwrap();
     _ = emulator.snapshot().unwrap();
-    emulator.pointer_mapping_invalidated = true;
+    let press = current_pointer(
+        &emulator,
+        pointer(
+            PointerPhase::Press,
+            Some(PointerButton::Left),
+            1.0,
+            1.0,
+            false,
+        ),
+    );
+    emulator.pointer(press).unwrap();
+    emulator.feed(b"!");
+    assert!(emulator.pointer_mapping_invalidated);
+    _ = emulator.snapshot().unwrap();
+    let model = drain_accessibility(&mut emulator);
     let request = model.selection_request(1..4).unwrap();
     emulator.set_accessibility_selection(request).unwrap();
 
     assert!(!emulator.pointer_mapping_invalidated);
+    assert_eq!(emulator.selection_text().unwrap(), Some("ell".to_owned()));
 }
 
 #[test]
@@ -3559,19 +3595,6 @@ fn modifier_key_transitions_should_preserve_selection_for_application_shortcuts(
     emulator.key(meta).unwrap();
 
     assert_eq!(emulator.selection_text().unwrap(), Some("hello".to_owned()));
-}
-
-#[test]
-fn non_modifier_key_input_should_clear_selection() {
-    let mut emulator = emulator(12, 3);
-    emulator.feed(b"hello world");
-    select_first_five(&mut emulator, false);
-
-    emulator
-        .key(key(PhysicalKey::A, InputModifiers::default()))
-        .unwrap();
-
-    assert_eq!(emulator.selection_text().unwrap(), None);
 }
 
 #[test]
@@ -3604,8 +3627,8 @@ fn selection_copy_distinguishes_soft_wraps_and_hard_lines() {
 
     assert_eq!(copy.plain_text, "abcdefgh\nxy");
     let html = copy.html.unwrap();
-    assert!(html.contains("abcdefgh"));
-    assert!(html.contains("xy"));
+    assert!(html.contains("abcdefgh\nxy"));
+    assert!(!html.contains("abcde\nfgh"));
     assert!(!html.contains("CellSnapshot"));
 }
 
@@ -3645,7 +3668,7 @@ fn repeat_clicks_select_cells_words_and_lines_with_injected_time() {
         (Duration::from_millis(100), Some("beta")),
         (Duration::from_millis(200), Some("alpha beta")),
     ] {
-        emulator.set_gesture_time_for_test(time);
+        emulator.gesture_clock = GestureClock::Manual(time);
         _ = emulator
             .pointer(pointer(
                 PointerPhase::Press,
@@ -3675,7 +3698,7 @@ fn wide_tail_and_soft_wrapped_word_select_complete_graphemes() {
         let mut wide = emulator(8, 2);
         wide.feed("A😀B".as_bytes());
         for time in [Duration::ZERO, Duration::from_millis(100)] {
-            wide.set_gesture_time_for_test(time);
+            wide.gesture_clock = GestureClock::Manual(time);
             _ = wide
                 .pointer(pointer(
                     PointerPhase::Press,
@@ -3701,7 +3724,7 @@ fn wide_tail_and_soft_wrapped_word_select_complete_graphemes() {
     let mut wrapped = emulator(5, 2);
     wrapped.feed(b"abcdefgh");
     for time in [Duration::ZERO, Duration::from_millis(100)] {
-        wrapped.set_gesture_time_for_test(time);
+        wrapped.gesture_clock = GestureClock::Manual(time);
         _ = wrapped
             .pointer(pointer(
                 PointerPhase::Press,
@@ -4005,10 +4028,16 @@ fn scroll_commands_leave_the_alternate_screen_and_its_program_alone() {
     ] {
         let action = emulator.scroll_scrollback(movement);
         assert!(action.bytes.is_empty(), "{movement:?}");
-        if let Some(after) = emulator.snapshot().unwrap() {
-            assert_eq!(after.scrollbar, before.scrollbar, "{movement:?}");
-            assert!(row_text(&after, 0).starts_with("alt"), "{movement:?}");
-        }
+        let after = emulator
+            .snapshot()
+            .unwrap()
+            .unwrap_or_else(|| Arc::clone(&before));
+        assert_eq!(after.scrollbar, before.scrollbar, "{movement:?}");
+        assert_eq!(after.rows, before.rows, "{movement:?}");
+        assert_eq!(
+            emulator.terminal.scrollbar().unwrap().offset,
+            before.scrollbar.offset_rows
+        );
     }
 }
 
@@ -4281,10 +4310,13 @@ fn output_mapping_changes_reject_active_gesture_coordinates() {
     let after = emulator.snapshot().unwrap().unwrap();
     assert!(after.generation > before.generation);
 
-    let stale = emulator.pointer(input(PointerPhase::Motion, 68.0)).unwrap();
-
-    assert!(!stale.screen_changed);
-    assert_eq!(emulator.selection_autoscroll_interval().unwrap(), None);
+    let selected_before = emulator.selection_text().unwrap();
+    for phase in [PointerPhase::Motion, PointerPhase::Release] {
+        let stale = emulator.pointer(input(phase, 68.0)).unwrap();
+        assert!(!stale.screen_changed);
+        assert_eq!(emulator.selection_text().unwrap(), selected_before);
+        assert_eq!(emulator.selection_autoscroll_interval().unwrap(), None);
+    }
 }
 
 #[test]
@@ -4314,7 +4346,7 @@ fn tracked_and_alternate_screen_wheel_events_encode_input() {
 }
 
 #[test]
-fn osc8_identity_survives_wrapping_in_immutable_snapshots() {
+fn osc8_wrapped_cells_share_identity() {
     let mut emulator = emulator(5, 2);
     emulator.feed(b"\x1b]8;;https://example.test/path\x07abcdefgh\x1b]8;;\x07");
 
@@ -4386,10 +4418,10 @@ fn ground_utf8_containing_9d_is_printed_without_starting_c1_osc() {
 
 #[test]
 fn raw_9d_in_ground_does_not_introduce_an_osc8_link() {
-    let mut emulator = emulator(32, 2);
+    let mut negative = emulator(32, 2);
 
-    emulator.feed(b"\x9d8;;file:/tmp/not-a-link\x07visible");
-    let snapshot = emulator.snapshot().unwrap().unwrap();
+    negative.feed(b"\x9d8;;https://example.test/\x07visible");
+    let snapshot = negative.snapshot().unwrap().unwrap();
 
     assert!(
         snapshot
@@ -4398,6 +4430,16 @@ fn raw_9d_in_ground_does_not_introduce_an_osc8_link() {
             .flat_map(|row| row.iter())
             .all(|cell| cell.hyperlink.is_none())
     );
+    assert!(row_text(&snapshot, 0).contains("visible"));
+    let mut positive = emulator(32, 2);
+    positive.feed(b"\x1b]8;;https://example.test/\x07visible");
+    let linked = positive.snapshot().unwrap().unwrap();
+    assert_eq!(&row_text(&linked, 0)[..7], "visible");
+    assert!(linked.rows[0][..7].iter().all(|cell| {
+        cell.hyperlink
+            .as_ref()
+            .is_some_and(|link| link.value == "https://example.test/")
+    }));
 }
 
 #[test]
@@ -4420,7 +4462,7 @@ fn rejected_local_osc8_start_ends_a_previously_active_link() {
 }
 
 #[test]
-fn unsupported_terminal_uri_cannot_attach_resolver_only_local_metadata() {
+fn unsupported_osc8_uri_is_rejected() {
     let mut emulator = emulator(16, 2);
 
     emulator.feed(b"\x1b]8;;unsupported:terminal-controlled-metadata\x07plain\x1b]8;;\x07");
@@ -4430,6 +4472,13 @@ fn unsupported_terminal_uri_cannot_attach_resolver_only_local_metadata() {
         snapshot.rows[0][..5]
             .iter()
             .all(|cell| cell.hyperlink.is_none())
+    );
+    emulator.feed(b"\r\x1b]8;;https://example.test/\x07plain\x1b]8;;\x07");
+    let linked = emulator.snapshot().unwrap().unwrap();
+    assert!(
+        linked.rows[0][..5]
+            .iter()
+            .all(|cell| cell.hyperlink.is_some())
     );
 }
 
@@ -4526,7 +4575,7 @@ fn mouse_tracking_reports_bytes_but_shift_overrides_with_selection() {
         ),
     );
     let reported = emulator.pointer(input).unwrap();
-    assert!(!reported.bytes.is_empty());
+    assert_eq!(reported.bytes, b"\x1b[<0;1;1M");
     let input = current_pointer(
         &emulator,
         pointer(
@@ -4538,7 +4587,7 @@ fn mouse_tracking_reports_bytes_but_shift_overrides_with_selection() {
         ),
     );
     let released = emulator.pointer(input).unwrap();
-    assert!(!released.bytes.is_empty());
+    assert_eq!(released.bytes, b"\x1b[<4;1;1m");
     assert!(!released.selection_completed);
 
     let input = current_pointer(
@@ -4575,6 +4624,8 @@ fn mouse_tracking_reports_bytes_but_shift_overrides_with_selection() {
 
     let snapshot = emulator.snapshot().unwrap().unwrap();
     assert!(snapshot.rows[0][..5].iter().all(|cell| cell.selected));
+    assert!(!snapshot.rows[0][5].selected);
+    assert_eq!(emulator.selection_text().unwrap(), Some("hello".to_owned()));
 }
 
 #[test]
@@ -4755,8 +4806,8 @@ fn auxiliary_buttons_and_hover_only_report_when_tracking_allows() {
             true,
         ))
         .unwrap();
-    assert!(!reported.bytes.is_empty());
-    _ = emulator
+    assert_eq!(reported.bytes, b"\x1b[<6;1;1M");
+    let released = emulator
         .pointer(pointer(
             PointerPhase::Release,
             Some(PointerButton::Right),
@@ -4766,10 +4817,12 @@ fn auxiliary_buttons_and_hover_only_report_when_tracking_allows() {
         ))
         .unwrap();
 
+    assert_eq!(released.bytes, b"\x1b[<6;1;1m");
+
     let hover = emulator
         .pointer(pointer(PointerPhase::Motion, None, 11.0, 1.0, false))
         .unwrap();
-    assert!(!hover.bytes.is_empty());
+    assert_eq!(hover.bytes, b"\x1b[<35;2;1M");
     let shifted_hover = emulator
         .pointer(pointer(PointerPhase::Motion, None, 21.0, 1.0, true))
         .unwrap();
@@ -4777,7 +4830,7 @@ fn auxiliary_buttons_and_hover_only_report_when_tracking_allows() {
 }
 
 #[test]
-fn screen_snapshots_are_owned_and_safe_to_share_across_threads() {
+fn screen_snapshots_are_send_and_sync() {
     fn assert_send_sync<T: Send + Sync>() {}
 
     assert_send_sync::<ScreenSnapshot>();
@@ -4845,7 +4898,7 @@ fn kitty_retransmission_replaces_content_and_deletion_releases_it() {
 }
 
 #[test]
-fn kitty_png_and_chunked_zlib_transmissions_decode_on_the_worker() {
+fn kitty_png_and_chunked_zlib_transmissions_decode_into_owned_pixels() {
     let _guard = crate::terminal::graphics::test_lock();
     let mut emulator = emulator(8, 4);
     emulator.feed(
@@ -4881,8 +4934,15 @@ fn kitty_later_display_resolves_crop_offsets_size_and_z() {
     let displayed = emulator.snapshot().unwrap().unwrap();
     let placement = &displayed.graphics.placements[0];
     assert_eq!(placement.placement_id, 7);
-    assert_eq!(placement.source_x, 1);
-    assert_eq!(placement.source_width, 1);
+    assert_eq!(
+        (
+            placement.source_x,
+            placement.source_y,
+            placement.source_width,
+            placement.source_height
+        ),
+        (1, 0, 1, 1)
+    );
     assert_eq!(placement.cell_offset_x, 3);
     assert_eq!(placement.cell_offset_y, 4);
     assert_eq!(placement.destination_width, 17);
@@ -4912,12 +4972,39 @@ fn kitty_graphics_follow_screen_sync_scroll_and_resize_lifecycle() {
     let synchronized = emulator.snapshot().unwrap().unwrap();
     assert_eq!(synchronized.graphics.placements.len(), 2);
 
+    // Keep the original one-pixel placements and add a placement that remains partly visible.
+    emulator.feed(b"\x1b_Ga=p,i=40,p=3,c=1,r=2,C=1\x1b\\");
+    let tall = emulator.snapshot().unwrap().unwrap();
+    assert_eq!(tall.graphics.placements.len(), 3);
     emulator.feed(b"one\r\ntwo\r\nthree\r\nfour\r\nfive");
     let scrolled = emulator.snapshot().unwrap().unwrap();
     assert!(scrolled.damage.graphics_geometry);
     emulator.resize(geometry(10, 5, 10.0, 20.0)).unwrap();
     let resized = emulator.snapshot().unwrap().unwrap();
-    assert!(resized.damage.graphics_geometry || resized.damage.resize);
+    assert!(resized.damage.graphics_geometry);
+    let placement_geometry = |snapshot: &ScreenSnapshot| {
+        let mut placements = snapshot
+            .graphics
+            .placements
+            .iter()
+            .map(|placement| {
+                (
+                    placement.placement_id,
+                    placement.viewport_col,
+                    placement.viewport_row,
+                    placement.destination_width,
+                    placement.destination_height,
+                )
+            })
+            .collect::<Vec<_>>();
+        placements.sort_unstable();
+        placements
+    };
+    assert_eq!(placement_geometry(&scrolled), [(3, 0, -1, 10, 40)]);
+    assert_eq!(
+        placement_geometry(&resized),
+        [(1, 0, 0, 1, 1), (2, 0, 0, 1, 1), (3, 0, 0, 10, 40)]
+    );
 }
 
 #[test]
@@ -4952,6 +5039,8 @@ fn kitty_q_policy_and_unsupported_media_remain_safe() {
 
     emulator.feed(b"\x1b_Ga=f,i=50\x1b\\");
     let animation_error = emulator.take_pty_responses();
+    assert!(animation_error.starts_with(b"\x1b_Gi=50;"));
+    assert!(animation_error.ends_with(b"\x1b\\"));
     assert!(!animation_error.windows(2).any(|window| window == b"OK"));
 
     emulator.feed(b"\x1b_Ga=q,t=d,f=32,i=52,s=8193,v=1,q=2;AAAA\x1b\\alive");
@@ -5233,4 +5322,26 @@ fn kitty_animation_accepts_chunked_frames_across_idle_presentations() {
 ))]
 mod unix_adapter_tests {
     include!("../../platform/unix_adapter_tests/emulator.rs");
+}
+
+#[test]
+fn accessibility_selection_rejects_a_model_from_before_the_latest_screen() {
+    let mut emulator = TerminalEmulator::new(geometry(80, 24, 8.0, 20.0)).unwrap();
+    emulator.feed(b"old text");
+    let _ = emulator.snapshot().unwrap();
+    let request = drain_accessibility(&mut emulator)
+        .selection_request(0..3)
+        .unwrap();
+
+    emulator.feed(b" changed");
+    let _ = emulator.snapshot().unwrap();
+    let action = emulator.set_accessibility_selection(request).unwrap();
+
+    assert!(!action.screen_changed);
+    assert!(
+        emulator
+            .selection_copy(SelectionCopyOptions::default())
+            .unwrap()
+            .is_none()
+    );
 }

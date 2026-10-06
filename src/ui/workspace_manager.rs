@@ -13,8 +13,6 @@ use super::workspace_sidebar::{
     remote_connection_status,
 };
 use crate::platform::terminal_accessibility::TerminalAccessibilityAdapterFactory;
-#[cfg(test)]
-use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
 use crate::ssh::remote_account::RemoteWorkspaceAccount;
 use crate::terminal::native_services::NativeServiceAdapters;
 use crate::ui::appearance::gpui_color;
@@ -30,7 +28,7 @@ use super::directory_picker::{
     RemoteDirectorySource,
 };
 use super::remote_workspace_flow::{
-    RemoteWorkspaceAliasPin, RemoteWorkspaceConnectContext, RemoteWorkspaceConnectedSession,
+    ConnectedControlConnection, RemoteWorkspaceAliasPin, RemoteWorkspaceConnectContext,
     RemoteWorkspaceConnectionProgress, RemoteWorkspaceFlow, RemoteWorkspaceFlowBackend,
     RemoteWorkspaceFlowBackendError, RemoteWorkspaceFlowBackendFactory,
     RemoteWorkspaceFlowCompletion, RemoteWorkspaceFlowCompletionHandle, RemoteWorkspaceFlowEvent,
@@ -56,8 +54,6 @@ use crate::appearance::Color;
 use crate::close_confirmation::{
     ApplicationCloseFacts, ApplicationPaneFacts, CloseConfirmation, CloseHierarchy, CloseTarget,
 };
-#[cfg(test)]
-use crate::directory_selection::GpuiDirectorySelection;
 use crate::directory_selection::SystemDirectorySelection;
 use crate::domain::{
     CloseWorkspaceOutcome, DirectoryAvailability, FinalTabCloseOutcome, LocalDirectoryIdentity,
@@ -71,8 +67,6 @@ use crate::platform::window_movement::{
 };
 use crate::ssh::live_connection::{ControlConnectionObserver, ControlConnectionTerminalState};
 use crate::ssh::process::TransientSshErrorOutput;
-#[cfg(test)]
-use crate::terminal::GpuiTerminalKeyInputAdapterFactory;
 use crate::terminal::metadata::RemoteTerminalMetadataContext;
 use crate::terminal::{
     NativeServiceOrigin, NativeServiceStatus, PreparedWorkspaceTerminalLaunch, SelectionCopy,
@@ -96,7 +90,7 @@ use spaceterm_ui::{
 };
 
 #[cfg(test)]
-const CHROME_DIVIDER_SIZE: f32 = super::resize_handle_theme::VISIBLE_THICKNESS;
+const CHROME_DIVIDER_SIZE: f32 = super::control_theme::resize_handle::VISIBLE_THICKNESS;
 
 fn sidebar_toggle_presentation(sidebar_visible: bool) -> (CustomIconName, &'static str) {
     if sidebar_visible {
@@ -114,7 +108,7 @@ enum CloseConfirmationAction {
 
 struct RemoteWorkspaceRuntime {
     generation: u64,
-    session: Option<RemoteWorkspaceConnectedSession>,
+    control_connection: Option<ConnectedControlConnection>,
     lifecycle: Option<ControlConnectionObserver>,
     alias_pin: Option<RemoteWorkspaceAliasPin>,
 }
@@ -122,13 +116,13 @@ struct RemoteWorkspaceRuntime {
 impl RemoteWorkspaceRuntime {
     fn new(
         generation: u64,
-        session: RemoteWorkspaceConnectedSession,
+        control_connection: ConnectedControlConnection,
         lifecycle: ControlConnectionObserver,
         alias_pin: Option<RemoteWorkspaceAliasPin>,
     ) -> Self {
         Self {
             generation,
-            session: Some(session),
+            control_connection: Some(control_connection),
             lifecycle: Some(lifecycle),
             alias_pin,
         }
@@ -136,7 +130,7 @@ impl RemoteWorkspaceRuntime {
 
     fn close(&mut self) {
         self.lifecycle.take();
-        self.session.take();
+        self.control_connection.take();
         self.alias_pin.take();
     }
 }
@@ -159,7 +153,7 @@ struct RemoteWorkspaceReconnectProgressIdentity {
 }
 
 struct PreparedRemoteWorkspaceReconnect {
-    session: RemoteWorkspaceConnectedSession,
+    control_connection: ConnectedControlConnection,
     lifecycle: ControlConnectionObserver,
     restart: PreparedTabManagerRemoteRestart,
     remote_user: crate::domain::RemoteUser,
@@ -275,8 +269,6 @@ pub(crate) struct WorkspaceManager {
     remote_workspace_activation_task: Option<Task<()>>,
     remote_workspace_focus_restore_pending: bool,
     remote_workspace_reconnect: Option<RemoteWorkspaceReconnectAttempt>,
-    #[cfg(test)]
-    close_focused_pane_before_reconnect_commit: bool,
     operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
     window_drag_status: WindowDragRegionStatus,
     update_control: Entity<super::updates::UpdateControl>,
@@ -285,86 +277,6 @@ pub(crate) struct WorkspaceManager {
 }
 
 impl WorkspaceManager {
-    #[cfg(test)]
-    fn new_with_remote_workspace_backend_factory(
-        session_factory: Rc<dyn TerminalSessionFactory>,
-        local_home_directory_path: PathBuf,
-        remote_workspace_backend_factory: Arc<dyn RemoteWorkspaceFlowBackendFactory>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        Self::new_with_adapters(
-            session_factory,
-            local_home_directory_path,
-            WorkspaceManagerAdapters {
-                local_filesystem: LocalFilesystemAuthority::testing(),
-                key_input: Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
-                accessibility: Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default()),
-                native_services: crate::terminal::native_services::testing::adapters(),
-                lifecycle: PaneLifecycleDependencies::testing(),
-                directory_selection: Rc::new(GpuiDirectorySelection),
-                window_drag: Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
-                remote_workspace: remote_workspace_backend_factory,
-            },
-            window,
-            cx,
-        )
-    }
-
-    #[cfg(test)]
-    fn new_with_directory_selection(
-        session_factory: Rc<dyn TerminalSessionFactory>,
-        local_home_directory_path: PathBuf,
-        directory_selection: Rc<dyn SystemDirectorySelection>,
-        remote_workspace_backend_factory: Arc<dyn RemoteWorkspaceFlowBackendFactory>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        Self::new_with_adapters(
-            session_factory,
-            local_home_directory_path,
-            WorkspaceManagerAdapters {
-                local_filesystem: LocalFilesystemAuthority::testing(),
-                key_input: Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
-                accessibility: Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default()),
-                native_services: crate::terminal::native_services::testing::adapters(),
-                lifecycle: PaneLifecycleDependencies::testing(),
-                directory_selection,
-                window_drag: Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
-                remote_workspace: remote_workspace_backend_factory,
-            },
-            window,
-            cx,
-        )
-    }
-
-    #[cfg(test)]
-    fn new_with_operating_system_window_drag_platform(
-        session_factory: Rc<dyn TerminalSessionFactory>,
-        local_home_directory_path: PathBuf,
-        operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
-        remote_workspace_backend_factory: Arc<dyn RemoteWorkspaceFlowBackendFactory>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        Self::new_with_adapters(
-            session_factory,
-            local_home_directory_path,
-            WorkspaceManagerAdapters {
-                local_filesystem: LocalFilesystemAuthority::testing(),
-                key_input: Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
-                accessibility: Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default()),
-                native_services: crate::terminal::native_services::testing::adapters(),
-                lifecycle: PaneLifecycleDependencies::testing(),
-                directory_selection: Rc::new(GpuiDirectorySelection),
-                window_drag: operating_system_window_drag_platform,
-                remote_workspace: remote_workspace_backend_factory,
-            },
-            window,
-            cx,
-        )
-    }
-
     pub(crate) fn new_with_adapters(
         session_factory: Rc<dyn TerminalSessionFactory>,
         local_home_directory_path: PathBuf,
@@ -490,8 +402,6 @@ impl WorkspaceManager {
             remote_workspace_activation_task: None,
             remote_workspace_focus_restore_pending: false,
             remote_workspace_reconnect: None,
-            #[cfg(test)]
-            close_focused_pane_before_reconnect_commit: false,
             operating_system_window_drag_platform,
             window_drag_status: WindowDragRegionStatus::new(),
             update_control: cx.new(super::updates::UpdateControl::new),
@@ -517,7 +427,7 @@ impl WorkspaceManager {
         creation: TabManagerCreation,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Result<Entity<TabManager>, crate::terminal::RemoteChannelUnavailable> {
+    ) -> Result<Entity<TabManager>, crate::terminal::TerminalSessionChannelUnavailable> {
         let prepared_launch = session_factory.prepare_child_launch()?;
         Ok(Self::create_tab_manager_with_prepared_launch(
             session_factory,
@@ -1049,9 +959,7 @@ impl WorkspaceManager {
             Self::report_workspace_error("pin", error);
         }
         if let Some(name) = name
-            && let Err(error) = self
-                .workspaces
-                .name_workspace_for_creation(workspace_id, name)
+            && let Err(error) = self.workspaces.rename_workspace(workspace_id, name)
         {
             Self::report_workspace_error("rename", error);
         }
@@ -1223,13 +1131,16 @@ impl WorkspaceManager {
                 let Some(runtime) = self.remote_workspace_runtimes.get(&workspace_id) else {
                     return;
                 };
-                let Some(session) = runtime.session.as_ref() else {
+                let Some(control_connection) = runtime.control_connection.as_ref() else {
                     Self::show_pin_error(window, cx);
                     return;
                 };
                 let host = key.destination().host().to_owned();
                 (
-                    Rc::new(RemoteDirectorySource::new(session.provider(), &host)),
+                    Rc::new(RemoteDirectorySource::new(
+                        control_connection.provider(),
+                        &host,
+                    )),
                     Some(runtime.generation),
                 )
             }
@@ -1268,7 +1179,7 @@ impl WorkspaceManager {
                                     .get(workspace_id)
                                     .is_some_and(|runtime| {
                                         runtime.generation == generation
-                                            && runtime.session.is_some()
+                                            && runtime.control_connection.is_some()
                                     })
                             });
                         let application = match (current, pinned.clone(), target.clone()) {
@@ -1543,7 +1454,7 @@ impl WorkspaceManager {
             // A Remote Pane falls back to its login shell, exactly as a Local Pane does. The
             // The sidebar's machine label identifies the destination independently of its name.
             completion.account().login_shell().name().to_owned(),
-            completion.terminal_channels(),
+            completion.terminal_session_channels(),
         );
         terminal_factory.set_pinned_directory(completion.pinned_directory());
         let Some(revalidation) = terminal_factory.revalidate_remote_child_launch() else {
@@ -1574,7 +1485,7 @@ impl WorkspaceManager {
     fn finish_remote_workspace_activation(
         &mut self,
         activation: PendingRemoteActivation,
-        revalidation: Result<(), crate::terminal::RemoteChannelRevalidationError>,
+        revalidation: Result<(), crate::terminal::TerminalSessionChannelRevalidationError>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1673,16 +1584,14 @@ impl WorkspaceManager {
             Self::report_workspace_error("pin", error);
         }
         if let Some(name) = self.remote_workspace_name.take()
-            && let Err(error) = self
-                .workspaces
-                .name_workspace_for_creation(workspace_id, name)
+            && let Err(error) = self.workspaces.rename_workspace(workspace_id, name)
         {
             Self::report_workspace_error("rename", error);
         }
-        let (session, _, _, _, _, _, lifecycle) = completion.into_parts();
+        let (control_connection, _, _, _, _, _, lifecycle) = completion.into_parts();
         let replaced = self.remote_workspace_runtimes.insert(
             workspace_id,
-            RemoteWorkspaceRuntime::new(1, session, lifecycle, alias_pin),
+            RemoteWorkspaceRuntime::new(1, control_connection, lifecycle, alias_pin),
         );
         debug_assert!(
             replaced.is_none(),
@@ -1850,7 +1759,7 @@ impl WorkspaceManager {
             return;
         }
         if let Some(runtime) = self.remote_workspace_runtimes.get_mut(&workspace_id) {
-            runtime.session.take();
+            runtime.control_connection.take();
         }
 
         cx.notify();
@@ -1939,7 +1848,7 @@ impl WorkspaceManager {
         let work_cancelled = Arc::clone(&cancelled);
         let work = cx.spawn_in(window, async move |manager, cx| {
             let result = async {
-                let mut session = connection.await.map_err(|error| {
+                let mut control_connection = connection.await.map_err(|error| {
                     if work_cancelled.load(Ordering::Acquire)
                         || matches!(
                             error,
@@ -1956,7 +1865,7 @@ impl WorkspaceManager {
                 if work_cancelled.load(Ordering::Acquire) {
                     return Err(RemoteWorkspaceReconnectFailure::Cancelled);
                 }
-                let provider = session.provider();
+                let provider = control_connection.provider();
                 let account = provider.discover_account().await.map_err(|_| {
                     RemoteWorkspaceReconnectFailure::ConnectionFailed { detail: None }
                 })?;
@@ -1970,12 +1879,12 @@ impl WorkspaceManager {
                 if actual_identity != expected_identity {
                     return Err(RemoteWorkspaceReconnectFailure::IdentityChanged);
                 }
-                let channels = session
-                    .bind_terminal_channels(account.login_shell())
+                let channels = control_connection
+                    .bind_terminal_session_channels(account.login_shell())
                     .map_err(|_| RemoteWorkspaceReconnectFailure::ConnectionFailed {
                         detail: None,
                     })?;
-                let lifecycle = session
+                let lifecycle = control_connection
                     .take_lifecycle_observer()
                     .ok_or(RemoteWorkspaceReconnectFailure::ConnectionFailed { detail: None })?;
                 let mut factory = WorkspaceTerminalSessionFactory::new_remote(
@@ -1998,7 +1907,7 @@ impl WorkspaceManager {
                     return Err(RemoteWorkspaceReconnectFailure::Cancelled);
                 }
                 Ok(PreparedRemoteWorkspaceReconnect {
-                    session,
+                    control_connection,
                     lifecycle,
                     restart,
                     remote_user: account.remote_user().clone(),
@@ -2183,14 +2092,6 @@ impl WorkspaceManager {
                 else {
                     return;
                 };
-                #[cfg(test)]
-                if self.close_focused_pane_before_reconnect_commit {
-                    self.close_focused_pane_before_reconnect_commit = false;
-                    tab_manager
-                        .read(cx)
-                        .active_pane_host()
-                        .update(cx, |host, cx| host.close_focused_for_test(window, cx));
-                }
                 if let Err(error) = tab_manager.update(cx, |manager, cx| {
                     manager.commit_remote_restart(prepared.restart, window, cx)
                 }) {
@@ -2215,7 +2116,7 @@ impl WorkspaceManager {
                     workspace_id,
                     RemoteWorkspaceRuntime::new(
                         generation,
-                        prepared.session,
+                        prepared.control_connection,
                         prepared.lifecycle,
                         alias_pin,
                     ),
@@ -3097,9 +2998,6 @@ impl WorkspaceManager {
 
     /// The Active Workspace's identity, shown in the top-left chrome only while the sidebar is
     /// hidden.
-    ///
-    /// With the sidebar open its highlighted row already answers "which Workspace is this", so the
-    /// chip would be duplicate chrome; with it closed nothing on screen does.
     fn workspace_chrome_identity(&self) -> (WorkspaceChromeIdentity, Tooltip) {
         let workspace = self.workspaces.active_workspace();
         let remote_connection_phase = workspace
@@ -3249,9 +3147,8 @@ impl WorkspaceManager {
             "No matching Workspaces",
         ))
         .menu_with_filter_header()
-        // The chooser takes the top chrome's icon size rather than the selector's own, so the
-        // glyph is one size whether the sidebar is open, where the chooser is this icon beside the
-        // sidebar toggle, or closed, where it widens into the chip carrying the same glyph.
+        // The chooser takes the top chrome's icon size so its glyph keeps one size across sidebar
+        // states.
         .icon_trigger(move |_, _| {
             // The same selector the chip's glyph carries: they are the one chooser icon in its two
             // states, so a test can hold them to one size.
@@ -3273,7 +3170,7 @@ impl WorkspaceManager {
         .tooltip(
             Tooltip::new("workspace-switcher-tooltip", "Switch Workspace")
                 .debug_selector("workspace-switcher-tooltip")
-                .keyboard_equivalent(presentation.shortcut(&SwitchWorkspace).unwrap_or_default()),
+                .shortcut(presentation.shortcut(&SwitchWorkspace).unwrap_or_default()),
         )
         .when_some(collapsed_identity, |chooser, (identity, tooltip)| {
             chooser
@@ -3284,9 +3181,9 @@ impl WorkspaceManager {
                 ))
                 .custom_trigger_height(frame.top_chip_height(appearance.top_height()))
                 .full_width(true)
-                .tooltip(tooltip.keyboard_equivalent(
-                    presentation.shortcut(&SwitchWorkspace).unwrap_or_default(),
-                ))
+                .tooltip(
+                    tooltip.shortcut(presentation.shortcut(&SwitchWorkspace).unwrap_or_default()),
+                )
         })
         .on_lifecycle(move |_, cx| {
             let manager = combo_lifecycle_manager.clone();
@@ -3329,9 +3226,7 @@ impl WorkspaceManager {
                 .debug_selector("toggle-sidebar-button")
                 .tooltip(
                     Tooltip::new("toggle-sidebar-tooltip", toggle_label)
-                        .keyboard_equivalent(
-                            presentation.shortcut(&ToggleSidebar).unwrap_or_default(),
-                        )
+                        .shortcut(presentation.shortcut(&ToggleSidebar).unwrap_or_default())
                         .debug_selector("toggle-sidebar-tooltip"),
                 )
                 .on_activate(move |_, window, cx| {
@@ -3355,7 +3250,7 @@ impl WorkspaceManager {
         ))
         .status(self.window_drag_status.clone())
         .pointer_insets(Edges {
-            right: super::resize_handle_theme::spacious_target_half_thickness(cx),
+            right: super::control_theme::resize_handle::spacious_target_half_thickness(cx),
             ..Edges::default()
         })
         .debug_selector("workspace-top-chrome-drag-region")
@@ -3383,11 +3278,8 @@ impl WorkspaceManager {
             .into_any_element()
     }
 
-    /// The title-bar surface behind the top-left chrome.
-    ///
-    /// It paints beneath the Tab manager rather than with the chrome's controls. The first Tab's
-    /// leading inset reaches under the chrome, so an opaque surface painted above the Tab strip
-    /// would hide the mark that separates the strip's start from the sidebar.
+    /// The title-bar surface behind the top-left chrome. It paints beneath the Tab manager so it
+    /// cannot hide the mark at the Tab strip's start.
     fn render_top_left_chrome_surface(
         layout: WorkspaceChromeLayout,
         window: &Window,
@@ -3543,9 +3435,8 @@ impl WorkspaceManager {
 }
 
 impl WorkspaceManager {
-    /// Keeps ordinary content and complete transient owners on the same action routes while
-    /// leaving the active modal outside those routes. Picker-owned capture handlers still decide
-    /// which hierarchy actions may reach the Workspace.
+    /// Keeps ordinary content and complete transient owners on the same action routes while leaving
+    /// the active modal outside those routes.
     fn workspace_action_scope(cx: &Context<Self>) -> gpui::Div {
         div()
             .key_context(TERMINAL_KEY_CONTEXT)
@@ -3626,10 +3517,10 @@ fn classify_remote_workspace_restart_failure(
 ) -> RemoteWorkspaceReconnectFailure {
     match error {
         RemoteTabManagerLifecycleError::Revalidation(
-            crate::terminal::RemoteChannelRevalidationError::DirectoryUnavailable,
+            crate::terminal::TerminalSessionChannelRevalidationError::DirectoryUnavailable,
         ) => RemoteWorkspaceReconnectFailure::DirectoryUnavailable,
         RemoteTabManagerLifecycleError::Revalidation(
-            crate::terminal::RemoteChannelRevalidationError::IdentityChanged,
+            crate::terminal::TerminalSessionChannelRevalidationError::IdentityChanged,
         ) => RemoteWorkspaceReconnectFailure::IdentityChanged,
         _ => RemoteWorkspaceReconnectFailure::ConnectionFailed { detail: None },
     }

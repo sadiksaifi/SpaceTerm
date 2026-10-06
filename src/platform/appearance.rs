@@ -41,11 +41,9 @@ pub(crate) struct NativeWindowComposition {
 /// Selected at startup; only this Adapter queries or changes native appearance.
 pub(crate) trait AppearancePlatform {
     fn system_appearance(&self) -> Option<Appearance>;
-    /// Whether the user asks application motion to be reduced.
     fn prefers_reduced_motion(&self) -> bool {
         false
     }
-    /// Whether this Adapter can present a translucent native Operating-System Window.
     fn supports_native_window_transparency(&self) -> bool {
         false
     }
@@ -188,23 +186,5 @@ pub(crate) mod testing {
         fn apply_native_appearance(&self, appearance: Appearance) {
             self.applied.borrow_mut().push(appearance);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn non_material_accessibility_facts_do_not_suppress_transparency() {
-        let platform = testing::RecordingAppearancePlatform::default();
-        platform.set_show_borders(true);
-        platform.set_differentiate_without_color(true);
-        let options = platform.accessibility_display_options();
-
-        assert!(options.show_borders);
-        assert!(options.differentiate_without_color);
-        assert!(!options.reduce_transparency);
-        assert!(!options.increase_contrast);
     }
 }

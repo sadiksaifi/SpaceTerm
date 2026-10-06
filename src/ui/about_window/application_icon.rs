@@ -1,9 +1,5 @@
 //! Draws an identity's application icon from its Icon Composer document.
-//!
-//! Hosts with a compiled bundle icon show that icon. Elsewhere SpaceTerm composes the same document
-//! as one full-color SVG: the document's fill on the icon body, each layer's artwork in its
-//! light-appearance fill, and the layer shadow and translucency the document asks for. The glass
-//! material itself is approximated as a flat, partly translucent fill under a soft rim highlight.
+//! Without a compiled bundle icon, the glass material is approximated as a flat translucent fill.
 
 use std::fmt::Write as _;
 
@@ -517,14 +513,26 @@ mod tests {
     fn channel_marks_rank_the_preflight_and_development_icons() {
         let mark = artwork(838.5, 627.0);
         let upper = artwork(838.5, 514.0);
+        let lower = artwork(838.5, 740.0);
         let light = |pixel: [u8; 4]| pixel[..3].iter().all(|channel| *channel > 150);
         let identities = crate::application_identity::testing::all();
         let marks = identities.map(|identity| {
             let pixel = rendered(identity.icon());
-            (light(pixel(mark.0, mark.1)), light(pixel(upper.0, upper.1)))
+            (
+                light(pixel(mark.0, mark.1)),
+                light(pixel(upper.0, upper.1)),
+                light(pixel(lower.0, lower.1)),
+            )
         });
         // Release: no mark. Preflight: one centered mark. Development: two marks.
-        assert_eq!(marks, [(false, false), (true, false), (false, true)]);
+        assert_eq!(
+            marks,
+            [
+                (false, false, false),
+                (true, false, false),
+                (false, true, true)
+            ]
+        );
     }
 
     #[test]

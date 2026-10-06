@@ -34,7 +34,6 @@ impl ControlTypography {
         }
     }
 
-    /// Sets the distinct font used by group headings in command and menu surfaces.
     pub fn section(mut self, section: Font) -> Self {
         self.section = section;
         self
@@ -48,37 +47,30 @@ impl ControlTypography {
         self
     }
 
-    /// Returns the font used for ordinary labels, values, and editable text.
     pub fn regular(&self) -> &Font {
         &self.regular
     }
 
-    /// Returns the font used for section labels and other emphasized chrome text.
     pub fn emphasis(&self) -> &Font {
         &self.emphasis
     }
 
-    /// Returns the font used for group headings in command and menu surfaces.
     pub fn section_font(&self) -> &Font {
         &self.section
     }
 
-    /// Returns the font used for modal and major chrome headings.
     pub fn heading(&self) -> &Font {
         &self.heading
     }
 
-    /// Returns the font used for keyboard equivalents.
     pub fn shortcut(&self) -> &Font {
         &self.shortcut
     }
 
-    /// Returns the font used for compact explanatory text.
     pub fn caption(&self) -> &Font {
         &self.caption
     }
 
-    /// Returns the font used for compact tabular labels.
     pub fn badge(&self) -> &Font {
         &self.badge
     }
@@ -172,7 +164,6 @@ impl ControlShadow {
         }
     }
 
-    /// Creates an explicitly shadowless presentation.
     pub fn none() -> Self {
         Self::default()
     }
@@ -198,13 +189,6 @@ pub(crate) fn scale_metric(value: Pixels, scale: f32) -> Pixels {
     value * normalized_scale(scale)
 }
 
-pub(crate) fn scale_line_box(
-    extent: Pixels,
-    baseline_text: Pixels,
-    text_scale: f32,
-    spacing_scale: f32,
-) -> Pixels {
-    let content = baseline_text * normalized_scale(text_scale);
-    let padding = (extent - baseline_text).max(px(0.0)) * normalized_scale(spacing_scale);
-    content + padding
+pub(crate) fn scale_line_box(extent: Pixels, baseline_text: Pixels, spacing_scale: f32) -> Pixels {
+    baseline_text + (extent - baseline_text).max(px(0.0)) * normalized_scale(spacing_scale)
 }

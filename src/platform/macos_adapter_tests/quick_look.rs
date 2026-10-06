@@ -15,8 +15,9 @@ fn native_link(
     )
 }
 
-#[test]
-fn presenter_rejects_a_replaced_file_before_calling_the_platform() {
+#[gpui::test]
+fn presenter_rejects_a_replaced_file_before_calling_the_platform(cx: &mut gpui::TestAppContext) {
+    let window = cx.add_window(|_, _| gpui::EmptyView);
     let directory = std::env::temp_dir().join(format!(
         "spaceterm-file-preview-platform-replaced-{}",
         std::process::id()
@@ -31,9 +32,13 @@ fn presenter_rejects_a_replaced_file_before_calling_the_platform() {
     fs::rename(replacement, &file).unwrap();
     let mut presenter = FilePreviewPresenter::new(RecordingPanel::default());
 
-    let result = presenter.preview(&target);
+    let result = window
+        .update(cx, |_, window, cx| {
+            presenter.preview_in_window(&target, window, cx)
+        })
+        .unwrap();
 
-    assert_eq!(result, Err(FilePreviewError::StaleTarget));
+    assert_eq!(result.err(), Some(FilePreviewError::StaleTarget));
     assert_eq!(
         (presenter.panel.previews.len(), presenter.panel.dismissals),
         (0, 1)

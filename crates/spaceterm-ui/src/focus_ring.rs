@@ -1,13 +1,7 @@
 //! The keyboard focus ring every focusable control draws around itself.
 //!
-//! One band, measured from AppKit on macOS: its outer edge sits 3pt outside the control's fill and
-//! it runs 3.5pt inward, so it overlaps the fill by half a point and covers any border drawn around
-//! the fill. Its corners stay concentric with the control's. The ring wraps its control and paints
-//! after it, and the control's border fades out as the band fades in, so neither the border nor
-//! anything else the control draws shows through the translucent band. The control otherwise keeps
-//! its resting appearance; the ring alone states focus. On gaining focus the band starts wide
-//! and far out, faint, and contracts onto the control while it fades in. On losing focus it
-//! disappears at once.
+//! The band geometry is measured from AppKit on macOS. The ring paints after its control and fades
+//! the control's border out, so nothing shows through the translucent band.
 use std::cell::Cell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -614,7 +608,7 @@ mod tests {
     #[gpui::test]
     fn reduced_motion_shows_the_ring_at_rest(cx: &mut gpui::TestAppContext) {
         let catalog = crate::catalog_tests::catalog_with_motion(1, ControlMotion::Reduced);
-        cx.update(|cx| crate::init(cx, catalog).unwrap());
+        cx.update(|cx| crate::catalog_tests::init_uniform_control_catalog(cx, catalog).unwrap());
         let (root, cx) = cx.add_window_view(|_, cx| Fixture {
             focus: cx.focus_handle(),
             border_width: px(1.0),

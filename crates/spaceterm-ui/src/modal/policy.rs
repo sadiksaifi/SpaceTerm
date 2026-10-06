@@ -27,26 +27,6 @@ pub enum TextDirection {
     RightToLeft,
 }
 
-/// Direction-independent edge used by desktop placement policy tests.
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum LogicalEdge {
-    /// Start edge in the current logical direction.
-    Leading,
-    /// End edge in the current logical direction.
-    Trailing,
-}
-
-/// Resolved viewport edge used by desktop placement policy tests.
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PhysicalEdge {
-    /// Physical left edge.
-    Left,
-    /// Physical right edge.
-    Right,
-}
-
 /// Adaptive action-area direction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ActionAxis {
@@ -63,13 +43,6 @@ pub enum ModalInitialFocus {
     Action(usize),
     /// Focus the modal surface when no safe action is available.
     Surface,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum DesktopShape {
-    MacOs,
-    #[cfg(test)]
-    WinUi,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -105,33 +78,18 @@ impl ArrangementActionFacts for super::core::ModalRenderAction {
 
 /// Immutable installed logical desktop policy, separate from paint and metrics.
 ///
-/// Policy validates action identity, role, intent, enabled/default facts, facade-specific safe
-/// dismissal, Alert bounds, and programmatic-only deadlines. It also selects initial focus, logical
-/// leading/trailing action placement, right-to-left mirroring, and adaptive action axis.
-/// Callers keep typed identity and logical order; physical order never changes result identity.
-///
-/// The application must explicitly install one policy with [`install_modal_policy`]. Production
-/// uses [`Self::mac_os`]. An alternate WinUI-shaped profile exists only inside pure tests to prove
-/// that public semantics do not depend on macOS ordering.
+/// The policy selects focus entry, physical action placement, and action axis; physical order never
+/// changes result identity. Install it with [`install_modal_policy`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ModalDesktopPolicy {
-    shape: DesktopShape,
     text_direction: TextDirection,
     maximum_programmatic_only_deadline: Duration,
 }
 
 impl ModalDesktopPolicy {
-    /// Returns the macOS logical policy used by production application installation.
-    ///
-    /// In horizontal left-to-right rows Cancel is leading and the explicit default is trailing;
-    /// right-to-left layout mirrors physical placement while retaining logical traversal and typed
-    /// identity. Return activates an enabled focused action before falling back to an explicit
-    /// enabled default, and cancellation actions route only to the enabled safe Cancel path. The
-    /// separately installed macOS modal keybinding profile adds Command-Period. Programmatic-only
-    /// progress is capped at thirty minutes.
+    /// Returns the macOS logical policy used in production.
     pub const fn mac_os() -> Self {
         Self {
-            shape: DesktopShape::MacOs,
             text_direction: TextDirection::LeftToRight,
             maximum_programmatic_only_deadline: MAXIMUM_PROGRAMMATIC_ONLY_DEADLINE,
         }
@@ -148,15 +106,6 @@ impl ModalDesktopPolicy {
 
     pub(super) const fn text_direction(self) -> TextDirection {
         self.text_direction
-    }
-
-    #[cfg(test)]
-    pub(super) const fn win_ui_for_tests() -> Self {
-        Self {
-            shape: DesktopShape::WinUi,
-            text_direction: TextDirection::LeftToRight,
-            maximum_programmatic_only_deadline: MAXIMUM_PROGRAMMATIC_ONLY_DEADLINE,
-        }
     }
 
     pub(super) fn validate_alert<A: Eq>(
@@ -184,24 +133,7 @@ impl ModalDesktopPolicy {
                 count: alert.actions.len(),
             });
         }
-        if let Some(index) = alert
-            .actions
-            .iter()
-            .position(|action| action.role() == ModalActionRole::Help)
-        {
-            return Err(ModalValidationError::AlertHelpMustBeSeparate { index });
-        }
-        if let Some(help) = &alert.help
-            && help.role() != ModalActionRole::Help
-        {
-            return Err(ModalValidationError::InvalidHelpActionRole);
-        }
-
-        let mut all_actions = alert.actions.iter().collect::<Vec<_>>();
-        if let Some(help) = &alert.help {
-            all_actions.push(help);
-        }
-        let facts = validate_actions(&all_actions)?;
+        let facts = validate_actions(&alert.actions.iter().collect::<Vec<_>>())?;
         validate_alert_dismissal(&alert.actions, facts.safe_cancel)?;
         self.alert_initial_focus(&alert.actions)
             .ok_or(ModalValidationError::MissingSafeDismissal)?;
@@ -266,13 +198,7 @@ impl ModalDesktopPolicy {
         actions: &[A],
         axis: ActionAxis,
     ) -> ActionArrangement {
-        let row = actions
-            .iter()
-            .enumerate()
-            .filter_map(|(index, action)| {
-                (action.arrangement_role() != ModalActionRole::Help).then_some(index)
-            })
-            .collect::<Vec<_>>();
+        let row = (0..actions.len()).collect::<Vec<_>>();
         let default = row
             .iter()
             .copied()
@@ -281,23 +207,15 @@ impl ModalDesktopPolicy {
             .iter()
             .copied()
             .find(|index| actions[*index].arrangement_role() == ModalActionRole::Cancel);
-        let traversal = match (self.shape, axis) {
-            (DesktopShape::MacOs, ActionAxis::Horizontal) => ordered_indices(
+        let traversal = match axis {
+            ActionAxis::Horizontal => ordered_indices(
                 cancel,
                 row.iter()
                     .copied()
                     .filter(|index| Some(*index) != cancel && Some(*index) != default),
                 default,
             ),
-            (DesktopShape::MacOs, ActionAxis::Vertical) => ordered_indices(
-                default,
-                row.iter()
-                    .copied()
-                    .filter(|index| Some(*index) != default && Some(*index) != cancel),
-                cancel,
-            ),
-            #[cfg(test)]
-            (DesktopShape::WinUi, _) => ordered_indices(
+            ActionAxis::Vertical => ordered_indices(
                 default,
                 row.iter()
                     .copied()
@@ -309,17 +227,9 @@ impl ModalDesktopPolicy {
         if axis == ActionAxis::Horizontal && self.text_direction == TextDirection::RightToLeft {
             physical.reverse();
         }
-        let help = actions
-            .iter()
-            .enumerate()
-            .filter_map(|(index, action)| {
-                (action.arrangement_role() == ModalActionRole::Help).then_some(index)
-            })
-            .collect();
         ActionArrangement {
             physical,
             traversal,
-            help,
         }
     }
 
@@ -327,7 +237,7 @@ impl ModalDesktopPolicy {
         &self,
         action: &super::core::ModalRenderAction,
     ) -> DefaultActionPresentation {
-        if action.is_default && self.shape == DesktopShape::MacOs {
+        if action.is_default {
             DefaultActionPresentation::Emphasized
         } else {
             DefaultActionPresentation::None
@@ -410,7 +320,6 @@ pub fn install_modal_policy(cx: &mut App, policy: ModalDesktopPolicy) {
 pub(super) struct ActionArrangement {
     pub(super) physical: Vec<usize>,
     pub(super) traversal: Vec<usize>,
-    pub(super) help: Vec<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -508,11 +417,6 @@ fn validate_actions<A: Eq>(
                 safe_cancel = Some(index);
             }
         }
-        if action.role() == ModalActionRole::Help
-            && (action.is_default() || action.intent() == ModalActionIntent::Destructive)
-        {
-            return Err(ModalValidationError::InvalidHelpAction { index });
-        }
     }
     Ok(ActionFacts { safe_cancel })
 }
@@ -548,11 +452,9 @@ fn validate_alert_dismissal<A>(
     safe_cancel: Option<usize>,
 ) -> Result<(), ModalValidationError> {
     validate_destructive_decision(actions, safe_cancel)?;
-    let has_enabled_acknowledgement = actions.iter().any(|action| {
-        action.is_enabled()
-            && action.role() != ModalActionRole::Help
-            && action.intent() == ModalActionIntent::Ordinary
-    });
+    let has_enabled_acknowledgement = actions
+        .iter()
+        .any(|action| action.is_enabled() && action.intent() == ModalActionIntent::Ordinary);
     if !has_enabled_acknowledgement {
         return Err(ModalValidationError::MissingSafeDismissal);
     }
@@ -576,16 +478,6 @@ fn ordered_indices(
     last: Option<usize>,
 ) -> Vec<usize> {
     first.into_iter().chain(middle).chain(last).collect()
-}
-
-#[cfg(test)]
-pub(super) const fn physical_edge(edge: LogicalEdge, direction: TextDirection) -> PhysicalEdge {
-    match (edge, direction) {
-        (LogicalEdge::Leading, TextDirection::LeftToRight)
-        | (LogicalEdge::Trailing, TextDirection::RightToLeft) => PhysicalEdge::Left,
-        (LogicalEdge::Trailing, TextDirection::LeftToRight)
-        | (LogicalEdge::Leading, TextDirection::RightToLeft) => PhysicalEdge::Right,
-    }
 }
 
 pub(super) fn select_action_axis(
@@ -795,41 +687,6 @@ mod tests {
     }
 
     #[test]
-    fn alert_validation_requires_help_to_be_separate() {
-        let alert = ordinary_alert(vec![action("help", ModalActionRole::Help, "help")]);
-
-        assert_eq!(
-            alert.validate(&ModalDesktopPolicy::mac_os()),
-            Err(ModalValidationError::AlertHelpMustBeSeparate { index: 0 })
-        );
-    }
-
-    #[test]
-    fn alert_validation_rejects_non_help_in_help_slot() {
-        let alert = ordinary_alert(vec![action("okay", ModalActionRole::Affirmative, "okay")])
-            .help_action(action("more", ModalActionRole::Auxiliary, "more"));
-
-        assert_eq!(
-            alert.validate(&ModalDesktopPolicy::mac_os()),
-            Err(ModalValidationError::InvalidHelpActionRole)
-        );
-    }
-
-    #[test]
-    fn alert_validation_rejects_invalid_separate_help_action() {
-        let alert = ordinary_alert(vec![action("okay", ModalActionRole::Affirmative, "okay")])
-            .help_action(
-                action("help", ModalActionRole::Help, "help")
-                    .with_intent(ModalActionIntent::Destructive),
-            );
-
-        assert_eq!(
-            alert.validate(&ModalDesktopPolicy::mac_os()),
-            Err(ModalValidationError::InvalidHelpAction { index: 1 })
-        );
-    }
-
-    #[test]
     fn dialog_validation_rejects_missing_action_initial_focus_identity() {
         let dialog = Dialog::new(
             ModalId::new("dialog"),
@@ -860,7 +717,7 @@ mod tests {
     }
 
     #[test]
-    fn cancel_key_equivalents_never_target_a_destructive_cancel() {
+    fn cancel_shortcuts_never_target_a_destructive_cancel() {
         let policy = ModalDesktopPolicy::mac_os();
         let actions = vec![
             action("continue", ModalActionRole::Affirmative, "continue"),
@@ -934,7 +791,6 @@ mod tests {
         let policy = ModalDesktopPolicy::mac_os();
         let actions = vec![
             action("replace", ModalActionRole::Affirmative, "replace").default_action(true),
-            action("help", ModalActionRole::Help, "help"),
             action("options", ModalActionRole::Auxiliary, "options"),
             action("cancel", ModalActionRole::Cancel, "cancel"),
         ];
@@ -947,17 +803,11 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(
-            (
-                physical_ids,
-                arrangement.physical,
-                arrangement.traversal,
-                arrangement.help,
-            ),
+            (physical_ids, arrangement.physical, arrangement.traversal),
             (
                 vec!["cancel", "options", "replace"],
-                vec![3, 2, 0],
-                vec![3, 2, 0],
-                vec![1],
+                vec![2, 1, 0],
+                vec![2, 1, 0],
             )
         );
     }
@@ -967,7 +817,6 @@ mod tests {
         let policy = ModalDesktopPolicy::mac_os().with_text_direction(TextDirection::RightToLeft);
         let actions = vec![
             action("replace", ModalActionRole::Affirmative, "replace").default_action(true),
-            action("help", ModalActionRole::Help, "help"),
             action("options", ModalActionRole::Auxiliary, "options"),
             action("cancel", ModalActionRole::Cancel, "cancel"),
         ];
@@ -980,17 +829,11 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(
-            (
-                physical_ids,
-                arrangement.physical,
-                arrangement.traversal,
-                arrangement.help,
-            ),
+            (physical_ids, arrangement.physical, arrangement.traversal),
             (
                 vec!["replace", "options", "cancel"],
-                vec![0, 2, 3],
-                vec![3, 2, 0],
-                vec![1],
+                vec![0, 1, 2],
+                vec![2, 1, 0],
             )
         );
     }
@@ -1009,39 +852,6 @@ mod tests {
         assert_eq!(
             (arrangement.physical, arrangement.traversal),
             (vec![2, 0, 1], vec![2, 0, 1])
-        );
-    }
-
-    #[test]
-    fn alternate_policy_arranges_shared_typed_facts_and_preserves_identity() {
-        let policy = ModalDesktopPolicy::win_ui_for_tests();
-        let actions = vec![
-            action("cancel", ModalActionRole::Cancel, "cancel"),
-            action("help", ModalActionRole::Help, "help"),
-            action("options", ModalActionRole::Auxiliary, "options"),
-            action("save", ModalActionRole::Affirmative, "save").default_action(true),
-        ];
-
-        let arrangement = policy.action_arrangement(&actions, ActionAxis::Horizontal);
-        let physical_ids = arrangement
-            .physical
-            .iter()
-            .map(|index| *actions[*index].id())
-            .collect::<Vec<_>>();
-
-        assert_eq!(
-            (
-                physical_ids,
-                arrangement.physical,
-                arrangement.traversal,
-                arrangement.help,
-            ),
-            (
-                vec!["save", "options", "cancel"],
-                vec![3, 2, 0],
-                vec![3, 2, 0],
-                vec![1],
-            )
         );
     }
 
@@ -1209,17 +1019,6 @@ mod tests {
         assert_eq!(
             select_action_axis(px(320.0), px(288.0), &[px(80.0)], metrics),
             ActionAxis::Vertical
-        );
-    }
-
-    #[test]
-    fn logical_edges_mirror_in_right_to_left_layout() {
-        assert_eq!(
-            (
-                physical_edge(LogicalEdge::Leading, TextDirection::RightToLeft),
-                physical_edge(LogicalEdge::Trailing, TextDirection::RightToLeft),
-            ),
-            (PhysicalEdge::Right, PhysicalEdge::Left)
         );
     }
 }

@@ -1,9 +1,5 @@
 //! The Settings Window: a separate, modeless Operating-System Window for SpaceTerm Settings.
-//!
-//! Settings is its own window rather than a Workspace panel because it is application scoped: it
-//! outlives any one Workspace and must stay reachable when no Workspace window exists. It follows
-//! the desktop convention for a settings window while remaining entirely GPUI-rendered, so nothing
-//! here depends on a host settings surface and the layout stays portable.
+//! It is application scoped so it stays reachable when no Workspace window exists.
 
 mod advanced;
 mod catalog;
@@ -19,16 +15,7 @@ mod themes;
 mod updates;
 
 #[cfg(test)]
-pub(crate) mod test_support;
-
-#[cfg(test)]
 mod control_tests;
-
-#[cfg(test)]
-mod permission_access_tests;
-
-#[cfg(test)]
-mod microphone_tests;
 
 #[cfg(test)]
 mod updates_tests;
@@ -55,8 +42,8 @@ use spaceterm_ui::{
 
 use crate::appearance::{
     Appearance, AppearanceGeneration, AppearanceMode, AvailableFonts, ChromeDensity, Color,
-    FontClass, ResetTarget, SettingsDocument, SystemAppearance, TerminalFontFamily, ThemeCatalog,
-    ThemeId, UnavailableWindowEffect, WindowBackgroundChoices,
+    FontClass, ResetTarget, SystemAppearance, TerminalFontFamily, ThemeCatalog, ThemeId,
+    UnavailableWindowEffect, WindowBackgroundChoices,
 };
 use crate::desktop_profile::HostFeature;
 use crate::platform::microphone_access::MicrophoneAccess;
@@ -64,6 +51,7 @@ use crate::platform::permission_access::{PermissionAccess, SystemPermission};
 #[cfg(test)]
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
 use crate::platform::window_movement::{OperatingSystemWindowDragPlatform, WindowMovementFactory};
+use crate::settings::SettingsDocument;
 use crate::theme_registry::ZedThemeRegistry;
 use crate::ui::appearance::ChromeAppearance;
 use crate::ui::appearance::settings::{SettingsAppearance, SettingsSurfaceRole};
@@ -110,8 +98,6 @@ struct OpenSettingsWindow(WindowHandle<SettingsWindow>);
 impl Global for OpenSettingsWindow {}
 
 /// The system permissions the Privacy section reads and recovers.
-///
-/// A host without one of these authorizations composes none, and the Privacy section says so.
 #[derive(Clone, Default)]
 pub(crate) struct PermissionCapabilities {
     pub(crate) microphone: Option<Rc<dyn MicrophoneAccess>>,
@@ -121,9 +107,6 @@ pub(crate) struct PermissionCapabilities {
 }
 
 /// Host-owned capabilities needed by the Settings window's app-drawn titlebar and Privacy section.
-///
-/// Keeping the native movement adapter behind the same factory used by Workspace windows leaves
-/// Settings portable and gives each opened window one independent pointer-interaction owner.
 struct SettingsWindowComposition {
     window_movement: Rc<dyn WindowMovementFactory>,
     permissions: PermissionCapabilities,
@@ -325,7 +308,6 @@ impl SidebarOwner for SettingsWindow {
     }
 }
 
-/// The host feature a whole section presents, if any.
 fn section_feature(section: SettingsSectionId) -> Option<HostFeature> {
     (section == SettingsSectionId::Updates).then_some(HostFeature::Updates)
 }
@@ -474,10 +456,9 @@ impl SettingsWindow {
             },
         )
         .detach();
-        // Authorization can change in the system's settings while this window is in the background,
-        // most often right after the Denied recovery sent the person there.
-        // Leaving the window also ends searching by Shortcut, which keeps focus but must not keep
-        // taking the chords pressed on return.
+        // Authorization can change in System Settings while this window is in the background.
+        // Leaving the window also ends searching by Shortcut, so chords pressed on return are not
+        // captured.
         cx.observe_window_activation(window, |settings, window, cx| {
             if window.is_window_active() {
                 settings.refresh_microphone_access(cx);
@@ -696,19 +677,13 @@ impl SettingsWindow {
     fn fixed_appearance(&self) -> Appearance {
         self.editor
             .document()
-            .preferences
+            .appearance
             .mode
             .resolve(Appearance::Dark)
     }
 
     fn edit(&mut self, edit: impl FnOnce(&mut SettingsDocument), cx: &mut Context<Self>) {
         self.editor.edit(edit, cx);
-    }
-
-    /// Whether this row differs from its default, which is when a reset is worth offering.
-    #[cfg(test)]
-    fn differs_from_default(&self, row: SettingsRowId, cx: &App) -> bool {
-        self.pending_reset(row, cx).is_some()
     }
 
     /// How this row returns to its default, when it differs from it.
@@ -731,10 +706,9 @@ impl SettingsWindow {
             return None;
         }
         let target = row.reset_target(self.fixed_appearance())?;
-        // Every resettable row asks this on every frame, so only preferences are copied. Cloning
-        // the document would copy the whole installed theme catalog to answer a question about
-        // one field.
-        let current = &self.editor.document().preferences;
+        // Only preferences are copied, because cloning the document every frame would copy the
+        // installed theme catalog.
+        let current = &self.editor.document().appearance;
         let mut reset = current.clone();
         reset.reset(target.clone());
         (reset != *current).then_some(RowReset::Appearance(target))
@@ -1157,7 +1131,7 @@ impl SettingsWindow {
             SettingsRowId::Transparency => self.render_transparency(appearance, cx),
             SettingsRowId::Blur => self.render_blur(cx),
             SettingsRowId::TerminalTheme => self.render_current_theme(appearance, window, cx),
-            SettingsRowId::Density => self.render_density(appearance, cx),
+            SettingsRowId::Density => self.render_density(cx),
             SettingsRowId::TerminalFontFamily => self.render_terminal_font(appearance, cx),
             SettingsRowId::TerminalBaseSize => self.render_terminal_size(appearance, cx),
             SettingsRowId::TerminalLineHeight => self.render_line_height(appearance, cx),
@@ -1230,7 +1204,7 @@ impl SettingsWindow {
 
     /// One mode selects Chrome appearance and the matching Terminal slot.
     fn render_appearance_mode(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let current = self.editor.document().preferences.mode;
+        let current = self.editor.document().appearance.mode;
         let selector = "settings-appearance-mode";
         let edge = crate::ui::appearance::chrome(cx)
             .host_colors(spaceterm_ui::ControlHost::Card)
@@ -1262,15 +1236,14 @@ impl SettingsWindow {
             .into_any_element()
     }
 
-    /// Each miniature previews built-in Chrome and its matching Terminal slot.
-    ///
-    /// Auto shows both slots side by side, light leading, so it never reads as a second Light.
+    /// Each miniature previews built-in Chrome and its matching Terminal slot. Auto shows both
+    /// slots side by side, light leading.
     fn mode_preview_palettes(&self, mode: AppearanceMode) -> Vec<ModePreviewPalette> {
         let document = self.editor.document();
         let catalog =
             ThemeCatalog::from_terminal_themes(&document.terminal_themes).unwrap_or_default();
         let pick = |appearance: Appearance| {
-            let mut preferences = document.preferences.clone();
+            let mut preferences = document.appearance.clone();
             preferences.mode = appearance.into();
             let resolved = catalog
                 .resolve(
@@ -1299,27 +1272,22 @@ impl SettingsWindow {
     }
 
     fn set_appearance_mode(&mut self, mode: AppearanceMode, cx: &mut Context<Self>) {
-        self.edit(move |draft| draft.preferences.mode = mode, cx);
+        self.edit(move |draft| draft.appearance.mode = mode, cx);
         self.synchronize_search_results();
     }
 
     fn set_theme(&mut self, slot: Appearance, id: ThemeId, cx: &mut Context<Self>) {
         self.edit(
             move |draft| {
-                let themes = &mut draft.preferences.terminal.themes;
+                let themes = &mut draft.appearance.terminal.themes;
                 themes.set(slot, id);
             },
             cx,
         );
     }
 
-    fn render_density(
-        &mut self,
-        appearance: &ChromeAppearance,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let _ = appearance;
-        let current = self.editor.document().preferences.window.density;
+    fn render_density(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let current = self.editor.document().appearance.window.density;
         let owner = cx.weak_entity();
         SegmentedControl::new(
             "settings-density",
@@ -1338,7 +1306,7 @@ impl SettingsWindow {
         .on_change(move |change, _, cx| {
             let density = *change.requested();
             let _ = owner.update(cx, |settings, cx| {
-                settings.edit(move |draft| draft.preferences.window.density = density, cx);
+                settings.edit(move |draft| draft.appearance.window.density = density, cx);
             });
         })
         .into_any_element()
@@ -1350,14 +1318,7 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let fonts = crate::ui::appearance_runtime::available_fonts(cx);
-        let current = match &self
-            .editor
-            .document()
-            .preferences
-            .terminal
-            .typography
-            .family
-        {
+        let current = match &self.editor.document().appearance.terminal.typography.family {
             TerminalFontFamily::DefaultMonospace => None,
             TerminalFontFamily::Named { family } => Some(family.clone()),
         };
@@ -1391,13 +1352,11 @@ impl SettingsWindow {
         )
         .disabled(!self.editor.editable())
         .on_accept(move |acceptance, _, cx| {
-            let Some(choice) = Some(acceptance.item_id().clone()) else {
-                return;
-            };
+            let choice = acceptance.item_id().clone();
             let _ = owner.update(cx, |settings, cx| {
                 settings.edit(
                     move |draft| {
-                        draft.preferences.terminal.typography.family = match choice {
+                        draft.appearance.terminal.typography.family = match choice {
                             Some(family) => TerminalFontFamily::Named { family },
                             None => TerminalFontFamily::DefaultMonospace,
                         };
@@ -1409,16 +1368,15 @@ impl SettingsWindow {
         .into_any_element()
     }
 
-    /// Transparency and Blur as the window presents them on this desktop.
-    ///
-    /// Where a window effect is unavailable, both rows show the defaults that render and cannot
-    /// change, while the retained choices wait in the document for a desktop that presents them.
+    /// Transparency and Blur as the window presents them on this desktop. Where a window effect is
+    /// unavailable, both rows show the rendering defaults and the retained choices wait in the
+    /// document.
     fn window_background(&self, cx: &App) -> WindowBackgroundChoices {
         super::appearance_runtime::current(cx)
             .chrome
             .composition
             .capabilities
-            .window_background(&self.editor.document().preferences.window)
+            .window_background(&self.editor.document().appearance.window)
     }
 
     fn render_transparency(
@@ -1440,7 +1398,7 @@ impl SettingsWindow {
             let _ = owner.update(cx, |settings, cx| {
                 settings.edit(
                     move |draft| {
-                        let value = &mut draft.preferences.window.transparency;
+                        let value = &mut draft.appearance.window.transparency;
                         *value = (((*value * 20.0).round() + delta as f32) / 20.0).clamp(0.0, 1.0);
                     },
                     cx,
@@ -1462,7 +1420,7 @@ impl SettingsWindow {
             .on_change(move |change, _, cx| {
                 let blur = change.requested();
                 let _ = owner.update(cx, |settings, cx| {
-                    settings.edit(move |draft| draft.preferences.window.blur = blur, cx);
+                    settings.edit(move |draft| draft.appearance.window.blur = blur, cx);
                 });
             })
             .into_any_element()
@@ -1476,7 +1434,7 @@ impl SettingsWindow {
         let value = self
             .editor
             .document()
-            .preferences
+            .appearance
             .terminal
             .typography
             .base_size;
@@ -1492,7 +1450,7 @@ impl SettingsWindow {
             let _ = owner.update(cx, |settings, cx| {
                 settings.edit(
                     move |draft| {
-                        let size = &mut draft.preferences.terminal.typography.base_size;
+                        let size = &mut draft.appearance.terminal.typography.base_size;
                         *size = (*size + f32::from(delta as i16)).clamp(8.0, 32.0);
                     },
                     cx,
@@ -1512,7 +1470,7 @@ impl SettingsWindow {
         let value = self
             .editor
             .document()
-            .preferences
+            .appearance
             .terminal
             .typography
             .line_height;
@@ -1528,7 +1486,7 @@ impl SettingsWindow {
             let _ = owner.update(cx, |settings, cx| {
                 settings.edit(
                     move |draft| {
-                        let height = &mut draft.preferences.terminal.typography.line_height;
+                        let height = &mut draft.appearance.terminal.typography.line_height;
                         // Round to the step so repeated presses cannot drift off the grid.
                         let stepped = (*height / STEP).round() + f32::from(delta as i16);
                         *height = (stepped * STEP).clamp(1.0, 2.0);
@@ -1542,16 +1500,13 @@ impl SettingsWindow {
     }
 
     /// Renders one font-weight row.
-    ///
-    /// Weight uses the same selector family as the theme and font rows. One dropdown family for
-    /// every "choose one" row keeps a single form from presenting two different control shapes.
     fn render_weight(
         &mut self,
         row: SettingsRowId,
         appearance: &ChromeAppearance,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let typography = &self.editor.document().preferences;
+        let typography = &self.editor.document().appearance;
         let current = match row {
             SettingsRowId::TerminalRegularWeight => typography.terminal.typography.regular_weight,
             _ => typography.terminal.typography.bold_weight,
@@ -1583,7 +1538,7 @@ impl SettingsWindow {
             let _ = owner.update(cx, |settings, cx| {
                 settings.edit(
                     move |draft| {
-                        let preferences = &mut draft.preferences;
+                        let preferences = &mut draft.appearance;
                         match row {
                             SettingsRowId::TerminalRegularWeight => {
                                 preferences.terminal.typography.regular_weight = weight
@@ -1599,13 +1554,7 @@ impl SettingsWindow {
     }
 
     fn render_italic(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let value = self
-            .editor
-            .document()
-            .preferences
-            .terminal
-            .typography
-            .italic;
+        let value = self.editor.document().appearance.terminal.typography.italic;
         let owner = cx.weak_entity();
         Switch::new("settings-terminal-italic", "Italic text", value)
             .size(ToggleSize::Regular)
@@ -1616,7 +1565,7 @@ impl SettingsWindow {
                 let italic = change.requested();
                 let _ = owner.update(cx, |settings, cx| {
                     settings.edit(
-                        move |draft| draft.preferences.terminal.typography.italic = italic,
+                        move |draft| draft.appearance.terminal.typography.italic = italic,
                         cx,
                     );
                 });
@@ -1628,7 +1577,7 @@ impl SettingsWindow {
         let value = self
             .editor
             .document()
-            .preferences
+            .appearance
             .terminal
             .rendering
             .bold_as_bright;
@@ -1647,7 +1596,7 @@ impl SettingsWindow {
             let _ = owner.update(cx, |settings, cx| {
                 settings.edit(
                     move |draft| {
-                        draft.preferences.terminal.rendering.bold_as_bright = bold_as_bright;
+                        draft.appearance.terminal.rendering.bold_as_bright = bold_as_bright;
                     },
                     cx,
                 );
@@ -1682,9 +1631,6 @@ impl SettingsWindow {
                 .flex_row()
                 .items_start()
                 .gap(appearance.spacing(8.0))
-                // The same inset notice the Themes page carries, at the window's own scope
-                // rather than the page's. A strip ruled off across the pane would be the one square
-                // edge left on a surface made of cards.
                 .mx(card_gutter(appearance))
                 .mt(appearance.spacing(12.0))
                 .p(appearance.spacing(10.0))
@@ -1722,8 +1668,6 @@ impl SettingsWindow {
                                 .child(explanation),
                         ),
                 )
-                // The glyph and text start at the top, beside the title. The actions answer the
-                // whole notice, so they center on its height.
                 .child(
                     div()
                         .flex()
@@ -1898,9 +1842,6 @@ struct ModePreviewPalette {
 }
 
 /// A miniature SpaceTerm window for each palette, split evenly when there is more than one.
-///
-/// Each part clips one full-size miniature from its own side, so a split reads as one window
-/// crossing from light to dark. A hairline edge keeps a light miniature visible on a light surface.
 fn mode_preview(
     palettes: &[ModePreviewPalette],
     edge: Color,
@@ -1976,10 +1917,8 @@ fn mode_miniature(
         )
 }
 
-/// The families the terminal font list offers.
-///
-/// Only monospaced families are offered: a proportional terminal font resolves to a fallback and
-/// reports a diagnostic, so it is not a choice worth presenting in the first place.
+/// The families the terminal font list offers. Only monospaced families are offered, because a
+/// proportional terminal font resolves to a fallback.
 fn terminal_font_families(fonts: &crate::appearance::AvailableFonts) -> Vec<String> {
     fonts
         .installed
@@ -1998,9 +1937,6 @@ fn retain_selected_item<I: Eq>(items: &mut Vec<ComboBoxItem<I>>, current: ComboB
 }
 
 /// One settings selector, decorated the same way wherever the form offers a choice.
-///
-/// Every selector filters a list, so its popup carries the same search glyph as the window's own
-/// search field, and the control marks the current value in its list.
 fn settings_selector<I: Clone + Eq + 'static>(
     selector: String,
     accessibility_name: impl Into<SharedString>,
@@ -2028,18 +1964,11 @@ fn settings_selector<I: Clone + Eq + 'static>(
     .debug_selector(selector)
 }
 
-/// The selector of the control inside one row.
-///
-/// A row and the control it holds are separate elements, so they carry separate selectors and a
-/// test can address either one.
 fn control_selector(row: SettingsRowId) -> String {
     format!("{}-control", row.descriptor().selector)
 }
 
 /// Where a row's label sits.
-///
-/// The theme preview, the gallery, and the settings file present themselves under their group's title,
-/// so they span the row without a label.
 fn row_layout(row: SettingsRowId) -> FormRowLayout {
     match row {
         SettingsRowId::TerminalTheme
@@ -2051,8 +1980,6 @@ fn row_layout(row: SettingsRowId) -> FormRowLayout {
 
 impl SettingsWindow {
     /// One line of guidance for the rows that warrant it.
-    ///
-    /// Guidance follows effective appearance and system access without changing retained choices.
     fn row_description(&self, row: SettingsRowId, cx: &App) -> Option<&'static str> {
         match row {
             SettingsRowId::AppearanceMode => Some("Auto matches the system light or dark setting."),

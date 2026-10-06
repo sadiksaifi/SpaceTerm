@@ -346,7 +346,7 @@ mod tests {
     }
 
     #[test]
-    fn scale_changes_invalidate_only_scale_dependent_resources() {
+    fn scale_change_requests_resources_once_and_release_stops_presentation() {
         let mut lifecycle = RenderLifecycle::new(visible());
         assert_eq!(lifecycle.update_scale(2.0), ScaleChange::ScaleResources);
         assert_eq!(lifecycle.update_scale(2.0), ScaleChange::Unchanged);

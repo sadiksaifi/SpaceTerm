@@ -1,4 +1,4 @@
-//! Private Session scheduling, including deadline arbitration and bounded fairness.
+//! Private Terminal Session scheduling, including deadline arbitration and bounded fairness.
 use super::*;
 use crate::terminal::paste::PasteConfirmationSchedule;
 use libghostty_vt::terminal::{CompressionActivity, CompressionResult};
@@ -73,7 +73,7 @@ impl<Activity: Eq> CompressionSchedule<Activity> {
     }
 }
 
-/// The Session handle can enqueue coalesced work without accessing worker schedules.
+/// The Terminal Session handle can enqueue coalesced work without accessing worker schedules.
 #[derive(Clone, Default)]
 pub(super) struct ScheduleInput {
     resizes: ResizeMailbox,
@@ -389,514 +389,6 @@ impl WorkerSchedules {
             return Some(Command::PublishAccessibility);
         }
         (now >= self.hidden_input.deadline).then_some(Command::PollHiddenInput)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn compression_waits_for_a_quiet_interval_after_activity() {
-        let start = Instant::now();
-        let mut schedule = CompressionSchedule::<u64>::new();
-
-        schedule.observe(start, 1, false);
-
-        assert!(!schedule.take_due(start + Duration::from_millis(249)));
-        assert!(schedule.take_due(start + Duration::from_millis(250)));
-        assert!(!schedule.take_due(start + Duration::from_millis(250)));
-    }
-
-    #[test]
-    fn compression_postpones_pending_work_after_input_or_output() {
-        let start = Instant::now();
-        let mut schedule = CompressionSchedule::<u64>::new();
-        schedule.observe(start, 1, false);
-        schedule.observe(start + Duration::from_millis(200), 1, true);
-
-        assert!(!schedule.take_due(start + Duration::from_millis(250)));
-        assert!(schedule.take_due(start + Duration::from_millis(450)));
-    }
-
-    #[test]
-    fn compression_continues_in_bounded_steps_until_complete() {
-        let start = Instant::now();
-        let mut schedule = CompressionSchedule::<u64>::new();
-        schedule.observe(start, 1, false);
-        assert!(schedule.take_due(start + Duration::from_millis(250)));
-
-        schedule.complete(
-            start + Duration::from_millis(250),
-            CompressionResult::Pending,
-        );
-        assert!(!schedule.take_due(start + Duration::from_millis(250)));
-        assert!(schedule.take_due(start + Duration::from_millis(251)));
-        schedule.complete(
-            start + Duration::from_millis(251),
-            CompressionResult::Complete,
-        );
-        assert_eq!(schedule.deadline(), None);
-    }
-
-    #[test]
-    fn completed_compression_restarts_only_when_activity_token_changes() {
-        let start = Instant::now();
-        let mut schedule = CompressionSchedule::<u64>::new();
-        schedule.observe(start, 1, false);
-        assert!(schedule.take_due(start + Duration::from_millis(250)));
-        schedule.complete(
-            start + Duration::from_millis(250),
-            CompressionResult::Complete,
-        );
-
-        schedule.observe(start + Duration::from_millis(300), 1, true);
-        assert_eq!(schedule.deadline(), None);
-        schedule.observe(start + Duration::from_millis(300), 2, false);
-        assert_eq!(
-            schedule.deadline(),
-            Some(start + Duration::from_millis(550))
-        );
-    }
-
-    #[test]
-    fn unsupported_compression_stops_for_the_terminal_lifetime() {
-        let start = Instant::now();
-        let mut schedule = CompressionSchedule::<u64>::new();
-        schedule.observe(start, 1, false);
-        assert!(schedule.take_due(start + Duration::from_millis(250)));
-        schedule.complete(
-            start + Duration::from_millis(250),
-            CompressionResult::Unsupported,
-        );
-
-        schedule.observe(start + Duration::from_millis(300), 1, true);
-        assert_eq!(schedule.deadline(), None);
-        schedule.observe(start + Duration::from_millis(300), 2, false);
-        assert_eq!(schedule.deadline(), None);
-    }
-
-    #[test]
-    fn failed_compression_stops_for_the_terminal_lifetime() {
-        let start = Instant::now();
-        let mut schedule = CompressionSchedule::<u64>::new();
-        schedule.observe(start, 1, false);
-
-        schedule.stop();
-        schedule.observe(start + Duration::from_millis(300), 2, false);
-
-        assert_eq!(schedule.deadline(), None);
-    }
-    #[test]
-    fn accessibility_continuation_runs_after_eight_normal_commands() {
-        let mut schedule = AccessibilityContinuationSchedule::default();
-        schedule.update(true);
-
-        for command in 0..ACCESSIBILITY_NORMAL_COMMAND_BURST {
-            assert!(!schedule.must_continue());
-            schedule.note_normal_command();
-            assert_eq!(
-                schedule.must_continue(),
-                command + 1 == ACCESSIBILITY_NORMAL_COMMAND_BURST
-            );
-        }
-
-        assert!(schedule.take());
-        assert!(!schedule.pending);
-        assert_eq!(schedule.normal_commands, 0);
-    }
-
-    #[test]
-    fn accessibility_continuation_is_cancelled_by_a_complete_update() {
-        let mut schedule = AccessibilityContinuationSchedule::default();
-        schedule.update(true);
-        schedule.note_normal_command();
-        schedule.update(false);
-
-        assert!(!schedule.pending);
-        assert!(!schedule.must_continue());
-        assert!(!schedule.take());
-    }
-
-    #[test]
-    fn repeated_incomplete_observations_do_not_starve_continuation_fairness() {
-        let mut schedule = AccessibilityContinuationSchedule::default();
-        schedule.update(true);
-
-        for _ in 0..ACCESSIBILITY_NORMAL_COMMAND_BURST {
-            schedule.note_normal_command();
-            schedule.update(true);
-        }
-
-        assert!(schedule.must_continue());
-    }
-
-    #[test]
-    fn hidden_input_polling_emits_only_transitions_and_fails_closed() {
-        let start = Instant::now();
-        let mut schedule = HiddenInputSchedule::new(start);
-
-        assert_eq!(schedule.update(start, Ok(false)), None);
-        assert_eq!(schedule.update(start, Ok(true)), Some(true));
-        assert_eq!(schedule.update(start, Ok(true)), None);
-        assert_eq!(
-            schedule.update(
-                start,
-                Err(NativePtyOperationFailure::new(
-                    std::io::ErrorKind::BrokenPipe
-                ))
-            ),
-            Some(false)
-        );
-        assert_eq!(schedule.deadline, start + HIDDEN_INPUT_IDLE_INTERVAL);
-    }
-
-    #[test]
-    fn hidden_input_idles_for_thirty_seconds_after_one_transition_followup() {
-        let now = Instant::now();
-        let mut schedules = WorkerSchedules::new(now, ScheduleInput::default());
-        schedules.update_hidden_input(now, Ok(false));
-        assert_eq!(
-            schedules.deadline(None),
-            Some(now + Duration::from_secs(30))
-        );
-        assert!(schedules.take_due(now + Duration::from_secs(29)).is_none());
-
-        let prompt = now + Duration::from_secs(1);
-        schedules.hidden_input_transition(prompt);
-        assert!(matches!(
-            schedules.take_due(prompt),
-            Some(Command::PollHiddenInput)
-        ));
-        assert_eq!(schedules.update_hidden_input(prompt, Ok(false)), None);
-        let settled = prompt + Duration::from_millis(200);
-        assert_eq!(schedules.deadline(None), Some(settled));
-        assert!(matches!(
-            schedules.take_due(settled),
-            Some(Command::PollHiddenInput)
-        ));
-        assert_eq!(schedules.update_hidden_input(settled, Ok(true)), Some(true));
-        assert_eq!(
-            schedules.deadline(None),
-            Some(settled + Duration::from_secs(30))
-        );
-
-        let focused = settled + Duration::from_secs(1);
-        schedules.hidden_input_transition(focused);
-        assert_eq!(schedules.deadline(None), Some(focused));
-        assert_eq!(
-            schedules.update_hidden_input(focused, Ok(false)),
-            Some(false)
-        );
-    }
-
-    #[test]
-    fn selection_autoscroll_schedule_uses_an_injected_monotonic_now() {
-        let epoch = Instant::now();
-        let mut schedule = SelectionAutoscrollSchedule::default();
-
-        schedule.update(epoch, Some(Duration::from_millis(100)));
-
-        assert!(!schedule.take_due(epoch + Duration::from_millis(99)));
-        assert!(schedule.take_due(epoch + Duration::from_millis(100)));
-        assert!(!schedule.take_due(epoch + Duration::from_secs(1)));
-
-        schedule.update(epoch, Some(Duration::from_millis(25)));
-        schedule.update(epoch, None);
-        assert!(!schedule.take_due(epoch + Duration::from_secs(1)));
-    }
-
-    #[test]
-    fn selection_autoscroll_motion_does_not_postpone_the_next_tick() {
-        let epoch = Instant::now();
-        let interval = Duration::from_millis(15);
-        let mut schedule = SelectionAutoscrollSchedule::default();
-        schedule.update(epoch, Some(interval));
-        for millis in 1..15 {
-            schedule.update(epoch + Duration::from_millis(millis), Some(interval));
-        }
-        assert!(schedule.take_due(epoch + interval));
-        assert!(!schedule.take_due(epoch + interval));
-        schedule.update(epoch + interval, Some(interval));
-        assert!(!schedule.take_due(epoch + Duration::from_millis(29)));
-        assert!(schedule.take_due(epoch + Duration::from_millis(30)));
-    }
-
-    #[test]
-    fn worker_schedules_preserve_deadline_priority_and_expire_each_payload_once() {
-        let now = Instant::now();
-        let mut schedules = WorkerSchedules::new(now, ScheduleInput::default());
-        schedules.update_hidden_input(now, Ok(false));
-        let due = now + Duration::from_secs(30);
-        schedules.update_selection_autoscroll(now, Some(Duration::from_secs(30)));
-        schedules
-            .request_paste_confirmation(PreparedPaste::prepare("one\ntwo".into()).unwrap(), now)
-            .unwrap();
-        assert_eq!(schedules.deadline(Some(now)), Some(now));
-        assert!(matches!(
-            schedules.take_due(due),
-            Some(Command::SelectionAutoscrollTick)
-        ));
-        assert!(matches!(
-            schedules.take_due(due),
-            Some(Command::PasteConfirmationExpired)
-        ));
-        assert!(matches!(
-            schedules.take_due(due),
-            Some(Command::PollHiddenInput)
-        ));
-        schedules.update_hidden_input(due, Ok(false));
-        assert!(schedules.take_due(due).is_none());
-    }
-
-    #[test]
-    fn presentation_schedule_accumulates_an_idle_output_burst_before_publishing() {
-        let start = Instant::now();
-        let mut schedule = PresentationSchedule::new(start);
-
-        schedule.request_accumulated(start);
-        let accumulation_deadline = start + PRESENTATION_ACCUMULATION_INTERVAL;
-        assert_eq!(schedule.deadline(), Some(accumulation_deadline));
-        assert!(!schedule.take_due(accumulation_deadline - Duration::from_micros(1)));
-
-        schedule.request_accumulated(start + Duration::from_millis(1));
-        assert_eq!(schedule.deadline(), Some(accumulation_deadline));
-        assert!(schedule.take_due(accumulation_deadline));
-    }
-
-    #[test]
-    fn presentation_schedule_coalesces_repeated_requests_to_one_display_interval() {
-        let start = Instant::now();
-        let mut schedule = PresentationSchedule::new(start);
-
-        schedule.request();
-        assert!(schedule.take_due(start));
-        schedule.mark_presented(start);
-
-        schedule.request();
-        schedule.request();
-        let next_frame = start + PRESENTATION_INTERVAL;
-        assert_eq!(schedule.deadline(), Some(next_frame));
-        assert!(!schedule.take_due(next_frame - Duration::from_micros(1)));
-        assert!(schedule.take_due(next_frame));
-        assert!(!schedule.take_due(next_frame));
-    }
-
-    #[test]
-    fn graphics_animation_wakes_once_at_the_engine_deadline() {
-        let start = Instant::now();
-        let mut schedules = WorkerSchedules::new(start, ScheduleInput::default());
-        schedules.update_hidden_input(start, Ok(false));
-        let due = start + Duration::from_millis(40);
-        schedules.update_graphics_animation(Some(due));
-
-        assert_eq!(schedules.deadline(None), Some(due));
-        assert!(schedules.take_due(due - Duration::from_millis(1)).is_none());
-        assert!(matches!(
-            schedules.take_due(due),
-            Some(Command::GraphicsAnimationTick)
-        ));
-        assert!(schedules.take_due(due).is_none());
-    }
-
-    #[test]
-    fn hidden_graphics_stop_waking_and_resume_with_a_fresh_presentation() {
-        let start = Instant::now();
-        let mut schedules = WorkerSchedules::new(start, ScheduleInput::default());
-        schedules.update_hidden_input(start, Ok(false));
-        schedules.update_graphics_animation(Some(start + Duration::from_millis(40)));
-        schedules.set_presentable(false, start);
-
-        assert!(
-            schedules
-                .take_due(start + Duration::from_millis(40))
-                .is_none()
-        );
-        let shown = start + Duration::from_millis(80);
-        schedules.set_presentable(true, shown);
-        assert!(matches!(
-            schedules.take_due(shown),
-            Some(Command::PublishPendingScreen)
-        ));
-    }
-
-    #[test]
-    fn hidden_presentation_retains_only_pending_work_and_restores_it_immediately() {
-        let start = Instant::now();
-        let mut schedule = PresentationSchedule::new(start);
-        schedule.mark_presented(start);
-        schedule.set_presentable(false, start);
-
-        schedule.request();
-        schedule.request();
-        assert_eq!(schedule.deadline(), None);
-        assert!(!schedule.take_due(start + Duration::from_secs(1)));
-
-        let restored = start + Duration::from_secs(1);
-        schedule.set_presentable(true, restored);
-        assert_eq!(schedule.deadline(), Some(restored));
-        assert!(schedule.take_due(restored));
-        assert!(!schedule.take_due(restored));
-    }
-
-    #[test]
-    fn presentation_barrier_flushes_visible_work_before_generation_sensitive_input() {
-        let start = Instant::now();
-        let mut schedules = WorkerSchedules::new(start, ScheduleInput::default());
-        schedules.mark_presented(start);
-        schedules.request_presentation();
-
-        assert!(schedules.take_presentation_barrier());
-        assert!(!schedules.take_presentation_barrier());
-
-        schedules.set_presentable(false, start);
-        schedules.request_presentation();
-        assert!(schedules.take_presentation_barrier());
-    }
-
-    #[test]
-    fn hidden_presentation_cancels_background_accessibility_and_autoscroll_work() {
-        let start = Instant::now();
-        let mut schedules = WorkerSchedules::new(start, ScheduleInput::default());
-        schedules.update_hidden_input(start, Ok(false));
-        schedules.update_accessibility(true);
-        schedules.update_selection_autoscroll(start, Some(Duration::from_millis(20)));
-
-        schedules.set_presentable(false, start);
-
-        assert!(!schedules.accessibility_pending());
-        assert!(!matches!(
-            schedules.take_due(start + Duration::from_millis(20)),
-            Some(Command::SelectionAutoscrollTick)
-        ));
-    }
-
-    #[test]
-    fn accessibility_presentation_is_seeded_then_paced_only_during_native_demand() {
-        let start = Instant::now();
-        let mut schedules = WorkerSchedules::new(start, ScheduleInput::default());
-        schedules.note_screen_published();
-        assert!(schedules.accessibility_presentation_due(start));
-        schedules.mark_accessibility_presented(start, true);
-
-        schedules.note_screen_published();
-        assert!(!schedules.accessibility_presentation_due(start + Duration::from_secs(1)));
-
-        schedules
-            .input
-            .enqueue_accessibility_demand(start + Duration::from_secs(1));
-        schedules.accessibility_demand_received(start + Duration::from_secs(1));
-        assert!(schedules.accessibility_presentation_due(start + Duration::from_secs(1)));
-        schedules.mark_accessibility_presented(start + Duration::from_secs(1), true);
-
-        schedules.note_screen_published();
-        schedules.note_screen_published();
-        assert!(!schedules.accessibility_presentation_due(
-            start + Duration::from_secs(1) + ACCESSIBILITY_PRESENTATION_INTERVAL
-                - Duration::from_micros(1)
-        ));
-        assert!(schedules.accessibility_presentation_due(
-            start + Duration::from_secs(1) + ACCESSIBILITY_PRESENTATION_INTERVAL
-        ));
-    }
-
-    #[test]
-    fn accessibility_demand_mailbox_coalesces_one_visible_lifetime_activation() {
-        let start = Instant::now();
-        let input = ScheduleInput::default();
-        let mut schedules = WorkerSchedules::new(start, input.clone());
-        schedules.update_hidden_input(start, Ok(false));
-        schedules.note_screen_published();
-        assert!(schedules.accessibility_presentation_due(start));
-        schedules.mark_accessibility_presented(start, true);
-
-        assert!(input.enqueue_accessibility_demand(start));
-        assert!(!input.enqueue_accessibility_demand(start + Duration::from_millis(400)));
-        schedules.accessibility_demand_received(start + Duration::from_millis(400));
-        assert!(schedules.accessibility_presentation_due(start + Duration::from_millis(400)));
-        schedules.mark_accessibility_presented(start + Duration::from_millis(400), true);
-
-        schedules.note_screen_published();
-        assert!(schedules.accessibility_presentation_due(start + Duration::from_secs(60)));
-        assert!(!input.enqueue_accessibility_demand(start + Duration::from_secs(60)));
-    }
-
-    #[test]
-    fn restoring_visibility_reuses_a_complete_accessibility_cache_until_demanded() {
-        let start = Instant::now();
-        let input = ScheduleInput::default();
-        let mut schedules = WorkerSchedules::new(start, input.clone());
-        schedules.note_screen_published();
-        assert!(schedules.accessibility_presentation_due(start));
-        schedules.mark_accessibility_presented(start, true);
-
-        schedules.set_presentable(false, start + ACCESSIBILITY_PRESENTATION_INTERVAL);
-        assert!(!schedules.accessibility_presentation_due(start + Duration::from_secs(1)));
-        schedules.set_presentable(true, start + Duration::from_secs(1));
-        assert!(!schedules.accessibility_presentation_due(start + Duration::from_secs(1)));
-        assert!(input.enqueue_accessibility_demand(start + Duration::from_secs(1)));
-        schedules.accessibility_demand_received(start + Duration::from_secs(1));
-        assert!(schedules.accessibility_presentation_due(start + Duration::from_secs(1)));
-    }
-
-    #[test]
-    fn incomplete_accessibility_seed_survives_a_new_screen_generation() {
-        let start = Instant::now();
-        let mut schedules = WorkerSchedules::new(start, ScheduleInput::default());
-        schedules.note_screen_published();
-        assert!(schedules.accessibility_presentation_due(start));
-        schedules.mark_accessibility_presented(start, false);
-
-        schedules.note_screen_published();
-        assert!(!schedules.accessibility_presentation_due(
-            start + ACCESSIBILITY_PRESENTATION_INTERVAL - Duration::from_micros(1)
-        ));
-        assert!(
-            schedules.accessibility_presentation_due(start + ACCESSIBILITY_PRESENTATION_INTERVAL)
-        );
-    }
-
-    #[test]
-    fn hiding_clears_accessibility_demand_and_pending_refreshes() {
-        let start = Instant::now();
-        let input = ScheduleInput::default();
-        let mut schedules = WorkerSchedules::new(start, input.clone());
-        schedules.note_screen_published();
-        assert!(schedules.accessibility_presentation_due(start));
-        schedules.mark_accessibility_presented(start, true);
-
-        assert!(input.enqueue_accessibility_demand(start));
-        schedules.accessibility_demand_received(start);
-        assert!(schedules.accessibility_presentation_due(start));
-        schedules.mark_accessibility_presented(start, true);
-        schedules.note_screen_published();
-
-        schedules.set_presentable(false, start + Duration::from_millis(50));
-        assert!(!schedules.accessibility_presentation_due(start + Duration::from_secs(60)));
-        assert!(!input.enqueue_accessibility_demand(start + Duration::from_secs(60)));
-    }
-
-    #[test]
-    fn terminal_appearance_mailbox_retains_only_the_latest_update() {
-        let input = ScheduleInput::default();
-        let mut schedules = WorkerSchedules::new(Instant::now(), input.clone());
-        let mut update = crate::terminal::test_terminal_appearance_update();
-        update.generation = AppearanceGeneration::new(1);
-        assert!(input.enqueue_terminal_appearance(update));
-
-        for generation in 2..=3 {
-            let mut update = crate::terminal::test_terminal_appearance_update();
-            update.generation = AppearanceGeneration::new(generation);
-            assert!(!input.enqueue_terminal_appearance(update));
-        }
-
-        assert_eq!(
-            schedules.take_terminal_appearance().unwrap().generation,
-            AppearanceGeneration::new(3)
-        );
-        let mut next = crate::terminal::test_terminal_appearance_update();
-        next.generation = AppearanceGeneration::new(4);
-        assert!(input.enqueue_terminal_appearance(next));
     }
 }
 
@@ -1312,5 +804,510 @@ impl AccessibilityDemandMailbox {
             eprintln!("terminal accessibility demand mailbox recovered after a worker panic");
             poisoned.into_inner()
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compression_waits_for_a_quiet_interval_after_activity() {
+        let start = Instant::now();
+        let mut schedule = CompressionSchedule::<u64>::new();
+
+        schedule.observe(start, 1, false);
+
+        assert!(!schedule.take_due(start + Duration::from_millis(249)));
+        assert!(schedule.take_due(start + Duration::from_millis(250)));
+        assert!(!schedule.take_due(start + Duration::from_millis(250)));
+    }
+
+    #[test]
+    fn compression_postpones_pending_work_after_input_or_output() {
+        let start = Instant::now();
+        let mut schedule = CompressionSchedule::<u64>::new();
+        schedule.observe(start, 1, false);
+        schedule.observe(start + Duration::from_millis(200), 1, true);
+
+        assert!(!schedule.take_due(start + Duration::from_millis(250)));
+        assert!(schedule.take_due(start + Duration::from_millis(450)));
+    }
+
+    #[test]
+    fn compression_continues_in_bounded_steps_until_complete() {
+        let start = Instant::now();
+        let mut schedule = CompressionSchedule::<u64>::new();
+        schedule.observe(start, 1, false);
+        assert!(schedule.take_due(start + Duration::from_millis(250)));
+
+        schedule.complete(
+            start + Duration::from_millis(250),
+            CompressionResult::Pending,
+        );
+        assert!(!schedule.take_due(start + Duration::from_millis(250)));
+        assert!(schedule.take_due(start + Duration::from_millis(251)));
+        schedule.complete(
+            start + Duration::from_millis(251),
+            CompressionResult::Complete,
+        );
+        assert_eq!(schedule.deadline(), None);
+    }
+
+    #[test]
+    fn completed_compression_restarts_only_when_activity_token_changes() {
+        let start = Instant::now();
+        let mut schedule = CompressionSchedule::<u64>::new();
+        schedule.observe(start, 1, false);
+        assert!(schedule.take_due(start + Duration::from_millis(250)));
+        schedule.complete(
+            start + Duration::from_millis(250),
+            CompressionResult::Complete,
+        );
+
+        schedule.observe(start + Duration::from_millis(300), 1, true);
+        assert_eq!(schedule.deadline(), None);
+        schedule.observe(start + Duration::from_millis(300), 2, false);
+        assert_eq!(
+            schedule.deadline(),
+            Some(start + Duration::from_millis(550))
+        );
+    }
+
+    #[test]
+    fn unsupported_compression_stops_for_the_terminal_lifetime() {
+        let start = Instant::now();
+        let mut schedule = CompressionSchedule::<u64>::new();
+        schedule.observe(start, 1, false);
+        assert!(schedule.take_due(start + Duration::from_millis(250)));
+        schedule.complete(
+            start + Duration::from_millis(250),
+            CompressionResult::Unsupported,
+        );
+
+        schedule.observe(start + Duration::from_millis(300), 1, true);
+        assert_eq!(schedule.deadline(), None);
+        schedule.observe(start + Duration::from_millis(300), 2, false);
+        assert_eq!(schedule.deadline(), None);
+    }
+
+    #[test]
+    fn failed_compression_stops_for_the_terminal_lifetime() {
+        let start = Instant::now();
+        let mut schedule = CompressionSchedule::<u64>::new();
+        schedule.observe(start, 1, false);
+
+        schedule.stop();
+        schedule.observe(start + Duration::from_millis(300), 2, false);
+
+        assert_eq!(schedule.deadline(), None);
+    }
+    #[test]
+    fn accessibility_continuation_runs_after_eight_normal_commands() {
+        let mut schedule = AccessibilityContinuationSchedule::default();
+        schedule.update(true);
+
+        for command in 0..8 {
+            assert!(!schedule.must_continue());
+            schedule.note_normal_command();
+            assert_eq!(schedule.must_continue(), command + 1 == 8);
+        }
+
+        assert!(schedule.take());
+        assert!(!schedule.pending);
+        assert_eq!(schedule.normal_commands, 0);
+    }
+
+    #[test]
+    fn accessibility_continuation_is_cancelled_by_a_complete_update() {
+        let mut schedule = AccessibilityContinuationSchedule::default();
+        schedule.update(true);
+        schedule.note_normal_command();
+        schedule.update(false);
+
+        assert!(!schedule.pending);
+        assert!(!schedule.must_continue());
+        assert!(!schedule.take());
+    }
+
+    #[test]
+    fn repeated_incomplete_observations_do_not_starve_continuation_fairness() {
+        let mut schedule = AccessibilityContinuationSchedule::default();
+        schedule.update(true);
+
+        for _ in 0..ACCESSIBILITY_NORMAL_COMMAND_BURST {
+            schedule.note_normal_command();
+            schedule.update(true);
+        }
+
+        assert!(schedule.must_continue());
+    }
+
+    #[test]
+    fn hidden_input_polling_emits_only_transitions_and_fails_closed() {
+        let start = Instant::now();
+        let mut schedule = HiddenInputSchedule::new(start);
+
+        assert_eq!(schedule.update(start, Ok(false)), None);
+        assert_eq!(schedule.update(start, Ok(true)), Some(true));
+        assert_eq!(schedule.update(start, Ok(true)), None);
+        assert_eq!(
+            schedule.update(
+                start,
+                Err(NativePtyOperationFailure::new(
+                    std::io::ErrorKind::BrokenPipe
+                ))
+            ),
+            Some(false)
+        );
+        assert_eq!(schedule.deadline, start + HIDDEN_INPUT_IDLE_INTERVAL);
+    }
+
+    #[test]
+    fn hidden_input_idles_for_thirty_seconds_after_one_transition_followup() {
+        let now = Instant::now();
+        let mut schedules = WorkerSchedules::new(now, ScheduleInput::default());
+        schedules.update_hidden_input(now, Ok(false));
+        assert_eq!(
+            schedules.deadline(None),
+            Some(now + Duration::from_secs(30))
+        );
+        assert!(schedules.take_due(now + Duration::from_secs(29)).is_none());
+
+        let prompt = now + Duration::from_secs(1);
+        schedules.hidden_input_transition(prompt);
+        assert!(matches!(
+            schedules.take_due(prompt),
+            Some(Command::PollHiddenInput)
+        ));
+        assert_eq!(schedules.update_hidden_input(prompt, Ok(false)), None);
+        let settled = prompt + Duration::from_millis(200);
+        assert_eq!(schedules.deadline(None), Some(settled));
+        assert!(matches!(
+            schedules.take_due(settled),
+            Some(Command::PollHiddenInput)
+        ));
+        assert_eq!(schedules.update_hidden_input(settled, Ok(true)), Some(true));
+        assert_eq!(
+            schedules.deadline(None),
+            Some(settled + Duration::from_secs(30))
+        );
+
+        let focused = settled + Duration::from_secs(1);
+        schedules.hidden_input_transition(focused);
+        assert_eq!(schedules.deadline(None), Some(focused));
+        assert_eq!(
+            schedules.update_hidden_input(focused, Ok(false)),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn selection_autoscroll_schedule_uses_an_injected_monotonic_now() {
+        let epoch = Instant::now();
+        let mut schedule = SelectionAutoscrollSchedule::default();
+
+        schedule.update(epoch, Some(Duration::from_millis(100)));
+
+        assert!(!schedule.take_due(epoch + Duration::from_millis(99)));
+        assert!(schedule.take_due(epoch + Duration::from_millis(100)));
+        assert!(!schedule.take_due(epoch + Duration::from_secs(1)));
+
+        schedule.update(epoch, Some(Duration::from_millis(25)));
+        schedule.update(epoch, None);
+        assert!(!schedule.take_due(epoch + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn selection_autoscroll_motion_does_not_postpone_the_next_tick() {
+        let epoch = Instant::now();
+        let interval = Duration::from_millis(15);
+        let mut schedule = SelectionAutoscrollSchedule::default();
+        schedule.update(epoch, Some(interval));
+        for millis in 1..15 {
+            schedule.update(epoch + Duration::from_millis(millis), Some(interval));
+        }
+        assert!(schedule.take_due(epoch + interval));
+        assert!(!schedule.take_due(epoch + interval));
+        schedule.update(epoch + interval, Some(interval));
+        assert!(!schedule.take_due(epoch + Duration::from_millis(29)));
+        assert!(schedule.take_due(epoch + Duration::from_millis(30)));
+    }
+
+    #[test]
+    fn worker_schedules_preserve_deadline_priority_and_expire_each_payload_once() {
+        let now = Instant::now();
+        let mut schedules = WorkerSchedules::new(now, ScheduleInput::default());
+        schedules.update_hidden_input(now, Ok(false));
+        let due = now + Duration::from_secs(30);
+        schedules.update_selection_autoscroll(now, Some(Duration::from_secs(30)));
+        schedules
+            .request_paste_confirmation(PreparedPaste::prepare("one\ntwo".into()).unwrap(), now)
+            .unwrap();
+        assert_eq!(schedules.deadline(Some(now)), Some(now));
+        assert!(matches!(
+            schedules.take_due(due),
+            Some(Command::SelectionAutoscrollTick)
+        ));
+        assert!(matches!(
+            schedules.take_due(due),
+            Some(Command::PasteConfirmationExpired)
+        ));
+        assert!(matches!(
+            schedules.take_due(due),
+            Some(Command::PollHiddenInput)
+        ));
+        schedules.update_hidden_input(due, Ok(false));
+        assert!(schedules.take_due(due).is_none());
+    }
+
+    #[test]
+    fn presentation_schedule_accumulates_an_idle_output_burst_before_publishing() {
+        let start = Instant::now();
+        let mut schedule = PresentationSchedule::new(start);
+
+        schedule.request_accumulated(start);
+        let accumulation_deadline = start + PRESENTATION_ACCUMULATION_INTERVAL;
+        assert_eq!(schedule.deadline(), Some(accumulation_deadline));
+        assert!(!schedule.take_due(accumulation_deadline - Duration::from_micros(1)));
+
+        schedule.request_accumulated(start + Duration::from_millis(1));
+        assert_eq!(schedule.deadline(), Some(accumulation_deadline));
+        assert!(schedule.take_due(accumulation_deadline));
+    }
+
+    #[test]
+    fn presentation_schedule_coalesces_repeated_requests_to_one_display_interval() {
+        let start = Instant::now();
+        let mut schedule = PresentationSchedule::new(start);
+
+        schedule.request();
+        assert!(schedule.take_due(start));
+        schedule.mark_presented(start);
+
+        schedule.request();
+        schedule.request();
+        let next_frame = start + PRESENTATION_INTERVAL;
+        assert_eq!(schedule.deadline(), Some(next_frame));
+        assert!(!schedule.take_due(next_frame - Duration::from_micros(1)));
+        assert!(schedule.take_due(next_frame));
+        assert!(!schedule.take_due(next_frame));
+    }
+
+    #[test]
+    fn graphics_animation_wakes_once_at_the_engine_deadline() {
+        let start = Instant::now();
+        let mut schedules = WorkerSchedules::new(start, ScheduleInput::default());
+        schedules.update_hidden_input(start, Ok(false));
+        let due = start + Duration::from_millis(40);
+        schedules.update_graphics_animation(Some(due));
+
+        assert_eq!(schedules.deadline(None), Some(due));
+        assert!(schedules.take_due(due - Duration::from_millis(1)).is_none());
+        assert!(matches!(
+            schedules.take_due(due),
+            Some(Command::GraphicsAnimationTick)
+        ));
+        assert!(schedules.take_due(due).is_none());
+    }
+
+    #[test]
+    fn hidden_graphics_stop_waking_and_resume_with_a_fresh_presentation() {
+        let start = Instant::now();
+        let mut schedules = WorkerSchedules::new(start, ScheduleInput::default());
+        schedules.update_hidden_input(start, Ok(false));
+        schedules.update_graphics_animation(Some(start + Duration::from_millis(40)));
+        schedules.set_presentable(false, start);
+
+        assert!(
+            schedules
+                .take_due(start + Duration::from_millis(40))
+                .is_none()
+        );
+        let shown = start + Duration::from_millis(80);
+        schedules.set_presentable(true, shown);
+        assert!(matches!(
+            schedules.take_due(shown),
+            Some(Command::PublishPendingScreen)
+        ));
+    }
+
+    #[test]
+    fn hidden_presentation_retains_only_pending_work_and_restores_it_immediately() {
+        let start = Instant::now();
+        let mut schedule = PresentationSchedule::new(start);
+        schedule.mark_presented(start);
+        schedule.set_presentable(false, start);
+
+        schedule.request();
+        schedule.request();
+        assert_eq!(schedule.deadline(), None);
+        assert!(!schedule.take_due(start + Duration::from_secs(1)));
+
+        let restored = start + Duration::from_secs(1);
+        schedule.set_presentable(true, restored);
+        assert_eq!(schedule.deadline(), Some(restored));
+        assert!(schedule.take_due(restored));
+        assert!(!schedule.take_due(restored));
+    }
+
+    #[test]
+    fn presentation_barrier_consumes_pending_work_in_visible_and_hidden_states() {
+        let start = Instant::now();
+        let mut schedules = WorkerSchedules::new(start, ScheduleInput::default());
+        schedules.mark_presented(start);
+        schedules.request_presentation();
+
+        assert!(schedules.take_presentation_barrier());
+        assert!(!schedules.take_presentation_barrier());
+
+        schedules.set_presentable(false, start);
+        schedules.request_presentation();
+        assert!(schedules.take_presentation_barrier());
+    }
+
+    #[test]
+    fn hidden_presentation_cancels_background_accessibility_and_autoscroll_work() {
+        let start = Instant::now();
+        let mut schedules = WorkerSchedules::new(start, ScheduleInput::default());
+        schedules.update_hidden_input(start, Ok(false));
+        schedules.update_accessibility(true);
+        schedules.update_selection_autoscroll(start, Some(Duration::from_millis(20)));
+
+        schedules.set_presentable(false, start);
+
+        assert!(!schedules.accessibility_pending());
+        assert!(!matches!(
+            schedules.take_due(start + Duration::from_millis(20)),
+            Some(Command::SelectionAutoscrollTick)
+        ));
+    }
+
+    #[test]
+    fn accessibility_presentation_is_seeded_then_paced_only_during_native_demand() {
+        let start = Instant::now();
+        let mut schedules = WorkerSchedules::new(start, ScheduleInput::default());
+        schedules.note_screen_published();
+        assert!(schedules.accessibility_presentation_due(start));
+        schedules.mark_accessibility_presented(start, true);
+
+        schedules.note_screen_published();
+        assert!(!schedules.accessibility_presentation_due(start + Duration::from_secs(1)));
+
+        schedules
+            .input
+            .enqueue_accessibility_demand(start + Duration::from_secs(1));
+        schedules.accessibility_demand_received(start + Duration::from_secs(1));
+        assert!(schedules.accessibility_presentation_due(start + Duration::from_secs(1)));
+        schedules.mark_accessibility_presented(start + Duration::from_secs(1), true);
+
+        schedules.note_screen_published();
+        schedules.note_screen_published();
+        assert!(!schedules.accessibility_presentation_due(
+            start + Duration::from_secs(1) + ACCESSIBILITY_PRESENTATION_INTERVAL
+                - Duration::from_micros(1)
+        ));
+        assert!(schedules.accessibility_presentation_due(
+            start + Duration::from_secs(1) + ACCESSIBILITY_PRESENTATION_INTERVAL
+        ));
+    }
+
+    #[test]
+    fn accessibility_demand_mailbox_coalesces_one_visible_lifetime_activation() {
+        let start = Instant::now();
+        let input = ScheduleInput::default();
+        let mut schedules = WorkerSchedules::new(start, input.clone());
+        schedules.update_hidden_input(start, Ok(false));
+        schedules.note_screen_published();
+        assert!(schedules.accessibility_presentation_due(start));
+        schedules.mark_accessibility_presented(start, true);
+
+        assert!(input.enqueue_accessibility_demand(start));
+        assert!(!input.enqueue_accessibility_demand(start + Duration::from_millis(400)));
+        schedules.accessibility_demand_received(start + Duration::from_millis(400));
+        assert!(schedules.accessibility_presentation_due(start + Duration::from_millis(400)));
+        schedules.mark_accessibility_presented(start + Duration::from_millis(400), true);
+
+        schedules.note_screen_published();
+        assert!(schedules.accessibility_presentation_due(start + Duration::from_secs(60)));
+        assert!(!input.enqueue_accessibility_demand(start + Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn restoring_visibility_reuses_a_complete_accessibility_cache_until_demanded() {
+        let start = Instant::now();
+        let input = ScheduleInput::default();
+        let mut schedules = WorkerSchedules::new(start, input.clone());
+        schedules.note_screen_published();
+        assert!(schedules.accessibility_presentation_due(start));
+        schedules.mark_accessibility_presented(start, true);
+
+        schedules.set_presentable(false, start + ACCESSIBILITY_PRESENTATION_INTERVAL);
+        assert!(!schedules.accessibility_presentation_due(start + Duration::from_secs(1)));
+        schedules.set_presentable(true, start + Duration::from_secs(1));
+        assert!(!schedules.accessibility_presentation_due(start + Duration::from_secs(1)));
+        assert!(input.enqueue_accessibility_demand(start + Duration::from_secs(1)));
+        schedules.accessibility_demand_received(start + Duration::from_secs(1));
+        assert!(schedules.accessibility_presentation_due(start + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn incomplete_accessibility_seed_survives_a_new_screen_generation() {
+        let start = Instant::now();
+        let mut schedules = WorkerSchedules::new(start, ScheduleInput::default());
+        schedules.note_screen_published();
+        assert!(schedules.accessibility_presentation_due(start));
+        schedules.mark_accessibility_presented(start, false);
+
+        schedules.note_screen_published();
+        assert!(!schedules.accessibility_presentation_due(
+            start + ACCESSIBILITY_PRESENTATION_INTERVAL - Duration::from_micros(1)
+        ));
+        assert!(
+            schedules.accessibility_presentation_due(start + ACCESSIBILITY_PRESENTATION_INTERVAL)
+        );
+    }
+
+    #[test]
+    fn hiding_clears_accessibility_demand_and_pending_refreshes() {
+        let start = Instant::now();
+        let input = ScheduleInput::default();
+        let mut schedules = WorkerSchedules::new(start, input.clone());
+        schedules.note_screen_published();
+        assert!(schedules.accessibility_presentation_due(start));
+        schedules.mark_accessibility_presented(start, true);
+
+        assert!(input.enqueue_accessibility_demand(start));
+        schedules.accessibility_demand_received(start);
+        assert!(schedules.accessibility_presentation_due(start));
+        schedules.mark_accessibility_presented(start, true);
+        schedules.note_screen_published();
+
+        schedules.set_presentable(false, start + Duration::from_millis(50));
+        assert!(!schedules.accessibility_presentation_due(start + Duration::from_secs(60)));
+        assert!(!input.enqueue_accessibility_demand(start + Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn terminal_appearance_mailbox_retains_only_the_latest_update() {
+        let input = ScheduleInput::default();
+        let mut schedules = WorkerSchedules::new(Instant::now(), input.clone());
+        let mut update = crate::terminal::test_terminal_appearance_update();
+        update.generation = AppearanceGeneration::new(1);
+        assert!(input.enqueue_terminal_appearance(update));
+
+        for generation in 2..=3 {
+            let mut update = crate::terminal::test_terminal_appearance_update();
+            update.generation = AppearanceGeneration::new(generation);
+            assert!(!input.enqueue_terminal_appearance(update));
+        }
+
+        assert_eq!(
+            schedules.take_terminal_appearance().unwrap().generation,
+            AppearanceGeneration::new(3)
+        );
+        let mut next = crate::terminal::test_terminal_appearance_update();
+        next.generation = AppearanceGeneration::new(4);
+        assert!(input.enqueue_terminal_appearance(next));
     }
 }

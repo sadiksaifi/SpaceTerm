@@ -7,7 +7,7 @@ use gpui::{App, BorrowAppContext, Global, Subscription, Task};
 use super::{CUSTOMIZABLE_BINDINGS, KeybindingPreferences, KeymapProfile, ResolvedKeymap};
 use crate::desktop_profile::DesktopPresentation;
 use crate::platform::application_menu::ApplicationMenuAdapter;
-use crate::settings::UserSettings;
+use crate::settings::Settings;
 
 pub(crate) struct KeymapRuntime {
     profile: Rc<KeymapProfile>,
@@ -66,7 +66,7 @@ pub(crate) fn attach_application_menu(menu: Rc<dyn ApplicationMenuAdapter>, cx: 
     cx.global_mut::<KeymapRuntime>().menu = Some(menu);
 }
 
-pub(crate) fn follow(settings: &UserSettings, cx: &mut App) {
+pub(crate) fn follow(settings: &Settings, cx: &mut App) {
     // Subscribe before reading so a concurrent settings change cannot be missed.
     let changed = settings.subscribe();
     apply(&settings.snapshot().candidate.keybindings, cx);

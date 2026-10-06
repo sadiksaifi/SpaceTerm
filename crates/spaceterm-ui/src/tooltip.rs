@@ -197,7 +197,7 @@ impl TooltipMetrics {
         self
     }
 
-    /// Sets primary, secondary, and keyboard-equivalent font sizes.
+    /// Sets primary, secondary, and Shortcut font sizes.
     pub fn font_sizes(mut self, primary: Pixels, secondary: Pixels, keyboard: Pixels) -> Self {
         self.primary_font_size = bounded_metric(primary, 8.0, 32.0, 11.0);
         self.secondary_font_size = bounded_metric(secondary, 8.0, 32.0, 10.0);
@@ -205,7 +205,7 @@ impl TooltipMetrics {
         self
     }
 
-    /// Sets primary, secondary, and keyboard-equivalent line heights.
+    /// Sets primary, secondary, and Shortcut line heights.
     pub fn line_heights(mut self, primary: Pixels, secondary: Pixels, keyboard: Pixels) -> Self {
         self.primary_line_height = bounded_metric(primary, 8.0, 64.0, 13.0);
         self.secondary_line_height = bounded_metric(secondary, 8.0, 64.0, 12.0);
@@ -213,9 +213,8 @@ impl TooltipMetrics {
         self
     }
 
-    fn scaled(self, text_scale: f32, spacing_scale: f32) -> Self {
-        let width_scale = crate::appearance::normalized_scale(text_scale)
-            .max(crate::appearance::normalized_scale(spacing_scale));
+    fn scaled(self, spacing_scale: f32) -> Self {
+        let width_scale = crate::appearance::normalized_scale(spacing_scale).max(1.0);
         Self {
             maximum_width: self.maximum_width * width_scale,
             horizontal_padding: crate::appearance::scale_metric(
@@ -227,27 +226,7 @@ impl TooltipMetrics {
             keyboard_gap: crate::appearance::scale_metric(self.keyboard_gap, spacing_scale),
             target_gap: crate::appearance::scale_metric(self.target_gap, spacing_scale),
             viewport_margin: crate::appearance::scale_metric(self.viewport_margin, spacing_scale),
-            primary_font_size: crate::appearance::scale_metric(self.primary_font_size, text_scale),
-            secondary_font_size: crate::appearance::scale_metric(
-                self.secondary_font_size,
-                text_scale,
-            ),
-            keyboard_font_size: crate::appearance::scale_metric(
-                self.keyboard_font_size,
-                text_scale,
-            ),
-            primary_line_height: crate::appearance::scale_metric(
-                self.primary_line_height,
-                text_scale,
-            ),
-            secondary_line_height: crate::appearance::scale_metric(
-                self.secondary_line_height,
-                text_scale,
-            ),
-            keyboard_line_height: crate::appearance::scale_metric(
-                self.keyboard_line_height,
-                text_scale,
-            ),
+            ..self
         }
     }
 }
@@ -282,9 +261,9 @@ impl TooltipTheme {
         }
     }
 
-    pub(crate) fn scaled_metrics(self, text_scale: f32, spacing_scale: f32) -> Self {
+    pub(crate) fn scaled_spacing(self, spacing_scale: f32) -> Self {
         Self {
-            metrics: self.metrics.scaled(text_scale, spacing_scale),
+            metrics: self.metrics.scaled(spacing_scale),
             ..self
         }
     }
@@ -302,18 +281,14 @@ fn tooltip_theme(cx: &App) -> TooltipTheme {
 
 /// Short, semantic contextual help for one noninteractive desktop tooltip.
 ///
-/// A tooltip is delayed, transient, pointer-transparent, and scoped to one Operating-System
-/// Window. It never receives focus or pointer input and must not contain actions. `text` is required;
-/// optional detail and keyboard-equivalent text remain bounded and are presented through fixed
-/// semantic slots rather than arbitrary popup children. A tooltip supplements, but never replaces,
-/// the target control's logical accessibility name. Use a Menu or another interactive popover when
-/// content must accept focus or input.
+/// A tooltip never receives focus or pointer input and never replaces the target's logical
+/// accessibility name. Use a Menu or another interactive popover for content that accepts input.
 #[derive(Clone)]
 pub struct Tooltip {
     id: ElementId,
     text: SharedString,
     detail: Option<SharedString>,
-    keyboard_equivalent: Option<SharedString>,
+    shortcut: Option<SharedString>,
     debug_selector: SharedString,
 }
 
@@ -324,25 +299,21 @@ impl Tooltip {
             id: id.into(),
             text: bounded_text(text.into(), MAX_PRIMARY_CHARACTERS),
             detail: None,
-            keyboard_equivalent: None,
+            shortcut: None,
             debug_selector: "tooltip".into(),
         }
     }
 
-    /// Adds secondary detail such as a Workspace path.
     pub fn detail(mut self, detail: impl Into<SharedString>) -> Self {
         self.detail = nonempty_bounded_text(detail.into(), MAX_DETAIL_CHARACTERS);
         self
     }
 
-    /// Adds a compact keyboard-equivalent label.
-    pub fn keyboard_equivalent(mut self, equivalent: impl Into<SharedString>) -> Self {
-        self.keyboard_equivalent =
-            nonempty_bounded_text(equivalent.into(), MAX_KEYBOARD_CHARACTERS);
+    pub fn shortcut(mut self, shortcut: impl Into<SharedString>) -> Self {
+        self.shortcut = nonempty_bounded_text(shortcut.into(), MAX_KEYBOARD_CHARACTERS);
         self
     }
 
-    /// Sets the stable selector exposed by the presented tooltip surface.
     pub fn debug_selector(mut self, selector: impl Into<SharedString>) -> Self {
         self.debug_selector = selector.into();
         self
@@ -408,7 +379,6 @@ pub struct TooltipTarget {
 }
 
 impl TooltipTarget {
-    /// Controls whether the target may present its tooltip.
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
         self
@@ -425,7 +395,6 @@ pub struct TooltipLayer {
 }
 
 impl TooltipLayer {
-    /// Wraps the complete content of one Operating-System Window.
     pub fn new(content: impl IntoElement) -> Self {
         Self {
             content: content.into_any_element(),
@@ -499,7 +468,7 @@ fn render_surface(
     let metrics = theme.metrics;
     let shell = theme.shell;
     let available = available_tooltip_size(viewport, metrics.viewport_margin);
-    let keyboard = tooltip.keyboard_equivalent.clone();
+    let keyboard = tooltip.shortcut.clone();
     let primary = div()
         .flex()
         .flex_row()
@@ -733,10 +702,11 @@ impl Element for TooltipTargetElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        self.target.paint(window, cx);
+        // Tooltip capture must precede controls that consume primary pointer presses.
         if let Some(hitbox) = prepaint.hitbox.clone() {
             register_target_handlers(self.state.clone(), hitbox, window, cx);
         }
+        self.target.paint(window, cx);
         if let Some(overlay) = self.overlay.as_mut() {
             overlay.paint(window, cx);
         }
@@ -1602,11 +1572,9 @@ mod tests {
 
     #[test]
     fn empty_optional_content_should_be_omitted() {
-        let tooltip = Tooltip::new("optional", "Primary")
-            .detail("")
-            .keyboard_equivalent("");
+        let tooltip = Tooltip::new("optional", "Primary").detail("").shortcut("");
 
-        assert!(tooltip.detail.is_none() && tooltip.keyboard_equivalent.is_none());
+        assert!(tooltip.detail.is_none() && tooltip.shortcut.is_none());
     }
 
     #[test]
@@ -1627,6 +1595,7 @@ mod tests {
         second_target: bool,
         long_detail: bool,
         focus_handle: FocusHandle,
+        keys: std::rc::Rc<std::cell::RefCell<Vec<gpui::Keystroke>>>,
     }
 
     impl Render for TestRoot {
@@ -1637,10 +1606,12 @@ mod tests {
                 "Secondary detail".into()
             };
             let target_visibility = self.target_visibility;
+            let keys = std::rc::Rc::clone(&self.keys);
             let content = div()
                 .relative()
                 .size_full()
                 .track_focus(&self.focus_handle)
+                .on_key_down(move |event, _, _| keys.borrow_mut().push(event.keystroke.clone()))
                 .when(self.show_target, |root| {
                     // The target sits in scrolled content, as a control in a scrolled list does.
                     root.child(
@@ -1655,7 +1626,7 @@ mod tests {
                                     div().absolute().left(self.target_left).top(px(80.0)).child(
                                         Tooltip::new("test-tooltip-target", "Primary help")
                                             .detail(detail)
-                                            .keyboard_equivalent("⌘K")
+                                            .shortcut("⌘K")
                                             .debug_selector("test-tooltip")
                                             .attach(
                                                 div()
@@ -1712,6 +1683,7 @@ mod tests {
             second_target: false,
             long_detail: false,
             focus_handle: cx.focus_handle(),
+            keys: std::rc::Rc::default(),
         });
         let focus_handle = root.read_with(cx, |root, _| root.focus_handle.clone());
         cx.update(|window, cx| {
@@ -1733,6 +1705,33 @@ mod tests {
         cx.simulate_mouse_move(center, None, Modifiers::default());
         cx.executor().advance_clock(TOOLTIP_SHOW_DELAY);
         cx.run_until_parked();
+    }
+
+    fn owner_count(cx: &mut VisualTestContext) -> usize {
+        cx.update(|_, cx| cx.global::<TooltipCoordinator>().owners.len())
+    }
+
+    fn reenter_until_pending(cx: &mut VisualTestContext) {
+        hover_for_show_delay(cx, "test-tooltip-button");
+        assert!(cx.debug_bounds("test-tooltip").is_some());
+        let owner = cx.update(|window, cx| {
+            cx.global::<TooltipCoordinator>().owners[&window.window_handle().window_id()]
+                .owner
+                .clone()
+        });
+        cx.simulate_mouse_move(point(px(10.0), px(10.0)), None, Modifiers::default());
+        let center = target_center(cx, "test-tooltip-button");
+        cx.simulate_mouse_move(center, None, Modifiers::default());
+        cx.executor().advance_clock(TOOLTIP_SHOW_DELAY / 2);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("test-tooltip").is_none());
+        assert!(
+            owner
+                .read_with(cx, |state, _| state.task.is_some()
+                    && state.hovered
+                    && !state.visible)
+                .expect("the pending target is live")
+        );
     }
 
     #[gpui::test]
@@ -1801,6 +1800,7 @@ mod tests {
     fn leaving_after_opening_should_dismiss(cx: &mut TestAppContext) {
         let (_, cx) = tooltip_window(cx);
         hover_for_show_delay(cx, "test-tooltip-button");
+        assert!(cx.debug_bounds("test-tooltip").is_some());
 
         cx.simulate_mouse_move(point(px(10.0), px(10.0)), None, Modifiers::default());
         cx.run_until_parked();
@@ -1822,13 +1822,20 @@ mod tests {
 
     #[gpui::test]
     fn keyboard_input_should_dismiss_without_consuming_input(cx: &mut TestAppContext) {
-        let (_, cx) = tooltip_window(cx);
+        let (root, cx) = tooltip_window(cx);
         hover_for_show_delay(cx, "test-tooltip-button");
+        assert!(cx.debug_bounds("test-tooltip").is_some());
+        let focus = root.read_with(cx, |root, _| root.focus_handle.clone());
+        assert!(cx.update(|window, _| focus.is_focused(window)));
 
         cx.simulate_keystrokes("a");
         cx.run_until_parked();
 
         assert!(cx.debug_bounds("test-tooltip").is_none());
+        let keys = root.read_with(cx, |root, _| root.keys.borrow().clone());
+        let mut expected = gpui::Keystroke::parse("a").expect("a parses");
+        expected.key_char = Some("a".into());
+        assert_eq!(keys, [expected]);
     }
 
     #[gpui::test]
@@ -1846,6 +1853,8 @@ mod tests {
     fn removing_the_target_should_cancel_pending_and_visible_state(cx: &mut TestAppContext) {
         let (root, cx) = tooltip_window(cx);
         hover_for_show_delay(cx, "test-tooltip-button");
+        assert!(cx.debug_bounds("test-tooltip").is_some());
+        assert_eq!(owner_count(cx), 1);
 
         root.update(cx, |root, cx| {
             root.show_target = false;
@@ -1854,6 +1863,24 @@ mod tests {
         cx.run_until_parked();
 
         assert!(cx.debug_bounds("test-tooltip").is_none());
+        assert_eq!(owner_count(cx), 0);
+
+        root.update(cx, |root, cx| {
+            root.show_target = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.simulate_mouse_move(point(px(10.0), px(10.0)), None, Modifiers::default());
+        reenter_until_pending(cx);
+        root.update(cx, |root, cx| {
+            root.show_target = false;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.executor().advance_clock(TOOLTIP_SHOW_DELAY);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("test-tooltip").is_none());
+        assert_eq!(owner_count(cx), 0);
     }
 
     #[gpui::test]
@@ -1934,6 +1961,7 @@ mod tests {
                         second_target: false,
                         long_detail: true,
                         focus_handle: cx.focus_handle(),
+                        keys: std::rc::Rc::default(),
                     })
                 },
             )
@@ -1981,13 +2009,28 @@ mod tests {
         });
         cx.run_until_parked();
         hover_for_show_delay(cx, "test-tooltip-button");
+        assert!(cx.debug_bounds("test-tooltip").is_some());
+        let first_owner = cx.update(|window, cx| {
+            cx.global::<TooltipCoordinator>().owners[&window.window_handle().window_id()]
+                .owner
+                .clone()
+        });
 
         hover_for_show_delay(cx, "second-tooltip-button");
 
-        let owner_count = cx.update(|_, cx| cx.global::<TooltipCoordinator>().owners.len());
-
-        assert_eq!(owner_count, 1);
+        assert_eq!(owner_count(cx), 1);
         assert!(cx.debug_bounds("second-tooltip").is_some());
+        assert!(cx.debug_bounds("test-tooltip").is_none());
+        let second_bounds = cx.debug_bounds("second-tooltip-button");
+        cx.update(|window, cx| {
+            let owner = &cx.global::<TooltipCoordinator>().owners
+                [&window.window_handle().window_id()]
+                .owner;
+            assert_ne!(owner, &first_owner);
+            let state = owner.upgrade().expect("the second owner is live");
+            assert!(state.read(cx).visible);
+            assert_eq!(state.read(cx).target_bounds, second_bounds);
+        });
     }
 
     #[gpui::test]
@@ -2006,9 +2049,7 @@ mod tests {
         cx.simulate_mouse_move(center, None, Modifiers::default());
         cx.executor().advance_clock(TOOLTIP_SHOW_DELAY);
         cx.run_until_parked();
-        let owner_count = cx.update(|_, cx| cx.global::<TooltipCoordinator>().owners.len());
-
-        assert_eq!(owner_count, 0);
+        assert_eq!(owner_count(cx), 0);
     }
 
     #[gpui::test]
@@ -2067,6 +2108,8 @@ mod tests {
         let (_, cx) = tooltip_window(cx);
         let center = target_center(cx, "test-tooltip-button");
 
+        reenter_until_pending(cx);
+
         cx.simulate_mouse_down(center, MouseButton::Left, Modifiers::default());
         cx.simulate_mouse_move(
             point(center.x + px(20.0), center.y),
@@ -2075,9 +2118,8 @@ mod tests {
         );
         cx.executor().advance_clock(TOOLTIP_SHOW_DELAY);
         cx.run_until_parked();
-        let owner_count = cx.update(|_, cx| cx.global::<TooltipCoordinator>().owners.len());
-
-        assert_eq!(owner_count, 0);
+        assert_eq!(owner_count(cx), 0);
+        assert!(cx.debug_bounds("test-tooltip").is_none());
     }
 
     #[gpui::test]
@@ -2120,5 +2162,10 @@ mod tests {
             .unwrap_or_else(|| panic!("tooltip was not repainted"));
 
         assert_ne!(before.origin.x, after.origin.x);
+        assert_eq!(after.origin.x - before.origin.x, px(140.0));
+        let target = cx
+            .debug_bounds("test-tooltip-button")
+            .expect("the moved target renders");
+        assert_eq!(after.top(), target.bottom() + px(6.0));
     }
 }

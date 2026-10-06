@@ -5,8 +5,6 @@ use std::fmt;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RemoteWorkspaceAccountError {
     InvalidUser,
-    #[cfg(test)]
-    InvalidLoginShell,
 }
 
 /// Account facts discovered during remote home initialization and reused by manual directory pinning.
@@ -24,22 +22,6 @@ impl fmt::Debug for RemoteWorkspaceAccount {
 }
 
 impl RemoteWorkspaceAccount {
-    #[cfg(test)]
-    pub(crate) fn new(
-        user: String,
-        home_identity: RemoteDirectoryIdentity,
-        login_shell: String,
-    ) -> Result<Self, RemoteWorkspaceAccountError> {
-        let user = RemoteUser::new(user).map_err(|_| RemoteWorkspaceAccountError::InvalidUser)?;
-        let login_shell = ValidatedRemoteLoginShell::new(login_shell)
-            .map_err(|_| RemoteWorkspaceAccountError::InvalidLoginShell)?;
-        Ok(Self {
-            user,
-            home_identity,
-            login_shell,
-        })
-    }
-
     pub(crate) fn from_validated_login_shell(
         user: String,
         home_identity: RemoteDirectoryIdentity,

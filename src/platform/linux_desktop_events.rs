@@ -135,7 +135,7 @@ impl super::desktop_events::DesktopEventAdapter for LinuxDesktopEvents {
 
 #[cfg(all(test, feature = "native-tests"))]
 mod tests {
-    use crate::platform::linux_session_bus::SessionBus;
+    use crate::platform::linux_session_bus::{SessionBus, SessionBusError};
     use crate::terminal::attention_notification::NotificationAdapter;
     use std::collections::HashMap;
     use std::io::{BufRead, BufReader};
@@ -656,6 +656,16 @@ mod tests {
             )
             .unwrap()
         );
+        let (owner, primary_unique_name) = primary
+            .query(move |connection| {
+                let dbus = zbus::blocking::fdo::DBusProxy::new(connection)?;
+                let owner = dbus
+                    .get_name_owner(identity.application_id().try_into().unwrap())
+                    .map_err(zbus::Error::from)?;
+                Ok((owner, connection.unique_name().unwrap().to_owned()))
+            })
+            .unwrap();
+        assert_eq!(owner, primary_unique_name);
         assert!(
             crate::platform::linux_application_instance::forward_if_secondary(
                 &secondary,
@@ -668,6 +678,14 @@ mod tests {
         );
         assert_eq!(wait_activation(&events).as_deref(), Some("launch-token"));
         assert!(events.pending.lock().unwrap().activation.is_none());
+        let remaining_owner = secondary
+            .query(move |connection| {
+                zbus::blocking::fdo::DBusProxy::new(connection)?
+                    .get_name_owner(identity.application_id().try_into().unwrap())
+                    .map_err(|error| SessionBusError::from(zbus::Error::from(error)))
+            })
+            .unwrap();
+        assert_eq!(remaining_owner, owner);
     }
 
     #[test]
@@ -1067,13 +1085,10 @@ mod tests {
     }
 
     #[test]
-    fn linux_desktop_portal_absent_status_shapes_keeps_color_only_cues() {
-        assert_status_shapes_disabled(None);
-    }
-
-    #[test]
-    fn linux_desktop_portal_malformed_status_shapes_keeps_color_only_cues() {
-        assert_status_shapes_disabled(Some(1u32.into()));
+    fn linux_desktop_portal_absent_or_malformed_status_shapes_keeps_color_only_cues() {
+        for value in [None, Some(1u32.into())] {
+            assert_status_shapes_disabled(value);
+        }
     }
 
     #[test]
@@ -1092,11 +1107,15 @@ mod tests {
         for _ in 0..32 {
             bus.dispatch(|_| {}).unwrap();
         }
-        assert_eq!(
-            bus.dispatch(|_| panic!("rejected operation must not run")),
-            Err(SessionBusError::Rejected)
-        );
+        let started = std::time::Instant::now();
+        let rejected = bus.dispatch(|_| panic!("rejected operation must not run"));
+        let elapsed = started.elapsed();
         release.send(()).unwrap();
+        assert_eq!(rejected, Err(SessionBusError::Rejected));
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "queue rejection took {elapsed:?}"
+        );
     }
 
     struct UnresponsiveSettings;

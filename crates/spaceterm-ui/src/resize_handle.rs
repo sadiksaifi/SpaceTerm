@@ -8,8 +8,8 @@ use gpui::{
     Styled as _, Window, canvas, div, prelude::FluentBuilder as _, px,
 };
 
-const DEFAULT_KEYBOARD_STEP: f32 = 1.0;
-const DEFAULT_MODIFIED_KEYBOARD_STEP: f32 = 10.0;
+const KEYBOARD_STEP: f32 = 1.0;
+const MODIFIED_KEYBOARD_STEP: f32 = 10.0;
 const SPACIOUS_TARGET_MULTIPLIER: f32 = 2.0;
 const MINIMUM_METRIC: f32 = 0.5;
 const MAXIMUM_TARGET_EXTENT: f32 = 4096.0;
@@ -69,7 +69,6 @@ pub enum ResizeHandleTarget {
 pub struct ResizeInteractionId(u64);
 
 impl ResizeInteractionId {
-    /// Returns the monotonic numeric identity.
     pub fn get(self) -> u64 {
         self.0
     }
@@ -192,19 +191,16 @@ impl ResizeHandleMetrics {
         .normalized()
     }
 
-    /// Sets the visible emphasis used while hovered.
     pub fn hover_thickness(mut self, thickness: Pixels) -> Self {
         self.hover_thickness = thickness;
         self.normalized()
     }
 
-    /// Sets the visible emphasis used during an active pointer interaction.
     pub fn active_thickness(mut self, thickness: Pixels) -> Self {
         self.active_thickness = thickness;
         self.normalized()
     }
 
-    /// Sets the visible emphasis used while the handle has keyboard focus.
     pub fn focus_thickness(mut self, thickness: Pixels) -> Self {
         self.focus_thickness = thickness;
         self.normalized()
@@ -215,7 +211,6 @@ impl ResizeHandleMetrics {
         self.visible_thickness
     }
 
-    /// Returns the regular pointer target thickness.
     pub fn hitbox_thickness(self) -> Pixels {
         self.hitbox_thickness
     }
@@ -263,7 +258,6 @@ pub struct ResizeHandleTheme {
 }
 
 impl ResizeHandleTheme {
-    /// Creates a complete theme from application-owned paint and bounded metrics.
     pub fn new(paint: ResizeHandlePaint, metrics: ResizeHandleMetrics) -> Self {
         Self { paint, metrics }
     }
@@ -273,17 +267,15 @@ impl ResizeHandleTheme {
         self.metrics.visible_thickness
     }
 
-    /// Returns the regular pointer target thickness.
     pub fn hitbox_thickness(self) -> Pixels {
         self.metrics.hitbox_thickness
     }
 
-    /// Returns the pointer-target thickness for the selected shape.
     pub fn pointer_target_thickness(self, target: ResizeHandleTarget) -> Pixels {
         self.metrics.pointer_target_thickness(target)
     }
 
-    pub(crate) fn scaled_metrics(self, _text_scale: f32, spacing_scale: f32) -> Self {
+    pub(crate) fn scaled_spacing(self, spacing_scale: f32) -> Self {
         let spacing_scale = crate::appearance::normalized_scale(spacing_scale);
         Self {
             metrics: ResizeHandleMetrics {
@@ -305,14 +297,8 @@ type ResizeHandler = Rc<dyn Fn(&ResizeHandleEvent, &mut Window, &mut App) -> Opt
 
 /// A platform-neutral GPUI divider that owns resize input and presentation mechanics.
 ///
-/// The control owns its enlarged hitbox, pointer capture, cumulative displacement, keyboard
-/// interaction, cancellation, focus, and themed visual states. It never owns Pane Layout ratios,
-/// panel dimensions, minimum sizes, collapse behavior, or other application policy. Each
-/// [`ResizeHandleEvent::ResizeRequested`] is advisory: callers apply policy and feed their
-/// authoritative value back on the next render. Caller clamping never rebases an active drag.
-///
-/// A logical accessibility name is mandatory. The control retains its axis, value, and range for
-/// callers. It does not yet publish a separator node to the native accessibility tree.
+/// Each [`ResizeHandleEvent::ResizeRequested`] is advisory: callers apply their own policy and feed
+/// the authoritative value back on the next render.
 #[derive(IntoElement)]
 pub struct ResizeHandle {
     #[cfg(feature = "control-preview")]
@@ -327,8 +313,6 @@ pub struct ResizeHandle {
     reset_on_double_click: bool,
     target: ResizeHandleTarget,
     paint_divider: bool,
-    keyboard_step: f32,
-    modified_keyboard_step: f32,
     debug_selector: Option<String>,
     on_event: Option<ResizeHandler>,
 }
@@ -361,8 +345,6 @@ impl ResizeHandle {
             reset_on_double_click: false,
             target: ResizeHandleTarget::Regular,
             paint_divider: true,
-            keyboard_step: DEFAULT_KEYBOARD_STEP,
-            modified_keyboard_step: DEFAULT_MODIFIED_KEYBOARD_STEP,
             debug_selector: None,
             on_event: None,
         }
@@ -384,13 +366,11 @@ impl ResizeHandle {
         self
     }
 
-    /// Controls whether keyboard traversal may stop on this handle.
     pub fn tab_stop(mut self, tab_stop: bool) -> Self {
         self.tab_stop = tab_stop;
         self
     }
 
-    /// Enables the optional primary-pointer double-click reset request.
     pub fn reset_on_double_click(mut self, enabled: bool) -> Self {
         self.reset_on_double_click = enabled;
         self
@@ -420,17 +400,6 @@ impl ResizeHandle {
     /// restrained indicator so the tab stop stays visible.
     pub fn paint_divider(mut self, paint: bool) -> Self {
         self.paint_divider = paint;
-        self
-    }
-
-    /// Configures the ordinary and Shift-modified keyboard steps.
-    pub fn keyboard_steps(mut self, ordinary: f32, modified: f32) -> Self {
-        if ordinary.is_finite() && ordinary > 0.0 {
-            self.keyboard_step = ordinary;
-        }
-        if modified.is_finite() && modified > 0.0 {
-            self.modified_keyboard_step = modified;
-        }
         self
     }
 
@@ -480,8 +449,6 @@ impl RenderOnce for ResizeHandle {
                 self.axis,
                 self.current_value,
                 self.range.clone(),
-                self.keyboard_step,
-                self.modified_keyboard_step,
                 self.on_event.clone(),
                 cx,
             )
@@ -828,8 +795,6 @@ struct ResizeHandleState {
     current_value: f32,
     keyboard_value: f32,
     range: Option<RangeInclusive<f32>>,
-    keyboard_step: f32,
-    modified_keyboard_step: f32,
     enabled: bool,
     hovered: bool,
     hovered_targets: u8,
@@ -870,8 +835,6 @@ impl ResizeHandleState {
             current_value: 0.0,
             keyboard_value: 0.0,
             range: None,
-            keyboard_step: DEFAULT_KEYBOARD_STEP,
-            modified_keyboard_step: DEFAULT_MODIFIED_KEYBOARD_STEP,
             enabled: false,
             hovered: false,
             hovered_targets: 0,
@@ -894,8 +857,6 @@ impl ResizeHandleState {
         axis: ResizeAxis,
         current_value: f32,
         range: Option<RangeInclusive<f32>>,
-        keyboard_step: f32,
-        modified_keyboard_step: f32,
         handler: Option<ResizeHandler>,
         cx: &mut gpui::Context<Self>,
     ) -> Vec<ResizeHandleEvent> {
@@ -908,8 +869,6 @@ impl ResizeHandleState {
         }
         self.current_value = current_value;
         self.range = range;
-        self.keyboard_step = keyboard_step;
-        self.modified_keyboard_step = modified_keyboard_step;
         if self.enabled == enabled {
             return Vec::new();
         }
@@ -1093,9 +1052,9 @@ impl ResizeHandleState {
             cx.notify();
         }
         let step = if modifiers.shift {
-            self.modified_keyboard_step
+            MODIFIED_KEYBOARD_STEP
         } else {
-            self.keyboard_step
+            KEYBOARD_STEP
         };
         let displacement = direction * step;
         let original_value = self.keyboard_value;
@@ -1173,7 +1132,7 @@ mod tests {
     #[test]
     fn density_scales_resize_target_but_not_visible_hairline() {
         let original = test_theme();
-        let comfortable = original.scaled_metrics(1.0, 1.25);
+        let comfortable = original.scaled_spacing(1.25);
 
         assert!(comfortable.metrics.hitbox_thickness > original.metrics.hitbox_thickness);
         assert_eq!(
@@ -1384,33 +1343,37 @@ mod tests {
         cx.simulate_mouse_up(second, MouseButton::Left, Modifiers::none());
 
         let events = events.borrow();
-        assert!(matches!(
-            events[0],
-            ResizeHandleEvent::InteractionStarted { .. }
-        ));
-        assert!(matches!(
-            events[1],
-            ResizeHandleEvent::ResizeRequested {
-                displacement: 12.0,
-                requested_value: 112.0,
-                ..
-            }
-        ));
-        assert!(matches!(
-            events[2],
-            ResizeHandleEvent::ResizeRequested {
-                displacement: 25.0,
-                requested_value: 125.0,
-                ..
-            }
-        ));
-        assert!(matches!(
-            events[3],
-            ResizeHandleEvent::InteractionFinished {
-                reason: ResizeFinishReason::Completed,
-                ..
-            }
-        ));
+        let ResizeHandleEvent::InteractionStarted { interaction, .. } = events[0] else {
+            panic!("a drag must start an interaction");
+        };
+        assert_ne!(interaction.get(), 0);
+        assert_eq!(
+            events.as_slice(),
+            [
+                ResizeHandleEvent::InteractionStarted {
+                    interaction,
+                    source: ResizeInputSource::Pointer,
+                    original_value: 100.0
+                },
+                ResizeHandleEvent::ResizeRequested {
+                    interaction,
+                    source: ResizeInputSource::Pointer,
+                    displacement: 12.0,
+                    requested_value: 112.0
+                },
+                ResizeHandleEvent::ResizeRequested {
+                    interaction,
+                    source: ResizeInputSource::Pointer,
+                    displacement: 25.0,
+                    requested_value: 125.0
+                },
+                ResizeHandleEvent::InteractionFinished {
+                    interaction,
+                    source: ResizeInputSource::Pointer,
+                    reason: ResizeFinishReason::Completed
+                },
+            ]
+        );
     }
 
     #[gpui::test]
@@ -1831,6 +1794,7 @@ mod tests {
 
     struct PaintlessRoot {
         events: Rc<RefCell<Vec<ResizeHandleEvent>>>,
+        disabled: bool,
     }
 
     impl Render for PaintlessRoot {
@@ -1844,6 +1808,7 @@ mod tests {
                     100.0,
                 )
                 .tab_stop(true)
+                .disabled(self.disabled)
                 .paint_divider(false)
                 .debug_selector("paintless-resize")
                 .on_event(move |event, _, _| events.borrow_mut().push(*event)),
@@ -1858,6 +1823,7 @@ mod tests {
         let root_events = Rc::clone(&events);
         let (_, cx) = cx.add_window_view(move |_, _| PaintlessRoot {
             events: root_events,
+            disabled: false,
         });
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
@@ -1897,8 +1863,9 @@ mod tests {
         cx.set_global(test_theme());
         let events = Rc::new(RefCell::new(Vec::new()));
         let root_events = Rc::clone(&events);
-        let (_, cx) = cx.add_window_view(move |_, _| PaintlessRoot {
+        let (root, cx) = cx.add_window_view(move |_, _| PaintlessRoot {
             events: root_events,
+            disabled: false,
         });
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
@@ -1906,6 +1873,25 @@ mod tests {
             .debug_bounds("paintless-resize-hitbox")
             .expect("the paintless hitbox was rendered");
         let center = target.center();
+        let assert_paintless = |cx: &mut VisualTestContext| {
+            let scale = cx.update(|window, _| window.scale_factor());
+            let visible = cx.update(|window, _| {
+                window
+                    .painted_quads()
+                    .into_iter()
+                    .filter(|quad| {
+                        quad.bounds.intersects(&target.scale(scale))
+                            && (!quad.background.is_transparent()
+                                || !quad.border_color.is_transparent())
+                    })
+                    .collect::<Vec<_>>()
+            });
+            assert!(
+                visible.is_empty(),
+                "a paintless divider must emit no visible quad"
+            );
+        };
+        assert_paintless(cx);
         assert!(
             cx.debug_bounds("paintless-resize-keyboard-focus-indicator")
                 .is_none()
@@ -1918,6 +1904,7 @@ mod tests {
                 .is_none(),
             "pointer hover must remain paintless"
         );
+        assert_paintless(cx);
         cx.simulate_mouse_down(center, MouseButton::Left, Modifiers::none());
         cx.run_until_parked();
         assert!(
@@ -1925,6 +1912,7 @@ mod tests {
                 .is_none(),
             "pointer drag must remain paintless"
         );
+        assert_paintless(cx);
         cx.simulate_mouse_up(center, MouseButton::Left, Modifiers::none());
         cx.run_until_parked();
         assert!(
@@ -1932,6 +1920,17 @@ mod tests {
                 .is_none(),
             "pointer focus must remain paintless after release"
         );
+        assert_paintless(cx);
+        root.update(cx, |root, cx| {
+            root.disabled = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("paintless-resize-keyboard-focus-indicator")
+                .is_none()
+        );
+        assert_paintless(cx);
     }
 
     #[gpui::test]
@@ -1943,6 +1942,7 @@ mod tests {
         let root_events = Rc::clone(&events);
         let (_, cx) = cx.add_window_view(move |_, _| PaintlessRoot {
             events: root_events,
+            disabled: false,
         });
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();

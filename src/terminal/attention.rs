@@ -199,7 +199,7 @@ mod tests {
     }
 
     #[test]
-    fn focus_or_input_clear_resets_visual_unread_and_dock_state() {
+    fn clearing_attention_resets_visual_unread_and_cancellation_effects() {
         let mut state = AttentionState::default();
         state.observe(
             AttentionEvent::Bell,

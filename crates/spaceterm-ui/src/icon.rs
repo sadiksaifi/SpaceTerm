@@ -318,17 +318,8 @@ pub struct Icon {
     source: IconSource,
     size: Pixels,
     tint: Option<Rgba>,
-    text_alignment: Option<IconTextAlignment>,
     #[cfg(test)]
     tint_observer: Option<Arc<std::sync::Mutex<Vec<Hsla>>>>,
-}
-
-#[derive(Clone)]
-struct IconTextAlignment {
-    font: gpui::Font,
-    font_size: Pixels,
-    line_height: Pixels,
-    baseline_center: Pixels,
 }
 
 impl Icon {
@@ -338,7 +329,6 @@ impl Icon {
             source: IconSource::Lucide(name),
             size,
             tint: Some(tint),
-            text_alignment: None,
             #[cfg(test)]
             tint_observer: None,
         }
@@ -350,19 +340,6 @@ impl Icon {
             source: IconSource::Lucide(name),
             size,
             tint: None,
-            text_alignment: None,
-            #[cfg(test)]
-            tint_observer: None,
-        }
-    }
-
-    /// Creates a bundled vector whose tint follows the surrounding semantic foreground state.
-    pub fn custom_inherited(name: CustomIconName, size: Pixels) -> Self {
-        Self {
-            source: IconSource::Custom(name),
-            size,
-            tint: None,
-            text_alignment: None,
             #[cfg(test)]
             tint_observer: None,
         }
@@ -375,30 +352,9 @@ impl Icon {
             source: IconSource::Custom(name),
             size,
             tint: Some(tint),
-            text_alignment: None,
             #[cfg(test)]
             tint_observer: None,
         }
-    }
-
-    /// Aligns the icon box's center to a prepared text role's cap-height band.
-    ///
-    /// The caller supplies the role's center-above-baseline metric. Font ascent remains a renderer
-    /// fact and is resolved from the actual font and line height when the icon paints.
-    pub fn align_to_text(
-        mut self,
-        font: gpui::Font,
-        font_size: Pixels,
-        line_height: Pixels,
-        baseline_center: Pixels,
-    ) -> Self {
-        self.text_alignment = Some(IconTextAlignment {
-            font,
-            font_size,
-            line_height,
-            baseline_center,
-        });
-        self
     }
 
     #[cfg(test)]
@@ -409,12 +365,8 @@ impl Icon {
 }
 
 impl RenderOnce for Icon {
-    fn render(self, window: &mut Window, _: &mut App) -> impl IntoElement {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
         let artwork_size = optical_artwork_size(self.source, self.size);
-        let vertical_offset = self
-            .text_alignment
-            .map(|alignment| icon_text_offset(&alignment, window))
-            .unwrap_or_default();
         let content = match self.source {
             IconSource::Lucide(name) => match lucide_asset_path(name, self.size, artwork_size) {
                 Some(path) => icon_svg(
@@ -456,8 +408,6 @@ impl RenderOnce for Icon {
             .items_center()
             .justify_center()
             .size(self.size)
-            .relative()
-            .top(vertical_offset)
             .child(content)
     }
 }
@@ -500,16 +450,6 @@ fn icon_svg(path: SharedString, size: Pixels, tint: IconTint) -> impl IntoElemen
         },
     )
     .size(size)
-}
-
-fn icon_text_offset(alignment: &IconTextAlignment, window: &Window) -> Pixels {
-    text_alignment_offset(
-        &alignment.font,
-        alignment.font_size,
-        alignment.line_height,
-        alignment.baseline_center,
-        window,
-    )
 }
 
 pub(crate) fn text_alignment_offset(
@@ -569,18 +509,48 @@ mod tests {
 
     impl Render for IconTestRoot {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            div().flex().children(
+            div().flex().items_start().children(
                 [
-                    ("icon-10", IconName::Pin, 10.0),
-                    ("icon-12", IconName::Search, 12.0),
-                    ("icon-14", IconName::Folder, 14.0),
+                    ("icon-10", IconName::Pin, 10.0, "pin/10", 10.0),
+                    ("icon-12", IconName::Search, 12.0, "search/12", 12.0),
+                    ("icon-14", IconName::Folder, 14.0, "folder/14", 14.0),
+                    ("icon-pin-off", IconName::PinOff, 16.0, "pin-off/14", 14.0),
                 ]
-                .map(|(id, name, logical_size)| {
+                .map(|(id, name, logical_size, asset, artwork_size)| {
                     let logical_size = gpui::px(logical_size);
+                    let artwork_size = gpui::px(artwork_size);
+                    let path = format!("spaceterm-ui/lucide/{asset}/1.svg");
+                    // TestAppContext has an empty asset source. Supply the real embedded asset to
+                    // its atlas with transparent paint; only the Icon's own paint can emit a
+                    // visible sprite.
+                    let preload = gpui::canvas(
+                        |_, _, _| (),
+                        move |bounds, (), window, cx| {
+                            let bytes = EmbeddedAssets
+                                .load(&path)
+                                .expect("asset lookup")
+                                .expect("the fixture asset is embedded");
+                            window
+                                .paint_svg(
+                                    gpui::Bounds::new(
+                                        bounds.center()
+                                            - gpui::point(artwork_size / 2.0, artwork_size / 2.0),
+                                        size(artwork_size, artwork_size),
+                                    ),
+                                    path.into(),
+                                    Some(&bytes),
+                                    Default::default(),
+                                    gpui::rgba(0).into(),
+                                    cx,
+                                )
+                                .expect("the asset rasterizes");
+                        },
+                    );
                     div()
                         .id(id)
                         .debug_selector(move || id.to_owned())
-                        .size(logical_size)
+                        .relative()
+                        .child(preload.absolute().size_full())
                         .child(Icon::new(name, logical_size, gpui::rgba(0x8f9aafff)))
                 }),
             )
@@ -643,7 +613,7 @@ mod tests {
     use super::*;
 
     #[gpui::test]
-    fn lucide_font_registration_should_succeed_once(cx: &mut TestAppContext) {
+    fn successful_font_registration_is_cached_per_app(cx: &mut TestAppContext) {
         let mut registrations = 0;
 
         cx.update(|cx| {
@@ -816,7 +786,7 @@ mod tests {
     }
 
     #[test]
-    fn optical_correction_preserves_the_nominal_layout_box() {
+    fn optical_artwork_size_corrects_the_selected_glyphs() {
         for (name, corrected) in [
             (IconName::PinOff, 14.0),
             (IconName::Maximize2, 13.0),
@@ -854,23 +824,10 @@ mod tests {
         assert!(svg.contains("stroke-width=\"3.200000\""));
         assert_eq!(normalized_stroke_width(gpui::px(17.0)), 1.0);
         assert_eq!(normalized_stroke_width(gpui::px(18.0)), 2.0);
-
-        // Product roles can produce artwork from 7 through 36 points after the text-role clamp,
-        // glyph offsets, PinOff optical correction, and the compact search clear mark. The
-        // embedded sources' nearest geometry is two view-box units from an edge. The normalized
-        // stroke keeps a positive geometric margin at both extremes; an antialiased outer raster
-        // pixel is therefore not evidence of clipping.
-        let edge_margin = |artwork_size: f32, stroke_width: f32| {
-            let source_width = stroke_width * 24.0 / artwork_size;
-            (2.0 - source_width / 2.0) * artwork_size / 24.0
-        };
-        assert!(edge_margin(7.0, 1.0) > 0.0);
-        assert!(edge_margin(6.0, 1.0) <= 0.0);
-        assert!(edge_margin(36.0, 2.0) > 0.0);
     }
 
     #[test]
-    fn compact_clear_mark_glyph_paints_prepared_vector_artwork() {
+    fn compact_clear_mark_resolves_a_prepared_vector_asset() {
         // The Lucide font fallback places its glyph by text metrics rather than centering its
         // artwork, which strikes the clear mark off its disc.
         let path = lucide_asset_path(IconName::X, gpui::px(7.0), gpui::px(7.0))
@@ -1017,13 +974,39 @@ mod tests {
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
 
-        for (id, logical_size) in [("icon-10", 10.0), ("icon-12", 12.0), ("icon-14", 14.0)] {
+        for (id, logical_size) in [
+            ("icon-10", 10.0),
+            ("icon-12", 12.0),
+            ("icon-14", 14.0),
+            ("icon-pin-off", 16.0),
+        ] {
             let bounds = cx
                 .debug_bounds(id)
                 .unwrap_or_else(|| panic!("{id} should be painted"));
             assert_eq!(
                 bounds.size,
                 size(gpui::px(logical_size), gpui::px(logical_size))
+            );
+            let scale = cx.update(|window, _| window.scale_factor());
+            let sprites = cx.update(|window, _| {
+                window
+                    .painted_monochrome_sprites()
+                    .into_iter()
+                    .filter(|sprite| {
+                        sprite.bounds.intersects(&bounds.scale(scale))
+                            && !sprite.color.is_transparent()
+                    })
+                    .collect::<Vec<_>>()
+            });
+            assert_eq!(sprites.len(), 1, "{id} must paint its artwork");
+            let artwork = if id == "icon-pin-off" {
+                14.0
+            } else {
+                logical_size
+            };
+            assert_eq!(
+                sprites[0].bounds.size,
+                size(gpui::px(artwork), gpui::px(artwork)).scale(scale)
             );
         }
     }

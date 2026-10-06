@@ -450,6 +450,26 @@ mod tests {
         invisible.alpha = 0.0;
         let tiny = window(OTHER, 0, 0.0, 0.0, 10.0, 10.0);
 
+        for irrelevant in [
+            invisible,
+            tiny,
+            window(OTHER, 0, 0.0, 0.0, 39.0, 100.0),
+            window(OTHER, 0, 0.0, 0.0, 100.0, 39.0),
+        ] {
+            assert_eq!(
+                frontmost_window(&[irrelevant, settings], &[SETTINGS]),
+                Some(settings.frame)
+            );
+        }
+        for (width, height) in [(40.0, 100.0), (100.0, 40.0), (40.0, 40.0)] {
+            assert_eq!(
+                frontmost_window(
+                    &[window(OTHER, 0, 0.0, 0.0, width, height), settings],
+                    &[SETTINGS]
+                ),
+                None
+            );
+        }
         assert_eq!(
             frontmost_window(&[invisible, tiny, settings], &[SETTINGS]),
             Some(settings.frame)

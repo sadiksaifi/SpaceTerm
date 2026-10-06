@@ -1,15 +1,13 @@
 //! The Updates section: the installed version, the latest check, and update preferences.
-//!
-//! [`crate::updates`] owns update policy and state. These rows render that state, forward the one
-//! next step it offers, and edit the retained [`UpdatePreferences`] through the Settings draft.
+//! [`crate::updates`] owns update policy and state.
 
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Entity, SharedString};
 use spaceterm_ui::{SegmentedControl, SegmentedOption, Switch, ToggleSize};
 
 use super::{SettingsRowId, SettingsWindow};
-use crate::appearance::SettingsDocument;
 use crate::application_identity::ApplicationIdentity;
+use crate::settings::SettingsDocument;
 use crate::ui::sidebar_window::form::action_button;
 use crate::updates::policy::{CheckInterval, ReminderInterval, UpdatePreferences};
 use crate::updates::{ApplicationUpdates, UpdateError, UpdateService, UpdateState};
@@ -93,9 +91,7 @@ impl UpdateStatusPresentation {
     }
 }
 
-/// How long ago the service last completed a check, in the words a status line uses.
-///
-/// A check stamped after `now` belongs to a clock that moved backwards and reads as just now.
+/// How long ago the service last completed a check. A stamp after `now` reads as just now.
 pub(super) fn last_checked(last_check: Option<u64>, now: u64) -> String {
     const MINUTE: u64 = 60;
     const HOUR: u64 = 60 * MINUTE;

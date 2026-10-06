@@ -38,8 +38,13 @@ mod tests {
             (
                 text_direction_from_native(NSUserInterfaceLayoutDirection::LeftToRight),
                 text_direction_from_native(NSUserInterfaceLayoutDirection::RightToLeft),
+                text_direction_from_native(NSUserInterfaceLayoutDirection(99)),
             ),
-            (TextDirection::LeftToRight, TextDirection::RightToLeft)
+            (
+                TextDirection::LeftToRight,
+                TextDirection::RightToLeft,
+                TextDirection::LeftToRight
+            )
         );
     }
 }

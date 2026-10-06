@@ -1,8 +1,5 @@
 //! The Terminal section: display fixtures the Workspace windows render in place of host facts.
-//!
-//! Each fixture replaces only what a Pane shows, never what it does. The Pane Caption fixture
-//! keeps captures independent of the host account and directory, and the link preview fixture
-//! shows the hover preview without a terminal hyperlink target.
+//! Each fixture replaces only what a Pane shows, never what it does.
 
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Global, Window};
@@ -162,7 +159,7 @@ mod tests {
     use super::*;
 
     #[gpui::test]
-    fn fixtures_supply_display_facts_only_while_enabled(cx: &mut TestAppContext) {
+    fn caption_and_link_display_fixtures_toggle_independently(cx: &mut TestAppContext) {
         cx.update(|cx| {
             assert!(caption_fixture(cx).is_none());
             assert!(link_preview_fixture(cx).is_none());
@@ -181,6 +178,9 @@ mod tests {
                 link_preview_fixture(cx),
                 Some("https://example.invalid/workbench-fixture")
             );
+            reset_fixtures(cx);
+            assert!(caption_fixture(cx).is_none());
+            assert!(link_preview_fixture(cx).is_none());
         });
     }
 }

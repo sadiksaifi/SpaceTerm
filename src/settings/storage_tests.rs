@@ -1,18 +1,18 @@
 use super::storage::*;
 use crate::platform::app_directories::AppDirectoryEnvironment;
-use crate::platform::app_paths::{AppPathHostFacts, AppPaths};
 use crate::platform::secure_filesystem::{SecureCommitOutcome, SecureFilesystemError};
 use crate::platform::testing::RecordingFilesystem;
 use std::sync::Arc;
 
 fn storage() -> (ConfigSettingsStorage, Arc<RecordingFilesystem>) {
     let filesystem = Arc::new(RecordingFilesystem::default());
-    let paths = AppPaths::resolve(
+    let paths = crate::platform::testing::resolve_app_paths(
         &AppDirectoryEnvironment {
             home: Some("/home/test".into()),
             ..Default::default()
         },
-        &AppPathHostFacts::new("/runtime".into(), 200).unwrap(),
+        Some("/runtime".into()),
+        200,
         filesystem.clone(),
     )
     .unwrap();
@@ -101,7 +101,7 @@ fn uncertain_sync_does_not_turn_a_committed_write_into_failure() {
 fn temporary_collisions_are_bounded_and_oversized_writes_do_not_create_config() {
     let (storage, filesystem) = storage();
     assert!(matches!(
-        storage.write(&vec![0; MAXIMUM_DOCUMENT_BYTES + 1], None),
+        storage.write(&vec![0; MAX_DOCUMENT_BYTES + 1], None),
         Err(StorageError::TooLarge)
     ));
     assert!(filesystem.events.lock().unwrap().is_empty());
@@ -147,7 +147,7 @@ fn oversized_committed_document_is_rejected_on_read() {
     storage.write(b"candidate", None).unwrap();
     let mut files = filesystem.files.lock().unwrap();
     let (bytes, _) = files.values.first_entry().unwrap().into_mut();
-    *bytes = vec![0; MAXIMUM_DOCUMENT_BYTES + 1];
+    *bytes = vec![0; MAX_DOCUMENT_BYTES + 1];
     drop(files);
 
     assert!(matches!(storage.read(), Err(StorageError::TooLarge)));
@@ -156,6 +156,7 @@ fn oversized_committed_document_is_rejected_on_read() {
 #[cfg(all(target_os = "macos", feature = "native-tests"))]
 mod native {
     use super::*;
+    use crate::platform::app_paths::AppPaths;
     use std::{
         fs,
         os::unix::fs::{PermissionsExt, symlink},
@@ -178,13 +179,14 @@ mod native {
                 ));
             fs::create_dir(&root).unwrap();
             fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
-            let paths = AppPaths::resolve(
+            let paths = crate::platform::testing::resolve_app_paths(
                 &AppDirectoryEnvironment {
                     home: Some(root.clone().into_os_string()),
                     xdg_config_home: Some(root.join("config").into_os_string()),
                     ..Default::default()
                 },
-                &AppPathHostFacts::new(root.clone(), 103).unwrap(),
+                Some(root.clone()),
+                103,
                 Arc::new(crate::platform::unix_secure_filesystem::UnixSecureFilesystem),
             )
             .unwrap();
@@ -208,10 +210,10 @@ mod native {
         let fixture = Fixture::new();
         let storage = fixture.storage();
         storage.write(b"initial", None).unwrap();
-        let bytes = vec![0xff; MAXIMUM_DOCUMENT_BYTES + 100];
+        let bytes = vec![0xff; MAX_DOCUMENT_BYTES + 100];
         let path = fixture.paths.directories().settings_file();
         fs::write(&path, &bytes).unwrap();
-        let settings = crate::settings::UserSettings::load(Arc::new(storage));
+        let settings = crate::settings::Settings::load(Arc::new(storage));
         assert_eq!(
             settings.snapshot().status,
             Some(crate::settings::SettingsError::Storage(
@@ -225,7 +227,7 @@ mod native {
         );
         assert_eq!(
             fs::read(&path).unwrap(),
-            crate::appearance::export_settings(&crate::appearance::SettingsDocument::default())
+            crate::settings::export_settings(&crate::settings::SettingsDocument::default())
                 .unwrap()
                 .as_bytes()
         );
@@ -241,13 +243,12 @@ mod native {
                 storage.write(b"malformed", None).unwrap();
                 let path = fixture.paths.directories().settings_file();
                 if oversized {
-                    fs::write(&path, vec![0xff; MAXIMUM_DOCUMENT_BYTES + 100]).unwrap();
+                    fs::write(&path, vec![0xff; MAX_DOCUMENT_BYTES + 100]).unwrap();
                 }
-                let settings = crate::settings::UserSettings::load(Arc::new(storage));
-                let repaired = crate::appearance::export_settings(
-                    &crate::appearance::SettingsDocument::default(),
-                )
-                .unwrap();
+                let settings = crate::settings::Settings::load(Arc::new(storage));
+                let repaired =
+                    crate::settings::export_settings(&crate::settings::SettingsDocument::default())
+                        .unwrap();
                 if replace {
                     let successor = fixture.root.join("successor");
                     fs::write(&successor, &repaired).unwrap();
@@ -273,11 +274,16 @@ mod native {
         let fixture = Fixture::new();
         let storage = fixture.storage();
         assert!(storage.read().unwrap().is_none());
-        assert!(!fixture.paths.config().exists());
+        assert!(!fixture.paths.directories().config.as_path().exists());
         let first = storage.write(b"first", None).unwrap();
-        let path = fixture.paths.config().join("settings.json");
+        let path = fixture
+            .paths
+            .directories()
+            .config
+            .as_path()
+            .join("settings.json");
         assert_eq!(
-            fs::metadata(fixture.paths.config())
+            fs::metadata(fixture.paths.directories().config.as_path())
                 .unwrap()
                 .permissions()
                 .mode()
@@ -318,15 +324,15 @@ mod native {
 
 #[test]
 fn oversized_settings_are_recoverable_and_quarantine_preserves_all_bytes() {
-    use crate::settings::UserSettings;
+    use crate::settings::Settings;
     let (storage, filesystem) = storage();
     storage.write(b"initial", None).unwrap();
-    let bytes = vec![0xff; MAXIMUM_DOCUMENT_BYTES + 100];
+    let bytes = vec![0xff; MAX_DOCUMENT_BYTES + 100];
     {
         let mut files = filesystem.files.lock().unwrap();
         files.values.first_entry().unwrap().get_mut().0 = bytes.clone();
     }
-    let settings = UserSettings::load(Arc::new(storage));
+    let settings = Settings::load(Arc::new(storage));
     assert!(settings.snapshot().status.unwrap().is_malformed());
     settings.recover_by_reset().unwrap();
     let files = filesystem.files.lock().unwrap();
@@ -372,11 +378,11 @@ fn recovery_refuses_settings_repaired_after_the_malformed_read() {
                 .first_entry()
                 .unwrap()
                 .get_mut()
-                .0 = vec![0xff; MAXIMUM_DOCUMENT_BYTES + 1];
+                .0 = vec![0xff; MAX_DOCUMENT_BYTES + 1];
         }
-        let settings = crate::settings::UserSettings::load(Arc::new(storage));
+        let settings = crate::settings::Settings::load(Arc::new(storage));
         let repaired =
-            crate::appearance::export_settings(&crate::appearance::SettingsDocument::default())
+            crate::settings::export_settings(&crate::settings::SettingsDocument::default())
                 .unwrap()
                 .into_bytes();
         {
@@ -401,11 +407,10 @@ fn recovery_refuses_settings_repaired_after_the_malformed_read() {
 fn recovery_requires_reload_after_a_successor_replaces_its_publication() {
     let (storage, filesystem) = storage();
     storage.write(b"malformed", None).unwrap();
-    let settings = crate::settings::UserSettings::load(Arc::new(storage));
-    let successor =
-        crate::appearance::export_settings(&crate::appearance::SettingsDocument::default())
-            .unwrap()
-            .into_bytes();
+    let settings = crate::settings::Settings::load(Arc::new(storage));
+    let successor = crate::settings::export_settings(&crate::settings::SettingsDocument::default())
+        .unwrap()
+        .into_bytes();
     filesystem.files.lock().unwrap().successor_after_commit = Some(successor.clone());
     settings.recover_by_reset().unwrap();
     assert_eq!(
@@ -418,7 +423,7 @@ fn recovery_requires_reload_after_a_successor_replaces_its_publication() {
         settings
             .update_committed(
                 settings.snapshot().committed.revision,
-                crate::appearance::SettingsDocument::default()
+                crate::settings::SettingsDocument::default()
             )
             .is_err()
     );
