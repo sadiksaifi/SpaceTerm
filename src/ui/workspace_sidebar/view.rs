@@ -810,6 +810,12 @@ impl WorkspaceSidebar {
                 .ok()
                 .flatten()
         });
+        // A hidden sidebar is zero wide, although its handle stays at the collapsed chrome's edge.
+        let handle = if self.layout.visible {
+            handle
+        } else {
+            handle.accessibility_value(0.0)
+        };
         let handle = SidebarResizeHandle {
             handle,
             divider_position: handle_width,

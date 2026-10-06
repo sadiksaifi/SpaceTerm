@@ -747,15 +747,19 @@ impl WorkspaceSidebar {
                 cx.notify();
             }
             ResizeHandleEvent::ResizeRequested {
-                requested_value, ..
+                source,
+                requested_value,
+                ..
             } => {
-                let should_resize = self.layout.visible
-                    || px(requested_value)
-                        >= self
-                            .collapsed_top_chrome_width(window, cx)
-                            .max(px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH));
-                if should_resize {
+                let reveal_width = self
+                    .collapsed_top_chrome_width(window, cx)
+                    .max(px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH));
+                if self.layout.visible || px(requested_value) >= reveal_width {
                     self.resize(px(requested_value), window, cx);
+                } else if source == ResizeInputSource::Accessibility && requested_value > 0.0 {
+                    // The hidden sidebar publishes zero width, so assistive technology steps up
+                    // from zero. Any width above it shows the sidebar at its last width.
+                    self.resize(self.layout.width.max(px(requested_value)), window, cx);
                 }
             }
             ResizeHandleEvent::ResetRequested { source } => {

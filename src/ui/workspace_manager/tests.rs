@@ -10466,9 +10466,10 @@ fn sidebar_resize_handle_publishes_the_range_its_model_resizes_within(cx: &mut T
         .size
         .width;
     let collapsed = f64::from(f32::from(collapsed));
+    // The handle stays at the collapsed chrome's edge, but the hidden sidebar is zero wide.
     assert_eq!(
         sidebar_splitter_range(cx),
-        (collapsed, 0.0, maximum.max(collapsed))
+        (0.0, 0.0, maximum.max(collapsed))
     );
 }
 
@@ -10510,6 +10511,17 @@ fn sidebar_resize_handle_moves_to_the_width_assistive_technology_sets(cx: &mut T
         "a width below the minimum collapses the sidebar"
     );
     assert!(manager.read_with(cx, |manager, cx| !manager.sidebar.read(cx).is_resizing()));
+    assert_eq!(sidebar_splitter_range(cx).0, 0.0);
+
+    // VoiceOver steps a splitter from its published value, so its first step from a hidden
+    // sidebar requests a width below the minimum.
+    let hidden_width = layout(cx).1;
+    set_width(1.0, cx);
+    assert_eq!(layout(cx), (true, hidden_width));
+    assert_eq!(
+        sidebar_splitter_range(cx).0,
+        f64::from(f32::from(hidden_width))
+    );
 }
 
 #[gpui::test]
