@@ -2803,6 +2803,52 @@ mod tests {
     }
 
     #[gpui::test]
+    fn connection_dialogs_publish_modal_dialogs_that_act_through_their_buttons(
+        cx: &mut TestAppContext,
+    ) {
+        use gpui::accesskit::Action;
+        use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
+        let pending = cx.update(|cx| cx.background_executor().spawn(std::future::pending()));
+        let backend = FakeBackend::new([
+            Task::ready(Err(RemoteWorkspaceFlowBackendError::ConnectionFailed)),
+            pending,
+        ]);
+        let (harness, flow, events, cx) = flow_window(backend, cx);
+
+        select_destination(&flow, "work", cx);
+        let tree = A11yTree::read(cx);
+        let alert = tree.node("Remote connection failed");
+        assert_eq!(alert["aria"]["role"], "AlertDialog");
+        assert_eq!(alert["aria"]["modal"], true);
+
+        perform(cx, tree.node("Retry"), Action::Click);
+        assert!(A11yTree::read(cx).find("Remote connection failed").is_none());
+        // Authentication suspends the progress, which returns once it reports another phase.
+        cx.update(|window, cx| {
+            flow.update(cx, |flow, cx| {
+                let generation = flow.action_generation;
+                flow.apply_connection_progress(
+                    generation,
+                    RemoteWorkspaceConnectionProgress::Connecting,
+                    window,
+                    cx,
+                );
+            });
+        });
+        let tree = A11yTree::read(cx);
+        let progress = tree.node("Remote connection progress");
+        assert_eq!(progress["aria"]["role"], "Dialog");
+        assert_eq!(progress["aria"]["modal"], true);
+
+        perform(cx, tree.node("Cancel"), Action::Click);
+        cx.run_until_parked();
+        assert_eq!(events.borrow().cancelled, 1);
+        assert!(A11yTree::read(cx).find("Remote connection progress").is_none());
+        assert!(cx.update(|window, cx| harness.read(cx).prior_focus.is_focused(window)));
+    }
+
+    #[gpui::test]
     fn connection_error_back_should_return_to_host_selection_then_cancel_once(
         cx: &mut TestAppContext,
     ) {
