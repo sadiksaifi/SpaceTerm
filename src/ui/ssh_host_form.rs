@@ -706,7 +706,7 @@ impl Render for SshHostForm {
                     div()
                         .id("managed-ssh-host-backend-error")
                         .role(accesskit::Role::Label)
-                        .aria_label(error)
+                        .aria_value(error)
                         .debug_selector(|| "managed-ssh-host-backend-error".to_owned())
                         .chrome_text(appearance.typography.style(TextRole::Body))
                         .text_color(gpui_color(colors.error))
@@ -802,7 +802,7 @@ fn form_field(
                 div()
                     .id(format!("{error_selector}-message"))
                     .role(accesskit::Role::Label)
-                    .aria_label(error)
+                    .aria_value(error)
                     .debug_selector(move || error_selector.to_owned())
                     .chrome_text(appearance.typography.style(TextRole::Body))
                     .text_color(gpui_color(colors.error))
@@ -1201,14 +1201,14 @@ mod tests {
         assert_eq!(fields, ["Alias", "Host name", "User", "Port", "Identity file"]);
         assert_eq!(tree.focused(), tree.find("Alias"));
         assert_eq!(tree.node("Choose Identity File")["aria"]["role"], "Button");
-        assert!(tree.find("Alias is required.").is_none());
+        assert!(tree.find_text("Alias is required.").is_none());
 
         perform(cx, tree.node("Save"), Action::Click);
         let tree = A11yTree::read(cx);
         assert!(backend.records().is_empty());
         for message in ["Alias is required.", "Host name is required."] {
-            assert_eq!(tree.node(message)["aria"]["role"], "Label");
-            assert!(tree.exposed(tree.node(message)));
+            assert!(tree.find(message).is_none());
+            assert!(tree.exposed(tree.text(message)));
         }
         assert_eq!(tree.focused(), tree.find("Alias"));
 
@@ -1380,7 +1380,8 @@ mod tests {
         );
         assert!(cx.debug_bounds("managed-ssh-host-backend-error").is_some());
         let tree = spaceterm_ui::a11y_testing::A11yTree::read(cx);
-        assert_eq!(tree.node(SAVE_FAILURE_MESSAGE)["aria"]["role"], "Label");
+        assert!(tree.find(SAVE_FAILURE_MESSAGE).is_none());
+        tree.text(SAVE_FAILURE_MESSAGE);
         let host_name = form.read_with(cx, |form, _| form.host_name.clone());
         cx.update(|window, cx| window.focus(&host_name.read(cx).focus_handle(), cx));
         cx.simulate_input("x");

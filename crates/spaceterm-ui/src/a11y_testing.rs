@@ -132,3 +132,17 @@ impl A11yTree {
         nodes
     }
 }
+
+impl A11yTree {
+    /// Returns the Label node that publishes this text as its value, if one is published.
+    pub fn find_text(&self, text: &str) -> Option<&Value> {
+        self.nodes()
+            .find(|node| node["aria"]["role"] == "Label" && node["aria"]["value"] == text)
+    }
+
+    /// Returns the Label node that publishes this text as its value.
+    pub fn text(&self, text: &str) -> &Value {
+        self.find_text(text)
+            .unwrap_or_else(|| panic!("no Label publishes {text:?}"))
+    }
+}

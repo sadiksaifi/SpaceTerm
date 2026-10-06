@@ -698,16 +698,15 @@ fn the_guide_publishes_its_instruction_and_the_application_row(cx: &mut TestAppC
 
     let guide = guide_context(cx);
     let tree = A11yTree::read(guide);
-    let instruction =
-        tree.node(&format!("Drag {application} to the list above to allow Screen Recording."));
-    assert_eq!(instruction["aria"]["role"], "Label");
+    tree.text(&format!(
+        "Drag {application} to the list above to allow Screen Recording."
+    ));
     let row = tree.node(application);
     assert_eq!(row["aria"]["role"], "Group");
     assert_eq!(row["aria"]["description"], "Drag to the list above");
-    let caption = tree.node(&format!(
+    tree.text(&format!(
         "{application} removed any earlier entry. Or use the + button below the list."
     ));
-    assert_eq!(caption["aria"]["role"], "Label");
 
     perform(guide, tree.node("Close"), Action::Click);
     guide.run_until_parked();
@@ -728,8 +727,7 @@ fn a_granted_guide_publishes_its_result_and_advice(cx: &mut TestAppContext) {
         .setup
         .read_with(cx, |setup, _| setup.copy(Accessibility).name);
     let tree = spaceterm_ui::a11y_testing::A11yTree::read(guide_context(cx));
-    assert_eq!(tree.node(&format!("{name} is allowed."))["aria"]["role"], "Label");
-    let advice = tree.node("Restart any tool that was already running.");
-    assert_eq!(advice["aria"]["role"], "Label");
+    tree.text(&format!("{name} is allowed."));
+    tree.text("Restart any tool that was already running.");
     assert_eq!(tree.node("Allow Screen Recording")["aria"]["role"], "Button");
 }

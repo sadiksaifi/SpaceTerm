@@ -476,7 +476,7 @@ impl Render for AskPassSecretBody {
                             div()
                                 .id("ssh-askpass-required-error")
                                 .role(accesskit::Role::Label)
-                                .aria_label(REQUIRED_SECRET_MESSAGE)
+                                .aria_value(REQUIRED_SECRET_MESSAGE)
                                 .debug_selector(|| "ssh-askpass-required-error".to_owned())
                                 .chrome_text(appearance.typography.style(TextRole::Secondary))
                                 .text_color(gpui_color(colors.error))
@@ -638,7 +638,8 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("ssh-askpass-required-error").is_some());
         let tree = spaceterm_ui::a11y_testing::A11yTree::read(cx);
-        assert_eq!(tree.node(REQUIRED_SECRET_MESSAGE)["aria"]["role"], "Label");
+        assert!(tree.find(REQUIRED_SECRET_MESSAGE).is_none());
+        tree.text(REQUIRED_SECRET_MESSAGE);
         assert!(results.borrow().is_empty());
 
         cx.simulate_input("correct horse");
