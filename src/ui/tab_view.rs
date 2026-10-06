@@ -11,6 +11,7 @@ use crate::domain::remote_workspace::RemoteRestartBatch;
 use crate::terminal::metadata::CurrentDirectory;
 use crate::ui::appearance::gpui_color;
 use std::collections::BTreeMap;
+use std::ops::RangeInclusive;
 
 use thiserror::Error;
 
@@ -1881,11 +1882,17 @@ impl TabView {
         };
 
         let gap = pane_gap(cx);
-        let current_offset = self
-            .split_bounds
-            .get(&split_id)
-            .and_then(|bounds| split_content_extent(axis, *bounds, gap))
-            .map_or(0.0, |extent| extent * ratio);
+        let bounds = self.split_bounds.get(&split_id).copied();
+        let extent = bounds.and_then(|bounds| split_content_extent(axis, bounds, gap));
+        let current_offset = extent.map_or(0.0, |extent| extent * ratio);
+        // A ratio left outside the bounds by a smaller window stays inside the published range.
+        let offset_range = bounds.zip(extent).and_then(|(bounds, extent)| {
+            let range = self
+                .tab
+                .split_ratio_range(split_id, pane_size(bounds).ok()?, gap)
+                .ok()?;
+            Some(extent * range.start().min(ratio)..=extent * range.end().max(ratio))
+        });
 
         // The resize target paints after both Panes but before sibling popovers; a deferred target
         // would paint through command palettes.
@@ -1899,6 +1906,7 @@ impl TabView {
                 split_id,
                 axis,
                 current_offset,
+                offset_range,
                 view,
             ));
         let (spacer, resize_target) = match axis {
@@ -2733,9 +2741,10 @@ fn render_split_resize_handle(
     split_id: SplitId,
     axis: SplitAxis,
     current_offset: f32,
+    offset_range: Option<RangeInclusive<f32>>,
     view: gpui::WeakEntity<TabView>,
 ) -> AnyElement {
-    ResizeHandle::new(
+    let handle = ResizeHandle::new(
         ("split-resize", split_id.get()),
         "Resize Pane split",
         match axis {
@@ -2743,7 +2752,11 @@ fn render_split_resize_handle(
             SplitAxis::Vertical => ResizeAxis::Vertical,
         },
         current_offset,
-    )
+    );
+    match offset_range {
+        Some(range) => handle.range(range),
+        None => handle,
+    }
     .tab_stop(true)
     .reset_on_double_click(true)
     .paint_divider(false)
@@ -5945,5 +5958,131 @@ mod tests {
         assert!(ratio > 0.25 && ratio < 1.0, "{ratio}");
         assert_eq!(published(cx), f64::from(extent * ratio));
         assert_eq!(view.read_with(cx, |view, _| view.resizing_split_id), None);
+    }
+
+    /// Each Split's published value, minimum, and maximum, from the Tab's own bounds.
+    fn expected_split_ranges(
+        view: &Entity<TabView>,
+        cx: &mut VisualTestContext,
+    ) -> Vec<(&'static str, (f64, f64, f64))> {
+        fn collect(tree: PaneTreeRef<'_>, splits: &mut Vec<(SplitId, SplitAxis, f32)>) {
+            if let PaneNodeRef::Split {
+                split_id,
+                axis,
+                ratio,
+                first,
+                second,
+            } = tree.node()
+            {
+                splits.push((split_id, axis, ratio));
+                collect(first, splits);
+                collect(second, splits);
+            }
+        }
+
+        view.read_with(cx, |view, cx| {
+            let gap = pane_gap(cx);
+            let mut splits = Vec::new();
+            collect(view.tab.root(), &mut splits);
+            splits
+                .into_iter()
+                .map(|(split_id, axis, ratio)| {
+                    let bounds = view.split_bounds[&split_id];
+                    let extent = split_content_extent(axis, bounds, gap).unwrap();
+                    let range = view
+                        .tab
+                        .split_ratio_range(split_id, pane_size(bounds).unwrap(), gap)
+                        .unwrap();
+                    let orientation = match axis {
+                        SplitAxis::Horizontal => "Vertical",
+                        SplitAxis::Vertical => "Horizontal",
+                    };
+                    let offset = |ratio: f32| f64::from(extent * ratio);
+                    (
+                        orientation,
+                        (offset(ratio), offset(*range.start()), offset(*range.end())),
+                    )
+                })
+                .collect()
+        })
+    }
+
+    fn pane_split_handle<'a>(
+        tree: &'a spaceterm_ui::a11y_testing::A11yTree,
+        orientation: &str,
+    ) -> &'a serde_json::Value {
+        tree.with_role("Splitter")
+            .into_iter()
+            .find(|node| {
+                node["aria"]["label"] == "Resize Pane split"
+                    && node["aria"]["orientation"] == orientation
+            })
+            .unwrap_or_else(|| panic!("no {orientation} Pane split handle"))
+    }
+
+    /// The published value, minimum, and maximum of the Pane split handle with `orientation`.
+    fn published_split_range(orientation: &str, cx: &mut VisualTestContext) -> (f64, f64, f64) {
+        let tree = spaceterm_ui::a11y_testing::A11yTree::read(cx);
+        let splitter = pane_split_handle(&tree, orientation);
+        let number = |key: &str| {
+            splitter["aria"][key]
+                .as_f64()
+                .unwrap_or_else(|| panic!("the Pane split handle publishes no {key}"))
+        };
+        (
+            number("numeric_value"),
+            number("min_numeric_value"),
+            number("max_numeric_value"),
+        )
+    }
+
+    #[gpui::test]
+    fn split_resize_handles_publish_the_range_their_tab_resizes_within(cx: &mut TestAppContext) {
+        use gpui::accesskit::{Action, ActionData};
+        use spaceterm_ui::a11y_testing::{A11yTree, perform_with};
+
+        let (view, cx) = split_gap_view(cx);
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.split_pane(PaneId::new(1), SplitAxis::Horizontal, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.split_pane(PaneId::new(2), SplitAxis::Vertical, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        let expected = expected_split_ranges(&view, cx);
+        assert_eq!(expected.len(), 2);
+        for (orientation, range) in &expected {
+            assert!(range.1 > 0.0 && range.1 < range.0 && range.0 < range.2, "{range:?}");
+            assert_eq!(published_split_range(orientation, cx), *range);
+        }
+
+        for (orientation, _) in expected {
+            for requested in [-10_000.0, 10_000.0] {
+                let tree = A11yTree::read(cx);
+                perform_with(
+                    cx,
+                    pane_split_handle(&tree, orientation),
+                    Action::SetValue,
+                    Some(ActionData::NumericValue(requested)),
+                );
+                cx.run_until_parked();
+
+                let (value, minimum, maximum) = published_split_range(orientation, cx);
+                let bound = if requested < 0.0 { minimum } else { maximum };
+                assert_eq!(value, bound, "{orientation} handle after {requested}");
+                let current = expected_split_ranges(&view, cx)
+                    .into_iter()
+                    .find(|(candidate, _)| *candidate == orientation)
+                    .unwrap()
+                    .1;
+                assert_eq!((value, minimum, maximum), current);
+            }
+        }
     }
 }
