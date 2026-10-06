@@ -8314,3 +8314,30 @@ fn modals_without_a_focusable_control_report_the_dialog_as_focused(cx: &mut Test
         "Programmatic progress"
     );
 }
+
+#[gpui::test]
+fn alert_suppression_publishes_a_checkbox_that_toggles_on_request(cx: &mut TestAppContext) {
+    use crate::a11y_testing::{A11yTree, perform, supports};
+    use gpui::accesskit::Action;
+
+    let (_, _, outcome, cx) = alert_window(cx);
+    let tree = A11yTree::read(cx);
+    let suppression = tree.node("Do not ask again");
+    assert_eq!(suppression["aria"]["role"], "CheckBox");
+    assert_eq!(suppression["aria"]["toggled"], "False");
+    assert!(supports(suppression, Action::Click));
+
+    perform(cx, suppression, Action::Click);
+    let tree = A11yTree::read(cx);
+    assert_eq!(tree.node("Do not ask again")["aria"]["toggled"], "True");
+
+    perform(cx, tree.node("Save"), Action::Click);
+    assert!(matches!(
+        outcome.borrow().as_ref(),
+        Some(AlertOutcome::Activated {
+            action_id: "save",
+            suppression_selected: Some(true),
+            ..
+        })
+    ));
+}

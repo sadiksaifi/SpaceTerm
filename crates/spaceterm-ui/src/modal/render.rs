@@ -1140,12 +1140,22 @@ fn render_alert_suppression(
     let pressed_font = font.clone();
     let key_down_state = state.clone();
     let key_up_state = state;
-    let keyboard_owner = owner;
+    let keyboard_owner = owner.clone();
+    let accessibility_owner = owner;
     let keyboard_focus = focus.clone();
     let focus_anchor = focus_anchors.register(&focus);
     let scroll_anchor = focus_anchor.scroll_anchor();
     let control = div()
         .id(("modal-suppression", presentation.value()))
+        .role(accesskit::Role::CheckBox)
+        .aria_label(label.clone())
+        .aria_toggled(accesskit::Toggled::from(selected))
+        .aria_disabled(!enabled)
+        .when(enabled, |control| {
+            control.on_a11y_action(accesskit::Action::Click, move |_, _, cx| {
+                toggle_alert_suppression(&accessibility_owner, presentation, cx);
+            })
+        })
         .debug_selector(|| "modal-alert-suppression".to_owned())
         .relative()
         .group(crate::toggle::INTERACTION_GROUP)
