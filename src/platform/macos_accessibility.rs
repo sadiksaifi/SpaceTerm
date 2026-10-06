@@ -659,11 +659,10 @@ mod native {
         let state = state(this).filter(|state| state.presented)?;
         // SAFETY: NSAccessibilityElement stores the parent that AccessKit assigns.
         let parent: Option<Retained<AnyObject>> = unsafe { msg_send![this, accessibilityParent] };
-        parent.and_then(|parent| resolve(&parent)).or_else(|| {
-            let view = state.view.as_deref()?;
-            // SAFETY: GPUI's live NSView answers this NSAccessibility method.
-            unsafe { msg_send![view, accessibilityParent] }
-        })
+        match parent {
+            Some(parent) => resolve(&parent),
+            None => resolve(state.view.as_deref()?),
+        }
     }
 
     fn semantic_state(this: &PaneAccessibilityElement) -> Option<&AccessibilityElementState> {
