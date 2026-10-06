@@ -301,9 +301,6 @@ impl WorkspaceChromeStatus {
         let size = status_mark_size(appearance);
         let mark = div()
             .id(self.selector())
-            .role(gpui::accesskit::Role::Status)
-            .aria_label("Workspace status")
-            .aria_value(self.label())
             .debug_selector(move || self.selector().to_owned())
             .flex_none()
             .size(size);
@@ -440,6 +437,34 @@ mod tests {
             assert_eq!(leading_clearance(true, px(8.0), cx), px(8.0));
             assert_eq!(leading_clearance(false, px(8.0), cx), px(78.0));
         });
+    }
+
+    #[gpui::test]
+    fn workspace_status_mark_does_not_repeat_the_switcher_status(cx: &mut gpui::TestAppContext) {
+        use spaceterm_ui::a11y_testing::A11yTree;
+
+        struct Probe;
+        impl gpui::Render for Probe {
+            fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+                let appearance = ChromeAppearance::default();
+                let host = appearance.colors.title_bar_background;
+                div()
+                    .id("switcher-probe")
+                    .role(gpui::accesskit::Role::ComboBox)
+                    .aria_label("Switch Workspace, work, Disconnected")
+                    .child(WorkspaceChromeStatus::Disconnected.mark(
+                        &appearance,
+                        WorkspaceChromeStatusHosts::new(host, host),
+                        "switcher-probe",
+                    ))
+            }
+        }
+        cx.update(crate::ui::init).unwrap();
+        let (_, cx) = cx.add_window_view(|_, _| Probe);
+        let tree = A11yTree::read(cx);
+        let switcher = tree.node("Switch Workspace, work, Disconnected");
+        assert_eq!(switcher["aria"]["role"], "ComboBox");
+        assert!(tree.children(switcher).is_empty());
     }
 
     #[test]

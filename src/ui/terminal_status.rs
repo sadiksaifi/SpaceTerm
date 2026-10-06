@@ -346,6 +346,7 @@ impl Mark {
             id,
             selector,
         } = self;
+        let visual_id = ElementId::NamedChild(std::sync::Arc::new(id.clone()), "visual".into());
         let (tint, opacity) = treatment(progress, blinked);
         let mark = match (
             status_shape(progress, differentiate_without_color),
@@ -373,6 +374,9 @@ impl Mark {
             (StatusShape::Glyph, None) => Icon::inherited(icon, size).into_any_element(),
         };
         div()
+            .id(visual_id)
+            .role(gpui::accesskit::Role::Group)
+            .aria_hidden(true)
             .size_full()
             .flex()
             .items_center()
@@ -539,7 +543,7 @@ mod tests {
     fn terminal_glyphs_publish_bounded_status_and_attention(cx: &mut gpui::TestAppContext) {
         use spaceterm_ui::a11y_testing::{A11yTree, node_id};
 
-        struct Probe(TerminalProgress, bool);
+        struct Probe(TerminalProgress, bool, bool);
         impl gpui::Render for Probe {
             fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
                 StatusGlyph {
@@ -557,42 +561,50 @@ mod tests {
                         error: gpui::rgba(0xff3333ff),
                         paused: gpui::rgba(0x888888ff),
                     },
-                    differentiate_without_color: false,
+                    differentiate_without_color: self.2,
                 }
                 .render()
             }
         }
         cx.update(crate::ui::init).unwrap();
-        let (probe, cx) = cx.add_window_view(|_, _| Probe(TerminalProgress::None, false));
+        let (probe, cx) = cx.add_window_view(|_, _| Probe(TerminalProgress::None, false, false));
         let tree = A11yTree::read(cx);
         let status = tree.node("Terminal Session status");
         assert_eq!(status["aria"]["role"], "Status");
         let identity = node_id(status);
-        for (progress, value, percent) in [
-            (TerminalProgress::None, "Idle", None),
-            (TerminalProgress::Normal(42), "Busy, 42%", Some(42.0)),
-            (TerminalProgress::Indeterminate, "In progress", None),
-            (TerminalProgress::TitleActivity, "Activity", None),
-            (TerminalProgress::Error(30), "Error, 30%", Some(30.0)),
-            (TerminalProgress::Paused(70), "Paused, 70%", Some(70.0)),
-        ] {
-            probe.update(cx, |probe, cx| {
-                probe.0 = progress;
-                probe.1 = true;
-                cx.notify();
-            });
-            let tree = A11yTree::read(cx);
-            let status = tree.node("Terminal Session status");
-            assert_eq!(node_id(status), identity);
-            assert_eq!(tree.with_role("Status").len(), 1);
-            assert_eq!(status["aria"]["value"], value);
-            assert_eq!(status["aria"]["numeric_value"].as_f64(), percent);
-            assert_eq!(status["aria"]["description"], "Needs attention");
-            assert!(
-                tree.in_order()
-                    .iter()
-                    .all(|node| !node["aria"].to_string().contains("private-terminal-glyph"))
-            );
+        for differentiate_without_color in [false, true] {
+            for (progress, value, percent) in [
+                (TerminalProgress::None, "Idle", None),
+                (TerminalProgress::Normal(42), "Busy, 42%", Some(42.0)),
+                (TerminalProgress::Indeterminate, "In progress", None),
+                (TerminalProgress::TitleActivity, "Activity", None),
+                (TerminalProgress::Error(30), "Error, 30%", Some(30.0)),
+                (TerminalProgress::Paused(70), "Paused, 70%", Some(70.0)),
+            ] {
+                probe.update(cx, |probe, cx| {
+                    probe.0 = progress;
+                    probe.1 = true;
+                    probe.2 = differentiate_without_color;
+                    cx.notify();
+                });
+                let tree = A11yTree::read(cx);
+                let status = tree.node("Terminal Session status");
+                assert_eq!(node_id(status), identity);
+                assert_eq!(tree.with_role("Status").len(), 1);
+                assert!(
+                    tree.with_role("ProgressIndicator")
+                        .iter()
+                        .all(|node| !tree.exposed(node))
+                );
+                assert_eq!(status["aria"]["value"], value);
+                assert_eq!(status["aria"]["numeric_value"].as_f64(), percent);
+                assert_eq!(status["aria"]["description"], "Needs attention");
+                assert!(
+                    tree.in_order()
+                        .iter()
+                        .all(|node| !node["aria"].to_string().contains("private-terminal-glyph"))
+                );
+            }
         }
         probe.update(cx, |probe, cx| {
             probe.1 = false;
