@@ -2,8 +2,8 @@
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Entity, FocusHandle, Font, KeyDownEvent, SharedString, StyledText, Window,
-    accesskit, div, px, relative,
+    AnyElement, App, Entity, FocusHandle, Font, KeyDownEvent, SharedString, StyledText, Text,
+    Window, accesskit, div, px, relative,
 };
 use spaceterm_ui::{
     Alert, AlertIntent, AlertOutcome, HoverFade, Icon, IconName, ModalAction, ModalActionEmphasis,
@@ -402,7 +402,15 @@ impl SettingsWindow {
                         .child(SharedString::from(format!("No themes match “{query}”."))),
                 )
             })
-            .child(div().flex().flex_col().children(rows))
+            .child(
+                div()
+                    .id("settings-installed-theme-list")
+                    .role(accesskit::Role::List)
+                    .aria_label(self.installed_themes_title(cx))
+                    .flex()
+                    .flex_col()
+                    .children(rows),
+            )
             .into_any_element()
     }
 
@@ -435,7 +443,10 @@ impl SettingsWindow {
                     appearance.icons.metrics(IconRole::Caption).glyph_size,
                     gpui_color(colors.text_secondary),
                 ))
-                .child("In Use")
+                .child(Text::new(
+                    SharedString::from(format!("{selector}-in-use")).into(),
+                    SharedString::from("In Use"),
+                ))
                 .into_any_element()
         } else {
             let owner = cx.weak_entity();
@@ -489,6 +500,10 @@ impl SettingsWindow {
             })
         });
         div()
+            .id(SharedString::from(selector.clone()))
+            .role(accesskit::Role::ListItem)
+            .aria_label(summary.name.clone())
+            .aria_description(theme_origin(summary))
             .debug_selector({
                 let selector = selector.clone();
                 move || selector

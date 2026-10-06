@@ -905,6 +905,58 @@ fn use_applies_a_theme_to_the_displayed_slot(cx: &mut TestAppContext) {
     }
 }
 
+#[gpui::test]
+fn installed_themes_publish_a_list_of_named_themes_with_their_actions(cx: &mut TestAppContext) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
+    let family = br##"{"themes":[{"name":"Sample Dark","appearance":"dark","style":{}}]}"##;
+    let document = SettingsDocument {
+        terminal_themes: crate::appearance::translate_zed_family(family).unwrap(),
+        ..Default::default()
+    };
+    let imported = document.terminal_themes[0].id.clone();
+    let (window, _, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
+    select_section(SettingsSectionId::Themes, cx);
+    let tree = A11yTree::read(cx);
+    let list = tree.node("Dark themes");
+    assert_eq!(list["aria"]["role"], "List");
+    let items = tree.children(list);
+    assert!(items.iter().all(|item| item["aria"]["role"] == "ListItem"));
+    let item = |name: &str| {
+        *items
+            .iter()
+            .find(|item| item["aria"]["label"] == name)
+            .unwrap_or_else(|| panic!("no theme item is named {name:?}"))
+    };
+    let in_use = tree.children(item("SpaceTerm Dark"));
+    assert!(in_use.iter().any(|node| node["aria"]["value"] == "In Use"));
+    let sample = item("Sample Dark");
+    assert!(!sample["aria"]["description"].as_str().unwrap().is_empty());
+    let actions = tree
+        .children(sample)
+        .into_iter()
+        .filter(|node| node["aria"]["role"] == "Button")
+        .map(|node| node["aria"]["label"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(actions, ["Use", "Remove Sample Dark"]);
+
+    let use_sample = tree
+        .children(sample)
+        .into_iter()
+        .find(|node| node["aria"]["label"] == "Use")
+        .unwrap();
+    perform(cx, use_sample, Action::Click);
+    assert_eq!(
+        document_of(&window, cx)
+            .appearance
+            .terminal
+            .themes
+            .get(Appearance::Dark),
+        &imported
+    );
+}
+
 /// The same slot selection, Use, and removal operations remain reachable without a pointer.
 #[gpui::test]
 fn keyboard_navigation_selects_slots_applies_themes_and_opens_removal(cx: &mut TestAppContext) {
