@@ -884,6 +884,7 @@ pub struct ContextMenuTarget {
     label: SharedString,
     description: Option<SharedString>,
     selected: Option<bool>,
+    disabled: bool,
     on_press: Option<TargetPressHandler>,
 }
 
@@ -894,6 +895,7 @@ impl ContextMenuTarget {
             label: label.into(),
             description: None,
             selected: None,
+            disabled: false,
             on_press: None,
         }
     }
@@ -905,6 +907,14 @@ impl ContextMenuTarget {
 
     pub fn selected(mut self, selected: bool) -> Self {
         self.selected = Some(selected);
+        self
+    }
+
+    /// Publishes the content as unavailable and withholds its press and menu actions.
+    ///
+    /// The caller disables the content's own pointer and keyboard paths to match.
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
         self
     }
 
@@ -1691,6 +1701,7 @@ impl<A: Clone + 'static> MenuControl<A> {
             .id(self.id)
             // A context menu's content publishes its own semantics unless it names a target.
             .when_some(self.context_target, |trigger, target| {
+                let available = !target.disabled;
                 trigger
                     .role(target.role)
                     .aria_label(target.label)
@@ -1700,12 +1711,13 @@ impl<A: Clone + 'static> MenuControl<A> {
                     .when_some(target.selected, |trigger, selected| {
                         trigger.aria_selected(selected)
                     })
-                    .when_some(target.on_press, |trigger, press| {
+                    .aria_disabled(target.disabled)
+                    .when_some(target.on_press.filter(|_| available), |trigger, press| {
                         trigger.on_a11y_action(accesskit::Action::Click, move |_, window, cx| {
                             press(window, cx)
                         })
                     })
-                    .when(enabled, |trigger| {
+                    .when(enabled && available, |trigger| {
                         trigger.on_a11y_action(
                             accesskit::Action::ShowContextMenu,
                             move |_, window, cx| {
@@ -4675,6 +4687,41 @@ mod tests {
         let tree = A11yTree::read(cx);
         assert_eq!(tree.with_role("Menu").len(), 1);
         assert_eq!(tree.focused().unwrap()["aria"]["label"], "Inspect");
+    }
+
+    #[gpui::test]
+    fn a_disabled_context_menu_target_publishes_its_state_and_refuses_actions(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::a11y_testing::{A11yTree, supports};
+        use gpui::accesskit::{Action, Role};
+
+        struct TargetRoot;
+        impl Render for TargetRoot {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                ContextMenu::new(
+                    "row-menu",
+                    "Row actions",
+                    div().w(px(80.0)).h(px(40.0)),
+                    vec![MenuEntry::action("Inspect", ())],
+                )
+                .target(
+                    ContextMenuTarget::new(Role::ListBoxOption, "Row")
+                        .disabled(true)
+                        .on_press(|_, _| {}),
+                )
+                .on_activate(|_, _, _| {})
+            }
+        }
+
+        cx.update(super::init);
+        cx.set_global(test_theme());
+        let (_, cx) = cx.add_window_view(|_, _| TargetRoot);
+        let tree = A11yTree::read(cx);
+        let target = tree.node("Row");
+        assert_eq!(target["aria"]["disabled"], true);
+        assert!(!supports(target, Action::Click));
+        assert!(!supports(target, Action::ShowContextMenu));
     }
 
     #[gpui::test]
