@@ -116,3 +116,19 @@ pub fn node_id(node: &Value) -> accesskit::NodeId {
             .expect("a published node id"),
     )
 }
+
+impl A11yTree {
+    /// Returns reachable nodes in presented reading order, preserving duplicate child links.
+    pub fn in_order(&self) -> Vec<&Value> {
+        let mut pending = self.0["nodes"]
+            .get(self.0["root"].as_str().expect("a root node"))
+            .into_iter()
+            .collect::<Vec<_>>();
+        let mut nodes = Vec::new();
+        while let Some(node) = pending.pop() {
+            pending.extend(self.children(node).into_iter().rev());
+            nodes.push(node);
+        }
+        nodes
+    }
+}

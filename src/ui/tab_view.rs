@@ -3808,6 +3808,111 @@ mod tests {
     }
 
     #[gpui::test]
+    fn split_panes_publish_terminal_nodes_in_layout_order_and_follow_input_focus(
+        cx: &mut TestAppContext,
+    ) {
+        use gpui::accesskit::Action;
+        use spaceterm_ui::a11y_testing::{A11yTree, node_id, perform};
+
+        cx.update(crate::ui::init).unwrap();
+        let factory = test_session_factory();
+        let launch = factory.prepare_child_launch().unwrap();
+        let construction = PaneConstruction::new(
+            Rc::new(crate::terminal::GpuiTerminalKeyInputAdapterFactory::default()),
+            Rc::new(crate::platform::accesskit_terminal_accessibility::AccessKitTerminalAccessibilityAdapterFactory),
+            crate::terminal::native_services::testing::adapters(),
+            crate::ui::pane_lifecycle::PaneLifecycleDependencies::testing(),
+        );
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            TabView::new_with_prepared_launch(
+                TabId::new(1),
+                factory,
+                launch,
+                construction,
+                window,
+                cx,
+            )
+        });
+        cx.update(|window, cx| {
+            window.activate_window();
+            view.update(cx, |view, cx| view.activate(window, cx));
+        });
+        cx.run_until_parked();
+        split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
+        split_test_pane(&view, PaneId::new(1), SplitAxis::Vertical, cx);
+
+        let tree = A11yTree::read(cx);
+        let panes = tree
+            .in_order()
+            .into_iter()
+            .filter(|node| node["aria"]["role"] == "Terminal")
+            .collect::<Vec<_>>();
+        assert_eq!(panes.len(), 3);
+        assert_eq!(
+            panes
+                .iter()
+                .map(|pane| node_id(pane))
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            3
+        );
+        for pane in &panes {
+            let children = tree.children(pane);
+            assert_eq!(
+                children
+                    .iter()
+                    .map(|child| node_id(child))
+                    .collect::<std::collections::HashSet<_>>()
+                    .len(),
+                children.len()
+            );
+        }
+        let captions = tree
+            .in_order()
+            .into_iter()
+            .filter(|node| node["aria"]["role"] == "Group")
+            .map(|node| node["aria"]["label"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            captions,
+            ["Pane 1 Caption", "Pane 3 Caption", "Pane 2 Caption"]
+        );
+        assert_eq!(node_id(tree.focused().unwrap()), node_id(panes[1]));
+
+        perform(cx, panes[2], Action::Focus);
+        let tree = A11yTree::read(cx);
+        assert_eq!(node_id(tree.focused().unwrap()), node_id(panes[2]));
+        assert_eq!(
+            view.read_with(cx, |view, _| view.focused_pane_id()),
+            PaneId::new(2)
+        );
+        assert!(cx.update(|window, cx| view.read(cx).focused_terminal_has_input_focus(window, cx)));
+
+        cx.simulate_keystrokes("cmd-alt-left");
+        let tree = A11yTree::read(cx);
+        let focused = view.read_with(cx, |view, _| view.focused_pane_id());
+        assert_ne!(focused, PaneId::new(2));
+        assert!(cx.update(|window, cx| view.read(cx).focused_terminal_has_input_focus(window, cx)));
+        assert_ne!(node_id(tree.focused().unwrap()), node_id(panes[2]));
+
+        cx.update(|window, cx| view.update(cx, |view, cx| view.toggle_zoom(window, cx)));
+        assert_eq!(A11yTree::read(cx).with_role("Terminal").len(), 1);
+        cx.update(|window, cx| view.update(cx, |view, cx| view.toggle_zoom(window, cx)));
+        assert_eq!(A11yTree::read(cx).with_role("Terminal").len(), 3);
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.close_pane_authorized(focused, window, cx)
+            })
+        });
+        let tree = A11yTree::read(cx);
+        assert_eq!(tree.with_role("Terminal").len(), 2);
+        assert!(
+            tree.find(&format!("Pane {} Caption", focused.get()))
+                .is_none()
+        );
+    }
+
+    #[gpui::test]
     fn inactive_first_mouse_ignores_hidden_caption_actions_but_keeps_focused_actions_available(
         cx: &mut TestAppContext,
     ) {

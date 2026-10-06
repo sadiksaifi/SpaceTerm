@@ -822,6 +822,7 @@ impl TerminalPane {
         )
         .detach();
         cx.on_focus(&focus_handle, window, |pane, window, cx| {
+            cx.emit(TerminalPaneEvent::FocusRequested);
             pane.refresh_surface(window, cx);
             cx.notify();
         })
