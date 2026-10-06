@@ -10,7 +10,7 @@ use gpui::{
     KeyDownEvent, ListAlignment, ListOffset, ListState, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, RenderOnce, Rgba, SharedString, Size,
     StatefulInteractiveElement as _, Styled as _, StyledText, Subscription, WeakEntity,
-    WeakFocusHandle, Window, WindowId, actions, anchored, canvas, div, list,
+    WeakFocusHandle, Window, WindowId, accesskit, actions, anchored, canvas, div, list,
     prelude::FluentBuilder as _, px, size,
 };
 
@@ -96,6 +96,8 @@ pub enum ComboBoxActivationSource {
     Keyboard,
     /// A primary pointer press and release on the same row accepted it.
     Pointer,
+    /// An assistive technology press accepted it, such as VoiceOver's activation.
+    Accessibility,
 }
 
 /// A typed ComboBox acceptance delivered after popup closure.
@@ -1789,10 +1791,14 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> ComboBoxState<I, C> {
     }
 
     fn trigger_label(&self) -> SharedString {
+        self.selected_label().unwrap_or_else(|| self.prompt.clone())
+    }
+
+    fn selected_label(&self) -> Option<SharedString> {
         self.selected
             .as_ref()
             .and_then(|selected| self.enabled_item(selected))
-            .map_or_else(|| self.prompt.clone(), |item| item.label.clone())
+            .map(|item| item.label.clone())
     }
 
     fn set_query(&mut self, query: String, cx: &mut gpui::Context<Self>) {
@@ -2274,6 +2280,7 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> RenderOnce for ComboBox<I
         let open = snapshot.open;
         let enabled = !snapshot.disabled;
         let label = snapshot.trigger_label();
+        let value = snapshot.selected_label();
         let focus = snapshot.trigger_focus.clone();
         // A popup opened from the focused trigger returns focus to it on close, so the ring stays
         // at rest while the popup is open instead of replaying its entrance afterwards.
@@ -2327,6 +2334,7 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> RenderOnce for ComboBox<I
         .absolute()
         .inset_0();
         let key_state = state.downgrade();
+        let press_state = state.downgrade();
         let debug_selector = self.debug_selector;
         let focus_selector = debug_selector
             .as_ref()
@@ -2337,6 +2345,7 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> RenderOnce for ComboBox<I
             .map(|selector| format!("{selector}-disclosure"))
             .unwrap_or_else(|| format!("{}-disclosure", self.accessibility_name));
         let accessibility_name = self.accessibility_name;
+        let debug_name = accessibility_name.clone();
         let mut paint = crate::floating_surface::hosted_combo_box_theme(cx)
             .map_or(theme.paint, |theme| theme.paint);
         let surface = match self.trigger_surface {
@@ -2413,9 +2422,7 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> RenderOnce for ComboBox<I
         };
         let trigger = div()
             .id(self.id)
-            .debug_selector(move || {
-                debug_selector.unwrap_or_else(|| accessibility_name.to_string())
-            })
+            .debug_selector(move || debug_selector.unwrap_or_else(|| debug_name.to_string()))
             .relative()
             .when(icon_trigger, |trigger| {
                 trigger
@@ -2483,6 +2490,22 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> RenderOnce for ComboBox<I
             .font(font)
             .cursor_default()
             .when(enabled, |trigger| trigger.track_focus(&focus))
+            .role(accesskit::Role::ComboBox)
+            .aria_label(accessibility_name)
+            .when_some(value, |trigger, value| trigger.aria_value(value))
+            .aria_expanded(open)
+            .aria_disabled(!enabled)
+            .when(enabled, |trigger| {
+                trigger.on_a11y_action(accesskit::Action::Click, move |_, window, cx| {
+                    let _ = press_state.update(cx, |state, cx| {
+                        if state.open {
+                            state.close(ComboBoxCloseReason::Trigger, true, Some(window), cx);
+                        } else {
+                            state.open(None, false, window, cx);
+                        }
+                    });
+                })
+            })
             .children(
                 self.trigger_leading
                     .filter(|_| !custom_trigger)
@@ -2675,6 +2698,7 @@ fn render_overlay<I: Clone + Eq + 'static, C: Clone + Eq + 'static>(
     let font = typography.regular().clone();
     let snapshot = state.read(cx);
     let collection_focused = snapshot.popup_focus.contains_focused(window, cx);
+    let accessibility_name = snapshot.accessibility_name.clone();
     let theme = combo_box_theme(cx);
     let Some(target) = snapshot.trigger_bounds else {
         return div().into_any_element();
@@ -2822,7 +2846,7 @@ fn render_overlay<I: Clone + Eq + 'static, C: Clone + Eq + 'static>(
     } else if matches.is_empty() {
         status_row(copy.empty_status, "combo-box-empty", theme).into_any_element()
     } else {
-        list(list_state, move |position, _, _| {
+        let options = list(list_state, move |position, _, _| {
             matches
                 .get(position)
                 .and_then(|index| items.get(*index))
@@ -2861,8 +2885,14 @@ fn render_overlay<I: Clone + Eq + 'static, C: Clone + Eq + 'static>(
                 .unwrap_or_else(|| div().into_any_element())
         })
         .h(rows_height)
-        .w_full()
-        .into_any_element()
+        .w_full();
+        div()
+            .id("combo-box-options")
+            .role(accesskit::Role::ListBox)
+            .aria_label(accessibility_name)
+            .w_full()
+            .child(options)
+            .into_any_element()
     };
     let panel = div()
         .debug_selector(|| "combo-box-panel".to_owned())
@@ -3068,8 +3098,19 @@ fn render_row<I: Clone + Eq + 'static, C: Clone + Eq + 'static>(
         .map_or_else(|| format!("combo-box-row-{position}"), Clone::clone);
     let hover_state = state.clone();
     let hover_tracking_state = state.clone();
+    let press_state = state.clone();
     let mut row = div()
         .id(("combo-box-row", position))
+        .role(accesskit::Role::ListBoxOption)
+        .aria_label(item.label.clone())
+        .when_some(item.description.clone(), |row, description| {
+            row.aria_description(description)
+        })
+        .when_some(item.shortcut.clone(), |row, shortcut| {
+            row.aria_keyshortcuts(shortcut)
+        })
+        .aria_selected(provisional)
+        .aria_disabled(item.disabled)
         .debug_selector(move || debug_selector.unwrap_or_else(|| logical_name.to_string()))
         .relative()
         .w_full()
@@ -3093,7 +3134,14 @@ fn render_row<I: Clone + Eq + 'static, C: Clone + Eq + 'static>(
         .when(!item.disabled, |row| {
             let id = id.clone();
             let hover_id = id.clone();
-            row.on_hover(move |hovered, _, cx| {
+            let press_id = id.clone();
+            row.on_a11y_action(accesskit::Action::Click, move |_, window, cx| {
+                let _ = press_state.update(cx, |state, cx| {
+                    state.provisional = Some(press_id.clone());
+                    state.accept(ComboBoxActivationSource::Accessibility, window, cx);
+                });
+            })
+            .on_hover(move |hovered, _, cx| {
                 let _ = hover_tracking_state.update(cx, |state, cx| {
                     if *hovered {
                         state.hovered_row = Some(hover_id.clone());
