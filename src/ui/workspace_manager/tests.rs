@@ -10755,3 +10755,60 @@ fn closing_an_inactive_tab_from_its_close_button_by_assistive_technology_keeps_f
     assert_eq!(records.dropped_session_ids(), vec![1]);
     assert_closed_tab_left_focus_on_the_active_terminal(&manager, &closed, cx);
 }
+
+#[gpui::test]
+fn closing_the_active_tab_from_its_close_button_by_assistive_technology_keeps_focus(
+    cx: &mut TestAppContext,
+) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, node_id, perform};
+
+    let (manager, records, cx) = workspace_manager_with_terminal_nodes(cx);
+    cx.simulate_keystrokes("cmd-t");
+    report_idle_prompt(&records, 2, cx);
+    let tree = A11yTree::read(cx);
+    let closed = [
+        node_id(tree.with_role("Tab")[1]),
+        node_id(tab_close_button(&tree, 1)),
+    ];
+    perform(cx, tab_close_button(&tree, 1), Action::Focus);
+    assert_eq!(A11yTree::read(cx).focused().map(node_id), Some(closed[1]));
+    let tree = A11yTree::read(cx);
+    perform(cx, tab_close_button(&tree, 1), Action::Click);
+
+    assert!(manager.read_with(cx, |manager, _| {
+        manager.close_confirmation.pending().is_none()
+    }));
+    assert_eq!(records.dropped_session_ids(), vec![2]);
+    assert_closed_tab_left_focus_on_the_active_terminal(&manager, &closed, cx);
+}
+
+#[gpui::test]
+fn cancelling_a_tab_close_pressed_by_assistive_technology_returns_focus_to_its_button(
+    cx: &mut TestAppContext,
+) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, node_id, perform};
+
+    let (manager, records, cx) = workspace_manager_with_terminal_nodes(cx);
+    cx.simulate_keystrokes("cmd-t");
+    let tree = A11yTree::read(cx);
+    let button = node_id(tab_close_button(&tree, 0));
+    perform(cx, tab_close_button(&tree, 0), Action::Focus);
+    let tree = A11yTree::read(cx);
+    perform(cx, tab_close_button(&tree, 0), Action::Click);
+    assert!(manager.read_with(cx, |manager, _| {
+        manager.close_confirmation.pending().is_some()
+    }));
+
+    let tree = A11yTree::read(cx);
+    perform(cx, tree.node("Cancel"), Action::Click);
+    redraw(cx);
+    let tree = A11yTree::read(cx);
+    assert!(manager.read_with(cx, |manager, _| {
+        manager.close_confirmation.pending().is_none()
+    }));
+    assert_eq!(tree.with_role("Tab").len(), 2);
+    assert!(records.dropped_session_ids().is_empty());
+    assert_eq!(tree.focused().map(node_id), Some(button));
+}
