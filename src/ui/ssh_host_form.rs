@@ -6,7 +6,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::prelude::*;
-use gpui::{AnyWindowHandle, App, Context, Entity, EventEmitter, Render, Task, Window, div, px};
+use gpui::{
+    AnyWindowHandle, App, Context, Entity, EventEmitter, Render, Task, Window, accesskit, div, px,
+};
 use spaceterm_ui::{
     Dialog, DialogCloseDecision, DialogCompletion, DialogInitialFocus, DialogOutcome,
     DialogPendingCompletion, DialogSize, ModalAction, ModalActionRole, ModalId, TextInput,
@@ -702,6 +704,9 @@ impl Render for SshHostForm {
             .when_some(self.backend_error, |form, error| {
                 form.child(
                     div()
+                        .id("managed-ssh-host-backend-error")
+                        .role(accesskit::Role::Label)
+                        .aria_label(error)
                         .debug_selector(|| "managed-ssh-host-backend-error".to_owned())
                         .chrome_text(appearance.typography.style(TextRole::Body))
                         .text_color(gpui_color(colors.error))
@@ -795,6 +800,9 @@ fn form_field(
         .when_some(error, |field, error| {
             field.child(
                 div()
+                    .id(format!("{error_selector}-message"))
+                    .role(accesskit::Role::Label)
+                    .aria_label(error)
                     .debug_selector(move || error_selector.to_owned())
                     .chrome_text(appearance.typography.style(TextRole::Body))
                     .text_color(gpui_color(colors.error))
@@ -1175,6 +1183,43 @@ mod tests {
     }
 
     #[gpui::test]
+    fn form_publishes_named_fields_and_their_validation_messages(cx: &mut TestAppContext) {
+        use gpui::accesskit::Action;
+        use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
+        let backend = ScriptedBackend::ready(Ok(()));
+        let (_, _, events, cx) = form_window(Arc::clone(&backend), cx);
+        let tree = A11yTree::read(cx);
+        let dialog = tree.node("Add SSH host");
+        assert_eq!(dialog["aria"]["role"], "Dialog");
+        assert_eq!(dialog["aria"]["modal"], true);
+        let fields = tree
+            .with_role("TextInput")
+            .iter()
+            .map(|field| field["aria"]["label"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(fields, ["Alias", "Host name", "User", "Port", "Identity file"]);
+        assert_eq!(tree.focused(), tree.find("Alias"));
+        assert_eq!(tree.node("Choose Identity File")["aria"]["role"], "Button");
+        assert!(tree.find("Alias is required.").is_none());
+
+        perform(cx, tree.node("Save"), Action::Click);
+        let tree = A11yTree::read(cx);
+        assert!(backend.records().is_empty());
+        for message in ["Alias is required.", "Host name is required."] {
+            assert_eq!(tree.node(message)["aria"]["role"], "Label");
+            assert!(tree.exposed(tree.node(message)));
+        }
+        assert_eq!(tree.focused(), tree.find("Alias"));
+
+        perform(cx, tree.node("Cancel"), Action::Click);
+        let tree = A11yTree::read(cx);
+        assert!(tree.find("Add SSH host").is_none());
+        assert!(tree.with_role("TextInput").is_empty());
+        assert!(events.borrow().contains(&SshHostFormEvent::Cancelled));
+    }
+
+    #[gpui::test]
     fn typing_and_tab_navigation_should_not_write(cx: &mut TestAppContext) {
         let backend = ScriptedBackend::ready(Ok(()));
         let (_, form, _, cx) = form_window(Arc::clone(&backend), cx);
@@ -1334,6 +1379,8 @@ mod tests {
             (false, Some(SAVE_FAILURE_MESSAGE))
         );
         assert!(cx.debug_bounds("managed-ssh-host-backend-error").is_some());
+        let tree = spaceterm_ui::a11y_testing::A11yTree::read(cx);
+        assert_eq!(tree.node(SAVE_FAILURE_MESSAGE)["aria"]["role"], "Label");
         let host_name = form.read_with(cx, |form, _| form.host_name.clone());
         cx.update(|window, cx| window.focus(&host_name.read(cx).focus_handle(), cx));
         cx.simulate_input("x");
