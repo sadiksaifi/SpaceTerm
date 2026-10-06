@@ -26,6 +26,34 @@ fn segmented_control_theme(
     )
 }
 
+pub(super) fn init_uniform_control_catalog(
+    cx: &mut gpui::App,
+    catalog: ControlThemeCatalog,
+) -> gpui::Result<()> {
+    let catalog = Box::new(catalog);
+    crate::init(
+        cx,
+        catalog.clone(),
+        catalog.clone(),
+        catalog.clone(),
+        catalog,
+    )
+}
+
+pub(super) fn replace_uniform_control_catalog(
+    cx: &mut gpui::App,
+    catalog: ControlThemeCatalog,
+) -> Result<ControlThemeReplacement, ControlThemeCatalogError> {
+    let catalog = Box::new(catalog);
+    replace_control_theme_catalogs(
+        cx,
+        catalog.clone(),
+        catalog.clone(),
+        catalog.clone(),
+        catalog,
+    )
+}
+
 pub(super) fn catalog(generation: u64) -> ControlThemeCatalog {
     catalog_with_motion(generation, ControlMotion::Standard)
 }
@@ -186,16 +214,7 @@ impl Render for CatalogObserver {
 #[gpui::test]
 fn replacement_should_require_initialization(cx: &mut TestAppContext) {
     assert_eq!(
-        cx.update(|cx| {
-            let catalog = catalog(1);
-            crate::replace_control_theme_catalogs(
-                cx,
-                Box::new(catalog.clone()),
-                Box::new(catalog.clone()),
-                Box::new(catalog.clone()),
-                Box::new(catalog),
-            )
-        }),
+        cx.update(|cx| replace_uniform_control_catalog(cx, catalog(1))),
         Err(ControlThemeCatalogError::NotInitialized)
     );
 }
@@ -203,17 +222,8 @@ fn replacement_should_require_initialization(cx: &mut TestAppContext) {
 #[gpui::test]
 fn catalog_replacement_requires_one_generation_and_is_atomic(cx: &mut TestAppContext) {
     let initial = catalog(1);
-    cx.update(|cx| {
-        let catalog = initial.clone();
-        crate::init(
-            cx,
-            Box::new(catalog.clone()),
-            Box::new(catalog.clone()),
-            Box::new(catalog.clone()),
-            Box::new(catalog),
-        )
-    })
-    .expect("control initialization should succeed");
+    cx.update(|cx| init_uniform_control_catalog(cx, initial.clone()))
+        .expect("control initialization should succeed");
 
     for mismatched_variant in 0..4 {
         assert_eq!(
@@ -319,17 +329,8 @@ fn catalog_metric_scaling_composes_for_floating_shells_and_hosted_controls() {
 #[gpui::test]
 fn replacement_should_publish_all_families_and_refresh_observers(cx: &mut TestAppContext) {
     let initial = catalog(1);
-    cx.update(|cx| {
-        let catalog = initial.clone();
-        crate::init(
-            cx,
-            Box::new(catalog.clone()),
-            Box::new(catalog.clone()),
-            Box::new(catalog.clone()),
-            Box::new(catalog),
-        )
-    })
-    .expect("control initialization should succeed");
+    cx.update(|cx| init_uniform_control_catalog(cx, initial.clone()))
+        .expect("control initialization should succeed");
     let renders = Rc::new(Cell::new(0));
     let observed_renders = Rc::clone(&renders);
     let (_, cx) = cx.add_window_view(move |_, _| CatalogObserver {
@@ -350,16 +351,7 @@ fn replacement_should_publish_all_families_and_refresh_observers(cx: &mut TestAp
         .generation(ControlThemeGeneration::new(2));
     assert_ne!(replacement.progress, initial.progress);
     assert_eq!(
-        cx.update(|_, cx| {
-            let catalog = replacement.clone();
-            crate::replace_control_theme_catalogs(
-                cx,
-                Box::new(catalog.clone()),
-                Box::new(catalog.clone()),
-                Box::new(catalog.clone()),
-                Box::new(catalog),
-            )
-        }),
+        cx.update(|_, cx| replace_uniform_control_catalog(cx, replacement.clone())),
         Ok(ControlThemeReplacement::Applied)
     );
     cx.run_until_parked();
@@ -403,16 +395,7 @@ fn replacement_should_publish_all_families_and_refresh_observers(cx: &mut TestAp
         );
         assert_eq!(cx.global::<ControlThemeCatalog>(), &replacement);
         assert_eq!(
-            {
-                let catalog = replacement;
-                crate::replace_control_theme_catalogs(
-                    cx,
-                    Box::new(catalog.clone()),
-                    Box::new(catalog.clone()),
-                    Box::new(catalog.clone()),
-                    Box::new(catalog),
-                )
-            },
+            replace_uniform_control_catalog(cx, replacement),
             Ok(ControlThemeReplacement::Unchanged)
         );
     });

@@ -2617,20 +2617,7 @@ fn terminal_find_reflows_all_actions_inside_a_narrow_pane_with_fixed_chrome_type
         publish_terminal_preferences(preferences, cx);
         let resolved = super::super::appearance_runtime::current(cx);
         let chrome = super::super::appearance::ChromeAppearance::prepare(&resolved.chrome);
-        {
-            let catalog = Box::new(super::super::control_theme_catalog::catalog(
-                &chrome,
-                spaceterm_ui::ControlMotion::Standard,
-            ));
-            spaceterm_ui::replace_control_theme_catalogs(
-                cx,
-                catalog.clone(),
-                catalog.clone(),
-                catalog.clone(),
-                catalog,
-            )
-        }
-        .unwrap();
+        super::super::control_theme_catalog::replace_uniform_control_catalog(cx, &chrome).unwrap();
         cx.set_global(super::super::appearance::InstalledChrome::single(Arc::new(
             chrome,
         )));
@@ -2691,20 +2678,8 @@ fn terminal_find_field_contains_fixed_chrome_line_height_in_both_densities(
                 .typography
                 .style(crate::ui::chrome_typography::TextRole::Body)
                 .line_height;
-            {
-                let catalog = Box::new(super::super::control_theme_catalog::catalog(
-                    &chrome,
-                    spaceterm_ui::ControlMotion::Standard,
-                ));
-                spaceterm_ui::replace_control_theme_catalogs(
-                    cx,
-                    catalog.clone(),
-                    catalog.clone(),
-                    catalog.clone(),
-                    catalog,
-                )
-            }
-            .unwrap();
+            super::super::control_theme_catalog::replace_uniform_control_catalog(cx, &chrome)
+                .unwrap();
             cx.set_global(super::super::appearance::InstalledChrome::single(Arc::new(
                 chrome,
             )));
@@ -4424,20 +4399,8 @@ fn paste_notice_spacing_tracks_density_without_resizing_terminal_grid(cx: &mut T
     cx.update(|_, cx| {
         let mut appearance = chrome(cx).clone();
         appearance.spacing_scale *= 1.25;
-        {
-            let catalog = Box::new(super::super::control_theme_catalog::catalog(
-                &appearance,
-                spaceterm_ui::ControlMotion::Standard,
-            ));
-            spaceterm_ui::replace_control_theme_catalogs(
-                cx,
-                catalog.clone(),
-                catalog.clone(),
-                catalog.clone(),
-                catalog,
-            )
-        }
-        .unwrap();
+        super::super::control_theme_catalog::replace_uniform_control_catalog(cx, &appearance)
+            .unwrap();
         cx.set_global(super::super::appearance::InstalledChrome::single(Arc::new(
             appearance,
         )));

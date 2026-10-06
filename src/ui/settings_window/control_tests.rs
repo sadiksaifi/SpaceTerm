@@ -105,20 +105,7 @@ fn stepper_field_resolves_inside_its_rendered_card_host(cx: &mut TestAppContext)
     appearance.card_controls.colors.input_background = Color::rgb(0x228844);
     let expected = gpui_color(appearance.card_controls.colors.input_background);
     cx.update(|cx| {
-        {
-            let catalog = Box::new(crate::ui::control_theme_catalog::catalog(
-                &appearance,
-                spaceterm_ui::ControlMotion::Standard,
-            ));
-            spaceterm_ui::replace_control_theme_catalogs(
-                cx,
-                catalog.clone(),
-                catalog.clone(),
-                catalog.clone(),
-                catalog,
-            )
-        }
-        .unwrap()
+        crate::ui::control_theme_catalog::replace_uniform_control_catalog(cx, &appearance).unwrap()
     });
     let (_, cx) = cx.add_window_view(|_, _| StepperCard(SettingsAppearance::fallback(appearance)));
     cx.run_until_parked();

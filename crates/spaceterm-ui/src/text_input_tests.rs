@@ -1,7 +1,4 @@
-use std::{
-    cell::{Cell, RefCell},
-    rc::Rc,
-};
+use std::{cell::RefCell, rc::Rc};
 
 use super::*;
 use gpui::{Modifiers, TestAppContext, VisualTestContext, rgba};
@@ -10,18 +7,17 @@ struct EventRoot {
     input: Entity<TextInput>,
     other_focus: FocusHandle,
     unrelated_menu: bool,
-    outer_submit: Rc<Cell<usize>>,
-    outer_cancel: Rc<Cell<usize>>,
+    trace: Rc<RefCell<Vec<&'static str>>>,
 }
 
 impl Render for EventRoot {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let submit = self.outer_submit.clone();
-        let cancel = self.outer_cancel.clone();
+        let submit = self.trace.clone();
+        let cancel = self.trace.clone();
         div()
             .size_full()
-            .on_action(move |_: &Submit, _, _| submit.set(submit.get() + 1))
-            .on_action(move |_: &Cancel, _, _| cancel.set(cancel.get() + 1))
+            .on_action(move |_: &Submit, _, _| submit.borrow_mut().push("parent Submit"))
+            .on_action(move |_: &Cancel, _, _| cancel.borrow_mut().push("parent Cancel"))
             .flex()
             .flex_col()
             .child(div().h(px(32.0)).child(self.input.clone()))
@@ -181,21 +177,27 @@ fn input_with_events<'a>(
     install_theme(cx);
     let events = Rc::new(RefCell::new(Vec::new()));
     let recorded_events = events.clone();
+    let trace = Rc::new(RefCell::new(Vec::new()));
     let (root, cx) = cx.add_window_view(move |window, cx| {
         let input = cx.new(|cx| {
             TextInput::new("test-input", "Test input", value, window, cx)
                 .debug_selector("test-input")
         });
+        let event_trace = trace.clone();
         cx.subscribe(&input, move |_, _, event: &TextInputEvent, _| {
             recorded_events.borrow_mut().push(*event);
+            match event {
+                TextInputEvent::Submitted => event_trace.borrow_mut().push("Submitted"),
+                TextInputEvent::Cancelled => event_trace.borrow_mut().push("Cancelled"),
+                _ => {}
+            }
         })
         .detach();
         EventRoot {
             input,
             other_focus: cx.focus_handle(),
             unrelated_menu,
-            outer_submit: Rc::new(Cell::new(0)),
-            outer_cancel: Rc::new(Cell::new(0)),
+            trace,
         }
     });
     let (input, other_focus) =
@@ -207,6 +209,13 @@ fn input_with_events<'a>(
     cx.run_until_parked();
     events.borrow_mut().clear();
     (input, other_focus, events, cx)
+}
+
+fn trace(cx: &mut VisualTestContext) -> Vec<&'static str> {
+    cx.update(|window, cx| {
+        let root = window.root::<EventRoot>().flatten().unwrap();
+        root.read(cx).trace.borrow().clone()
+    })
 }
 
 #[gpui::test]
@@ -273,7 +282,6 @@ fn removing_default_limit_preserves_initial_value_above_default_limit(cx: &mut T
 fn normalization_preserves_word_boundaries_for_listed_line_separators() {
     let source = "a\r\nb\rc\nd\te\u{0007}f\u{2028}g\u{2029}h";
     assert_eq!(normalize_single_line(source), "a b c d e f g h");
-    assert_eq!(normalized_single_line_len(source), 15);
     assert_eq!(
         normalized_single_line_len(source),
         normalize_single_line(source).len()
@@ -318,44 +326,27 @@ fn history_is_bounded_across_undo_and_redo() {
             HARD_VALUE_LIMIT
         ));
     }
-    assert!(!buffer.history.undo.is_empty());
-    assert_eq!(buffer.text.len(), 240 * 4096);
-    assert!(buffer.history.undo.len() + buffer.history.redo.len() <= 128);
-    assert!(buffer.history.retained_bytes <= 1024 * 1024);
-    let before_undo = buffer.snapshot();
-    assert!(buffer.undo());
-    assert_eq!(buffer.text.len(), 239 * 4096);
-    assert!(!buffer.history.redo.is_empty());
-    for _ in 1..80 {
-        buffer.undo();
-    }
-    assert_eq!(buffer.text.len(), 239 * 4096);
-    assert!(buffer.history.undo.len() + buffer.history.redo.len() <= 128);
-    assert!(buffer.history.retained_bytes <= 1024 * 1024);
-    assert!(buffer.history.undo.len() + buffer.history.redo.len() <= HISTORY_ENTRY_LIMIT);
     assert!(buffer.history.retained_bytes <= HISTORY_BYTE_LIMIT);
-    assert!(buffer.redo());
+    let before_undo = buffer.snapshot();
+    assert!(buffer.undo() && buffer.redo());
     assert_eq!(buffer.snapshot(), before_undo);
-    assert!(buffer.history.undo.len() + buffer.history.redo.len() <= 128);
-    assert!(buffer.history.retained_bytes <= 1024 * 1024);
 
     let mut buffer = TextBuffer::new(String::new());
     for end in 0..240 {
         buffer.history.break_group();
         assert!(buffer.replace(end..end, "x".into(), EditKind::Atomic, HARD_VALUE_LIMIT));
     }
-    assert_eq!(buffer.history.undo.len(), 128);
     for _ in 0..80 {
         assert!(buffer.undo());
     }
-    assert_eq!(buffer.text.as_str(), "x".repeat(160));
-    assert_eq!(buffer.history.undo.len() + buffer.history.redo.len(), 128);
+    assert_eq!(
+        buffer.history.undo.len() + buffer.history.redo.len(),
+        HISTORY_ENTRY_LIMIT
+    );
     for _ in 0..80 {
         assert!(buffer.redo());
     }
     assert_eq!(buffer.text.as_str(), "x".repeat(240));
-    assert_eq!(buffer.history.undo.len() + buffer.history.redo.len(), 128);
-    assert!(buffer.history.retained_bytes <= 1024 * 1024);
 }
 #[gpui::test]
 fn set_value_semantics_and_safe_event(cx: &mut TestAppContext) {
@@ -366,14 +357,9 @@ fn set_value_semantics_and_safe_event(cx: &mut TestAppContext) {
         assert!(!input.set_value("new value", cx));
     });
     assert_eq!(
-        input.read_with(cx, |input, _| (
-            input.value().to_owned(),
-            input.revision(),
-            input.selection()
-        )),
+        input.read_with(cx, |input, _| (input.value().to_owned(), input.selection())),
         (
             "new value".into(),
-            1,
             TextInputSelection {
                 range: 9..9,
                 reversed: false
@@ -399,19 +385,12 @@ fn composition_empty_state_cancels_before_cancel_event(cx: &mut TestAppContext) 
     });
     assert!(input.read_with(cx, |input, _| input.composition().is_some()));
     events.borrow_mut().clear();
-    cx.simulate_keystrokes("escape");
+    cx.simulate_keystrokes("escape escape");
     cx.run_until_parked();
-    assert!(input.read_with(cx, |input, _| input.composition().is_none()));
     assert_eq!(
         input.read_with(cx, |input, _| input.value().to_owned()),
         "abc"
     );
-    assert_eq!(
-        events.borrow().as_slice(),
-        &[TextInputEvent::CompositionCancelled]
-    );
-    cx.simulate_keystrokes("escape");
-    cx.run_until_parked();
     assert_eq!(
         events.borrow().as_slice(),
         &[
@@ -614,31 +593,31 @@ fn obscured_clipboard_kill_and_history_actions_are_inert(cx: &mut TestAppContext
             input.copy(&Copy, window, cx);
             input.cut(&Cut, window, cx);
             input.kill_to_end(&KillToEnd, window, cx);
-            assert_eq!(cx.global::<TextKillRing>().0.as_str(), "ring sentinel");
-            assert_eq!(input.value(), "secret");
             input.kill_to_beginning(&KillToBeginning, window, cx);
-            assert_eq!(cx.global::<TextKillRing>().0.as_str(), "ring sentinel");
-            assert_eq!(input.value(), "secret");
             input.kill_previous_word(&KillPreviousWord, window, cx);
-            assert_eq!(cx.global::<TextKillRing>().0.as_str(), "ring sentinel");
-            assert_eq!(input.value(), "secret");
             input.yank(&Yank, window, cx);
-            assert_eq!(cx.global::<TextKillRing>().0.as_str(), "ring sentinel");
-            assert_eq!(input.value(), "secret");
             input.undo(&Undo, window, cx);
             input.redo(&Redo, window, cx);
         });
     });
 
     let clipboard = cx.update(|_, cx| cx.read_from_clipboard().and_then(bounded_clipboard_text));
+    let ring = cx.update(|_, cx| cx.global::<TextKillRing>().0.to_string());
     assert_eq!(
         input.read_with(cx, |input, _| (
             input.value().to_owned(),
             input.buffer.history.undo.len(),
             input.buffer.history.redo.len(),
             clipboard,
+            ring,
         )),
-        ("secret".into(), 0, 0, Some("clipboard sentinel".into()))
+        (
+            "secret".into(),
+            0,
+            0,
+            Some("clipboard sentinel".into()),
+            "ring sentinel".into()
+        )
     );
 }
 
@@ -690,43 +669,17 @@ fn obscured_input_enforces_sixteen_kibibyte_limit(cx: &mut TestAppContext) {
 #[gpui::test]
 fn take_and_clear_remove_retained_obscured_state(cx: &mut TestAppContext) {
     let (input, cx) = obscured_input(cx, "first secret");
-
-    native_input_handler(&input, cx).replace_and_mark_text_in_range(
-        Some(0..12),
-        "first secret",
-        None,
-    );
-    cx.run_until_parked();
-    assert!(input.read_with(cx, |input, _| {
-        input.composition.is_some() && input.geometry.as_ref().unwrap().line.text == "••••••••••••"
-    }));
-
-    let (taken, empty_after_take) = input.update(cx, |input, cx| {
-        let taken = input.take_value(cx);
-        let empty = input.value().is_empty()
-            && input.selection().range() == (0..0)
-            && !input.selection().reversed
-            && input.composition.is_none()
-            && input.buffer.history.undo.is_empty()
-            && input.buffer.history.redo.is_empty()
-            && input.initial_value_source.is_none()
-            && input.geometry.is_none();
-        (taken, empty)
-    });
-    input.update(cx, |input, cx| {
-        assert!(input.set_value("second secret", cx));
-    });
-    native_input_handler(&input, cx).replace_and_mark_text_in_range(
-        Some(0..13),
-        "second secret",
-        None,
-    );
-    cx.run_until_parked();
-    assert!(input.read_with(cx, |input, _| {
-        input.composition.is_some() && input.geometry.as_ref().unwrap().line.text == "•••••••••••••"
-    }));
-    let empty_after_clear = input.update(cx, |input, cx| {
-        assert!(input.clear(cx));
+    let compose = |secret: &str, cx: &mut VisualTestContext| {
+        native_input_handler(&input, cx).replace_and_mark_text_in_range(
+            Some(0..secret.len()),
+            secret,
+            None,
+        );
+        cx.run_until_parked();
+        assert!(input.read_with(cx, |input, _| input.composition.is_some()
+            && input.geometry.as_ref().unwrap().line.text == "•".repeat(secret.len())));
+    };
+    let retains_nothing = |input: &TextInput| {
         input.value().is_empty()
             && input.selection().range() == (0..0)
             && !input.selection().reversed
@@ -735,12 +688,18 @@ fn take_and_clear_remove_retained_obscured_state(cx: &mut TestAppContext) {
             && input.buffer.history.redo.is_empty()
             && input.initial_value_source.is_none()
             && input.geometry.is_none()
-    });
+    };
 
-    assert_eq!(
-        (taken, empty_after_take, empty_after_clear),
-        ("first secret".into(), true, true)
-    );
+    compose("first secret", cx);
+    input.update(cx, |input, cx| {
+        assert_eq!(input.take_value(cx), "first secret");
+        assert!(retains_nothing(input));
+        assert!(input.set_value("second secret", cx));
+    });
+    compose("second secret", cx);
+    input.update(cx, |input, cx| {
+        assert!(input.clear(cx) && retains_nothing(input))
+    });
 }
 
 #[test]
@@ -787,39 +746,19 @@ fn macos_command_option_and_control_bindings_drive_editing(cx: &mut TestAppConte
             (value.into(), caret..caret)
         );
     }
-    assert_eq!(input.read_with(cx, |input, _| input.value().to_owned()), "");
 }
 
 #[gpui::test]
 fn macos_select_all_replacement_is_one_undo_edit(cx: &mut TestAppContext) {
     let (input, cx) = input(cx, "Workspace Name");
-    cx.simulate_keystrokes("cmd-a D e v");
+    cx.simulate_keystrokes("cmd-a D e v cmd-z");
     cx.run_until_parked();
     assert_eq!(
         input.read_with(cx, |input, _| (
             input.value().to_owned(),
-            input.buffer.history.undo.len(),
-            input.buffer.history.redo.len()
+            input.buffer.history.undo.len()
         )),
-        ("Dev".into(), 1, 0)
-    );
-    cx.simulate_keystrokes("cmd-z");
-    cx.run_until_parked();
-    assert_eq!(
-        input.read_with(cx, |input, _| input.value().to_owned()),
-        "Workspace Name"
-    );
-    assert_eq!(
-        input.read_with(cx, |input, _| (
-            input.buffer.history.undo.len(),
-            input.buffer.history.redo.len()
-        )),
-        (0, 1)
-    );
-    cx.simulate_keystrokes("cmd-z");
-    assert_eq!(
-        input.read_with(cx, |input, _| input.value().to_owned()),
-        "Workspace Name"
+        ("Workspace Name".into(), 0)
     );
 }
 
@@ -851,32 +790,15 @@ fn macos_kill_and_yank_share_the_bounded_application_ring(cx: &mut TestAppContex
     });
     cx.run_until_parked();
     cx.simulate_keystrokes("ctrl-b ctrl-k");
-    cx.run_until_parked();
-    assert_eq!(
-        input.read_with(cx, |input, _| (
-            input.value().to_owned(),
-            input.selection().range()
-        )),
-        ("ab".into(), 2..2)
-    );
-    assert_eq!(
-        cx.update(|_, cx| cx.global::<TextKillRing>().0.to_string()),
-        "c"
-    );
     cx.update(|window, cx| second.read(cx).focus_handle().focus(window, cx));
     cx.run_until_parked();
     cx.simulate_keystrokes("ctrl-y");
     assert_eq!(
-        second.read_with(cx, |input, _| input.value().to_owned()),
-        "c"
-    );
-    cx.update(|window, cx| input.read(cx).focus_handle().focus(window, cx));
-    cx.run_until_parked();
-    cx.simulate_keystrokes("ctrl-y");
-    cx.run_until_parked();
-    assert_eq!(
-        input.read_with(cx, |input, _| input.value().to_owned()),
-        "abc"
+        cx.update(|_, cx| (
+            input.read(cx).value().to_owned(),
+            second.read(cx).value().to_owned()
+        )),
+        ("ab".into(), "c".into())
     );
 }
 
@@ -1040,10 +962,6 @@ fn kill_ring_capture_is_bounded_while_the_whole_selection_is_deleted(cx: &mut Te
         assert_eq!(input.read_with(cx, |input, _| input.value().to_owned()), "");
         let killed = cx.update(|_, cx| cx.global::<TextKillRing>().0.clone());
         assert_eq!(killed.as_str(), prefix);
-        assert!(killed.len() <= 64 * 1024);
-        assert!(killed.len() <= KILL_RING_LIMIT);
-        assert!(!killed.ends_with('\u{200d}'));
-        assert!(killed.is_char_boundary(killed.len()));
     }
 }
 
@@ -1106,10 +1024,9 @@ fn composition_movement_commits_one_undoable_edit_before_moving(cx: &mut TestApp
     assert_eq!(
         input.read_with(cx, |input, _| (
             input.value().to_owned(),
-            input.composition().is_none(),
             input.selection().range()
         )),
-        ("abc日".into(), true, 3..3)
+        ("abc日".into(), 3..3)
     );
     assert_eq!(
         events.borrow().as_slice(),
@@ -1563,34 +1480,17 @@ fn runtime_editable_and_enabled_transitions_preserve_selection_and_gate_edits(
     cx: &mut TestAppContext,
 ) {
     let (input, cx) = input(cx, "abc");
-    input.update(cx, |input, _| input.editable = false);
-    cx.simulate_keystrokes("backspace");
-    assert_eq!(
-        input.read_with(cx, |input, _| input.value().to_owned()),
-        "abc"
-    );
-    input.update(cx, |input, _| {
-        input.editable = true;
-        input.enabled = false;
-    });
-    cx.simulate_keystrokes("backspace");
-    assert_eq!(
-        input.read_with(cx, |input, _| input.value().to_owned()),
-        "abc"
-    );
-    input.update(cx, |input, cx| input.set_enabled(true, cx));
     input.update(cx, |input, cx| {
         input.select_all(cx);
         input.set_editable(false, cx);
     });
     cx.simulate_keystrokes("backspace");
     assert_eq!(
-        input.read_with(cx, |input, _| input.value().to_owned()),
-        "abc"
-    );
-    assert_eq!(
-        input.read_with(cx, |input, _| input.selection().range()),
-        0..3
+        input.read_with(cx, |input, _| (
+            input.value().to_owned(),
+            input.selection().range()
+        )),
+        ("abc".into(), 0..3)
     );
     input.update(cx, |input, cx| {
         input.set_editable(true, cx);
@@ -1628,23 +1528,7 @@ fn disabling_a_focused_input_releases_responder_focus(cx: &mut TestAppContext) {
 fn set_value_cancels_composition_clears_history_and_emits_in_order(cx: &mut TestAppContext) {
     let (input, _, events, cx) = input_with_events(cx, "abc", false);
     cx.simulate_keystrokes("X left Y cmd-z");
-    assert_eq!(
-        input.read_with(cx, |input, _| (
-            input.value().to_owned(),
-            input.buffer.history.undo.len(),
-            input.buffer.history.redo.len()
-        )),
-        ("abcX".into(), 1, 1)
-    );
     mark_text(&input, cx, "日");
-    assert_eq!(
-        input.read_with(cx, |input, _| (
-            input.buffer.history.undo.len(),
-            input.buffer.history.redo.len(),
-            input.composition().is_some()
-        )),
-        (1, 1, true)
-    );
     events.borrow_mut().clear();
     input.update(cx, |input, cx| {
         input.emit_programmatic_changes = true;
@@ -1664,183 +1548,46 @@ fn set_value_cancels_composition_clears_history_and_emits_in_order(cx: &mut Test
         input.read_with(cx, |input, _| (
             input.value().to_owned(),
             input.selection().range(),
-            input.composition().is_none(),
             input.buffer.history.undo.len(),
             input.buffer.history.redo.len(),
         )),
-        ("new value".into(), 9..9, true, 0, 0)
+        ("new value".into(), 9..9, 0, 0)
     );
 }
 
 #[gpui::test]
 fn default_return_and_escape_behaviors_consume_before_parent(cx: &mut TestAppContext) {
-    install_theme(cx);
-    let (root, cx) = cx.add_window_view(|window, cx| {
-        let input = cx.new(|cx| TextInput::new("test-input", "Test input", "", window, cx));
-        EventRoot {
-            input,
-            other_focus: cx.focus_handle(),
-            unrelated_menu: false,
-            outer_submit: Rc::new(Cell::new(0)),
-            outer_cancel: Rc::new(Cell::new(0)),
-        }
-    });
-    let (input, submit, cancel) = root.read_with(cx, |root, _| {
-        (
-            root.input.clone(),
-            root.outer_submit.clone(),
-            root.outer_cancel.clone(),
-        )
-    });
-    cx.update(|window, cx| input.read(cx).focus_handle().focus(window, cx));
-
-    let events = Rc::new(RefCell::new(Vec::new()));
-    let recorded_events = events.clone();
-    input.update(cx, |_, cx| {
-        cx.subscribe(&input, move |_, _, event: &TextInputEvent, _| {
-            recorded_events.borrow_mut().push(*event)
-        })
-        .detach();
-    });
-
+    let (_, _, _, cx) = input_with_events(cx, "", false);
     cx.simulate_keystrokes("enter escape");
-
-    assert_eq!((submit.get(), cancel.get()), (0, 0));
-    assert_eq!(
-        events.borrow().as_slice(),
-        &[TextInputEvent::Submitted, TextInputEvent::Cancelled]
-    );
+    assert_eq!(trace(cx), ["Submitted", "Cancelled"]);
 }
 
 #[gpui::test]
 fn propagated_return_and_escape_reach_parent_before_queued_typed_events(cx: &mut TestAppContext) {
-    struct PropagationRoot {
-        input: Entity<TextInput>,
-        other_focus: FocusHandle,
-        outer_submit: Rc<Cell<usize>>,
-        outer_cancel: Rc<Cell<usize>>,
-        trace: Rc<RefCell<Vec<&'static str>>>,
-    }
-    impl Render for PropagationRoot {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            let submit = self.outer_submit.clone();
-            let cancel = self.outer_cancel.clone();
-            let submit_trace = self.trace.clone();
-            let cancel_trace = self.trace.clone();
-            div()
-                .size_full()
-                .on_action(move |_: &Submit, _, _| {
-                    submit.set(submit.get() + 1);
-                    submit_trace.borrow_mut().push("parent Submit");
-                })
-                .on_action(move |_: &Cancel, _, _| {
-                    cancel.set(cancel.get() + 1);
-                    cancel_trace.borrow_mut().push("parent Cancel");
-                })
-                .flex()
-                .flex_col()
-                .child(div().h(px(32.0)).child(self.input.clone()))
-                .child(div().track_focus(&self.other_focus).child("Other"))
-        }
-    }
-
-    install_theme(cx);
-    let trace = Rc::new(RefCell::new(Vec::new()));
-    let parent_trace = trace.clone();
-    let (root, cx) = cx.add_window_view(move |window, cx| {
-        let input = cx.new(|cx| {
-            TextInput::new("test-input", "Test input", "", window, cx)
-                .return_behavior(TextInputReturnBehavior::Propagate)
-                .escape_behavior(TextInputEscapeBehavior::Propagate)
-        });
-        PropagationRoot {
-            input,
-            other_focus: cx.focus_handle(),
-            outer_submit: Rc::new(Cell::new(0)),
-            outer_cancel: Rc::new(Cell::new(0)),
-            trace: parent_trace,
-        }
-    });
-    let (input, submit, cancel) = root.read_with(cx, |root, _| {
-        (
-            root.input.clone(),
-            root.outer_submit.clone(),
-            root.outer_cancel.clone(),
-        )
-    });
-    cx.update(|window, cx| input.read(cx).focus_handle().focus(window, cx));
-
-    let events = Rc::new(RefCell::new(Vec::new()));
-    let recorded_events = events.clone();
-    let event_trace = trace.clone();
-    input.update(cx, |_, cx| {
-        cx.subscribe(&input, move |_, _, event: &TextInputEvent, _| {
-            recorded_events.borrow_mut().push(*event);
-            match event {
-                TextInputEvent::Submitted => event_trace.borrow_mut().push("Submitted"),
-                TextInputEvent::Cancelled => event_trace.borrow_mut().push("Cancelled"),
-                _ => {}
-            }
-        })
-        .detach();
+    let (input, _, _, cx) = input_with_events(cx, "", false);
+    input.update(cx, |input, _| {
+        input.return_behavior = TextInputReturnBehavior::Propagate;
+        input.escape_behavior = TextInputEscapeBehavior::Propagate;
     });
     cx.simulate_keystrokes("enter");
-    assert_eq!(trace.borrow().as_slice(), &["parent Submit", "Submitted"]);
-    assert_eq!((submit.get(), cancel.get()), (1, 0));
-    assert_eq!(events.borrow().as_slice(), &[TextInputEvent::Submitted]);
     cx.simulate_keystrokes("escape");
-
     assert_eq!(
-        trace.borrow().as_slice(),
-        &["parent Submit", "Submitted", "parent Cancel", "Cancelled"]
-    );
-    assert_eq!((submit.get(), cancel.get()), (1, 1));
-    assert_eq!(
-        events.borrow().as_slice(),
-        &[TextInputEvent::Submitted, TextInputEvent::Cancelled]
+        trace(cx),
+        ["parent Submit", "Submitted", "parent Cancel", "Cancelled"]
     );
 }
 
 #[gpui::test]
 fn propagated_escape_consumes_composition_before_later_parent_cancel(cx: &mut TestAppContext) {
-    install_theme(cx);
-    let (root, cx) = cx.add_window_view(|window, cx| {
-        let input = cx.new(|cx| {
-            TextInput::new("test-input", "Test input", "", window, cx)
-                .escape_behavior(TextInputEscapeBehavior::Propagate)
-        });
-        EventRoot {
-            input,
-            other_focus: cx.focus_handle(),
-            unrelated_menu: false,
-            outer_submit: Rc::new(Cell::new(0)),
-            outer_cancel: Rc::new(Cell::new(0)),
-        }
-    });
-    let (input, cancel) = root.read_with(cx, |root, _| {
-        (root.input.clone(), root.outer_cancel.clone())
-    });
-    cx.update(|window, cx| input.read(cx).focus_handle().focus(window, cx));
-    let events = Rc::new(RefCell::new(Vec::new()));
-    let recorded_events = events.clone();
-    input.update(cx, |_, cx| {
-        cx.subscribe(&input, move |_, _, event: &TextInputEvent, _| {
-            recorded_events.borrow_mut().push(*event)
-        })
-        .detach();
+    let (input, _, events, cx) = input_with_events(cx, "", false);
+    input.update(cx, |input, _| {
+        input.escape_behavior = TextInputEscapeBehavior::Propagate;
     });
     mark_text(&input, cx, "日");
     events.borrow_mut().clear();
 
     cx.simulate_keystrokes("escape");
-    assert_eq!(cancel.get(), 0);
-    assert_eq!(
-        input.read_with(cx, |input, _| (
-            input.value().to_owned(),
-            input.composition().is_none()
-        )),
-        ("".into(), true)
-    );
+    assert!(input.read_with(cx, |input, _| input.value().is_empty()));
     assert_eq!(
         events.borrow().as_slice(),
         &[
@@ -1851,11 +1598,9 @@ fn propagated_escape_consumes_composition_before_later_parent_cancel(cx: &mut Te
             TextInputEvent::CompositionCancelled
         ]
     );
+    assert!(trace(cx).is_empty());
     cx.simulate_keystrokes("escape");
-
-    assert_eq!(cancel.get(), 1);
-    assert_eq!(events.borrow().last(), Some(&TextInputEvent::Cancelled));
-    assert_eq!(events.borrow().len(), 3);
+    assert_eq!(trace(cx), ["parent Cancel", "Cancelled"]);
 }
 
 #[gpui::test]

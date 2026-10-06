@@ -564,6 +564,21 @@ fn readable_material_row_fill(
 }
 
 #[cfg(test)]
+pub(super) fn replace_uniform_control_catalog(
+    cx: &mut gpui::App,
+    chrome: &super::appearance::ChromeAppearance,
+) -> Result<spaceterm_ui::ControlThemeReplacement, spaceterm_ui::ControlThemeCatalogError> {
+    let catalog = Box::new(catalog(chrome, spaceterm_ui::ControlMotion::Standard));
+    spaceterm_ui::replace_control_theme_catalogs(
+        cx,
+        catalog.clone(),
+        catalog.clone(),
+        catalog.clone(),
+        catalog,
+    )
+}
+
+#[cfg(test)]
 pub(super) fn overlay_list_rows(
     reference: &crate::appearance::ChromeColors,
     paint: &crate::appearance::ChromeColors,
@@ -854,7 +869,7 @@ mod tests {
             CompositionCapabilities, SystemAppearance, ThemeCatalog,
         };
         use crate::ui::appearance::ChromeAppearance;
-        use spaceterm_ui::{ControlHost, ControlMotion, replace_control_theme_catalogs};
+        use spaceterm_ui::ControlHost;
 
         cx.update(crate::ui::init).unwrap();
         let mut violations = Vec::new();
@@ -883,19 +898,7 @@ mod tests {
                     .unwrap();
                 for active in [true, false] {
                     let prepared = ChromeAppearance::prepare_for_activity(&resolved.chrome, active);
-                    cx.update(|cx| {
-                        {
-                            let catalog = Box::new(catalog(&prepared, ControlMotion::Standard));
-                            replace_control_theme_catalogs(
-                                cx,
-                                catalog.clone(),
-                                catalog.clone(),
-                                catalog.clone(),
-                                catalog,
-                            )
-                        }
-                        .unwrap()
-                    });
+                    cx.update(|cx| replace_uniform_control_catalog(cx, &prepared).unwrap());
                     for host in [
                         ControlHost::Window,
                         ControlHost::TitleBar,

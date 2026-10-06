@@ -203,16 +203,10 @@ fn alert_suppression_paints_with_the_floating_toggle_theme(cx: &mut TestAppConte
         root_catalog.text_input,
     );
     cx.update(|cx| {
-        {
-            let catalog = root_catalog.floating(crate::FloatingSurfaceTheme::default(), controls);
-            crate::init(
-                cx,
-                Box::new(catalog.clone()),
-                Box::new(catalog.clone()),
-                Box::new(catalog.clone()),
-                Box::new(catalog),
-            )
-        }
+        crate::catalog_tests::init_uniform_control_catalog(
+            cx,
+            root_catalog.floating(crate::FloatingSurfaceTheme::default(), controls),
+        )
         .expect("distinct root and floating themes should install");
         install_modal_policy(cx, ModalDesktopPolicy::mac_os());
     });
@@ -1546,16 +1540,10 @@ fn modal_action_layout_follows_floating_button_metrics(cx: &mut TestAppContext) 
             catalog.search_field,
             catalog.text_input,
         );
-        {
-            let catalog = catalog.floating(crate::FloatingSurfaceTheme::default(), controls);
-            crate::init(
-                cx,
-                Box::new(catalog.clone()),
-                Box::new(catalog.clone()),
-                Box::new(catalog.clone()),
-                Box::new(catalog),
-            )
-        }
+        crate::catalog_tests::init_uniform_control_catalog(
+            cx,
+            catalog.floating(crate::FloatingSurfaceTheme::default(), controls),
+        )
         .expect("host-specific catalog should install");
     });
     let root = window.root(cx).expect("geometry root should exist");
@@ -1589,16 +1577,10 @@ fn modal_action_layout_follows_floating_button_metrics(cx: &mut TestAppContext) 
             catalog.text_input,
         );
         catalog.button = test_button_theme_scaled(3.0);
-        {
-            let catalog = catalog.floating(crate::FloatingSurfaceTheme::default(), controls);
-            crate::replace_control_theme_catalogs(
-                cx,
-                Box::new(catalog.clone()),
-                Box::new(catalog.clone()),
-                Box::new(catalog.clone()),
-                Box::new(catalog),
-            )
-        }
+        crate::catalog_tests::replace_uniform_control_catalog(
+            cx,
+            catalog.floating(crate::FloatingSurfaceTheme::default(), controls),
+        )
         .expect("open modal should accept replacement metrics");
     });
     cx.run_until_parked();

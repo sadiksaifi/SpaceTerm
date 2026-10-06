@@ -8581,23 +8581,9 @@ fn inline_rename_frame_should_resolve_inside_the_sidebar_control_host(cx: &mut T
     let window_background = gpui_color(appearance.control_colors.input_background);
     let panel_background = gpui_color(appearance.panel_controls.colors.input_background);
     assert_ne!(window_background, panel_background);
-    let catalog = crate::ui::control_theme_catalog::catalog(
-        &appearance,
-        spaceterm_ui::ControlMotion::Standard,
-    )
-    .generation(spaceterm_ui::ControlThemeGeneration::new(u64::MAX));
     cx.update(|window, cx| {
         assert_eq!(
-            {
-                let catalog = Box::new(catalog);
-                spaceterm_ui::replace_control_theme_catalogs(
-                    cx,
-                    catalog.clone(),
-                    catalog.clone(),
-                    catalog.clone(),
-                    catalog,
-                )
-            },
+            crate::ui::control_theme_catalog::replace_uniform_control_catalog(cx, &appearance),
             Ok(spaceterm_ui::ControlThemeReplacement::Applied)
         );
         cx.set_global(crate::ui::appearance::InstalledChrome::single(Arc::new(

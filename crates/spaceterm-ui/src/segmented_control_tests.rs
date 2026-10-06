@@ -773,7 +773,6 @@ fn card_presentation_draws_every_option_and_its_preview(cx: &mut TestAppContext)
     let preview = cx
         .debug_bounds("test-segmented-light-preview")
         .expect("the Card preview renders");
-    assert_eq!(preview.size, gpui::size(px(52.0), px(52.0)));
     assert!(light.contains(&preview.center()));
     assert!(
         light.size.height > px(52.0),

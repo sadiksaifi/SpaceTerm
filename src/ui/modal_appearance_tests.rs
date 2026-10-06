@@ -75,23 +75,9 @@ fn replace_appearance(generation: u64, cx: &mut VisualTestContext) {
         spacing_scale: 1.0 + generation as f32 / 20.0,
         ..ChromeAppearance::default()
     };
-    let controls = crate::ui::control_theme_catalog::catalog(
-        &appearance,
-        spaceterm_ui::ControlMotion::Standard,
-    )
-    .generation(spaceterm_ui::ControlThemeGeneration::new(generation));
     cx.update(|window, cx| {
         assert_eq!(
-            {
-                let catalog = Box::new(controls);
-                spaceterm_ui::replace_control_theme_catalogs(
-                    cx,
-                    catalog.clone(),
-                    catalog.clone(),
-                    catalog.clone(),
-                    catalog,
-                )
-            },
+            crate::ui::control_theme_catalog::replace_uniform_control_catalog(cx, &appearance),
             Ok(spaceterm_ui::ControlThemeReplacement::Applied)
         );
         cx.set_global(InstalledChrome::single(Arc::new(appearance)));

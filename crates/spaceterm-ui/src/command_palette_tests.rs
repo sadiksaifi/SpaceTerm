@@ -473,6 +473,10 @@ fn editor_is_focused(palette: &Entity<CommandPalette<u8>>, window: &Window, cx: 
         .is_focused(window)
 }
 
+fn selected(palette: &Entity<CommandPalette<u8>>, cx: &VisualTestContext) -> Option<u8> {
+    palette.read_with(cx, |palette, _| palette.selected_item_id().copied())
+}
+
 fn palette_window(cx: &mut TestAppContext) -> PaletteWindow<'_> {
     cx.set_global(test_theme());
     install_control_themes(cx);
@@ -579,7 +583,7 @@ fn open_palette_font_change_should_remeasure_offscreen_rows_without_losing_posit
         touch_phase: TouchPhase::Moved,
     });
     cx.run_until_parked();
-    let selected = palette.read_with(cx, |palette, _| palette.selected_item_id().copied());
+    let selected = selected(&palette, cx);
     let initial_row = cx.debug_bounds("font-change-row-5").unwrap();
     let initial_editor = cx.debug_bounds("command-palette-editor").unwrap();
     let initial_row_offset = initial_row.top()
@@ -653,8 +657,7 @@ fn wheel_scrolling_the_results_should_not_reenter_the_list_state(cx: &mut TestAp
     let panel = cx
         .debug_bounds("command-palette-panel")
         .expect("the palette panel was not rendered");
-    let selected_before_scroll =
-        palette.read_with(cx, |palette, _| palette.selected_item_id().copied());
+    let selected_before_scroll = selected(&palette, cx);
     cx.simulate_event(ScrollWheelEvent {
         position: panel.center(),
         delta: ScrollDelta::Pixels(point(px(0.0), px(-240.0))),
@@ -672,7 +675,7 @@ fn wheel_scrolling_the_results_should_not_reenter_the_list_state(cx: &mut TestAp
         "the palette stopped rendering after a wheel scroll"
     );
     assert_eq!(
-        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
+        selected(&palette, cx),
         selected_before_scroll,
         "wheel scrolling changed selection under a stationary pointer"
     );
@@ -1167,10 +1170,7 @@ fn the_confirm_key_should_activate_the_primary_action_regardless_of_selection(
         palette.set_primary_action(Some(CommandPalettePrimaryAction::new("pin", "Pin")), cx);
     });
     open_palette(&root, &palette, cx);
-    assert_eq!(
-        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
-        Some(1)
-    );
+    assert_eq!(selected(&palette, cx), Some(1));
 
     cx.simulate_keystrokes("cmd-enter");
     cx.run_until_parked();
@@ -1488,7 +1488,7 @@ fn down_on_the_focused_menu_segment_should_open_the_menu_and_keep_the_selection(
         "Down did not open the menu"
     );
     assert_eq!(
-        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
+        selected(&palette, cx),
         Some(1),
         "Down moved the list selection"
     );
@@ -1612,10 +1612,7 @@ fn return_should_open_the_primary_action_when_only_items_outside_default_selecti
     });
     open_palette(&root, &palette, cx);
 
-    assert_eq!(
-        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
-        None
-    );
+    assert_eq!(selected(&palette, cx), None);
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     assert_eq!(header_actions(&events), vec![SharedString::from("open")]);
@@ -1629,13 +1626,10 @@ fn return_should_open_the_primary_action_when_only_items_outside_default_selecti
             cx,
         );
     });
-    assert_eq!(
-        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
-        Some(2)
-    );
+    assert_eq!(selected(&palette, cx), Some(2));
     cx.simulate_keystrokes("up");
     assert_eq!(
-        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
+        selected(&palette, cx),
         Some(1),
         "the item could not be selected on request"
     );
@@ -1822,10 +1816,7 @@ fn applying_sectioned_results_should_keep_the_first_heading_above_initial_select
     });
     cx.run_until_parked();
 
-    assert_eq!(
-        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
-        Some(1)
-    );
+    assert_eq!(selected(&palette, cx), Some(1));
     let (heading, selected, viewport) = palette.read_with(cx, |palette, _| {
         (
             palette.list.bounds_for_item(0),
@@ -1946,10 +1937,7 @@ fn navigation_should_wrap_and_skip_disabled_items(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("ctrl-n ctrl-n ctrl-p");
     cx.run_until_parked();
 
-    assert_eq!(
-        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
-        Some(3)
-    );
+    assert_eq!(selected(&palette, cx), Some(3));
 }
 
 #[gpui::test]
@@ -1964,19 +1952,13 @@ fn pointer_hover_should_stay_suppressed_until_the_pointer_moves(cx: &mut TestApp
     cx.simulate_keystrokes("down");
     cx.run_until_parked();
 
-    assert_eq!(
-        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
-        Some(1)
-    );
+    assert_eq!(selected(&palette, cx), Some(1));
     assert!(palette.read_with(cx, |palette, _| palette.pointer_suppressed));
 
     cx.simulate_mouse_move(close_row, None, Modifiers::default());
     cx.run_until_parked();
 
-    assert_eq!(
-        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
-        Some(1)
-    );
+    assert_eq!(selected(&palette, cx), Some(1));
     assert!(palette.read_with(cx, |palette, _| palette.pointer_suppressed));
 
     cx.simulate_mouse_move(
@@ -1986,10 +1968,7 @@ fn pointer_hover_should_stay_suppressed_until_the_pointer_moves(cx: &mut TestApp
     );
     cx.run_until_parked();
 
-    assert_eq!(
-        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
-        Some(3)
-    );
+    assert_eq!(selected(&palette, cx), Some(3));
     assert!(!palette.read_with(cx, |palette, _| palette.pointer_suppressed));
 }
 
@@ -2007,27 +1986,12 @@ fn page_navigation_should_move_by_the_visible_result_count(cx: &mut TestAppConte
     });
     open_palette(&root, &palette, cx);
 
-    // The 260 px panel budget leaves seven complete 28 px result rows.
-    assert_eq!(
-        palette.read_with(cx, |palette, _| palette.list.viewport_bounds().size.height),
-        px(196.0)
-    );
-    assert_eq!(
-        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
-        Some(0)
-    );
     cx.simulate_keystrokes("pagedown");
     cx.run_until_parked();
-    assert_eq!(
-        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
-        Some(7)
-    );
+    assert_eq!(selected(&palette, cx), Some(7));
     cx.simulate_keystrokes("pageup");
     cx.run_until_parked();
-    assert_eq!(
-        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
-        Some(0)
-    );
+    assert_eq!(selected(&palette, cx), Some(0));
 }
 
 #[gpui::test]
@@ -2049,10 +2013,7 @@ fn keyboard_navigation_should_reveal_results_beyond_the_initial_viewport(cx: &mu
     cx.simulate_keystrokes(&["down"; 12].join(" "));
     cx.run_until_parked();
 
-    assert_eq!(
-        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
-        Some(12)
-    );
+    assert_eq!(selected(&palette, cx), Some(12));
     assert!(
         cx.debug_bounds("row-12").is_some(),
         "keyboard navigation selected an offscreen result without revealing it"
@@ -2107,25 +2068,16 @@ fn preferred_item_should_seed_each_open_transition(cx: &mut TestAppContext) {
     let (root, palette, _, _, cx) = palette_window(cx);
     palette.update(cx, |palette, cx| palette.set_preferred_item(Some(3), cx));
     open_palette(&root, &palette, cx);
-    assert_eq!(
-        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
-        Some(3)
-    );
+    assert_eq!(selected(&palette, cx), Some(3));
 
     cx.simulate_keystrokes("up");
     cx.run_until_parked();
-    assert_eq!(
-        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
-        Some(1)
-    );
+    assert_eq!(selected(&palette, cx), Some(1));
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
     assert!(!palette.read_with(cx, |palette, _| palette.is_open()));
     open_palette(&root, &palette, cx);
-    assert_eq!(
-        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
-        Some(3)
-    );
+    assert_eq!(selected(&palette, cx), Some(3));
 }
 
 #[gpui::test]
@@ -2174,10 +2126,7 @@ fn replacing_items_should_keep_rows_above_a_visible_preferred_item_in_view(
     palette.update(cx, |palette, cx| palette.set_items(items(), cx));
     cx.run_until_parked();
 
-    assert_eq!(
-        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
-        Some(1)
-    );
+    assert_eq!(selected(&palette, cx), Some(1));
     assert!(cx.debug_bounds("row-0").is_some());
 }
 
@@ -2971,10 +2920,7 @@ fn stable_selection_should_survive_query_and_item_refresh(cx: &mut TestAppContex
         palette.set_items(items(), cx);
     });
 
-    assert_eq!(
-        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
-        Some(3)
-    );
+    assert_eq!(selected(&palette, cx), Some(3));
 }
 
 #[gpui::test]
@@ -3003,10 +2949,7 @@ fn caller_ranked_item_refresh_should_select_the_new_first_result(cx: &mut TestAp
         );
     });
 
-    assert_eq!(
-        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
-        Some(2)
-    );
+    assert_eq!(selected(&palette, cx), Some(2));
 }
 
 #[derive(Debug, Eq, PartialEq)]

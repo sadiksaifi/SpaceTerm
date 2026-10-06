@@ -3194,20 +3194,9 @@ fn installed_floating_catalog_uses_the_material_control_presentation(
     let expected_card = with_elevation(expected_card);
 
     cx.update(|cx| {
-        {
-            let catalog = Box::new(super::control_theme_catalog::catalog(
-                &prepared,
-                spaceterm_ui::ControlMotion::Standard,
-            ));
-            spaceterm_ui::init(
-                cx,
-                catalog.clone(),
-                catalog.clone(),
-                catalog.clone(),
-                catalog,
-            )
-        }
-        .expect("floating catalog should install");
+        super::initialize_controls(cx).unwrap();
+        super::control_theme_catalog::replace_uniform_control_catalog(cx, &prepared)
+            .expect("floating catalog should install");
         assert_eq!(
             cx.global::<spaceterm_ui::ControlThemeCatalog>()
                 .hosted_controls(spaceterm_ui::ControlHost::TitleBar),
