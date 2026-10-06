@@ -3,7 +3,7 @@
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Entity, FocusHandle, Font, KeyDownEvent, SharedString, StyledText, Window,
-    div, px, relative,
+    accesskit, div, px, relative,
 };
 use spaceterm_ui::{
     Alert, AlertIntent, AlertOutcome, HoverFade, Icon, IconName, ModalAction, ModalActionEmphasis,
@@ -200,6 +200,9 @@ impl SettingsWindow {
             .gap(appearance.spacing(12.0))
             .child(
                 div()
+                    .id("settings-theme-slots")
+                    .role(accesskit::Role::RadioGroup)
+                    .aria_label("Current theme")
                     .flex()
                     .flex_row()
                     .justify_center()
@@ -242,8 +245,19 @@ impl SettingsWindow {
         let hover = HoverFade::new(SharedString::from(format!("{selector}-hover")), window, cx);
         let hover_level = hover.level(window, cx);
         let focused = focus.is_focused(window) && window.last_input_was_keyboard();
+        let description = name.clone();
+        let selecting = cx.weak_entity();
         div()
             .id(SharedString::from(selector.clone()))
+            .role(accesskit::Role::RadioButton)
+            .aria_label(label)
+            .when(!description.is_empty(), |card| card.aria_description(description))
+            .aria_toggled(accesskit::Toggled::from(selected))
+            .aria_position_in_set(usize::from(slot == Appearance::Dark) + 1)
+            .aria_size_of_set(2)
+            .on_a11y_action(accesskit::Action::Click, move |_, _, cx| {
+                let _ = selecting.update(cx, |settings, cx| settings.select_auto_slot(slot, cx));
+            })
             .debug_selector(move || selector.clone())
             .track_focus(focus)
             .flex()

@@ -776,6 +776,46 @@ fn every_mode_shows_the_theme_in_use_and_auto_shows_both_slots(cx: &mut TestAppC
 }
 
 #[gpui::test]
+fn auto_theme_slots_publish_a_radio_group_that_selects_on_press(cx: &mut TestAppContext) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
+    let (window, _harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::Themes, cx);
+    cx.update(|_, cx| {
+        window.update(cx, |settings, cx| {
+            settings.set_appearance_mode(AppearanceMode::Auto, cx)
+        })
+    });
+    let tree = A11yTree::read(cx);
+    let group = tree.node("Current theme");
+    assert_eq!(group["aria"]["role"], "RadioGroup");
+    let slots = tree.children(group);
+    let labels = slots
+        .iter()
+        .map(|slot| slot["aria"]["label"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(labels, ["Light", "Dark"]);
+    for slot in &slots {
+        assert_eq!(slot["aria"]["role"], "RadioButton");
+        assert!(!slot["aria"]["description"].as_str().unwrap().is_empty());
+    }
+    // The system appearance is Dark, so the gallery starts on the Dark slot.
+    assert_eq!(slots[0]["aria"]["toggled"], "False");
+    assert_eq!(slots[1]["aria"]["toggled"], "True");
+
+    perform(cx, slots[0], Action::Click);
+    assert_eq!(
+        window.read_with(cx, |settings, cx| settings.theme_slot(cx)),
+        Appearance::Light
+    );
+    let tree = A11yTree::read(cx);
+    let slots = tree.children(tree.node("Current theme"));
+    assert_eq!(slots[0]["aria"]["toggled"], "True");
+    assert_eq!(slots[1]["aria"]["toggled"], "False");
+}
+
+#[gpui::test]
 fn changing_one_theme_slot_preserves_the_mode_and_other_slot(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
     for mode in [
