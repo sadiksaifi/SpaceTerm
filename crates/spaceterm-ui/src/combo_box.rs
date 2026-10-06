@@ -318,11 +318,6 @@ impl<I> ComboBoxItem<I> {
         self.description.as_ref().map(AsRef::as_ref)
     }
 
-    /// Returns the display-only keyboard equivalent, when present.
-    pub fn shortcut_text(&self) -> Option<&str> {
-        self.shortcut.as_ref().map(AsRef::as_ref)
-    }
-
     /// Returns whether the item is visible but inert.
     pub const fn is_disabled(&self) -> bool {
         self.disabled

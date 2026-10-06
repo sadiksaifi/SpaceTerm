@@ -936,7 +936,7 @@ fn remote_completion_with_provider(
     )
     .unwrap();
     (
-        RemoteWorkspaceFlowCompletion::for_test(
+        crate::ui::remote_workspace_flow::tests::completion(
             session,
             destination,
             directory,
@@ -1013,7 +1013,7 @@ fn remote_completion_with_active_alias_pin_failure(
     )
     .unwrap();
     (
-        RemoteWorkspaceFlowCompletion::for_test(
+        crate::ui::remote_workspace_flow::tests::completion(
             session,
             destination,
             directory,
@@ -1497,7 +1497,9 @@ fn emit_remote_workspace_completion(
     cx: &mut VisualTestContext,
 ) {
     cx.update(|_, cx| {
-        flow.update(cx, |flow, cx| flow.emit_completion_for_test(completion, cx));
+        flow.update(cx, |flow, cx| {
+            crate::ui::remote_workspace_flow::tests::emit_completion(flow, completion, cx);
+        });
     });
     cx.run_until_parked();
 }
@@ -1585,12 +1587,6 @@ fn application_rtl_locale_installation_should_mirror_production_modal_footer(
             )
             .default_action(true),
             ModalAction::new(
-                "help",
-                "Help",
-                ModalActionRole::Help,
-                "rtl-application-help",
-            ),
-            ModalAction::new(
                 "cancel",
                 "Cancel",
                 ModalActionRole::Cancel,
@@ -1623,9 +1619,6 @@ fn application_rtl_locale_installation_should_mirror_production_modal_footer(
     let cancel = cx
         .debug_bounds("modal-action-rtl-application-cancel")
         .expect("Cancel should render");
-    let help = cx
-        .debug_bounds("modal-action-rtl-application-help")
-        .expect("Help should render");
     let policy_is_rtl = cx.update(|_, cx| {
         *cx.global::<spaceterm_ui::ModalDesktopPolicy>()
             == spaceterm_ui::ModalDesktopPolicy::mac_os()
@@ -1633,8 +1626,8 @@ fn application_rtl_locale_installation_should_mirror_production_modal_footer(
     });
 
     assert!(
-        policy_is_rtl && save.left() < cancel.left() && cancel.right() < help.left(),
-        "RTL production bounds were save={save:?}, cancel={cancel:?}, help={help:?}"
+        policy_is_rtl && save.left() < cancel.left(),
+        "RTL production bounds were save={save:?}, cancel={cancel:?}"
     );
 }
 
@@ -2458,7 +2451,8 @@ fn deactivated_remote_creation_should_restore_actions_after_releasing_its_flow(
     let flow = open_remote_workspace_flow(&manager, cx);
     cx.update(|window, cx| {
         flow.update(cx, |flow, cx| {
-            flow.select_destination_for_test(
+            crate::ui::remote_workspace_flow::tests::select_host_destination(
+                flow,
                 crate::domain::SshDestination::new("work".to_owned()).unwrap(),
                 window,
                 cx,
@@ -3881,7 +3875,9 @@ fn remote_revalidation_failures_should_close_completion_without_mutation(cx: &mu
         );
 
         cx.update(|window, cx| {
-            flow.update(cx, |flow, cx| flow.cancel_for_test(window, cx));
+            flow.update(cx, |flow, cx| {
+                crate::ui::remote_workspace_flow::tests::cancel(flow, window, cx);
+            });
         });
         cx.run_until_parked();
         assert_eq!(closes.load(Ordering::Acquire), 1);
@@ -3911,7 +3907,9 @@ fn cancelled_initial_revalidation_should_close_immediately_without_late_resurrec
     assert_eq!(stale_revalidations.load(Ordering::Acquire), 1);
 
     cx.update(|window, cx| {
-        first_flow.update(cx, |flow, cx| flow.cancel_for_test(window, cx));
+        first_flow.update(cx, |flow, cx| {
+            crate::ui::remote_workspace_flow::tests::cancel(flow, window, cx);
+        });
     });
     cx.run_until_parked();
     assert_eq!(
@@ -4141,7 +4139,9 @@ fn failed_workspace_alias_pin_should_return_activation_without_leaking_authority
     );
 
     cx.update(|window, cx| {
-        flow.update(cx, |flow, cx| flow.cancel_for_test(window, cx));
+        flow.update(cx, |flow, cx| {
+            crate::ui::remote_workspace_flow::tests::cancel(flow, window, cx);
+        });
     });
     cx.run_until_parked();
 
@@ -4370,7 +4370,7 @@ fn open_local_directory_should_keep_the_picker_usable_after_a_failed_creation(
     fs::create_dir_all(&project).unwrap();
     let (manager, _, cx) = workspace_manager_with_directory_selection([], cx);
     manager.update(cx, |manager, _| {
-        manager.workspaces.set_next_workspace_id_for_test(u64::MAX);
+        crate::domain::set_next_workspace_id(&mut manager.workspaces, u64::MAX);
     });
     cx.simulate_keystrokes("cmd-o");
     cx.run_until_parked();
@@ -4381,7 +4381,7 @@ fn open_local_directory_should_keep_the_picker_usable_after_a_failed_creation(
     });
 
     manager.update(cx, |manager, _| {
-        manager.workspaces.set_next_workspace_id_for_test(2);
+        crate::domain::set_next_workspace_id(&mut manager.workspaces, 2);
     });
     confirm_directory_picker_path(&format!("{}/", project.to_str().unwrap()), cx);
 
@@ -4538,7 +4538,10 @@ fn open_remote_directory_should_start_the_remote_flow_at_a_chosen_directory(
         .read_with(cx, |manager, _| manager.remote_workspace_flow.clone())
         .expect("Open Remote Directory should present the Remote Workspace flow");
     assert_eq!(
-        flow.read_with(cx, |flow, _| (flow.stage(), flow.start())),
+        flow.read_with(cx, |flow, _| (
+            flow.stage(),
+            crate::ui::remote_workspace_flow::tests::start(flow)
+        )),
         (
             RemoteWorkspaceFlowStage::HostSelection,
             RemoteWorkspaceStart::ChosenDirectory
@@ -4572,7 +4575,8 @@ fn open_remote_directory_should_return_to_the_picker_after_a_failed_launch_and_t
     });
     cx.update(|window, cx| {
         flow.update(cx, |flow, cx| {
-            flow.select_destination_for_test(
+            crate::ui::remote_workspace_flow::tests::select_host_destination(
+                flow,
                 crate::domain::SshDestination::new("work".to_owned()).unwrap(),
                 window,
                 cx,
@@ -4643,7 +4647,11 @@ fn open_remote_directory_should_pin_the_new_workspace_and_reuse_it_for_the_same_
         let flow = open_remote_workspace_flow(&manager, cx);
         let (completion, completion_closes, _, _) =
             remote_completion("work", "~/src", "/home/tester/src", true);
-        emit_remote_workspace_completion(&flow, completion.pinned_for_test(), cx);
+        emit_remote_workspace_completion(
+            &flow,
+            crate::ui::remote_workspace_flow::tests::pinned(completion),
+            cx,
+        );
         closes.push(completion_closes);
     }
 
@@ -9773,28 +9781,45 @@ fn workspace_activation_hints_should_follow_sidebar_order_after_closing(cx: &mut
         cx.simulate_keystrokes("cmd-n");
     }
     cx.run_until_parked();
-    manager.read_with(cx, |manager, cx| {
-        let items = manager.workspace_switcher_items(cx);
-        for (index, item) in items.iter().take(9).enumerate() {
-            assert_eq!(
-                item.shortcut_text(),
-                Some(format!("Ctrl+{}", index + 1).as_str())
-            );
-        }
-        assert_eq!(items[9].shortcut_text(), None);
+    let hints = cx.update(|_, cx| {
+        let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
+        [0, 8, 9].map(|index| workspace_activation_shortcut(index, presentation))
     });
+    assert_eq!(hints, [Some("Ctrl+1".into()), Some("Ctrl+9".into()), None]);
+    open_workspace_switcher(cx);
+    assert_eq!(switcher_shortcut_row(9, cx), Some(8));
+    assert_eq!(switcher_shortcut_row(10, cx), None);
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
             manager.close_workspace(WorkspaceId::new(1), window, cx)
         })
     });
+    cx.simulate_keystrokes("ctrl-1");
     cx.run_until_parked();
-    manager.read_with(cx, |manager, cx| {
-        let items = manager.workspace_switcher_items(cx);
-        assert_eq!(items[0].id(), &WorkspaceId::new(2));
-        assert_eq!(items[0].shortcut_text(), Some("Ctrl+1"));
-        assert_eq!(items[8].shortcut_text(), Some("Ctrl+9"));
-    });
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id()),
+        WorkspaceId::new(2)
+    );
+    open_workspace_switcher(cx);
+    assert_eq!(switcher_shortcut_row(2, cx), Some(0));
+    assert_eq!(switcher_shortcut_row(9, cx), Some(7));
+    cx.simulate_keystrokes("end");
+    cx.run_until_parked();
+    assert_eq!(switcher_shortcut_row(10, cx), Some(8));
+}
+
+fn switcher_shortcut_row(workspace: u64, cx: &mut VisualTestContext) -> Option<usize> {
+    let row = cx
+        .debug_bounds(format!("workspace-switcher-result-{workspace}").leak())
+        .expect("the Workspace switcher row should render");
+    (0..12).find(|position| {
+        cx.debug_bounds(format!("combo-box-row-{position}-shortcut").leak())
+            .is_some_and(|shortcut| {
+                row.top() <= shortcut.center().y && shortcut.center().y <= row.bottom()
+            })
+    })
 }
 
 #[gpui::test]

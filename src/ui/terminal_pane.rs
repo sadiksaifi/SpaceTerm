@@ -566,8 +566,6 @@ pub(crate) struct TerminalPane {
     next_operation_id: u64,
     latest_presentation_operation: Option<u64>,
     latest_export_operation: Option<u64>,
-    #[cfg(test)]
-    scene_submission_attempts: Vec<crate::terminal::PresentationGeneration>,
     diagnostics: DiagnosticBundle,
     status: Option<String>,
     status_intent: StatusIntent,
@@ -863,8 +861,6 @@ impl TerminalPane {
             next_operation_id: 0,
             latest_presentation_operation: None,
             latest_export_operation: None,
-            #[cfg(test)]
-            scene_submission_attempts: Vec::new(),
             diagnostics: DiagnosticBundle::default(),
             status: None,
             status_intent: StatusIntent::Information,
@@ -1814,16 +1810,6 @@ impl TerminalPane {
             PaneTerminalState::Exited(exit) => Some(exit.to_string()),
             PaneTerminalState::Failed { failure, .. } => Some(failure.to_string()),
         }
-    }
-
-    pub(super) fn record_scene_submission_attempt(
-        &mut self,
-        generation: crate::terminal::PresentationGeneration,
-    ) {
-        #[cfg(test)]
-        self.scene_submission_attempts.push(generation);
-        #[cfg(not(test))]
-        let _ = generation;
     }
 
     pub(super) fn presentation_succeeded(

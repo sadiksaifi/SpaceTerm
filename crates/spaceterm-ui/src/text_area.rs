@@ -436,24 +436,6 @@ impl TextArea {
         self.restart_caret(cx);
     }
 
-    /// Places the caret at a one-based line and column and scrolls it into view.
-    ///
-    /// Columns count characters, the way a JSON parser reports a position. A position past the
-    /// end of its line or of the value lands on the nearest end.
-    pub fn move_caret_to_position(&mut self, line: usize, column: usize, cx: &mut Context<Self>) {
-        self.commit_composition();
-        let index = line.saturating_sub(1).min(self.lines.len() - 1);
-        let range = self.lines[index].clone();
-        let offset = self.buffer.text[range.clone()]
-            .char_indices()
-            .nth(column.saturating_sub(1))
-            .map_or(range.end, |(offset, _)| range.start + offset);
-        self.buffer.move_to(offset);
-        self.goal_x = None;
-        self.reveal_caret = true;
-        self.restart_caret(cx);
-    }
-
     fn can_edit(&self) -> bool {
         self.editable
     }

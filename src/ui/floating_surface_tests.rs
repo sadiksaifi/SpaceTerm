@@ -580,7 +580,8 @@ fn quiet_floating_material_preserves_readability_with_stronger_diffusion() {
                 for prepared in [&active, &inactive] {
                     let shell = prepared.floating_surfaces().shell(FloatingRole::Readout);
                     if transparency > 0.0 {
-                        assert_eq!(shell.backdrop_blur_radius(), gpui::px(20.0));
+                        let surfaces = prepared.floating_surfaces();
+                        assert_eq!(surfaces, surfaces.backdrop_blur(gpui::px(20.0)));
                         let minimum = if increase_contrast { 0.95 } else { 0.90 };
                         assert!(shell.backdrop_tone().a >= minimum);
                     } else {
@@ -637,11 +638,6 @@ fn interactive_floating_roles_share_one_material() {
                         assert_eq!(
                             shell.backdrop_alpha_limit(),
                             popover.backdrop_alpha_limit(),
-                            "{case}"
-                        );
-                        assert_eq!(
-                            shell.backdrop_blur_radius(),
-                            popover.backdrop_blur_radius(),
                             "{case}"
                         );
                     }
@@ -2256,8 +2252,9 @@ fn floating_material_tracks_transparency_and_blur_only_changes_filter() {
                                 supported && transparency > 0.0,
                                 "only effective native glass can admit the window backing"
                             );
+                            let surfaces = prepared.floating_surfaces();
                             assert_eq!(
-                                shell.backdrop_blur_radius() > gpui::px(0.0),
+                                surfaces != surfaces.backdrop_blur(gpui::px(0.0)),
                                 blur && transparency > 0.0
                             );
                         }

@@ -635,7 +635,6 @@ fn toggle_shortcut_previews_the_mode_while_the_palette_keeps_focus_and_query(
     click("workbench-open-palette", cx);
     let palette = workbench.read_with(cx, |workbench, _| workbench.palette.clone());
     assert!(palette.read_with(cx, |palette, _| palette.is_open()));
-    assert!(cx.update(|window, cx| palette.read(cx).editor_is_focused(window, cx)));
 
     for expected in [Appearance::Light, Appearance::Dark] {
         cx.simulate_keystrokes("cmd-alt-c");
@@ -650,7 +649,12 @@ fn toggle_shortcut_previews_the_mode_while_the_palette_keeps_focus_and_query(
             assert!(palette.read(cx).is_open());
             assert_eq!(palette.read(cx).query(), "Open");
         });
-        assert!(cx.update(|window, cx| palette.read(cx).editor_is_focused(window, cx)));
+        cx.simulate_input("!");
+        assert_eq!(
+            palette.read_with(cx, |palette, _| palette.query().to_owned()),
+            "Open!"
+        );
+        cx.simulate_keystrokes("backspace");
     }
 }
 

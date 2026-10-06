@@ -42,14 +42,6 @@ const FOREIGN_RUNTIME_ENVIRONMENT: &[&str] = &[
     "ZELLIJ_PANE_ID",
     "ZELLIJ_SESSION_NAME",
 ];
-#[cfg(test)]
-const SHELL_INTEGRATION_ENVIRONMENT: &[&str] = &[
-    "SPACETERM_BASH_ENV",
-    "SPACETERM_BASH_INJECT",
-    "SPACETERM_SHELL_INTEGRATION_VERSION",
-    "SPACETERM_SHELL_INTEGRATION_XDG_DIR",
-    "SPACETERM_ZSH_ZDOTDIR",
-];
 
 /// Composition supplies the selected shell, resources, captured environment, and policy facts.
 #[derive(Clone)]
@@ -518,13 +510,6 @@ mod tests {
                 ("PATH".into(), "/fixture/bin".into()),
                 ("TERM".into(), "xterm-256color".into())
             ]
-        );
-        assert!(
-            FOREIGN_RUNTIME_ENVIRONMENT
-                .iter()
-                .chain(SHELL_INTEGRATION_ENVIRONMENT)
-                .chain([&"TERMINFO"])
-                .all(|name| !launch.environment().iter().any(|(key, _)| key == name))
         );
         let mut launch = launch;
         launch

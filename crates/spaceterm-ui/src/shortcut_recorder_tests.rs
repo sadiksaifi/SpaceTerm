@@ -10,7 +10,7 @@ use gpui::{
     VisualTestContext, Window, div, px, rgba,
 };
 
-use crate::shortcut_recorder::ShortcutTone;
+use super::ShortcutTone;
 use crate::*;
 
 gpui::actions!(shortcut_recorder_tests, [CloseProbe, Traverse]);
@@ -132,7 +132,7 @@ impl Harness<'_> {
 
     fn recording(&mut self) -> bool {
         self.recorder
-            .read_with(self.cx, |recorder, _| recorder.is_recording())
+            .read_with(self.cx, |recorder, _| recorder.recording.is_some())
     }
 
     fn presentation(&mut self) -> (SharedString, ShortcutTone) {

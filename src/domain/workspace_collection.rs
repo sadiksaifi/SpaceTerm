@@ -545,12 +545,6 @@ impl<T> WorkspaceCollection<T> {
             .begin_close())
     }
 
-    /// Sets the next Workspace ID; `u64::MAX` makes every creation fail with an exhausted ID space.
-    #[cfg(test)]
-    pub(crate) fn set_next_workspace_id_for_test(&mut self, next_workspace_id: u64) {
-        self.next_workspace_id = next_workspace_id;
-    }
-
     pub(crate) fn create_local_workspace(
         &mut self,
         directory: ValidatedLocalDirectory,
@@ -898,11 +892,16 @@ fn default_workspace_name(workspace_number: usize) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
 
     use super::*;
+
+    /// `u64::MAX` makes every creation fail with an exhausted ID space.
+    pub(crate) fn set_next_workspace_id<T>(workspaces: &mut WorkspaceCollection<T>, next: u64) {
+        workspaces.next_workspace_id = next;
+    }
 
     struct DropProbe {
         drops: Rc<Cell<usize>>,

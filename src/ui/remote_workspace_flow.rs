@@ -354,35 +354,6 @@ pub(crate) struct RemoteWorkspaceFlowCompletion {
 }
 
 impl RemoteWorkspaceFlowCompletion {
-    #[cfg(test)]
-    pub(crate) fn for_test(
-        session: RemoteWorkspaceConnectedSession,
-        destination: SshDestination,
-        initial_directory: RemoteDirectory,
-        physical_directory: RemoteDirectoryIdentity,
-        account: RemoteWorkspaceAccount,
-        terminal_channels: Arc<dyn RemoteTerminalChannelProvider>,
-        lifecycle: ControlConnectionObserver,
-    ) -> Self {
-        Self {
-            session,
-            destination,
-            initial_directory,
-            physical_directory,
-            pinned: false,
-            account,
-            terminal_channels,
-            lifecycle,
-        }
-    }
-
-    /// Marks the initial directory as chosen through Open Remote Directory, which pins it.
-    #[cfg(test)]
-    pub(crate) fn pinned_for_test(mut self) -> Self {
-        self.pinned = true;
-        self
-    }
-
     pub(crate) const fn destination(&self) -> &SshDestination {
         &self.destination
     }
@@ -736,45 +707,6 @@ impl RemoteWorkspaceFlow {
     pub(crate) fn owns_activation(&self, handle: &RemoteWorkspaceFlowCompletionHandle) -> bool {
         matches!(&self.state, RemoteWorkspaceFlowState::AwaitingActivation(pending)
             if pending.handle.is_same_transfer(handle) && handle.is_empty())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn emit_completion_for_test(
-        &mut self,
-        completion: RemoteWorkspaceFlowCompletion,
-        cx: &mut Context<Self>,
-    ) {
-        let handle = RemoteWorkspaceFlowCompletionHandle::new(completion);
-        self.state = RemoteWorkspaceFlowState::AwaitingActivation(PendingActivation {
-            handle: handle.clone(),
-            picker: None,
-        });
-        cx.emit(RemoteWorkspaceFlowEvent::Completed(handle));
-        self.publish(cx);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn cancel_for_test(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.cancel_flow(window, cx);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn select_destination_for_test(
-        &mut self,
-        destination: SshDestination,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.reduce_host_event(
-            &SshHostPickerEvent::SelectDestination(destination),
-            window,
-            cx,
-        );
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn start(&self) -> RemoteWorkspaceStart {
-        self.start
     }
 
     /// Opens host selection for a Workspace whose Terminal Sessions start at `start`.
@@ -1740,7 +1672,7 @@ impl Render for RemoteWorkspaceFlow {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::rc::Rc;
@@ -1756,6 +1688,73 @@ mod tests {
     use crate::ui::directory_picker::{
         DirectoryListing, ExactPathState, RemoteDirectoryProviderError,
     };
+
+    pub(in crate::ui) fn completion(
+        session: RemoteWorkspaceConnectedSession,
+        destination: SshDestination,
+        initial_directory: RemoteDirectory,
+        physical_directory: RemoteDirectoryIdentity,
+        account: RemoteWorkspaceAccount,
+        terminal_channels: Arc<dyn RemoteTerminalChannelProvider>,
+        lifecycle: ControlConnectionObserver,
+    ) -> RemoteWorkspaceFlowCompletion {
+        RemoteWorkspaceFlowCompletion {
+            session,
+            destination,
+            initial_directory,
+            physical_directory,
+            pinned: false,
+            account,
+            terminal_channels,
+            lifecycle,
+        }
+    }
+
+    pub(in crate::ui) fn pinned(
+        mut completion: RemoteWorkspaceFlowCompletion,
+    ) -> RemoteWorkspaceFlowCompletion {
+        completion.pinned = true;
+        completion
+    }
+
+    pub(in crate::ui) fn emit_completion(
+        flow: &mut RemoteWorkspaceFlow,
+        completion: RemoteWorkspaceFlowCompletion,
+        cx: &mut Context<RemoteWorkspaceFlow>,
+    ) {
+        let handle = RemoteWorkspaceFlowCompletionHandle::new(completion);
+        flow.state = RemoteWorkspaceFlowState::AwaitingActivation(PendingActivation {
+            handle: handle.clone(),
+            picker: None,
+        });
+        cx.emit(RemoteWorkspaceFlowEvent::Completed(handle));
+        flow.publish(cx);
+    }
+
+    pub(in crate::ui) fn select_host_destination(
+        flow: &mut RemoteWorkspaceFlow,
+        destination: SshDestination,
+        window: &mut Window,
+        cx: &mut Context<RemoteWorkspaceFlow>,
+    ) {
+        flow.reduce_host_event(
+            &SshHostPickerEvent::SelectDestination(destination),
+            window,
+            cx,
+        );
+    }
+
+    pub(in crate::ui) fn cancel(
+        flow: &mut RemoteWorkspaceFlow,
+        window: &mut Window,
+        cx: &mut Context<RemoteWorkspaceFlow>,
+    ) {
+        flow.cancel_flow(window, cx);
+    }
+
+    pub(in crate::ui) const fn start(flow: &RemoteWorkspaceFlow) -> RemoteWorkspaceStart {
+        flow.start
+    }
 
     #[derive(Default)]
     struct ReadyRemoteProvider;
@@ -2171,7 +2170,7 @@ mod tests {
         acquisition_fails: bool,
         closes: &Arc<AtomicUsize>,
     ) -> RemoteWorkspaceFlowCompletion {
-        RemoteWorkspaceFlowCompletion::for_test(
+        completion(
             RemoteWorkspaceConnectedSession::new(
                 Box::new(AliasPinningOwner {
                     alias,

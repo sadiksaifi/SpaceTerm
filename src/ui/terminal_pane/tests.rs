@@ -3198,7 +3198,7 @@ fn cursor_layer_refresh_does_not_repeat_a_completed_presentation(cx: &mut TestAp
     }));
     let completed = pane.read_with(cx, |pane, _| {
         (
-            pane.scene_submission_attempts.len(),
+            pane.latest_presentation_operation,
             pane.last_valid_screen.generation,
         )
     });
@@ -3210,7 +3210,7 @@ fn cursor_layer_refresh_does_not_repeat_a_completed_presentation(cx: &mut TestAp
     );
     assert_eq!(
         pane.read_with(cx, |pane, _| (
-            pane.scene_submission_attempts.len(),
+            pane.latest_presentation_operation,
             pane.last_valid_screen.generation
         )),
         completed
@@ -6621,8 +6621,14 @@ fn second_row_preflight_failure_submits_only_the_last_valid_generation() {
     cx.run_until_parked();
     cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear(cx))
         .unwrap();
-    let before = handle
-        .read_with(&cx, |pane, _| pane.scene_submission_attempts.len())
+    let retained_sprites = cx
+        .update_window(handle.into(), |_, window, _| {
+            window
+                .painted_monochrome_sprites()
+                .iter()
+                .map(|sprite| (sprite.tile.tile_id, sprite.bounds))
+                .collect::<Vec<_>>()
+        })
         .unwrap();
     atlas.glyph_lookups.lock().unwrap().clear();
     *atlas.fail_glyph.lock().unwrap() = Some(gpui::GlyphId('f' as u32));
@@ -6666,16 +6672,19 @@ fn second_row_preflight_failure_submits_only_the_last_valid_generation() {
             Some(crate::terminal::FailureClass::Presentation),
         )
     );
-    let submissions = handle
-        .read_with(&cx, |pane, _| {
-            pane.scene_submission_attempts[before..].to_vec()
+    let submitted_sprites = cx
+        .update_window(handle.into(), |_, window, _| {
+            window
+                .painted_monochrome_sprites()
+                .iter()
+                .filter(|sprite| {
+                    sprite.bounds.origin.y < retained_sprites.last().unwrap().1.bottom()
+                })
+                .map(|sprite| (sprite.tile.tile_id, sprite.bounds))
+                .collect::<Vec<_>>()
         })
         .unwrap();
-    assert!(!submissions.contains(&crate::terminal::PresentationGeneration::test(2)));
-    assert_eq!(
-        submissions.last(),
-        Some(&crate::terminal::PresentationGeneration::test(1))
-    );
+    assert_eq!(submitted_sprites, retained_sprites);
 }
 #[test]
 fn candidate_and_fallback_use_isolated_render_caches() {
@@ -6697,9 +6706,6 @@ fn candidate_and_fallback_use_isolated_render_caches() {
         })
         .unwrap();
     assert!(!retained_sprites.is_empty());
-    let before = handle
-        .read_with(&cx, |pane, _| pane.scene_submission_attempts.len())
-        .unwrap();
     atlas.glyph_lookups.lock().unwrap().clear();
     *atlas.fail_glyph.lock().unwrap() = Some(gpui::GlyphId('f' as u32));
     events
@@ -6745,16 +6751,6 @@ fn candidate_and_fallback_use_isolated_render_caches() {
             Some(crate::terminal::PresentationGeneration::test(1)),
             Some(crate::terminal::FailureClass::Presentation),
         )
-    );
-    let submissions = handle
-        .read_with(&cx, |pane, _| {
-            pane.scene_submission_attempts[before..].to_vec()
-        })
-        .unwrap();
-    assert!(!submissions.contains(&crate::terminal::PresentationGeneration::test(2)));
-    assert_eq!(
-        submissions.last(),
-        Some(&crate::terminal::PresentationGeneration::test(1))
     );
     handle
         .read_with(&cx, |pane, _| {
@@ -6833,8 +6829,14 @@ fn second_glyph_preflight_failure_submits_only_the_last_valid_generation() {
     cx.run_until_parked();
     cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear(cx))
         .unwrap();
-    let before = handle
-        .read_with(&cx, |pane, _| pane.scene_submission_attempts.len())
+    let retained_sprites = cx
+        .update_window(handle.into(), |_, window, _| {
+            window
+                .painted_monochrome_sprites()
+                .iter()
+                .map(|sprite| (sprite.tile.tile_id, sprite.bounds))
+                .collect::<Vec<_>>()
+        })
         .unwrap();
     atlas.glyph_lookups.lock().unwrap().clear();
     *atlas.fail_glyph.lock().unwrap() = Some(gpui::GlyphId('e' as u32));
@@ -6869,16 +6871,19 @@ fn second_glyph_preflight_failure_submits_only_the_last_valid_generation() {
             Some(crate::terminal::FailureClass::Presentation),
         )
     );
-    let submissions = handle
-        .read_with(&cx, |pane, _| {
-            pane.scene_submission_attempts[before..].to_vec()
+    let submitted_sprites = cx
+        .update_window(handle.into(), |_, window, _| {
+            window
+                .painted_monochrome_sprites()
+                .iter()
+                .filter(|sprite| {
+                    sprite.bounds.origin.y < retained_sprites.last().unwrap().1.bottom()
+                })
+                .map(|sprite| (sprite.tile.tile_id, sprite.bounds))
+                .collect::<Vec<_>>()
         })
         .unwrap();
-    assert!(!submissions.contains(&crate::terminal::PresentationGeneration::test(2)));
-    assert_eq!(
-        submissions.last(),
-        Some(&crate::terminal::PresentationGeneration::test(1))
-    );
+    assert_eq!(submitted_sprites, retained_sprites);
     assert_eq!(
         &lookups[..2],
         &[gpui::GlyphId('n' as u32), gpui::GlyphId('e' as u32)]
@@ -6992,9 +6997,16 @@ fn second_image_atlas_failure_rolls_back_the_unpresented_generation() {
     cx.run_until_parked();
     cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear(cx))
         .unwrap();
-    let submissions_before = handle
-        .read_with(&cx, |pane, _| pane.scene_submission_attempts.len())
+    let retained_sprites = cx
+        .update_window(handle.into(), |_, window, _| {
+            window
+                .painted_polychrome_sprites()
+                .iter()
+                .map(|sprite| (sprite.tile.tile_id, sprite.bounds))
+                .collect::<Vec<_>>()
+        })
         .unwrap();
+    assert!(!retained_sprites.is_empty());
 
     let lookups_before = atlas.image_lookups.load(Ordering::Relaxed);
     atlas
@@ -7011,7 +7023,17 @@ fn second_image_atlas_failure_rolls_back_the_unpresented_generation() {
         .unwrap();
 
     assert!(atlas.image_lookups.load(Ordering::Relaxed) >= lookups_before + 2);
-    let (last_valid, failure, cached, staged, submissions) = handle
+    let submitted_sprites = cx
+        .update_window(handle.into(), |_, window, _| {
+            window
+                .painted_polychrome_sprites()
+                .iter()
+                .map(|sprite| (sprite.tile.tile_id, sprite.bounds))
+                .collect::<Vec<_>>()
+        })
+        .unwrap();
+    assert_eq!(submitted_sprites, retained_sprites);
+    let (last_valid, failure, cached, staged) = handle
         .read_with(&cx, |pane, cx| {
             (
                 pane.last_valid_screen.generation,
@@ -7020,7 +7042,6 @@ fn second_image_atlas_failure_rolls_back_the_unpresented_generation() {
                     .read_with(cx, |cache, _| cache.cached_image_keys()),
                 pane.graphics_cache
                     .read_with(cx, |cache, _| cache.staged_image_keys()),
-                pane.scene_submission_attempts[submissions_before..].to_vec(),
             )
         })
         .unwrap();
@@ -7034,11 +7055,6 @@ fn second_image_atlas_failure_rolls_back_the_unpresented_generation() {
         }]
     );
     assert!(staged.is_empty());
-    assert!(!submissions.contains(&crate::terminal::PresentationGeneration::test(2)));
-    assert_eq!(
-        submissions.last(),
-        Some(&crate::terminal::PresentationGeneration::test(1))
-    );
 }
 
 #[gpui::test]
@@ -7517,7 +7533,7 @@ fn repeated_same_generation_delivery_preserves_snapshot_identity_and_does_not_su
         .try_send(SessionEvent::Screen(Arc::clone(&original)))
         .unwrap();
     cx.run_until_parked();
-    let submissions = pane.read_with(cx, |pane, _| pane.scene_submission_attempts.len());
+    let paints = pane.read_with(cx, |pane, _| pane.grid_presentation.paint_counts().0);
     for _ in 0..16 {
         let redundant = Arc::new((*original).clone());
         let released = Arc::downgrade(&redundant);
@@ -7527,8 +7543,8 @@ fn repeated_same_generation_delivery_preserves_snapshot_identity_and_does_not_su
     }
     assert!(pane.read_with(cx, |pane, _| Arc::ptr_eq(&pane.screen, &original)));
     assert_eq!(
-        pane.read_with(cx, |pane, _| pane.scene_submission_attempts.len()),
-        submissions
+        pane.read_with(cx, |pane, _| pane.grid_presentation.paint_counts().0),
+        paints
     );
 }
 

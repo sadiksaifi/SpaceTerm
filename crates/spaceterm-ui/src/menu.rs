@@ -668,62 +668,6 @@ struct MenuItem<A> {
     debug_selector: Option<String>,
 }
 
-/// One configurable option in a semantic radio group.
-pub struct MenuRadioOption<A> {
-    item: MenuItem<A>,
-}
-
-impl<A> MenuRadioOption<A> {
-    /// Creates an enabled radio option.
-    pub fn new(label: impl Into<SharedString>, action: A) -> Self {
-        Self {
-            item: MenuItem {
-                label: label.into(),
-                action,
-                disabled: false,
-                destructive: false,
-                shortcut: None,
-                icon: None,
-                mark: EntryMark::None,
-                debug_selector: None,
-            },
-        }
-    }
-
-    /// Controls whether navigation and activation may reach this option.
-    pub fn disabled(mut self, disabled: bool) -> Self {
-        self.item.disabled = disabled;
-        self
-    }
-
-    /// Marks the option as destructive.
-    pub fn destructive(mut self, destructive: bool) -> Self {
-        self.item.destructive = destructive;
-        self
-    }
-
-    /// Adds a display-only shortcut hint.
-    pub fn shortcut(mut self, shortcut: impl Into<SharedString>) -> Self {
-        self.item.shortcut = Some(shortcut.into());
-        self
-    }
-
-    /// Adds a leading icon built with the resolved row foreground color and live glyph size.
-    ///
-    /// The icon sits after the radio mark. Every row in the panel reserves the icon column when one
-    /// entry has an icon.
-    pub fn icon(mut self, build: impl Fn(Rgba, Pixels) -> AnyElement + 'static) -> Self {
-        self.item.icon = Some(Rc::new(build));
-        self
-    }
-
-    /// Adds a stable selector used by GPUI interaction tests.
-    pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
-        self.item.debug_selector = Some(selector.into());
-        self
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum EntryMark {
     #[default]
@@ -786,30 +730,6 @@ impl<A> MenuEntry<A> {
                 entries,
             },
         }
-    }
-
-    /// Creates a radio group with at most one selected option.
-    ///
-    /// Selection state remains caller-owned. A nonempty group falls back to its first option when
-    /// the selected index is absent or out of range.
-    pub fn radio_group(selected: Option<usize>, options: Vec<MenuRadioOption<A>>) -> Self {
-        let normalized = (!options.is_empty())
-            .then(|| selected.filter(|index| *index < options.len()).unwrap_or(0));
-        Self::group(
-            options
-                .into_iter()
-                .enumerate()
-                .map(|(index, mut option)| {
-                    option.item.mark = EntryMark::Radio {
-                        selected: normalized == Some(index),
-                        index,
-                    };
-                    Self {
-                        kind: MenuEntryKind::Item(option.item),
-                    }
-                })
-                .collect(),
-        )
     }
 
     /// Creates a submenu entry.
@@ -4251,44 +4171,6 @@ mod tests {
     }
 
     #[test]
-    fn radio_group_should_normalize_nonempty_selection_to_exactly_one() {
-        for (selection, expected) in [
-            (None, [("One", true, 0), ("Two", false, 1)]),
-            (Some(1), [("One", false, 0), ("Two", true, 1)]),
-            (Some(99), [("One", true, 0), ("Two", false, 1)]),
-        ] {
-            let group = MenuEntry::radio_group(
-                selection,
-                vec![
-                    MenuRadioOption::new("One", 1),
-                    MenuRadioOption::new("Two", 2),
-                ],
-            );
-            let MenuEntryKind::Section { entries, .. } = group.kind else {
-                panic!("radio group did not create a section");
-            };
-            let rows: Vec<_> = entries
-                .iter()
-                .map(|entry| match &entry.kind {
-                    MenuEntryKind::Item(MenuItem {
-                        label,
-                        mark: EntryMark::Radio { selected, index },
-                        ..
-                    }) => (label.as_ref(), *selected, *index),
-                    _ => panic!("radio group did not create a radio row"),
-                })
-                .collect();
-            assert_eq!(rows, expected, "selection {selection:?}");
-            assert_eq!(rows.iter().filter(|(_, selected, _)| *selected).count(), 1);
-        }
-        let group = MenuEntry::<u8>::radio_group(None, Vec::new());
-        let MenuEntryKind::Section { entries, .. } = group.kind else {
-            panic!("empty radio group did not create a section");
-        };
-        assert!(entries.is_empty());
-    }
-
-    #[test]
     fn size_catalog_should_preserve_three_bounded_widths() {
         let paint = test_theme().paint;
         let sizes = MenuSizes::new(
@@ -5133,16 +5015,7 @@ mod tests {
             Menu::new(
                 "semantic-menu",
                 "Semantic",
-                vec![
-                    MenuEntry::checkbox("Flag", false, "flag").debug_selector("checkbox-entry"),
-                    MenuEntry::radio_group(
-                        Some(99),
-                        vec![
-                            MenuRadioOption::new("One", "one"),
-                            MenuRadioOption::new("Two", "two"),
-                        ],
-                    ),
-                ],
+                vec![MenuEntry::checkbox("Flag", false, "flag").debug_selector("checkbox-entry")],
             )
             .debug_selector("semantic-trigger")
             .on_activate(move |event, _, _| events.borrow_mut().push(event.clone()))
@@ -5150,7 +5023,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn checkbox_and_radio_should_emit_typed_proposals(cx: &mut TestAppContext) {
+    fn checkbox_should_emit_typed_proposal(cx: &mut TestAppContext) {
         cx.update(super::init);
         cx.set_global(test_theme());
         let events = Rc::new(RefCell::new(Vec::new()));
@@ -5172,28 +5045,13 @@ mod tests {
         cx.simulate_click(checkbox.center(), Modifiers::none());
         cx.run_until_parked();
 
-        cx.simulate_click(trigger.center(), Modifiers::none());
-        cx.run_until_parked();
-        let radio = cx
-            .debug_bounds("One")
-            .unwrap_or_else(|| panic!("radio option not painted"));
-        cx.simulate_click(radio.center(), Modifiers::none());
-        cx.run_until_parked();
-
         assert_eq!(
             events.borrow().as_slice(),
-            [
-                MenuActivation::Checkbox {
-                    action: "flag",
-                    checked: true,
-                    source: MenuActivationSource::Pointer,
-                },
-                MenuActivation::Radio {
-                    action: "one",
-                    index: 0,
-                    source: MenuActivationSource::Pointer,
-                },
-            ]
+            [MenuActivation::Checkbox {
+                action: "flag",
+                checked: true,
+                source: MenuActivationSource::Pointer,
+            },]
         );
     }
 

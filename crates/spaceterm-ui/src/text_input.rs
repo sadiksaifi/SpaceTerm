@@ -460,10 +460,6 @@ impl TextInputSelection {
     pub fn range(&self) -> Range<usize> {
         self.range.clone()
     }
-    /// Returns whether the active end precedes the anchor.
-    pub fn is_reversed(&self) -> bool {
-        self.reversed
-    }
     /// Returns the active insertion end.
     pub fn caret(&self) -> usize {
         if self.reversed {

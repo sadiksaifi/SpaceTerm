@@ -620,6 +620,10 @@ impl ModalWindowOwner {
             defer_released_owner_effects(effects, cx);
         })
         .detach();
+        Self::detached(window_id)
+    }
+
+    fn detached(window_id: WindowId) -> Self {
         Self {
             window_id,
             next_presentation_generation: 0,
@@ -635,26 +639,6 @@ impl ModalWindowOwner {
             transients_active: false,
             press_owner: ModalPressOwner::default(),
             #[cfg(test)]
-            caller_release_callbacks: 0,
-        }
-    }
-
-    #[cfg(test)]
-    fn new_for_test(window_id: WindowId) -> Self {
-        Self {
-            window_id,
-            next_presentation_generation: 0,
-            active: None,
-            queue: VecDeque::new(),
-            settlement: SettlementState::Idle,
-            effect_pump: EffectPumpState::Idle,
-            deferred_effects: VecDeque::new(),
-            reentrant_effects: VecDeque::new(),
-            focus_chain: FocusChain::default(),
-            window_available: true,
-            palette_suspension: None,
-            transients_active: false,
-            press_owner: ModalPressOwner::default(),
             caller_release_callbacks: 0,
         }
     }
@@ -2831,67 +2815,5 @@ pub(super) fn window_modal_is_open(window: &Window, cx: &App) -> bool {
 }
 
 #[cfg(test)]
-pub(super) fn retire_modal_owner_for_test(window: &Window, cx: &mut App) -> bool {
-    let Some(owner) = modal_owner_for_render(window, cx) else {
-        return true;
-    };
-    let press_owner = owner.read_with(cx, |owner, _| owner.press_owner());
-    retire_window_owner(&owner, cx);
-    press_owner.controls_are_idle(cx)
-}
-
-#[cfg(test)]
-pub(super) fn modal_controls_are_idle_for_test(window: &Window, cx: &App) -> bool {
-    modal_owner_for_render(window, cx)
-        .is_none_or(|owner| owner.read(cx).press_owner.controls_are_idle(cx))
-}
-
-#[cfg(test)]
-pub(super) fn modal_button_controls_are_idle_for_test(window: &Window, cx: &App) -> bool {
-    modal_controls_are_idle_for_test(window, cx)
-}
-
-#[cfg(test)]
-pub(super) fn close_attempt_generation_for_test(window: &Window, cx: &App) -> Option<u64> {
-    modal_owner_for_render(window, cx)?
-        .read(cx)
-        .active
-        .as_ref()
-        .map(|active| active.close_attempt_generation)
-}
-
-#[cfg(test)]
-pub(super) fn active_progress_for_test(
-    window: &Window,
-    cx: &App,
-) -> Option<(ModalPresentationId, ProgressRuntime, u64)> {
-    modal_owner_for_render(window, cx)?
-        .read(cx)
-        .active
-        .as_ref()
-        .and_then(|active| {
-            Some((
-                active.id,
-                active.progress.clone()?,
-                active.update_generation,
-            ))
-        })
-}
-
-#[cfg(test)]
-pub(super) fn active_progress_presentation_facts_for_test(
-    window: &Window,
-    cx: &App,
-) -> Option<(bool, usize)> {
-    let owner = modal_owner_for_render(window, cx)?;
-    let owner_state = owner.read(cx);
-    let active = owner_state.active.as_ref()?;
-    Some((
-        active.progress.as_ref()?.cancellation_available(),
-        active.request.actions.len(),
-    ))
-}
-
-#[cfg(test)]
 #[path = "core_tests.rs"]
-mod tests;
+pub(super) mod tests;

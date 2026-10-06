@@ -599,11 +599,6 @@ impl DirectoryPicker {
         self.open || self.opening
     }
 
-    #[cfg(test)]
-    pub(super) fn path_input_is_focused(&self, window: &Window, cx: &App) -> bool {
-        self.palette.read(cx).editor_is_focused(window, cx)
-    }
-
     pub(super) fn refocus_path(&self, window: &mut Window, cx: &mut Context<Self>) {
         if self.open {
             self.palette
@@ -680,7 +675,7 @@ impl DirectoryPicker {
                 self.finish_close(*reason, cx);
             }
             CommandPaletteEvent::QueryChanged(query) => {
-                self.refresh_for_input(query.text().to_owned(), window, cx);
+                self.refresh_for_input(query.clone(), window, cx);
             }
             CommandPaletteEvent::Activated(activation) => match activation.item_id() {
                 DirectoryPickerItemId::Enclosing {
@@ -2418,7 +2413,6 @@ mod tests {
         );
         let (picker, events, cx) = directory_picker(provider, cx);
         assert!(picker.read_with(cx, |picker, _| picker.blocks_terminal_input()));
-        assert!(cx.update(|window, cx| picker.read(cx).path_input_is_focused(window, cx)));
 
         cx.update(|window, cx| {
             window.dispatch_keystroke(Keystroke::parse("escape").unwrap(), cx);

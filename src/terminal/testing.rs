@@ -248,7 +248,7 @@ impl TestTerminalSessionRecords {
         snapshots.insert(session_id, Arc::new(metadata));
         self.event_sender(session_id)
             .expect("session must be live")
-            .try_send(SessionEvent::metadata_changed_for_test())
+            .try_send(super::session::tests::metadata_changed())
             .expect("metadata event must fit");
     }
 

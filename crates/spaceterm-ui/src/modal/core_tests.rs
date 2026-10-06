@@ -5,6 +5,58 @@ use gpui::{AnyWeakEntity, TestAppContext, div};
 use super::*;
 use crate::modal::DeterminateProgress;
 
+pub(in crate::modal) fn retire_modal_owner(window: &Window, cx: &mut App) -> bool {
+    let Some(owner) = modal_owner_for_render(window, cx) else {
+        return true;
+    };
+    let press_owner = owner.read_with(cx, |owner, _| owner.press_owner());
+    retire_window_owner(&owner, cx);
+    press_owner.controls_are_idle(cx)
+}
+
+pub(in crate::modal) fn modal_controls_are_idle(window: &Window, cx: &App) -> bool {
+    modal_owner_for_render(window, cx)
+        .is_none_or(|owner| owner.read(cx).press_owner.controls_are_idle(cx))
+}
+
+pub(in crate::modal) fn close_attempt_generation(window: &Window, cx: &App) -> Option<u64> {
+    modal_owner_for_render(window, cx)?
+        .read(cx)
+        .active
+        .as_ref()
+        .map(|active| active.close_attempt_generation)
+}
+
+pub(in crate::modal) fn active_progress(
+    window: &Window,
+    cx: &App,
+) -> Option<(ModalPresentationId, ProgressRuntime, u64)> {
+    modal_owner_for_render(window, cx)?
+        .read(cx)
+        .active
+        .as_ref()
+        .and_then(|active| {
+            Some((
+                active.id,
+                active.progress.clone()?,
+                active.update_generation,
+            ))
+        })
+}
+
+pub(in crate::modal) fn active_progress_presentation_facts(
+    window: &Window,
+    cx: &App,
+) -> Option<(bool, usize)> {
+    let owner = modal_owner_for_render(window, cx)?;
+    let owner_state = owner.read(cx);
+    let active = owner_state.active.as_ref()?;
+    Some((
+        active.progress.as_ref()?.cancellation_available(),
+        active.request.actions.len(),
+    ))
+}
+
 fn test_request(
     id: &'static str,
     owner: AnyWeakEntity,
@@ -59,7 +111,7 @@ fn traced_request(
     })))
 }
 
-fn dismiss_retained_handle_for_test(handle: &ModalPresentationHandle, cx: &mut App) {
+fn dismiss_retained_handle(handle: &ModalPresentationHandle, cx: &mut App) {
     let owner = handle.owner.clone();
     let effects = owner
         .update(cx, |state, _| {
@@ -241,7 +293,7 @@ fn repeated_settled_presentations_do_not_retain_caller_release_callbacks(cx: &mu
 #[test]
 fn queue_is_fifo_and_bounded_to_eight_waiting_requests() {
     let window_id = WindowId::from(1);
-    let mut owner = ModalWindowOwner::new_for_test(window_id);
+    let mut owner = ModalWindowOwner::detached(window_id);
     let weak = WeakEntity::new_invalid();
     let caller = AnyWeakEntity::new_invalid();
     let outcomes = Rc::new(RefCell::new(Vec::new()));
@@ -289,7 +341,7 @@ fn queue_is_fifo_and_bounded_to_eight_waiting_requests() {
 
 #[test]
 fn settlement_reservation_preserves_eight_waiting_slots_behind_the_fifo_head() {
-    let mut owner = ModalWindowOwner::new_for_test(WindowId::from(1));
+    let mut owner = ModalWindowOwner::detached(WindowId::from(1));
     let weak = WeakEntity::new_invalid();
     let caller = AnyWeakEntity::new_invalid();
     let outcomes = Rc::new(RefCell::new(Vec::new()));
@@ -341,7 +393,7 @@ fn settlement_reservation_preserves_eight_waiting_slots_behind_the_fifo_head() {
 
 #[test]
 fn presentation_generations_are_monotonic_across_queue_promotion() {
-    let mut owner = ModalWindowOwner::new_for_test(WindowId::from(1));
+    let mut owner = ModalWindowOwner::detached(WindowId::from(1));
     let weak = WeakEntity::new_invalid();
     let caller = AnyWeakEntity::new_invalid();
     let outcomes = Rc::new(RefCell::new(Vec::new()));
@@ -378,8 +430,8 @@ fn independent_window_owners_do_not_share_generations_or_queues() {
     let weak = WeakEntity::new_invalid();
     let caller = AnyWeakEntity::new_invalid();
     let outcomes = Rc::new(RefCell::new(Vec::new()));
-    let mut first = ModalWindowOwner::new_for_test(WindowId::from(1));
-    let mut second = ModalWindowOwner::new_for_test(WindowId::from(2));
+    let mut first = ModalWindowOwner::detached(WindowId::from(1));
+    let mut second = ModalWindowOwner::detached(WindowId::from(2));
     let (first_id, _) = first
         .submit(
             test_request("first", caller.clone(), outcomes.clone()),
@@ -403,7 +455,7 @@ fn independent_window_owners_do_not_share_generations_or_queues() {
 
 #[test]
 fn stale_completion_cannot_close_promoted_successor() {
-    let mut owner = ModalWindowOwner::new_for_test(WindowId::from(1));
+    let mut owner = ModalWindowOwner::detached(WindowId::from(1));
     let weak = WeakEntity::new_invalid();
     let caller = AnyWeakEntity::new_invalid();
     let outcomes = Rc::new(RefCell::new(Vec::new()));
@@ -439,7 +491,7 @@ fn stale_completion_cannot_close_promoted_successor() {
 
 #[test]
 fn owner_removal_resolves_active_and_queued_requests_once() {
-    let mut owner = ModalWindowOwner::new_for_test(WindowId::from(1));
+    let mut owner = ModalWindowOwner::detached(WindowId::from(1));
     let weak = WeakEntity::new_invalid();
     let caller = AnyWeakEntity::new_invalid();
     let other = AnyWeakEntity::new_invalid();
@@ -478,7 +530,7 @@ fn owner_removal_resolves_active_and_queued_requests_once() {
 
 #[test]
 fn replacement_finishes_previous_generation_before_installing_new_active_state() {
-    let mut owner = ModalWindowOwner::new_for_test(WindowId::from(1));
+    let mut owner = ModalWindowOwner::detached(WindowId::from(1));
     let weak = WeakEntity::new_invalid();
     let caller = AnyWeakEntity::new_invalid();
     let outcomes = Rc::new(RefCell::new(Vec::new()));
@@ -520,7 +572,7 @@ fn replacement_finishes_previous_generation_before_installing_new_active_state()
 
 #[test]
 fn dialog_programmatic_completion_is_independent_of_pending_action_authority() {
-    let mut owner = ModalWindowOwner::new_for_test(WindowId::from(1));
+    let mut owner = ModalWindowOwner::detached(WindowId::from(1));
     let weak = WeakEntity::new_invalid();
     let request = dialog_request(AnyWeakEntity::new_invalid());
     let completion = request.completion.clone();
@@ -544,7 +596,7 @@ fn dialog_programmatic_completion_is_independent_of_pending_action_authority() {
 
 #[test]
 fn stale_dialog_programmatic_completion_cannot_close_replacement() {
-    let mut owner = ModalWindowOwner::new_for_test(WindowId::from(1));
+    let mut owner = ModalWindowOwner::detached(WindowId::from(1));
     let weak = WeakEntity::new_invalid();
     let caller = AnyWeakEntity::new_invalid();
     let (presentation, _) = owner
@@ -570,7 +622,7 @@ fn stale_dialog_programmatic_completion_cannot_close_replacement() {
 
 #[test]
 fn stale_dialog_pending_completion_cannot_close_replacement() {
-    let mut owner = ModalWindowOwner::new_for_test(WindowId::from(1));
+    let mut owner = ModalWindowOwner::detached(WindowId::from(1));
     let weak = WeakEntity::new_invalid();
     let caller = AnyWeakEntity::new_invalid();
     let (presentation, _) = owner
@@ -603,7 +655,7 @@ fn dialog_with_primary_and_cancel_pending() -> (
     WeakEntity<ModalWindowOwner>,
     CompletionFlag,
 ) {
-    let mut owner = ModalWindowOwner::new_for_test(WindowId::from(1));
+    let mut owner = ModalWindowOwner::detached(WindowId::from(1));
     let weak = WeakEntity::new_invalid();
     let request = dialog_request(AnyWeakEntity::new_invalid());
     let completion = request.completion.clone();
@@ -627,7 +679,7 @@ fn dialog_with_primary_and_cancel_pending() -> (
 
 #[test]
 fn primary_cancel_pending_rejects_repeated_activation_without_advancing_generation() {
-    let mut owner = ModalWindowOwner::new_for_test(WindowId::from(1));
+    let mut owner = ModalWindowOwner::detached(WindowId::from(1));
     let weak = WeakEntity::new_invalid();
     let (presentation, _) = owner
         .submit(dialog_request(AnyWeakEntity::new_invalid()), weak.clone())
@@ -687,7 +739,7 @@ fn pending_nested_cancel_rejects_repeated_activation_without_advancing_generatio
 
 #[test]
 fn progress_cancellation_denial_reopens_with_a_new_attempt_available() {
-    let mut owner = ModalWindowOwner::new_for_test(WindowId::from(1));
+    let mut owner = ModalWindowOwner::detached(WindowId::from(1));
     let weak = WeakEntity::new_invalid();
     let (presentation, _) = owner
         .submit(progress_request(AnyWeakEntity::new_invalid()), weak.clone())
@@ -715,7 +767,7 @@ fn progress_cancellation_denial_reopens_with_a_new_attempt_available() {
 
 #[test]
 fn progress_cancellation_pending_blocks_duplicate_activation() {
-    let mut owner = ModalWindowOwner::new_for_test(WindowId::from(1));
+    let mut owner = ModalWindowOwner::detached(WindowId::from(1));
     let weak = WeakEntity::new_invalid();
     let (presentation, _) = owner
         .submit(progress_request(AnyWeakEntity::new_invalid()), weak.clone())
@@ -734,7 +786,7 @@ fn progress_cancellation_pending_blocks_duplicate_activation() {
 
 #[test]
 fn progress_cancellation_allow_closes_exactly_once() {
-    let mut owner = ModalWindowOwner::new_for_test(WindowId::from(1));
+    let mut owner = ModalWindowOwner::detached(WindowId::from(1));
     let weak = WeakEntity::new_invalid();
     let request = progress_request(AnyWeakEntity::new_invalid());
     let completion = request.completion.clone();
@@ -756,7 +808,7 @@ fn progress_cancellation_allow_closes_exactly_once() {
 
 #[test]
 fn determinate_maximum_update_does_not_close_progress() {
-    let mut owner = ModalWindowOwner::new_for_test(WindowId::from(1));
+    let mut owner = ModalWindowOwner::detached(WindowId::from(1));
     let weak = WeakEntity::new_invalid();
     let (presentation, _) = owner
         .submit(progress_request(AnyWeakEntity::new_invalid()), weak)
@@ -779,7 +831,7 @@ fn determinate_maximum_update_does_not_close_progress() {
 
 #[test]
 fn initially_disabled_progress_cancellation_can_be_enabled_at_runtime() {
-    let mut owner = ModalWindowOwner::new_for_test(WindowId::from(1));
+    let mut owner = ModalWindowOwner::detached(WindowId::from(1));
     let weak = WeakEntity::new_invalid();
     let mut request = progress_request(AnyWeakEntity::new_invalid());
     request.actions[0].enabled = false;
@@ -823,7 +875,7 @@ fn initially_disabled_progress_cancellation_can_be_enabled_at_runtime() {
 
 #[test]
 fn disabling_cancellable_progress_invalidates_only_the_current_attempt() {
-    let mut owner = ModalWindowOwner::new_for_test(WindowId::from(1));
+    let mut owner = ModalWindowOwner::detached(WindowId::from(1));
     let weak = WeakEntity::new_invalid();
     let request = progress_request(AnyWeakEntity::new_invalid());
     let completion = request.completion.clone();
@@ -878,7 +930,7 @@ fn disabling_cancellable_progress_invalidates_only_the_current_attempt() {
 
 #[test]
 fn stale_progress_update_generation_cannot_overwrite_newer_status() {
-    let mut owner = ModalWindowOwner::new_for_test(WindowId::from(1));
+    let mut owner = ModalWindowOwner::detached(WindowId::from(1));
     let weak = WeakEntity::new_invalid();
     let (presentation, _) = owner
         .submit(progress_request(AnyWeakEntity::new_invalid()), weak)
@@ -1013,7 +1065,7 @@ fn predecessor_result_can_dismiss_queued_successor_without_opening_it(cx: &mut T
     predecessor.result_sink = Some(Box::new(move |_, cx| {
         let handle = callback_handle.borrow().clone();
         let handle = handle.expect("queued successor handle should be retained");
-        dismiss_retained_handle_for_test(&handle, cx);
+        dismiss_retained_handle(&handle, cx);
     }));
     let (predecessor_id, _) = owner
         .update(cx, |state, _| state.submit(predecessor, weak.clone()))
@@ -1065,7 +1117,7 @@ fn predecessor_lifecycle_can_dismiss_queued_successor_without_opening_it(cx: &mu
                 .borrow()
                 .clone()
                 .expect("queued successor handle should be retained");
-            dismiss_retained_handle_for_test(&handle, cx);
+            dismiss_retained_handle(&handle, cx);
         }
     })));
     let (predecessor_id, _) = owner
@@ -1182,7 +1234,7 @@ fn reentrant_submission_promotes_only_after_reserved_head_queued_close_effects(
             .borrow()
             .clone()
             .expect("queued successor handle should be retained");
-        dismiss_retained_handle_for_test(&handle, cx);
+        dismiss_retained_handle(&handle, cx);
         let owner = callback_owner
             .upgrade()
             .expect("modal owner should survive callback");
@@ -1347,7 +1399,7 @@ fn reentrant_dialog_lifecycle_close_skips_stale_action_handler(cx: &mut TestAppC
                     .borrow()
                     .clone()
                     .expect("Dialog handle should be retained");
-                dismiss_retained_handle_for_test(&handle, cx);
+                dismiss_retained_handle(&handle, cx);
             }
         })));
     let completion = request.completion.clone();
@@ -1393,7 +1445,7 @@ fn reentrant_progress_lifecycle_close_skips_stale_cancel_handler(cx: &mut TestAp
                     .borrow()
                     .clone()
                     .expect("ProgressDialog handle should be retained");
-                dismiss_retained_handle_for_test(&handle, cx);
+                dismiss_retained_handle(&handle, cx);
             }
         })));
     let completion = request.completion.clone();
@@ -1446,7 +1498,7 @@ fn promoted_successor_opened_callback_can_dismiss_itself_in_documented_order(
                 .borrow()
                 .clone()
                 .expect("promoted successor handle should be retained");
-            dismiss_retained_handle_for_test(&handle, cx);
+            dismiss_retained_handle(&handle, cx);
         }
         ModalLifecycleEvent::Closing(_) => lifecycle_trace.borrow_mut().push("closing"),
         ModalLifecycleEvent::Closed(_, _) => lifecycle_trace.borrow_mut().push("closed"),
@@ -1494,7 +1546,7 @@ fn promoted_successor_opened_callback_can_dismiss_itself_in_documented_order(
 
 #[test]
 fn alert_render_snapshot_retains_every_required_fact() {
-    let mut owner = ModalWindowOwner::new_for_test(WindowId::from(1));
+    let mut owner = ModalWindowOwner::detached(WindowId::from(1));
     let actions = vec![
         ModalAction::new("delete", "Delete", ModalActionRole::Affirmative, "delete")
             .with_intent(ModalActionIntent::Destructive)
@@ -1622,7 +1674,7 @@ fn alert_render_snapshot_retains_every_required_fact() {
 
 #[gpui::test]
 fn dialog_render_snapshot_retains_role_relationships_and_body_focus(cx: &mut TestAppContext) {
-    let mut owner = ModalWindowOwner::new_for_test(WindowId::from(1));
+    let mut owner = ModalWindowOwner::detached(WindowId::from(1));
     let body_focus = cx.new(|cx| cx.focus_handle());
     let body_focus = body_focus.read_with(cx, |focus, _| focus.clone());
     let request = PreparedModalRequest::new(
@@ -1714,7 +1766,7 @@ fn dialog_render_snapshot_retains_role_relationships_and_body_focus(cx: &mut Tes
 
 #[test]
 fn progress_render_snapshot_tracks_value_status_and_cancellation() {
-    let mut owner = ModalWindowOwner::new_for_test(WindowId::from(1));
+    let mut owner = ModalWindowOwner::detached(WindowId::from(1));
     let (presentation, _) = owner
         .submit(
             progress_request(AnyWeakEntity::new_invalid()),

@@ -899,26 +899,21 @@ impl Render for DeferredRestorationFixture {
 
 struct ActionGeometryFixture {
     actions: Vec<ModalAction<&'static str>>,
-    help: Option<ModalAction<&'static str>>,
     presentation: Option<super::super::ModalPresentationHandle>,
 }
 
 impl ActionGeometryFixture {
     fn present(&mut self, window: &Window, cx: &mut Context<Self>) {
-        let mut alert = Alert::new(
-            ModalId::new("action-geometry"),
-            "Action geometry",
-            "Adaptive Actions",
-            "Every required action remains reachable.",
-            self.actions.clone(),
-        );
-        if let Some(help) = self.help.clone() {
-            alert = alert.help_action(help);
-        }
         self.presentation = Some(
-            alert
-                .present(window, cx, |_, _| {})
-                .expect("geometry Alert should present"),
+            Alert::new(
+                ModalId::new("action-geometry"),
+                "Action geometry",
+                "Adaptive Actions",
+                "Every required action remains reachable.",
+                self.actions.clone(),
+            )
+            .present(window, cx, |_, _| {})
+            .expect("geometry Alert should present"),
         );
     }
 }
@@ -962,12 +957,6 @@ impl CompactWarningFixture {
             .suppression(AlertSuppression::new(
                 "Do not show this warning again",
                 false,
-            ))
-            .help_action(ModalAction::new(
-                "help",
-                "Help",
-                ModalActionRole::Help,
-                "compact-warning-help",
             ))
             .present(window, cx, |_, _| {})
             .expect("compact warning Alert should present"),
@@ -1104,7 +1093,6 @@ fn open_action_geometry_window(
     metrics: ModalMetrics,
     button_scale: f32,
     actions: Vec<ModalAction<&'static str>>,
-    help: Option<ModalAction<&'static str>>,
 ) -> WindowHandle<ActionGeometryFixture> {
     install_test_catalogs(cx);
     cx.set_global(ModalDesktopPolicy::mac_os().with_text_direction(direction));
@@ -1122,7 +1110,6 @@ fn open_action_geometry_window(
             |_, cx| {
                 cx.new(|_| ActionGeometryFixture {
                     actions,
-                    help,
                     presentation: None,
                 })
             },
@@ -1289,7 +1276,6 @@ fn standard_default_action_paints_bounded_macos_emphasis(cx: &mut TestAppContext
             .with_emphasis(ModalActionEmphasis::Standard)
             .default_action(true),
         ],
-        None,
     );
     let root = window.root(cx).expect("geometry root should exist");
     let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -1468,9 +1454,6 @@ fn compact_warning_keeps_content_and_safe_actions_visible_together(cx: &mut Test
     let suppression = cx
         .debug_bounds("modal-alert-suppression")
         .expect("warning suppression should render");
-    let help = cx
-        .debug_bounds("modal-action-compact-warning-help")
-        .expect("warning Help should render");
     let cancel = cx
         .debug_bounds("modal-action-compact-warning-cancel")
         .expect("warning Cancel should render");
@@ -1481,12 +1464,10 @@ fn compact_warning_keeps_content_and_safe_actions_visible_together(cx: &mut Test
     assert!(
         bounds_contains(body, message)
             && bounds_contains(body, suppression)
-            && bounds_contains(footer, help)
             && bounds_contains(footer, cancel)
             && bounds_contains(footer, replace)
-            && help.left() < cancel.left()
             && cancel.left() < replace.left(),
-        "body={body:?}, message={message:?}, suppression={suppression:?}, footer={footer:?}, help={help:?}, cancel={cancel:?}, replace={replace:?}"
+        "body={body:?}, message={message:?}, suppression={suppression:?}, footer={footer:?}, cancel={cancel:?}, replace={replace:?}"
     );
 }
 
@@ -1547,7 +1528,6 @@ fn modal_action_layout_follows_floating_button_metrics(cx: &mut TestAppContext) 
                 "host-cancel",
             ),
         ],
-        None,
     );
     cx.update(|cx| {
         let catalog = crate::catalog_tests::catalog(1);
@@ -1640,63 +1620,6 @@ fn modal_action_layout_follows_floating_button_metrics(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
-fn long_help_label_forces_one_vertical_footer_without_escaping_it(cx: &mut TestAppContext) {
-    let window = open_action_geometry_window(
-        cx,
-        size(px(560.0), px(700.0)),
-        TextDirection::LeftToRight,
-        ModalMetrics::new(px(440.0), px(480.0), px(640.0)),
-        1.0,
-        vec![
-            ModalAction::new(
-                "save",
-                "Save",
-                ModalActionRole::Affirmative,
-                "geometry-save",
-            )
-            .default_action(true),
-            ModalAction::new(
-                "cancel",
-                "Cancel",
-                ModalActionRole::Cancel,
-                "geometry-cancel",
-            ),
-        ],
-        Some(ModalAction::new(
-            "help",
-            "Open detailed assistance for resolving this localized operation safely",
-            ModalActionRole::Help,
-            "geometry-help",
-        )),
-    );
-    let root = window.root(cx).expect("geometry root should exist");
-    let mut cx = VisualTestContext::from_window(window.into(), cx);
-    cx.update(|window, cx| root.update(cx, |root, cx| root.present(window, cx)));
-    cx.run_until_parked();
-    let footer = cx
-        .debug_bounds("modal-footer-1")
-        .expect("footer should render");
-    let actions = [
-        "modal-action-geometry-help",
-        "modal-action-geometry-save",
-        "modal-action-geometry-cancel",
-    ]
-    .map(|selector| cx.debug_bounds(selector).expect("action should render"));
-
-    assert!(
-        actions
-            .into_iter()
-            .all(|action| bounds_contains(footer, action)),
-        "actions {actions:?} escaped footer {footer:?}"
-    );
-    let [help, save, cancel] = actions;
-    assert!(
-        help.bottom() <= save.top() && save.bottom() <= cancel.top(),
-        "vertical footer order was help={help:?}, save={save:?}, cancel={cancel:?}"
-    );
-}
-
-#[gpui::test]
 fn long_cjk_decision_labels_wrap_inside_growing_hitboxes(cx: &mut TestAppContext) {
     let window = open_action_geometry_window(
         cx,
@@ -1730,7 +1653,6 @@ fn long_cjk_decision_labels_wrap_inside_growing_hitboxes(cx: &mut TestAppContext
                 "cjk-cancel",
             ),
         ],
-        None,
     );
     let root = window.root(cx).expect("geometry root should exist");
     let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -1759,7 +1681,7 @@ fn long_cjk_decision_labels_wrap_inside_growing_hitboxes(cx: &mut TestAppContext
 }
 
 #[gpui::test]
-fn right_to_left_horizontal_footer_mirrors_groups_and_decision_order(cx: &mut TestAppContext) {
+fn right_to_left_horizontal_footer_mirrors_decision_order(cx: &mut TestAppContext) {
     let window = open_action_geometry_window(
         cx,
         size(px(640.0), px(700.0)),
@@ -1771,12 +1693,6 @@ fn right_to_left_horizontal_footer_mirrors_groups_and_decision_order(cx: &mut Te
                 .default_action(true),
             ModalAction::new("cancel", "Cancel", ModalActionRole::Cancel, "rtl-cancel"),
         ],
-        Some(ModalAction::new(
-            "help",
-            "Help",
-            ModalActionRole::Help,
-            "rtl-help",
-        )),
     );
     let root = window.root(cx).expect("geometry root should exist");
     let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -1788,90 +1704,15 @@ fn right_to_left_horizontal_footer_mirrors_groups_and_decision_order(cx: &mut Te
     let cancel = cx
         .debug_bounds("modal-action-rtl-cancel")
         .expect("Cancel should render");
-    let help = cx
-        .debug_bounds("modal-action-rtl-help")
-        .expect("Help should render");
 
     assert!(
-        save.left() < cancel.left() && cancel.right() < help.left(),
-        "RTL bounds were save={save:?}, cancel={cancel:?}, help={help:?}"
+        save.left() < cancel.left(),
+        "RTL bounds were save={save:?}, cancel={cancel:?}"
     );
 }
 
 #[gpui::test]
-fn right_to_left_horizontal_dialog_mirrors_multiple_help_actions(cx: &mut TestAppContext) {
-    install_test_catalogs(cx);
-    cx.set_global(ModalDesktopPolicy::mac_os().with_text_direction(TextDirection::RightToLeft));
-    let window = cx.update(|cx| {
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(Bounds::new(
-                    point(px(0.0), px(0.0)),
-                    size(px(800.0), px(700.0)),
-                ))),
-                ..WindowOptions::default()
-            },
-            |_, cx| {
-                let body = cx.new(|_| DialogGeometryBody { tall: false });
-                cx.new(|_| DialogGeometryFixture {
-                    body,
-                    title: "RTL Help Actions".into(),
-                    description: "Every horizontal action group mirrors in RTL.".into(),
-                    actions: vec![
-                        ModalAction::new(
-                            "save",
-                            "Save",
-                            ModalActionRole::Affirmative,
-                            "rtl-help-save",
-                        )
-                        .default_action(true),
-                        ModalAction::new(
-                            "cancel",
-                            "Cancel",
-                            ModalActionRole::Cancel,
-                            "rtl-help-cancel",
-                        ),
-                        ModalAction::new(
-                            "help-primary",
-                            "Help",
-                            ModalActionRole::Help,
-                            "rtl-help-primary",
-                        ),
-                        ModalAction::new(
-                            "help-secondary",
-                            "More Help",
-                            ModalActionRole::Help,
-                            "rtl-help-secondary",
-                        ),
-                    ],
-                    size: DialogSize::Regular,
-                    presentation: None,
-                })
-            },
-        )
-        .expect("RTL Dialog window should open")
-    });
-    let root = window.root(cx).expect("RTL Dialog root should exist");
-    let mut cx = VisualTestContext::from_window(window.into(), cx);
-    cx.update(|window, cx| root.update(cx, |root, cx| root.present(window, cx)));
-    cx.run_until_parked();
-    let primary = cx
-        .debug_bounds("modal-action-rtl-help-primary")
-        .expect("primary Help action should render");
-    let secondary = cx
-        .debug_bounds("modal-action-rtl-help-secondary")
-        .expect("secondary Help action should render");
-
-    assert!(
-        secondary.right() < primary.left(),
-        "RTL Help actions did not mirror: primary={primary:?}, secondary={secondary:?}"
-    );
-}
-
-#[gpui::test]
-fn left_to_right_horizontal_footer_without_help_anchors_decisions_at_logical_trailing(
-    cx: &mut TestAppContext,
-) {
+fn left_to_right_horizontal_footer_anchors_decisions_at_logical_trailing(cx: &mut TestAppContext) {
     let metrics = ModalMetrics::new(px(440.0), px(480.0), px(640.0));
     let window = open_action_geometry_window(
         cx,
@@ -1894,7 +1735,6 @@ fn left_to_right_horizontal_footer_without_help_anchors_decisions_at_logical_tra
                 "ltr-edge-cancel",
             ),
         ],
-        None,
     );
     let root = window.root(cx).expect("geometry root should exist");
     let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -1916,9 +1756,7 @@ fn left_to_right_horizontal_footer_without_help_anchors_decisions_at_logical_tra
 }
 
 #[gpui::test]
-fn right_to_left_horizontal_footer_without_help_anchors_decisions_at_logical_trailing(
-    cx: &mut TestAppContext,
-) {
+fn right_to_left_horizontal_footer_anchors_decisions_at_logical_trailing(cx: &mut TestAppContext) {
     let metrics = ModalMetrics::new(px(440.0), px(480.0), px(640.0));
     let window = open_action_geometry_window(
         cx,
@@ -1941,7 +1779,6 @@ fn right_to_left_horizontal_footer_without_help_anchors_decisions_at_logical_tra
                 "rtl-edge-cancel",
             ),
         ],
-        None,
     );
     let root = window.root(cx).expect("geometry root should exist");
     let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -2417,7 +2254,6 @@ fn tiny_width_keeps_wrapped_action_hitboxes_inside_the_footer(cx: &mut TestAppCo
                 "tiny-cancel",
             ),
         ],
-        None,
     );
     let root = window.root(cx).expect("geometry root should exist");
     let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -2463,7 +2299,6 @@ fn scaled_metrics_keep_actions_wrapped_and_reachable(cx: &mut TestAppContext) {
                 "scaled-cancel",
             ),
         ],
-        None,
     );
     let root = window.root(cx).expect("geometry root should exist");
     let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -2517,24 +2352,17 @@ fn short_height_footer_scroll_reaches_every_action_without_horizontal_escape(
                 "short-cancel",
             ),
         ],
-        Some(ModalAction::new(
-            "help",
-            "Open detailed help for this operation",
-            ModalActionRole::Help,
-            "short-help",
-        )),
     );
     let root = window.root(cx).expect("geometry root should exist");
     let mut cx = VisualTestContext::from_window(window.into(), cx);
     cx.update(|window, cx| root.update(cx, |root, cx| root.present(window, cx)));
     cx.run_until_parked();
     let selectors = [
-        "modal-action-short-help",
         "modal-action-short-save",
         "modal-action-short-replace",
         "modal-action-short-cancel",
     ];
-    let mut reached = [false; 4];
+    let mut reached = [false; 3];
     for _ in 0..24 {
         let footer = cx
             .debug_bounds("modal-footer-1")
@@ -2910,8 +2738,8 @@ fn initially_disabled_progress_cancellation_is_inert_then_focuses_and_routes_aft
     press_space(cx);
     let initial = cx.update(|window, cx| {
         (
-            super::super::core::active_progress_for_test(window, cx),
-            super::super::core::active_progress_presentation_facts_for_test(window, cx),
+            super::super::core::tests::active_progress(window, cx),
+            super::super::core::tests::active_progress_presentation_facts(window, cx),
             super::super::window_modal_is_open(window, cx),
         )
     });
@@ -3223,8 +3051,8 @@ fn active_programmatic_progress_rejects_cancellation_and_keeps_escape_inert(
     cx.run_until_parked();
     let before_escape = cx.update(|window, cx| {
         (
-            super::super::core::active_progress_for_test(window, cx),
-            super::super::core::active_progress_presentation_facts_for_test(window, cx),
+            super::super::core::tests::active_progress(window, cx),
+            super::super::core::tests::active_progress_presentation_facts(window, cx),
             super::super::window_modal_is_open(window, cx),
         )
     });
@@ -3422,8 +3250,8 @@ fn queued_programmatic_progress_rejects_cancellation_and_stays_inert_after_promo
     cx.run_until_parked();
     let promoted = cx.update(|window, cx| {
         (
-            super::super::core::active_progress_for_test(window, cx),
-            super::super::core::active_progress_presentation_facts_for_test(window, cx),
+            super::super::core::tests::active_progress(window, cx),
+            super::super::core::tests::active_progress_presentation_facts(window, cx),
         )
     });
     cx.simulate_keystrokes("escape");
@@ -3685,9 +3513,9 @@ fn queued_initially_disabled_progress_enables_and_routes_escape_after_promotion(
     cx.run_until_parked();
     let promoted = cx.update(|window, cx| {
         (
-            super::super::core::active_progress_for_test(window, cx)
+            super::super::core::tests::active_progress(window, cx)
                 .expect("updated ProgressDialog should promote"),
-            super::super::core::active_progress_presentation_facts_for_test(window, cx),
+            super::super::core::tests::active_progress_presentation_facts(window, cx),
         )
     });
 
@@ -3754,7 +3582,7 @@ fn queued_progress_update_should_transfer_runtime_and_generation_on_promotion(
     });
     cx.run_until_parked();
     let promoted = cx.update(|window, cx| {
-        super::super::core::active_progress_for_test(window, cx)
+        super::super::core::tests::active_progress(window, cx)
             .expect("updated ProgressDialog should promote")
     });
     cx.update(|window, cx| {
@@ -4290,12 +4118,12 @@ fn pointer_duplicate_cancel_should_not_repeat_callback_or_advance_attempt_genera
     cx.simulate_click(cancel.center(), Modifiers::default());
     cx.run_until_parked();
     let generation_before_duplicate =
-        cx.update(|window, cx| super::super::core::close_attempt_generation_for_test(window, cx));
+        cx.update(|window, cx| super::super::core::tests::close_attempt_generation(window, cx));
 
     cx.simulate_click(cancel.center(), Modifiers::default());
     cx.run_until_parked();
     let generation_after_duplicate =
-        cx.update(|window, cx| super::super::core::close_attempt_generation_for_test(window, cx));
+        cx.update(|window, cx| super::super::core::tests::close_attempt_generation(window, cx));
 
     assert_eq!(
         (
@@ -4318,12 +4146,12 @@ fn keyboard_duplicate_cancel_should_not_repeat_callback_or_advance_attempt_gener
     let (requests, _, _, cx) = pending_dialog_window(cx);
     request_primary_and_nested_cancel(cx);
     let generation_before_duplicate =
-        cx.update(|window, cx| super::super::core::close_attempt_generation_for_test(window, cx));
+        cx.update(|window, cx| super::super::core::tests::close_attempt_generation(window, cx));
 
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
     let generation_after_duplicate =
-        cx.update(|window, cx| super::super::core::close_attempt_generation_for_test(window, cx));
+        cx.update(|window, cx| super::super::core::tests::close_attempt_generation(window, cx));
 
     assert_eq!(
         (
@@ -4797,9 +4625,8 @@ fn disabling_reenabled_progress_cancellation_invalidates_attempt_and_owned_press
             )
             .expect("cancellation should disable during the owned press");
     });
-    let idle = cx.update(|window, cx| {
-        super::super::core::modal_button_controls_are_idle_for_test(window, cx)
-    });
+    let idle =
+        cx.update(|window, cx| super::super::core::tests::modal_controls_are_idle(window, cx));
     cx.simulate_mouse_up(cancel.center(), MouseButton::Left, Modifiers::default());
     cx.run_until_parked();
 
@@ -4808,7 +4635,7 @@ fn disabling_reenabled_progress_cancellation_invalidates_attempt_and_owned_press
             && matches!(stale_attempt, Err(ModalTerminalOutcomeError::Stale(_)))
             && idle
             && cx.update(|window, cx| {
-                super::super::core::modal_button_controls_are_idle_for_test(window, cx)
+                super::super::core::tests::modal_controls_are_idle(window, cx)
                     && super::super::window_modal_is_open(window, cx)
             })
     );
@@ -4968,9 +4795,8 @@ fn public_progress_replacement_rejects_cancellation_terminal_and_update_authorit
             .expect("public ProgressDialog replacement should succeed")
         })
     });
-    let controls_are_idle = cx.update(|window, cx| {
-        super::super::core::modal_button_controls_are_idle_for_test(window, cx)
-    });
+    let controls_are_idle =
+        cx.update(|window, cx| super::super::core::tests::modal_controls_are_idle(window, cx));
     cx.run_until_parked();
     let replacement_cancel = cx
         .debug_bounds("modal-action-replacement-progress-cancel")
@@ -5153,7 +4979,7 @@ impl Render for DialogBodyButton {
                             }
                         }
                         controls_are_idle.set(Some(
-                            super::super::core::modal_button_controls_are_idle_for_test(window, cx),
+                            super::super::core::tests::modal_controls_are_idle(window, cx),
                         ));
                     }
                 });
@@ -5361,7 +5187,7 @@ fn modal_owner_removal_disarms_and_resolves_the_active_alert_once(cx: &mut TestA
     cx.simulate_mouse_down(cancel.center(), MouseButton::Left, Modifiers::default());
 
     let idle_after_removal =
-        cx.update(|window, cx| super::super::core::retire_modal_owner_for_test(window, cx));
+        cx.update(|window, cx| super::super::core::tests::retire_modal_owner(window, cx));
     cx.simulate_mouse_up(cancel.center(), MouseButton::Left, Modifiers::default());
     cx.run_until_parked();
 
@@ -5390,7 +5216,7 @@ fn operating_system_window_owner_removal_cancels_suppression_press(cx: &mut Test
     );
 
     let idle_after_removal =
-        cx.update(|window, cx| super::super::core::retire_modal_owner_for_test(window, cx));
+        cx.update(|window, cx| super::super::core::tests::retire_modal_owner(window, cx));
     cx.simulate_mouse_up(
         suppression.center(),
         MouseButton::Left,
@@ -5423,9 +5249,8 @@ fn modal_deactivation_retains_presentation_and_cancels_pressed_action(cx: &mut T
 
     cx.simulate_mouse_down(cancel.center(), MouseButton::Left, Modifiers::default());
     cx.deactivate_window();
-    let idle_after_deactivation = cx.update(|window, cx| {
-        super::super::core::modal_button_controls_are_idle_for_test(window, cx)
-    });
+    let idle_after_deactivation =
+        cx.update(|window, cx| super::super::core::tests::modal_controls_are_idle(window, cx));
     cx.simulate_mouse_up(cancel.center(), MouseButton::Left, Modifiers::default());
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
@@ -5832,9 +5657,8 @@ fn outside_release_disarms_modal_action_before_blocking_underlay_input(cx: &mut 
     cx.simulate_mouse_down(cancel.center(), MouseButton::Left, Modifiers::default());
     cx.simulate_mouse_move(outside, MouseButton::Left, Modifiers::default());
     cx.simulate_mouse_up(outside, MouseButton::Left, Modifiers::default());
-    let idle_after_outside = cx.update(|window, cx| {
-        super::super::core::modal_button_controls_are_idle_for_test(window, cx)
-    });
+    let idle_after_outside =
+        cx.update(|window, cx| super::super::core::tests::modal_controls_are_idle(window, cx));
     cx.simulate_mouse_down(outside, MouseButton::Left, Modifiers::default());
     cx.simulate_mouse_move(cancel.center(), MouseButton::Left, Modifiers::default());
     cx.simulate_mouse_up(cancel.center(), MouseButton::Left, Modifiers::default());
@@ -5864,9 +5688,8 @@ fn outside_matching_release_disarms_an_action_moved_off_inside_the_surface(
     cx.simulate_mouse_down(cancel.center(), MouseButton::Left, Modifiers::default());
     cx.simulate_mouse_move(inside_surface, MouseButton::Left, Modifiers::default());
     cx.simulate_mouse_up(outside, MouseButton::Left, Modifiers::default());
-    let idle_after_release = cx.update(|window, cx| {
-        super::super::core::modal_button_controls_are_idle_for_test(window, cx)
-    });
+    let idle_after_release =
+        cx.update(|window, cx| super::super::core::tests::modal_controls_are_idle(window, cx));
     cx.simulate_mouse_down(outside, MouseButton::Left, Modifiers::default());
     cx.simulate_mouse_move(cancel.center(), MouseButton::Left, Modifiers::default());
     cx.simulate_mouse_up(cancel.center(), MouseButton::Left, Modifiers::default());
@@ -5896,9 +5719,8 @@ fn lost_button_move_disarms_modal_action_before_outside_blocking(cx: &mut TestAp
         pressed_button: None,
         modifiers: Modifiers::default(),
     });
-    let idle_after_lost_button = cx.update(|window, cx| {
-        super::super::core::modal_button_controls_are_idle_for_test(window, cx)
-    });
+    let idle_after_lost_button =
+        cx.update(|window, cx| super::super::core::tests::modal_controls_are_idle(window, cx));
     cx.simulate_mouse_down(outside, MouseButton::Left, Modifiers::default());
     cx.simulate_mouse_move(cancel.center(), MouseButton::Left, Modifiers::default());
     cx.simulate_mouse_up(cancel.center(), MouseButton::Left, Modifiers::default());
@@ -5927,9 +5749,8 @@ fn modal_action_replacement_does_not_inherit_the_predecessor_press(cx: &mut Test
             .dismiss(window, cx)
             .expect("first presentation should dismiss");
     });
-    let idle_before_replacement = cx.update(|window, cx| {
-        super::super::core::modal_button_controls_are_idle_for_test(window, cx)
-    });
+    let idle_before_replacement =
+        cx.update(|window, cx| super::super::core::tests::modal_controls_are_idle(window, cx));
     cx.update(|window, cx| root.update(cx, |root, cx| root.present(window, cx)));
     cx.run_until_parked();
     let replacement_cancel = cx
@@ -6027,9 +5848,8 @@ fn progress_action_disablement_disarms_before_the_next_render(cx: &mut TestAppCo
             )
             .expect("cancellation should disable");
     });
-    let idle_after_disablement = cx.update(|window, cx| {
-        super::super::core::modal_button_controls_are_idle_for_test(window, cx)
-    });
+    let idle_after_disablement =
+        cx.update(|window, cx| super::super::core::tests::modal_controls_are_idle(window, cx));
     cx.simulate_mouse_up(cancel.center(), MouseButton::Left, Modifiers::default());
     cx.run_until_parked();
     cx.update(|window, cx| {
@@ -6058,7 +5878,7 @@ fn progress_action_disablement_disarms_before_the_next_render(cx: &mut TestAppCo
         idle_after_disablement
             && requests.get() == 0
             && cx.update(|window, cx| {
-                super::super::core::modal_button_controls_are_idle_for_test(window, cx)
+                super::super::core::tests::modal_controls_are_idle(window, cx)
                     && super::super::window_modal_is_open(window, cx)
             })
     );
@@ -7016,7 +6836,12 @@ impl DialogFocusFixture {
                 "Dialog focus traversal",
                 "Focus Traversal",
                 vec![
-                    ModalAction::new("help", "Help", ModalActionRole::Help, "focus-help"),
+                    ModalAction::new(
+                        "options",
+                        "Options",
+                        ModalActionRole::Auxiliary,
+                        "focus-options",
+                    ),
                     ModalAction::new("cancel", "Cancel", ModalActionRole::Cancel, "focus-cancel"),
                     ModalAction::new("save", "Save", ModalActionRole::Affirmative, "focus-save")
                         .default_action(true),
@@ -7056,7 +6881,7 @@ enum DialogFocusTarget {
     Underlay,
     First,
     Second,
-    Help,
+    Options,
     Cancel,
     Save,
     Other,
@@ -7120,7 +6945,7 @@ fn observe_dialog_focus_target(
     });
     press_space(cx);
     match requests.borrow().get(before).copied() {
-        Some("help") => DialogFocusTarget::Help,
+        Some("options") => DialogFocusTarget::Options,
         Some("cancel") => DialogFocusTarget::Cancel,
         Some("save") => DialogFocusTarget::Save,
         _ => DialogFocusTarget::Other,
@@ -7217,7 +7042,7 @@ fn dialog_denial_refocuses_the_original_initial_field_without_mutating_values(
 }
 
 #[gpui::test]
-fn dialog_tab_order_includes_all_body_help_and_decision_stops_in_both_directions(
+fn dialog_tab_order_includes_all_body_and_decision_stops_in_both_directions(
     cx: &mut TestAppContext,
 ) {
     let (root, cx) = dialog_focus_window(cx, TextDirection::LeftToRight);
@@ -7244,13 +7069,13 @@ fn dialog_tab_order_includes_all_body_help_and_decision_stops_in_both_directions
         vec![
             DialogFocusTarget::First,
             DialogFocusTarget::Second,
-            DialogFocusTarget::Help,
             DialogFocusTarget::Cancel,
+            DialogFocusTarget::Options,
             DialogFocusTarget::Save,
             DialogFocusTarget::First,
             DialogFocusTarget::Save,
+            DialogFocusTarget::Options,
             DialogFocusTarget::Cancel,
-            DialogFocusTarget::Help,
             DialogFocusTarget::Second,
             DialogFocusTarget::First,
         ]
@@ -7285,13 +7110,13 @@ fn right_to_left_dialog_tab_order_follows_logical_policy_not_button_geometry(
         vec![
             DialogFocusTarget::First,
             DialogFocusTarget::Second,
-            DialogFocusTarget::Help,
             DialogFocusTarget::Cancel,
+            DialogFocusTarget::Options,
             DialogFocusTarget::Save,
             DialogFocusTarget::First,
             DialogFocusTarget::Save,
+            DialogFocusTarget::Options,
             DialogFocusTarget::Cancel,
-            DialogFocusTarget::Help,
             DialogFocusTarget::Second,
             DialogFocusTarget::First,
         ]
@@ -7444,7 +7269,7 @@ fn dialog_repairs_disabled_and_removed_body_focus_to_the_first_live_tab_stop(
 
     assert_eq!(
         (after_disable, after_remove),
-        (DialogFocusTarget::Second, DialogFocusTarget::Help)
+        (DialogFocusTarget::Second, DialogFocusTarget::Cancel)
     );
 }
 
@@ -7478,14 +7303,14 @@ impl AlertFocusFixture {
                         ModalActionRole::Cancel,
                         "alert-focus-cancel",
                     ),
+                    ModalAction::new(
+                        "options",
+                        "Options",
+                        ModalActionRole::Auxiliary,
+                        "alert-focus-options",
+                    ),
                 ],
             )
-            .help_action(ModalAction::new(
-                "help",
-                "Help",
-                ModalActionRole::Help,
-                "alert-focus-help",
-            ))
             .suppression(AlertSuppression::new("Do not ask again", false))
             .present(window, cx, move |result, _| {
                 *outcome.borrow_mut() = Some(result);
@@ -7510,7 +7335,7 @@ impl Render for AlertFocusFixture {
 enum AlertFocusTarget {
     Underlay,
     Suppression,
-    Help,
+    Options,
     Cancel,
     Save,
 }
@@ -7534,8 +7359,9 @@ fn observe_alert_focus_target(
     let outcome = root.read_with(cx, |root, _| root.outcome.borrow().clone());
     let target = match outcome {
         Some(AlertOutcome::Activated {
-            action_id: "help", ..
-        }) => AlertFocusTarget::Help,
+            action_id: "options",
+            ..
+        }) => AlertFocusTarget::Options,
         Some(AlertOutcome::Activated {
             action_id: "cancel",
             ..
@@ -7561,7 +7387,7 @@ fn observe_alert_focus_target(
 }
 
 #[gpui::test]
-fn alert_tab_order_includes_suppression_help_and_decisions_without_underlay_escape(
+fn alert_tab_order_includes_suppression_and_decisions_without_underlay_escape(
     cx: &mut TestAppContext,
 ) {
     install_test_catalogs(cx);
@@ -7596,11 +7422,11 @@ fn alert_tab_order_includes_suppression_help_and_decisions_without_underlay_esca
         vec![
             AlertFocusTarget::Save,
             AlertFocusTarget::Suppression,
-            AlertFocusTarget::Help,
             AlertFocusTarget::Cancel,
+            AlertFocusTarget::Options,
             AlertFocusTarget::Save,
+            AlertFocusTarget::Options,
             AlertFocusTarget::Cancel,
-            AlertFocusTarget::Help,
             AlertFocusTarget::Suppression,
             AlertFocusTarget::Save,
         ]
@@ -7608,7 +7434,7 @@ fn alert_tab_order_includes_suppression_help_and_decisions_without_underlay_esca
 }
 
 #[gpui::test]
-fn right_to_left_alert_tab_order_keeps_suppression_help_and_logical_decisions_contained(
+fn right_to_left_alert_tab_order_keeps_suppression_and_logical_decisions_contained(
     cx: &mut TestAppContext,
 ) {
     install_test_catalogs(cx);
@@ -7644,11 +7470,11 @@ fn right_to_left_alert_tab_order_keeps_suppression_help_and_logical_decisions_co
         vec![
             AlertFocusTarget::Save,
             AlertFocusTarget::Suppression,
-            AlertFocusTarget::Help,
             AlertFocusTarget::Cancel,
+            AlertFocusTarget::Options,
             AlertFocusTarget::Save,
+            AlertFocusTarget::Options,
             AlertFocusTarget::Cancel,
-            AlertFocusTarget::Help,
             AlertFocusTarget::Suppression,
             AlertFocusTarget::Save,
         ]

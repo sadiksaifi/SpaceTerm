@@ -83,8 +83,6 @@ pub(crate) use tab_manager::{TabManager, TabManagerEvent};
 pub(crate) use terminal_focus::{
     TerminalFocusBlocker, TerminalFocusCoordinator, TerminalFocusFacts,
 };
-#[cfg(test)]
-pub(crate) use terminal_ime::conformance_ime_observation;
 pub(crate) use terminal_pane::{
     PaneOrigin, PreparedRemotePaneRestart, RemotePaneLifecycleError, TerminalPane,
     TerminalPaneEvent,
@@ -98,7 +96,8 @@ pub(crate) use workspace_manager::{WorkspaceManager, WorkspaceManagerAdapters};
 #[cfg(test)]
 pub(crate) fn settle_hover(cx: &mut gpui::VisualTestContext) {
     cx.run_until_parked();
-    cx.executor().advance_clock(spaceterm_ui::HoverFade::SETTLE);
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(220));
     cx.update(|window, cx| window.simulate_next_frame(cx));
     cx.run_until_parked();
 }

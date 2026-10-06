@@ -115,7 +115,7 @@ impl AlertSuppression {
 /// Typed terminal result delivered exactly once for an Alert presentation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AlertOutcome<A> {
-    /// An enabled typed decision or Help action was activated.
+    /// An enabled typed decision was activated.
     Activated {
         /// Stable caller-owned action identity.
         action_id: A,
@@ -135,7 +135,7 @@ pub enum AlertOutcome<A> {
 
 /// A concise, window-modal desktop decision or acknowledgement.
 ///
-/// Alert accepts one to three decision actions plus an optional separate Help action. It never
+/// Alert accepts one to three decision actions. It never
 /// dismisses from an outside press. Initial focus prefers an explicit default or sole ordinary
 /// acknowledgement, but a destructive Alert enters on the enabled safe Cancel path. Return
 /// activates the enabled focused action first, then only an explicit enabled default after a
@@ -157,7 +157,6 @@ pub struct Alert<A> {
     pub(super) actions: Vec<ModalAction<A>>,
     pub(super) detail: Option<SharedString>,
     pub(super) accessory: Option<AlertAccessory>,
-    pub(super) help: Option<ModalAction<A>>,
     pub(super) suppression: Option<AlertSuppression>,
 }
 
@@ -179,7 +178,6 @@ impl<A> Alert<A> {
             actions,
             detail: None,
             accessory: None,
-            help: None,
             suppression: None,
         }
     }
@@ -199,12 +197,6 @@ impl<A> Alert<A> {
     /// Sets the single bounded noninteractive accessory.
     pub fn accessory(mut self, accessory: AlertAccessory) -> Self {
         self.accessory = Some(accessory);
-        self
-    }
-
-    /// Sets a separately rendered Help action.
-    pub fn help_action(mut self, help: ModalAction<A>) -> Self {
-        self.help = Some(help);
         self
     }
 
@@ -336,10 +328,7 @@ impl<A> Alert<A> {
             .as_ref()
             .map(|(_, selected)| Rc::new(Cell::new(*selected)));
         let result_suppression_flag = suppression_flag.clone();
-        let mut actions = self.actions;
-        if let Some(help) = self.help {
-            actions.push(help);
-        }
+        let actions = self.actions;
         let action_ids = actions
             .iter()
             .map(|action| action.id().clone())

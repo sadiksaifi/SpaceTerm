@@ -39,8 +39,6 @@ mod search_field;
 mod segmented_control;
 mod shortcut_label;
 mod shortcut_recorder;
-#[cfg(test)]
-mod shortcut_recorder_tests;
 mod text_area;
 mod text_editing;
 mod text_input;
@@ -79,10 +77,9 @@ pub use command_palette::Confirm as CommandPaletteConfirm;
 pub use command_palette::{
     CommandPalette, CommandPaletteAccessory, CommandPaletteAction, CommandPaletteActivation,
     CommandPaletteActivationPolicy, CommandPaletteActivationSource, CommandPaletteCloseReason,
-    CommandPaletteEmpty, CommandPaletteEmptyAction, CommandPaletteEvent, CommandPaletteFallback,
-    CommandPaletteGeneration, CommandPaletteItem, CommandPaletteKeybindingProfile,
-    CommandPaletteLifecycleEvent, CommandPaletteMatching, CommandPaletteMetrics,
-    CommandPalettePaint, CommandPalettePrimaryAction, CommandPaletteQuery,
+    CommandPaletteEmpty, CommandPaletteEmptyAction, CommandPaletteEvent, CommandPaletteItem,
+    CommandPaletteKeybindingProfile, CommandPaletteLifecycleEvent, CommandPaletteMatching,
+    CommandPaletteMetrics, CommandPalettePaint, CommandPalettePrimaryAction,
     CommandPaletteReplacementFocus, CommandPaletteTheme, install_command_palette_keybindings,
 };
 pub use field_frame::{FieldFrameTheme, FieldState, field_frame, field_surface};
@@ -100,9 +97,9 @@ pub use list_row::{ListRowPaint, ListRowPaints};
 pub use menu::{
     ComboButton, ContextMenu, ContextMenuOpenRequest, Menu, MenuActivation, MenuActivationSource,
     MenuAlignment, MenuCloseReason, MenuEntry, MenuKeybindingProfile, MenuLifecycleEvent,
-    MenuMetrics, MenuPaint, MenuPlacement, MenuPlacementConfig, MenuRadioOption, MenuSize,
-    MenuSizes, MenuTheme, Picker, PickerBuildError, PickerChange, PickerOption,
-    dismiss_active_menu, install_menu_keybindings, window_menu_is_open,
+    MenuMetrics, MenuPaint, MenuPlacement, MenuPlacementConfig, MenuSize, MenuSizes, MenuTheme,
+    Picker, PickerBuildError, PickerChange, PickerOption, dismiss_active_menu,
+    install_menu_keybindings, window_menu_is_open,
 };
 pub use middle_truncated_text::MiddleTruncatedText;
 pub use modal::{
@@ -492,16 +489,6 @@ impl ControlThemeCatalog {
     pub fn typography(mut self, typography: ControlTypography) -> Self {
         self.typography = typography;
         self
-    }
-
-    /// Returns the catalog's application-issued generation.
-    pub fn installed_generation(&self) -> ControlThemeGeneration {
-        self.generation
-    }
-
-    /// Returns the complete resolved typography used by this catalog.
-    pub fn installed_typography(&self) -> &ControlTypography {
-        &self.typography
     }
 
     /// Scales every control family's spacing metrics as one complete catalog.

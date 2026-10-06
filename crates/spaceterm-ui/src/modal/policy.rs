@@ -145,24 +145,7 @@ impl ModalDesktopPolicy {
                 count: alert.actions.len(),
             });
         }
-        if let Some(index) = alert
-            .actions
-            .iter()
-            .position(|action| action.role() == ModalActionRole::Help)
-        {
-            return Err(ModalValidationError::AlertHelpMustBeSeparate { index });
-        }
-        if let Some(help) = &alert.help
-            && help.role() != ModalActionRole::Help
-        {
-            return Err(ModalValidationError::InvalidHelpActionRole);
-        }
-
-        let mut all_actions = alert.actions.iter().collect::<Vec<_>>();
-        if let Some(help) = &alert.help {
-            all_actions.push(help);
-        }
-        let facts = validate_actions(&all_actions)?;
+        let facts = validate_actions(&alert.actions.iter().collect::<Vec<_>>())?;
         validate_alert_dismissal(&alert.actions, facts.safe_cancel)?;
         self.alert_initial_focus(&alert.actions)
             .ok_or(ModalValidationError::MissingSafeDismissal)?;
@@ -227,13 +210,7 @@ impl ModalDesktopPolicy {
         actions: &[A],
         axis: ActionAxis,
     ) -> ActionArrangement {
-        let row = actions
-            .iter()
-            .enumerate()
-            .filter_map(|(index, action)| {
-                (action.arrangement_role() != ModalActionRole::Help).then_some(index)
-            })
-            .collect::<Vec<_>>();
+        let row = (0..actions.len()).collect::<Vec<_>>();
         let default = row
             .iter()
             .copied()
@@ -262,17 +239,9 @@ impl ModalDesktopPolicy {
         if axis == ActionAxis::Horizontal && self.text_direction == TextDirection::RightToLeft {
             physical.reverse();
         }
-        let help = actions
-            .iter()
-            .enumerate()
-            .filter_map(|(index, action)| {
-                (action.arrangement_role() == ModalActionRole::Help).then_some(index)
-            })
-            .collect();
         ActionArrangement {
             physical,
             traversal,
-            help,
         }
     }
 
@@ -363,7 +332,6 @@ pub fn install_modal_policy(cx: &mut App, policy: ModalDesktopPolicy) {
 pub(super) struct ActionArrangement {
     pub(super) physical: Vec<usize>,
     pub(super) traversal: Vec<usize>,
-    pub(super) help: Vec<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -461,11 +429,6 @@ fn validate_actions<A: Eq>(
                 safe_cancel = Some(index);
             }
         }
-        if action.role() == ModalActionRole::Help
-            && (action.is_default() || action.intent() == ModalActionIntent::Destructive)
-        {
-            return Err(ModalValidationError::InvalidHelpAction { index });
-        }
     }
     Ok(ActionFacts { safe_cancel })
 }
@@ -501,11 +464,9 @@ fn validate_alert_dismissal<A>(
     safe_cancel: Option<usize>,
 ) -> Result<(), ModalValidationError> {
     validate_destructive_decision(actions, safe_cancel)?;
-    let has_enabled_acknowledgement = actions.iter().any(|action| {
-        action.is_enabled()
-            && action.role() != ModalActionRole::Help
-            && action.intent() == ModalActionIntent::Ordinary
-    });
+    let has_enabled_acknowledgement = actions
+        .iter()
+        .any(|action| action.is_enabled() && action.intent() == ModalActionIntent::Ordinary);
     if !has_enabled_acknowledgement {
         return Err(ModalValidationError::MissingSafeDismissal);
     }
@@ -738,41 +699,6 @@ mod tests {
     }
 
     #[test]
-    fn alert_validation_requires_help_to_be_separate() {
-        let alert = ordinary_alert(vec![action("help", ModalActionRole::Help, "help")]);
-
-        assert_eq!(
-            alert.validate(&ModalDesktopPolicy::mac_os()),
-            Err(ModalValidationError::AlertHelpMustBeSeparate { index: 0 })
-        );
-    }
-
-    #[test]
-    fn alert_validation_rejects_non_help_in_help_slot() {
-        let alert = ordinary_alert(vec![action("okay", ModalActionRole::Affirmative, "okay")])
-            .help_action(action("more", ModalActionRole::Auxiliary, "more"));
-
-        assert_eq!(
-            alert.validate(&ModalDesktopPolicy::mac_os()),
-            Err(ModalValidationError::InvalidHelpActionRole)
-        );
-    }
-
-    #[test]
-    fn alert_validation_rejects_invalid_separate_help_action() {
-        let alert = ordinary_alert(vec![action("okay", ModalActionRole::Affirmative, "okay")])
-            .help_action(
-                action("help", ModalActionRole::Help, "help")
-                    .with_intent(ModalActionIntent::Destructive),
-            );
-
-        assert_eq!(
-            alert.validate(&ModalDesktopPolicy::mac_os()),
-            Err(ModalValidationError::InvalidHelpAction { index: 1 })
-        );
-    }
-
-    #[test]
     fn dialog_validation_rejects_missing_action_initial_focus_identity() {
         let dialog = Dialog::new(
             ModalId::new("dialog"),
@@ -877,7 +803,6 @@ mod tests {
         let policy = ModalDesktopPolicy::mac_os();
         let actions = vec![
             action("replace", ModalActionRole::Affirmative, "replace").default_action(true),
-            action("help", ModalActionRole::Help, "help"),
             action("options", ModalActionRole::Auxiliary, "options"),
             action("cancel", ModalActionRole::Cancel, "cancel"),
         ];
@@ -890,17 +815,11 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(
-            (
-                physical_ids,
-                arrangement.physical,
-                arrangement.traversal,
-                arrangement.help,
-            ),
+            (physical_ids, arrangement.physical, arrangement.traversal),
             (
                 vec!["cancel", "options", "replace"],
-                vec![3, 2, 0],
-                vec![3, 2, 0],
-                vec![1],
+                vec![2, 1, 0],
+                vec![2, 1, 0],
             )
         );
     }
@@ -910,7 +829,6 @@ mod tests {
         let policy = ModalDesktopPolicy::mac_os().with_text_direction(TextDirection::RightToLeft);
         let actions = vec![
             action("replace", ModalActionRole::Affirmative, "replace").default_action(true),
-            action("help", ModalActionRole::Help, "help"),
             action("options", ModalActionRole::Auxiliary, "options"),
             action("cancel", ModalActionRole::Cancel, "cancel"),
         ];
@@ -923,17 +841,11 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(
-            (
-                physical_ids,
-                arrangement.physical,
-                arrangement.traversal,
-                arrangement.help,
-            ),
+            (physical_ids, arrangement.physical, arrangement.traversal),
             (
                 vec!["replace", "options", "cancel"],
-                vec![0, 2, 3],
-                vec![3, 2, 0],
-                vec![1],
+                vec![0, 1, 2],
+                vec![2, 1, 0],
             )
         );
     }

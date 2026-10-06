@@ -53,7 +53,6 @@ impl Render for GridView {
         self.0.presentation_operation = None;
         self.0.graphics_attempt = None;
         self.0.fallback = None;
-        self.0.fallback_generation = None;
         element
     }
 }

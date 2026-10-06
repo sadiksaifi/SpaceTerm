@@ -182,10 +182,6 @@ impl ShortcutRecorder {
         cx.notify();
     }
 
-    pub fn is_recording(&self) -> bool {
-        self.recording.is_some()
-    }
-
     pub fn focus_handle(&self) -> FocusHandle {
         self.focus_handle.clone()
     }
@@ -359,3 +355,7 @@ impl Render for ShortcutRecorder {
         .child(div().min_w_0().truncate().child(text))
     }
 }
+
+#[cfg(test)]
+#[path = "shortcut_recorder_tests.rs"]
+mod tests;

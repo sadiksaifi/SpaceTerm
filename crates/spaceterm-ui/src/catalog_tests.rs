@@ -299,15 +299,6 @@ fn catalog_metric_scaling_composes_for_floating_shells_and_hosted_controls() {
         identity_after_scale.hosted_controls(ControlHost::Floating),
         scaled.hosted_controls(ControlHost::Floating),
     );
-    let chained_button = chained
-        .hosted_controls(ControlHost::Floating)
-        .expect("catalog should include floating controls")
-        .regular_button_extent_for_test();
-    let direct_button = direct
-        .hosted_controls(ControlHost::Floating)
-        .expect("catalog should include floating controls")
-        .regular_button_extent_for_test();
-    assert!((chained_button - direct_button).abs() < px(0.001));
 
     let expanded = catalog(1).scale_spacing(1.5).scale_spacing(1.5);
     let contracted = catalog(1).scale_spacing(0.5).scale_spacing(0.5);

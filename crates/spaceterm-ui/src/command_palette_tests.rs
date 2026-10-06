@@ -256,15 +256,6 @@ fn duplicate_item_identity_should_keep_only_the_first_semantic_item() {
 }
 
 #[test]
-fn fallback_provider_should_preserve_exact_query_in_typed_identity() {
-    let fallback = CommandPaletteFallback::new(|query| {
-        CommandPaletteItem::new(query.to_owned(), "Use exact query")
-    });
-
-    assert_eq!(fallback.item(" Mixed Case ").id(), " Mixed Case ");
-}
-
-#[test]
 fn matcher_should_search_labels_and_keywords() {
     let items = items();
 
@@ -473,6 +464,15 @@ fn install_control_themes(cx: &mut TestAppContext) {
     });
 }
 
+fn editor_is_focused(palette: &Entity<CommandPalette<u8>>, window: &Window, cx: &App) -> bool {
+    palette
+        .read(cx)
+        .input
+        .read(cx)
+        .focus_handle()
+        .is_focused(window)
+}
+
 fn palette_window(cx: &mut TestAppContext) -> PaletteWindow<'_> {
     cx.set_global(test_theme());
     install_control_themes(cx);
@@ -631,133 +631,6 @@ fn open_palette_font_change_should_remeasure_offscreen_rows_without_losing_posit
             )
         }),
         (String::from("Command"), selected),
-    );
-}
-
-#[gpui::test]
-fn pinned_fallback_should_receive_exact_query_and_yield_to_ordinary_matches(
-    cx: &mut TestAppContext,
-) {
-    let (root, palette, events, _, cx) = palette_window(cx);
-    let queries = Rc::new(RefCell::new(Vec::new()));
-    let recorded_queries = Rc::clone(&queries);
-    palette.update(cx, |palette, cx| {
-        palette.set_fallback(
-            Some(CommandPaletteFallback::new(move |query| {
-                recorded_queries.borrow_mut().push(query.to_owned());
-                CommandPaletteItem::new(9, format!("Create {query}")).debug_selector("row-fallback")
-            })),
-            cx,
-        );
-    });
-    open_palette(&root, &palette, cx);
-    palette.update(cx, |palette, cx| palette.set_query(" Mixed Case ", cx));
-    cx.run_until_parked();
-
-    assert_eq!(
-        queries.borrow().last().map(String::as_str),
-        Some(" Mixed Case ")
-    );
-    assert_eq!(
-        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
-        Some(9)
-    );
-    assert!(cx.debug_bounds("row-fallback").is_some());
-
-    events.borrow_mut().clear();
-    cx.simulate_keystrokes("enter");
-    cx.run_until_parked();
-    assert!(
-        events
-            .borrow()
-            .contains(&CommandPaletteEvent::Activated(CommandPaletteActivation {
-                item_id: 9,
-                source: CommandPaletteActivationSource::Keyboard,
-            }))
-    );
-
-    palette.update(cx, |palette, cx| palette.set_query("open", cx));
-    cx.update(|window, cx| {
-        palette.update(cx, |palette, cx| palette.open(window, cx));
-    });
-    cx.run_until_parked();
-
-    assert_eq!(
-        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
-        Some(1)
-    );
-    let ordinary = cx
-        .debug_bounds("row-open")
-        .expect("the ordinary match should render");
-    let fallback = cx
-        .debug_bounds("row-fallback")
-        .expect("the pinned fallback should remain visible");
-    assert!(fallback.top() >= ordinary.bottom());
-}
-
-#[gpui::test]
-fn disabled_command_palette_fallback_should_render_without_selection(cx: &mut TestAppContext) {
-    let (root, palette, events, _, cx) = palette_window(cx);
-    palette.update(cx, |palette, cx| {
-        palette.set_fallback(
-            Some(CommandPaletteFallback::new(|query| {
-                CommandPaletteItem::new(9, format!("Create {query}"))
-                    .disabled(true)
-                    .debug_selector("row-fallback")
-            })),
-            cx,
-        );
-    });
-    open_palette(&root, &palette, cx);
-    palette.update(cx, |palette, cx| {
-        palette.set_query("no ordinary result", cx)
-    });
-    cx.run_until_parked();
-    events.borrow_mut().clear();
-
-    assert_eq!(
-        palette.read_with(cx, |palette, _| palette.selected_item_id().copied()),
-        None
-    );
-    assert!(cx.debug_bounds("row-fallback").is_some());
-    cx.simulate_keystrokes("enter");
-    cx.run_until_parked();
-    assert!(palette.read_with(cx, |palette, _| palette.is_open()));
-    assert!(
-        events
-            .borrow()
-            .iter()
-            .all(|event| !matches!(event, CommandPaletteEvent::Activated(_)))
-    );
-}
-
-#[gpui::test]
-fn pointer_should_accept_the_command_palette_fallback(cx: &mut TestAppContext) {
-    let (root, palette, events, _, cx) = palette_window(cx);
-    palette.update(cx, |palette, cx| {
-        palette.set_fallback(
-            Some(CommandPaletteFallback::new(|query| {
-                CommandPaletteItem::new(9, format!("Create {query}")).debug_selector("row-fallback")
-            })),
-            cx,
-        );
-    });
-    open_palette(&root, &palette, cx);
-    events.borrow_mut().clear();
-    let fallback = cx
-        .debug_bounds("row-fallback")
-        .expect("the fallback row should render");
-
-    cx.simulate_click(fallback.center(), Modifiers::default());
-    cx.run_until_parked();
-
-    assert!(
-        events
-            .borrow()
-            .contains(&CommandPaletteEvent::Activated(CommandPaletteActivation {
-                item_id: 9,
-                source: CommandPaletteActivationSource::Pointer,
-            }))
     );
 }
 
@@ -1225,13 +1098,13 @@ fn tab_navigation_should_reach_empty_actions_and_return_to_the_query(cx: &mut Te
 
     cx.simulate_keystrokes("tab");
     cx.run_until_parked();
-    assert!(!cx.update(|window, cx| palette.read(cx).editor_is_focused(window, cx)));
+    assert!(!cx.update(|window, cx| editor_is_focused(&palette, window, cx)));
     assert!(palette.read_with(cx, |palette, _| palette.is_open()));
 
     cx.simulate_keystrokes("shift-tab backspace");
     cx.run_until_parked();
 
-    assert!(cx.update(|window, cx| palette.read(cx).editor_is_focused(window, cx)));
+    assert!(cx.update(|window, cx| editor_is_focused(&palette, window, cx)));
     assert_eq!(
         palette.read_with(cx, |palette, _| palette.query().to_owned()),
         "zz"
@@ -1987,7 +1860,10 @@ fn scored_queries_should_preserve_contiguous_section_order() {
     assert_eq!(
         matches
             .iter()
-            .map(|matched| items[matched.item_index].section_text().unwrap_or_default())
+            .map(|matched| items[matched.item_index]
+                .section
+                .as_deref()
+                .unwrap_or_default())
             .collect::<Vec<_>>(),
         vec!["Recent", "Recent", "All", "All"],
     );
@@ -2602,42 +2478,6 @@ fn pointer_release_should_not_activate_a_row_removed_by_a_query_change(cx: &mut 
 }
 
 #[gpui::test]
-fn query_rebuild_should_invalidate_an_in_progress_fallback_pointer_gesture(
-    cx: &mut TestAppContext,
-) {
-    let (root, palette, events, _, cx) = palette_window(cx);
-    palette.update(cx, |palette, cx| {
-        palette.set_fallback(
-            Some(CommandPaletteFallback::new(|query| {
-                CommandPaletteItem::new(9, format!("Create {query}"))
-            })),
-            cx,
-        );
-    });
-    open_palette(&root, &palette, cx);
-    events.borrow_mut().clear();
-
-    cx.update(|window, cx| {
-        palette.update(cx, |palette, cx| {
-            palette.pointer_down(9, cx);
-            palette.set_query("rebuilt", cx);
-            if palette.pointer_up(&9, true) {
-                palette.selected = Some(9);
-                palette.activate_selected(CommandPaletteActivationSource::Pointer, window, cx);
-            }
-        });
-    });
-
-    assert!(palette.read_with(cx, |palette, _| palette.is_open()));
-    assert!(
-        !events
-            .borrow()
-            .iter()
-            .any(|event| matches!(event, CommandPaletteEvent::Activated(_)))
-    );
-}
-
-#[gpui::test]
 fn pointer_click_should_emit_typed_pointer_activation_for_any_visible_row(cx: &mut TestAppContext) {
     let (root, _, events, _, cx) = palette_window(cx);
     let palette = root.read_with(cx, |root, _| root.palette.clone());
@@ -3169,60 +3009,6 @@ fn caller_ranked_item_refresh_should_select_the_new_first_result(cx: &mut TestAp
     );
 }
 
-#[gpui::test]
-fn stale_generation_results_should_be_ignored(cx: &mut TestAppContext) {
-    let (root, palette, _, _, cx) = palette_window(cx);
-    open_palette(&root, &palette, cx);
-    let first = palette.update(cx, |palette, cx| palette.refresh(cx));
-    let second = palette.update(cx, |palette, cx| palette.refresh(cx));
-    let before = palette_state_snapshot(&palette, cx);
-
-    let applied = palette.update(cx, |palette, cx| {
-        palette.apply_items(first, vec![CommandPaletteItem::new(9, "Stale")], cx)
-    });
-    assert!(!applied);
-    assert_eq!(palette_state_snapshot(&palette, cx), before);
-    assert_eq!(
-        palette.read_with(cx, |palette, _| palette.generation()),
-        second
-    );
-
-    assert!(palette.update(cx, |palette, cx| {
-        palette.apply_items(second, vec![CommandPaletteItem::new(9, "Current")], cx)
-    }));
-    let current = palette_state_snapshot(&palette, cx);
-    assert_eq!(current.item_ids, vec![9]);
-    assert_eq!(current.item_labels, vec![String::from("Current")]);
-    assert_eq!(current.match_indexes, vec![0]);
-    assert_eq!(current.selected, Some(9));
-    assert!(!current.loading);
-}
-
-#[gpui::test]
-fn closed_palette_should_reject_results_from_the_dismissed_generation(cx: &mut TestAppContext) {
-    let (root, palette, _, _, cx) = palette_window(cx);
-    open_palette(&root, &palette, cx);
-    let dismissed_generation = palette.read_with(cx, |palette, _| palette.generation());
-    cx.update(|window, cx| {
-        palette.update(cx, |palette, cx| {
-            palette.dismiss(window, cx);
-        });
-    });
-
-    let before = palette_state_snapshot(&palette, cx);
-    assert!(!before.open);
-    let applied = palette.update(cx, |palette, cx| {
-        palette.apply_items(
-            dismissed_generation,
-            vec![CommandPaletteItem::new(9, "Stale")],
-            cx,
-        )
-    });
-
-    assert!(!applied);
-    assert_eq!(palette_state_snapshot(&palette, cx), before);
-}
-
 #[derive(Debug, Eq, PartialEq)]
 struct PaletteStateSnapshot {
     item_ids: Vec<u8>,
@@ -3235,7 +3021,6 @@ struct PaletteStateSnapshot {
     preferred: Option<u8>,
     query: String,
     input_value: String,
-    generation: CommandPaletteGeneration,
     loading: bool,
     dismissible: bool,
     open: bool,
@@ -3269,7 +3054,6 @@ fn palette_state_snapshot(
         preferred: palette.preferred,
         query: palette.query.clone(),
         input_value: palette.input.read(cx).value().to_owned(),
-        generation: palette.generation,
         loading: palette.loading,
         dismissible: palette.dismissible,
         open: palette.open,
@@ -3477,7 +3261,7 @@ fn pending_palette_dismissal_restores_focus_before_the_modal(cx: &mut TestAppCon
     let modal = root.read_with(cx, |root, _| root.modal.clone().unwrap());
     cx.update(|window, cx| modal.dismiss(window, cx).unwrap());
     cx.run_until_parked();
-    assert!(cx.update(|window, cx| palette.read(cx).editor_is_focused(window, cx)));
+    assert!(cx.update(|window, cx| editor_is_focused(&palette, window, cx)));
 
     cx.update(|window, cx| {
         assert!(palette.update(cx, |palette, cx| palette.dismiss(window, cx)));
@@ -3508,7 +3292,7 @@ fn pending_palette_dismissal_blurs_when_modal_predecessor_is_gone(cx: &mut TestA
     let modal = root.read_with(cx, |root, _| root.modal.clone().unwrap());
     cx.update(|window, cx| modal.dismiss(window, cx).unwrap());
     cx.run_until_parked();
-    assert!(cx.update(|window, cx| palette.read(cx).editor_is_focused(window, cx)));
+    assert!(cx.update(|window, cx| editor_is_focused(&palette, window, cx)));
 
     cx.update(|window, cx| {
         assert!(palette.update(cx, |palette, cx| palette.dismiss(window, cx)));
@@ -3539,7 +3323,7 @@ fn pending_palette_dismissal_restores_the_dialog_successor_focus(cx: &mut TestAp
             .unwrap();
     });
     cx.run_until_parked();
-    assert!(cx.update(|window, cx| palette.read(cx).editor_is_focused(window, cx)));
+    assert!(cx.update(|window, cx| editor_is_focused(&palette, window, cx)));
 
     cx.update(|window, cx| {
         assert!(palette.update(cx, |palette, cx| palette.dismiss(window, cx)));
@@ -3596,7 +3380,6 @@ fn palette_open_requested_after_modal_presentation_should_wait_without_mutating_
             palette.query.clone(),
             palette.input.read(cx).value().to_owned(),
             palette.selected,
-            palette.generation,
         )
     });
     cx.update(|window, cx| {
@@ -3625,19 +3408,15 @@ fn palette_open_requested_after_modal_presentation_should_wait_without_mutating_
             palette.query.clone(),
             palette.input.read(cx).value().to_owned(),
             palette.selected,
-            palette.generation,
         )
     });
     let modal_retained_focus = cx.update(|window, cx| {
         crate::modal::focused_modal_parent(window, cx).is_some()
-            && !palette.read(cx).editor_is_focused(window, cx)
+            && !editor_is_focused(&palette, window, cx)
     });
 
     assert_eq!(open_results, (false, false));
-    assert_eq!(
-        blocked,
-        (false, true, true, before.0, before.1, before.2, before.3)
-    );
+    assert_eq!(blocked, (false, true, true, before.0, before.1, before.2));
     assert!(modal_retained_focus);
     assert!(cx.debug_bounds("command-palette-panel").is_none());
     assert_eq!(root.read_with(cx, |root, _| root.palette_open_events), 0);
@@ -3654,7 +3433,7 @@ fn palette_open_requested_after_modal_presentation_should_wait_without_mutating_
             && palette.suspended_by_modal.is_none()
             && palette.query.is_empty()
     }));
-    assert!(cx.update(|window, cx| palette.read(cx).editor_is_focused(window, cx)));
+    assert!(cx.update(|window, cx| editor_is_focused(&palette, window, cx)));
     assert!(cx.debug_bounds("command-palette-panel").is_some());
     assert_eq!(root.read_with(cx, |root, _| root.palette_open_events), 1);
 }
@@ -3688,7 +3467,7 @@ fn suspended_palette_focus_entries_should_not_steal_focus_from_active_modal(
 
     assert!(cx.update(|window, cx| {
         crate::modal::focused_modal_parent(window, cx).is_some()
-            && !palette.read(cx).editor_is_focused(window, cx)
+            && !editor_is_focused(&palette, window, cx)
     }));
     assert!(palette.read_with(cx, |palette, _| {
         palette.open && palette.suspended_by_modal.is_some() && palette.query == "window"
@@ -3723,7 +3502,7 @@ fn suspended_palette_focus_entries_should_not_steal_focus_from_active_dialog(
 
     assert!(cx.update(|window, cx| {
         crate::modal::focused_modal_parent(window, cx).is_some()
-            && !palette.read(cx).editor_is_focused(window, cx)
+            && !editor_is_focused(&palette, window, cx)
     }));
     assert!(cx.debug_bounds("modal-surface-1").is_some());
     assert!(cx.debug_bounds("command-palette-panel").is_none());
@@ -3776,7 +3555,7 @@ fn modal_close_without_registered_palette_should_not_suspend_later_palette(
             .modal_suspensions
             .contains_key(&window_id)
     }));
-    assert!(cx.update(|window, cx| palette.read(cx).editor_is_focused(window, cx)));
+    assert!(cx.update(|window, cx| editor_is_focused(&palette, window, cx)));
 }
 
 #[gpui::test]
@@ -3831,7 +3610,7 @@ fn closing_suspended_palette_should_not_suspend_replacement_after_modal_close(
             .modal_suspensions
             .contains_key(&window_id)
     }));
-    assert!(cx.update(|window, cx| { replacement.read(cx).editor_is_focused(window, cx) }));
+    assert!(cx.update(|window, cx| { editor_is_focused(&replacement, window, cx) }));
 }
 
 #[gpui::test]
@@ -4042,7 +3821,7 @@ fn modal_open_and_close_should_suspend_then_resume_the_registered_palette(cx: &m
     cx.run_until_parked();
 
     assert_eq!(palette_state_snapshot(&palette, cx), before);
-    assert!(cx.update(|window, cx| palette.read(cx).editor_is_focused(window, cx)));
+    assert!(cx.update(|window, cx| editor_is_focused(&palette, window, cx)));
 }
 
 #[gpui::test]
@@ -4072,7 +3851,7 @@ fn programmatic_progress_close_should_resume_the_registered_palette(cx: &mut Tes
     assert!(palette.read_with(cx, |palette, _| {
         palette.open && palette.suspended_by_modal.is_none()
     }));
-    assert!(cx.update(|window, cx| palette.read(cx).editor_is_focused(window, cx)));
+    assert!(cx.update(|window, cx| editor_is_focused(&palette, window, cx)));
 }
 
 #[gpui::test]
@@ -4106,7 +3885,7 @@ fn parent_completion_closes_owned_menu_before_suspended_palette_resumes(cx: &mut
     assert!(palette.read_with(cx, |palette, _| {
         palette.open && palette.suspended_by_modal.is_none()
     }));
-    assert!(cx.update(|window, cx| palette.read(cx).editor_is_focused(window, cx)));
+    assert!(cx.update(|window, cx| editor_is_focused(&palette, window, cx)));
 }
 
 #[gpui::test]
@@ -4142,7 +3921,7 @@ fn programmatic_progress_closed_while_deactivated_should_resume_palette_on_react
     assert!(palette.read_with(cx, |palette, _| {
         palette.open && palette.suspended_by_modal.is_none()
     }));
-    assert!(cx.update(|window, cx| palette.read(cx).editor_is_focused(window, cx)));
+    assert!(cx.update(|window, cx| editor_is_focused(&palette, window, cx)));
 }
 
 #[gpui::test]
@@ -4177,7 +3956,7 @@ fn first_deferred_palette_request_resumes_after_window_reactivation(cx: &mut Tes
     assert!(palette.read_with(cx, |palette, _| {
         palette.open && palette.pending_open.is_none() && palette.suspended_by_modal.is_none()
     }));
-    assert!(cx.update(|window, cx| palette.read(cx).editor_is_focused(window, cx)));
+    assert!(cx.update(|window, cx| editor_is_focused(&palette, window, cx)));
 }
 
 #[gpui::test]
@@ -4233,7 +4012,7 @@ fn closing_a_modal_while_deactivated_should_resume_its_palette_after_reactivatio
     assert!(palette.read_with(cx, |palette, _| {
         palette.open && palette.suspended_by_modal.is_none()
     }));
-    assert!(cx.update(|window, cx| palette.read(cx).editor_is_focused(window, cx)));
+    assert!(cx.update(|window, cx| editor_is_focused(&palette, window, cx)));
 }
 
 #[gpui::test]

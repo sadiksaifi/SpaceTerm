@@ -11,6 +11,8 @@ pub(crate) use tab::{
     SplitId, Tab, TabId, ZoomState,
 };
 pub(crate) use tab_collection::{TabCollection, TabError, TabStep};
+#[cfg(test)]
+pub(crate) use workspace_collection::tests::set_next_workspace_id;
 pub(crate) use workspace_collection::{
     CurrentDirectory, DirectoryAvailability, LocalDirectoryIdentity, PinnedDirectory,
     RemoteDirectory, RemoteDirectoryIdentity, RemoteUser, RemoteWorkspaceTarget, SshDestination,

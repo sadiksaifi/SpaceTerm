@@ -264,8 +264,6 @@ pub enum ModalActionRole {
     Cancel,
     /// Performs a secondary operation without being the default decision.
     Auxiliary,
-    /// Opens contextual help outside the decision action area.
-    Help,
 }
 
 /// Consequence of an action, independent of its role or physical position.
@@ -513,18 +511,6 @@ pub enum ModalValidationError {
     /// Cancel was designated as the default action.
     CancelDefaultAction {
         /// Index of the Cancel default action in caller order.
-        index: usize,
-    },
-    /// Help was placed in an Alert's decision action collection.
-    AlertHelpMustBeSeparate {
-        /// Index of the misplaced Help action in caller order.
-        index: usize,
-    },
-    /// A separately supplied Alert help action did not have the Help role.
-    InvalidHelpActionRole,
-    /// Help was destructive or designated as the default decision.
-    InvalidHelpAction {
-        /// Index of the invalid Help action in combined caller order.
         index: usize,
     },
     /// A Dialog's action initial-focus identity was absent or currently disabled.

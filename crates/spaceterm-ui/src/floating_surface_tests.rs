@@ -1448,18 +1448,7 @@ fn resting_host_metrics_scale_once_with_the_complete_catalog() {
             scaled.hosted_controls(host),
             Some(&original.clone().scale_spacing(1.25))
         );
-        assert_eq!(
-            scaled
-                .hosted_controls(host)
-                .unwrap()
-                .regular_button_extent_for_test(),
-            px(32.0),
-            "{host:?}"
-        );
     }
     assert!(scaled.hosted_controls(ControlHost::Window).is_none());
-    assert_eq!(
-        scaled.installed_generation(),
-        initial.installed_generation()
-    );
+    assert_eq!(scaled.generation, initial.generation);
 }

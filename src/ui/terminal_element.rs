@@ -450,7 +450,6 @@ pub(crate) struct TerminalGridElement {
     graphics_cache: Entity<TerminalGraphicsCache>,
     active_hyperlink: Option<(u64, CellGridPosition)>,
     fallback: Option<Box<TerminalGridElement>>,
-    fallback_generation: Option<crate::terminal::PresentationGeneration>,
     cursor_layer: Option<presentation::CursorLayer>,
     padding: TerminalPadding,
 }
@@ -526,9 +525,6 @@ impl TerminalGridElement {
                     cx,
                 ))
             });
-        let fallback_generation = fallback
-            .as_ref()
-            .map(|fallback| fallback.presentation.generation);
         let cursor = screen.cursor.position.and_then(|position| {
             screen
                 .rows
@@ -590,7 +586,6 @@ impl TerminalGridElement {
             graphics_cache: configuration.graphics_cache,
             active_hyperlink: configuration.active_hyperlink,
             fallback,
-            fallback_generation,
             cursor_layer: None,
             padding: configuration.padding,
         }
@@ -2012,7 +2007,6 @@ impl Element for TerminalGridElement {
         {
             failure = cursor.preflight(window, cx).err();
         }
-        let mut submitted_generation = None;
         let mut candidate_submission_started = false;
         if failure.is_none() {
             candidate_submission_started = true;
@@ -2021,7 +2015,6 @@ impl Element for TerminalGridElement {
                 .submit(prepaint.candidate.grid_bounds, true, window, cx)
             {
                 Ok(()) => {
-                    submitted_generation = Some(self.presentation.generation);
                     if let Some(layer) = &self.cursor_layer {
                         layer.set(prepaint.cursor.clone());
                     }
@@ -2042,11 +2035,8 @@ impl Element for TerminalGridElement {
             && !candidate_submission_started
             && let Some(fallback) = &prepaint.fallback
             && fallback.preflight(window, cx).is_ok()
-            && fallback
-                .submit(fallback.grid_bounds, true, window, cx)
-                .is_ok()
         {
-            submitted_generation = self.fallback_generation;
+            _ = fallback.submit(fallback.grid_bounds, true, window, cx);
         }
         let Some(pane) = self.input.upgrade() else {
             return;
@@ -2062,26 +2052,21 @@ impl Element for TerminalGridElement {
             (self.presentation_operation, self.graphics_attempt)
         {
             window.defer(cx, move |window, cx| {
-                pane.update(cx, |pane, cx| {
-                    if let Some(generation) = submitted_generation {
-                        pane.record_scene_submission_attempt(generation);
+                pane.update(cx, |pane, cx| match failure {
+                    Some(PaintBatchFailure::RendererResources) => {
+                        pane.renderer_resource_failed(operation, graphics_attempt, cx);
                     }
-                    match failure {
-                        Some(PaintBatchFailure::RendererResources) => {
-                            pane.renderer_resource_failed(operation, graphics_attempt, cx);
-                        }
-                        Some(PaintBatchFailure::Presentation) => {
-                            pane.presentation_failed(operation, graphics_attempt, cx);
-                        }
-                        None => {
-                            pane.presentation_succeeded(
-                                operation,
-                                graphics_attempt,
-                                presentation,
-                                window,
-                                cx,
-                            );
-                        }
+                    Some(PaintBatchFailure::Presentation) => {
+                        pane.presentation_failed(operation, graphics_attempt, cx);
+                    }
+                    None => {
+                        pane.presentation_succeeded(
+                            operation,
+                            graphics_attempt,
+                            presentation,
+                            window,
+                            cx,
+                        );
                     }
                 });
             });

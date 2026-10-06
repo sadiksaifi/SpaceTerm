@@ -111,14 +111,6 @@ impl Drop for MetadataWakeup {
     }
 }
 
-#[cfg(test)]
-impl SessionEvent {
-    pub(crate) fn metadata_changed_for_test() -> Self {
-        let queued = Arc::new(AtomicBool::new(true));
-        Self::MetadataChanged(MetadataWakeup::new(queued))
-    }
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct TerminalAppearanceUpdate {
     pub(crate) generation: AppearanceGeneration,
@@ -2325,7 +2317,7 @@ fn join_worker(worker: JoinHandle<()>) {
 
 #[cfg(test)]
 #[path = "session/tests.rs"]
-mod tests;
+pub(super) mod tests;
 
 #[cfg(all(
     test,

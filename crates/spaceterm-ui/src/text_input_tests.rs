@@ -705,7 +705,7 @@ fn take_and_clear_remove_retained_obscured_state(cx: &mut TestAppContext) {
         let taken = input.take_value(cx);
         let empty = input.value().is_empty()
             && input.selection().range() == (0..0)
-            && !input.selection().is_reversed()
+            && !input.selection().reversed
             && input.composition.is_none()
             && input.buffer.history.undo.is_empty()
             && input.buffer.history.redo.is_empty()
@@ -729,7 +729,7 @@ fn take_and_clear_remove_retained_obscured_state(cx: &mut TestAppContext) {
         assert!(input.clear(cx));
         input.value().is_empty()
             && input.selection().range() == (0..0)
-            && !input.selection().is_reversed()
+            && !input.selection().reversed
             && input.composition.is_none()
             && input.buffer.history.undo.is_empty()
             && input.buffer.history.redo.is_empty()

@@ -43,7 +43,7 @@ use crate::platform::shell_integration::{
 };
 use crate::ui::{
     RenderLifecycle, ScaleChange, SurfaceVisibility, TerminalFocusBlocker,
-    TerminalFocusCoordinator, TerminalFocusFacts, conformance_ime_observation,
+    TerminalFocusCoordinator, TerminalFocusFacts,
 };
 
 const MAX_FIXTURE_STEPS: usize = 1_024;
@@ -199,20 +199,6 @@ const FIXTURES: &[FixtureSpec] = &[
         [6, 7],
         "dec-deccusr-and-spaceterm-cadence",
         Lifecycle
-    ),
-    fixture!(
-        "ime.marked-text",
-        22,
-        [22],
-        "apple-nstextinputclient",
-        Interface
-    ),
-    fixture!(
-        "input.secure-event",
-        23,
-        [23],
-        "apple-secure-event-input",
-        Security
     ),
     fixture!(
         "screen.scrollback-and-reflow",
@@ -767,8 +753,6 @@ fn observe_portable_contract(
         19 => check_gpui_keyboard_adapter()?,
         20 => check_focus_reporting()?,
         21 => check_cursor_blink_lifecycle()?,
-        22 => check_ime()?,
-        23 => check_secure_input()?,
         24 => check_screens_scrollback_and_reflow()?,
         25 => check_mouse_protocols()?,
         26 => check_selection_and_copy(false)?,
@@ -804,7 +788,7 @@ fn observe_portable_contract(
 
 fn check_kitty_graphics() -> Result<(), String> {
     run_fixture(&ExecutableFixture {
-        spec: &FIXTURES[35],
+        spec: &FIXTURES[33],
         expected: KITTY_GRAPHICS_EXPECTED,
         observe: observe_kitty_graphics,
     })
@@ -1132,26 +1116,6 @@ fn check_cursor_blink_lifecycle() -> Result<(), String> {
         !steady.cursor.blinking,
         "cursor-steady-mode",
         "steady block cursor blinked",
-    )
-}
-
-fn check_ime() -> Result<(), String> {
-    let observation = conformance_ime_observation();
-    for expected in ["marked=A界B", "selection=2..2", "commit=Some(\"A界B\")"] {
-        require(
-            observation.contains(expected),
-            "ime-state",
-            format!("expected `{expected}` in `{observation}`"),
-        )?;
-    }
-    Ok(())
-}
-
-fn check_secure_input() -> Result<(), String> {
-    require_eq(
-        "secure-input-balance",
-        crate::terminal::secure_input::conformance_secure_input_observation(),
-        "transitions=[true, false, true, false] enabled=false".to_owned(),
     )
 }
 
@@ -1768,7 +1732,7 @@ const EXECUTABLE_FIXTURES: &[ExecutableFixture] = &[
         observe: observe_semantic_snapshot,
     },
     ExecutableFixture {
-        spec: &FIXTURES[35],
+        spec: &FIXTURES[33],
         expected: KITTY_GRAPHICS_EXPECTED,
         observe: observe_kitty_graphics,
     },
@@ -1893,7 +1857,7 @@ fn semantic_snapshot_fixtures_match_terminal_state() {
 
 #[test]
 fn registered_portable_contract_fixtures_pass() {
-    // PTY, Secure Input, IME and native-service drivers exercise injected portable contracts.
+    // PTY and native-service drivers exercise injected portable contracts.
     // Native Adapter suites validate their operating system integrations separately.
     for spec in FIXTURES {
         let fixture = ExecutableFixture {

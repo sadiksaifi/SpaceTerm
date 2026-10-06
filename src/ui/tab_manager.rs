@@ -3150,7 +3150,7 @@ mod tests {
         )
     }
 
-    fn prepare_remote_restart_for_test(
+    fn await_remote_restart_preparation(
         manager: &Entity<TabManager>,
         session_factory: WorkspaceTerminalSessionFactory,
         generation: u64,
@@ -5731,7 +5731,7 @@ mod tests {
 
         provider.fail_revalidation_with(Some(RemoteChannelRevalidationError::IdentityChanged));
         let factory = manager.read_with(cx, |manager, _| manager.session_factory.clone());
-        let identity_changed = prepare_remote_restart_for_test(&manager, factory, 5, cx);
+        let identity_changed = await_remote_restart_preparation(&manager, factory, 5, cx);
         assert!(matches!(
             identity_changed,
             Err(RemoteTabManagerLifecycleError::Revalidation(
@@ -5750,7 +5750,7 @@ mod tests {
         provider.fail_revalidation_with(None);
         provider.fail_at(Some(provider.preparation_count() + 2));
         let factory = manager.read_with(cx, |manager, _| manager.session_factory.clone());
-        let failed = prepare_remote_restart_for_test(&manager, factory, 5, cx);
+        let failed = await_remote_restart_preparation(&manager, factory, 5, cx);
         assert!(matches!(
             failed,
             Err(RemoteTabManagerLifecycleError::ChannelUnavailable(_))
@@ -5767,7 +5767,7 @@ mod tests {
 
         provider.fail_at(None);
         let factory = manager.read_with(cx, |manager, _| manager.session_factory.clone());
-        let prepared = prepare_remote_restart_for_test(&manager, factory, 5, cx).unwrap();
+        let prepared = await_remote_restart_preparation(&manager, factory, 5, cx).unwrap();
         cx.update(|window, cx| {
             manager
                 .update(cx, |manager, cx| {
@@ -5864,7 +5864,7 @@ mod tests {
             destination,
             provider,
         );
-        let prepared = prepare_remote_restart_for_test(&manager, restart_factory, 11, cx).unwrap();
+        let prepared = await_remote_restart_preparation(&manager, restart_factory, 11, cx).unwrap();
         cx.update(|window, cx| {
             manager
                 .update(cx, |manager, cx| {
@@ -6162,7 +6162,7 @@ mod tests {
             .update(cx, |manager, cx| manager.disconnect_remote(4, cx))
             .unwrap();
         let factory = manager.read_with(cx, |manager, _| manager.session_factory.clone());
-        let prepared = prepare_remote_restart_for_test(&manager, factory, 5, cx).unwrap();
+        let prepared = await_remote_restart_preparation(&manager, factory, 5, cx).unwrap();
         cx.update(|window, cx| {
             manager.update(cx, |manager, cx| {
                 manager.commit_remote_restart(prepared, window, cx)

@@ -3715,7 +3715,7 @@ fn repeat_clicks_select_cells_words_and_lines_with_injected_time() {
         (Duration::from_millis(100), Some("beta")),
         (Duration::from_millis(200), Some("alpha beta")),
     ] {
-        emulator.set_gesture_time_for_test(time);
+        emulator.gesture_clock = GestureClock::Manual(time);
         _ = emulator
             .pointer(pointer(
                 PointerPhase::Press,
@@ -3745,7 +3745,7 @@ fn wide_tail_and_soft_wrapped_word_select_complete_graphemes() {
         let mut wide = emulator(8, 2);
         wide.feed("A😀B".as_bytes());
         for time in [Duration::ZERO, Duration::from_millis(100)] {
-            wide.set_gesture_time_for_test(time);
+            wide.gesture_clock = GestureClock::Manual(time);
             _ = wide
                 .pointer(pointer(
                     PointerPhase::Press,
@@ -3771,7 +3771,7 @@ fn wide_tail_and_soft_wrapped_word_select_complete_graphemes() {
     let mut wrapped = emulator(5, 2);
     wrapped.feed(b"abcdefgh");
     for time in [Duration::ZERO, Duration::from_millis(100)] {
-        wrapped.set_gesture_time_for_test(time);
+        wrapped.gesture_clock = GestureClock::Manual(time);
         _ = wrapped
             .pointer(pointer(
                 PointerPhase::Press,

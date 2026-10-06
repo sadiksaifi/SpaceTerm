@@ -347,11 +347,6 @@ impl FloatingShell {
         self.content_inset
     }
 
-    /// The Gaussian sigma used to filter already-painted content beneath this shell.
-    pub fn backdrop_blur_radius(&self) -> Pixels {
-        self.backdrop_blur
-    }
-
     /// Maximum framebuffer coverage retained beneath this shell.
     pub fn backdrop_alpha_limit(&self) -> f32 {
         self.backdrop_alpha_limit
@@ -946,13 +941,6 @@ impl SurfaceControlThemes {
     }
 }
 
-#[cfg(test)]
-impl SurfaceControlThemes {
-    pub(crate) fn regular_button_extent_for_test(&self) -> Pixels {
-        self.button.icon_button_size(crate::ButtonSize::Regular)
-    }
-}
-
 fn hosted(cx: &App) -> Option<&SurfaceControlThemes> {
     let host = CURRENT_CONTROL_HOST.with(Cell::get);
     crate::control_theme_catalog(cx)?.hosted_controls(host)
@@ -1043,8 +1031,8 @@ mod tests {
         ] {
             assert_eq!(theme.shell(role).corner_radius(), px(radius));
             assert_eq!(scaled.shell(role).corner_radius(), px(radius));
-            assert_eq!(theme.shell(role).backdrop_blur_radius(), px(blur));
-            assert_eq!(scaled.shell(role).backdrop_blur_radius(), px(blur));
+            assert_eq!(theme.shell(role).backdrop_blur, px(blur));
+            assert_eq!(scaled.shell(role).backdrop_blur, px(blur));
         }
     }
 
@@ -1060,5 +1048,21 @@ mod tests {
             assert_eq!(identity_after_scale.shell(role), scaled.shell(role));
             assert_eq!(composed.shell(role), direct.shell(role));
         }
+    }
+
+    #[test]
+    fn hosted_button_extent_scales_once_and_composes() {
+        let regular_button = |catalog: &crate::ControlThemeCatalog| {
+            catalog
+                .hosted_controls(ControlHost::Floating)
+                .expect("catalog should include floating controls")
+                .button
+                .icon_button_size(crate::ButtonSize::Regular)
+        };
+        let scaled = crate::catalog_tests::catalog(1).scale_spacing(1.25);
+        let chained = scaled.clone().scale_spacing(1.2);
+        let direct = crate::catalog_tests::catalog(1).scale_spacing(1.5);
+        assert_eq!(regular_button(&scaled), px(32.0));
+        assert!((regular_button(&chained) - regular_button(&direct)).abs() < px(0.001));
     }
 }

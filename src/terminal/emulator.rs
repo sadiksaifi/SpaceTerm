@@ -2128,11 +2128,6 @@ impl TerminalEmulator {
         Ok(EmulatorAction::screen_changed())
     }
 
-    #[cfg(test)]
-    fn set_gesture_time_for_test(&mut self, elapsed: Duration) {
-        self.gesture_clock = GestureClock::Manual(elapsed);
-    }
-
     fn selection_viewport_point(
         &self,
         position: SurfacePosition,

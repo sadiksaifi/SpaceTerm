@@ -117,13 +117,16 @@ fn host_font_facts_survive_initial_resolution_catalog_completion_and_reload(
                     .as_ref(),
                 "Chrome Test"
             );
+            let unversioned = spaceterm_ui::ControlThemeGeneration::new(0);
             assert_eq!(
                 cx.global::<spaceterm_ui::ControlThemeCatalog>()
-                    .installed_typography()
-                    .regular()
-                    .family
-                    .as_ref(),
-                "Chrome Test"
+                    .clone()
+                    .generation(unversioned),
+                super::super::control_theme_catalog::catalog(
+                    crate::ui::appearance::chrome(cx),
+                    cx.global::<AppearanceRuntime>().control_motion,
+                )
+                .generation(unversioned)
             );
         }
     });
@@ -743,8 +746,7 @@ fn terminal_only_preview_does_not_replace_control_catalog_or_force_native_chrome
     let (chrome_before, controls_before) = cx.update(|cx| {
         (
             Arc::clone(&cx.global::<InstalledChrome>().active),
-            cx.global::<spaceterm_ui::ControlThemeCatalog>()
-                .installed_generation(),
+            cx.global::<spaceterm_ui::ControlThemeCatalog>().clone(),
         )
     });
     let native_calls = platform.applied.borrow().len();
@@ -759,9 +761,8 @@ fn terminal_only_preview_does_not_replace_control_catalog_or_force_native_chrome
             &cx.global::<InstalledChrome>().active
         ));
         assert_eq!(
-            cx.global::<spaceterm_ui::ControlThemeCatalog>()
-                .installed_generation(),
-            controls_before
+            cx.global::<spaceterm_ui::ControlThemeCatalog>(),
+            &controls_before
         );
         assert_eq!(current(cx).terminal.typography.cell_size, 24.0);
     });
