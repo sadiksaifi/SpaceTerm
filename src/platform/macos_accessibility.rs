@@ -372,6 +372,8 @@ mod native {
     pub(crate) struct MacosAccessibilityElement {
         element: Rc<Retained<PaneAccessibilityElement>>,
         state: Box<AccessibilityElementState>,
+        #[cfg(all(test, feature = "native-tests"))]
+        assumed_on_screen: bool,
     }
 
     impl MacosAccessibilityElement {
@@ -400,7 +402,12 @@ mod native {
             let mtm = MainThreadMarker::new()
                 .expect("GPUI must create native accessibility on the main thread");
             let element = Rc::new(PaneAccessibilityElement::new(mtm, pointer));
-            Self { element, state }
+            Self {
+                element,
+                state,
+                #[cfg(all(test, feature = "native-tests"))]
+                assumed_on_screen: false,
+            }
         }
 
         /// Hierarchy order follows the Pane's position in GPUI's tree, so only presentation
@@ -415,11 +422,19 @@ mod native {
             self.state.focused &= presented;
         }
 
-        /// Test windows have no native view to place the Pane on screen, so tests mark a
-        /// presented Pane visible directly.
+        /// Test windows have no native view to place the Pane on screen, so tests place the
+        /// Pane's window bounds on screen unchanged.
         #[cfg(all(test, feature = "native-tests"))]
         pub(super) fn assume_on_screen(&mut self) {
-            self.state.visible = self.state.presented;
+            self.assumed_on_screen = true;
+        }
+
+        #[cfg(all(test, feature = "native-tests"))]
+        pub(super) fn native_element(&self) -> Retained<AnyObject> {
+            Retained::clone(&self.element)
+                .into_super()
+                .into_super()
+                .into_super()
         }
 
         /// Gives the Pane its node and attaches the native text area while it is visible.
@@ -483,6 +498,15 @@ mod native {
                 self.state.font = resolve_font_metadata(font, point_size);
             }
             let bounds = bounds.and_then(|bounds| {
+                #[cfg(all(test, feature = "native-tests"))]
+                if self.assumed_on_screen {
+                    return Some(ScreenRect {
+                        x: f64::from(bounds.origin.x),
+                        y: f64::from(bounds.origin.y),
+                        width: f64::from(bounds.size.width),
+                        height: f64::from(bounds.size.height),
+                    });
+                }
                 self.state
                     .view
                     .as_deref()
@@ -968,17 +992,54 @@ pub(crate) mod tests {
         assert_eq!(TEXT_AREA_ROLE, "AXTextArea");
     }
 
-    struct DecoratedPane(native::MacosAccessibilityElement);
+    /// Builds native text areas that the test window places on screen, and keeps each one so
+    /// tests can call it the way an accessibility client does.
+    #[derive(Default)]
+    struct OnScreenAccessibilityFactory {
+        elements: std::cell::RefCell<Vec<objc2::rc::Retained<objc2::runtime::AnyObject>>>,
+    }
 
-    impl gpui::Render for DecoratedPane {
-        fn render(
-            &mut self,
-            _: &mut Window,
-            _: &mut gpui::Context<Self>,
-        ) -> impl gpui::IntoElement {
-            use gpui::{InteractiveElement as _, Styled as _};
-            self.0.decorate(gpui::div().id("terminal-pane").size_full())
+    impl TerminalAccessibilityAdapterFactory for OnScreenAccessibilityFactory {
+        fn create(
+            &self,
+            window: &Window,
+            model: TerminalAccessibilityModel,
+            font: &crate::appearance::ResolvedFontDescriptor,
+            font_size: Pixels,
+        ) -> Box<dyn TerminalAccessibilityAdapter> {
+            let mut element = native::MacosAccessibilityElement::new(window, model, font, font_size);
+            element.assume_on_screen();
+            self.elements.borrow_mut().push(element.native_element());
+            Box::new(element)
         }
+    }
+
+    fn terminal_pane(
+        factory: &OnScreenAccessibilityFactory,
+        window: &mut Window,
+        cx: &mut gpui::Context<crate::ui::TerminalPane>,
+    ) -> crate::ui::TerminalPane {
+        let session_factory = crate::terminal::WorkspaceTerminalSessionFactory::new_local(
+            std::rc::Rc::new(
+                crate::terminal::testing::TestTerminalSessionFactory::new(
+                    crate::terminal::testing::TestTerminalSessionRecords::default(),
+                )
+                .with_start_failure("terminal session unavailable in accessibility test"),
+            ),
+            crate::terminal::testing::test_local_directory(std::path::PathBuf::from(
+                "/tmp/spaceterm-accessibility-test",
+            )),
+        );
+        crate::ui::TerminalPane::new_with_prepared_launch(
+            session_factory.clone(),
+            session_factory.prepare_child_launch().unwrap(),
+            crate::terminal::testing::test_terminal_key_input_adapter(),
+            factory,
+            crate::terminal::native_services::testing::adapters(),
+            crate::ui::pane_lifecycle::PaneLifecycleDependencies::testing(),
+            window,
+            cx,
+        )
     }
 
     fn native_children(cx: &mut gpui::VisualTestContext) -> Vec<(String, u64)> {
@@ -1002,39 +1063,28 @@ pub(crate) mod tests {
     pub(crate) fn presented_pane_attaches_its_text_area_to_the_pane_node(
         cx: &mut gpui::TestAppContext,
     ) {
-        let font = crate::terminal::test_terminal_appearance_update()
-            .appearance
-            .typography
-            .regular
-            .clone();
-        let (pane, cx) = cx.add_window_view(|window, _| {
-            DecoratedPane(native::MacosAccessibilityElement::new(
-                window,
-                state().model,
-                &font,
-                gpui::px(14.0),
-            ))
-        });
+        cx.update(crate::ui::init).unwrap();
+        let factory = OnScreenAccessibilityFactory::default();
+        let (pane, cx) = cx.add_window_view(|window, cx| terminal_pane(&factory, window, cx));
         cx.activate_accessibility();
         assert!(native_children(cx).is_empty());
 
         pane.update(cx, |pane, cx| {
-            pane.0.set_hierarchy(true);
-            pane.0.assume_on_screen();
+            pane.set_accessibility_hierarchy(true);
             cx.notify();
         });
         assert_eq!(native_children(cx), [("Group".to_owned(), 1)]);
 
         pane.update(cx, |pane, cx| {
-            pane.0.set_hierarchy(false);
+            pane.set_accessibility_hierarchy(false);
             cx.notify();
         });
         assert!(native_children(cx).is_empty());
 
         pane.update(cx, |pane, cx| {
-            pane.0.set_hierarchy(true);
+            pane.set_accessibility_hierarchy(true);
             cx.notify();
         });
-        assert!(native_children(cx).is_empty());
+        assert_eq!(native_children(cx), [("Group".to_owned(), 1)]);
     }
 }
