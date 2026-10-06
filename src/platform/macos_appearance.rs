@@ -112,7 +112,7 @@ impl AppearancePlatform for MacosAppearancePlatform {
         NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
     }
 
-    fn supports_native_window_transparency(&self) -> bool {
+    fn supports_native_window_opacity(&self) -> bool {
         true
     }
 
@@ -120,7 +120,7 @@ impl AppearancePlatform for MacosAppearancePlatform {
         let workspace = NSWorkspace::sharedWorkspace();
         let contrast = workspace.accessibilityDisplayShouldIncreaseContrast();
         AccessibilityDisplayOptions {
-            reduce_transparency: workspace.accessibilityDisplayShouldReduceTransparency(),
+            require_opaque_surfaces: workspace.accessibilityDisplayShouldReduceTransparency(),
             increase_contrast: contrast,
             show_borders: show_borders_enabled(contrast),
             differentiate_without_color: workspace

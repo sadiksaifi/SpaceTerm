@@ -132,7 +132,7 @@ impl AppearancePlatform for LinuxAppearancePlatform {
     ) -> super::appearance::NativeWindowComposition {
         let support = cx.window_background_support();
         super::appearance::NativeWindowComposition {
-            transparency: support.transparent,
+            opacity: support.transparent,
             blur: support.blurred,
         }
     }

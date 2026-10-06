@@ -156,7 +156,7 @@ impl Default for TerminalPreferences {
 #[serde(deny_unknown_fields)]
 pub(crate) struct WindowPreferences {
     pub(crate) density: ChromeDensity,
-    pub(crate) transparency: f32,
+    pub(crate) opacity: f32,
     pub(crate) blur: bool,
 }
 
@@ -164,7 +164,7 @@ impl Default for WindowPreferences {
     fn default() -> Self {
         Self {
             density: ChromeDensity::Compact,
-            transparency: 0.35,
+            opacity: 0.65,
             blur: true,
         }
     }
@@ -180,7 +180,7 @@ pub(crate) struct AppearancePreferences {
 
 impl AppearancePreferences {
     pub(crate) fn validate(&self) -> Result<(), PreferenceError> {
-        finite_range(self.window.transparency, 0.0, 1.0)?;
+        finite_range(self.window.opacity, 0.0, 1.0)?;
         self.terminal.typography.validate()?;
         if self.terminal.overrides.len() > 128 {
             return Err(PreferenceError::TooManyOverrides);
@@ -198,7 +198,7 @@ impl AppearancePreferences {
         let defaults = Self::default();
         match target {
             ResetTarget::AppearanceMode => self.mode = defaults.mode,
-            ResetTarget::Transparency => self.window.transparency = defaults.window.transparency,
+            ResetTarget::Opacity => self.window.opacity = defaults.window.opacity,
             ResetTarget::Blur => self.window.blur = defaults.window.blur,
             ResetTarget::TerminalTheme(appearance) => {
                 *self.terminal.themes.get_mut(appearance) =
@@ -255,7 +255,7 @@ impl AppearancePreferences {
 )]
 pub(crate) enum ResetTarget {
     AppearanceMode,
-    Transparency,
+    Opacity,
     Blur,
     TerminalTheme(Appearance),
     TerminalFontFamily,

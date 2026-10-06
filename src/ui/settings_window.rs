@@ -699,7 +699,7 @@ impl SettingsWindow {
         if let Some(differs) = self.clipboard_preference_differs(row) {
             return differs.then_some(RowReset::Clipboard);
         }
-        if matches!(row, SettingsRowId::Transparency | SettingsRowId::Blur)
+        if matches!(row, SettingsRowId::Opacity | SettingsRowId::Blur)
             && !self.window_background(cx).adjustable()
         {
             // The row already shows its default and cannot change, so there is nothing to offer.
@@ -1128,7 +1128,7 @@ impl SettingsWindow {
     ) -> AnyElement {
         match row {
             SettingsRowId::AppearanceMode => self.render_appearance_mode(cx),
-            SettingsRowId::Transparency => self.render_transparency(appearance, cx),
+            SettingsRowId::Opacity => self.render_opacity(appearance, cx),
             SettingsRowId::Blur => self.render_blur(cx),
             SettingsRowId::TerminalTheme => self.render_current_theme(appearance, window, cx),
             SettingsRowId::Density => self.render_density(cx),
@@ -1368,7 +1368,7 @@ impl SettingsWindow {
         .into_any_element()
     }
 
-    /// Transparency and Blur as the window presents them on this desktop. Where a window effect is
+    /// Opacity and Blur as the window presents them on this desktop. Where a window effect is
     /// unavailable, both rows show the rendering defaults and the retained choices wait in the
     /// document.
     fn window_background(&self, cx: &App) -> WindowBackgroundChoices {
@@ -1379,17 +1379,17 @@ impl SettingsWindow {
             .window_background(&self.editor.document().appearance.window)
     }
 
-    fn render_transparency(
+    fn render_opacity(
         &mut self,
         appearance: &ChromeAppearance,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let background = self.window_background(cx);
-        let value = background.transparency;
+        let value = background.opacity;
         let owner = cx.weak_entity();
         Stepper::new(
-            "settings-transparency",
-            "background transparency",
+            "settings-opacity",
+            "background opacity",
             format!("{value:.2}"),
         )
         .bounds(value > 0.0, value < 1.0)
@@ -1398,7 +1398,7 @@ impl SettingsWindow {
             let _ = owner.update(cx, |settings, cx| {
                 settings.edit(
                     move |draft| {
-                        let value = &mut draft.appearance.window.transparency;
+                        let value = &mut draft.appearance.window.opacity;
                         *value = (((*value * 20.0).round() + delta as f32) / 20.0).clamp(0.0, 1.0);
                     },
                     cx,
@@ -1983,50 +1983,50 @@ impl SettingsWindow {
     fn row_description(&self, row: SettingsRowId, cx: &App) -> Option<&'static str> {
         match row {
             SettingsRowId::AppearanceMode => Some("Auto matches the system light or dark setting."),
-            SettingsRowId::Transparency | SettingsRowId::Blur => {
+            SettingsRowId::Opacity | SettingsRowId::Blur => {
                 let background = self.window_background(cx);
-                let zero_transparency = background.transparency == 0.0;
+                let fully_opaque = background.opacity == 1.0;
                 let composition = super::appearance_runtime::current(cx).chrome.composition;
                 let accessibility_forced_opaque =
-                    !zero_transparency && composition.floating_materials.is_opaque();
-                let transparency = row == SettingsRowId::Transparency;
+                    !fully_opaque && composition.floating_materials.is_opaque();
+                let opacity = row == SettingsRowId::Opacity;
                 Some(
                     match (background.unavailable, accessibility_forced_opaque) {
-                        (Some(UnavailableWindowEffect::Transparency), false) if transparency => {
-                            "Desktop transparency is unavailable on this system, so the window stays opaque. Floating surfaces use the default transparency."
+                        (Some(UnavailableWindowEffect::Opacity), false) if opacity => {
+                            "Window opacity adjustment is unavailable on this system, so the window stays opaque. Floating surfaces use the default opacity."
                         }
-                        (Some(UnavailableWindowEffect::Transparency), false) => {
-                            "Desktop transparency is unavailable on this system, so the window stays opaque. Floating surfaces use the default blur."
+                        (Some(UnavailableWindowEffect::Opacity), false) => {
+                            "Window opacity adjustment is unavailable on this system, so the window stays opaque. Floating surfaces use the default blur."
                         }
-                        (Some(UnavailableWindowEffect::Transparency), true) if transparency => {
-                            "Desktop transparency is unavailable on this system, so the window stays opaque. Accessibility settings currently keep floating surfaces opaque."
+                        (Some(UnavailableWindowEffect::Opacity), true) if opacity => {
+                            "Window opacity adjustment is unavailable on this system, so the window stays opaque. Accessibility settings currently keep floating surfaces opaque."
                         }
-                        (Some(UnavailableWindowEffect::Transparency), true) => {
-                            "Desktop transparency is unavailable on this system, so the window stays opaque. Accessibility settings currently disable floating-surface blur."
+                        (Some(UnavailableWindowEffect::Opacity), true) => {
+                            "Window opacity adjustment is unavailable on this system, so the window stays opaque. Accessibility settings currently disable floating-surface blur."
                         }
-                        (Some(UnavailableWindowEffect::Blur), false) if transparency => {
-                            "Desktop blur is unavailable on this system, so the window stays opaque. Floating surfaces use the default transparency."
+                        (Some(UnavailableWindowEffect::Blur), false) if opacity => {
+                            "Desktop blur is unavailable on this system, so the window stays opaque. Floating surfaces use the default opacity."
                         }
                         (Some(UnavailableWindowEffect::Blur), false) => {
                             "Desktop blur is unavailable on this system, so the window stays opaque. Floating surfaces use the default blur."
                         }
-                        (Some(UnavailableWindowEffect::Blur), true) if transparency => {
+                        (Some(UnavailableWindowEffect::Blur), true) if opacity => {
                             "Desktop blur is unavailable on this system, so the window stays opaque. Accessibility settings currently keep floating surfaces opaque."
                         }
                         (Some(UnavailableWindowEffect::Blur), true) => {
                             "Desktop blur is unavailable on this system, so the window stays opaque. Accessibility settings currently disable floating-surface blur."
                         }
-                        (None, _) if transparency && zero_transparency => {
-                            "The window and floating surfaces are opaque at 0. Increase this value to reveal the content behind them."
+                        (None, _) if opacity && fully_opaque => {
+                            "The window and floating surfaces are opaque at 1. Decrease this value to reveal the content behind them."
                         }
-                        (None, true) if transparency => {
-                            "Accessibility settings currently keep the window and floating surfaces opaque. Your transparency choice is kept."
+                        (None, true) if opacity => {
+                            "Accessibility settings currently keep the window and floating surfaces opaque. Your opacity choice is kept."
                         }
-                        (None, _) if transparency => {
-                            "Show the desktop behind the window and content behind floating surfaces. 0 is opaque; 1 is maximum transparency."
+                        (None, _) if opacity => {
+                            "Adjust opacity for windows and floating surfaces. 0 is transparent; 1 is opaque."
                         }
-                        (None, _) if zero_transparency => {
-                            "Blur affects the desktop behind the window and content behind floating surfaces. Increase Transparency above 0 to see it."
+                        (None, _) if fully_opaque => {
+                            "Blur affects the desktop behind the window and content behind floating surfaces. Decrease Opacity below 1 to see it."
                         }
                         (None, true) => {
                             "Accessibility settings currently disable window and floating-surface blur. Your blur choice is kept."

@@ -46,7 +46,7 @@ fn highlighted_row_materializes_against_its_card_host() {
     };
 
     let mut preferences = AppearancePreferences::default();
-    preferences.window.transparency = 1.0;
+    preferences.window.opacity = 0.0;
     let resolved = ThemeCatalog::default()
         .resolve(
             AppearanceGeneration::INITIAL,

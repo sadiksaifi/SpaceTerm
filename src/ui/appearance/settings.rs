@@ -357,14 +357,14 @@ mod tests {
 
     #[test]
     fn built_in_dark_groups_use_fill_separation_and_accessible_edges() {
-        for transparency in [0.0, 0.35, 1.0] {
+        for opacity in [1.0, 0.65, 0.0] {
             for (increase_contrast, show_borders) in [(false, false), (true, false), (false, true)]
             {
                 let mut preferences = AppearancePreferences {
                     mode: AppearanceMode::Dark,
                     ..AppearancePreferences::default()
                 };
-                preferences.window.transparency = transparency;
+                preferences.window.opacity = opacity;
                 let mut resolved = ThemeCatalog::default()
                     .resolve(
                         AppearanceGeneration::INITIAL,
@@ -413,12 +413,12 @@ mod tests {
     }
 
     #[test]
-    fn built_in_light_card_keeps_its_content_step_at_full_transparency() {
+    fn built_in_light_card_keeps_its_content_step_at_minimum_opacity() {
         let mut preferences = AppearancePreferences {
             mode: AppearanceMode::Light,
             ..AppearancePreferences::default()
         };
-        preferences.window.transparency = 1.0;
+        preferences.window.opacity = 0.0;
         let resolved = ThemeCatalog::default()
             .resolve(
                 AppearanceGeneration::INITIAL,
@@ -442,12 +442,12 @@ mod tests {
 
     #[test]
     fn built_in_light_inactive_settings_segments_suppress_hover_after_reconciliation() {
-        for transparency in [0.0, 0.35, 1.0] {
+        for opacity in [1.0, 0.65, 0.0] {
             let mut preferences = AppearancePreferences {
                 mode: AppearanceMode::Light,
                 ..AppearancePreferences::default()
             };
-            preferences.window.transparency = transparency;
+            preferences.window.opacity = opacity;
             let resolved = ThemeCatalog::default()
                 .resolve(
                     AppearanceGeneration::INITIAL,
@@ -478,11 +478,11 @@ mod tests {
                 let hovered = colors.selection_hover_background.source_over(track);
                 assert!(
                     selected.r > track.r,
-                    "inactive Light Settings {name} segment at {transparency} must stay raised over {track:?}"
+                    "inactive Light Settings {name} segment at {opacity} must stay raised over {track:?}"
                 );
                 assert_eq!(
                     hovered, selected,
-                    "inactive Light Settings {name} segment at {transparency} must suppress hover"
+                    "inactive Light Settings {name} segment at {opacity} must suppress hover"
                 );
             }
         }

@@ -8,6 +8,80 @@ fn setup() -> (Settings, Arc<MemoryStorage>) {
     (settings, storage)
 }
 
+#[test]
+fn legacy_settings_load_without_writing_and_save_as_canonical_opacity() {
+    let document = SettingsDocument {
+        revision: 12,
+        ..SettingsDocument::default()
+    };
+    let mut legacy = serde_json::to_value(document).unwrap();
+    legacy["schema_version"] = serde_json::json!(3);
+    let window = legacy["appearance"]["window"].as_object_mut().unwrap();
+    window.remove("opacity");
+    window.insert("transparency".into(), serde_json::json!(0.25));
+    let bytes = serde_json::to_vec(&legacy).unwrap();
+    let storage = MemoryStorage::with_bytes(bytes.clone());
+
+    let settings = Settings::load(storage.clone());
+
+    let loaded = settings.snapshot();
+    assert_eq!(loaded.status, None);
+    assert_eq!(loaded.committed.revision, 12);
+    assert_eq!(loaded.committed.appearance.window.opacity, 0.75);
+    assert!(settings.ensure_file().unwrap().is_none());
+    assert_eq!(storage.writes(), 0);
+    assert_eq!(
+        storage.0.lock().unwrap().snapshot.as_ref().unwrap().0,
+        bytes
+    );
+
+    settings
+        .update_committed(loaded.committed.revision, (*loaded.committed).clone())
+        .unwrap()
+        .run()
+        .unwrap();
+
+    let saved: serde_json::Value =
+        serde_json::from_slice(&storage.0.lock().unwrap().snapshot.as_ref().unwrap().0).unwrap();
+    assert_eq!(saved["schema_version"], 4);
+    assert_eq!(saved["revision"], 13);
+    assert_eq!(saved["appearance"]["window"]["opacity"], 0.75);
+    assert!(saved["appearance"]["window"].get("transparency").is_none());
+    assert_eq!(storage.writes(), 1);
+    assert_eq!(
+        Settings::load(storage).snapshot().committed,
+        settings.snapshot().committed
+    );
+}
+
+#[test]
+fn saving_migrated_settings_preserves_a_competing_writer() {
+    let mut legacy = serde_json::to_value(SettingsDocument::default()).unwrap();
+    legacy["schema_version"] = serde_json::json!(3);
+    let window = legacy["appearance"]["window"].as_object_mut().unwrap();
+    window.remove("opacity");
+    window.insert("transparency".into(), serde_json::json!(0.25));
+    let storage = MemoryStorage::with_bytes(serde_json::to_vec(&legacy).unwrap());
+    let settings = Settings::load(storage.clone());
+    let loaded = settings.snapshot().committed;
+    let job = settings
+        .update_committed(loaded.revision, (*loaded).clone())
+        .unwrap();
+    let mut external = SettingsDocument::default();
+    external.appearance.window.opacity = 0.5;
+    storage.save_elsewhere(&external);
+
+    assert_eq!(
+        job.run(),
+        Err(SettingsError::Storage(StorageError::Conflict))
+    );
+    assert_eq!(storage.writes(), 0);
+    assert_eq!(storage.document(), Some(external));
+    assert_eq!(settings.snapshot().committed, loaded);
+    settings.reload().unwrap();
+    assert_eq!(settings.snapshot().committed.appearance.window.opacity, 0.5);
+}
+
 const ZED_FAMILY: &[u8] = br##"{"name":"Sample Family","themes":[{"name":"Sample","appearance":"light","style":{"terminal.foreground":"#112233"}}]}"##;
 
 fn zed_extension(version: &str, names: &[&str]) -> ZedExtension {

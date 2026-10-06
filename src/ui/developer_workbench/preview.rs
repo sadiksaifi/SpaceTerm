@@ -116,8 +116,8 @@ impl AppearancePreview {
         self.edit(|document| document.appearance.window.density = density)
     }
 
-    pub(super) fn set_transparency(&mut self, transparency: f32) -> Result<(), PreviewError> {
-        self.edit(|document| document.appearance.window.transparency = transparency)
+    pub(super) fn set_opacity(&mut self, opacity: f32) -> Result<(), PreviewError> {
+        self.edit(|document| document.appearance.window.opacity = opacity)
     }
 
     pub(super) fn set_blur(&mut self, blur: bool) -> Result<(), PreviewError> {

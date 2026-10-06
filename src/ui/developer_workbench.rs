@@ -171,8 +171,8 @@ enum Simulation {
 
 const ACCESSIBILITY_SIMULATIONS: [(AccessibilityPreviewFact, &str); 5] = [
     (
-        AccessibilityPreviewFact::ReduceTransparency,
-        "Reduce Transparency",
+        AccessibilityPreviewFact::RequireOpaqueSurfaces,
+        "Require Opaque Surfaces",
     ),
     (
         AccessibilityPreviewFact::IncreaseContrast,
@@ -657,7 +657,7 @@ fn accessibility_enabled(fact: AccessibilityPreviewFact, cx: &App) -> bool {
         .composition
         .capabilities;
     match fact {
-        AccessibilityPreviewFact::ReduceTransparency => capabilities.reduce_transparency,
+        AccessibilityPreviewFact::RequireOpaqueSurfaces => capabilities.require_opaque_surfaces,
         AccessibilityPreviewFact::IncreaseContrast => capabilities.increase_contrast,
         AccessibilityPreviewFact::ShowBorders => capabilities.show_borders,
         AccessibilityPreviewFact::ReduceMotion => capabilities.reduce_motion,

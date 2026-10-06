@@ -14,45 +14,43 @@ use crate::ui::appearance_runtime;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use crate::ui::sidebar_window::form::{FormGroup, FormRow, FormRowLayout};
 
-/// The transparency stops a capture compares. A document between stops selects none.
+/// The opacity stops a capture compares. A document between stops selects none.
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum TransparencyStop {
-    Opaque,
+enum OpacityStop {
+    Minimum,
     Default,
-    Maximum,
+    Opaque,
 }
 
-impl TransparencyStop {
-    const ALL: [Self; 3] = [Self::Opaque, Self::Default, Self::Maximum];
+impl OpacityStop {
+    const ALL: [Self; 3] = [Self::Minimum, Self::Default, Self::Opaque];
 
     fn value(self) -> f32 {
         match self {
-            Self::Opaque => 0.0,
-            Self::Default => SettingsDocument::default().appearance.window.transparency,
-            Self::Maximum => 1.0,
+            Self::Minimum => 0.0,
+            Self::Default => SettingsDocument::default().appearance.window.opacity,
+            Self::Opaque => 1.0,
         }
     }
 
     fn label(self) -> &'static str {
         match self {
-            Self::Opaque => "Opaque",
+            Self::Minimum => "Minimum",
             Self::Default => "Default",
-            Self::Maximum => "Maximum",
+            Self::Opaque => "Opaque",
         }
     }
 
     fn selector(self) -> &'static str {
         match self {
-            Self::Opaque => "workbench-transparency-opaque",
-            Self::Default => "workbench-transparency-default",
-            Self::Maximum => "workbench-transparency-maximum",
+            Self::Minimum => "workbench-opacity-minimum",
+            Self::Default => "workbench-opacity-default",
+            Self::Opaque => "workbench-opacity-opaque",
         }
     }
 
-    fn of(transparency: f32) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|stop| stop.value() == transparency)
+    fn of(opacity: f32) -> Option<Self> {
+        Self::ALL.into_iter().find(|stop| stop.value() == opacity)
     }
 }
 
@@ -64,7 +62,7 @@ fn reset_entries(cx: &gpui::App) -> Vec<MenuEntry<ResetTarget>> {
         .clone();
     let mut fields = vec![
         MenuEntry::action("Appearance Mode", ResetTarget::AppearanceMode),
-        MenuEntry::action("Transparency", ResetTarget::Transparency),
+        MenuEntry::action("Opacity", ResetTarget::Opacity),
         MenuEntry::action("Blur", ResetTarget::Blur),
         MenuEntry::action(
             "Light Terminal Theme",
@@ -117,8 +115,8 @@ pub(super) fn render(
         .capabilities
         .window_background(window_preferences);
     let background_description = background.unavailable.map(|effect| match effect {
-        UnavailableWindowEffect::Transparency => "Desktop transparency is unavailable on this system, so the window stays opaque. Transparency and Blur use their defaults.",
-        UnavailableWindowEffect::Blur => "Desktop blur is unavailable on this system, so the window stays opaque. Transparency and Blur use their defaults.",
+        UnavailableWindowEffect::Opacity => "Window opacity adjustment is unavailable on this system, so the window stays opaque. Opacity and Blur use their defaults.",
+        UnavailableWindowEffect::Blur => "Desktop blur is unavailable on this system, so the window stays opaque. Opacity and Blur use their defaults.",
     });
 
     let owner = cx.weak_entity();
@@ -146,11 +144,11 @@ pub(super) fn render(
         });
     });
     let owner = cx.weak_entity();
-    let transparency = SegmentedControl::new(
-        "workbench-transparency",
-        "Transparency",
-        &TransparencyStop::of(background.transparency),
-        TransparencyStop::ALL
+    let opacity = SegmentedControl::new(
+        "workbench-opacity",
+        "Opacity",
+        &OpacityStop::of(background.opacity),
+        OpacityStop::ALL
             .into_iter()
             .map(|stop| {
                 SegmentedOption::new(Some(stop), stop.label()).debug_selector(stop.selector())
@@ -159,15 +157,15 @@ pub(super) fn render(
     )
     .expect("three stops are within the bounded option set")
     .disabled(!background.adjustable())
-    .debug_selector("workbench-transparency")
+    .debug_selector("workbench-opacity")
     .on_change(move |change, _, cx| {
         let Some(stop) = *change.requested() else {
             return;
         };
         let _ = owner.update(cx, |workbench, cx| {
             workbench.apply(
-                |preview| preview.set_transparency(stop.value()),
-                "Transparency changed",
+                |preview| preview.set_opacity(stop.value()),
+                "Opacity changed",
                 cx,
             );
         });
@@ -241,9 +239,9 @@ pub(super) fn render(
             .render(appearance, window, cx)
             .into_any_element(),
         describe_background(FormRow::new(
-            "workbench-row-appearance-transparency",
-            "Transparency",
-            transparency,
+            "workbench-row-appearance-opacity",
+            "Opacity",
+            opacity,
         ))
         .render(appearance, window, cx)
         .into_any_element(),

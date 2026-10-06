@@ -10,7 +10,7 @@ use crate::platform::permission_access::AccessibilityNaming;
 /// One named group of Settings presented as one navigation entry and one content region.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum SettingsSectionId {
-    /// How SpaceTerm's windows present themselves: density, transparency, and blur.
+    /// How SpaceTerm's windows present themselves: density, opacity, and blur.
     Interface,
     /// Terminal typography and text rendering.
     Font,
@@ -55,7 +55,7 @@ impl SettingsSectionId {
         desktop: &crate::desktop_profile::DesktopPresentation,
     ) -> &'static str {
         match self {
-            Self::Interface => "Density, transparency, and blur for SpaceTerm's windows.",
+            Self::Interface => "Density, opacity, and blur for SpaceTerm's windows.",
             Self::Font => "The typeface and text rendering in terminal panes.",
             Self::Themes => {
                 "Light, dark, or automatic appearance, and the colors terminal panes use in each. Themes published for Zed work too."
@@ -96,7 +96,7 @@ impl SettingsSectionId {
 pub(super) enum SettingsRowId {
     /// The shared light, dark, or automatic choice.
     AppearanceMode,
-    Transparency,
+    Opacity,
     Blur,
     Density,
     /// The Terminal Theme in use, or both slots under Auto.
@@ -149,7 +149,7 @@ impl SettingsRowId {
     pub(super) fn reset_target(self, appearance: Appearance) -> Option<ResetTarget> {
         Some(match self {
             Self::AppearanceMode => ResetTarget::AppearanceMode,
-            Self::Transparency => ResetTarget::Transparency,
+            Self::Opacity => ResetTarget::Opacity,
             Self::Blur => ResetTarget::Blur,
             Self::Density => ResetTarget::Density,
             Self::TerminalTheme => ResetTarget::TerminalTheme(appearance),
@@ -282,12 +282,12 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         selector: "settings-row-density",
     },
     SettingsRowDescriptor {
-        id: SettingsRowId::Transparency,
+        id: SettingsRowId::Opacity,
         section: SettingsSectionId::Interface,
         group: "Window",
-        label: "Transparency",
-        keywords: &["opacity", "transparent", "opaque", "window", "terminal"],
-        selector: "settings-row-transparency",
+        label: "Opacity",
+        keywords: &["opaque", "window", "terminal"],
+        selector: "settings-row-opacity",
     },
     SettingsRowDescriptor {
         id: SettingsRowId::Blur,
@@ -769,7 +769,7 @@ mod tests {
     /// The complete preference row identity set, so the catalog cannot silently omit one.
     const EVERY_PREFERENCE_ROW: [SettingsRowId; 26] = [
         SettingsRowId::AppearanceMode,
-        SettingsRowId::Transparency,
+        SettingsRowId::Opacity,
         SettingsRowId::Blur,
         SettingsRowId::Density,
         SettingsRowId::TerminalTheme,

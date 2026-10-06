@@ -2838,7 +2838,7 @@ mod tests {
 
     fn prepared_appearance(
         appearance: crate::appearance::Appearance,
-        transparency: f32,
+        opacity: f32,
     ) -> super::super::appearance::ChromeAppearance {
         let mut preferences = crate::appearance::AppearancePreferences {
             mode: match appearance {
@@ -2847,7 +2847,7 @@ mod tests {
             },
             ..crate::appearance::AppearancePreferences::default()
         };
-        preferences.window.transparency = transparency;
+        preferences.window.opacity = opacity;
         let resolved = crate::appearance::ThemeCatalog::default()
             .resolve(
                 crate::appearance::AppearanceGeneration::INITIAL,
@@ -2862,9 +2862,8 @@ mod tests {
 
     #[test]
     fn light_pane_rim_uses_the_accepted_terminal_surface_as_its_host() {
-        for transparency in [0.0, 0.35, 1.0] {
-            let appearance =
-                prepared_appearance(crate::appearance::Appearance::Light, transparency);
+        for opacity in [1.0, 0.65, 0.0] {
+            let appearance = prepared_appearance(crate::appearance::Appearance::Light, opacity);
             let window = appearance.control_host_background(spaceterm_ui::ControlHost::Window);
             for terminal in [Color::BLACK, Color::rgb(0xfafafa), Color::rgb(0x38658a)] {
                 let host = appearance.pane_surface(terminal).source_over(window);
@@ -2872,7 +2871,7 @@ mod tests {
                 let contrast = edge.contrast_ratio(host);
                 assert!(
                     (1.20..=1.30).contains(&contrast),
-                    "Light Pane edge {edge:?} must remain in its surface band on {host:?} at transparency {transparency}"
+                    "Light Pane edge {edge:?} must remain in its surface band on {host:?} at opacity {opacity}"
                 );
             }
         }
@@ -2880,8 +2879,8 @@ mod tests {
 
     #[test]
     fn dark_pane_rim_uses_the_accepted_terminal_surface_as_its_host() {
-        for transparency in [0.0, 0.35, 1.0] {
-            let appearance = prepared_appearance(crate::appearance::Appearance::Dark, transparency);
+        for opacity in [1.0, 0.65, 0.0] {
+            let appearance = prepared_appearance(crate::appearance::Appearance::Dark, opacity);
             for terminal in [Color::BLACK, Color::rgb(0xfafafa), Color::rgb(0x38658a)] {
                 let window = appearance.control_host_background(spaceterm_ui::ControlHost::Window);
                 let host = appearance.pane_surface(terminal).source_over(window);

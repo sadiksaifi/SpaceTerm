@@ -2628,7 +2628,7 @@ mod tests {
         };
 
         let mut preferences = AppearancePreferences::default();
-        preferences.window.transparency = 1.0;
+        preferences.window.opacity = 0.0;
         let resolved = ThemeCatalog::default()
             .resolve(
                 AppearanceGeneration::INITIAL,

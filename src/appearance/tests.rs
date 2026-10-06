@@ -5,7 +5,7 @@ use super::*;
 #[test]
 fn floating_backdrop_alpha_limit_only_opens_over_an_effective_native_backdrop() {
     let mut preferences = AppearancePreferences::default();
-    preferences.window.transparency = 1.0;
+    preferences.window.opacity = 0.0;
 
     let supported = ResolvedWindowComposition::resolve(
         &preferences.window,
@@ -27,7 +27,7 @@ fn floating_backdrop_alpha_limit_only_opens_over_an_effective_native_backdrop() 
     assert_eq!(unsupported.materials.floating_backdrop_alpha_limit(), 1.0);
     assert_eq!(inaccessible.materials.floating_backdrop_alpha_limit(), 1.0);
 
-    preferences.window.transparency = 0.0;
+    preferences.window.opacity = 1.0;
     let opaque = ResolvedWindowComposition::resolve(
         &preferences.window,
         CompositionCapabilities::new(true, true),
@@ -37,7 +37,7 @@ fn floating_backdrop_alpha_limit_only_opens_over_an_effective_native_backdrop() 
 }
 
 #[test]
-fn transparency_resolves_endpoints_in_both_modes_without_changing_theme_colors() {
+fn opacity_resolves_endpoints_in_both_modes_without_changing_theme_colors() {
     let catalog = ThemeCatalog::default();
     for mode in [AppearanceMode::Light, AppearanceMode::Dark] {
         let mut preferences = AppearancePreferences {
@@ -45,8 +45,8 @@ fn transparency_resolves_endpoints_in_both_modes_without_changing_theme_colors()
             ..Default::default()
         };
         let opaque = resolve(&preferences);
-        for transparency in [0.0, 0.15, 0.35, 1.0] {
-            preferences.window.transparency = transparency;
+        for opacity in [1.0, 0.85, 0.65, 0.0] {
+            preferences.window.opacity = opacity;
             let resolved = catalog
                 .resolve(
                     AppearanceGeneration::INITIAL,
@@ -80,7 +80,7 @@ fn transparency_resolves_endpoints_in_both_modes_without_changing_theme_colors()
                 .pane_rim_on(resolved.terminal.colors.background)
                 .source_over(host);
             assert!(rim_band.contains(&edge.contrast_ratio(host)));
-            if transparency == 0.0 {
+            if opacity == 1.0 {
                 assert_eq!(pane, opaque.terminal.colors.background);
                 assert_eq!(sheet.a, 255);
                 assert_eq!(controls.row_selected_background.a, 255);
@@ -96,9 +96,9 @@ fn transparency_resolves_endpoints_in_both_modes_without_changing_theme_colors()
                 );
                 assert!(
                     controls.elevated_surface_background.a > sheet.a,
-                    "{mode:?} at {transparency}: an elevated resting surface retains more color than the sheet"
+                    "{mode:?} at {opacity}: an elevated resting surface retains more color than the sheet"
                 );
-                if transparency == 1.0 {
+                if opacity == 0.0 {
                     // The sheet clears while elevated controls keep enough tint to retain shape.
                     assert_eq!(sheet.a, 0);
                     assert!(pane.a > 0 && pane.a < 255);
@@ -115,13 +115,13 @@ fn transparency_resolves_endpoints_in_both_modes_without_changing_theme_colors()
     }
 }
 
-/// The Pane material of one appearance, prepared at one Transparency Setting.
-fn prepared_appearance(mode: AppearanceMode, transparency: f32) -> ResolvedAppearance {
+/// The Pane material of one appearance, prepared at one Opacity Setting.
+fn prepared_appearance(mode: AppearanceMode, opacity: f32) -> ResolvedAppearance {
     let mut preferences = AppearancePreferences {
         mode,
         ..Default::default()
     };
-    preferences.window.transparency = transparency;
+    preferences.window.opacity = opacity;
     ThemeCatalog::default()
         .resolve(
             AppearanceGeneration::INITIAL,
@@ -136,8 +136,8 @@ fn prepared_appearance(mode: AppearanceMode, transparency: f32) -> ResolvedAppea
 /// A Dark Pane sits one quiet step above the window root, measured against the opaque reference.
 #[test]
 fn dark_pane_rests_one_subtle_step_above_the_window_root() {
-    for transparency in [0.0, 0.05, 0.15, 0.35, 0.7, 1.0] {
-        let resolved = prepared_appearance(AppearanceMode::Dark, transparency);
+    for opacity in [1.0, 0.95, 0.85, 0.65, 0.3, 0.0] {
+        let resolved = prepared_appearance(AppearanceMode::Dark, opacity);
         let prepared = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
         let root = prepared.colors.background;
         let pane = prepared
@@ -148,23 +148,23 @@ fn dark_pane_rests_one_subtle_step_above_the_window_root() {
             [(pane.r, root.r), (pane.g, root.g), (pane.b, root.b)]
                 .into_iter()
                 .all(|(pane, root)| pane > root),
-            "a Dark Pane stays lighter than the window root at transparency {transparency}: pane={pane:?}",
+            "a Dark Pane stays lighter than the window root at opacity {opacity}: pane={pane:?}",
         );
         let step = root.contrast_ratio(pane);
         assert!(
             (1.015..=1.07).contains(&step),
-            "a Dark Pane stays within one subtle step of the window root at transparency {transparency}: step={step}, pane={pane:?}",
+            "a Dark Pane stays within one subtle step of the window root at opacity {opacity}: step={step}, pane={pane:?}",
         );
     }
 }
 
 /// A Dark Pane transmits with the window and keeps only the ink its step below the root costs.
 #[test]
-fn dark_pane_transmits_what_the_transparency_setting_asks() {
-    let settings = [0.0_f32, 0.15, 0.35, 0.7, 1.0];
+fn dark_pane_transmits_what_the_opacity_setting_asks() {
+    let settings = [0.0_f32, 0.3, 0.65, 0.85, 1.0];
     let mut previous: Option<f64> = None;
-    for transparency in settings {
-        let resolved = prepared_appearance(AppearanceMode::Dark, transparency);
+    for opacity in settings {
+        let resolved = prepared_appearance(AppearanceMode::Dark, opacity);
         let prepared = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
         let sheet = prepared.surface(SurfaceRole::Sheet, prepared.colors.background);
         let pane = prepared.pane_surface(resolved.terminal.colors.background);
@@ -174,18 +174,18 @@ fn dark_pane_transmits_what_the_transparency_setting_asks() {
 
         if let Some(previous) = previous {
             assert!(
-                terminal > previous,
-                "a Dark Pane admits more desktop as the Setting rises: {terminal} at transparency {transparency} after {previous}",
+                terminal < previous,
+                "a Dark Pane admits less desktop as opacity rises: {terminal} at opacity {opacity} after {previous}",
             );
         }
         previous = Some(terminal);
         assert!(
             terminal >= chrome * 0.8,
-            "a Dark Pane admits nearly what the chrome admits at transparency {transparency}: terminal={terminal}, chrome={chrome}",
+            "a Dark Pane admits nearly what the chrome admits at opacity {opacity}: terminal={terminal}, chrome={chrome}",
         );
         assert!(
-            terminal < chrome || transparency == 0.0,
-            "a Dark Pane stays denser than the chrome at transparency {transparency}",
+            terminal < chrome || opacity == 1.0,
+            "a Dark Pane stays denser than the chrome at opacity {opacity}",
         );
     }
 }
@@ -193,7 +193,7 @@ fn dark_pane_transmits_what_the_transparency_setting_asks() {
 /// An authored Terminal background that states a color keeps it; a neutral one joins the ladder.
 #[test]
 fn dark_pane_keeps_a_stated_terminal_background_apart_from_the_neutral_ladder() {
-    let resolved = prepared_appearance(AppearanceMode::Dark, 0.35);
+    let resolved = prepared_appearance(AppearanceMode::Dark, 0.65);
     let prepared = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
     let neutral = prepared.pane_surface(resolved.terminal.colors.background);
     let stated = prepared.pane_surface(Color::rgb(0x002b36));
@@ -313,12 +313,12 @@ fn light_navigation_selections_share_one_contrast_direction_across_material_sett
     let desktop = Color::rgb(0x808080);
     let weight = |color: Color| i32::from(color.r) + i32::from(color.g) + i32::from(color.b);
 
-    for transparency in [0.0, 0.35, 1.0] {
+    for opacity in [1.0, 0.65, 0.0] {
         let mut preferences = AppearancePreferences {
             mode: AppearanceMode::Light,
             ..Default::default()
         };
-        preferences.window.transparency = transparency;
+        preferences.window.opacity = opacity;
         let resolved = catalog
             .resolve(
                 AppearanceGeneration::INITIAL,
@@ -341,11 +341,11 @@ fn light_navigation_selections_share_one_contrast_direction_across_material_sett
             .source_over(sheet);
         assert_eq!(
             tab_shell, sidebar_shell,
-            "Light navigation hosts should share one shell at {transparency}"
+            "Light navigation hosts should share one shell at {opacity}"
         );
         assert_eq!(
             tab_shell, sheet,
-            "Light navigation shell should match the root at {transparency}"
+            "Light navigation shell should match the root at {opacity}"
         );
 
         let active_tab = appearance
@@ -369,22 +369,22 @@ fn light_navigation_selections_share_one_contrast_direction_across_material_sett
 
         assert_ne!(
             tab_direction, 0,
-            "Active Tab should remain distinct from its Light shell at {transparency}"
+            "Active Tab should remain distinct from its Light shell at {opacity}"
         );
         assert_ne!(
             sidebar_direction, 0,
-            "selected sidebar row should remain distinct from its Light shell at {transparency}"
+            "selected sidebar row should remain distinct from its Light shell at {opacity}"
         );
         assert_eq!(
             tab_direction, sidebar_direction,
             "Active Tab and selected sidebar row should move in the same contrast direction from \
-             their Light shell at {transparency}: tab={active_tab:?}, sidebar={selected_sidebar:?}, \
+             their Light shell at {opacity}: tab={active_tab:?}, sidebar={selected_sidebar:?}, \
              shell={tab_shell:?}"
         );
         assert_eq!(
             (colors.tab_active_border.a, colors.row_selected_border.a),
             (4, 4),
-            "Light navigation should retain its authored chip lift at {transparency}"
+            "Light navigation should retain its authored chip lift at {opacity}"
         );
     }
 }
@@ -393,8 +393,8 @@ fn light_navigation_selections_share_one_contrast_direction_across_material_sett
 /// to the ladder ceiling as glass engages.
 #[test]
 fn light_pane_rests_one_subtle_step_above_the_window_root() {
-    for transparency in [0.0, 0.05, 0.15, 0.35, 0.7, 1.0] {
-        let resolved = prepared_appearance(AppearanceMode::Light, transparency);
+    for opacity in [1.0, 0.95, 0.85, 0.65, 0.3, 0.0] {
+        let resolved = prepared_appearance(AppearanceMode::Light, opacity);
         let prepared = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
         let root = prepared.colors.background;
         let pane = prepared
@@ -405,12 +405,12 @@ fn light_pane_rests_one_subtle_step_above_the_window_root() {
             [(pane.r, root.r), (pane.g, root.g), (pane.b, root.b)]
                 .into_iter()
                 .all(|(pane, root)| pane > root),
-            "a Light Pane stays brighter than the window root at transparency {transparency}: pane={pane:?}",
+            "a Light Pane stays brighter than the window root at opacity {opacity}: pane={pane:?}",
         );
         let step = pane.contrast_ratio(root);
         assert!(
             (1.035..=1.24).contains(&step),
-            "a Light Pane stays within one subtle step of the window root at transparency {transparency}: step={step}, pane={pane:?}",
+            "a Light Pane stays within one subtle step of the window root at opacity {opacity}: step={step}, pane={pane:?}",
         );
     }
 }
@@ -418,11 +418,11 @@ fn light_pane_rests_one_subtle_step_above_the_window_root() {
 /// A Light Pane transmits with the window and keeps only the overlay its step above the root
 /// costs, which is wider than a Dark Pane's.
 #[test]
-fn light_pane_transmits_what_the_transparency_setting_asks() {
-    let settings = [0.0_f32, 0.15, 0.35, 0.7, 1.0];
+fn light_pane_transmits_what_the_opacity_setting_asks() {
+    let settings = [0.0_f32, 0.3, 0.65, 0.85, 1.0];
     let mut previous: Option<f64> = None;
-    for transparency in settings {
-        let resolved = prepared_appearance(AppearanceMode::Light, transparency);
+    for opacity in settings {
+        let resolved = prepared_appearance(AppearanceMode::Light, opacity);
         let prepared = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
         let sheet = prepared.surface(SurfaceRole::Sheet, prepared.colors.background);
         let pane = prepared.pane_surface(resolved.terminal.colors.background);
@@ -432,32 +432,32 @@ fn light_pane_transmits_what_the_transparency_setting_asks() {
 
         if let Some(previous) = previous {
             assert!(
-                terminal > previous,
-                "a Light Pane admits more desktop as the Setting rises: {terminal} at transparency {transparency} after {previous}",
+                terminal < previous,
+                "a Light Pane admits less desktop as opacity rises: {terminal} at opacity {opacity} after {previous}",
             );
         }
         previous = Some(terminal);
         // Near-white ink over a near-white root costs more coverage, so this bound is below Dark's.
         assert!(
             terminal >= chrome * 0.6,
-            "a Light Pane admits nearly what the chrome admits at transparency {transparency}: terminal={terminal}, chrome={chrome}",
+            "a Light Pane admits nearly what the chrome admits at opacity {opacity}: terminal={terminal}, chrome={chrome}",
         );
         assert!(
-            terminal < chrome || transparency == 0.0,
-            "a Light Pane stays denser than the chrome at transparency {transparency}",
+            terminal < chrome || opacity == 1.0,
+            "a Light Pane stays denser than the chrome at opacity {opacity}",
         );
     }
 }
 
 /// A Light selected chip spends one overlay for its step and transmits the rest, so its contrast
-/// stays within a band as the Setting rises.
+/// stays within a band as opacity falls.
 #[test]
 fn light_selected_navigation_keeps_one_step_across_the_setting() {
     use spaceterm_ui::ControlHost;
 
     let desktop = Color::rgb(0x2b3a55);
-    for transparency in [0.0, 0.15, 0.35, 0.7, 1.0] {
-        let resolved = prepared_appearance(AppearanceMode::Light, transparency);
+    for opacity in [1.0, 0.85, 0.65, 0.3, 0.0] {
+        let resolved = prepared_appearance(AppearanceMode::Light, opacity);
         let appearance = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
         let shell = appearance
             .surface(SurfaceRole::Sheet, appearance.colors.background)
@@ -484,17 +484,17 @@ fn light_selected_navigation_keeps_one_step_across_the_setting() {
             let step = chip.contrast_ratio(shell);
             assert!(
                 (1.15..=2.35).contains(&step),
-                "a Light {name} holds one step from its shell at transparency {transparency}: step={step}, chip={chip:?} over {shell:?}",
+                "a Light {name} holds one step from its shell at opacity {opacity}: step={step}, chip={chip:?} over {shell:?}",
             );
             assert!(
                 chip.r > shell.r,
-                "a Light {name} lifts from its shell at transparency {transparency}",
+                "a Light {name} lifts from its shell at opacity {opacity}",
             );
             let ink = appearance.selection_surface(host, fill).a;
             assert_eq!(
                 ink == 255,
-                transparency == 0.0,
-                "a Light {name} transmits at transparency {transparency}: ink={ink}",
+                opacity == 1.0,
+                "a Light {name} transmits at opacity {opacity}: ink={ink}",
             );
         }
     }
@@ -503,10 +503,10 @@ fn light_selected_navigation_keeps_one_step_across_the_setting() {
 /// The Light Terminal backing is the Pane's own color under the window material, with no
 /// elevation rung of its own, and window activation does not change it.
 #[test]
-fn light_terminal_backing_applies_transparency_without_an_elevation_tint() {
+fn light_terminal_backing_applies_opacity_without_an_elevation_tint() {
     let mut previous: Option<u8> = None;
-    for transparency in [0.0, 0.05, 0.15, 0.35, 0.7, 1.0] {
-        let resolved = prepared_appearance(AppearanceMode::Light, transparency);
+    for opacity in [1.0, 0.95, 0.85, 0.65, 0.3, 0.0] {
+        let resolved = prepared_appearance(AppearanceMode::Light, opacity);
         let background = resolved.terminal.colors.background;
         let (active, inactive) =
             crate::ui::appearance::ChromeAppearance::prepare_variants(&resolved.chrome);
@@ -516,7 +516,7 @@ fn light_terminal_backing_applies_transparency_without_an_elevation_tint() {
             assert_eq!(
                 pane,
                 prepared.surface(SurfaceRole::Surface, background),
-                "Light Terminal at transparency {transparency}, active={}",
+                "Light Terminal at opacity {opacity}, active={}",
                 prepared.active,
             );
             assert!(
@@ -527,7 +527,7 @@ fn light_terminal_backing_applies_transparency_without_an_elevation_tint() {
         if let Some(previous) = previous {
             assert!(
                 alpha < previous,
-                "the Light Terminal backing thins as the Setting rises: {alpha} at transparency {transparency} after {previous}",
+                "the Light Terminal backing thins as opacity falls: {alpha} at opacity {opacity} after {previous}",
             );
         }
         previous = Some(alpha);
@@ -550,14 +550,14 @@ fn light_terminal_backing_uses_custom_background_as_its_material_color() {
 }
 
 #[test]
-fn selected_surfaces_follow_transparency_in_both_appearances() {
+fn selected_surfaces_follow_opacity_in_both_appearances() {
     for mode in [AppearanceMode::Light, AppearanceMode::Dark] {
-        for transparency in [0.0, 0.35, 1.0] {
+        for opacity in [1.0, 0.65, 0.0] {
             let mut preferences = AppearancePreferences {
                 mode,
                 ..Default::default()
             };
-            preferences.window.transparency = transparency;
+            preferences.window.opacity = opacity;
             let resolved = ThemeCatalog::default()
                 .resolve(
                     AppearanceGeneration::INITIAL,
@@ -572,12 +572,12 @@ fn selected_surfaces_follow_transparency_in_both_appearances() {
                 prepared.colors.panel_background,
                 prepared.colors.row_selected_background,
             );
-            if transparency == 0.0 {
+            if opacity == 1.0 {
                 assert_eq!(selected, prepared.colors.row_selected_background);
             } else {
                 assert!(
                     selected.a > 0 && selected.a < 255,
-                    "{mode:?} selected surface must transmit its backdrop at {transparency}: {selected:?}"
+                    "{mode:?} selected surface must transmit its backdrop at {opacity}: {selected:?}"
                 );
                 // Against the rendered shell, the promised bound is the ink spent, not a ratio.
                 let host = prepared.colors.panel_background;
@@ -596,12 +596,12 @@ fn selected_surfaces_follow_transparency_in_both_appearances() {
 
 /// Row hover and selection must remain distinct on every host once their fills are translucent.
 #[test]
-fn surface_ladder_holds_its_order_from_the_default_setting_to_the_maximum() {
+fn surface_ladder_holds_its_order_as_opacity_decreases() {
     for appearance in [Appearance::Light, Appearance::Dark] {
         let reference = builtin_chrome_base(appearance).opaque_presentation();
-        for transparency in [0.05, 0.15, 0.35, 0.7, 1.0] {
+        for opacity in [0.95, 0.85, 0.65, 0.3, 0.0] {
             let mut preferences = AppearancePreferences::default();
-            preferences.window.transparency = transparency;
+            preferences.window.opacity = opacity;
             let materials = ResolvedWindowComposition::resolve(
                 &preferences.window,
                 CompositionCapabilities::new(true, true),
@@ -615,7 +615,7 @@ fn surface_ladder_holds_its_order_from_the_default_setting_to_the_maximum() {
             );
             assert!(
                 pane.a > 0,
-                "{appearance:?} at {transparency}: Pane material disappeared"
+                "{appearance:?} at {opacity}: Pane material disappeared"
             );
             for (host_name, host) in [
                 ("shell", reference.panel_background),
@@ -634,7 +634,7 @@ fn surface_ladder_holds_its_order_from_the_default_setting_to_the_maximum() {
                 }
                 assert!(
                     hover.a > 0 && selected.a > hover.a,
-                    "{appearance:?} at {transparency}: row ladder collapsed on the \
+                    "{appearance:?} at {opacity}: row ladder collapsed on the \
                      {host_name}: hover={} selection={}",
                     hover.a,
                     selected.a
@@ -645,14 +645,14 @@ fn surface_ladder_holds_its_order_from_the_default_setting_to_the_maximum() {
 }
 
 /// Light's hierarchy is checked as rendered over a desktop: the navigation shell matches the
-/// root, while raised surfaces and navigation selections lift across the transparency range.
+/// root, while raised surfaces and navigation selections lift across the opacity range.
 #[test]
 fn light_surfaces_separate_over_the_desktop_at_every_setting() {
     let reference = builtin_chrome_base(Appearance::Light).opaque_presentation();
     let desktop = Color::rgb(0x808080);
-    for (transparency, minimum) in [(0.15, 11_u8), (0.35, 10), (0.7, 5), (1.0, 2)] {
+    for (opacity, minimum) in [(0.85, 11_u8), (0.65, 10), (0.3, 5), (0.0, 2)] {
         let mut preferences = AppearancePreferences::default();
-        preferences.window.transparency = transparency;
+        preferences.window.opacity = opacity;
         let materials = ResolvedWindowComposition::resolve(
             &preferences.window,
             CompositionCapabilities::new(true, true),
@@ -694,7 +694,7 @@ fn light_surfaces_separate_over_the_desktop_at_every_setting() {
             let step = surface.g.abs_diff(host.g);
             assert!(
                 step >= minimum.min(3),
-                "{name} at {transparency}: {step} levels of separation"
+                "{name} at {opacity}: {step} levels of separation"
             );
         }
         assert!(pane.g > sheet.g, "a Pane should lift from the light sheet");
@@ -708,16 +708,16 @@ fn light_surfaces_separate_over_the_desktop_at_every_setting() {
         );
         assert!(
             pane.g.saturating_sub(sheet.g) >= minimum,
-            "a Pane at {transparency} must stay clearly above the sheet: {pane:?} over {sheet:?}"
+            "a Pane at {opacity} must stay clearly above the sheet: {pane:?} over {sheet:?}"
         );
     }
 }
 
 #[test]
-fn transparency_rejects_invalid_numbers() {
+fn opacity_rejects_invalid_numbers() {
     let mut preferences = AppearancePreferences::default();
     for invalid in [-0.01, 1.01, f32::NAN, f32::INFINITY] {
-        preferences.window.transparency = invalid;
+        preferences.window.opacity = invalid;
         assert!(preferences.validate().is_err());
     }
 }
@@ -774,7 +774,7 @@ fn defaults_select_spaceterm_owned_themes_in_both_appearances() {
 }
 
 #[test]
-fn built_in_resting_surfaces_do_not_introduce_a_color_cast_at_any_transparency() {
+fn built_in_resting_surfaces_do_not_introduce_a_color_cast_at_any_opacity() {
     let catalog = ThemeCatalog::default();
     for mode in [AppearanceMode::Light, AppearanceMode::Dark] {
         let mut preferences = AppearancePreferences {
@@ -782,7 +782,7 @@ fn built_in_resting_surfaces_do_not_introduce_a_color_cast_at_any_transparency()
             ..Default::default()
         };
         for step in 0..=100 {
-            preferences.window.transparency = step as f32 / 100.0;
+            preferences.window.opacity = step as f32 / 100.0;
             let resolved = catalog
                 .resolve(
                     AppearanceGeneration::INITIAL,

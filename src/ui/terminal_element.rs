@@ -5460,7 +5460,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_background_matching_default_still_paints_over_transparency() {
+    fn explicit_background_matching_default_still_paints_over_reduced_opacity() {
         let colors = colors();
         let mut explicit = cell("a");
         explicit.background_source = TerminalColor::Rgb(colors.background);

@@ -6,6 +6,142 @@ use crate::appearance::{
 };
 
 #[test]
+fn legacy_transparency_exports_as_opacity() {
+    for (transparency, expected_opacity) in [(0.0, 1.0), (0.35, 0.65), (0.6, 0.4), (1.0, 0.0)] {
+        let legacy = legacy_document(
+            &SettingsDocument::default(),
+            serde_json::json!(transparency),
+        );
+
+        let document = parse_settings(&serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let exported: serde_json::Value =
+            serde_json::from_str(&export_settings(&document).unwrap()).unwrap();
+        let opacity = exported["appearance"]["window"]["opacity"]
+            .as_f64()
+            .unwrap();
+        assert_eq!(opacity, expected_opacity);
+        assert_eq!(exported["schema_version"], 4);
+        assert!(
+            exported["appearance"]["window"]
+                .get("transparency")
+                .is_none()
+        );
+        assert_eq!(
+            parse_settings(&serde_json::to_vec(&exported).unwrap()).unwrap(),
+            document
+        );
+    }
+}
+
+fn legacy_document(
+    document: &SettingsDocument,
+    transparency: serde_json::Value,
+) -> serde_json::Value {
+    let mut legacy = serde_json::to_value(document).unwrap();
+    legacy["schema_version"] = serde_json::json!(3);
+    let window = legacy["appearance"]["window"].as_object_mut().unwrap();
+    window.remove("opacity");
+    window.insert("transparency".into(), transparency);
+    legacy
+}
+
+#[test]
+fn legacy_migration_preserves_revision_and_every_other_setting() {
+    let mut expected = reset_fixture();
+    expected.revision = 37;
+    expected.appearance.window.opacity = 0.75;
+    expected.clipboard.allow_read = true;
+    expected.updates.automatic_downloads = false;
+    expected.keybindings = serde_json::from_value(serde_json::json!({"close_tab": null})).unwrap();
+    let legacy = legacy_document(&expected, serde_json::json!(0.25));
+
+    assert_eq!(
+        parse_settings(&serde_json::to_vec(&legacy).unwrap()).unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn legacy_migration_rejects_invalid_transparency_values() {
+    for transparency in [
+        serde_json::json!(-0.01),
+        serde_json::json!(1.01),
+        serde_json::json!(1e100),
+    ] {
+        let legacy = legacy_document(&SettingsDocument::default(), transparency);
+        assert_eq!(
+            parse_settings(&serde_json::to_vec(&legacy).unwrap()),
+            Err(SettingsDocumentError::InvalidAppearance)
+        );
+    }
+    for transparency in [
+        serde_json::Value::Null,
+        serde_json::json!("0.35"),
+        serde_json::json!(true),
+        serde_json::json!([]),
+    ] {
+        let legacy = legacy_document(&SettingsDocument::default(), transparency);
+        assert_eq!(
+            parse_settings(&serde_json::to_vec(&legacy).unwrap()),
+            Err(SettingsDocumentError::InvalidJson)
+        );
+    }
+}
+
+#[test]
+fn settings_versions_reject_ambiguous_or_mismatched_window_fields() {
+    let canonical = serde_json::to_value(SettingsDocument::default()).unwrap();
+    let legacy = legacy_document(&SettingsDocument::default(), serde_json::json!(0.35));
+    let mut legacy_with_opacity = legacy.clone();
+    legacy_with_opacity["appearance"]["window"]["opacity"] = serde_json::json!(0.65);
+    let mut legacy_without_transparency = legacy.clone();
+    legacy_without_transparency["appearance"]["window"]
+        .as_object_mut()
+        .unwrap()
+        .remove("transparency");
+    let mut legacy_with_canonical_fields = canonical.clone();
+    legacy_with_canonical_fields["schema_version"] = serde_json::json!(3);
+    let mut canonical_with_legacy_fields = legacy;
+    canonical_with_legacy_fields["schema_version"] = serde_json::json!(4);
+    let mut canonical_with_transparency = canonical;
+    canonical_with_transparency["appearance"]["window"]["transparency"] = serde_json::json!(0.35);
+
+    for value in [
+        legacy_with_opacity,
+        legacy_without_transparency,
+        legacy_with_canonical_fields,
+        canonical_with_legacy_fields,
+        canonical_with_transparency,
+    ] {
+        assert_eq!(
+            parse_settings(&serde_json::to_vec(&value).unwrap()),
+            Err(SettingsDocumentError::InvalidJson)
+        );
+    }
+}
+
+#[test]
+fn legacy_migration_keeps_duplicate_and_unknown_field_rejection() {
+    let mut legacy = legacy_document(&SettingsDocument::default(), serde_json::json!(0.35));
+    let encoded = serde_json::to_string(&legacy).unwrap();
+    let duplicate = encoded.replacen(
+        "\"transparency\":0.35",
+        "\"transparency\":0.35,\"transparency\":0.7",
+        1,
+    );
+    assert_eq!(
+        parse_settings(duplicate.as_bytes()),
+        Err(SettingsDocumentError::DuplicateKey)
+    );
+
+    legacy["appearance"]["window"]["unknown"] = serde_json::json!(true);
+    assert_eq!(
+        parse_settings(&serde_json::to_vec(&legacy).unwrap()),
+        Err(SettingsDocumentError::InvalidJson)
+    );
+}
+
+#[test]
 fn a_terminal_theme_must_match_its_slot_appearance() {
     let mut document = SettingsDocument::default();
     document.appearance.terminal.themes.light = ThemeId::builtin("builtin.spaceterm.dark");
@@ -29,7 +165,7 @@ fn reset_fixture() -> SettingsDocument {
     let mut document = SettingsDocument::default();
     document.appearance.mode = AppearanceMode::Light;
     document.appearance.window.density = ChromeDensity::Comfortable;
-    document.appearance.window.transparency = 0.8;
+    document.appearance.window.opacity = 0.2;
     document.appearance.window.blur = false;
     document.appearance.terminal.themes.light = ThemeId::new("custom.reset-light").unwrap();
     document.appearance.terminal.typography.family = TerminalFontFamily::Named {
@@ -75,9 +211,7 @@ fn every_individual_preference_reset_changes_only_its_field() {
         (ResetTarget::Density, |value| {
             value.window.density = ChromeDensity::Compact
         }),
-        (ResetTarget::Transparency, |value| {
-            value.window.transparency = 0.35
-        }),
+        (ResetTarget::Opacity, |value| value.window.opacity = 0.65),
         (ResetTarget::Blur, |value| value.window.blur = true),
         (ResetTarget::TerminalTheme(Appearance::Light), |value| {
             value.terminal.themes.light = AppearancePreferences::default().terminal.themes.light;
@@ -355,9 +489,9 @@ fn native_settings_are_canonical_strict_and_round_trip() {
     document.appearance.terminal.themes.light = ThemeId::builtin("builtin.spaceterm.light");
     let encoded = export_settings(&document).unwrap();
     let encoded_value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
-    assert_eq!(encoded_value["schema_version"], 3);
+    assert_eq!(encoded_value["schema_version"], 4);
     assert_eq!(parse_settings(encoded.as_bytes()).unwrap(), document);
-    let unsupported = encoded.replacen("\"schema_version\": 3", "\"schema_version\": 2", 1);
+    let unsupported = encoded.replacen("\"schema_version\": 4", "\"schema_version\": 2", 1);
     assert!(matches!(
         parse_settings(unsupported.as_bytes()),
         Err(SettingsDocumentError::UnsupportedVersion)
