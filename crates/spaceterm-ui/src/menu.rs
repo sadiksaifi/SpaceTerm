@@ -968,6 +968,7 @@ impl<T: IntoElement + 'static, A: Clone + 'static> ContextMenu<T, A> {
     ///
     /// The caller owns navigation to this focus handle. Opening uses the same request gate,
     /// menu entries, and lifecycle as a secondary click; dismissal restores displaced focus.
+    /// An assistive technology opening moves focus here first, so dismissal returns to the target.
     pub fn keyboard_trigger(mut self, focus: &FocusHandle) -> Self {
         self.core.context_focus = Some(focus.clone());
         self
@@ -1554,6 +1555,7 @@ impl<A: Clone + 'static> MenuControl<A> {
         let key_context_open = context_open.clone();
         let request_open = context_open.clone();
         let context_focus = self.context_focus;
+        let request_focus = context_focus.clone();
         let keyboard_context_enabled = context_focus.is_some();
         let entries = convert_entries(self.entries, &move |action: A, mark| {
             let handler = handler.clone();
@@ -1724,6 +1726,7 @@ impl<A: Clone + 'static> MenuControl<A> {
                                 open_context_menu_below_trigger(
                                     &request_state,
                                     request_open.as_ref(),
+                                    request_focus.as_ref(),
                                     window,
                                     cx,
                                 );
@@ -1794,6 +1797,7 @@ impl<A: Clone + 'static> MenuControl<A> {
                 if open_context_menu_below_trigger(
                     &key_state,
                     key_context_open.as_ref(),
+                    None,
                     window,
                     cx,
                 ) {
@@ -2942,10 +2946,12 @@ fn toggle_menu(
 }
 
 /// Opens a context menu below its trigger, as a keyboard or assistive technology request does.
+/// An admitted request first focuses `trigger_focus`, which dismissal then restores.
 /// Returns whether the request passed the caller's gate.
 fn open_context_menu_below_trigger(
     state: &WeakEntity<MenuState>,
     context_open: Option<&ContextOpenHandler>,
+    trigger_focus: Option<&FocusHandle>,
     window: &mut Window,
     cx: &mut App,
 ) -> bool {
@@ -2961,6 +2967,9 @@ fn open_context_menu_below_trigger(
     let request = ContextMenuOpenRequest { position };
     if context_open.is_some_and(|handler| !handler(&request, window, cx)) {
         return false;
+    }
+    if let Some(focus) = trigger_focus {
+        focus.focus(window, cx);
     }
     open_menu(state, Some(position), window, cx);
     true
@@ -4687,6 +4696,79 @@ mod tests {
         let tree = A11yTree::read(cx);
         assert_eq!(tree.with_role("Menu").len(), 1);
         assert_eq!(tree.focused().unwrap()["aria"]["label"], "Inspect");
+    }
+
+    #[gpui::test]
+    fn context_menus_return_focus_to_the_target_after_an_assistive_opening(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::a11y_testing::{A11yTree, node_id, perform};
+        use gpui::accesskit::{Action, Role};
+
+        struct TargetRoot {
+            focus: FocusHandle,
+            other: FocusHandle,
+        }
+        impl Render for TargetRoot {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .child(
+                        div()
+                            .id("other")
+                            .role(Role::Button)
+                            .aria_label("Other")
+                            .track_focus(&self.other)
+                            .w(px(80.0))
+                            .h(px(40.0)),
+                    )
+                    .child(
+                        ContextMenu::new(
+                            "row-menu",
+                            "Row actions",
+                            div().w(px(80.0)).h(px(40.0)),
+                            vec![MenuEntry::action("Inspect", ())],
+                        )
+                        .keyboard_trigger(&self.focus)
+                        .target(ContextMenuTarget::new(Role::ListBoxOption, "Row"))
+                        .debug_selector("row-menu")
+                        .on_activate(|_, _, _| {}),
+                    )
+            }
+        }
+
+        cx.update(super::init);
+        cx.set_global(test_theme());
+        let (root, cx) = cx.add_window_view(|_, cx| TargetRoot {
+            focus: cx.focus_handle(),
+            other: cx.focus_handle(),
+        });
+        let focus_other = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| root.read(cx).other.clone().focus(window, cx));
+        };
+        cx.update(|window, _| window.activate_window());
+        focus_other(cx);
+        let tree = A11yTree::read(cx);
+        let (row, other) = (node_id(tree.node("Row")), node_id(tree.node("Other")));
+
+        perform(cx, tree.node("Row"), Action::ShowContextMenu);
+        assert_eq!(A11yTree::read(cx).with_role("Menu").len(), 1);
+        cx.simulate_keystrokes("escape");
+        let tree = A11yTree::read(cx);
+        assert!(tree.with_role("Menu").is_empty());
+        assert_eq!(tree.focused().map(node_id), Some(row));
+
+        cx.simulate_keystrokes("shift-f10");
+        assert_eq!(A11yTree::read(cx).with_role("Menu").len(), 1);
+        cx.simulate_keystrokes("escape");
+        assert_eq!(A11yTree::read(cx).focused().map(node_id), Some(row));
+
+        focus_other(cx);
+        let position = cx.debug_bounds("row-menu").unwrap().center();
+        cx.simulate_mouse_down(position, MouseButton::Right, Modifiers::none());
+        cx.simulate_mouse_up(position, MouseButton::Right, Modifiers::none());
+        assert_eq!(A11yTree::read(cx).with_role("Menu").len(), 1);
+        cx.simulate_keystrokes("escape");
+        assert_eq!(A11yTree::read(cx).focused().map(node_id), Some(other));
     }
 
     #[gpui::test]
