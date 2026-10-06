@@ -2,6 +2,7 @@ use crate::close_confirmation::{CloseContinuation, ClosePaneOutcome, HierarchyCl
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::ops::RangeInclusive;
 
 use thiserror::Error;
 
@@ -495,6 +496,25 @@ impl<T> Tab<T> {
             return Err(PaneError::InvalidSplitRatio(requested_ratio));
         }
 
+        let range = self.split_ratio_range(split_id, available_size, divider_size)?;
+        let ratio = requested_ratio.clamp(*range.start(), *range.end());
+
+        let split = self
+            .root
+            .split_mut(split_id)
+            .ok_or(PaneError::SplitNotFound(split_id))?;
+        *split.ratio = ratio;
+        Ok(ratio)
+    }
+
+    /// The ratios a Split may take while each side keeps its minimum size.
+    pub(crate) fn split_ratio_range(
+        &self,
+        split_id: SplitId,
+        available_size: PaneSize,
+        divider_size: f32,
+    ) -> Result<RangeInclusive<f32>, PaneError> {
+        validate_divider_size(divider_size)?;
         let split = self
             .root
             .split(split_id)
@@ -511,14 +531,7 @@ impl<T> Tab<T> {
         let content_extent = available_size.extent(split.axis) - divider_size;
         let minimum_ratio = first_minimum.extent(split.axis) / content_extent;
         let maximum_ratio = 1.0 - second_minimum.extent(split.axis) / content_extent;
-        let ratio = requested_ratio.clamp(minimum_ratio, maximum_ratio);
-
-        let split = self
-            .root
-            .split_mut(split_id)
-            .ok_or(PaneError::SplitNotFound(split_id))?;
-        *split.ratio = ratio;
-        Ok(ratio)
+        Ok(minimum_ratio..=maximum_ratio)
     }
 
     fn validate_split(
@@ -1771,6 +1784,58 @@ mod tests {
             .unwrap();
 
         assert_eq!(ratio, 201.0 / 401.0);
+    }
+
+    #[test]
+    fn split_ratio_range_should_bound_each_side_at_its_recursive_minimum() {
+        let mut tab = tab(());
+        tab.split_pane(
+            PaneId::new(1),
+            SplitAxis::Horizontal,
+            size(500.0, 400.0),
+            DIVIDER_SIZE,
+            |_| (),
+        )
+        .unwrap();
+        tab.split_pane(
+            PaneId::new(1),
+            SplitAxis::Horizontal,
+            size(250.0, 400.0),
+            DIVIDER_SIZE,
+            |_| (),
+        )
+        .unwrap();
+
+        let range = tab.split_ratio_range(SplitId::new(1), size(502.0, 100.0), DIVIDER_SIZE);
+
+        assert_eq!(range, Ok(201.0 / 501.0..=1.0 - 100.0 / 501.0));
+    }
+
+    #[test]
+    fn split_ratio_range_should_reject_unknown_splits_and_insufficient_space() {
+        let mut tab = tab(());
+        tab.split_pane(
+            PaneId::new(1),
+            SplitAxis::Horizontal,
+            size(500.0, 400.0),
+            DIVIDER_SIZE,
+            |_| (),
+        )
+        .unwrap();
+
+        assert_eq!(
+            (
+                tab.split_ratio_range(SplitId::new(9), size(500.0, 400.0), DIVIDER_SIZE),
+                tab.split_ratio_range(SplitId::new(1), size(200.0, 50.0), DIVIDER_SIZE),
+            ),
+            (
+                Err(PaneError::SplitNotFound(SplitId::new(9))),
+                Err(PaneError::InsufficientSpace {
+                    available: size(200.0, 50.0),
+                    required: size(201.0, 50.0),
+                }),
+            )
+        );
     }
 
     #[test]
