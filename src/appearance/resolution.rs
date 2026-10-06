@@ -280,6 +280,7 @@ impl ThemeCatalog {
         if !found_terminal {
             diagnostics.push(AppearanceDiagnostic::TerminalThemeUnavailable { appearance });
         }
+        super::harmonization::harmonize(&mut terminal_colors, appearance);
         if found_terminal
             && let Some(overrides) = preferences.terminal.overrides.get(requested_terminal)
         {

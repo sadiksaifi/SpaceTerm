@@ -1,3 +1,5 @@
+use std::ops::RangeInclusive;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct Color {
     pub(crate) r: u8,
@@ -419,6 +421,43 @@ impl Color {
             return Some(readable);
         }
         None
+    }
+
+    pub(crate) fn oklab_lightness(self) -> f64 {
+        self.oklab()[0]
+    }
+
+    /// Clamps OKLab lightness into `lightness` and chroma to at most `max_chroma`, keeping hue and
+    /// alpha. Chroma moves further inward when the sRGB gamut boundary requires it.
+    pub(crate) fn fit_oklab(self, lightness: RangeInclusive<f64>, max_chroma: f64) -> Self {
+        let [start_l, start_a, start_b] = self.oklab();
+        let fitted_l = start_l.clamp(*lightness.start(), *lightness.end());
+        let chroma = start_a.hypot(start_b);
+        let scale = if chroma > max_chroma {
+            max_chroma / chroma
+        } else {
+            1.0
+        };
+        if fitted_l == start_l && scale == 1.0 {
+            return self;
+        }
+        let at = |scale: f64| Self::from_oklab(fitted_l, start_a * scale, start_b * scale, self.a);
+        if let Some(fitted) = at(scale) {
+            return fitted;
+        }
+        let mut lower = 0.0;
+        let mut upper = scale;
+        let mut fitted = at(0.0).unwrap_or(self);
+        for _ in 0..12 {
+            let middle = (lower + upper) / 2.0;
+            if let Some(in_gamut) = at(middle) {
+                fitted = in_gamut;
+                lower = middle;
+            } else {
+                upper = middle;
+            }
+        }
+        fitted
     }
 
     fn oklab(self) -> [f64; 3] {
