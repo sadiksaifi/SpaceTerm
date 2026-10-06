@@ -25,7 +25,17 @@ Or install with Homebrew:
 brew install --cask sadiksaifi/tap/spaceterm
 ```
 
-On Linux, [build from source](docs/development.md). SpaceTerm provides no Linux packages or updates.
+On Linux, build from source. SpaceTerm provides no Linux packages or updates.
+Install [mise](https://mise.jdx.dev/), then run:
+
+```sh
+git clone https://github.com/sadiksaifi/SpaceTerm.git
+cd SpaceTerm
+mise trust
+mise run setup
+```
+
+`mise tasks` lists everything else you can run.
 
 ## Workspace hierarchy
 
