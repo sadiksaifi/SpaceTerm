@@ -8,8 +8,8 @@ use std::{error::Error, fmt, time::Duration};
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, Bounds, ElementId, Global,
     InteractiveElement as _, IntoElement, ParentElement as _, PathBuilder, Pixels, RenderOnce,
-    Rgba, SharedString, Styled as _, Window, canvas, div, point, prelude::FluentBuilder as _, px,
-    relative,
+    Rgba, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Window, accesskit,
+    canvas, div, point, prelude::FluentBuilder as _, px, relative,
 };
 
 use crate::ControlMotion;
@@ -280,8 +280,7 @@ pub struct ProgressBar {
 impl ProgressBar {
     /// Creates a bar for one named operation.
     ///
-    /// The name identifies the operation for the owner's own visible text and diagnostics. The
-    /// bar never paints it.
+    /// The name identifies the operation for assistive technology. The bar never paints it.
     pub fn new(
         id: impl Into<ElementId>,
         name: impl Into<SharedString>,
@@ -333,10 +332,10 @@ impl RenderOnce for ProgressBar {
             .unwrap_or_else(|| SharedString::from(self.id.to_string()));
         debug_assert!(
             !self.name.is_empty(),
-            "a progress indicator needs a name for its owner's visible text"
+            "a progress indicator needs an accessible name"
         );
         let track_selector = selector.clone();
-        div()
+        progress_indicator(self.id.clone(), self.name, self.state)
             .debug_selector(move || format!("{track_selector}-track"))
             .flex()
             .flex_row()
@@ -404,10 +403,10 @@ impl RenderOnce for FrameSpinner {
             .unwrap_or_else(|| SharedString::from(self.id.to_string()));
         debug_assert!(
             !self.name.is_empty(),
-            "a frame spinner needs a name for its owner's visible text"
+            "a frame spinner needs an accessible name"
         );
         let root_selector = selector.clone();
-        let root = div()
+        let root = progress_indicator(self.id.clone(), self.name, ProgressState::Indeterminate)
             .debug_selector(move || root_selector.to_string())
             .flex_none()
             .size(extent);
@@ -623,8 +622,7 @@ pub struct ProgressRing {
 impl ProgressRing {
     /// Creates a ring for one named operation.
     ///
-    /// The name identifies the operation for the owner's own visible text and diagnostics. The
-    /// ring never paints it.
+    /// The name identifies the operation for assistive technology. The ring never paints it.
     pub fn new(
         id: impl Into<ElementId>,
         name: impl Into<SharedString>,
@@ -677,10 +675,10 @@ impl RenderOnce for ProgressRing {
             .unwrap_or_else(|| SharedString::from(self.id.to_string()));
         debug_assert!(
             !self.name.is_empty(),
-            "a progress indicator needs a name for its owner's visible text"
+            "a progress indicator needs an accessible name"
         );
         let track_selector = selector.clone();
-        div()
+        progress_indicator(self.id.clone(), self.name, self.state)
             .debug_selector(move || format!("{track_selector}-track"))
             .relative()
             .flex_none()
@@ -710,6 +708,24 @@ impl RenderOnce for ProgressRing {
                 crate::control_motion(cx),
             ))
     }
+}
+
+fn progress_indicator(
+    id: ElementId,
+    name: SharedString,
+    state: ProgressState,
+) -> Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .role(accesskit::Role::ProgressIndicator)
+        .aria_label(name)
+        .map(|indicator| match state {
+            ProgressState::Indeterminate => indicator,
+            ProgressState::Determinate(progress) => indicator
+                .aria_numeric_value(f64::from(progress.value()))
+                .aria_min_numeric_value(0.0)
+                .aria_max_numeric_value(1.0),
+        })
 }
 
 /// Where a ring's two colors come from.

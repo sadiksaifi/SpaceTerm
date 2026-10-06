@@ -496,3 +496,55 @@ fn standard_frame_spinner_uses_the_animated_frame_structure(cx: &mut TestAppCont
     assert!(cx.debug_bounds("test-progress-frame").is_some());
     assert!(cx.debug_bounds("test-progress-reduced-motion").is_none());
 }
+
+#[gpui::test]
+fn progress_indicators_publish_named_progress_and_clear_indeterminate_values(
+    cx: &mut TestAppContext,
+) {
+    use crate::a11y_testing::{A11yTree, node_id};
+
+    cx.set_global(test_theme());
+    cx.set_global(ControlMotion::Reduced);
+    for kind in [
+        FixtureKind::Bar {
+            right_to_left: false,
+        },
+        FixtureKind::Ring,
+        FixtureKind::Spinner,
+    ] {
+        let (root, cx) = cx.add_window_view(move |_, _| ProgressFixture {
+            kind,
+            state: determinate(0.25),
+            size: ProgressSize::Regular,
+        });
+        let tree = A11yTree::read(cx);
+        assert_eq!(tree.with_role("ProgressIndicator").len(), 1);
+        let progress = tree.node("Copying files");
+        assert_eq!(progress["aria"]["role"], "ProgressIndicator");
+        let id = node_id(progress);
+        if matches!(kind, FixtureKind::Spinner) {
+            assert!(progress["aria"]["numeric_value"].is_null());
+        } else {
+            assert_eq!(progress["aria"]["numeric_value"], 0.25);
+            assert_eq!(progress["aria"]["min_numeric_value"], 0.0);
+            assert_eq!(progress["aria"]["max_numeric_value"], 1.0);
+            root.update(cx, |root, cx| {
+                root.state = determinate(1.0);
+                cx.notify();
+            });
+            assert_eq!(
+                A11yTree::read(cx).node("Copying files")["aria"]["numeric_value"],
+                1.0
+            );
+        }
+        root.update(cx, |root, cx| {
+            root.state = ProgressState::Indeterminate;
+            cx.notify();
+        });
+        let tree = A11yTree::read(cx);
+        let progress = tree.node("Copying files");
+        assert_eq!(node_id(progress), id);
+        assert!(progress["aria"]["numeric_value"].is_null());
+        assert!(progress["aria"]["on_action"].is_null());
+    }
+}
