@@ -13,6 +13,7 @@ use super::{WORKSPACE_SIDEBAR_DEFAULT_WIDTH, WORKSPACE_SIDEBAR_MINIMUM_WIDTH};
 use crate::appearance::ChromeColors;
 use crate::appearance::Color;
 use crate::domain::{RemoteConnectionPhase, WorkspaceId};
+use std::ops::RangeInclusive;
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Context, DispatchPhase, Entity, EntityId, EventEmitter, FocusHandle,
@@ -678,11 +679,10 @@ impl WorkspaceSidebar {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
-        let maximum = (spaceterm_ui::content_viewport(window).size.width
-            - px(TERMINAL_CONTENT_MINIMUM_WIDTH))
-        .min(px(SIDEBAR_MAXIMUM_WIDTH))
-        .max(px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH));
-        let width = width.clamp(px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH), maximum);
+        let width = width.clamp(
+            px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH),
+            Self::maximum_width(window),
+        );
         if self.layout == (SidebarLayout { visible, width }) {
             return;
         }
@@ -693,6 +693,18 @@ impl WorkspaceSidebar {
         }
         cx.emit(SidebarEvent::LayoutChanged);
         cx.notify();
+    }
+    /// The widest sidebar the window leaves room for beside the terminal content.
+    fn maximum_width(window: &Window) -> Pixels {
+        (spaceterm_ui::content_viewport(window).size.width - px(TERMINAL_CONTENT_MINIMUM_WIDTH))
+            .min(px(SIDEBAR_MAXIMUM_WIDTH))
+            .max(px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH))
+    }
+    /// The widths a resize may request, including the divider's presented position.
+    ///
+    /// Every request below the minimum width collapses the sidebar, so the range reaches zero.
+    pub(super) fn resize_range(divider_position: Pixels, window: &Window) -> RangeInclusive<f32> {
+        0.0..=f32::from(Self::maximum_width(window).max(divider_position))
     }
     fn constrain_to_window(&mut self, window: &Window, cx: &mut Context<Self>) {
         if self.layout.visible {

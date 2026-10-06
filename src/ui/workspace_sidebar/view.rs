@@ -810,6 +810,10 @@ impl WorkspaceSidebar {
                 .ok()
                 .flatten()
         });
+        let handle = SidebarResizeHandle {
+            handle,
+            divider_position: handle_width,
+        };
         let wrapper = div()
             .absolute()
             .top_0()
@@ -826,6 +830,22 @@ impl WorkspaceSidebar {
         }
     }
 }
+/// The sidebar Resize Handle, given the range the window allows when it renders.
+#[derive(IntoElement)]
+struct SidebarResizeHandle {
+    handle: ResizeHandle,
+    divider_position: Pixels,
+}
+
+impl RenderOnce for SidebarResizeHandle {
+    fn render(self, window: &mut Window, _: &mut App) -> impl IntoElement {
+        self.handle.range(WorkspaceSidebar::resize_range(
+            self.divider_position,
+            window,
+        ))
+    }
+}
+
 /// The footer creation menu's rows, built from the shared creation descriptors.
 fn new_workspace_menu_entries(
     presentation: &crate::desktop_profile::DesktopPresentation,

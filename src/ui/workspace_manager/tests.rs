@@ -10405,3 +10405,109 @@ fn main_window_reads_in_presented_layout_order(cx: &mut TestAppContext) {
         ]
     );
 }
+
+/// The widest sidebar the window allows, the same limit a drag clamps to.
+fn sidebar_maximum_width(cx: &mut VisualTestContext) -> Pixels {
+    cx.update(|window, _| {
+        (spaceterm_ui::content_viewport(window).size.width - px(TERMINAL_CONTENT_MINIMUM_WIDTH))
+            .min(px(SIDEBAR_MAXIMUM_WIDTH))
+            .max(px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH))
+    })
+}
+
+/// The sidebar Resize Handle's published value, minimum, and maximum.
+fn sidebar_splitter_range(cx: &mut VisualTestContext) -> (f64, f64, f64) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let tree = A11yTree::read(cx);
+    let splitter = tree.node("Resize Workspace sidebar");
+    let number = |key: &str| {
+        splitter["aria"][key]
+            .as_f64()
+            .unwrap_or_else(|| panic!("the sidebar splitter publishes no {key}"))
+    };
+    (
+        number("numeric_value"),
+        number("min_numeric_value"),
+        number("max_numeric_value"),
+    )
+}
+
+#[gpui::test]
+fn sidebar_resize_handle_publishes_the_range_its_model_resizes_within(cx: &mut TestAppContext) {
+    let (manager, _records, cx) = workspace_manager(cx);
+    let maximum = f64::from(f32::from(sidebar_maximum_width(cx)));
+
+    // Every width below the minimum collapses the sidebar, so the range reaches zero width.
+    assert_eq!(
+        sidebar_splitter_range(cx),
+        (f64::from(WORKSPACE_SIDEBAR_DEFAULT_WIDTH), 0.0, maximum)
+    );
+
+    let root = cx
+        .debug_bounds("workspace-manager")
+        .expect("the Workspace manager was not rendered");
+    drag_to(
+        "workspace-sidebar-resize-handle",
+        root.origin.x + px(300.0),
+        cx,
+    );
+    let width = manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).layout().width);
+    assert_eq!(
+        sidebar_splitter_range(cx),
+        (f64::from(f32::from(width)), 0.0, maximum)
+    );
+
+    cx.simulate_keystrokes("cmd-b");
+    cx.run_until_parked();
+    let collapsed = cx
+        .debug_bounds("workspace-top-chrome")
+        .expect("the collapsed top-left chrome was not rendered")
+        .size
+        .width;
+    let collapsed = f64::from(f32::from(collapsed));
+    assert_eq!(
+        sidebar_splitter_range(cx),
+        (collapsed, 0.0, maximum.max(collapsed))
+    );
+}
+
+#[gpui::test]
+fn sidebar_resize_handle_moves_to_the_width_assistive_technology_sets(cx: &mut TestAppContext) {
+    use gpui::accesskit::{Action, ActionData};
+    use spaceterm_ui::a11y_testing::{A11yTree, perform_with};
+
+    let (manager, _records, cx) = workspace_manager(cx);
+    let maximum = sidebar_maximum_width(cx);
+    let set_width = |width: f64, cx: &mut VisualTestContext| {
+        let tree = A11yTree::read(cx);
+        perform_with(
+            cx,
+            tree.node("Resize Workspace sidebar"),
+            Action::SetValue,
+            Some(ActionData::NumericValue(width)),
+        );
+        cx.run_until_parked();
+    };
+    let layout = |cx: &mut VisualTestContext| {
+        manager.read_with(cx, |manager, cx| {
+            let sidebar = manager.sidebar.read(cx);
+            (sidebar.layout().visible, sidebar.layout().width)
+        })
+    };
+
+    set_width(300.0, cx);
+    assert_eq!(layout(cx), (true, px(300.0)));
+    assert_eq!(sidebar_splitter_range(cx).0, 300.0);
+
+    set_width(10_000.0, cx);
+    assert_eq!(layout(cx), (true, maximum));
+    assert_eq!(
+        sidebar_splitter_range(cx).0,
+        f64::from(f32::from(maximum))
+    );
+
+    set_width(-50.0, cx);
+    assert!(!layout(cx).0, "a width below the minimum collapses the sidebar");
+    assert!(manager.read_with(cx, |manager, cx| !manager.sidebar.read(cx).is_resizing()));
+}
