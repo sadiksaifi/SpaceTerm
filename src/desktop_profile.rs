@@ -17,6 +17,8 @@ pub(crate) struct DesktopWording {
     pub(crate) operating_system_name: &'static str,
     /// The command that opens System Directory Selection.
     pub(crate) system_directory_selection: &'static str,
+    /// The remedy for an installation the updater cannot replace, as an alert title and message.
+    pub(crate) read_only_update: (&'static str, &'static str),
 }
 
 pub(crate) trait ShortcutFormatter {
@@ -397,6 +399,7 @@ pub(crate) fn testing_presentation() -> DesktopPresentation {
             file_preview: "Preview File",
             operating_system_name: "Operating System",
             system_directory_selection: "Choose Directory…",
+            read_only_update: ("Move SpaceTerm", "Move SpaceTerm before updating it."),
         },
         Rc::new(TestingShortcutFormatter),
         ShortcutSelection::NativeMenu,

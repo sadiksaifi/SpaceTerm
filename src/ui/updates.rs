@@ -21,6 +21,7 @@ use super::WorkspaceManager;
 use super::appearance::gpui_color;
 use super::settings_window::SettingsWindow;
 use crate::updates::policy::UpdateStage;
+use crate::desktop_profile::{DesktopPresentation, DesktopWording};
 use crate::updates::{ApplicationUpdates, UpdateError, UpdateNotice, UpdateService, UpdateState};
 
 actions!(spaceterm, [CheckForUpdates, OpenReleaseNotes]);
@@ -424,18 +425,22 @@ fn put_off(cx: &mut App) {
     }
 }
 
-fn failure_alert(error: UpdateError) -> Alert<PromptAction> {
+/// Only the read-only failure names a remedy, which the desktop wording supplies.
+pub(crate) fn failure_message(error: UpdateError, wording: DesktopWording) -> String {
+    match error {
+        UpdateError::ReadOnly => wording.read_only_update.1.to_owned(),
+        error => error.to_string(),
+    }
+}
+
+fn failure_alert(error: UpdateError, wording: DesktopWording) -> Alert<PromptAction> {
     let (title, retry, intent) = match error {
         UpdateError::Unavailable => ("Updates Unavailable", false, AlertIntent::Informational),
         UpdateError::Check => ("Couldn’t Check for Updates", true, AlertIntent::Warning),
         UpdateError::Download => ("Couldn’t Download the Update", true, AlertIntent::Warning),
         UpdateError::Verification => ("Couldn’t Verify the Update", true, AlertIntent::Warning),
         UpdateError::Installation => ("Couldn’t Install the Update", true, AlertIntent::Warning),
-        UpdateError::ReadOnly => (
-            "Move SpaceTerm to Applications",
-            false,
-            AlertIntent::Warning,
-        ),
+        UpdateError::ReadOnly => (wording.read_only_update.0, false, AlertIntent::Warning),
     };
     let mut actions = Vec::with_capacity(2);
     if retry {
@@ -456,14 +461,15 @@ fn failure_alert(error: UpdateError) -> Alert<PromptAction> {
         ModalId::new("update-failure"),
         title,
         title,
-        error.to_string(),
+        failure_message(error, wording),
         actions,
     )
     .intent(intent)
 }
 
 fn present_failure<T: 'static>(error: UpdateError, window: &mut Window, cx: &mut Context<T>) {
-    present(failure_alert(error), window, cx, |action, cx| {
+    let wording = DesktopPresentation::get(cx).wording();
+    present(failure_alert(error, wording), window, cx, |action, cx| {
         if action == Some(PromptAction::TryAgain) {
             check_for_updates(cx);
         }
@@ -660,6 +666,7 @@ impl ControlPresentation {
         state: &UpdateState,
         pending_version: Option<&str>,
         cancelling: bool,
+        wording: DesktopWording,
     ) -> Option<Self> {
         let control =
             |step: &str, version: &str, tooltip: String, glyph, prominent, command| Self {
@@ -699,7 +706,7 @@ impl ControlPresentation {
                 control(
                     "Retry",
                     version,
-                    error.to_string(),
+                    failure_message(*error, wording),
                     ControlGlyph::Warning,
                     false,
                     Some(ControlCommand::RetryDownload),
@@ -860,6 +867,7 @@ impl Render for UpdateControl {
             updates.state(),
             updates.pending_version(),
             updates.is_cancelling(),
+            DesktopPresentation::get(cx).wording(),
         )
         .map(|presentation| presentation.remind(updates.reminder())) else {
             return div().into_any_element();
@@ -960,7 +968,11 @@ mod tests {
     const PENDING: Option<&str> = Some("0.4.2");
 
     fn resolve(state: UpdateState) -> Option<ControlPresentation> {
-        ControlPresentation::resolve(&state, PENDING, false)
+        ControlPresentation::resolve(&state, PENDING, false, testing_wording())
+    }
+
+    fn testing_wording() -> DesktopWording {
+        crate::desktop_profile::testing_presentation().wording()
     }
 
     fn version() -> String {
@@ -1005,7 +1017,7 @@ mod tests {
             },
         ] {
             assert_eq!(
-                ControlPresentation::resolve(&state, None, false),
+                ControlPresentation::resolve(&state, None, false, testing_wording()),
                 None,
                 "{state:?}"
             );
@@ -1119,7 +1131,7 @@ mod tests {
             },
             UpdateState::Verifying { version: version() },
         ] {
-            let presentation = ControlPresentation::resolve(&state, PENDING, true)
+            let presentation = ControlPresentation::resolve(&state, PENDING, true, testing_wording())
                 .expect("a stopping update stays visible until the service settles");
             assert_eq!(presentation.label.as_ref(), "Stopping 0.4.2");
             assert_eq!(presentation.command, None);
@@ -1424,7 +1436,7 @@ mod tests {
                 UpdateError::Installation,
                 UpdateError::ReadOnly,
             ]
-            .map(failure_alert),
+            .map(|error| failure_alert(error, testing_wording())),
         );
         for alert in alerts {
             assert_eq!(alert.validate(&policy), Ok(()));

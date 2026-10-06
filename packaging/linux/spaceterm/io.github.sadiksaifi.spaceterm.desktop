@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=SpaceTerm
+Comment=Terminal multiplexer
+Exec=spaceterm
+Icon=io.github.sadiksaifi.spaceterm
+Terminal=false
+StartupNotify=true
+StartupWMClass=io.github.sadiksaifi.spaceterm
+Categories=System;TerminalEmulator;

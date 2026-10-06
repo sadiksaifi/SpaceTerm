@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 struct Pending {
     windows: HashMap<gpui::AnyWindowHandle, WindowEffects>,
     activation: Option<Option<String>>,
+    quit: bool,
 }
 
 #[derive(Default)]
@@ -21,6 +22,7 @@ trait DesktopEffects {
     fn bell(&mut self, window: gpui::AnyWindowHandle);
     fn attention(&mut self, window: gpui::AnyWindowHandle, requested: bool);
     fn activate(&mut self, token: Option<String>);
+    fn quit(&mut self);
 }
 struct GpuiEffects<'a>(&'a mut App);
 impl DesktopEffects for GpuiEffects<'_> {
@@ -39,6 +41,10 @@ impl DesktopEffects for GpuiEffects<'_> {
     fn activate(&mut self, token: Option<String>) {
         crate::app::activate_default_window(self.0, token.as_deref());
     }
+    /// Quit runs the application quit policy, including its confirmation.
+    fn quit(&mut self) {
+        self.0.dispatch_action(&crate::app::QuitApplication);
+    }
 }
 impl Pending {
     fn apply(self, effects: &mut impl DesktopEffects) {
@@ -52,6 +58,9 @@ impl Pending {
         }
         if let Some(token) = self.activation {
             effects.activate(token);
+        }
+        if self.quit {
+            effects.quit();
         }
     }
 }
@@ -80,6 +89,9 @@ impl DesktopEventSender {
     pub(super) fn activate(&self, token: Option<String>) {
         let token = token.filter(|value| !value.is_empty() && value.len() <= 4096);
         self.send(|pending| pending.activation = Some(token));
+    }
+    pub(super) fn quit(&self) {
+        self.send(|pending| pending.quit = true);
     }
 }
 
@@ -159,6 +171,7 @@ mod tests {
                 self.attention.insert(window, requested);
             }
             fn activate(&mut self, _token: Option<String>) {}
+            fn quit(&mut self) {}
         }
         use crate::terminal::attention_runtime::{AudioBell, DockAttentionDriver};
         let first = cx.add_window(|_, _| gpui::Empty).into();

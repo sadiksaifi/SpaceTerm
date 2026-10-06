@@ -31,7 +31,7 @@ pub(super) enum InstanceLaunch {
 }
 
 impl InstanceLaunch {
-    const NEW_INSTANCE_ARGUMENT: &str = "--new-instance";
+    pub(super) const NEW_INSTANCE_ARGUMENT: &str = "--new-instance";
 
     /// `arguments` excludes the program name.
     pub(super) fn from_arguments(mut arguments: impl Iterator<Item = std::ffi::OsString>) -> Self {

@@ -7,6 +7,7 @@ use spaceterm_ui::{SegmentedControl, SegmentedOption, Switch, ToggleSize};
 
 use super::{SettingsRowId, SettingsWindow};
 use crate::application_identity::ApplicationIdentity;
+use crate::desktop_profile::{DesktopPresentation, DesktopWording};
 use crate::settings::SettingsDocument;
 use crate::ui::sidebar_window::form::action_button;
 use crate::updates::policy::{CheckInterval, ReminderInterval, UpdatePreferences};
@@ -42,7 +43,12 @@ pub(super) struct UpdateStatusPresentation {
 
 impl UpdateStatusPresentation {
     /// `last_check` and `now` are Unix seconds.
-    pub(super) fn resolve(state: &UpdateState, last_check: Option<u64>, now: u64) -> Self {
+    pub(super) fn resolve(
+        state: &UpdateState,
+        last_check: Option<u64>,
+        now: u64,
+        wording: DesktopWording,
+    ) -> Self {
         let check_now = Some(UpdateStatusAction::CheckNow { enabled: true });
         let (summary, action) = match state {
             UpdateState::Unavailable => (UpdateError::Unavailable.to_string(), None),
@@ -82,7 +88,9 @@ impl UpdateStatusPresentation {
                 format!("Version {version} installs when SpaceTerm restarts."),
                 Some(UpdateStatusAction::FinishInstall),
             ),
-            UpdateState::Failed { error } => (error.to_string(), check_now),
+            UpdateState::Failed { error } => {
+                (crate::ui::updates::failure_message(*error, wording), check_now)
+            }
         };
         Self {
             summary: summary.into(),
@@ -129,10 +137,16 @@ fn service(cx: &App) -> Option<Entity<ApplicationUpdates>> {
 impl SettingsWindow {
     pub(super) fn update_status(&self, cx: &App) -> UpdateStatusPresentation {
         let Some(updates) = service(cx) else {
-            return UpdateStatusPresentation::resolve(&UpdateState::Unavailable, None, 0);
+            return UpdateStatusPresentation::resolve(
+                &UpdateState::Unavailable,
+                None,
+                0,
+                DesktopPresentation::get(cx).wording(),
+            );
         };
+        let wording = DesktopPresentation::get(cx).wording();
         let updates = updates.read(cx);
-        UpdateStatusPresentation::resolve(updates.state(), updates.last_check(), unix_now())
+        UpdateStatusPresentation::resolve(updates.state(), updates.last_check(), unix_now(), wording)
     }
 
     pub(super) fn render_update_status(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -324,7 +338,12 @@ mod tests {
     const NOW: u64 = 1_000_000;
 
     fn resolve(state: UpdateState) -> UpdateStatusPresentation {
-        UpdateStatusPresentation::resolve(&state, Some(NOW - 5 * 60), NOW)
+        UpdateStatusPresentation::resolve(
+            &state,
+            Some(NOW - 5 * 60),
+            NOW,
+            crate::desktop_profile::testing_presentation().wording(),
+        )
     }
 
     #[test]

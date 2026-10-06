@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=SpaceTerm Preflight
+Comment=Terminal multiplexer
+Exec=spaceterm-preflight
+Icon=io.github.sadiksaifi.spaceterm-preflight
+Terminal=false
+StartupNotify=true
+StartupWMClass=io.github.sadiksaifi.spaceterm-preflight
+Categories=System;TerminalEmulator;

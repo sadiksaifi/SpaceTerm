@@ -8,23 +8,38 @@ import plistlib
 import shutil
 import subprocess
 import tempfile
+import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from spaceterm_tasks import ROOT, TaskError, sparkle
+from spaceterm_tasks import ROOT, TaskError, package_linux, sparkle
 from spaceterm_tasks.macos_bundle import identity
-from spaceterm_tasks.package_macos import DIST, STABLE_TAG, release_version
+from spaceterm_tasks.packaging import DIST, STABLE_TAG, release_version
 
 SPARKLE_NS = "http://www.andymatuschak.org/xml-namespaces/sparkle"
 RELEASES = "https://github.com/sadiksaifi/SpaceTerm/releases"
 RELEASE_ASSETS = DIST / "release"
-INSTALLER = ROOT / "packaging" / "macos" / "install-release.sh"
+LINUX_RELEASE_ASSETS = DIST / "release-linux"
+LINUX_PLATFORM = "linux-x86_64"
+INSTALLER = ROOT / "packaging" / "install.sh"
 CASK = "sadiksaifi/tap/spaceterm"
+SIGNING_SECRET = "UPDATE_SIGNING_KEY"
 ED25519_PKCS8_PREFIX = bytes.fromhex("302e020100300506032b657004220420")
+ED25519_SPKI_PREFIX = bytes.fromhex("302a300506032b6570032100")
+# The Linux updater refuses a longer feed.
+MAX_FEED_BYTES = 4096
 
 
 def archive_name(version):
     return f"SpaceTerm-{version}-darwin-arm64.dmg"
+
+
+def linux_archive_name(version):
+    return f"SpaceTerm-{version}-{LINUX_PLATFORM}.tar.gz"
+
+
+def linux_feed_name():
+    return f"latest-{LINUX_PLATFORM}.json"
 
 
 def public_key():
@@ -39,21 +54,30 @@ def checked(arguments, **kwargs):
     return result.stdout
 
 
+def signing_seed(secret):
+    """The 32-byte Ed25519 seed of the base64 update signing secret."""
+    try:
+        seed = base64.b64decode(secret.strip(), validate=True)
+    except ValueError:
+        raise TaskError("the update signing secret is invalid") from None
+    if len(seed) != 32:
+        raise TaskError("the update signing secret must contain a 32-byte Ed25519 seed")
+    return seed
+
+
+def derived_public_key(seed):
+    # Derive only the public key through stdin. Never put the private key in argv or logs.
+    derived = checked(
+        ["openssl", "pkey", "-inform", "DER", "-pubout", "-outform", "DER"],
+        input=ED25519_PKCS8_PREFIX + seed,
+    )
+    return base64.b64encode(derived[-32:]).decode()
+
+
 def signing_options():
-    secret = os.environ.get("SPARKLE_PRIVATE_KEY")
+    secret = os.environ.get(SIGNING_SECRET)
     if secret:
-        try:
-            seed = base64.b64decode(secret.strip(), validate=True)
-        except ValueError:
-            raise TaskError("the update signing secret is invalid") from None
-        if len(seed) != 32:
-            raise TaskError("the update signing secret must contain a 32-byte Ed25519 seed")
-        # Derive only the public key through stdin. Never put the private key in argv or logs.
-        derived = checked(
-            ["openssl", "pkey", "-inform", "DER", "-pubout", "-outform", "DER"],
-            input=ED25519_PKCS8_PREFIX + seed,
-        )
-        actual = base64.b64encode(derived[-32:]).decode()
+        actual = derived_public_key(signing_seed(secret))
         options = ["--ed-key-file", "-"]
         stdin = secret.strip().encode()
     else:
@@ -101,7 +125,7 @@ def create_assets(tag):
     if plist["CFBundleShortVersionString"] != version or plist["CFBundleVersion"] != version:
         raise TaskError("package the selected Git tag before preparing release assets")
     options, stdin = signing_options()
-    environment = {key: value for key, value in os.environ.items() if key != "SPARKLE_PRIVATE_KEY"}
+    environment = {key: value for key, value in os.environ.items() if key != SIGNING_SECRET}
     with tempfile.TemporaryDirectory(dir=DIST) as temporary:
         directory = Path(temporary)
         archive = directory / archive_name(version)
@@ -138,17 +162,130 @@ def create_assets(tag):
         )
         installer = directory / "install.sh"
         shutil.copyfile(INSTALLER, installer)
-        checksums = []
-        for path in (archive, feed, installer):
-            with path.open("rb") as source:
-                digest = hashlib.file_digest(source, "sha256").hexdigest()
-            checksums.append(f"{digest}  {path.name}\n")
-        (directory / "SHA256SUMS").write_text("".join(checksums))
+        (directory / "SHA256SUMS").write_text(checksums((archive, feed, installer)))
         shutil.rmtree(RELEASE_ASSETS, ignore_errors=True)
         RELEASE_ASSETS.mkdir()
         for path in (archive, feed, installer, directory / "SHA256SUMS"):
             shutil.copyfile(path, RELEASE_ASSETS / path.name)
     print("Release DMG, signed appcast, installer, and checksums verified.")
+
+
+def sha256(path):
+    with path.open("rb") as source:
+        return hashlib.file_digest(source, "sha256").hexdigest()
+
+
+def checksums(paths):
+    return "".join(f"{sha256(path)}  {path.name}\n" for path in paths)
+
+
+def sign_ed25519(seed, message, signature):
+    """Sign the file `message` into `signature` with a key file only this process can read."""
+    with tempfile.TemporaryDirectory(prefix="spaceterm-signing-") as temporary:
+        key = Path(temporary) / "key.der"
+        descriptor = os.open(key, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(ED25519_PKCS8_PREFIX + seed)
+        checked(
+            [
+                "openssl",
+                "pkeyutl",
+                "-sign",
+                "-rawin",
+                "-keyform",
+                "DER",
+                "-inkey",
+                key,
+                "-in",
+                message,
+                "-out",
+                signature,
+            ]
+        )
+
+
+def verify_ed25519(public, message, signature):
+    """Verify a raw Ed25519 signature with the base64 public key installed releases trust."""
+    with tempfile.TemporaryDirectory(prefix="spaceterm-verify-") as temporary:
+        key = Path(temporary) / "key.der"
+        key.write_bytes(ED25519_SPKI_PREFIX + base64.b64decode(public))
+        checked(
+            [
+                "openssl",
+                "pkeyutl",
+                "-verify",
+                "-pubin",
+                "-rawin",
+                "-keyform",
+                "DER",
+                "-inkey",
+                key,
+                "-in",
+                message,
+                "-sigfile",
+                signature,
+            ]
+        )
+
+
+def sign_linux_release(seed, archive, version, published_at, directory):
+    """Write the archive, its signed feed, and the feed's detached signature into `directory`.
+
+    The feed names the archive with its size, SHA-256, and signature. The detached signature
+    covers the exact feed bytes, which the updater verifies before reading any field.
+    """
+    public = derived_public_key(seed)
+    release_archive = directory / linux_archive_name(version)
+    shutil.copyfile(archive, release_archive)
+    feed = directory / linux_feed_name()
+    feed_signature = directory / f"{feed.name}.sig"
+    with tempfile.TemporaryDirectory(prefix="spaceterm-signatures-") as temporary:
+        archive_signature = Path(temporary) / "archive"
+        sign_ed25519(seed, release_archive, archive_signature)
+        verify_ed25519(public, release_archive, archive_signature)
+        document = {
+            "version": version,
+            "published_at": published_at,
+            "archive": {
+                "name": release_archive.name,
+                "size": release_archive.stat().st_size,
+                "sha256": sha256(release_archive),
+                "signature": base64.b64encode(archive_signature.read_bytes()).decode(),
+            },
+        }
+        feed.write_bytes(json.dumps(document, separators=(",", ":")).encode())
+        if feed.stat().st_size > MAX_FEED_BYTES:
+            raise TaskError("the Linux release feed is larger than installed updaters accept")
+        raw = Path(temporary) / "feed"
+        sign_ed25519(seed, feed, raw)
+        verify_ed25519(public, feed, raw)
+        feed_signature.write_text(base64.b64encode(raw.read_bytes()).decode() + "\n")
+    return [release_archive, feed, feed_signature]
+
+
+def create_linux_assets(tag):
+    """Sign the packaged Linux release into dist/release-linux: archive, feed, and checksums."""
+    version = release_version(tag)
+    archive = package_linux.archive_path("spaceterm")
+    if not archive.is_file():
+        raise TaskError("package the selected Git tag before preparing release assets")
+    # Verification runs the packaged executable, which reports the version it was built for.
+    package_linux.verify(archive, tag)
+    secret = os.environ.get(SIGNING_SECRET)
+    if not secret:
+        raise TaskError(f"{SIGNING_SECRET} must hold the update signing key")
+    seed = signing_seed(secret)
+    if derived_public_key(seed) != public_key():
+        raise TaskError("the signing key does not match the key trusted by installed applications")
+    with tempfile.TemporaryDirectory(dir=DIST) as temporary:
+        directory = Path(temporary)
+        assets = sign_linux_release(seed, archive, version, int(time.time()), directory)
+        (directory / "SHA256SUMS").write_text(checksums(assets))
+        shutil.rmtree(LINUX_RELEASE_ASSETS, ignore_errors=True)
+        LINUX_RELEASE_ASSETS.mkdir()
+        for path in (*assets, directory / "SHA256SUMS"):
+            shutil.copyfile(path, LINUX_RELEASE_ASSETS / path.name)
+    print("Linux release archive, signed feed, and checksums verified.")
 
 
 def notes(root=ROOT):
@@ -180,13 +317,24 @@ def publish(tag):
     )
     if tagged.returncode or tagged.stdout.strip() != head:
         raise TaskError("check out the release tag before publishing")
-    assets = [
-        RELEASE_ASSETS / name
-        for name in (archive_name(version), "appcast.xml", "install.sh", "SHA256SUMS")
+    platforms = [
+        (RELEASE_ASSETS, (archive_name(version), "appcast.xml", "install.sh")),
+        (
+            LINUX_RELEASE_ASSETS,
+            (linux_archive_name(version), linux_feed_name(), f"{linux_feed_name()}.sig"),
+        ),
     ]
+    assets = [directory / name for directory, names in platforms for name in names]
     if not all(path.is_file() for path in assets):
         raise TaskError("prepare the complete release assets before publishing")
+    # Each package job lists its own assets. The release publishes one list of every asset.
+    for directory, names in platforms:
+        if published_checksums(directory) != checksums(directory / name for name in names):
+            raise TaskError("the release assets differ from their checksums")
     with tempfile.TemporaryDirectory() as temporary:
+        combined = Path(temporary) / "SHA256SUMS"
+        combined.write_text(checksums(assets))
+        assets.append(combined)
         release_notes = Path(temporary) / "release-notes.md"
         release_notes.write_text(notes())
         # gh uploads the assets to a draft and publishes it only after every upload succeeds, so
@@ -211,10 +359,17 @@ def publish(tag):
     print(f"Published SpaceTerm {tag} with complete update assets.")
 
 
-def archive_digest(version, checksums):
+def published_checksums(directory):
+    try:
+        return (directory / "SHA256SUMS").read_text()
+    except OSError:
+        raise TaskError("the release checksums are missing") from None
+
+
+def archive_digest(version, listing):
     archive = archive_name(version)
     digests = [
-        line.split("  ", 1)[0] for line in checksums.splitlines() if line.endswith(f"  {archive}")
+        line.split("  ", 1)[0] for line in listing.splitlines() if line.endswith(f"  {archive}")
     ]
     if (
         len(digests) != 1
