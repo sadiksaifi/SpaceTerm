@@ -6073,6 +6073,63 @@ fn terminal_scrollback_publishes_a_named_scroll_bar_that_requests_rows(cx: &mut 
 }
 
 #[gpui::test]
+fn terminal_context_menu_without_pointer_does_not_target_the_bottom_left_link(
+    cx: &mut TestAppContext,
+) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
+    let (pane, cx, _) = connected_terminal_pane(cx);
+    let directory = std::env::temp_dir().join(format!(
+        "spaceterm-context-anchor-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(directory.join("preview.txt"), b"preview").unwrap();
+    let link = crate::terminal::HyperlinkTarget::osc8(
+        "file:preview.txt",
+        &directory,
+        None,
+        TerminalLocalFileCapabilities::Enabled,
+    )
+    .unwrap();
+    pane.update(cx, |pane, cx| {
+        let mut screen = context_action_screen(Some(link), true);
+        let rows = pane.last_geometry.unwrap().grid().rows;
+        let bottom = screen.rows[0].clone();
+        let mut cells = vec![Arc::from([]); usize::from(rows)];
+        cells[usize::from(rows - 1)] = bottom;
+        Arc::make_mut(&mut screen).rows = cells.into();
+        pane.screen = screen;
+        pane.file_preview_available = true;
+        cx.notify();
+    });
+    let tree = A11yTree::read(cx);
+    perform(cx, tree.node("Terminal context actions"), Action::ShowContextMenu);
+    let tree = A11yTree::read(cx);
+    assert_eq!(tree.with_role("Menu").len(), 1);
+    assert_eq!(tree.node("Open Link")["aria"]["disabled"], true);
+    let preview_name = cx.update(|_, cx| {
+        crate::desktop_profile::DesktopPresentation::get(cx).wording().file_preview
+    });
+    assert_eq!(tree.node(preview_name)["aria"]["disabled"], true);
+    cx.simulate_keystrokes("escape");
+    A11yTree::read(cx);
+    let bottom_left = pane.read_with(cx, |pane, _| {
+        let bounds = pane.grid_bounds.unwrap();
+        let cell = pane.last_geometry.unwrap().logical_cell_size();
+        point(bounds.left() + px(cell.width / 2.0), bounds.bottom() - px(cell.height / 2.0))
+    });
+    cx.simulate_mouse_down(bottom_left, MouseButton::Right, Modifiers::none());
+    cx.simulate_mouse_up(bottom_left, MouseButton::Right, Modifiers::none());
+    let tree = A11yTree::read(cx);
+    assert_eq!(tree.with_role("Menu").len(), 1);
+    assert_ne!(tree.node("Open Link")["aria"]["disabled"], true);
+    assert_ne!(tree.node(preview_name)["aria"]["disabled"], true);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[gpui::test]
 fn terminal_notices_publish_bounded_status_classifications(cx: &mut TestAppContext) {
     use spaceterm_ui::a11y_testing::A11yTree;
 

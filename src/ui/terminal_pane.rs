@@ -3154,7 +3154,7 @@ impl TerminalPane {
     }
 
     fn context_menu_actions(&self, menu: &TerminalContextMenuState) -> NativeContextActions {
-        let current = self.link_at(menu.position);
+        let current = menu.link.as_ref().and_then(|_| self.link_at(menu.position));
         menu.actions(
             self.terminal_session.local_file_capabilities,
             self.screen.generation,
@@ -3178,16 +3178,9 @@ impl TerminalPane {
         ) {
             return false;
         }
-        let Some(mut position) = self.surface_position(request.position(), true) else {
+        let Some(position) = self.surface_position(request.position(), true) else {
             return false;
         };
-        // Keyboard and accessibility openings anchor below the trigger, outside the grid.
-        let Some(geometry) = self.last_geometry else {
-            return false;
-        };
-        let grid = geometry.backing_grid_size();
-        position.x = position.x.clamp(0.0, (grid.width as f32 - 1.0).max(0.0));
-        position.y = position.y.clamp(0.0, (grid.height as f32 - 1.0).max(0.0));
 
         self.pointer_modifiers = input_modifiers(modifiers);
         self.focus(window, cx);
@@ -3196,7 +3189,9 @@ impl TerminalPane {
             return false;
         }
 
-        let link = self.link_at(position);
+        let link = self
+            .surface_position(request.position(), false)
+            .and_then(|position| self.link_at(position));
         let file_preview_eligible = NativeContextActions::from_presence(
             self.terminal_session.local_file_capabilities,
             false,
@@ -3239,7 +3234,7 @@ impl TerminalPane {
         cx: &mut Context<Self>,
     ) {
         self.context_menu = None;
-        let current = self.link_at(menu.position);
+        let current = menu.link.as_ref().and_then(|_| self.link_at(menu.position));
         let link = revalidated_context_link(
             menu.generation,
             menu.link.as_ref(),
