@@ -724,7 +724,7 @@ fn terminal_only_preview_does_not_replace_control_catalog_or_force_native_chrome
     let (chrome_before, controls_before) = cx.update(|cx| {
         (
             Arc::clone(&cx.global::<InstalledChrome>().active),
-            cx.global::<spaceterm_ui::ControlThemeCatalog>().clone(),
+            Box::new(cx.global::<spaceterm_ui::ControlThemeCatalog>().clone()),
         )
     });
     let native_calls = platform.applied.borrow().len();
@@ -740,7 +740,7 @@ fn terminal_only_preview_does_not_replace_control_catalog_or_force_native_chrome
         ));
         assert_eq!(
             cx.global::<spaceterm_ui::ControlThemeCatalog>(),
-            &controls_before
+            controls_before.as_ref()
         );
         assert_eq!(current(cx).terminal.typography.cell_size, 24.0);
     });
