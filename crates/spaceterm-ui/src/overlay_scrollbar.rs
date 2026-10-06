@@ -3,8 +3,8 @@ use std::time::Duration;
 use gpui::prelude::*;
 use gpui::{
     AnyElement, Context, DispatchPhase, Empty, EventEmitter, Global, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Render, Rgba, SharedString, Task, Window, canvas, div,
-    px,
+    MouseMoveEvent, MouseUpEvent, Pixels, Render, Rgba, SharedString, Task, Window, accesskit,
+    canvas, div, px,
 };
 
 const DEFAULT_THUMB_WIDTH: f32 = 7.0;
@@ -144,6 +144,13 @@ impl ScrollMetrics<f32> {
 }
 
 impl<O: ScrollOffset> ScrollMetrics<O> {
+    fn page_step(self) -> f64 {
+        let maximum = self.maximum_offset.as_f64();
+        (maximum * self.viewport_fraction / (1.0 - self.viewport_fraction))
+            .max(1.0)
+            .min(maximum)
+    }
+
     fn with_offset(self, offset: O) -> Self {
         Self {
             current_offset: offset,
@@ -345,6 +352,7 @@ pub struct OverlayScrollbar<O: ScrollOffset> {
     #[cfg(feature = "control-preview")]
     preview_state: Option<crate::ControlPreviewState>,
     name: &'static str,
+    accessibility_name: SharedString,
     metrics: Option<ScrollMetrics<O>>,
     visible: bool,
     persistent: bool,
@@ -361,6 +369,7 @@ impl<O: ScrollOffset> OverlayScrollbar<O> {
             #[cfg(feature = "control-preview")]
             preview_state: None,
             name,
+            accessibility_name: "Scroll content".into(),
             metrics: None,
             visible: false,
             persistent: false,
@@ -369,6 +378,11 @@ impl<O: ScrollOffset> OverlayScrollbar<O> {
             visibility_generation: 0,
             _hide_task: None,
         }
+    }
+
+    pub fn accessibility_name(mut self, name: impl Into<SharedString>) -> Self {
+        self.accessibility_name = name.into();
+        self
     }
 
     /// Pins only thumb presentation without starting a drag interaction.
@@ -571,9 +585,40 @@ impl<O: ScrollOffset> OverlayScrollbar<O> {
         if let Some(drag) = &mut self.drag {
             drag.target_offset = offset;
         }
+        self.request_offset(offset, cx);
+        true
+    }
+
+    fn request_offset(&mut self, offset: O, cx: &mut Context<Self>) {
         cx.emit(OverlayScrollbarEvent::OffsetRequested(offset));
         cx.notify();
-        true
+    }
+
+    fn set_from_accessibility(&mut self, value: f64, cx: &mut Context<Self>) {
+        if !value.is_finite() || !self.visible || self.drag.is_some() {
+            return;
+        }
+        let Some(metrics) = self.metrics else {
+            return;
+        };
+        let Some(offset) = metrics.offset_for_progress(value / metrics.maximum_offset.as_f64())
+        else {
+            return;
+        };
+        cx.emit(OverlayScrollbarEvent::InteractionStarted);
+        if offset != metrics.current_offset {
+            self.request_offset(offset, cx);
+        }
+        self.reveal_current(cx);
+    }
+
+    fn step_from_accessibility(&mut self, direction: f64, cx: &mut Context<Self>) {
+        if let Some(metrics) = self.metrics {
+            self.set_from_accessibility(
+                metrics.current_offset.as_f64() + direction * metrics.page_step(),
+                cx,
+            );
+        }
     }
 
     fn finish_drag(&mut self, cx: &mut Context<Self>) -> bool {
@@ -614,6 +659,9 @@ impl<O: ScrollOffset> OverlayScrollbar<O> {
         let down_scrollbar = scrollbar.clone();
         let move_scrollbar = scrollbar.clone();
         let up_scrollbar = scrollbar;
+        let increment_scrollbar = cx.entity().downgrade();
+        let decrement_scrollbar = increment_scrollbar.clone();
+        let value_scrollbar = increment_scrollbar.clone();
         let thumb_id: SharedString = format!("{}-thumb", self.name).into();
         let hitbox_id: SharedString = format!("{}-thumb-hitbox", self.name).into();
         let dragging = self.drag.is_some();
@@ -640,6 +688,40 @@ impl<O: ScrollOffset> OverlayScrollbar<O> {
 
         div()
             .id(hitbox_id)
+            .role(accesskit::Role::ScrollBar)
+            .aria_label(self.accessibility_name.clone())
+            .aria_orientation(accesskit::Orientation::Vertical)
+            .when_some(self.metrics, |thumb, metrics| {
+                let offset = self
+                    .drag
+                    .filter(|drag| drag.offset_valid)
+                    .map_or(metrics.current_offset, |drag| drag.target_offset);
+                thumb
+                    .aria_numeric_value(offset.as_f64())
+                    .aria_min_numeric_value(0.0)
+                    .aria_max_numeric_value(metrics.maximum_offset.as_f64())
+                    .aria_numeric_value_step(metrics.page_step())
+            })
+            .when(!dragging, |thumb| {
+                thumb
+                    .on_a11y_action(accesskit::Action::Increment, move |_, _, cx| {
+                        let _ = increment_scrollbar.update(cx, |scrollbar, cx| {
+                            scrollbar.step_from_accessibility(1.0, cx)
+                        });
+                    })
+                    .on_a11y_action(accesskit::Action::Decrement, move |_, _, cx| {
+                        let _ = decrement_scrollbar.update(cx, |scrollbar, cx| {
+                            scrollbar.step_from_accessibility(-1.0, cx)
+                        });
+                    })
+                    .on_a11y_action(accesskit::Action::SetValue, move |data, _, cx| {
+                        if let Some(accesskit::ActionData::NumericValue(value)) = data {
+                            let _ = value_scrollbar.update(cx, |scrollbar, cx| {
+                                scrollbar.set_from_accessibility(*value, cx)
+                            });
+                        }
+                    })
+            })
             .debug_selector(move || hitbox_debug.to_string())
             .absolute()
             .top(px(geometry.track_top_px + geometry.top_px))
@@ -1110,5 +1192,96 @@ mod tests {
                 OverlayScrollbarEvent::OffsetRequested(40),
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod accessibility_tests {
+    use super::*;
+    use crate::a11y_testing::{A11yTree, perform, perform_with, supports};
+    use gpui::{
+        TestAppContext,
+        accesskit::{Action, ActionData},
+    };
+    use std::{cell::RefCell, rc::Rc};
+
+    #[gpui::test]
+    fn scrollbars_publish_vertical_ranges_and_route_adjustments(cx: &mut TestAppContext) {
+        cx.set_global(ScrollbarTheme::new(
+            gpui::rgba(1),
+            gpui::rgba(2),
+            gpui::rgba(3),
+        ));
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let recorded = events.clone();
+        let (scrollbar, cx) =
+            cx.add_window_view(|_, _| OverlayScrollbar::<u64>::new("test-scrollbar").persistent());
+        scrollbar.update(cx, |_, cx| {
+            cx.subscribe(&scrollbar, move |scrollbar, _, event, cx| {
+                recorded.borrow_mut().push(*event);
+                if let OverlayScrollbarEvent::OffsetRequested(offset) = event {
+                    scrollbar.sync(ScrollMetrics::for_rows(0.0, 200.0, 100, 20, *offset), cx);
+                }
+            })
+            .detach();
+        });
+        scrollbar.update(cx, |scrollbar, cx| {
+            scrollbar.sync(ScrollMetrics::for_rows(0.0, 200.0, 100, 20, 40), cx);
+        });
+        let tree = A11yTree::read(cx);
+        let node = tree.node("Scroll content");
+        assert_eq!(node["aria"]["role"], "ScrollBar");
+        assert_eq!(node["aria"]["orientation"], "Vertical");
+        assert_eq!(node["aria"]["numeric_value"], 40.0);
+        assert_eq!(node["aria"]["min_numeric_value"], 0.0);
+        assert_eq!(node["aria"]["max_numeric_value"], 80.0);
+        for action in [Action::Increment, Action::Decrement, Action::SetValue] {
+            assert!(supports(node, action));
+        }
+        perform(cx, node, Action::Increment);
+        assert_eq!(
+            A11yTree::read(cx).node("Scroll content")["aria"]["numeric_value"],
+            60.0
+        );
+        perform(cx, node, Action::Decrement);
+        perform_with(
+            cx,
+            node,
+            Action::SetValue,
+            Some(ActionData::NumericValue(500.0)),
+        );
+        assert_eq!(
+            A11yTree::read(cx).node("Scroll content")["aria"]["numeric_value"],
+            80.0
+        );
+        assert_eq!(
+            *events.borrow(),
+            [
+                OverlayScrollbarEvent::InteractionStarted,
+                OverlayScrollbarEvent::OffsetRequested(60),
+                OverlayScrollbarEvent::InteractionStarted,
+                OverlayScrollbarEvent::OffsetRequested(40),
+                OverlayScrollbarEvent::InteractionStarted,
+                OverlayScrollbarEvent::OffsetRequested(80),
+            ]
+        );
+        events.borrow_mut().clear();
+        perform_with(
+            cx,
+            node,
+            Action::SetValue,
+            Some(ActionData::NumericValue(f64::NAN)),
+        );
+        perform_with(
+            cx,
+            node,
+            Action::SetValue,
+            Some(ActionData::Value("ignored".into())),
+        );
+        assert!(events.borrow().is_empty());
+        scrollbar.update(cx, |scrollbar, cx| scrollbar.reset(cx));
+        assert!(A11yTree::read(cx).with_role("ScrollBar").is_empty());
+        perform(cx, node, Action::Increment);
+        assert!(events.borrow().is_empty());
     }
 }
