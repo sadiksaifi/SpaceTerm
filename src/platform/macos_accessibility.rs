@@ -264,6 +264,25 @@ mod native {
                 }
             }
 
+            #[unsafe(method(isAccessibilityEnabled))]
+            fn is_accessibility_enabled(&self) -> bool {
+                state(self).is_some_and(|state| state.presented)
+            }
+
+            #[unsafe(method_id(accessibilityWindow))]
+            fn accessibility_window(&self) -> Option<Retained<AnyObject>> {
+                // SAFETY: Both selectors are part of NSAccessibility and the receivers are live.
+                containing_element(self, |parent| unsafe { msg_send![parent, accessibilityWindow] })
+            }
+
+            #[unsafe(method_id(accessibilityTopLevelUIElement))]
+            fn accessibility_top_level_ui_element(&self) -> Option<Retained<AnyObject>> {
+                // SAFETY: Both selectors are part of NSAccessibility and the receivers are live.
+                containing_element(self, |parent| unsafe {
+                    msg_send![parent, accessibilityTopLevelUIElement]
+                })
+            }
+
             #[unsafe(method(isAccessibilitySelectorAllowed:))]
             fn is_accessibility_selector_allowed(&self, selector: Sel) -> bool {
                 if selector == sel!(setAccessibilityFocused:) {
@@ -629,6 +648,22 @@ mod native {
         // SAFETY: The owner keeps its Box stable until Drop clears the pointer, and native
         // callbacks run on the main thread that owns both.
         unsafe { this.ivars().state.get().as_ref() }
+    }
+
+    /// Resolves the window that contains a presented text area through its accessibility
+    /// parent, as AccessKit resolves it for GPUI's nodes, or else through the GPUI view.
+    fn containing_element(
+        this: &PaneAccessibilityElement,
+        resolve: impl FnOnce(&AnyObject) -> Option<Retained<AnyObject>>,
+    ) -> Option<Retained<AnyObject>> {
+        let state = state(this).filter(|state| state.presented)?;
+        // SAFETY: NSAccessibilityElement stores the parent that AccessKit assigns.
+        let parent: Option<Retained<AnyObject>> = unsafe { msg_send![this, accessibilityParent] };
+        parent.and_then(|parent| resolve(&parent)).or_else(|| {
+            let view = state.view.as_deref()?;
+            // SAFETY: GPUI's live NSView answers this NSAccessibility method.
+            unsafe { msg_send![view, accessibilityParent] }
+        })
     }
 
     fn semantic_state(this: &PaneAccessibilityElement) -> Option<&AccessibilityElementState> {
@@ -1180,6 +1215,35 @@ pub(crate) mod tests {
         };
         assert!(allowed);
 
+        let window = objc2_app_kit::NSAccessibilityElement::new();
+        let parent = objc2_app_kit::NSAccessibilityElement::new();
+        let first = factory.elements.borrow()[0].clone();
+        // SAFETY: The selectors are part of NSAccessibility and every element is live.
+        unsafe {
+            let _: () = msg_send![&*parent, setAccessibilityWindow: &*window];
+            let _: () = msg_send![&*parent, setAccessibilityTopLevelUIElement: &*window];
+            for element in [&first, &second] {
+                let _: () = msg_send![&**element, setAccessibilityParent: &*parent];
+            }
+        }
+        let containment = |element: &objc2::runtime::AnyObject| {
+            // SAFETY: The selectors are part of NSAccessibility and the element is live.
+            unsafe {
+                let enabled: bool = msg_send![element, isAccessibilityEnabled];
+                let window: Option<objc2::rc::Retained<objc2::runtime::AnyObject>> =
+                    msg_send![element, accessibilityWindow];
+                let top_level: Option<objc2::rc::Retained<objc2::runtime::AnyObject>> =
+                    msg_send![element, accessibilityTopLevelUIElement];
+                (
+                    enabled,
+                    window.map(|window| objc2::rc::Retained::as_ptr(&window)),
+                    top_level.map(|top_level| objc2::rc::Retained::as_ptr(&top_level)),
+                )
+            }
+        };
+        let window_pointer = Some(objc2::rc::Retained::as_ptr(&window).cast());
+        assert_eq!(containment(&second), (true, window_pointer, window_pointer));
+
         // SAFETY: The selector is part of NSAccessibility and the element is live.
         let _: () = unsafe { msg_send![&*second, setAccessibilityFocused: false] };
         cx.run_until_parked();
@@ -1192,12 +1256,12 @@ pub(crate) mod tests {
         assert_eq!(*requests.borrow(), [1]);
         assert_eq!(focused(cx), [false, true]);
 
-        let first = factory.elements.borrow()[0].clone();
         panes[0].update(cx, |pane, cx| {
             pane.set_accessibility_hierarchy(false);
             cx.notify();
         });
         cx.run_until_parked();
+        assert_eq!(containment(&first), (false, None, None));
         // SAFETY: The selector is part of NSAccessibility and the element is live.
         let _: () = unsafe { msg_send![&*first, setAccessibilityFocused: true] };
         cx.run_until_parked();
