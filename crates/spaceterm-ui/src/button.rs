@@ -889,6 +889,12 @@ pub struct Button {
 }
 
 impl Button {
+    /// Supplies guidance or status separately from the button's name.
+    pub fn accessibility_description(mut self, description: impl Into<SharedString>) -> Self {
+        self.core.accessibility_description = Some(description.into());
+        self
+    }
+
     /// Pins only presentation for the development acceptance gallery.
     #[cfg(feature = "control-preview")]
     pub fn preview_state(mut self, state: crate::ControlPreviewState) -> Self {
@@ -1176,6 +1182,12 @@ pub struct IconButton {
 }
 
 impl IconButton {
+    /// Supplies guidance or status separately from the button's name.
+    pub fn accessibility_description(mut self, description: impl Into<SharedString>) -> Self {
+        self.core.accessibility_description = Some(description.into());
+        self
+    }
+
     /// Pins only presentation for the development acceptance gallery.
     #[cfg(feature = "control-preview")]
     pub fn preview_state(mut self, state: crate::ControlPreviewState) -> Self {
@@ -1322,6 +1334,7 @@ struct ButtonLayout {
 struct ButtonCore {
     id: ElementId,
     accessibility_name: SharedString,
+    accessibility_description: Option<SharedString>,
     variant: ButtonVariant,
     size: ButtonSize,
     shape: ButtonShape,
@@ -1355,6 +1368,7 @@ impl ButtonCore {
         Self {
             id,
             accessibility_name,
+            accessibility_description: None,
             variant: ButtonVariant::default(),
             size: ButtonSize::default(),
             shape: ButtonShape::default(),
@@ -1583,6 +1597,9 @@ impl ButtonCore {
             .id(self.id)
             .role(accesskit::Role::Button)
             .aria_label(self.accessibility_name.clone())
+            .when_some(self.accessibility_description, |button, description| {
+                button.aria_description(description)
+            })
             .aria_disabled(!enabled)
             .when_some(on_accessibility_activate, |button, handler| {
                 button.on_a11y_action(accesskit::Action::Click, move |_, window, cx| {
@@ -2206,6 +2223,51 @@ mod tests {
                 cx.debug_bounds(tooltip).is_none(),
                 "disabled {button} refuses hover"
             );
+        }
+    }
+
+    #[gpui::test]
+    fn buttons_publish_descriptions_and_refresh_them(cx: &mut TestAppContext) {
+        use crate::a11y_testing::A11yTree;
+
+        struct DescriptionRoot(Option<&'static str>);
+        impl Render for DescriptionRoot {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .flex()
+                    .child(
+                        Button::new("download", "Download").when_some(self.0, |button, text| {
+                            button.accessibility_description(text)
+                        }),
+                    )
+                    .child(
+                        IconButton::new("help", "Help", |_| div().into_any_element())
+                            .when_some(self.0, |button, text| {
+                                button.accessibility_description(text)
+                            }),
+                    )
+                    .child(Button::new("cancel", "Cancel"))
+            }
+        }
+
+        cx.set_global(test_theme());
+        let (root, cx) =
+            cx.add_window_view(|_, _| DescriptionRoot(Some("Download SpaceTerm 0.4.2")));
+        for description in [
+            Some("Download SpaceTerm 0.4.2"),
+            Some("Downloading SpaceTerm 0.4.2, 37%"),
+            None,
+        ] {
+            root.update(cx, |root, cx| {
+                root.0 = description;
+                cx.notify();
+            });
+            let tree = A11yTree::read(cx);
+            for name in ["Download", "Help"] {
+                assert_eq!(tree.node(name)["aria"]["role"], "Button");
+                assert_eq!(tree.node(name)["aria"]["description"].as_str(), description);
+            }
+            assert!(tree.node("Cancel")["aria"]["description"].is_null());
         }
     }
 
