@@ -783,6 +783,40 @@ mod tests {
         assert!(!published.contains("correct horse"));
     }
 
+    #[gpui::test]
+    fn confirmation_publishes_an_alert_dialog_that_answers_through_its_buttons(
+        cx: &mut TestAppContext,
+    ) {
+        use gpui::accesskit::Action;
+        use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
+        let (_, presenter, results, cx) = askpass_window(cx);
+        let prompt = "Allow use of key /tmp/example-key?";
+        let presentation = request(prompt, AskPassPromptKind::Confirmation)
+            .confirmation_presentation()
+            .expect("a confirmation presentation");
+        present(
+            1,
+            request(prompt, AskPassPromptKind::Confirmation),
+            &presenter,
+            &results,
+            cx,
+        );
+
+        let tree = A11yTree::read(cx);
+        let alert = tree.node(presentation.title());
+        assert_eq!(alert["aria"]["role"], "AlertDialog");
+        assert_eq!(alert["aria"]["modal"], true);
+        assert_eq!(alert["aria"]["description"], presentation.message());
+        perform(cx, tree.node(presentation.affirmative()), Action::Click);
+        cx.run_until_parked();
+        assert_eq!(
+            results.borrow().as_slice(),
+            [ObservedResult::Confirmation(true)]
+        );
+        assert!(A11yTree::read(cx).find(presentation.title()).is_none());
+    }
+
     #[test]
     fn confirmation_rejection_maps_first_contact_to_cancel_and_generic_to_false() {
         let rejected = AlertOutcome::Activated {
