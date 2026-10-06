@@ -2147,6 +2147,27 @@ impl ModalPresentationHandle {
         self.presentation
     }
 
+    /// Reports whether this active presentation contains the window's current focus.
+    pub fn contains_focus(&self, window: &Window, cx: &App) -> bool {
+        if self.check_window(window).is_err()
+            || self.completion.status() != CompletionStatus::Pending
+        {
+            return false;
+        }
+        let state = self.owner.read(cx);
+        state
+            .active
+            .as_ref()
+            .is_some_and(|active| active.id == self.presentation)
+            && state.focus_chain.modal_scope_presentation == Some(self.presentation)
+            && state
+                .focus_chain
+                .modal_scope
+                .as_ref()
+                .and_then(WeakFocusHandle::upgrade)
+                .is_some_and(|scope| scope.contains_focused(window, cx))
+    }
+
     /// Dismisses this exact active or queued presentation without affecting a successor.
     ///
     /// # Errors

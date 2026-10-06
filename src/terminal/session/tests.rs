@@ -4572,3 +4572,110 @@ fn worker_spawn_failure_diagnostics_exclude_native_content() {
     assert_eq!(format!("{error:?}"), "SpawnWorker(PermissionDenied)");
     assert!(std::error::Error::source(&error).is_none());
 }
+
+#[test]
+fn paste_confirmation_focus_owns_one_payload_without_terminal_input_authority() {
+    let (result, _reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
+    let (mut session, _events, _accessibility) = result.unwrap();
+    let PasteRequestOutcome::ConfirmationRequired(confirmation) = session
+        .request_paste("first\nsecond".to_owned().into())
+        .recv_blocking()
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("multiline paste requires confirmation")
+    };
+
+    session.focus_paste_confirmation(confirmation.id);
+    assert_eq!(
+        session
+            .request_paste("other".to_owned().into())
+            .recv_blocking()
+            .unwrap(),
+        Ok(PasteRequestOutcome::Rejected(
+            PasteRejection::TerminalUnfocused
+        ))
+    );
+    assert_eq!(
+        session
+            .resolve_paste(confirmation.id, PasteDecision::Confirm)
+            .recv_blocking()
+            .unwrap(),
+        Ok(PasteResolution::Written)
+    );
+    assert_eq!(records.snapshot().written, b"first\rsecond");
+    assert_eq!(
+        session
+            .resolve_paste(confirmation.id, PasteDecision::Confirm)
+            .recv_blocking()
+            .unwrap(),
+        Ok(PasteResolution::Stale)
+    );
+    assert_eq!(records.snapshot().written, b"first\rsecond");
+    session.shutdown();
+}
+
+#[test]
+fn leaving_paste_confirmation_focus_cancels_even_after_terminal_focus_was_revoked() {
+    for refocus in [false, true] {
+        let (result, _reader_steps, records) =
+            start_scripted_session(ScriptedPtyOptions::default());
+        let (mut session, _events, _accessibility) = result.unwrap();
+        let PasteRequestOutcome::ConfirmationRequired(confirmation) = session
+            .request_paste("first\nsecond".to_owned().into())
+            .recv_blocking()
+            .unwrap()
+            .unwrap()
+        else {
+            panic!("multiline paste requires confirmation")
+        };
+        session.focus_paste_confirmation(confirmation.id);
+        session.focus(false);
+        if refocus {
+            session.focus(true);
+        }
+        assert_eq!(
+            session
+                .resolve_paste(confirmation.id, PasteDecision::Confirm)
+                .recv_blocking()
+                .unwrap(),
+            Ok(PasteResolution::Stale)
+        );
+        assert!(records.snapshot().written.is_empty());
+        session.shutdown();
+    }
+}
+
+#[test]
+fn paste_confirmation_focus_cannot_claim_a_different_or_cancelled_payload() {
+    for cancelled in [false, true] {
+        let (result, _reader_steps, records) =
+            start_scripted_session(ScriptedPtyOptions::default());
+        let (mut session, _events, _accessibility) = result.unwrap();
+        let PasteRequestOutcome::ConfirmationRequired(confirmation) = session
+            .request_paste("first\nsecond".to_owned().into())
+            .recv_blocking()
+            .unwrap()
+            .unwrap()
+        else {
+            panic!("multiline paste requires confirmation")
+        };
+        if cancelled {
+            session.focus(false);
+        }
+        session.focus_paste_confirmation(if cancelled {
+            confirmation.id
+        } else {
+            PasteConfirmationId::new(999)
+        });
+        assert_eq!(
+            session
+                .resolve_paste(confirmation.id, PasteDecision::Confirm)
+                .recv_blocking()
+                .unwrap(),
+            Ok(PasteResolution::Stale)
+        );
+        assert!(records.snapshot().written.is_empty());
+        session.shutdown();
+    }
+}

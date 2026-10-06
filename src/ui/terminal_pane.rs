@@ -1,5 +1,4 @@
 use super::pane_lifecycle::PaneLifecycleDependencies;
-#[cfg(test)]
 use super::terminal_focus::TerminalFocusBlocker;
 pub(crate) use crate::domain::remote_workspace::RemotePaneLifecycleError;
 use crate::domain::remote_workspace::{RemotePaneFacts, RemoteRestartAuthority};
@@ -26,12 +25,12 @@ use super::terminal_focus::{TerminalFocusCoordinator, TerminalFocusFacts, Termin
 use super::terminal_graphics::{GraphicsAttemptToken, TerminalGraphicsCache};
 use super::terminal_ime::{PreeditLayout, PreeditPosition, TerminalIme, layout_preedit};
 use super::{
-    CancelUnsafePaste, ClearTerminalScreenAndScrollback, CloseTerminalFind, ConfirmUnsafePaste,
-    CopySelection, DecreaseTerminalFontSize, ExportTerminalDiagnostics, FindNext, FindPrevious,
-    FocusNextTerminalFindControl, FocusPreviousTerminalFindControl, IncreaseTerminalFontSize,
-    OpenTerminalFind, PasteClipboard, PasteSelection, ResetTerminalFontSize, ScrollPageDown,
-    ScrollPageUp, ScrollToBottom, ScrollToTop, TERMINAL_FIND_KEY_CONTEXT, TERMINAL_KEY_CONTEXT,
-    TERMINAL_PASTE_CONFIRMATION_KEY_CONTEXT, TERMINAL_PERMISSION_REQUEST_KEY_CONTEXT,
+    ClearTerminalScreenAndScrollback, CloseTerminalFind, CopySelection, DecreaseTerminalFontSize,
+    ExportTerminalDiagnostics, FindNext, FindPrevious, FocusNextTerminalFindControl,
+    FocusPreviousTerminalFindControl, IncreaseTerminalFontSize, OpenTerminalFind, PasteClipboard,
+    PasteSelection, ResetTerminalFontSize, ScrollPageDown, ScrollPageUp, ScrollToBottom,
+    ScrollToTop, TERMINAL_FIND_KEY_CONTEXT, TERMINAL_KEY_CONTEXT,
+    TERMINAL_PERMISSION_REQUEST_KEY_CONTEXT,
 };
 use super::{DeclinePermissionRequest, SetUpPermissionRequest};
 use crate::appearance::Color;
@@ -81,10 +80,11 @@ use gpui::{
     SharedString, Task, TextRun, UTF16Selection, Window, div, point, px, relative, size,
 };
 use spaceterm_ui::{
-    Button, ButtonRole, ButtonSize, ButtonVariant, ContextMenu, ContextMenuTarget, EditCopy,
-    EditPaste, FloatingRole, FloatingShell, Icon, IconButton, IconName, MenuLifecycleEvent,
-    MenuSize, OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics, TextInput, TextInputEvent,
-    TextInputTabBehavior, TextInputVariant, Tooltip, window_modal_is_open,
+    Alert, AlertIntent, AlertOutcome, Button, ButtonRole, ButtonSize, ButtonVariant, ContextMenu,
+    ContextMenuTarget, EditCopy, EditPaste, FloatingRole, FloatingShell, Icon, IconButton,
+    IconName, MenuLifecycleEvent, MenuSize, ModalAction, ModalActionRole, ModalId,
+    ModalPresentationHandle, OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics, TextInput,
+    TextInputEvent, TextInputTabBehavior, TextInputVariant, Tooltip, window_modal_is_open,
 };
 
 #[cfg(test)]
@@ -534,6 +534,12 @@ impl Drop for PaneTerminalSessionLifecycle {
     }
 }
 
+struct PasteConfirmationOwnership {
+    _owner: Entity<()>,
+    presentation: ModalPresentationHandle,
+    focus_entered: bool,
+}
+
 pub(crate) struct TerminalPane {
     terminal_session: PaneTerminalSessionLifecycle,
     window_handle: gpui::AnyWindowHandle,
@@ -618,6 +624,8 @@ pub(crate) struct TerminalPane {
     /// discards that read.
     pending_paste_read: Option<Task<()>>,
     pending_paste: Option<PasteConfirmation>,
+    // Releasing the caller retires the Modal with its Paste Payload, including on Pane close.
+    paste_confirmation_owner: Option<PasteConfirmationOwnership>,
     /// Permissions a Permission Request asked for that the person has not answered. The Pane
     /// keeps them while granted, so it offers a setup again if a grant is later withdrawn.
     requested_permissions: Vec<SystemPermission>,
@@ -929,6 +937,7 @@ impl TerminalPane {
             pending_file_insertion: None,
             pending_paste_read: None,
             pending_paste: None,
+            paste_confirmation_owner: None,
             requested_permissions: Vec::new(),
             permission_request: Vec::new(),
             declined_permissions: Vec::new(),
@@ -999,15 +1008,15 @@ impl TerminalPane {
         if pane_inactive {
             self.file_preview.dismiss();
         }
+        let own_paste_modal = self.paste_confirmation_owner.is_some()
+            && product_focus.blocker == Some(TerminalFocusBlocker::Modal)
+            && !pane_inactive;
+        if native_service_blocked && !own_paste_modal {
+            self.cancel_pending_paste();
+        }
         if native_service_blocked {
             self.pending_file_insertion = None;
             self.context_menu = None;
-        }
-        if native_service_blocked
-            && let Some(confirmation) = self.pending_paste.take()
-            && let Some(session) = &self.terminal_session.session
-        {
-            let _ = session.resolve_paste(confirmation.id, PasteDecision::Cancel);
         }
         let was_presentable = self.render_lifecycle.can_present();
         self.product_focus = product_focus;
@@ -1237,6 +1246,7 @@ impl TerminalPane {
             window,
             self.current_activity(window, cx),
             window_modal_is_open(window, cx),
+            cx,
         )
     }
 
@@ -1245,10 +1255,31 @@ impl TerminalPane {
         window: &Window,
         activity: SurfaceActivity,
         modal_open: bool,
+        cx: &App,
     ) -> (bool, bool) {
         self.lifecycle_dependencies
             .secure_input
             .update_application_activation(activity.application_active);
+        if let Some(ownership) = &mut self.paste_confirmation_owner {
+            let inside = ownership.presentation.contains_focus(window, cx);
+            let entering =
+                !ownership.focus_entered && self.focus_handle.is_focused(window) && modal_open;
+            ownership.focus_entered |= inside;
+            if !(inside || entering)
+                || !activity.application_active
+                || !activity.operating_system_window_key
+                || !self.product_focus.active_workspace
+                || !self.product_focus.active_tab
+                || !self.product_focus.focused_pane
+                || !matches!(
+                    self.product_focus.blocker,
+                    None | Some(TerminalFocusBlocker::Modal)
+                )
+                || self.terminal_session.remote_input_blocked
+            {
+                self.cancel_pending_paste();
+            }
+        }
         let focused = self.terminal_input_focused_with_activity(window, activity, modal_open);
         let focus_gained = !self.terminal_input_focus && focused;
         self.apply_terminal_input_focus(focused);
@@ -1275,7 +1306,8 @@ impl TerminalPane {
             }
             self.reset_blink_phase();
             if !focused {
-                if let Some(confirmation) = self.pending_paste.take()
+                if self.paste_confirmation_owner.is_none()
+                    && let Some(confirmation) = self.pending_paste.take()
                     && let Some(session) = &self.terminal_session.session
                 {
                     let _ = session.resolve_paste(confirmation.id, PasteDecision::Cancel);
@@ -1284,7 +1316,14 @@ impl TerminalPane {
                 self.invalidate_preedit_layout();
             }
             if let Some(session) = &self.terminal_session.session {
-                session.focus(focused);
+                if !focused
+                    && self.paste_confirmation_owner.is_some()
+                    && let Some(confirmation) = self.pending_paste
+                {
+                    session.focus_paste_confirmation(confirmation.id);
+                } else {
+                    session.focus(focused);
+                }
             }
             self.sync_secure_input();
         }
@@ -1488,6 +1527,7 @@ impl TerminalPane {
             return;
         }
         self.end_find_state();
+        self.paste_confirmation_owner.take();
         if let Some(confirmation) = self.pending_paste.take()
             && let Some(session) = &self.terminal_session.session
         {
@@ -3366,38 +3406,42 @@ impl TerminalPane {
         };
         let guard = self.paste_request_guard();
         let receiver = session.request_paste(text);
+        let window_handle = self.window_handle;
         cx.spawn(async move |this, cx| {
             let outcome = receiver.recv().await;
-            let _ = this.update(cx, |this, cx| {
-                if !this.paste_request_guard_is_current(guard) {
-                    if let Ok(Ok(PasteRequestOutcome::ConfirmationRequired(confirmation))) = outcome
-                        && this.terminal_session.native_service_session_identity
-                            == guard.session_identity
-                        && let Some(session) = &this.terminal_session.session
-                    {
-                        let _ = session.resolve_paste(confirmation.id, PasteDecision::Cancel);
+            let _ = cx.update_window(window_handle, |_, window, cx| {
+                this.update(cx, |this, cx| {
+                    if !this.paste_request_guard_is_current(guard) {
+                        if let Ok(Ok(PasteRequestOutcome::ConfirmationRequired(confirmation))) =
+                            outcome
+                            && this.terminal_session.native_service_session_identity
+                                == guard.session_identity
+                            && let Some(session) = &this.terminal_session.session
+                        {
+                            let _ = session.resolve_paste(confirmation.id, PasteDecision::Cancel);
+                        }
+                        return;
                     }
-                    return;
-                }
-                match outcome {
-                    Ok(Ok(PasteRequestOutcome::Written)) => this.clear_attention(cx),
-                    Ok(Ok(PasteRequestOutcome::ConfirmationRequired(confirmation))) => {
-                        this.pending_paste = Some(confirmation);
-                        cx.notify();
+                    match outcome {
+                        Ok(Ok(PasteRequestOutcome::Written)) => this.clear_attention(cx),
+                        Ok(Ok(PasteRequestOutcome::ConfirmationRequired(confirmation))) => {
+                            this.present_paste_confirmation(confirmation, guard, window, cx);
+                        }
+                        Ok(Ok(PasteRequestOutcome::Rejected(rejection))) => {
+                            this.status = Some(format!("Paste rejected: {rejection}"));
+                            this.status_intent = StatusIntent::Warning;
+                            cx.notify();
+                        }
+                        Ok(Err(_)) | Err(_) => {
+                            this.status = Some(
+                                "Paste request failed before any terminal input was written"
+                                    .to_owned(),
+                            );
+                            this.status_intent = StatusIntent::Error;
+                            cx.notify();
+                        }
                     }
-                    Ok(Ok(PasteRequestOutcome::Rejected(rejection))) => {
-                        this.status = Some(format!("Paste rejected: {rejection}"));
-                        this.status_intent = StatusIntent::Warning;
-                        cx.notify();
-                    }
-                    Ok(Err(_)) | Err(_) => {
-                        this.status = Some(
-                            "Paste request failed before any terminal input was written".to_owned(),
-                        );
-                        this.status_intent = StatusIntent::Error;
-                        cx.notify();
-                    }
-                }
+                })
             });
         })
         .detach();
@@ -3678,41 +3722,127 @@ impl TerminalPane {
         cx.notify();
     }
 
-    fn confirm_unsafe_paste(
-        &mut self,
-        _: &ConfirmUnsafePaste,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.resolve_pending_paste(PasteDecision::Confirm, window, cx);
+    fn cancel_pending_paste(&mut self) {
+        self.paste_confirmation_owner.take();
+        if let Some(confirmation) = self.pending_paste.take()
+            && let Some(session) = &self.terminal_session.session
+        {
+            let _ = session.resolve_paste(confirmation.id, PasteDecision::Cancel);
+            session.focus(false);
+        }
     }
 
-    fn cancel_unsafe_paste(
+    fn present_paste_confirmation(
         &mut self,
-        _: &CancelUnsafePaste,
-        window: &mut Window,
+        confirmation: PasteConfirmation,
+        guard: PasteRequestGuard,
+        window: &Window,
         cx: &mut Context<Self>,
     ) {
-        self.resolve_pending_paste(PasteDecision::Cancel, window, cx);
+        let title = format!(
+            "Paste {} bytes across {} lines?",
+            confirmation.byte_len, confirmation.line_count
+        );
+        let message = if confirmation.risk.control_bytes || confirmation.risk.closing_fence {
+            "This text contains control sequences that may change terminal behavior or execute commands."
+        } else {
+            "Pasting multiple lines may execute commands in your shell."
+        };
+        let alert = Alert::new(
+            ModalId::new("unsafe-paste-confirmation"),
+            title.clone(),
+            title,
+            message,
+            vec![
+                ModalAction::new(
+                    PasteDecision::Cancel,
+                    "Cancel",
+                    ModalActionRole::Cancel,
+                    "cancel-unsafe-paste",
+                ),
+                ModalAction::new(
+                    PasteDecision::Confirm,
+                    "Paste",
+                    ModalActionRole::Affirmative,
+                    "confirm-unsafe-paste",
+                )
+                .default_action(true),
+            ],
+        )
+        .intent(AlertIntent::Warning);
+        let owner = cx.new(|_| ());
+        let pane = cx.weak_entity();
+        let window_handle = self.window_handle;
+        self.pending_paste = Some(confirmation);
+        let result = owner.update(cx, |_, cx| {
+            alert.present(window, cx, move |outcome, cx| {
+                let decision = match outcome {
+                    AlertOutcome::Activated { action_id, .. } => action_id,
+                    AlertOutcome::Dismissed { .. } => PasteDecision::Cancel,
+                };
+                let _ = cx.update_window(window_handle, |_, window, cx| {
+                    pane.update(cx, |pane, cx| {
+                        if pane.pending_paste == Some(confirmation) {
+                            pane.resolve_pending_paste(decision, guard, window, cx);
+                        }
+                    })
+                });
+            })
+        });
+        if let Ok(presentation) = result {
+            self.paste_confirmation_owner = Some(PasteConfirmationOwnership {
+                _owner: owner,
+                presentation,
+                focus_entered: false,
+            });
+            self.apply_terminal_input_focus(false);
+        } else {
+            self.pending_paste = None;
+            if let Some(session) = &self.terminal_session.session {
+                let _ = session.resolve_paste(confirmation.id, PasteDecision::Cancel);
+            }
+            self.status =
+                Some("Paste confirmation could not open; no terminal input was written".to_owned());
+            self.status_intent = StatusIntent::Error;
+        }
+        cx.notify();
     }
 
     fn resolve_pending_paste(
         &mut self,
         mut decision: PasteDecision,
+        guard: PasteRequestGuard,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(confirmation) = self.pending_paste.take() else {
             return;
         };
-        if !self.synchronize_terminal_input_focus(window, cx) {
+        self.paste_confirmation_owner.take();
+        // The Modal owns focus while answering; authority still belongs to the original Pane.
+        let activity = self.current_activity(window, cx);
+        if self.terminal_session.native_service_session_identity != guard.session_identity {
+            cx.notify();
+            return;
+        }
+        if self.native_attention_pane.is_none()
+            || !self.product_focus.active_workspace
+            || !self.product_focus.active_tab
+            || !self.product_focus.focused_pane
+            || !matches!(
+                self.product_focus.blocker,
+                None | Some(TerminalFocusBlocker::Modal)
+            )
+            || self.terminal_session.remote_input_blocked
+            || !activity.application_active
+            || !activity.operating_system_window_key
+        {
             decision = PasteDecision::Cancel;
         }
         let Some(session) = &self.terminal_session.session else {
             return;
         };
         let receiver = session.resolve_paste(confirmation.id, decision);
-        self.focus(window, cx);
         cx.notify();
         cx.spawn(async move |this, cx| match receiver.recv().await {
             Ok(Ok(PasteResolution::Written)) => {
@@ -4172,6 +4302,7 @@ impl Render for TerminalPane {
                 window,
                 native_activity,
                 window_modal_is_open(window, cx),
+                cx,
             );
         self.flush_pending_file_insertion(cx);
         let surface_active = terminal_surface_active(self.product_focus, native_activity);
@@ -4372,13 +4503,9 @@ impl Render for TerminalPane {
         // The notice's shortcuts apply only once it accepts answers. Until then the keys reach the
         // program, which is what the person meant them for.
         let mut key_context = gpui::KeyContext::default();
-        if paste_confirmation.is_some() {
-            key_context.add(TERMINAL_PASTE_CONFIRMATION_KEY_CONTEXT);
-        } else {
-            key_context.add(TERMINAL_KEY_CONTEXT);
-            if permission_request_armed {
-                key_context.add(TERMINAL_PERMISSION_REQUEST_KEY_CONTEXT);
-            }
+        key_context.add(TERMINAL_KEY_CONTEXT);
+        if permission_request_armed {
+            key_context.add(TERMINAL_PERMISSION_REQUEST_KEY_CONTEXT);
         }
         // A failed Terminal Session reads as an error notice.
         let status_intent = match self.pane_state {
@@ -4553,8 +4680,6 @@ impl Render for TerminalPane {
             .on_action(cx.listener(Self::edit_paste))
             .on_action(cx.listener(Self::export_diagnostics))
             .on_drop(cx.listener(Self::insert_dropped_files))
-            .on_action(cx.listener(Self::confirm_unsafe_paste))
-            .on_action(cx.listener(Self::cancel_unsafe_paste))
             .on_action(cx.listener(Self::set_up_permission_request))
             .on_action(cx.listener(Self::decline_permission_request_action))
             .on_action(cx.listener(Self::increase_font_size))
@@ -4618,14 +4743,6 @@ impl Render for TerminalPane {
                     )
                 },
             )
-            .when_some(paste_confirmation, |root, confirmation| {
-                root.child(render_paste_confirmation(
-                    confirmation,
-                    cx.entity().downgrade(),
-                    appearance.clone(),
-                    notice_shell,
-                ))
-            })
             .when_some(permission_request, |root, copies| {
                 root.child(render_permission_request(
                     copies,
@@ -4777,105 +4894,6 @@ impl Render for TerminalPane {
             )
             .into_any_element()
     }
-}
-
-/// Presents the Pane-local unsafe-paste confirmation on the shared Notice surface. The caller
-/// resolves the shell so it sits at the elevation of the Pane's other notices.
-fn render_paste_confirmation(
-    confirmation: PasteConfirmation,
-    pane: gpui::WeakEntity<TerminalPane>,
-    appearance: Arc<super::appearance::ChromeAppearance>,
-    shell: FloatingShell,
-) -> impl IntoElement {
-    let floating_colors = &appearance.floating_colors;
-    let cancel_pane = pane.clone();
-    let explanation = if confirmation.risk.control_bytes || confirmation.risk.closing_fence {
-        "This text contains control sequences that may change terminal behavior or execute commands."
-    } else {
-        "Pasting multiple lines may execute commands in your shell."
-    };
-
-    let prompt = format!(
-        "Paste {} bytes across {} lines? {explanation}",
-        confirmation.byte_len, confirmation.line_count
-    );
-    shell.mount(
-        div()
-            .id("unsafe-paste-confirmation")
-            .role(gpui::Role::Group)
-            .aria_label(prompt.clone())
-            .debug_selector(|| "unsafe-paste-confirmation".to_owned())
-            .chrome_text(appearance.typography.style(TextRole::Body))
-            .absolute()
-            .left(appearance.spacing(16.0))
-            .right(appearance.spacing(16.0))
-            .bottom(appearance.spacing(16.0))
-            .flex()
-            .flex_row()
-            .text_color(gpui_color(floating_colors.text))
-            .occlude()
-            // This notice asks the reader to weigh a risk, so the warning stays visible as a
-            // leading rail now that the surface edge belongs to the shared role.
-            .child(
-                div()
-                    .debug_selector(|| "unsafe-paste-confirmation-warning".to_owned())
-                    .w(shell.hairline() * 2.0)
-                    .flex_shrink_0()
-                    .bg(gpui_color(
-                        appearance.floating_control_colors.warning_border,
-                    )),
-            )
-            .child(
-                div()
-                    .min_w_0()
-                    .flex_1()
-                    .flex()
-                    .flex_col()
-                    .items_start()
-                    .gap(appearance.spacing(10.0))
-                    .px(appearance.spacing(12.0))
-                    .py(appearance.spacing(10.0))
-                    .child(div().w_full().whitespace_normal().child(prompt))
-                    .child(
-                        div()
-                            .w_full()
-                            .flex()
-                            .justify_end()
-                            .gap(appearance.spacing(8.0))
-                            .child(
-                                Button::new("cancel-unsafe-paste", "Cancel")
-                                    .variant(ButtonVariant::Secondary)
-                                    .size(ButtonSize::Small)
-                                    .role(ButtonRole::Cancel)
-                                    .debug_selector("cancel-unsafe-paste")
-                                    .on_activate(move |_, window, cx| {
-                                        let _ = cancel_pane.update(cx, |pane, cx| {
-                                            pane.cancel_unsafe_paste(
-                                                &CancelUnsafePaste,
-                                                window,
-                                                cx,
-                                            );
-                                        });
-                                    }),
-                            )
-                            .child(
-                                Button::new("confirm-unsafe-paste", "Paste")
-                                    .variant(ButtonVariant::Primary)
-                                    .size(ButtonSize::Small)
-                                    .debug_selector("confirm-unsafe-paste")
-                                    .on_activate(move |_, window, cx| {
-                                        let _ = pane.update(cx, |pane, cx| {
-                                            pane.confirm_unsafe_paste(
-                                                &ConfirmUnsafePaste,
-                                                window,
-                                                cx,
-                                            );
-                                        });
-                                    }),
-                            ),
-                    ),
-            ),
-    )
 }
 
 /// The offer a Permission Request notice shows, where, and since when.

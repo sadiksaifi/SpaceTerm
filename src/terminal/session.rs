@@ -427,6 +427,11 @@ pub(crate) trait TerminalSessionHandle {
     fn key(&self, input: KeyInput);
     fn clear_screen_and_scrollback(&self);
     fn focus(&self, focused: bool);
+
+    /// Transfers Terminal Input Focus to this Terminal Session's Paste Confirmation.
+    fn focus_paste_confirmation(&self, _id: PasteConfirmationId) {
+        self.focus(false);
+    }
     fn resize(&self, geometry: TerminalGeometry);
     fn pointer(&self, input: PointerInput);
     fn pointer_and_copy_selection(
@@ -596,6 +601,17 @@ impl TerminalSessionHandle for TerminalSession {
             && commands.send(Command::Focus(focused)).is_err()
         {
             eprintln!("terminal focus input was dropped because the worker has stopped");
+        }
+    }
+
+    fn focus_paste_confirmation(&self, id: PasteConfirmationId) {
+        self.clipboard_authority.focus(false);
+        if let Some(commands) = &self.commands
+            && commands.send(Command::FocusPasteConfirmation(id)).is_err()
+        {
+            eprintln!(
+                "terminal paste confirmation focus was dropped because the worker has stopped"
+            );
         }
     }
 
@@ -843,6 +859,7 @@ enum Command {
     Key(KeyInput),
     ClearScreenAndScrollback,
     Focus(bool),
+    FocusPasteConfirmation(PasteConfirmationId),
     Resize,
     Pointer(PointerInput),
     PointerAndCopySelection(
@@ -929,6 +946,7 @@ impl fmt::Debug for Command {
             Self::Key(..) => "Key",
             Self::ClearScreenAndScrollback => "ClearScreenAndScrollback",
             Self::Focus(..) => "Focus",
+            Self::FocusPasteConfirmation(..) => "FocusPasteConfirmation",
             Self::Resize => "Resize",
             Self::Pointer(..) => "Pointer",
             Self::PointerAndCopySelection(..) => "PointerAndCopySelection",
@@ -984,6 +1002,12 @@ struct TerminalWorker {
     osc52_filter: Osc52Filter<Option<u64>>,
     permission_requests: PermissionRequestFilter,
     clipboard: WorkerClipboard,
+}
+
+enum TerminalFocusTarget {
+    Terminal,
+    Unfocused,
+    PasteConfirmation(PasteConfirmationId),
 }
 
 struct TerminalWorkerContext {
@@ -1186,6 +1210,7 @@ impl TerminalWorker {
                     | Command::RequestPaste(..)
                     | Command::ResolvePaste(..)
                     | Command::Focus(..)
+                    | Command::FocusPasteConfirmation(..)
             );
             let compression_step = matches!(&command, Command::CompressScrollback);
             if !self.process_command(command) {
@@ -1357,6 +1382,9 @@ impl TerminalWorker {
                 self.apply_emulator_action(action)
             }
             Command::Focus(focused) => self.process_focus(focused),
+            Command::FocusPasteConfirmation(id) => {
+                self.process_focus_target(TerminalFocusTarget::PasteConfirmation(id))
+            }
             Command::ReaderReady(epoch) if self.clipboard.pending() => {
                 self.clipboard.deferred_readers.push_back(epoch);
                 true
@@ -1659,6 +1687,7 @@ impl TerminalWorker {
         decision: PasteDecision,
         reply: async_channel::Sender<Result<PasteResolution, String>>,
     ) -> bool {
+        let confirmation_focused = self.schedules.paste_confirmation_has_focus(id);
         let Some(payload) = self
             .schedules
             .resolve_paste_confirmation(id, Instant::now())
@@ -1666,7 +1695,9 @@ impl TerminalWorker {
             let _ = reply.try_send(Ok(PasteResolution::Stale));
             return true;
         };
-        if decision == PasteDecision::Cancel || !self.terminal_input_focused {
+        if decision == PasteDecision::Cancel
+            || (!self.terminal_input_focused && !confirmation_focused)
+        {
             let _ = reply.try_send(Ok(PasteResolution::Cancelled));
             return true;
         }
@@ -2001,6 +2032,26 @@ impl TerminalWorker {
     }
 
     fn process_focus(&mut self, focused: bool) -> bool {
+        self.process_focus_target(if focused {
+            TerminalFocusTarget::Terminal
+        } else {
+            TerminalFocusTarget::Unfocused
+        })
+    }
+
+    fn process_focus_target(&mut self, target: TerminalFocusTarget) -> bool {
+        let focused = matches!(target, TerminalFocusTarget::Terminal);
+        match target {
+            TerminalFocusTarget::PasteConfirmation(id) if self.terminal_input_focused => {
+                if !self.schedules.focus_paste_confirmation(id) {
+                    self.schedules.cancel_paste_confirmation();
+                }
+            }
+            TerminalFocusTarget::Terminal => {}
+            TerminalFocusTarget::Unfocused | TerminalFocusTarget::PasteConfirmation(_) => {
+                self.schedules.cancel_paste_confirmation();
+            }
+        }
         if !focused && !self.cancel_pointer_drag() {
             return false;
         }
@@ -2012,7 +2063,6 @@ impl TerminalWorker {
         }
 
         if !focused {
-            self.schedules.cancel_paste_confirmation();
             for input in self.held_keys.take_releases() {
                 match self.emulator.key(input) {
                     Ok(action) => {
