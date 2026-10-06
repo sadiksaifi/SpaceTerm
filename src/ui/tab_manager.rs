@@ -1441,11 +1441,17 @@ impl TabManager {
             cx.emit(RemoteChildLaunchUnavailable::ConnectionUnavailable);
             return;
         }
+        let was_active = self.tabs.active_tab_id() == tab_id;
         if !self.activate_tab(tab_id, window, cx) {
             return;
         }
         let view = self.tabs.active_tab().clone();
-        view.update(cx, |view, cx| view.split_focused(axis, window, cx));
+        if was_active {
+            view.update(cx, |view, cx| view.split_focused(axis, window, cx));
+        } else {
+            // A Tab that was inactive keeps Pane bounds from its last paint.
+            view.update(cx, |view, cx| view.split_focused_after_layout(axis, cx));
+        }
     }
 
     fn on_close_tab(&mut self, _: &CloseTab, _: &mut Window, cx: &mut Context<Self>) {
@@ -3736,6 +3742,34 @@ mod tests {
             TabId::new(2)
         );
         assert_eq!(records.starts().len(), 2);
+    }
+
+    /// An inactive Tab keeps the Pane bounds from its last paint, which a resize makes stale.
+    #[gpui::test]
+    fn tab_menu_split_should_use_the_current_window_size_for_an_inactive_tab(
+        cx: &mut TestAppContext,
+    ) {
+        let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
+        let provider = Arc::new(SequencedTerminalSessionChannelProvider::new(destination));
+        let (manager, records, events, cx) =
+            remote_tab_manager_with_provider_and_events(cx, provider);
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| manager.create_tab(window, cx));
+        });
+        cx.run_until_parked();
+        cx.simulate_resize(gpui::size(px(900.0), px(500.0)));
+        cx.run_until_parked();
+
+        right_click("tab-item-1-inactive", cx);
+        click("tab-menu-row-split-right", cx);
+
+        assert!(events.borrow().is_empty());
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager.tabs.active_tab_id()),
+            TabId::new(1)
+        );
+        assert_eq!(pane_counts(&manager, cx), vec![2, 1]);
+        assert_eq!(records.starts().len(), 3);
     }
 
     #[gpui::test]
