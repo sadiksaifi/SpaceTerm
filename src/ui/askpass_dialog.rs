@@ -751,6 +751,33 @@ mod tests {
         assert!(presenter.read_with(cx, |presenter, _| presenter.active.is_none()));
     }
 
+    #[gpui::test]
+    fn secret_field_publishes_a_named_secure_field_without_the_secret(cx: &mut TestAppContext) {
+        use spaceterm_ui::a11y_testing::A11yTree;
+
+        let (_, presenter, results, cx) = askpass_window(cx);
+        present(
+            1,
+            request("root@example.test's password:", AskPassPromptKind::Secret),
+            &presenter,
+            &results,
+            cx,
+        );
+        cx.simulate_input("correct horse");
+
+        let tree = A11yTree::read(cx);
+        let dialog = tree.node("SSH authentication response");
+        assert_eq!(dialog["aria"]["role"], "Dialog");
+        assert_eq!(dialog["aria"]["modal"], true);
+        let fields = tree.with_role("PasswordInput");
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0]["aria"]["label"], "Password");
+        assert!(tree.with_role("TextInput").is_empty());
+        assert_eq!(tree.focused(), Some(fields[0]));
+        let published = cx.update(|window, _| window.debug_a11y_tree_json().unwrap());
+        assert!(!published.contains("correct horse"));
+    }
+
     #[test]
     fn confirmation_rejection_maps_first_contact_to_cancel_and_generic_to_false() {
         let rejected = AlertOutcome::Activated {
