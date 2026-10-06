@@ -1436,6 +1436,11 @@ impl TabManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A menu opened before a disconnect still offers Split; refuse before changing the Tab.
+        if self.remote_lifecycle.disconnected_generation().is_some() {
+            cx.emit(RemoteChildLaunchUnavailable::ConnectionUnavailable);
+            return;
+        }
         if !self.activate_tab(tab_id, window, cx) {
             return;
         }
@@ -3697,6 +3702,40 @@ mod tests {
             manager.read_with(cx, |manager, _| manager.tabs.active_tab_id()),
             TabId::new(3)
         );
+    }
+
+    /// An open menu keeps the entries it opened with, so a disconnect can leave Split enabled.
+    #[gpui::test]
+    fn tab_menu_split_after_a_disconnect_should_leave_the_active_tab_unchanged(
+        cx: &mut TestAppContext,
+    ) {
+        let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
+        let provider = Arc::new(SequencedTerminalSessionChannelProvider::new(destination));
+        let (manager, records, events, cx) =
+            remote_tab_manager_with_provider_and_events(cx, provider);
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| manager.create_tab(window, cx));
+        });
+        cx.run_until_parked();
+        right_click("tab-item-1-inactive", cx);
+        manager
+            .update(cx, |manager, cx| manager.disconnect_remote(1, cx))
+            .unwrap();
+        cx.run_until_parked();
+        let before = manager.read_with(cx, hierarchy_identity);
+
+        click("tab-menu-row-split-right", cx);
+
+        assert_eq!(
+            events.borrow().as_slice(),
+            [RemoteChildLaunchUnavailable::ConnectionUnavailable]
+        );
+        assert_eq!(manager.read_with(cx, hierarchy_identity), before);
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager.tabs.active_tab_id()),
+            TabId::new(2)
+        );
+        assert_eq!(records.starts().len(), 2);
     }
 
     #[gpui::test]
