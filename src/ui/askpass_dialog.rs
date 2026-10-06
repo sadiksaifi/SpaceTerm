@@ -2,7 +2,7 @@ use crate::ui::appearance::gpui_color;
 use gpui::prelude::*;
 #[cfg(test)]
 use gpui::px;
-use gpui::{App, Context, Entity, Render, Window, div};
+use gpui::{App, Context, Entity, Render, Window, accesskit, div};
 use spaceterm_ui::{
     Alert, AlertIntent, AlertOutcome, Dialog, DialogCloseDecision, DialogCompletion,
     DialogInitialFocus, DialogOutcome, DialogSize, ModalAction, ModalActionRole, ModalId,
@@ -474,6 +474,9 @@ impl Render for AskPassSecretBody {
                     .when(self.required_error, |field| {
                         field.child(
                             div()
+                                .id("ssh-askpass-required-error")
+                                .role(accesskit::Role::Label)
+                                .aria_label(REQUIRED_SECRET_MESSAGE)
                                 .debug_selector(|| "ssh-askpass-required-error".to_owned())
                                 .chrome_text(appearance.typography.style(TextRole::Secondary))
                                 .text_color(gpui_color(colors.error))
@@ -634,6 +637,8 @@ mod tests {
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
         assert!(cx.debug_bounds("ssh-askpass-required-error").is_some());
+        let tree = spaceterm_ui::a11y_testing::A11yTree::read(cx);
+        assert_eq!(tree.node(REQUIRED_SECRET_MESSAGE)["aria"]["role"], "Label");
         assert!(results.borrow().is_empty());
 
         cx.simulate_input("correct horse");
