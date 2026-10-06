@@ -3,8 +3,8 @@
 //! The crate owns interaction and editing behavior while the application supplies all product
 //! colors and surrounding chrome from its canonical theme.
 
-#[cfg(test)]
-mod a11y_testing;
+#[cfg(any(test, feature = "test-support"))]
+pub mod a11y_testing;
 mod accessible_text;
 mod anchored_placement;
 mod appearance;

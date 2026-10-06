@@ -85,6 +85,7 @@ raw-window-handle = "=0.6.2"
 accesskit_consumer = "=0.38.0"
 gpui = { git = "https://github.com/sadiksaifi/zed", tag = "spaceterm-2026-10-05.1", features = ["test-support"] }
 jsonschema = { version = "=0.56.0", default-features = false }
+spaceterm-ui = { path = "crates/spaceterm-ui", features = ["test-support"] }
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 gpui_macos = { git = "https://github.com/sadiksaifi/zed", tag = "spaceterm-2026-10-05.1", features = ["font-kit", "test-support"] }
