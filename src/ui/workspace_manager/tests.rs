@@ -3335,6 +3335,8 @@ fn hierarchy_change_between_restart_prepare_and_commit_should_fail_with_typed_al
             )
         })
     });
+    // A cancelled task drops its future only when the executor runs it.
+    cx.run_until_parked();
     drop(pending_sender);
     cx.run_until_parked();
     redraw(cx);
