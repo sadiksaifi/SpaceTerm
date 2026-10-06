@@ -3,8 +3,8 @@ use std::rc::Rc;
 use gpui::{
     App, ClickEvent, ElementId, FocusHandle, Global, InteractiveElement as _, IntoElement,
     KeyDownEvent, KeyUpEvent, MouseButton, ParentElement as _, Pixels, RenderOnce, Rgba,
-    SharedString, StatefulInteractiveElement as _, StyleRefinement, Styled as _, Window, div,
-    prelude::FluentBuilder as _, px,
+    SharedString, StatefulInteractiveElement as _, StyleRefinement, Styled as _, Window, accesskit,
+    div, prelude::FluentBuilder as _, px,
 };
 
 use crate::{
@@ -46,6 +46,8 @@ pub enum ToggleActivationSource {
     Pointer,
     /// An unmodified Space key press released while the control retained focus.
     Space,
+    /// An assistive technology press, such as VoiceOver's activation.
+    Accessibility,
 }
 
 /// A controlled checkbox change request.
@@ -778,9 +780,30 @@ impl ToggleCore {
         let key_down_state = state.clone();
         let key_up_state = state;
         let keyboard_focus = focus_handle.clone();
+        let accessibility_handler = self.on_activate.clone().filter(|_| enabled);
         let keyboard_handler = self.on_activate;
+        let (role, toggled) = match kind {
+            ToggleKind::Checkbox(value) => (
+                accesskit::Role::CheckBox,
+                match value {
+                    CheckboxState::Unchecked => accesskit::Toggled::False,
+                    CheckboxState::Checked => accesskit::Toggled::True,
+                    CheckboxState::Mixed => accesskit::Toggled::Mixed,
+                },
+            ),
+            ToggleKind::Switch => (accesskit::Role::Switch, accesskit::Toggled::from(on)),
+        };
         let row = div()
             .id(self.id)
+            .role(role)
+            .aria_label(self.label.clone())
+            .aria_toggled(toggled)
+            .aria_disabled(!enabled)
+            .when_some(accessibility_handler, |row, handler| {
+                row.on_a11y_action(accesskit::Action::Click, move |_, window, cx| {
+                    handler(ToggleActivationSource::Accessibility, window, cx);
+                })
+            })
             .debug_selector(move || selector)
             .relative()
             .flex()
@@ -1799,6 +1822,32 @@ mod tests {
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
         (root, cx)
+    }
+
+    #[gpui::test]
+    fn toggles_publish_native_roles_states_and_press(cx: &mut TestAppContext) {
+        use crate::a11y_testing::{A11yTree, perform, supports};
+        use gpui::accesskit::Action;
+
+        let (root, cx) = geometry_window(cx);
+        let tree = A11yTree::read(cx);
+        let checkbox = tree.node("Checkbox");
+        assert_eq!(checkbox["aria"]["role"], "CheckBox");
+        assert_eq!(checkbox["aria"]["toggled"], "Mixed");
+        assert!(supports(checkbox, Action::Click));
+        let switch = tree.node("Switch");
+        assert_eq!(switch["aria"]["role"], "Switch");
+        assert_eq!(switch["aria"]["toggled"], "False");
+
+        perform(cx, tree.node("Switch"), Action::Click);
+        perform(cx, tree.node("Checkbox"), Action::Click);
+        root.read_with(cx, |root, _| {
+            assert!(root.switch_on);
+            assert_eq!(root.checkbox_state, CheckboxState::Checked);
+        });
+        let tree = A11yTree::read(cx);
+        assert_eq!(tree.node("Switch")["aria"]["toggled"], "True");
+        assert_eq!(tree.node("Checkbox")["aria"]["toggled"], "True");
     }
 
     #[gpui::test]
