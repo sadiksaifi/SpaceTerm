@@ -2424,8 +2424,21 @@ fn render_pane_caption_content(
     }
     let caption_content =
         render_caption_identity(pane_id, text, attention, layout, appearance, &paint);
+    let focus_pane = move |window: &mut Window, cx: &mut App| {
+        let _ = focus_view.update(cx, |view, cx| {
+            view.focus_pane(pane_id, cx);
+            view.focus(window, cx);
+        });
+    };
+    let accessibility_focus = focus_pane.clone();
     caption_row(appearance, color)
         .id(("pane-caption", pane_id.get()))
+        .role(gpui::accesskit::Role::Group)
+        .aria_label(format!("Pane {} Caption", pane_id.get()))
+        .when(zoomed, |row| row.aria_description("Zoomed Pane"))
+        .on_a11y_action(gpui::accesskit::Action::Click, move |_, window, cx| {
+            accessibility_focus(window, cx);
+        })
         .debug_selector(move || {
             format!(
                 "pane-caption-{}-{}",
@@ -2435,10 +2448,7 @@ fn render_pane_caption_content(
         })
         // The press focuses the Pane at once, since a press that starts a drag never clicks.
         .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
-            let _ = focus_view.update(cx, |view, cx| {
-                view.focus_pane(pane_id, cx);
-                view.focus(window, cx);
-            });
+            focus_pane(window, cx);
             cx.stop_propagation();
         })
         // The caption carries its Pane to another Pane's edge whenever another Pane is visible.
@@ -3715,6 +3725,65 @@ mod tests {
         cx.simulate_mouse_move(control, None, Modifiers::none());
         cx.simulate_click(control, Modifiers::none());
         cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn pane_captions_publish_groups_that_focus_and_operate_their_pane(cx: &mut TestAppContext) {
+        use gpui::accesskit::Action;
+        use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
+        let (_, view, records, cx) = caption_view(cx);
+        let closes = Rc::new(RefCell::new(Vec::new()));
+        let requested_closes = closes.clone();
+        view.update(cx, |_, cx| {
+            cx.subscribe(&view, move |_, _, event: &TabViewEvent, _| {
+                if let TabViewEvent::UserClosePaneRequested { pane_id, .. } = event {
+                    requested_closes.borrow_mut().push(*pane_id);
+                }
+            })
+            .detach();
+        });
+        let tree = A11yTree::read(cx);
+        assert_eq!(tree.node("Pane 1 Caption")["aria"]["role"], "Group");
+        perform(cx, tree.node("Split Right"), Action::Click);
+        assert_eq!(view.read_with(cx, |view, _| view.pane_count()), 2);
+
+        let tree = A11yTree::read(cx);
+        perform(cx, tree.node("Pane 1 Caption"), Action::Click);
+        assert_eq!(
+            view.read_with(cx, |view, _| view.focused_pane_id()),
+            PaneId::new(1)
+        );
+        assert!(cx.update(|window, cx| view.read(cx).focused_terminal_has_input_focus(window, cx)));
+        let tree = A11yTree::read(cx);
+        let controls = tree.children(tree.node("Pane 1 Caption"));
+        let control = |name| {
+            controls
+                .iter()
+                .find(|node| node["aria"]["label"] == name)
+                .unwrap()
+        };
+        for name in ["Split Right", "Split Down", "Zoom Pane", "Close Pane"] {
+            assert_eq!(control(name)["aria"]["role"], "Button");
+        }
+        perform(cx, control("Zoom Pane"), Action::Click);
+        let tree = A11yTree::read(cx);
+        assert!(tree.find("Pane 2 Caption").is_none());
+        perform(cx, tree.node("Restore Panes"), Action::Click);
+        let tree = A11yTree::read(cx);
+        let close = tree
+            .children(tree.node("Pane 1 Caption"))
+            .into_iter()
+            .find(|node| node["aria"]["label"] == "Close Pane")
+            .unwrap();
+        perform(cx, close, Action::Click);
+        assert_eq!(*closes.borrow(), [PaneId::new(1)]);
+        assert_eq!(
+            view.read_with(cx, |view, _| view.pane_count()),
+            2,
+            "Close Confirmation owns authorization to remove the Pane"
+        );
+        assert_eq!(records.pointer_count(), 0);
     }
 
     fn first_mouse_click_caption_control(selector: &'static str, cx: &mut VisualTestContext) {
