@@ -889,6 +889,12 @@ pub struct Button {
 }
 
 impl Button {
+    /// Publishes the caller-owned toggle state of a button that switches a mode.
+    pub fn toggled(mut self, toggled: bool) -> Self {
+        self.core.toggled = Some(toggled);
+        self
+    }
+
     /// Supplies guidance or status separately from the button's name.
     pub fn accessibility_description(mut self, description: impl Into<SharedString>) -> Self {
         self.core.accessibility_description = Some(description.into());
@@ -1182,6 +1188,12 @@ pub struct IconButton {
 }
 
 impl IconButton {
+    /// Publishes the caller-owned toggle state of a button that switches a mode.
+    pub fn toggled(mut self, toggled: bool) -> Self {
+        self.core.toggled = Some(toggled);
+        self
+    }
+
     /// Supplies guidance or status separately from the button's name.
     pub fn accessibility_description(mut self, description: impl Into<SharedString>) -> Self {
         self.core.accessibility_description = Some(description.into());
@@ -1335,6 +1347,7 @@ struct ButtonCore {
     id: ElementId,
     accessibility_name: SharedString,
     accessibility_description: Option<SharedString>,
+    toggled: Option<bool>,
     variant: ButtonVariant,
     size: ButtonSize,
     shape: ButtonShape,
@@ -1369,6 +1382,7 @@ impl ButtonCore {
             id,
             accessibility_name,
             accessibility_description: None,
+            toggled: None,
             variant: ButtonVariant::default(),
             size: ButtonSize::default(),
             shape: ButtonShape::default(),
@@ -1599,6 +1613,9 @@ impl ButtonCore {
             .aria_label(self.accessibility_name.clone())
             .when_some(self.accessibility_description, |button, description| {
                 button.aria_description(description)
+            })
+            .when_some(self.toggled, |button, toggled| {
+                button.aria_toggled(accesskit::Toggled::from(toggled))
             })
             .aria_disabled(!enabled)
             .when_some(on_accessibility_activate, |button, handler| {
@@ -2269,6 +2286,76 @@ mod tests {
             }
             assert!(tree.node("Cancel")["aria"]["description"].is_null());
         }
+    }
+
+    #[gpui::test]
+    fn buttons_publish_toggle_state_that_follows_activation(cx: &mut TestAppContext) {
+        use crate::a11y_testing::{A11yTree, perform};
+        use gpui::accesskit::Action;
+
+        struct ToggleButtonsRoot {
+            text_on: bool,
+            icon_on: bool,
+            sources: Vec<ButtonActivationSource>,
+        }
+        impl Render for ToggleButtonsRoot {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .flex()
+                    .child(
+                        Button::new("case", "Match case")
+                            .toggled(self.text_on)
+                            .on_activate(cx.listener(
+                                |root, activation: &ButtonActivation, _, cx| {
+                                    root.text_on = !root.text_on;
+                                    root.sources.push(activation.source());
+                                    cx.notify();
+                                },
+                            )),
+                    )
+                    .child(
+                        IconButton::new("regex", "Regular expression", |_| {
+                            div().into_any_element()
+                        })
+                        .toggled(self.icon_on)
+                        .on_activate(cx.listener(
+                            |root, activation: &ButtonActivation, _, cx| {
+                                root.icon_on = !root.icon_on;
+                                root.sources.push(activation.source());
+                                cx.notify();
+                            },
+                        )),
+                    )
+                    .child(Button::new("search", "Search"))
+            }
+        }
+
+        cx.set_global(test_theme());
+        let (root, cx) = cx.add_window_view(|_, _| ToggleButtonsRoot {
+            text_on: false,
+            icon_on: false,
+            sources: Vec::new(),
+        });
+        let tree = A11yTree::read(cx);
+        for name in ["Match case", "Regular expression"] {
+            assert_eq!(tree.node(name)["aria"]["role"], "Button");
+            assert_eq!(tree.node(name)["aria"]["toggled"], "False");
+        }
+        for state in ["True", "False"] {
+            let tree = A11yTree::read(cx);
+            for name in ["Match case", "Regular expression"] {
+                perform(cx, tree.node(name), Action::Click);
+            }
+            let tree = A11yTree::read(cx);
+            for name in ["Match case", "Regular expression"] {
+                assert_eq!(tree.node(name)["aria"]["toggled"], state);
+            }
+            assert!(tree.node("Search")["aria"]["toggled"].is_null());
+        }
+        assert_eq!(
+            root.read_with(cx, |root, _| root.sources.clone()),
+            [ButtonActivationSource::Accessibility; 4]
+        );
     }
 
     #[gpui::test]
