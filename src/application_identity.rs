@@ -169,6 +169,7 @@ impl ApplicationIdentity {
                 ["Channel Mark.svg", "Glyph.svg"]
             ),
             update_source: UpdateSource::Simulation,
+            // Each rebuild is signed ad hoc again, which invalidates a microphone grant.
             microphone_access: false,
         }
     }
