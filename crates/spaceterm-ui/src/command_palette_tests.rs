@@ -3977,3 +3977,51 @@ fn deactivation_should_dismiss_without_restoring_prior_focus(cx: &mut TestAppCon
 
     assert!(cx.update(|window, _| prior.is_focused(window)));
 }
+
+#[gpui::test]
+fn command_palettes_publish_a_modal_dialog_with_a_list_of_options(cx: &mut TestAppContext) {
+    use crate::a11y_testing::{A11yTree, perform, supports};
+    use gpui::accesskit::Action;
+
+    let (root, palette, events, _underlay, cx) = palette_window(cx);
+    assert!(A11yTree::read(cx).with_role("Dialog").is_empty());
+
+    open_palette(&root, &palette, cx);
+    let tree = A11yTree::read(cx);
+    let dialog = tree.node("Search commands");
+    assert_eq!(dialog["aria"]["role"], "Dialog");
+    assert_eq!(dialog["aria"]["modal"], true);
+    assert_eq!(tree.focused().unwrap()["aria"]["role"], "TextInput");
+    let lists = tree.with_role("ListBox");
+    assert_eq!(lists.len(), 1);
+    let options = tree
+        .children(lists[0])
+        .into_iter()
+        .map(|option| {
+            (
+                option["aria"]["role"].as_str().unwrap(),
+                option["aria"]["label"].as_str().unwrap(),
+                option["aria"]["disabled"] == true,
+                option["aria"]["selected"] == true,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        options,
+        [
+            ("ListBoxOption", "Open Workspace", false, true),
+            ("ListBoxOption", "Disabled Command", true, false),
+            ("ListBoxOption", "Close Window", false, false),
+        ]
+    );
+    assert!(!supports(tree.node("Disabled Command"), Action::Click));
+
+    perform(cx, tree.node("Close Window"), Action::Click);
+    assert!(A11yTree::read(cx).with_role("Dialog").is_empty());
+    assert!(events.borrow().iter().any(|event| matches!(
+        event,
+        CommandPaletteEvent::Activated(activation)
+            if *activation.item_id() == 3
+                && activation.source() == CommandPaletteActivationSource::Accessibility
+    )));
+}

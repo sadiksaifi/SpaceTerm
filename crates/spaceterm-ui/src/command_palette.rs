@@ -5,8 +5,8 @@ use gpui::{
     HitboxBehavior, InteractiveElement as _, IntoElement, KeyBinding, ListAlignment, ListState,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Render,
     Rgba, ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Task, WeakEntity, WeakFocusHandle, Window, WindowId, actions, anchored, canvas,
-    div, list, prelude::FluentBuilder as _, px,
+    Subscription, Task, WeakEntity, WeakFocusHandle, Window, WindowId, accesskit, actions,
+    anchored, canvas, div, list, prelude::FluentBuilder as _, px,
 };
 
 use crate::{
@@ -453,6 +453,8 @@ pub enum CommandPaletteActivationSource {
     Keyboard,
     /// A primary pointer press and release activated one row.
     Pointer,
+    /// An assistive technology press activated one row, such as VoiceOver's activation.
+    Accessibility,
 }
 
 /// A typed command-palette activation.
@@ -1405,6 +1407,8 @@ fn command_palette_theme(cx: &App) -> CommandPaletteTheme {
 
 /// A reusable entity-backed command palette with typed semantic items.
 pub struct CommandPalette<I: Clone + Eq + 'static> {
+    /// Names the presented panel for assistive technology.
+    accessibility_name: SharedString,
     empty: CommandPaletteEmpty,
     items: Rc<[CommandPaletteItem<I>]>,
     matches: Rc<[CommandPaletteMatch]>,
@@ -1818,6 +1822,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         let list =
             ListState::new(presented_results.len(), ListAlignment::Top, px(0.0)).measure_all();
         let mut palette = Self {
+            accessibility_name: placeholder.clone(),
             empty: CommandPaletteEmpty::new("No matching items"),
             items,
             matches,
@@ -3283,6 +3288,10 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         };
 
         let panel = div()
+            .id("command-palette")
+            .role(accesskit::Role::Dialog)
+            .aria_label(self.accessibility_name.clone())
+            .aria_modal(true)
             .debug_selector(|| "command-palette-panel".to_owned())
             .w(width)
             .h(height)
@@ -3415,6 +3424,9 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         let leading_columns = self.leading_columns;
         let palette = cx.entity().downgrade();
         div()
+            .id("command-palette-results")
+            .role(accesskit::Role::ListBox)
+            .aria_label(self.accessibility_name.clone())
             .relative()
             .size_full()
             .child(
@@ -3773,8 +3785,16 @@ fn render_row<I: Clone + Eq + 'static>(
     let debug_selector = item.debug_selector.clone();
     let id = item.id.clone();
     let hover_palette = palette.clone();
+    let press_palette = palette.clone();
     let mut row = div()
         .id(("command-palette-row", position))
+        .role(accesskit::Role::ListBoxOption)
+        .aria_label(item.label.clone())
+        .when_some(item.description.clone(), |row, description| {
+            row.aria_description(description)
+        })
+        .aria_selected(selected)
+        .aria_disabled(item.disabled)
         .debug_selector(move || debug_selector.unwrap_or_else(|| logical_name.to_string()))
         .relative()
         .w_full()
@@ -3793,7 +3813,18 @@ fn render_row<I: Clone + Eq + 'static>(
             let id = id.clone();
             let entered_id = id.clone();
             let entered_palette = hover_palette.clone();
-            row.on_hover(move |hovered, _, cx| {
+            let press_id = id.clone();
+            row.on_a11y_action(accesskit::Action::Click, move |_, window, cx| {
+                let _ = press_palette.update(cx, |palette, cx| {
+                    palette.selected = Some(press_id.clone());
+                    palette.activate_selected(
+                        CommandPaletteActivationSource::Accessibility,
+                        window,
+                        cx,
+                    );
+                });
+            })
+            .on_hover(move |hovered, _, cx| {
                 let _ = entered_palette.update(cx, |palette, cx| {
                     palette.set_hovered_row(&entered_id, *hovered, cx);
                 });
