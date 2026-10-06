@@ -23,8 +23,8 @@ use super::{
     ActivateTab1, ActivateTab2, ActivateTab3, ActivateTab4, ActivateTab5, ActivateTab6,
     ActivateTab7, ActivateTab8, ActivateTab9, CloseTab, CreateTab, MoveTabLeft, MoveTabRight,
     NextTab, PreparedTabViewRemoteRestart, PreviousTab, RemoteChildLaunchUnavailable,
-    RemoteTabViewLifecycleError, TERMINAL_KEY_CONTEXT, TabIdentity, TabView, TabViewEvent,
-    WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
+    RemoteTabViewLifecycleError, SplitDown, SplitRight, TERMINAL_KEY_CONTEXT, TabIdentity, TabView,
+    TabViewEvent, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
 };
 #[cfg(test)]
 use super::{TOP_CHROME_HEIGHT, WORKSPACE_SIDEBAR_MINIMUM_WIDTH};
@@ -58,7 +58,7 @@ pub(crate) struct PreparedTabManagerRemoteRestart {
 use crate::appearance::ChromeColors;
 use crate::appearance::Color;
 use crate::domain::{
-    CloseTabOutcome, PaneId, TabCollection, TabError, TabId, TabStep, WorkspaceId,
+    CloseTabOutcome, PaneId, SplitAxis, TabCollection, TabError, TabId, TabStep, WorkspaceId,
 };
 #[cfg(test)]
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
@@ -382,6 +382,8 @@ struct TabHover {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TabMenuCommand {
     NewTab,
+    SplitRight,
+    SplitDown,
     Close,
 }
 
@@ -1406,8 +1408,25 @@ impl TabManager {
     ) {
         match command {
             TabMenuCommand::NewTab => self.create_tab(window, cx),
+            TabMenuCommand::SplitRight => self.split_tab(tab_id, SplitAxis::Horizontal, window, cx),
+            TabMenuCommand::SplitDown => self.split_tab(tab_id, SplitAxis::Vertical, window, cx),
             TabMenuCommand::Close => self.request_close_tab(tab_id, cx),
         }
+    }
+
+    /// Splits a Tab's Focused Pane. The Tab becomes active first so the new Pane is visible.
+    fn split_tab(
+        &mut self,
+        tab_id: TabId,
+        axis: SplitAxis,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.activate_tab(tab_id, window, cx) {
+            return;
+        }
+        let view = self.tabs.active_tab().clone();
+        view.update(cx, |view, cx| view.split_focused(axis, window, cx));
     }
 
     fn on_close_tab(&mut self, _: &CloseTab, _: &mut Window, cx: &mut Context<Self>) {
@@ -1730,6 +1749,8 @@ impl TabManager {
     ) -> AnyElement {
         let appearance = super::appearance::chrome(cx);
         let active_tab_id = self.tabs.active_tab_id();
+        // A disconnected Remote Workspace cannot start the Terminal Session a new Pane needs.
+        let child_launch_available = self.remote_lifecycle.disconnected_generation().is_none();
         let background = presentation.background;
         let create_icon_size = appearance.icons.metrics(IconRole::Chrome).glyph_size;
         // The strip pulls back the chip inset so the first Tab sits one frame space from the
@@ -1832,7 +1853,10 @@ impl TabManager {
                     ("tab-context-menu", tab_id.get()),
                     accessibility_name,
                     face,
-                    tab_menu_entries(crate::desktop_profile::DesktopPresentation::get(cx)),
+                    tab_menu_entries(
+                        child_launch_available,
+                        crate::desktop_profile::DesktopPresentation::get(cx),
+                    ),
                 )
                 .size(MenuSize::Wide)
                 .fill_parent_height()
@@ -2275,6 +2299,7 @@ fn render_tab_identity(
 
 /// Every Tab command carries a symbol, so all labels share the icon column.
 fn tab_menu_entries(
+    child_launch_available: bool,
     presentation: &crate::desktop_profile::DesktopPresentation,
 ) -> Vec<MenuEntry<TabMenuCommand>> {
     let with_shortcut =
@@ -2292,7 +2317,23 @@ fn tab_menu_entries(
         .icon(|foreground, size| {
             Icon::new(IconName::SquarePlus, size, foreground).into_any_element()
         })
+        .disabled(!child_launch_available)
         .debug_selector("tab-menu-row-new-tab"),
+        MenuEntry::separator(),
+        with_shortcut(
+            MenuEntry::action("Split Right", TabMenuCommand::SplitRight),
+            &SplitRight,
+        )
+        .disabled(!child_launch_available)
+        .icon(|foreground, size| Icon::new(IconName::Columns2, size, foreground).into_any_element())
+        .debug_selector("tab-menu-row-split-right"),
+        with_shortcut(
+            MenuEntry::action("Split Down", TabMenuCommand::SplitDown),
+            &SplitDown,
+        )
+        .disabled(!child_launch_available)
+        .icon(|foreground, size| Icon::new(IconName::Rows2, size, foreground).into_any_element())
+        .debug_selector("tab-menu-row-split-down"),
         MenuEntry::separator(),
         with_shortcut(
             MenuEntry::action("Close Tab", TabMenuCommand::Close),
@@ -3483,6 +3524,76 @@ mod tests {
             )),
             (TabId::new(2), None)
         );
+    }
+
+    fn pane_counts(manager: &Entity<TabManager>, cx: &mut VisualTestContext) -> Vec<usize> {
+        manager.read_with(cx, |manager, cx| {
+            manager
+                .tabs
+                .iter()
+                .map(|(_, view)| view.read(cx).pane_count())
+                .collect()
+        })
+    }
+
+    #[gpui::test]
+    fn tab_menu_split_should_activate_the_clicked_tab_and_split_its_focused_pane(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
+        right_click("tab-item-1-inactive", cx);
+        click("tab-menu-row-split-right", cx);
+
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager.tabs.active_tab_id()),
+            TabId::new(1)
+        );
+        assert_eq!(pane_counts(&manager, cx), vec![2, 1]);
+
+        right_click("tab-item-2-inactive", cx);
+        click("tab-menu-row-split-down", cx);
+
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager.tabs.active_tab_id()),
+            TabId::new(2)
+        );
+        assert_eq!(pane_counts(&manager, cx), vec![2, 2]);
+        assert!(cx.update(|window, cx| {
+            manager
+                .read(cx)
+                .focused_terminal_has_input_focus(window, cx)
+        }));
+    }
+
+    #[gpui::test]
+    fn tab_menu_should_disable_new_panes_while_the_remote_workspace_is_disconnected(
+        cx: &mut TestAppContext,
+    ) {
+        let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
+        let provider = Arc::new(SequencedTerminalSessionChannelProvider::new(destination));
+        let (manager, records, events, cx) =
+            remote_tab_manager_with_provider_and_events(cx, provider);
+        manager
+            .update(cx, |manager, cx| manager.disconnect_remote(1, cx))
+            .unwrap();
+        cx.run_until_parked();
+        let before = manager.read_with(cx, hierarchy_identity);
+
+        for row in [
+            "tab-menu-row-new-tab",
+            "tab-menu-row-split-right",
+            "tab-menu-row-split-down",
+        ] {
+            right_click("tab-item-1-active", cx);
+            click(row, cx);
+            cx.simulate_keystrokes("escape");
+            cx.run_until_parked();
+        }
+
+        assert!(events.borrow().is_empty());
+        assert_eq!(manager.read_with(cx, hierarchy_identity), before);
+        assert_eq!(records.starts().len(), 1);
     }
 
     #[gpui::test]
