@@ -133,3 +133,53 @@ fn third_party_backgrounds_rest_one_quiet_step_above_the_chrome_root() {
         }
     }
 }
+
+fn text_colors(colors: &TerminalColors) -> Vec<(&'static str, Color)> {
+    let mut text = vec![
+        ("foreground", colors.foreground),
+        ("bright_foreground", colors.bright_foreground),
+        ("dim_foreground", colors.dim_foreground),
+        ("cursor", colors.cursor),
+        ("hyperlink", colors.hyperlink),
+    ];
+    for (register, palette) in [
+        ("normal", colors.normal),
+        ("bright", colors.bright),
+        ("dim", colors.dim),
+    ] {
+        text.extend(palette.map(|color| (register, color)));
+    }
+    text
+}
+
+#[test]
+fn harmonized_backgrounds_keep_the_contrast_their_text_colors_were_authored_with() {
+    // GitHub Dark lifts above the root; its gray ANSI black and comment-like dim foreground lose
+    // contrast against the lighter background unless restored.
+    let theme = installed(
+        "dark",
+        json!({
+            "terminal.background": "#0d1117",
+            "terminal.foreground": "#e6edf3",
+            "terminal.dim_foreground": "#6e7681",
+            "terminal.ansi.black": "#484f58",
+            "terminal.ansi.bright_black": "#6e7681",
+            "terminal.ansi.blue": "#2f81f7",
+        }),
+    );
+    let mut authored = builtin_terminal_base(Appearance::Dark);
+    authored.apply(&theme.colors);
+    let resolved = resolve_theme(&theme);
+    let colors = &resolved.terminal.colors;
+    assert_ne!(colors.background, authored.background);
+
+    for ((role, before), (_, after)) in text_colors(&authored).into_iter().zip(text_colors(colors))
+    {
+        let required = before.contrast_ratio(authored.background).min(4.5);
+        let achieved = after.contrast_ratio(colors.background);
+        assert!(
+            achieved >= required - 0.01,
+            "{role} {before:?} keeps contrast {required}: now {after:?} at {achieved}",
+        );
+    }
+}
