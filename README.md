@@ -55,6 +55,11 @@ flowchart TB
     W3T2 --> W3T2P1["Pane"]
 ```
 
+## Copy and paste over SSH and tmux
+
+Programs can copy to your clipboard even when they run on another machine.
+Neovim and tmux each need a setting first. See [terminal clipboard setup](docs/terminal-clipboard.md).
+
 ## For program authors
 
 A program running in SpaceTerm can offer macOS permission setup with a
