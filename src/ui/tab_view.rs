@@ -1879,6 +1879,16 @@ impl TabView {
                 });
             })
             .id(("split", split_id.get()))
+            .role(gpui::accesskit::Role::Group)
+            .a11y_synthetic_children(|builder| {
+                // Keep the pointer target above both sides while reading the splitter between
+                // them. Retaining the Split's group also confines its platform contents.
+                let node = builder.parent_node();
+                if let [first, second, splitter] = node.children() {
+                    let children = [*first, *splitter, *second];
+                    node.set_children(children);
+                }
+            })
             .size_full()
             .min_w_0()
             .min_h_0()
@@ -1939,12 +1949,12 @@ impl TabView {
             ),
         };
         split
-            .child(split_child(first, axis, ratio))
+            .child(split_child("split-first", first, axis, ratio))
             .child(spacer.bg(gpui_color(appearance.surface(
                 crate::appearance::SurfaceRole::Base,
                 super::workspace_frame::base_surface(&appearance.colors),
             ))))
-            .child(split_child(second, axis, 1.0 - ratio))
+            .child(split_child("split-second", second, axis, 1.0 - ratio))
             .child(resize_target)
             .into_any_element()
     }
@@ -2729,8 +2739,22 @@ fn render_pane_drop_target(
     .into_any_element()
 }
 
-fn split_child(child: AnyElement, axis: SplitAxis, ratio: f32) -> impl IntoElement {
+fn split_child(
+    id: &'static str,
+    child: AnyElement,
+    axis: SplitAxis,
+    ratio: f32,
+) -> impl IntoElement {
     let child = div()
+        .id(id)
+        .role(gpui::accesskit::Role::Group)
+        .a11y_synthetic_children(|builder| {
+            // Preserve one child link per side for reordering, then let the platform present
+            // that side's Pane Captions and terminals in place.
+            builder
+                .parent_node()
+                .set_role(gpui::accesskit::Role::GenericContainer);
+        })
         .flex_basis(DefiniteLength::Fraction(ratio))
         .min_w_0()
         .min_h_0()

@@ -10606,6 +10606,193 @@ fn workspace_manager_with_terminal_nodes(
     (manager, records, cx)
 }
 
+#[gpui::test]
+fn pane_split_accessibility_reads_between_its_panes_in_both_orientations(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let (_manager, _records, cx) = workspace_manager_with_terminal_nodes(cx);
+    for shortcut in ["cmd-d", "cmd-shift-d"] {
+        if shortcut == "cmd-shift-d" {
+            cx.simulate_keystrokes("cmd-t");
+        }
+        cx.simulate_keystrokes(shortcut);
+        for hidden_sidebar in [false, true] {
+            if hidden_sidebar {
+                cx.simulate_keystrokes("cmd-b");
+            }
+            let tree = A11yTree::read(cx);
+            let order = tree
+                .in_order()
+                .into_iter()
+                .filter_map(|node| match node["aria"]["role"].as_str()? {
+                    "Group"
+                        if node["aria"]["label"]
+                            .as_str()
+                            .is_some_and(|label| label.starts_with("Pane Caption, ")) =>
+                    {
+                        Some("Pane Caption")
+                    }
+                    "Terminal" => Some("Terminal"),
+                    "Splitter" if node["aria"]["label"] == "Resize Pane split" => {
+                        Some("Resize Pane split")
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                order,
+                [
+                    "Pane Caption",
+                    "Terminal",
+                    "Resize Pane split",
+                    "Pane Caption",
+                    "Terminal"
+                ],
+                "{shortcut}, hidden sidebar: {hidden_sidebar}"
+            );
+        }
+        cx.simulate_keystrokes("cmd-b");
+    }
+}
+
+/// Children retained by the platform after it removes layout-only containers.
+fn platform_children<'a>(
+    tree: &'a spaceterm_ui::a11y_testing::A11yTree,
+    parent: &serde_json::Value,
+) -> Vec<&'a serde_json::Value> {
+    tree.children(parent)
+        .into_iter()
+        .flat_map(|child| {
+            if child["aria"]["role"] == "GenericContainer" {
+                platform_children(tree, child)
+            } else {
+                vec![child]
+            }
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn pane_split_accessibility_scopes_contents_to_its_two_sides(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::{A11yTree, node_id};
+
+    let (_manager, _records, cx) = workspace_manager_with_terminal_nodes(cx);
+    for shortcut in ["cmd-d", "cmd-shift-d"] {
+        if shortcut == "cmd-shift-d" {
+            cx.simulate_keystrokes("cmd-t");
+        }
+        cx.simulate_keystrokes(shortcut);
+        for hidden_sidebar in [false, true] {
+            if hidden_sidebar {
+                cx.simulate_keystrokes("cmd-b");
+            }
+            let tree = A11yTree::read(cx);
+            let splitter = tree.node("Resize Pane split");
+            let parent = tree
+                .in_order()
+                .into_iter()
+                .filter(|node| node["aria"]["role"] != "GenericContainer")
+                .find(|node| {
+                    platform_children(&tree, node)
+                        .iter()
+                        .any(|child| node_id(child) == node_id(splitter))
+                })
+                .expect("the splitter has a platform parent");
+            assert_eq!(parent["aria"]["role"], "Group");
+            let children = platform_children(&tree, parent);
+            assert_eq!(
+                children
+                    .iter()
+                    .map(|node| node["aria"]["role"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                ["Group", "Terminal", "Splitter", "Group", "Terminal"],
+                "{shortcut}, hidden sidebar: {hidden_sidebar}"
+            );
+            for caption in [children[0], children[3]] {
+                assert!(
+                    caption["aria"]["label"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("Pane Caption, ")
+                );
+            }
+        }
+        cx.simulate_keystrokes("cmd-b");
+    }
+}
+
+#[gpui::test]
+fn pane_split_accessibility_keeps_nested_splitters_between_their_own_sides(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_ui::a11y_testing::{A11yTree, node_id};
+
+    let (_manager, _records, cx) = workspace_manager_with_terminal_nodes(cx);
+    for shortcut in ["cmd-d", "cmd-shift-d", "cmd-d"] {
+        cx.simulate_keystrokes(shortcut);
+        cx.run_until_parked();
+    }
+    for hidden_sidebar in [false, true] {
+        if hidden_sidebar {
+            cx.simulate_keystrokes("cmd-b");
+        }
+        let tree = A11yTree::read(cx);
+        let captions = tree
+            .in_order()
+            .into_iter()
+            .filter(|node| {
+                node["aria"]["label"]
+                    .as_str()
+                    .is_some_and(|label| label.starts_with("Pane Caption, "))
+            })
+            .collect::<Vec<_>>();
+        let terminals = tree
+            .in_order()
+            .into_iter()
+            .filter(|node| node["aria"]["role"] == "Terminal")
+            .collect::<Vec<_>>();
+        assert_eq!(captions.len(), 4);
+        assert_eq!(terminals.len(), 4);
+        let groups = tree
+            .in_order()
+            .into_iter()
+            .filter(|node| {
+                node["aria"]["role"] == "Group"
+                    && platform_children(&tree, node)
+                        .iter()
+                        .any(|child| child["aria"]["label"] == "Resize Pane split")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            groups.len(),
+            3,
+            "each Split retains its own platform parent"
+        );
+        for (index, group) in groups.iter().enumerate() {
+            let children = platform_children(&tree, group);
+            let splitter = children
+                .iter()
+                .find(|node| node["aria"]["role"] == "Splitter")
+                .unwrap();
+            let mut expected = vec![
+                node_id(captions[index]),
+                node_id(terminals[index]),
+                node_id(splitter),
+            ];
+            if index < 2 {
+                expected.push(node_id(groups[index + 1]));
+            } else {
+                expected.extend([node_id(captions[3]), node_id(terminals[3])]);
+            }
+            assert_eq!(
+                children.into_iter().map(node_id).collect::<Vec<_>>(),
+                expected,
+                "Split {index}, hidden sidebar: {hidden_sidebar}"
+            );
+        }
+    }
+}
+
 /// Reports a shell prompt for one Terminal Session, so closing its Pane needs no confirmation.
 fn report_idle_prompt(
     records: &TestTerminalSessionRecords,
