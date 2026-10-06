@@ -31,6 +31,13 @@ impl A11yTree {
             .unwrap_or_else(|| panic!("no node is named {label:?}"))
     }
 
+    /// Returns every published node with this role, in tree order.
+    pub(crate) fn with_role(&self, role: &str) -> Vec<&Value> {
+        self.nodes()
+            .filter(|node| node["aria"]["role"] == role)
+            .collect()
+    }
+
     /// Returns the node GPUI reports as focused, preferring an active descendant.
     pub(crate) fn focused(&self) -> Option<&Value> {
         let key = self.0["active_descendant_focus"]
