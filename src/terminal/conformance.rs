@@ -1725,9 +1725,10 @@ fn check_typed_failures() -> Result<(), String> {
         failure.recoverability(),
         Recoverability::Fatal,
     )?;
-    let redacted = TerminalFailure::from_session(&TerminalSessionFailure::Runtime(
-        crate::terminal::TerminalFailure::emulator("session-runtime"),
-    ));
+    let redacted = TerminalFailure::from_session(&TerminalSessionFailure::Startup {
+        stage: super::session::TerminalSessionStartupStage::Emulator,
+        message: "private terminal content".to_owned(),
+    });
     require(
         !redacted.to_string().contains("private terminal content"),
         "failure-redaction",

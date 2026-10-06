@@ -7344,6 +7344,24 @@ fn terminal_failure_should_keep_the_pane_visible_with_a_failure_status(cx: &mut 
     );
     assert!(cx.debug_bounds("terminal-status").is_some());
     assert!(cx.debug_bounds("retry-terminal-recovery").is_none());
+    assert_eq!(cx.opened_url(), None);
+    let report = cx
+        .debug_bounds("report-terminal-failure")
+        .expect("typed failure should offer a GitHub issue draft");
+    cx.simulate_click(report.center(), Modifiers::none());
+    cx.run_until_parked();
+    let url = gpui::http_client::Url::parse(&cx.opened_url().unwrap()).unwrap();
+    assert_eq!(url.host_str(), Some("github.com"));
+    assert_eq!(url.path(), "/sadiksaifi/SpaceTerm/issues/new");
+    let query: std::collections::HashMap<_, _> = url.query_pairs().collect();
+    assert_eq!(
+        query.get("title").unwrap(),
+        "[Terminal failure] PTY: read-shell-output"
+    );
+    let body = query.get("body").unwrap();
+    assert!(body.contains("class=Pty recoverability=Fatal operation=read-shell-output"));
+    assert!(!body.contains("read unavailable"));
+    assert!(!cx.did_prompt_for_new_path());
     let export = cx
         .debug_bounds("export-terminal-diagnostics")
         .expect("typed failure should expose explicit diagnostic export");
