@@ -583,3 +583,17 @@ fn microphone_access_row_keeps_its_natural_height_with_wrapped_guidance(cx: &mut
         .expect("description bounds");
     assert!(description.size.height > label.size.height * 1.5);
 }
+
+#[gpui::test]
+fn microphone_access_publishes_its_state(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let access = ScriptedMicrophoneAccess::new(Ok(MicrophoneAuthorization::Authorized));
+    let (_window, cx) = open_privacy(&access, cx);
+    let tree = A11yTree::read(cx);
+    assert!(
+        tree.with_role("Label")
+            .iter()
+            .any(|label| label["aria"]["value"] == "Allowed")
+    );
+}

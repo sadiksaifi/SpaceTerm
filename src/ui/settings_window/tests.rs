@@ -4586,3 +4586,29 @@ fn a_fixed_appearance_publishes_the_current_theme_and_its_origin(cx: &mut TestAp
             .any(|label| label["aria"]["value"] == "No settings match “zzzz”.")
     );
 }
+
+#[gpui::test]
+fn save_status_and_the_failure_banner_publish_their_text(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let (_window, harness, cx) = open_settings(cx);
+    let labels = |cx: &mut VisualTestContext| {
+        A11yTree::read(cx)
+            .with_role("Label")
+            .into_iter()
+            .filter_map(|label| label["aria"]["value"].as_str().map(str::to_owned))
+            .collect::<Vec<_>>()
+    };
+    assert!(labels(cx).contains(&"All changes saved".to_owned()));
+
+    harness.storage.fail_writes(Some(StorageError::Unavailable));
+    click("settings-density-comfortable", cx);
+    settle(cx);
+    let text = labels(cx);
+    for expected in [
+        "Could not save your changes",
+        "The change is still applied. Retry to write it to your settings file.",
+    ] {
+        assert!(text.contains(&expected.to_owned()), "{expected:?} in {text:?}");
+    }
+}

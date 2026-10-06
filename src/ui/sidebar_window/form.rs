@@ -750,7 +750,9 @@ impl gpui::RenderOnce for StepperElement {
 
 /// A short status a row carries, such as a theme being the one in use. The fill uses the raised
 /// element role because a theme may resolve the plain element background to the window background.
+/// The id names the status text published to assistive technology.
 pub(crate) fn badge(
+    id: &'static str,
     label: impl Into<SharedString>,
     appearance: &ChromeAppearance,
 ) -> impl IntoElement {
@@ -765,7 +767,7 @@ pub(crate) fn badge(
         .bg(gpui_color(pair.background))
         .chrome_text(appearance.typography.style(TextRole::Badge))
         .text_color(gpui_color(pair.primary))
-        .child(label.into())
+        .child(Text::new(id.into(), label.into()))
 }
 
 /// A text button used by the interchange and diagnostics rows.

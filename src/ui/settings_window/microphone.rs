@@ -281,7 +281,7 @@ impl SettingsWindow {
             .child(
                 div()
                     .debug_selector(move || state_selector.to_owned())
-                    .child(badge(presentation.state, appearance)),
+                    .child(badge(state_selector, presentation.state, appearance)),
             )
             .children(action)
             .into_any_element()

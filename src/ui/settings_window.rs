@@ -1661,14 +1661,20 @@ impl SettingsWindow {
                         .child(
                             div()
                                 .chrome_text(appearance.typography.style(TextRole::BodyEmphasis))
-                                .child(status.message()),
+                                .child(gpui::Text::new(
+                                    "settings-banner-message".into(),
+                                    status.message().into(),
+                                )),
                         )
                         .child(
                             div()
                                 .chrome_text(appearance.typography.style(TextRole::Secondary))
                                 .text_color(gpui_color(pair.secondary))
                                 .whitespace_normal()
-                                .child(explanation),
+                                .child(gpui::Text::new(
+                                    "settings-banner-explanation".into(),
+                                    explanation.into(),
+                                )),
                         ),
                 )
                 .child(
@@ -1718,7 +1724,10 @@ impl SettingsWindow {
                 .chrome_text(appearance.typography.style(TextRole::Secondary))
                 // The recovery banner owns semantic emphasis on its paired surface.
                 .text_color(gpui_color(appearance.colors.text_muted))
-                .child(self.editor.status().message()),
+                .child(gpui::Text::new(
+                    "settings-save-status".into(),
+                    self.editor.status().message().into(),
+                )),
         )
     }
 
