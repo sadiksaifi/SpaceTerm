@@ -31,6 +31,24 @@ impl A11yTree {
             .unwrap_or_else(|| panic!("no node is named {label:?}"))
     }
 
+    /// Returns the node GPUI reports as focused, preferring an active descendant.
+    pub(crate) fn focused(&self) -> Option<&Value> {
+        let key = self.0["active_descendant_focus"]
+            .as_str()
+            .or_else(|| self.0["gpui_focus"].as_str())?;
+        self.0["nodes"].get(key)
+    }
+
+    /// Returns a node's children in tree order.
+    pub(crate) fn children(&self, node: &Value) -> Vec<&Value> {
+        node["children"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|key| self.0["nodes"].get(key.as_str()?))
+            .collect()
+    }
+
     fn nodes(&self) -> impl Iterator<Item = &Value> {
         self.0["nodes"]
             .as_object()

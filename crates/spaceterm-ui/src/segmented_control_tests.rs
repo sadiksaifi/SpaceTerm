@@ -827,3 +827,48 @@ fn spacing_scale_grows_option_height_but_not_text() {
     assert!(grown.option_height > base.option_height);
     assert_eq!(grown.border_width, base.border_width);
 }
+
+#[gpui::test]
+fn segmented_controls_publish_a_radio_group_that_follows_focus_and_press(cx: &mut TestAppContext) {
+    use crate::a11y_testing::{A11yTree, perform, supports};
+    use gpui::accesskit::Action;
+
+    let (root, changes, cx) = segmented_window(cx);
+    root.update(cx, |root, cx| {
+        root.disable_auto = true;
+        cx.notify();
+    });
+    let tree = A11yTree::read(cx);
+    let group = tree.node("Appearance");
+    assert_eq!(group["aria"]["role"], "RadioGroup");
+    let options = tree.children(group);
+    let labels = options
+        .iter()
+        .map(|option| option["aria"]["label"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(labels, ["Light", "Dark", "Auto"]);
+    for (option, (selected, position)) in options.iter().zip([(false, 1), (true, 2), (false, 3)]) {
+        assert_eq!(option["aria"]["role"], "RadioButton");
+        assert_eq!(
+            option["aria"]["toggled"],
+            if selected { "True" } else { "False" }
+        );
+        assert_eq!(option["aria"]["position_in_set"], position);
+        assert_eq!(option["aria"]["size_of_set"], 3);
+    }
+    assert_eq!(tree.node("Auto")["aria"]["disabled"], true);
+    assert!(!supports(tree.node("Auto"), Action::Click));
+
+    focus_control(cx);
+    let tree = A11yTree::read(cx);
+    assert_eq!(tree.focused().unwrap()["aria"]["label"], "Dark");
+
+    perform(cx, tree.node("Light"), Action::Click);
+    let changes = changes.borrow();
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].requested(), &Mode::Light);
+    assert_eq!(
+        changes[0].source(),
+        SegmentedActivationSource::Accessibility
+    );
+}
