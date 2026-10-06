@@ -7,7 +7,7 @@ use crate::appearance::{
 
 #[test]
 fn legacy_transparency_exports_as_opacity() {
-    for (transparency, expected_opacity) in [(0.0, 1.0), (0.35, 0.65), (1.0, 0.0)] {
+    for (transparency, expected_opacity) in [(0.0, 1.0), (0.35, 0.65), (0.6, 0.4), (1.0, 0.0)] {
         let legacy = legacy_document(
             &SettingsDocument::default(),
             serde_json::json!(transparency),
@@ -19,7 +19,7 @@ fn legacy_transparency_exports_as_opacity() {
         let opacity = exported["appearance"]["window"]["opacity"]
             .as_f64()
             .unwrap();
-        assert!((opacity - expected_opacity).abs() < 0.000001);
+        assert_eq!(opacity, expected_opacity);
         assert_eq!(exported["schema_version"], 4);
         assert!(
             exported["appearance"]["window"]

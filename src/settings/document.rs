@@ -150,7 +150,7 @@ fn migrate_v3_settings(value: &mut serde_json::Value) -> Result<(), SettingsDocu
     if window.contains_key("opacity") {
         return Err(SettingsDocumentError::InvalidJson);
     }
-    let transparency: f32 = serde_json::from_value(
+    let transparency: f64 = serde_json::from_value(
         window
             .remove("transparency")
             .ok_or(SettingsDocumentError::InvalidJson)?,
