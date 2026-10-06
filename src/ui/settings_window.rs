@@ -791,7 +791,10 @@ impl SettingsWindow {
             .on_action(cx.listener(Self::close))
             .on_action(cx.listener(Self::focus_search))
             .on_action(cx.listener(Self::clear_search));
+        // The surface holds the window's focus, so it publishes a node for focus to rest on.
         let content = super::sidebar_window::tab_traversal(surface, cx)
+            .id("settings-window-surface")
+            .role(gpui::accesskit::Role::Group)
             .size_full()
             .flex()
             .flex_row()

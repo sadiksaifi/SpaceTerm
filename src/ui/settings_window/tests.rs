@@ -4536,9 +4536,8 @@ fn settings_publish_headings_row_titles_and_guidance_in_reading_order(cx: &mut T
 
     select_section(SettingsSectionId::Themes, cx);
     let tree = A11yTree::read(cx);
-    let window = tree.with_role("Window")[0];
     let reading = tree
-        .children(window)
+        .in_order()
         .into_iter()
         .map(|node| {
             let text = node["aria"]["label"]
@@ -4615,4 +4614,14 @@ fn save_status_and_the_failure_banner_publish_their_text(cx: &mut TestAppContext
     ] {
         assert!(text.contains(&expected.to_owned()), "{expected:?} in {text:?}");
     }
+}
+
+#[gpui::test]
+fn settings_focus_reaches_assistive_technology(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let (_window, _harness, cx) = open_settings(cx);
+    let tree = A11yTree::read(cx);
+    let focused = tree.focused().expect("the focused surface publishes a node");
+    assert_eq!(focused["aria"]["role"], "Group");
 }
