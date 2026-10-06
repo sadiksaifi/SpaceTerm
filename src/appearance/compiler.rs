@@ -266,8 +266,7 @@ pub(crate) fn compile_builtin_chrome(appearance: Appearance) -> ChromeColors {
     let tab_inactive_background = title_bar_background;
     let tab_active_foreground = authored.tab_active_foreground;
     let tab_inactive_foreground = contrast(text_secondary, tab_inactive_background, 4.5);
-    let tab_inactive_selected_background = authored.tab_inactive_selected_background;
-    let tab_inactive_selected_foreground = authored.tab_inactive_selected_foreground;
+    let inactive_selection_background = authored.inactive_selection_background;
     let element_border = border_transparent;
     let element_hover_border = border_transparent;
     let element_active_border = border_transparent;
@@ -285,7 +284,6 @@ pub(crate) fn compile_builtin_chrome(appearance: Appearance) -> ChromeColors {
     let tab_hover_icon = tab_hover_foreground;
     let tab_active_icon = tab_active_foreground;
     let tab_inactive_icon = tab_inactive_foreground;
-    let tab_inactive_selected_icon = tab_inactive_selected_foreground;
     // The Active Tab carries the selected-row hierarchy in its own roles: a rim that stays put, and a
     // hover that gains weight from the Tab's material rather than from a list row's.
     let tab_active_border = authored.tab_active_border;
@@ -300,7 +298,7 @@ pub(crate) fn compile_builtin_chrome(appearance: Appearance) -> ChromeColors {
         tab_active_hover_background.source_over(background),
         3.0,
     );
-    let tab_inactive_selected_border = authored.tab_inactive_selected_border;
+    let inactive_selection_border = authored.inactive_selection_border;
     // The mark between two inactive Tabs is its own decision rather than a control outline or a
     // full-length divider. Missing, it takes the inactive title a step back into the bar it rests
     // on, so it follows the built-in title weight: seen as a short hairline, quieter than text.
@@ -512,8 +510,7 @@ pub(crate) fn compile_builtin_chrome(appearance: Appearance) -> ChromeColors {
         preview_foreground,
         tab_active_foreground,
         tab_inactive_foreground,
-        tab_inactive_selected_background,
-        tab_inactive_selected_foreground,
+        inactive_selection_background,
         scrollbar_thumb_active_background,
         success_background,
         success_border,
@@ -535,12 +532,11 @@ pub(crate) fn compile_builtin_chrome(appearance: Appearance) -> ChromeColors {
         tab_hover_icon,
         tab_active_icon,
         tab_inactive_icon,
-        tab_inactive_selected_icon,
         tab_active_border,
         tab_active_hover_background,
         tab_active_hover_foreground,
         tab_active_hover_icon,
-        tab_inactive_selected_border,
+        inactive_selection_border,
         tab_separator,
     }
 }
@@ -699,10 +695,6 @@ mod tests {
                 (c.toggle_off_mark, c.toggle_off_background),
                 (c.toggle_off_hover_mark, c.toggle_off_hover_background),
                 (c.toggle_off_pressed_mark, c.toggle_off_pressed_background),
-                (
-                    c.tab_inactive_selected_foreground,
-                    c.tab_inactive_selected_background,
-                ),
                 (c.tab_active_hover_foreground, c.tab_active_hover_background),
             ] {
                 assert!(

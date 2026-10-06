@@ -199,8 +199,7 @@ impl TabChromePresentation {
                 window_active,
                 show_borders,
                 background: colors.title_bar_inactive_background,
-                // ChromeAppearance has already prepared the common active-state roles for an
-                // inactive window. Keep the legacy inactive-selected aliases out of rendering.
+                // ChromeAppearance has already prepared the active-state roles for an inactive window.
                 active_tab_background: colors.tab_active_background,
                 active_tab_border: colors.tab_active_border,
                 active_tab_hover_background: colors.tab_active_hover_background,
@@ -2426,9 +2425,6 @@ mod tests {
             tab_active_hover_background: Color::rgb(0x2a3b4c),
             tab_active_hover_foreground: Color::rgb(0xeef0ff),
             tab_active_foreground: Color::rgb(0xddeeff),
-            tab_inactive_selected_background: Color::rgb(0x334455),
-            tab_inactive_selected_border: Color::rgb(0x3a4b5c),
-            tab_inactive_selected_foreground: Color::rgb(0xbbccdd),
             tab_hover_background: Color::rgb(0x556677),
             tab_hover_foreground: Color::rgb(0x99aabb),
             tab_hover_icon: Color::rgb(0x778899),
@@ -2645,11 +2641,9 @@ mod tests {
     fn tab_close_control_should_share_parent_at_rest_and_keep_direct_interaction_states() {
         let colors = ChromeColors {
             tab_active_background: Color::rgb(0x445566),
-            tab_inactive_selected_background: Color::rgb(0x556677),
             tab_active_hover_background: Color::rgb(0x667788),
             tab_hover_background: Color::rgb(0x778899),
             tab_active_icon: Color::rgb(0x112233),
-            tab_inactive_selected_icon: Color::rgb(0x223344),
             tab_hover_icon: Color::rgb(0x334455),
             ..ChromeColors::default()
         };

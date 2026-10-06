@@ -321,8 +321,7 @@ fn control_edges(c: &mut ChromeColors, host: Color) {
         selection_disabled_border,
         input_border,
         input_disabled_border,
-        tab_active_border,
-        tab_inactive_selected_border
+        tab_active_border
     );
 }
 
@@ -333,13 +332,13 @@ fn increased_contrast(c: &mut ChromeColors, host: Color) {
     content!(7.0; text, icon, row_foreground, row_hover_foreground,
         row_selected_foreground, row_selected_hover_foreground, navigation_selected_foreground,
         tab_active_foreground, tab_active_hover_foreground, tab_inactive_foreground,
-        tab_inactive_selected_foreground, tab_hover_foreground);
+        tab_hover_foreground);
     content!(4.5; text_secondary, text_muted, text_placeholder, text_disabled,
         icon_muted, icon_disabled, row_secondary, row_hover_secondary,
         row_selected_secondary, row_selected_hover_secondary, navigation_selected_secondary,
         row_icon, row_hover_icon, row_selected_icon, row_selected_hover_icon,
         navigation_selected_icon, tab_active_icon, tab_active_hover_icon,
-        tab_inactive_icon, tab_inactive_selected_icon, tab_hover_icon,
+        tab_inactive_icon, tab_hover_icon,
         link_text_disabled, ghost_element_disabled_foreground, ghost_element_disabled_icon,
         toggle_off_disabled_label, toggle_on_disabled_label);
     content!(3.0; border, border_variant, border_selected, border_disabled,
@@ -363,8 +362,7 @@ fn increased_contrast(c: &mut ChromeColors, host: Color) {
         selection_disabled_background => selection_disabled_border,
         row_selected_background => row_selected_border,
         row_selected_hover_background => row_selected_hover_border,
-        tab_active_background => tab_active_border,
-        tab_inactive_selected_background => tab_inactive_selected_border
+        tab_active_background => tab_active_border
     );
     c.navigation_selected_background = readable(c.navigation_selected_background, host, 1.4);
     macro_rules! control {
@@ -398,7 +396,6 @@ fn increased_contrast(c: &mut ChromeColors, host: Color) {
         row_selected_background => [row_selected_foreground] => row_selected_border,
         row_selected_hover_background => [row_selected_hover_foreground] => row_selected_hover_border,
         tab_active_background => [tab_active_foreground] => tab_active_border,
-        tab_inactive_selected_background => [tab_inactive_selected_foreground] => tab_inactive_selected_border,
         toggle_off_background => [toggle_off_mark] => toggle_off_border,
         toggle_off_hover_background => [toggle_off_hover_mark] => toggle_off_hover_border,
         toggle_off_pressed_background => [toggle_off_pressed_mark] => toggle_off_pressed_border,

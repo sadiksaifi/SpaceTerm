@@ -858,12 +858,8 @@ impl ComboBoxMetrics {
         self
     }
 
-    fn scaled(self, text_scale: f32, spacing_scale: f32) -> Self {
-        let width_scale = crate::appearance::normalized_scale(text_scale)
-            .max(crate::appearance::normalized_scale(spacing_scale));
-        let label_size = crate::appearance::scale_metric(self.label_size, text_scale);
-        let icon_size = crate::appearance::scale_metric(self.icon_size, text_scale);
-        let trigger_icon_size = crate::appearance::scale_metric(self.trigger_icon_size, text_scale);
+    fn scaled(self, spacing_scale: f32) -> Self {
+        let width_scale = crate::appearance::normalized_scale(spacing_scale).max(1.0);
         let density_step = (crate::appearance::normalized_scale(spacing_scale) - 1.0).max(0.0);
         Self {
             panel_width: self.panel_width * width_scale,
@@ -871,62 +867,40 @@ impl ComboBoxMetrics {
             trigger_height: crate::appearance::scale_line_box(
                 self.trigger_height,
                 self.label_size,
-                text_scale,
                 spacing_scale,
             ),
             icon_trigger_size: crate::appearance::scale_line_box(
                 self.icon_trigger_size,
                 self.icon_size,
-                text_scale,
                 spacing_scale,
             ),
             input_height: crate::appearance::scale_line_box(
                 self.input_height,
                 self.label_line_height,
-                text_scale,
                 spacing_scale,
             ),
             row_height: crate::appearance::scale_line_box(
                 self.row_height,
                 self.label_line_height,
-                text_scale,
                 spacing_scale,
             ),
             described_row_height: crate::appearance::scale_line_box(
                 self.described_row_height,
                 self.label_line_height + self.secondary_line_height,
-                text_scale,
                 spacing_scale,
             ),
-            panel_padding: self.panel_padding,
             horizontal_padding: crate::appearance::scale_metric(
                 self.horizontal_padding,
                 spacing_scale,
             ),
-            leading_width: (self.leading_width + px(8.0) * density_step).max(icon_size),
-            identity_icon_width: (self.identity_icon_width + px(8.0) * density_step).max(icon_size),
-            state_icon_gap: self.state_icon_gap,
-            gap: self.gap,
-            trigger_corner_radius: self.trigger_corner_radius,
-            corner_radius: self.corner_radius,
-            border_width: self.border_width,
-            label_size,
-            secondary_size: crate::appearance::scale_metric(self.secondary_size, text_scale),
-            label_line_height: crate::appearance::scale_metric(self.label_line_height, text_scale),
-            secondary_line_height: crate::appearance::scale_metric(
-                self.secondary_line_height,
-                text_scale,
-            ),
-            icon_size,
-            trigger_icon_size,
-            icon_baseline_center: crate::appearance::scale_metric(
-                self.icon_baseline_center,
-                text_scale,
-            ),
+            leading_width: (self.leading_width + px(8.0) * density_step).max(self.icon_size),
+            identity_icon_width: (self.identity_icon_width + px(8.0) * density_step)
+                .max(self.icon_size),
             group_separator_height: crate::appearance::scale_metric(
                 self.group_separator_height,
                 spacing_scale,
             ),
+            ..self
         }
     }
 
@@ -981,9 +955,9 @@ impl ComboBoxTheme {
         }
     }
 
-    pub(crate) fn scaled_metrics(self, text_scale: f32, spacing_scale: f32) -> Self {
+    pub(crate) fn scaled_spacing(self, spacing_scale: f32) -> Self {
         Self {
-            metrics: self.metrics.scaled(text_scale, spacing_scale),
+            metrics: self.metrics.scaled(spacing_scale),
             ..self
         }
     }
@@ -3511,7 +3485,7 @@ mod tests {
             paint,
             ComboBoxMetrics::new(px(240.0), px(28.0)).trigger_shape(px(6.0)),
         );
-        let comfortable = theme.scaled_metrics(1.0, 1.25);
+        let comfortable = theme.scaled_spacing(1.25);
 
         assert!(comfortable.metrics.trigger_height > theme.metrics.trigger_height);
         assert_eq!(
@@ -3670,20 +3644,6 @@ mod tests {
         assert_eq!(paint.selected_foreground, base);
         assert_eq!(paint.selected_background, selected);
         assert_eq!(paint.trigger_hover_background, base);
-    }
-
-    #[test]
-    fn role_line_boxes_scale_independently_from_fixed_combo_extents() {
-        let metrics = ComboBoxMetrics::new(px(240.0), px(28.0))
-            .geometry(px(260.0), px(28.0), px(28.0), px(40.0))
-            .text_geometry(px(18.0), px(15.0), px(14.0))
-            .scaled(1.5, 1.0);
-
-        assert_eq!(metrics.label_line_height, px(27.0));
-        assert_eq!(metrics.secondary_line_height, px(22.5));
-        assert_eq!(metrics.input_height, px(37.0));
-        assert_eq!(metrics.row_height, px(37.0));
-        assert_eq!(metrics.described_row_height, px(56.5));
     }
 
     #[test]

@@ -416,9 +416,8 @@ pub(super) struct ChromeDefinition {
     pub(super) tab_active_foreground: Color,
     pub(super) tab_active_border: Color,
     pub(super) tab_active_hover_foreground: Color,
-    pub(super) tab_inactive_selected_background: Color,
-    pub(super) tab_inactive_selected_foreground: Color,
-    pub(super) tab_inactive_selected_border: Color,
+    pub(super) inactive_selection_background: Color,
+    pub(super) inactive_selection_border: Color,
     pub(super) tab_separator: Color,
     pub(super) primary_background: Color,
     pub(super) primary_hover_background: Color,
@@ -523,9 +522,8 @@ impl ChromePalette {
             tab_active_foreground: opaque(self.row_selected_text),
             tab_active_border: self.selected_rim,
             tab_active_hover_foreground: opaque(self.row_selected_text),
-            tab_inactive_selected_background: opaque(self.selected_inactive),
-            tab_inactive_selected_foreground: opaque(self.text_secondary),
-            tab_inactive_selected_border: self.selected_rim_inactive,
+            inactive_selection_background: opaque(self.selected_inactive),
+            inactive_selection_border: self.selected_rim_inactive,
             tab_separator: self.tab_separator,
 
             primary_background: opaque(self.emphasis),
@@ -730,7 +728,7 @@ mod tests {
                 ("field outline", colors.input_border),
                 ("control outline", colors.outline_border),
                 ("chip rim", colors.row_selected_border),
-                ("inactive tab rim", colors.tab_inactive_selected_border),
+                ("inactive tab rim", colors.inactive_selection_border),
                 ("tab separator", colors.tab_separator),
                 ("resize handle", colors.resize_idle),
                 ("scrollbar", colors.scrollbar_thumb_background),
@@ -795,10 +793,7 @@ mod tests {
                 ("row hover", colors.row_selected_hover_background),
                 ("element", colors.element_selected),
                 ("tab", colors.tab_active_background),
-                (
-                    "inactive window tab",
-                    colors.tab_inactive_selected_background,
-                ),
+                ("inactive window tab", colors.inactive_selection_background),
             ] {
                 assert!(
                     tint(fill) <= NEUTRAL_TINT,
@@ -878,7 +873,7 @@ mod tests {
                 ("Active Tab", colors.tab_active_border),
                 (
                     "inactive-window Active Tab",
-                    colors.tab_inactive_selected_border,
+                    colors.inactive_selection_border,
                 ),
             ] {
                 assert!(
@@ -895,7 +890,7 @@ mod tests {
 
             let bar = weight(colors.title_bar_background);
             let focused = weight(colors.tab_active_background) - bar;
-            let unfocused = weight(colors.tab_inactive_selected_background) - bar;
+            let unfocused = weight(colors.inactive_selection_background) - bar;
             let row =
                 weight(colors.navigation_selected_background) - weight(colors.panel_background);
             assert!(

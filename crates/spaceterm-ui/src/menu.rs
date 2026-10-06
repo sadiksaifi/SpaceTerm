@@ -139,15 +139,6 @@ impl<A> MenuActivation<A> {
             | Self::Radio { source, .. } => *source,
         }
     }
-
-    /// Consumes the event and returns the caller-owned action identity.
-    pub fn into_action(self) -> A {
-        match self {
-            Self::Action { action, .. }
-            | Self::Checkbox { action, .. }
-            | Self::Radio { action, .. } => action,
-        }
-    }
 }
 
 /// Why an open menu chain closed.
@@ -209,11 +200,6 @@ impl<T> PickerChange<T> {
     /// Returns the input path that selected the value.
     pub fn source(&self) -> MenuActivationSource {
         self.source
-    }
-
-    /// Consumes the event and returns the selected value.
-    pub fn into_value(self) -> T {
-        self.value
     }
 }
 
@@ -485,30 +471,24 @@ impl MenuMetrics {
         }
     }
 
-    fn scaled(self, text_scale: f32, spacing_scale: f32) -> Self {
-        let width_scale = crate::appearance::normalized_scale(text_scale)
-            .max(crate::appearance::normalized_scale(spacing_scale));
-        let icon_size = crate::appearance::scale_metric(self.icon_size, text_scale);
-        let trigger_icon_size = crate::appearance::scale_metric(self.trigger_icon_size, text_scale);
+    fn scaled(self, spacing_scale: f32) -> Self {
+        let width_scale = crate::appearance::normalized_scale(spacing_scale).max(1.0);
         Self {
             panel_width: self.panel_width * width_scale,
             row_height: crate::appearance::scale_line_box(
                 self.row_height,
                 self.label_line_height.max(self.shortcut_line_height),
-                text_scale,
                 spacing_scale,
             ),
             section_height: crate::appearance::scale_line_box(
                 self.section_height,
                 self.section_line_height,
-                text_scale,
                 spacing_scale,
             ),
             separator_height: crate::appearance::scale_metric(self.separator_height, spacing_scale),
             trigger_height: crate::appearance::scale_line_box(
                 self.trigger_height,
                 self.label_line_height,
-                text_scale,
                 spacing_scale,
             ),
             horizontal_padding: crate::appearance::scale_metric(
@@ -519,41 +499,16 @@ impl MenuMetrics {
                 self.state_column_width,
                 spacing_scale,
             )
-            .max(icon_size),
+            .max(self.icon_size),
             icon_column_width: crate::appearance::scale_metric(
                 self.icon_column_width,
                 spacing_scale,
             )
-            .max(icon_size),
+            .max(self.icon_size),
             column_gap: crate::appearance::scale_metric(self.column_gap, spacing_scale),
             gap: crate::appearance::scale_metric(self.gap, spacing_scale),
-            trigger_corner_radius: self.trigger_corner_radius,
-            corner_radius: self.corner_radius,
-            border_width: self.border_width,
-            font_size: crate::appearance::scale_metric(self.font_size, text_scale),
-            shortcut_font_size: crate::appearance::scale_metric(
-                self.shortcut_font_size,
-                text_scale,
-            ),
-            section_font_size: crate::appearance::scale_metric(self.section_font_size, text_scale),
-            label_line_height: crate::appearance::scale_metric(self.label_line_height, text_scale),
-            shortcut_line_height: crate::appearance::scale_metric(
-                self.shortcut_line_height,
-                text_scale,
-            ),
-            section_line_height: crate::appearance::scale_metric(
-                self.section_line_height,
-                text_scale,
-            ),
-            panel_padding: self.panel_padding,
             submenu_gap: crate::appearance::scale_metric(self.submenu_gap, spacing_scale),
-            icon_size,
-            trigger_icon_size,
-            icon_baseline_center: crate::appearance::scale_metric(
-                self.icon_baseline_center,
-                text_scale,
-            ),
-            separator_thickness: self.separator_thickness,
+            ..self
         }
     }
 }
@@ -584,11 +539,11 @@ impl MenuSizes {
         }
     }
 
-    fn scaled(self, text_scale: f32, spacing_scale: f32) -> Self {
+    fn scaled(self, spacing_scale: f32) -> Self {
         Self {
-            small: self.small.scaled(text_scale, spacing_scale),
-            regular: self.regular.scaled(text_scale, spacing_scale),
-            wide: self.wide.scaled(text_scale, spacing_scale),
+            small: self.small.scaled(spacing_scale),
+            regular: self.regular.scaled(spacing_scale),
+            wide: self.wide.scaled(spacing_scale),
         }
     }
 }
@@ -609,9 +564,9 @@ impl MenuTheme {
         Self { paint, sizes }
     }
 
-    pub(crate) fn scaled_metrics(self, text_scale: f32, spacing_scale: f32) -> Self {
+    pub(crate) fn scaled_spacing(self, spacing_scale: f32) -> Self {
         Self {
-            sizes: self.sizes.scaled(text_scale, spacing_scale),
+            sizes: self.sizes.scaled(spacing_scale),
             ..self
         }
     }
@@ -4455,21 +4410,6 @@ mod tests {
     }
 
     #[test]
-    fn role_line_boxes_scale_independently_from_fixed_menu_extents() {
-        let metrics = MenuMetrics::new(px(196.0), px(26.0))
-            .trigger_height(px(28.0))
-            .text_geometry(px(18.0), px(15.0), px(21.0), px(4.0))
-            .scaled(1.5, 1.0);
-
-        assert_eq!(metrics.label_line_height, px(27.0));
-        assert_eq!(metrics.shortcut_line_height, px(22.5));
-        assert_eq!(metrics.section_line_height, px(31.5));
-        assert_eq!(metrics.row_height, px(35.0));
-        assert_eq!(metrics.section_height, px(32.5));
-        assert_eq!(metrics.trigger_height, px(37.0));
-    }
-
-    #[test]
     fn menu_shortcut_font_selects_the_shortcut_slot() {
         let regular = gpui::font("Regular");
         let shortcut = gpui::font("Shortcut");
@@ -4646,7 +4586,8 @@ mod tests {
             root.read_with(cx, |root, _| root.icon_color.get()),
             rgba(0x004400ff)
         );
-        theme = theme.scaled_metrics(2.0, 2.0);
+        let moved = MenuMetrics::new(px(320.0), px(56.0));
+        theme.sizes = MenuSizes::new(moved, moved, moved);
         cx.update(|window, cx| {
             cx.set_global(theme);
             window.refresh();
@@ -4688,7 +4629,12 @@ mod tests {
             .debug_bounds("open-entry-icon")
             .expect("the default custom row icon was not rendered");
 
-        let theme = test_theme().scaled_metrics(2.0, 1.25);
+        let metrics =
+            MenuMetrics::new(px(160.0), px(28.0)).decoration_metrics(default_size * 2.0, px(1.0));
+        let theme = MenuTheme::new(
+            test_theme().paint,
+            MenuSizes::new(metrics, metrics, metrics),
+        );
         let expected_size = theme
             .resolve(MenuSize::Regular, test_shell())
             .metrics
@@ -4820,7 +4766,7 @@ mod tests {
             .resolve(MenuSize::Regular, test_shell())
             .metrics;
         let comfortable = test_theme()
-            .scaled_metrics(1.0, 1.25)
+            .scaled_spacing(1.25)
             .resolve(MenuSize::Regular, test_shell())
             .metrics;
 

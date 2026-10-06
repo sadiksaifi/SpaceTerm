@@ -1117,7 +1117,7 @@ fn scaling_catalog_preserves_role_materials_radii_and_hairlines_while_growing_in
     cx.update(|cx| {
         {
             let catalog = initial
-                .scale_metrics(1.5, 1.25)
+                .scale_spacing(1.25)
                 .generation(ControlThemeGeneration::new(2));
             crate::replace_control_theme_catalogs(
                 cx,
@@ -1435,7 +1435,7 @@ fn control_host_wrappers_do_not_paint_another_surface(cx: &mut TestAppContext) {
 #[test]
 fn resting_host_metrics_scale_once_with_the_complete_catalog() {
     let initial = surface_host_catalog(1, PANEL_FIELD, CARD_FIELD);
-    let scaled = initial.clone().scale_metrics(1.5, 1.25);
+    let scaled = initial.clone().scale_spacing(1.25);
     for host in [
         ControlHost::TitleBar,
         ControlHost::Panel,
@@ -1446,14 +1446,14 @@ fn resting_host_metrics_scale_once_with_the_complete_catalog() {
         assert_ne!(scaled.hosted_controls(host), Some(original));
         assert_eq!(
             scaled.hosted_controls(host),
-            Some(&original.clone().scale_metrics(1.5, 1.25))
+            Some(&original.clone().scale_spacing(1.25))
         );
         assert_eq!(
             scaled
                 .hosted_controls(host)
                 .unwrap()
                 .regular_button_extent_for_test(),
-            px(38.0),
+            px(32.0),
             "{host:?}"
         );
     }

@@ -16,8 +16,6 @@ use super::permission_recovery::{PermissionRecovery, PermissionRecoveryError};
 
 const MICROPHONE_SETTINGS_URI: &str =
     "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Microphone";
-const LEGACY_MICROPHONE_SETTINGS_URI: &str =
-    "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone";
 
 pub(crate) struct MacosMicrophoneAccess {
     settings: PermissionRecovery,
@@ -30,7 +28,6 @@ impl MacosMicrophoneAccess {
             settings: PermissionRecovery::new(
                 Box::new(super::macos_system_settings::NsWorkspaceUrlLauncher::default()),
                 MICROPHONE_SETTINGS_URI,
-                LEGACY_MICROPHONE_SETTINGS_URI,
             ),
             _not_send_or_sync: PhantomData,
         }
@@ -138,11 +135,8 @@ mod tests {
     #[test]
     fn microphone_settings_routes_are_exact() {
         assert_eq!(
-            (MICROPHONE_SETTINGS_URI, LEGACY_MICROPHONE_SETTINGS_URI,),
-            (
-                "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Microphone",
-                "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone",
-            )
+            MICROPHONE_SETTINGS_URI,
+            "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Microphone"
         );
     }
 }

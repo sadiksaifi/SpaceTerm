@@ -68,7 +68,7 @@ pub(super) fn prepare_state_colors(
         return colors;
     }
 
-    let selection = source.tab_inactive_selected_background;
+    let selection = source.inactive_selection_background;
     colors.element_selected = selection;
     colors.ghost_element_selected = selection;
     colors.selection_background = selection;
@@ -79,17 +79,15 @@ pub(super) fn prepare_state_colors(
     colors.navigation_selected_background = selection;
     colors.tab_active_background = selection;
     colors.tab_active_hover_background = selection;
-    colors.tab_inactive_selected_background = selection;
 
     if !state.capabilities.show_borders {
-        let rim = source.tab_inactive_selected_border;
+        let rim = source.inactive_selection_border;
         colors.selection_border = rim;
         colors.selection_hover_border = rim;
         colors.selection_pressed_border = rim;
         colors.row_selected_border = rim;
         colors.row_selected_hover_border = rim;
         colors.tab_active_border = rim;
-        colors.tab_inactive_selected_border = rim;
     }
 
     colors

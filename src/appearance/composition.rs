@@ -582,7 +582,7 @@ macro_rules! resting_fill_roles {
         $apply!(
             tab_active_background,
             tab_inactive_background,
-            tab_inactive_selected_background,
+            inactive_selection_background,
             tab_active_hover_background,
             tab_hover_background,
             badge_background,

@@ -19,18 +19,14 @@ use super::permission_access::{
     PermissionSetupReadiness, SystemPermission,
 };
 use super::permission_recovery::{
-    PermissionRecovery, PermissionRecoveryError, PermissionRecoveryOpener, UrlLauncher,
+    PermissionRecovery, PermissionRecoveryError, PermissionRecoveryOpener,
 };
 use crate::application_identity::ApplicationIdentity;
 
 const SCREEN_RECORDING_SETTINGS_URI: &str =
     "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_ScreenCapture";
-const LEGACY_SCREEN_RECORDING_SETTINGS_URI: &str =
-    "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
 const ACCESSIBILITY_SETTINGS_URI: &str =
     "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Accessibility";
-const LEGACY_ACCESSIBILITY_SETTINGS_URI: &str =
-    "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility";
 
 /// The distributed notification the system posts when an application's Accessibility grant
 /// changes. HIServices observes it to clear the trust value `AXIsProcessTrusted` caches.
@@ -80,13 +76,13 @@ impl MacosPermissionAccess {
             .bundleIdentifier()
             .map(|identifier| identifier.to_string());
         Self {
-            screen_recording_settings: settings_recovery(
-                SystemPermission::ScreenRecording,
+            screen_recording_settings: PermissionRecovery::new(
                 Box::new(super::macos_system_settings::NsWorkspaceUrlLauncher::default()),
+                SCREEN_RECORDING_SETTINGS_URI,
             ),
-            accessibility_settings: settings_recovery(
-                SystemPermission::Accessibility,
+            accessibility_settings: PermissionRecovery::new(
                 Box::new(super::macos_system_settings::NsWorkspaceUrlLauncher::default()),
+                ACCESSIBILITY_SETTINGS_URI,
             ),
             reset_bundle_identifier: reset_bundle_identifier(
                 running.as_deref(),
@@ -96,23 +92,6 @@ impl MacosPermissionAccess {
             _not_send_or_sync: PhantomData,
         }
     }
-}
-
-fn settings_recovery(
-    permission: SystemPermission,
-    launcher: Box<dyn UrlLauncher>,
-) -> PermissionRecovery {
-    let (preferred, fallback) = match permission {
-        SystemPermission::ScreenRecording => (
-            SCREEN_RECORDING_SETTINGS_URI,
-            LEGACY_SCREEN_RECORDING_SETTINGS_URI,
-        ),
-        SystemPermission::Accessibility => (
-            ACCESSIBILITY_SETTINGS_URI,
-            LEGACY_ACCESSIBILITY_SETTINGS_URI,
-        ),
-    };
-    PermissionRecovery::new(launcher, preferred, fallback)
 }
 
 impl PermissionAccess for MacosPermissionAccess {
@@ -967,81 +946,52 @@ mod tests {
 
     #[test]
     fn permission_settings_routes_are_exact() {
-        use super::super::permission_recovery::UrlLaunchError;
+        use super::super::permission_recovery::{UrlLaunchError, UrlLauncher};
         use std::cell::RefCell;
-        use std::collections::VecDeque;
 
         struct Launcher {
             attempts: Rc<RefCell<Vec<&'static str>>>,
-            outcomes: RefCell<VecDeque<Result<(), UrlLaunchError>>>,
         }
         impl UrlLauncher for Launcher {
             fn open_url(&self, uri: &'static str) -> Result<(), UrlLaunchError> {
                 self.attempts.borrow_mut().push(uri);
-                self.outcomes
-                    .borrow_mut()
-                    .pop_front()
-                    .expect("one outcome per attempt")
+                Err(UrlLaunchError::Rejected)
             }
         }
-        for (permission, preferred, fallback) in [
+        for (permission, uri) in [
             (
                 SystemPermission::ScreenRecording,
                 "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_ScreenCapture",
-                "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
             ),
             (
                 SystemPermission::Accessibility,
                 "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Accessibility",
-                "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
             ),
         ] {
-            for (outcomes, expected_uris, expected_result) in [
-                (vec![Ok(())], vec![preferred], Ok(())),
-                (
-                    vec![Err(UrlLaunchError::Rejected), Ok(())],
-                    vec![preferred, fallback],
-                    Ok(()),
+            let attempts = Rc::new(RefCell::new(Vec::new()));
+            let launcher = || {
+                Box::new(Launcher {
+                    attempts: Rc::clone(&attempts),
+                }) as Box<dyn UrlLauncher>
+            };
+            let access = MacosPermissionAccess {
+                screen_recording_settings: PermissionRecovery::new(
+                    launcher(),
+                    SCREEN_RECORDING_SETTINGS_URI,
                 ),
-                (
-                    vec![Err(UrlLaunchError::Rejected), Err(UrlLaunchError::Rejected)],
-                    vec![preferred, fallback],
-                    Err(PermissionAccessError::PlatformRejected),
+                accessibility_settings: PermissionRecovery::new(
+                    launcher(),
+                    ACCESSIBILITY_SETTINGS_URI,
                 ),
-                (
-                    vec![Err(UrlLaunchError::OffMainThread)],
-                    vec![preferred],
-                    Err(PermissionAccessError::OffMainThread),
-                ),
-                (
-                    vec![Err(UrlLaunchError::Unavailable)],
-                    vec![preferred],
-                    Err(PermissionAccessError::PlatformUnavailable),
-                ),
-            ] {
-                let attempts = Rc::new(RefCell::new(Vec::new()));
-                let launcher = || {
-                    Box::new(Launcher {
-                        attempts: Rc::clone(&attempts),
-                        outcomes: RefCell::new(outcomes.clone().into()),
-                    }) as Box<dyn UrlLauncher>
-                };
-                let access = MacosPermissionAccess {
-                    screen_recording_settings: settings_recovery(
-                        SystemPermission::ScreenRecording,
-                        launcher(),
-                    ),
-                    accessibility_settings: settings_recovery(
-                        SystemPermission::Accessibility,
-                        launcher(),
-                    ),
-                    reset_bundle_identifier: None,
-                    verification: Arc::default(),
-                    _not_send_or_sync: PhantomData,
-                };
-                assert_eq!(access.open_settings(permission), expected_result);
-                assert_eq!(*attempts.borrow(), expected_uris);
-            }
+                reset_bundle_identifier: None,
+                verification: Arc::default(),
+                _not_send_or_sync: PhantomData,
+            };
+            assert_eq!(
+                access.open_settings(permission),
+                Err(PermissionAccessError::PlatformRejected)
+            );
+            assert_eq!(*attempts.borrow(), [uri]);
         }
     }
 }

@@ -6,7 +6,6 @@ use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
 
 pub const APP_DIR_NAME: &str = "spaceterm";
-const WINDOWS_VENDOR_DIR_NAME: &str = "sadiksaifi";
 pub const SETTINGS_BACKUP_NAME: &str = "settings.json.bak";
 const SETTINGS_DOCUMENT_NAME: &str = "settings.json";
 const MANAGED_SSH_CONFIG_NAME: &str = "ssh_config";
@@ -108,12 +107,6 @@ impl std::fmt::Debug for AppDirectoryFile {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum DirectoryLayout {
-    Xdg,
-    Windows,
-}
-
 /// Semantic storage locations shared by every platform adapter.
 ///
 /// Resolution is side-effect free. Callers create a directory only when they are about to write
@@ -125,7 +118,6 @@ pub struct AppDirectories {
     pub state: PathBuf,
     pub cache: PathBuf,
     pub runtime: Option<PathBuf>,
-    layout: DirectoryLayout,
     temporary: Option<PathBuf>,
     runtime_in_shared_temporary: bool,
 }
@@ -134,28 +126,15 @@ impl AppDirectories {
     /// Resolves the current platform's application directories without creating them.
     pub fn resolve(app_name: &str) -> Result<Self, DirectoryError> {
         validate_directory_name(app_name)?;
-
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        {
-            let environment = AppDirectoryEnvironment::capture();
-            return Self::resolve_xdg_for_host(
-                app_name,
-                &environment,
-                os_temporary_directory,
-                &temporary_runtime_name(app_name),
-            );
-        }
-
-        #[cfg(target_os = "windows")]
-        {
-            return windows::resolve(app_name);
-        }
-
-        #[allow(unreachable_code)]
-        Err(DirectoryError::UnsupportedPlatform)
+        let environment = AppDirectoryEnvironment::capture();
+        Self::resolve_xdg_for_host(
+            app_name,
+            &environment,
+            os_temporary_directory,
+            &temporary_runtime_name(app_name),
+        )
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn resolve_xdg_for_host(
         app_name: &str,
         environment: &AppDirectoryEnvironment,
@@ -235,44 +214,8 @@ impl AppDirectories {
             state,
             cache,
             runtime,
-            layout: DirectoryLayout::Xdg,
             temporary,
             runtime_in_shared_temporary,
-        })
-    }
-
-    pub fn resolve_windows(
-        app_name: &str,
-        roaming_app_data: PathBuf,
-        local_app_data: PathBuf,
-        temporary: Option<PathBuf>,
-    ) -> Result<Self, DirectoryError> {
-        validate_directory_name(app_name)?;
-        validate_native_root(&roaming_app_data, NativeDirectoryRoot::RoamingAppData)?;
-        validate_native_root(&local_app_data, NativeDirectoryRoot::LocalAppData)?;
-        if let Some(temporary) = temporary.as_deref() {
-            validate_native_root(temporary, NativeDirectoryRoot::Temporary)?;
-        }
-
-        let roaming_application = roaming_app_data
-            .join(WINDOWS_VENDOR_DIR_NAME)
-            .join(app_name);
-        let local_application = local_app_data.join(WINDOWS_VENDOR_DIR_NAME).join(app_name);
-        let data = local_application.join("Data");
-        let runtime = temporary.as_ref().map(|root| {
-            root.join(WINDOWS_VENDOR_DIR_NAME)
-                .join(app_name)
-                .join("Runtime")
-        });
-        Ok(Self {
-            config: roaming_application,
-            data,
-            state: local_application.join("State"),
-            cache: local_application.join("Cache"),
-            runtime,
-            layout: DirectoryLayout::Windows,
-            temporary,
-            runtime_in_shared_temporary: false,
         })
     }
 
@@ -287,31 +230,16 @@ impl AppDirectories {
     }
 
     pub fn managed_ssh_config(&self) -> AppDirectoryFile {
-        let root = match self.layout {
-            DirectoryLayout::Xdg => AppDirectoryRoot::Config,
-            DirectoryLayout::Windows => AppDirectoryRoot::Data,
-        };
-        AppDirectoryFile::new(root, self.root(root), MANAGED_SSH_CONFIG_NAME)
-    }
-
-    pub fn logs_dir(&self) -> PathBuf {
-        match self.layout {
-            DirectoryLayout::Xdg => self.state.join("logs"),
-            DirectoryLayout::Windows => self.state.parent().unwrap_or(&self.state).join("Logs"),
-        }
+        AppDirectoryFile::new(
+            AppDirectoryRoot::Config,
+            &self.config,
+            MANAGED_SSH_CONFIG_NAME,
+        )
     }
 
     pub fn with_config_directory(mut self, config: PathBuf) -> Self {
         self.config = config;
         self
-    }
-
-    pub fn session_file(&self) -> PathBuf {
-        self.state.join("session.json")
-    }
-
-    pub fn window_state_file(&self) -> PathBuf {
-        self.state.join("window-state.json")
     }
 
     pub fn temporary_directory(&self) -> Option<&Path> {
@@ -347,12 +275,6 @@ pub enum DirectoryError {
     InvalidAppName,
     #[error("HOME is required to resolve the {root:?} application directory")]
     MissingHome { root: AppDirectoryRoot },
-    #[error("the {root:?} native directory root is invalid")]
-    InvalidNativeRoot { root: NativeDirectoryRoot },
-    #[error("the operating system could not resolve application directories")]
-    NativeResolutionUnavailable,
-    #[error("application directories are unsupported on this platform")]
-    UnsupportedPlatform,
 }
 
 /// Read-only freedesktop locations of the host desktop's own resources, such as icon themes and
@@ -422,13 +344,6 @@ impl DesktopResourceDirectories {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum NativeDirectoryRoot {
-    RoamingAppData,
-    LocalAppData,
-    Temporary,
-}
-
 fn absolute_environment_path(value: Option<&OsStr>) -> Option<PathBuf> {
     value
         .filter(|value| !value.is_empty())
@@ -451,25 +366,11 @@ fn temporary_runtime_name(app_name: &str) -> String {
     format!("{app_name}-{user}")
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn os_temporary_directory() -> Option<PathBuf> {
-    let path = std::env::temp_dir();
-    if let Some(path) = canonical_temporary_directory(path) {
-        return Some(path);
-    }
-
-    #[cfg(unix)]
-    {
-        canonical_temporary_directory(PathBuf::from("/tmp"))
-    }
-
-    #[cfg(not(unix))]
-    {
-        None
-    }
+    canonical_temporary_directory(std::env::temp_dir())
+        .or_else(|| canonical_temporary_directory(PathBuf::from("/tmp")))
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn canonical_temporary_directory(path: PathBuf) -> Option<PathBuf> {
     is_absolute_normal_path(&path)
         .then(|| std::fs::canonicalize(path).ok())
@@ -519,115 +420,10 @@ fn validate_directory_name(name: &str) -> Result<(), DirectoryError> {
     }
 }
 
-fn validate_native_root(path: &Path, root: NativeDirectoryRoot) -> Result<(), DirectoryError> {
-    if is_absolute_normal_path(path) {
-        Ok(())
-    } else {
-        Err(DirectoryError::InvalidNativeRoot { root })
-    }
-}
-
-#[cfg(target_os = "windows")]
-mod windows {
-    use std::os::windows::ffi::OsStringExt;
-    use std::ptr;
-
-    use windows_sys::Win32::Foundation::RPC_E_CHANGED_MODE;
-    use windows_sys::Win32::Storage::FileSystem::GetTempPathW;
-    use windows_sys::Win32::System::Com::{
-        COINIT_APARTMENTTHREADED, CoInitializeEx, CoTaskMemFree, CoUninitialize,
-    };
-    use windows_sys::Win32::UI::Shell::{
-        FOLDERID_LocalAppData, FOLDERID_RoamingAppData, SHGetKnownFolderPath,
-    };
-    use windows_sys::core::{GUID, PWSTR};
-
-    use super::*;
-
-    pub(super) fn resolve(app_name: &str) -> Result<AppDirectories, DirectoryError> {
-        let _apartment = ComApartment::initialize()?;
-        let roaming_app_data = known_folder(&FOLDERID_RoamingAppData)?;
-        let local_app_data = known_folder(&FOLDERID_LocalAppData)?;
-        AppDirectories::resolve_windows(
-            app_name,
-            roaming_app_data,
-            local_app_data,
-            temporary_directory(),
-        )
-    }
-
-    fn known_folder(identifier: &GUID) -> Result<PathBuf, DirectoryError> {
-        let mut value: PWSTR = ptr::null_mut();
-        // SAFETY: COM is initialized above and `value` receives an optional COM allocation.
-        let result = unsafe { SHGetKnownFolderPath(identifier, 0, ptr::null_mut(), &mut value) };
-        let path = if result >= 0 && !value.is_null() {
-            let mut length = 0;
-            // SAFETY: successful `SHGetKnownFolderPath` returns a readable NUL-terminated allocation.
-            while unsafe { *value.add(length) } != 0 {
-                length += 1;
-            }
-            // SAFETY: the allocation contains at least `length` initialized UTF-16 code units.
-            Some(PathBuf::from(OsString::from_wide(unsafe {
-                std::slice::from_raw_parts(value, length)
-            })))
-        } else {
-            None
-        };
-        // SAFETY: `value` was allocated by `SHGetKnownFolderPath` for `CoTaskMemFree`.
-        unsafe { CoTaskMemFree(value.cast()) };
-        path.ok_or(DirectoryError::NativeResolutionUnavailable)
-    }
-
-    fn temporary_directory() -> Option<PathBuf> {
-        let mut buffer = vec![0_u16; 260];
-        loop {
-            // SAFETY: `buffer` is writable for the advertised number of UTF-16 code units.
-            let length = unsafe { GetTempPathW(buffer.len() as u32, buffer.as_mut_ptr()) } as usize;
-            if length == 0 {
-                return None;
-            }
-            if length < buffer.len() {
-                buffer.truncate(length);
-                let path = PathBuf::from(OsString::from_wide(&buffer));
-                return is_absolute_normal_path(&path).then_some(path);
-            }
-            buffer.resize(length.saturating_add(1), 0);
-        }
-    }
-
-    struct ComApartment {
-        owned: bool,
-    }
-
-    impl ComApartment {
-        fn initialize() -> Result<Self, DirectoryError> {
-            // SAFETY: the reserved pointer is null and successful initialization is balanced in Drop.
-            let result = unsafe { CoInitializeEx(ptr::null(), COINIT_APARTMENTTHREADED as u32) };
-            if result >= 0 {
-                Ok(Self { owned: true })
-            } else if result == RPC_E_CHANGED_MODE {
-                Ok(Self { owned: false })
-            } else {
-                Err(DirectoryError::NativeResolutionUnavailable)
-            }
-        }
-    }
-
-    impl Drop for ComApartment {
-        fn drop(&mut self) {
-            if self.owned {
-                // SAFETY: this balances this thread's successful `CoInitializeEx` call.
-                unsafe { CoUninitialize() };
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[cfg(not(target_os = "windows"))]
     #[test]
     fn desktop_resources_follow_xdg_order_and_ignore_relative_values() {
         let environment = AppDirectoryEnvironment {
@@ -656,7 +452,6 @@ mod tests {
         );
     }
 
-    #[cfg(not(target_os = "windows"))]
     #[test]
     fn desktop_resources_use_specification_defaults_without_a_home() {
         let resources = DesktopResourceDirectories::resolve(
@@ -674,7 +469,6 @@ mod tests {
         );
     }
 
-    #[cfg(not(target_os = "windows"))]
     fn environment() -> AppDirectoryEnvironment {
         AppDirectoryEnvironment {
             home: Some("/home/test".into()),
@@ -682,7 +476,6 @@ mod tests {
         }
     }
 
-    #[cfg(not(target_os = "windows"))]
     #[test]
     fn xdg_resolution_should_use_absolute_overrides_and_home_defaults() {
         let environment = AppDirectoryEnvironment {
@@ -719,7 +512,6 @@ mod tests {
         assert!(directories.runtime_in_shared_temporary());
     }
 
-    #[cfg(not(target_os = "windows"))]
     #[test]
     fn xdg_resolution_should_not_require_home_when_every_persistent_root_is_explicit() {
         let environment = AppDirectoryEnvironment {
@@ -740,7 +532,6 @@ mod tests {
         assert!(!directories.runtime_in_shared_temporary());
     }
 
-    #[cfg(not(target_os = "windows"))]
     #[test]
     fn xdg_resolution_should_leave_runtime_unavailable_without_a_valid_source() {
         for fallback in [None, Some("relative".into()), Some("/tmp/../tmp".into())] {
@@ -750,7 +541,6 @@ mod tests {
         }
     }
 
-    #[cfg(not(target_os = "windows"))]
     #[test]
     fn temporary_override_should_require_a_nonempty_absolute_normal_path() {
         for value in [
@@ -775,7 +565,6 @@ mod tests {
         );
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn host_resolution_should_canonicalize_tmpdir_before_secure_filesystem_use() {
         let environment = AppDirectoryEnvironment {
@@ -806,7 +595,6 @@ mod tests {
         );
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn host_resolution_should_use_os_temporary_fallback_or_leave_runtime_unavailable() {
         let environment = AppDirectoryEnvironment {
@@ -853,67 +641,7 @@ mod tests {
     }
 
     #[test]
-    fn windows_resolution_should_apply_known_folder_policy_without_xdg_inputs() {
-        let root = std::env::current_dir()
-            .unwrap()
-            .join("spaceterm-windows-policy");
-        let roaming = root.join("Roaming");
-        let local = root.join("Local");
-        let temporary = root.join("Temp");
-        let directories = AppDirectories::resolve_windows(
-            APP_DIR_NAME,
-            roaming.clone(),
-            local.clone(),
-            Some(temporary.clone()),
-        )
-        .unwrap();
-
-        assert_eq!(
-            directories.config,
-            roaming.join("sadiksaifi").join("spaceterm")
-        );
-        assert_eq!(
-            directories.data,
-            local.join("sadiksaifi").join("spaceterm").join("Data")
-        );
-        assert_eq!(
-            directories.state,
-            local.join("sadiksaifi").join("spaceterm").join("State")
-        );
-        assert_eq!(
-            directories.cache,
-            local.join("sadiksaifi").join("spaceterm").join("Cache")
-        );
-        assert_eq!(
-            directories.logs_dir(),
-            local.join("sadiksaifi").join("spaceterm").join("Logs")
-        );
-        assert_eq!(
-            directories.managed_ssh_config().path(),
-            local
-                .join("sadiksaifi")
-                .join("spaceterm")
-                .join("Data")
-                .join("ssh_config")
-        );
-        assert_eq!(
-            directories.managed_ssh_config().root(),
-            AppDirectoryRoot::Data
-        );
-        let expected_runtime = temporary
-            .join("sadiksaifi")
-            .join("spaceterm")
-            .join("Runtime");
-        assert_eq!(
-            directories.runtime.as_deref(),
-            Some(expected_runtime.as_path())
-        );
-        assert_eq!(directories.temporary_directory(), Some(temporary.as_path()));
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    #[test]
-    fn semantic_paths_should_preserve_the_existing_settings_document_name() {
+    fn semantic_paths_should_place_config_documents_in_the_config_root() {
         let directories =
             AppDirectories::resolve_xdg(APP_DIR_NAME, &environment(), Some("/temporary".into()))
                 .unwrap();
@@ -934,21 +662,8 @@ mod tests {
             directories.managed_ssh_config().root(),
             AppDirectoryRoot::Config
         );
-        assert_eq!(
-            directories.logs_dir(),
-            Path::new("/home/test/.local/state/spaceterm/logs")
-        );
-        assert_eq!(
-            directories.session_file(),
-            Path::new("/home/test/.local/state/spaceterm/session.json")
-        );
-        assert_eq!(
-            directories.window_state_file(),
-            Path::new("/home/test/.local/state/spaceterm/window-state.json")
-        );
     }
 
-    #[cfg(not(target_os = "windows"))]
     #[test]
     fn config_rebinding_should_keep_every_config_semantic_path_together() {
         let directories =
@@ -971,36 +686,6 @@ mod tests {
     }
 
     #[test]
-    fn resolution_should_reject_invalid_names_and_native_roots() {
-        let native_root = std::env::current_dir()
-            .unwrap()
-            .join("spaceterm-native-root-policy");
-        assert_eq!(
-            AppDirectories::resolve_windows(
-                "../escape",
-                native_root.join("Roaming"),
-                native_root.join("Local"),
-                None,
-            )
-            .unwrap_err(),
-            DirectoryError::InvalidAppName
-        );
-        assert_eq!(
-            AppDirectories::resolve_windows(
-                APP_DIR_NAME,
-                "relative/roaming".into(),
-                native_root.join("Local"),
-                None,
-            )
-            .unwrap_err(),
-            DirectoryError::InvalidNativeRoot {
-                root: NativeDirectoryRoot::RoamingAppData
-            }
-        );
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    #[test]
     fn debug_output_should_not_expose_resolved_paths() {
         let environment = AppDirectoryEnvironment {
             home: Some("/sensitive/home".into()),
@@ -1019,40 +704,5 @@ mod tests {
             "AppDirectoryEnvironment(<redacted>)"
         );
         assert_eq!(format!("{directories:?}"), "AppDirectories(..)");
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn native_windows_resolution_should_initialize_com_on_a_fresh_thread() {
-        std::thread::spawn(|| {
-            let directories = AppDirectories::resolve(APP_DIR_NAME).unwrap();
-
-            assert!(directories.config.is_absolute());
-            assert!(directories.data.is_absolute());
-            assert!(directories.state.is_absolute());
-            assert!(directories.cache.is_absolute());
-        })
-        .join()
-        .unwrap();
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn native_windows_resolution_should_preserve_an_existing_mta_apartment() {
-        std::thread::spawn(|| {
-            use windows_sys::Win32::System::Com::{
-                COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize,
-            };
-
-            // SAFETY: this fresh thread owns and balances its successful COM initialization.
-            let result = unsafe { CoInitializeEx(std::ptr::null(), COINIT_MULTITHREADED as u32) };
-            assert!(result >= 0);
-            let directories = AppDirectories::resolve(APP_DIR_NAME).unwrap();
-            assert!(directories.config.is_absolute());
-            // SAFETY: this balances the successful `CoInitializeEx` call above.
-            unsafe { CoUninitialize() };
-        })
-        .join()
-        .unwrap();
     }
 }

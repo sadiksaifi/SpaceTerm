@@ -166,8 +166,8 @@ pub(super) fn catalog(
         ),
     )
     .typography(prepared_control_typography(&appearance.typography))
-    // Typography already includes base-size and density changes. Scale structural spacing once.
-    .scale_metrics(1.0, appearance.spacing_scale);
+    // Typography already includes base-size and density changes.
+    .scale_spacing(appearance.spacing_scale);
 
     let shadow_opacity = if appearance.active { 89 } else { 53 };
     let shadow = ControlShadow::single(ControlShadowLayer::new(

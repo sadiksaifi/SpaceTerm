@@ -382,10 +382,6 @@ impl TextArea {
     pub fn is_focused(&self) -> bool {
         self.focused
     }
-    /// Returns whether keyboard and pointer editing may change the value.
-    pub fn is_editable(&self) -> bool {
-        self.editable
-    }
     /// Returns the focus handle used by a containing composite for explicit focus transfer.
     pub fn focus_handle(&self) -> FocusHandle {
         self.focus_handle.clone()

@@ -69,11 +69,6 @@ impl<T> SegmentedChange<T> {
     pub fn source(&self) -> SegmentedActivationSource {
         self.source
     }
-
-    /// Consumes the request and returns the requested value.
-    pub fn into_requested(self) -> T {
-        self.requested
-    }
 }
 
 /// Standard presentations for the segmented family.
@@ -304,12 +299,11 @@ impl SegmentedMetrics {
         self
     }
 
-    fn scaled(self, text_scale: f32, spacing_scale: f32) -> Self {
+    fn scaled(self, spacing_scale: f32) -> Self {
         Self {
             option_height: crate::appearance::scale_line_box(
                 self.option_height,
                 self.font_size,
-                text_scale,
                 spacing_scale,
             ),
             preview_height: crate::appearance::scale_metric(self.preview_height, spacing_scale),
@@ -323,11 +317,8 @@ impl SegmentedMetrics {
                 spacing_scale,
             ),
             vertical_padding: crate::appearance::scale_metric(self.vertical_padding, spacing_scale),
-            radius: self.radius,
-            border_width: self.border_width,
             preview_gap: crate::appearance::scale_metric(self.preview_gap, spacing_scale),
-            font_size: crate::appearance::scale_metric(self.font_size, text_scale),
-            line_height: self.line_height,
+            ..self
         }
     }
 }
@@ -352,10 +343,10 @@ impl SegmentedSizes {
         }
     }
 
-    fn scaled(self, text_scale: f32, spacing_scale: f32) -> Self {
+    fn scaled(self, spacing_scale: f32) -> Self {
         Self {
-            regular: self.regular.scaled(text_scale, spacing_scale),
-            card: self.card.scaled(text_scale, spacing_scale),
+            regular: self.regular.scaled(spacing_scale),
+            card: self.card.scaled(spacing_scale),
         }
     }
 }
@@ -438,10 +429,10 @@ impl SegmentedControlTheme {
         self
     }
 
-    /// Returns a copy with text and spacing metrics scaled independently.
-    pub fn scaled_metrics(self, text_scale: f32, spacing_scale: f32) -> Self {
+    /// Returns a copy with spacing metrics scaled.
+    pub fn scaled_spacing(self, spacing_scale: f32) -> Self {
         Self {
-            sizes: self.sizes.scaled(text_scale, spacing_scale),
+            sizes: self.sizes.scaled(spacing_scale),
             ..self
         }
     }

@@ -213,9 +213,8 @@ impl TooltipMetrics {
         self
     }
 
-    fn scaled(self, text_scale: f32, spacing_scale: f32) -> Self {
-        let width_scale = crate::appearance::normalized_scale(text_scale)
-            .max(crate::appearance::normalized_scale(spacing_scale));
+    fn scaled(self, spacing_scale: f32) -> Self {
+        let width_scale = crate::appearance::normalized_scale(spacing_scale).max(1.0);
         Self {
             maximum_width: self.maximum_width * width_scale,
             horizontal_padding: crate::appearance::scale_metric(
@@ -227,27 +226,7 @@ impl TooltipMetrics {
             keyboard_gap: crate::appearance::scale_metric(self.keyboard_gap, spacing_scale),
             target_gap: crate::appearance::scale_metric(self.target_gap, spacing_scale),
             viewport_margin: crate::appearance::scale_metric(self.viewport_margin, spacing_scale),
-            primary_font_size: crate::appearance::scale_metric(self.primary_font_size, text_scale),
-            secondary_font_size: crate::appearance::scale_metric(
-                self.secondary_font_size,
-                text_scale,
-            ),
-            keyboard_font_size: crate::appearance::scale_metric(
-                self.keyboard_font_size,
-                text_scale,
-            ),
-            primary_line_height: crate::appearance::scale_metric(
-                self.primary_line_height,
-                text_scale,
-            ),
-            secondary_line_height: crate::appearance::scale_metric(
-                self.secondary_line_height,
-                text_scale,
-            ),
-            keyboard_line_height: crate::appearance::scale_metric(
-                self.keyboard_line_height,
-                text_scale,
-            ),
+            ..self
         }
     }
 }
@@ -282,9 +261,9 @@ impl TooltipTheme {
         }
     }
 
-    pub(crate) fn scaled_metrics(self, text_scale: f32, spacing_scale: f32) -> Self {
+    pub(crate) fn scaled_spacing(self, spacing_scale: f32) -> Self {
         Self {
-            metrics: self.metrics.scaled(text_scale, spacing_scale),
+            metrics: self.metrics.scaled(spacing_scale),
             ..self
         }
     }

@@ -284,23 +284,19 @@ impl ToggleMetrics {
         self
     }
 
-    fn scaled(self, text_scale: f32, spacing_scale: f32) -> Self {
+    fn scaled(self, spacing_scale: f32) -> Self {
         Self {
             row_height: crate::appearance::scale_line_box(
                 self.row_height,
                 self.font_size,
-                text_scale,
                 spacing_scale,
             ),
             checkbox_extent: crate::appearance::scale_metric(self.checkbox_extent, spacing_scale),
             switch_width: crate::appearance::scale_metric(self.switch_width, spacing_scale),
             switch_height: crate::appearance::scale_metric(self.switch_height, spacing_scale),
             label_gap: crate::appearance::scale_metric(self.label_gap, spacing_scale),
-            checkbox_radius: self.checkbox_radius,
             switch_inset: crate::appearance::scale_metric(self.switch_inset, spacing_scale),
-            border_width: self.border_width,
-            font_size: crate::appearance::scale_metric(self.font_size, text_scale),
-            line_height: self.line_height,
+            ..self
         }
     }
 }
@@ -325,10 +321,10 @@ impl ToggleSizes {
         }
     }
 
-    fn scaled(self, text_scale: f32, spacing_scale: f32) -> Self {
+    fn scaled(self, spacing_scale: f32) -> Self {
         Self {
-            compact: self.compact.scaled(text_scale, spacing_scale),
-            regular: self.regular.scaled(text_scale, spacing_scale),
+            compact: self.compact.scaled(spacing_scale),
+            regular: self.regular.scaled(spacing_scale),
         }
     }
 }
@@ -387,10 +383,10 @@ impl ToggleTheme {
         self
     }
 
-    /// Returns a copy with text and spacing metrics scaled independently.
-    pub fn scaled_metrics(self, text_scale: f32, spacing_scale: f32) -> Self {
+    /// Returns a copy with spacing metrics scaled.
+    pub fn scaled_spacing(self, spacing_scale: f32) -> Self {
         Self {
-            sizes: self.sizes.scaled(text_scale, spacing_scale),
+            sizes: self.sizes.scaled(spacing_scale),
             ..self
         }
     }
@@ -1245,7 +1241,7 @@ mod tests {
 
     #[test]
     fn density_scales_toggle_bounds_but_not_checkbox_radius() {
-        let scaled = test_theme().scaled_metrics(1.0, 1.25);
+        let scaled = test_theme().scaled_spacing(1.25);
         let original = test_theme().resolve(ToggleSize::Regular, false).metrics;
         let comfortable = scaled.resolve(ToggleSize::Regular, false).metrics;
 

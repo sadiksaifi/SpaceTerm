@@ -175,7 +175,7 @@ mod tests {
             }
         }
         let base = theme(&ChromeColors::default());
-        let scaled = base.scaled_metrics(1.25, 1.25);
+        let scaled = base.scaled_spacing(1.25);
         for selected in [false, true] {
             for enabled in [false, true] {
                 for hovered in [false, true] {
@@ -192,7 +192,7 @@ mod tests {
         let (_, cx) = cx.add_window_view(|_, _| Fixture);
         cx.run_until_parked();
         let option = cx.debug_bounds("geometry-option").expect("option paints");
-        assert_eq!(option.size.height, px(30.0));
+        assert_eq!(option.size.height, px(27.0));
         assert_eq!(option.size.width, px(80.0));
         let body = ChromeTypography::default().style(TextRole::Body).clone();
         assert_eq!(
@@ -200,14 +200,14 @@ mod tests {
                 .unwrap()
                 .size
                 .height,
-            body.line_height * 1.25
+            body.line_height
         );
         let expected_label_width = cx.update(|window, _| {
             window
                 .text_system()
                 .shape_line(
                     "Off".into(),
-                    body.size * 1.25,
+                    body.size,
                     &[gpui::TextRun {
                         len: 3,
                         font: spaceterm_ui::ControlTypography::default().regular().clone(),
@@ -222,7 +222,7 @@ mod tests {
         });
         assert_eq!(
             cx.debug_bounds("geometry-option-label").unwrap().size.width,
-            expected_label_width
+            expected_label_width.round()
         );
     }
 

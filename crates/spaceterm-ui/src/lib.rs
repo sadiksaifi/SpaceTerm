@@ -504,44 +504,40 @@ impl ControlThemeCatalog {
         &self.typography
     }
 
-    /// Scales every control family's text and spacing metrics as one complete catalog.
+    /// Scales every control family's spacing metrics as one complete catalog.
     ///
-    /// Text-bearing control heights grow from their scaled line box plus scaled padding. Stable
+    /// Text-bearing control heights keep their line box and scale only their padding. Text sizes,
     /// hairlines, interaction timing, paint, typography, and the application generation remain
     /// unchanged.
-    pub fn scale_metrics(mut self, text_scale: f32, spacing_scale: f32) -> Self {
-        self.button = self.button.scaled_metrics(text_scale, spacing_scale);
-        self.toggle = self.toggle.scaled_metrics(text_scale, spacing_scale);
-        self.progress = self.progress.scaled_metrics(text_scale, spacing_scale);
-        self.scrollbar = self.scrollbar.scaled_metrics(text_scale, spacing_scale);
-        self.resize_handle = self.resize_handle.scaled_metrics(text_scale, spacing_scale);
-        self.segmented_control = self
-            .segmented_control
-            .scaled_metrics(text_scale, spacing_scale);
-        self.search_field = self.search_field.scaled_metrics(text_scale, spacing_scale);
-        self.menu = self.menu.scaled_metrics(text_scale, spacing_scale);
-        self.command_palette = self
-            .command_palette
-            .scaled_metrics(text_scale, spacing_scale);
-        self.combo_box = self.combo_box.scaled_metrics(text_scale, spacing_scale);
-        self.text_input = self.text_input.scaled_metrics(text_scale, spacing_scale);
-        self.tooltip = self.tooltip.scaled_metrics(text_scale, spacing_scale);
-        self.modal = self.modal.scaled_metrics(text_scale, spacing_scale);
+    pub fn scale_spacing(mut self, spacing_scale: f32) -> Self {
+        self.button = self.button.scaled_spacing(spacing_scale);
+        self.toggle = self.toggle.scaled_spacing(spacing_scale);
+        self.progress = self.progress.scaled_spacing(spacing_scale);
+        self.scrollbar = self.scrollbar.scaled_spacing(spacing_scale);
+        self.resize_handle = self.resize_handle.scaled_spacing(spacing_scale);
+        self.segmented_control = self.segmented_control.scaled_spacing(spacing_scale);
+        self.search_field = self.search_field.scaled_spacing(spacing_scale);
+        self.menu = self.menu.scaled_spacing(spacing_scale);
+        self.command_palette = self.command_palette.scaled_spacing(spacing_scale);
+        self.combo_box = self.combo_box.scaled_spacing(spacing_scale);
+        self.text_input = self.text_input.scaled_spacing(spacing_scale);
+        self.tooltip = self.tooltip.scaled_spacing(spacing_scale);
+        self.modal = self.modal.scaled_spacing(spacing_scale);
         self.floating = self
             .floating
-            .map(|floating| floating.scaled_metrics(text_scale, spacing_scale));
+            .map(|floating| floating.scaled_spacing(spacing_scale));
         self.floating_controls = self
             .floating_controls
-            .map(|controls| controls.scale_metrics(text_scale, spacing_scale));
+            .map(|controls| controls.scale_spacing(spacing_scale));
         self.title_bar_controls = self
             .title_bar_controls
-            .map(|controls| controls.scale_metrics(text_scale, spacing_scale));
+            .map(|controls| controls.scale_spacing(spacing_scale));
         self.panel_controls = self
             .panel_controls
-            .map(|controls| controls.scale_metrics(text_scale, spacing_scale));
+            .map(|controls| controls.scale_spacing(spacing_scale));
         self.card_controls = self
             .card_controls
-            .map(|controls| controls.scale_metrics(text_scale, spacing_scale));
+            .map(|controls| controls.scale_spacing(spacing_scale));
         self
     }
 }

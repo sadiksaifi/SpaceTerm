@@ -32,7 +32,7 @@ fn test_theme() -> CommandPaletteTheme {
 #[test]
 fn density_scales_palette_bounds_but_not_accessory_radius() {
     let theme = test_theme();
-    let comfortable = theme.scaled_metrics(1.0, 1.25);
+    let comfortable = theme.scaled_spacing(1.25);
 
     assert!(comfortable.metrics.row_height > theme.metrics.row_height);
     assert_eq!(
@@ -530,7 +530,9 @@ fn open_palette_custom_icon_should_follow_the_replaced_live_metric(cx: &mut Test
         .debug_bounds("row-open-icon")
         .expect("the default custom row icon was not rendered");
 
-    let scaled_theme = default_theme.scaled_metrics(2.0, 1.25);
+    let mut scaled_theme = default_theme;
+    scaled_theme.metrics.icon_size = default_size * 2.0;
+    let scaled_theme = scaled_theme.scaled_spacing(1.25);
     let scaled_size = scaled_theme.metrics.icon_size;
     cx.update(|window, cx| {
         cx.set_global(scaled_theme);
@@ -543,24 +545,6 @@ fn open_palette_custom_icon_should_follow_the_replaced_live_metric(cx: &mut Test
         .expect("the open custom row icon was not refreshed");
     assert_eq!(default_icon.size, gpui::size(default_size, default_size));
     assert_eq!(scaled_icon.size, gpui::size(scaled_size, scaled_size));
-}
-
-#[test]
-fn role_line_boxes_scale_independently_from_fixed_palette_extents() {
-    let metrics = CommandPaletteMetrics::new(px(420.0), px(48.0))
-        .single_line_row_height(px(32.0))
-        .editor_height(px(42.0))
-        .section_spacing(px(20.0), px(9.0))
-        .text_geometry(px(18.0), px(15.0), px(21.0), px(14.0))
-        .scaled(1.5, 1.0);
-
-    assert_eq!(metrics.body_line_height, px(27.0));
-    assert_eq!(metrics.secondary_line_height, px(22.5));
-    assert_eq!(metrics.section_line_height, px(31.5));
-    assert_eq!(metrics.input_height, px(51.0));
-    assert_eq!(metrics.row_height, px(64.5));
-    assert_eq!(metrics.single_line_row_height, px(41.0));
-    assert_eq!(metrics.section_height, px(31.5));
 }
 
 #[gpui::test]
@@ -604,7 +588,12 @@ fn open_palette_font_change_should_remeasure_offscreen_rows_without_losing_posit
         - initial_theme.metrics.panel_padding;
     assert!((initial_row_offset + px(7.0)).abs() <= px(1.0));
 
-    let replacement = initial_theme.scaled_metrics(24.0 / 13.0, 1.0);
+    let mut replacement = initial_theme;
+    let font_growth = 24.0 / 13.0;
+    let line_growth = initial_theme.metrics.body_line_height * (font_growth - 1.0);
+    replacement.metrics.label_size = initial_theme.metrics.label_size * font_growth;
+    replacement.metrics.body_line_height += line_growth;
+    replacement.metrics.single_line_row_height += line_growth;
     cx.update(|window, cx| {
         cx.set_global(replacement);
         window.refresh();

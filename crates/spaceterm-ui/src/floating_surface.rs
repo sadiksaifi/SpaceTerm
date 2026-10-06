@@ -281,7 +281,7 @@ impl FloatingSurfaceTheme {
         }
     }
 
-    pub(crate) fn scaled_metrics(self, _text_scale: f32, spacing_scale: f32) -> Self {
+    pub(crate) fn scaled_spacing(self, spacing_scale: f32) -> Self {
         Self {
             spacing_scale: self.spacing_scale * normalized_scale(spacing_scale),
             ..self
@@ -931,21 +931,17 @@ impl SurfaceControlThemes {
         self
     }
 
-    pub(crate) fn scale_metrics(mut self, text_scale: f32, spacing_scale: f32) -> Self {
-        self.button = self.button.scaled_metrics(text_scale, spacing_scale);
-        self.toggle = self.toggle.scaled_metrics(text_scale, spacing_scale);
-        self.progress = self.progress.scaled_metrics(text_scale, spacing_scale);
-        self.segmented_control = self
-            .segmented_control
-            .scaled_metrics(text_scale, spacing_scale);
-        self.search_field = self.search_field.scaled_metrics(text_scale, spacing_scale);
-        self.text_input = self.text_input.scaled_metrics(text_scale, spacing_scale);
-        self.menu = self
-            .menu
-            .map(|theme| theme.scaled_metrics(text_scale, spacing_scale));
+    pub(crate) fn scale_spacing(mut self, spacing_scale: f32) -> Self {
+        self.button = self.button.scaled_spacing(spacing_scale);
+        self.toggle = self.toggle.scaled_spacing(spacing_scale);
+        self.progress = self.progress.scaled_spacing(spacing_scale);
+        self.segmented_control = self.segmented_control.scaled_spacing(spacing_scale);
+        self.search_field = self.search_field.scaled_spacing(spacing_scale);
+        self.text_input = self.text_input.scaled_spacing(spacing_scale);
+        self.menu = self.menu.map(|theme| theme.scaled_spacing(spacing_scale));
         self.combo_box = self
             .combo_box
-            .map(|theme| theme.scaled_metrics(text_scale, spacing_scale));
+            .map(|theme| theme.scaled_spacing(spacing_scale));
         self
     }
 }
@@ -1036,7 +1032,7 @@ mod tests {
     #[test]
     fn role_geometry_and_blur_do_not_scale_with_layout_density() {
         let theme = FloatingSurfaceTheme::default().backdrop_blur(px(20.0));
-        let scaled = theme.scaled_metrics(1.5, 1.25);
+        let scaled = theme.scaled_spacing(1.25);
         for (role, radius, blur) in [
             (FloatingRole::Popover, 10.0, 20.0),
             (FloatingRole::Command, 12.0, 20.0),
@@ -1055,10 +1051,10 @@ mod tests {
     #[test]
     fn spacing_scale_composes_across_catalog_scaling() {
         let theme = FloatingSurfaceTheme::default();
-        let scaled = theme.scaled_metrics(1.0, 1.25);
-        let identity_after_scale = scaled.scaled_metrics(1.0, 1.0);
-        let composed = scaled.scaled_metrics(1.0, 1.2);
-        let direct = theme.scaled_metrics(1.0, 1.5);
+        let scaled = theme.scaled_spacing(1.25);
+        let identity_after_scale = scaled.scaled_spacing(1.0);
+        let composed = scaled.scaled_spacing(1.2);
+        let direct = theme.scaled_spacing(1.5);
 
         for role in [FloatingRole::Popover, FloatingRole::Modal] {
             assert_eq!(identity_after_scale.shell(role), scaled.shell(role));

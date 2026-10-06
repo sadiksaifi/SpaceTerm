@@ -1323,14 +1323,6 @@ impl CommandPaletteMetrics {
         self
     }
 
-    /// Sets the empty state's vertical padding, title-to-description gap, and text-to-actions gap.
-    pub fn empty_spacing(mut self, padding: Pixels, line_gap: Pixels, actions_gap: Pixels) -> Self {
-        self.empty_padding = padding;
-        self.empty_line_gap = line_gap;
-        self.empty_actions_gap = actions_gap;
-        self
-    }
-
     /// Sets editor, primary, and secondary font sizes.
     pub fn font_sizes(mut self, input: Pixels, label: Pixels, secondary: Pixels) -> Self {
         self.input_size = input;
@@ -1342,19 +1334,6 @@ impl CommandPaletteMetrics {
     /// Sets the group-heading size independently from row descriptions.
     pub fn section_font_size(mut self, size: Pixels) -> Self {
         self.section_size = size;
-        self
-    }
-
-    /// Sets the padded status accessory shape.
-    pub fn accessory_shape(
-        mut self,
-        padding: Pixels,
-        line_padding: Pixels,
-        radius: Pixels,
-    ) -> Self {
-        self.accessory_padding = padding;
-        self.accessory_line_padding = line_padding;
-        self.accessory_radius = radius;
         self
     }
 
@@ -1385,39 +1364,32 @@ impl CommandPaletteMetrics {
         self
     }
 
-    fn scaled(self, text_scale: f32, spacing_scale: f32) -> Self {
-        let width_scale = crate::appearance::normalized_scale(text_scale)
-            .max(crate::appearance::normalized_scale(spacing_scale));
-        let icon_size = crate::appearance::scale_metric(self.icon_size, text_scale);
+    fn scaled(self, spacing_scale: f32) -> Self {
+        let width_scale = crate::appearance::normalized_scale(spacing_scale).max(1.0);
         Self {
             panel_width: self.panel_width * width_scale,
             maximum_height: crate::appearance::scale_metric(self.maximum_height, spacing_scale),
             top_offset: crate::appearance::scale_metric(self.top_offset, spacing_scale),
             viewport_margin: crate::appearance::scale_metric(self.viewport_margin, spacing_scale),
-            panel_padding: self.panel_padding,
             input_height: crate::appearance::scale_line_box(
                 self.input_height,
                 self.body_line_height,
-                text_scale,
                 spacing_scale,
             ),
             row_height: crate::appearance::scale_line_box(
                 self.row_height,
                 self.body_line_height + self.secondary_line_height,
-                text_scale,
                 spacing_scale,
             ),
             single_line_row_height: crate::appearance::scale_line_box(
                 self.single_line_row_height,
                 self.body_line_height,
-                text_scale,
                 spacing_scale,
             ),
             row_line_gap: crate::appearance::scale_metric(self.row_line_gap, spacing_scale),
             section_height: crate::appearance::scale_line_box(
                 self.section_height,
                 self.section_line_height,
-                text_scale,
                 spacing_scale,
             ),
             separator_height: crate::appearance::scale_metric(self.separator_height, spacing_scale),
@@ -1436,15 +1408,8 @@ impl CommandPaletteMetrics {
                 spacing_scale,
             ),
             leading_width: crate::appearance::scale_metric(self.leading_width, spacing_scale)
-                .max(icon_size),
+                .max(self.icon_size),
             gap: crate::appearance::scale_metric(self.gap, spacing_scale),
-            corner_radius: self.corner_radius,
-            border_width: self.border_width,
-            input_size: crate::appearance::scale_metric(self.input_size, text_scale),
-            input_icon_size: crate::appearance::scale_metric(self.input_icon_size, text_scale),
-            label_size: crate::appearance::scale_metric(self.label_size, text_scale),
-            secondary_size: crate::appearance::scale_metric(self.secondary_size, text_scale),
-            section_size: crate::appearance::scale_metric(self.section_size, text_scale),
             accessory_padding: crate::appearance::scale_metric(
                 self.accessory_padding,
                 spacing_scale,
@@ -1453,21 +1418,7 @@ impl CommandPaletteMetrics {
                 self.accessory_line_padding,
                 spacing_scale,
             ),
-            accessory_radius: self.accessory_radius,
-            body_line_height: crate::appearance::scale_metric(self.body_line_height, text_scale),
-            secondary_line_height: crate::appearance::scale_metric(
-                self.secondary_line_height,
-                text_scale,
-            ),
-            section_line_height: crate::appearance::scale_metric(
-                self.section_line_height,
-                text_scale,
-            ),
-            icon_size,
-            icon_baseline_center: crate::appearance::scale_metric(
-                self.icon_baseline_center,
-                text_scale,
-            ),
+            ..self
         }
     }
 
@@ -1521,9 +1472,9 @@ impl CommandPaletteTheme {
         }
     }
 
-    pub(crate) fn scaled_metrics(self, text_scale: f32, spacing_scale: f32) -> Self {
+    pub(crate) fn scaled_spacing(self, spacing_scale: f32) -> Self {
         Self {
-            metrics: self.metrics.scaled(text_scale, spacing_scale),
+            metrics: self.metrics.scaled(spacing_scale),
             ..self
         }
     }
@@ -2504,20 +2455,6 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             return false;
         }
         self.set_items(items, cx);
-        true
-    }
-
-    /// Sets loading only when `generation` still describes the current query.
-    pub fn set_loading_for_generation(
-        &mut self,
-        generation: CommandPaletteGeneration,
-        loading: bool,
-        cx: &mut gpui::Context<Self>,
-    ) -> bool {
-        if generation != self.generation {
-            return false;
-        }
-        self.set_loading(loading, cx);
         true
     }
 

@@ -198,13 +198,6 @@ pub(crate) fn scale_metric(value: Pixels, scale: f32) -> Pixels {
     value * normalized_scale(scale)
 }
 
-pub(crate) fn scale_line_box(
-    extent: Pixels,
-    baseline_text: Pixels,
-    text_scale: f32,
-    spacing_scale: f32,
-) -> Pixels {
-    let content = baseline_text * normalized_scale(text_scale);
-    let padding = (extent - baseline_text).max(px(0.0)) * normalized_scale(spacing_scale);
-    content + padding
+pub(crate) fn scale_line_box(extent: Pixels, baseline_text: Pixels, spacing_scale: f32) -> Pixels {
+    baseline_text + (extent - baseline_text).max(px(0.0)) * normalized_scale(spacing_scale)
 }

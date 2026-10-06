@@ -877,10 +877,9 @@ impl ModalMetrics {
         }
     }
 
-    fn scaled_for_catalog(self, text_scale: f32, spacing_scale: f32) -> Self {
-        let text_scale = crate::appearance::normalized_scale(text_scale);
+    fn scaled_for_catalog(self, spacing_scale: f32) -> Self {
         let spacing_scale = crate::appearance::normalized_scale(spacing_scale);
-        let extent_scale = text_scale.max(spacing_scale);
+        let extent_scale = spacing_scale.max(1.0);
         Self {
             compact_width: bounded_metric(self.compact_width * extent_scale, 280.0, 720.0, 360.0),
             regular_width: bounded_metric(self.regular_width * extent_scale, 360.0, 960.0, 480.0),
@@ -917,29 +916,21 @@ impl ModalMetrics {
             accessory_extent: crate::appearance::scale_line_box(
                 self.accessory_extent,
                 self.body_size,
-                text_scale,
                 spacing_scale,
             ),
             horizontal_action_threshold: self.horizontal_action_threshold * extent_scale,
             minimum_action_width: self.minimum_action_width * extent_scale,
-            control_radius: self.control_radius,
             progress_status_region_height: crate::appearance::scale_line_box(
                 self.progress_status_region_height,
                 self.body_size,
-                text_scale,
                 spacing_scale,
             ),
             progress_detail_region_height: crate::appearance::scale_line_box(
                 self.progress_detail_region_height,
                 self.detail_size,
-                text_scale,
                 spacing_scale,
             ),
-            header_maximum_fraction: self.header_maximum_fraction,
-            footer_maximum_fraction: self.footer_maximum_fraction,
-            title_size: self.title_size * text_scale,
-            body_size: self.body_size * text_scale,
-            detail_size: self.detail_size * text_scale,
+            ..self
         }
     }
 
@@ -1033,9 +1024,9 @@ impl ModalTheme {
         }
     }
 
-    pub(crate) fn scaled_metrics(self, text_scale: f32, spacing_scale: f32) -> Self {
+    pub(crate) fn scaled_spacing(self, spacing_scale: f32) -> Self {
         Self {
-            metrics: self.metrics.scaled_for_catalog(text_scale, spacing_scale),
+            metrics: self.metrics.scaled_for_catalog(spacing_scale),
             ..self
         }
     }

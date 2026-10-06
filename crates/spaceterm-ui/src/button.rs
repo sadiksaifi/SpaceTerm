@@ -341,28 +341,15 @@ impl ButtonMetrics {
         self
     }
 
-    fn scaled(self, text_scale: f32, spacing_scale: f32) -> Self {
+    fn scaled(self, spacing_scale: f32) -> Self {
         Self {
-            height: crate::appearance::scale_line_box(
-                self.height,
-                self.font_size,
-                text_scale,
-                spacing_scale,
-            ),
-            icon_button_size: self.icon_button_size,
-            icon_baseline_center: self
-                .icon_baseline_center
-                .map(|center| crate::appearance::scale_metric(center, text_scale)),
+            height: crate::appearance::scale_line_box(self.height, self.font_size, spacing_scale),
             horizontal_padding: crate::appearance::scale_metric(
                 self.horizontal_padding,
                 spacing_scale,
             ),
             gap: crate::appearance::scale_metric(self.gap, spacing_scale),
-            corner_radius: self.corner_radius,
-            border_width: self.border_width,
-            font_size: crate::appearance::scale_metric(self.font_size, text_scale),
-            single_line_height: self.single_line_height,
-            multiline_line_height: self.multiline_line_height,
+            ..self
         }
     }
 }
@@ -448,12 +435,12 @@ impl ButtonSizes {
         }
     }
 
-    fn scaled(self, text_scale: f32, spacing_scale: f32) -> Self {
+    fn scaled(self, spacing_scale: f32) -> Self {
         Self {
-            compact: self.compact.scaled(text_scale, spacing_scale),
-            small: self.small.scaled(text_scale, spacing_scale),
-            regular: self.regular.scaled(text_scale, spacing_scale),
-            large: self.large.scaled(text_scale, spacing_scale),
+            compact: self.compact.scaled(spacing_scale),
+            small: self.small.scaled(spacing_scale),
+            regular: self.regular.scaled(spacing_scale),
+            large: self.large.scaled(spacing_scale),
         }
     }
 }
@@ -533,9 +520,9 @@ impl ButtonTheme {
         self.focus_border
     }
 
-    pub(crate) fn scaled_metrics(self, text_scale: f32, spacing_scale: f32) -> Self {
+    pub(crate) fn scaled_spacing(self, spacing_scale: f32) -> Self {
         Self {
-            sizes: self.sizes.scaled(text_scale, spacing_scale),
+            sizes: self.sizes.scaled(spacing_scale),
             ..self
         }
     }
@@ -2126,7 +2113,7 @@ mod tests {
             ButtonSizes::new(metrics, metrics, metrics, metrics),
             rgba(0x00aaffff),
         )
-        .scaled_metrics(1.0, 1.25);
+        .scaled_spacing(1.25);
         let style = theme.resolve(
             ButtonVariant::Secondary,
             ButtonSize::Compact,

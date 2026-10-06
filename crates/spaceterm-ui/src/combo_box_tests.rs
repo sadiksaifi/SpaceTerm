@@ -740,15 +740,12 @@ fn items() -> Vec<ComboBoxItem<u8>> {
     ]
 }
 
-pub(super) fn install_themes(cx: &mut TestAppContext) {
-    let surface =
-        crate::FloatingSurfacePaint::new(rgba(0x141415ff), rgba(0x252530ff), rgba(0x252530ff));
-    cx.set_global(crate::FloatingSurfaceTheme::new(
-        crate::FloatingSurfacePaints::new(surface, surface),
-        rgba(0x00000048).into(),
-        rgba(0x00000099),
-    ));
-    cx.set_global(ComboBoxTheme::new(
+fn test_combo_box_metrics() -> ComboBoxMetrics {
+    ComboBoxMetrics::new(px(240.0), px(40.0)).geometry(px(260.0), px(36.0), px(30.0), px(46.0))
+}
+
+fn combo_box_theme(metrics: ComboBoxMetrics) -> ComboBoxTheme {
+    ComboBoxTheme::new(
         ComboBoxPaint::new(
             rgba(0xcdcdcdff),
             rgba(0x878787ff),
@@ -760,8 +757,19 @@ pub(super) fn install_themes(cx: &mut TestAppContext) {
             rgba(0x606079ff),
             rgba(0x7e98e8ff),
         ),
-        ComboBoxMetrics::new(px(240.0), px(40.0)).geometry(px(260.0), px(36.0), px(30.0), px(46.0)),
+        metrics,
+    )
+}
+
+pub(super) fn install_themes(cx: &mut TestAppContext) {
+    let surface =
+        crate::FloatingSurfacePaint::new(rgba(0x141415ff), rgba(0x252530ff), rgba(0x252530ff));
+    cx.set_global(crate::FloatingSurfaceTheme::new(
+        crate::FloatingSurfacePaints::new(surface, surface),
+        rgba(0x00000048).into(),
+        rgba(0x00000099),
     ));
+    cx.set_global(combo_box_theme(test_combo_box_metrics()));
     let input_paint = TextInputPaint::new(
         rgba(0xcdcdcdff),
         rgba(0x878787ff),
@@ -3099,7 +3107,6 @@ fn open_filtered_combo_icons_should_follow_the_replaced_live_metric(cx: &mut Tes
     cx.simulate_input("ssh");
     cx.run_until_parked();
 
-    let default_theme = cx.update(|_, cx| *cx.global::<ComboBoxTheme>());
     let default_size = px(12.0);
     let default_trigger_icon = cx
         .debug_bounds("combo-box-trigger-icon")
@@ -3108,8 +3115,12 @@ fn open_filtered_combo_icons_should_follow_the_replaced_live_metric(cx: &mut Tes
         .debug_bounds("combo-row-remote-icon")
         .expect("the filtered row icon was not rendered");
 
-    let scaled_theme = default_theme.scaled_metrics(2.0, 1.25);
     let scaled_size = px(24.0);
+    let scaled_theme = combo_box_theme(
+        test_combo_box_metrics()
+            .text_geometry(px(16.0), px(15.0), scaled_size)
+            .trigger_icon_size(scaled_size),
+    );
     cx.update(|window, cx| {
         cx.set_global(scaled_theme);
         window.refresh();

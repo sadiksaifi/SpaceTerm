@@ -318,17 +318,8 @@ pub struct Icon {
     source: IconSource,
     size: Pixels,
     tint: Option<Rgba>,
-    text_alignment: Option<IconTextAlignment>,
     #[cfg(test)]
     tint_observer: Option<Arc<std::sync::Mutex<Vec<Hsla>>>>,
-}
-
-#[derive(Clone)]
-struct IconTextAlignment {
-    font: gpui::Font,
-    font_size: Pixels,
-    line_height: Pixels,
-    baseline_center: Pixels,
 }
 
 impl Icon {
@@ -338,7 +329,6 @@ impl Icon {
             source: IconSource::Lucide(name),
             size,
             tint: Some(tint),
-            text_alignment: None,
             #[cfg(test)]
             tint_observer: None,
         }
@@ -350,19 +340,6 @@ impl Icon {
             source: IconSource::Lucide(name),
             size,
             tint: None,
-            text_alignment: None,
-            #[cfg(test)]
-            tint_observer: None,
-        }
-    }
-
-    /// Creates a bundled vector whose tint follows the surrounding semantic foreground state.
-    pub fn custom_inherited(name: CustomIconName, size: Pixels) -> Self {
-        Self {
-            source: IconSource::Custom(name),
-            size,
-            tint: None,
-            text_alignment: None,
             #[cfg(test)]
             tint_observer: None,
         }
@@ -375,30 +352,9 @@ impl Icon {
             source: IconSource::Custom(name),
             size,
             tint: Some(tint),
-            text_alignment: None,
             #[cfg(test)]
             tint_observer: None,
         }
-    }
-
-    /// Aligns the icon box's center to a prepared text role's cap-height band.
-    ///
-    /// The caller supplies the role's center-above-baseline metric. Font ascent remains a renderer
-    /// fact and is resolved from the actual font and line height when the icon paints.
-    pub fn align_to_text(
-        mut self,
-        font: gpui::Font,
-        font_size: Pixels,
-        line_height: Pixels,
-        baseline_center: Pixels,
-    ) -> Self {
-        self.text_alignment = Some(IconTextAlignment {
-            font,
-            font_size,
-            line_height,
-            baseline_center,
-        });
-        self
     }
 
     #[cfg(test)]
@@ -409,12 +365,8 @@ impl Icon {
 }
 
 impl RenderOnce for Icon {
-    fn render(self, window: &mut Window, _: &mut App) -> impl IntoElement {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
         let artwork_size = optical_artwork_size(self.source, self.size);
-        let vertical_offset = self
-            .text_alignment
-            .map(|alignment| icon_text_offset(&alignment, window))
-            .unwrap_or_default();
         let content = match self.source {
             IconSource::Lucide(name) => match lucide_asset_path(name, self.size, artwork_size) {
                 Some(path) => icon_svg(
@@ -456,8 +408,6 @@ impl RenderOnce for Icon {
             .items_center()
             .justify_center()
             .size(self.size)
-            .relative()
-            .top(vertical_offset)
             .child(content)
     }
 }
@@ -500,16 +450,6 @@ fn icon_svg(path: SharedString, size: Pixels, tint: IconTint) -> impl IntoElemen
         },
     )
     .size(size)
-}
-
-fn icon_text_offset(alignment: &IconTextAlignment, window: &Window) -> Pixels {
-    text_alignment_offset(
-        &alignment.font,
-        alignment.font_size,
-        alignment.line_height,
-        alignment.baseline_center,
-        window,
-    )
 }
 
 pub(crate) fn text_alignment_offset(

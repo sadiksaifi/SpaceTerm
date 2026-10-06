@@ -268,10 +268,10 @@ fn catalog_replacement_requires_one_generation_and_is_atomic(cx: &mut TestAppCon
 #[test]
 fn catalog_metric_scaling_composes_for_floating_shells_and_hosted_controls() {
     let initial = catalog(1);
-    let scaled = initial.clone().scale_metrics(1.25, 1.25);
-    let identity_after_scale = scaled.clone().scale_metrics(1.0, 1.0);
-    let chained = scaled.clone().scale_metrics(1.2, 1.2);
-    let direct = initial.scale_metrics(1.5, 1.5);
+    let scaled = initial.clone().scale_spacing(1.25);
+    let identity_after_scale = scaled.clone().scale_spacing(1.0);
+    let chained = scaled.clone().scale_spacing(1.2);
+    let direct = initial.scale_spacing(1.5);
 
     for role in [FloatingRole::Popover, FloatingRole::Modal] {
         assert_eq!(
@@ -309,8 +309,8 @@ fn catalog_metric_scaling_composes_for_floating_shells_and_hosted_controls() {
         .regular_button_extent_for_test();
     assert!((chained_button - direct_button).abs() < px(0.001));
 
-    let expanded = catalog(1).scale_metrics(1.0, 1.5).scale_metrics(1.0, 1.5);
-    let contracted = catalog(1).scale_metrics(1.0, 0.5).scale_metrics(1.0, 0.5);
+    let expanded = catalog(1).scale_spacing(1.5).scale_spacing(1.5);
+    let contracted = catalog(1).scale_spacing(0.5).scale_spacing(0.5);
     let expanded_shell = expanded
         .floating
         .expect("catalog should include floating presentation")
@@ -355,7 +355,7 @@ fn replacement_should_publish_all_families_and_refresh_observers(cx: &mut TestAp
 
     let replacement = initial
         .clone()
-        .scale_metrics(1.5, 1.25)
+        .scale_spacing(1.25)
         .generation(ControlThemeGeneration::new(2));
     assert_ne!(replacement.progress, initial.progress);
     assert_eq!(

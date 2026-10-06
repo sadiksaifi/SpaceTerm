@@ -3220,11 +3220,6 @@ fn prepare_app_owned_tabs(
         [tab_active_hover_foreground, tab_active_hover_icon],
         Some(1.4)
     );
-    tab!(
-        tab_inactive_selected_background,
-        [tab_inactive_selected_foreground, tab_inactive_selected_icon],
-        Some(1.4)
-    );
     let Some(minimum) = hairline else {
         return;
     };
@@ -3237,14 +3232,6 @@ fn prepare_app_owned_tabs(
             colors.tab_active_hover_background,
         ],
         colors.tab_active_border,
-        minimum,
-    );
-    colors.tab_inactive_selected_border = prepare_app_state_boundary(
-        materials,
-        semantic_host,
-        final_host,
-        [colors.tab_inactive_selected_background],
-        colors.tab_inactive_selected_border,
         minimum,
     );
 }

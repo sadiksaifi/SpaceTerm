@@ -8,8 +8,8 @@ use gpui::{
     Styled as _, Window, canvas, div, prelude::FluentBuilder as _, px,
 };
 
-const DEFAULT_KEYBOARD_STEP: f32 = 1.0;
-const DEFAULT_MODIFIED_KEYBOARD_STEP: f32 = 10.0;
+const KEYBOARD_STEP: f32 = 1.0;
+const MODIFIED_KEYBOARD_STEP: f32 = 10.0;
 const SPACIOUS_TARGET_MULTIPLIER: f32 = 2.0;
 const MINIMUM_METRIC: f32 = 0.5;
 const MAXIMUM_TARGET_EXTENT: f32 = 4096.0;
@@ -283,7 +283,7 @@ impl ResizeHandleTheme {
         self.metrics.pointer_target_thickness(target)
     }
 
-    pub(crate) fn scaled_metrics(self, _text_scale: f32, spacing_scale: f32) -> Self {
+    pub(crate) fn scaled_spacing(self, spacing_scale: f32) -> Self {
         let spacing_scale = crate::appearance::normalized_scale(spacing_scale);
         Self {
             metrics: ResizeHandleMetrics {
@@ -327,8 +327,6 @@ pub struct ResizeHandle {
     reset_on_double_click: bool,
     target: ResizeHandleTarget,
     paint_divider: bool,
-    keyboard_step: f32,
-    modified_keyboard_step: f32,
     debug_selector: Option<String>,
     on_event: Option<ResizeHandler>,
 }
@@ -361,8 +359,6 @@ impl ResizeHandle {
             reset_on_double_click: false,
             target: ResizeHandleTarget::Regular,
             paint_divider: true,
-            keyboard_step: DEFAULT_KEYBOARD_STEP,
-            modified_keyboard_step: DEFAULT_MODIFIED_KEYBOARD_STEP,
             debug_selector: None,
             on_event: None,
         }
@@ -423,17 +419,6 @@ impl ResizeHandle {
         self
     }
 
-    /// Configures the ordinary and Shift-modified keyboard steps.
-    pub fn keyboard_steps(mut self, ordinary: f32, modified: f32) -> Self {
-        if ordinary.is_finite() && ordinary > 0.0 {
-            self.keyboard_step = ordinary;
-        }
-        if modified.is_finite() && modified > 0.0 {
-            self.modified_keyboard_step = modified;
-        }
-        self
-    }
-
     /// Adds a stable root selector. The hitbox and divider append `-hitbox` and `-divider`.
     pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
         self.debug_selector = Some(selector.into());
@@ -480,8 +465,6 @@ impl RenderOnce for ResizeHandle {
                 self.axis,
                 self.current_value,
                 self.range.clone(),
-                self.keyboard_step,
-                self.modified_keyboard_step,
                 self.on_event.clone(),
                 cx,
             )
@@ -828,8 +811,6 @@ struct ResizeHandleState {
     current_value: f32,
     keyboard_value: f32,
     range: Option<RangeInclusive<f32>>,
-    keyboard_step: f32,
-    modified_keyboard_step: f32,
     enabled: bool,
     hovered: bool,
     hovered_targets: u8,
@@ -870,8 +851,6 @@ impl ResizeHandleState {
             current_value: 0.0,
             keyboard_value: 0.0,
             range: None,
-            keyboard_step: DEFAULT_KEYBOARD_STEP,
-            modified_keyboard_step: DEFAULT_MODIFIED_KEYBOARD_STEP,
             enabled: false,
             hovered: false,
             hovered_targets: 0,
@@ -894,8 +873,6 @@ impl ResizeHandleState {
         axis: ResizeAxis,
         current_value: f32,
         range: Option<RangeInclusive<f32>>,
-        keyboard_step: f32,
-        modified_keyboard_step: f32,
         handler: Option<ResizeHandler>,
         cx: &mut gpui::Context<Self>,
     ) -> Vec<ResizeHandleEvent> {
@@ -908,8 +885,6 @@ impl ResizeHandleState {
         }
         self.current_value = current_value;
         self.range = range;
-        self.keyboard_step = keyboard_step;
-        self.modified_keyboard_step = modified_keyboard_step;
         if self.enabled == enabled {
             return Vec::new();
         }
@@ -1093,9 +1068,9 @@ impl ResizeHandleState {
             cx.notify();
         }
         let step = if modifiers.shift {
-            self.modified_keyboard_step
+            MODIFIED_KEYBOARD_STEP
         } else {
-            self.keyboard_step
+            KEYBOARD_STEP
         };
         let displacement = direction * step;
         let original_value = self.keyboard_value;
@@ -1173,7 +1148,7 @@ mod tests {
     #[test]
     fn density_scales_resize_target_but_not_visible_hairline() {
         let original = test_theme();
-        let comfortable = original.scaled_metrics(1.0, 1.25);
+        let comfortable = original.scaled_spacing(1.25);
 
         assert!(comfortable.metrics.hitbox_thickness > original.metrics.hitbox_thickness);
         assert_eq!(

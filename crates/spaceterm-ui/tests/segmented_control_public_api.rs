@@ -69,7 +69,7 @@ const _: fn() = || {
         gpui::rgba(0x2277ddff),
     )
     .selected_shadow(spaceterm_ui::ControlShadow::none())
-    .scaled_metrics(1.0, 1.0);
+    .scaled_spacing(1.0);
 
     let _ = (control, theme);
 };

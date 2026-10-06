@@ -18,8 +18,6 @@ fn application_directory_discovery_stays_in_its_platform_module() {
             "XDG_STATE_HOME_ENVIRONMENT_VARIABLE",
             "XDG_CACHE_HOME_ENVIRONMENT_VARIABLE",
             "XDG_RUNTIME_DIR_ENVIRONMENT_VARIABLE",
-            "FOLDERID_RoamingAppData",
-            "FOLDERID_LocalAppData",
             "Library/Application Support/spaceterm",
             "Library/Caches/spaceterm",
             "Library/Logs/spaceterm",

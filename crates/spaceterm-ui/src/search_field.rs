@@ -164,35 +164,20 @@ impl SearchFieldMetrics {
         (self.corner_radius - self.toggle_inset).max(px(0.0))
     }
 
-    fn scaled(self, text_scale: f32, spacing_scale: f32) -> Self {
+    fn scaled(self, spacing_scale: f32) -> Self {
         Self {
-            height: crate::appearance::scale_line_box(
-                self.height,
-                self.line_height,
-                text_scale,
-                spacing_scale,
-            ),
+            height: crate::appearance::scale_line_box(self.height, self.line_height, spacing_scale),
             horizontal_padding: crate::appearance::scale_metric(
                 self.horizontal_padding,
                 spacing_scale,
             ),
             gap: crate::appearance::scale_metric(self.gap, spacing_scale),
-            corner_radius: self.corner_radius,
-            label_size: crate::appearance::scale_metric(self.label_size, text_scale),
-            line_height: crate::appearance::scale_metric(self.line_height, text_scale),
-            icon_size: crate::appearance::scale_metric(self.icon_size, text_scale),
-            icon_baseline_center: crate::appearance::scale_metric(
-                self.icon_baseline_center,
-                text_scale,
-            ),
-            clear_mark_size: crate::appearance::scale_metric(self.clear_mark_size, text_scale),
-            clear_glyph_size: crate::appearance::scale_metric(self.clear_glyph_size, text_scale),
-            clear_target_size: self.clear_target_size,
             clear_trailing_inset: crate::appearance::scale_metric(
                 self.clear_trailing_inset,
                 spacing_scale,
             ),
             toggle_inset: crate::appearance::scale_metric(self.toggle_inset, spacing_scale),
+            ..self
         }
     }
 }
@@ -220,9 +205,9 @@ impl SearchFieldTheme {
         }
     }
 
-    pub(crate) fn scaled_metrics(self, text_scale: f32, spacing_scale: f32) -> Self {
+    pub(crate) fn scaled_spacing(self, spacing_scale: f32) -> Self {
         Self {
-            metrics: self.metrics.scaled(text_scale, spacing_scale),
+            metrics: self.metrics.scaled(spacing_scale),
             ..self
         }
     }
@@ -516,7 +501,7 @@ mod tests {
     #[test]
     fn density_scales_field_bounds_but_not_radius() {
         let metrics = SearchFieldMetrics::new(px(28.0)).spacing(px(8.0), px(7.0), px(6.0));
-        let comfortable = metrics.scaled(1.0, 1.25);
+        let comfortable = metrics.scaled(1.25);
 
         assert!(comfortable.height > metrics.height);
         assert_eq!(comfortable.corner_radius, metrics.corner_radius);
@@ -527,7 +512,7 @@ mod tests {
         let metrics = SearchFieldMetrics::new(px(28.0))
             .spacing(px(8.0), px(7.0), px(6.0))
             .toggle_inset(px(3.0));
-        let comfortable = metrics.scaled(1.0, 1.25);
+        let comfortable = metrics.scaled(1.25);
 
         assert_eq!(metrics.toggle_target_size(), px(22.0));
         assert_eq!(metrics.toggle_corner_radius(), px(3.0));
@@ -539,6 +524,6 @@ mod tests {
         let metrics =
             SearchFieldMetrics::new(px(28.0)).clear_mark(px(13.0), px(8.0), px(28.0), px(2.0));
 
-        assert_eq!(metrics.scaled(1.5, 1.25).clear_target_size, px(28.0));
+        assert_eq!(metrics.scaled(1.25).clear_target_size, px(28.0));
     }
 }

@@ -202,7 +202,7 @@ impl ProgressTheme {
         Self { paint, sizes }
     }
 
-    pub(crate) fn scaled_metrics(self, _text_scale: f32, spacing_scale: f32) -> Self {
+    pub(crate) fn scaled_spacing(self, spacing_scale: f32) -> Self {
         Self {
             sizes: self.sizes.scaled(spacing_scale),
             ..self

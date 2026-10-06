@@ -527,7 +527,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::platform::app_directories::{APP_DIR_NAME, AppDirectories, AppDirectoryEnvironment};
+    use crate::platform::app_directories::AppDirectoryEnvironment;
     use crate::platform::secure_filesystem::{
         PreparedPrivateFile, SecureCommitResult, SecureFilesystem,
     };
@@ -777,20 +777,6 @@ mod tests {
         .unwrap()
     }
 
-    fn windows_policy_paths(filesystem: Arc<RecordingFilesystem>) -> AppPaths {
-        let root = std::env::current_dir()
-            .unwrap()
-            .join("spaceterm-windows-storage-policy");
-        let directories = AppDirectories::resolve_windows(
-            APP_DIR_NAME,
-            root.join("Roaming"),
-            root.join("Local"),
-            Some(root.join("Temp")),
-        )
-        .unwrap();
-        AppPaths::from_directories(directories, 200, filesystem).unwrap()
-    }
-
     fn host(alias: &str, host_name: &str) -> ManagedSshHost {
         ManagedSshHost::new(alias.into(), host_name.into(), None, None, None).unwrap()
     }
@@ -890,26 +876,6 @@ mod tests {
             filesystem.file_bytes(&paths.managed_ssh_config()),
             b"# This file is managed by SpaceTerm.\n\nHost *\n  Include ~/.ssh/config\nHost *\n  Include /etc/ssh/ssh_config\n"
         );
-    }
-
-    #[test]
-    fn windows_policy_storage_and_command_path_should_share_the_data_root() {
-        let filesystem = Arc::new(RecordingFilesystem::default());
-        let paths = windows_policy_paths(filesystem.clone());
-        let command_path = paths.managed_ssh_config();
-        let store = ManagedHostsStore::new(&paths);
-
-        store.ensure_exists().unwrap();
-
-        let directory = command_path.parent().unwrap().to_path_buf();
-        let name = command_path
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
-        let state = filesystem.state.lock().unwrap();
-        assert!(state.directories.contains(&directory));
-        assert!(state.files.contains_key(&(directory, name)));
     }
 
     #[test]

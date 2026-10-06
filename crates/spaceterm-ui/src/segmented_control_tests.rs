@@ -10,7 +10,7 @@ use super::*;
 fn density_scales_segment_bounds_but_not_radius() {
     let original = test_theme().resolve(SegmentedSize::Regular).metrics;
     let comfortable = test_theme()
-        .scaled_metrics(1.0, 1.25)
+        .scaled_spacing(1.25)
         .resolve(SegmentedSize::Regular)
         .metrics;
 
@@ -121,7 +121,7 @@ impl Render for SizingRoot {
 #[gpui::test]
 fn intrinsic_track_hugs_options_in_every_parent_layout(cx: &mut TestAppContext) {
     for scale in [1.0, 1.25] {
-        cx.set_global(test_theme().scaled_metrics(1.0, scale));
+        cx.set_global(test_theme().scaled_spacing(scale));
         for host in [SizingHost::Block, SizingHost::Row, SizingHost::Column] {
             for size in [SegmentedSize::Regular, SegmentedSize::Card] {
                 for right_to_left in [false, true] {
@@ -157,7 +157,7 @@ fn intrinsic_track_hugs_options_in_every_parent_layout(cx: &mut TestAppContext) 
 #[gpui::test]
 fn full_width_track_distributes_all_available_width_between_options(cx: &mut TestAppContext) {
     for scale in [1.0, 1.25] {
-        cx.set_global(test_theme().scaled_metrics(1.0, scale));
+        cx.set_global(test_theme().scaled_spacing(scale));
         for host in [SizingHost::Block, SizingHost::Row, SizingHost::Column] {
             for size in [SegmentedSize::Regular, SegmentedSize::Card] {
                 for right_to_left in [false, true] {
@@ -817,15 +817,14 @@ fn a_value_matching_no_option_requests_the_chosen_value_without_a_previous(
 }
 
 #[test]
-fn scaling_metrics_grows_text_and_spacing_independently() {
+fn spacing_scale_grows_option_height_but_not_text() {
     let theme = test_theme();
 
-    let scaled = theme.scaled_metrics(2.0, 1.0);
+    let scaled = theme.scaled_spacing(2.0);
 
     let base = theme.sizes.resolve(SegmentedSize::Card);
     let grown = scaled.sizes.resolve(SegmentedSize::Card);
-    assert_eq!(grown.font_size, base.font_size * 2.0);
-    assert_eq!(grown.preview_height, base.preview_height);
+    assert_eq!(grown.font_size, base.font_size);
     assert!(grown.option_height > base.option_height);
     assert_eq!(grown.border_width, base.border_width);
 }

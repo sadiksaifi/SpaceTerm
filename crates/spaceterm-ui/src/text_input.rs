@@ -356,7 +356,7 @@ impl TextInputTheme {
         self
     }
 
-    pub(crate) fn scaled_metrics(self, _text_scale: f32, spacing_scale: f32) -> Self {
+    pub(crate) fn scaled_spacing(self, spacing_scale: f32) -> Self {
         Self {
             metrics: self.metrics.scaled(spacing_scale),
             ..self

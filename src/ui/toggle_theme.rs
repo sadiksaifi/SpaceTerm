@@ -252,7 +252,7 @@ mod tests {
             }
         }
         let base = theme(&ChromeColors::default());
-        let scaled = base.scaled_metrics(1.25, 1.25);
+        let scaled = base.scaled_spacing(1.25);
         for on in [false, true] {
             for enabled in [false, true] {
                 for hovered in [false, true] {
@@ -276,7 +276,7 @@ mod tests {
             .expect("switch paints");
         assert_eq!(checkbox.size, gpui::size(px(17.5), px(17.5)));
         assert_eq!(switch.size.width, px(37.5));
-        let body_size = ChromeTypography::default().style(TextRole::Body).size * 1.25;
+        let body_size = ChromeTypography::default().style(TextRole::Body).size;
         let expected_label_width = cx.update(|window, _| {
             window
                 .text_system()

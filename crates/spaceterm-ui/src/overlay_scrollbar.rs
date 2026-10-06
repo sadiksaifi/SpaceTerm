@@ -304,7 +304,7 @@ impl ScrollbarTheme {
         self
     }
 
-    pub(crate) fn scaled_metrics(self, _text_scale: f32, spacing_scale: f32) -> Self {
+    pub(crate) fn scaled_spacing(self, spacing_scale: f32) -> Self {
         let spacing_scale = crate::appearance::normalized_scale(spacing_scale);
         Self {
             metrics: ScrollbarMetrics {
