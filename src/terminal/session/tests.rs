@@ -995,7 +995,9 @@ fn session_failure_display_should_explain_each_classification() {
             stage: TerminalSessionStartupStage::Pty,
             message: "open unavailable".to_owned(),
         },
-        TerminalSessionFailure::Runtime("write unavailable".to_owned()),
+        TerminalSessionFailure::Runtime(crate::terminal::TerminalFailure::emulator(
+            "session-runtime",
+        )),
         TerminalSessionFailure::PtyRead {
             read_error: "read unavailable".to_owned(),
             exit_status: "exit code 7".to_owned(),
@@ -1016,7 +1018,7 @@ fn session_failure_display_should_explain_each_classification() {
         statuses,
         [
             "Terminal Session startup failed during PTY creation: open unavailable",
-            "Terminal runtime failed: write unavailable",
+            "Terminal Emulator failed during session-runtime. Close this Pane and restart the terminal command.",
             "Shell output failed: read unavailable; shell exited (exit code 7)",
             "Shell output failed: read unavailable; waiting for the shell also failed: wait unavailable",
             "Shell output ended, but waiting for the shell failed: wait unavailable",
@@ -3454,7 +3456,7 @@ fn only_one_unsafe_paste_can_await_confirmation() {
 #[test]
 fn write_failure_should_emit_a_runtime_failure_and_stop_the_worker() {
     let (result, _reader_steps, records) = start_scripted_session(ScriptedPtyOptions {
-        write_error: Some("write unavailable".to_owned()),
+        write_error: Some("/private/terminal token=secret output=private".to_owned()),
         ..ScriptedPtyOptions::default()
     });
     let (mut session, events, _accessibility) = result.unwrap();
@@ -3469,9 +3471,19 @@ fn write_failure_should_emit_a_runtime_failure_and_stop_the_worker() {
     let TerminalSessionEvent::Failed(failure) = event else {
         unreachable!("the event predicate accepts only terminal failures")
     };
+    let diagnostic = crate::terminal::TerminalFailure::from_session(&failure);
+    assert_eq!(diagnostic.class(), crate::terminal::FailureClass::Pty);
+    assert_eq!(diagnostic.operation(), "write-shell-input");
+    assert_eq!(
+        diagnostic.reason(),
+        Some(FailureReason::Io(ErrorKind::BrokenPipe))
+    );
     assert_eq!(
         failure,
-        TerminalSessionFailure::Runtime("failed to write to the shell PTY".to_owned())
+        TerminalSessionFailure::Runtime(
+            TerminalFailure::pty("write-shell-input")
+                .with_reason(FailureReason::Io(ErrorKind::BrokenPipe))
+        )
     );
     let state = records.wait_for("the failed PTY worker to release ownership", |state| {
         state.pty_drops == 1
@@ -3484,6 +3496,53 @@ fn write_failure_should_emit_a_runtime_failure_and_stop_the_worker() {
         (state.terminations, state.pty_drops, state.terminator_drops),
         (1, 1, 1)
     );
+}
+
+#[test]
+fn resize_failure_identifies_the_pty_operation_and_stops_the_worker() {
+    let (result, _reader_steps, records) = start_scripted_session(ScriptedPtyOptions {
+        resize_error: Some("/private/terminal token=secret".to_owned()),
+        ..ScriptedPtyOptions::default()
+    });
+    let (mut session, events, _accessibility) = result.unwrap();
+    session.resize(geometry(100, 30, 9.0, 21.0));
+    let event = receive_event(&events, "the PTY resize failure", |event| {
+        matches!(event, TerminalSessionEvent::Failed(_))
+    });
+    let TerminalSessionEvent::Failed(failure) = event else {
+        unreachable!("the predicate accepts only failures")
+    };
+    let diagnostic = TerminalFailure::from_session(&failure);
+    assert_eq!(
+        diagnostic,
+        TerminalFailure::pty("resize-pty").with_reason(FailureReason::Io(ErrorKind::Other))
+    );
+    records.wait_for("the failed PTY worker to release ownership", |state| {
+        state.pty_drops == 1
+    });
+    session.shutdown();
+}
+
+#[test]
+fn invalid_key_input_identifies_the_emulator_operation_without_retaining_text() {
+    let (result, _reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
+    let (mut session, events, _accessibility) = result.unwrap();
+    session.key(KeyInput::text_input(
+        "token=secret\nprivate output".to_owned(),
+    ));
+    let event = receive_event(&events, "the key validation failure", |event| {
+        matches!(event, TerminalSessionEvent::Failed(_))
+    });
+    let TerminalSessionEvent::Failed(failure) = event else {
+        unreachable!("the predicate accepts only failures")
+    };
+    let diagnostic = TerminalFailure::from_session(&failure);
+    assert_eq!(
+        diagnostic,
+        TerminalFailure::emulator("validate-key-text").with_reason(FailureReason::InvalidInput)
+    );
+    assert!(records.snapshot().written.is_empty());
+    session.shutdown();
 }
 
 #[test]

@@ -1,3 +1,4 @@
+use super::failure::{FailureReason, TerminalFailure};
 use libghostty_vt::Terminal;
 use libghostty_vt::key::{
     Action as GhosttyKeyAction, Encoder as KeyEncoder, Event as KeyEvent, Mods, OptionAsAlt,
@@ -23,14 +24,17 @@ impl KeyboardProtocolEncoder {
         terminal: &Terminal<'_, '_>,
         input: &KeyInput,
         bytes: &mut Vec<u8>,
-    ) -> Result<(), String> {
-        input.validate().map_err(|error| error.to_string())?;
+    ) -> Result<(), TerminalFailure> {
+        input.validate().map_err(|_| {
+            TerminalFailure::emulator("validate-key-input").with_reason(FailureReason::InvalidInput)
+        })?;
         if input
             .text
             .as_deref()
             .is_some_and(|text| text.chars().any(char::is_control))
         {
-            return Err("terminal key text must not contain control characters".to_owned());
+            return Err(TerminalFailure::emulator("validate-key-text")
+                .with_reason(FailureReason::InvalidInput));
         }
 
         // Ctrl+[ is xterm's Escape in legacy encoding. Keep the layout text so Ghostty can
@@ -62,13 +66,13 @@ impl KeyboardProtocolEncoder {
         let start = bytes.len();
         self.encoder
             .encode_to_vec(&self.event, bytes)
-            .map_err(|error| format!("failed to encode terminal key input: {error}"))?;
+            .map_err(|error| TerminalFailure::emulator_error("encode-terminal-key-input", error))?;
         // The legacy fixterms response is CSI u (or empty when there is no text). Kitty's
         // reports and modifyOtherKeys mode 2's CSI 27 response remain authoritative.
         if xterm_escape
             && terminal
                 .kitty_keyboard_flags()
-                .map_err(|_| "failed to read terminal keyboard protocol".to_owned())?
+                .map_err(|error| TerminalFailure::emulator_error("read-keyboard-protocol", error))?
                 .is_empty()
             && !bytes[start..].starts_with(b"\x1b[27;")
         {

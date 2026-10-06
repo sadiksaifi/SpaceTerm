@@ -1,3 +1,4 @@
+use super::failure::{FailureReason, TerminalFailure};
 use crate::platform::local_filesystem::{LocalFileEmissionRegistry, LocalFilesystemAuthority};
 mod compression;
 use std::cell::{Cell, RefCell};
@@ -1422,7 +1423,7 @@ impl TerminalEmulator {
         mem::take(&mut *self.pending_attention.borrow_mut())
     }
 
-    pub(crate) fn key(&mut self, input: KeyInput) -> Result<EmulatorAction, String> {
+    pub(crate) fn key(&mut self, input: KeyInput) -> Result<EmulatorAction, TerminalFailure> {
         if !input.is_modifier_key() && matches!(input.action, KeyAction::Press | KeyAction::Repeat)
         {
             self.clear_selection()?;
@@ -1437,10 +1438,10 @@ impl TerminalEmulator {
         })
     }
 
-    pub(crate) fn focus_reporting_enabled(&self) -> Result<bool, String> {
-        self.terminal
-            .mode(Mode::FOCUS_EVENT)
-            .map_err(|error| format!("failed to query terminal focus reporting mode: {error}"))
+    pub(crate) fn focus_reporting_enabled(&self) -> Result<bool, TerminalFailure> {
+        self.terminal.mode(Mode::FOCUS_EVENT).map_err(|error| {
+            TerminalFailure::emulator_error("query-terminal-focus-reporting-mode", error)
+        })
     }
 
     pub(crate) fn set_find_query(
@@ -1461,15 +1462,17 @@ impl TerminalEmulator {
         &mut self,
         generation: FindQueryGeneration,
         direction: FindDirection,
-    ) -> Result<EmulatorAction, String> {
+    ) -> Result<EmulatorAction, TerminalFailure> {
         let cols = self.geometry.grid().cols;
         self.find
             .navigate(&mut self.terminal, cols, generation, direction)
             .map(EmulatorAction::screen_changed_if)
-            .map_err(|error| format!("failed to navigate terminal Find results: {error}"))
+            .map_err(|error| {
+                TerminalFailure::emulator_error("navigate-terminal-find-results", error)
+            })
     }
 
-    pub(crate) fn focus(&self, focused: bool) -> Result<EmulatorAction, String> {
+    pub(crate) fn focus(&self, focused: bool) -> Result<EmulatorAction, TerminalFailure> {
         if !self.focus_reporting_enabled()? {
             return Ok(EmulatorAction::none());
         }
@@ -1480,18 +1483,19 @@ impl TerminalEmulator {
             FocusEvent::Lost
         };
         let mut buffer = [0_u8; 8];
-        let written = event
-            .encode(&mut buffer)
-            .map_err(|error| format!("failed to encode terminal focus event: {error}"))?;
+        let written = event.encode(&mut buffer).map_err(|error| {
+            TerminalFailure::emulator_error("encode-terminal-focus-event", error)
+        })?;
         Ok(EmulatorAction::bytes(buffer[..written].to_vec()))
     }
 
-    pub(crate) fn pointer(&mut self, input: PointerInput) -> Result<EmulatorAction, String> {
-        if self
-            .terminal
-            .mode(Mode::SYNC_OUTPUT)
-            .map_err(|error| format!("failed to query synchronized-output mode: {error}"))?
-            || !self.accept_pointer_generation(input.generation)
+    pub(crate) fn pointer(
+        &mut self,
+        input: PointerInput,
+    ) -> Result<EmulatorAction, TerminalFailure> {
+        if self.terminal.mode(Mode::SYNC_OUTPUT).map_err(|error| {
+            TerminalFailure::emulator_error("query-synchronized-output-mode", error)
+        })? || !self.accept_pointer_generation(input.generation)
         {
             self.selection_gesture.reset(&self.terminal);
             self.active_pointer = None;
@@ -1537,12 +1541,11 @@ impl TerminalEmulator {
         self.scroll_to(offset_rows)
     }
 
-    pub(crate) fn wheel(&mut self, input: WheelInput) -> Result<EmulatorAction, String> {
+    pub(crate) fn wheel(&mut self, input: WheelInput) -> Result<EmulatorAction, TerminalFailure> {
         if input.generation != self.presentation_generation
-            || self
-                .terminal
-                .mode(Mode::SYNC_OUTPUT)
-                .map_err(|error| format!("failed to query synchronized-output mode: {error}"))?
+            || self.terminal.mode(Mode::SYNC_OUTPUT).map_err(|error| {
+                TerminalFailure::emulator_error("query-synchronized-output-mode", error)
+            })?
         {
             return Ok(EmulatorAction::none());
         }
@@ -1556,10 +1559,9 @@ impl TerminalEmulator {
             return Ok(EmulatorAction::none());
         }
 
-        let tracking = self
-            .terminal
-            .is_mouse_tracking()
-            .map_err(|error| format!("failed to query terminal mouse tracking mode: {error}"))?;
+        let tracking = self.terminal.is_mouse_tracking().map_err(|error| {
+            TerminalFailure::emulator_error("query-terminal-mouse-tracking-mode", error)
+        })?;
         if tracking && !shift_overrides_application_mouse(input.modifiers, input.shift_selection) {
             self.clear_selection()?;
             let any_button_pressed = self.active_pointer.is_some();
@@ -1587,15 +1589,12 @@ impl TerminalEmulator {
             });
         }
 
-        let alternate_screen = self
-            .terminal
-            .active_screen()
-            .map_err(|error| format!("failed to query the active terminal screen: {error}"))?
-            == Screen::Alternate;
-        let alternate_scroll = self
-            .terminal
-            .mode(Mode::ALT_SCROLL)
-            .map_err(|error| format!("failed to query alternate-scroll mode: {error}"))?;
+        let alternate_screen = self.terminal.active_screen().map_err(|error| {
+            TerminalFailure::emulator_error("query-the-active-terminal-screen", error)
+        })? == Screen::Alternate;
+        let alternate_scroll = self.terminal.mode(Mode::ALT_SCROLL).map_err(|error| {
+            TerminalFailure::emulator_error("query-alternate-scroll-mode", error)
+        })?;
         if alternate_screen && alternate_scroll && vertical != 0 {
             self.clear_selection()?;
             let key = KeyInput {
@@ -1633,7 +1632,7 @@ impl TerminalEmulator {
         Ok(EmulatorAction::screen_changed())
     }
 
-    pub(crate) fn paste(&mut self, text: String) -> Result<EmulatorAction, String> {
+    pub(crate) fn paste(&mut self, text: String) -> Result<EmulatorAction, TerminalFailure> {
         self.clear_selection()?;
         let bracketed = self.bracketed_paste_mode()?;
         let mut source = text.into_bytes();
@@ -1646,7 +1645,12 @@ impl TerminalEmulator {
                     let grown = required.max(bytes.len().saturating_add(16));
                     bytes.resize(grown, 0);
                 }
-                Err(error) => return Err(format!("failed to encode terminal paste: {error}")),
+                Err(error) => {
+                    return Err(TerminalFailure::emulator_error(
+                        "encode-terminal-paste",
+                        error,
+                    ));
+                }
             }
         };
         bytes.truncate(written);
@@ -1659,21 +1663,21 @@ impl TerminalEmulator {
         })
     }
 
-    pub(crate) fn bracketed_paste_mode(&self) -> Result<bool, String> {
+    pub(crate) fn bracketed_paste_mode(&self) -> Result<bool, TerminalFailure> {
         self.terminal
             .mode(Mode::BRACKETED_PASTE)
-            .map_err(|error| format!("failed to query bracketed-paste mode: {error}"))
+            .map_err(|error| TerminalFailure::emulator_error("query-bracketed-paste-mode", error))
     }
 
     #[cfg(test)]
-    pub(crate) fn selection_text(&self) -> Result<Option<String>, String> {
+    pub(crate) fn selection_text(&self) -> Result<Option<String>, TerminalFailure> {
         self.format_selection(Format::Plain, SelectionCopyOptions::default())
     }
 
     pub(crate) fn selection_copy(
         &self,
         options: SelectionCopyOptions,
-    ) -> Result<Option<SelectionCopy>, String> {
+    ) -> Result<Option<SelectionCopy>, TerminalFailure> {
         let Some(plain_text) = self.format_selection(Format::Plain, options)? else {
             return Ok(None);
         };
@@ -1689,7 +1693,7 @@ impl TerminalEmulator {
         &self,
         format: Format,
         options: SelectionCopyOptions,
-    ) -> Result<Option<String>, String> {
+    ) -> Result<Option<String>, TerminalFailure> {
         let options = FormatOptions::new()
             .with_emit_format(format)
             .with_unwrap(options.unwrap_soft_wraps)
@@ -1697,18 +1701,16 @@ impl TerminalEmulator {
         let Some(bytes) = self
             .terminal
             .format_selection_alloc(None, options)
-            .map_err(|error| format!("failed to format terminal selection: {error}"))?
+            .map_err(|error| TerminalFailure::emulator_error("format-terminal-selection", error))?
         else {
             return Ok(None);
         };
 
         String::from_utf8(bytes.as_ref().to_vec())
             .map(Some)
-            .map_err(|error| {
-                format!(
-                    "formatted terminal selection contained invalid UTF-8 at byte {}",
-                    error.utf8_error().valid_up_to()
-                )
+            .map_err(|_| {
+                TerminalFailure::emulator("decode-terminal-selection")
+                    .with_reason(FailureReason::InvalidUtf8)
             })
     }
 
@@ -1731,15 +1733,14 @@ impl TerminalEmulator {
         true
     }
 
-    fn pointer_press(&mut self, input: PointerInput) -> Result<EmulatorAction, String> {
+    fn pointer_press(&mut self, input: PointerInput) -> Result<EmulatorAction, TerminalFailure> {
         if self.active_pointer.is_some() {
             return Ok(EmulatorAction::none());
         }
 
-        let tracking = self
-            .terminal
-            .is_mouse_tracking()
-            .map_err(|error| format!("failed to query terminal mouse tracking mode: {error}"))?;
+        let tracking = self.terminal.is_mouse_tracking().map_err(|error| {
+            TerminalFailure::emulator_error("query-terminal-mouse-tracking-mode", error)
+        })?;
         let Some(button) = input.button else {
             return Ok(EmulatorAction::none());
         };
@@ -1793,7 +1794,7 @@ impl TerminalEmulator {
         }
     }
 
-    fn pointer_motion(&mut self, input: PointerInput) -> Result<EmulatorAction, String> {
+    fn pointer_motion(&mut self, input: PointerInput) -> Result<EmulatorAction, TerminalFailure> {
         if let Some(active) = self.active_pointer.as_mut() {
             active.position = input.position;
             active.modifiers = input.modifiers;
@@ -1825,7 +1826,7 @@ impl TerminalEmulator {
             }
             None => {
                 let tracking = self.terminal.is_mouse_tracking().map_err(|error| {
-                    format!("failed to query terminal mouse tracking mode: {error}")
+                    TerminalFailure::emulator_error("query-terminal-mouse-tracking-mode", error)
                 })?;
                 if !tracking
                     || shift_overrides_application_mouse(input.modifiers, input.shift_selection)
@@ -1847,7 +1848,7 @@ impl TerminalEmulator {
         }
     }
 
-    fn pointer_release(&mut self, input: PointerInput) -> Result<EmulatorAction, String> {
+    fn pointer_release(&mut self, input: PointerInput) -> Result<EmulatorAction, TerminalFailure> {
         let Some(active) = self.active_pointer else {
             return Ok(EmulatorAction::none());
         };
@@ -1883,7 +1884,7 @@ impl TerminalEmulator {
             .is_ok_and(|flags| !flags.is_empty())
     }
 
-    fn encode_key(&mut self, input: &KeyInput, bytes: &mut Vec<u8>) -> Result<(), String> {
+    fn encode_key(&mut self, input: &KeyInput, bytes: &mut Vec<u8>) -> Result<(), TerminalFailure> {
         self.keyboard_protocol.encode(&self.terminal, input, bytes)
     }
 
@@ -1895,7 +1896,7 @@ impl TerminalEmulator {
         modifiers: InputModifiers,
         any_button_pressed: bool,
         bytes: &mut Vec<u8>,
-    ) -> Result<(), String> {
+    ) -> Result<(), TerminalFailure> {
         let modes = self.mouse_mode_state()?;
         if self.cached_mouse_modes != Some(modes) {
             self.mouse_encoder.set_options_from_terminal(&self.terminal);
@@ -1924,13 +1925,13 @@ impl TerminalEmulator {
             });
         self.mouse_encoder
             .encode_to_vec(&self.mouse_event, bytes)
-            .map_err(|error| format!("failed to encode terminal mouse event: {error}"))
+            .map_err(|error| TerminalFailure::emulator_error("encode-terminal-mouse-event", error))
     }
 
-    fn clear_selection(&mut self) -> Result<(), String> {
+    fn clear_selection(&mut self) -> Result<(), TerminalFailure> {
         self.terminal
             .set_selection(None)
-            .map_err(|error| format!("failed to clear terminal selection: {error}"))?;
+            .map_err(|error| TerminalFailure::emulator_error("clear-terminal-selection", error))?;
         self.selection_gesture.reset(&self.terminal);
         self.selection_drag_position = None;
         Ok(())
@@ -1939,15 +1940,13 @@ impl TerminalEmulator {
     pub(crate) fn set_accessibility_selection(
         &mut self,
         request: AccessibilitySelectionRequest,
-    ) -> Result<EmulatorAction, String> {
+    ) -> Result<EmulatorAction, TerminalFailure> {
         if request.generation != self.presentation_generation {
             return Ok(EmulatorAction::none());
         }
-        if self
-            .terminal
-            .mode(Mode::SYNC_OUTPUT)
-            .map_err(|error| format!("failed to query synchronized-output mode: {error}"))?
-        {
+        if self.terminal.mode(Mode::SYNC_OUTPUT).map_err(|error| {
+            TerminalFailure::emulator_error("query-synchronized-output-mode", error)
+        })? {
             return Ok(EmulatorAction::none());
         }
         let Some(selection) = self.accessibility.resolve_selection(&request) else {
@@ -1972,7 +1971,9 @@ impl TerminalEmulator {
         let changed = self
             .ghostty_accessibility
             .set_selection(&self.terminal, selection)
-            .map_err(|error| format!("failed to set terminal accessibility selection: {error}"))?;
+            .map_err(|error| {
+                TerminalFailure::emulator_error("set-terminal-accessibility-selection", error)
+            })?;
         if !changed {
             return Ok(EmulatorAction::none());
         }
@@ -1983,12 +1984,14 @@ impl TerminalEmulator {
         Ok(EmulatorAction::screen_changed())
     }
 
-    fn selection_press(&mut self, position: SurfacePosition) -> Result<(), String> {
+    fn selection_press(&mut self, position: SurfacePosition) -> Result<(), TerminalFailure> {
         let point = self.selection_viewport_point(position)?;
         let grid_ref = self
             .terminal
             .grid_ref(Point::Viewport(point))
-            .map_err(|error| format!("failed to resolve selection press position: {error}"))?;
+            .map_err(|error| {
+                TerminalFailure::emulator_error("resolve-selection-press-position", error)
+            })?;
         let selection = self
             .selection_press
             .set_position(f64::from(position.x), f64::from(position.y))
@@ -1996,20 +1999,26 @@ impl TerminalEmulator {
             .and_then(|event| event.set_time(self.gesture_clock.elapsed()))
             .and_then(|event| event.set_repeat_interval(REPEAT_CLICK_INTERVAL))
             .and_then(|event| event.apply(&mut self.selection_gesture, &self.terminal, grid_ref))
-            .map_err(|error| format!("failed to apply terminal selection press: {error}"))?;
+            .map_err(|error| {
+                TerminalFailure::emulator_error("apply-terminal-selection-press", error)
+            })?;
         self.terminal
             .set_selection(selection.as_ref())
-            .map_err(|error| format!("failed to install terminal selection: {error}"))?;
+            .map_err(|error| {
+                TerminalFailure::emulator_error("install-terminal-selection", error)
+            })?;
         Ok(())
     }
 
-    fn selection_drag(&mut self, position: SurfacePosition) -> Result<(), String> {
+    fn selection_drag(&mut self, position: SurfacePosition) -> Result<(), TerminalFailure> {
         let point = self.selection_viewport_point(position)?;
         let geometry = self.selection_geometry();
         let grid_ref = self
             .terminal
             .grid_ref(Point::Viewport(point))
-            .map_err(|error| format!("failed to resolve selection drag position: {error}"))?;
+            .map_err(|error| {
+                TerminalFailure::emulator_error("resolve-selection-drag-position", error)
+            })?;
         let selection = self
             .selection_drag
             .set_position(f64::from(position.x), f64::from(position.y))
@@ -2022,25 +2031,33 @@ impl TerminalEmulator {
                     geometry,
                 )
             })
-            .map_err(|error| format!("failed to apply terminal selection drag: {error}"))?;
+            .map_err(|error| {
+                TerminalFailure::emulator_error("apply-terminal-selection-drag", error)
+            })?;
         self.terminal
             .set_selection(selection.as_ref())
-            .map_err(|error| format!("failed to install terminal selection: {error}"))?;
+            .map_err(|error| {
+                TerminalFailure::emulator_error("install-terminal-selection", error)
+            })?;
         Ok(())
     }
 
-    fn selection_release(&mut self, position: SurfacePosition) -> Result<(), String> {
+    fn selection_release(&mut self, position: SurfacePosition) -> Result<(), TerminalFailure> {
         let point = self.selection_viewport_point(position)?;
         let grid_ref = self
             .terminal
             .grid_ref(Point::Viewport(point))
-            .map_err(|error| format!("failed to resolve selection release position: {error}"))?;
+            .map_err(|error| {
+                TerminalFailure::emulator_error("resolve-selection-release-position", error)
+            })?;
         self.selection_release
             .apply(&mut self.selection_gesture, &self.terminal, Some(grid_ref))
-            .map_err(|error| format!("failed to apply terminal selection release: {error}"))
+            .map_err(|error| {
+                TerminalFailure::emulator_error("apply-terminal-selection-release", error)
+            })
     }
 
-    pub(crate) fn cancel_pointer_drag(&mut self) -> Result<EmulatorAction, String> {
+    pub(crate) fn cancel_pointer_drag(&mut self) -> Result<EmulatorAction, TerminalFailure> {
         let Some(active) = self.active_pointer.take() else {
             return Ok(EmulatorAction::none());
         };
@@ -2063,7 +2080,9 @@ impl TerminalEmulator {
         Ok(EmulatorAction::none())
     }
 
-    pub(crate) fn selection_autoscroll_interval(&self) -> Result<Option<Duration>, String> {
+    pub(crate) fn selection_autoscroll_interval(
+        &self,
+    ) -> Result<Option<Duration>, TerminalFailure> {
         if !matches!(
             self.active_pointer,
             Some(ActivePointer {
@@ -2079,14 +2098,16 @@ impl TerminalEmulator {
         let direction = self
             .selection_gesture
             .autoscroll(&self.terminal)
-            .map_err(|error| format!("failed to query selection autoscroll: {error}"))?;
+            .map_err(|error| {
+                TerminalFailure::emulator_error("query-selection-autoscroll", error)
+            })?;
         if direction == Autoscroll::None {
             return Ok(None);
         }
         Ok(Some(SELECTION_AUTOSCROLL_INTERVAL))
     }
 
-    pub(crate) fn selection_autoscroll_tick(&mut self) -> Result<EmulatorAction, String> {
+    pub(crate) fn selection_autoscroll_tick(&mut self) -> Result<EmulatorAction, TerminalFailure> {
         // The worker owns this gesture; publishing a new snapshot does not end the drag.
         // libghostty-vt validates the tracked content anchor before scrolling.
         let Some(position) = self.selection_drag_position else {
@@ -2095,7 +2116,9 @@ impl TerminalEmulator {
         let direction = self
             .selection_gesture
             .autoscroll(&self.terminal)
-            .map_err(|error| format!("failed to query selection autoscroll: {error}"))?;
+            .map_err(|error| {
+                TerminalFailure::emulator_error("query-selection-autoscroll", error)
+            })?;
         if !matches!(direction, Autoscroll::Up | Autoscroll::Down) {
             return Ok(EmulatorAction::none());
         }
@@ -2121,17 +2144,21 @@ impl TerminalEmulator {
                     geometry,
                 )
             })
-            .map_err(|error| format!("failed to apply selection autoscroll tick: {error}"))?;
+            .map_err(|error| {
+                TerminalFailure::emulator_error("apply-selection-autoscroll-tick", error)
+            })?;
         self.terminal
             .set_selection(selection.as_ref())
-            .map_err(|error| format!("failed to install autoscrolled selection: {error}"))?;
+            .map_err(|error| {
+                TerminalFailure::emulator_error("install-autoscrolled-selection", error)
+            })?;
         Ok(EmulatorAction::screen_changed())
     }
 
     fn selection_viewport_point(
         &self,
         position: SurfacePosition,
-    ) -> Result<PointCoordinate, String> {
+    ) -> Result<PointCoordinate, TerminalFailure> {
         let position = self
             .geometry
             .cell_at_backing_position(BackingPosition::new(position.x, position.y));
@@ -2142,11 +2169,15 @@ impl TerminalEmulator {
         let grid_ref = self
             .terminal
             .grid_ref(Point::Viewport(point))
-            .map_err(|error| format!("failed to resolve terminal selection cell: {error}"))?;
+            .map_err(|error| {
+                TerminalFailure::emulator_error("resolve-terminal-selection-cell", error)
+            })?;
         if grid_ref
             .cell()
             .and_then(|cell| cell.wide())
-            .map_err(|error| format!("failed to inspect terminal selection cell: {error}"))?
+            .map_err(|error| {
+                TerminalFailure::emulator_error("inspect-terminal-selection-cell", error)
+            })?
             == CellWide::SpacerTail
         {
             point.x = point.x.saturating_sub(1);
@@ -2165,11 +2196,11 @@ impl TerminalEmulator {
         }
     }
 
-    fn mouse_mode_state(&self) -> Result<MouseModeState, String> {
+    fn mouse_mode_state(&self) -> Result<MouseModeState, TerminalFailure> {
         let mode = |mode| {
-            self.terminal
-                .mode(mode)
-                .map_err(|error| format!("failed to query terminal mouse encoder mode: {error}"))
+            self.terminal.mode(mode).map_err(|error| {
+                TerminalFailure::emulator_error("query-terminal-mouse-encoder-mode", error)
+            })
         };
         Ok(MouseModeState {
             x10: mode(Mode::X10_MOUSE)?,
@@ -2220,12 +2251,10 @@ impl TerminalEmulator {
     pub(crate) fn accessibility_snapshot(
         &mut self,
         bind_next_presentation: bool,
-    ) -> Result<(Option<Arc<TerminalAccessibilityModel>>, bool), String> {
-        if self
-            .terminal
-            .mode(Mode::SYNC_OUTPUT)
-            .map_err(|error| format!("failed to query synchronized-output mode: {error}"))?
-        {
+    ) -> Result<(Option<Arc<TerminalAccessibilityModel>>, bool), TerminalFailure> {
+        if self.terminal.mode(Mode::SYNC_OUTPUT).map_err(|error| {
+            TerminalFailure::emulator_error("query-synchronized-output-mode", error)
+        })? {
             return Ok((None, false));
         }
         if bind_next_presentation {
@@ -2240,7 +2269,9 @@ impl TerminalEmulator {
                     max_rows: 256,
                 },
             )
-            .map_err(|error| format!("failed to observe retained terminal text: {error}"))?;
+            .map_err(|error| {
+                TerminalFailure::emulator_error("observe-retained-terminal-text", error)
+            })?;
         self.accessibility_capture_needed = false;
         let more = snapshot.more;
         let update = accessibility_update(snapshot)?;
@@ -2252,12 +2283,10 @@ impl TerminalEmulator {
 
     pub(crate) fn accessibility_snapshot_for_current_presentation(
         &mut self,
-    ) -> Result<(Option<Arc<TerminalAccessibilityModel>>, bool), String> {
-        if self
-            .terminal
-            .mode(Mode::SYNC_OUTPUT)
-            .map_err(|error| format!("failed to query synchronized-output mode: {error}"))?
-        {
+    ) -> Result<(Option<Arc<TerminalAccessibilityModel>>, bool), TerminalFailure> {
+        if self.terminal.mode(Mode::SYNC_OUTPUT).map_err(|error| {
+            TerminalFailure::emulator_error("query-synchronized-output-mode", error)
+        })? {
             return Ok((None, false));
         }
         self.accessibility_generation = self.presentation_generation;
@@ -2703,13 +2732,15 @@ impl Drop for TerminalEmulator {
 
 fn accessibility_update(
     snapshot: ghostty_accessibility::Snapshot,
-) -> Result<AccessibilityUpdate, String> {
+) -> Result<AccessibilityUpdate, TerminalFailure> {
     let screen = match snapshot.screen {
         ghostty_accessibility::Screen::Primary => AccessibilityScreen::Primary,
         ghostty_accessibility::Screen::Alternate => AccessibilityScreen::Alternate,
     };
-    let screen_generation = usize::try_from(snapshot.screen_generation)
-        .map_err(|_| "terminal accessibility screen generation exceeded usize".to_owned())?;
+    let screen_generation = usize::try_from(snapshot.screen_generation).map_err(|_| {
+        TerminalFailure::emulator("observe-accessibility-generation")
+            .with_reason(FailureReason::CapacityExceeded)
+    })?;
     let row_id = |id: ghostty_accessibility::RowId| AccessibilityRowId {
         screen,
         screen_generation,

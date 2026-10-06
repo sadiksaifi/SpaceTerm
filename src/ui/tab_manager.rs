@@ -4870,7 +4870,9 @@ mod tests {
             .event_sender(1)
             .unwrap()
             .try_send(TerminalSessionEvent::Failed(
-                TerminalSessionFailure::Runtime("worker stopped".to_owned()),
+                TerminalSessionFailure::Runtime(crate::terminal::TerminalFailure::emulator(
+                    "session-runtime",
+                )),
             ))
             .unwrap();
         cx.run_until_parked();

@@ -997,7 +997,9 @@ fn runtime_failure_clears_live_terminal_progress(cx: &mut TestAppContext) {
         .event_sender(session_id)
         .unwrap()
         .try_send(TerminalSessionEvent::Failed(
-            TerminalSessionFailure::Runtime("worker stopped".to_owned()),
+            TerminalSessionFailure::Runtime(crate::terminal::TerminalFailure::emulator(
+                "session-runtime",
+            )),
         ))
         .unwrap();
     cx.run_until_parked();
@@ -1272,7 +1274,7 @@ fn failed_master_event_before_disconnect_retains_remote_pane(cx: &mut TestAppCon
         pane.handle_session_event(
             epoch,
             TerminalSessionEvent::Failed(TerminalSessionFailure::Runtime(
-                "master exited".to_owned(),
+                crate::terminal::TerminalFailure::emulator("session-runtime"),
             )),
             cx,
         );
@@ -1344,7 +1346,7 @@ fn authoritative_disconnect_before_terminal_events_ignores_exit_and_failure(
         pane.handle_session_event(
             old_epoch,
             TerminalSessionEvent::Failed(TerminalSessionFailure::Runtime(
-                "late failure".to_owned(),
+                crate::terminal::TerminalFailure::emulator("session-runtime"),
             )),
             cx,
         );
@@ -7092,7 +7094,9 @@ fn normal_exit_remains_distinct_from_stale_failures(cx: &mut TestAppContext) {
             Some(RecoveryAction::RendererResources),
         );
         pane.handle_event(
-            TerminalSessionEvent::Failed(TerminalSessionFailure::Runtime("stale fatal".to_owned())),
+            TerminalSessionEvent::Failed(TerminalSessionFailure::Runtime(
+                crate::terminal::TerminalFailure::emulator("session-runtime"),
+            )),
             cx,
         );
     });

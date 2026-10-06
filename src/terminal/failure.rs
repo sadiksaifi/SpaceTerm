@@ -33,11 +33,34 @@ pub(crate) enum Recoverability {
     Fatal,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FailureReason {
+    Io(std::io::ErrorKind),
+    OutOfMemory,
+    InvalidValue,
+    OutOfSpace,
+    InvalidInput,
+    InvalidUtf8,
+    CapacityExceeded,
+    ChannelClosed,
+}
+
+impl From<libghostty_vt::Error> for FailureReason {
+    fn from(error: libghostty_vt::Error) -> Self {
+        match error {
+            libghostty_vt::Error::OutOfMemory => Self::OutOfMemory,
+            libghostty_vt::Error::InvalidValue => Self::InvalidValue,
+            libghostty_vt::Error::OutOfSpace { .. } => Self::OutOfSpace,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TerminalFailure {
     class: FailureClass,
     recoverability: Recoverability,
     operation: &'static str,
+    reason: Option<FailureReason>,
 }
 
 impl TerminalFailure {
@@ -47,6 +70,15 @@ impl TerminalFailure {
 
     pub(crate) const fn emulator(operation: &'static str) -> Self {
         Self::new(FailureClass::Emulator, Recoverability::Fatal, operation)
+    }
+
+    pub(crate) fn emulator_error(operation: &'static str, error: libghostty_vt::Error) -> Self {
+        Self::emulator(operation).with_reason(error.into())
+    }
+
+    pub(crate) const fn with_reason(mut self, reason: FailureReason) -> Self {
+        self.reason = Some(reason);
+        self
     }
 
     pub(crate) const fn presentation(operation: &'static str) -> Self {
@@ -82,6 +114,7 @@ impl TerminalFailure {
             class,
             recoverability,
             operation,
+            reason: None,
         }
     }
 
@@ -93,7 +126,7 @@ impl TerminalFailure {
                 | TerminalSessionStartupStage::ReaderThread => Self::pty("session-startup"),
                 TerminalSessionStartupStage::Emulator => Self::emulator("session-startup"),
             },
-            TerminalSessionFailure::Runtime(_) => Self::emulator("session-runtime"),
+            TerminalSessionFailure::Runtime(failure) => failure.clone(),
             TerminalSessionFailure::PtyRead { .. } => Self::pty("read-shell-output"),
             TerminalSessionFailure::ShellWait { .. } => Self::pty("reap-shell-process"),
         }
@@ -109,6 +142,10 @@ impl TerminalFailure {
 
     pub(crate) const fn operation(&self) -> &'static str {
         self.operation
+    }
+
+    pub(crate) const fn reason(&self) -> Option<FailureReason> {
+        self.reason
     }
 
     pub(crate) const fn is_fatal(&self) -> bool {
@@ -207,6 +244,7 @@ enum DiagnosticRecord {
         class: FailureClass,
         recoverability: Recoverability,
         operation: &'static str,
+        reason: Option<FailureReason>,
     },
     UnhandledKey(UnhandledKeyDiagnostic),
 }
@@ -218,8 +256,17 @@ impl DiagnosticRecord {
                 class,
                 recoverability,
                 operation,
+                reason,
             } => {
-                format!("class={class:?} recoverability={recoverability:?} operation={operation}\n")
+                let mut encoded = format!(
+                    "class={class:?} recoverability={recoverability:?} operation={operation}"
+                );
+                if let Some(reason) = reason {
+                    use std::fmt::Write;
+                    let _ = write!(encoded, " reason={reason:?}");
+                }
+                encoded.push('\n');
+                encoded
             }
             Self::UnhandledKey(event) => match event.native_key_code {
                 Some(native_key_code) => format!(
@@ -251,6 +298,7 @@ impl DiagnosticBundle {
             class: failure.class(),
             recoverability: failure.recoverability(),
             operation: failure.operation(),
+            reason: failure.reason(),
         });
         self.enforce_bounds();
     }
@@ -325,15 +373,33 @@ mod tests {
     }
 
     #[test]
-    fn session_mapping_redacts_raw_terminal_content_and_secrets() {
-        let failure = TerminalFailure::from_session(&TerminalSessionFailure::Runtime(
-            "password=hunter2 output=private terminal text".to_owned(),
-        ));
-        let rendered = failure.to_string();
-        assert_eq!(failure.class(), FailureClass::Emulator);
-        assert!(!rendered.contains("hunter2"));
-        assert!(!rendered.contains("private terminal text"));
-        assert!(rendered.contains("restart"));
+    fn session_mapping_preserves_typed_emulator_failure_reasons() {
+        for (error, reason) in [
+            (
+                libghostty_vt::Error::OutOfMemory,
+                FailureReason::OutOfMemory,
+            ),
+            (
+                libghostty_vt::Error::InvalidValue,
+                FailureReason::InvalidValue,
+            ),
+            (
+                libghostty_vt::Error::OutOfSpace { required: 512 },
+                FailureReason::OutOfSpace,
+            ),
+        ] {
+            let failure = TerminalFailure::from_session(&TerminalSessionFailure::Runtime(
+                TerminalFailure::emulator_error("produce-terminal-screen-snapshot", error),
+            ));
+            assert_eq!(
+                (failure.class(), failure.operation(), failure.reason()),
+                (
+                    FailureClass::Emulator,
+                    "produce-terminal-screen-snapshot",
+                    Some(reason)
+                )
+            );
+        }
     }
 
     #[test]
@@ -423,6 +489,10 @@ mod tests {
             crate::terminal::KeyAction::Press,
             Some(u16::MAX),
         ));
+        bundle.record(
+            &TerminalFailure::pty("write-shell-input")
+                .with_reason(FailureReason::Io(std::io::ErrorKind::BrokenPipe)),
+        );
 
         let directory = std::env::temp_dir().join(format!(
             "spaceterm-unhandled-key-diagnostics-{}",
@@ -440,6 +510,7 @@ mod tests {
                 "network_telemetry=false\n",
                 "terminal_content=false\n",
                 "event=UnhandledKey kind=KeyDown action=Press native_key_code=65535\n",
+                "class=Pty recoverability=Fatal operation=write-shell-input reason=Io(BrokenPipe)\n",
             )
         );
         fs::remove_dir_all(directory).unwrap();

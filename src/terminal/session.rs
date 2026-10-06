@@ -1,3 +1,4 @@
+use super::failure::{FailureReason, TerminalFailure};
 use super::native_services::PastePayload;
 use crate::terminal::key::InputModifiers;
 mod clipboard;
@@ -173,7 +174,7 @@ pub(crate) enum TerminalSessionFailure {
         stage: TerminalSessionStartupStage,
         message: String,
     },
-    Runtime(String),
+    Runtime(TerminalFailure),
     PtyRead {
         read_error: String,
         exit_status: String,
@@ -201,7 +202,7 @@ impl fmt::Display for TerminalSessionFailure {
                     "Terminal Session startup failed during {stage}: {message}"
                 )
             }
-            Self::Runtime(message) => write!(formatter, "Terminal runtime failed: {message}"),
+            Self::Runtime(failure) => failure.fmt(formatter),
             Self::PtyRead {
                 read_error,
                 exit_status,
@@ -1410,12 +1411,15 @@ impl TerminalWorker {
                 let size = pty_size(geometry);
                 let winsize_changed = size != pty_size(self.emulator.geometry());
                 let result = (|| {
-                    self.native_pty
-                        .resize(size)
-                        .map_err(|error| format!("failed to resize the native PTY: {error}"))?;
+                    self.native_pty.resize(size).map_err(|error| {
+                        TerminalFailure::pty("resize-pty")
+                            .with_reason(FailureReason::Io(error.kind()))
+                    })?;
                     self.emulator
                         .resize_for_pty(geometry, winsize_changed)
-                        .map_err(|error| format!("failed to resize terminal state: {error}"))
+                        .map_err(|error| {
+                            TerminalFailure::emulator_error("resize-terminal-state", error)
+                        })
                 })();
 
                 match result {
@@ -1608,8 +1612,9 @@ impl TerminalWorker {
                         self.publish_screen()
                     }
                     Err(error) => {
-                        self.send_runtime_failure(format!(
-                            "failed to apply terminal appearance: {error}"
+                        self.send_runtime_failure(TerminalFailure::emulator_error(
+                            "apply-terminal-appearance",
+                            error,
                         ));
                         false
                     }
@@ -1809,7 +1814,7 @@ impl TerminalWorker {
         &mut self,
         limit: usize,
         mut epoch: Option<u64>,
-    ) -> Result<(ReaderEventBatch, bool), String> {
+    ) -> Result<(ReaderEventBatch, bool), TerminalFailure> {
         let mut batch = ReaderEventBatch {
             chunks: Vec::with_capacity(limit),
             reader_stopped: None,
@@ -1824,9 +1829,8 @@ impl TerminalWorker {
                     break;
                 }
                 Err(_) => {
-                    return Err(
-                        "PTY reader notification arrived after its event channel closed".to_owned(),
-                    );
+                    return Err(TerminalFailure::pty("receive-shell-output")
+                        .with_reason(FailureReason::ChannelClosed));
                 }
             }
 
@@ -1958,8 +1962,9 @@ impl TerminalWorker {
             },
         );
         if let Some(error) = self.emulator.graphics_failure() {
-            self.send_runtime_failure(format!(
-                "failed to update terminal graphics storage: {error}"
+            self.send_runtime_failure(TerminalFailure::emulator_error(
+                "update-terminal-graphics-storage",
+                error,
             ));
             return false;
         }
@@ -2123,15 +2128,21 @@ impl TerminalWorker {
 
     fn write_pty(&mut self, bytes: &[u8]) -> bool {
         if self.input.enqueue(bytes).is_err() {
-            let _ = self.send_runtime_failure("PTY input queue is full".to_owned());
+            let _ = self.send_runtime_failure(
+                TerminalFailure::pty("queue-shell-input")
+                    .with_reason(FailureReason::CapacityExceeded),
+            );
             return false;
         }
         self.flush_input()
     }
 
     fn flush_input(&mut self) -> bool {
-        if self.input.drain(&mut self.native_pty).is_err() {
-            let _ = self.send_runtime_failure("failed to write to the shell PTY".to_owned());
+        if let Err(error) = self.input.drain(&mut self.native_pty) {
+            let _ = self.send_runtime_failure(
+                TerminalFailure::pty("write-shell-input")
+                    .with_reason(FailureReason::Io(error.kind())),
+            );
             return false;
         }
         true
@@ -2167,8 +2178,9 @@ impl TerminalWorker {
             }
             Ok(None) => true,
             Err(error) => {
-                self.send_runtime_failure(format!(
-                    "failed to produce terminal screen snapshot: {error}"
+                self.send_runtime_failure(TerminalFailure::emulator_error(
+                    "produce-terminal-screen-snapshot",
+                    error,
                 ));
                 false
             }
@@ -2249,9 +2261,7 @@ impl TerminalWorker {
         let (accessibility, more) = match update {
             Ok(update) => update,
             Err(error) => {
-                self.send_runtime_failure(format!(
-                    "failed to produce terminal accessibility snapshot: {error}"
-                ));
+                self.send_runtime_failure(error);
                 return false;
             }
         };
@@ -2284,8 +2294,9 @@ impl TerminalWorker {
             Ok(true) => self.request_presentation_at(now),
             Ok(false) => true,
             Err(error) => {
-                self.send_runtime_failure(format!(
-                    "failed to release synchronized terminal output: {error}"
+                self.send_runtime_failure(TerminalFailure::emulator_error(
+                    "release-synchronized-terminal-output",
+                    error,
                 ));
                 false
             }
@@ -2296,17 +2307,18 @@ impl TerminalWorker {
         match self.emulator.end_synchronized_output() {
             Ok(_) => true,
             Err(error) => {
-                self.send_runtime_failure(format!(
-                    "failed to end synchronized terminal output: {error}"
+                self.send_runtime_failure(TerminalFailure::emulator_error(
+                    "end-synchronized-terminal-output",
+                    error,
                 ));
                 false
             }
         }
     }
 
-    fn send_runtime_failure(&self, message: String) -> bool {
+    fn send_runtime_failure(&self, failure: TerminalFailure) -> bool {
         self.send_terminal_event(TerminalSessionEvent::Failed(
-            TerminalSessionFailure::Runtime(message),
+            TerminalSessionFailure::Runtime(failure),
         ))
     }
 

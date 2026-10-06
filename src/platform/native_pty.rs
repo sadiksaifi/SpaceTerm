@@ -76,6 +76,10 @@ impl NativePtyOperationFailure {
     pub(crate) fn new(kind: io::ErrorKind) -> Self {
         Self { kind }
     }
+
+    pub(crate) const fn kind(&self) -> io::ErrorKind {
+        self.kind
+    }
 }
 
 #[derive(Debug, Error)]
