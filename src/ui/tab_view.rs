@@ -2422,6 +2422,7 @@ fn render_pane_caption_content(
             controls.child(button)
         };
     }
+    let caption_name = format!("Pane Caption, {}", text.name);
     let caption_content =
         render_caption_identity(pane_id, text, attention, layout, appearance, &paint);
     let focus_pane = move |window: &mut Window, cx: &mut App| {
@@ -2434,7 +2435,7 @@ fn render_pane_caption_content(
     caption_row(appearance, color)
         .id(("pane-caption", pane_id.get()))
         .role(gpui::accesskit::Role::Group)
-        .aria_label(format!("Pane {} Caption", pane_id.get()))
+        .aria_label(caption_name)
         .when(zoomed, |row| row.aria_description("Zoomed Pane"))
         .on_a11y_action(gpui::accesskit::Action::Click, move |_, window, cx| {
             accessibility_focus(window, cx);
@@ -3733,6 +3734,10 @@ mod tests {
         use spaceterm_ui::a11y_testing::{A11yTree, perform};
 
         let (_, view, records, cx) = caption_view(cx);
+        view.update(cx, |view, cx| {
+            view.pane_captions.get_mut(&PaneId::new(1)).unwrap().name = "Primary shell".into();
+            cx.notify();
+        });
         let closes = Rc::new(RefCell::new(Vec::new()));
         let requested_closes = closes.clone();
         view.update(cx, |_, cx| {
@@ -3744,19 +3749,23 @@ mod tests {
             .detach();
         });
         let tree = A11yTree::read(cx);
-        assert_eq!(tree.node("Pane 1 Caption")["aria"]["role"], "Group");
+        assert_eq!(tree.node("Pane Caption, Primary shell")["aria"]["role"], "Group");
         perform(cx, tree.node("Split Right"), Action::Click);
         assert_eq!(view.read_with(cx, |view, _| view.pane_count()), 2);
 
+        view.update(cx, |view, cx| {
+            view.pane_captions.get_mut(&PaneId::new(2)).unwrap().name = "Second shell".into();
+            cx.notify();
+        });
         let tree = A11yTree::read(cx);
-        perform(cx, tree.node("Pane 1 Caption"), Action::Click);
+        perform(cx, tree.node("Pane Caption, Primary shell"), Action::Click);
         assert_eq!(
             view.read_with(cx, |view, _| view.focused_pane_id()),
             PaneId::new(1)
         );
         assert!(cx.update(|window, cx| view.read(cx).focused_terminal_has_input_focus(window, cx)));
         let tree = A11yTree::read(cx);
-        let controls = tree.children(tree.node("Pane 1 Caption"));
+        let controls = tree.children(tree.node("Pane Caption, Primary shell"));
         let control = |name| {
             controls
                 .iter()
@@ -3768,11 +3777,11 @@ mod tests {
         }
         perform(cx, control("Zoom Pane"), Action::Click);
         let tree = A11yTree::read(cx);
-        assert!(tree.find("Pane 2 Caption").is_none());
+        assert!(tree.find("Pane Caption, Second shell").is_none());
         perform(cx, tree.node("Restore Panes"), Action::Click);
         let tree = A11yTree::read(cx);
         let close = tree
-            .children(tree.node("Pane 1 Caption"))
+            .children(tree.node("Pane Caption, Primary shell"))
             .into_iter()
             .find(|node| node["aria"]["label"] == "Close Pane")
             .unwrap();
@@ -3841,6 +3850,12 @@ mod tests {
         split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
         split_test_pane(&view, PaneId::new(1), SplitAxis::Vertical, cx);
 
+        view.update(cx, |view, cx| {
+            for (pane, title) in [(1, "Left upper"), (2, "Right"), (3, "Left lower")] {
+                view.pane_captions.get_mut(&PaneId::new(pane)).unwrap().name = title.into();
+            }
+            cx.notify();
+        });
         let tree = A11yTree::read(cx);
         let panes = tree
             .in_order()
@@ -3874,13 +3889,13 @@ mod tests {
                 node["aria"]["role"] == "Group"
                     && node["aria"]["label"]
                         .as_str()
-                        .is_some_and(|label| label.starts_with("Pane "))
+                        .is_some_and(|label| label.starts_with("Pane Caption, "))
             })
             .map(|node| node["aria"]["label"].as_str().unwrap())
             .collect::<Vec<_>>();
         assert_eq!(
             captions,
-            ["Pane 1 Caption", "Pane 3 Caption", "Pane 2 Caption"]
+            ["Pane Caption, Left upper", "Pane Caption, Left lower", "Pane Caption, Right"]
         );
         assert_eq!(node_id(tree.focused().unwrap()), node_id(panes[1]));
 
@@ -3904,6 +3919,9 @@ mod tests {
         assert_eq!(A11yTree::read(cx).with_role("Terminal").len(), 1);
         cx.update(|window, cx| view.update(cx, |view, cx| view.toggle_zoom(window, cx)));
         assert_eq!(A11yTree::read(cx).with_role("Terminal").len(), 3);
+        let removed_caption = view.read_with(cx, |view, _| {
+            format!("Pane Caption, {}", view.pane_captions[&focused].name)
+        });
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
                 view.close_pane_authorized(focused, window, cx)
@@ -3911,10 +3929,7 @@ mod tests {
         });
         let tree = A11yTree::read(cx);
         assert_eq!(tree.with_role("Terminal").len(), 2);
-        assert!(
-            tree.find(&format!("Pane {} Caption", focused.get()))
-                .is_none()
-        );
+        assert!(tree.find(&removed_caption).is_none());
     }
 
     #[gpui::test]
