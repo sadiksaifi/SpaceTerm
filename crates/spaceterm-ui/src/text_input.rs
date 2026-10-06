@@ -416,6 +416,7 @@ pub enum TextInputChangeSource {
     Keyboard,
     InputMethodComposition,
     Paste,
+    Accessibility,
     Cut,
     Undo,
     Redo,
@@ -1012,6 +1013,22 @@ impl TextInput {
 
     fn can_edit(&self) -> bool {
         self.enabled && self.editable
+    }
+
+    fn set_value_from_accessibility(&mut self, text: &str, cx: &mut Context<Self>) {
+        if !self.can_edit()
+            || text.len() > CLIPBOARD_INSERTION_LIMIT
+            || normalized_single_line_len(text) > self.input_length_limit
+        {
+            return;
+        }
+        self.select_all(cx);
+        self.replace_selection_normalized(
+            text,
+            EditKind::Atomic,
+            TextInputChangeSource::Accessibility,
+            cx,
+        );
     }
 
     fn display_offset_for_source(&self, source_offset: usize) -> usize {
@@ -2121,6 +2138,16 @@ impl Render for TextInput {
                 accesskit::Role::PasswordInput
             })
             .aria_label(self.accessibility_name.clone())
+            .when(can_edit, |editor| {
+                let input = entity.downgrade();
+                editor.on_a11y_action(accesskit::Action::SetValue, move |data, _, cx| {
+                    if let Some(accesskit::ActionData::Value(value)) = data {
+                        let _ = input.update(cx, |input, cx| {
+                            input.set_value_from_accessibility(value, cx);
+                        });
+                    }
+                })
+            })
             .when(exposes_content, |editor| {
                 let value = self.buffer.text.as_str().to_owned();
                 let published = self.accessible_text.clone();

@@ -362,3 +362,75 @@ fn text_areas_publish_one_text_run_per_line_and_accept_selection_requests(cx: &m
         5..9
     );
 }
+
+#[gpui::test]
+fn accessibility_value_writes_replace_text_areas_as_one_user_edit(cx: &mut TestAppContext) {
+    use crate::a11y_testing::{A11yTree, perform_with};
+    use gpui::accesskit::{Action, ActionData};
+
+    let (area, cx) = area(cx, "old", |area| area);
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let recorded = events.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(&area, move |_, event: &TextAreaEvent, _| {
+            recorded.borrow_mut().push(*event)
+        })
+        .detach();
+    });
+    cx.simulate_input("!");
+    let tree = A11yTree::read(cx);
+    perform_with(
+        cx,
+        tree.node("Test area"),
+        Action::SetValue,
+        Some(ActionData::Value("first\r\nsecond".into())),
+    );
+    assert_eq!(value(&area, cx), "first\nsecond");
+    assert_eq!(caret(&area, cx), 12);
+    assert_eq!(
+        *events.borrow(),
+        [
+            TextAreaEvent::ValueChanged { revision: 1 },
+            TextAreaEvent::ValueChanged { revision: 2 }
+        ]
+    );
+    assert_eq!(
+        A11yTree::read(cx).node("Test area")["aria"]["value"],
+        "first\nsecond"
+    );
+    cx.simulate_keystrokes("cmd-z");
+    assert_eq!(value(&area, cx), "!old");
+    cx.simulate_keystrokes("cmd-z");
+    assert_eq!(value(&area, cx), "old");
+}
+
+#[gpui::test]
+fn accessibility_value_writes_respect_text_area_editability_and_limits(cx: &mut TestAppContext) {
+    use crate::a11y_testing::{A11yTree, perform_with, supports};
+    use gpui::accesskit::{Action, ActionData};
+
+    let (area, cx) = area(cx, "old", |area| area.input_length_limit(Some(4)));
+    for data in [
+        None,
+        Some(ActionData::Value("too long".into())),
+        Some(ActionData::Value(
+            "x".repeat(CLIPBOARD_INSERTION_LIMIT + 1).into(),
+        )),
+    ] {
+        let tree = A11yTree::read(cx);
+        perform_with(cx, tree.node("Test area"), Action::SetValue, data);
+        assert_eq!(value(&area, cx), "old");
+        assert_eq!(caret(&area, cx), 0);
+        assert_eq!(area.read_with(cx, |area, _| area.revision()), 0);
+    }
+    area.update(cx, |area, cx| area.set_editable(false, cx));
+    let tree = A11yTree::read(cx);
+    assert!(!supports(tree.node("Test area"), Action::SetValue));
+    perform_with(
+        cx,
+        tree.node("Test area"),
+        Action::SetValue,
+        Some(ActionData::Value("new".into())),
+    );
+    assert_eq!(value(&area, cx), "old");
+}

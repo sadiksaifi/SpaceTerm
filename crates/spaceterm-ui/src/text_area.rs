@@ -439,6 +439,17 @@ impl TextArea {
         self.editable
     }
 
+    fn set_value_from_accessibility(&mut self, text: &str, cx: &mut Context<Self>) {
+        if !self.can_edit()
+            || text.len() > CLIPBOARD_INSERTION_LIMIT
+            || normalize_multiline(text).len() > self.input_length_limit
+        {
+            return;
+        }
+        self.select_all(cx);
+        self.replace_selection(text, EditKind::Atomic, cx);
+    }
+
     fn is_visually_active(&self, window: &Window) -> bool {
         self.focus_handle.is_focused(window) && window.is_window_active()
     }
@@ -1461,6 +1472,16 @@ impl Render for TextArea {
             .id(self.id.clone())
             .role(accesskit::Role::MultilineTextInput)
             .aria_label(self.accessibility_name.clone())
+            .when(can_edit, |editor| {
+                let area = entity.downgrade();
+                editor.on_a11y_action(accesskit::Action::SetValue, move |data, _, cx| {
+                    if let Some(accesskit::ActionData::Value(value)) = data {
+                        let _ = area.update(cx, |area, cx| {
+                            area.set_value_from_accessibility(value, cx);
+                        });
+                    }
+                })
+            })
             .aria_value(SharedString::from(self.buffer.text.as_str().to_owned()))
             .a11y_synthetic_children({
                 let value = self.buffer.text.as_str().to_owned();
