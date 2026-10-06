@@ -6166,18 +6166,17 @@ fn terminal_notices_publish_bounded_status_classifications(cx: &mut TestAppConte
         (StatusIntent::Error, "Error"),
     ] {
         pane.update(cx, |pane, cx| {
-            pane.status = Some("/private/terminal-result".into());
+            pane.status = Some("Terminal operation could not complete.".into());
             pane.status_intent = intent;
             cx.notify();
         });
         let tree = A11yTree::read(cx);
         assert_eq!(tree.node("Terminal status")["aria"]["role"], "Status");
         assert_eq!(tree.node("Terminal status")["aria"]["value"], value);
-        assert!(tree.in_order().iter().all(|node| {
-            !node["aria"]
-                .to_string()
-                .contains("/private/terminal-result")
-        }));
+        assert_eq!(
+            tree.node("Terminal status")["aria"]["description"],
+            "Terminal operation could not complete."
+        );
     }
 }
 

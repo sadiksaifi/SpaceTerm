@@ -4662,6 +4662,7 @@ impl Render for TerminalPane {
                                 .id("terminal-status")
                                 .role(gpui::accesskit::Role::Status)
                                 .aria_label("Terminal status")
+                                .aria_description(status.clone())
                                 .aria_value(status_intent.map_or("Terminal Session exited", StatusIntent::label))
                                 .debug_selector(|| "terminal-status".to_owned())
                                 .absolute()
