@@ -681,168 +681,6 @@ fn install_headless_window_actions(cx: &mut App, host: Rc<HostComposition>) {
     });
 }
 
-#[cfg(test)]
-mod tests {
-    use gpui::{Action, ClipboardItem, Keystroke, TestAppContext};
-
-    use super::*;
-    use crate::terminal::testing::{TestTerminalSessionFactory, TestTerminalSessionRecords};
-    use crate::terminal::{SelectionCopy, WorkspaceTerminalSessionFactory};
-    use crate::ui::TerminalPane;
-
-    fn application_menu() -> Rc<dyn ApplicationMenuAdapter> {
-        Rc::new(
-            crate::platform::application_menu::testing::RecordingApplicationMenuAdapter::default(),
-        )
-    }
-
-    fn application_quit() -> Rc<dyn ApplicationQuitAdapter> {
-        Rc::new(
-            crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
-        )
-    }
-
-    #[gpui::test]
-    fn last_window_policy_waits_for_all_windows_and_requests_quit_once(cx: &mut TestAppContext) {
-        struct Quit(std::cell::Cell<usize>);
-        impl ApplicationQuitAdapter for Quit {
-            fn last_window_policy(&self) -> crate::platform::application_quit::LastWindowPolicy {
-                crate::platform::application_quit::LastWindowPolicy::Quit
-            }
-            fn install(
-                &self,
-                _: ApplicationQuitHandler,
-            ) -> Result<(), crate::platform::application_quit::ApplicationQuitError> {
-                Ok(())
-            }
-            fn request_quit(&self, _: &mut App) {
-                self.0.set(self.0.get() + 1);
-            }
-            fn confirm_quit(&self, _: &mut App) {}
-        }
-        let quit = Rc::new(Quit(std::cell::Cell::new(0)));
-        cx.update(crate::ui::init).unwrap();
-        cx.update(|cx| init(cx, application_menu(), quit.clone()).unwrap());
-        let first = cx.add_window(|_, _| gpui::EmptyView);
-        let second = cx.add_window(|_, _| gpui::EmptyView);
-        cx.update(|cx| {
-            first
-                .update(cx, |_, window, _| window.remove_window())
-                .unwrap();
-        });
-        cx.run_until_parked();
-        assert_eq!(quit.0.get(), 0);
-        cx.update(|cx| {
-            second
-                .update(cx, |_, window, _| window.remove_window())
-                .unwrap();
-        });
-        cx.run_until_parked();
-        assert_eq!(quit.0.get(), 1);
-    }
-
-    #[gpui::test]
-    fn configured_shortcuts_should_bind_global_application_actions(cx: &mut TestAppContext) {
-        cx.update(crate::ui::init).expect("UI initialization");
-        cx.update(|cx| init(cx, application_menu(), application_quit()).unwrap());
-        let expected = [
-            ("cmd-q", QuitApplication.name()),
-            ("cmd-h", HideApplication.name()),
-            ("alt-cmd-h", HideOtherApplications.name()),
-            ("cmd-m", MinimizeWindow.name()),
-            ("ctrl-cmd-f", ToggleFullScreen.name()),
-            ("fn-f", ToggleFullScreen.name()),
-        ];
-        let actual = cx.update(|cx| {
-            expected
-                .iter()
-                .map(|(shortcut, _)| {
-                    let keystroke = Keystroke::parse(shortcut).unwrap_or_else(|error| {
-                        panic!("invalid test shortcut {shortcut}: {error}")
-                    });
-                    let bindings = cx.all_bindings_for_input(&[keystroke]);
-                    (
-                        *shortcut,
-                        bindings
-                            .last()
-                            .map(|binding| binding.action().name())
-                            .unwrap_or(""),
-                    )
-                })
-                .collect::<Vec<_>>()
-        });
-
-        assert_eq!(actual.as_slice(), expected);
-    }
-
-    #[gpui::test]
-    fn native_copy_command_dispatches_semantic_copy_to_the_terminal(cx: &mut TestAppContext) {
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
-        cx.update(|cx| init(cx, application_menu(), application_quit()).unwrap());
-        let records = TestTerminalSessionRecords::default();
-        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
-            TestTerminalSessionFactory::new(records.clone()).with_selection_copy_response(Ok(
-                Some(SelectionCopy {
-                    plain_text: "native command copy".to_owned(),
-                    html: None,
-                }),
-            )),
-        );
-        let session_factory = WorkspaceTerminalSessionFactory::new_local(
-            session_factory,
-            crate::terminal::testing::test_local_directory(PathBuf::from(
-                "/tmp/spaceterm-native-copy-command-test",
-            )),
-        );
-        let (pane, cx) =
-            cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
-        cx.update(|window, cx| {
-            window.activate_window();
-            pane.update(cx, |pane, cx| pane.focus(window, cx));
-        });
-        cx.run_until_parked();
-        cx.write_to_clipboard(ClipboardItem::new_string("stale clipboard".to_owned()));
-
-        cx.simulate_keystrokes("cmd-c");
-        cx.run_until_parked();
-
-        assert_eq!(
-            cx.read_from_clipboard().and_then(|item| item.text()),
-            Some("native command copy".to_owned())
-        );
-    }
-
-    #[gpui::test]
-    fn native_application_actions_should_dispatch_through_the_application_menu_adapter(
-        cx: &mut TestAppContext,
-    ) {
-        let menu = Rc::new(
-            crate::platform::application_menu::testing::RecordingApplicationMenuAdapter::default(),
-        );
-        let adapter: Rc<dyn ApplicationMenuAdapter> = menu.clone();
-        cx.update(crate::ui::init).unwrap();
-        cx.update(|cx| init(cx, adapter, application_quit()).unwrap());
-
-        cx.update(|cx| {
-            cx.dispatch_action(&ShowAboutApplication);
-            cx.dispatch_action(&OpenApplicationHelp);
-            cx.dispatch_action(&ZoomActiveWindow);
-            cx.dispatch_action(&BringAllWindowsToFront);
-        });
-
-        assert_eq!(
-            menu.commands(),
-            [
-                ApplicationMenuCommand::ShowAbout,
-                ApplicationMenuCommand::OpenHelp,
-                ApplicationMenuCommand::ZoomActiveWindow,
-                ApplicationMenuCommand::BringAllWindowsToFront,
-            ]
-        );
-    }
-}
-
 #[cfg_attr(
     not(target_os = "macos"),
     allow(
@@ -1204,6 +1042,168 @@ fn open_initial_workspace(
     #[cfg(feature = "developer-tools")]
     crate::ui::developer_workbench::open_at_launch(cx);
     Ok(workspace)
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{Action, ClipboardItem, Keystroke, TestAppContext};
+
+    use super::*;
+    use crate::terminal::testing::{TestTerminalSessionFactory, TestTerminalSessionRecords};
+    use crate::terminal::{SelectionCopy, WorkspaceTerminalSessionFactory};
+    use crate::ui::TerminalPane;
+
+    fn application_menu() -> Rc<dyn ApplicationMenuAdapter> {
+        Rc::new(
+            crate::platform::application_menu::testing::RecordingApplicationMenuAdapter::default(),
+        )
+    }
+
+    fn application_quit() -> Rc<dyn ApplicationQuitAdapter> {
+        Rc::new(
+            crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
+        )
+    }
+
+    #[gpui::test]
+    fn last_window_policy_waits_for_all_windows_and_requests_quit_once(cx: &mut TestAppContext) {
+        struct Quit(std::cell::Cell<usize>);
+        impl ApplicationQuitAdapter for Quit {
+            fn last_window_policy(&self) -> crate::platform::application_quit::LastWindowPolicy {
+                crate::platform::application_quit::LastWindowPolicy::Quit
+            }
+            fn install(
+                &self,
+                _: ApplicationQuitHandler,
+            ) -> Result<(), crate::platform::application_quit::ApplicationQuitError> {
+                Ok(())
+            }
+            fn request_quit(&self, _: &mut App) {
+                self.0.set(self.0.get() + 1);
+            }
+            fn confirm_quit(&self, _: &mut App) {}
+        }
+        let quit = Rc::new(Quit(std::cell::Cell::new(0)));
+        cx.update(crate::ui::init).unwrap();
+        cx.update(|cx| init(cx, application_menu(), quit.clone()).unwrap());
+        let first = cx.add_window(|_, _| gpui::EmptyView);
+        let second = cx.add_window(|_, _| gpui::EmptyView);
+        cx.update(|cx| {
+            first
+                .update(cx, |_, window, _| window.remove_window())
+                .unwrap();
+        });
+        cx.run_until_parked();
+        assert_eq!(quit.0.get(), 0);
+        cx.update(|cx| {
+            second
+                .update(cx, |_, window, _| window.remove_window())
+                .unwrap();
+        });
+        cx.run_until_parked();
+        assert_eq!(quit.0.get(), 1);
+    }
+
+    #[gpui::test]
+    fn configured_shortcuts_should_bind_global_application_actions(cx: &mut TestAppContext) {
+        cx.update(crate::ui::init).expect("UI initialization");
+        cx.update(|cx| init(cx, application_menu(), application_quit()).unwrap());
+        let expected = [
+            ("cmd-q", QuitApplication.name()),
+            ("cmd-h", HideApplication.name()),
+            ("alt-cmd-h", HideOtherApplications.name()),
+            ("cmd-m", MinimizeWindow.name()),
+            ("ctrl-cmd-f", ToggleFullScreen.name()),
+            ("fn-f", ToggleFullScreen.name()),
+        ];
+        let actual = cx.update(|cx| {
+            expected
+                .iter()
+                .map(|(shortcut, _)| {
+                    let keystroke = Keystroke::parse(shortcut).unwrap_or_else(|error| {
+                        panic!("invalid test shortcut {shortcut}: {error}")
+                    });
+                    let bindings = cx.all_bindings_for_input(&[keystroke]);
+                    (
+                        *shortcut,
+                        bindings
+                            .last()
+                            .map(|binding| binding.action().name())
+                            .unwrap_or(""),
+                    )
+                })
+                .collect::<Vec<_>>()
+        });
+
+        assert_eq!(actual.as_slice(), expected);
+    }
+
+    #[gpui::test]
+    fn native_copy_command_dispatches_semantic_copy_to_the_terminal(cx: &mut TestAppContext) {
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
+        cx.update(|cx| init(cx, application_menu(), application_quit()).unwrap());
+        let records = TestTerminalSessionRecords::default();
+        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
+            TestTerminalSessionFactory::new(records.clone()).with_selection_copy_response(Ok(
+                Some(SelectionCopy {
+                    plain_text: "native command copy".to_owned(),
+                    html: None,
+                }),
+            )),
+        );
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            session_factory,
+            crate::terminal::testing::test_local_directory(PathBuf::from(
+                "/tmp/spaceterm-native-copy-command-test",
+            )),
+        );
+        let (pane, cx) =
+            cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
+        cx.update(|window, cx| {
+            window.activate_window();
+            pane.update(cx, |pane, cx| pane.focus(window, cx));
+        });
+        cx.run_until_parked();
+        cx.write_to_clipboard(ClipboardItem::new_string("stale clipboard".to_owned()));
+
+        cx.simulate_keystrokes("cmd-c");
+        cx.run_until_parked();
+
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("native command copy".to_owned())
+        );
+    }
+
+    #[gpui::test]
+    fn native_application_actions_should_dispatch_through_the_application_menu_adapter(
+        cx: &mut TestAppContext,
+    ) {
+        let menu = Rc::new(
+            crate::platform::application_menu::testing::RecordingApplicationMenuAdapter::default(),
+        );
+        let adapter: Rc<dyn ApplicationMenuAdapter> = menu.clone();
+        cx.update(crate::ui::init).unwrap();
+        cx.update(|cx| init(cx, adapter, application_quit()).unwrap());
+
+        cx.update(|cx| {
+            cx.dispatch_action(&ShowAboutApplication);
+            cx.dispatch_action(&OpenApplicationHelp);
+            cx.dispatch_action(&ZoomActiveWindow);
+            cx.dispatch_action(&BringAllWindowsToFront);
+        });
+
+        assert_eq!(
+            menu.commands(),
+            [
+                ApplicationMenuCommand::ShowAbout,
+                ApplicationMenuCommand::OpenHelp,
+                ApplicationMenuCommand::ZoomActiveWindow,
+                ApplicationMenuCommand::BringAllWindowsToFront,
+            ]
+        );
+    }
 }
 
 #[cfg(test)]

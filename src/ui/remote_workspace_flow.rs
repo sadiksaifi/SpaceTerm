@@ -1672,7 +1672,12 @@ impl Render for RemoteWorkspaceFlow {
 }
 
 #[cfg(test)]
-pub(super) mod tests {
+pub(super) use tests::{
+    cancel, completion, emit_completion, pinned, select_host_destination, start,
+};
+
+#[cfg(test)]
+mod tests {
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::rc::Rc;

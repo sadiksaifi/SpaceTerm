@@ -3370,7 +3370,7 @@ fn grid_rebuilds_for_output_selection_and_font_changes_and_composes_the_cursor(
     paints = after_selection;
     assert_composition(cx, true);
     let assert_selected_row_reused = pane.read_with(cx, |pane, cx| {
-        crate::ui::terminal_element::tests::assert_geometry_reused(pane.render_cache.read(cx), 0)
+        crate::ui::terminal_element::assert_geometry_reused(pane.render_cache.read(cx), 0)
     });
     let selected_cursor_storage =
         pane.read_with(cx, |pane, _| pane.grid_presentation.cursor_storage());
@@ -8729,7 +8729,7 @@ fn blink_frames_reuse_stable_geometry_and_decorations_through_the_pane_clock(
     });
     cx.run_until_parked();
     let assert_reused = pane.read_with(cx, |pane, cx| {
-        crate::ui::terminal_element::tests::assert_geometry_reused(pane.render_cache.read(cx), 1)
+        crate::ui::terminal_element::assert_geometry_reused(pane.render_cache.read(cx), 1)
     });
     let decoration_count = |cx: &mut VisualTestContext| {
         cx.update(|window, _| {
@@ -8767,7 +8767,7 @@ fn headless_glyph_pane() -> (
         fail_glyph: Default::default(),
         fail_at_lookup: AtomicUsize::new(0),
     });
-    let text_system = Arc::new(crate::ui::terminal_element::tests::RasterTextSystem {
+    let text_system = Arc::new(crate::ui::terminal_element::RasterTextSystem {
         base: gpui::NoopTextSystem,
         bounds: Bounds::new(
             point(gpui::DevicePixels(0), gpui::DevicePixels(0)),

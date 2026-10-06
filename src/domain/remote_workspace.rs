@@ -165,6 +165,97 @@ impl<T> RemoteRestartBatch<T> {
     }
 }
 
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+/// A typed rejection of a Remote Pane disconnect or restart lifecycle operation.
+///
+/// Errors leave the Pane's session epoch, presentation, and input state unchanged.
+pub(crate) enum RemotePaneLifecycleError {
+    #[error("the Pane does not own a remote Terminal Session")]
+    LocalPane,
+    #[error("remote connection generation {received} is stale; current generation is {current}")]
+    StaleGeneration { current: u64, received: u64 },
+    #[error("the remote Pane is not disconnected")]
+    NotDisconnected,
+    #[error("the prepared remote restart no longer matches the Pane session epoch")]
+    SessionChanged,
+    #[error(transparent)]
+    ChannelUnavailable(#[from] RemoteChannelUnavailable),
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct RemotePaneFacts {
+    pub(crate) remote: bool,
+    pub(crate) generation: Option<u64>,
+    pub(crate) disconnected: bool,
+    pub(crate) epoch: u64,
+}
+
+impl RemotePaneFacts {
+    pub(crate) fn validate_generation(
+        self,
+        generation: u64,
+    ) -> Result<(), RemotePaneLifecycleError> {
+        if !self.remote {
+            return Err(RemotePaneLifecycleError::LocalPane);
+        }
+        if let Some(current) = self.generation
+            && generation < current
+        {
+            return Err(RemotePaneLifecycleError::StaleGeneration {
+                current,
+                received: generation,
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_successor(self, generation: u64) -> Result<(), RemotePaneLifecycleError> {
+        if !self.disconnected {
+            return Err(RemotePaneLifecycleError::NotDisconnected);
+        }
+        let current = self
+            .generation
+            .ok_or(RemotePaneLifecycleError::NotDisconnected)?;
+        if generation <= current {
+            return Err(RemotePaneLifecycleError::StaleGeneration {
+                current,
+                received: generation,
+            });
+        }
+        Ok(())
+    }
+}
+
+pub(crate) struct RemoteRestartAuthority {
+    generation: u64,
+    expected_epoch: u64,
+}
+
+impl RemoteRestartAuthority {
+    pub(crate) fn prepare(
+        facts: RemotePaneFacts,
+        generation: u64,
+    ) -> Result<Self, RemotePaneLifecycleError> {
+        facts.validate_generation(generation)?;
+        facts.validate_successor(generation)?;
+        Ok(Self {
+            generation,
+            expected_epoch: facts.epoch,
+        })
+    }
+
+    pub(crate) fn validate(&self, facts: RemotePaneFacts) -> Result<(), RemotePaneLifecycleError> {
+        if facts.epoch != self.expected_epoch {
+            return Err(RemotePaneLifecycleError::SessionChanged);
+        }
+        facts.validate_successor(self.generation)
+    }
+
+    pub(crate) const fn generation(&self) -> u64 {
+        self.generation
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,96 +363,5 @@ mod tests {
             state.begin_reconnect(),
             Some(RemoteConnectionReduction::Illegal)
         );
-    }
-}
-
-#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
-/// A typed rejection of a Remote Pane disconnect or restart lifecycle operation.
-///
-/// Errors leave the Pane's session epoch, presentation, and input state unchanged.
-pub(crate) enum RemotePaneLifecycleError {
-    #[error("the Pane does not own a remote Terminal Session")]
-    LocalPane,
-    #[error("remote connection generation {received} is stale; current generation is {current}")]
-    StaleGeneration { current: u64, received: u64 },
-    #[error("the remote Pane is not disconnected")]
-    NotDisconnected,
-    #[error("the prepared remote restart no longer matches the Pane session epoch")]
-    SessionChanged,
-    #[error(transparent)]
-    ChannelUnavailable(#[from] RemoteChannelUnavailable),
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct RemotePaneFacts {
-    pub(crate) remote: bool,
-    pub(crate) generation: Option<u64>,
-    pub(crate) disconnected: bool,
-    pub(crate) epoch: u64,
-}
-
-impl RemotePaneFacts {
-    pub(crate) fn validate_generation(
-        self,
-        generation: u64,
-    ) -> Result<(), RemotePaneLifecycleError> {
-        if !self.remote {
-            return Err(RemotePaneLifecycleError::LocalPane);
-        }
-        if let Some(current) = self.generation
-            && generation < current
-        {
-            return Err(RemotePaneLifecycleError::StaleGeneration {
-                current,
-                received: generation,
-            });
-        }
-        Ok(())
-    }
-
-    fn validate_successor(self, generation: u64) -> Result<(), RemotePaneLifecycleError> {
-        if !self.disconnected {
-            return Err(RemotePaneLifecycleError::NotDisconnected);
-        }
-        let current = self
-            .generation
-            .ok_or(RemotePaneLifecycleError::NotDisconnected)?;
-        if generation <= current {
-            return Err(RemotePaneLifecycleError::StaleGeneration {
-                current,
-                received: generation,
-            });
-        }
-        Ok(())
-    }
-}
-
-pub(crate) struct RemoteRestartAuthority {
-    generation: u64,
-    expected_epoch: u64,
-}
-
-impl RemoteRestartAuthority {
-    pub(crate) fn prepare(
-        facts: RemotePaneFacts,
-        generation: u64,
-    ) -> Result<Self, RemotePaneLifecycleError> {
-        facts.validate_generation(generation)?;
-        facts.validate_successor(generation)?;
-        Ok(Self {
-            generation,
-            expected_epoch: facts.epoch,
-        })
-    }
-
-    pub(crate) fn validate(&self, facts: RemotePaneFacts) -> Result<(), RemotePaneLifecycleError> {
-        if facts.epoch != self.expected_epoch {
-            return Err(RemotePaneLifecycleError::SessionChanged);
-        }
-        facts.validate_successor(self.generation)
-    }
-
-    pub(crate) const fn generation(&self) -> u64 {
-        self.generation
     }
 }

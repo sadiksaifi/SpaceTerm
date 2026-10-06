@@ -392,6 +392,421 @@ impl WorkerSchedules {
     }
 }
 
+struct AccessibilityPresentationSchedule {
+    presentable: bool,
+    pending: bool,
+    seed_required: bool,
+    not_before: Instant,
+    demand_request: Option<Instant>,
+}
+
+impl AccessibilityPresentationSchedule {
+    fn new(now: Instant) -> Self {
+        Self {
+            presentable: true,
+            pending: false,
+            seed_required: true,
+            not_before: now,
+            demand_request: None,
+        }
+    }
+
+    fn note_screen_published(&mut self) {
+        if self.seed_required || self.demand_request.is_some() {
+            self.pending = true;
+        }
+    }
+
+    fn activate_demand(&mut self, requested_at: Instant, now: Instant) -> bool {
+        if !self.presentable {
+            return false;
+        }
+        let was_inactive = self.demand_request.is_none();
+        self.demand_request = Some(requested_at);
+        if was_inactive {
+            self.pending = true;
+            self.not_before = now;
+        }
+        true
+    }
+
+    fn set_presentable(&mut self, presentable: bool, now: Instant) {
+        if presentable && !self.presentable {
+            self.not_before = now;
+            self.pending = self.seed_required;
+        } else if !presentable {
+            self.pending = false;
+            self.demand_request = None;
+        }
+        self.presentable = presentable;
+    }
+
+    fn mark_presented(&mut self, now: Instant, complete: bool) {
+        self.pending = false;
+        if complete {
+            self.seed_required = false;
+        }
+        self.not_before = now + ACCESSIBILITY_PRESENTATION_INTERVAL;
+    }
+
+    fn disable(&mut self) {
+        self.pending = false;
+        self.seed_required = false;
+        self.demand_request = None;
+    }
+
+    fn deadline(&self) -> Option<Instant> {
+        if !self.presentable {
+            return None;
+        }
+        self.pending.then_some(self.not_before)
+    }
+
+    fn take_due(&mut self, now: Instant) -> bool {
+        if self.presentable && self.pending && now >= self.not_before {
+            self.pending = false;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+struct PresentationSchedule {
+    presentable: bool,
+    pending: bool,
+    not_before: Instant,
+}
+
+impl PresentationSchedule {
+    fn new(now: Instant) -> Self {
+        Self {
+            presentable: true,
+            pending: false,
+            not_before: now,
+        }
+    }
+
+    fn request(&mut self) {
+        self.pending = true;
+    }
+
+    fn request_accumulated(&mut self, now: Instant) {
+        if self.presentable && !self.pending {
+            // TUI redraws commonly erase and rewrite a row in adjacent PTY reads. Hold the first
+            // read briefly so the renderer does not publish the intermediate erased state.
+            self.not_before = self
+                .not_before
+                .max(now + PRESENTATION_ACCUMULATION_INTERVAL);
+        }
+        self.request();
+    }
+
+    fn set_presentable(&mut self, presentable: bool, now: Instant) {
+        if presentable && !self.presentable {
+            self.not_before = now;
+        }
+        self.presentable = presentable;
+    }
+
+    fn mark_presented(&mut self, now: Instant) {
+        self.pending = false;
+        self.not_before = now + PRESENTATION_INTERVAL;
+    }
+
+    fn deadline(&self) -> Option<Instant> {
+        (self.presentable && self.pending).then_some(self.not_before)
+    }
+
+    fn take_due(&mut self, now: Instant) -> bool {
+        if self.deadline().is_some_and(|deadline| now >= deadline) {
+            self.take_pending()
+        } else {
+            false
+        }
+    }
+
+    fn take_pending(&mut self) -> bool {
+        if self.pending {
+            self.pending = false;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn take_visible_pending(&mut self) -> bool {
+        self.presentable && self.take_pending()
+    }
+}
+
+#[derive(Default)]
+struct AccessibilityContinuationSchedule {
+    pending: bool,
+    normal_commands: u8,
+}
+
+impl AccessibilityContinuationSchedule {
+    fn update(&mut self, more: bool) {
+        self.pending = more;
+        if !more {
+            self.normal_commands = 0;
+        }
+    }
+
+    fn note_normal_command(&mut self) {
+        if self.pending {
+            self.normal_commands = self.normal_commands.saturating_add(1);
+        }
+    }
+
+    fn must_continue(&self) -> bool {
+        self.pending && self.normal_commands >= ACCESSIBILITY_NORMAL_COMMAND_BURST
+    }
+
+    fn take(&mut self) -> bool {
+        if !self.pending {
+            return false;
+        }
+        self.pending = false;
+        self.normal_commands = 0;
+        true
+    }
+}
+
+struct HiddenInputSchedule {
+    active: bool,
+    deadline: Instant,
+    settle: bool,
+}
+
+impl HiddenInputSchedule {
+    fn new(now: Instant) -> Self {
+        Self {
+            active: false,
+            deadline: now,
+            settle: false,
+        }
+    }
+
+    fn transition(&mut self, now: Instant) {
+        self.deadline = now;
+        // Programs may write their prompt before changing termios. Check again once the
+        // transition has settled, then return to the long fallback for silent changes.
+        self.settle = true;
+    }
+
+    fn update(
+        &mut self,
+        now: Instant,
+        result: Result<bool, NativePtyOperationFailure>,
+    ) -> Option<bool> {
+        self.deadline = now
+            + if std::mem::take(&mut self.settle) {
+                HIDDEN_INPUT_SETTLE_INTERVAL
+            } else {
+                HIDDEN_INPUT_IDLE_INTERVAL
+            };
+        let active = match result {
+            Ok(active) => active,
+            Err(_) => {
+                eprintln!("PTY hidden-input inspection failed; releasing secure input");
+                false
+            }
+        };
+        if self.active == active {
+            None
+        } else {
+            self.active = active;
+            Some(active)
+        }
+    }
+}
+
+#[derive(Default)]
+struct SelectionAutoscrollSchedule {
+    deadline: Option<Instant>,
+}
+
+impl SelectionAutoscrollSchedule {
+    fn update(&mut self, now: Instant, interval: Option<Duration>) {
+        if let Some(interval) = interval {
+            // Pointer motion updates the drag position without delaying its clock.
+            self.deadline.get_or_insert(now + interval);
+        } else {
+            self.cancel();
+        }
+    }
+
+    fn deadline(&self) -> Option<Instant> {
+        self.deadline
+    }
+
+    fn cancel(&mut self) {
+        self.deadline = None;
+    }
+
+    fn take_due(&mut self, now: Instant) -> bool {
+        if self.deadline.is_some_and(|deadline| now >= deadline) {
+            self.deadline = None;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+struct ResizeMailbox {
+    pending: Arc<Mutex<Option<TerminalGeometry>>>,
+}
+
+impl ResizeMailbox {
+    fn replace(&self, geometry: TerminalGeometry) -> bool {
+        let mut pending = self.lock();
+        let should_notify = pending.is_none();
+        *pending = Some(geometry);
+        should_notify
+    }
+
+    fn take(&self) -> Option<TerminalGeometry> {
+        self.lock().take()
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Option<TerminalGeometry>> {
+        self.pending.lock().unwrap_or_else(|poisoned| {
+            eprintln!("terminal resize mailbox recovered after a worker panic");
+            poisoned.into_inner()
+        })
+    }
+}
+
+#[derive(Debug)]
+pub(super) enum FindQueryUpdate {
+    Set(FindQueryGeneration, String),
+    End(FindQueryGeneration),
+}
+
+#[derive(Clone, Default)]
+struct FindQueryMailbox {
+    pending: Arc<Mutex<Option<FindQueryUpdate>>>,
+}
+
+#[derive(Clone, Default)]
+struct TerminalAppearanceMailbox {
+    pending: Arc<Mutex<Option<TerminalAppearanceUpdate>>>,
+}
+
+impl TerminalAppearanceMailbox {
+    fn replace(&self, update: TerminalAppearanceUpdate) -> bool {
+        let mut pending = self.lock();
+        let should_notify = pending.is_none();
+        *pending = Some(update);
+        should_notify
+    }
+
+    fn take(&self) -> Option<TerminalAppearanceUpdate> {
+        self.lock().take()
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Option<TerminalAppearanceUpdate>> {
+        self.pending.lock().unwrap_or_else(|poisoned| {
+            eprintln!("terminal appearance mailbox recovered after a worker panic");
+            poisoned.into_inner()
+        })
+    }
+}
+
+impl FindQueryMailbox {
+    fn replace(&self, update: FindQueryUpdate) -> bool {
+        let mut pending = self.lock();
+        let should_notify = pending.is_none();
+        *pending = Some(update);
+        should_notify
+    }
+
+    fn take(&self) -> Option<FindQueryUpdate> {
+        self.lock().take()
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Option<FindQueryUpdate>> {
+        self.pending.lock().unwrap_or_else(|poisoned| {
+            eprintln!("terminal Find mailbox recovered after a worker panic");
+            poisoned.into_inner()
+        })
+    }
+}
+
+#[derive(Clone, Default)]
+struct AccessibilityDemandMailbox {
+    state: Arc<Mutex<AccessibilityDemandMailboxState>>,
+}
+
+struct AccessibilityDemandMailboxState {
+    latest_request: Option<Instant>,
+    notified: bool,
+    enabled: bool,
+}
+
+impl Default for AccessibilityDemandMailboxState {
+    fn default() -> Self {
+        Self {
+            latest_request: None,
+            notified: false,
+            enabled: true,
+        }
+    }
+}
+
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "only a native accessibility Adapter requests accessibility work"
+    )
+)]
+impl AccessibilityDemandMailbox {
+    fn request(&self, requested_at: Instant) -> bool {
+        let mut state = self.lock();
+        if !state.enabled {
+            return false;
+        }
+        state.latest_request = Some(requested_at);
+        if state.notified {
+            false
+        } else {
+            state.notified = true;
+            true
+        }
+    }
+
+    fn latest_request(&self) -> Option<Instant> {
+        self.lock().latest_request
+    }
+
+    fn clear(&self) {
+        let mut state = self.lock();
+        state.latest_request = None;
+        state.notified = false;
+    }
+
+    fn set_enabled(&self, enabled: bool) {
+        let mut state = self.lock();
+        state.enabled = enabled;
+        if !enabled {
+            state.latest_request = None;
+            state.notified = false;
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, AccessibilityDemandMailboxState> {
+        self.state.lock().unwrap_or_else(|poisoned| {
+            eprintln!("terminal accessibility demand mailbox recovered after a worker panic");
+            poisoned.into_inner()
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -894,420 +1309,5 @@ mod tests {
         let mut next = crate::terminal::test_terminal_appearance_update();
         next.generation = AppearanceGeneration::new(4);
         assert!(input.enqueue_terminal_appearance(next));
-    }
-}
-
-struct AccessibilityPresentationSchedule {
-    presentable: bool,
-    pending: bool,
-    seed_required: bool,
-    not_before: Instant,
-    demand_request: Option<Instant>,
-}
-
-impl AccessibilityPresentationSchedule {
-    fn new(now: Instant) -> Self {
-        Self {
-            presentable: true,
-            pending: false,
-            seed_required: true,
-            not_before: now,
-            demand_request: None,
-        }
-    }
-
-    fn note_screen_published(&mut self) {
-        if self.seed_required || self.demand_request.is_some() {
-            self.pending = true;
-        }
-    }
-
-    fn activate_demand(&mut self, requested_at: Instant, now: Instant) -> bool {
-        if !self.presentable {
-            return false;
-        }
-        let was_inactive = self.demand_request.is_none();
-        self.demand_request = Some(requested_at);
-        if was_inactive {
-            self.pending = true;
-            self.not_before = now;
-        }
-        true
-    }
-
-    fn set_presentable(&mut self, presentable: bool, now: Instant) {
-        if presentable && !self.presentable {
-            self.not_before = now;
-            self.pending = self.seed_required;
-        } else if !presentable {
-            self.pending = false;
-            self.demand_request = None;
-        }
-        self.presentable = presentable;
-    }
-
-    fn mark_presented(&mut self, now: Instant, complete: bool) {
-        self.pending = false;
-        if complete {
-            self.seed_required = false;
-        }
-        self.not_before = now + ACCESSIBILITY_PRESENTATION_INTERVAL;
-    }
-
-    fn disable(&mut self) {
-        self.pending = false;
-        self.seed_required = false;
-        self.demand_request = None;
-    }
-
-    fn deadline(&self) -> Option<Instant> {
-        if !self.presentable {
-            return None;
-        }
-        self.pending.then_some(self.not_before)
-    }
-
-    fn take_due(&mut self, now: Instant) -> bool {
-        if self.presentable && self.pending && now >= self.not_before {
-            self.pending = false;
-            true
-        } else {
-            false
-        }
-    }
-}
-
-struct PresentationSchedule {
-    presentable: bool,
-    pending: bool,
-    not_before: Instant,
-}
-
-impl PresentationSchedule {
-    fn new(now: Instant) -> Self {
-        Self {
-            presentable: true,
-            pending: false,
-            not_before: now,
-        }
-    }
-
-    fn request(&mut self) {
-        self.pending = true;
-    }
-
-    fn request_accumulated(&mut self, now: Instant) {
-        if self.presentable && !self.pending {
-            // TUI redraws commonly erase and rewrite a row in adjacent PTY reads. Hold the first
-            // read briefly so the renderer does not publish the intermediate erased state.
-            self.not_before = self
-                .not_before
-                .max(now + PRESENTATION_ACCUMULATION_INTERVAL);
-        }
-        self.request();
-    }
-
-    fn set_presentable(&mut self, presentable: bool, now: Instant) {
-        if presentable && !self.presentable {
-            self.not_before = now;
-        }
-        self.presentable = presentable;
-    }
-
-    fn mark_presented(&mut self, now: Instant) {
-        self.pending = false;
-        self.not_before = now + PRESENTATION_INTERVAL;
-    }
-
-    fn deadline(&self) -> Option<Instant> {
-        (self.presentable && self.pending).then_some(self.not_before)
-    }
-
-    fn take_due(&mut self, now: Instant) -> bool {
-        if self.deadline().is_some_and(|deadline| now >= deadline) {
-            self.take_pending()
-        } else {
-            false
-        }
-    }
-
-    fn take_pending(&mut self) -> bool {
-        if self.pending {
-            self.pending = false;
-            true
-        } else {
-            false
-        }
-    }
-
-    fn take_visible_pending(&mut self) -> bool {
-        self.presentable && self.take_pending()
-    }
-}
-
-#[derive(Default)]
-struct AccessibilityContinuationSchedule {
-    pending: bool,
-    normal_commands: u8,
-}
-
-impl AccessibilityContinuationSchedule {
-    fn update(&mut self, more: bool) {
-        self.pending = more;
-        if !more {
-            self.normal_commands = 0;
-        }
-    }
-
-    fn note_normal_command(&mut self) {
-        if self.pending {
-            self.normal_commands = self.normal_commands.saturating_add(1);
-        }
-    }
-
-    fn must_continue(&self) -> bool {
-        self.pending && self.normal_commands >= ACCESSIBILITY_NORMAL_COMMAND_BURST
-    }
-
-    fn take(&mut self) -> bool {
-        if !self.pending {
-            return false;
-        }
-        self.pending = false;
-        self.normal_commands = 0;
-        true
-    }
-}
-
-struct HiddenInputSchedule {
-    active: bool,
-    deadline: Instant,
-    settle: bool,
-}
-
-impl HiddenInputSchedule {
-    fn new(now: Instant) -> Self {
-        Self {
-            active: false,
-            deadline: now,
-            settle: false,
-        }
-    }
-
-    fn transition(&mut self, now: Instant) {
-        self.deadline = now;
-        // Programs may write their prompt before changing termios. Check again once the
-        // transition has settled, then return to the long fallback for silent changes.
-        self.settle = true;
-    }
-
-    fn update(
-        &mut self,
-        now: Instant,
-        result: Result<bool, NativePtyOperationFailure>,
-    ) -> Option<bool> {
-        self.deadline = now
-            + if std::mem::take(&mut self.settle) {
-                HIDDEN_INPUT_SETTLE_INTERVAL
-            } else {
-                HIDDEN_INPUT_IDLE_INTERVAL
-            };
-        let active = match result {
-            Ok(active) => active,
-            Err(_) => {
-                eprintln!("PTY hidden-input inspection failed; releasing secure input");
-                false
-            }
-        };
-        if self.active == active {
-            None
-        } else {
-            self.active = active;
-            Some(active)
-        }
-    }
-}
-
-#[derive(Default)]
-struct SelectionAutoscrollSchedule {
-    deadline: Option<Instant>,
-}
-
-impl SelectionAutoscrollSchedule {
-    fn update(&mut self, now: Instant, interval: Option<Duration>) {
-        if let Some(interval) = interval {
-            // Pointer motion updates the drag position without delaying its clock.
-            self.deadline.get_or_insert(now + interval);
-        } else {
-            self.cancel();
-        }
-    }
-
-    fn deadline(&self) -> Option<Instant> {
-        self.deadline
-    }
-
-    fn cancel(&mut self) {
-        self.deadline = None;
-    }
-
-    fn take_due(&mut self, now: Instant) -> bool {
-        if self.deadline.is_some_and(|deadline| now >= deadline) {
-            self.deadline = None;
-            true
-        } else {
-            false
-        }
-    }
-}
-
-#[derive(Clone, Default)]
-struct ResizeMailbox {
-    pending: Arc<Mutex<Option<TerminalGeometry>>>,
-}
-
-impl ResizeMailbox {
-    fn replace(&self, geometry: TerminalGeometry) -> bool {
-        let mut pending = self.lock();
-        let should_notify = pending.is_none();
-        *pending = Some(geometry);
-        should_notify
-    }
-
-    fn take(&self) -> Option<TerminalGeometry> {
-        self.lock().take()
-    }
-
-    fn lock(&self) -> MutexGuard<'_, Option<TerminalGeometry>> {
-        self.pending.lock().unwrap_or_else(|poisoned| {
-            eprintln!("terminal resize mailbox recovered after a worker panic");
-            poisoned.into_inner()
-        })
-    }
-}
-
-#[derive(Debug)]
-pub(super) enum FindQueryUpdate {
-    Set(FindQueryGeneration, String),
-    End(FindQueryGeneration),
-}
-
-#[derive(Clone, Default)]
-struct FindQueryMailbox {
-    pending: Arc<Mutex<Option<FindQueryUpdate>>>,
-}
-
-#[derive(Clone, Default)]
-struct TerminalAppearanceMailbox {
-    pending: Arc<Mutex<Option<TerminalAppearanceUpdate>>>,
-}
-
-impl TerminalAppearanceMailbox {
-    fn replace(&self, update: TerminalAppearanceUpdate) -> bool {
-        let mut pending = self.lock();
-        let should_notify = pending.is_none();
-        *pending = Some(update);
-        should_notify
-    }
-
-    fn take(&self) -> Option<TerminalAppearanceUpdate> {
-        self.lock().take()
-    }
-
-    fn lock(&self) -> MutexGuard<'_, Option<TerminalAppearanceUpdate>> {
-        self.pending.lock().unwrap_or_else(|poisoned| {
-            eprintln!("terminal appearance mailbox recovered after a worker panic");
-            poisoned.into_inner()
-        })
-    }
-}
-
-impl FindQueryMailbox {
-    fn replace(&self, update: FindQueryUpdate) -> bool {
-        let mut pending = self.lock();
-        let should_notify = pending.is_none();
-        *pending = Some(update);
-        should_notify
-    }
-
-    fn take(&self) -> Option<FindQueryUpdate> {
-        self.lock().take()
-    }
-
-    fn lock(&self) -> MutexGuard<'_, Option<FindQueryUpdate>> {
-        self.pending.lock().unwrap_or_else(|poisoned| {
-            eprintln!("terminal Find mailbox recovered after a worker panic");
-            poisoned.into_inner()
-        })
-    }
-}
-
-#[derive(Clone, Default)]
-struct AccessibilityDemandMailbox {
-    state: Arc<Mutex<AccessibilityDemandMailboxState>>,
-}
-
-struct AccessibilityDemandMailboxState {
-    latest_request: Option<Instant>,
-    notified: bool,
-    enabled: bool,
-}
-
-impl Default for AccessibilityDemandMailboxState {
-    fn default() -> Self {
-        Self {
-            latest_request: None,
-            notified: false,
-            enabled: true,
-        }
-    }
-}
-
-#[cfg_attr(
-    not(target_os = "macos"),
-    allow(
-        dead_code,
-        reason = "only a native accessibility Adapter requests accessibility work"
-    )
-)]
-impl AccessibilityDemandMailbox {
-    fn request(&self, requested_at: Instant) -> bool {
-        let mut state = self.lock();
-        if !state.enabled {
-            return false;
-        }
-        state.latest_request = Some(requested_at);
-        if state.notified {
-            false
-        } else {
-            state.notified = true;
-            true
-        }
-    }
-
-    fn latest_request(&self) -> Option<Instant> {
-        self.lock().latest_request
-    }
-
-    fn clear(&self) {
-        let mut state = self.lock();
-        state.latest_request = None;
-        state.notified = false;
-    }
-
-    fn set_enabled(&self, enabled: bool) {
-        let mut state = self.lock();
-        state.enabled = enabled;
-        if !enabled {
-            state.latest_request = None;
-            state.notified = false;
-        }
-    }
-
-    fn lock(&self) -> MutexGuard<'_, AccessibilityDemandMailboxState> {
-        self.state.lock().unwrap_or_else(|poisoned| {
-            eprintln!("terminal accessibility demand mailbox recovered after a worker panic");
-            poisoned.into_inner()
-        })
     }
 }

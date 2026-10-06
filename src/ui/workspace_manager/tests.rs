@@ -936,7 +936,7 @@ fn remote_completion_with_provider(
     )
     .unwrap();
     (
-        crate::ui::remote_workspace_flow::tests::completion(
+        crate::ui::remote_workspace_flow::completion(
             session,
             destination,
             directory,
@@ -1013,7 +1013,7 @@ fn remote_completion_with_active_alias_pin_failure(
     )
     .unwrap();
     (
-        crate::ui::remote_workspace_flow::tests::completion(
+        crate::ui::remote_workspace_flow::completion(
             session,
             destination,
             directory,
@@ -1498,7 +1498,7 @@ fn emit_remote_workspace_completion(
 ) {
     cx.update(|_, cx| {
         flow.update(cx, |flow, cx| {
-            crate::ui::remote_workspace_flow::tests::emit_completion(flow, completion, cx);
+            crate::ui::remote_workspace_flow::emit_completion(flow, completion, cx);
         });
     });
     cx.run_until_parked();
@@ -2432,7 +2432,7 @@ fn deactivated_remote_creation_should_restore_actions_after_releasing_its_flow(
     let flow = open_remote_workspace_flow(&manager, cx);
     cx.update(|window, cx| {
         flow.update(cx, |flow, cx| {
-            crate::ui::remote_workspace_flow::tests::select_host_destination(
+            crate::ui::remote_workspace_flow::select_host_destination(
                 flow,
                 crate::domain::SshDestination::new("work".to_owned()).unwrap(),
                 window,
@@ -3852,7 +3852,7 @@ fn remote_revalidation_failures_should_close_completion_without_mutation(cx: &mu
 
         cx.update(|window, cx| {
             flow.update(cx, |flow, cx| {
-                crate::ui::remote_workspace_flow::tests::cancel(flow, window, cx);
+                crate::ui::remote_workspace_flow::cancel(flow, window, cx);
             });
         });
         cx.run_until_parked();
@@ -3884,7 +3884,7 @@ fn cancelled_initial_revalidation_should_close_immediately_without_late_resurrec
 
     cx.update(|window, cx| {
         first_flow.update(cx, |flow, cx| {
-            crate::ui::remote_workspace_flow::tests::cancel(flow, window, cx);
+            crate::ui::remote_workspace_flow::cancel(flow, window, cx);
         });
     });
     cx.run_until_parked();
@@ -4116,7 +4116,7 @@ fn failed_workspace_alias_pin_should_return_activation_without_leaking_authority
 
     cx.update(|window, cx| {
         flow.update(cx, |flow, cx| {
-            crate::ui::remote_workspace_flow::tests::cancel(flow, window, cx);
+            crate::ui::remote_workspace_flow::cancel(flow, window, cx);
         });
     });
     cx.run_until_parked();
@@ -4516,7 +4516,7 @@ fn open_remote_directory_should_start_the_remote_flow_at_a_chosen_directory(
     assert_eq!(
         flow.read_with(cx, |flow, _| (
             flow.stage(),
-            crate::ui::remote_workspace_flow::tests::start(flow)
+            crate::ui::remote_workspace_flow::start(flow)
         )),
         (
             RemoteWorkspaceFlowStage::HostSelection,
@@ -4551,7 +4551,7 @@ fn open_remote_directory_should_return_to_the_picker_after_a_failed_launch_and_t
     });
     cx.update(|window, cx| {
         flow.update(cx, |flow, cx| {
-            crate::ui::remote_workspace_flow::tests::select_host_destination(
+            crate::ui::remote_workspace_flow::select_host_destination(
                 flow,
                 crate::domain::SshDestination::new("work".to_owned()).unwrap(),
                 window,
@@ -4625,7 +4625,7 @@ fn open_remote_directory_should_pin_the_new_workspace_and_reuse_it_for_the_same_
             remote_completion("work", "~/src", "/home/tester/src", true);
         emit_remote_workspace_completion(
             &flow,
-            crate::ui::remote_workspace_flow::tests::pinned(completion),
+            crate::ui::remote_workspace_flow::pinned(completion),
             cx,
         );
         closes.push(completion_closes);

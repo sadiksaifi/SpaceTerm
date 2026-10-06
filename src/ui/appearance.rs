@@ -4416,8 +4416,71 @@ impl ChromeAppearance {
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct InstalledChrome {
+    pub(crate) active: Arc<ChromeAppearance>,
+    pub(crate) inactive: Arc<ChromeAppearance>,
+}
+impl Global for InstalledChrome {}
+
+impl InstalledChrome {
+    pub(crate) fn single(appearance: Arc<ChromeAppearance>) -> Self {
+        Self {
+            active: appearance.clone(),
+            inactive: appearance,
+        }
+    }
+}
+
+pub(crate) fn chrome(cx: &App) -> &ChromeAppearance {
+    if spaceterm_ui::ControlThemeScope::current() == spaceterm_ui::ControlThemeScope::Settings
+        && cx.has_global::<settings::InstalledSettingsChrome>()
+    {
+        return settings::selected(cx).chrome.as_ref();
+    }
+    selected_chrome(cx)
+}
+
+/// Retains the immutable prepared variant for render closures without copying its catalogs.
+pub(crate) fn shared_chrome(cx: &App) -> Arc<ChromeAppearance> {
+    if spaceterm_ui::ControlThemeScope::current() == spaceterm_ui::ControlThemeScope::Settings
+        && cx.has_global::<settings::InstalledSettingsChrome>()
+    {
+        return Arc::clone(&settings::selected(cx).chrome);
+    }
+    Arc::clone(selected_chrome(cx))
+}
+
+fn selected_chrome(cx: &App) -> &Arc<ChromeAppearance> {
+    let installed = cx.global::<InstalledChrome>();
+    match spaceterm_ui::ControlWindowActivity::current() {
+        spaceterm_ui::ControlWindowActivity::Active => &installed.active,
+        spaceterm_ui::ControlWindowActivity::Inactive => &installed.inactive,
+    }
+}
+
+pub(crate) fn window_activity(window: &Window) -> spaceterm_ui::ControlWindowActivity {
+    if window.is_window_active() {
+        spaceterm_ui::ControlWindowActivity::Active
+    } else {
+        spaceterm_ui::ControlWindowActivity::Inactive
+    }
+}
+
+pub(crate) fn initialize(cx: &mut App) {
+    if !cx.has_global::<InstalledChrome>() {
+        cx.set_global(InstalledChrome::single(Arc::new(
+            ChromeAppearance::default(),
+        )));
+    }
+    if !cx.has_global::<settings::InstalledSettingsChrome>() {
+        let chrome = cx.global::<InstalledChrome>().active.as_ref().clone();
+        cx.set_global(settings::InstalledSettingsChrome::single(chrome));
+    }
+}
+
 #[cfg(test)]
-mod typography_tests {
+mod tests {
     use super::{
         FloatingContrastFloors, floating_constraint, floating_host_constraint, floating_state,
         host_relative_fill, relative_luminance, resolve_floating_control_colors_detailed,
@@ -4941,68 +5004,5 @@ mod typography_tests {
         let resolved = resolution.colors;
         assert_ne!(resolved.warning_border, resolved.warning);
         assert!(resolved.warning_border.contrast_ratio(Color::WHITE) >= 3.0,);
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct InstalledChrome {
-    pub(crate) active: Arc<ChromeAppearance>,
-    pub(crate) inactive: Arc<ChromeAppearance>,
-}
-impl Global for InstalledChrome {}
-
-impl InstalledChrome {
-    pub(crate) fn single(appearance: Arc<ChromeAppearance>) -> Self {
-        Self {
-            active: appearance.clone(),
-            inactive: appearance,
-        }
-    }
-}
-
-pub(crate) fn chrome(cx: &App) -> &ChromeAppearance {
-    if spaceterm_ui::ControlThemeScope::current() == spaceterm_ui::ControlThemeScope::Settings
-        && cx.has_global::<settings::InstalledSettingsChrome>()
-    {
-        return settings::selected(cx).chrome.as_ref();
-    }
-    selected_chrome(cx)
-}
-
-/// Retains the immutable prepared variant for render closures without copying its catalogs.
-pub(crate) fn shared_chrome(cx: &App) -> Arc<ChromeAppearance> {
-    if spaceterm_ui::ControlThemeScope::current() == spaceterm_ui::ControlThemeScope::Settings
-        && cx.has_global::<settings::InstalledSettingsChrome>()
-    {
-        return Arc::clone(&settings::selected(cx).chrome);
-    }
-    Arc::clone(selected_chrome(cx))
-}
-
-fn selected_chrome(cx: &App) -> &Arc<ChromeAppearance> {
-    let installed = cx.global::<InstalledChrome>();
-    match spaceterm_ui::ControlWindowActivity::current() {
-        spaceterm_ui::ControlWindowActivity::Active => &installed.active,
-        spaceterm_ui::ControlWindowActivity::Inactive => &installed.inactive,
-    }
-}
-
-pub(crate) fn window_activity(window: &Window) -> spaceterm_ui::ControlWindowActivity {
-    if window.is_window_active() {
-        spaceterm_ui::ControlWindowActivity::Active
-    } else {
-        spaceterm_ui::ControlWindowActivity::Inactive
-    }
-}
-
-pub(crate) fn initialize(cx: &mut App) {
-    if !cx.has_global::<InstalledChrome>() {
-        cx.set_global(InstalledChrome::single(Arc::new(
-            ChromeAppearance::default(),
-        )));
-    }
-    if !cx.has_global::<settings::InstalledSettingsChrome>() {
-        let chrome = cx.global::<InstalledChrome>().active.as_ref().clone();
-        cx.set_global(settings::InstalledSettingsChrome::single(chrome));
     }
 }

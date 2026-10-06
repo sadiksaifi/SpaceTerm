@@ -3358,8 +3358,10 @@ fn frame_cursor_paint_plan(
 }
 
 #[cfg(test)]
-pub(super) mod tests {
+pub(super) use tests::{RasterTextSystem, assert_geometry_reused};
 
+#[cfg(test)]
+mod tests {
     use std::{
         borrow::Cow,
         cell::{Cell, RefCell},
@@ -7471,11 +7473,6 @@ pub(super) mod tests {
 
         assert!(!Arc::ptr_eq(&first[0], &second[0]));
     }
-}
-
-#[cfg(test)]
-mod idle_retention_tests {
-    use super::*;
 
     #[test]
     fn evict_releases_retained_rows_and_geometry_capacity() {
