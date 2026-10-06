@@ -280,10 +280,14 @@ impl ThemeCatalog {
         if !found_terminal {
             diagnostics.push(AppearanceDiagnostic::TerminalThemeUnavailable { appearance });
         }
-        super::harmonization::harmonize(&mut terminal_colors, appearance);
-        if found_terminal
-            && let Some(overrides) = preferences.terminal.overrides.get(requested_terminal)
-        {
+        let overrides = found_terminal
+            .then(|| preferences.terminal.overrides.get(requested_terminal))
+            .flatten();
+        // A background the person chose is used as authored, with the theme's own text colors.
+        if overrides.is_none_or(|overrides| overrides.background.is_none()) {
+            super::harmonization::harmonize(&mut terminal_colors, appearance);
+        }
+        if let Some(overrides) = overrides {
             terminal_colors.apply(overrides);
         }
         terminal_colors

@@ -183,3 +183,27 @@ fn harmonized_backgrounds_keep_the_contrast_their_text_colors_were_authored_with
         );
     }
 }
+
+#[test]
+fn a_background_override_is_used_as_authored() {
+    let theme = installed(
+        "dark",
+        json!({
+            "terminal.background": "#0d1117",
+            "terminal.dim_foreground": "#6e7681",
+        }),
+    );
+    let catalog = ThemeCatalog::from_terminal_themes(std::slice::from_ref(&theme)).unwrap();
+    let mut preferences = preferences_for(&theme);
+    preferences.terminal.overrides.insert(
+        theme.id.clone(),
+        TerminalColorOverrides {
+            background: Some(Color::rgb(0x0d1117)),
+            ..Default::default()
+        },
+    );
+    let colors = resolve(&catalog, &preferences).terminal.colors.clone();
+
+    assert_eq!(colors.background, Color::rgb(0x0d1117));
+    assert_eq!(colors.dim_foreground, Color::rgb(0x6e7681));
+}
