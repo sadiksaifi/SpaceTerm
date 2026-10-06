@@ -12,6 +12,8 @@ use gpui::{Pixels, Window};
 
 use crate::terminal::TerminalAccessibilityModel;
 #[cfg(all(target_os = "macos", any(not(test), feature = "native-tests")))]
+use super::terminal_accessibility::AccessibilityFocusSender;
+#[cfg(all(target_os = "macos", any(not(test), feature = "native-tests")))]
 use crate::terminal::{AccessibilityDemandSender, AccessibilitySelectionSender};
 #[cfg(any(not(test), feature = "native-tests"))]
 use crate::terminal::{AccessibilityGeometry, AccessibilityNotification};
@@ -88,6 +90,8 @@ struct AccessibilityElementState {
     selection_sender: Option<AccessibilitySelectionSender>,
     #[cfg(all(target_os = "macos", any(not(test), feature = "native-tests")))]
     demand_sender: Option<AccessibilityDemandSender>,
+    #[cfg(all(target_os = "macos", any(not(test), feature = "native-tests")))]
+    focus_sender: Option<AccessibilityFocusSender>,
     /// The GPUI view whose coordinates place this element on screen.
     #[cfg(all(target_os = "macos", any(not(test), feature = "native-tests")))]
     view: Option<objc2::rc::Retained<objc2_app_kit::NSView>>,
@@ -178,9 +182,9 @@ mod native {
         Window, accesskit::Role,
     };
     use objc2::rc::Retained;
-    use objc2::runtime::AnyObject;
+    use objc2::runtime::{AnyObject, Sel};
     use objc2::{
-        AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send,
+        AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
     };
     use objc2_app_kit::{
         NSAccessibilityElement, NSAccessibilityFontFamilyKey, NSAccessibilityFontNameKey,
@@ -246,6 +250,28 @@ mod native {
             #[unsafe(method(isAccessibilityFocused))]
             fn is_accessibility_focused(&self) -> bool {
                 state(self).is_some_and(|state| state.focused)
+            }
+
+            /// Asks the Pane for focus, which moves Terminal Input Focus as a pointer press does.
+            #[unsafe(method(setAccessibilityFocused:))]
+            fn set_accessibility_focused(&self, focused: bool) {
+                if focused
+                    && let Some(sender) = state(self)
+                        .filter(|state| state.visible)
+                        .and_then(|state| state.focus_sender.as_ref())
+                {
+                    sender.request();
+                }
+            }
+
+            #[unsafe(method(isAccessibilitySelectorAllowed:))]
+            fn is_accessibility_selector_allowed(&self, selector: Sel) -> bool {
+                if selector == sel!(setAccessibilityFocused:) {
+                    state(self).is_some_and(|state| state.visible && state.focus_sender.is_some())
+                } else {
+                    // SAFETY: NSAccessibilityElement implements this NSAccessibility method.
+                    unsafe { msg_send![super(self), isAccessibilitySelectorAllowed: selector] }
+                }
             }
 
             #[unsafe(method(accessibilityNumberOfCharacters))]
@@ -396,6 +422,7 @@ mod native {
                 presented: false,
                 selection_sender: None,
                 demand_sender: None,
+                focus_sender: None,
                 view,
             });
             let pointer = state.as_mut() as *mut AccessibilityElementState;
@@ -417,6 +444,7 @@ mod native {
             if !presented {
                 self.state.selection_sender = None;
                 self.state.demand_sender = None;
+                self.state.focus_sender = None;
             }
             self.state.visible &= presented;
             self.state.focused &= presented;
@@ -474,6 +502,7 @@ mod native {
                 notifications,
                 selection_sender,
                 demand_sender,
+                focus_sender,
             } = update;
             let was_focused = self.state.focused;
             self.state.view = native_view(window);
@@ -482,6 +511,7 @@ mod native {
             }
             self.state.selection_sender = selection_sender.filter(|_| self.state.presented);
             self.state.demand_sender = demand_sender.filter(|_| self.state.presented);
+            self.state.focus_sender = focus_sender.filter(|_| self.state.presented);
             self.state.cell_width = f32::from(cell_width);
             self.state.line_height = f32::from(line_height);
             let point_size = f32::from(font_size);
@@ -907,6 +937,7 @@ pub(crate) mod tests {
             presented: true,
             selection_sender: None,
             demand_sender: None,
+            focus_sender: None,
             view: None,
         }
     }
@@ -1086,5 +1117,86 @@ pub(crate) mod tests {
             cx.notify();
         });
         assert_eq!(native_children(cx), [("Group".to_owned(), 1)]);
+    }
+
+    struct SplitPanes([gpui::Entity<crate::ui::TerminalPane>; 2]);
+
+    impl gpui::Render for SplitPanes {
+        fn render(
+            &mut self,
+            _: &mut Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            use gpui::{ParentElement as _, Styled as _};
+            gpui::div().flex().size_full().children(
+                self.0
+                    .iter()
+                    .map(|pane| gpui::div().flex_1().h_full().child(pane.clone())),
+            )
+        }
+    }
+
+    pub(crate) fn text_area_focus_request_focuses_its_pane(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+        use objc2::{msg_send, sel};
+
+        cx.update(crate::ui::init).unwrap();
+        let factory = OnScreenAccessibilityFactory::default();
+        let (split, cx) = cx.add_window_view(|window, cx| {
+            SplitPanes([0, 1].map(|_| cx.new(|cx| terminal_pane(&factory, window, cx))))
+        });
+        let panes = split.read_with(cx, |split, _| split.0.clone());
+        let requests = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        cx.update(|window, cx| {
+            for (index, pane) in panes.iter().enumerate() {
+                let requests = std::rc::Rc::clone(&requests);
+                cx.subscribe(pane, move |_, event, _| {
+                    if *event == crate::ui::TerminalPaneEvent::FocusRequested {
+                        requests.borrow_mut().push(index);
+                    }
+                })
+                .detach();
+                pane.update(cx, |pane, cx| {
+                    pane.set_accessibility_hierarchy(true);
+                    cx.notify();
+                });
+            }
+            panes[0].update(cx, |pane, cx| pane.focus(window, cx));
+        });
+        cx.run_until_parked();
+        let second = factory.elements.borrow()[1].clone();
+        let focused = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| panes.each_ref().map(|pane| pane.read(cx).is_focused(window)))
+        };
+        assert_eq!(focused(cx), [true, false]);
+        // SAFETY: The selector is part of NSAccessibility and the element is live.
+        let allowed: bool = unsafe {
+            msg_send![&*second, isAccessibilitySelectorAllowed: sel!(setAccessibilityFocused:)]
+        };
+        assert!(allowed);
+
+        // SAFETY: The selector is part of NSAccessibility and the element is live.
+        let _: () = unsafe { msg_send![&*second, setAccessibilityFocused: false] };
+        cx.run_until_parked();
+        assert!(requests.borrow().is_empty());
+        assert_eq!(focused(cx), [true, false]);
+
+        // SAFETY: The selector is part of NSAccessibility and the element is live.
+        let _: () = unsafe { msg_send![&*second, setAccessibilityFocused: true] };
+        cx.run_until_parked();
+        assert_eq!(*requests.borrow(), [1]);
+        assert_eq!(focused(cx), [false, true]);
+
+        let first = factory.elements.borrow()[0].clone();
+        panes[0].update(cx, |pane, cx| {
+            pane.set_accessibility_hierarchy(false);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        // SAFETY: The selector is part of NSAccessibility and the element is live.
+        let _: () = unsafe { msg_send![&*first, setAccessibilityFocused: true] };
+        cx.run_until_parked();
+        assert_eq!(*requests.borrow(), [1]);
+        assert_eq!(focused(cx), [false, true]);
     }
 }

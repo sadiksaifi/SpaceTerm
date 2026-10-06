@@ -39,7 +39,8 @@ use crate::close_confirmation::PaneCloseFacts;
 use crate::domain::{PaneId, TabId, WorkspaceId};
 use crate::platform::permission_access::SystemPermission;
 use crate::platform::terminal_accessibility::{
-    TerminalAccessibilityAdapter, TerminalAccessibilityAdapterFactory, TerminalAccessibilityUpdate,
+    AccessibilityFocusSender, TerminalAccessibilityAdapter, TerminalAccessibilityAdapterFactory,
+    TerminalAccessibilityUpdate,
 };
 use crate::platform::window_visibility::{WindowVisibility, WindowVisibilitySource};
 use crate::terminal::attention::AttentionState;
@@ -547,6 +548,8 @@ pub(crate) struct TerminalPane {
     accessibility: Arc<TerminalAccessibilityModel>,
     pending_accessibility: Option<(u64, Arc<TerminalAccessibilityModel>)>,
     accessibility_element: Box<dyn TerminalAccessibilityAdapter>,
+    accessibility_focus_sender: AccessibilityFocusSender,
+    _accessibility_focus_task: Task<()>,
     pending_accessibility_notifications: AccessibilityNotifications,
     accessibility_needs_presentation: bool,
     render_lifecycle: RenderLifecycle,
@@ -762,6 +765,18 @@ impl TerminalPane {
             &appearance.terminal.typography.regular,
             px(font_size),
         );
+        let (accessibility_focus_sender, accessibility_focus_receiver) =
+            AccessibilityFocusSender::channel();
+        let accessibility_focus_task = cx.spawn_in(window, async move |this, cx| {
+            while accessibility_focus_receiver.recv().await.is_ok() {
+                if this
+                    .update_in(cx, |pane, window, cx| pane.request_focus(window, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
         let mut render_lifecycle = RenderLifecycle::new(SurfaceVisibility {
             application_active: false,
             key_window: false,
@@ -776,10 +791,7 @@ impl TerminalPane {
             &scrollbar,
             window,
             |pane, _, event: &OverlayScrollbarEvent<u64>, window, cx| match event {
-                OverlayScrollbarEvent::InteractionStarted => {
-                    pane.focus(window, cx);
-                    cx.emit(TerminalPaneEvent::FocusRequested);
-                }
+                OverlayScrollbarEvent::InteractionStarted => pane.request_focus(window, cx),
                 OverlayScrollbarEvent::OffsetRequested(rows) => {
                     if let Some(session) = &pane.terminal_session.session {
                         session.scroll_to(*rows, pane.screen.generation);
@@ -842,6 +854,8 @@ impl TerminalPane {
             accessibility,
             pending_accessibility: None,
             accessibility_element,
+            accessibility_focus_sender,
+            _accessibility_focus_task: accessibility_focus_task,
             pending_accessibility_notifications: AccessibilityNotifications::default(),
             accessibility_needs_presentation: false,
             render_lifecycle,
@@ -937,6 +951,12 @@ impl TerminalPane {
     pub(crate) fn focus(&self, window: &mut Window, cx: &mut App) {
         self.advance_native_service_focus_epoch();
         self.focus_handle.focus(window, cx);
+    }
+
+    /// Focuses this Pane and asks its Tab to make it the focused Pane.
+    fn request_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus(window, cx);
+        cx.emit(TerminalPaneEvent::FocusRequested);
     }
 
     fn focus_find(&mut self, window: &mut Window, cx: &mut App) {
@@ -2064,6 +2084,7 @@ impl TerminalPane {
                     notifications,
                     selection_sender,
                     demand_sender,
+                    focus_sender: Some(self.accessibility_focus_sender.clone()),
                 });
         self.accessibility_needs_presentation = false;
     }
@@ -3108,8 +3129,7 @@ impl TerminalPane {
         };
         self.pending_file_insertion = Some(insertion);
         window.activate_window();
-        self.focus(window, cx);
-        cx.emit(TerminalPaneEvent::FocusRequested);
+        self.request_focus(window, cx);
         cx.notify();
     }
 

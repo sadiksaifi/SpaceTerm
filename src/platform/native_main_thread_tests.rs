@@ -41,6 +41,7 @@ pub(crate) fn run() {
     gpui_test!(
         super::macos_accessibility::tests::presented_pane_attaches_its_text_area_to_the_pane_node
     );
+    gpui_test!(super::macos_accessibility::tests::text_area_focus_request_focuses_its_pane);
 
     gpui_test!(
         macos_appearance::tests::forcing_native_chrome_does_not_change_the_system_preference
@@ -94,5 +95,5 @@ pub(crate) fn run() {
     native_test!(
         macos_pasteboard::tests::native_text_clipboard_preserves_utf8_and_rejects_oversized_text
     );
-    println!("32 native main-thread tests passed");
+    println!("33 native main-thread tests passed");
 }

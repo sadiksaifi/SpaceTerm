@@ -48,6 +48,44 @@ pub(crate) struct TerminalAccessibilityUpdate<'a> {
     pub(crate) notifications: AccessibilityNotifications,
     pub(crate) selection_sender: Option<AccessibilitySelectionSender>,
     pub(crate) demand_sender: Option<AccessibilityDemandSender>,
+    #[cfg_attr(
+        not(all(target_os = "macos", any(not(test), feature = "native-tests"))),
+        allow(
+            dead_code,
+            reason = "only the native macOS Adapter requests Pane focus"
+        )
+    )]
+    pub(crate) focus_sender: Option<AccessibilityFocusSender>,
+}
+
+/// Asks one Pane to take focus on behalf of an accessibility client. Requests carry no content
+/// and coalesce until the Pane handles them.
+#[cfg_attr(
+    not(all(target_os = "macos", any(not(test), feature = "native-tests"))),
+    allow(
+        dead_code,
+        reason = "only the native macOS Adapter requests Pane focus"
+    )
+)]
+#[derive(Clone, Debug)]
+pub(crate) struct AccessibilityFocusSender(async_channel::Sender<()>);
+
+impl AccessibilityFocusSender {
+    pub(crate) fn channel() -> (Self, async_channel::Receiver<()>) {
+        let (sender, receiver) = async_channel::bounded(1);
+        (Self(sender), receiver)
+    }
+
+    #[cfg_attr(
+        not(all(target_os = "macos", any(not(test), feature = "native-tests"))),
+        allow(
+            dead_code,
+            reason = "only the native macOS Adapter requests Pane focus"
+        )
+    )]
+    pub(crate) fn request(&self) {
+        let _ = self.0.try_send(());
+    }
 }
 
 #[cfg(test)]

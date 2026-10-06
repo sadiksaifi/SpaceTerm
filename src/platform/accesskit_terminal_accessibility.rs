@@ -1856,6 +1856,7 @@ mod tests {
                 notifications,
                 selection_sender: Some(sender.clone()),
                 demand_sender: None,
+                focus_sender: None,
             })
         };
         cx.update(|window, _| {
