@@ -1009,8 +1009,8 @@ impl TerminalPane {
         self.native_service_hierarchy_generation = generation;
     }
 
-    pub(crate) fn set_accessibility_hierarchy(&mut self, presented: bool, order: usize) {
-        self.accessibility_element.set_hierarchy(presented, order);
+    pub(crate) fn set_accessibility_hierarchy(&mut self, presented: bool) {
+        self.accessibility_element.set_hierarchy(presented);
     }
 
     fn open_find(&mut self, _: &OpenTerminalFind, window: &mut Window, cx: &mut Context<Self>) {
@@ -1482,7 +1482,7 @@ impl TerminalPane {
         self.visibility_source.take();
         self.context_menu = None;
         self.file_preview.dismiss();
-        self.accessibility_element.set_hierarchy(false, usize::MAX);
+        self.accessibility_element.set_hierarchy(false);
         self.terminal_session.close();
     }
 

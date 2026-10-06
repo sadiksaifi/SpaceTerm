@@ -1106,14 +1106,14 @@ fn accessibility_factory_reaches_initial_and_new_workspaces_tabs_and_split_panes
             .borrow()
             .hierarchy
             .iter()
-            .any(|(presented, _)| !presented)
+            .any(|presented| !presented)
     );
     assert!(
         records[3]
             .borrow()
             .hierarchy
             .iter()
-            .any(|(presented, order)| *presented && *order == 0)
+            .any(|presented| *presented)
     );
 }
 

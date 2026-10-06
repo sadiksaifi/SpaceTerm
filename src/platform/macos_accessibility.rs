@@ -762,7 +762,7 @@ impl TerminalAccessibilityAdapterFactory for MacosTerminalAccessibilityAdapterFa
 
 #[cfg(any(not(test), feature = "native-tests"))]
 impl TerminalAccessibilityAdapter for native::MacosAccessibilityElement {
-    fn set_hierarchy(&mut self, presented: bool, _: usize) {
+    fn set_hierarchy(&mut self, presented: bool) {
         self.set_hierarchy(presented);
     }
     fn update(&mut self, update: TerminalAccessibilityUpdate<'_>) -> AccessibilityNotifications {

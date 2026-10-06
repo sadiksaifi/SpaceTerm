@@ -8,7 +8,7 @@ use gpui::{Bounds, Div, Pixels, Stateful, Window};
 /// Owns one Pane's native accessibility resources. Dropping it retires those resources.
 pub(crate) trait TerminalAccessibilityAdapter {
     /// Updates layout membership synchronously. Hidden elements must reject Selection requests.
-    fn set_hierarchy(&mut self, presented: bool, order: usize);
+    fn set_hierarchy(&mut self, presented: bool);
     /// Publishes current facts and returns notifications that could not yet be delivered.
     fn update(&mut self, update: TerminalAccessibilityUpdate<'_>) -> AccessibilityNotifications;
     /// Describes this Pane inside the Window's portable accessibility tree.
@@ -69,7 +69,7 @@ pub(crate) mod testing {
         pub(crate) bounds: Option<Bounds<Pixels>>,
         pub(crate) cell_width: Pixels,
         pub(crate) line_height: Pixels,
-        pub(crate) hierarchy: Vec<(bool, usize)>,
+        pub(crate) hierarchy: Vec<bool>,
         pub(crate) presented: bool,
         pub(crate) visible: bool,
         pub(crate) focused: bool,
@@ -112,9 +112,9 @@ pub(crate) mod testing {
     struct RecordingAccessibilityAdapter(Rc<RefCell<AccessibilityRecord>>);
 
     impl TerminalAccessibilityAdapter for RecordingAccessibilityAdapter {
-        fn set_hierarchy(&mut self, presented: bool, order: usize) {
+        fn set_hierarchy(&mut self, presented: bool) {
             let mut record = self.0.borrow_mut();
-            record.hierarchy.push((presented, order));
+            record.hierarchy.push(presented);
             record.presented = presented;
             record.visible &= presented;
             record.focused &= presented;

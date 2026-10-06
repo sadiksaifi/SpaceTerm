@@ -528,7 +528,7 @@ fn visibility_subscription_coalesces_hidden_receivers_and_retires_without_pollin
         crate::terminal::testing::test_accessibility_viewport_models(
             crate::terminal::PresentationGeneration::test(12),
         );
-    pane.update(cx, |pane, _| pane.set_accessibility_hierarchy(true, 0));
+    pane.update(cx, |pane, _| pane.set_accessibility_hierarchy(true));
     records
         .last_accessibility_sender()
         .unwrap()
@@ -1605,7 +1605,7 @@ fn accesskit_terminal_pane_activation_publishes_text_focus_and_retires_hidden_pa
     cx.update(|window, cx| {
         window.activate_window();
         pane.update(cx, |pane, cx| {
-            pane.set_accessibility_hierarchy(true, 0);
+            pane.set_accessibility_hierarchy(true);
             pane.handle_accessibility(accessibility_model(42));
             pane.focus(window, cx);
             cx.notify();
@@ -1629,7 +1629,7 @@ fn accesskit_terminal_pane_activation_publishes_text_focus_and_retires_hidden_pa
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0]["aria"]["value"], "update-42x");
     pane.update(cx, |pane, cx| {
-        pane.set_accessibility_hierarchy(false, usize::MAX);
+        pane.set_accessibility_hierarchy(false);
         cx.notify();
     });
     cx.run_until_parked();
@@ -1686,7 +1686,7 @@ fn accessibility_adapter_receives_construction_publication_and_teardown(cx: &mut
             pane.cell_width = px(9.5);
             pane.line_height = 21.0;
             pane.handle_accessibility(Arc::clone(&model));
-            pane.set_accessibility_hierarchy(true, 7);
+            pane.set_accessibility_hierarchy(true);
             pane.sync_native_accessibility(window, true);
         })
     });
@@ -1696,10 +1696,10 @@ fn accessibility_adapter_receives_construction_publication_and_teardown(cx: &mut
         assert_eq!(record.bounds, Some(bounds));
         assert_eq!((record.cell_width, record.line_height), (px(9.5), px(21.0)));
         assert!(record.focused && record.visible);
-        assert_eq!(record.hierarchy, [(true, 7)]);
+        assert_eq!(record.hierarchy, [true]);
     }
     pane.update(cx, |pane, _| pane.close());
-    assert_eq!(record.borrow().hierarchy.last(), Some(&(false, usize::MAX)));
+    assert_eq!(record.borrow().hierarchy.last(), Some(&false));
     assert!(!record.borrow().visible && !record.borrow().focused);
     cx.update(|_, _| drop(pane));
     cx.run_until_parked();
@@ -1725,9 +1725,7 @@ fn accessibility_selection_authority_follows_remote_restart_hierarchy_and_close(
         std::slice::from_ref(&request)
     );
 
-    pane.update(cx, |pane, _| {
-        pane.set_accessibility_hierarchy(false, usize::MAX)
-    });
+    pane.update(cx, |pane, _| pane.set_accessibility_hierarchy(false));
     assert!(record.borrow().selection_sender.is_none());
     cx.update(|window, cx| {
         pane.update(cx, |pane, _| pane.sync_native_accessibility(window, false))
@@ -1736,11 +1734,9 @@ fn accessibility_selection_authority_follows_remote_restart_hierarchy_and_close(
         record.borrow().selection_sender.is_none(),
         "hidden publication must not restore authority"
     );
-    pane.update(cx, |pane, _| {
-        pane.set_accessibility_hierarchy(false, usize::MAX)
-    });
+    pane.update(cx, |pane, _| pane.set_accessibility_hierarchy(false));
     assert!(record.borrow().selection_sender.is_none());
-    pane.update(cx, |pane, _| pane.set_accessibility_hierarchy(true, 0));
+    pane.update(cx, |pane, _| pane.set_accessibility_hierarchy(true));
     cx.update(|window, cx| pane.update(cx, |pane, _| pane.sync_native_accessibility(window, true)));
     assert!(record.borrow().selection_sender.is_some());
 
@@ -1802,7 +1798,7 @@ fn prepare_accessibility_presentation(
     });
     cx.update(|window, cx| {
         pane.update(cx, |pane, _| {
-            pane.set_accessibility_hierarchy(true, 0);
+            pane.set_accessibility_hierarchy(true);
             pane.sync_native_accessibility(window, false);
         });
     });
@@ -1911,7 +1907,7 @@ fn zoom_hidden_pane_retains_only_bounded_accessibility_state_until_restore(
         });
         pane.update(cx, |pane, cx| {
             pane.set_product_focus(hidden, cx);
-            pane.set_accessibility_hierarchy(false, usize::MAX);
+            pane.set_accessibility_hierarchy(false);
             for index in 0..4_096 {
                 pane.handle_accessibility(accessibility_model(index));
             }
@@ -1933,7 +1929,7 @@ fn zoom_hidden_pane_retains_only_bounded_accessibility_state_until_restore(
 
         pane.update(cx, |pane, cx| {
             pane.set_product_focus(TerminalProductFocus::default(), cx);
-            pane.set_accessibility_hierarchy(true, 0);
+            pane.set_accessibility_hierarchy(true);
         });
         cx.update(|window, cx| {
             pane.update(cx, |pane, _| pane.sync_native_accessibility(window, false));
@@ -1983,7 +1979,7 @@ fn hidden_focus_gain_is_delivered_once_when_the_pane_becomes_presented(cx: &mut 
     let (pane, cx) = terminal_pane(cx);
     let accessibility_record = prepare_accessibility_presentation(&pane, cx);
     pane.update(cx, |pane, _| {
-        pane.set_accessibility_hierarchy(false, usize::MAX);
+        pane.set_accessibility_hierarchy(false);
         pane.apply_terminal_input_focus(false);
         pane.apply_terminal_input_focus(true);
     });
@@ -1996,7 +1992,7 @@ fn hidden_focus_gain_is_delivered_once_when_the_pane_becomes_presented(cx: &mut 
             && accessibility_record.borrow().delivered.is_empty()
     }));
 
-    pane.update(cx, |pane, _| pane.set_accessibility_hierarchy(true, 0));
+    pane.update(cx, |pane, _| pane.set_accessibility_hierarchy(true));
     cx.update(|window, cx| {
         pane.update(cx, |pane, _| pane.sync_native_accessibility(window, true));
     });

@@ -1378,7 +1378,7 @@ impl TabView {
             }) => {
                 self.advance_native_service_hierarchy_generation(cx);
                 closed_pane.update(cx, |terminal, _| {
-                    terminal.set_accessibility_hierarchy(false, usize::MAX);
+                    terminal.set_accessibility_hierarchy(false);
                     terminal.close();
                 });
                 self.pane_bounds.remove(&pane_id);
@@ -1521,11 +1521,6 @@ impl TabView {
             ZoomState::Zoomed(pane_id) => vec![pane_id],
             ZoomState::Restored => panes.clone(),
         };
-        let presentation_order = presented_panes
-            .into_iter()
-            .enumerate()
-            .map(|(order, pane_id)| (pane_id, order))
-            .collect::<BTreeMap<_, _>>();
         for pane_id in panes {
             let Some(terminal) = self.tab.pane(pane_id) else {
                 continue;
@@ -1541,13 +1536,8 @@ impl TabView {
             terminal.update(cx, |terminal, cx| {
                 let product_focus_changed = terminal.set_product_focus(product_focus, cx);
                 terminal.synchronize_native_service_hierarchy_generation(hierarchy_generation);
-                terminal.set_accessibility_hierarchy(
-                    self.active && presentation_order.contains_key(&pane_id),
-                    presentation_order
-                        .get(&pane_id)
-                        .copied()
-                        .unwrap_or(usize::MAX),
-                );
+                terminal
+                    .set_accessibility_hierarchy(self.active && presented_panes.contains(&pane_id));
                 if product_focus_changed {
                     cx.notify();
                 }
