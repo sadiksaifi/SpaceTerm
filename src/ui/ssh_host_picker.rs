@@ -1257,6 +1257,42 @@ mod tests {
     }
 
     #[gpui::test]
+    fn hosts_publish_a_list_whose_options_select_a_destination(cx: &mut TestAppContext) {
+        use gpui::accesskit::Action;
+        use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
+        let provider = Arc::new(ScriptedHostDiscoveryProvider::new([host_discovery(
+            "Host first\nHost second\n",
+            "",
+        )]));
+        let (_, _, events, cx) = host_picker(provider, cx);
+        let tree = A11yTree::read(cx);
+        let dialog = &tree.with_role("Dialog")[0];
+        assert_eq!(dialog["aria"]["modal"], true);
+        let options = tree
+            .with_role("ListBoxOption")
+            .iter()
+            .map(|option| option["aria"]["label"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(options, ["first", "second"]);
+        assert_eq!(tree.node(ADD_HOST_LABEL)["aria"]["role"], "Button");
+
+        events.borrow_mut().clear();
+        perform(cx, tree.node("second"), Action::Click);
+        assert_eq!(
+            events.borrow().as_slice(),
+            [SshHostPickerEvent::SelectDestination(
+                SshDestination::new("second".to_owned()).unwrap()
+            )]
+        );
+
+        events.borrow_mut().clear();
+        let tree = A11yTree::read(cx);
+        perform(cx, tree.node(ADD_HOST_LABEL), Action::Click);
+        assert!(events.borrow().contains(&SshHostPickerEvent::RequestAddHost));
+    }
+
+    #[gpui::test]
     fn escape_should_emit_typed_close_restore_focus_and_reopen_with_fresh_discovery(
         cx: &mut TestAppContext,
     ) {
