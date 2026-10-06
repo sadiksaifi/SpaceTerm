@@ -4488,3 +4488,23 @@ fn settings_sections_publish_a_list_that_selects_on_press(cx: &mut TestAppContex
     );
     assert_eq!(A11yTree::read(cx).node("Font")["aria"]["selected"], true);
 }
+
+#[gpui::test]
+fn about_publishes_one_button_that_requests_the_about_window(cx: &mut TestAppContext) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
+    let (_window, _harness, cx) = open_settings(cx);
+    let requests = count_about_requests(cx);
+    let tree = A11yTree::read(cx);
+    let about = tree
+        .with_role("Button")
+        .into_iter()
+        .filter(|button| button["aria"]["label"] == "About SpaceTerm")
+        .collect::<Vec<_>>();
+    assert_eq!(about.len(), 1);
+
+    perform(cx, about[0], Action::Click);
+    cx.run_until_parked();
+    assert_eq!(requests.get(), 1);
+}

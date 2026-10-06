@@ -604,16 +604,7 @@ pub(crate) fn render_footer_action(
         .font_size(text.size)
         .line_heights(line_height, line_height);
     let glyph_size = appearance.icons.metrics(IconRole::Row).glyph_size;
-    let activated = action.boxed_clone();
-    // The shared button publishes no accessibility node of its own, so the row names it, the way
-    // client-drawn Window Controls do.
     div()
-        .id(SharedString::from(format!("{selector}-accessible")))
-        .role(gpui::Role::Button)
-        .aria_label(label.clone())
-        .on_a11y_action(gpui::AccessibleAction::Click, move |_, window, cx| {
-            window.dispatch_action(action.boxed_clone(), cx)
-        })
         .w_full()
         .child(
             Button::new(SharedString::from(selector.clone()), label)
@@ -628,7 +619,7 @@ pub(crate) fn render_footer_action(
                 .debug_selector(selector)
                 .leading(move |color| Icon::new(icon, glyph_size, color).into_any_element())
                 .on_activate(move |_, window, cx| {
-                    window.dispatch_action(activated.boxed_clone(), cx)
+                    window.dispatch_action(action.boxed_clone(), cx)
                 }),
         )
         .into_any_element()
