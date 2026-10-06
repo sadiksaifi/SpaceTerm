@@ -623,7 +623,8 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
         state.update(cx, |state, cx| {
             state.synchronize(enabled, self.tab_stop, cx);
         });
-        let focused = focus_handle.is_focused(window) && state.read(cx).focus_visible;
+        let holds_focus = focus_handle.is_focused(window);
+        let focused = holds_focus && state.read(cx).focus_visible;
         #[cfg(feature = "control-preview")]
         let focused = self.preview_state.map_or(focused, |state| state.focused());
         let selector = self
@@ -737,9 +738,11 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
                     .aria_disabled(!option_enabled)
                     .aria_position_in_set(index + 1)
                     .aria_size_of_set(option_count)
-                    // The track holds keyboard focus and arrows move the selection, so the
+                    // While the track holds keyboard focus, arrows move the selection, so the
                     // selected option is the focused one.
-                    .when(selected, |segment| segment.aria_active_descendant())
+                    .when(selected && holds_focus, |segment| {
+                        segment.aria_active_descendant()
+                    })
                     .when(option_enabled, |segment| {
                         segment.on_a11y_action(accesskit::Action::Click, move |_, window, cx| {
                             accessibility_activate(

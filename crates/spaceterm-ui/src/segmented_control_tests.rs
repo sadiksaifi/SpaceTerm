@@ -244,6 +244,7 @@ struct TestRoot {
     right_to_left: bool,
     changes: Rc<RefCell<Vec<SegmentedChange<Mode>>>>,
     other_focus: FocusHandle,
+    container_focus: FocusHandle,
     preview_font: Rc<RefCell<Option<gpui::Font>>>,
 }
 
@@ -296,6 +297,10 @@ impl Render for TestRoot {
         .debug_selector("test-segmented")
         .on_change(move |change, _, _| changes.borrow_mut().push(change.clone()));
         div()
+            .id("test-segmented-container")
+            .role(accesskit::Role::Group)
+            .aria_label("Container")
+            .track_focus(&self.container_focus)
             .flex()
             .flex_col()
             .child(div().track_focus(&self.other_focus).child("Other"))
@@ -323,6 +328,7 @@ fn segmented_window(cx: &mut TestAppContext) -> SegmentedWindow<'_> {
         right_to_left: false,
         changes: root_changes,
         other_focus: cx.focus_handle().tab_stop(true),
+        container_focus: cx.focus_handle(),
         preview_font: Rc::default(),
     });
     cx.update(|window, _| window.activate_window());
@@ -802,6 +808,7 @@ fn a_value_matching_no_option_requests_the_chosen_value_without_a_previous(
         right_to_left: false,
         changes: root_changes,
         other_focus: cx.focus_handle().tab_stop(true),
+        container_focus: cx.focus_handle(),
         preview_font: Rc::default(),
     });
     cx.update(|window, _| window.activate_window());
@@ -871,4 +878,20 @@ fn segmented_controls_publish_a_radio_group_that_follows_focus_and_press(cx: &mu
         changes[0].source(),
         SegmentedActivationSource::Accessibility
     );
+}
+
+#[gpui::test]
+fn only_a_focused_segmented_control_claims_its_selected_option(cx: &mut TestAppContext) {
+    use crate::a11y_testing::A11yTree;
+
+    let (root, _, cx) = segmented_window(cx);
+    cx.update(|window, cx| {
+        root.read(cx).container_focus.clone().focus(window, cx);
+    });
+    let tree = A11yTree::read(cx);
+    assert_eq!(tree.focused().unwrap()["aria"]["label"], "Container");
+
+    focus_control(cx);
+    let tree = A11yTree::read(cx);
+    assert_eq!(tree.focused().unwrap()["aria"]["label"], "Dark");
 }
