@@ -102,10 +102,11 @@ fn builtin_terminal_themes_resolve_to_their_authored_colors() {
 #[test]
 fn third_party_backgrounds_rest_one_quiet_step_above_the_chrome_root() {
     let cases = DARK_REFERENCES
-        .map(|background| ("dark", background, 0.06, 0.035))
+        .map(|background| ("dark", background, 0.035))
         .into_iter()
-        .chain(LIGHT_REFERENCES.map(|background| ("light", background, 0.08, 0.03)));
-    for (appearance, authored, widest_step, chroma_ceiling) in cases {
+        .chain(LIGHT_REFERENCES.map(|background| ("light", background, 0.08)));
+    let chroma_ceiling = 0.006;
+    for (appearance, authored, widest_step) in cases {
         let authored = Color::rgb(authored);
         let theme = installed(
             appearance,
@@ -122,7 +123,7 @@ fn third_party_backgrounds_rest_one_quiet_step_above_the_chrome_root() {
             "{authored:?} rests one quiet step above the root: pane={pane:?}",
         );
         assert!(
-            chroma <= chroma_ceiling + 0.002,
+            chroma <= chroma_ceiling + 0.001,
             "{authored:?} keeps a quiet chroma: pane={pane:?} chroma={chroma}",
         );
         if authored_chroma > 0.01 {

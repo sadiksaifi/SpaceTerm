@@ -9,6 +9,10 @@ use super::{Appearance, Color, TerminalColors, builtin};
 
 /// Where a Pane background may rest, in OKLab lightness above the Chrome root, and how much
 /// chroma it may keep. SpaceTerm's own Terminal Theme backgrounds lie inside both bands.
+///
+/// A translucent window rebuilds a tinted Pane over its sheet with saturated ink, so a chroma
+/// that reads as a quiet tint when opaque reads as a colored slab against the Chrome. Only a
+/// trace of the theme's hue survives.
 struct PaneBand {
     above_root: RangeInclusive<f64>,
     max_lightness: f64,
@@ -16,16 +20,16 @@ struct PaneBand {
 }
 
 const DARK: PaneBand = PaneBand {
-    above_root: 0.008..=0.05,
+    above_root: 0.008..=0.03,
     max_lightness: 1.0,
-    max_chroma: 0.035,
+    max_chroma: 0.006,
 };
 
 /// Light Panes may reach near-white, but pure white costs ink that ignores the Opacity Setting.
 const LIGHT: PaneBand = PaneBand {
     above_root: 0.033..=1.0,
     max_lightness: 0.994,
-    max_chroma: 0.03,
+    max_chroma: 0.006,
 };
 
 /// The contrast a text color keeps against a moved background, unless its author gave it less.
