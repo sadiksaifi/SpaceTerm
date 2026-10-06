@@ -8271,3 +8271,46 @@ fn modals_publish_a_modal_dialog_and_hide_the_underlay(cx: &mut TestAppContext) 
     let invoker = root.read_with(cx, |root, _| root.invoker.clone());
     assert!(cx.update(|window, _| invoker.is_focused(window)));
 }
+
+#[gpui::test]
+fn modals_without_a_focusable_control_report_the_dialog_as_focused(cx: &mut TestAppContext) {
+    use crate::a11y_testing::A11yTree;
+
+    install_test_catalogs(cx);
+    let (root, cx) = cx.add_window_view(|_, _| ProgressGeometryFixture { handle: None });
+    cx.update(|window, cx| {
+        window.activate_window();
+        root.update(cx, |root, cx| {
+            root.handle = Some(
+                ProgressDialog::new(
+                    ModalId::new("programmatic-progress"),
+                    "Programmatic progress",
+                    "Updating Project",
+                    "Starting",
+                    ProgressState::Indeterminate,
+                    ProgressCancellation::<()>::programmatic_only(Duration::from_secs(30)),
+                )
+                .present(
+                    window,
+                    cx,
+                    |_, _, _| ProgressCancelDecision::Deny,
+                    |_, _| {},
+                )
+                .expect("programmatic progress should present"),
+            );
+        });
+    });
+
+    let tree = A11yTree::read(cx);
+    assert_eq!(
+        tree.focused().unwrap()["aria"]["label"],
+        "Programmatic progress"
+    );
+
+    cx.simulate_keystrokes("tab");
+    let tree = A11yTree::read(cx);
+    assert_eq!(
+        tree.focused().unwrap()["aria"]["label"],
+        "Programmatic progress"
+    );
+}

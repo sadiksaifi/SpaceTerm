@@ -325,7 +325,6 @@ fn render_overlay(
     });
     let (
         scope,
-        surface_focus,
         leading,
         trailing,
         suppression_focus,
@@ -339,7 +338,6 @@ fn render_overlay(
         let state = focus_state.read(cx);
         (
             state.scope.clone(),
-            state.surface.clone(),
             state.leading.clone(),
             state.trailing.clone(),
             state.suppression.clone(),
@@ -439,7 +437,7 @@ fn render_overlay(
         .font(typography.regular().clone())
         .track_focus(&scope)
         // Static content accepts no keyboard focus. A press that no control claims would
-        // otherwise focus the containment scope, which focus repair moves to the first tab stop.
+        // otherwise move focus from the focused control to the containment scope.
         .on_any_mouse_down(move |_, window, cx| {
             if press_scope.contains_focused(window, cx) {
                 window.prevent_default();
@@ -505,7 +503,6 @@ fn render_overlay(
             window.prevent_default();
             cx.stop_propagation();
         })
-        .child(div().size_0().track_focus(&surface_focus))
         .child(div().size_0().track_focus(&leading))
         .child(header)
         .child(body)
@@ -1590,8 +1587,8 @@ fn safe_cancel_action(index: Option<usize>, actions: &[ModalRenderAction]) -> Op
 }
 
 struct ModalFocusRing {
+    /// Contains modal focus. The Dialog itself takes focus when no control can.
     scope: FocusHandle,
-    surface: FocusHandle,
     leading: FocusHandle,
     trailing: FocusHandle,
     suppression: FocusHandle,
@@ -1612,7 +1609,6 @@ struct ModalFocusRing {
 impl ModalFocusRing {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let scope = cx.focus_handle();
-        let surface = cx.focus_handle();
         let leading = cx.focus_handle().tab_stop(true);
         let trailing = cx.focus_handle().tab_stop(true);
         let suppression = cx.focus_handle();
@@ -1649,7 +1645,6 @@ impl ModalFocusRing {
         .detach();
         Self {
             scope,
-            surface,
             leading,
             trailing,
             suppression,
@@ -1721,13 +1716,13 @@ impl ModalFocusRing {
         self.leading.focus(window, cx);
         window.focus_next(cx);
         if self.trailing.is_focused(window) {
-            self.surface.focus(window, cx);
+            self.scope.focus(window, cx);
         }
         self.reveal_current_focus(window, cx);
     }
 
     fn focus_next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.surface.is_focused(window) || !self.scope.contains_focused(window, cx) {
+        if self.scope.is_focused(window) || !self.scope.contains_focused(window, cx) {
             self.focus_first(window, cx);
         } else {
             window.focus_next(cx);
@@ -1736,7 +1731,7 @@ impl ModalFocusRing {
     }
 
     fn focus_previous(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.surface.is_focused(window) || !self.scope.contains_focused(window, cx) {
+        if self.scope.is_focused(window) || !self.scope.contains_focused(window, cx) {
             self.focus_last(window, cx);
         } else {
             window.focus_prev(cx);
@@ -1748,7 +1743,7 @@ impl ModalFocusRing {
         self.trailing.focus(window, cx);
         window.focus_prev(cx);
         if self.leading.is_focused(window) {
-            self.surface.focus(window, cx);
+            self.scope.focus(window, cx);
         }
         self.reveal_current_focus(window, cx);
     }
@@ -1782,7 +1777,7 @@ impl ModalFocusRing {
             let requested = match &self.initial {
                 PreparedFocusIntent::Action(index) => self.action_focus.get(*index).cloned(),
                 PreparedFocusIntent::Body(body) => Some(body.clone()),
-                PreparedFocusIntent::Surface => Some(self.surface.clone()),
+                PreparedFocusIntent::Surface => Some(self.scope.clone()),
             };
             if let Some(requested) = requested
                 && self.scope.contains(&requested, window)
@@ -1804,7 +1799,7 @@ impl ModalFocusRing {
             let focused_tab_stop_is_invalid = focused_inside
                 && window
                     .focused(cx)
-                    .is_some_and(|focused| !focused.tab_stop && !self.surface.is_focused(window));
+                    .is_some_and(|focused| !focused.tab_stop && !self.scope.is_focused(window));
             if focused_tab_stop_is_invalid || (self.owned_focus_before_render && !focused_inside) {
                 self.focus_first(window, cx);
             }
