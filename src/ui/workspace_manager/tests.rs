@@ -10511,3 +10511,51 @@ fn sidebar_resize_handle_moves_to_the_width_assistive_technology_sets(cx: &mut T
     assert!(!layout(cx).0, "a width below the minimum collapses the sidebar");
     assert!(manager.read_with(cx, |manager, cx| !manager.sidebar.read(cx).is_resizing()));
 }
+
+#[gpui::test]
+#[gpui::test]
+fn tab_menu_opened_by_assistive_technology_returns_focus_to_its_tab(cx: &mut TestAppContext) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, node_id, perform};
+
+    let (_manager, _records, cx) = workspace_manager(cx);
+    cx.simulate_keystrokes("cmd-t");
+    // VoiceOver moves keyboard focus with its cursor, so focus rests on the last focusable
+    // control the cursor passed before it reached the Tab.
+    let tree = A11yTree::read(cx);
+    perform(cx, tree.node("Resize Workspace sidebar"), Action::Focus);
+    let tree = A11yTree::read(cx);
+    let tab = node_id(tree.with_role("Tab")[0]);
+    perform(cx, tree.with_role("Tab")[0], Action::ShowContextMenu);
+    assert_eq!(A11yTree::read(cx).with_role("Menu").len(), 1);
+
+    cx.simulate_keystrokes("escape");
+    let tree = A11yTree::read(cx);
+    assert!(tree.with_role("Menu").is_empty());
+    assert_eq!(tree.focused().map(node_id), Some(tab));
+}
+
+#[gpui::test]
+fn tab_menu_opened_by_the_pointer_returns_focus_to_where_it_was(cx: &mut TestAppContext) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, node_id, perform};
+
+    let (manager, _records, cx) = workspace_manager(cx);
+    cx.update(|window, _| window.activate_window());
+    cx.simulate_keystrokes("cmd-t");
+    right_click("tab-item-1-inactive", cx);
+    assert_eq!(A11yTree::read(cx).with_role("Menu").len(), 1);
+    cx.simulate_keystrokes("escape");
+    assert!(A11yTree::read(cx).with_role("Menu").is_empty());
+    assert!(active_terminal_has_input_focus(&manager, cx));
+
+    let tree = A11yTree::read(cx);
+    let handle = node_id(tree.node("Resize Workspace sidebar"));
+    perform(cx, tree.node("Resize Workspace sidebar"), Action::Focus);
+    right_click("tab-item-1-inactive", cx);
+    assert_eq!(A11yTree::read(cx).with_role("Menu").len(), 1);
+    cx.simulate_keystrokes("escape");
+    let tree = A11yTree::read(cx);
+    assert!(tree.with_role("Menu").is_empty());
+    assert_eq!(tree.focused().map(node_id), Some(handle));
+}

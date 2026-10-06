@@ -53,8 +53,8 @@ use crate::terminal::{
 };
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Bounds, Context, DefiniteLength, Entity, EventEmitter, MouseDownEvent, Pixels,
-    Point, Render, Window, div, px, relative,
+    AnyElement, App, Bounds, Context, DefiniteLength, Entity, EventEmitter, FocusHandle,
+    MouseDownEvent, Pixels, Point, Render, Window, div, px, relative,
 };
 use spaceterm_ui::{
     Alert, AlertIntent, ButtonSize, ButtonVariant, HoverFade, Icon, IconButton, IconName,
@@ -358,6 +358,8 @@ pub(crate) struct TabView {
     native_service_focus_signature: Option<(bool, PaneId, Option<TerminalFocusBlocker>)>,
     close_tab_requested: bool,
     remote_lifecycle: RemoteHierarchyLifecycle,
+    /// The Tab's own focus in the Tab bar, where assistive technology can rest on it.
+    tab_focus: FocusHandle,
 }
 
 impl TabView {
@@ -438,6 +440,7 @@ impl TabView {
             native_service_focus_signature: None,
             close_tab_requested: false,
             remote_lifecycle: RemoteHierarchyLifecycle::default(),
+            tab_focus: cx.focus_handle(),
         }
     }
 
@@ -580,6 +583,10 @@ impl TabView {
 
     pub(crate) fn set_pinned_directory(&mut self, directory: Option<PinnedDirectory>) {
         self.session_factory.set_pinned_directory(directory);
+    }
+
+    pub(crate) fn tab_focus(&self) -> &FocusHandle {
+        &self.tab_focus
     }
 
     /// What this Tab presents about the Terminal Session its Focused Pane runs, read from that
