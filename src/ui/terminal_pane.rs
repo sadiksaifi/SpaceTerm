@@ -1,3 +1,5 @@
+mod report;
+
 use super::pane_lifecycle::PaneLifecycleDependencies;
 use super::terminal_focus::TerminalFocusBlocker;
 pub(crate) use crate::domain::remote_workspace::RemotePaneLifecycleError;
@@ -3486,6 +3488,12 @@ impl TerminalPane {
         self.export_diagnostics_with_recovery(None, window, cx);
     }
 
+    fn report_failure(&self, cx: &mut Context<Self>) {
+        if let Some(failure) = self.pane_state.failure() {
+            cx.open_url(&report::issue_url(&self.diagnostics, failure));
+        }
+    }
+
     fn export_diagnostics_with_recovery(
         &mut self,
         recovery: Option<RecoveryToken>,
@@ -4525,6 +4533,7 @@ impl Render for TerminalPane {
         let recovery_available = self.pending_recovery.is_some();
         let last_valid_frame_preserved = self.pane_state.last_valid_frame().is_some();
         let export_pane = cx.entity().downgrade();
+        let report_pane = cx.entity().downgrade();
         let retry_pane = cx.entity().downgrade();
         let native_context_selector = format!(
             "terminal-native-context-copy-{}-open-{}-file-preview-{}-failure-{}-last-frame-{}",
@@ -4769,6 +4778,7 @@ impl Render for TerminalPane {
                         appearance
                             .typography
                             .measure(TextRole::Body, "Export Diagnostics", window)
+                            .max(appearance.typography.measure(TextRole::Body, "Report on GitHub", window))
                     } else if recovery_available {
                         appearance
                             .typography
@@ -4860,6 +4870,15 @@ impl Render for TerminalPane {
                                         })
                                         .when(diagnostics_available, |status| {
                                             status.child(
+                                                Button::new("report-terminal-failure", "Report on GitHub")
+                                                    .variant(ButtonVariant::Link)
+                                                    .size(ButtonSize::Compact)
+                                                    .debug_selector("report-terminal-failure")
+                                                    .tooltip(Tooltip::new("report-terminal-failure-tooltip", "Open a GitHub issue draft with privacy-safe diagnostics"))
+                                                    .on_activate(move |_, _, cx| {
+                                                        let _ = report_pane.update(cx, |pane, cx| pane.report_failure(cx));
+                                                    }),
+                                            ).child(
                                                 Button::new(
                                                     "export-terminal-diagnostics",
                                                     "Export Diagnostics",

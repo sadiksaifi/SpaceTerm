@@ -468,32 +468,36 @@ fn observe_keyboard_protocols(
         BackingScale::ONE,
     );
     let mut emulator = TerminalEmulator::new(geometry).map_err(|error| error.to_string())?;
-    let printable = emulator.key(KeyInput {
-        action: KeyAction::Press,
-        physical_key: PhysicalKey::A,
-        native_key_code: Some(0),
-        logical_key: "a".to_owned(),
-        text: Some("a".to_owned()),
-        unshifted_codepoint: Some('a'),
-        modifiers: InputModifiers::default(),
-        consumed_modifiers: InputModifiers::default(),
-        option_as_alt: OptionAsAltPolicy::None,
-    })?;
+    let printable = emulator
+        .key(KeyInput {
+            action: KeyAction::Press,
+            physical_key: PhysicalKey::A,
+            native_key_code: Some(0),
+            logical_key: "a".to_owned(),
+            text: Some("a".to_owned()),
+            unshifted_codepoint: Some('a'),
+            modifiers: InputModifiers::default(),
+            consumed_modifiers: InputModifiers::default(),
+            option_as_alt: OptionAsAltPolicy::None,
+        })
+        .map_err(|error| error.to_string())?;
     budget.record(1, printable.bytes.len());
 
     const APPLICATION_CURSOR_MODE: &[u8] = b"\x1b[?1h";
     emulator.feed(APPLICATION_CURSOR_MODE);
-    let cursor_up = emulator.key(KeyInput {
-        action: KeyAction::Press,
-        physical_key: PhysicalKey::ArrowUp,
-        native_key_code: Some(126),
-        logical_key: "ArrowUp".to_owned(),
-        text: None,
-        unshifted_codepoint: None,
-        modifiers: InputModifiers::default(),
-        consumed_modifiers: InputModifiers::default(),
-        option_as_alt: OptionAsAltPolicy::None,
-    })?;
+    let cursor_up = emulator
+        .key(KeyInput {
+            action: KeyAction::Press,
+            physical_key: PhysicalKey::ArrowUp,
+            native_key_code: Some(126),
+            logical_key: "ArrowUp".to_owned(),
+            text: None,
+            unshifted_codepoint: None,
+            modifiers: InputModifiers::default(),
+            consumed_modifiers: InputModifiers::default(),
+            option_as_alt: OptionAsAltPolicy::None,
+        })
+        .map_err(|error| error.to_string())?;
     budget.record(APPLICATION_CURSOR_MODE.len(), cursor_up.bytes.len());
 
     Ok(vec![
@@ -1082,16 +1086,29 @@ fn check_gpui_keyboard_adapter() -> Result<(), String> {
 
 fn check_focus_reporting() -> Result<(), String> {
     let mut emulator = emulator(10, 2)?;
-    require_eq("focus-disabled", emulator.focus(true)?.bytes, Vec::new())?;
+    require_eq(
+        "focus-disabled",
+        emulator
+            .focus(true)
+            .map_err(|error| error.to_string())?
+            .bytes,
+        Vec::new(),
+    )?;
     emulator.feed(b"\x1b[?1004h");
     require_eq(
         "focus-gained",
-        emulator.focus(true)?.bytes,
+        emulator
+            .focus(true)
+            .map_err(|error| error.to_string())?
+            .bytes,
         b"\x1b[I".to_vec(),
     )?;
     require_eq(
         "focus-lost",
-        emulator.focus(false)?.bytes,
+        emulator
+            .focus(false)
+            .map_err(|error| error.to_string())?
+            .bytes,
         b"\x1b[O".to_vec(),
     )
 }
@@ -1187,31 +1204,37 @@ fn check_mouse_protocols() -> Result<(), String> {
     let mut emulator = emulator(12, 3)?;
     emulator.feed(b"hello world\x1b[?1000h\x1b[?1006h");
     _ = emulator.snapshot().map_err(|error| error.to_string())?;
-    let report = emulator.pointer(pointer_input(
-        &emulator,
-        PointerPhase::Press,
-        Some(PointerButton::Left),
-        2.0,
-        10.0,
-        false,
-    ))?;
+    let report = emulator
+        .pointer(pointer_input(
+            &emulator,
+            PointerPhase::Press,
+            Some(PointerButton::Left),
+            2.0,
+            10.0,
+            false,
+        ))
+        .map_err(|error| error.to_string())?;
     require_eq("sgr-mouse-press", report.bytes, b"\x1b[<0;1;1M".to_vec())?;
-    _ = emulator.pointer(pointer_input(
-        &emulator,
-        PointerPhase::Release,
-        Some(PointerButton::Left),
-        2.0,
-        10.0,
-        false,
-    ))?;
-    let selection = emulator.pointer(pointer_input(
-        &emulator,
-        PointerPhase::Press,
-        Some(PointerButton::Left),
-        2.0,
-        10.0,
-        true,
-    ))?;
+    _ = emulator
+        .pointer(pointer_input(
+            &emulator,
+            PointerPhase::Release,
+            Some(PointerButton::Left),
+            2.0,
+            10.0,
+            false,
+        ))
+        .map_err(|error| error.to_string())?;
+    let selection = emulator
+        .pointer(pointer_input(
+            &emulator,
+            PointerPhase::Press,
+            Some(PointerButton::Left),
+            2.0,
+            10.0,
+            true,
+        ))
+        .map_err(|error| error.to_string())?;
     require(
         selection.bytes.is_empty() && selection.screen_changed,
         "shift-selection-override",
@@ -1241,7 +1264,7 @@ fn select_hello(emulator: &mut TerminalEmulator) -> Result<(), String> {
             false,
         ),
     ] {
-        emulator.pointer(input)?;
+        emulator.pointer(input).map_err(|error| error.to_string())?;
     }
     Ok(())
 }
@@ -1254,7 +1277,8 @@ fn check_selection_and_copy(copy_semantics: bool) -> Result<(), String> {
             trailing_spaces: TrailingSpacePolicy::Trim,
             include_html: copy_semantics,
             ..SelectionCopyOptions::default()
-        })?
+        })
+        .map_err(|error| error.to_string())?
         .ok_or_else(|| "selection produced no copy payload".to_owned())?;
     require_eq("selection-text", copy.plain_text.as_str(), "hello")?;
     require_eq("selection-html", copy.html.is_some(), copy_semantics)
@@ -1263,15 +1287,17 @@ fn check_selection_and_copy(copy_semantics: bool) -> Result<(), String> {
 fn check_precision_wheel() -> Result<(), String> {
     let mut emulator = emulator(10, 2)?;
     emulator.feed(b"\x1b[?1000h\x1b[?1006h");
-    let action = emulator.wheel(WheelInput {
-        generation: emulator.presentation_generation(),
-        horizontal_steps: 0,
-        vertical_steps: 2,
-        phase: WheelPhase::MomentumChanged,
-        position: SurfacePosition { x: 1.0, y: 1.0 },
-        modifiers: InputModifiers::default(),
-        shift_selection: ShiftSelectionPolicy::ReportToApplication,
-    })?;
+    let action = emulator
+        .wheel(WheelInput {
+            generation: emulator.presentation_generation(),
+            horizontal_steps: 0,
+            vertical_steps: 2,
+            phase: WheelPhase::MomentumChanged,
+            position: SurfacePosition { x: 1.0, y: 1.0 },
+            modifiers: InputModifiers::default(),
+            shift_selection: ShiftSelectionPolicy::ReportToApplication,
+        })
+        .map_err(|error| error.to_string())?;
     require_eq(
         "precision-wheel-bytes",
         action.bytes,
@@ -1699,9 +1725,10 @@ fn check_typed_failures() -> Result<(), String> {
         failure.recoverability(),
         Recoverability::Fatal,
     )?;
-    let redacted = TerminalFailure::from_session(&TerminalSessionFailure::Runtime(
-        "private terminal content".to_owned(),
-    ));
+    let redacted = TerminalFailure::from_session(&TerminalSessionFailure::Startup {
+        stage: super::session::TerminalSessionStartupStage::Emulator,
+        message: "private terminal content".to_owned(),
+    });
     require(
         !redacted.to_string().contains("private terminal content"),
         "failure-redaction",

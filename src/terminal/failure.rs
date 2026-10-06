@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::fmt;
 use std::path::Path;
+use std::time::Instant;
 
 use super::emulator::PresentationGeneration;
 use super::key::KeyAction;
@@ -33,11 +34,34 @@ pub(crate) enum Recoverability {
     Fatal,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FailureReason {
+    Io(std::io::ErrorKind),
+    OutOfMemory,
+    InvalidValue,
+    OutOfSpace,
+    InvalidInput,
+    InvalidUtf8,
+    CapacityExceeded,
+    ChannelClosed,
+}
+
+impl From<libghostty_vt::Error> for FailureReason {
+    fn from(error: libghostty_vt::Error) -> Self {
+        match error {
+            libghostty_vt::Error::OutOfMemory => Self::OutOfMemory,
+            libghostty_vt::Error::InvalidValue => Self::InvalidValue,
+            libghostty_vt::Error::OutOfSpace { .. } => Self::OutOfSpace,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TerminalFailure {
     class: FailureClass,
     recoverability: Recoverability,
     operation: &'static str,
+    reason: Option<FailureReason>,
 }
 
 impl TerminalFailure {
@@ -47,6 +71,15 @@ impl TerminalFailure {
 
     pub(crate) const fn emulator(operation: &'static str) -> Self {
         Self::new(FailureClass::Emulator, Recoverability::Fatal, operation)
+    }
+
+    pub(crate) fn emulator_error(operation: &'static str, error: libghostty_vt::Error) -> Self {
+        Self::emulator(operation).with_reason(error.into())
+    }
+
+    pub(crate) const fn with_reason(mut self, reason: FailureReason) -> Self {
+        self.reason = Some(reason);
+        self
     }
 
     pub(crate) const fn presentation(operation: &'static str) -> Self {
@@ -82,6 +115,7 @@ impl TerminalFailure {
             class,
             recoverability,
             operation,
+            reason: None,
         }
     }
 
@@ -93,7 +127,7 @@ impl TerminalFailure {
                 | TerminalSessionStartupStage::ReaderThread => Self::pty("session-startup"),
                 TerminalSessionStartupStage::Emulator => Self::emulator("session-startup"),
             },
-            TerminalSessionFailure::Runtime(_) => Self::emulator("session-runtime"),
+            TerminalSessionFailure::Runtime(failure) => failure.clone(),
             TerminalSessionFailure::PtyRead { .. } => Self::pty("read-shell-output"),
             TerminalSessionFailure::ShellWait { .. } => Self::pty("reap-shell-process"),
         }
@@ -109,6 +143,10 @@ impl TerminalFailure {
 
     pub(crate) const fn operation(&self) -> &'static str {
         self.operation
+    }
+
+    pub(crate) const fn reason(&self) -> Option<FailureReason> {
+        self.reason
     }
 
     pub(crate) const fn is_fatal(&self) -> bool {
@@ -202,24 +240,34 @@ impl UnhandledKeyDiagnostic {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum DiagnosticRecord {
+enum DiagnosticEvent {
     Failure {
         class: FailureClass,
         recoverability: Recoverability,
         operation: &'static str,
+        reason: Option<FailureReason>,
     },
     UnhandledKey(UnhandledKeyDiagnostic),
 }
 
-impl DiagnosticRecord {
+impl DiagnosticEvent {
     fn encode(&self) -> String {
         match self {
             Self::Failure {
                 class,
                 recoverability,
                 operation,
+                reason,
             } => {
-                format!("class={class:?} recoverability={recoverability:?} operation={operation}\n")
+                let mut encoded = format!(
+                    "class={class:?} recoverability={recoverability:?} operation={operation}"
+                );
+                if let Some(reason) = reason {
+                    use std::fmt::Write;
+                    let _ = write!(encoded, " reason={reason:?}");
+                }
+                encoded.push('\n');
+                encoded
             }
             Self::UnhandledKey(event) => match event.native_key_code {
                 Some(native_key_code) => format!(
@@ -235,33 +283,75 @@ impl DiagnosticRecord {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DiagnosticRecord {
+    sequence: u64,
+    elapsed_ms: u128,
+    event: DiagnosticEvent,
+}
+
+impl DiagnosticRecord {
+    fn encode(&self) -> String {
+        format!(
+            "sequence={} elapsed_ms={} {}",
+            self.sequence,
+            self.elapsed_ms,
+            self.event.encode()
+        )
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DiagnosticBundle {
     records: VecDeque<DiagnosticRecord>,
+    started: Instant,
+    next_sequence: u64,
+}
+
+impl Default for DiagnosticBundle {
+    fn default() -> Self {
+        Self {
+            records: VecDeque::new(),
+            started: Instant::now(),
+            next_sequence: 1,
+        }
+    }
 }
 
 impl DiagnosticBundle {
     pub(crate) const MAX_RECORDS: usize = 128;
     pub(crate) const MAX_BYTES: usize = 64 * 1024;
-    const HEADER: &'static str =
-        "SpaceTerm diagnostics\nnetwork_telemetry=false\nterminal_content=false\n";
+
+    fn header(&self, skipped: usize) -> String {
+        let omitted = self.next_sequence - 1 - self.records.len() as u64 + skipped as u64;
+        format!(
+            "SpaceTerm diagnostics\nschema=2\nbuild_version={}\nos={}\narch={}\nnetwork_telemetry=false\nterminal_content=false\nrecords_omitted={omitted}\n",
+            env!("SPACETERM_VERSION"),
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+        )
+    }
 
     pub(crate) fn record(&mut self, failure: &TerminalFailure) {
-        self.records.push_back(DiagnosticRecord::Failure {
+        self.push(DiagnosticEvent::Failure {
             class: failure.class(),
             recoverability: failure.recoverability(),
             operation: failure.operation(),
+            reason: failure.reason(),
         });
-        self.enforce_bounds();
     }
 
     pub(crate) fn record_unhandled_key(&mut self, event: UnhandledKeyDiagnostic) {
-        self.records
-            .push_back(DiagnosticRecord::UnhandledKey(event));
-        self.enforce_bounds();
+        self.push(DiagnosticEvent::UnhandledKey(event));
     }
 
-    fn enforce_bounds(&mut self) {
+    fn push(&mut self, event: DiagnosticEvent) {
+        self.records.push_back(DiagnosticRecord {
+            sequence: self.next_sequence,
+            elapsed_ms: self.started.elapsed().as_millis(),
+            event,
+        });
+        self.next_sequence += 1;
         while self.records.len() > Self::MAX_RECORDS || self.encoded_len() > Self::MAX_BYTES {
             self.records.pop_front();
         }
@@ -272,7 +362,7 @@ impl DiagnosticBundle {
     }
 
     pub(crate) fn encoded_len(&self) -> usize {
-        Self::HEADER.len()
+        self.header(0).len()
             + self
                 .records
                 .iter()
@@ -280,13 +370,28 @@ impl DiagnosticBundle {
                 .sum::<usize>()
     }
 
-    pub(crate) fn export(&self, path: &Path) -> std::io::Result<()> {
-        let mut encoded = String::with_capacity(self.encoded_len());
-        encoded.push_str(Self::HEADER);
-        for record in &self.records {
-            encoded.push_str(&record.encode());
+    fn encode_from(&self, skipped: usize) -> String {
+        let mut text = self.header(skipped);
+        for record in self.records.iter().skip(skipped) {
+            text.push_str(&record.encode());
         }
-        std::fs::write(path, encoded)
+        text
+    }
+
+    /// Keeps the newest complete records and states how many earlier records were omitted.
+    pub(crate) fn report_text(&self, max_bytes: usize) -> String {
+        let mut skipped = 0;
+        loop {
+            let text = self.encode_from(skipped);
+            if text.len() <= max_bytes || skipped == self.records.len() {
+                return text;
+            }
+            skipped += 1;
+        }
+    }
+
+    pub(crate) fn export(&self, path: &Path) -> std::io::Result<()> {
+        std::fs::write(path, self.encode_from(0))
     }
 }
 
@@ -296,6 +401,30 @@ mod tests {
 
     use super::*;
     use crate::terminal::{PresentationGeneration, TerminalSessionFailure};
+
+    fn diagnostic_records(text: &str) -> Vec<(u64, u128, &str)> {
+        text.lines()
+            .filter(|line| line.starts_with("sequence="))
+            .map(|line| {
+                let mut fields = line.splitn(3, ' ');
+                let sequence = fields
+                    .next()
+                    .unwrap()
+                    .strip_prefix("sequence=")
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                let elapsed = fields
+                    .next()
+                    .unwrap()
+                    .strip_prefix("elapsed_ms=")
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                (sequence, elapsed, fields.next().unwrap())
+            })
+            .collect()
+    }
 
     #[test]
     fn normal_exit_and_every_failure_class_are_distinguishable() {
@@ -325,15 +454,33 @@ mod tests {
     }
 
     #[test]
-    fn session_mapping_redacts_raw_terminal_content_and_secrets() {
-        let failure = TerminalFailure::from_session(&TerminalSessionFailure::Runtime(
-            "password=hunter2 output=private terminal text".to_owned(),
-        ));
-        let rendered = failure.to_string();
-        assert_eq!(failure.class(), FailureClass::Emulator);
-        assert!(!rendered.contains("hunter2"));
-        assert!(!rendered.contains("private terminal text"));
-        assert!(rendered.contains("restart"));
+    fn session_mapping_preserves_typed_emulator_failure_reasons() {
+        for (error, reason) in [
+            (
+                libghostty_vt::Error::OutOfMemory,
+                FailureReason::OutOfMemory,
+            ),
+            (
+                libghostty_vt::Error::InvalidValue,
+                FailureReason::InvalidValue,
+            ),
+            (
+                libghostty_vt::Error::OutOfSpace { required: 512 },
+                FailureReason::OutOfSpace,
+            ),
+        ] {
+            let failure = TerminalFailure::from_session(&TerminalSessionFailure::Runtime(
+                TerminalFailure::emulator_error("produce-terminal-screen-snapshot", error),
+            ));
+            assert_eq!(
+                (failure.class(), failure.operation(), failure.reason()),
+                (
+                    FailureClass::Emulator,
+                    "produce-terminal-screen-snapshot",
+                    Some(reason)
+                )
+            );
+        }
     }
 
     #[test]
@@ -385,9 +532,27 @@ mod tests {
         assert!(!path.exists());
         bundle.export(&path).unwrap();
         let exported = fs::read_to_string(&path).unwrap();
-        let header = "SpaceTerm diagnostics\nnetwork_telemetry=false\nterminal_content=false\n";
-        let record = "class=Platform recoverability=Recoverable operation=native-event\n";
-        assert_eq!(exported, format!("{header}{}", record.repeat(128)));
+        assert!(exported.contains("schema=2\n"));
+        assert!(exported.contains(&format!("build_version={}\n", env!("SPACETERM_VERSION"))));
+        assert!(exported.contains(&format!(
+            "os={}\narch={}\n",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )));
+        assert!(
+            exported
+                .contains("network_telemetry=false\nterminal_content=false\nrecords_omitted=72\n")
+        );
+        let records = diagnostic_records(&exported);
+        assert_eq!(records.len(), 128);
+        for (index, (sequence, _, event)) in records.iter().enumerate() {
+            assert_eq!(*sequence, 73 + index as u64);
+            assert_eq!(
+                *event,
+                "class=Platform recoverability=Recoverable operation=native-event"
+            );
+        }
+        assert!(records.windows(2).all(|pair| pair[0].1 <= pair[1].1));
 
         static LONG_OPERATION: [u8; 1024] = [b'x'; 1024];
         let long_operation = std::str::from_utf8(&LONG_OPERATION).unwrap();
@@ -395,22 +560,18 @@ mod tests {
         for _ in 0..128 {
             bytes.record(&TerminalFailure::platform(long_operation));
         }
-        let long_record = format!(
-            "class=Platform recoverability=Recoverable operation={}\n",
-            "x".repeat(1024)
-        );
-        let retained = (65_536 - header.len()) / long_record.len();
-        assert!(retained < 128);
-        assert_eq!(bytes.record_count(), retained);
-        assert_eq!(
-            bytes.encoded_len(),
-            header.len() + retained * long_record.len()
-        );
+        assert!(bytes.record_count() < 128);
         assert!(bytes.encoded_len() <= 65_536);
         bytes.export(&path).unwrap();
-        assert_eq!(
-            fs::read_to_string(&path).unwrap(),
-            format!("{header}{}", long_record.repeat(retained))
+        let exported = fs::read_to_string(&path).unwrap();
+        assert_eq!(exported.len(), bytes.encoded_len());
+        let records = diagnostic_records(&exported);
+        assert_eq!(records.len(), bytes.record_count());
+        assert_eq!(records.last().unwrap().0, 128);
+        assert!(
+            records
+                .iter()
+                .all(|(_, _, event)| event.ends_with(long_operation))
         );
         fs::remove_dir_all(directory).unwrap();
     }
@@ -423,6 +584,10 @@ mod tests {
             crate::terminal::KeyAction::Press,
             Some(u16::MAX),
         ));
+        bundle.record(
+            &TerminalFailure::pty("write-shell-input")
+                .with_reason(FailureReason::Io(std::io::ErrorKind::BrokenPipe)),
+        );
 
         let directory = std::env::temp_dir().join(format!(
             "spaceterm-unhandled-key-diagnostics-{}",
@@ -433,15 +598,24 @@ mod tests {
         bundle.export(&path).unwrap();
         let exported = fs::read_to_string(&path).unwrap();
 
+        let records = diagnostic_records(&exported);
         assert_eq!(
-            exported,
-            concat!(
-                "SpaceTerm diagnostics\n",
-                "network_telemetry=false\n",
-                "terminal_content=false\n",
-                "event=UnhandledKey kind=KeyDown action=Press native_key_code=65535\n",
-            )
+            records
+                .iter()
+                .map(|(sequence, _, event)| (*sequence, *event))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    1,
+                    "event=UnhandledKey kind=KeyDown action=Press native_key_code=65535"
+                ),
+                (
+                    2,
+                    "class=Pty recoverability=Fatal operation=write-shell-input reason=Io(BrokenPipe)"
+                ),
+            ]
         );
+        assert!(records[0].1 <= records[1].1);
         fs::remove_dir_all(directory).unwrap();
     }
 }
