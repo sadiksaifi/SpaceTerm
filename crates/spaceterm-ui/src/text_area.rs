@@ -355,6 +355,7 @@ impl TextArea {
             self.buffer = TextBuffer::new(value);
             self.buffer.move_to(0);
             self.lines = line_ranges(&self.buffer.text);
+            self.accessible_text = Default::default();
         }
         self
     }
@@ -1451,7 +1452,7 @@ impl EntityInputHandler for TextArea {
 }
 
 impl Render for TextArea {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
         let has_selection = !self.buffer.selection.is_empty();
         let can_edit = self.can_edit();
@@ -1482,13 +1483,16 @@ impl Render for TextArea {
                     }
                 })
             })
-            .aria_value(SharedString::from(self.buffer.text.as_str().to_owned()))
-            .a11y_synthetic_children({
-                let value = self.buffer.text.as_str().to_owned();
+            .when(window.is_a11y_active(), |editor| {
+                let value = self.accessible_text.value(&self.buffer.text, self.revision);
                 let published = self.accessible_text.clone();
                 let selection = &self.buffer.selection;
                 let (anchor, focus) = (selection.anchor(), selection.cursor());
-                move |builder| published.publish(builder, &value, anchor, focus)
+                editor
+                    .aria_value(value)
+                    .a11y_synthetic_children(move |builder| {
+                        published.publish(builder, anchor, focus);
+                    })
             })
             .on_a11y_action(accesskit::Action::SetTextSelection, {
                 let requested = self.accessible_text.clone();

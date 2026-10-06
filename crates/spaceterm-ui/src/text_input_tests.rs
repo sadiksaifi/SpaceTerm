@@ -1963,3 +1963,88 @@ fn accessibility_value_writes_edit_obscured_inputs_without_publishing_secrets(
         "new secret"
     );
 }
+
+#[gpui::test]
+fn text_inputs_reuse_accessibility_publication_until_the_value_changes(cx: &mut TestAppContext) {
+    use crate::a11y_testing::{A11yTree, node_id, perform_with};
+    use crate::accessible_text::testing::run_storage;
+    use gpui::accesskit::{Action, ActionData, TextPosition, TextSelection};
+
+    let (input, cx) = input(cx, "hello world");
+    assert!(
+        input
+            .read_with(cx, |input, _| run_storage(&input.accessible_text))
+            .is_none()
+    );
+    let tree = A11yTree::read(cx);
+    let run = node_id(tree.children(tree.node("Test input"))[0]);
+    let storage = input.read_with(cx, |input, _| run_storage(&input.accessible_text));
+    for _ in 0..3 {
+        cx.executor().advance_clock(CARET_BLINK_INTERVAL);
+        let tree = A11yTree::read(cx);
+        let field = tree.node("Test input");
+        assert_eq!(field["aria"]["value"], "hello world");
+        assert_eq!(node_id(tree.children(field)[0]), run);
+        assert_eq!(
+            input.read_with(cx, |input, _| run_storage(&input.accessible_text)),
+            storage
+        );
+    }
+
+    let tree = A11yTree::read(cx);
+    perform_with(
+        cx,
+        tree.node("Test input"),
+        Action::SetTextSelection,
+        Some(ActionData::SetTextSelection(TextSelection {
+            anchor: TextPosition {
+                node: run,
+                character_index: 11,
+            },
+            focus: TextPosition {
+                node: run,
+                character_index: 6,
+            },
+        })),
+    );
+    assert_eq!(
+        A11yTree::read(cx).node("Test input")["aria"]["text_selection"]["focus"]["character_index"],
+        6
+    );
+    assert_eq!(
+        input.read_with(cx, |input, _| run_storage(&input.accessible_text)),
+        storage
+    );
+
+    cx.simulate_input("there");
+    let tree = A11yTree::read(cx);
+    let field = tree.node("Test input");
+    assert_eq!(field["aria"]["value"], "hello there");
+    assert_eq!(tree.children(field)[0]["aria"]["value"], "hello there");
+    input.update(cx, |input, cx| {
+        input.clear(cx);
+    });
+    let tree = A11yTree::read(cx);
+    assert_eq!(tree.node("Test input")["aria"]["value"], "");
+    assert_eq!(
+        tree.children(tree.node("Test input"))[0]["aria"]["value"],
+        ""
+    );
+
+    cx.deactivate_accessibility();
+    let tree = A11yTree::read(cx);
+    assert_eq!(
+        tree.children(tree.node("Test input"))[0]["aria"]["value"],
+        ""
+    );
+    cx.deactivate_accessibility();
+    input.update(cx, |input, cx| {
+        input.set_value("after reconnect", cx);
+    });
+    let tree = A11yTree::read(cx);
+    assert_eq!(tree.node("Test input")["aria"]["value"], "after reconnect");
+    assert_eq!(
+        tree.children(tree.node("Test input"))[0]["aria"]["value"],
+        "after reconnect"
+    );
+}

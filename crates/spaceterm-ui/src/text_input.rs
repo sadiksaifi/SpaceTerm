@@ -749,6 +749,7 @@ impl TextInput {
         self.buffer
             .set_history_enabled(mode == TextInputContentMode::Plain);
         if mode == TextInputContentMode::Obscured {
+            self.accessible_text = Default::default();
             self.input_length_limit = self.input_length_limit.min(OBSCURED_VALUE_LIMIT);
             let value = truncate_grapheme(&self.buffer.text, self.input_length_limit).to_owned();
             if value != *self.buffer.text {
@@ -837,6 +838,7 @@ impl TextInput {
             self.buffer = TextBuffer::new(value);
             self.buffer
                 .set_history_enabled(self.content_mode == TextInputContentMode::Plain);
+            self.accessible_text = Default::default();
         }
         self
     }
@@ -2148,17 +2150,17 @@ impl Render for TextInput {
                     }
                 })
             })
-            .when(exposes_content, |editor| {
-                let value = self.buffer.text.as_str().to_owned();
+            .when(exposes_content && window.is_a11y_active(), |editor| {
+                let value = self.accessible_text.value(&self.buffer.text, self.revision);
                 let published = self.accessible_text.clone();
                 let requested = self.accessible_text.clone();
                 let selection = &self.buffer.selection;
                 let (anchor, focus) = (selection.anchor(), selection.cursor());
                 let input = entity.downgrade();
                 editor
-                    .aria_value(SharedString::from(value.clone()))
+                    .aria_value(value)
                     .a11y_synthetic_children(move |builder| {
-                        published.publish(builder, &value, anchor, focus);
+                        published.publish(builder, anchor, focus);
                     })
                     .on_a11y_action(accesskit::Action::SetTextSelection, move |data, _, cx| {
                         if let Some((anchor, focus)) = requested.requested_selection(data) {

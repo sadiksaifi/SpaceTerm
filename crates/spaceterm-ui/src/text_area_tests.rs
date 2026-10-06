@@ -434,3 +434,86 @@ fn accessibility_value_writes_respect_text_area_editability_and_limits(cx: &mut 
     );
     assert_eq!(value(&area, cx), "old");
 }
+
+#[gpui::test]
+fn text_areas_reuse_accessibility_publication_until_the_value_changes(cx: &mut TestAppContext) {
+    use crate::a11y_testing::{A11yTree, node_id, perform_with};
+    use crate::accessible_text::testing::run_storage;
+    use gpui::accesskit::{Action, ActionData, TextPosition, TextSelection};
+
+    let (area, cx) = area(cx, "first\nsecond\n", |area| area);
+    assert!(
+        area.read_with(cx, |area, _| run_storage(&area.accessible_text))
+            .is_none()
+    );
+    let tree = A11yTree::read(cx);
+    let runs = tree.children(tree.node("Test area"));
+    let first = node_id(runs[0]);
+    let second = node_id(runs[1]);
+    let storage = area.read_with(cx, |area, _| run_storage(&area.accessible_text));
+    for _ in 0..3 {
+        cx.executor().advance_clock(CARET_BLINK_INTERVAL);
+        let tree = A11yTree::read(cx);
+        let runs = tree.children(tree.node("Test area"));
+        assert_eq!(runs.len(), 3);
+        assert_eq!(runs[0]["aria"]["value"], "first\n");
+        assert_eq!(runs[1]["aria"]["value"], "second\n");
+        assert_eq!(runs[2]["aria"]["value"], "");
+        assert_eq!(
+            area.read_with(cx, |area, _| run_storage(&area.accessible_text)),
+            storage
+        );
+    }
+
+    let tree = A11yTree::read(cx);
+    perform_with(
+        cx,
+        tree.node("Test area"),
+        Action::SetTextSelection,
+        Some(ActionData::SetTextSelection(TextSelection {
+            anchor: TextPosition {
+                node: first,
+                character_index: 5,
+            },
+            focus: TextPosition {
+                node: second,
+                character_index: 3,
+            },
+        })),
+    );
+    assert_eq!(
+        A11yTree::read(cx).node("Test area")["aria"]["text_selection"]["focus"]["character_index"],
+        3
+    );
+    assert_eq!(
+        area.read_with(cx, |area, _| run_storage(&area.accessible_text)),
+        storage
+    );
+
+    area.update(cx, |area, cx| {
+        area.set_value("one line", cx);
+    });
+    let tree = A11yTree::read(cx);
+    assert_eq!(tree.children(tree.node("Test area")).len(), 1);
+    assert_eq!(tree.with_role("TextRun").len(), 1);
+    assert_eq!(
+        tree.children(tree.node("Test area"))[0]["aria"]["value"],
+        "one line"
+    );
+
+    cx.deactivate_accessibility();
+    let tree = A11yTree::read(cx);
+    assert_eq!(
+        tree.children(tree.node("Test area"))[0]["aria"]["value"],
+        "one line"
+    );
+    cx.deactivate_accessibility();
+    area.update(cx, |area, cx| {
+        area.set_value("after\nreconnect", cx);
+    });
+    let tree = A11yTree::read(cx);
+    let runs = tree.children(tree.node("Test area"));
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[0]["aria"]["value"], "after\n");
+    assert_eq!(runs[1]["aria"]["value"], "reconnect");
+}
