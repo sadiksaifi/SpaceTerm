@@ -81,7 +81,8 @@ pub enum ResizeInputSource {
     Pointer,
     /// An axis-appropriate arrow key.
     Keyboard,
-    /// An assistive technology increment or decrement, such as VoiceOver's adjustment.
+    /// An assistive technology increment, decrement, or value change, such as VoiceOver's
+    /// adjustment.
     Accessibility,
 }
 
@@ -695,24 +696,20 @@ impl RenderOnce for ResizeHandle {
         let key_focus = focus_handle.clone();
         let step_state = key_state.clone();
         let step_handler = key_handler.clone();
-        // An assistive technology steps by the modified key step, so one adjustment is noticeable.
-        let adjust = move |direction: f32, window: &mut Window, cx: &mut App| {
-            if !step_state.read(cx).enabled || step_state.read(cx).owns_pointer_stream() {
-                return;
-            }
-            let events = step_state.update(cx, |state, _| {
-                state.step(
-                    direction * MODIFIED_KEYBOARD_STEP,
-                    ResizeInputSource::Accessibility,
-                )
-            });
-            if let Some(accepted) = emit_events(step_handler.clone(), events, window, cx) {
-                step_state.update(cx, |state, _| {
-                    state.keyboard_value = finite_or_zero(accepted);
-                });
-            }
-        };
+        let adjust =
+            move |adjustment: AccessibilityAdjustment, window: &mut Window, cx: &mut App| {
+                if !step_state.read(cx).enabled || step_state.read(cx).owns_pointer_stream() {
+                    return;
+                }
+                let events = step_state.update(cx, |state, _| state.adjust(adjustment));
+                if let Some(accepted) = emit_events(step_handler.clone(), events, window, cx) {
+                    step_state.update(cx, |state, _| {
+                        state.keyboard_value = finite_or_zero(accepted);
+                    });
+                }
+            };
         let decrement = adjust.clone();
+        let set_value = adjust.clone();
         div()
             .id(self.id)
             .role(accesskit::Role::Splitter)
@@ -731,11 +728,23 @@ impl RenderOnce for ResizeHandle {
             .aria_disabled(!enabled)
             .when(enabled, |root| {
                 root.on_a11y_action(accesskit::Action::Increment, move |_, window, cx| {
-                    adjust(1.0, window, cx)
+                    adjust(AccessibilityAdjustment::Increment, window, cx)
                 })
                 .on_a11y_action(accesskit::Action::Decrement, move |_, window, cx| {
-                    decrement(-1.0, window, cx)
+                    decrement(AccessibilityAdjustment::Decrement, window, cx)
                 })
+                // VoiceOver moves a splitter by setting its value.
+                .on_a11y_action(
+                    accesskit::Action::SetValue,
+                    move |data, window, cx| {
+                        if let Some(&accesskit::ActionData::NumericValue(value)) = data {
+                            let value = value as f32;
+                            if value.is_finite() {
+                                set_value(AccessibilityAdjustment::SetValue(value), window, cx);
+                            }
+                        }
+                    },
+                )
             })
             .debug_selector(move || root_selector)
             .relative()
@@ -823,6 +832,13 @@ fn emit_events(
         }
     }
     accepted
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum AccessibilityAdjustment {
+    Increment,
+    Decrement,
+    SetValue(f32),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1101,6 +1117,18 @@ impl ResizeHandleState {
             KEYBOARD_STEP
         };
         self.step(direction * step, ResizeInputSource::Keyboard)
+    }
+
+    /// An assistive technology steps by the modified key step, so one adjustment is noticeable.
+    fn adjust(&mut self, adjustment: AccessibilityAdjustment) -> Vec<ResizeHandleEvent> {
+        let displacement = match adjustment {
+            AccessibilityAdjustment::Increment => MODIFIED_KEYBOARD_STEP,
+            AccessibilityAdjustment::Decrement => -MODIFIED_KEYBOARD_STEP,
+            AccessibilityAdjustment::SetValue(value) => {
+                clamp_to_range(value, self.range.as_ref()) - self.keyboard_value
+            }
+        };
+        self.step(displacement, ResizeInputSource::Accessibility)
     }
 
     /// Requests one discrete resize from the last accepted value.
@@ -2077,5 +2105,64 @@ mod tests {
         assert_eq!(splitter["aria"]["disabled"], true);
         assert!(!supports(splitter, Action::Increment));
         assert!(!supports(splitter, Action::Decrement));
+    }
+
+    #[gpui::test]
+    fn resize_handles_move_to_a_value_assistive_technology_sets(cx: &mut TestAppContext) {
+        use crate::a11y_testing::{A11yTree, perform_with, supports};
+        use gpui::accesskit::{Action, ActionData};
+
+        let (root, events, cx) = resize_window(cx, ResizeAxis::Horizontal);
+        root.update(cx, |root, _| root.clamp = Some((0.0, 200.0)));
+        let tree = A11yTree::read(cx);
+        assert!(supports(tree.node("Resize test"), Action::SetValue));
+
+        perform_with(
+            cx,
+            tree.node("Resize test"),
+            Action::SetValue,
+            Some(ActionData::NumericValue(150.0)),
+        );
+        let tree = A11yTree::read(cx);
+        assert_eq!(tree.node("Resize test")["aria"]["numeric_value"], 150.0);
+        perform_with(
+            cx,
+            tree.node("Resize test"),
+            Action::SetValue,
+            Some(ActionData::NumericValue(500.0)),
+        );
+        let requests = events
+            .borrow()
+            .iter()
+            .filter_map(|event| match event {
+                ResizeHandleEvent::ResizeRequested {
+                    source,
+                    displacement,
+                    requested_value,
+                    ..
+                } => Some((*source, *displacement, *requested_value)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            requests,
+            [
+                (ResizeInputSource::Accessibility, 50.0, 150.0),
+                (ResizeInputSource::Accessibility, 50.0, 200.0),
+            ]
+        );
+        assert_eq!(
+            A11yTree::read(cx).node("Resize test")["aria"]["numeric_value"],
+            200.0
+        );
+
+        root.update(cx, |root, cx| {
+            root.disabled = true;
+            cx.notify();
+        });
+        assert!(!supports(
+            A11yTree::read(cx).node("Resize test"),
+            Action::SetValue
+        ));
     }
 }
