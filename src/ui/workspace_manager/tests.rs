@@ -10596,6 +10596,101 @@ fn close_confirmation_publishes_text_before_actions_and_contains_accessibility(
     assert_eq!(tree.focused().unwrap()["aria"]["label"], "Cancel");
     for name in ["Tabs", "Workspaces", "Terminal context actions"] {
         assert!(!tree.exposed(tree.node(name)), "{name}");
+}
+
+#[gpui::test]
+/// Opens a Workspace whose Terminal Panes publish their accessibility nodes.
+fn workspace_manager_with_terminal_nodes(
+    cx: &mut TestAppContext,
+) -> (
+    Entity<WorkspaceManager>,
+    TestTerminalSessionRecords,
+    &mut VisualTestContext,
+) {
+    use crate::platform::accesskit_terminal_accessibility::AccessKitTerminalAccessibilityAdapterFactory;
+
+    cx.update(crate::ui::init)
+        .expect("UI initialization should succeed");
+    let records = TestTerminalSessionRecords::default();
+    let session_factory: Rc<dyn TerminalSessionFactory> =
+        Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
+    let (manager, cx) = cx.add_window_view(|window, cx| {
+        WorkspaceManager::new_with_adapters(
+            session_factory,
+            std::env::temp_dir(),
+            WorkspaceManagerAdapters {
+                accessibility: Rc::new(AccessKitTerminalAccessibilityAdapterFactory),
+                ..workspace_adapters(test_remote_backend_factory())
+            },
+            window,
+            cx,
+        )
+    });
+    cx.update(|window, cx| {
+        window.activate_window();
+        manager.update(cx, |manager, cx| manager.focus(window, cx));
+    });
+    cx.run_until_parked();
+    (manager, records, cx)
+}
+
+/// Reports a shell prompt for one Terminal Session, so closing its Pane needs no confirmation.
+fn report_idle_prompt(
+    records: &TestTerminalSessionRecords,
+    session_id: usize,
+    cx: &mut VisualTestContext,
+) {
+    let mut metadata = crate::terminal::metadata::MetadataTracker::new(
+        crate::local_path::LocalPathSemantics::Posix,
+        "/Users/test",
+        "zsh",
+        Default::default(),
+        Instant::now(),
+    );
+    assert!(metadata.apply_semantic_prompt("A", Instant::now()));
+    let mut screen =
+        (*crate::terminal::ScreenSnapshot::empty(crate::local_path::LocalPathSemantics::Posix))
+            .clone();
+    screen.metadata = metadata.snapshot();
+    records
+        .event_sender(session_id)
+        .expect("the Terminal Session was not started")
+        .try_send(TerminalSessionEvent::Screen(Arc::new(screen)))
+        .unwrap();
+    cx.run_until_parked();
+}
+
+/// Returns the "Close Tab" button inside the Tab at this Tab bar position.
+fn tab_close_button(
+    tree: &spaceterm_ui::a11y_testing::A11yTree,
+    index: usize,
+) -> &serde_json::Value {
+    let mut pending = vec![tree.with_role("Tab")[index]];
+    while let Some(node) = pending.pop() {
+        if node["aria"]["label"] == "Close Tab" {
+            return node;
+        }
+        pending.extend(tree.children(node));
+    }
+    panic!("Tab {index} has no Close Tab button");
+}
+
+/// Asserts that the Active Tab's terminal holds focus and no node of a closed Tab remains.
+fn assert_closed_tab_left_focus_on_the_active_terminal(
+    manager: &Entity<WorkspaceManager>,
+    closed: &[gpui::accesskit::NodeId],
+    cx: &mut VisualTestContext,
+) {
+    use spaceterm_ui::a11y_testing::{A11yTree, node_id};
+
+    let tree = A11yTree::read(cx);
+    assert_eq!(tree.with_role("Tab").len(), 1);
+    let focused = tree.focused().expect("a node holds focus");
+    assert_eq!(focused["aria"]["role"], "Terminal");
+    assert!(active_terminal_has_input_focus(manager, cx));
+    let remaining = tree.in_order().into_iter().map(node_id).collect::<Vec<_>>();
+    for node in closed {
+        assert!(!remaining.contains(node), "a node of the closed Tab remains");
     }
 }
 
@@ -10631,4 +10726,32 @@ fn close_confirmation_restores_accessibility_focus_after_escape_and_cancel(
         }));
         assert!(records.dropped_session_ids().is_empty());
     }
+}
+
+#[gpui::test]
+fn closing_an_inactive_tab_from_its_close_button_by_assistive_technology_keeps_focus(
+    cx: &mut TestAppContext,
+) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, node_id, perform};
+
+    let (manager, records, cx) = workspace_manager_with_terminal_nodes(cx);
+    cx.simulate_keystrokes("cmd-t");
+    report_idle_prompt(&records, 1, cx);
+    // VoiceOver moves keyboard focus with its cursor onto the button it then presses.
+    let tree = A11yTree::read(cx);
+    let closed = [
+        node_id(tree.with_role("Tab")[0]),
+        node_id(tab_close_button(&tree, 0)),
+    ];
+    perform(cx, tab_close_button(&tree, 0), Action::Focus);
+    assert_eq!(A11yTree::read(cx).focused().map(node_id), Some(closed[1]));
+    let tree = A11yTree::read(cx);
+    perform(cx, tab_close_button(&tree, 0), Action::Click);
+
+    assert!(manager.read_with(cx, |manager, _| {
+        manager.close_confirmation.pending().is_none()
+    }));
+    assert_eq!(records.dropped_session_ids(), vec![1]);
+    assert_closed_tab_left_focus_on_the_active_terminal(&manager, &closed, cx);
 }

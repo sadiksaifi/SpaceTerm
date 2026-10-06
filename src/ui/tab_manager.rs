@@ -1344,7 +1344,7 @@ impl TabManager {
                 active_tab_id,
             }) => {
                 debug_assert_eq!(closed_tab_id, tab_id);
-                let tab_focused = payload.read(cx).tab_focus().is_focused(window);
+                let tab_focused = payload.read(cx).tab_focus().contains_focused(window, cx);
                 payload.update(cx, |view, cx| view.close_all(cx));
                 if was_active {
                     let active_tab = self.tabs.active_tab().clone();
@@ -1354,7 +1354,8 @@ impl TabManager {
                         active_tab.update(cx, |view, cx| view.deactivate(cx));
                     }
                 } else if tab_focused {
-                    // The closed Tab's own focus leaves with it, so the Active Tab takes it.
+                    // Focus on the closed Tab or its Close Tab button leaves with it, so the
+                    // Active Tab takes it.
                     self.focus(window, cx);
                 }
                 self.tab_selector_pressed = None;
