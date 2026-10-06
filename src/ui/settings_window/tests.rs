@@ -1876,6 +1876,39 @@ fn a_stepper_stops_at_the_ends_of_its_validated_range(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn steppers_publish_an_adjustable_value_that_stops_at_its_range(cx: &mut TestAppContext) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, perform, supports};
+
+    let mut document = SettingsDocument::default();
+    document.appearance.terminal.typography.base_size = 31.0;
+    let (window, _harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
+    select_section(SettingsSectionId::Font, cx);
+    let tree = A11yTree::read(cx);
+    let size = tree.node("terminal font size");
+    assert_eq!(size["aria"]["role"], "SpinButton");
+    assert_eq!(size["aria"]["value"], "31 pt");
+    assert!(supports(size, Action::Decrement));
+
+    perform(cx, size, Action::Increment);
+    let base_size = |cx: &mut VisualTestContext| {
+        document_of(&window, cx)
+            .appearance
+            .terminal
+            .typography
+            .base_size
+    };
+    assert_eq!(base_size(cx), 32.0);
+    let tree = A11yTree::read(cx);
+    let size = tree.node("terminal font size");
+    assert_eq!(size["aria"]["value"], "32 pt");
+    assert!(!supports(size, Action::Increment));
+
+    perform(cx, size, Action::Decrement);
+    assert_eq!(base_size(cx), 31.0);
+}
+
+#[gpui::test]
 fn line_height_steps_stay_on_the_step_grid(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
 

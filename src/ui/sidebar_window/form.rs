@@ -5,7 +5,9 @@ use crate::ui::appearance::gpui_color;
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Bounds, Pixels, Rgba, SharedString, StyledText, Window, div, px};
+use gpui::{
+    AnyElement, App, Bounds, Pixels, Rgba, SharedString, StyledText, Window, accesskit, div, px,
+};
 use spaceterm_ui::{
     Button, ButtonSize, ButtonVariant, Icon, IconButton, IconName, Tooltip, highlight_ranges,
 };
@@ -635,7 +637,34 @@ impl gpui::RenderOnce for StepperElement {
             })
         };
         let selector = control.selector;
+        let can_decrease = control.enabled && control.can_decrease;
+        let can_increase = control.enabled && control.can_increase;
+        // Assistive technology adjusts the value through the same steps the buttons request.
+        let adjust = |delta: i32, handler: Option<StepHandler>| {
+            move |_: Option<&accesskit::ActionData>, window: &mut Window, cx: &mut App| {
+                if let Some(handler) = &handler {
+                    handler(delta, window, cx);
+                }
+            }
+        };
         div()
+            .id(SharedString::from(format!("{selector}-accessible")))
+            .role(accesskit::Role::SpinButton)
+            .aria_label(accessibility_name)
+            .aria_value(control.value.clone())
+            .aria_disabled(!control.enabled)
+            .when(can_decrease, |stepper| {
+                stepper.on_a11y_action(
+                    accesskit::Action::Decrement,
+                    adjust(-1, control.on_step.clone()),
+                )
+            })
+            .when(can_increase, |stepper| {
+                stepper.on_a11y_action(
+                    accesskit::Action::Increment,
+                    adjust(1, control.on_step.clone()),
+                )
+            })
             .debug_selector(move || selector.to_owned())
             .flex()
             .flex_row()
@@ -677,7 +706,7 @@ impl gpui::RenderOnce for StepperElement {
                     "Decrease",
                     IconName::Minus,
                     -1,
-                    control.enabled && control.can_decrease,
+                    can_decrease,
                     control.on_step.clone(),
                 ))
                 .child(step(
@@ -685,7 +714,7 @@ impl gpui::RenderOnce for StepperElement {
                     "Increase",
                     IconName::Plus,
                     1,
-                    control.enabled && control.can_increase,
+                    can_increase,
                     control.on_step,
                 ))
                 .child(
