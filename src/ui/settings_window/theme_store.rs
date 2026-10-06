@@ -5,7 +5,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Entity, FocusHandle, SharedString, WeakEntity, Window, div, px};
+use gpui::{
+    AnyElement, App, Entity, FocusHandle, SharedString, Text, WeakEntity, Window, accesskit, div,
+    px,
+};
 use spaceterm_ui::{
     Dialog, DialogCloseDecision, DialogInitialFocus, DialogSize, FuzzyTarget, Icon, IconName,
     ModalAction, ModalActionEmphasis, ModalActionRole, ModalId, ProgressBar, ProgressRing,
@@ -321,12 +324,12 @@ impl ThemeStore {
 
     fn render_listing(&self, appearance: &ChromeAppearance, cx: &mut Context<Self>) -> AnyElement {
         let colors = appearance.host_colors(spaceterm_ui::ControlHost::Floating);
-        let secondary = |text: SharedString| {
+        let secondary = |id: &'static str, text: SharedString| {
             div()
                 .chrome_text(appearance.typography.style(TextRole::Secondary))
                 .text_color(gpui_color(colors.text_secondary))
                 .whitespace_normal()
-                .child(text)
+                .child(Text::new(id.into(), text))
         };
         // A state with no rows sits centered where the rows would be, so the sheet keeps its size.
         let placeholder = || {
@@ -342,6 +345,7 @@ impl ThemeStore {
         match self.listing.clone() {
             _ if self.registry.is_none() => placeholder()
                 .child(secondary(
+                    "settings-theme-store-unavailable",
                     "The Zed extension registry is unavailable. You can still import a theme file."
                         .into(),
                 ))
@@ -358,14 +362,17 @@ impl ThemeStore {
                     ),
                 )
                 .child(
-                    secondary("Loading themes…".into())
+                    secondary("settings-theme-store-loading-caption", "Loading themes…".into())
                         .debug_selector(|| "settings-theme-store-loading-caption".into()),
                 )
                 .into_any_element(),
             Listing::Failed(error) => {
                 let store = cx.weak_entity();
                 placeholder()
-                    .child(secondary(registry_failure_message(error).into()))
+                    .child(secondary(
+                        "settings-theme-store-failure",
+                        registry_failure_message(error).into(),
+                    ))
                     .child(action_button(
                         "settings-theme-store-retry",
                         "Try Again",
@@ -383,6 +390,7 @@ impl ThemeStore {
                 if shown.is_empty() {
                     return placeholder()
                         .child(secondary(
+                            "settings-theme-store-no-results",
                             format!("No Zed themes match “{}”.", self.query).into(),
                         ))
                         .into_any_element();
@@ -397,6 +405,9 @@ impl ThemeStore {
                         })
                 });
                 div()
+                    .id("settings-zed-extensions")
+                    .role(accesskit::Role::List)
+                    .aria_label("Zed theme extensions")
                     .flex()
                     .flex_col()
                     .w_full()
@@ -404,6 +415,7 @@ impl ThemeStore {
                     .when(total > count, |list| {
                         list.child(
                             div().pt(appearance.spacing(10.0)).child(secondary(
+                                "settings-theme-store-truncated",
                                 format!(
                                     "Showing {count} of {total} extensions. Search to find others."
                                 )
@@ -463,7 +475,7 @@ impl Render for ThemeStore {
                     .chrome_text(appearance.typography.style(TextRole::Secondary))
                     .text_color(gpui_color(colors.text_secondary))
                     .whitespace_normal()
-                    .child(status)
+                    .child(Text::new("settings-theme-store-status".into(), status))
             }))
     }
 }
@@ -507,7 +519,7 @@ fn render_extension_row(
     editable: bool,
     appearance: &ChromeAppearance,
     cx: &mut Context<ThemeStore>,
-) -> gpui::Div {
+) -> gpui::Stateful<gpui::Div> {
     let colors = appearance.host_colors(spaceterm_ui::ControlHost::Floating);
     let mut byline = Vec::new();
     if !extension.authors.is_empty() {
@@ -575,13 +587,28 @@ fn render_extension_row(
                         appearance.icons.metrics(IconRole::Caption).glyph_size,
                         gpui_color(colors.text_secondary),
                     ))
-                    .child("Installed"),
+                    .child(Text::new(
+                        "installed".into(),
+                        SharedString::from("Installed"),
+                    )),
             )
             .child(remove())
             .into_any_element(),
     };
     let row_selector = format!("settings-zed-extension-{}", extension.id);
+    // The row names the extension, so its one action reads in context.
+    let summary = extension
+        .description
+        .iter()
+        .cloned()
+        .chain([byline.join(" · ")])
+        .collect::<Vec<_>>()
+        .join(". ");
     div()
+        .id(SharedString::from(row_selector.clone()))
+        .role(accesskit::Role::ListItem)
+        .aria_label(SharedString::from(extension.name.clone()))
+        .aria_description(summary)
         .debug_selector(move || row_selector)
         .flex()
         .flex_row()
