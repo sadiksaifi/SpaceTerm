@@ -729,7 +729,7 @@ mod tests {
     }
 
     #[test]
-    fn cancel_key_equivalents_never_target_a_destructive_cancel() {
+    fn cancel_shortcuts_never_target_a_destructive_cancel() {
         let policy = ModalDesktopPolicy::mac_os();
         let actions = vec![
             action("continue", ModalActionRole::Affirmative, "continue"),

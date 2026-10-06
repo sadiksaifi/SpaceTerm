@@ -440,7 +440,7 @@ mod tests {
 
     struct Payload;
 
-    /// Owns the drag its root's source starts, as a Tab, Workspace sidebar, or Pane host does.
+    /// Owns the drag its root's source starts, as a Tab, Workspace sidebar, or Tab view does.
     #[derive(Default)]
     struct Owner {
         session: Option<DragSession>,

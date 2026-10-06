@@ -68,7 +68,7 @@ impl ControlTypography {
         &self.heading
     }
 
-    /// Returns the font used for keyboard equivalents.
+    /// Returns the font used for Shortcuts.
     pub fn shortcut(&self) -> &Font {
         &self.shortcut
     }

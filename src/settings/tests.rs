@@ -123,10 +123,7 @@ fn settings_owner_imports_reinstalls_resets_and_exports_without_implicit_selecti
     let imported = settings.snapshot();
     assert_eq!(receipt.installed.len(), 1);
     assert_eq!(receipt.catalog_revision, imported.catalog_revision);
-    assert_eq!(
-        imported.candidate.preferences,
-        initial.committed.preferences
-    );
+    assert_eq!(imported.candidate.appearance, initial.committed.appearance);
     assert_eq!(imported.candidate.terminal_themes.len(), 1);
     assert_eq!(storage.0.lock().unwrap().writes, 0);
     assert_eq!(
@@ -199,14 +196,14 @@ fn preview_import_and_reset_use_the_same_serialized_commit_owner() {
         .begin_preview(settings.snapshot().committed.revision)
         .unwrap();
     let mut candidate = (*settings.snapshot().candidate).clone();
-    candidate.preferences.mode = AppearanceMode::Light;
+    candidate.appearance.mode = AppearanceMode::Light;
     settings.update_preview(&token, candidate).unwrap();
     settings
         .reset_preview(&token, ResetTarget::AllAppearance)
         .unwrap();
     assert_eq!(
-        settings.snapshot().candidate.preferences,
-        SettingsDocument::default().preferences
+        settings.snapshot().candidate.appearance,
+        SettingsDocument::default().appearance
     );
     settings.commit_preview(&token).unwrap().run().unwrap();
     assert_eq!(settings.snapshot().committed.terminal_themes.len(), 1);
@@ -235,8 +232,8 @@ fn a_zed_family_installs_without_changing_any_selection() {
         .unwrap();
     assert_eq!(settings.snapshot().candidate.terminal_themes.len(), 1);
     assert_eq!(
-        settings.snapshot().candidate.preferences,
-        SettingsDocument::default().preferences
+        settings.snapshot().candidate.appearance,
+        SettingsDocument::default().appearance
     );
 }
 
@@ -299,7 +296,7 @@ fn updating_an_extension_replaces_its_themes_and_keeps_surviving_selections() {
         .unwrap()
         .clone();
     let mut candidate = (*settings.snapshot().candidate).clone();
-    candidate.preferences.terminal.themes.dark = kept.clone();
+    candidate.appearance.terminal.themes.dark = kept.clone();
     settings.update_preview(&token, candidate).unwrap();
 
     let second = settings
@@ -313,7 +310,7 @@ fn updating_an_extension_replaces_its_themes_and_keeps_surviving_selections() {
     assert!(second.installed.contains(&kept));
     assert_eq!(installed_names(&settings), ["Added", "Kept", "Sample"]);
     let snapshot = settings.snapshot();
-    assert_eq!(snapshot.candidate.preferences.terminal.themes.dark, kept);
+    assert_eq!(snapshot.candidate.appearance.terminal.themes.dark, kept);
     let versions = snapshot
         .candidate
         .terminal_themes
@@ -336,7 +333,7 @@ fn updating_an_extension_without_the_selected_theme_selects_the_builtin_theme() 
         )
         .unwrap();
     let mut candidate = (*settings.snapshot().candidate).clone();
-    candidate.preferences.terminal.themes.dark = first.installed[0].clone();
+    candidate.appearance.terminal.themes.dark = first.installed[0].clone();
     settings.update_preview(&token, candidate).unwrap();
 
     settings
@@ -352,7 +349,7 @@ fn updating_an_extension_without_the_selected_theme_selects_the_builtin_theme() 
         settings
             .snapshot()
             .candidate
-            .preferences
+            .appearance
             .terminal
             .themes
             .dark,
@@ -409,17 +406,17 @@ fn preview_deletion_returns_the_selected_slot_to_its_builtin_theme() {
         .unwrap();
     let selected = imported.installed[0].clone();
     let mut candidate = (*settings.snapshot().candidate).clone();
-    candidate.preferences.mode = AppearanceMode::Light;
-    candidate.preferences.terminal.themes.light = selected.clone();
+    candidate.appearance.mode = AppearanceMode::Light;
+    candidate.appearance.terminal.themes.light = selected.clone();
     candidate
-        .preferences
+        .appearance
         .terminal
         .overrides
         .insert(selected.clone(), TerminalColorOverrides::default());
     settings.update_preview(&token, candidate).unwrap();
 
     let catalog_revision = settings.snapshot().catalog_revision;
-    let mut expected = settings.snapshot().candidate.preferences.clone();
+    let mut expected = settings.snapshot().candidate.appearance.clone();
     expected.terminal.themes.light = ThemeId::builtin("builtin.spaceterm.light");
     let removed_revision = settings
         .remove_themes_preview(&token, catalog_revision, std::slice::from_ref(&selected))
@@ -427,7 +424,7 @@ fn preview_deletion_returns_the_selected_slot_to_its_builtin_theme() {
     let snapshot = settings.snapshot();
     assert_eq!(removed_revision, snapshot.catalog_revision);
     assert!(snapshot.candidate.terminal_themes.is_empty());
-    assert_eq!(snapshot.candidate.preferences, expected);
+    assert_eq!(snapshot.candidate.appearance, expected);
     assert_eq!(storage.0.lock().unwrap().writes, 0);
 }
 
@@ -437,7 +434,7 @@ fn preview_rejects_a_missing_theme_selection() {
     let (settings, _storage) = setup();
     let token = settings.begin_preview(0).unwrap();
     let mut candidate = (*settings.snapshot().candidate).clone();
-    candidate.preferences.terminal.themes.dark = ThemeId::new("custom.missing").unwrap();
+    candidate.appearance.terminal.themes.dark = ThemeId::new("custom.missing").unwrap();
 
     assert!(settings.update_preview(&token, candidate).is_err());
 }
@@ -587,7 +584,7 @@ fn preview_deletion_commits_only_the_named_custom_theme() {
 fn invalid_reload_preserves_valid_settings_until_a_later_valid_reload() {
     let (settings, storage) = setup();
     let mut first = SettingsDocument::default();
-    first.preferences.terminal.typography.base_size = 20.0;
+    first.appearance.terminal.typography.base_size = 20.0;
     settings.update_committed(0, first).unwrap().run().unwrap();
     let committed = settings.snapshot().committed;
     storage.0.lock().unwrap().snapshot = Some((b"invalid document".to_vec(), 50));
@@ -598,12 +595,12 @@ fn invalid_reload_preserves_valid_settings_until_a_later_valid_reload() {
         b"invalid document"
     );
     let mut second = (*committed).clone();
-    second.preferences.terminal.typography.base_size = 30.0;
+    second.appearance.terminal.typography.base_size = 30.0;
     storage.0.lock().unwrap().snapshot = Some((export_settings(&second).unwrap().into_bytes(), 51));
     settings.reload().unwrap();
     let loaded = settings.snapshot();
     assert!(loaded.committed.revision > committed.revision);
-    assert_eq!(loaded.committed.preferences, second.preferences);
+    assert_eq!(loaded.committed.appearance, second.appearance);
     assert_eq!(loaded.status, None);
 }
 
@@ -612,7 +609,7 @@ fn failed_direct_save_preserves_local_candidate_without_publishing_it() {
     let (settings, storage) = setup();
     let original = settings.snapshot().committed;
     let mut candidate = (*original).clone();
-    candidate.preferences.terminal.typography.base_size = 24.0;
+    candidate.appearance.terminal.typography.base_size = 24.0;
     let job = settings
         .update_committed(original.revision, candidate.clone())
         .unwrap();
@@ -642,7 +639,7 @@ fn failed_direct_save_preserves_local_candidate_without_publishing_it() {
         settings
             .snapshot()
             .committed
-            .preferences
+            .appearance
             .terminal
             .typography
             .base_size,
@@ -894,7 +891,7 @@ fn subscribers_receive_coalesced_changes_and_closed_subscribers_are_pruned() {
 fn recovery_keeps_exact_bytes_replaces_backup_and_retires_edits() {
     let (settings, storage) = setup();
     let mut document = (*settings.snapshot().committed).clone();
-    document.preferences.mode = AppearanceMode::Light;
+    document.appearance.mode = AppearanceMode::Light;
     settings
         .update_committed(0, document)
         .unwrap()
@@ -921,8 +918,8 @@ fn recovery_keeps_exact_bytes_replaces_backup_and_retires_edits() {
     assert_eq!(recovered.status, None);
     assert_eq!(recovered.phase, PreviewPhase::Idle);
     assert_eq!(
-        recovered.committed.preferences,
-        SettingsDocument::default().preferences
+        recovered.committed.appearance,
+        SettingsDocument::default().appearance
     );
     assert!(recovered.recoverable_candidate.is_none());
     assert!(recovered.committed.revision > before.committed.revision);
@@ -1058,13 +1055,13 @@ fn following_the_file_adopts_an_outside_change_once() {
     let before = settings.snapshot();
 
     let mut outside = SettingsDocument::default();
-    outside.preferences.terminal.typography.base_size = 21.0;
+    outside.appearance.terminal.typography.base_size = 21.0;
     storage.0.lock().unwrap().snapshot =
         Some((export_settings(&outside).unwrap().into_bytes(), 40));
 
     assert_eq!(settings.follow_file(), Ok(true));
     let after = settings.snapshot();
-    assert_eq!(after.committed.preferences, outside.preferences);
+    assert_eq!(after.committed.appearance, outside.appearance);
     assert!(after.committed.revision > before.committed.revision);
     assert!(after.catalog_revision > before.catalog_revision);
     assert_eq!(settings.follow_file(), Ok(false));
@@ -1092,11 +1089,11 @@ fn following_a_malformed_file_keeps_the_settings_until_a_valid_one_arrives() {
     );
 
     let mut fixed = SettingsDocument::default();
-    fixed.preferences.terminal.typography.base_size = 19.0;
+    fixed.appearance.terminal.typography.base_size = 19.0;
     storage.0.lock().unwrap().snapshot = Some((export_settings(&fixed).unwrap().into_bytes(), 41));
     assert_eq!(settings.follow_file(), Ok(true));
     assert_eq!(settings.snapshot().status, None);
-    assert_eq!(settings.snapshot().committed.preferences, fixed.preferences);
+    assert_eq!(settings.snapshot().committed.appearance, fixed.appearance);
 }
 
 #[test]
@@ -1135,8 +1132,8 @@ fn ensuring_the_file_writes_only_a_document_no_file_holds() {
     assert_eq!(
         crate::settings::parse_settings(&written.0)
             .unwrap()
-            .preferences,
-        SettingsDocument::default().preferences
+            .appearance,
+        SettingsDocument::default().appearance
     );
 
     assert!(settings.ensure_file().unwrap().is_none());

@@ -183,7 +183,7 @@ fn unavailable_window_effects_show_defaults_and_refuse_preview_edits(cx: &mut Te
     click("workbench-transparency-maximum", cx);
     click("workbench-blur", cx);
     let preferences = workbench.read_with(cx, |workbench, _| {
-        workbench.preview.document().preferences.window
+        workbench.preview.document().appearance.window
     });
     assert_eq!(preferences.transparency, 1.0);
     assert!(preferences.blur);
@@ -281,7 +281,7 @@ fn diagnostics_repaint_for_shared_system_changes(cx: &mut TestAppContext) {
 
     let token = settings.begin_preview(0).unwrap();
     let mut candidate = crate::settings::SettingsDocument::default();
-    candidate.preferences.mode = AppearanceMode::Auto;
+    candidate.appearance.mode = AppearanceMode::Auto;
     settings.update_preview(&token, candidate).unwrap();
     cx.run_until_parked();
     platform.set_system_appearance(Some(Appearance::Light));
@@ -772,7 +772,7 @@ fn inactive_window_simulation_selects_inactive_control_states_without_editing_pr
     let (settings, _) = install(cx);
     let (workbench, cx) = open_workbench_window(cx);
     click("workbench-navigation-workbench-section-controls", cx);
-    let preferences = settings.snapshot().candidate.preferences.clone();
+    let preferences = settings.snapshot().candidate.appearance.clone();
 
     // The pinned hover column's fill, which the active and inactive catalogs paint differently.
     let hover_fill = |cx: &mut VisualTestContext| {
@@ -823,14 +823,14 @@ fn inactive_window_simulation_selects_inactive_control_states_without_editing_pr
 
     assert_ne!(hover_fill(cx), active_fill);
     assert!(!paints_focus_ring(cx));
-    assert_eq!(settings.snapshot().candidate.preferences, preferences);
+    assert_eq!(settings.snapshot().candidate.appearance, preferences);
 
     simulate_inactive(cx);
     settle_focus_rings(cx);
 
     assert_eq!(hover_fill(cx), active_fill);
     assert!(paints_focus_ring(cx));
-    assert_eq!(settings.snapshot().candidate.preferences, preferences);
+    assert_eq!(settings.snapshot().candidate.appearance, preferences);
 }
 
 #[gpui::test]

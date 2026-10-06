@@ -223,7 +223,7 @@ impl MacosKeyboardBridge {
             action: event.action,
             native_key_code: Some(event.native_key_code),
         };
-        // Let AppKit process its Help key equivalent after GPUI's responder declines it.
+        // Let AppKit process its Help Shortcut after GPUI's responder declines it.
         // Matching the character preserves Command-? on non-US keyboard layouts.
         if event.modifiers.platform
             && !event.modifiers.control

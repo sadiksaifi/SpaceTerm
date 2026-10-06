@@ -50,7 +50,7 @@ fn density_preview_should_reposition_open_workspace_and_settings_traffic_lights(
     });
     let token = settings.begin_preview(0).unwrap();
     let mut candidate = SettingsDocument::default();
-    candidate.preferences.window.density = ChromeDensity::Comfortable;
+    candidate.appearance.window.density = ChromeDensity::Comfortable;
     settings.update_preview(&token, candidate).unwrap();
     cx.run_until_parked();
 

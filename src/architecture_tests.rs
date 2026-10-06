@@ -141,7 +141,7 @@ fn local_filesystem_policy_cannot_reintroduce_native_identity_or_host_selection(
         "terminal/native_services.rs",
         "terminal/emulator.rs",
         "ui/workspace_manager.rs",
-        "ui/pane_host.rs",
+        "ui/tab_view.rs",
         "ui/tab_manager.rs",
     ] {
         let source =
@@ -893,12 +893,12 @@ fn shared_ui_and_failure_presentation_contain_no_host_shortcuts_or_wording() {
 fn shared_presentation_guard_rejects_adversarial_host_fixtures() {
     for source in [
         "button.child(\"⌘N\")",
-        "tooltip.keyboard_equivalent(\"cmd-t\")",
+        "tooltip.shortcut(\"cmd-t\")",
         "let label = \"Choose with Finder\";",
         "let label = \"Quick Look\";",
         "let description = \"Pinned to a directory on this Mac\";",
         "let failure = \"macOS integration\";",
-        "tooltip.keyboard_equivalent(\"Ctrl+Shift+T\")",
+        "tooltip.shortcut(\"Ctrl+Shift+T\")",
         "let label = \"Super+Space\";",
         "let label = \"Preview with GNOME Sushi\";",
         "let label = \"Show in Nautilus\";",

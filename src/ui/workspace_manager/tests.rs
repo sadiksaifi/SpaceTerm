@@ -1636,28 +1636,25 @@ fn workspace_modal_mount_blocks_and_restores_terminal_input(cx: &mut TestAppCont
     let (manager, _, cx) = workspace_manager(cx);
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
-    let pane_host = manager.read_with(cx, |manager, cx| {
+    let view = manager.read_with(cx, |manager, cx| {
         manager
             .workspaces
             .active_workspace()
             .payload()
             .read(cx)
-            .active_pane_host()
+            .active_tab_view()
     });
-    let focused_pane = pane_host.read_with(cx, |pane_host, _| pane_host.focused_pane_id());
-    let focused_before = cx.update(|window, cx| {
-        pane_host
-            .read(cx)
-            .focused_terminal_has_input_focus(window, cx)
-    });
+    let focused_pane = view.read_with(cx, |view, _| view.focused_pane_id());
+    let focused_before =
+        cx.update(|window, cx| view.read(cx).focused_terminal_has_input_focus(window, cx));
 
     let presentation = present_test_alert(&manager, "root-layer-alert", cx);
     cx.run_until_parked();
     let modal_state = cx.update(|window, cx| {
-        let pane_host = pane_host.read(cx);
+        let view = view.read(cx);
         (
-            pane_host.focused_pane_id(),
-            pane_host.focused_terminal_has_input_focus(window, cx),
+            view.focused_pane_id(),
+            view.focused_terminal_has_input_focus(window, cx),
         )
     });
 
@@ -1674,10 +1671,10 @@ fn workspace_modal_mount_blocks_and_restores_terminal_input(cx: &mut TestAppCont
     });
     cx.run_until_parked();
     let restored = cx.update(|window, cx| {
-        let pane_host = pane_host.read(cx);
+        let view = view.read(cx);
         (
-            pane_host.focused_pane_id(),
-            pane_host.focused_terminal_has_input_focus(window, cx),
+            view.focused_pane_id(),
+            view.focused_terminal_has_input_focus(window, cx),
         )
     });
 
@@ -1717,21 +1714,19 @@ fn queued_modals_should_preserve_focused_pane_and_restore_terminal_input_focus(
     let (manager, records, cx) = workspace_manager(cx);
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
-    let pane_host = manager.read_with(cx, |manager, cx| {
+    let view = manager.read_with(cx, |manager, cx| {
         manager
             .workspaces
             .active_workspace()
             .payload()
             .read(cx)
-            .active_pane_host()
+            .active_tab_view()
     });
-    let focused_pane = pane_host.read_with(cx, |pane_host, _| pane_host.focused_pane_id());
+    let focused_pane = view.read_with(cx, |view, _| view.focused_pane_id());
     let before = cx.update(|window, cx| {
         (
-            pane_host.read(cx).focused_pane_id(),
-            pane_host
-                .read(cx)
-                .focused_terminal_has_input_focus(window, cx),
+            view.read(cx).focused_pane_id(),
+            view.read(cx).focused_terminal_has_input_focus(window, cx),
         )
     });
     let command_count = records.commands().len();
@@ -1740,20 +1735,16 @@ fn queued_modals_should_preserve_focused_pane_and_restore_terminal_input_focus(
     cx.run_until_parked();
     let active = cx.update(|window, cx| {
         (
-            pane_host.read(cx).focused_pane_id(),
-            pane_host
-                .read(cx)
-                .focused_terminal_has_input_focus(window, cx),
+            view.read(cx).focused_pane_id(),
+            view.read(cx).focused_terminal_has_input_focus(window, cx),
         )
     });
     let second = present_test_alert(&manager, "queued-modal-second", cx);
     cx.run_until_parked();
     let queued = cx.update(|window, cx| {
         (
-            pane_host.read(cx).focused_pane_id(),
-            pane_host
-                .read(cx)
-                .focused_terminal_has_input_focus(window, cx),
+            view.read(cx).focused_pane_id(),
+            view.read(cx).focused_terminal_has_input_focus(window, cx),
         )
     });
 
@@ -1765,10 +1756,8 @@ fn queued_modals_should_preserve_focused_pane_and_restore_terminal_input_focus(
     cx.run_until_parked();
     let promoted = cx.update(|window, cx| {
         (
-            pane_host.read(cx).focused_pane_id(),
-            pane_host
-                .read(cx)
-                .focused_terminal_has_input_focus(window, cx),
+            view.read(cx).focused_pane_id(),
+            view.read(cx).focused_terminal_has_input_focus(window, cx),
         )
     });
 
@@ -1780,10 +1769,8 @@ fn queued_modals_should_preserve_focused_pane_and_restore_terminal_input_focus(
     cx.run_until_parked();
     let restored = cx.update(|window, cx| {
         (
-            pane_host.read(cx).focused_pane_id(),
-            pane_host
-                .read(cx)
-                .focused_terminal_has_input_focus(window, cx),
+            view.read(cx).focused_pane_id(),
+            view.read(cx).focused_terminal_has_input_focus(window, cx),
         )
     });
     let focus_reports = records
@@ -1840,7 +1827,7 @@ fn simultaneous_modals_should_block_and_restore_terminal_input_focus_per_operati
         )
     });
 
-    let first_pane_host = first
+    let first_view = first
         .update(cx, |manager, window, cx| {
             window.activate_window();
             manager.focus(window, cx);
@@ -1849,15 +1836,14 @@ fn simultaneous_modals_should_block_and_restore_terminal_input_focus_per_operati
                 .active_workspace()
                 .payload()
                 .read(cx)
-                .active_pane_host()
+                .active_tab_view()
         })
         .expect("first Operating-System Window should remain available");
     cx.run_until_parked();
-    let first_focused_pane =
-        first_pane_host.read_with(cx, |pane_host, _| pane_host.focused_pane_id());
+    let first_focused_pane = first_view.read_with(cx, |view, _| view.focused_pane_id());
     let first_before = first
         .update(cx, |_, window, cx| {
-            first_pane_host
+            first_view
                 .read(cx)
                 .focused_terminal_has_input_focus(window, cx)
         })
@@ -1871,7 +1857,7 @@ fn simultaneous_modals_should_block_and_restore_terminal_input_focus_per_operati
         .expect("first Operating-System Window should present its modal");
     cx.run_until_parked();
 
-    let second_pane_host = second
+    let second_view = second
         .update(cx, |manager, window, cx| {
             window.activate_window();
             manager.focus(window, cx);
@@ -1880,15 +1866,14 @@ fn simultaneous_modals_should_block_and_restore_terminal_input_focus_per_operati
                 .active_workspace()
                 .payload()
                 .read(cx)
-                .active_pane_host()
+                .active_tab_view()
         })
         .expect("second Operating-System Window should remain available");
     cx.run_until_parked();
-    let second_focused_pane =
-        second_pane_host.read_with(cx, |pane_host, _| pane_host.focused_pane_id());
+    let second_focused_pane = second_view.read_with(cx, |view, _| view.focused_pane_id());
     let second_before = second
         .update(cx, |_, window, cx| {
-            second_pane_host
+            second_view
                 .read(cx)
                 .focused_terminal_has_input_focus(window, cx)
         })
@@ -1904,19 +1889,19 @@ fn simultaneous_modals_should_block_and_restore_terminal_input_focus_per_operati
 
     let first_blocked = first
         .update(cx, |_, window, cx| {
-            let pane_host = first_pane_host.read(cx);
+            let view = first_view.read(cx);
             (
-                pane_host.focused_pane_id(),
-                pane_host.focused_terminal_has_input_focus(window, cx),
+                view.focused_pane_id(),
+                view.focused_terminal_has_input_focus(window, cx),
             )
         })
         .expect("first Operating-System Window should remain available");
     let second_blocked = second
         .update(cx, |_, window, cx| {
-            let pane_host = second_pane_host.read(cx);
+            let view = second_view.read(cx);
             (
-                pane_host.focused_pane_id(),
-                pane_host.focused_terminal_has_input_focus(window, cx),
+                view.focused_pane_id(),
+                view.focused_terminal_has_input_focus(window, cx),
             )
         })
         .expect("second Operating-System Window should remain available");
@@ -1931,19 +1916,19 @@ fn simultaneous_modals_should_block_and_restore_terminal_input_focus_per_operati
     cx.run_until_parked();
     let first_restored = first
         .update(cx, |_, window, cx| {
-            let pane_host = first_pane_host.read(cx);
+            let view = first_view.read(cx);
             (
-                pane_host.focused_pane_id(),
-                pane_host.focused_terminal_has_input_focus(window, cx),
+                view.focused_pane_id(),
+                view.focused_terminal_has_input_focus(window, cx),
             )
         })
         .expect("first Operating-System Window should remain available");
     let second_still_blocked = second
         .update(cx, |_, window, cx| {
-            let pane_host = second_pane_host.read(cx);
+            let view = second_view.read(cx);
             (
-                pane_host.focused_pane_id(),
-                pane_host.focused_terminal_has_input_focus(window, cx),
+                view.focused_pane_id(),
+                view.focused_terminal_has_input_focus(window, cx),
             )
         })
         .expect("second Operating-System Window should remain available");
@@ -1999,10 +1984,10 @@ fn simultaneous_modals_should_block_and_restore_terminal_input_focus_per_operati
     cx.run_until_parked();
     let second_restored = second
         .update(cx, |_, window, cx| {
-            let pane_host = second_pane_host.read(cx);
+            let view = second_view.read(cx);
             (
-                pane_host.focused_pane_id(),
-                pane_host.focused_terminal_has_input_focus(window, cx),
+                view.focused_pane_id(),
+                view.focused_terminal_has_input_focus(window, cx),
             )
         })
         .expect("second Operating-System Window should remain available");
@@ -2029,20 +2014,16 @@ fn cancelled_directory_selection_fallback_should_leave_hierarchy_unchanged(
     let (manager, records, cx) = workspace_manager_with_directory_selection([Ok(None)], cx);
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
-    let pane_host = manager.read_with(cx, |manager, cx| {
+    let view = manager.read_with(cx, |manager, cx| {
         manager
             .workspaces
             .active_workspace()
             .payload()
             .read(cx)
-            .active_pane_host()
+            .active_tab_view()
     });
     let terminal_focused = |cx: &mut VisualTestContext| {
-        cx.update(|window, cx| {
-            pane_host
-                .read(cx)
-                .focused_terminal_has_input_focus(window, cx)
-        })
+        cx.update(|window, cx| view.read(cx).focused_terminal_has_input_focus(window, cx))
     };
     assert!(terminal_focused(cx));
 
@@ -2700,11 +2681,11 @@ fn closed_remote_control_connection_should_preserve_workspace_and_block_its_pane
         gpui::Task::ready(Ok(())),
     );
     emit_remote_workspace_completion(&flow, completion, cx);
-    let (workspace_id, tab_manager, pane_host) = manager.read_with(cx, |manager, cx| {
+    let (workspace_id, tab_manager, view) = manager.read_with(cx, |manager, cx| {
         let workspace = manager.workspaces.active_workspace();
         let tab_manager = workspace.payload().clone();
-        let pane_host = tab_manager.read(cx).active_pane_host();
-        (workspace.id(), tab_manager, pane_host)
+        let view = tab_manager.read(cx).active_tab_view();
+        (workspace.id(), tab_manager, view)
     });
     let starts_before_disconnect = records.starts().len();
 
@@ -2734,11 +2715,11 @@ fn closed_remote_control_connection_should_preserve_workspace_and_block_its_pane
         tab_manager.entity_id()
     );
     assert_eq!(
-        tab_manager.read_with(cx, |manager, _| manager.active_pane_host().entity_id()),
-        pane_host.entity_id()
+        tab_manager.read_with(cx, |manager, _| manager.active_tab_view().entity_id()),
+        view.entity_id()
     );
     assert_eq!(
-        pane_host.read_with(cx, |host, cx| (
+        view.read_with(cx, |host, cx| (
             host.remote_disconnected_generation(),
             host.focused_terminal_remote_state(cx),
             host.pane_count(),
@@ -2779,7 +2760,7 @@ fn closed_remote_control_connection_should_preserve_workspace_and_block_its_pane
     cx.simulate_keystrokes("cmd-t");
     cx.run_until_parked();
     assert_eq!(records.starts().len(), starts_before_disconnect);
-    assert_eq!(pane_host.read_with(cx, |host, _| host.pane_count()), 1);
+    assert_eq!(view.read_with(cx, |host, _| host.pane_count()), 1);
 }
 
 #[gpui::test]
@@ -2968,17 +2949,12 @@ fn reconnect_should_atomically_restart_the_same_workspace_tab_and_pane(cx: &mut 
         gpui::Task::ready(Ok(())),
     );
     emit_remote_workspace_completion(&flow, completion, cx);
-    let (workspace_id, tab_manager, pane_host, starts_before_reconnect) =
+    let (workspace_id, tab_manager, view, starts_before_reconnect) =
         manager.read_with(cx, |manager, cx| {
             let workspace = manager.workspaces.active_workspace();
             let tab_manager = workspace.payload().clone();
-            let pane_host = tab_manager.read(cx).active_pane_host();
-            (
-                workspace.id(),
-                tab_manager,
-                pane_host,
-                records.starts().len(),
-            )
+            let view = tab_manager.read(cx).active_tab_view();
+            (workspace.id(), tab_manager, view, records.starts().len())
         });
 
     old_lifecycle
@@ -3016,11 +2992,11 @@ fn reconnect_should_atomically_restart_the_same_workspace_tab_and_pane(cx: &mut 
         tab_manager.entity_id()
     );
     assert_eq!(
-        tab_manager.read_with(cx, |manager, _| manager.active_pane_host().entity_id()),
-        pane_host.entity_id()
+        tab_manager.read_with(cx, |manager, _| manager.active_tab_view().entity_id()),
+        view.entity_id()
     );
     assert_eq!(
-        pane_host.read_with(cx, |host, cx| (
+        view.read_with(cx, |host, cx| (
             host.remote_disconnected_generation(),
             host.focused_terminal_remote_state(cx),
             host.pane_count(),
@@ -3119,11 +3095,11 @@ fn reconnect_identity_change_should_keep_final_presentation_and_show_typed_alert
         gpui::Task::ready(Ok(())),
     );
     emit_remote_workspace_completion(&flow, completion, cx);
-    let (workspace_id, pane_host, starts) = manager.read_with(cx, |manager, cx| {
+    let (workspace_id, view, starts) = manager.read_with(cx, |manager, cx| {
         let workspace = manager.workspaces.active_workspace();
         (
             workspace.id(),
-            workspace.payload().read(cx).active_pane_host(),
+            workspace.payload().read(cx).active_tab_view(),
             records.starts().len(),
         )
     });
@@ -3153,7 +3129,7 @@ fn reconnect_identity_change_should_keep_final_presentation_and_show_typed_alert
     assert_eq!(new_revalidations.load(Ordering::Acquire), 0);
     assert_eq!(records.starts().len(), starts);
     assert_eq!(
-        pane_host.read_with(cx, |host, cx| host.focused_terminal_remote_state(cx)),
+        view.read_with(cx, |host, cx| host.focused_terminal_remote_state(cx)),
         (true, true)
     );
     assert!(
@@ -3364,7 +3340,7 @@ fn hierarchy_change_between_restart_prepare_and_commit_should_fail_with_typed_al
     cx.update(|window, cx| {
         tab_manager
             .read(cx)
-            .active_pane_host()
+            .active_tab_view()
             .update(cx, |host, cx| {
                 host.close_pane_authorized(host.focused_pane_id(), window, cx);
             })
@@ -5047,7 +5023,7 @@ fn the_workspace_chooser_glyph_should_keep_one_size_across_sidebar_states(cx: &m
     );
 }
 
-/// The sidebar's cog asks for Settings the same way the menu item and the keyboard equivalent do.
+/// The sidebar's cog asks for Settings the same way the menu item and the Shortcut do.
 ///
 /// It dispatches the application action rather than opening a window itself, so the one Settings
 /// Window, and the decision to activate it when it already exists, stay in one place.

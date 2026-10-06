@@ -786,7 +786,7 @@ impl DeveloperWorkbench {
 
     /// Window-wide controls: the previewed Appearance Mode and simulated system settings.
     fn render_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mode = self.preview.document().preferences.mode;
+        let mode = self.preview.document().appearance.mode;
         let owner = cx.weak_entity();
         let modes = SegmentedControl::new(
             "workbench-appearance-mode",

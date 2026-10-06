@@ -1971,7 +1971,7 @@ impl TerminalWorker {
     }
 
     fn process_shortcut(&mut self, mut input: KeyInput) -> bool {
-        // Menu key equivalents may never deliver a physical key-up event.
+        // Menu Shortcuts may never deliver a physical key-up event.
         // Complete the semantic gesture and suppress any later physical release.
         if !self.process_key(input.clone()) {
             return false;

@@ -26,7 +26,6 @@ mod menu_theme;
 mod modal_appearance_tests;
 mod modal_theme;
 mod native_remote_workspace_flow_backend;
-mod pane_host;
 pub(crate) mod pane_lifecycle;
 pub(crate) mod permission_setup;
 mod progress_theme;
@@ -46,6 +45,7 @@ pub(crate) mod ssh_askpass_dialog;
 mod ssh_host_form;
 mod ssh_host_picker;
 mod tab_manager;
+mod tab_view;
 mod terminal_context_menu;
 mod terminal_element;
 mod terminal_focus;
@@ -71,14 +71,13 @@ use gpui::{App, actions};
 pub(crate) use native_remote_workspace_flow_backend::{
     NativeRemoteWorkspaceFlowBackendFactory, RemoteWorkspaceSshRuntime,
 };
-pub(crate) use pane_host::{
-    PaneHost, PaneHostEvent, PreparedPaneHostRemoteRestart, RemotePaneHostLifecycleError,
-    TabIdentity,
-};
 pub(crate) use remote_child_launch::RemoteChildLaunchUnavailable;
 #[cfg(test)]
 pub(crate) use render_lifecycle::{RenderLifecycle, ScaleChange, SurfaceVisibility};
 pub(crate) use tab_manager::{TabManager, TabManagerEvent};
+pub(crate) use tab_view::{
+    PreparedTabViewRemoteRestart, RemoteTabViewLifecycleError, TabIdentity, TabView, TabViewEvent,
+};
 #[cfg(test)]
 pub(crate) use terminal_focus::{
     TerminalFocusBlocker, TerminalFocusCoordinator, TerminalFocusFacts,
@@ -269,8 +268,7 @@ mod tests {
     #[gpui::test]
     fn ui_init_should_install_explicit_modal_command_period_binding(cx: &mut TestAppContext) {
         cx.update(|cx| init(cx).expect("UI initialization should succeed"));
-        let command_period =
-            Keystroke::parse("cmd-.").expect("macOS modal key equivalent should parse");
+        let command_period = Keystroke::parse("cmd-.").expect("macOS modal Shortcut should parse");
 
         let has_binding = cx.update(|cx| {
             cx.all_bindings_for_input(&[command_period])

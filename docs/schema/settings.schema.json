@@ -7,7 +7,7 @@
   "required": [
     "schema_version",
     "revision",
-    "preferences",
+    "appearance",
     "terminal_themes"
   ],
   "properties": {
@@ -18,8 +18,8 @@
       "type": "integer",
       "minimum": 0
     },
-    "preferences": {
-      "$ref": "#/$defs/preferences"
+    "appearance": {
+      "$ref": "#/$defs/appearancePreferences"
     },
     "terminal_themes": {
       "type": "array",
@@ -122,7 +122,7 @@
       "minimum": 100,
       "maximum": 900
     },
-    "preferences": {
+    "appearancePreferences": {
       "type": "object",
       "additionalProperties": false,
       "required": [

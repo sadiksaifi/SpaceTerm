@@ -270,7 +270,7 @@ pub(crate) enum ClosePaneOutcome<T> {
     PaneClosed {
         closed_pane_id: PaneId,
         focused_pane_id: PaneId,
-        closed_terminal: T,
+        closed_pane: T,
     },
     CloseTab {
         tab_id: TabId,

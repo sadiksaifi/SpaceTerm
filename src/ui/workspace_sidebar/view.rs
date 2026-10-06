@@ -755,10 +755,10 @@ impl WorkspaceSidebar {
                         .debug_selector("open-settings-button")
                         .tooltip(
                             Tooltip::new("open-settings-tooltip", "Settings")
-                                .keyboard_equivalent(settings_shortcut.unwrap_or_default())
+                                .shortcut(settings_shortcut.unwrap_or_default())
                                 .debug_selector("open-settings-tooltip"),
                         )
-                        // The same application action the menu item and the keyboard equivalent
+                        // The same application action the menu item and the Shortcut
                         // carry, so every way in reaches the one Settings Window.
                         .on_activate(move |_, window, cx| {
                             window.dispatch_action(

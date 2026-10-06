@@ -350,7 +350,7 @@ fn light_navigation_pointer_selection_survives_focus_changes_during_a_click(
     cx: &mut TestAppContext,
 ) {
     let mut document = SettingsDocument::default();
-    document.preferences.mode = AppearanceMode::Light;
+    document.appearance.mode = AppearanceMode::Light;
     let (settings, cx) = open_settings(&document, cx);
     cx.simulate_keystrokes("tab tab");
     cx.run_until_parked();
@@ -465,7 +465,7 @@ fn navigation_skips_sections_without_search_matches(cx: &mut TestAppContext) {
 fn non_preset_weights_remain_selected_when_the_picker_is_accepted(cx: &mut TestAppContext) {
     let mut document = SettingsDocument::default();
 
-    document.preferences.terminal.typography.regular_weight = 450;
+    document.appearance.terminal.typography.regular_weight = 450;
     let (settings, cx) = open_settings(&document, cx);
 
     click("settings-navigation-settings-section-font", cx);
@@ -494,7 +494,7 @@ fn non_preset_weights_remain_selected_when_the_picker_is_accepted(cx: &mut TestA
 #[gpui::test]
 fn unavailable_terminal_font_remains_selected(cx: &mut TestAppContext) {
     let mut document = SettingsDocument::default();
-    document.preferences.terminal.typography.family = TerminalFontFamily::Named {
+    document.appearance.terminal.typography.family = TerminalFontFamily::Named {
         family: "Unavailable Settings Test Monospace".to_owned(),
     };
     let (settings, cx) = open_settings(&document, cx);
@@ -519,7 +519,7 @@ fn unavailable_terminal_font_remains_selected(cx: &mut TestAppContext) {
 #[gpui::test]
 fn a_missing_theme_selection_opens_on_the_builtin_theme(cx: &mut TestAppContext) {
     let mut document = SettingsDocument::default();
-    document.preferences.mode = crate::appearance::AppearanceMode::Dark;
+    document.appearance.mode = crate::appearance::AppearanceMode::Dark;
     let bytes = crate::settings::export_settings(&document)
         .unwrap()
         .replace("builtin.spaceterm.dark", "user.missing-terminal")

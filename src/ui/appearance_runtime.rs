@@ -110,7 +110,7 @@ pub(crate) fn install(
 ) -> Result<(), SettingsError> {
     let changed = settings.subscribe();
     let (fonts, pending_font_names) =
-        capture_initial_fonts(cx, &settings.snapshot().candidate.preferences);
+        capture_initial_fonts(cx, &settings.snapshot().candidate.appearance);
     let observation = platform.observe();
     let mut tasks = vec![cx.spawn(async move |cx| {
         while changed.recv().await.is_ok() {
@@ -154,7 +154,7 @@ pub(crate) fn refresh(cx: &mut App) -> Result<(), SettingsError> {
             runtime.control_motion,
         )
     };
-    ensure_selected_fonts(&candidate.preferences, cx);
+    ensure_selected_fonts(&candidate.appearance, cx);
     let fonts = cx.global::<AppearanceRuntime>().fonts.clone();
     let catalog = ThemeCatalog::from_terminal_themes(&candidate.terminal_themes)
         .map_err(|_| SettingsError::Invalid)?;
@@ -183,7 +183,7 @@ pub(crate) fn refresh(cx: &mut App) -> Result<(), SettingsError> {
     let resolved = catalog
         .resolve(
             generation,
-            &candidate.preferences,
+            &candidate.appearance,
             SystemAppearance::from(platform.system_appearance()).with_composition(capabilities),
             &fonts,
         )

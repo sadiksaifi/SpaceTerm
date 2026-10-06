@@ -41,7 +41,7 @@ actions!(
     ]
 );
 
-/// Platform-specific modal key equivalents layered over the portable modal bindings.
+/// Platform-specific modal bindings layered over the portable modal bindings.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModalKeybindingProfile {
     /// Conventional macOS Command-Period cancellation. Selecting this profile is explicit and
@@ -51,10 +51,10 @@ pub enum ModalKeybindingProfile {
     Linux,
 }
 
-/// Installs the platform-specific key equivalents for `profile`.
+/// Installs the platform-specific bindings for `profile`.
 ///
 /// Applications explicitly install portable Tab, Shift-Tab, Return, and Escape behavior before
-/// calling this function to opt into desktop-specific equivalents. Neither installation requires
+/// calling this function to opt into desktop-specific bindings. Neither installation requires
 /// host-platform detection in the reusable library.
 pub fn install_modal_keybindings(cx: &mut App, profile: ModalKeybindingProfile) {
     match profile {

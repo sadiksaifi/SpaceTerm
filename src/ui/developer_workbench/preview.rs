@@ -104,12 +104,12 @@ impl AppearancePreview {
     }
 
     pub(super) fn set_mode(&mut self, mode: AppearanceMode) -> Result<(), PreviewError> {
-        self.edit(|document| document.preferences.mode = mode)
+        self.edit(|document| document.appearance.mode = mode)
     }
 
     /// Light becomes Dark; Dark and Auto become Light.
     pub(super) fn toggle_mode(&mut self) -> Result<AppearanceMode, PreviewError> {
-        let mode = match self.document().preferences.mode {
+        let mode = match self.document().appearance.mode {
             AppearanceMode::Light => AppearanceMode::Dark,
             AppearanceMode::Dark | AppearanceMode::Auto => AppearanceMode::Light,
         };
@@ -117,25 +117,25 @@ impl AppearancePreview {
     }
 
     pub(super) fn set_density(&mut self, density: ChromeDensity) -> Result<(), PreviewError> {
-        self.edit(|document| document.preferences.window.density = density)
+        self.edit(|document| document.appearance.window.density = density)
     }
 
     pub(super) fn set_transparency(&mut self, transparency: f32) -> Result<(), PreviewError> {
-        self.edit(|document| document.preferences.window.transparency = transparency)
+        self.edit(|document| document.appearance.window.transparency = transparency)
     }
 
     pub(super) fn set_blur(&mut self, blur: bool) -> Result<(), PreviewError> {
-        self.edit(|document| document.preferences.window.blur = blur)
+        self.edit(|document| document.appearance.window.blur = blur)
     }
 
     pub(super) fn set_bold_as_bright(&mut self, enabled: bool) -> Result<(), PreviewError> {
-        self.edit(|document| document.preferences.terminal.rendering.bold_as_bright = enabled)
+        self.edit(|document| document.appearance.terminal.rendering.bold_as_bright = enabled)
     }
 
     /// Whether the terminal typography is the alternate one this preview offers.
     pub(super) fn alternate_typography(&self, document: &SettingsDocument) -> bool {
         matches!(
-            &document.preferences.terminal.typography.family,
+            &document.appearance.terminal.typography.family,
             TerminalFontFamily::Named { family } if family == &self.alternate_font_family
         )
     }
@@ -143,10 +143,10 @@ impl AppearancePreview {
     /// Switches the terminal between its default typography and a larger, looser alternate, so
     /// a capture shows metrics changing without a font install.
     pub(super) fn set_alternate_typography(&mut self, alternate: bool) -> Result<(), PreviewError> {
-        let defaults = SettingsDocument::default().preferences.terminal.typography;
+        let defaults = SettingsDocument::default().appearance.terminal.typography;
         let alternate_font_family = self.alternate_font_family.clone();
         self.edit(|document| {
-            let typography = &mut document.preferences.terminal.typography;
+            let typography = &mut document.appearance.terminal.typography;
             if alternate {
                 typography.family = TerminalFontFamily::Named {
                     family: alternate_font_family,
@@ -258,9 +258,9 @@ mod tests {
         preview.set_density(ChromeDensity::Comfortable).unwrap();
 
         assert!(preview.is_open());
-        assert_eq!(preview.document().preferences.mode, AppearanceMode::Light);
+        assert_eq!(preview.document().appearance.mode, AppearanceMode::Light);
         assert_eq!(
-            preview.document().preferences.window.density,
+            preview.document().appearance.window.density,
             ChromeDensity::Comfortable
         );
         preview.cancel().unwrap();
@@ -281,24 +281,24 @@ mod tests {
     #[test]
     fn alternate_typography_round_trips_to_the_defaults() {
         let mut preview = preview();
-        let defaults = SettingsDocument::default().preferences.terminal.typography;
+        let defaults = SettingsDocument::default().appearance.terminal.typography;
 
         preview.set_alternate_typography(true).unwrap();
         assert!(preview.alternate_typography(&preview.document()));
         assert_eq!(
-            preview.document().preferences.terminal.typography.family,
+            preview.document().appearance.terminal.typography.family,
             TerminalFontFamily::Named {
                 family: "Fixture Mono".into()
             },
         );
         assert_eq!(
-            preview.document().preferences.terminal.typography.base_size,
+            preview.document().appearance.terminal.typography.base_size,
             22.0
         );
         assert_eq!(
             preview
                 .document()
-                .preferences
+                .appearance
                 .terminal
                 .typography
                 .line_height,
@@ -307,7 +307,7 @@ mod tests {
         preview.set_alternate_typography(false).unwrap();
 
         assert!(!preview.alternate_typography(&preview.document()));
-        assert_eq!(preview.document().preferences.terminal.typography, defaults);
+        assert_eq!(preview.document().appearance.terminal.typography, defaults);
     }
 
     #[test]
@@ -334,7 +334,7 @@ mod tests {
         assert!(!preview.is_open());
         assert_eq!(storage.writes(), 1);
         assert_eq!(
-            storage.document().unwrap().preferences.mode,
+            storage.document().unwrap().appearance.mode,
             AppearanceMode::Light
         );
     }
@@ -350,7 +350,7 @@ mod tests {
         assert_eq!(preview.commit().err(), Some(PreviewError::SaveFailed));
 
         assert!(preview.is_open());
-        assert_eq!(preview.document().preferences.mode, AppearanceMode::Light);
+        assert_eq!(preview.document().appearance.mode, AppearanceMode::Light);
         storage.fail_writes(None);
         assert!(preview.commit().is_ok());
         assert!(!preview.is_open());

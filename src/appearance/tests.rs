@@ -1076,16 +1076,16 @@ fn proportional_terminal_font_request_falls_back_to_monospace_without_reordering
 #[test]
 fn a_terminal_theme_must_match_its_slot_appearance() {
     let mut document = SettingsDocument::default();
-    document.preferences.terminal.themes.light = super::builtin::dark_terminal_id();
-    document.preferences.mode = AppearanceMode::Light;
+    document.appearance.terminal.themes.light = super::builtin::dark_terminal_id();
+    document.appearance.mode = AppearanceMode::Light;
     assert_eq!(
         document.validate(),
-        Err(SettingsDocumentError::InvalidPreferences)
+        Err(SettingsDocumentError::InvalidAppearance)
     );
     assert!(matches!(
         ThemeCatalog::default().resolve(
             AppearanceGeneration::INITIAL,
-            &document.preferences,
+            &document.appearance,
             SystemAppearance::unavailable(),
             &AvailableFonts::default()
         ),
@@ -1095,21 +1095,21 @@ fn a_terminal_theme_must_match_its_slot_appearance() {
 
 fn reset_fixture() -> SettingsDocument {
     let mut document = SettingsDocument::default();
-    document.preferences.mode = AppearanceMode::Light;
-    document.preferences.window.density = ChromeDensity::Comfortable;
-    document.preferences.window.transparency = 0.8;
-    document.preferences.window.blur = false;
-    document.preferences.terminal.themes.light = ThemeId::new("custom.reset-light").unwrap();
-    document.preferences.terminal.typography.family = TerminalFontFamily::Named {
+    document.appearance.mode = AppearanceMode::Light;
+    document.appearance.window.density = ChromeDensity::Comfortable;
+    document.appearance.window.transparency = 0.8;
+    document.appearance.window.blur = false;
+    document.appearance.terminal.themes.light = ThemeId::new("custom.reset-light").unwrap();
+    document.appearance.terminal.typography.family = TerminalFontFamily::Named {
         family: String::from("Menlo"),
     };
-    document.preferences.terminal.typography.base_size = 32.0;
-    document.preferences.terminal.typography.regular_weight = 800;
-    document.preferences.terminal.typography.bold_weight = 900;
-    document.preferences.terminal.typography.line_height = 2.0;
-    document.preferences.terminal.typography.italic = false;
-    document.preferences.terminal.rendering.bold_as_bright = false;
-    document.preferences.terminal.overrides.insert(
+    document.appearance.terminal.typography.base_size = 32.0;
+    document.appearance.terminal.typography.regular_weight = 800;
+    document.appearance.terminal.typography.bold_weight = 900;
+    document.appearance.terminal.typography.line_height = 2.0;
+    document.appearance.terminal.typography.italic = false;
+    document.appearance.terminal.rendering.bold_as_bright = false;
+    document.appearance.terminal.overrides.insert(
         ThemeId::builtin("builtin.spaceterm.light"),
         TerminalColorOverrides::complete(&TerminalColors::default()),
     );
@@ -1228,14 +1228,14 @@ fn every_individual_preference_reset_changes_only_its_field() {
     for (target, expected_edit) in cases {
         let mut actual = reset_fixture();
         let retained_themes = actual.terminal_themes.clone();
-        let mut expected = actual.preferences.clone();
+        let mut expected = actual.appearance.clone();
         expected_edit(&mut expected);
         actual.reset(target.clone()).unwrap();
-        assert_eq!(actual.preferences, expected, "{target:?}");
+        assert_eq!(actual.appearance, expected, "{target:?}");
         assert_eq!(actual.terminal_themes, retained_themes, "{target:?}");
     }
 
-    assert_ne!(reset_fixture().preferences, defaults);
+    assert_ne!(reset_fixture().appearance, defaults);
 }
 
 #[test]
@@ -1264,10 +1264,10 @@ fn group_and_all_resets_have_exact_scope_and_retain_color_themes() {
     for (target, expected_edit) in cases {
         let mut actual = reset_fixture();
         let retained_themes = actual.terminal_themes.clone();
-        let mut expected = actual.preferences.clone();
+        let mut expected = actual.appearance.clone();
         expected_edit(&mut expected);
         actual.reset(target.clone()).unwrap();
-        assert_eq!(actual.preferences, expected, "{target:?}");
+        assert_eq!(actual.appearance, expected, "{target:?}");
         assert_eq!(actual.terminal_themes, retained_themes, "{target:?}");
     }
 }
@@ -1293,7 +1293,7 @@ fn resetting_the_whole_document_empties_the_catalog_and_keeps_its_identity() {
     document.reset_all();
 
     assert_eq!(
-        document.preferences,
+        document.appearance,
         AppearancePreferences::default(),
         "every preference should return to its default"
     );
@@ -1316,12 +1316,12 @@ fn resetting_the_whole_document_empties_the_catalog_and_keeps_its_identity() {
 fn resetting_the_whole_document_releases_a_selected_imported_theme() {
     let mut document = reset_fixture();
     let imported = document.terminal_themes[0].id.clone();
-    document.preferences.terminal.themes.dark = imported.clone();
+    document.appearance.terminal.themes.dark = imported.clone();
     document.validate().unwrap();
 
     document.reset_all();
 
-    assert_ne!(document.preferences.terminal.themes.dark, imported);
+    assert_ne!(document.appearance.terminal.themes.dark, imported);
     document.validate().unwrap();
 }
 
@@ -1351,10 +1351,10 @@ fn every_color_role_can_be_removed_without_changing_other_overrides() {
     for role in terminal_roles {
         let mut actual = reset_fixture();
         let retained_themes = actual.terminal_themes.clone();
-        let before_window = actual.preferences.window.clone();
+        let before_window = actual.appearance.window.clone();
         let mut expected = serde_json::to_value(
             actual
-                .preferences
+                .appearance
                 .terminal
                 .overrides
                 .get(&terminal_id)
@@ -1368,7 +1368,7 @@ fn every_color_role_can_be_removed_without_changing_other_overrides() {
         assert_eq!(
             serde_json::to_value(
                 actual
-                    .preferences
+                    .appearance
                     .terminal
                     .overrides
                     .get(&terminal_id)
@@ -1379,7 +1379,7 @@ fn every_color_role_can_be_removed_without_changing_other_overrides() {
             "terminal role {role}"
         );
         assert_eq!(
-            actual.preferences.window, before_window,
+            actual.appearance.window, before_window,
             "terminal role {role}"
         );
         assert_eq!(
@@ -1392,7 +1392,7 @@ fn every_color_role_can_be_removed_without_changing_other_overrides() {
 
     let mut sparse = SettingsDocument::default();
     let terminal_id = ThemeId::builtin("builtin.spaceterm.dark");
-    sparse.preferences.terminal.overrides.insert(
+    sparse.appearance.terminal.overrides.insert(
         terminal_id.clone(),
         TerminalColorOverrides {
             cursor_text: OptionalColorOverride::None,
@@ -1404,7 +1404,7 @@ fn every_color_role_can_be_removed_without_changing_other_overrides() {
         .unwrap();
     assert!(
         !sparse
-            .preferences
+            .appearance
             .terminal
             .overrides
             .contains_key(&terminal_id)
@@ -1423,7 +1423,7 @@ fn reading_a_missing_theme_selection_returns_the_slot_to_the_builtin_theme() {
         metadata: ThemeMetadata::default(),
         colors: TerminalColorOverrides::default(),
     });
-    document.preferences.terminal.themes.dark = ThemeId::new("custom.kept-dark").unwrap();
+    document.appearance.terminal.themes.dark = ThemeId::new("custom.kept-dark").unwrap();
     let encoded = export_settings(&document)
         .unwrap()
         .replace("builtin.spaceterm.light", "custom.removed-light");
@@ -1431,11 +1431,11 @@ fn reading_a_missing_theme_selection_returns_the_slot_to_the_builtin_theme() {
     let read = parse_settings(encoded.as_bytes()).unwrap();
 
     assert_eq!(
-        read.preferences.terminal.themes.light,
+        read.appearance.terminal.themes.light,
         ThemeId::builtin("builtin.spaceterm.light")
     );
     assert_eq!(
-        read.preferences.terminal.themes.dark,
+        read.appearance.terminal.themes.dark,
         ThemeId::new("custom.kept-dark").unwrap()
     );
 }
@@ -1443,18 +1443,18 @@ fn reading_a_missing_theme_selection_returns_the_slot_to_the_builtin_theme() {
 #[test]
 fn native_settings_are_canonical_strict_and_round_trip() {
     let mut document = SettingsDocument::default();
-    document.preferences.mode = AppearanceMode::Auto;
-    document.preferences.terminal.themes.light = ThemeId::builtin("builtin.spaceterm.dark");
+    document.appearance.mode = AppearanceMode::Auto;
+    document.appearance.terminal.themes.light = ThemeId::builtin("builtin.spaceterm.dark");
     assert!(
         export_settings(&document).is_err(),
         "a slot should name a theme of its own appearance"
     );
-    document.preferences.terminal.themes.light = ThemeId::new("missing.terminal.light").unwrap();
+    document.appearance.terminal.themes.light = ThemeId::new("missing.terminal.light").unwrap();
     assert!(
         export_settings(&document).is_err(),
         "a slot should name an installed theme"
     );
-    document.preferences.terminal.themes.light = ThemeId::builtin("builtin.spaceterm.light");
+    document.appearance.terminal.themes.light = ThemeId::builtin("builtin.spaceterm.light");
     let encoded = export_settings(&document).unwrap();
     let encoded_value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
     assert_eq!(encoded_value["schema_version"], 3);
@@ -1464,7 +1464,7 @@ fn native_settings_are_canonical_strict_and_round_trip() {
         parse_settings(unsupported.as_bytes()),
         Err(SettingsDocumentError::UnsupportedVersion)
     ));
-    assert!(matches!(parse_settings(br#"{"schema_version":3,"schema_version":3,"revision":0,"preferences":{},"terminal_themes":[]}"#),
+    assert!(matches!(parse_settings(br#"{"schema_version":3,"schema_version":3,"revision":0,"appearance":{},"terminal_themes":[]}"#),
         Err(SettingsDocumentError::DuplicateKey)));
 
     let unknown = encoded.replacen(
@@ -1481,10 +1481,10 @@ fn native_settings_are_canonical_strict_and_round_trip() {
 #[test]
 fn invalid_bounds_and_protocol_alpha_are_rejected() {
     let mut document = SettingsDocument::default();
-    document.preferences.terminal.typography.base_size = f32::NAN;
+    document.appearance.terminal.typography.base_size = f32::NAN;
     assert!(matches!(
         export_settings(&document),
-        Err(SettingsDocumentError::InvalidPreferences)
+        Err(SettingsDocumentError::InvalidAppearance)
     ));
 
     let custom = TerminalTheme {
@@ -1574,7 +1574,7 @@ fn keybinding_overrides_round_trip_as_a_sparse_map() {
     );
     assert_eq!(parse_settings(encoded.as_bytes()).unwrap(), document);
     assert!(encoded.find("\"updates\"").unwrap() < encoded.find("\"keybindings\"").unwrap());
-    assert!(encoded.find("\"keybindings\"").unwrap() < encoded.find("\"preferences\"").unwrap());
+    assert!(encoded.find("\"keybindings\"").unwrap() < encoded.find("\"appearance\"").unwrap());
 
     let mut without_overrides = value;
     without_overrides
@@ -1683,7 +1683,7 @@ fn replacing_settings_takes_the_imported_catalog_and_keeps_identity() {
 
     document.replace_settings(imported.clone());
 
-    assert_eq!(document.preferences, imported.preferences);
+    assert_eq!(document.appearance, imported.appearance);
     assert_eq!(document.terminal_themes, imported.terminal_themes);
     assert_eq!(document.revision, 4);
     document.validate().unwrap();

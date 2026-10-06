@@ -42,7 +42,7 @@ actions!(
     ]
 );
 
-/// Platform-specific Menu key equivalents layered over the portable bindings.
+/// Platform-specific Menu bindings layered over the portable bindings.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MenuKeybindingProfile {
     /// Conventional macOS Control-N and Control-P navigation. Selecting this profile is explicit
@@ -52,7 +52,7 @@ pub enum MenuKeybindingProfile {
     Linux,
 }
 
-/// Installs the platform-specific key equivalents for `profile`.
+/// Installs the platform-specific bindings for `profile`.
 pub fn install_menu_keybindings(cx: &mut App, profile: MenuKeybindingProfile) {
     match profile {
         MenuKeybindingProfile::MacOs | MenuKeybindingProfile::Linux => cx.bind_keys([

@@ -34,7 +34,7 @@ fn an_idle_draft_adopts_another_surfaces_commit() {
     let (mut draft, settings, _) = setup();
     let original = settings.snapshot().committed;
     let mut document = (*original).clone();
-    document.preferences.window.density = ChromeDensity::Comfortable;
+    document.appearance.window.density = ChromeDensity::Comfortable;
     settings
         .update_committed(original.revision, document)
         .unwrap()
@@ -55,20 +55,20 @@ fn synchronization_keeps_a_draft_that_was_blocked_by_another_writer() {
         .update_committed(original.revision, (*original).clone())
         .unwrap();
     assert!(draft.edit(|document| {
-        document.preferences.window.density = ChromeDensity::Comfortable;
+        document.appearance.window.density = ChromeDensity::Comfortable;
     }));
     competing.run().unwrap();
 
     draft.synchronize();
 
     assert_eq!(
-        draft.document().preferences.window.density,
+        draft.document().appearance.window.density,
         ChromeDensity::Comfortable
     );
     let result = draft.prepare_commit().unwrap().run();
     assert!(!draft.settle(true, result));
     assert_eq!(
-        storage.document().unwrap().preferences.window.density,
+        storage.document().unwrap().appearance.window.density,
         ChromeDensity::Comfortable
     );
     assert_eq!(draft.status(), SaveStatus::Saved);
@@ -78,20 +78,20 @@ fn synchronization_keeps_a_draft_that_was_blocked_by_another_writer() {
 fn an_edit_after_publication_reacquires_the_retired_preview() {
     let (mut draft, settings, storage) = setup();
     assert!(draft.edit(|document| {
-        document.preferences.window.density = ChromeDensity::Comfortable;
+        document.appearance.window.density = ChromeDensity::Comfortable;
     }));
     // The storage write has finished, but its scheduling Adapter has not delivered completion.
     draft.prepare_commit().unwrap().run().unwrap();
 
     assert!(draft.edit(|document| {
-        document.preferences.terminal.typography.base_size = 21.0;
+        document.appearance.terminal.typography.base_size = 21.0;
     }));
 
     assert_eq!(
         settings
             .snapshot()
             .candidate
-            .preferences
+            .appearance
             .terminal
             .typography
             .base_size,
@@ -101,10 +101,10 @@ fn an_edit_after_publication_reacquires_the_retired_preview() {
     assert!(!draft.settle(true, result));
     let retained = storage.document().unwrap();
     assert_eq!(
-        retained.preferences.window.density,
+        retained.appearance.window.density,
         ChromeDensity::Comfortable
     );
-    assert_eq!(retained.preferences.terminal.typography.base_size, 21.0);
+    assert_eq!(retained.appearance.terminal.typography.base_size, 21.0);
     assert_eq!(draft.status(), SaveStatus::Saved);
 }
 
@@ -112,7 +112,7 @@ fn an_edit_after_publication_reacquires_the_retired_preview() {
 fn an_obsolete_completion_cannot_report_the_current_edit_saved() {
     let (mut draft, _, _) = setup();
     assert!(draft.edit(|document| {
-        document.preferences.window.density = ChromeDensity::Comfortable;
+        document.appearance.window.density = ChromeDensity::Comfortable;
     }));
     let result = draft.prepare_commit().unwrap().run();
 
@@ -124,7 +124,7 @@ fn an_obsolete_completion_cannot_report_the_current_edit_saved() {
 #[test]
 fn import_and_removal_share_the_draft_without_selecting_a_theme() {
     let (mut draft, _, storage) = setup();
-    let preferences = draft.document().preferences.clone();
+    let preferences = draft.document().appearance.clone();
     let receipt = draft
         .import(ThemeImport::ZedFamily(IMPORTED_FAMILY))
         .unwrap();
@@ -144,7 +144,7 @@ fn import_and_removal_share_the_draft_without_selecting_a_theme() {
         crate::settings::parse_settings(exported.as_bytes()).unwrap(),
         *draft.document()
     );
-    assert_eq!(draft.document().preferences, preferences);
+    assert_eq!(draft.document().appearance, preferences);
     assert_eq!(storage.writes(), 0);
 
     let result = draft.prepare_commit().unwrap().run();
@@ -158,7 +158,7 @@ fn import_and_removal_share_the_draft_without_selecting_a_theme() {
     assert!(!draft.settle(true, result));
     let retained = storage.document().unwrap();
     assert!(retained.terminal_themes.is_empty());
-    assert_eq!(retained.preferences, preferences);
+    assert_eq!(retained.appearance, preferences);
 }
 
 #[test]
@@ -166,7 +166,7 @@ fn a_successful_edit_owns_its_unwritten_state_before_scheduling() {
     let (mut draft, settings, storage) = setup();
 
     assert!(draft.edit(|document| {
-        document.preferences.window.density = ChromeDensity::Comfortable;
+        document.appearance.window.density = ChromeDensity::Comfortable;
     }));
 
     assert_eq!(draft.status(), SaveStatus::Saving);
@@ -181,7 +181,7 @@ fn a_successful_edit_owns_its_unwritten_state_before_scheduling() {
 fn unchanged_or_rejected_edits_preserve_a_save_failure_until_retry_finishes() {
     let (mut draft, _, storage) = setup();
     assert!(draft.edit(|document| {
-        document.preferences.window.density = ChromeDensity::Comfortable;
+        document.appearance.window.density = ChromeDensity::Comfortable;
     }));
     storage.fail_writes(Some(StorageError::Unavailable));
     let result = draft.prepare_commit().unwrap().run();
@@ -205,7 +205,7 @@ fn unchanged_or_rejected_edits_preserve_a_save_failure_until_retry_finishes() {
 fn busy_commit_preparation_requeues_a_failed_draft() {
     let (mut draft, _, storage) = setup();
     assert!(draft.edit(|document| {
-        document.preferences.window.density = ChromeDensity::Comfortable;
+        document.appearance.window.density = ChromeDensity::Comfortable;
     }));
     storage.fail_writes(Some(StorageError::Unavailable));
     let result = draft.prepare_commit().unwrap().run();
@@ -225,11 +225,11 @@ fn busy_commit_preparation_requeues_a_failed_draft() {
 fn resynchronization_after_failure_owns_its_unwritten_state() {
     let (mut draft, _, storage) = setup();
     assert!(draft.edit(|document| {
-        document.preferences.window.density = ChromeDensity::Comfortable;
+        document.appearance.window.density = ChromeDensity::Comfortable;
     }));
     let in_flight = draft.prepare_commit().unwrap();
     assert!(draft.edit(|document| {
-        document.preferences.terminal.typography.base_size = 21.0;
+        document.appearance.terminal.typography.base_size = 21.0;
     }));
     storage.fail_writes(Some(StorageError::Unavailable));
 
@@ -244,7 +244,7 @@ fn resynchronization_after_failure_owns_its_unwritten_state() {
         storage
             .document()
             .unwrap()
-            .preferences
+            .appearance
             .terminal
             .typography
             .base_size,
@@ -255,25 +255,25 @@ fn resynchronization_after_failure_owns_its_unwritten_state() {
 #[test]
 fn a_completed_write_preserves_the_edit_made_while_storage_was_blocked() {
     let (mut draft, settings, storage) = setup();
-    draft.edit(|document| document.preferences.window.density = ChromeDensity::Comfortable);
+    draft.edit(|document| document.appearance.window.density = ChromeDensity::Comfortable);
     let blocked = storage.block_next_write();
     let first = draft.prepare_commit().unwrap();
     let worker = std::thread::spawn(move || first.run());
     blocked.wait_until_started();
-    draft.edit(|document| document.preferences.terminal.typography.base_size = 21.0);
+    draft.edit(|document| document.appearance.terminal.typography.base_size = 21.0);
     blocked.release();
     let result = worker.join().unwrap();
 
     assert!(draft.settle(false, result));
     assert_eq!(
-        draft.document().preferences.terminal.typography.base_size,
+        draft.document().appearance.terminal.typography.base_size,
         21.0
     );
     assert_eq!(
         settings
             .snapshot()
             .candidate
-            .preferences
+            .appearance
             .terminal
             .typography
             .base_size,
@@ -284,10 +284,10 @@ fn a_completed_write_preserves_the_edit_made_while_storage_was_blocked() {
     assert!(!draft.settle(true, result));
     let retained = storage.document().unwrap();
     assert_eq!(
-        retained.preferences.window.density,
+        retained.appearance.window.density,
         ChromeDensity::Comfortable
     );
-    assert_eq!(retained.preferences.terminal.typography.base_size, 21.0);
+    assert_eq!(retained.appearance.terminal.typography.base_size, 21.0);
 }
 
 #[test]
@@ -296,16 +296,16 @@ fn opening_during_a_foreign_preview_never_adopts_its_canceled_values() {
     let committed = settings.snapshot().committed;
     let foreign = settings.begin_preview(committed.revision).unwrap();
     let mut candidate = (*committed).clone();
-    candidate.preferences.window.density = ChromeDensity::Comfortable;
+    candidate.appearance.window.density = ChromeDensity::Comfortable;
     settings.update_preview(&foreign, candidate).unwrap();
     let mut draft = SettingsDraft::new(settings.clone());
     drop(foreign);
     draft.synchronize();
-    draft.edit(|document| document.preferences.terminal.typography.base_size = 21.0);
+    draft.edit(|document| document.appearance.terminal.typography.base_size = 21.0);
     let result = draft.prepare_commit().unwrap().run();
     draft.settle(true, result);
     assert_eq!(
-        storage.document().unwrap().preferences.window.density,
+        storage.document().unwrap().appearance.window.density,
         ChromeDensity::Compact
     );
 }
@@ -317,12 +317,12 @@ fn exporting_while_another_writer_is_busy_uses_the_authoritative_draft() {
     let competing = settings
         .update_committed(committed.revision, (*committed).clone())
         .unwrap();
-    draft.edit(|document| document.preferences.terminal.typography.base_size = 21.0);
+    draft.edit(|document| document.appearance.terminal.typography.base_size = 21.0);
     let exported = draft.export_document().unwrap();
     assert_eq!(
         crate::settings::parse_settings(exported.as_bytes())
             .unwrap()
-            .preferences
+            .appearance
             .terminal
             .typography
             .base_size,
@@ -362,7 +362,7 @@ fn rejected_catalog_changes_from_idle_do_not_reserve_the_shared_preview() {
 #[test]
 fn rejected_catalog_changes_preserve_a_preexisting_pending_edit() {
     let (mut draft, settings, storage) = setup();
-    draft.edit(|document| document.preferences.window.density = ChromeDensity::Comfortable);
+    draft.edit(|document| document.appearance.window.density = ChromeDensity::Comfortable);
     let expected = draft.document().clone();
 
     assert!(draft.import(ThemeImport::ZedFamily(b"invalid")).is_err());
@@ -379,7 +379,7 @@ fn rejected_catalog_changes_preserve_a_preexisting_pending_edit() {
     let result = draft.prepare_commit().unwrap().run();
     assert!(!draft.settle(true, result));
     assert_eq!(
-        storage.document().unwrap().preferences.window.density,
+        storage.document().unwrap().appearance.window.density,
         ChromeDensity::Comfortable
     );
 }

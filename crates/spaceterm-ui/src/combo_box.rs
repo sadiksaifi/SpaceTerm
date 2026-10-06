@@ -49,7 +49,7 @@ actions!(
     ]
 );
 
-/// Platform-specific ComboBox key equivalents layered over the portable bindings.
+/// Platform-specific ComboBox bindings layered over the portable bindings.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ComboBoxKeybindingProfile {
     /// Conventional macOS Control-N and Control-P navigation. Selecting this profile is explicit
@@ -59,7 +59,7 @@ pub enum ComboBoxKeybindingProfile {
     Linux,
 }
 
-/// Installs the platform-specific key equivalents for `profile`.
+/// Installs the platform-specific bindings for `profile`.
 ///
 /// Applications explicitly install the portable navigation, acceptance, and dismissal bindings
 /// before calling this function. Both sets remain scoped to an open ComboBox.
@@ -166,7 +166,7 @@ pub enum ComboBoxAccessory {
     Text(SharedString),
     /// Compact status text such as `Unavailable`.
     Status(SharedString),
-    /// A display-only keyboard equivalent.
+    /// A display-only Shortcut.
     Shortcut(SharedString),
 }
 
@@ -291,7 +291,7 @@ impl<I> ComboBoxItem<I> {
         self
     }
 
-    /// Adds a display-only keyboard equivalent after any trailing accessory.
+    /// Adds a display-only Shortcut after any trailing accessory.
     pub fn shortcut(mut self, shortcut: impl Into<SharedString>) -> Self {
         self.shortcut = Some(shortcut.into());
         self
@@ -383,7 +383,7 @@ impl<C> ComboBoxCommand<C> {
         Self(self.0.trailing(accessory))
     }
 
-    /// Adds a display-only keyboard equivalent after any trailing accessory.
+    /// Adds a display-only Shortcut after any trailing accessory.
     pub fn shortcut(self, shortcut: impl Into<SharedString>) -> Self {
         Self(self.0.shortcut(shortcut))
     }
@@ -1195,7 +1195,7 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> ComboBox<I, C> {
     }
 
     /// Uses the menu-with-filter grammar: row-driven width, a 240-point minimum, a 420-point
-    /// truncation cap, and a 24-point minimum gap before keyboard equivalents.
+    /// truncation cap, and a 24-point minimum gap before Shortcuts.
     pub fn menu_with_filter_header(mut self) -> Self {
         self.menu_with_filter_header = true;
         self
@@ -3344,7 +3344,7 @@ fn row_border_width(theme: ComboBoxTheme) -> Pixels {
     }
 }
 
-/// The font rows render keyboard equivalents in, shared with the width measurement so a
+/// The font rows render Shortcuts in, shared with the width measurement so a
 /// row-driven panel is exactly as wide as its widest rendered row.
 fn combo_box_shortcut_font(typography: &crate::ControlTypography) -> &gpui::Font {
     typography.shortcut()

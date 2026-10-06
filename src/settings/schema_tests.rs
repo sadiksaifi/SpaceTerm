@@ -46,8 +46,7 @@ fn published_schema_accepts_defaults_and_installed_themes_and_rejects_reserved_i
     let settings = serde_json::to_value(super::SettingsDocument::default()).unwrap();
     assert!(validator.is_valid(&settings));
     let mut invalid_settings = settings.clone();
-    invalid_settings["preferences"]["terminal"]["themes"]["light"] =
-        serde_json::json!("INVALID ID");
+    invalid_settings["appearance"]["terminal"]["themes"]["light"] = serde_json::json!("INVALID ID");
     assert!(!validator.is_valid(&invalid_settings));
 
     let family = br##"{"name":"Sample","themes":[{"name":"Sample Dark","appearance":"dark","style":{"terminal.foreground":"#abcdef"}}]}"##;
@@ -71,7 +70,7 @@ fn published_schema_accepts_defaults_and_installed_themes_and_rejects_reserved_i
 #[test]
 fn published_schema_accepts_sparse_terminal_palettes() {
     let mut settings = serde_json::to_value(super::SettingsDocument::default()).unwrap();
-    settings["preferences"]["terminal"]["overrides"] = serde_json::json!({
+    settings["appearance"]["terminal"]["overrides"] = serde_json::json!({
         "builtin.spaceterm.dark": {
             "normal": [null, "#dd1133", null, null, null, null, null, null]
         }
@@ -86,13 +85,13 @@ fn named_font_families_have_matching_schema_and_runtime_character_rules() {
     let validator = validator();
 
     let mut invalid = serde_json::to_value(super::SettingsDocument::default()).unwrap();
-    invalid["preferences"]["terminal"]["typography"]["family"] =
+    invalid["appearance"]["terminal"]["typography"]["family"] =
         serde_json::json!({"source": "named", "family": "Broken\nFamily"});
     assert!(!validator.is_valid(&invalid));
     assert!(super::parse_settings(&serde_json::to_vec(&invalid).unwrap()).is_err());
 
     let mut unicode = serde_json::to_value(super::SettingsDocument::default()).unwrap();
-    unicode["preferences"]["terminal"]["typography"]["family"] =
+    unicode["appearance"]["terminal"]["typography"]["family"] =
         serde_json::json!({"source": "named", "family": "ヒラギノ角ゴシック"});
     assert!(validator.is_valid(&unicode));
     assert!(super::parse_settings(&serde_json::to_vec(&unicode).unwrap()).is_ok());
@@ -117,29 +116,29 @@ fn published_schema_and_runtime_preferences_have_identical_fields() {
         property_keys(&schema["$defs"]["updates"])
     );
     assert_eq!(
-        object_keys(&runtime["preferences"]),
-        property_keys(&schema["$defs"]["preferences"])
+        object_keys(&runtime["appearance"]),
+        property_keys(&schema["$defs"]["appearancePreferences"])
     );
     assert_eq!(
-        object_keys(&runtime["preferences"]["terminal"]),
-        property_keys(&schema["$defs"]["preferences"]["properties"]["terminal"])
+        object_keys(&runtime["appearance"]["terminal"]),
+        property_keys(&schema["$defs"]["appearancePreferences"]["properties"]["terminal"])
     );
     assert_eq!(
-        object_keys(&runtime["preferences"]["window"]),
+        object_keys(&runtime["appearance"]["window"]),
         property_keys(&schema["$defs"]["window"])
     );
     assert_eq!(
-        object_keys(&runtime["preferences"]["terminal"]["themes"]),
+        object_keys(&runtime["appearance"]["terminal"]["themes"]),
         property_keys(&schema["$defs"]["themeSlots"])
     );
     assert_eq!(
-        object_keys(&runtime["preferences"]["terminal"]["typography"]),
+        object_keys(&runtime["appearance"]["terminal"]["typography"]),
         property_keys(&schema["$defs"]["terminalTypography"])
     );
     assert_eq!(
-        object_keys(&runtime["preferences"]["terminal"]["rendering"]),
+        object_keys(&runtime["appearance"]["terminal"]["rendering"]),
         property_keys(
-            &schema["$defs"]["preferences"]["properties"]["terminal"]["properties"]["rendering"]
+            &schema["$defs"]["appearancePreferences"]["properties"]["terminal"]["properties"]["rendering"]
         )
     );
 }

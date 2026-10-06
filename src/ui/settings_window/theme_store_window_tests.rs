@@ -28,7 +28,7 @@ fn get_more_themes_lists_the_registry_and_installs_without_selection(cx: &mut Te
         window.read_with(cx, |settings, cx| settings.theme_store.read(cx).listing.clone()),
         Listing::Loaded(extensions) if extensions.len() == 2
     ));
-    let preferences = document_of(&window, cx).preferences;
+    let preferences = document_of(&window, cx).appearance;
 
     click("settings-zed-extension-action-sample-themes", cx);
 
@@ -40,7 +40,7 @@ fn get_more_themes_lists_the_registry_and_installs_without_selection(cx: &mut Te
         .collect::<Vec<_>>();
     names.sort_unstable();
     assert_eq!(names, ["Sample Dark", "Sample Light"]);
-    assert_eq!(document.preferences, preferences);
+    assert_eq!(document.appearance, preferences);
     assert_eq!(
         window
             .read_with(cx, |settings, cx| settings
@@ -102,8 +102,8 @@ fn removing_an_extension_from_the_sheet_removes_its_themes(cx: &mut TestAppConte
     let document = document_of(&window, cx);
     assert!(document.terminal_themes.is_empty());
     assert_eq!(
-        document.preferences.terminal.themes.dark,
-        SettingsDocument::default().preferences.terminal.themes.dark
+        document.appearance.terminal.themes.dark,
+        SettingsDocument::default().appearance.terminal.themes.dark
     );
     assert_eq!(
         window

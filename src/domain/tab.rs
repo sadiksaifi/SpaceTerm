@@ -152,8 +152,8 @@ pub(crate) enum PaneError {
     },
     #[error("Pane layout minimum size exceeds the supported numeric range")]
     LayoutSizeOverflow,
-    #[error("Pane {0} exists in the layout without an owned terminal")]
-    MissingTerminal(PaneId),
+    #[error("Pane {0} exists in the layout but not in the Tab's Panes")]
+    MissingPane(PaneId),
 }
 
 #[derive(Clone, Debug)]
@@ -216,7 +216,7 @@ enum FocusHistoryStep {
 pub(crate) struct Tab<T> {
     id: TabId,
     root: PaneNode,
-    terminals: BTreeMap<PaneId, T>,
+    panes: BTreeMap<PaneId, T>,
     focused_pane_id: PaneId,
     focus_history: Vec<PaneId>,
     root_pane_id: PaneId,
@@ -230,16 +230,13 @@ impl<T> Tab<T> {
     pub(crate) fn new(
         id: TabId,
         minimum_pane_size: PaneSize,
-        create_initial_terminal: impl FnOnce(PaneId) -> T,
+        create_initial_pane: impl FnOnce(PaneId) -> T,
     ) -> Self {
         let initial_pane_id = PaneId::from_raw(1);
         Self {
             id,
             root: PaneNode::Leaf(initial_pane_id),
-            terminals: BTreeMap::from([(
-                initial_pane_id,
-                create_initial_terminal(initial_pane_id),
-            )]),
+            panes: BTreeMap::from([(initial_pane_id, create_initial_pane(initial_pane_id))]),
             focused_pane_id: initial_pane_id,
             focus_history: vec![initial_pane_id],
             root_pane_id: initial_pane_id,
@@ -275,25 +272,23 @@ impl<T> Tab<T> {
     }
 
     pub(crate) fn pane_count(&self) -> usize {
-        self.terminals.len()
+        self.panes.len()
     }
 
     pub(crate) fn root(&self) -> PaneTreeRef<'_> {
         PaneTreeRef { node: &self.root }
     }
 
-    pub(crate) fn terminal(&self, pane_id: PaneId) -> Option<&T> {
-        self.terminals.get(&pane_id)
+    pub(crate) fn pane(&self, pane_id: PaneId) -> Option<&T> {
+        self.panes.get(&pane_id)
     }
 
-    pub(crate) fn terminals(&self) -> impl ExactSizeIterator<Item = &T> {
-        self.terminals.values()
+    pub(crate) fn panes(&self) -> impl ExactSizeIterator<Item = &T> {
+        self.panes.values()
     }
 
-    pub(crate) fn terminals_with_ids(&self) -> impl ExactSizeIterator<Item = (PaneId, &T)> {
-        self.terminals
-            .iter()
-            .map(|(pane_id, terminal)| (*pane_id, terminal))
+    pub(crate) fn panes_with_ids(&self) -> impl ExactSizeIterator<Item = (PaneId, &T)> {
+        self.panes.iter().map(|(pane_id, pane)| (*pane_id, pane))
     }
 
     pub(crate) fn focus_pane(&mut self, pane_id: PaneId) -> Result<(), PaneError> {
@@ -371,7 +366,7 @@ impl<T> Tab<T> {
         axis: SplitAxis,
         target_size: PaneSize,
         divider_size: f32,
-        create_terminal: impl FnOnce(PaneId) -> T,
+        create_pane: impl FnOnce(PaneId) -> T,
     ) -> Result<PaneId, PaneError> {
         self.validate_split(target_pane_id, axis, target_size, divider_size)?;
         let (new_pane_id, split_id, next_pane_id, next_split_id) = self.next_split_ids()?;
@@ -383,10 +378,10 @@ impl<T> Tab<T> {
         ) else {
             unreachable!("a validated split target must remain in the Pane layout")
         };
-        let terminal = create_terminal(new_pane_id);
+        let pane = create_pane(new_pane_id);
         self.next_pane_id = next_pane_id;
         self.next_split_id = next_split_id;
-        self.commit_split(new_root, new_pane_id, terminal);
+        self.commit_split(new_root, new_pane_id, pane);
         Ok(new_pane_id)
     }
 
@@ -462,10 +457,10 @@ impl<T> Tab<T> {
         let Some(new_root) = removal.replacement else {
             unreachable!("removing a non-final Pane retains its layout")
         };
-        let terminal = self
-            .terminals
+        let pane = self
+            .panes
             .remove(&pane_id)
-            .ok_or(PaneError::MissingTerminal(pane_id))?;
+            .ok_or(PaneError::MissingPane(pane_id))?;
 
         self.root = new_root;
         if self.root_pane_id == pane_id {
@@ -481,7 +476,7 @@ impl<T> Tab<T> {
         Ok(ClosePaneOutcome::PaneClosed {
             closed_pane_id: pane_id,
             focused_pane_id: self.focused_pane_id,
-            closed_terminal: terminal,
+            closed_pane: pane,
         })
     }
 
@@ -566,9 +561,9 @@ impl<T> Tab<T> {
         ))
     }
 
-    fn commit_split(&mut self, root: PaneNode, pane_id: PaneId, terminal: T) {
+    fn commit_split(&mut self, root: PaneNode, pane_id: PaneId, pane: T) {
         self.root = root;
-        self.terminals.insert(pane_id, terminal);
+        self.panes.insert(pane_id, pane);
         self.zoom_state = ZoomState::Restored;
         self.set_focused_pane(pane_id);
     }
@@ -1021,8 +1016,8 @@ mod tests {
         PaneSize::new(width, height).unwrap()
     }
 
-    fn tab<T>(terminal: T) -> Tab<T> {
-        Tab::new(TabId::new(7), size(100.0, 50.0), |_| terminal)
+    fn tab<T>(pane: T) -> Tab<T> {
+        Tab::new(TabId::new(7), size(100.0, 50.0), |_| pane)
     }
 
     fn four_pane_tab() -> Tab<()> {
@@ -1327,7 +1322,7 @@ mod tests {
     }
 
     #[test]
-    fn split_pane_should_validate_the_target_before_creating_terminal() {
+    fn split_pane_should_validate_the_target_before_creating_pane() {
         let mut tab = tab(());
         let creations = Cell::new(0);
 
@@ -1348,7 +1343,7 @@ mod tests {
     }
 
     #[test]
-    fn split_pane_should_validate_minimum_size_before_creating_terminal() {
+    fn split_pane_should_validate_minimum_size_before_creating_pane() {
         let mut tab = tab(());
         let creations = Cell::new(0);
 
@@ -1585,7 +1580,7 @@ mod tests {
     }
 
     #[test]
-    fn close_pane_should_transfer_its_terminal_and_drop_it_exactly_once() {
+    fn close_pane_should_transfer_its_pane_and_drop_it_exactly_once() {
         let drops = Rc::new(RefCell::new(Vec::new()));
         let mut tab = tab(DropProbe {
             id: 1,

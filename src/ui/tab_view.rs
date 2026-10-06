@@ -24,7 +24,7 @@ use super::{
 
 #[derive(Debug, Error)]
 /// A typed rejection while coordinating Remote lifecycle across one Tab's Pane hierarchy.
-pub(crate) enum RemotePaneHostLifecycleError {
+pub(crate) enum RemoteTabViewLifecycleError {
     #[error("Pane {pane_id} cannot change remote session lifecycle: {source}")]
     Pane {
         pane_id: PaneId,
@@ -40,7 +40,7 @@ pub(crate) enum RemotePaneHostLifecycleError {
 /// Move-only restart reservations for every Pane in one unchanged Tab hierarchy.
 ///
 /// The token is valid only while Tab, Pane, and session-epoch identities remain unchanged.
-pub(crate) struct PreparedPaneHostRemoteRestart {
+pub(crate) struct PreparedTabViewRemoteRestart {
     tab_id: TabId,
     panes: RemoteRestartBatch<(PaneId, Entity<TerminalPane>, PreparedRemotePaneRestart)>,
 }
@@ -311,18 +311,18 @@ fn minimum_pane_width(appearance: &super::appearance::ChromeAppearance) -> f32 {
 }
 
 #[derive(Clone, Eq, PartialEq)]
-pub(crate) enum PaneHostEvent {
+pub(crate) enum TabViewEvent {
     UserClosePaneRequested { tab_id: TabId, pane_id: PaneId },
     CloseTabRequested { tab_id: TabId },
     PresentationChanged { tab_id: TabId },
 }
 
-impl std::fmt::Debug for PaneHostEvent {
+impl std::fmt::Debug for TabViewEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::UserClosePaneRequested { .. } => "PaneHostEvent::UserClosePaneRequested",
-            Self::CloseTabRequested { .. } => "PaneHostEvent::CloseTabRequested",
-            Self::PresentationChanged { .. } => "PaneHostEvent::PresentationChanged",
+            Self::UserClosePaneRequested { .. } => "TabViewEvent::UserClosePaneRequested",
+            Self::CloseTabRequested { .. } => "TabViewEvent::CloseTabRequested",
+            Self::PresentationChanged { .. } => "TabViewEvent::PresentationChanged",
         })
     }
 }
@@ -347,7 +347,7 @@ struct PaneDrag {
     session: DragSession,
 }
 
-pub(crate) struct PaneHost {
+pub(crate) struct TabView {
     tab: Tab<Entity<TerminalPane>>,
     session_factory: WorkspaceTerminalSessionFactory,
     pane_construction: PaneConstruction,
@@ -367,7 +367,7 @@ pub(crate) struct PaneHost {
     remote_lifecycle: RemoteHierarchyLifecycle,
 }
 
-impl PaneHost {
+impl TabView {
     #[cfg(test)]
     pub(crate) fn new(
         tab_id: TabId,
@@ -377,7 +377,7 @@ impl PaneHost {
     ) -> Self {
         let prepared_launch = match session_factory.prepare_child_launch() {
             Ok(prepared_launch) => prepared_launch,
-            Err(error) => panic!("test PaneHost channel preparation failed: {error}"),
+            Err(error) => panic!("test TabView channel preparation failed: {error}"),
         };
         Self::new_with_prepared_launch(
             tab_id,
@@ -420,7 +420,7 @@ impl PaneHost {
             )
         });
         let initial_pane_id = tab.focused_pane_id();
-        let Some(initial_terminal) = tab.terminal(initial_pane_id) else {
+        let Some(initial_terminal) = tab.pane(initial_pane_id) else {
             unreachable!("a new Tab must own its initial Pane terminal")
         };
         let initial_title = initial_terminal.read(cx).title();
@@ -460,38 +460,38 @@ impl PaneHost {
         cx.subscribe_in(
             &terminal,
             window,
-            move |host, terminal, event: &TerminalPaneEvent, window, cx| match event {
-                TerminalPaneEvent::FocusRequested => host.focus_pane(pane_id, cx),
+            move |view, terminal, event: &TerminalPaneEvent, window, cx| match event {
+                TerminalPaneEvent::FocusRequested => view.focus_pane(pane_id, cx),
                 TerminalPaneEvent::SurfaceBackgroundChanged => cx.notify(),
                 TerminalPaneEvent::TitleChanged(title) => {
-                    host.pane_titles.insert(pane_id, title.clone());
-                    cx.emit(PaneHostEvent::PresentationChanged {
-                        tab_id: host.tab.id(),
+                    view.pane_titles.insert(pane_id, title.clone());
+                    cx.emit(TabViewEvent::PresentationChanged {
+                        tab_id: view.tab.id(),
                     });
                     cx.notify();
                 }
                 TerminalPaneEvent::CaptionChanged => {
                     let caption = PaneCaptionText::from_terminal(terminal.read(cx));
-                    if host.pane_captions.get(&pane_id) != Some(&caption) {
-                        host.pane_captions.insert(pane_id, caption);
-                        if pane_id == host.tab.root_pane_id()
-                            || pane_id == host.tab.focused_pane_id()
+                    if view.pane_captions.get(&pane_id) != Some(&caption) {
+                        view.pane_captions.insert(pane_id, caption);
+                        if pane_id == view.tab.root_pane_id()
+                            || pane_id == view.tab.focused_pane_id()
                         {
-                            cx.emit(PaneHostEvent::PresentationChanged {
-                                tab_id: host.tab.id(),
+                            cx.emit(TabViewEvent::PresentationChanged {
+                                tab_id: view.tab.id(),
                             });
                         }
                         cx.notify();
                     }
                 }
                 TerminalPaneEvent::AttentionChanged { unread_count } => {
-                    host.pane_attention.insert(pane_id, *unread_count);
-                    cx.emit(PaneHostEvent::PresentationChanged {
-                        tab_id: host.tab.id(),
+                    view.pane_attention.insert(pane_id, *unread_count);
+                    cx.emit(TabViewEvent::PresentationChanged {
+                        tab_id: view.tab.id(),
                     });
                     cx.notify();
                 }
-                TerminalPaneEvent::Exited => host.close_pane(pane_id, window, cx),
+                TerminalPaneEvent::Exited => view.close_pane(pane_id, window, cx),
             },
         )
         .detach();
@@ -499,7 +499,7 @@ impl PaneHost {
     }
 
     pub(crate) fn focus(&self, window: &mut Window, cx: &mut App) {
-        let Some(terminal) = self.tab.terminal(self.tab.focused_pane_id()) else {
+        let Some(terminal) = self.tab.pane(self.tab.focused_pane_id()) else {
             return;
         };
         terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
@@ -522,7 +522,7 @@ impl PaneHost {
         let pane_id = self.tab.focused_pane_id();
         let tab_id = self.tab.id();
         let hierarchy_generation = self.native_service_hierarchy_generation;
-        let Some(terminal) = self.tab.terminal(pane_id) else {
+        let Some(terminal) = self.tab.pane(pane_id) else {
             return NativeServiceStatus::default();
         };
         terminal.update(cx, |terminal, cx| {
@@ -554,7 +554,7 @@ impl PaneHost {
         {
             return None;
         }
-        self.tab.terminal(origin.pane_id()).cloned()
+        self.tab.pane(origin.pane_id()).cloned()
     }
 
     pub(crate) const fn tab_id(&self) -> TabId {
@@ -571,7 +571,7 @@ impl PaneHost {
 
     pub(crate) fn current_directory(&self, pane_id: PaneId, cx: &App) -> Option<CurrentDirectory> {
         self.tab
-            .terminal(pane_id)
+            .pane(pane_id)
             .and_then(|terminal| terminal.read(cx).current_directory())
     }
 
@@ -580,7 +580,7 @@ impl PaneHost {
         cx: &'a App,
     ) -> impl Iterator<Item = (PaneId, &'a TerminalPane)> {
         self.tab
-            .terminals_with_ids()
+            .panes_with_ids()
             .map(|(id, terminal)| (id, terminal.read(cx)))
     }
 
@@ -626,7 +626,7 @@ impl PaneHost {
         cx: &mut Context<Self>,
     ) {
         self.pane_attention.insert(pane_id, unread_count);
-        cx.emit(PaneHostEvent::PresentationChanged {
+        cx.emit(TabViewEvent::PresentationChanged {
             tab_id: self.tab.id(),
         });
         cx.notify();
@@ -672,7 +672,7 @@ impl PaneHost {
     pub(crate) fn close_all(&mut self, cx: &mut Context<Self>) {
         self.active = false;
         self.sync_terminal_focus(cx);
-        for terminal in self.tab.terminals() {
+        for terminal in self.tab.panes() {
             terminal.update(cx, |terminal, _| terminal.close());
         }
     }
@@ -685,9 +685,9 @@ impl PaneHost {
         &mut self,
         generation: u64,
         cx: &mut Context<Self>,
-    ) -> Result<(), RemotePaneHostLifecycleError> {
+    ) -> Result<(), RemoteTabViewLifecycleError> {
         self.can_disconnect_remote(generation, cx)?;
-        for (_, terminal) in self.tab.terminals_with_ids() {
+        for (_, terminal) in self.tab.panes_with_ids() {
             terminal.update(cx, |terminal, cx| {
                 terminal
                     .disconnect_remote(generation, cx)
@@ -704,12 +704,12 @@ impl PaneHost {
         &self,
         generation: u64,
         cx: &App,
-    ) -> Result<(), RemotePaneHostLifecycleError> {
-        for (pane_id, terminal) in self.tab.terminals_with_ids() {
+    ) -> Result<(), RemoteTabViewLifecycleError> {
+        for (pane_id, terminal) in self.tab.panes_with_ids() {
             terminal
                 .read(cx)
                 .can_disconnect_remote(generation)
-                .map_err(|source| RemotePaneHostLifecycleError::Pane { pane_id, source })?;
+                .map_err(|source| RemoteTabViewLifecycleError::Pane { pane_id, source })?;
         }
         Ok(())
     }
@@ -724,23 +724,23 @@ impl PaneHost {
         generation: u64,
         prepared_launches: Vec<PreparedWorkspaceTerminalLaunch>,
         cx: &App,
-    ) -> Result<PreparedPaneHostRemoteRestart, RemotePaneHostLifecycleError> {
+    ) -> Result<PreparedTabViewRemoteRestart, RemoteTabViewLifecycleError> {
         if self.tab.pane_count() != prepared_launches.len() {
-            return Err(RemotePaneHostLifecycleError::PaneChanged(
+            return Err(RemoteTabViewLifecycleError::PaneChanged(
                 self.tab.focused_pane_id(),
             ));
         }
         let mut panes = Vec::with_capacity(self.tab.pane_count());
         for ((pane_id, terminal), prepared_launch) in
-            self.tab.terminals_with_ids().zip(prepared_launches)
+            self.tab.panes_with_ids().zip(prepared_launches)
         {
             let prepared = terminal
                 .read(cx)
                 .prepare_remote_restart(session_factory.clone(), generation, prepared_launch)
-                .map_err(|source| RemotePaneHostLifecycleError::Pane { pane_id, source })?;
+                .map_err(|source| RemoteTabViewLifecycleError::Pane { pane_id, source })?;
             panes.push((pane_id, terminal.clone(), prepared));
         }
-        Ok(PreparedPaneHostRemoteRestart {
+        Ok(PreparedTabViewRemoteRestart {
             tab_id: self.tab.id(),
             panes: RemoteRestartBatch::new(panes),
         })
@@ -749,18 +749,18 @@ impl PaneHost {
     /// Revalidates every prepared Pane restart against the current Tab hierarchy.
     pub(crate) fn can_commit_remote_restart(
         &self,
-        prepared: &PreparedPaneHostRemoteRestart,
+        prepared: &PreparedTabViewRemoteRestart,
         cx: &App,
-    ) -> Result<(), RemotePaneHostLifecycleError> {
+    ) -> Result<(), RemoteTabViewLifecycleError> {
         if self.tab.id() != prepared.tab_id {
-            return Err(RemotePaneHostLifecycleError::TabChanged {
+            return Err(RemoteTabViewLifecycleError::TabChanged {
                 prepared: prepared.tab_id,
                 current: self.tab.id(),
             });
         }
         prepared.panes.validate(
             self.tab.pane_count(),
-            || RemotePaneHostLifecycleError::PaneChanged(self.tab.focused_pane_id()),
+            || RemoteTabViewLifecycleError::PaneChanged(self.tab.focused_pane_id()),
             |(pane_id, terminal, pane_restart)| {
                 self.validate_restart_pane(*pane_id, terminal, pane_restart, cx)
             },
@@ -773,17 +773,17 @@ impl PaneHost {
         terminal: &Entity<TerminalPane>,
         pane_restart: &PreparedRemotePaneRestart,
         cx: &App,
-    ) -> Result<(), RemotePaneHostLifecycleError> {
-        let Some(current) = self.tab.terminal(pane_id) else {
-            return Err(RemotePaneHostLifecycleError::PaneChanged(pane_id));
+    ) -> Result<(), RemoteTabViewLifecycleError> {
+        let Some(current) = self.tab.pane(pane_id) else {
+            return Err(RemoteTabViewLifecycleError::PaneChanged(pane_id));
         };
         if current.entity_id() != terminal.entity_id() {
-            return Err(RemotePaneHostLifecycleError::PaneChanged(pane_id));
+            return Err(RemoteTabViewLifecycleError::PaneChanged(pane_id));
         }
         terminal
             .read(cx)
             .can_commit_remote_restart(pane_restart)
-            .map_err(|source| RemotePaneHostLifecycleError::Pane { pane_id, source })?;
+            .map_err(|source| RemoteTabViewLifecycleError::Pane { pane_id, source })?;
         Ok(())
     }
 
@@ -794,20 +794,20 @@ impl PaneHost {
     /// already committed siblings.
     pub(crate) fn commit_remote_restart(
         &mut self,
-        prepared: PreparedPaneHostRemoteRestart,
+        prepared: PreparedTabViewRemoteRestart,
         session_factory: WorkspaceTerminalSessionFactory,
         window: &Window,
         cx: &mut Context<Self>,
-    ) -> Result<(), RemotePaneHostLifecycleError> {
+    ) -> Result<(), RemoteTabViewLifecycleError> {
         if self.tab.id() != prepared.tab_id {
-            return Err(RemotePaneHostLifecycleError::TabChanged {
+            return Err(RemoteTabViewLifecycleError::TabChanged {
                 prepared: prepared.tab_id,
                 current: self.tab.id(),
             });
         }
         prepared.panes.commit(
             self.tab.pane_count(),
-            || RemotePaneHostLifecycleError::PaneChanged(self.tab.focused_pane_id()),
+            || RemoteTabViewLifecycleError::PaneChanged(self.tab.focused_pane_id()),
             cx,
             |(pane_id, terminal, pane_restart), cx| {
                 self.validate_restart_pane(*pane_id, terminal, pane_restart, cx)
@@ -825,7 +825,7 @@ impl PaneHost {
         self.session_factory = session_factory;
         self.remote_lifecycle.restarted();
         self.sync_terminal_focus(cx);
-        cx.emit(PaneHostEvent::PresentationChanged {
+        cx.emit(TabViewEvent::PresentationChanged {
             tab_id: self.tab.id(),
         });
         cx.notify();
@@ -839,7 +839,7 @@ impl PaneHost {
     #[cfg(test)]
     pub(crate) fn pane_entity_ids(&self) -> Vec<(PaneId, gpui::EntityId)> {
         self.tab
-            .terminals_with_ids()
+            .panes_with_ids()
             .map(|(pane_id, terminal)| (pane_id, terminal.entity_id()))
             .collect()
     }
@@ -880,7 +880,7 @@ impl PaneHost {
     #[cfg(test)]
     pub(crate) fn focused_terminal_remote_state(&self, cx: &App) -> (bool, bool) {
         self.tab
-            .terminal(self.tab.focused_pane_id())
+            .pane(self.tab.focused_pane_id())
             .map(|terminal| {
                 let terminal = terminal.read(cx);
                 terminal.remote_session_state()
@@ -894,7 +894,7 @@ impl PaneHost {
         cx: &App,
     ) -> Vec<(PaneId, bool, Option<&'static str>)> {
         self.tab
-            .terminals_with_ids()
+            .panes_with_ids()
             .map(|(pane_id, terminal)| {
                 let terminal = terminal.read(cx);
                 let (session_attached, failure_operation) = terminal.restart_state();
@@ -906,14 +906,14 @@ impl PaneHost {
     #[cfg(test)]
     pub(crate) fn focused_terminal_is_focused(&self, window: &Window, cx: &App) -> bool {
         self.tab
-            .terminal(self.tab.focused_pane_id())
+            .pane(self.tab.focused_pane_id())
             .is_some_and(|terminal| terminal.read(cx).is_focused(window))
     }
 
     #[cfg(test)]
     pub(crate) fn focused_terminal_has_input_focus(&self, window: &Window, cx: &App) -> bool {
         self.tab
-            .terminal(self.tab.focused_pane_id())
+            .pane(self.tab.focused_pane_id())
             .is_some_and(|terminal| terminal.read(cx).terminal_input_focused(window, cx))
     }
 
@@ -931,7 +931,7 @@ impl PaneHost {
             return;
         }
         self.sync_terminal_focus(cx);
-        cx.emit(PaneHostEvent::PresentationChanged {
+        cx.emit(TabViewEvent::PresentationChanged {
             tab_id: self.tab.id(),
         });
         cx.notify();
@@ -956,11 +956,11 @@ impl PaneHost {
         cx: &mut Context<Self>,
     ) {
         self.sync_terminal_focus(cx);
-        cx.emit(PaneHostEvent::PresentationChanged {
+        cx.emit(TabViewEvent::PresentationChanged {
             tab_id: self.tab.id(),
         });
         cx.notify();
-        if let Some(terminal) = self.tab.terminal(pane_id) {
+        if let Some(terminal) = self.tab.pane(pane_id) {
             terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
         }
     }
@@ -999,7 +999,7 @@ impl PaneHost {
                 let detail = format!(
                     "Cannot create a Pane because {error}. Restore the directory or change the pinned directory."
                 );
-                let host = cx.weak_entity();
+                let view = cx.weak_entity();
                 let window_handle = window.window_handle();
                 let _ = Alert::new(
                     ModalId::new("pane-starting-directory-unavailable"),
@@ -1016,7 +1016,7 @@ impl PaneHost {
                 .intent(AlertIntent::Warning)
                 .present(window, cx, move |_, cx| {
                     let _ = window_handle.update(cx, |_, window, cx| {
-                        let _ = host.update(cx, |host, cx| host.focus(window, cx));
+                        let _ = view.update(cx, |view, cx| view.focus(window, cx));
                     });
                 });
                 return;
@@ -1024,14 +1024,14 @@ impl PaneHost {
         };
         if let Some(revalidation) = session_factory.revalidate_remote_child_launch() {
             let child_launch_generation = self.remote_lifecycle.begin_child_launch();
-            cx.spawn_in(window, async move |host, cx| {
+            cx.spawn_in(window, async move |view, cx| {
                 let revalidation = revalidation.await;
-                let _ = host.update_in(cx, |host, window, cx| {
-                    if host.remote_lifecycle.disconnected_generation().is_some() {
+                let _ = view.update_in(cx, |view, window, cx| {
+                    if view.remote_lifecycle.disconnected_generation().is_some() {
                         cx.emit(RemoteChildLaunchUnavailable::Cancelled);
                         return;
                     }
-                    if !host
+                    if !view
                         .remote_lifecycle
                         .is_current_child_launch(child_launch_generation)
                     {
@@ -1049,14 +1049,14 @@ impl PaneHost {
                             return;
                         }
                     };
-                    let Some(current_size) = host.split_target_size(target_pane_id, pane_gap(cx))
+                    let Some(current_size) = view.split_target_size(target_pane_id, pane_gap(cx))
                     else {
                         return;
                     };
                     if current_size != target_size {
                         return;
                     }
-                    host.split_pane_with_prepared_launch(
+                    view.split_pane_with_prepared_launch(
                         target_pane_id,
                         axis,
                         target_size,
@@ -1105,8 +1105,8 @@ impl PaneHost {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> DragPreview {
-        let session = DragSession::begin(cx, |host: &mut Self, _, cx| {
-            if host.pane_drag.take().is_some() {
+        let session = DragSession::begin(cx, |view: &mut Self, _, cx| {
+            if view.pane_drag.take().is_some() {
                 cx.notify();
             }
         });
@@ -1129,11 +1129,11 @@ impl PaneHost {
             ),
         );
         let grab = grab_point(window, cx);
-        let host = cx.entity().downgrade();
+        let view = cx.entity().downgrade();
         DragPreview::new(window, cx, move |window, cx| {
-            host.upgrade()
-                .map(|host| {
-                    host.read(cx)
+            view.upgrade()
+                .map(|view| {
+                    view.read(cx)
                         .render_lifted_caption(pane_id, caption, grab, window, cx)
                 })
                 .unwrap_or_else(|| div().into_any_element())
@@ -1154,7 +1154,7 @@ impl PaneHost {
         window: &Window,
         cx: &App,
     ) -> AnyElement {
-        let Some(terminal) = self.tab.terminal(pane_id).cloned() else {
+        let Some(terminal) = self.tab.pane(pane_id).cloned() else {
             return div().into_any_element();
         };
         let appearance = super::appearance::chrome(cx);
@@ -1266,10 +1266,10 @@ impl PaneHost {
                 self.advance_native_service_hierarchy_generation(cx);
                 self.split_bounds.clear();
                 self.sync_terminal_focus(cx);
-                cx.emit(PaneHostEvent::PresentationChanged {
+                cx.emit(TabViewEvent::PresentationChanged {
                     tab_id: self.tab.id(),
                 });
-                if let Some(terminal) = self.tab.terminal(drag.pane_id) {
+                if let Some(terminal) = self.tab.pane(drag.pane_id) {
                     terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
                 }
             }
@@ -1335,7 +1335,7 @@ impl PaneHost {
         match result {
             Ok(pane_id) => {
                 self.advance_native_service_hierarchy_generation(cx);
-                if let Some(terminal) = self.tab.terminal(pane_id) {
+                if let Some(terminal) = self.tab.pane(pane_id) {
                     self.pane_titles.insert(pane_id, terminal.read(cx).title());
                     self.pane_captions
                         .insert(pane_id, PaneCaptionText::from_terminal(terminal.read(cx)));
@@ -1343,11 +1343,11 @@ impl PaneHost {
                 self.pane_attention.insert(pane_id, 0);
                 self.split_bounds.clear();
                 self.sync_terminal_focus(cx);
-                cx.emit(PaneHostEvent::PresentationChanged {
+                cx.emit(TabViewEvent::PresentationChanged {
                     tab_id: self.tab.id(),
                 });
                 cx.notify();
-                if let Some(terminal) = self.tab.terminal(pane_id) {
+                if let Some(terminal) = self.tab.pane(pane_id) {
                     terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
                 }
             }
@@ -1356,10 +1356,10 @@ impl PaneHost {
     }
 
     fn request_close_pane(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
-        if self.close_tab_requested || self.tab.terminal(pane_id).is_none() {
+        if self.close_tab_requested || self.tab.pane(pane_id).is_none() {
             return;
         }
-        cx.emit(PaneHostEvent::UserClosePaneRequested {
+        cx.emit(TabViewEvent::UserClosePaneRequested {
             tab_id: self.tab.id(),
             pane_id,
         });
@@ -1385,15 +1385,15 @@ impl PaneHost {
                 self.close_tab_requested = true;
                 self.active = false;
                 self.sync_terminal_focus(cx);
-                cx.emit(PaneHostEvent::CloseTabRequested { tab_id });
+                cx.emit(TabViewEvent::CloseTabRequested { tab_id });
             }
             Ok(ClosePaneOutcome::PaneClosed {
                 focused_pane_id,
-                closed_terminal,
+                closed_pane,
                 ..
             }) => {
                 self.advance_native_service_hierarchy_generation(cx);
-                closed_terminal.update(cx, |terminal, _| {
+                closed_pane.update(cx, |terminal, _| {
                     terminal.set_accessibility_hierarchy(false, usize::MAX);
                     terminal.close();
                 });
@@ -1403,12 +1403,12 @@ impl PaneHost {
                 self.pane_captions.remove(&pane_id);
                 self.pane_attention.remove(&pane_id);
                 self.sync_terminal_focus(cx);
-                cx.emit(PaneHostEvent::PresentationChanged {
+                cx.emit(TabViewEvent::PresentationChanged {
                     tab_id: self.tab.id(),
                 });
                 cx.notify();
                 if self.active
-                    && let Some(terminal) = self.tab.terminal(focused_pane_id)
+                    && let Some(terminal) = self.tab.pane(focused_pane_id)
                 {
                     terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
                 }
@@ -1423,7 +1423,7 @@ impl PaneHost {
         }
         self.advance_native_service_hierarchy_generation(cx);
         self.sync_terminal_focus(cx);
-        cx.emit(PaneHostEvent::PresentationChanged {
+        cx.emit(TabViewEvent::PresentationChanged {
             tab_id: self.tab.id(),
         });
         cx.notify();
@@ -1515,11 +1515,11 @@ impl PaneHost {
     fn sync_terminal_focus(&mut self, cx: &mut Context<Self>) {
         let focused_terminal_id = self
             .tab
-            .terminal(self.tab.focused_pane_id())
+            .pane(self.tab.focused_pane_id())
             .map(Entity::entity_id);
         let visible_terminal_id = match self.tab.zoom_state() {
             ZoomState::Restored => None,
-            ZoomState::Zoomed(pane_id) => self.tab.terminal(pane_id).map(Entity::entity_id),
+            ZoomState::Zoomed(pane_id) => self.tab.pane(pane_id).map(Entity::entity_id),
         };
         let blocker = TerminalFocusCoordinator::pane_layout_blocker(
             self.focus_branch_blocker,
@@ -1543,7 +1543,7 @@ impl PaneHost {
             .map(|(order, pane_id)| (pane_id, order))
             .collect::<BTreeMap<_, _>>();
         for pane_id in panes {
-            let Some(terminal) = self.tab.terminal(pane_id) else {
+            let Some(terminal) = self.tab.pane(pane_id) else {
                 continue;
             };
             let product_focus = TerminalProductFocus {
@@ -1575,7 +1575,7 @@ impl PaneHost {
         self.native_service_hierarchy_generation =
             self.native_service_hierarchy_generation.wrapping_add(1);
         let hierarchy_generation = self.native_service_hierarchy_generation;
-        for terminal in self.tab.terminals() {
+        for terminal in self.tab.panes() {
             terminal.update(cx, |terminal, _| {
                 terminal.synchronize_native_service_hierarchy_generation(hierarchy_generation);
             });
@@ -1589,7 +1589,7 @@ impl PaneHost {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.tab.terminal(pane_id).is_none() {
+        if self.tab.pane(pane_id).is_none() {
             return;
         }
         self.focus_pane(pane_id, cx);
@@ -1690,13 +1690,13 @@ impl PaneHost {
         &self,
         tree: PaneTreeRef<'_>,
         hovers: &PaneHovers,
-        host: gpui::WeakEntity<Self>,
+        view: gpui::WeakEntity<Self>,
         appearance: &std::sync::Arc<super::appearance::ChromeAppearance>,
         cx: &App,
     ) -> AnyElement {
         match tree.node() {
             PaneNodeRef::Leaf { pane_id } => {
-                self.render_leaf(pane_id, hovers, host, appearance, cx)
+                self.render_leaf(pane_id, hovers, view, appearance, cx)
             }
             PaneNodeRef::Split {
                 split_id,
@@ -1710,7 +1710,7 @@ impl PaneHost {
                 ratio,
                 (first, second),
                 hovers,
-                host,
+                view,
                 appearance,
                 cx,
             ),
@@ -1720,7 +1720,7 @@ impl PaneHost {
     /// Each Pane's hover, read once per frame.
     fn pane_hovers(&self, window: &mut Window, cx: &mut App) -> PaneHovers {
         self.tab
-            .terminals_with_ids()
+            .panes_with_ids()
             .map(|(pane_id, _)| {
                 let fade = HoverFade::new(("pane-hover", pane_id.get()), window, cx);
                 let level = fade.level(window, cx);
@@ -1733,11 +1733,11 @@ impl PaneHost {
         &self,
         pane_id: PaneId,
         hovers: &PaneHovers,
-        host: gpui::WeakEntity<Self>,
+        view: gpui::WeakEntity<Self>,
         appearance: &std::sync::Arc<super::appearance::ChromeAppearance>,
         cx: &App,
     ) -> AnyElement {
-        let Some(terminal) = self.tab.terminal(pane_id).cloned() else {
+        let Some(terminal) = self.tab.pane(pane_id).cloned() else {
             // A Pane without its Terminal still occupies a Pane's place, so it keeps a Pane's
             // material rather than punching an opaque block through a translucent window.
             return div()
@@ -1764,8 +1764,8 @@ impl PaneHost {
             .as_ref()
             .and_then(|drag| drag.drop_target)
             .and_then(|(target_pane_id, edge)| (target_pane_id == pane_id).then_some(edge));
-        let measure_host = host.clone();
-        let focus_host = host.clone();
+        let measure_view = view.clone();
+        let focus_view = view.clone();
         let frame = super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
         // The Pane interior stays Terminal-owned; only the surface shape comes from the frame.
         let surface_terminal = terminal.clone();
@@ -1800,8 +1800,8 @@ impl PaneHost {
                 let bounds = children
                     .get(2)
                     .map_or(*first, |terminal| first.union(terminal));
-                let _ = measure_host.update(cx, |host, _| {
-                    host.pane_bounds.insert(pane_id, bounds);
+                let _ = measure_view.update(cx, |view, _| {
+                    view.pane_bounds.insert(pane_id, bounds);
                 });
             })
             .id(("pane", pane_id.get()))
@@ -1814,7 +1814,7 @@ impl PaneHost {
             .flex_col()
             .overflow_hidden()
             .capture_any_mouse_down(move |_: &MouseDownEvent, _, cx| {
-                let _ = focus_host.update(cx, |host, cx| host.focus_pane(pane_id, cx));
+                let _ = focus_view.update(cx, |view, cx| view.focus_pane(pane_id, cx));
             })
             .rounded(frame.pane_radius())
             .child(
@@ -1844,7 +1844,7 @@ impl PaneHost {
                     has_multiple_panes,
                 },
                 hover_level,
-                host.clone(),
+                view.clone(),
                 appearance.clone(),
             ))
             .child(
@@ -1867,7 +1867,7 @@ impl PaneHost {
 
     #[expect(
         clippy::too_many_arguments,
-        reason = "one recursive render step over the Split node, its host, and the frame inputs"
+        reason = "one recursive render step over the Split node, its TabView, and the frame inputs"
     )]
     fn render_split(
         &self,
@@ -1876,14 +1876,14 @@ impl PaneHost {
         ratio: f32,
         children: (PaneTreeRef<'_>, PaneTreeRef<'_>),
         hovers: &PaneHovers,
-        host: gpui::WeakEntity<Self>,
+        view: gpui::WeakEntity<Self>,
         appearance: &std::sync::Arc<super::appearance::ChromeAppearance>,
         cx: &App,
     ) -> AnyElement {
         let (first, second) = children;
-        let first = self.render_tree(first, hovers, host.clone(), appearance, cx);
-        let second = self.render_tree(second, hovers, host.clone(), appearance, cx);
-        let measure_host = host.clone();
+        let first = self.render_tree(first, hovers, view.clone(), appearance, cx);
+        let second = self.render_tree(second, hovers, view.clone(), appearance, cx);
+        let measure_view = view.clone();
         let mut split = div()
             .relative()
             .on_children_prepainted(move |children, _, cx| {
@@ -1891,8 +1891,8 @@ impl PaneHost {
                     return;
                 };
                 let bounds = first.union(last);
-                let _ = measure_host.update(cx, |host, cx| {
-                    if host.split_bounds.insert(split_id, bounds) != Some(bounds) {
+                let _ = measure_view.update(cx, |view, cx| {
+                    if view.split_bounds.insert(split_id, bounds) != Some(bounds) {
                         cx.notify();
                     }
                 });
@@ -1928,7 +1928,7 @@ impl PaneHost {
                 split_id,
                 axis,
                 current_offset,
-                host,
+                view,
             ));
         let (spacer, resize_target) = match axis {
             SplitAxis::Horizontal => (
@@ -1964,8 +1964,8 @@ impl PaneHost {
     }
 }
 
-impl EventEmitter<PaneHostEvent> for PaneHost {}
-impl EventEmitter<RemoteChildLaunchUnavailable> for PaneHost {}
+impl EventEmitter<TabViewEvent> for TabView {}
+impl EventEmitter<RemoteChildLaunchUnavailable> for TabView {}
 
 fn collect_pane_order(tree: PaneTreeRef<'_>, panes: &mut Vec<PaneId>) {
     match tree.node() {
@@ -1977,7 +1977,7 @@ fn collect_pane_order(tree: PaneTreeRef<'_>, panes: &mut Vec<PaneId>) {
     }
 }
 
-impl Render for PaneHost {
+impl Render for TabView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // A drag GPUI no longer carries ended without this Tab seeing the release, such as while
         // the Tab was hidden, so it moves nothing.
@@ -1998,7 +1998,7 @@ impl Render for PaneHost {
             self.tab.set_minimum_pane_size(minimum);
         }
         self.sync_terminal_focus(cx);
-        let host = cx.entity().downgrade();
+        let view = cx.entity().downgrade();
         let zoom_state = self.tab.zoom_state();
         let minimum_size = match zoom_state {
             ZoomState::Zoomed(_) => self.tab.minimum_pane_size(),
@@ -2013,24 +2013,24 @@ impl Render for PaneHost {
         let hovers = self.pane_hovers(window, cx);
         let content = match zoom_state {
             ZoomState::Restored => {
-                self.render_tree(self.tab.root(), &hovers, host.clone(), &appearance, cx)
+                self.render_tree(self.tab.root(), &hovers, view.clone(), &appearance, cx)
             }
-            ZoomState::Zoomed(pane_id) => self.render_leaf(pane_id, &hovers, host, &appearance, cx),
+            ZoomState::Zoomed(pane_id) => self.render_leaf(pane_id, &hovers, view, &appearance, cx),
         };
 
         div()
             .on_children_prepainted({
-                let host = cx.entity().downgrade();
+                let view = cx.entity().downgrade();
                 move |children, _, cx| {
                     let Some(bounds) = children.first() else {
                         return;
                     };
-                    let _ = host.update(cx, |host, _| {
-                        host.pane_layout_size = pane_size(*bounds).ok();
+                    let _ = view.update(cx, |view, _| {
+                        view.pane_layout_size = pane_size(*bounds).ok();
                     });
                 }
             })
-            .id(("pane-host", self.tab.id().get()))
+            .id(("tab-view", self.tab.id().get()))
             .key_context(TERMINAL_KEY_CONTEXT)
             .relative()
             .size_full()
@@ -2050,7 +2050,7 @@ impl Render for PaneHost {
             .on_action(cx.listener(Self::on_toggle_zoom))
             .on_action(cx.listener(Self::on_close_pane))
             .on_drag_move::<DraggedPane>({
-                let host = cx.entity().downgrade();
+                let view = cx.entity().downgrade();
                 let owner = cx.entity_id();
                 move |event, _, cx| {
                     let dragged = event.drag(cx);
@@ -2059,15 +2059,15 @@ impl Render for PaneHost {
                     }
                     let pane_id = dragged.pane_id;
                     let pointer = event.event.position;
-                    let _ = host.update(cx, |host, cx| host.drag_pane_to(pane_id, pointer, cx));
+                    let _ = view.update(cx, |view, cx| view.drag_pane_to(pane_id, pointer, cx));
                 }
             })
             .child(content)
             .child({
-                let host = cx.entity().downgrade();
+                let view = cx.entity().downgrade();
                 drag_release_observer(move |window, cx| {
                     let pointer = window.mouse_position();
-                    let _ = host.update(cx, |host, cx| host.finish_pane_drag(pointer, window, cx));
+                    let _ = view.update(cx, |view, cx| view.finish_pane_drag(pointer, window, cx));
                 })
             })
     }
@@ -2225,7 +2225,7 @@ struct PaneCaption {
 fn render_pane_caption(
     caption: PaneCaption,
     hover: f32,
-    host: gpui::WeakEntity<PaneHost>,
+    view: gpui::WeakEntity<TabView>,
     appearance: std::sync::Arc<super::appearance::ChromeAppearance>,
 ) -> AnyElement {
     let caption_height = appearance.caption_height();
@@ -2267,7 +2267,7 @@ fn render_pane_caption(
             let content = render_pane_caption_content(
                 caption,
                 hover,
-                host,
+                view,
                 crate::desktop_profile::DesktopPresentation::get(cx),
                 layout,
                 &appearance,
@@ -2315,7 +2315,7 @@ pub(super) fn drawable_reported_glyph(
 fn render_pane_caption_content(
     caption: PaneCaption,
     hover: f32,
-    host: gpui::WeakEntity<PaneHost>,
+    view: gpui::WeakEntity<TabView>,
     presentation: &crate::desktop_profile::DesktopPresentation,
     layout: CaptionLayout,
     appearance: &super::appearance::ChromeAppearance,
@@ -2351,8 +2351,8 @@ fn render_pane_caption_content(
     // Focused controls remain available on that same activation click, and active-window hover
     // behavior is unchanged.
     let caption_action_available = focused || appearance.active;
-    let focus_host = host.clone();
-    let drag_host = host.clone();
+    let focus_view = view.clone();
+    let drag_view = view.clone();
     let mut controls = div()
         .id(("pane-controls", pane_id.get()))
         .debug_selector(move || {
@@ -2413,7 +2413,7 @@ fn render_pane_caption_content(
         if !visible {
             continue;
         }
-        let host = host.clone();
+        let view = view.clone();
         let id = format!("pane-{selector}-{}", pane_id.get());
         let icon_size = appearance.icons.metrics(IconRole::Control).glyph_size;
         let button = IconButton::new(
@@ -2429,14 +2429,14 @@ fn render_pane_caption_content(
         .debug_selector(id.clone())
         .tooltip(
             Tooltip::new(gpui::SharedString::from(format!("{id}-tooltip")), name)
-                .keyboard_equivalent(shortcut.unwrap_or_default()),
+                .shortcut(shortcut.unwrap_or_default()),
         )
         .on_activate(move |_, window, cx| {
             if !caption_action_available {
                 return;
             }
-            let _ = host.update(cx, |host, cx| {
-                host.perform_caption_action(action, pane_id, window, cx);
+            let _ = view.update(cx, |view, cx| {
+                view.perform_caption_action(action, pane_id, window, cx);
             });
         });
         controls = if matches!(action, PaneCaptionAction::Close) {
@@ -2462,18 +2462,18 @@ fn render_pane_caption_content(
         })
         // The press focuses the Pane at once, since a press that starts a drag never clicks.
         .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
-            let _ = focus_host.update(cx, |host, cx| {
-                host.focus_pane(pane_id, cx);
-                host.focus(window, cx);
+            let _ = focus_view.update(cx, |view, cx| {
+                view.focus_pane(pane_id, cx);
+                view.focus(window, cx);
             });
             cx.stop_propagation();
         })
         // The caption carries its Pane to another Pane's edge whenever another Pane is visible.
         .when(has_multiple_panes && !zoomed, |row| {
-            let owner = drag_host.entity_id();
+            let owner = drag_view.entity_id();
             row.on_drag(DraggedPane { pane_id, owner }, move |_, _, window, cx| {
-                let preview = drag_host
-                    .update(cx, |host, cx| host.begin_pane_drag(pane_id, window, cx))
+                let preview = drag_view
+                    .update(cx, |view, cx| view.begin_pane_drag(pane_id, window, cx))
                     .unwrap_or_else(|_| DragPreview::empty());
                 cx.new(|_| preview)
             })
@@ -2752,7 +2752,7 @@ fn render_split_resize_handle(
     split_id: SplitId,
     axis: SplitAxis,
     current_offset: f32,
-    host: gpui::WeakEntity<PaneHost>,
+    view: gpui::WeakEntity<TabView>,
 ) -> AnyElement {
     ResizeHandle::new(
         ("split-resize", split_id.get()),
@@ -2769,8 +2769,8 @@ fn render_split_resize_handle(
     .debug_selector(format!("split-resize-{}", split_id.get()))
     .on_event_with_accepted_value(move |event, window, cx| {
         let event = *event;
-        host.update(cx, |host, cx| {
-            host.handle_resize_event(split_id, axis, event, window, cx)
+        view.update(cx, |view, cx| {
+            view.handle_resize_event(split_id, axis, event, window, cx)
         })
         .ok()
         .flatten()
@@ -2938,13 +2938,13 @@ mod tests {
     }
 
     struct RemoteLaunchEventHarness {
-        host: Entity<PaneHost>,
+        view: Entity<TabView>,
         events: Rc<RefCell<Vec<RemoteChildLaunchUnavailable>>>,
     }
 
     impl Render for RemoteLaunchEventHarness {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            self.host.clone()
+            self.view.clone()
         }
     }
 
@@ -3056,24 +3056,24 @@ mod tests {
     }
 
     fn split_test_pane(
-        host: &Entity<PaneHost>,
+        view: &Entity<TabView>,
         pane_id: PaneId,
         axis: SplitAxis,
         cx: &mut VisualTestContext,
     ) {
         cx.update(|window, cx| {
-            host.update(cx, |host, cx| {
-                host.split_pane(pane_id, axis, window, cx);
+            view.update(cx, |view, cx| {
+                view.split_pane(pane_id, axis, window, cx);
             });
         });
         cx.run_until_parked();
     }
 
-    fn remote_pane_host_with_events(
+    fn remote_view_with_events(
         session_factory: WorkspaceTerminalSessionFactory,
         cx: &mut TestAppContext,
     ) -> (
-        Entity<PaneHost>,
+        Entity<TabView>,
         Rc<RefCell<Vec<RemoteChildLaunchUnavailable>>>,
         &mut VisualTestContext,
     ) {
@@ -3082,21 +3082,21 @@ mod tests {
         let events = Rc::new(RefCell::new(Vec::new()));
         let recorded_events = Rc::clone(&events);
         let (harness, cx) = cx.add_window_view(move |window, cx| {
-            let host = cx.new(|cx| PaneHost::new(TabId::new(1), session_factory, window, cx));
+            let view = cx.new(|cx| TabView::new(TabId::new(1), session_factory, window, cx));
             cx.subscribe(
-                &host,
+                &view,
                 move |_, _, event: &RemoteChildLaunchUnavailable, _| {
                     recorded_events.borrow_mut().push(*event);
                 },
             )
             .detach();
-            RemoteLaunchEventHarness { host, events }
+            RemoteLaunchEventHarness { view, events }
         });
-        let (host, events) = harness.read_with(cx, |harness, _| {
-            (harness.host.clone(), Rc::clone(&harness.events))
+        let (view, events) = harness.read_with(cx, |harness, _| {
+            (harness.view.clone(), Rc::clone(&harness.events))
         });
         cx.run_until_parked();
-        (host, events, cx)
+        (view, events, cx)
     }
 
     #[gpui::test]
@@ -3111,12 +3111,12 @@ mod tests {
             destination,
             Arc::clone(&provider) as Arc<dyn RemoteTerminalChannelProvider>,
         );
-        let (host, events, cx) = remote_pane_host_with_events(session_factory, cx);
-        let before = host.read_with(cx, |host, _| {
+        let (view, events, cx) = remote_view_with_events(session_factory, cx);
+        let before = view.read_with(cx, |view, _| {
             (
-                host.pane_count(),
-                host.focused_pane_id(),
-                host.layout_signature(),
+                view.pane_count(),
+                view.focused_pane_id(),
+                view.layout_signature(),
             )
         });
 
@@ -3126,7 +3126,7 @@ mod tests {
             RemoteChannelRevalidationError::IdentityChanged,
         ] {
             provider.fail_revalidation_with(Some(error));
-            split_test_pane(&host, before.1, SplitAxis::Horizontal, cx);
+            split_test_pane(&view, before.1, SplitAxis::Horizontal, cx);
         }
 
         assert_eq!(
@@ -3138,11 +3138,11 @@ mod tests {
             ]
         );
         assert_eq!(
-            host.read_with(cx, |host, _| {
+            view.read_with(cx, |view, _| {
                 (
-                    host.pane_count(),
-                    host.focused_pane_id(),
-                    host.layout_signature(),
+                    view.pane_count(),
+                    view.focused_pane_id(),
+                    view.layout_signature(),
                 )
             }),
             before
@@ -3162,27 +3162,27 @@ mod tests {
             destination,
             Arc::clone(&provider) as Arc<dyn RemoteTerminalChannelProvider>,
         );
-        let (host, events, cx) = remote_pane_host_with_events(session_factory, cx);
-        let before = host.read_with(cx, |host, _| {
+        let (view, events, cx) = remote_view_with_events(session_factory, cx);
+        let before = view.read_with(cx, |view, _| {
             (
-                host.pane_count(),
-                host.focused_pane_id(),
-                host.layout_signature(),
+                view.pane_count(),
+                view.focused_pane_id(),
+                view.layout_signature(),
             )
         });
 
         cx.update(|window, cx| {
-            host.update(cx, |host, cx| {
-                host.split_pane(before.1, SplitAxis::Horizontal, window, cx);
-                host.remote_lifecycle.begin_child_launch();
+            view.update(cx, |view, cx| {
+                view.split_pane(before.1, SplitAxis::Horizontal, window, cx);
+                view.remote_lifecycle.begin_child_launch();
             });
         });
         cx.run_until_parked();
 
         cx.update(|window, cx| {
-            host.update(cx, |host, cx| {
-                host.split_pane(before.1, SplitAxis::Horizontal, window, cx);
-                host.disconnect_remote(1, cx).unwrap();
+            view.update(cx, |view, cx| {
+                view.split_pane(before.1, SplitAxis::Horizontal, window, cx);
+                view.disconnect_remote(1, cx).unwrap();
             });
         });
         cx.run_until_parked();
@@ -3195,11 +3195,11 @@ mod tests {
             ]
         );
         assert_eq!(
-            host.read_with(cx, |host, _| {
+            view.read_with(cx, |view, _| {
                 (
-                    host.pane_count(),
-                    host.focused_pane_id(),
-                    host.layout_signature(),
+                    view.pane_count(),
+                    view.focused_pane_id(),
+                    view.layout_signature(),
                 )
             }),
             before
@@ -3215,14 +3215,13 @@ mod tests {
             .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
         let session_factory = remote_test_session_factory(records.clone());
-        let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(TabId::new(1), session_factory, window, cx)
-        });
+        let (view, cx) = cx
+            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
         cx.run_until_parked();
 
-        split_test_pane(&host, PaneId::new(1), SplitAxis::Horizontal, cx);
+        split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
 
-        assert_eq!(host.read_with(cx, |host, _| host.pane_count()), 2);
+        assert_eq!(view.read_with(cx, |view, _| view.pane_count()), 2);
         assert_eq!(records.starts().len(), 2);
         assert!(records.starts().iter().all(|start| {
             start.remote_launch_plan().is_some_and(|plan| {
@@ -3244,18 +3243,17 @@ mod tests {
             destination,
             Arc::clone(&provider) as Arc<dyn RemoteTerminalChannelProvider>,
         );
-        let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(TabId::new(1), session_factory, window, cx)
-        });
+        let (view, cx) = cx
+            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
         cx.run_until_parked();
-        let focused = host.read_with(cx, |host, _| host.focused_pane_id());
+        let focused = view.read_with(cx, |view, _| view.focused_pane_id());
 
         provider.fail_revalidation_with(Some(RemoteChannelRevalidationError::IdentityChanged));
-        split_test_pane(&host, focused, SplitAxis::Horizontal, cx);
+        split_test_pane(&view, focused, SplitAxis::Horizontal, cx);
 
-        assert_eq!(host.read_with(cx, |host, _| host.pane_count()), 1);
+        assert_eq!(view.read_with(cx, |view, _| view.pane_count()), 1);
         assert_eq!(
-            host.read_with(cx, |host, _| host.focused_pane_id()),
+            view.read_with(cx, |view, _| view.focused_pane_id()),
             focused
         );
         assert_eq!(records.starts().len(), 1);
@@ -3263,9 +3261,9 @@ mod tests {
         assert_eq!(provider.revalidations.load(Ordering::Acquire), 1);
 
         provider.fail_revalidation_with(None);
-        split_test_pane(&host, focused, SplitAxis::Horizontal, cx);
+        split_test_pane(&view, focused, SplitAxis::Horizontal, cx);
 
-        assert_eq!(host.read_with(cx, |host, _| host.pane_count()), 2);
+        assert_eq!(view.read_with(cx, |view, _| view.pane_count()), 2);
         assert_eq!(records.starts().len(), 2);
         assert_eq!(provider.preparations.load(Ordering::Acquire), 2);
         assert_eq!(provider.revalidations.load(Ordering::Acquire), 2);
@@ -3297,41 +3295,39 @@ mod tests {
         };
         let session_factory =
             remote_test_session_factory_with_provider(records.clone(), destination, provider);
-        let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(TabId::new(1), session_factory, window, cx)
-        });
+        let (view, cx) = cx
+            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
         cx.run_until_parked();
 
-        split_test_pane(&host, PaneId::new(1), SplitAxis::Horizontal, cx);
+        split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
 
         assert_eq!(
-            host.read_with(cx, |host, _| (host.pane_count(), host.focused_pane_id())),
+            view.read_with(cx, |view, _| (view.pane_count(), view.focused_pane_id())),
             (1, PaneId::new(1))
         );
         assert_eq!(records.starts().len(), 1);
         assert_eq!(preparations.load(std::sync::atomic::Ordering::Acquire), 2);
     }
 
-    fn four_pane_host(cx: &mut TestAppContext) -> (Entity<PaneHost>, &mut VisualTestContext) {
+    fn four_pane_view(cx: &mut TestAppContext) -> (Entity<TabView>, &mut VisualTestContext) {
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
         let session_factory = test_session_factory();
-        let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(TabId::new(1), session_factory, window, cx)
-        });
+        let (view, cx) = cx
+            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
 
-        split_test_pane(&host, PaneId::new(1), SplitAxis::Horizontal, cx);
-        split_test_pane(&host, PaneId::new(1), SplitAxis::Vertical, cx);
-        split_test_pane(&host, PaneId::new(2), SplitAxis::Vertical, cx);
+        split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
+        split_test_pane(&view, PaneId::new(1), SplitAxis::Vertical, cx);
+        split_test_pane(&view, PaneId::new(2), SplitAxis::Vertical, cx);
         cx.update(|window, cx| {
-            host.update(cx, |host, cx| {
-                host.focus_pane(PaneId::new(1), cx);
-                host.focus(window, cx);
+            view.update(cx, |view, cx| {
+                view.focus_pane(PaneId::new(1), cx);
+                view.focus(window, cx);
             });
         });
         cx.run_until_parked();
 
-        (host, cx)
+        (view, cx)
     }
 
     /// Presses a Pane's caption beside its name and moves the pointer along `path`.
@@ -3353,7 +3349,7 @@ mod tests {
 
     #[gpui::test]
     fn dropping_a_pane_on_an_edge_of_another_should_split_it_there(cx: &mut TestAppContext) {
-        let (host, cx) = four_pane_host(cx);
+        let (view, cx) = four_pane_view(cx);
         let caption = cx.debug_bounds("pane-caption-4-unfocused").unwrap();
         let target = cx.debug_bounds("pane-surface-1").unwrap();
         let near_left_edge = point(target.left() + target.size.width * 0.1, target.center().y);
@@ -3379,11 +3375,11 @@ mod tests {
             )
         );
         assert_eq!(
-            host.read_with(cx, |host, _| (
-                host.layout_signature(),
-                host.focused_pane_id(),
-                host.pane_count(),
-                host.pane_drag.is_some(),
+            view.read_with(cx, |view, _| (
+                view.layout_signature(),
+                view.focused_pane_id(),
+                view.pane_count(),
+                view.pane_drag.is_some(),
             )),
             (
                 "split:1:Horizontal:0.5(split:2:Vertical:0.5(split:4:Horizontal:0.5(pane:4,pane:1),pane:3),pane:2)"
@@ -3398,7 +3394,7 @@ mod tests {
 
     #[gpui::test]
     fn a_pane_drag_should_start_over_a_terminal_painted_after_its_caption(cx: &mut TestAppContext) {
-        let (host, cx) = four_pane_host(cx);
+        let (view, cx) = four_pane_view(cx);
         let caption = cx.debug_bounds("pane-caption-1-focused").unwrap();
         let target = cx.debug_bounds("pane-surface-4").unwrap();
         let near_right_edge = point(target.right() - target.size.width * 0.1, target.center().y);
@@ -3412,15 +3408,15 @@ mod tests {
         cx.run_until_parked();
 
         assert_eq!(
-            host.read_with(cx, |host, _| host.layout_signature()),
+            view.read_with(cx, |view, _| view.layout_signature()),
             "split:1:Horizontal:0.5(pane:3,split:3:Vertical:0.5(pane:2,split:4:Horizontal:0.5(pane:4,pane:1)))"
         );
     }
 
     #[gpui::test]
     fn escape_should_cancel_a_pane_drag_without_moving_the_pane(cx: &mut TestAppContext) {
-        let (host, cx) = four_pane_host(cx);
-        let before = host.read_with(cx, |host, _| host.layout_signature());
+        let (view, cx) = four_pane_view(cx);
+        let before = view.read_with(cx, |view, _| view.layout_signature());
         let caption = cx.debug_bounds("pane-caption-4-unfocused").unwrap();
         let target = cx.debug_bounds("pane-surface-1").unwrap();
         let near_left_edge = point(target.left() + target.size.width * 0.1, target.center().y);
@@ -3433,7 +3429,7 @@ mod tests {
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
         let cancelled = (
-            host.read_with(cx, |host, _| host.pane_drag.is_some()),
+            view.read_with(cx, |view, _| view.pane_drag.is_some()),
             cx.debug_bounds("pane-drop-target-1-left").is_some(),
             cx.debug_bounds("drag-preview").is_some(),
         );
@@ -3443,7 +3439,7 @@ mod tests {
         assert_eq!(
             (
                 cancelled,
-                host.read_with(cx, |host, _| host.layout_signature())
+                view.read_with(cx, |view, _| view.layout_signature())
             ),
             ((false, false, false), before)
         );
@@ -3451,8 +3447,8 @@ mod tests {
 
     #[gpui::test]
     fn a_pane_drag_that_ended_unseen_should_move_nothing(cx: &mut TestAppContext) {
-        let (host, cx) = four_pane_host(cx);
-        let before = host.read_with(cx, |host, _| host.layout_signature());
+        let (view, cx) = four_pane_view(cx);
+        let before = view.read_with(cx, |view, _| view.layout_signature());
         let caption = cx.debug_bounds("pane-caption-4-unfocused").unwrap();
         let target = cx.debug_bounds("pane-surface-1").unwrap();
         let near_left_edge = point(target.left() + target.size.width * 0.1, target.center().y);
@@ -3462,24 +3458,24 @@ mod tests {
             &[near_left_edge, near_left_edge + point(px(1.0), px(0.0))],
             cx,
         );
-        // GPUI ends the drag while this Tab is hidden, so the host never sees the release.
+        // GPUI ends the drag while this Tab is hidden, so the Tab never sees the release.
         cx.update(|window, cx| {
             cx.stop_active_drag(window);
         });
         cx.run_until_parked();
-        let ended = host.read_with(cx, |host, _| host.pane_drag.is_some());
+        let ended = view.read_with(cx, |view, _| view.pane_drag.is_some());
         cx.simulate_click(near_left_edge, Modifiers::none());
         cx.run_until_parked();
 
         assert_eq!(
-            (ended, host.read_with(cx, |host, _| host.layout_signature())),
+            (ended, view.read_with(cx, |view, _| view.layout_signature())),
             (false, before)
         );
     }
 
     #[gpui::test]
     fn a_pane_drag_that_moves_nothing_should_leave_its_pane_focused(cx: &mut TestAppContext) {
-        let (host, cx) = four_pane_host(cx);
+        let (view, cx) = four_pane_view(cx);
         let caption = cx.debug_bounds("pane-caption-4-unfocused").unwrap();
         let own_pane = cx.debug_bounds("pane-surface-4").unwrap();
 
@@ -3487,10 +3483,10 @@ mod tests {
         cx.simulate_mouse_up(own_pane.center(), MouseButton::Left, Modifiers::none());
         cx.run_until_parked();
         let released = cx.update(|window, cx| {
-            let host = host.read(cx);
+            let view = view.read(cx);
             (
-                host.focused_pane_id(),
-                host.focused_terminal_is_focused(window, cx),
+                view.focused_pane_id(),
+                view.focused_terminal_is_focused(window, cx),
             )
         });
 
@@ -3501,10 +3497,10 @@ mod tests {
         cx.simulate_mouse_up(target.center(), MouseButton::Left, Modifiers::none());
         cx.run_until_parked();
         let cancelled = cx.update(|window, cx| {
-            let host = host.read(cx);
+            let view = view.read(cx);
             (
-                host.focused_pane_id(),
-                host.focused_terminal_is_focused(window, cx),
+                view.focused_pane_id(),
+                view.focused_terminal_is_focused(window, cx),
             )
         });
 
@@ -3517,14 +3513,14 @@ mod tests {
 
     #[gpui::test]
     fn releasing_a_pane_over_itself_should_leave_the_layout_unchanged(cx: &mut TestAppContext) {
-        let (host, cx) = four_pane_host(cx);
-        let before = host.read_with(cx, |host, _| host.layout_signature());
+        let (view, cx) = four_pane_view(cx);
+        let before = view.read_with(cx, |view, _| view.layout_signature());
         let caption = cx.debug_bounds("pane-caption-4-unfocused").unwrap();
         let own_pane = cx.debug_bounds("pane-surface-4").unwrap();
 
         drag_pane_caption(caption, &[own_pane.center()], cx);
-        let offered_target = host.read_with(cx, |host, _| {
-            host.pane_drag.as_ref().and_then(|drag| drag.drop_target)
+        let offered_target = view.read_with(cx, |view, _| {
+            view.pane_drag.as_ref().and_then(|drag| drag.drop_target)
         });
         cx.simulate_mouse_up(own_pane.center(), MouseButton::Left, Modifiers::none());
         cx.run_until_parked();
@@ -3532,9 +3528,9 @@ mod tests {
         assert_eq!(
             (
                 offered_target,
-                host.read_with(cx, |host, _| (
-                    host.layout_signature(),
-                    host.pane_drag.is_some()
+                view.read_with(cx, |view, _| (
+                    view.layout_signature(),
+                    view.pane_drag.is_some()
                 )),
             ),
             (None, (before, false))
@@ -3568,20 +3564,20 @@ mod tests {
     fn pane_attention_count_should_decorate_its_tab_title(cx: &mut TestAppContext) {
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
-        let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(TabId::new(1), test_session_factory(), window, cx)
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            TabView::new(TabId::new(1), test_session_factory(), window, cx)
         });
 
-        host.update(cx, |host, _| {
-            host.pane_attention.insert(PaneId::new(1), 2);
+        view.update(cx, |view, _| {
+            view.pane_attention.insert(PaneId::new(1), 2);
         });
 
         assert_eq!(
-            host.read_with(cx, |host, _| host.tab_title()),
+            view.read_with(cx, |view, _| view.tab_title()),
             "• Terminal · spaceterm-test-workspace"
         );
         assert_eq!(
-            host.read_with(cx, |host, _| host.pane_attention.clone()),
+            view.read_with(cx, |view, _| view.pane_attention.clone()),
             BTreeMap::from([(PaneId::new(1), 2)])
         );
     }
@@ -3662,18 +3658,18 @@ mod tests {
     }
 
     fn focused_panes_after_shortcuts<const N: usize>(
-        host: &Entity<PaneHost>,
+        view: &Entity<TabView>,
         cx: &mut VisualTestContext,
         shortcuts: [&str; N],
     ) -> [PaneId; N] {
         shortcuts.map(|shortcut| {
             cx.simulate_keystrokes(shortcut);
-            host.read_with(cx, |host, _| host.tab.focused_pane_id())
+            view.read_with(cx, |view, _| view.tab.focused_pane_id())
         })
     }
 
     struct CaptionTestView {
-        host: Entity<PaneHost>,
+        view: Entity<TabView>,
         width: Pixels,
         activity: spaceterm_ui::ControlWindowActivity,
     }
@@ -3681,27 +3677,27 @@ mod tests {
     impl Render for CaptionTestView {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             self.activity
-                .mount(div().w(self.width).h(px(600.0)).child(self.host.clone()))
+                .mount(div().w(self.width).h(px(600.0)).child(self.view.clone()))
         }
     }
 
-    fn caption_host(
+    fn caption_view(
         cx: &mut TestAppContext,
     ) -> (
         Entity<CaptionTestView>,
-        Entity<PaneHost>,
+        Entity<TabView>,
         TestTerminalSessionRecords,
         &mut VisualTestContext,
     ) {
-        caption_host_with_activity(cx, spaceterm_ui::ControlWindowActivity::Active)
+        caption_view_with_activity(cx, spaceterm_ui::ControlWindowActivity::Active)
     }
 
-    fn caption_host_with_activity(
+    fn caption_view_with_activity(
         cx: &mut TestAppContext,
         activity: spaceterm_ui::ControlWindowActivity,
     ) -> (
         Entity<CaptionTestView>,
-        Entity<PaneHost>,
+        Entity<TabView>,
         TestTerminalSessionRecords,
         &mut VisualTestContext,
     ) {
@@ -3722,18 +3718,18 @@ mod tests {
             factory,
             crate::terminal::testing::test_local_directory(test_home_directory()),
         );
-        let (view, cx) = cx.add_window_view(|window, cx| CaptionTestView {
-            host: cx.new(|cx| PaneHost::new(TabId::new(1), factory, window, cx)),
+        let (root, cx) = cx.add_window_view(|window, cx| CaptionTestView {
+            view: cx.new(|cx| TabView::new(TabId::new(1), factory, window, cx)),
             width: px(1000.0),
             activity,
         });
-        let host = view.read_with(cx, |view, _| view.host.clone());
+        let view = root.read_with(cx, |root, _| root.view.clone());
         cx.update(|window, cx| {
             window.activate_window();
-            host.update(cx, |host, cx| host.activate(window, cx));
+            view.update(cx, |view, cx| view.activate(window, cx));
         });
         cx.run_until_parked();
-        (view, host, records, cx)
+        (root, view, records, cx)
     }
 
     fn click_caption_control(selector: &'static str, cx: &mut VisualTestContext) {
@@ -3771,19 +3767,19 @@ mod tests {
     fn inactive_first_mouse_ignores_hidden_caption_actions_but_keeps_focused_actions_available(
         cx: &mut TestAppContext,
     ) {
-        let (_, host, _, cx) =
-            caption_host_with_activity(cx, spaceterm_ui::ControlWindowActivity::Inactive);
+        let (_, view, _, cx) =
+            caption_view_with_activity(cx, spaceterm_ui::ControlWindowActivity::Inactive);
 
         first_mouse_click_caption_control("pane-split-right-1", cx);
         assert_eq!(
-            host.read_with(cx, |host, _| (host.pane_count(), host.focused_pane_id())),
+            view.read_with(cx, |view, _| (view.pane_count(), view.focused_pane_id())),
             (2, PaneId::new(2)),
             "the visible focused-Pane action remains available on the activation click",
         );
 
         first_mouse_click_caption_control("pane-split-down-1", cx);
         assert_eq!(
-            host.read_with(cx, |host, _| (host.pane_count(), host.focused_pane_id())),
+            view.read_with(cx, |view, _| (view.pane_count(), view.focused_pane_id())),
             (2, PaneId::new(1)),
             "the activation click may focus its Pane but must not invoke its opacity-zero action",
         );
@@ -3793,17 +3789,19 @@ mod tests {
     fn caption_split_buttons_should_split_their_owner_and_restore_terminal_input(
         cx: &mut TestAppContext,
     ) {
-        let (_, host, records, cx) = caption_host(cx);
+        let (_, view, records, cx) = caption_view(cx);
         assert!(cx.debug_bounds("pane-toggle-zoom-1").is_none());
         assert!(cx.debug_bounds("pane-close-1").is_none());
         click_caption_control("pane-split-right-1", cx);
         click_caption_control("pane-split-down-1", cx);
         assert_eq!(
-            host.read_with(cx, |host, _| (host.pane_count(), host.focused_pane_id())),
+            view.read_with(cx, |view, _| (view.pane_count(), view.focused_pane_id())),
             (3, PaneId::new(3))
         );
         assert_eq!(records.pointer_count(), 0);
-        assert!(cx.update(|window, cx| host.read(cx).focused_terminal_has_input_focus(window, cx)));
+        assert!(
+            cx.update(|window, cx| { view.read(cx).focused_terminal_has_input_focus(window, cx) })
+        );
         cx.simulate_keystrokes("a");
         assert!(
             records.commands().iter().any(|call| call.session_id == 3
@@ -3815,17 +3813,17 @@ mod tests {
     fn caption_zoom_should_target_hovered_pane_and_split_should_restore_the_layout(
         cx: &mut TestAppContext,
     ) {
-        let (_, host, records, cx) = caption_host(cx);
+        let (_, view, records, cx) = caption_view(cx);
         click_caption_control("pane-split-right-1", cx);
         click_caption_control("pane-toggle-zoom-1", cx);
         assert_eq!(
-            host.read_with(cx, |host, _| host.zoom_state()),
+            view.read_with(cx, |view, _| view.zoom_state()),
             ZoomState::Zoomed(PaneId::new(1))
         );
         assert!(cx.debug_bounds("pane-caption-2-unfocused").is_none());
         click_caption_control("pane-split-down-1", cx);
         assert_eq!(
-            host.read_with(cx, |host, _| (host.zoom_state(), host.pane_count())),
+            view.read_with(cx, |view, _| (view.zoom_state(), view.pane_count())),
             (ZoomState::Restored, 3)
         );
         assert!(cx.debug_bounds("pane-caption-2-unfocused").is_some());
@@ -3834,39 +3832,39 @@ mod tests {
 
     #[gpui::test]
     fn zoom_then_split_before_repaint_should_use_the_retained_layout_size(cx: &mut TestAppContext) {
-        let (view, host, _, cx) = caption_host(cx);
+        let (root, view, _, cx) = caption_view(cx);
         click_caption_control("pane-split-right-1", cx);
-        view.update(cx, |view, cx| {
-            view.width = px(400.0);
+        root.update(cx, |root, cx| {
+            root.width = px(400.0);
             cx.notify();
         });
         cx.run_until_parked();
         cx.update(|window, cx| {
-            host.update(cx, |host, cx| {
-                host.toggle_zoom(window, cx);
-                host.split_focused(SplitAxis::Horizontal, window, cx);
+            view.update(cx, |view, cx| {
+                view.toggle_zoom(window, cx);
+                view.split_focused(SplitAxis::Horizontal, window, cx);
             })
         });
         cx.run_until_parked();
         assert_eq!(
-            host.read_with(cx, |host, _| (host.pane_count(), host.zoom_state())),
+            view.read_with(cx, |view, _| (view.pane_count(), view.zoom_state())),
             (3, ZoomState::Restored)
         );
     }
 
     #[gpui::test]
     fn zoomed_split_should_respect_the_restored_pane_allocation(cx: &mut TestAppContext) {
-        let (view, host, records, cx) = caption_host(cx);
+        let (root, view, records, cx) = caption_view(cx);
         click_caption_control("pane-split-right-1", cx);
-        view.update(cx, |view, cx| {
-            view.width = px(200.0);
+        root.update(cx, |root, cx| {
+            root.width = px(200.0);
             cx.notify();
         });
         cx.run_until_parked();
         click_caption_control("pane-toggle-zoom-1", cx);
         click_caption_control("pane-split-right-1", cx);
         assert_eq!(
-            host.read_with(cx, |host, _| (host.pane_count(), host.zoom_state())),
+            view.read_with(cx, |view, _| (view.pane_count(), view.zoom_state())),
             (2, ZoomState::Zoomed(PaneId::new(1)))
         );
         assert_eq!(records.starts().len(), 2);
@@ -3874,15 +3872,15 @@ mod tests {
 
     #[gpui::test]
     fn minimum_width_single_pane_should_keep_both_split_controls(cx: &mut TestAppContext) {
-        let (view, host, _, cx) = caption_host(cx);
+        let (root, view, _, cx) = caption_view(cx);
         let minimum_width =
             cx.update(|_, cx| minimum_pane_width(crate::ui::appearance::chrome(cx)));
-        view.update(cx, |view, cx| {
-            view.width = px(minimum_width);
+        root.update(cx, |root, cx| {
+            root.width = px(minimum_width);
             cx.notify();
         });
-        host.update(cx, |host, cx| {
-            host.pane_attention.insert(PaneId::new(1), 1);
+        view.update(cx, |view, cx| {
+            view.pane_attention.insert(PaneId::new(1), 1);
             cx.notify();
         });
         cx.run_until_parked();
@@ -3908,16 +3906,16 @@ mod tests {
     fn minimum_width_attention_captions_should_keep_zoom_and_close_inside_their_pane(
         cx: &mut TestAppContext,
     ) {
-        let (view, host, _, cx) = caption_host(cx);
+        let (root, view, _, cx) = caption_view(cx);
         click_caption_control("pane-split-down-1", cx);
         let minimum_width =
             cx.update(|_, cx| minimum_pane_width(crate::ui::appearance::chrome(cx)));
-        view.update(cx, |view, cx| {
-            view.width = px(minimum_width);
+        root.update(cx, |root, cx| {
+            root.width = px(minimum_width);
             cx.notify();
         });
-        host.update(cx, |host, cx| {
-            host.pane_attention.insert(PaneId::new(2), 1);
+        view.update(cx, |view, cx| {
+            view.pane_attention.insert(PaneId::new(2), 1);
             cx.notify();
         });
         cx.run_until_parked();
@@ -3939,11 +3937,11 @@ mod tests {
         );
         click_caption_control("pane-toggle-zoom-2", cx);
         assert_eq!(
-            host.read_with(cx, |host, _| host.zoom_state()),
+            view.read_with(cx, |view, _| view.zoom_state()),
             ZoomState::Zoomed(PaneId::new(2))
         );
-        view.update(cx, |view, cx| {
-            view.width = px(1000.0);
+        root.update(cx, |root, cx| {
+            root.width = px(1000.0);
             cx.notify();
         });
         cx.run_until_parked();
@@ -3955,7 +3953,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         use crate::terminal::metadata::{CommandMetadata, CommandState, TitleProvenance};
-        let (_, host, records, cx) = caption_host(cx);
+        let (_, view, records, cx) = caption_view(cx);
         let mut screen =
             ScreenSnapshot::from_test_parts_at(Arc::from([]), Default::default(), "zsh", 1);
         let metadata = Arc::make_mut(&mut Arc::make_mut(&mut screen).metadata);
@@ -3971,8 +3969,8 @@ mod tests {
             .try_send(SessionEvent::Screen(screen.clone()))
             .unwrap();
         cx.run_until_parked();
-        let caption = host.read_with(cx, |host, _| {
-            let caption = host.pane_captions.get(&PaneId::new(1)).unwrap();
+        let caption = view.read_with(cx, |view, _| {
+            let caption = view.pane_captions.get(&PaneId::new(1)).unwrap();
             (
                 caption.directory.clone(),
                 caption.name.clone(),
@@ -3997,8 +3995,8 @@ mod tests {
             .try_send(SessionEvent::Screen(screen))
             .unwrap();
         cx.run_until_parked();
-        let caption = host.read_with(cx, |host, _| {
-            let caption = host.pane_captions.get(&PaneId::new(1)).unwrap();
+        let caption = view.read_with(cx, |view, _| {
+            let caption = view.pane_captions.get(&PaneId::new(1)).unwrap();
             (
                 caption.directory.clone(),
                 caption.name.clone(),
@@ -4065,7 +4063,7 @@ mod tests {
                 "build-box",
             ),
         ] {
-            let (_, host_entity, records, cx) = caption_host(cx);
+            let (_, view, records, cx) = caption_view(cx);
             let mut screen =
                 ScreenSnapshot::from_test_parts_at(Arc::from([]), Default::default(), "zsh", 1);
             let metadata = Arc::make_mut(&mut Arc::make_mut(&mut screen).metadata);
@@ -4078,8 +4076,8 @@ mod tests {
                 .unwrap();
             cx.run_until_parked();
 
-            let caption = host_entity.read_with(cx, |host, _| {
-                let caption = host.pane_captions.get(&PaneId::new(1)).unwrap();
+            let caption = view.read_with(cx, |view, _| {
+                let caption = view.pane_captions.get(&PaneId::new(1)).unwrap();
                 (
                     caption.origin.user.clone(),
                     caption.origin.host.clone(),
@@ -4112,7 +4110,7 @@ mod tests {
 
     #[gpui::test]
     fn caption_should_present_origin_directory_status_then_activity(cx: &mut TestAppContext) {
-        let (_, _, records, cx) = caption_host(cx);
+        let (_, _, records, cx) = caption_view(cx);
         let mut screen =
             ScreenSnapshot::from_test_parts_at(Arc::from([]), Default::default(), "zsh", 1);
         let metadata = Arc::make_mut(&mut Arc::make_mut(&mut screen).metadata);
@@ -4160,7 +4158,7 @@ mod tests {
 
     #[gpui::test]
     fn caption_vertical_spacing_should_be_symmetric_in_both_densities(cx: &mut TestAppContext) {
-        let (_, _, _, cx) = caption_host(cx);
+        let (_, _, _, cx) = caption_view(cx);
         for spacing_scale in [1.0, 1.25] {
             let appearance = super::super::appearance::ChromeAppearance {
                 spacing_scale,
@@ -4202,7 +4200,7 @@ mod tests {
 
     #[gpui::test]
     fn caption_background_should_follow_its_own_terminal_surface(cx: &mut TestAppContext) {
-        let (_, _, records, cx) = caption_host(cx);
+        let (_, _, records, cx) = caption_view(cx);
         click_caption_control("pane-split-right-1", cx);
         let chrome_before = cx.update(|_, cx| super::super::appearance::chrome(cx).clone());
         for (generation, first, second, selectors) in [
@@ -4254,9 +4252,8 @@ mod tests {
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
         let session_factory = test_session_factory();
-        let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(TabId::new(1), session_factory, window, cx)
-        });
+        let (view, cx) = cx
+            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
         cx.run_until_parked();
 
         let root = gpui::Bounds::new(
@@ -4272,7 +4269,7 @@ mod tests {
         let terminal = cx
             .debug_bounds("terminal-pane")
             .expect("the Terminal was rendered");
-        assert_eq!(surface, root, "a single Pane should fill its host");
+        assert_eq!(surface, root, "a single Pane should fill its Tab");
         assert!(
             surface.contains(&caption.origin) && caption.right() <= surface.right(),
             "the Pane Caption should sit inside the Pane surface"
@@ -4289,7 +4286,7 @@ mod tests {
             (
                 super::super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx),
                 super::super::workspace_frame::base_surface(&appearance.colors),
-                host.read(cx).pane_bounds.get(&PaneId::new(1)).copied(),
+                view.read(cx).pane_bounds.get(&PaneId::new(1)).copied(),
             )
         });
         assert_eq!(
@@ -4321,13 +4318,12 @@ mod tests {
             session_factory,
             crate::terminal::testing::test_local_directory(home_directory.clone()),
         );
-        let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(TabId::new(1), session_factory, window, cx)
-        });
+        let (view, cx) = cx
+            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
 
         cx.update(|window, cx| {
-            host.update(cx, |host, cx| {
-                host.split_focused(SplitAxis::Horizontal, window, cx);
+            view.update(cx, |view, cx| {
+                view.split_focused(SplitAxis::Horizontal, window, cx);
             });
         });
         cx.run_until_parked();
@@ -4457,10 +4453,10 @@ mod tests {
 
     #[gpui::test]
     fn every_split_pane_caption_should_render_its_own_name_segment(cx: &mut TestAppContext) {
-        let (_, host, _, cx) = caption_host(cx);
+        let (_, view, _, cx) = caption_view(cx);
         cx.update(|window, cx| {
-            host.update(cx, |host, cx| {
-                host.split_focused(SplitAxis::Horizontal, window, cx);
+            view.update(cx, |view, cx| {
+                view.split_focused(SplitAxis::Horizontal, window, cx);
             });
         });
         cx.run_until_parked();
@@ -4473,13 +4469,12 @@ mod tests {
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
         let session_factory = test_session_factory();
-        let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(TabId::new(1), session_factory, window, cx)
-        });
+        let (view, cx) = cx
+            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
 
         cx.update(|window, cx| {
-            host.update(cx, |host, cx| {
-                host.split_focused(SplitAxis::Horizontal, window, cx);
+            view.update(cx, |view, cx| {
+                view.split_focused(SplitAxis::Horizontal, window, cx);
             });
         });
         cx.run_until_parked();
@@ -4502,14 +4497,13 @@ mod tests {
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
         let session_factory = test_session_factory();
-        let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(TabId::new(1), session_factory, window, cx)
-        });
+        let (view, cx) = cx
+            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
 
         cx.update(|window, cx| {
-            host.update(cx, |host, cx| {
-                host.split_focused(SplitAxis::Horizontal, window, cx);
-                host.focus_pane(PaneId::new(1), cx);
+            view.update(cx, |view, cx| {
+                view.split_focused(SplitAxis::Horizontal, window, cx);
+                view.focus_pane(PaneId::new(1), cx);
             });
         });
         cx.run_until_parked();
@@ -4532,33 +4526,32 @@ mod tests {
             session_factory,
             crate::terminal::testing::test_local_directory(test_home_directory()),
         );
-        let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(TabId::new(1), session_factory, window, cx)
-        });
+        let (view, cx) = cx
+            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
         cx.update(|window, cx| {
             window.activate_window();
-            host.update(cx, |host, cx| {
-                host.focus(window, cx);
-                host.split_focused(SplitAxis::Horizontal, window, cx);
-                host.focus_pane(PaneId::new(1), cx);
-                host.focus(window, cx);
+            view.update(cx, |view, cx| {
+                view.focus(window, cx);
+                view.split_focused(SplitAxis::Horizontal, window, cx);
+                view.focus_pane(PaneId::new(1), cx);
+                view.focus(window, cx);
             });
         });
         cx.run_until_parked();
 
         let origin = cx.update(|window, cx| {
-            host.update(cx, |host, cx| {
-                host.native_service_status(WorkspaceId::new(1), window, cx)
+            view.update(cx, |view, cx| {
+                view.native_service_status(WorkspaceId::new(1), window, cx)
                     .origin
                     .expect("the focused terminal must expose a Service origin")
             })
         });
         let accepted = cx.update(|window, cx| {
-            host.update(cx, |host, cx| {
-                host.focus_pane(PaneId::new(2), cx);
-                host.focus_pane(PaneId::new(1), cx);
-                host.focus(window, cx);
-                host.native_service_target(origin).is_some_and(|terminal| {
+            view.update(cx, |view, cx| {
+                view.focus_pane(PaneId::new(2), cx);
+                view.focus_pane(PaneId::new(1), cx);
+                view.focus(window, cx);
+                view.native_service_target(origin).is_some_and(|terminal| {
                     terminal.update(cx, |terminal, cx| {
                         terminal.insert_native_service_text(
                             origin,
@@ -4591,31 +4584,30 @@ mod tests {
             session_factory,
             crate::terminal::testing::test_local_directory(test_home_directory()),
         );
-        let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(TabId::new(1), session_factory, window, cx)
-        });
+        let (view, cx) = cx
+            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
         cx.update(|window, cx| {
             window.activate_window();
-            host.update(cx, |host, cx| {
-                host.focus(window, cx);
-                host.split_focused(SplitAxis::Horizontal, window, cx);
-                host.focus_pane(PaneId::new(1), cx);
-                host.focus(window, cx);
+            view.update(cx, |view, cx| {
+                view.focus(window, cx);
+                view.split_focused(SplitAxis::Horizontal, window, cx);
+                view.focus_pane(PaneId::new(1), cx);
+                view.focus(window, cx);
             });
         });
         cx.run_until_parked();
         let origin = cx.update(|window, cx| {
-            host.update(cx, |host, cx| {
-                host.native_service_status(WorkspaceId::new(1), window, cx)
+            view.update(cx, |view, cx| {
+                view.native_service_status(WorkspaceId::new(1), window, cx)
                     .origin
                     .unwrap()
             })
         });
 
         let accepted = cx.update(|window, cx| {
-            host.update(cx, |host, cx| {
-                host.close_pane(PaneId::new(2), window, cx);
-                host.native_service_target(origin).is_some_and(|terminal| {
+            view.update(cx, |view, cx| {
+                view.close_pane(PaneId::new(2), window, cx);
+                view.native_service_target(origin).is_some_and(|terminal| {
                     terminal.update(cx, |terminal, cx| {
                         terminal.insert_native_service_text(
                             origin,
@@ -4648,26 +4640,25 @@ mod tests {
             session_factory,
             crate::terminal::testing::test_local_directory(test_home_directory()),
         );
-        let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(TabId::new(1), session_factory, window, cx)
-        });
+        let (view, cx) = cx
+            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
         cx.update(|window, cx| {
             window.activate_window();
-            host.update(cx, |host, cx| {
-                host.focus(window, cx);
-                host.split_focused(SplitAxis::Horizontal, window, cx);
+            view.update(cx, |view, cx| {
+                view.focus(window, cx);
+                view.split_focused(SplitAxis::Horizontal, window, cx);
             });
         });
         cx.run_until_parked();
-        let _first_pane = host.read_with(cx, |host, _| {
-            host.tab
-                .terminal(PaneId::new(1))
+        let _first_pane = view.read_with(cx, |view, _| {
+            view.tab
+                .pane(PaneId::new(1))
                 .cloned()
                 .expect("the original Pane should still exist")
         });
 
-        let position = host.read_with(cx, |host, _| {
-            host.pane_bounds
+        let position = view.read_with(cx, |view, _| {
+            view.pane_bounds
                 .get(&PaneId::new(1))
                 .expect("the target Pane has measured bounds")
                 .center()
@@ -4692,7 +4683,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             (
-                host.read_with(cx, |host, _| host.focused_pane_id()),
+                view.read_with(cx, |view, _| view.focused_pane_id()),
                 paste_requests,
             ),
             (PaneId::new(1), vec![(1, "'/tmp/first pane'".to_owned())],)
@@ -4710,12 +4701,11 @@ mod tests {
             session_factory,
             crate::terminal::testing::test_local_directory(test_home_directory()),
         );
-        let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(TabId::new(1), session_factory, window, cx)
-        });
+        let (view, cx) = cx
+            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
         cx.update(|window, cx| {
-            host.update(cx, |host, cx| {
-                host.split_focused(SplitAxis::Horizontal, window, cx);
+            view.update(cx, |view, cx| {
+                view.split_focused(SplitAxis::Horizontal, window, cx);
             });
         });
         cx.run_until_parked();
@@ -4736,8 +4726,8 @@ mod tests {
             .unwrap();
         cx.run_until_parked();
 
-        let first_pane = host.read_with(cx, |host, _| {
-            host.pane_bounds
+        let first_pane = view.read_with(cx, |view, _| {
+            view.pane_bounds
                 .get(&PaneId::new(1))
                 .copied()
                 .expect("the first Pane bounds were not measured")
@@ -4758,10 +4748,10 @@ mod tests {
         cx.run_until_parked();
 
         let state = cx.update(|window, cx| {
-            host.read_with(cx, |host, cx| {
+            view.read_with(cx, |view, cx| {
                 (
-                    host.focused_pane_id(),
-                    host.focused_terminal_is_focused(window, cx),
+                    view.focused_pane_id(),
+                    view.focused_terminal_is_focused(window, cx),
                 )
             })
         });
@@ -4770,10 +4760,10 @@ mod tests {
 
     #[gpui::test]
     fn command_shift_vim_shortcuts_should_not_move_pane_focus(cx: &mut TestAppContext) {
-        let (host, cx) = four_pane_host(cx);
+        let (view, cx) = four_pane_view(cx);
 
         let focused_panes = focused_panes_after_shortcuts(
-            &host,
+            &view,
             cx,
             ["cmd-shift-l", "cmd-shift-j", "cmd-shift-h", "cmd-shift-k"],
         );
@@ -4793,10 +4783,10 @@ mod tests {
     fn command_option_arrow_shortcuts_should_focus_panes_in_each_direction(
         cx: &mut TestAppContext,
     ) {
-        let (host, cx) = four_pane_host(cx);
+        let (view, cx) = four_pane_view(cx);
 
         let focused_panes = focused_panes_after_shortcuts(
-            &host,
+            &view,
             cx,
             [
                 "cmd-alt-right",
@@ -4819,11 +4809,11 @@ mod tests {
 
     #[gpui::test]
     fn command_bracket_shortcuts_should_cycle_panes_in_recency_order(cx: &mut TestAppContext) {
-        let (host, cx) = four_pane_host(cx);
+        let (view, cx) = four_pane_view(cx);
 
         let previous =
-            focused_panes_after_shortcuts(&host, cx, ["cmd-[", "cmd-[", "cmd-[", "cmd-["]);
-        let next = focused_panes_after_shortcuts(&host, cx, ["cmd-]", "cmd-]", "cmd-]", "cmd-]"]);
+            focused_panes_after_shortcuts(&view, cx, ["cmd-[", "cmd-[", "cmd-[", "cmd-["]);
+        let next = focused_panes_after_shortcuts(&view, cx, ["cmd-]", "cmd-]", "cmd-]", "cmd-]"]);
 
         assert_eq!(
             (previous, next),
@@ -4855,13 +4845,12 @@ mod tests {
             session_factory,
             crate::terminal::testing::test_local_directory(test_home_directory()),
         );
-        let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(TabId::new(1), session_factory, window, cx)
-        });
+        let (view, cx) = cx
+            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
 
         cx.update(|window, cx| {
-            host.update(cx, |host, cx| {
-                host.split_focused(SplitAxis::Horizontal, window, cx);
+            view.update(cx, |view, cx| {
+                view.split_focused(SplitAxis::Horizontal, window, cx);
             });
         });
         cx.run_until_parked();
@@ -4878,7 +4867,7 @@ mod tests {
             .unwrap();
         cx.run_until_parked();
 
-        let title = host.read_with(cx, |host, _| host.pane_titles.get(&PaneId::new(2)).cloned());
+        let title = view.read_with(cx, |view, _| view.pane_titles.get(&PaneId::new(2)).cloned());
         assert_eq!(
             title.as_ref().map(|title| title.as_ref()),
             Some("Claude Code")
@@ -4898,13 +4887,12 @@ mod tests {
             session_factory,
             crate::terminal::testing::test_local_directory(test_home_directory()),
         );
-        let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(TabId::new(1), session_factory, window, cx)
-        });
+        let (view, cx) = cx
+            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
 
         cx.update(|window, cx| {
-            host.update(cx, |host, cx| {
-                host.split_focused(SplitAxis::Horizontal, window, cx);
+            view.update(cx, |view, cx| {
+                view.split_focused(SplitAxis::Horizontal, window, cx);
             });
         });
         cx.run_until_parked();
@@ -4916,10 +4904,10 @@ mod tests {
             .unwrap();
         cx.run_until_parked();
 
-        let state = host.read_with(cx, |host, _| {
+        let state = view.read_with(cx, |view, _| {
             (
-                host.tab.pane_count(),
-                host.tab.focused_pane_id(),
+                view.tab.pane_count(),
+                view.tab.focused_pane_id(),
                 records.dropped_session_ids(),
             )
         });
@@ -4938,12 +4926,11 @@ mod tests {
             session_factory,
             crate::terminal::testing::test_local_directory(test_home_directory()),
         );
-        let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(TabId::new(1), session_factory, window, cx)
-        });
+        let (view, cx) = cx
+            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
         let close_requests_for_subscription = Rc::clone(&close_requests);
-        host.update(cx, |_, cx| {
-            cx.subscribe(&host, move |_, _, event: &PaneHostEvent, _| {
+        view.update(cx, |_, cx| {
+            cx.subscribe(&view, move |_, _, event: &TabViewEvent, _| {
                 close_requests_for_subscription
                     .borrow_mut()
                     .push(event.clone());
@@ -4968,7 +4955,7 @@ mod tests {
                 records.dropped_session_ids()
             ),
             (
-                vec![PaneHostEvent::CloseTabRequested {
+                vec![TabViewEvent::CloseTabRequested {
                     tab_id: TabId::new(1)
                 }],
                 Vec::new()
@@ -4982,13 +4969,12 @@ mod tests {
             .expect("UI initialization should succeed");
         let presentation_changes = Rc::new(Cell::new(0));
         let session_factory = test_session_factory();
-        let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(TabId::new(1), session_factory, window, cx)
-        });
+        let (view, cx) = cx
+            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
         let presentation_changes_for_subscription = Rc::clone(&presentation_changes);
-        host.update(cx, |_, cx| {
-            cx.subscribe(&host, move |_, _, event: &PaneHostEvent, _| {
-                if matches!(event, PaneHostEvent::PresentationChanged { .. }) {
+        view.update(cx, |_, cx| {
+            cx.subscribe(&view, move |_, _, event: &TabViewEvent, _| {
+                if matches!(event, TabViewEvent::PresentationChanged { .. }) {
                     presentation_changes_for_subscription.update(|count| count + 1);
                 }
             })
@@ -4996,7 +4982,7 @@ mod tests {
         });
 
         cx.update(|window, cx| {
-            host.update(cx, |host, cx| host.toggle_zoom(window, cx));
+            view.update(cx, |view, cx| view.toggle_zoom(window, cx));
         });
         cx.run_until_parked();
 
@@ -5009,14 +4995,13 @@ mod tests {
             .expect("UI initialization should succeed");
         let presentation_changes = Rc::new(Cell::new(0));
         let session_factory = test_session_factory();
-        let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(TabId::new(1), session_factory, window, cx)
-        });
-        split_test_pane(&host, PaneId::new(1), SplitAxis::Horizontal, cx);
+        let (view, cx) = cx
+            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
+        split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
         let presentation_changes_for_subscription = Rc::clone(&presentation_changes);
-        host.update(cx, |_, cx| {
-            cx.subscribe(&host, move |_, _, event: &PaneHostEvent, _| {
-                if matches!(event, PaneHostEvent::PresentationChanged { .. }) {
+        view.update(cx, |_, cx| {
+            cx.subscribe(&view, move |_, _, event: &TabViewEvent, _| {
+                if matches!(event, TabViewEvent::PresentationChanged { .. }) {
                     presentation_changes_for_subscription.update(|count| count + 1);
                 }
             })
@@ -5024,7 +5009,7 @@ mod tests {
         });
 
         cx.update(|window, cx| {
-            host.update(cx, |host, cx| host.toggle_zoom(window, cx));
+            view.update(cx, |view, cx| view.toggle_zoom(window, cx));
         });
         cx.run_until_parked();
 
@@ -5044,14 +5029,13 @@ mod tests {
             session_factory,
             crate::terminal::testing::test_local_directory(test_home_directory()),
         );
-        let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(TabId::new(1), session_factory, window, cx)
-        });
+        let (view, cx) = cx
+            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
 
         cx.update(|window, cx| {
-            host.update(cx, |host, cx| {
-                host.split_focused(SplitAxis::Horizontal, window, cx);
-                host.toggle_zoom(window, cx);
+            view.update(cx, |view, cx| {
+                view.split_focused(SplitAxis::Horizontal, window, cx);
+                view.toggle_zoom(window, cx);
             });
         });
         cx.run_until_parked();
@@ -5064,8 +5048,8 @@ mod tests {
         cx.simulate_click(restore_button, Modifiers::none());
         cx.run_until_parked();
 
-        let state = host.read_with(cx, |host, _| {
-            (host.tab.zoom_state(), records.pointer_count())
+        let state = view.read_with(cx, |view, _| {
+            (view.tab.zoom_state(), records.pointer_count())
         });
         assert_eq!(state, (ZoomState::Restored, 0));
     }
@@ -5083,14 +5067,13 @@ mod tests {
             session_factory,
             crate::terminal::testing::test_local_directory(test_home_directory()),
         );
-        let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(TabId::new(1), session_factory, window, cx)
-        });
+        let (view, cx) = cx
+            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
         cx.update(|window, cx| {
             window.activate_window();
-            host.update(cx, |host, cx| {
-                host.split_focused(SplitAxis::Horizontal, window, cx);
-                host.focus(window, cx);
+            view.update(cx, |view, cx| {
+                view.split_focused(SplitAxis::Horizontal, window, cx);
+                view.focus(window, cx);
             });
         });
         cx.run_until_parked();
@@ -5106,15 +5089,15 @@ mod tests {
         cx.run_until_parked();
 
         let state = cx.update(|window, cx| {
-            let host = host.read(cx);
-            let ratio = match host.tab.root().node() {
+            let view = view.read(cx);
+            let ratio = match view.tab.root().node() {
                 PaneNodeRef::Split { ratio, .. } => ratio,
                 PaneNodeRef::Leaf { .. } => 0.0,
             };
             (
                 ratio,
-                host.resizing_split_id,
-                host.focused_terminal_has_input_focus(window, cx),
+                view.resizing_split_id,
+                view.focused_terminal_has_input_focus(window, cx),
             )
         });
         assert!(
@@ -5135,12 +5118,11 @@ mod tests {
             session_factory,
             crate::terminal::testing::test_local_directory(test_home_directory()),
         );
-        let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(TabId::new(1), session_factory, window, cx)
-        });
+        let (view, cx) = cx
+            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
         cx.update(|window, cx| {
-            host.update(cx, |host, cx| {
-                host.split_focused(SplitAxis::Horizontal, window, cx);
+            view.update(cx, |view, cx| {
+                view.split_focused(SplitAxis::Horizontal, window, cx);
             });
         });
         cx.run_until_parked();
@@ -5191,13 +5173,12 @@ mod tests {
             session_factory,
             crate::terminal::testing::test_local_directory(test_home_directory()),
         );
-        let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(TabId::new(1), session_factory, window, cx)
-        });
+        let (view, cx) = cx
+            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
         cx.update(|window, cx| {
             window.activate_window();
-            host.update(cx, |host, cx| {
-                host.split_focused(SplitAxis::Horizontal, window, cx);
+            view.update(cx, |view, cx| {
+                view.split_focused(SplitAxis::Horizontal, window, cx);
             });
         });
         cx.run_until_parked();
@@ -5237,14 +5218,13 @@ mod tests {
             session_factory,
             crate::terminal::testing::test_local_directory(test_home_directory()),
         );
-        let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(TabId::new(1), session_factory, window, cx)
-        });
+        let (view, cx) = cx
+            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
         cx.update(|window, cx| {
             window.activate_window();
-            host.update(cx, |host, cx| {
-                host.split_focused(SplitAxis::Horizontal, window, cx);
-                host.focus(window, cx);
+            view.update(cx, |view, cx| {
+                view.split_focused(SplitAxis::Horizontal, window, cx);
+                view.focus(window, cx);
             });
         });
         cx.run_until_parked();
@@ -5260,13 +5240,13 @@ mod tests {
             cx.simulate_mouse_move(edge, None, Modifiers::none());
             cx.simulate_mouse_down(edge, MouseButton::Left, Modifiers::none());
             assert_eq!(
-                host.read_with(cx, |host, _| host.resizing_split_id),
+                view.read_with(cx, |view, _| view.resizing_split_id),
                 Some(SplitId::new(1)),
                 "the split handle did not own outer hitbox edge {edge:?}"
             );
             cx.simulate_mouse_up(edge, MouseButton::Left, Modifiers::none());
             assert_eq!(
-                host.read_with(cx, |host, _| host.resizing_split_id),
+                view.read_with(cx, |view, _| view.resizing_split_id),
                 None,
                 "the split handle did not release outer hitbox edge {edge:?}"
             );
@@ -5309,16 +5289,15 @@ mod tests {
         );
     }
 
-    fn split_gap_host(cx: &mut TestAppContext) -> (Entity<PaneHost>, &mut VisualTestContext) {
+    fn split_gap_view(cx: &mut TestAppContext) -> (Entity<TabView>, &mut VisualTestContext) {
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
         let session_factory = test_session_factory();
-        let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(TabId::new(1), session_factory, window, cx)
-        });
+        let (view, cx) = cx
+            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
-        (host, cx)
+        (view, cx)
     }
 
     fn install_spacing_scale(spacing_scale: f32, cx: &mut VisualTestContext) -> f32 {
@@ -5342,8 +5321,8 @@ mod tests {
         gap
     }
 
-    fn split_ratio(host: &Entity<PaneHost>, cx: &mut VisualTestContext) -> f32 {
-        host.read_with(cx, |host, _| match host.tab.root().node() {
+    fn split_ratio(view: &Entity<TabView>, cx: &mut VisualTestContext) -> f32 {
+        view.read_with(cx, |view, _| match view.tab.root().node() {
             PaneNodeRef::Split { ratio, .. } => ratio,
             PaneNodeRef::Leaf { .. } => f32::NAN,
         })
@@ -5355,20 +5334,20 @@ mod tests {
     fn split_gaps_should_follow_the_frame_rhythm_in_nested_splits_at_both_densities(
         cx: &mut TestAppContext,
     ) {
-        let (host, cx) = split_gap_host(cx);
+        let (view, cx) = split_gap_view(cx);
         cx.update(|window, cx| {
-            host.update(cx, |host, cx| {
-                host.split_pane(PaneId::new(1), SplitAxis::Horizontal, window, cx);
+            view.update(cx, |view, cx| {
+                view.split_pane(PaneId::new(1), SplitAxis::Horizontal, window, cx);
             });
         });
         cx.run_until_parked();
         cx.update(|window, cx| {
-            host.update(cx, |host, cx| {
-                host.split_pane(PaneId::new(2), SplitAxis::Vertical, window, cx);
+            view.update(cx, |view, cx| {
+                view.split_pane(PaneId::new(2), SplitAxis::Vertical, window, cx);
             });
         });
         cx.run_until_parked();
-        assert_eq!(host.read_with(cx, |host, _| host.pane_count()), 3);
+        assert_eq!(view.read_with(cx, |view, _| view.pane_count()), 3);
 
         let mut gaps = Vec::new();
         for spacing_scale in [1.0, 1.25] {
@@ -5436,10 +5415,10 @@ mod tests {
                 );
             }
 
-            let (minimum, expected) = host.read_with(cx, |host, _| {
-                let leaf = host.tab.minimum_pane_size();
+            let (minimum, expected) = view.read_with(cx, |view, _| {
+                let leaf = view.tab.minimum_pane_size();
                 (
-                    host.tab.minimum_size(gap).unwrap(),
+                    view.tab.minimum_size(gap).unwrap(),
                     (leaf.width() * 2.0 + gap, leaf.height() * 2.0 + gap),
                 )
             });
@@ -5461,15 +5440,14 @@ mod tests {
             Rc::new(TestTerminalSessionFactory::new(records.clone())),
             crate::terminal::testing::test_local_directory(test_home_directory()),
         );
-        let (host, cx) = cx.add_window_view(|window, cx| {
-            PaneHost::new(TabId::new(1), session_factory, window, cx)
-        });
+        let (view, cx) = cx
+            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
         cx.update(|window, cx| {
-            host.update(cx, |host, cx| {
-                host.split_focused(SplitAxis::Horizontal, window, cx);
-                host.focus(window, cx);
+            view.update(cx, |view, cx| {
+                view.split_focused(SplitAxis::Horizontal, window, cx);
+                view.focus(window, cx);
             });
         });
         cx.run_until_parked();
@@ -5491,7 +5469,7 @@ mod tests {
         cx.simulate_mouse_up(destination, MouseButton::Left, Modifiers::none());
         cx.run_until_parked();
         assert!(
-            split_ratio(&host, cx) > 0.5,
+            split_ratio(&view, cx) > 0.5,
             "dragging the gap should resize"
         );
 
@@ -5517,13 +5495,13 @@ mod tests {
         cx.run_until_parked();
 
         assert_eq!(
-            split_ratio(&host, cx),
+            split_ratio(&view, cx),
             0.5,
             "double-clicking the gap resets"
         );
         assert_eq!(records.pointer_count(), 0);
         let focused =
-            cx.update(|window, cx| host.read(cx).focused_terminal_has_input_focus(window, cx));
+            cx.update(|window, cx| view.read(cx).focused_terminal_has_input_focus(window, cx));
         assert!(
             focused,
             "a pointer interaction should return input to the terminal"
@@ -5532,19 +5510,19 @@ mod tests {
 
     #[gpui::test]
     fn zoomed_pane_should_preserve_its_gapped_restored_split_allocation(cx: &mut TestAppContext) {
-        let (host, cx) = split_gap_host(cx);
+        let (view, cx) = split_gap_view(cx);
         cx.update(|window, cx| {
-            host.update(cx, |host, cx| {
-                host.split_focused(SplitAxis::Horizontal, window, cx);
+            view.update(cx, |view, cx| {
+                view.split_focused(SplitAxis::Horizontal, window, cx);
             });
         });
         cx.run_until_parked();
         let restored = cx.debug_bounds("pane-surface-2").expect("Pane 2 surface");
-        cx.update(|window, cx| host.update(cx, |host, cx| host.toggle_zoom(window, cx)));
+        cx.update(|window, cx| view.update(cx, |view, cx| view.toggle_zoom(window, cx)));
         cx.run_until_parked();
 
         assert_eq!(
-            host.read_with(cx, |host, _| host.tab.zoom_state()),
+            view.read_with(cx, |view, _| view.tab.zoom_state()),
             ZoomState::Zoomed(PaneId::new(2)),
             "the focused Pane should be zoomed before its rendered geometry is inspected"
         );
@@ -5553,7 +5531,7 @@ mod tests {
             .debug_bounds("pane-surface-2")
             .expect("zoomed Pane surface");
         let viewport = cx.update(|window, _| window.viewport_size());
-        assert_eq!(zoomed.size, viewport, "the Zoomed Pane fills its host");
+        assert_eq!(zoomed.size, viewport, "the Zoomed Pane fills its Tab");
         let (radius, base) = cx.update(|_, cx| {
             let appearance = super::super::appearance::chrome(cx);
             (
@@ -5574,7 +5552,7 @@ mod tests {
 
         let target = cx.update(|_, cx| {
             let gap = pane_gap(cx);
-            host.read(cx).split_target_size(PaneId::new(2), gap)
+            view.read(cx).split_target_size(PaneId::new(2), gap)
         });
         let target = target.expect("a Zoomed Pane keeps its restored allocation");
         assert!(
@@ -5624,17 +5602,17 @@ mod tests {
         cx.update(crate::ui::init).unwrap();
         let records = TestTerminalSessionRecords::default();
         let factory = remote_test_session_factory(records.clone());
-        let (host, cx) =
-            cx.add_window_view(|window, cx| PaneHost::new(TabId::new(1), factory, window, cx));
+        let (view, cx) =
+            cx.add_window_view(|window, cx| TabView::new(TabId::new(1), factory, window, cx));
         cx.run_until_parked();
         report_current_directory(&records, 1, 1, "/srv/frontend", true);
         cx.run_until_parked();
-        split_test_pane(&host, PaneId::new(1), SplitAxis::Horizontal, cx);
+        split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
         report_current_directory(&records, 2, 1, "/srv/backend", true);
         cx.run_until_parked();
         cx.update(|window, cx| {
-            host.update(cx, |host, cx| {
-                host.split_pane(PaneId::new(1), SplitAxis::Vertical, window, cx)
+            view.update(cx, |view, cx| {
+                view.split_pane(PaneId::new(1), SplitAxis::Vertical, window, cx)
             })
         });
         report_current_directory(&records, 1, 2, "/srv/later", true);
@@ -5657,7 +5635,7 @@ mod tests {
             "/srv/frontend"
         );
         assert_eq!(
-            host.read_with(cx, |host, cx| host.current_directory(PaneId::new(2), cx)),
+            view.read_with(cx, |view, cx| view.current_directory(PaneId::new(2), cx)),
             Some(CurrentDirectory::Remote(
                 crate::domain::RemoteDirectory::new("/srv/backend".into()).unwrap()
             ))
@@ -5680,22 +5658,22 @@ mod tests {
             authority.validate_directory(&home).unwrap(),
             authority.clone(),
         );
-        let (host, cx) =
-            cx.add_window_view(|window, cx| PaneHost::new(TabId::new(1), factory, window, cx));
+        let (view, cx) =
+            cx.add_window_view(|window, cx| TabView::new(TabId::new(1), factory, window, cx));
         cx.run_until_parked();
         report_current_directory(&records, 1, 1, first.to_str().unwrap(), false);
         cx.run_until_parked();
-        split_test_pane(&host, PaneId::new(1), SplitAxis::Horizontal, cx);
+        split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
         report_current_directory(&records, 2, 1, second.to_str().unwrap(), false);
         cx.run_until_parked();
-        split_test_pane(&host, PaneId::new(1), SplitAxis::Vertical, cx);
-        host.update(cx, |host, _| {
-            host.set_pinned_directory(Some(PinnedDirectory::Local(
+        split_test_pane(&view, PaneId::new(1), SplitAxis::Vertical, cx);
+        view.update(cx, |view, _| {
+            view.set_pinned_directory(Some(PinnedDirectory::Local(
                 authority.validate_directory(&second).unwrap(),
             )))
         });
-        split_test_pane(&host, PaneId::new(1), SplitAxis::Horizontal, cx);
-        host.update(cx, |host, _| host.set_pinned_directory(None));
+        split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
+        view.update(cx, |view, _| view.set_pinned_directory(None));
         report_current_directory(
             &records,
             1,
@@ -5704,9 +5682,9 @@ mod tests {
             false,
         );
         cx.run_until_parked();
-        let count = host.read_with(cx, |host, _| host.pane_count());
-        split_test_pane(&host, PaneId::new(1), SplitAxis::Vertical, cx);
-        assert_eq!(host.read_with(cx, |host, _| host.pane_count()), count);
+        let count = view.read_with(cx, |view, _| view.pane_count());
+        split_test_pane(&view, PaneId::new(1), SplitAxis::Vertical, cx);
+        assert_eq!(view.read_with(cx, |view, _| view.pane_count()), count);
         assert_eq!(
             records
                 .starts()

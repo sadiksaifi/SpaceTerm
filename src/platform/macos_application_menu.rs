@@ -343,9 +343,9 @@ impl ApplicationMenuAdapter for MacosApplicationMenuAdapter {
     fn install(&self, cx: &mut App) -> Result<(), ApplicationMenuError> {
         let application_name = self.identity.display_name();
         let menus = menus(application_name);
-        let native_keys = native_key_equivalents(&menus, &cx.key_bindings().borrow());
+        let native_shortcuts = native_menu_shortcuts(&menus, &cx.key_bindings().borrow());
         cx.set_menus(menus);
-        native::decorate(application_name, &native_keys)
+        native::decorate(application_name, &native_shortcuts)
     }
 
     fn perform(
@@ -371,13 +371,13 @@ fn application_menu_item_icons(application_name: &str) -> [(String, &'static str
 }
 
 #[derive(Debug, Eq, PartialEq)]
-struct NativeKeyEquivalent {
+struct NativeMenuShortcut {
     path: Vec<SharedString>,
     modifiers: Modifiers,
     key: &'static str,
 }
 
-fn missing_native_key_equivalent(key: &str) -> Option<&'static str> {
+fn native_menu_key(key: &str) -> Option<&'static str> {
     match key {
         "enter" => Some("\r"),
         "tab" => Some("\t"),
@@ -385,12 +385,12 @@ fn missing_native_key_equivalent(key: &str) -> Option<&'static str> {
     }
 }
 
-fn native_key_equivalents(menus: &[Menu], keymap: &Keymap) -> Vec<NativeKeyEquivalent> {
+fn native_menu_shortcuts(menus: &[Menu], keymap: &Keymap) -> Vec<NativeMenuShortcut> {
     fn collect(
         menu: &Menu,
         path: &mut Vec<SharedString>,
         keymap: &Keymap,
-        keys: &mut Vec<NativeKeyEquivalent>,
+        keys: &mut Vec<NativeMenuShortcut>,
     ) {
         path.push(menu.name.clone());
         for item in &menu.items {
@@ -402,11 +402,11 @@ fn native_key_equivalents(menus: &[Menu], keymap: &Keymap) -> Vec<NativeKeyEquiv
                         .any(|command| command.action().partial_eq(action.as_ref()))
                         && let Some(shortcut) =
                             crate::desktop_profile::installed_shortcut(keymap, action.as_ref())
-                        && let Some(key) = missing_native_key_equivalent(shortcut.key())
+                        && let Some(key) = native_menu_key(shortcut.key())
                     {
                         let mut item_path = path.clone();
                         item_path.push(name.clone());
-                        keys.push(NativeKeyEquivalent {
+                        keys.push(NativeMenuShortcut {
                             path: item_path,
                             modifiers: shortcut.modifiers(),
                             key,
@@ -440,20 +440,20 @@ mod native {
 
     use super::{
         ApplicationMenuCommand, ApplicationMenuError, DEVELOP_MENU_ITEM_ICONS, MENU_ITEM_ICONS,
-        MenuItemIcon, NativeKeyEquivalent,
+        MenuItemIcon, NativeMenuShortcut,
     };
 
     const HELP_URL: &str = "https://github.com/sadiksaifi/SpaceTerm";
 
     pub(super) fn decorate(
         application_name: &str,
-        native_keys: &[NativeKeyEquivalent],
+        native_shortcuts: &[NativeMenuShortcut],
     ) -> Result<(), ApplicationMenuError> {
         let mtm = MainThreadMarker::new().ok_or(ApplicationMenuError::OffMainThread)?;
         decorate_main_menu(
             &NSApplication::sharedApplication(mtm),
             application_name,
-            native_keys,
+            native_shortcuts,
         )
     }
 
@@ -512,7 +512,7 @@ mod native {
     fn decorate_main_menu(
         application: &NSApplication,
         application_name: &str,
-        native_keys: &[NativeKeyEquivalent],
+        native_shortcuts: &[NativeMenuShortcut],
     ) -> Result<(), ApplicationMenuError> {
         let main_menu = application
             .mainMenu()
@@ -542,8 +542,8 @@ mod native {
             set_symbol_image(&item, decoration.symbol)?;
         }
         // Complete the named keys omitted by GPUI's native translation.
-        for equivalent in native_keys {
-            let (title, menu_path) = equivalent
+        for shortcut in native_shortcuts {
+            let (title, menu_path) = shortcut
                 .path
                 .split_last()
                 .ok_or(ApplicationMenuError::Unavailable)?;
@@ -557,13 +557,13 @@ mod native {
             let item = menu
                 .itemWithTitle(&NSString::from_str(title))
                 .ok_or(ApplicationMenuError::Unavailable)?;
-            let key_equivalent = NSString::from_str(equivalent.key);
+            let key_equivalent = NSString::from_str(shortcut.key);
             let mut modifiers = NSEventModifierFlags::empty();
             for (enabled, flag) in [
-                (equivalent.modifiers.control, NSEventModifierFlags::Control),
-                (equivalent.modifiers.alt, NSEventModifierFlags::Option),
-                (equivalent.modifiers.shift, NSEventModifierFlags::Shift),
-                (equivalent.modifiers.platform, NSEventModifierFlags::Command),
+                (shortcut.modifiers.control, NSEventModifierFlags::Control),
+                (shortcut.modifiers.alt, NSEventModifierFlags::Option),
+                (shortcut.modifiers.shift, NSEventModifierFlags::Shift),
+                (shortcut.modifiers.platform, NSEventModifierFlags::Command),
             ] {
                 if enabled {
                     modifiers |= flag;
@@ -637,7 +637,7 @@ mod native {
 
     pub(super) fn decorate(
         _: &str,
-        _: &[super::NativeKeyEquivalent],
+        _: &[super::NativeMenuShortcut],
     ) -> Result<(), ApplicationMenuError> {
         Ok(())
     }
@@ -695,7 +695,7 @@ mod tests {
     }
 
     #[test]
-    fn native_equivalents_follow_overrides_for_top_level_and_nested_commands() {
+    fn native_menu_shortcuts_follow_overrides_for_top_level_and_nested_commands() {
         let profile = crate::desktop_profile::default_keymap::profile(
             crate::platform::keyboard_layout::testing::us(),
             super::super::macos_reserved_shortcuts::shortcuts(),
@@ -728,7 +728,7 @@ mod tests {
             let keymap = Keymap::new(profile.resolve(&preferences).key_bindings());
             let expected = expected
                 .into_iter()
-                .map(|(path, shortcut)| NativeKeyEquivalent {
+                .map(|(path, shortcut)| NativeMenuShortcut {
                     path: path.into_iter().map(SharedString::from).collect(),
                     key: if shortcut.ends_with("tab") {
                         "\t"
@@ -741,7 +741,7 @@ mod tests {
                 })
                 .collect::<Vec<_>>();
             assert_eq!(
-                native_key_equivalents(&menus("SpaceTerm"), &keymap),
+                native_menu_shortcuts(&menus("SpaceTerm"), &keymap),
                 expected
             );
         }

@@ -11,7 +11,6 @@ mod platform;
 mod settings;
 mod ssh;
 mod terminal;
-mod theme;
 mod theme_registry;
 mod ui;
 mod updates;

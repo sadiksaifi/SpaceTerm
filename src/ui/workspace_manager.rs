@@ -3171,7 +3171,7 @@ impl WorkspaceManager {
         .tooltip(
             Tooltip::new("workspace-switcher-tooltip", "Switch Workspace")
                 .debug_selector("workspace-switcher-tooltip")
-                .keyboard_equivalent(presentation.shortcut(&SwitchWorkspace).unwrap_or_default()),
+                .shortcut(presentation.shortcut(&SwitchWorkspace).unwrap_or_default()),
         )
         .when_some(collapsed_identity, |chooser, (identity, tooltip)| {
             chooser
@@ -3182,9 +3182,9 @@ impl WorkspaceManager {
                 ))
                 .custom_trigger_height(frame.top_chip_height(appearance.top_height()))
                 .full_width(true)
-                .tooltip(tooltip.keyboard_equivalent(
-                    presentation.shortcut(&SwitchWorkspace).unwrap_or_default(),
-                ))
+                .tooltip(
+                    tooltip.shortcut(presentation.shortcut(&SwitchWorkspace).unwrap_or_default()),
+                )
         })
         .on_lifecycle(move |_, cx| {
             let manager = combo_lifecycle_manager.clone();
@@ -3227,9 +3227,7 @@ impl WorkspaceManager {
                 .debug_selector("toggle-sidebar-button")
                 .tooltip(
                     Tooltip::new("toggle-sidebar-tooltip", toggle_label)
-                        .keyboard_equivalent(
-                            presentation.shortcut(&ToggleSidebar).unwrap_or_default(),
-                        )
+                        .shortcut(presentation.shortcut(&ToggleSidebar).unwrap_or_default())
                         .debug_selector("toggle-sidebar-tooltip"),
                 )
                 .on_activate(move |_, window, cx| {

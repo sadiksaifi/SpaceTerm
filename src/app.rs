@@ -1861,7 +1861,7 @@ mod runtime_tests {
         });
         let token = settings.begin_preview(0).unwrap();
         let mut candidate = SettingsDocument::default();
-        candidate.preferences.window.density = ChromeDensity::Comfortable;
+        candidate.appearance.window.density = ChromeDensity::Comfortable;
         settings.update_preview(&token, candidate).unwrap();
         cx.run_until_parked();
         let (workspace_expected, settings_expected) = cx.update(|cx| {

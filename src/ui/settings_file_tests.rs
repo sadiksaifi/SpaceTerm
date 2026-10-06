@@ -9,7 +9,7 @@ use crate::ui::settings_window::test_support::MemoryStorage;
 
 fn document_with_size(size: f32) -> SettingsDocument {
     let mut document = SettingsDocument::default();
-    document.preferences.terminal.typography.base_size = size;
+    document.appearance.terminal.typography.base_size = size;
     document
 }
 
@@ -28,7 +28,7 @@ fn base_size(settings: &Settings) -> f32 {
     settings
         .snapshot()
         .committed
-        .preferences
+        .appearance
         .terminal
         .typography
         .base_size

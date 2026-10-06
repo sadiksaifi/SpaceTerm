@@ -22,8 +22,8 @@ use super::terminal_status::{StatusColors, StatusGlyph};
 use super::{
     ActivateTab1, ActivateTab2, ActivateTab3, ActivateTab4, ActivateTab5, ActivateTab6,
     ActivateTab7, ActivateTab8, ActivateTab9, CloseTab, CreateTab, MoveTabLeft, MoveTabRight,
-    NextTab, PaneHost, PaneHostEvent, PreparedPaneHostRemoteRestart, PreviousTab,
-    RemoteChildLaunchUnavailable, RemotePaneHostLifecycleError, TERMINAL_KEY_CONTEXT, TabIdentity,
+    NextTab, PreparedTabViewRemoteRestart, PreviousTab, RemoteChildLaunchUnavailable,
+    RemoteTabViewLifecycleError, TERMINAL_KEY_CONTEXT, TabIdentity, TabView, TabViewEvent,
     WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
 };
 #[cfg(test)]
@@ -42,7 +42,7 @@ pub(crate) enum RemoteTabManagerLifecycleError {
     Tab {
         tab_id: TabId,
         #[source]
-        source: RemotePaneHostLifecycleError,
+        source: RemoteTabViewLifecycleError,
     },
     #[error("Tab {0} changed after remote restart preparation")]
     TabChanged(TabId),
@@ -53,7 +53,7 @@ pub(crate) enum RemoteTabManagerLifecycleError {
 /// No Tab or Pane is mutated until the complete token has been prepared and revalidated.
 pub(crate) struct PreparedTabManagerRemoteRestart {
     session_factory: WorkspaceTerminalSessionFactory,
-    tabs: RemoteRestartBatch<(TabId, Entity<PaneHost>, PreparedPaneHostRemoteRestart)>,
+    tabs: RemoteRestartBatch<(TabId, Entity<TabView>, PreparedTabViewRemoteRestart)>,
 }
 use crate::appearance::ChromeColors;
 use crate::appearance::Color;
@@ -413,7 +413,7 @@ struct DraggedTab {
 }
 
 pub(crate) struct TabManager {
-    tabs: TabCollection<Entity<PaneHost>>,
+    tabs: TabCollection<Entity<TabView>>,
     session_factory: WorkspaceTerminalSessionFactory,
     pane_construction: PaneConstruction,
     active: bool,
@@ -489,7 +489,7 @@ impl TabManager {
         cx: &mut Context<Self>,
     ) -> Self {
         let tabs = TabCollection::new(|tab_id| {
-            Self::create_pane_host(
+            Self::create_tab_view(
                 tab_id,
                 session_factory.clone(),
                 prepared_launch,
@@ -527,16 +527,16 @@ impl TabManager {
         }
     }
 
-    fn create_pane_host(
+    fn create_tab_view(
         tab_id: TabId,
         session_factory: WorkspaceTerminalSessionFactory,
         prepared_launch: PreparedWorkspaceTerminalLaunch,
         pane_construction: PaneConstruction,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Entity<PaneHost> {
-        let pane_host = cx.new(|cx| {
-            PaneHost::new_with_prepared_launch(
+    ) -> Entity<TabView> {
+        let view = cx.new(|cx| {
+            TabView::new_with_prepared_launch(
                 tab_id,
                 session_factory,
                 prepared_launch,
@@ -545,35 +545,32 @@ impl TabManager {
                 cx,
             )
         });
-        debug_assert_eq!(pane_host.read(cx).tab_id(), tab_id);
+        debug_assert_eq!(view.read(cx).tab_id(), tab_id);
         cx.subscribe_in(
-            &pane_host,
+            &view,
             window,
-            |manager, _, event: &PaneHostEvent, window, cx| match event {
-                PaneHostEvent::UserClosePaneRequested { tab_id, pane_id } => {
+            |manager, _, event: &TabViewEvent, window, cx| match event {
+                TabViewEvent::UserClosePaneRequested { tab_id, pane_id } => {
                     cx.emit(TabManagerEvent::ClosePaneRequested {
                         tab_id: *tab_id,
                         pane_id: *pane_id,
                     });
                 }
-                PaneHostEvent::CloseTabRequested { tab_id } => {
+                TabViewEvent::CloseTabRequested { tab_id } => {
                     manager.close_tab(*tab_id, window, cx);
                 }
-                PaneHostEvent::PresentationChanged { .. } => {
+                TabViewEvent::PresentationChanged { .. } => {
                     cx.emit(TabManagerEvent::PresentationChanged);
                     cx.notify();
                 }
             },
         )
         .detach();
-        cx.subscribe(
-            &pane_host,
-            |_, _, event: &RemoteChildLaunchUnavailable, cx| {
-                cx.emit(*event);
-            },
-        )
+        cx.subscribe(&view, |_, _, event: &RemoteChildLaunchUnavailable, cx| {
+            cx.emit(*event);
+        })
         .detach();
-        pane_host
+        view
     }
 
     pub(crate) fn focus(&self, window: &mut Window, cx: &mut App) {
@@ -601,9 +598,9 @@ impl TabManager {
             return NativeServiceStatus::default();
         }
         let blocker = self.terminal_focus_blocker();
-        self.tabs.active_tab().update(cx, |pane_host, cx| {
-            pane_host.set_focus_branch(true, blocker, cx);
-            pane_host.native_service_status(workspace_id, window, cx)
+        self.tabs.active_tab().update(cx, |view, cx| {
+            view.set_focus_branch(true, blocker, cx);
+            view.native_service_status(workspace_id, window, cx)
         })
     }
 
@@ -637,7 +634,7 @@ impl TabManager {
         self.active = true;
         self.tabs
             .active_tab()
-            .update(cx, |pane_host, cx| pane_host.activate_without_focus(cx));
+            .update(cx, |view, cx| view.activate_without_focus(cx));
         self.sync_terminal_focus_blocker(cx);
     }
 
@@ -645,14 +642,14 @@ impl TabManager {
         self.active = false;
         self.tabs
             .active_tab()
-            .update(cx, |pane_host, cx| pane_host.deactivate(cx));
+            .update(cx, |view, cx| view.deactivate(cx));
         self.tab_selector_pressed = None;
         self.sync_terminal_focus_blocker(cx);
     }
 
     pub(crate) fn close_all(&self, cx: &mut App) {
-        for (_, pane_host) in self.tabs.iter() {
-            pane_host.update(cx, |pane_host, cx| pane_host.close_all(cx));
+        for (_, view) in self.tabs.iter() {
+            view.update(cx, |view, cx| view.close_all(cx));
         }
     }
 
@@ -660,8 +657,8 @@ impl TabManager {
         &'a self,
         cx: &'a App,
     ) -> impl Iterator<Item = (TabId, PaneId, &'a super::terminal_pane::TerminalPane)> {
-        self.tabs.iter().flat_map(move |(tab, host)| {
-            host.read(cx)
+        self.tabs.iter().flat_map(move |(tab, view)| {
+            view.read(cx)
                 .terminal_panes(cx)
                 .map(move |(pane, terminal)| (tab, pane, terminal))
         })
@@ -674,11 +671,11 @@ impl TabManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(host) = self.tabs.tab(tab_id).cloned() else {
+        let Some(view) = self.tabs.tab(tab_id).cloned() else {
             return;
         };
-        host.update(cx, |host, cx| {
-            host.close_pane_authorized(pane_id, window, cx)
+        view.update(cx, |view, cx| {
+            view.close_pane_authorized(pane_id, window, cx)
         });
     }
 
@@ -701,16 +698,14 @@ impl TabManager {
         generation: u64,
         cx: &mut Context<Self>,
     ) -> Result<(), RemoteTabManagerLifecycleError> {
-        for (tab_id, pane_host) in self.tabs.iter() {
-            pane_host
-                .read(cx)
+        for (tab_id, view) in self.tabs.iter() {
+            view.read(cx)
                 .can_disconnect_remote(generation, cx)
                 .map_err(|source| RemoteTabManagerLifecycleError::Tab { tab_id, source })?;
         }
-        for (_, pane_host) in self.tabs.iter() {
-            pane_host.update(cx, |pane_host, cx| {
-                pane_host
-                    .disconnect_remote(generation, cx)
+        for (_, view) in self.tabs.iter() {
+            view.update(cx, |view, cx| {
+                view.disconnect_remote(generation, cx)
                     .expect("prevalidated Tab disconnect must remain legal")
             });
         }
@@ -735,8 +730,8 @@ impl TabManager {
         let sources: Vec<_> = self
             .tabs
             .iter()
-            .flat_map(|(_, host)| {
-                host.read(cx)
+            .flat_map(|(_, view)| {
+                view.read(cx)
                     .terminal_panes(cx)
                     .map(|(_, terminal)| terminal.current_directory())
             })
@@ -793,17 +788,17 @@ impl TabManager {
     ) -> Result<PreparedTabManagerRemoteRestart, RemoteTabManagerLifecycleError> {
         let mut prepared_launches = prepared_launches.into_iter();
         let mut tabs = Vec::with_capacity(self.tabs.len());
-        for (tab_id, pane_host) in self.tabs.iter() {
-            let pane_count = pane_host.read(cx).pane_count();
+        for (tab_id, view) in self.tabs.iter() {
+            let pane_count = view.read(cx).pane_count();
             let launches: Vec<_> = prepared_launches.by_ref().take(pane_count).collect();
             if launches.len() != pane_count {
                 return Err(RemoteTabManagerLifecycleError::TabChanged(tab_id));
             }
-            let prepared = pane_host
+            let prepared = view
                 .read(cx)
                 .prepare_remote_restart(session_factory.clone(), generation, launches, cx)
                 .map_err(|source| RemoteTabManagerLifecycleError::Tab { tab_id, source })?;
-            tabs.push((tab_id, pane_host.clone(), prepared));
+            tabs.push((tab_id, view.clone(), prepared));
         }
         if prepared_launches.next().is_some() {
             return Err(RemoteTabManagerLifecycleError::PreparationSuperseded);
@@ -829,15 +824,14 @@ impl TabManager {
             self.tabs.len(),
             || RemoteTabManagerLifecycleError::TabChanged(self.tabs.active_tab_id()),
             cx,
-            |(tab_id, pane_host, host_restart), cx| {
+            |(tab_id, view, host_restart), cx| {
                 let Some(current) = self.tabs.tab(*tab_id) else {
                     return Err(RemoteTabManagerLifecycleError::TabChanged(*tab_id));
                 };
-                if current.entity_id() != pane_host.entity_id() {
+                if current.entity_id() != view.entity_id() {
                     return Err(RemoteTabManagerLifecycleError::TabChanged(*tab_id));
                 }
-                pane_host
-                    .read(cx)
+                view.read(cx)
                     .can_commit_remote_restart(host_restart, cx)
                     .map_err(|source| RemoteTabManagerLifecycleError::Tab {
                         tab_id: *tab_id,
@@ -845,10 +839,9 @@ impl TabManager {
                     })?;
                 Ok(())
             },
-            |(tab_id, pane_host, host_restart), cx| {
-                pane_host.update(cx, |pane_host, cx| {
-                    pane_host
-                        .commit_remote_restart(host_restart, session_factory.clone(), window, cx)
+            |(tab_id, view, host_restart), cx| {
+                view.update(cx, |view, cx| {
+                    view.commit_remote_restart(host_restart, session_factory.clone(), window, cx)
                         .unwrap_or_else(|error| {
                             panic!("prevalidated Tab {tab_id} restart commit failed: {error}")
                         })
@@ -867,7 +860,7 @@ impl TabManager {
         let panes = self
             .tabs
             .iter()
-            .map(|(_, pane_host)| pane_host.read(cx).pane_count())
+            .map(|(_, view)| view.read(cx).pane_count())
             .sum();
         (self.tabs.len(), panes)
     }
@@ -889,10 +882,8 @@ impl TabManager {
         cx: &mut Context<Self>,
     ) {
         self.session_factory.set_pinned_directory(directory.clone());
-        for (_, pane_host) in self.tabs.iter() {
-            pane_host.update(cx, |pane_host, _| {
-                pane_host.set_pinned_directory(directory.clone())
-            });
+        for (_, view) in self.tabs.iter() {
+            view.update(cx, |view, _| view.set_pinned_directory(directory.clone()));
         }
     }
 
@@ -960,10 +951,10 @@ impl TabManager {
     fn sync_terminal_focus_blocker(&self, cx: &mut Context<Self>) {
         let blocker = self.terminal_focus_blocker();
         let active_tab_id = self.tabs.active_tab_id();
-        for (tab_id, pane_host) in self.tabs.iter() {
+        for (tab_id, view) in self.tabs.iter() {
             let active = self.active && tab_id == active_tab_id;
-            pane_host.update(cx, |pane_host, cx| {
-                pane_host.set_focus_branch(active, blocker, cx);
+            view.update(cx, |view, cx| {
+                view.set_focus_branch(active, blocker, cx);
             });
         }
     }
@@ -1147,7 +1138,7 @@ impl TabManager {
     }
 
     #[cfg(test)]
-    pub(crate) fn active_pane_host(&self) -> Entity<PaneHost> {
+    pub(crate) fn active_tab_view(&self) -> Entity<TabView> {
         self.tabs.active_tab().clone()
     }
 
@@ -1272,7 +1263,7 @@ impl TabManager {
         let session_factory = self.session_factory.clone();
         let pane_construction = self.pane_construction.clone();
         let result = self.tabs.create_tab(|tab_id| {
-            Self::create_pane_host(
+            Self::create_tab_view(
                 tab_id,
                 session_factory,
                 prepared_launch,
@@ -1288,15 +1279,15 @@ impl TabManager {
                 return;
             }
         };
-        let Some(pane_host) = self.tabs.tab(tab_id).cloned() else {
+        let Some(view) = self.tabs.tab(tab_id).cloned() else {
             unreachable!("a newly created Tab must remain owned by its collection")
         };
 
-        previous_tab.update(cx, |pane_host, cx| pane_host.deactivate(cx));
+        previous_tab.update(cx, |view, cx| view.deactivate(cx));
         if self.active {
-            pane_host.update(cx, |pane_host, cx| pane_host.activate(window, cx));
+            view.update(cx, |view, cx| view.activate(window, cx));
         } else {
-            pane_host.update(cx, |pane_host, cx| pane_host.deactivate(cx));
+            view.update(cx, |view, cx| view.deactivate(cx));
         }
         self.sync_terminal_focus_blocker(cx);
         self.scroll_active_tab_into_view();
@@ -1317,16 +1308,16 @@ impl TabManager {
         }
 
         if previous_tab_id != tab_id {
-            previous_tab.update(cx, |pane_host, cx| pane_host.deactivate(cx));
+            previous_tab.update(cx, |view, cx| view.deactivate(cx));
         }
         let blocker = self.terminal_focus_blocker();
-        next_tab.update(cx, |pane_host, cx| {
-            pane_host.set_focus_branch(self.active, blocker, cx);
+        next_tab.update(cx, |view, cx| {
+            view.set_focus_branch(self.active, blocker, cx);
         });
         if self.active {
-            next_tab.update(cx, |pane_host, cx| pane_host.activate(window, cx));
+            next_tab.update(cx, |view, cx| view.activate(window, cx));
         } else {
-            next_tab.update(cx, |pane_host, cx| pane_host.deactivate(cx));
+            next_tab.update(cx, |view, cx| view.deactivate(cx));
         }
         self.sync_terminal_focus_blocker(cx);
         self.scroll_active_tab_into_view();
@@ -1370,13 +1361,13 @@ impl TabManager {
                 active_tab_id,
             }) => {
                 debug_assert_eq!(closed_tab_id, tab_id);
-                payload.update(cx, |pane_host, cx| pane_host.close_all(cx));
+                payload.update(cx, |view, cx| view.close_all(cx));
                 if was_active {
                     let active_tab = self.tabs.active_tab().clone();
                     if self.active {
-                        active_tab.update(cx, |pane_host, cx| pane_host.activate(window, cx));
+                        active_tab.update(cx, |view, cx| view.activate(window, cx));
                     } else {
-                        active_tab.update(cx, |pane_host, cx| pane_host.deactivate(cx));
+                        active_tab.update(cx, |view, cx| view.deactivate(cx));
                     }
                 }
                 self.tab_selector_pressed = None;
@@ -1475,7 +1466,7 @@ impl TabManager {
         window: &Window,
         cx: &App,
     ) -> AnyElement {
-        let Some(pane_host) = self.tabs.tab(tab_id) else {
+        let Some(view) = self.tabs.tab(tab_id) else {
             return div().into_any_element();
         };
         let appearance = super::appearance::chrome(cx);
@@ -1486,7 +1477,7 @@ impl TabManager {
         );
         self.render_tab_item(
             tab_id,
-            pane_host.read(cx).tab_identity(),
+            view.read(cx).tab_identity(),
             tab_id == self.tabs.active_tab_id(),
             TabItemRole::Lifted,
             TabHover {
@@ -1571,7 +1562,7 @@ impl TabManager {
         let text_style = appearance.typography.style(TextRole::Navigation);
         let mut identity = identity;
         identity.glyph =
-            super::pane_host::drawable_reported_glyph(identity.glyph.as_ref(), |glyph| {
+            super::tab_view::drawable_reported_glyph(identity.glyph.as_ref(), |glyph| {
                 super::terminal_status::reported_glyph_is_drawable(
                     glyph,
                     &text_style.font,
@@ -1765,9 +1756,7 @@ impl TabManager {
         let insertion = self.tab_reorder.insertion(self.tabs.len());
         let marker_inset = tab_chip_shape(appearance, cx).inset_y;
         let mut previous_inactive_tab = None;
-        for (index, ((tab_id, pane_host), (fade, hover))) in
-            self.tabs.iter().zip(hovers).enumerate()
-        {
+        for (index, ((tab_id, view), (fade, hover))) in self.tabs.iter().zip(hovers).enumerate() {
             let active = tab_id == active_tab_id;
             // The strip's leading neighbour is the sidebar's edge while the sidebar is visible,
             // and the Workspace Switcher's chip while it is collapsed. Its trailing neighbour is
@@ -1807,7 +1796,7 @@ impl TabManager {
             items = items.child(
                 self.render_tab_item(
                     tab_id,
-                    pane_host.read(cx).tab_identity(),
+                    view.read(cx).tab_identity(),
                     active,
                     TabItemRole::InBar,
                     hover,
@@ -1875,7 +1864,7 @@ impl TabManager {
                         .debug_selector("create-tab-button")
                         .tooltip(
                             Tooltip::new("create-tab-tooltip", "Create Tab")
-                                .keyboard_equivalent(
+                                .shortcut(
                                     create_tab_shortcut(
                                         crate::desktop_profile::DesktopPresentation::get(cx),
                                     )
@@ -3135,15 +3124,16 @@ mod tests {
             manager
                 .tabs
                 .iter()
-                .map(|(tab_id, pane_host)| {
-                    let host = pane_host.read(cx);
+                .map(|(tab_id, view)| {
+                    let entity_id = view.entity_id();
+                    let view = view.read(cx);
                     (
                         tab_id,
-                        pane_host.entity_id(),
-                        host.pane_entity_ids(),
-                        host.layout_signature(),
-                        host.focused_pane_id(),
-                        host.zoom_state(),
+                        entity_id,
+                        view.pane_entity_ids(),
+                        view.layout_signature(),
+                        view.focused_pane_id(),
+                        view.zoom_state(),
                     )
                 })
                 .collect(),
@@ -4241,8 +4231,8 @@ mod tests {
         cx.simulate_keystrokes("cmd-alt-left");
         cx.run_until_parked();
         manager.update(cx, |manager, cx| {
-            manager.tabs.active_tab().update(cx, |host, cx| {
-                host.set_test_attention(PaneId::new(2), 1, cx);
+            manager.tabs.active_tab().update(cx, |view, cx| {
+                view.set_test_attention(PaneId::new(2), 1, cx);
             });
         });
         cx.run_until_parked();
@@ -4285,8 +4275,8 @@ mod tests {
         cx.simulate_keystrokes("cmd-w");
         cx.run_until_parked();
         manager.update(cx, |manager, cx| {
-            manager.tabs.active_tab().update(cx, |host, cx| {
-                host.set_test_attention(PaneId::new(1), 1, cx);
+            manager.tabs.active_tab().update(cx, |view, cx| {
+                view.set_test_attention(PaneId::new(1), 1, cx);
             });
         });
         cx.run_until_parked();
@@ -4325,8 +4315,8 @@ mod tests {
 
         assert_eq!(
             manager.read_with(cx, |manager, cx| {
-                let host = manager.tabs.active_tab().read(cx);
-                (host.cached_focused_progress(), host.tab_identity().progress)
+                let view = manager.tabs.active_tab().read(cx);
+                (view.cached_focused_progress(), view.tab_identity().progress)
             }),
             (TerminalProgress::None, TerminalProgress::None)
         );
@@ -4353,8 +4343,8 @@ mod tests {
 
         assert_eq!(
             manager.read_with(cx, |manager, cx| {
-                let host = manager.tabs.active_tab().read(cx);
-                (host.cached_focused_progress(), host.tab_identity().progress)
+                let view = manager.tabs.active_tab().read(cx);
+                (view.cached_focused_progress(), view.tab_identity().progress)
             }),
             (TerminalProgress::None, TerminalProgress::None)
         );
@@ -4644,7 +4634,7 @@ mod tests {
                 .tabs
                 .iter()
                 .find(|(tab_id, _)| *tab_id == TabId::new(1))
-                .map(|(_, host)| host.read(cx).tab_identity())
+                .map(|(_, view)| view.read(cx).tab_identity())
                 .unwrap()
         });
         assert_eq!(
@@ -5283,11 +5273,11 @@ mod tests {
                 .expect("Tab 1 must remain owned")
         });
         let state = cx.update(|window, cx| {
-            let pane_host = first_tab.read(cx);
+            let view = first_tab.read(cx);
             (
                 manager.read(cx).tabs.active_tab_id(),
-                pane_host.focused_pane_id(),
-                pane_host.focused_terminal_is_focused(window, cx),
+                view.focused_pane_id(),
+                view.focused_terminal_is_focused(window, cx),
             )
         });
         assert_eq!(state, (TabId::new(1), PaneId::new(2), true));
@@ -5744,7 +5734,7 @@ mod tests {
             manager
                 .tabs
                 .iter()
-                .all(|(_, host)| host.read(cx).remote_disconnected_generation() == Some(4))
+                .all(|(_, view)| view.read(cx).remote_disconnected_generation() == Some(4))
         }));
 
         provider.fail_revalidation_with(None);
@@ -5762,7 +5752,7 @@ mod tests {
             manager
                 .tabs
                 .iter()
-                .all(|(_, host)| host.read(cx).remote_disconnected_generation() == Some(4))
+                .all(|(_, view)| view.read(cx).remote_disconnected_generation() == Some(4))
         }));
 
         provider.fail_at(None);
@@ -5833,11 +5823,11 @@ mod tests {
         cx.run_until_parked();
 
         let state = manager.read_with(cx, |manager, cx| {
-            let host = manager.tabs.active_tab().read(cx);
-            let remote_state = host.focused_terminal_remote_state(cx);
+            let view = manager.tabs.active_tab().read(cx);
+            let remote_state = view.focused_terminal_remote_state(cx);
             (
                 manager.tabs.len(),
-                host.pane_count(),
+                view.pane_count(),
                 remote_state.0,
                 remote_state.1,
             )

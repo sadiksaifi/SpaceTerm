@@ -29,7 +29,7 @@
 //! policy selects locale direction, physical action placement, focus entry, layout axis, and
 //! deadline limits. Every Operating-System Window modal root consumes that installed direction;
 //! individual modal call sites do not select it. The application explicitly installs portable
-//! modal bindings and separately selects platform key equivalents through
+//! modal bindings and separately selects platform bindings through
 //! [`ModalKeybindingProfile`]. It also owns and explicitly installs the immutable policy and
 //! aggregate [`ModalTheme`].
 //!
@@ -276,7 +276,7 @@ pub enum ModalActionIntent {
     Destructive,
 }
 
-/// Visual weight of an action, independent of its key equivalent and consequence.
+/// Visual weight of an action, independent of its Shortcut and consequence.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ModalActionEmphasis {
     /// Ordinary desktop action presentation.

@@ -28,7 +28,7 @@ impl TransparencyStop {
     fn value(self) -> f32 {
         match self {
             Self::Opaque => 0.0,
-            Self::Default => SettingsDocument::default().preferences.window.transparency,
+            Self::Default => SettingsDocument::default().appearance.window.transparency,
             Self::Maximum => 1.0,
         }
     }
@@ -110,7 +110,7 @@ pub(super) fn render(
 ) -> Vec<AnyElement> {
     let appearance = &surface.chrome;
     let document = workbench.preview.document();
-    let window_preferences = &document.preferences.window;
+    let window_preferences = &document.appearance.window;
     let background = appearance_runtime::current(cx)
         .chrome
         .composition
@@ -188,7 +188,7 @@ pub(super) fn render(
     let bold_as_bright = Switch::new(
         "workbench-bold-as-bright",
         "Bold as bright",
-        document.preferences.terminal.rendering.bold_as_bright,
+        document.appearance.terminal.rendering.bold_as_bright,
     )
     .size(ToggleSize::Regular)
     .label_hidden(true)

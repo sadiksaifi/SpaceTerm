@@ -184,6 +184,7 @@ macro_rules! chrome_color_fields {
 mod builtin;
 #[cfg(test)]
 mod catalog_tests;
+mod color;
 mod compiler;
 mod composition;
 mod preferences;
@@ -195,7 +196,7 @@ mod zed;
 #[cfg(test)]
 mod zed_tests;
 
-pub(crate) use crate::theme::Color;
+pub(crate) use color::Color;
 pub(crate) use compiler::{CaptionPaint, SemanticPaint, StatusPaint};
 pub(crate) use composition::{
     ChromeTone, CompositionCapabilities, ResolvedWindowComposition, SurfaceMaterials, SurfaceRole,

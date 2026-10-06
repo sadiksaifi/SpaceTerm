@@ -108,7 +108,7 @@ struct SlotPreview {
 impl SettingsWindow {
     /// The appearance whose themes the gallery shows and a click assigns.
     pub(super) fn theme_slot(&self, cx: &App) -> Appearance {
-        match self.editor.document().preferences.mode {
+        match self.editor.document().appearance.mode {
             AppearanceMode::Light => Appearance::Light,
             AppearanceMode::Dark => Appearance::Dark,
             AppearanceMode::Auto => self.theme_gallery.auto_slot.unwrap_or_else(|| {
@@ -133,10 +133,10 @@ impl SettingsWindow {
 
     fn slot_preview(&self, slot: Appearance, summaries: &[ThemeSummary]) -> SlotPreview {
         let document = self.editor.document();
-        let requested = document.preferences.terminal.themes.get(slot).clone();
+        let requested = document.appearance.terminal.themes.get(slot).clone();
         let catalog =
             ThemeCatalog::from_terminal_themes(&document.terminal_themes).unwrap_or_default();
-        let mut preferences = document.preferences.clone();
+        let mut preferences = document.appearance.clone();
         preferences.mode = slot.into();
         let resolved = catalog
             .resolve(
@@ -180,7 +180,7 @@ impl SettingsWindow {
             .debug_selector(|| "settings-current-theme".to_owned())
             .w_full()
             .py(appearance.spacing(6.0));
-        if self.editor.document().preferences.mode != AppearanceMode::Auto {
+        if self.editor.document().appearance.mode != AppearanceMode::Auto {
             let preview = self.slot_preview(self.theme_slot(cx), &summaries);
             return content
                 .child(current_theme_details(&preview, font, appearance))
@@ -311,7 +311,7 @@ impl SettingsWindow {
         let selected = self
             .editor
             .document()
-            .preferences
+            .appearance
             .terminal
             .themes
             .get(slot)
@@ -551,7 +551,7 @@ impl SettingsWindow {
             .iter()
             .map(|summary| summary.id.clone())
             .collect::<Vec<_>>();
-        let slots = self.editor.document().preferences.terminal.themes.clone();
+        let slots = self.editor.document().appearance.terminal.themes.clone();
         let in_use = [Appearance::Light, Appearance::Dark]
             .into_iter()
             .filter(|slot| ids.contains(slots.get(*slot)))

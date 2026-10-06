@@ -25,7 +25,7 @@ pub(crate) struct SettingsDocument {
     pub(crate) keybindings: KeybindingPreferences,
     #[serde(default)]
     pub(crate) clipboard: crate::terminal::native_services::clipboard::ClipboardPreferences,
-    pub(crate) preferences: AppearancePreferences,
+    pub(crate) appearance: AppearancePreferences,
     #[serde(default)]
     pub(crate) terminal_themes: Vec<TerminalTheme>,
 }
@@ -38,7 +38,7 @@ impl Default for SettingsDocument {
             updates: Default::default(),
             keybindings: Default::default(),
             clipboard: Default::default(),
-            preferences: AppearancePreferences::default(),
+            appearance: AppearancePreferences::default(),
             terminal_themes: Vec::new(),
         }
     }
@@ -49,15 +49,15 @@ impl SettingsDocument {
         if self.schema_version != SETTINGS_SCHEMA_VERSION {
             return Err(SettingsDocumentError::UnsupportedVersion);
         }
-        self.preferences
+        self.appearance
             .validate()
-            .map_err(|_| SettingsDocumentError::InvalidPreferences)?;
+            .map_err(|_| SettingsDocumentError::InvalidAppearance)?;
         self.keybindings
             .validate()
             .map_err(|_| SettingsDocumentError::InvalidKeybindings)?;
         let catalog = ThemeCatalog::from_terminal_themes(&self.terminal_themes)
             .map_err(|_| SettingsDocumentError::InvalidCatalog)?;
-        validate_selection(&catalog, &self.preferences.terminal.themes)?;
+        validate_selection(&catalog, &self.appearance.terminal.themes)?;
         Ok(())
     }
 
@@ -69,17 +69,17 @@ impl SettingsDocument {
         };
         for slot in [Appearance::Light, Appearance::Dark] {
             if catalog
-                .get(self.preferences.terminal.themes.get(slot))
+                .get(self.appearance.terminal.themes.get(slot))
                 .is_none()
             {
-                self.preferences.reset(ResetTarget::TerminalTheme(slot));
+                self.appearance.reset(ResetTarget::TerminalTheme(slot));
             }
         }
     }
 
     pub(crate) fn reset(&mut self, target: ResetTarget) -> Result<(), SettingsDocumentError> {
         let mut candidate = self.clone();
-        candidate.preferences.reset(target);
+        candidate.appearance.reset(target);
         candidate.validate()?;
         *self = candidate;
         Ok(())
@@ -88,7 +88,7 @@ impl SettingsDocument {
     /// Resets preferences and imported themes together, preserving revision and schema identity.
     pub(crate) fn reset_all(&mut self) {
         let defaults = Self::default();
-        self.preferences = defaults.preferences;
+        self.appearance = defaults.appearance;
         self.updates = defaults.updates;
         self.keybindings = defaults.keybindings;
         self.clipboard = defaults.clipboard;
@@ -98,7 +98,7 @@ impl SettingsDocument {
     /// Replaces every Setting and the imported catalog with those of `imported`, keeping this
     /// document's identity fields for the same reason [`Self::reset_all`] does.
     pub(crate) fn replace_settings(&mut self, imported: Self) {
-        self.preferences = imported.preferences;
+        self.appearance = imported.appearance;
         self.updates = imported.updates;
         self.keybindings = imported.keybindings;
         self.clipboard = imported.clipboard;
@@ -116,7 +116,7 @@ fn validate_selection(
     ];
     for (id, expected) in selections {
         if catalog.get(id).map(|theme| theme.appearance) != Some(expected) {
-            return Err(SettingsDocumentError::InvalidPreferences);
+            return Err(SettingsDocumentError::InvalidAppearance);
         }
     }
     Ok(())
@@ -260,7 +260,7 @@ pub(crate) enum SettingsDocumentError {
     #[error("settings document version is unsupported")]
     UnsupportedVersion,
     #[error("appearance preferences are invalid")]
-    InvalidPreferences,
+    InvalidAppearance,
     #[error("keybinding preferences are invalid")]
     InvalidKeybindings,
     #[error("appearance catalog is invalid")]

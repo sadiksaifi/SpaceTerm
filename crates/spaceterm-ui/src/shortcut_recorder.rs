@@ -60,7 +60,7 @@ pub(crate) enum ShortcutTone {
 /// [`validator`](Self::validator), and applies [`ShortcutRecorderEvent`]s to its own model.
 ///
 /// A click, or Return or Space while the field is focused, starts recording. While recording, the
-/// recorder intercepts every keystroke in its window before key bindings and menu key equivalents
+/// recorder intercepts every keystroke in its window before key bindings and menu Shortcuts
 /// resolve, so a chord that already means something, such as closing the window, is captured
 /// rather than performed, and its auto-repeat stays held back until the chord is let go. Escape
 /// cancels, Delete or Backspace clears, and Tab cancels and moves focus on. Losing focus, the window

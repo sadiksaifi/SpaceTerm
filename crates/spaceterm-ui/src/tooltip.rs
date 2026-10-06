@@ -197,7 +197,7 @@ impl TooltipMetrics {
         self
     }
 
-    /// Sets primary, secondary, and keyboard-equivalent font sizes.
+    /// Sets primary, secondary, and Shortcut font sizes.
     pub fn font_sizes(mut self, primary: Pixels, secondary: Pixels, keyboard: Pixels) -> Self {
         self.primary_font_size = bounded_metric(primary, 8.0, 32.0, 11.0);
         self.secondary_font_size = bounded_metric(secondary, 8.0, 32.0, 10.0);
@@ -205,7 +205,7 @@ impl TooltipMetrics {
         self
     }
 
-    /// Sets primary, secondary, and keyboard-equivalent line heights.
+    /// Sets primary, secondary, and Shortcut line heights.
     pub fn line_heights(mut self, primary: Pixels, secondary: Pixels, keyboard: Pixels) -> Self {
         self.primary_line_height = bounded_metric(primary, 8.0, 64.0, 13.0);
         self.secondary_line_height = bounded_metric(secondary, 8.0, 64.0, 12.0);
@@ -283,7 +283,7 @@ fn tooltip_theme(cx: &App) -> TooltipTheme {
 ///
 /// A tooltip is delayed, transient, pointer-transparent, and scoped to one Operating-System
 /// Window. It never receives focus or pointer input and must not contain actions. `text` is required;
-/// optional detail and keyboard-equivalent text remain bounded and are presented through fixed
+/// optional detail and Shortcut text remain bounded and are presented through fixed
 /// semantic slots rather than arbitrary popup children. A tooltip supplements, but never replaces,
 /// the target control's logical accessibility name. Use a Menu or another interactive popover when
 /// content must accept focus or input.
@@ -292,7 +292,7 @@ pub struct Tooltip {
     id: ElementId,
     text: SharedString,
     detail: Option<SharedString>,
-    keyboard_equivalent: Option<SharedString>,
+    shortcut: Option<SharedString>,
     debug_selector: SharedString,
 }
 
@@ -303,7 +303,7 @@ impl Tooltip {
             id: id.into(),
             text: bounded_text(text.into(), MAX_PRIMARY_CHARACTERS),
             detail: None,
-            keyboard_equivalent: None,
+            shortcut: None,
             debug_selector: "tooltip".into(),
         }
     }
@@ -314,10 +314,9 @@ impl Tooltip {
         self
     }
 
-    /// Adds a compact keyboard-equivalent label.
-    pub fn keyboard_equivalent(mut self, equivalent: impl Into<SharedString>) -> Self {
-        self.keyboard_equivalent =
-            nonempty_bounded_text(equivalent.into(), MAX_KEYBOARD_CHARACTERS);
+    /// Adds a compact Shortcut label.
+    pub fn shortcut(mut self, shortcut: impl Into<SharedString>) -> Self {
+        self.shortcut = nonempty_bounded_text(shortcut.into(), MAX_KEYBOARD_CHARACTERS);
         self
     }
 
@@ -478,7 +477,7 @@ fn render_surface(
     let metrics = theme.metrics;
     let shell = theme.shell;
     let available = available_tooltip_size(viewport, metrics.viewport_margin);
-    let keyboard = tooltip.keyboard_equivalent.clone();
+    let keyboard = tooltip.shortcut.clone();
     let primary = div()
         .flex()
         .flex_row()
@@ -1582,11 +1581,9 @@ mod tests {
 
     #[test]
     fn empty_optional_content_should_be_omitted() {
-        let tooltip = Tooltip::new("optional", "Primary")
-            .detail("")
-            .keyboard_equivalent("");
+        let tooltip = Tooltip::new("optional", "Primary").detail("").shortcut("");
 
-        assert!(tooltip.detail.is_none() && tooltip.keyboard_equivalent.is_none());
+        assert!(tooltip.detail.is_none() && tooltip.shortcut.is_none());
     }
 
     #[test]
@@ -1638,7 +1635,7 @@ mod tests {
                                     div().absolute().left(self.target_left).top(px(80.0)).child(
                                         Tooltip::new("test-tooltip-target", "Primary help")
                                             .detail(detail)
-                                            .keyboard_equivalent("⌘K")
+                                            .shortcut("⌘K")
                                             .debug_selector("test-tooltip")
                                             .attach(
                                                 div()

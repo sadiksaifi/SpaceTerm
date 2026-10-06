@@ -1,5 +1,5 @@
-//! Chord capture: the keystrokes of one window, taken ahead of key bindings and menu key
-//! equivalents while one focus target holds focus.
+//! Chord capture: the keystrokes of one window, taken ahead of key bindings and menu
+//! Shortcuts while one focus target holds focus.
 use std::{cell::Cell, rc::Rc};
 
 use gpui::{
@@ -30,7 +30,7 @@ pub enum CapturedKey {
 
 /// Captures key chords in one window while one focus target is focused.
 ///
-/// A capture sees every keystroke before key bindings and menu key equivalents resolve, so a chord
+/// A capture sees every keystroke before key bindings and menu Shortcuts resolve, so a chord
 /// that already means something, such as closing the window, is captured rather than performed.
 /// Its owner decides what each [`CapturedKey`] means and ends the capture by dropping it.
 pub struct ChordCapture {

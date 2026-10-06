@@ -58,7 +58,7 @@ pub enum CommandPaletteKeybindingProfile {
     Linux,
 }
 
-/// Installs the platform-specific key equivalents for `profile`.
+/// Installs the platform-specific bindings for `profile`.
 pub fn install_command_palette_keybindings(cx: &mut App, profile: CommandPaletteKeybindingProfile) {
     match profile {
         CommandPaletteKeybindingProfile::MacOs => cx.bind_keys([

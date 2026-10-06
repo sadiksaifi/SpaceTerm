@@ -691,7 +691,7 @@ impl SettingsWindow {
     fn fixed_appearance(&self) -> Appearance {
         self.editor
             .document()
-            .preferences
+            .appearance
             .mode
             .resolve(Appearance::Dark)
     }
@@ -723,7 +723,7 @@ impl SettingsWindow {
         // Every resettable row asks this on every frame, so only preferences are copied. Cloning
         // the document would copy the whole installed theme catalog to answer a question about
         // one field.
-        let current = &self.editor.document().preferences;
+        let current = &self.editor.document().appearance;
         let mut reset = current.clone();
         reset.reset(target.clone());
         (reset != *current).then_some(RowReset::Appearance(target))
@@ -1219,7 +1219,7 @@ impl SettingsWindow {
 
     /// One mode selects Chrome appearance and the matching Terminal slot.
     fn render_appearance_mode(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let current = self.editor.document().preferences.mode;
+        let current = self.editor.document().appearance.mode;
         let selector = "settings-appearance-mode";
         let edge = crate::ui::appearance::chrome(cx)
             .host_colors(spaceterm_ui::ControlHost::Card)
@@ -1259,7 +1259,7 @@ impl SettingsWindow {
         let catalog =
             ThemeCatalog::from_terminal_themes(&document.terminal_themes).unwrap_or_default();
         let pick = |appearance: Appearance| {
-            let mut preferences = document.preferences.clone();
+            let mut preferences = document.appearance.clone();
             preferences.mode = appearance.into();
             let resolved = catalog
                 .resolve(
@@ -1288,14 +1288,14 @@ impl SettingsWindow {
     }
 
     fn set_appearance_mode(&mut self, mode: AppearanceMode, cx: &mut Context<Self>) {
-        self.edit(move |draft| draft.preferences.mode = mode, cx);
+        self.edit(move |draft| draft.appearance.mode = mode, cx);
         self.synchronize_search_results();
     }
 
     fn set_theme(&mut self, slot: Appearance, id: ThemeId, cx: &mut Context<Self>) {
         self.edit(
             move |draft| {
-                let themes = &mut draft.preferences.terminal.themes;
+                let themes = &mut draft.appearance.terminal.themes;
                 themes.set(slot, id);
             },
             cx,
@@ -1303,7 +1303,7 @@ impl SettingsWindow {
     }
 
     fn render_density(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let current = self.editor.document().preferences.window.density;
+        let current = self.editor.document().appearance.window.density;
         let owner = cx.weak_entity();
         SegmentedControl::new(
             "settings-density",
@@ -1322,7 +1322,7 @@ impl SettingsWindow {
         .on_change(move |change, _, cx| {
             let density = *change.requested();
             let _ = owner.update(cx, |settings, cx| {
-                settings.edit(move |draft| draft.preferences.window.density = density, cx);
+                settings.edit(move |draft| draft.appearance.window.density = density, cx);
             });
         })
         .into_any_element()
@@ -1334,14 +1334,7 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let fonts = crate::ui::appearance_runtime::available_fonts(cx);
-        let current = match &self
-            .editor
-            .document()
-            .preferences
-            .terminal
-            .typography
-            .family
-        {
+        let current = match &self.editor.document().appearance.terminal.typography.family {
             TerminalFontFamily::DefaultMonospace => None,
             TerminalFontFamily::Named { family } => Some(family.clone()),
         };
@@ -1379,7 +1372,7 @@ impl SettingsWindow {
             let _ = owner.update(cx, |settings, cx| {
                 settings.edit(
                     move |draft| {
-                        draft.preferences.terminal.typography.family = match choice {
+                        draft.appearance.terminal.typography.family = match choice {
                             Some(family) => TerminalFontFamily::Named { family },
                             None => TerminalFontFamily::DefaultMonospace,
                         };
@@ -1400,7 +1393,7 @@ impl SettingsWindow {
             .chrome
             .composition
             .capabilities
-            .window_background(&self.editor.document().preferences.window)
+            .window_background(&self.editor.document().appearance.window)
     }
 
     fn render_transparency(
@@ -1422,7 +1415,7 @@ impl SettingsWindow {
             let _ = owner.update(cx, |settings, cx| {
                 settings.edit(
                     move |draft| {
-                        let value = &mut draft.preferences.window.transparency;
+                        let value = &mut draft.appearance.window.transparency;
                         *value = (((*value * 20.0).round() + delta as f32) / 20.0).clamp(0.0, 1.0);
                     },
                     cx,
@@ -1444,7 +1437,7 @@ impl SettingsWindow {
             .on_change(move |change, _, cx| {
                 let blur = change.requested();
                 let _ = owner.update(cx, |settings, cx| {
-                    settings.edit(move |draft| draft.preferences.window.blur = blur, cx);
+                    settings.edit(move |draft| draft.appearance.window.blur = blur, cx);
                 });
             })
             .into_any_element()
@@ -1458,7 +1451,7 @@ impl SettingsWindow {
         let value = self
             .editor
             .document()
-            .preferences
+            .appearance
             .terminal
             .typography
             .base_size;
@@ -1474,7 +1467,7 @@ impl SettingsWindow {
             let _ = owner.update(cx, |settings, cx| {
                 settings.edit(
                     move |draft| {
-                        let size = &mut draft.preferences.terminal.typography.base_size;
+                        let size = &mut draft.appearance.terminal.typography.base_size;
                         *size = (*size + f32::from(delta as i16)).clamp(8.0, 32.0);
                     },
                     cx,
@@ -1494,7 +1487,7 @@ impl SettingsWindow {
         let value = self
             .editor
             .document()
-            .preferences
+            .appearance
             .terminal
             .typography
             .line_height;
@@ -1510,7 +1503,7 @@ impl SettingsWindow {
             let _ = owner.update(cx, |settings, cx| {
                 settings.edit(
                     move |draft| {
-                        let height = &mut draft.preferences.terminal.typography.line_height;
+                        let height = &mut draft.appearance.terminal.typography.line_height;
                         // Round to the step so repeated presses cannot drift off the grid.
                         let stepped = (*height / STEP).round() + f32::from(delta as i16);
                         *height = (stepped * STEP).clamp(1.0, 2.0);
@@ -1533,7 +1526,7 @@ impl SettingsWindow {
         appearance: &ChromeAppearance,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let typography = &self.editor.document().preferences;
+        let typography = &self.editor.document().appearance;
         let current = match row {
             SettingsRowId::TerminalRegularWeight => typography.terminal.typography.regular_weight,
             _ => typography.terminal.typography.bold_weight,
@@ -1565,7 +1558,7 @@ impl SettingsWindow {
             let _ = owner.update(cx, |settings, cx| {
                 settings.edit(
                     move |draft| {
-                        let preferences = &mut draft.preferences;
+                        let preferences = &mut draft.appearance;
                         match row {
                             SettingsRowId::TerminalRegularWeight => {
                                 preferences.terminal.typography.regular_weight = weight
@@ -1581,13 +1574,7 @@ impl SettingsWindow {
     }
 
     fn render_italic(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let value = self
-            .editor
-            .document()
-            .preferences
-            .terminal
-            .typography
-            .italic;
+        let value = self.editor.document().appearance.terminal.typography.italic;
         let owner = cx.weak_entity();
         Switch::new("settings-terminal-italic", "Italic text", value)
             .size(ToggleSize::Regular)
@@ -1598,7 +1585,7 @@ impl SettingsWindow {
                 let italic = change.requested();
                 let _ = owner.update(cx, |settings, cx| {
                     settings.edit(
-                        move |draft| draft.preferences.terminal.typography.italic = italic,
+                        move |draft| draft.appearance.terminal.typography.italic = italic,
                         cx,
                     );
                 });
@@ -1610,7 +1597,7 @@ impl SettingsWindow {
         let value = self
             .editor
             .document()
-            .preferences
+            .appearance
             .terminal
             .rendering
             .bold_as_bright;
@@ -1629,7 +1616,7 @@ impl SettingsWindow {
             let _ = owner.update(cx, |settings, cx| {
                 settings.edit(
                     move |draft| {
-                        draft.preferences.terminal.rendering.bold_as_bright = bold_as_bright;
+                        draft.appearance.terminal.rendering.bold_as_bright = bold_as_bright;
                     },
                     cx,
                 );

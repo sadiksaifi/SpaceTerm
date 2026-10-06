@@ -259,7 +259,7 @@ fn a_new_named_font_is_classified_before_appearance_resolution() {
     let (settings, _) = start(&mut cx);
     let token = settings.begin_preview(0).unwrap();
     let mut document = SettingsDocument::default();
-    document.preferences.terminal.typography.family = TerminalFontFamily::Named {
+    document.appearance.terminal.typography.family = TerminalFontFamily::Named {
         family: "Arial".to_owned(),
     };
     settings.update_preview(&token, document).unwrap();
@@ -342,7 +342,7 @@ fn the_backdrop_request_follows_the_chrome_appearance(cx: &mut TestAppContext) {
     platform.set_native_window_transparency_supported(true);
     let token = settings.begin_preview(0).unwrap();
     let mut candidate = SettingsDocument::default();
-    candidate.preferences.mode = AppearanceMode::Auto;
+    candidate.appearance.mode = AppearanceMode::Auto;
     settings.update_preview(&token, candidate).unwrap();
     cx.run_until_parked();
     let test_window = cx.add_window(|_, _| gpui::EmptyView);
@@ -392,8 +392,8 @@ fn transparency_updates_surfaces_and_capability_fallback_without_terminal_protoc
     );
     let token = settings.begin_preview(0).unwrap();
     let mut document = SettingsDocument::default();
-    document.preferences.window.transparency = 0.5;
-    document.preferences.window.blur = false;
+    document.appearance.window.transparency = 0.5;
+    document.appearance.window.blur = false;
     settings.update_preview(&token, document).unwrap();
     cx.run_until_parked();
     cx.update(|cx| {
@@ -722,7 +722,7 @@ fn preview_cancel_restores_the_committed_mode_using_current_system_fact(cx: &mut
     let (settings, platform) = start(cx);
     let token = settings.begin_preview(0).unwrap();
     let mut candidate = SettingsDocument::default();
-    candidate.preferences.mode = AppearanceMode::Auto;
+    candidate.appearance.mode = AppearanceMode::Auto;
     settings.update_preview(&token, candidate).unwrap();
     platform.set_system_appearance(Some(Appearance::Light));
     cx.run_until_parked();
@@ -752,7 +752,7 @@ fn terminal_only_preview_does_not_replace_control_catalog_or_force_native_chrome
     let native_calls = platform.applied.borrow().len();
     let token = settings.begin_preview(0).unwrap();
     let mut candidate = SettingsDocument::default();
-    candidate.preferences.terminal.typography.base_size = 24.0;
+    candidate.appearance.terminal.typography.base_size = 24.0;
     settings.update_preview(&token, candidate).unwrap();
     cx.run_until_parked();
     cx.update(|cx| {
@@ -783,7 +783,7 @@ fn repeated_system_notifications_without_effective_change_do_not_publish(cx: &mu
 #[gpui::test]
 fn cancelling_fixed_preview_resolves_committed_auto_mode_again(cx: &mut TestAppContext) {
     let mut committed = SettingsDocument::default();
-    committed.preferences.mode = AppearanceMode::Auto;
+    committed.appearance.mode = AppearanceMode::Auto;
     let bytes = crate::settings::export_settings(&committed)
         .unwrap()
         .into_bytes();
