@@ -6,7 +6,8 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Bounds, Pixels, Rgba, SharedString, StyledText, Window, accesskit, div, px,
+    AnyElement, App, Bounds, Pixels, Rgba, SharedString, StyledText, Text, Window, accesskit, div,
+    px,
 };
 use spaceterm_ui::{
     Button, ButtonSize, ButtonVariant, Icon, IconButton, IconName, Tooltip, highlight_ranges,
@@ -175,6 +176,10 @@ impl FormGroup {
                 group.child(
                     div().px(row_inset + px(HAIRLINE)).child(
                         div()
+                            .id(SharedString::from(title_selector.clone()))
+                            .role(accesskit::Role::Heading)
+                            .aria_level(2)
+                            .aria_label(self.title)
                             .debug_selector(move || title_selector.clone())
                             .chrome_text(appearance.typography.style(TextRole::Section))
                             .text_color(gpui_color(appearance.colors.text))
@@ -338,7 +343,10 @@ impl FormRow {
                 .chrome_text(appearance.typography.style(TextRole::Secondary))
                 .text_color(gpui_color(caption_color))
                 .whitespace_normal()
-                .child(description)
+                .child(Text::new(
+                    SharedString::from(description_selector.clone()).into(),
+                    description,
+                ))
         };
         // Guidance stacks with the label so it stays anchored to the setting it explains.
         let label_basis = self
@@ -375,6 +383,9 @@ impl FormRow {
                         .gap(appearance.spacing(RESET_GAP))
                         .child(
                             div()
+                                .id(SharedString::from(label_selector.clone()))
+                                .role(accesskit::Role::Label)
+                                .aria_value(self.label)
                                 .debug_selector(move || label_selector.clone())
                                 .flex_basis(label_width)
                                 .flex_shrink(1.0)
@@ -481,6 +492,10 @@ pub(crate) fn section_heading(
         .gap(appearance.spacing(4.0))
         .child(
             div()
+                .id(SharedString::from(format!("{selector}-title")))
+                .role(accesskit::Role::Heading)
+                .aria_level(1)
+                .aria_label(title)
                 .debug_selector(move || format!("{selector}-title"))
                 .truncate()
                 .chrome_text(appearance.typography.style(TextRole::Title))
@@ -494,7 +509,10 @@ pub(crate) fn section_heading(
                 .chrome_text(appearance.typography.style(TextRole::Body))
                 .text_color(gpui_color(appearance.colors.text_secondary))
                 .whitespace_normal()
-                .child(description),
+                .child(Text::new(
+                    SharedString::from(format!("{selector}-description")).into(),
+                    description.into(),
+                )),
         )
 }
 

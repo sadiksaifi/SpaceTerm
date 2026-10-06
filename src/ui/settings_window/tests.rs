@@ -4508,3 +4508,51 @@ fn about_publishes_one_button_that_requests_the_about_window(cx: &mut TestAppCon
     cx.run_until_parked();
     assert_eq!(requests.get(), 1);
 }
+
+#[gpui::test]
+fn settings_publish_headings_row_titles_and_guidance_in_reading_order(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let (_window, _harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::Font, cx);
+    let tree = A11yTree::read(cx);
+    let headings = tree
+        .with_role("Heading")
+        .into_iter()
+        .map(|heading| {
+            (
+                heading["aria"]["label"].as_str().unwrap(),
+                heading["aria"]["level"].as_u64().unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    for heading in [("Font", 1), ("Typeface", 2), ("Weight", 2), ("Rendering", 2)] {
+        assert!(headings.contains(&heading), "{heading:?} in {headings:?}");
+    }
+
+    select_section(SettingsSectionId::Themes, cx);
+    let tree = A11yTree::read(cx);
+    let window = tree.with_role("Window")[0];
+    let reading = tree
+        .children(window)
+        .into_iter()
+        .map(|node| {
+            let text = node["aria"]["label"]
+                .as_str()
+                .or_else(|| node["aria"]["value"].as_str())
+                .unwrap_or_default();
+            format!("{} {text}", node["aria"]["role"].as_str().unwrap())
+        })
+        .collect::<Vec<_>>();
+    let position = |entry: &str| {
+        reading
+            .iter()
+            .position(|candidate| candidate == entry)
+            .unwrap_or_else(|| panic!("{entry:?} is not in {reading:?}"))
+    };
+    assert!(position("Heading Themes") < position("Label Appearance"));
+    // Guidance stacks under its row title, beside the control it explains.
+    let guidance = position("Label Auto matches the system light or dark setting.");
+    assert!(position("Label Appearance") < guidance);
+    assert!(guidance < position("RadioGroup Appearance"));
+}
