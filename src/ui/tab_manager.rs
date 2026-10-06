@@ -1094,18 +1094,17 @@ impl TabManager {
     }
 
     fn move_tab(&mut self, tab_id: TabId, position: usize, cx: &mut Context<Self>) {
-        match self.tabs.move_tab(tab_id, position) {
-            Ok(true) => {
-                cx.emit(TabManagerEvent::PresentationChanged);
-                cx.notify();
-            }
-            Ok(false) => {}
-            Err(error) => Self::report_tab_error("move", error),
-        }
+        let moved = self.tabs.move_tab(tab_id, position);
+        Self::present_tab_move(moved, cx);
     }
 
     fn step_tab(&mut self, tab_id: TabId, step: TabStep, cx: &mut Context<Self>) {
-        match self.tabs.step_tab(tab_id, step) {
+        let moved = self.tabs.step_tab(tab_id, step);
+        Self::present_tab_move(moved, cx);
+    }
+
+    fn present_tab_move(moved: Result<bool, TabError>, cx: &mut Context<Self>) {
+        match moved {
             Ok(true) => {
                 cx.emit(TabManagerEvent::PresentationChanged);
                 cx.notify();
@@ -1766,6 +1765,7 @@ impl TabManager {
         let active_tab_id = self.tabs.active_tab_id();
         // A disconnected Remote Workspace cannot start the Terminal Session a new Pane needs.
         let child_launch_available = self.remote_lifecycle.disconnected_generation().is_none();
+        let desktop_presentation = crate::desktop_profile::DesktopPresentation::get(cx);
         let background = presentation.background;
         let create_icon_size = appearance.icons.metrics(IconRole::Chrome).glyph_size;
         // The strip pulls back the chip inset so the first Tab sits one frame space from the
@@ -1835,13 +1835,15 @@ impl TabManager {
                 )
             });
             let identity = view.read(cx).tab_identity();
-            let accessibility_name = match (identity.activity.is_empty(), &identity.place) {
-                (true, place) if place.is_empty() => "Tab actions for Terminal".to_owned(),
-                (true, place) => format!("Tab actions for {place}"),
-                (false, place) if place.is_empty() => {
-                    format!("Tab actions for {}", identity.activity)
-                }
-                (false, place) => format!("Tab actions for {} in {place}", identity.activity),
+            let title = if identity.activity.is_empty() {
+                "Terminal"
+            } else {
+                identity.activity.as_ref()
+            };
+            let accessibility_name = if identity.place.is_empty() {
+                format!("Tab actions for {title}")
+            } else {
+                format!("Tab actions for {title} in {}", identity.place)
             };
             let face = self
                 .render_tab_item(
@@ -1861,7 +1863,6 @@ impl TabManager {
                 .child(fade.tracker());
             let open_manager = manager.clone();
             let lifecycle_manager = manager.clone();
-            let lifecycle_window = window.window_handle();
             let activate_manager = manager.clone();
             items = items.child(
                 ContextMenu::new(
@@ -1872,7 +1873,7 @@ impl TabManager {
                         index == 0,
                         index == last_index,
                         child_launch_available,
-                        crate::desktop_profile::DesktopPresentation::get(cx),
+                        desktop_presentation,
                     ),
                 )
                 .size(MenuSize::Wide)
@@ -1889,10 +1890,8 @@ impl TabManager {
                     let event = *event;
                     // Menu lifecycle delivery can occur while its Window is borrowed.
                     cx.defer(move |cx| {
-                        let _ = lifecycle_window.update(cx, |_, _, cx| {
-                            let _ = manager.update(cx, |manager, cx| {
-                                manager.handle_tab_menu_lifecycle(tab_id, event, cx);
-                            });
+                        let _ = manager.update(cx, |manager, cx| {
+                            manager.handle_tab_menu_lifecycle(tab_id, event, cx);
                         });
                     });
                 })
