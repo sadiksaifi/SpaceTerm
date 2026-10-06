@@ -76,7 +76,8 @@ use gpui::{
     ScrollHandle, Task, Window, div, px, relative,
 };
 use spaceterm_ui::{
-    Alert, AlertIntent, ButtonSize, ButtonTheme, ButtonVariant, ContextMenu, CustomIconName,
+    Alert, AlertIntent, ButtonSize, ButtonTheme, ButtonVariant, ContextMenu, ContextMenuTarget,
+    CustomIconName,
     HoverFade, Icon, IconButton, IconName, MenuEntry, MenuLifecycleEvent, MenuSize, ModalAction,
     ModalActionRole, ModalId, Tooltip, WindowDragRegion, WindowDragRegionEvent,
     WindowDragRegionResponse, WindowDragRegionStatus,
@@ -1582,15 +1583,8 @@ impl TabManager {
         let release_manager = manager.clone();
         let click_manager = manager.clone();
         let drag_manager = manager.clone();
-        let press_manager_a11y = manager.clone();
         let owner = manager.entity_id();
         let close_manager = manager;
-        let accessible_title = if identity.activity.is_empty() {
-            gpui::SharedString::from("Terminal")
-        } else {
-            identity.activity.clone()
-        };
-        let accessible_place = identity.place.clone();
         let hover_active = appearance.active && presentation.window_active;
         let under_pointer = hover_active && hover.under_pointer;
         let hover = if hover_active { hover.level } else { 0.0 };
@@ -1729,18 +1723,7 @@ impl TabManager {
         if lifted {
             return face;
         }
-        face.role(accesskit::Role::Tab)
-            .aria_label(accessible_title)
-            .when(!accessible_place.is_empty(), |face| {
-                face.aria_description(accessible_place)
-            })
-            .aria_selected(active)
-            .on_a11y_action(accesskit::Action::Click, move |_, window, cx| {
-                let _ = press_manager_a11y.update(cx, |manager, cx| {
-                    manager.activate_tab(tab_id, window, cx);
-                });
-            })
-            .cursor_pointer()
+        face.cursor_pointer()
             .block_mouse_except_scroll()
             .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                 let _ = press_manager.update(cx, |manager, cx| {
@@ -1876,6 +1859,17 @@ impl TabManager {
             } else {
                 format!("Tab actions for {title} in {}", identity.place)
             };
+            let press_manager = manager.clone();
+            let mut target = ContextMenuTarget::new(accesskit::Role::Tab, title.to_owned())
+                .selected(active)
+                .on_press(move |window, cx| {
+                    let _ = press_manager.update(cx, |manager, cx| {
+                        manager.activate_tab(tab_id, window, cx);
+                    });
+                });
+            if !identity.place.is_empty() {
+                target = target.description(identity.place.clone());
+            }
             let face = self
                 .render_tab_item(
                     tab_id,
@@ -1911,6 +1905,7 @@ impl TabManager {
                 .size(MenuSize::Wide)
                 .fill_parent_height()
                 .preserve_trigger_cursor()
+                .target(target)
                 .debug_selector(format!("tab-context-menu-{}", tab_id.get()))
                 .on_open_request(move |_, _, cx| {
                     open_manager
@@ -4186,6 +4181,9 @@ mod tests {
             .map(|tab| tab["aria"]["selected"] == true)
             .collect::<Vec<_>>();
         assert_eq!(selected, [true, false]);
+
+        perform(cx, tree.with_role("Tab")[1], Action::ShowContextMenu);
+        assert_eq!(A11yTree::read(cx).with_role("Menu").len(), 1);
     }
 
     #[gpui::test]
