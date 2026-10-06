@@ -343,6 +343,8 @@ pub(crate) struct TabView {
     pane_construction: PaneConstruction,
     pane_bounds: BTreeMap<PaneId, Bounds<Pixels>>,
     pane_layout_size: Option<PaneSize>,
+    /// A Split that waits for the next Pane measurement, because the retained bounds are stale.
+    pending_split: Option<(PaneId, SplitAxis)>,
     split_bounds: BTreeMap<SplitId, Bounds<Pixels>>,
     pane_titles: BTreeMap<PaneId, gpui::SharedString>,
     pane_captions: BTreeMap<PaneId, PaneCaptionText>,
@@ -422,6 +424,7 @@ impl TabView {
             pane_construction,
             pane_bounds: BTreeMap::new(),
             pane_layout_size: None,
+            pending_split: None,
             split_bounds: BTreeMap::new(),
             pane_titles: BTreeMap::from([(initial_pane_id, initial_title)]),
             pane_captions: BTreeMap::from([(initial_pane_id, initial_caption)]),
@@ -641,6 +644,7 @@ impl TabView {
     }
 
     pub(crate) fn deactivate(&mut self, cx: &mut Context<Self>) {
+        self.pending_split = None;
         self.set_focus_branch(false, None, cx);
         cx.notify();
     }
@@ -953,6 +957,12 @@ impl TabView {
     ) {
         let focused_pane_id = self.tab.focused_pane_id();
         self.split_pane(focused_pane_id, axis, window, cx);
+    }
+
+    /// Splits the Focused Pane after this Tab next measures its Panes, unless that Pane closes first.
+    pub(crate) fn split_focused_after_layout(&mut self, axis: SplitAxis, cx: &mut Context<Self>) {
+        self.pending_split = Some((self.tab.focused_pane_id(), axis));
+        cx.notify();
     }
 
     fn split_pane(
@@ -1992,13 +2002,27 @@ impl Render for TabView {
         div()
             .on_children_prepainted({
                 let view = cx.entity().downgrade();
-                move |children, _, cx| {
+                move |children, window, cx| {
                     let Some(bounds) = children.first() else {
                         return;
                     };
-                    let _ = view.update(cx, |view, _| {
-                        view.pane_layout_size = pane_size(*bounds).ok();
-                    });
+                    let pending_split = view
+                        .update(cx, |view, _| {
+                            view.pane_layout_size = pane_size(*bounds).ok();
+                            view.pending_split.take()
+                        })
+                        .ok()
+                        .flatten();
+                    if let Some((pane_id, axis)) = pending_split {
+                        let view = view.clone();
+                        window.defer(cx, move |window, cx| {
+                            let _ = view.update(cx, |view, cx| {
+                                if view.tab.pane(pane_id).is_some() {
+                                    view.split_pane(pane_id, axis, window, cx);
+                                }
+                            });
+                        });
+                    }
                 }
             })
             .id(("tab-view", self.tab.id().get()))
@@ -4424,6 +4448,34 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("pane-caption-name-1").is_some());
         assert!(cx.debug_bounds("pane-caption-name-2").is_some());
+    }
+
+    #[gpui::test]
+    fn a_split_after_layout_should_skip_a_pane_closed_before_the_layout(cx: &mut TestAppContext) {
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
+        let session_factory = test_session_factory();
+        let (view, cx) = cx
+            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.split_focused(SplitAxis::Horizontal, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.split_focused_after_layout(SplitAxis::Vertical, cx);
+                view.close_pane_authorized(PaneId::new(2), window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            view.read_with(cx, |view, _| view.layout_signature()),
+            "pane:1"
+        );
     }
 
     #[gpui::test]

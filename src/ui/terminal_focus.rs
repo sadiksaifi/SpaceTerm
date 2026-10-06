@@ -81,6 +81,7 @@ pub(crate) struct TabFocusOwners {
     pub(crate) parent: Option<TerminalFocusBlocker>,
     pub(crate) window_drag: bool,
     pub(crate) selector: bool,
+    pub(crate) context_menu: bool,
 }
 
 impl TerminalFocusCoordinator {
@@ -104,6 +105,7 @@ impl TerminalFocusCoordinator {
             Self::first_owner(&[
                 (owners.window_drag, TerminalFocusBlocker::TopChrome),
                 (owners.selector, TerminalFocusBlocker::TabSelector),
+                (owners.context_menu, TerminalFocusBlocker::ContextMenu),
             ])
         })
     }

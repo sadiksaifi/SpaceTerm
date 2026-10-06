@@ -23,8 +23,8 @@ use super::{
     ActivateTab1, ActivateTab2, ActivateTab3, ActivateTab4, ActivateTab5, ActivateTab6,
     ActivateTab7, ActivateTab8, ActivateTab9, CloseTab, CreateTab, MoveTabLeft, MoveTabRight,
     NextTab, PreparedTabViewRemoteRestart, PreviousTab, RemoteChildLaunchUnavailable,
-    RemoteTabViewLifecycleError, TERMINAL_KEY_CONTEXT, TabIdentity, TabView, TabViewEvent,
-    WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
+    RemoteTabViewLifecycleError, SplitDown, SplitRight, TERMINAL_KEY_CONTEXT, TabIdentity, TabView,
+    TabViewEvent, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
 };
 #[cfg(test)]
 use super::{TOP_CHROME_HEIGHT, WORKSPACE_SIDEBAR_MINIMUM_WIDTH};
@@ -58,7 +58,7 @@ pub(crate) struct PreparedTabManagerRemoteRestart {
 use crate::appearance::ChromeColors;
 use crate::appearance::Color;
 use crate::domain::{
-    CloseTabOutcome, PaneId, TabCollection, TabError, TabId, TabStep, WorkspaceId,
+    CloseTabOutcome, PaneId, SplitAxis, TabCollection, TabError, TabId, TabStep, WorkspaceId,
 };
 #[cfg(test)]
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
@@ -76,9 +76,10 @@ use gpui::{
     ScrollHandle, Task, Window, div, px, relative,
 };
 use spaceterm_ui::{
-    Alert, AlertIntent, ButtonSize, ButtonTheme, ButtonVariant, CustomIconName, HoverFade, Icon,
-    IconButton, IconName, ModalAction, ModalActionRole, ModalId, Tooltip, WindowDragRegion,
-    WindowDragRegionEvent, WindowDragRegionResponse, WindowDragRegionStatus,
+    Alert, AlertIntent, ButtonSize, ButtonTheme, ButtonVariant, ContextMenu, CustomIconName,
+    HoverFade, Icon, IconButton, IconName, MenuEntry, MenuLifecycleEvent, MenuSize, ModalAction,
+    ModalActionRole, ModalId, Tooltip, WindowDragRegion, WindowDragRegionEvent,
+    WindowDragRegionResponse, WindowDragRegionStatus,
 };
 
 #[cfg(test)]
@@ -377,6 +378,17 @@ struct TabHover {
     under_pointer: bool,
 }
 
+/// A command in a Tab's context menu. Each one targets the Tab whose menu chose it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TabMenuCommand {
+    NewTab,
+    SplitRight,
+    SplitDown,
+    MoveLeft,
+    MoveRight,
+    Close,
+}
+
 /// The value a Tab drag carries, scoped to the Tab bar that owns the Tab.
 struct DraggedTab {
     tab_id: TabId,
@@ -395,6 +407,7 @@ pub(crate) struct TabManager {
     window_close_handler: Option<spaceterm_ui::WindowCloseHandler>,
     parent_focus_blocker: Option<TerminalFocusBlocker>,
     tab_selector_pressed: Option<TabId>,
+    tab_menu: Option<TabId>,
     tab_reorder: ReorderableStrip<TabId>,
     operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
     window_drag_status: WindowDragRegionStatus,
@@ -481,6 +494,7 @@ impl TabManager {
             window_close_handler: None,
             parent_focus_blocker: None,
             tab_selector_pressed: None,
+            tab_menu: None,
             tab_reorder: ReorderableStrip::new(gpui::Axis::Horizontal),
             operating_system_window_drag_platform,
             window_drag_status: WindowDragRegionStatus::new(),
@@ -906,6 +920,7 @@ impl TabManager {
             parent: self.parent_focus_blocker,
             window_drag: self.window_drag_status.is_active(),
             selector: self.tab_selector_pressed.is_some(),
+            context_menu: self.tab_menu.is_some(),
         })
     }
 
@@ -1079,7 +1094,17 @@ impl TabManager {
     }
 
     fn move_tab(&mut self, tab_id: TabId, position: usize, cx: &mut Context<Self>) {
-        match self.tabs.move_tab(tab_id, position) {
+        let moved = self.tabs.move_tab(tab_id, position);
+        Self::present_tab_move(moved, cx);
+    }
+
+    fn step_tab(&mut self, tab_id: TabId, step: TabStep, cx: &mut Context<Self>) {
+        let moved = self.tabs.step_tab(tab_id, step);
+        Self::present_tab_move(moved, cx);
+    }
+
+    fn present_tab_move(moved: Result<bool, TabError>, cx: &mut Context<Self>) {
+        match moved {
             Ok(true) => {
                 cx.emit(TabManagerEvent::PresentationChanged);
                 cx.notify();
@@ -1329,6 +1354,9 @@ impl TabManager {
                     }
                 }
                 self.tab_selector_pressed = None;
+                if self.tab_menu == Some(tab_id) {
+                    self.tab_menu = None;
+                }
                 self.sync_terminal_focus_blocker(cx);
                 debug_assert_eq!(active_tab_id, self.tabs.active_tab_id());
                 self.scroll_active_tab_into_view();
@@ -1353,6 +1381,77 @@ impl TabManager {
             return;
         }
         cx.emit(TabManagerEvent::CloseTabRequested { tab_id });
+    }
+
+    /// Admits a context menu for a Tab without activating it. A Tab mid-drag or a Workspace
+    /// already closing offers no menu.
+    fn request_tab_menu(&mut self, tab_id: TabId, cx: &mut Context<Self>) -> bool {
+        if self.close_workspace_requested
+            || self.tab_reorder.dragged().is_some()
+            || self.tabs.tab(tab_id).is_none()
+        {
+            return false;
+        }
+        self.cancel_tab_selector(tab_id, cx);
+        true
+    }
+
+    fn handle_tab_menu_lifecycle(
+        &mut self,
+        tab_id: TabId,
+        event: MenuLifecycleEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            MenuLifecycleEvent::Opened => self.tab_menu = Some(tab_id),
+            MenuLifecycleEvent::Closed(_) if self.tab_menu == Some(tab_id) => self.tab_menu = None,
+            MenuLifecycleEvent::Closed(_) => return,
+        }
+        self.sync_terminal_focus_blocker(cx);
+        cx.notify();
+    }
+
+    fn perform_tab_menu_command(
+        &mut self,
+        tab_id: TabId,
+        command: TabMenuCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match command {
+            TabMenuCommand::NewTab => self.create_tab(window, cx),
+            TabMenuCommand::SplitRight => self.split_tab(tab_id, SplitAxis::Horizontal, window, cx),
+            TabMenuCommand::SplitDown => self.split_tab(tab_id, SplitAxis::Vertical, window, cx),
+            TabMenuCommand::MoveLeft => self.step_tab(tab_id, TabStep::Previous, cx),
+            TabMenuCommand::MoveRight => self.step_tab(tab_id, TabStep::Next, cx),
+            TabMenuCommand::Close => self.request_close_tab(tab_id, cx),
+        }
+    }
+
+    /// Splits a Tab's Focused Pane. The Tab becomes active first so the new Pane is visible.
+    fn split_tab(
+        &mut self,
+        tab_id: TabId,
+        axis: SplitAxis,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // A menu opened before a disconnect still offers Split; refuse before changing the Tab.
+        if self.remote_lifecycle.disconnected_generation().is_some() {
+            cx.emit(RemoteChildLaunchUnavailable::ConnectionUnavailable);
+            return;
+        }
+        let was_active = self.tabs.active_tab_id() == tab_id;
+        if !self.activate_tab(tab_id, window, cx) {
+            return;
+        }
+        let view = self.tabs.active_tab().clone();
+        if was_active {
+            view.update(cx, |view, cx| view.split_focused(axis, window, cx));
+        } else {
+            // A Tab that was inactive keeps Pane bounds from its last paint.
+            view.update(cx, |view, cx| view.split_focused_after_layout(axis, cx));
+        }
     }
 
     fn on_close_tab(&mut self, _: &CloseTab, _: &mut Window, cx: &mut Context<Self>) {
@@ -1675,6 +1774,9 @@ impl TabManager {
     ) -> AnyElement {
         let appearance = super::appearance::chrome(cx);
         let active_tab_id = self.tabs.active_tab_id();
+        // A disconnected Remote Workspace cannot start the Terminal Session a new Pane needs.
+        let child_launch_available = self.remote_lifecycle.disconnected_generation().is_none();
+        let desktop_presentation = crate::desktop_profile::DesktopPresentation::get(cx);
         let background = presentation.background;
         let create_icon_size = appearance.icons.metrics(IconRole::Chrome).glyph_size;
         // The strip pulls back the chip inset so the first Tab sits one frame space from the
@@ -1743,10 +1845,21 @@ impl TabManager {
                     appearance,
                 )
             });
-            items = items.child(
-                self.render_tab_item(
+            let identity = view.read(cx).tab_identity();
+            let title = if identity.activity.is_empty() {
+                "Terminal"
+            } else {
+                identity.activity.as_ref()
+            };
+            let accessibility_name = if identity.place.is_empty() {
+                format!("Tab actions for {title}")
+            } else {
+                format!("Tab actions for {title} in {}", identity.place)
+            };
+            let face = self
+                .render_tab_item(
                     tab_id,
-                    view.read(cx).tab_identity(),
+                    identity,
                     active,
                     TabItemRole::InBar,
                     hover,
@@ -1758,7 +1871,48 @@ impl TabManager {
                 )
                 .children(separators)
                 .children(markers)
-                .child(fade.tracker()),
+                .child(fade.tracker());
+            let open_manager = manager.clone();
+            let lifecycle_manager = manager.clone();
+            let activate_manager = manager.clone();
+            items = items.child(
+                ContextMenu::new(
+                    ("tab-context-menu", tab_id.get()),
+                    accessibility_name,
+                    face,
+                    tab_menu_entries(
+                        active,
+                        index == 0,
+                        index == last_index,
+                        child_launch_available,
+                        desktop_presentation,
+                    ),
+                )
+                .size(MenuSize::Wide)
+                .fill_parent_height()
+                .preserve_trigger_cursor()
+                .debug_selector(format!("tab-context-menu-{}", tab_id.get()))
+                .on_open_request(move |_, _, cx| {
+                    open_manager
+                        .update(cx, |manager, cx| manager.request_tab_menu(tab_id, cx))
+                        .unwrap_or(false)
+                })
+                .on_lifecycle(move |event, cx| {
+                    let manager = lifecycle_manager.clone();
+                    let event = *event;
+                    // Menu lifecycle delivery can occur while its Window is borrowed.
+                    cx.defer(move |cx| {
+                        let _ = manager.update(cx, |manager, cx| {
+                            manager.handle_tab_menu_lifecycle(tab_id, event, cx);
+                        });
+                    });
+                })
+                .on_activate(move |activation, window, cx| {
+                    let command = *activation.action();
+                    let _ = activate_manager.update(cx, |manager, cx| {
+                        manager.perform_tab_menu_command(tab_id, command, window, cx);
+                    });
+                }),
             );
         }
         let release_manager = manager.clone();
@@ -2169,6 +2323,78 @@ fn render_tab_identity(
         )
         .child(words)
         .into_any_element()
+}
+
+/// Every Tab command carries a symbol, so all labels share the icon column. A Shortcut acts on
+/// the Active Tab, so only the Active Tab's menu advertises one.
+fn tab_menu_entries(
+    active: bool,
+    first: bool,
+    last: bool,
+    child_launch_available: bool,
+    presentation: &crate::desktop_profile::DesktopPresentation,
+) -> Vec<MenuEntry<TabMenuCommand>> {
+    let with_shortcut =
+        |entry: MenuEntry<TabMenuCommand>, action: &dyn gpui::Action| match presentation
+            .shortcut(action)
+            .filter(|_| active)
+        {
+            Some(shortcut) => entry.shortcut(shortcut),
+            None => entry,
+        };
+    vec![
+        with_shortcut(
+            MenuEntry::action("New Tab", TabMenuCommand::NewTab),
+            &CreateTab,
+        )
+        .icon(|foreground, size| {
+            Icon::new(IconName::SquarePlus, size, foreground).into_any_element()
+        })
+        .disabled(!child_launch_available)
+        .debug_selector("tab-menu-row-new-tab"),
+        MenuEntry::separator(),
+        with_shortcut(
+            MenuEntry::action("Split Right", TabMenuCommand::SplitRight),
+            &SplitRight,
+        )
+        .disabled(!child_launch_available)
+        .icon(|foreground, size| Icon::new(IconName::Columns2, size, foreground).into_any_element())
+        .debug_selector("tab-menu-row-split-right"),
+        with_shortcut(
+            MenuEntry::action("Split Down", TabMenuCommand::SplitDown),
+            &SplitDown,
+        )
+        .disabled(!child_launch_available)
+        .icon(|foreground, size| Icon::new(IconName::Rows2, size, foreground).into_any_element())
+        .debug_selector("tab-menu-row-split-down"),
+        MenuEntry::separator(),
+        with_shortcut(
+            MenuEntry::action("Move Tab Left", TabMenuCommand::MoveLeft),
+            &MoveTabLeft,
+        )
+        .disabled(first)
+        .icon(|foreground, size| {
+            Icon::new(IconName::ArrowLeft, size, foreground).into_any_element()
+        })
+        .debug_selector("tab-menu-row-move-left"),
+        with_shortcut(
+            MenuEntry::action("Move Tab Right", TabMenuCommand::MoveRight),
+            &MoveTabRight,
+        )
+        .disabled(last)
+        .icon(|foreground, size| {
+            Icon::new(IconName::ArrowRight, size, foreground).into_any_element()
+        })
+        .debug_selector("tab-menu-row-move-right"),
+        MenuEntry::separator(),
+        with_shortcut(
+            MenuEntry::action("Close Tab", TabMenuCommand::Close),
+            &CloseTab,
+        )
+        .destructive(true)
+        .icon(|foreground, size| Icon::new(IconName::X, size, foreground).into_any_element())
+        .debug_selector("tab-menu-row-close"),
+    ]
 }
 
 fn title_bar_control_focus_ring(appearance: &super::appearance::ChromeAppearance) -> Color {
@@ -2854,7 +3080,7 @@ mod tests {
     use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
     use crate::ssh::command::ValidatedRemoteShellCommand;
     use crate::terminal::testing::{
-        RecordedCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
+        RecordedCall, RecordedCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
     };
     use crate::terminal::{
         TerminalSessionChannelProvider, TerminalSessionChannelUnavailable, TerminalSessionEvent,
@@ -3278,25 +3504,286 @@ mod tests {
     }
 
     #[gpui::test]
-    fn right_clicking_a_tab_should_leave_the_active_tab_and_terminal_focus_unchanged(
-        cx: &mut TestAppContext,
-    ) {
+    fn right_clicking_a_tab_should_open_its_menu_without_activating_it(cx: &mut TestAppContext) {
         let (manager, records, cx) = tab_manager(cx);
         click("create-tab-button", cx);
         let commands_before = records.commands().len();
         right_click("tab-item-1-inactive", cx);
+        assert!(cx.debug_bounds("menu-panel-0").is_some());
         assert_eq!(
             manager.read_with(cx, |manager, _| manager.tabs.active_tab_id()),
             TabId::new(2)
         );
-        assert!(cx.debug_bounds("tab-menu-button").is_none());
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager.terminal_focus_blocker()),
+            Some(TerminalFocusBlocker::ContextMenu)
+        );
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
         assert!(cx.debug_bounds("menu-panel-0").is_none());
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager.tabs.active_tab_id()),
+            TabId::new(2)
+        );
         assert!(cx.update(|window, cx| {
             manager
                 .read(cx)
                 .focused_terminal_has_input_focus(window, cx)
         }));
-        assert_eq!(records.commands().len(), commands_before);
+        // Only the Active Tab's terminal hears the menu take focus and give it back.
+        assert_eq!(
+            records.commands()[commands_before..],
+            [
+                RecordedCall {
+                    session_id: 2,
+                    command: RecordedCommand::Focus(false),
+                },
+                RecordedCall {
+                    session_id: 2,
+                    command: RecordedCommand::Focus(true),
+                },
+            ]
+        );
+    }
+
+    /// A Shortcut acts on the Active Tab, so only the Active Tab's menu may advertise one.
+    #[gpui::test]
+    fn tab_menu_should_show_shortcuts_only_for_the_active_tab(cx: &mut TestAppContext) {
+        let (_manager, _records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
+        let rows = [
+            "tab-menu-row-new-tab-shortcut",
+            "tab-menu-row-split-right-shortcut",
+            "tab-menu-row-split-down-shortcut",
+            "tab-menu-row-move-left-shortcut",
+            "tab-menu-row-move-right-shortcut",
+            "tab-menu-row-close-shortcut",
+        ];
+
+        right_click("tab-item-2-active", cx);
+        assert!(cx.debug_bounds("tab-menu-row-close-shortcut").is_some());
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        right_click("tab-item-1-inactive", cx);
+        assert!(cx.debug_bounds("menu-panel-0").is_some());
+        for row in rows {
+            assert!(
+                cx.debug_bounds(row).is_none(),
+                "{row} must not advertise a Shortcut"
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn tab_menu_new_tab_should_create_and_activate_a_tab(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = tab_manager(cx);
+        right_click("tab-item-1-active", cx);
+        click("tab-menu-row-new-tab", cx);
+
+        assert_eq!(tab_order(&manager, cx), vec![1, 2]);
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager.tabs.active_tab_id()),
+            TabId::new(2)
+        );
+    }
+
+    #[gpui::test]
+    fn tab_menu_close_should_close_the_clicked_tab_not_the_active_tab(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
+        right_click("tab-item-1-inactive", cx);
+        click("tab-menu-row-close", cx);
+
+        assert_eq!(tab_order(&manager, cx), vec![2]);
+        assert_eq!(
+            manager.read_with(cx, |manager, _| (
+                manager.tabs.active_tab_id(),
+                manager.terminal_focus_blocker()
+            )),
+            (TabId::new(2), None)
+        );
+    }
+
+    fn pane_counts(manager: &Entity<TabManager>, cx: &mut VisualTestContext) -> Vec<usize> {
+        manager.read_with(cx, |manager, cx| {
+            manager
+                .tabs
+                .iter()
+                .map(|(_, view)| view.read(cx).pane_count())
+                .collect()
+        })
+    }
+
+    #[gpui::test]
+    fn tab_menu_split_should_activate_the_clicked_tab_and_split_its_focused_pane(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
+        right_click("tab-item-1-inactive", cx);
+        click("tab-menu-row-split-right", cx);
+
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager.tabs.active_tab_id()),
+            TabId::new(1)
+        );
+        assert_eq!(pane_counts(&manager, cx), vec![2, 1]);
+
+        right_click("tab-item-2-inactive", cx);
+        click("tab-menu-row-split-down", cx);
+
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager.tabs.active_tab_id()),
+            TabId::new(2)
+        );
+        assert_eq!(pane_counts(&manager, cx), vec![2, 2]);
+        assert!(cx.update(|window, cx| {
+            manager
+                .read(cx)
+                .focused_terminal_has_input_focus(window, cx)
+        }));
+    }
+
+    #[gpui::test]
+    fn tab_menu_should_disable_new_panes_while_the_remote_workspace_is_disconnected(
+        cx: &mut TestAppContext,
+    ) {
+        let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
+        let provider = Arc::new(SequencedTerminalSessionChannelProvider::new(destination));
+        let (manager, records, events, cx) =
+            remote_tab_manager_with_provider_and_events(cx, provider);
+        manager
+            .update(cx, |manager, cx| manager.disconnect_remote(1, cx))
+            .unwrap();
+        cx.run_until_parked();
+        let before = manager.read_with(cx, hierarchy_identity);
+
+        for row in [
+            "tab-menu-row-new-tab",
+            "tab-menu-row-split-right",
+            "tab-menu-row-split-down",
+        ] {
+            right_click("tab-item-1-active", cx);
+            click(row, cx);
+            cx.simulate_keystrokes("escape");
+            cx.run_until_parked();
+        }
+
+        assert!(events.borrow().is_empty());
+        assert_eq!(manager.read_with(cx, hierarchy_identity), before);
+        assert_eq!(records.starts().len(), 1);
+    }
+
+    #[gpui::test]
+    fn tab_menu_move_should_reorder_only_the_clicked_tab_and_stop_at_the_ends(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
+        click("create-tab-button", cx);
+
+        right_click("tab-item-1-inactive", cx);
+        click("tab-menu-row-move-right", cx);
+        assert_eq!(tab_order(&manager, cx), vec![2, 1, 3]);
+
+        right_click("tab-item-1-inactive", cx);
+        click("tab-menu-row-move-left", cx);
+        assert_eq!(tab_order(&manager, cx), vec![1, 2, 3]);
+
+        // The first Tab cannot move left, and the last Tab cannot move right.
+        for (tab, row) in [
+            ("tab-item-1-inactive", "tab-menu-row-move-left"),
+            ("tab-item-3-active", "tab-menu-row-move-right"),
+        ] {
+            right_click(tab, cx);
+            click(row, cx);
+            cx.simulate_keystrokes("escape");
+            cx.run_until_parked();
+        }
+        assert_eq!(tab_order(&manager, cx), vec![1, 2, 3]);
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager.tabs.active_tab_id()),
+            TabId::new(3)
+        );
+    }
+
+    /// An open menu keeps the entries it opened with, so a disconnect can leave Split enabled.
+    #[gpui::test]
+    fn tab_menu_split_after_a_disconnect_should_leave_the_active_tab_unchanged(
+        cx: &mut TestAppContext,
+    ) {
+        let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
+        let provider = Arc::new(SequencedTerminalSessionChannelProvider::new(destination));
+        let (manager, records, events, cx) =
+            remote_tab_manager_with_provider_and_events(cx, provider);
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| manager.create_tab(window, cx));
+        });
+        cx.run_until_parked();
+        right_click("tab-item-1-inactive", cx);
+        manager
+            .update(cx, |manager, cx| manager.disconnect_remote(1, cx))
+            .unwrap();
+        cx.run_until_parked();
+        let before = manager.read_with(cx, hierarchy_identity);
+
+        click("tab-menu-row-split-right", cx);
+
+        assert_eq!(
+            events.borrow().as_slice(),
+            [RemoteChildLaunchUnavailable::ConnectionUnavailable]
+        );
+        assert_eq!(manager.read_with(cx, hierarchy_identity), before);
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager.tabs.active_tab_id()),
+            TabId::new(2)
+        );
+        assert_eq!(records.starts().len(), 2);
+    }
+
+    /// An inactive Tab keeps the Pane bounds from its last paint, which a resize makes stale.
+    #[gpui::test]
+    fn tab_menu_split_should_use_the_current_window_size_for_an_inactive_tab(
+        cx: &mut TestAppContext,
+    ) {
+        let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
+        let provider = Arc::new(SequencedTerminalSessionChannelProvider::new(destination));
+        let (manager, records, events, cx) =
+            remote_tab_manager_with_provider_and_events(cx, provider);
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| manager.create_tab(window, cx));
+        });
+        cx.run_until_parked();
+        cx.simulate_resize(gpui::size(px(900.0), px(500.0)));
+        cx.run_until_parked();
+
+        right_click("tab-item-1-inactive", cx);
+        click("tab-menu-row-split-right", cx);
+
+        assert!(events.borrow().is_empty());
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager.tabs.active_tab_id()),
+            TabId::new(1)
+        );
+        assert_eq!(pane_counts(&manager, cx), vec![2, 1]);
+        assert_eq!(records.starts().len(), 3);
+    }
+
+    #[gpui::test]
+    fn a_secondary_click_during_a_tab_drag_should_open_no_menu(cx: &mut TestAppContext) {
+        let (_manager, _records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
+        let first = cx.debug_bounds("tab-item-1-inactive").unwrap().center();
+        let second = cx.debug_bounds("tab-item-2-active").unwrap().center();
+        drag_tab(first, &[second], cx);
+
+        cx.simulate_mouse_down(second, MouseButton::Right, Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("menu-panel-0").is_none());
     }
 
     #[gpui::test]

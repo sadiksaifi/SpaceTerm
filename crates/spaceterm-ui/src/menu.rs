@@ -929,6 +929,15 @@ impl<T: IntoElement + 'static, A: Clone + 'static> ContextMenu<T, A> {
         self
     }
 
+    /// Makes the context-menu decorator fill the height allocated by its parent.
+    ///
+    /// Use this for children whose percentage height requires a definite containing block, such
+    /// as an item filling a strip's height.
+    pub fn fill_parent_height(mut self) -> Self {
+        self.core.fill_parent_height = true;
+        self
+    }
+
     /// Leaves pointer cursor selection to the decorated content and its ancestors.
     ///
     /// Context-menu triggers request the default cursor unless this is enabled.
@@ -1424,6 +1433,7 @@ struct MenuControl<A> {
     disabled: bool,
     icon_trigger: bool,
     fill_parent_width: bool,
+    fill_parent_height: bool,
     preserve_trigger_cursor: bool,
     debug_selector: Option<String>,
     /// Paints the trigger as the menu segment of a combo button instead of a menu trigger.
@@ -1451,6 +1461,7 @@ impl<A> MenuControl<A> {
             disabled: false,
             icon_trigger: false,
             fill_parent_width: false,
+            fill_parent_height: false,
             preserve_trigger_cursor: false,
             debug_selector: None,
             button_segment: None,
@@ -1608,6 +1619,7 @@ impl<A: Clone + 'static> MenuControl<A> {
         let key_state = state.downgrade();
         let open_state = state.downgrade();
         let fill_parent_width = self.fill_parent_width;
+        let fill_parent_height = self.fill_parent_height;
         let preserve_trigger_cursor = self.preserve_trigger_cursor;
         let debug_selector = self.debug_selector;
         let focus_selector = debug_selector
@@ -1624,6 +1636,7 @@ impl<A: Clone + 'static> MenuControl<A> {
             .relative()
             .when(!preserve_trigger_cursor, |trigger| trigger.cursor_default())
             .when(fill_parent_width, |trigger| trigger.w_full())
+            .when(fill_parent_height, |trigger| trigger.h_full())
             .when(!open && self.kind != TriggerKind::Context, |trigger| {
                 trigger.track_focus(&focus_handle)
             })
@@ -1776,6 +1789,7 @@ impl<A: Clone + 'static> MenuControl<A> {
         div()
             .relative()
             .when(fill_parent_width, |root| root.w_full())
+            .when(fill_parent_height, |root| root.h_full())
             .child(crate::Ringed::new(trigger, ring))
             .when(open && !combo_box_overlay_hosted, |root| {
                 root.child(render_overlay(state, window, cx))
@@ -3378,6 +3392,7 @@ fn render_row(
     let label_selector = format!("{row_selector}-label");
     let mark_selector = format!("{row_selector}-mark");
     let icon_selector = format!("{row_selector}-icon");
+    let shortcut_selector = format!("{row_selector}-shortcut");
     let mut row = div()
         .id(index)
         .debug_selector(move || row_selector)
@@ -3440,6 +3455,7 @@ fn render_row(
         .when_some(shortcut, |row, shortcut| {
             row.child(
                 div()
+                    .debug_selector(move || shortcut_selector)
                     .text_size(style.metrics.shortcut_font_size)
                     .line_height(style.metrics.shortcut_line_height)
                     .font(menu_shortcut_font(typography).clone())
