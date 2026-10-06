@@ -952,10 +952,13 @@ impl SettingsWindow {
                                         .debug_selector(|| "settings-no-results".to_owned())
                                         .px(row_horizontal_inset(appearance))
                                         .text_color(gpui_color(appearance.colors.text_muted))
-                                        .child(SharedString::from(format!(
-                                            "No settings match “{}”.",
-                                            self.query
-                                        ))),
+                                        .child(gpui::Text::new(
+                                            "settings-no-results".into(),
+                                            SharedString::from(format!(
+                                                "No settings match “{}”.",
+                                                self.query
+                                            )),
+                                        )),
                                 )
                             }),
                     )

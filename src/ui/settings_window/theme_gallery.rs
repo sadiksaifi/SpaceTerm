@@ -215,10 +215,13 @@ impl SettingsWindow {
                     .chrome_text(appearance.typography.style(TextRole::Secondary))
                     .text_color(gpui_color(colors.text_secondary))
                     .whitespace_normal()
-                    .child(
-                        "Terminal panes follow the system appearance. Select Light or Dark, then \
-                         choose its theme below.",
-                    ),
+                    .child(Text::new(
+                        "settings-theme-slots-guidance".into(),
+                        SharedString::from(
+                            "Terminal panes follow the system appearance. Select Light or Dark, \
+                             then choose its theme below.",
+                        ),
+                    )),
             )
             .into_any_element()
     }
@@ -399,7 +402,10 @@ impl SettingsWindow {
                         .chrome_text(appearance.typography.style(TextRole::Secondary))
                         .text_color(gpui_color(colors.text_secondary))
                         .whitespace_normal()
-                        .child(SharedString::from(format!("No themes match “{query}”."))),
+                        .child(Text::new(
+                            "settings-theme-gallery-no-results".into(),
+                            SharedString::from(format!("No themes match “{query}”.")),
+                        )),
                 )
             })
             .child(
@@ -707,6 +713,9 @@ fn current_theme_details(
 ) -> impl IntoElement {
     let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
     div()
+        .id("settings-current-theme-details")
+        .role(accesskit::Role::Group)
+        .aria_label("Current theme")
         .flex()
         .flex_row()
         .items_center()
@@ -730,14 +739,20 @@ fn current_theme_details(
                         .truncate()
                         .chrome_text(appearance.typography.style(TextRole::Section))
                         .text_color(gpui_color(colors.text))
-                        .child(preview_name(preview)),
+                        .child(Text::new(
+                            "settings-current-theme-name".into(),
+                            preview_name(preview),
+                        )),
                 )
                 .child(
                     div()
                         .chrome_text(appearance.typography.style(TextRole::Secondary))
                         .text_color(gpui_color(colors.text_secondary))
                         .whitespace_normal()
-                        .child(preview_origin(preview)),
+                        .child(Text::new(
+                            "settings-current-theme-origin".into(),
+                            preview_origin(preview),
+                        )),
                 )
                 .child(
                     div()

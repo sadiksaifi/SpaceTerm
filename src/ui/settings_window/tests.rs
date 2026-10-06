@@ -4556,3 +4556,33 @@ fn settings_publish_headings_row_titles_and_guidance_in_reading_order(cx: &mut T
     assert!(position("Label Appearance") < guidance);
     assert!(guidance < position("RadioGroup Appearance"));
 }
+
+#[gpui::test]
+fn a_fixed_appearance_publishes_the_current_theme_and_its_origin(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let (window, _harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::Themes, cx);
+    cx.update(|_, cx| {
+        window.update(cx, |settings, cx| {
+            settings.set_appearance_mode(AppearanceMode::Light, cx)
+        })
+    });
+    let tree = A11yTree::read(cx);
+    let current = tree.node("Current theme");
+    assert_eq!(current["aria"]["role"], "Group");
+    let text = tree
+        .children(current)
+        .into_iter()
+        .filter_map(|node| node["aria"]["value"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(text, ["SpaceTerm Light", "Built into SpaceTerm"]);
+
+    set_query(&window, "zzzz", cx);
+    let tree = A11yTree::read(cx);
+    assert!(
+        tree.with_role("Label")
+            .iter()
+            .any(|label| label["aria"]["value"] == "No settings match “zzzz”.")
+    );
+}
