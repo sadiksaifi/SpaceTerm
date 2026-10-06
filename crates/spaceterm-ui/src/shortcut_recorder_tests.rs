@@ -382,3 +382,50 @@ fn the_value_or_empty_label_is_presented_when_idle(cx: &mut TestAppContext) {
         ("Primary+T".into(), ShortcutTone::Value)
     );
 }
+
+#[gpui::test]
+fn shortcut_recorder_publishes_value_recording_focus_and_press(cx: &mut TestAppContext) {
+    use crate::a11y_testing::{A11yTree, perform, supports};
+    use gpui::accesskit::Action;
+
+    let mut harness = harness(cx);
+    harness.recorder.update(harness.cx, |recorder, cx| {
+        recorder.set_value(Some("Primary+T".into()), cx);
+    });
+    let tree = A11yTree::read(harness.cx);
+    let recorder = tree.node("New Tab");
+    assert_eq!(recorder["aria"]["role"], "Button");
+    assert_eq!(recorder["aria"]["value"], "Primary+T");
+    assert!(supports(recorder, Action::Click));
+    assert_eq!(tree.focused().unwrap()["aria"]["label"], "New Tab");
+
+    perform(harness.cx, recorder, Action::Click);
+    assert!(harness.recording());
+    let tree = A11yTree::read(harness.cx);
+    assert_eq!(tree.node("New Tab")["aria"]["value"], "Primary+T");
+    assert_eq!(
+        tree.node("New Tab")["aria"]["description"],
+        "Recording Shortcut. Type Shortcut"
+    );
+    assert_eq!(
+        tree.with_role("Status")[0]["aria"]["value"],
+        "Recording Shortcut. Type Shortcut"
+    );
+    harness.cx.simulate_keystrokes("cmd-w");
+    assert_eq!(harness.take_events(), [recorded("cmd-w")]);
+    assert_eq!(harness.closes.get(), 0);
+
+    let tree = A11yTree::read(harness.cx);
+    perform(harness.cx, tree.node("New Tab"), Action::Click);
+    let tree = A11yTree::read(harness.cx);
+    perform(harness.cx, tree.node("New Tab"), Action::Click);
+    assert!(!harness.recording());
+    assert_eq!(harness.take_events(), [ShortcutRecorderEvent::Cancelled]);
+    assert!(A11yTree::read(harness.cx).with_role("Status").is_empty());
+    harness
+        .recorder
+        .update(harness.cx, |recorder, cx| recorder.set_disabled(true, cx));
+    let tree = A11yTree::read(harness.cx);
+    assert_eq!(tree.node("New Tab")["aria"]["disabled"], true);
+    assert!(!supports(tree.node("New Tab"), Action::Click));
+}
