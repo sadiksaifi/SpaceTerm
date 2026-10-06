@@ -25,7 +25,7 @@ fn install(cx: &mut TestAppContext) -> (Settings, RecordingAppearancePlatform, A
     let settings = Settings::load(storage.clone());
     let platform = RecordingAppearancePlatform::default();
     platform.set_system_appearance(Some(Appearance::Dark));
-    platform.set_native_window_transparency_supported(true);
+    platform.set_native_window_opacity_supported(true);
     cx.update(|cx| {
         appearance_runtime::install(settings.clone(), Rc::new(platform.clone()), cx).unwrap();
         crate::ui::init(cx).unwrap();
@@ -62,19 +62,15 @@ fn unavailable_window_effects_show_defaults_and_refuse_preview_edits(cx: &mut Te
     let (_, platform, _) = install(cx);
     let (workbench, cx) = open_workbench_window(cx);
     workbench.update(cx, |workbench, cx| {
-        workbench.apply(
-            |preview| preview.set_transparency(0.8),
-            "Fixture transparency",
-            cx,
-        );
+        workbench.apply(|preview| preview.set_opacity(0.2), "Fixture opacity", cx);
         workbench.apply(|preview| preview.set_blur(false), "Fixture blur", cx);
     });
     cx.run_until_parked();
     for show_borders in [false, true] {
         platform.set_show_borders(show_borders);
         cx.run_until_parked();
-        for (transparency, blur) in [(false, false), (true, false), (false, true)] {
-            platform.set_native_window_transparency_supported(transparency);
+        for (opacity, blur) in [(false, false), (true, false), (false, true)] {
+            platform.set_native_window_opacity_supported(opacity);
             platform.set_native_window_blur_supported(blur);
             cx.run_until_parked();
             let before = workbench.read_with(cx, |workbench, _| workbench.preview.document());
@@ -86,8 +82,8 @@ fn unavailable_window_effects_show_defaults_and_refuse_preview_edits(cx: &mut Te
                 "Blur must show its effective default"
             );
             // The disabled selected segment still presents the effective Default stop.
-            let default_bounds = cx.debug_bounds("workbench-transparency-default").unwrap();
-            let maximum_bounds = cx.debug_bounds("workbench-transparency-maximum").unwrap();
+            let default_bounds = cx.debug_bounds("workbench-opacity-default").unwrap();
+            let minimum_bounds = cx.debug_bounds("workbench-opacity-minimum").unwrap();
             cx.update(|window, cx| {
                 let surface = crate::ui::appearance::settings::shared(cx);
                 let appearance = &surface.chrome;
@@ -108,13 +104,13 @@ fn unavailable_window_effects_show_defaults_and_refuse_preview_edits(cx: &mut Te
                     theme.paint(true, false, false, false).background().into()
                 );
                 assert_eq!(
-                    fill(maximum_bounds).map(|fill| gpui::Rgba::from(fill.as_solid().unwrap()).a),
+                    fill(minimum_bounds).map(|fill| gpui::Rgba::from(fill.as_solid().unwrap()).a),
                     show_borders.then(|| theme.paint(false, false, false, false).background().a)
                 );
             });
             for selector in [
-                "workbench-transparency-opaque",
-                "workbench-transparency-maximum",
+                "workbench-opacity-opaque",
+                "workbench-opacity-minimum",
                 "workbench-blur",
             ] {
                 click(selector, cx);
@@ -127,19 +123,32 @@ fn unavailable_window_effects_show_defaults_and_refuse_preview_edits(cx: &mut Te
         }
     }
     // Once both effects return, the controls present and edit the retained choices again.
-    platform.set_native_window_transparency_supported(true);
+    platform.set_native_window_opacity_supported(true);
     platform.set_native_window_blur_supported(true);
     cx.run_until_parked();
     let track = cx.debug_bounds("workbench-blur-indicator").unwrap();
     let thumb = cx.debug_bounds("workbench-blur-thumb").unwrap();
     assert!(thumb.center().x < track.center().x);
-    click("workbench-transparency-maximum", cx);
+    click("workbench-opacity-minimum", cx);
     click("workbench-blur", cx);
     let preferences = workbench.read_with(cx, |workbench, _| {
         workbench.preview.document().appearance.window
     });
-    assert_eq!(preferences.transparency, 1.0);
+    assert_eq!(preferences.opacity, 0.0);
     assert!(preferences.blur);
+    for (selector, opacity) in [
+        ("workbench-opacity-opaque", 1.0),
+        ("workbench-opacity-default", 0.65),
+        ("workbench-opacity-minimum", 0.0),
+    ] {
+        click(selector, cx);
+        assert_eq!(
+            workbench.read_with(cx, |workbench, _| {
+                workbench.preview.document().appearance.window.opacity
+            }),
+            opacity
+        );
+    }
 }
 
 #[test]
@@ -392,26 +401,30 @@ fn toolbar_and_window_controls_keep_separate_space_at_every_density(cx: &mut Tes
 fn simulations_apply_and_system_settings_ends_them(cx: &mut TestAppContext) {
     let (_, platform, _) = install(cx);
     let (workbench, cx) = open_workbench_window(cx);
-    let reduce_transparency = |cx: &mut VisualTestContext| {
+    let require_opaque_surfaces = |cx: &mut VisualTestContext| {
         cx.update(|_, cx| {
             appearance_runtime::current(cx)
                 .chrome
                 .composition
                 .capabilities
-                .reduce_transparency
+                .require_opaque_surfaces
         })
     };
 
     workbench.update(cx, |workbench, cx| {
         workbench.simulate(
-            Simulation::Accessibility(AccessibilityPreviewFact::ReduceTransparency),
+            Simulation::Accessibility(AccessibilityPreviewFact::RequireOpaqueSurfaces),
             cx,
         );
     });
     cx.run_until_parked();
 
-    assert!(reduce_transparency(cx));
-    assert!(!platform.accessibility_display_options().reduce_transparency);
+    assert!(require_opaque_surfaces(cx));
+    assert!(
+        !platform
+            .accessibility_display_options()
+            .require_opaque_surfaces
+    );
     assert!(status(&workbench, cx).contains("System Settings are unchanged"));
 
     workbench.update(cx, |workbench, cx| {
@@ -420,7 +433,7 @@ fn simulations_apply_and_system_settings_ends_them(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
 
-    assert!(!reduce_transparency(cx));
+    assert!(!require_opaque_surfaces(cx));
     assert!(cx.update(|_, cx| !workbench.read(cx).simulate_inactive));
     assert_eq!(
         status(&workbench, cx),
@@ -654,10 +667,10 @@ fn floating_tones_stay_on_their_appearance_side(cx: &mut TestAppContext) {
         (AppearanceMode::Dark, Appearance::Dark),
         (AppearanceMode::Light, Appearance::Light),
     ] {
-        for transparency in [0.0, 0.35, 1.0] {
+        for opacity in [1.0, 0.65, 0.0] {
             workbench.update(cx, |workbench, cx| {
                 workbench.preview.set_mode(mode).unwrap();
-                workbench.preview.set_transparency(transparency).unwrap();
+                workbench.preview.set_opacity(opacity).unwrap();
                 cx.notify();
             });
             cx.run_until_parked();
@@ -688,11 +701,11 @@ fn floating_tones_stay_on_their_appearance_side(cx: &mut TestAppContext) {
                         match appearance {
                             Appearance::Light => assert!(
                                 lightness >= 50.0,
-                                "{mode:?} {transparency} {activity:?} {role:?} crossed below L* 50 over {endpoint:?}: {lightness:.2}"
+                                "{mode:?} {opacity} {activity:?} {role:?} crossed below L* 50 over {endpoint:?}: {lightness:.2}"
                             ),
                             Appearance::Dark => assert!(
                                 lightness < 50.0,
-                                "{mode:?} {transparency} {activity:?} {role:?} crossed above L* 50 over {endpoint:?}: {lightness:.2}"
+                                "{mode:?} {opacity} {activity:?} {role:?} crossed above L* 50 over {endpoint:?}: {lightness:.2}"
                             ),
                         }
                     }

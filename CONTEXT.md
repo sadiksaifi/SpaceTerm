@@ -193,7 +193,7 @@ _Avoid_: session, terminal
 
 **Window Background Appearance**: Native window presentation, independent of Light/Dark and color alpha.
 
-**Transparency**: The amount of underlying content visible through window backgrounds and floating surfaces.
+**Opacity**: The amount of underlying content covered by window backgrounds and floating surfaces.
 
 **Density**: The Compact or Comfortable spacing of Application Chrome.
 

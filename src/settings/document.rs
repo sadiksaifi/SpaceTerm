@@ -10,7 +10,7 @@ use crate::appearance::{
 };
 use crate::keybindings::KeybindingPreferences;
 
-const SETTINGS_SCHEMA_VERSION: u32 = 3;
+const SETTINGS_SCHEMA_VERSION: u32 = 4;
 pub(super) const MAX_DOCUMENT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_DEPTH: usize = 32;
 
@@ -124,11 +124,44 @@ fn validate_selection(
 
 pub(crate) fn parse_settings(bytes: &[u8]) -> Result<SettingsDocument, SettingsDocumentError> {
     preflight(bytes).map_err(SettingsDocumentError::from_preflight)?;
-    let mut document: SettingsDocument =
+    let mut value: serde_json::Value =
         serde_json::from_slice(bytes).map_err(|_| SettingsDocumentError::InvalidJson)?;
+    match value
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+    {
+        Some(3) => migrate_v3_settings(&mut value)?,
+        Some(version) if version == u64::from(SETTINGS_SCHEMA_VERSION) => {}
+        Some(_) => return Err(SettingsDocumentError::UnsupportedVersion),
+        None => return Err(SettingsDocumentError::InvalidJson),
+    }
+    let mut document: SettingsDocument =
+        serde_json::from_value(value).map_err(|_| SettingsDocumentError::InvalidJson)?;
     document.select_builtin_for_missing_themes();
     document.validate()?;
     Ok(document)
+}
+
+fn migrate_v3_settings(value: &mut serde_json::Value) -> Result<(), SettingsDocumentError> {
+    let window = value
+        .pointer_mut("/appearance/window")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or(SettingsDocumentError::InvalidJson)?;
+    if window.contains_key("opacity") {
+        return Err(SettingsDocumentError::InvalidJson);
+    }
+    let transparency: f32 = serde_json::from_value(
+        window
+            .remove("transparency")
+            .ok_or(SettingsDocumentError::InvalidJson)?,
+    )
+    .map_err(|_| SettingsDocumentError::InvalidJson)?;
+    if !transparency.is_finite() || !(0.0..=1.0).contains(&transparency) {
+        return Err(SettingsDocumentError::InvalidAppearance);
+    }
+    window.insert("opacity".into(), serde_json::json!(1.0 - transparency));
+    value["schema_version"] = serde_json::json!(SETTINGS_SCHEMA_VERSION);
+    Ok(())
 }
 
 pub(crate) fn export_settings(

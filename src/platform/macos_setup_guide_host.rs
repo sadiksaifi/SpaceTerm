@@ -103,7 +103,7 @@ impl SetupGuideHost for MacosSetupGuideHost {
             return false;
         };
         // An ordinary, unmodified glass view below GPUI's rendering view, which paints the guide
-        // over it with transparency wherever the guide draws nothing.
+        // over it with zero opacity wherever the guide draws nothing.
         let glass =
             NSGlassEffectView::initWithFrame(NSGlassEffectView::alloc(mtm), content_view.bounds());
         glass.setStyle(NSGlassEffectViewStyle::Regular);

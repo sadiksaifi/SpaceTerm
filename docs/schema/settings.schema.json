@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://spaceterm.dev/schema/settings-v3.json",
+  "$id": "https://spaceterm.dev/schema/settings-v4.json",
   "title": "SpaceTerm Settings",
   "type": "object",
   "additionalProperties": false,
@@ -12,7 +12,7 @@
   ],
   "properties": {
     "schema_version": {
-      "const": 3
+      "const": 4
     },
     "revision": {
       "type": "integer",
@@ -183,11 +183,12 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "transparency": {
+        "opacity": {
+          "description": "Window background opacity: 0 is transparent and 1 is opaque.",
           "type": "number",
           "minimum": 0,
           "maximum": 1,
-          "default": 0.35
+          "default": 0.65
         },
         "blur": {
           "type": "boolean",
@@ -202,7 +203,7 @@
       },
       "required": [
         "density",
-        "transparency",
+        "opacity",
         "blur"
       ]
     },

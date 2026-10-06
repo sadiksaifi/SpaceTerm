@@ -113,7 +113,7 @@ mod tests {
             mode: AppearanceMode::Light,
             ..Default::default()
         };
-        preferences.window.transparency = 1.0;
+        preferences.window.opacity = 0.0;
         let mut capabilities = CompositionCapabilities::new(true, true);
         capabilities.increase_contrast = increase_contrast;
         let resolved = catalog

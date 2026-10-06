@@ -484,15 +484,15 @@ fn nonzero_row_state_uses_fallback_when_no_nonzero_readable_alpha_exists() {
 
 /// Built-in row content stays authored when possible and remains readable across materials.
 #[test]
-fn overlay_row_content_stays_readable_across_transparency_in_both_appearances() {
+fn overlay_row_content_stays_readable_across_opacity_in_both_appearances() {
     use crate::appearance::{
         Appearance, AppearancePreferences, ResolvedWindowComposition, builtin_chrome_base,
     };
     for appearance in [Appearance::Light, Appearance::Dark] {
         let reference = builtin_chrome_base(appearance).opaque_presentation();
-        let rows_at = |transparency: f32| {
+        let rows_at = |opacity: f32| {
             let mut preferences = AppearancePreferences::default();
-            preferences.window.transparency = transparency;
+            preferences.window.opacity = opacity;
             let materials = ResolvedWindowComposition::resolve(
                 &preferences.window,
                 crate::appearance::CompositionCapabilities::new(true, true),
@@ -535,9 +535,9 @@ fn overlay_row_content_stays_readable_across_transparency_in_both_appearances() 
                 ]
             }),
         ];
-        let (opaque_rows, _) = rows_at(0.0);
-        for transparency in [0.15, 1.0] {
-            let (rows, paint) = rows_at(transparency);
+        let (opaque_rows, _) = rows_at(1.0);
+        for opacity in [0.85, 0.0] {
+            let (rows, paint) = rows_at(opacity);
             for (selected, hovered, pick) in states {
                 let [fill, foreground, secondary, icon, matched, border] = pick(&reference);
                 let opaque = OverlayRow::resolve(
@@ -560,7 +560,7 @@ fn overlay_row_content_stays_readable_across_transparency_in_both_appearances() 
                 assert_eq!(
                     rows.resolve(true, selected, hovered),
                     expected.paint(),
-                    "{appearance:?} at {transparency}: rows use the final material endpoints"
+                    "{appearance:?} at {opacity}: rows use the final material endpoints"
                 );
                 let backgrounds = if paint.elevated_surface_background.is_opaque() {
                     [expected.fill.source_over(paint.elevated_surface_background); 2]
@@ -580,18 +580,18 @@ fn overlay_row_content_stays_readable_across_transparency_in_both_appearances() 
                             .source_over(background)
                             .contrast_ratio(background)
                             >= 4.5),
-                        "{appearance:?} at {transparency}: {resolved:?} must read over {backgrounds:?}"
+                        "{appearance:?} at {opacity}: {resolved:?} must read over {backgrounds:?}"
                     );
                     if backgrounds.into_iter().all(|background| {
                         authored.source_over(background).contrast_ratio(background) >= 4.5
                     }) {
                         assert_eq!(
                             resolved, authored,
-                            "{appearance:?} at {transparency}: readable authored content stays exact"
+                            "{appearance:?} at {opacity}: readable authored content stays exact"
                         );
                     }
                 }
-                if transparency == 1.0 {
+                if opacity == 0.0 {
                     assert!(
                         expected.fill.a < 255,
                         "{appearance:?}: a row state must still transmit its backing: {:?}",
@@ -611,7 +611,7 @@ fn overlay_row_content_stays_readable_across_transparency_in_both_appearances() 
             let readable = readable_on(foreground, reference.elevated_surface_background, 4.5);
             assert!(
                 readable.contrast_ratio(Color::BLACK) < readable.contrast_ratio(Color::WHITE),
-                "Light overlay text stays dark at every transparency"
+                "Light overlay text stays dark at every opacity"
             );
         }
     }
@@ -633,7 +633,7 @@ fn built_in_floating_row_states_remain_distinct_translucent_and_readable_at_maxi
             },
             ..AppearancePreferences::default()
         };
-        preferences.window.transparency = 1.0;
+        preferences.window.opacity = 0.0;
         let resolved = ThemeCatalog::default()
             .resolve(
                 AppearanceGeneration::INITIAL,
@@ -918,7 +918,7 @@ const FLOATING_ROLES: [FloatingRole; 6] = [
 #[test]
 fn light_selections_and_terminal_share_the_common_surface() {
     let (resolved, prepared) =
-        resolve_case(Appearance::Light, ChromeDensity::Compact, 0.0, true, true);
+        resolve_case(Appearance::Light, ChromeDensity::Compact, 1.0, true, true);
     let selected = Color::rgb(0xfdfdfd);
     let popup_selected = selected;
     assert_eq!(
@@ -1016,11 +1016,11 @@ fn light_selections_and_terminal_share_the_common_surface() {
 
 #[test]
 fn light_navigation_keeps_quiet_edges_and_uses_the_rim_for_selected_hover() {
-    for transparency in [0.0, 0.35, 1.0] {
+    for opacity in [1.0, 0.65, 0.0] {
         let (_, prepared) = resolve_case(
             Appearance::Light,
             ChromeDensity::Compact,
-            transparency,
+            opacity,
             true,
             true,
         );
@@ -1053,16 +1053,16 @@ fn light_navigation_keeps_quiet_edges_and_uses_the_rim_for_selected_hover() {
             let hovered_edge = paint.hover_rim.unwrap().source_over(host);
             assert_eq!(
                 paint.fill, paint.hover_fill,
-                "Light {name} at {transparency}: selected hover should keep its content fill"
+                "Light {name} at {opacity}: selected hover should keep its content fill"
             );
             assert!(
                 (1.025..=1.09).contains(&edge.contrast_ratio(host)),
-                "Light {name} at {transparency}: the resting lift {edge:?} must stay visible on \
+                "Light {name} at {opacity}: the resting lift {edge:?} must stay visible on \
                  {host:?} without drawing a border"
             );
             assert!(
                 hovered_edge.contrast_ratio(host) > edge.contrast_ratio(host),
-                "Light {name} at {transparency}: selected hover must strengthen its rim"
+                "Light {name} at {opacity}: selected hover must strengthen its rim"
             );
         }
     }
@@ -1072,11 +1072,11 @@ fn light_navigation_keeps_quiet_edges_and_uses_the_rim_for_selected_hover() {
 fn light_settings_grouping_uses_surface_separation_and_quiet_outer_edges() {
     use crate::ui::appearance::settings::SettingsSurfaceRole::{Canvas, Card};
 
-    for transparency in [0.0, 0.35, 1.0] {
+    for opacity in [1.0, 0.65, 0.0] {
         let (resolved, _) = resolve_case(
             Appearance::Light,
             ChromeDensity::Compact,
-            transparency,
+            opacity,
             true,
             true,
         );
@@ -1090,26 +1090,26 @@ fn light_settings_grouping_uses_surface_separation_and_quiet_outer_edges() {
 
         assert!(
             card.r > canvas.r && card.contrast_ratio(canvas) >= 1.05,
-            "Light Settings at {transparency}: card {card:?} must separate from canvas {canvas:?} without relying on an outline"
+            "Light Settings at {opacity}: card {card:?} must separate from canvas {canvas:?} without relying on an outline"
         );
         assert!(
             edge == card,
-            "Light Settings at {transparency}: a group must not need a decorative outline"
+            "Light Settings at {opacity}: a group must not need a decorative outline"
         );
         assert!(
             (1.12..=1.22).contains(&divider.contrast_ratio(card)),
-            "Light Settings at {transparency}: inset row rule {divider:?} must remain visible and quiet on {card:?}"
+            "Light Settings at {opacity}: inset row rule {divider:?} must remain visible and quiet on {card:?}"
         );
     }
 }
 
 #[test]
 fn dark_search_fields_separate_from_their_host_without_competing_with_selection() {
-    for transparency in [0.0, 0.35] {
+    for opacity in [1.0, 0.65] {
         let (resolved, _) = resolve_case(
             Appearance::Dark,
             ChromeDensity::Compact,
-            transparency,
+            opacity,
             true,
             true,
         );
@@ -1123,7 +1123,7 @@ fn dark_search_fields_separate_from_their_host_without_competing_with_selection(
         let field = colors.input_background.source_over(host);
         assert!(
             field.r > host.r && field.contrast_ratio(host) >= 1.12,
-            "Dark search fill must remain distinct at {transparency}: {field:?} on {host:?}"
+            "Dark search fill must remain distinct at {opacity}: {field:?} on {host:?}"
         );
         assert!(colors.input_text.source_over(field).contrast_ratio(field) >= 4.5);
         assert!(
@@ -1154,12 +1154,12 @@ fn dark_search_fields_separate_from_their_host_without_competing_with_selection(
 fn dark_settings_sidebar_separates_from_canvas_without_changing_transmission() {
     use crate::ui::appearance::settings::SettingsSurfaceRole::{Canvas, Sidebar};
 
-    for transparency in [0.0, 0.35] {
+    for opacity in [1.0, 0.65] {
         for blur in [false, true] {
             let (resolved, _) = resolve_case(
                 Appearance::Dark,
                 ChromeDensity::Compact,
-                transparency,
+                opacity,
                 blur,
                 true,
             );
@@ -1175,7 +1175,7 @@ fn dark_settings_sidebar_separates_from_canvas_without_changing_transmission() {
                 assert!(
                     sidebar.background.r > canvas.background.r
                         && sidebar.background.contrast_ratio(canvas.background) >= 1.15,
-                    "Dark Settings sidebar must separate by fill at {transparency}: {sidebar:?}, {canvas:?}"
+                    "Dark Settings sidebar must separate by fill at {opacity}: {sidebar:?}, {canvas:?}"
                 );
                 assert_eq!(sidebar.paint.a, canvas.paint.a);
                 assert!(settings.sidebar_edge().is_none());
@@ -1219,7 +1219,7 @@ fn dark_settings_sidebar_separates_from_canvas_without_changing_transmission() {
 }
 
 #[test]
-fn settings_surfaces_follow_window_transparency_and_controls_use_their_actual_hosts() {
+fn settings_surfaces_follow_window_opacity_and_controls_use_their_actual_hosts() {
     use crate::ui::appearance::settings::SettingsSurfaceRole::{Canvas, Card, Sidebar};
 
     let cumulative_alpha = |under: u8, over: u8| {
@@ -1228,9 +1228,9 @@ fn settings_surfaces_follow_window_transparency_and_controls_use_their_actual_ho
         ((over + under * (1.0 - over)) * 255.0).round() as u8
     };
     for appearance in [Appearance::Light, Appearance::Dark] {
-        for transparency in [0.0, 0.35, 1.0] {
+        for opacity in [1.0, 0.65, 0.0] {
             let (resolved, _) =
-                resolve_case(appearance, ChromeDensity::Compact, transparency, true, true);
+                resolve_case(appearance, ChromeDensity::Compact, opacity, true, true);
             let authored = resolved.chrome.colors.clone();
             let (active, inactive) = ChromeAppearance::prepare_variants(&resolved.chrome);
             let (settings, _) = crate::ui::appearance::settings::prepare_variants(
@@ -1250,7 +1250,7 @@ fn settings_surfaces_follow_window_transparency_and_controls_use_their_actual_ho
             ] {
                 assert_eq!(settings.chrome.control_host_background(host), expected);
             }
-            if transparency == 0.0 {
+            if opacity == 1.0 {
                 assert_eq!([sidebar.paint.a, canvas.paint.a, card.paint.a], [255; 3]);
             } else {
                 let card_alpha = cumulative_alpha(canvas.paint.a, card.paint.a);
@@ -1261,7 +1261,7 @@ fn settings_surfaces_follow_window_transparency_and_controls_use_their_actual_ho
                             crate::appearance::SurfaceRole::Sheet,
                             settings.chrome.colors.background,
                         ),
-                        "Settings must not halve the requested window transparency"
+                        "Settings must retain the requested window opacity"
                     );
                     assert_eq!(sidebar.paint.a, canvas.paint.a);
                 } else {
@@ -1278,10 +1278,10 @@ fn settings_surfaces_follow_window_transparency_and_controls_use_their_actual_ho
             }
         }
 
-        let (resolved, _) = resolve_case_with_transparency_accessibility(
+        let (resolved, _) = resolve_case_with_opacity_accessibility(
             appearance,
             ChromeDensity::Compact,
-            1.0,
+            0.0,
             true,
             true,
             false,
@@ -1300,7 +1300,7 @@ fn settings_surfaces_follow_window_transparency_and_controls_use_their_actual_ho
     }
 
     let (mut resolved, _) =
-        resolve_case(Appearance::Light, ChromeDensity::Compact, 0.35, true, true);
+        resolve_case(Appearance::Light, ChromeDensity::Compact, 0.65, true, true);
     let authored_panel = Color::rgb(0x7a91b3);
     std::sync::Arc::make_mut(&mut resolved.chrome)
         .colors
@@ -1313,11 +1313,11 @@ fn settings_surfaces_follow_window_transparency_and_controls_use_their_actual_ho
 
 #[test]
 fn light_unfocused_navigation_and_segments_keep_translucent_raised_selections() {
-    for transparency in [0.0, 0.35, 1.0] {
+    for opacity in [1.0, 0.65, 0.0] {
         let (_, prepared) = resolve_case(
             Appearance::Light,
             ChromeDensity::Compact,
-            transparency,
+            opacity,
             true,
             true,
         );
@@ -1326,7 +1326,7 @@ fn light_unfocused_navigation_and_segments_keep_translucent_raised_selections() 
         // never a darker fill invented to reach a floor the window's material cannot hold.
         assert!(
             [Color::rgb(0xfdfdfd), Color::rgb(0xf4f4f4)].contains(&panel.row_selected_background),
-            "unfocused sidebar at transparency {transparency}: {:?}; active {:?}; host {:?}",
+            "unfocused sidebar at opacity {opacity}: {:?}; active {:?}; host {:?}",
             panel.row_selected_background,
             prepared.panel_controls.reference.row_selected_background,
             prepared.control_host_background(spaceterm_ui::ControlHost::Panel),
@@ -1343,7 +1343,7 @@ fn light_unfocused_navigation_and_segments_keep_translucent_raised_selections() 
             fill,
             prepared.selection_surface(panel.panel_background, panel.row_selected_background)
         );
-        assert_eq!(fill.a == 255, transparency == 0.0);
+        assert_eq!(fill.a == 255, opacity == 1.0);
         for (host, colors) in [
             (
                 spaceterm_ui::ControlHost::Window,
@@ -1364,12 +1364,12 @@ fn light_unfocused_navigation_and_segments_keep_translucent_raised_selections() 
             let selected = colors.selection_background.source_over(track);
             assert!(
                 selected.r > track.r,
-                "selected segment should remain raised on {host:?} at {transparency}"
+                "selected segment should remain raised on {host:?} at {opacity}"
             );
             assert_eq!(
                 colors.selection_background.a == 255,
-                transparency == 0.0,
-                "selected segment on {host:?} must respect transparency {transparency}"
+                opacity == 1.0,
+                "selected segment on {host:?} must respect opacity {opacity}"
             );
         }
     }
@@ -1377,7 +1377,7 @@ fn light_unfocused_navigation_and_segments_keep_translucent_raised_selections() 
 
 #[test]
 fn light_navigation_uses_raised_surfaces_without_erasing_popup_selection() {
-    let (_, prepared) = resolve_case(Appearance::Light, ChromeDensity::Compact, 0.0, true, true);
+    let (_, prepared) = resolve_case(Appearance::Light, ChromeDensity::Compact, 1.0, true, true);
     let background = Color::rgb(0xe5e5e5);
     let raised = Color::rgb(0xfafafa);
     let selected = Color::rgb(0xfdfdfd);
@@ -1396,10 +1396,10 @@ fn light_navigation_uses_raised_surfaces_without_erasing_popup_selection() {
 #[test]
 fn floating_separators_remain_visible_on_both_material_endpoints() {
     for appearance in [Appearance::Light, Appearance::Dark] {
-        for transparency in [0.0, 0.35, 1.0] {
+        for opacity in [1.0, 0.65, 0.0] {
             for increase_contrast in [false, true] {
                 let (mut resolved, _) =
-                    resolve_case(appearance, ChromeDensity::Compact, transparency, true, true);
+                    resolve_case(appearance, ChromeDensity::Compact, opacity, true, true);
                 std::sync::Arc::make_mut(&mut resolved.chrome)
                     .composition
                     .capabilities
@@ -1419,7 +1419,7 @@ fn floating_separators_remain_visible_on_both_material_endpoints() {
                             };
                             assert!(
                                 contrast >= floor,
-                                "{appearance:?} {role:?} active={} transparency={transparency} increase_contrast={increase_contrast}: separator contrast {contrast} < {floor}",
+                                "{appearance:?} {role:?} active={} opacity={opacity} increase_contrast={increase_contrast}: separator contrast {contrast} < {floor}",
                                 prepared.active,
                             );
                             if let Some(ceiling) = ceiling {
@@ -1438,11 +1438,11 @@ fn floating_separators_remain_visible_on_both_material_endpoints() {
 
 #[test]
 fn show_borders_reinforces_dark_floating_surface_edges() {
-    for transparency in [0.0, 0.35, 1.0] {
+    for opacity in [1.0, 0.65, 0.0] {
         let (mut resolved, _) = resolve_case(
             Appearance::Dark,
             ChromeDensity::Compact,
-            transparency,
+            opacity,
             true,
             true,
         );
@@ -1468,9 +1468,9 @@ fn show_borders_reinforces_dark_floating_surface_edges() {
 fn quiet_floating_material_preserves_readability_with_stronger_diffusion() {
     for appearance in [Appearance::Light, Appearance::Dark] {
         for increase_contrast in [false, true] {
-            for transparency in [0.0, 0.35, 1.0] {
+            for opacity in [1.0, 0.65, 0.0] {
                 let (mut resolved, _) =
-                    resolve_case(appearance, ChromeDensity::Compact, transparency, true, true);
+                    resolve_case(appearance, ChromeDensity::Compact, opacity, true, true);
                 std::sync::Arc::make_mut(&mut resolved.chrome)
                     .composition
                     .capabilities
@@ -1478,7 +1478,7 @@ fn quiet_floating_material_preserves_readability_with_stronger_diffusion() {
                 let (active, inactive) = ChromeAppearance::prepare_variants(&resolved.chrome);
                 for prepared in [&active, &inactive] {
                     let shell = prepared.floating_surfaces().shell(FloatingRole::Readout);
-                    if transparency > 0.0 {
+                    if opacity < 1.0 {
                         let surfaces = prepared.floating_surfaces();
                         assert_eq!(surfaces, surfaces.backdrop_blur(gpui::px(20.0)));
                         let minimum = if increase_contrast { 0.95 } else { 0.90 };
@@ -1504,12 +1504,12 @@ fn quiet_floating_material_preserves_readability_with_stronger_diffusion() {
 
 #[test]
 fn interactive_floating_roles_share_one_material() {
-    let default_transparency = AppearancePreferences::default().window.transparency;
+    let default_opacity = AppearancePreferences::default().window.opacity;
     for appearance in [Appearance::Light, Appearance::Dark] {
         for increase_contrast in [false, true] {
-            for transparency in [0.0, default_transparency, 1.0] {
+            for opacity in [1.0, default_opacity, 0.0] {
                 let (mut resolved, _) =
-                    resolve_case(appearance, ChromeDensity::Compact, transparency, true, true);
+                    resolve_case(appearance, ChromeDensity::Compact, opacity, true, true);
                 std::sync::Arc::make_mut(&mut resolved.chrome)
                     .composition
                     .capabilities
@@ -1526,7 +1526,7 @@ fn interactive_floating_roles_share_one_material() {
                     ] {
                         let shell = surfaces.shell(role);
                         let case = format!(
-                            "{appearance:?} {role:?} transparency={transparency} \
+                            "{appearance:?} {role:?} opacity={opacity} \
                              increase_contrast={increase_contrast} active={}",
                             prepared.active
                         );
@@ -1551,10 +1551,10 @@ fn resting_chrome_separators_meet_final_host_policy() {
     use spaceterm_ui::ControlHost;
 
     for appearance in [Appearance::Light, Appearance::Dark] {
-        for transparency in [0.0, 0.35, 1.0] {
+        for opacity in [1.0, 0.65, 0.0] {
             for increase_contrast in [false, true] {
                 let (mut resolved, _) =
-                    resolve_case(appearance, ChromeDensity::Compact, transparency, true, true);
+                    resolve_case(appearance, ChromeDensity::Compact, opacity, true, true);
                 std::sync::Arc::make_mut(&mut resolved.chrome)
                     .composition
                     .capabilities
@@ -1572,7 +1572,7 @@ fn resting_chrome_separators_meet_final_host_policy() {
                         };
                         assert!(
                             contrast >= floor,
-                            "{appearance:?} {host:?} active={} transparency={transparency}: separator {contrast} < {floor}",
+                            "{appearance:?} {host:?} active={} opacity={opacity}: separator {contrast} < {floor}",
                             prepared.active,
                         );
                         if let Some(ceiling) = ceiling {
@@ -1592,9 +1592,9 @@ fn resting_chrome_separators_meet_final_host_policy() {
 fn prepared_unfocused_collection_pairs_reach_every_final_host_floor() {
     for appearance in [Appearance::Light, Appearance::Dark] {
         for increase_contrast in [false, true] {
-            for transparency in [0.0, 1.0] {
+            for opacity in [1.0, 0.0] {
                 let (mut resolved, _) =
-                    resolve_case(appearance, ChromeDensity::Compact, transparency, true, true);
+                    resolve_case(appearance, ChromeDensity::Compact, opacity, true, true);
                 std::sync::Arc::make_mut(&mut resolved.chrome)
                     .composition
                     .capabilities
@@ -1713,7 +1713,7 @@ fn prepared_unfocused_collection_pairs_reach_every_final_host_floor() {
                         {
                             assert!(
                                 background.contrast_ratio(resting) >= selection_floor,
-                                "{appearance:?}/{host:?}/IC={increase_contrast}/transparency={transparency}: unfocused selection {background:?} must remain distinct from {resting:?}"
+                                "{appearance:?}/{host:?}/IC={increase_contrast}/opacity={opacity}: unfocused selection {background:?} must remain distinct from {resting:?}"
                             );
                             for (content, floor) in [
                                 (primary, primary_floor),
@@ -1724,7 +1724,7 @@ fn prepared_unfocused_collection_pairs_reach_every_final_host_floor() {
                                 assert!(
                                     content.source_over(background).contrast_ratio(background)
                                         >= floor,
-                                    "{appearance:?}/{host:?}/IC={increase_contrast}/transparency={transparency}: {content:?} on {background:?}"
+                                    "{appearance:?}/{host:?}/IC={increase_contrast}/opacity={opacity}: {content:?} on {background:?}"
                                 );
                             }
                         }
@@ -1773,7 +1773,7 @@ fn prepared_unfocused_collection_pairs_reach_every_final_host_floor() {
                         };
                         assert!(
                             background.contrast_ratio(host) >= selection_floor,
-                            "{appearance:?}/Floating/IC={increase_contrast}/transparency={transparency}: unfocused selection {background:?} must remain distinct from {host:?}"
+                            "{appearance:?}/Floating/IC={increase_contrast}/opacity={opacity}: unfocused selection {background:?} must remain distinct from {host:?}"
                         );
                         for (content, floor) in [
                             (primary, primary_floor),
@@ -1783,7 +1783,7 @@ fn prepared_unfocused_collection_pairs_reach_every_final_host_floor() {
                         ] {
                             assert!(
                                 content.source_over(background).contrast_ratio(background) >= floor,
-                                "{appearance:?}/Floating/IC={increase_contrast}/transparency={transparency}: {content:?} on {background:?}"
+                                "{appearance:?}/Floating/IC={increase_contrast}/opacity={opacity}: {content:?} on {background:?}"
                             );
                         }
                     }
@@ -1797,9 +1797,9 @@ fn prepared_unfocused_collection_pairs_reach_every_final_host_floor() {
 fn disabled_segmented_content_remains_readable_on_both_activity_tracks() {
     for appearance in [Appearance::Light, Appearance::Dark] {
         for increase_contrast in [false, true] {
-            for transparency in [0.0, 0.35, 1.0] {
+            for opacity in [1.0, 0.65, 0.0] {
                 let (mut resolved, _) =
-                    resolve_case(appearance, ChromeDensity::Compact, transparency, true, true);
+                    resolve_case(appearance, ChromeDensity::Compact, opacity, true, true);
                 std::sync::Arc::make_mut(&mut resolved.chrome)
                     .composition
                     .capabilities
@@ -1856,7 +1856,7 @@ fn disabled_segmented_content_remains_readable_on_both_activity_tracks() {
                                     label.source_over(background).contrast_ratio(background);
                                 assert!(
                                     contrast >= minimum,
-                                    "{appearance:?}/{name}/{state}, active={}, IC={increase_contrast}, transparency={transparency}: {contrast:.3} < {minimum}, label={label:?}, background={background:?}",
+                                    "{appearance:?}/{name}/{state}, active={}, IC={increase_contrast}, opacity={opacity}: {contrast:.3} < {minimum}, label={label:?}, background={background:?}",
                                     prepared.active
                                 );
                             }
@@ -1880,7 +1880,7 @@ fn disabled_segmented_content_remains_readable_on_both_activity_tracks() {
 fn disabled_control_paints_share_activity_variants_when_feasible() {
     for appearance in [Appearance::Light, Appearance::Dark] {
         for increase_contrast in [false, true] {
-            for transparency in [0.0, 0.35, 1.0] {
+            for opacity in [1.0, 0.65, 0.0] {
                 let mut preferences = AppearancePreferences {
                     mode: if appearance == Appearance::Light {
                         AppearanceMode::Light
@@ -1889,7 +1889,7 @@ fn disabled_control_paints_share_activity_variants_when_feasible() {
                     },
                     ..AppearancePreferences::default()
                 };
-                preferences.window.transparency = transparency;
+                preferences.window.opacity = opacity;
                 let resolved = ThemeCatalog::default()
                     .resolve(
                         AppearanceGeneration::INITIAL,
@@ -1933,7 +1933,7 @@ fn disabled_control_paints_share_activity_variants_when_feasible() {
                         &inactive.card_controls.colors,
                     ),
                 ] {
-                    macro_rules! identical { ($($field:ident),+ $(,)?) => { $(assert_eq!(active_colors.$field, inactive_colors.$field, "{appearance:?}/{name}/{}, IC={increase_contrast}, transparency={transparency}", stringify!($field));)+ }; }
+                    macro_rules! identical { ($($field:ident),+ $(,)?) => { $(assert_eq!(active_colors.$field, inactive_colors.$field, "{appearance:?}/{name}/{}, IC={increase_contrast}, opacity={opacity}", stringify!($field));)+ }; }
                     if name == "Floating segmented" {
                         identical!(text_disabled);
                         if increase_contrast {
@@ -2064,7 +2064,7 @@ fn disabled_control_paints_share_activity_variants_when_feasible() {
 fn inactive_prepared_control_hosts_suppress_hover_without_clearing_selection() {
     for appearance in [Appearance::Light, Appearance::Dark] {
         for increase_contrast in [false, true] {
-            for transparency in [0.0, 0.35, 1.0] {
+            for opacity in [1.0, 0.65, 0.0] {
                 let mut preferences = AppearancePreferences {
                     mode: if appearance == Appearance::Light {
                         AppearanceMode::Light
@@ -2073,7 +2073,7 @@ fn inactive_prepared_control_hosts_suppress_hover_without_clearing_selection() {
                     },
                     ..AppearancePreferences::default()
                 };
-                preferences.window.transparency = transparency;
+                preferences.window.opacity = opacity;
                 let resolved = ThemeCatalog::default()
                     .resolve(
                         AppearanceGeneration::INITIAL,
@@ -2138,7 +2138,7 @@ fn inactive_prepared_control_hosts_suppress_hover_without_clearing_selection() {
                     ] {
                         assert_eq!(
                             hover, idle,
-                            "{appearance:?}/{name}/{family}, IC={increase_contrast}, transparency={transparency}"
+                            "{appearance:?}/{name}/{family}, IC={increase_contrast}, opacity={opacity}"
                         );
                     }
                     assert_eq!(colors.focus_ring.a, 0, "{name}");
@@ -2159,7 +2159,7 @@ fn inactive_prepared_control_hosts_suppress_hover_without_clearing_selection() {
 #[test]
 fn increased_contrast_reaches_final_host_floors_without_mutating_resolved_colors() {
     for appearance in [Appearance::Light, Appearance::Dark] {
-        for transparency in [0.0, 0.35, 1.0] {
+        for opacity in [1.0, 0.65, 0.0] {
             let mut preferences = AppearancePreferences {
                 mode: match appearance {
                     Appearance::Light => AppearanceMode::Light,
@@ -2167,7 +2167,7 @@ fn increased_contrast_reaches_final_host_floors_without_mutating_resolved_colors
                 },
                 ..AppearancePreferences::default()
             };
-            preferences.window.transparency = transparency;
+            preferences.window.opacity = opacity;
             preferences.window.blur = true;
             let resolved = ThemeCatalog::default()
                 .resolve(
@@ -2205,11 +2205,11 @@ fn increased_contrast_reaches_final_host_floors_without_mutating_resolved_colors
                     let edge = Color::rgba(u32::from(shell.edge()));
                     assert!(
                         edge.source_over(background).contrast_ratio(background) >= 3.0,
-                        "floating edge: {appearance:?}, transparency={transparency}, active={active}"
+                        "floating edge: {appearance:?}, opacity={opacity}, active={active}"
                     );
                     assert!(
                         prepared.floating_colors.text.contrast_ratio(background) >= 7.0,
-                        "floating text: {appearance:?}, transparency={transparency}, active={active}, background={background:?}"
+                        "floating text: {appearance:?}, opacity={opacity}, active={active}, background={background:?}"
                     );
                     let field = prepared
                         .floating_field_colors
@@ -2221,7 +2221,7 @@ fn increased_contrast_reaches_final_host_floors_without_mutating_resolved_colors
                             .input_text
                             .contrast_ratio(field)
                             >= 7.0,
-                        "field text: {appearance:?}, transparency={transparency}, active={active}, background={field:?}"
+                        "field text: {appearance:?}, opacity={opacity}, active={active}, background={field:?}"
                     );
                 }
                 assert_eq!(resolved.chrome.colors, authored);
@@ -2233,7 +2233,7 @@ fn increased_contrast_reaches_final_host_floors_without_mutating_resolved_colors
 #[test]
 fn increased_contrast_app_owned_state_pairs_reach_their_final_material_hosts() {
     let (mut resolved, _) =
-        resolve_case(Appearance::Light, ChromeDensity::Compact, 1.0, true, true);
+        resolve_case(Appearance::Light, ChromeDensity::Compact, 0.0, true, true);
     let chrome = std::sync::Arc::make_mut(&mut resolved.chrome);
     chrome.composition.capabilities.increase_contrast = true;
     let authored = chrome.colors.clone();
@@ -2415,7 +2415,7 @@ fn increased_contrast_app_owned_state_pairs_reach_their_final_material_hosts() {
 #[test]
 fn focused_selected_sidebar_row_uses_panel_prepared_focus_and_selection_roles() {
     let (mut resolved, _) =
-        resolve_case(Appearance::Light, ChromeDensity::Compact, 1.0, true, true);
+        resolve_case(Appearance::Light, ChromeDensity::Compact, 0.0, true, true);
     let chrome = std::sync::Arc::make_mut(&mut resolved.chrome);
     chrome.composition.capabilities.increase_contrast = true;
     let authored = chrome.colors.clone();
@@ -2451,7 +2451,7 @@ fn focused_selected_sidebar_row_uses_panel_prepared_focus_and_selection_roles() 
 #[test]
 fn accessibility_control_boundaries_reach_final_floating_endpoints() {
     for appearance in [Appearance::Light, Appearance::Dark] {
-        for transparency in [0.0, 0.35, 1.0] {
+        for opacity in [1.0, 0.65, 0.0] {
             for (mode, capabilities) in [
                 (
                     "Increase Contrast",
@@ -2476,7 +2476,7 @@ fn accessibility_control_boundaries_reach_final_floating_endpoints() {
                     },
                     ..AppearancePreferences::default()
                 };
-                preferences.window.transparency = transparency;
+                preferences.window.opacity = opacity;
                 preferences.window.blur = true;
                 let resolved = ThemeCatalog::default()
                     .resolve(
@@ -2494,12 +2494,12 @@ fn accessibility_control_boundaries_reach_final_floating_endpoints() {
                     |name: &str, color: Color, hosts: [Color; 2], minimum: f64| {
                         assert_ne!(
                             color.a, 0,
-                            "{appearance:?}/{mode}/{name}, transparency={transparency}: paint must be visible"
+                            "{appearance:?}/{mode}/{name}, opacity={opacity}: paint must be visible"
                         );
                         for host in hosts {
                             assert!(
                                 color.source_over(host).contrast_ratio(host) >= minimum,
-                                "{appearance:?}/{mode}/{name}, transparency={transparency}, host={host:?}, color={color:?}, minimum={minimum}"
+                                "{appearance:?}/{mode}/{name}, opacity={opacity}, host={host:?}, color={color:?}, minimum={minimum}"
                             );
                         }
                     };
@@ -2615,27 +2615,20 @@ fn shell_endpoint_background(shell: FloatingShell, underlay: Color) -> Color {
 fn resolve_case(
     appearance: Appearance,
     density: ChromeDensity,
-    transparency: f32,
+    opacity: f32,
     blur: bool,
     supported: bool,
 ) -> (ResolvedAppearance, ChromeAppearance) {
-    resolve_case_with_transparency_accessibility(
-        appearance,
-        density,
-        transparency,
-        blur,
-        supported,
-        true,
-    )
+    resolve_case_with_opacity_accessibility(appearance, density, opacity, blur, supported, true)
 }
 
-fn resolve_case_with_transparency_accessibility(
+fn resolve_case_with_opacity_accessibility(
     appearance: Appearance,
     density: ChromeDensity,
-    transparency: f32,
+    opacity: f32,
     blur: bool,
     supported: bool,
-    accessibility_allows_transparency: bool,
+    allows_reduced_opacity: bool,
 ) -> (ResolvedAppearance, ChromeAppearance) {
     let mut preferences = AppearancePreferences {
         mode: match appearance {
@@ -2645,17 +2638,14 @@ fn resolve_case_with_transparency_accessibility(
         ..AppearancePreferences::default()
     };
     preferences.window.density = density;
-    preferences.window.transparency = transparency;
+    preferences.window.opacity = opacity;
     preferences.window.blur = blur;
     let resolved = ThemeCatalog::default()
         .resolve(
             AppearanceGeneration::INITIAL,
             &preferences,
             SystemAppearance::available(appearance).with_composition(
-                crate::appearance::CompositionCapabilities::new(
-                    supported,
-                    accessibility_allows_transparency,
-                ),
+                crate::appearance::CompositionCapabilities::new(supported, allows_reduced_opacity),
             ),
             &AvailableFonts::default(),
         )
@@ -2666,7 +2656,7 @@ fn resolve_case_with_transparency_accessibility(
 
 #[test]
 fn non_floating_material_controls_meet_content_floors_on_their_known_hosts() {
-    let (_, prepared) = resolve_case(Appearance::Light, ChromeDensity::Compact, 1.0, true, true);
+    let (_, prepared) = resolve_case(Appearance::Light, ChromeDensity::Compact, 0.0, true, true);
 
     for (host_name, host, paint, segmented) in [
         (
@@ -3006,7 +2996,7 @@ fn non_floating_material_controls_meet_content_floors_on_their_known_hosts() {
 
 #[test]
 fn non_floating_control_hosts_match_the_painted_surface_stack() {
-    let (_, prepared) = resolve_case(Appearance::Light, ChromeDensity::Compact, 1.0, true, true);
+    let (_, prepared) = resolve_case(Appearance::Light, ChromeDensity::Compact, 0.0, true, true);
     let sheet = prepared
         .surface(
             crate::appearance::SurfaceRole::Sheet,
@@ -3062,11 +3052,11 @@ fn native_window_support_does_not_disable_floating_translucency() {
         let (_, supported) = resolve_case(
             appearance,
             ChromeDensity::Compact,
-            defaults.transparency,
+            defaults.opacity,
             defaults.blur,
             true,
         );
-        let (_, unsupported) = resolve_case(appearance, ChromeDensity::Compact, 1.0, false, false);
+        let (_, unsupported) = resolve_case(appearance, ChromeDensity::Compact, 0.0, false, false);
 
         for role in FLOATING_ROLES {
             let supported_shell = supported.floating_surfaces().shell(role);
@@ -3095,25 +3085,25 @@ fn native_window_support_does_not_disable_floating_translucency() {
 }
 
 #[test]
-fn floating_material_tracks_transparency_and_blur_only_changes_filter() {
+fn floating_material_tracks_opacity_and_blur_only_changes_filter() {
     let defaults = AppearancePreferences::default().window;
-    let default_transparency = defaults.transparency;
+    let default_opacity = defaults.opacity;
     for appearance in [Appearance::Light, Appearance::Dark] {
         for density in [ChromeDensity::Compact, ChromeDensity::Comfortable] {
-            let (opaque, opaque_prepared) = resolve_case(appearance, density, 0.0, false, true);
-            for transparency in [0.0, default_transparency, 1.0] {
+            let (opaque, opaque_prepared) = resolve_case(appearance, density, 1.0, false, true);
+            for opacity in [1.0, default_opacity, 0.0] {
                 for supported in [false, true] {
                     let (plain, plain_prepared) =
-                        resolve_case(appearance, density, transparency, false, supported);
+                        resolve_case(appearance, density, opacity, false, supported);
                     for blur in [false, true] {
                         let (resolved, prepared) =
-                            resolve_case(appearance, density, transparency, blur, supported);
+                            resolve_case(appearance, density, opacity, blur, supported);
                         // Without native window support the retained choices cannot take
                         // effect, so every material follows the defaults instead.
-                        let (transparency, blur) = if supported {
-                            (transparency, blur)
+                        let (opacity, blur) = if supported {
+                            (opacity, blur)
                         } else {
-                            (defaults.transparency, defaults.blur)
+                            (defaults.opacity, defaults.blur)
                         };
                         assert_eq!(resolved.terminal, opaque.terminal);
                         assert_eq!(resolved.chrome.colors, opaque.chrome.colors);
@@ -3141,16 +3131,16 @@ fn floating_material_tracks_transparency_and_blur_only_changes_filter() {
                             );
                             assert_eq!(
                                 shell.backdrop_alpha_limit() < 1.0,
-                                supported && transparency > 0.0,
+                                supported && opacity < 1.0,
                                 "only effective native glass can admit the window backing"
                             );
                             let surfaces = prepared.floating_surfaces();
                             assert_eq!(
                                 surfaces != surfaces.backdrop_blur(gpui::px(0.0)),
-                                blur && transparency > 0.0
+                                blur && opacity < 1.0
                             );
                         }
-                        if transparency == 0.0 {
+                        if opacity == 1.0 {
                             assert_eq!(
                                 resolved.chrome.composition.effective,
                                 WindowBackgroundAppearance::Opaque
@@ -3192,9 +3182,9 @@ fn floating_material_tracks_transparency_and_blur_only_changes_filter() {
 }
 
 #[test]
-fn maximum_floating_transparency_does_not_rebuild_an_opaque_slab_when_nested() {
+fn minimum_floating_opacity_does_not_rebuild_an_opaque_slab_when_nested() {
     for appearance in [Appearance::Light, Appearance::Dark] {
-        let (_, prepared) = resolve_case(appearance, ChromeDensity::Compact, 1.0, true, true);
+        let (_, prepared) = resolve_case(appearance, ChromeDensity::Compact, 0.0, true, true);
         for role in FLOATING_ROLES {
             let material = Color::rgba(u32::from(
                 prepared.floating_surfaces().shell(role).material(),
@@ -3214,8 +3204,8 @@ fn maximum_floating_transparency_does_not_rebuild_an_opaque_slab_when_nested() {
 #[test]
 fn floating_decoration_edges_transmit_glass_without_weakening_opaque_or_accessible_presentation() {
     for appearance in [Appearance::Light, Appearance::Dark] {
-        let (_, translucent) = resolve_case(appearance, ChromeDensity::Compact, 1.0, true, true);
-        let (_, opaque) = resolve_case(appearance, ChromeDensity::Compact, 0.0, true, true);
+        let (_, translucent) = resolve_case(appearance, ChromeDensity::Compact, 0.0, true, true);
+        let (_, opaque) = resolve_case(appearance, ChromeDensity::Compact, 1.0, true, true);
 
         let mut preferences = AppearancePreferences {
             mode: match appearance {
@@ -3225,7 +3215,7 @@ fn floating_decoration_edges_transmit_glass_without_weakening_opaque_or_accessib
             ..AppearancePreferences::default()
         };
         preferences.window.density = ChromeDensity::Compact;
-        preferences.window.transparency = 1.0;
+        preferences.window.opacity = 0.0;
         preferences.window.blur = true;
         let accessible = ThemeCatalog::default()
             .resolve(
@@ -3293,7 +3283,7 @@ fn floating_decoration_edges_transmit_glass_without_weakening_opaque_or_accessib
 #[test]
 fn floating_control_states_transmit_their_host_until_the_opaque_override() {
     for appearance in [Appearance::Light, Appearance::Dark] {
-        let (_, translucent) = resolve_case(appearance, ChromeDensity::Compact, 1.0, true, true);
+        let (_, translucent) = resolve_case(appearance, ChromeDensity::Compact, 0.0, true, true);
         let paint = &translucent.floating_control_colors;
         for (state, color) in [
             ("button", paint.element_background),
@@ -3337,7 +3327,7 @@ fn floating_control_states_transmit_their_host_until_the_opaque_override() {
         assert_ne!(paint.element_background, paint.element_hover);
         assert_ne!(paint.element_hover, paint.element_active);
 
-        let (_, opaque) = resolve_case(appearance, ChromeDensity::Compact, 0.0, true, true);
+        let (_, opaque) = resolve_case(appearance, ChromeDensity::Compact, 1.0, true, true);
         for paint in [
             opaque.floating_control_colors.element_hover,
             opaque.floating_control_colors.ghost_element_hover,
@@ -3349,9 +3339,9 @@ fn floating_control_states_transmit_their_host_until_the_opaque_override() {
 }
 
 #[test]
-fn built_in_control_backgrounds_transmit_at_the_default_transparency() {
+fn built_in_control_backgrounds_transmit_at_the_default_opacity() {
     for appearance in [Appearance::Light, Appearance::Dark] {
-        let (_, prepared) = resolve_case(appearance, ChromeDensity::Compact, 0.35, true, true);
+        let (_, prepared) = resolve_case(appearance, ChromeDensity::Compact, 0.65, true, true);
         for (host, colors) in [
             ("Window", &prepared.control_colors),
             ("TitleBar", &prepared.title_bar_controls.colors),
@@ -3379,7 +3369,7 @@ fn built_in_control_backgrounds_transmit_at_the_default_transparency() {
 #[test]
 fn dark_floating_ordinary_controls_share_one_readable_ordered_alpha() {
     let (resolved, prepared) =
-        resolve_case(Appearance::Dark, ChromeDensity::Compact, 1.0, true, true);
+        resolve_case(Appearance::Dark, ChromeDensity::Compact, 0.0, true, true);
     assert_eq!(
         (
             resolved.chrome.colors.element_background,
@@ -3448,7 +3438,7 @@ fn dark_floating_ordinary_controls_share_one_readable_ordered_alpha() {
 #[test]
 fn dark_floating_ghost_states_preserve_authored_order_without_an_opaque_fallback() {
     let (resolved, prepared) =
-        resolve_case(Appearance::Dark, ChromeDensity::Compact, 1.0, true, true);
+        resolve_case(Appearance::Dark, ChromeDensity::Compact, 0.0, true, true);
     let paint = &prepared.floating_control_colors;
     assert_eq!(paint.ghost_element_background.a, 0);
     let rest = prepared.floating_colors.elevated_surface_background;
@@ -3488,19 +3478,19 @@ fn dark_floating_ghost_states_preserve_authored_order_without_an_opaque_fallback
 #[test]
 fn built_in_floating_ghost_states_transmit_without_weakening_order_or_content() {
     for appearance in [Appearance::Light, Appearance::Dark] {
-        for transparency in [0.35, 0.7, 1.0] {
+        for opacity in [0.65, 0.3, 0.0] {
             let (resolved, prepared) =
-                resolve_case(appearance, ChromeDensity::Compact, transparency, true, true);
+                resolve_case(appearance, ChromeDensity::Compact, opacity, true, true);
             let colors = &prepared.floating_control_colors;
             assert!(
                 !prepared
                     .floating_fallbacks
                     .contains(&FloatingControlFamily::GhostElement),
-                "{appearance:?} Ghost must not require an opaque fallback at {transparency}"
+                "{appearance:?} Ghost must not require an opaque fallback at {opacity}"
             );
             assert!(
                 colors.ghost_element_hover.a < 255 && colors.ghost_element_active.a < 255,
-                "{appearance:?} Ghost states must transmit at {transparency}: hover={:?}, pressed={:?}",
+                "{appearance:?} Ghost states must transmit at {opacity}: hover={:?}, pressed={:?}",
                 colors.ghost_element_hover,
                 colors.ghost_element_active,
             );
@@ -3530,7 +3520,7 @@ fn built_in_floating_ghost_states_transmit_without_weakening_order_or_content() 
                         rendered[1].r.cmp(&rendered[2].r),
                     ],
                     reference_order,
-                    "{appearance:?} Ghost order changed over {underlay:?} at {transparency}"
+                    "{appearance:?} Ghost order changed over {underlay:?} at {opacity}"
                 );
                 for (background, foreground, icon) in [
                     (
@@ -3573,7 +3563,7 @@ fn builtin_ghost_seeds_clear_the_authored_separation_floor() {
             Color::rgb(0xc4c4c4),
         ),
     ] {
-        let (resolved, _) = resolve_case(appearance, ChromeDensity::Compact, 1.0, true, true);
+        let (resolved, _) = resolve_case(appearance, ChromeDensity::Compact, 0.0, true, true);
         let colors = &resolved.chrome.colors;
         assert_eq!(colors.background, root);
         assert_eq!(colors.ghost_element_hover, hover);
@@ -3586,7 +3576,7 @@ fn builtin_ghost_seeds_clear_the_authored_separation_floor() {
 #[test]
 fn panel_and_card_controls_compile_against_their_immediate_hosts() {
     for appearance in [Appearance::Light, Appearance::Dark] {
-        let (_, translucent) = resolve_case(appearance, ChromeDensity::Compact, 1.0, true, true);
+        let (_, translucent) = resolve_case(appearance, ChromeDensity::Compact, 0.0, true, true);
         for (name, host, expected_background) in [
             (
                 "Panel",
@@ -3618,7 +3608,7 @@ fn panel_and_card_controls_compile_against_their_immediate_hosts() {
             assert_ne!(host.colors.element_hover, host.colors.element_active);
         }
 
-        let (_, opaque) = resolve_case(appearance, ChromeDensity::Compact, 0.0, true, true);
+        let (_, opaque) = resolve_case(appearance, ChromeDensity::Compact, 1.0, true, true);
         for host in [&opaque.panel_controls, &opaque.card_controls] {
             assert_eq!(host.colors.background, host.reference.background);
             for (state, actual, expected) in [
@@ -3702,7 +3692,7 @@ fn panel_and_card_controls_compile_against_their_immediate_hosts() {
 
 #[test]
 fn segmented_options_preserve_their_authored_step_against_each_actual_track() {
-    let (resolved, _) = resolve_case(Appearance::Dark, ChromeDensity::Compact, 0.0, true, true);
+    let (resolved, _) = resolve_case(Appearance::Dark, ChromeDensity::Compact, 1.0, true, true);
     let authored = resolved.chrome.colors.clone();
 
     let prepared = ChromeAppearance::prepare(&resolved.chrome);
@@ -3763,7 +3753,7 @@ fn segmented_options_preserve_their_authored_step_against_each_actual_track() {
 #[test]
 fn floating_control_content_remains_readable_on_material_state_fills() {
     for appearance in [Appearance::Light, Appearance::Dark] {
-        let (_, prepared) = resolve_case(appearance, ChromeDensity::Compact, 1.0, true, true);
+        let (_, prepared) = resolve_case(appearance, ChromeDensity::Compact, 0.0, true, true);
         let colors = &prepared.floating_control_colors;
         let shell = prepared.floating_surfaces().shell(FloatingRole::Popover);
         let text_states = [
@@ -3965,9 +3955,9 @@ fn floating_control_content_remains_readable_on_material_state_fills() {
 #[test]
 fn unfocused_popup_selection_keeps_transmitting_the_material() {
     for appearance in [Appearance::Light, Appearance::Dark] {
-        for transparency in [0.35, 1.0] {
+        for opacity in [0.65, 0.0] {
             let (_, prepared) =
-                resolve_case(appearance, ChromeDensity::Compact, transparency, true, true);
+                resolve_case(appearance, ChromeDensity::Compact, opacity, true, true);
             let mut popup = prepared.floating_colors.clone();
             popup.elevated_surface_background =
                 prepared.floating_surface(prepared.floating_colors.elevated_surface_background);
@@ -3981,7 +3971,7 @@ fn unfocused_popup_selection_keeps_transmitting_the_material() {
 
             assert!(
                 selected.background().a > 0.0 && selected.background().a < 1.0,
-                "{appearance:?} transparency={transparency}: unfocused popup selection must remain translucent: {selected:?}; reference={:?}; paint={:?}; surface={:?}",
+                "{appearance:?} opacity={opacity}: unfocused popup selection must remain translucent: {selected:?}; reference={:?}; paint={:?}; surface={:?}",
                 unfocused.reference.row_selected_background,
                 unfocused.paint.row_selected_background,
                 unfocused.paint.elevated_surface_background,
@@ -3994,7 +3984,7 @@ fn unfocused_popup_selection_keeps_transmitting_the_material() {
 fn installed_floating_catalog_uses_the_material_control_presentation(
     cx: &mut gpui::TestAppContext,
 ) {
-    let (_, prepared) = resolve_case(Appearance::Dark, ChromeDensity::Compact, 1.0, true, true);
+    let (_, prepared) = resolve_case(Appearance::Dark, ChromeDensity::Compact, 0.0, true, true);
     let reference = &prepared.floating_colors;
     let colors = &prepared.floating_control_colors;
     let field = &prepared.floating_field_colors;
@@ -4108,9 +4098,9 @@ fn installed_floating_catalog_uses_the_material_control_presentation(
 fn floating_wash_eases_from_opaque_to_thin_without_an_opacity_step() {
     for appearance in [Appearance::Light, Appearance::Dark] {
         let mut previous = 255_u8;
-        for transparency in [0.0, 1.0 / 255.0, 0.03, 0.06, 0.12, 0.35, 1.0] {
+        for opacity in [1.0, 1.0 - 1.0 / 255.0, 0.97, 0.94, 0.88, 0.65, 0.0] {
             let (_, prepared) =
-                resolve_case(appearance, ChromeDensity::Compact, transparency, true, true);
+                resolve_case(appearance, ChromeDensity::Compact, opacity, true, true);
             let alpha = Color::rgba(u32::from(
                 prepared
                     .floating_surfaces()
@@ -4120,15 +4110,15 @@ fn floating_wash_eases_from_opaque_to_thin_without_an_opacity_step() {
             .a;
             assert!(
                 alpha <= previous,
-                "{appearance:?} wash coverage rose from {previous} to {alpha} at {transparency}"
+                "{appearance:?} wash coverage rose from {previous} to {alpha} at {opacity}"
             );
-            if transparency == 1.0 / 255.0 {
+            if opacity == 1.0 - 1.0 / 255.0 {
                 assert!(
                     255 - alpha <= 10,
-                    "{appearance:?} first nonzero setting stepped from opaque to {alpha}"
+                    "{appearance:?} first reduced setting stepped from opaque to {alpha}"
                 );
             }
-            if transparency >= 0.12 {
+            if opacity <= 0.88 {
                 assert!(
                     alpha <= 20,
                     "{appearance:?} engaged glass must keep only a thin elevation wash, got {alpha}"
@@ -4140,9 +4130,9 @@ fn floating_wash_eases_from_opaque_to_thin_without_an_opacity_step() {
 }
 
 #[test]
-fn floating_text_stays_readable_over_extreme_content_at_maximum_transparency() {
+fn floating_text_stays_readable_over_extreme_content_at_minimum_opacity() {
     for appearance in [Appearance::Light, Appearance::Dark] {
-        let (_, prepared) = resolve_case(appearance, ChromeDensity::Compact, 1.0, true, true);
+        let (_, prepared) = resolve_case(appearance, ChromeDensity::Compact, 0.0, true, true);
         let host = &prepared.floating_colors;
         for role in FLOATING_ROLES {
             let shell = prepared.floating_surfaces().shell(role);
@@ -4166,9 +4156,9 @@ fn floating_text_stays_readable_over_extreme_content_at_maximum_transparency() {
 }
 
 #[test]
-fn floating_supporting_text_stays_readable_over_extreme_content_at_maximum_transparency() {
+fn floating_supporting_text_stays_readable_over_extreme_content_at_minimum_opacity() {
     for appearance in [Appearance::Light, Appearance::Dark] {
-        let (_, prepared) = resolve_case(appearance, ChromeDensity::Compact, 1.0, true, true);
+        let (_, prepared) = resolve_case(appearance, ChromeDensity::Compact, 0.0, true, true);
         let host = &prepared.floating_colors;
         // Tooltip shortcuts, modal body copy, and Find result counts use this register directly.
         // Menu and palette rows resolve their own content contrast and do not use this contract.
@@ -4195,7 +4185,7 @@ fn floating_supporting_text_stays_readable_over_extreme_content_at_maximum_trans
 #[test]
 fn floating_disabled_content_stays_perceptible_without_matching_enabled_text() {
     for appearance in [Appearance::Light, Appearance::Dark] {
-        let (_, prepared) = resolve_case(appearance, ChromeDensity::Compact, 1.0, true, true);
+        let (_, prepared) = resolve_case(appearance, ChromeDensity::Compact, 0.0, true, true);
         let shell = prepared.floating_surfaces().shell(FloatingRole::Popover);
         for disabled in [
             prepared.floating_colors.text_disabled,
@@ -4217,9 +4207,9 @@ fn floating_disabled_content_stays_perceptible_without_matching_enabled_text() {
 fn builtin_disabled_controls_never_report_an_unmet_absolute_floor() {
     for appearance in [Appearance::Light, Appearance::Dark] {
         for increase_contrast in [false, true] {
-            for transparency in [0.0, 0.35, 1.0] {
+            for opacity in [1.0, 0.65, 0.0] {
                 let (mut resolved, _) =
-                    resolve_case(appearance, ChromeDensity::Compact, transparency, true, true);
+                    resolve_case(appearance, ChromeDensity::Compact, opacity, true, true);
                 std::sync::Arc::make_mut(&mut resolved.chrome)
                     .composition
                     .capabilities
@@ -4234,7 +4224,7 @@ fn builtin_disabled_controls_never_report_an_unmet_absolute_floor() {
                                 diagnostic,
                                 DisabledControlDiagnostic::ContrastFloor { .. }
                             )),
-                        "{appearance:?}, active={}, IC={increase_contrast}, transparency={transparency}: {:?}",
+                        "{appearance:?}, active={}, IC={increase_contrast}, opacity={opacity}: {:?}",
                         prepared.active,
                         prepared.disabled_diagnostics,
                     );
@@ -4310,7 +4300,7 @@ fn builtin_disabled_controls_never_report_an_unmet_absolute_floor() {
                                         .source_over(background)
                                         .contrast_ratio(background)
                                         >= if increase_contrast { 4.5 } else { 3.0 },
-                                    "{appearance:?}/{host_name}/{family}, active={}, IC={increase_contrast}, transparency={transparency}: fill={fill:?}, foreground={foreground:?}, host={host:?}",
+                                    "{appearance:?}/{host_name}/{family}, active={}, IC={increase_contrast}, opacity={opacity}: fill={fill:?}, foreground={foreground:?}, host={host:?}",
                                     prepared.active,
                                 );
                             }
@@ -4325,7 +4315,7 @@ fn builtin_disabled_controls_never_report_an_unmet_absolute_floor() {
 #[test]
 fn floating_bare_editor_placeholders_stay_readable_over_extreme_content() {
     for appearance in [Appearance::Light, Appearance::Dark] {
-        let (_, prepared) = resolve_case(appearance, ChromeDensity::Compact, 1.0, true, true);
+        let (_, prepared) = resolve_case(appearance, ChromeDensity::Compact, 0.0, true, true);
         let host = &prepared.floating_colors;
         for role in [FloatingRole::Command, FloatingRole::Popover] {
             let shell = prepared.floating_surfaces().shell(role);
@@ -4349,9 +4339,9 @@ fn floating_row_content_is_readable_on_idle_hovered_and_selected_backgrounds() {
     use super::OverlayRow;
 
     for appearance in [Appearance::Light, Appearance::Dark] {
-        for transparency in [0.0, 0.15, 0.35, 0.7, 1.0] {
+        for opacity in [1.0, 0.85, 0.65, 0.3, 0.0] {
             let (_, prepared) =
-                resolve_case(appearance, ChromeDensity::Compact, transparency, true, true);
+                resolve_case(appearance, ChromeDensity::Compact, opacity, true, true);
             let reference = prepared.floating_colors.clone();
             let shell = prepared.floating_surfaces().shell(FloatingRole::Popover);
             let material =
@@ -4415,7 +4405,7 @@ fn floating_row_content_is_readable_on_idle_hovered_and_selected_backgrounds() {
                     for content in row.content {
                         assert!(
                             content.contrast_ratio(background) >= 4.5,
-                            "{appearance:?} at {transparency}: row content {content:?} must read over {background:?}"
+                            "{appearance:?} at {opacity}: row content {content:?} must read over {background:?}"
                         );
                     }
                 }
@@ -4426,7 +4416,7 @@ fn floating_row_content_is_readable_on_idle_hovered_and_selected_backgrounds() {
 
 #[test]
 fn floating_standard_and_bare_inputs_resolve_against_their_actual_backgrounds() {
-    let (resolved, _) = resolve_case(Appearance::Dark, ChromeDensity::Compact, 1.0, true, true);
+    let (resolved, _) = resolve_case(Appearance::Dark, ChromeDensity::Compact, 0.0, true, true);
     let prepared = ChromeAppearance::prepare(&resolved.chrome);
     let bare = &prepared.floating_colors;
     let field_reference = &prepared.floating_field_reference;

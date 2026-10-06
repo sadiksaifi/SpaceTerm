@@ -189,9 +189,9 @@ mod tests {
         SystemAppearance, ThemeCatalog,
     };
 
-    fn appearance(transparency: f32) -> crate::ui::appearance::ChromeAppearance {
+    fn appearance(opacity: f32) -> crate::ui::appearance::ChromeAppearance {
         let mut preferences = AppearancePreferences::default();
-        preferences.window.transparency = transparency;
+        preferences.window.opacity = opacity;
         let resolved = ThemeCatalog::default()
             .resolve(
                 AppearanceGeneration::INITIAL,
@@ -215,7 +215,7 @@ mod tests {
 
     #[test]
     fn raised_chip_materializes_each_state_against_its_actual_host() {
-        let appearance = appearance(1.0);
+        let appearance = appearance(0.0);
         let colors = &appearance.colors;
         let host = colors.panel_background;
         let paint = selected(colors).raised_on(&appearance, host);
@@ -237,7 +237,7 @@ mod tests {
 
     #[test]
     fn opaque_chip_keeps_its_authored_states() {
-        let appearance = appearance(0.0);
+        let appearance = appearance(1.0);
         let colors = &appearance.colors;
         let authored = selected(colors);
         let paint = authored.raised_on(&appearance, colors.panel_background);
@@ -254,8 +254,8 @@ mod tests {
             hover_fill: Some(Color::rgb(0x404040)),
             hover_rim: Some(Color::rgba(0x606060a0)),
         };
-        let opaque = appearance(0.0);
-        let glass = appearance(1.0);
+        let opaque = appearance(1.0);
+        let glass = appearance(0.0);
         let host = Color::rgb(0x202020);
         let opaque_paint = authored.raised_on(&opaque, host);
         assert_eq!(

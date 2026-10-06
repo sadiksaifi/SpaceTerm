@@ -13,7 +13,7 @@ pub(crate) struct SystemAppearanceObservation {
 /// Accessibility display choices supplied independently of retained appearance Settings.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct AccessibilityDisplayOptions {
-    pub(crate) reduce_transparency: bool,
+    pub(crate) require_opaque_surfaces: bool,
     pub(crate) increase_contrast: bool,
     pub(crate) show_borders: bool,
     pub(crate) differentiate_without_color: bool,
@@ -34,7 +34,7 @@ pub(crate) enum WindowBackdrop {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct NativeWindowComposition {
-    pub(crate) transparency: bool,
+    pub(crate) opacity: bool,
     pub(crate) blur: bool,
 }
 
@@ -44,13 +44,13 @@ pub(crate) trait AppearancePlatform {
     fn prefers_reduced_motion(&self) -> bool {
         false
     }
-    fn supports_native_window_transparency(&self) -> bool {
+    fn supports_native_window_opacity(&self) -> bool {
         false
     }
     fn native_window_composition(&self, _: &gpui::App) -> NativeWindowComposition {
-        let supported = self.supports_native_window_transparency();
+        let supported = self.supports_native_window_opacity();
         NativeWindowComposition {
-            transparency: supported,
+            opacity: supported,
             blur: supported,
         }
     }
@@ -79,7 +79,7 @@ pub(crate) mod testing {
     pub(crate) struct RecordingAppearancePlatform {
         fact: Rc<Cell<Option<Appearance>>>,
         reduced_motion: Rc<Cell<bool>>,
-        native_window_transparency: Rc<Cell<bool>>,
+        native_window_opacity: Rc<Cell<bool>>,
         native_window_blur: Rc<Cell<Option<bool>>>,
         accessibility: Rc<Cell<AccessibilityDisplayOptions>>,
         pub(crate) backdrops: Rc<RefCell<Vec<WindowBackdrop>>>,
@@ -98,17 +98,17 @@ pub(crate) mod testing {
                 .collect()
         }
 
-        pub(crate) fn set_native_window_transparency_supported(&self, supported: bool) {
-            self.native_window_transparency.set(supported);
+        pub(crate) fn set_native_window_opacity_supported(&self, supported: bool) {
+            self.native_window_opacity.set(supported);
             self.set_system_appearance(self.fact.get());
         }
         pub(crate) fn set_native_window_blur_supported(&self, supported: bool) {
             self.native_window_blur.set(Some(supported));
             self.set_system_appearance(self.fact.get());
         }
-        pub(crate) fn set_reduce_transparency(&self, reduced: bool) {
+        pub(crate) fn set_require_opaque_surfaces(&self, required: bool) {
             let mut options = self.accessibility.get();
-            options.reduce_transparency = reduced;
+            options.require_opaque_surfaces = required;
             self.accessibility.set(options);
             self.set_system_appearance(self.fact.get());
         }
@@ -152,16 +152,16 @@ pub(crate) mod testing {
         fn prefers_reduced_motion(&self) -> bool {
             self.reduced_motion.get()
         }
-        fn supports_native_window_transparency(&self) -> bool {
-            self.native_window_transparency.get()
+        fn supports_native_window_opacity(&self) -> bool {
+            self.native_window_opacity.get()
         }
         fn native_window_composition(&self, _: &gpui::App) -> NativeWindowComposition {
             NativeWindowComposition {
-                transparency: self.native_window_transparency.get(),
+                opacity: self.native_window_opacity.get(),
                 blur: self
                     .native_window_blur
                     .get()
-                    .unwrap_or(self.native_window_transparency.get()),
+                    .unwrap_or(self.native_window_opacity.get()),
             }
         }
         fn accessibility_display_options(&self) -> AccessibilityDisplayOptions {

@@ -274,7 +274,7 @@ fn window_owner_installs_the_application_backdrop_and_removes_it_with_the_effect
     cx: &mut TestAppContext,
 ) {
     let (_settings, platform) = start(cx);
-    platform.set_native_window_transparency_supported(true);
+    platform.set_native_window_opacity_supported(true);
     cx.run_until_parked();
     let test_window = cx.add_window(|_, _| gpui::EmptyView);
     let mut owner = WindowAppearanceOwner::default();
@@ -289,7 +289,7 @@ fn window_owner_installs_the_application_backdrop_and_removes_it_with_the_effect
         .unwrap();
     assert_eq!(platform.backdrop_presence(), vec![true]);
 
-    platform.set_native_window_transparency_supported(false);
+    platform.set_native_window_opacity_supported(false);
     cx.run_until_parked();
     test_window
         .update(cx, |_, window, cx| {
@@ -317,7 +317,7 @@ fn the_backdrop_request_follows_the_chrome_appearance(cx: &mut TestAppContext) {
     use crate::platform::appearance::WindowBackdrop;
 
     let (settings, platform) = start(cx);
-    platform.set_native_window_transparency_supported(true);
+    platform.set_native_window_opacity_supported(true);
     let token = settings.begin_preview(0).unwrap();
     let mut candidate = SettingsDocument::default();
     candidate.appearance.mode = AppearanceMode::Auto;
@@ -355,11 +355,11 @@ fn the_backdrop_request_follows_the_chrome_appearance(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn transparency_updates_surfaces_and_capability_fallback_without_terminal_protocol_changes(
+fn opacity_updates_surfaces_and_capability_fallback_without_terminal_protocol_changes(
     cx: &mut TestAppContext,
 ) {
     let (settings, platform) = start(cx);
-    platform.set_native_window_transparency_supported(true);
+    platform.set_native_window_opacity_supported(true);
     cx.run_until_parked();
     let before = cx.update(|cx| current(cx));
     assert!(shell(&before) > 0 && shell(&before) < 255);
@@ -370,14 +370,14 @@ fn transparency_updates_surfaces_and_capability_fallback_without_terminal_protoc
     );
     let token = settings.begin_preview(0).unwrap();
     let mut document = SettingsDocument::default();
-    document.appearance.window.transparency = 0.5;
+    document.appearance.window.opacity = 0.8;
     document.appearance.window.blur = false;
     settings.update_preview(&token, document).unwrap();
     cx.run_until_parked();
     cx.update(|cx| {
         let after = current(cx);
-        assert!(shell(&after) > 0 && shell(&after) < shell(&before));
-        assert!(floating(&after) < floating(&before));
+        assert!(shell(&after) < 255 && shell(&after) > shell(&before));
+        assert!(floating(&after) > floating(&before));
         // Floating tone remains stronger than the base tint between the endpoints.
         assert!(floating(&after) > shell(&after));
         assert_eq!(
@@ -403,12 +403,12 @@ fn transparency_updates_surfaces_and_capability_fallback_without_terminal_protoc
     });
     let preview_shell = cx.update(|cx| shell(&current(cx)));
     let preview_floating = cx.update(|cx| floating(&current(cx)));
-    platform.set_native_window_transparency_supported(false);
+    platform.set_native_window_opacity_supported(false);
     cx.run_until_parked();
     cx.update(|cx| {
         let current = current(cx);
         assert!(current.chrome.composition.materials.is_opaque());
-        // Without desktop transparency the retained choices cannot take effect, so floating
+        // Without window opacity adjustment the retained choices cannot take effect, so floating
         // surfaces follow the defaults the Settings rows then show.
         assert_eq!(floating(&current), floating(&before));
         assert_eq!(
@@ -416,7 +416,7 @@ fn transparency_updates_surfaces_and_capability_fallback_without_terminal_protoc
             gpui::WindowBackgroundAppearance::Opaque
         );
     });
-    platform.set_native_window_transparency_supported(true);
+    platform.set_native_window_opacity_supported(true);
     cx.run_until_parked();
     cx.update(|cx| {
         assert_eq!(shell(&current(cx)), preview_shell);
@@ -428,34 +428,32 @@ fn transparency_updates_surfaces_and_capability_fallback_without_terminal_protoc
 }
 
 #[gpui::test]
-fn accessibility_display_options_keep_contrast_and_transparency_independent(
-    cx: &mut TestAppContext,
-) {
+fn accessibility_display_options_keep_contrast_and_opacity_independent(cx: &mut TestAppContext) {
     let (_settings, platform) = start(cx);
-    platform.set_native_window_transparency_supported(true);
+    platform.set_native_window_opacity_supported(true);
     cx.run_until_parked();
     let before = cx.update(|cx| current(cx));
     assert!(!before.chrome.composition.materials.is_opaque());
     assert!(!before.chrome.composition.floating_materials.is_opaque());
     assert!(before.chrome.composition.floating_blur);
 
-    for reduce_transparency in [false, true] {
+    for require_opaque_surfaces in [false, true] {
         platform.set_increase_contrast(true);
-        platform.set_reduce_transparency(reduce_transparency);
+        platform.set_require_opaque_surfaces(require_opaque_surfaces);
         cx.run_until_parked();
         cx.update(|cx| {
             let current = current(cx);
             assert_eq!(
                 current.chrome.composition.materials.is_opaque(),
-                reduce_transparency
+                require_opaque_surfaces
             );
             assert_eq!(
                 current.chrome.composition.floating_materials.is_opaque(),
-                reduce_transparency
+                require_opaque_surfaces
             );
             assert_eq!(
                 current.chrome.composition.floating_blur,
-                !reduce_transparency
+                !require_opaque_surfaces
             );
             let prepared = &cx.global::<InstalledChrome>().active;
             let shell = prepared
@@ -470,7 +468,7 @@ fn accessibility_display_options_keep_contrast_and_transparency_independent(
                     >= 7.0
             );
         });
-        platform.set_reduce_transparency(false);
+        platform.set_require_opaque_surfaces(false);
         platform.set_increase_contrast(false);
         cx.run_until_parked();
         cx.update(|cx| assert_eq!(current(cx).chrome.composition, before.chrome.composition));
@@ -490,7 +488,11 @@ fn non_material_accessibility_facts_are_retained_and_reprepare_chrome(cx: &mut T
         let resolved = current(cx);
         assert_eq!(
             (
-                resolved.chrome.composition.capabilities.reduce_transparency,
+                resolved
+                    .chrome
+                    .composition
+                    .capabilities
+                    .require_opaque_surfaces,
                 resolved.chrome.composition.capabilities.increase_contrast,
                 resolved.chrome.composition.capabilities.show_borders,
                 resolved.chrome.composition.capabilities.reduce_motion,
@@ -568,7 +570,7 @@ fn accessibility_preview_overrides_only_selected_facts_and_resets_to_live_values
     cx: &mut TestAppContext,
 ) {
     let (settings, platform) = start(cx);
-    platform.set_native_window_transparency_supported(true);
+    platform.set_native_window_opacity_supported(true);
     platform.set_increase_contrast(true);
     platform.set_show_borders(true);
     platform.set_reduced_motion(true);
@@ -591,8 +593,8 @@ fn accessibility_preview_overrides_only_selected_facts_and_resets_to_live_values
         let capabilities = current(cx).chrome.composition.capabilities;
         assert_eq!(
             (
-                capabilities.native_window_transparency,
-                capabilities.reduce_transparency,
+                capabilities.native_window_opacity,
+                capabilities.require_opaque_surfaces,
                 capabilities.increase_contrast,
                 capabilities.show_borders,
                 capabilities.reduce_motion,
@@ -607,11 +609,11 @@ fn accessibility_preview_overrides_only_selected_facts_and_resets_to_live_values
         (
             platform.accessibility_display_options(),
             platform.prefers_reduced_motion(),
-            platform.supports_native_window_transparency(),
+            platform.supports_native_window_opacity(),
         ),
         (
             crate::platform::appearance::AccessibilityDisplayOptions {
-                reduce_transparency: false,
+                require_opaque_surfaces: false,
                 increase_contrast: true,
                 show_borders: true,
                 differentiate_without_color: false,
@@ -622,14 +624,15 @@ fn accessibility_preview_overrides_only_selected_facts_and_resets_to_live_values
     );
 
     cx.update(|cx| {
-        set_accessibility_preview(AccessibilityPreviewFact::ReduceTransparency, true, cx).unwrap();
+        set_accessibility_preview(AccessibilityPreviewFact::RequireOpaqueSurfaces, true, cx)
+            .unwrap();
         set_accessibility_preview(AccessibilityPreviewFact::ReduceMotion, false, cx).unwrap();
     });
     cx.update(|cx| {
         let capabilities = current(cx).chrome.composition.capabilities;
         assert_eq!(
             (
-                capabilities.reduce_transparency,
+                capabilities.require_opaque_surfaces,
                 capabilities.increase_contrast,
                 capabilities.show_borders,
                 capabilities.reduce_motion,
@@ -645,8 +648,8 @@ fn accessibility_preview_overrides_only_selected_facts_and_resets_to_live_values
         let capabilities = current(cx).chrome.composition.capabilities;
         assert_eq!(
             (
-                capabilities.native_window_transparency,
-                capabilities.reduce_transparency,
+                capabilities.native_window_opacity,
+                capabilities.require_opaque_surfaces,
                 capabilities.increase_contrast,
                 capabilities.show_borders,
                 capabilities.reduce_motion,

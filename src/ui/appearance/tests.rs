@@ -10,12 +10,12 @@ use crate::appearance::{
     ChromeColors, Color, CompositionCapabilities, SystemAppearance, ThemeCatalog,
 };
 
-fn resolve_light(transparency: f32) -> crate::appearance::ResolvedAppearance {
+fn resolve_light(opacity: f32) -> crate::appearance::ResolvedAppearance {
     let mut preferences = AppearancePreferences {
         mode: AppearanceMode::Light,
         ..Default::default()
     };
-    preferences.window.transparency = transparency;
+    preferences.window.opacity = opacity;
     ThemeCatalog::default()
         .resolve(
             AppearanceGeneration::INITIAL,
@@ -27,13 +27,13 @@ fn resolve_light(transparency: f32) -> crate::appearance::ResolvedAppearance {
         .unwrap()
 }
 
-fn light(transparency: f32) -> ChromeAppearance {
-    ChromeAppearance::prepare(&resolve_light(transparency).chrome)
+fn light(opacity: f32) -> ChromeAppearance {
+    ChromeAppearance::prepare(&resolve_light(opacity).chrome)
 }
 
 #[test]
 fn light_popup_uses_base_host_and_raised_selection() {
-    let appearance = light(0.0);
+    let appearance = light(1.0);
     let colors = &appearance.floating_colors;
     assert_eq!(colors.elevated_surface_background, Color::rgb(0xe5e5e5));
     for selected in [
@@ -60,8 +60,8 @@ fn light_popup_uses_base_host_and_raised_selection() {
 #[test]
 fn light_unselected_navigation_hover_remains_visible_through_materials() {
     let desktop = Color::rgb(0x808080);
-    for transparency in [0.0, 0.35, 1.0] {
-        let appearance = light(transparency);
+    for opacity in [1.0, 0.65, 0.0] {
+        let appearance = light(opacity);
         let shell = appearance
             .surface(
                 crate::appearance::SurfaceRole::Sheet,
@@ -91,7 +91,7 @@ fn light_unselected_navigation_hover_remains_visible_through_materials() {
             let hovered = chip.hover_fill.unwrap().source_over(shell);
             assert!(
                 hovered.contrast_ratio(shell) >= 1.10,
-                "{name} hover at {transparency} disappears: {hovered:?} over {shell:?}"
+                "{name} hover at {opacity} disappears: {hovered:?} over {shell:?}"
             );
         }
     }
@@ -99,8 +99,8 @@ fn light_unselected_navigation_hover_remains_visible_through_materials() {
 
 #[test]
 fn light_unselected_control_hover_has_a_visible_step_on_each_host() {
-    for transparency in [0.0, 0.35, 1.0] {
-        let appearance = light(transparency);
+    for opacity in [1.0, 0.65, 0.0] {
+        let appearance = light(opacity);
         for (host_role, colors) in [
             (
                 spaceterm_ui::ControlHost::Window,
@@ -136,7 +136,7 @@ fn light_unselected_control_hover_has_a_visible_step_on_each_host() {
                 let hover = hover.source_over(host);
                 assert!(
                     hover.contrast_ratio(normal) >= 1.10,
-                    "{family} {host_role:?} hover at {transparency} disappears: {hover:?} vs {normal:?}"
+                    "{family} {host_role:?} hover at {opacity} disappears: {hover:?} vs {normal:?}"
                 );
             }
         }
@@ -150,8 +150,8 @@ fn light_settings_uses_the_workspace_content_hierarchy() {
         SettingsSurfaceRole::{Canvas, Card, Sidebar},
     };
 
-    for transparency in [0.0, 0.35, 1.0] {
-        let resolved = resolve_light(transparency);
+    for opacity in [1.0, 0.65, 0.0] {
+        let resolved = resolve_light(opacity);
         let (active, inactive) = ChromeAppearance::prepare_variants(&resolved.chrome);
         let content = active.pane_surface(resolved.terminal.colors.background);
         let raised = active.colors.elevated_surface_background;
@@ -170,12 +170,12 @@ fn light_settings_uses_the_workspace_content_hierarchy() {
         );
         assert!(
             canvas.paint.a >= content.a,
-            "the Settings canvas must keep at least the Pane's ink at {transparency}: canvas={:?}, pane={content:?}",
+            "the Settings canvas must keep at least the Pane's ink at {opacity}: canvas={:?}, pane={content:?}",
             canvas.paint,
         );
         assert!(
             sidebar.background.r < canvas.background.r && canvas.background.r < card.background.r,
-            "Light hierarchy at {transparency}: muted navigation {sidebar:?}, page {canvas:?}, raised group {card:?}"
+            "Light hierarchy at {opacity}: muted navigation {sidebar:?}, page {canvas:?}, raised group {card:?}"
         );
         for (name, lower, upper) in [
             ("navigation and page", sidebar.background, canvas.background),
@@ -183,7 +183,7 @@ fn light_settings_uses_the_workspace_content_hierarchy() {
         ] {
             assert!(
                 upper.contrast_ratio(lower) >= 1.05,
-                "Light {name} at {transparency} must separate by fill: {lower:?} then {upper:?}"
+                "Light {name} at {opacity} must separate by fill: {lower:?} then {upper:?}"
             );
         }
         assert_eq!(
@@ -197,7 +197,7 @@ fn light_settings_uses_the_workspace_content_hierarchy() {
 #[test]
 fn light_settings_keeps_accessibility_group_boundaries() {
     for increase_contrast in [false, true] {
-        let mut resolved = resolve_light(0.35);
+        let mut resolved = resolve_light(0.65);
         let chrome = std::sync::Arc::make_mut(&mut resolved.chrome);
         chrome.composition.capabilities.increase_contrast = increase_contrast;
         chrome.composition.capabilities.show_borders = !increase_contrast;
@@ -216,8 +216,8 @@ fn light_settings_keeps_accessibility_group_boundaries() {
 
 #[test]
 fn light_settings_control_hover_retains_a_visible_step_on_scoped_hosts() {
-    for transparency in [0.0, 0.35, 1.0] {
-        let resolved = resolve_light(transparency);
+    for opacity in [1.0, 0.65, 0.0] {
+        let resolved = resolve_light(opacity);
         let (active, inactive) = ChromeAppearance::prepare_variants(&resolved.chrome);
         let (settings, _) = super::settings::prepare_variants(&resolved.chrome, active, inactive);
         let appearance = &settings.chrome;
@@ -245,7 +245,7 @@ fn light_settings_control_hover_retains_a_visible_step_on_scoped_hosts() {
                         .source_over(host)
                         .contrast_ratio(normal.source_over(host))
                         >= 1.10,
-                    "Settings {role:?} hover at {transparency} must remain visible"
+                    "Settings {role:?} hover at {opacity} must remain visible"
                 );
             }
         }
@@ -259,12 +259,12 @@ fn every_chip_lifts_without_drawing_a_border() {
 
     let desktop = Color::rgb(0x2b3a55);
     for mode in [AppearanceMode::Light, AppearanceMode::Dark] {
-        for transparency in [0.0, 0.35, 1.0] {
+        for opacity in [1.0, 0.65, 0.0] {
             let mut preferences = AppearancePreferences {
                 mode,
                 ..Default::default()
             };
-            preferences.window.transparency = transparency;
+            preferences.window.opacity = opacity;
             let resolved = ThemeCatalog::default()
                 .resolve(
                     AppearanceGeneration::INITIAL,
@@ -318,19 +318,19 @@ fn every_chip_lifts_without_drawing_a_border() {
                 let rim = paint.rim.unwrap();
                 assert!(
                     rim.a > 0,
-                    "{mode:?} at {transparency}: the {name} lift is missing"
+                    "{mode:?} at {opacity}: the {name} lift is missing"
                 );
                 assert_eq!(
                     rim.r > 128,
                     resolved.chrome.appearance == Appearance::Dark,
-                    "{mode:?} at {transparency}: the {name} rim uses the wrong ink: {rim:?}"
+                    "{mode:?} at {opacity}: the {name} rim uses the wrong ink: {rim:?}"
                 );
                 let strip = semantic_host.source_over(desktop);
                 let painted = paint.fill.unwrap().source_over(strip);
                 let chip_lift = lift(rim, painted);
                 assert!(
                     chip_lift >= 0.03,
-                    "{mode:?} at {transparency}: the {name} lift vanishes at {chip_lift:.3}"
+                    "{mode:?} at {opacity}: the {name} lift vanishes at {chip_lift:.3}"
                 );
                 let rimmed = rim.source_over(painted);
                 let inward = (i32::from(painted.r) - i32::from(rimmed.r)).signum()
@@ -338,7 +338,7 @@ fn every_chip_lifts_without_drawing_a_border() {
                 assert_eq!(
                     inward,
                     resolved.chrome.appearance == Appearance::Light,
-                    "{mode:?} at {transparency}: the {name} rim states its edge the wrong way: \
+                    "{mode:?} at {opacity}: the {name} rim states its edge the wrong way: \
                      strip={strip:?} fill={painted:?} rim={rimmed:?}"
                 );
                 // The rim is a fraction of the chip's own step from its strip. Past that step it
@@ -346,12 +346,12 @@ fn every_chip_lifts_without_drawing_a_border() {
                 let chip_step = painted.contrast_ratio(strip) - 1.0;
                 assert!(
                     chip_lift <= chip_step * 0.6,
-                    "{mode:?} at {transparency}: the {name} rim outruns the chip it belongs to \
+                    "{mode:?} at {opacity}: the {name} rim outruns the chip it belongs to \
                      at {chip_lift:.3} against the fill's own {chip_step:.3}"
                 );
                 assert!(
                     chip_lift <= pane_lift * 0.5,
-                    "{mode:?} at {transparency}: the {name} rim reads as a border at \
+                    "{mode:?} at {opacity}: the {name} rim reads as a border at \
                      {chip_lift:.3} against the Pane boundary's {pane_lift:.3}"
                 );
             }
@@ -402,7 +402,7 @@ fn builtin_light_ordinary_control_edges_distinguish_hover_and_disabled(
         mode: AppearanceMode::Light,
         ..Default::default()
     };
-    preferences.window.transparency = 0.0;
+    preferences.window.opacity = 1.0;
     let resolved = ThemeCatalog::default()
         .resolve(
             AppearanceGeneration::INITIAL,
@@ -440,8 +440,8 @@ fn builtin_light_ordinary_control_edges_distinguish_hover_and_disabled(
 #[test]
 fn builtin_light_inactive_navigation_and_segments_keep_raised_polarity() {
     let inactive_selection = Color::rgb(0xf4f4f4);
-    for transparency in [0.0, 0.35, 1.0] {
-        let resolved = resolve_light(transparency);
+    for opacity in [1.0, 0.65, 0.0] {
+        let resolved = resolve_light(opacity);
         let (_, inactive) = ChromeAppearance::prepare_variants(&resolved.chrome);
 
         for (role, host, fill, hover) in [
@@ -461,11 +461,11 @@ fn builtin_light_inactive_navigation_and_segments_keep_raised_polarity() {
                     .row_selected_hover_background,
             ),
         ] {
-            assert_eq!(fill, inactive_selection, "{role} at {transparency}");
+            assert_eq!(fill, inactive_selection, "{role} at {opacity}");
             assert_eq!(hover, fill, "inactive {role} must suppress hover");
             assert!(
                 fill.r > host.r,
-                "inactive Light {role} at {transparency} must stay raised over {host:?}"
+                "inactive Light {role} at {opacity} must stay raised over {host:?}"
             );
         }
 
@@ -492,11 +492,11 @@ fn builtin_light_inactive_navigation_and_segments_keep_raised_polarity() {
             let hovered = colors.selection_hover_background.source_over(track);
             assert!(
                 selected.r > track.r,
-                "inactive Light {name} segment at {transparency} must stay raised over {track:?}"
+                "inactive Light {name} segment at {opacity} must stay raised over {track:?}"
             );
             assert_eq!(
                 hovered, selected,
-                "inactive Light {name} segment at {transparency} must suppress hover"
+                "inactive Light {name} segment at {opacity} must suppress hover"
             );
         }
     }
@@ -504,7 +504,7 @@ fn builtin_light_inactive_navigation_and_segments_keep_raised_polarity() {
 
 fn assert_active_segment_uses_elevated_surface(
     name: &str,
-    transparency: f32,
+    opacity: f32,
     appearance: &ChromeAppearance,
     reference: &ChromeColors,
     paint: &ChromeColors,
@@ -539,19 +539,19 @@ fn assert_active_segment_uses_elevated_surface(
     ] {
         assert_eq!(
             fill, expected_paint,
-            "active Light {name} {state} segment at {transparency} must preserve the elevated selection material and its alpha"
+            "active Light {name} {state} segment at {opacity} must preserve the elevated selection material and its alpha"
         );
         assert!(
             foreground.contrast_ratio(fill.source_over(track)) >= 4.5,
-            "active Light {name} {state} segment at {transparency} must keep readable content"
+            "active Light {name} {state} segment at {opacity} must keep readable content"
         );
     }
 }
 
 #[test]
 fn builtin_light_active_segments_use_the_elevated_selection_material_on_every_host() {
-    for transparency in [0.0, 0.35, 1.0] {
-        let resolved = resolve_light(transparency);
+    for opacity in [1.0, 0.65, 0.0] {
+        let resolved = resolve_light(opacity);
         let (active, inactive) = ChromeAppearance::prepare_variants(&resolved.chrome);
         let (settings_active, _) =
             settings::prepare_variants(&resolved.chrome, active.clone(), inactive);
@@ -584,7 +584,7 @@ fn builtin_light_active_segments_use_the_elevated_selection_material_on_every_ho
         ] {
             assert_active_segment_uses_elevated_surface(
                 name,
-                transparency,
+                opacity,
                 &active,
                 reference,
                 paint,
@@ -601,7 +601,7 @@ fn builtin_light_active_segments_use_the_elevated_selection_material_on_every_ho
                 .source_over(Color::rgba(u32::from(shell.backdrop_tone())).source_over(underlay));
             assert_active_segment_uses_elevated_surface(
                 "Floating",
-                transparency,
+                opacity,
                 &active,
                 &active.floating_colors,
                 &active.floating_segmented_colors,
@@ -626,7 +626,7 @@ fn builtin_light_active_segments_use_the_elevated_selection_material_on_every_ho
         ] {
             assert_active_segment_uses_elevated_surface(
                 name,
-                transparency,
+                opacity,
                 &settings_active.chrome,
                 reference,
                 paint,

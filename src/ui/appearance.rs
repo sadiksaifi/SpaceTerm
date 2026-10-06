@@ -3505,7 +3505,7 @@ fn resolve_floating_segmented_colors_detailed(
     ];
     let segmented_states = if explicit_track {
         // These fills have already been materialized against their authored track. Rehosting
-        // their opaque targets would discard transparency and force bright selections opaque.
+        // their opaque targets would discard reduced opacity and force bright selections opaque.
         Ok(segmented_states)
     } else {
         rehost_floating_states(

@@ -15,9 +15,9 @@ pub(crate) enum WindowBackgroundAppearance {
 /// Independent facts that constrain native-window and in-window composition.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct CompositionCapabilities {
-    pub(crate) native_window_transparency: bool,
+    pub(crate) native_window_opacity: bool,
     pub(crate) native_window_blur: bool,
-    pub(crate) reduce_transparency: bool,
+    pub(crate) require_opaque_surfaces: bool,
     pub(crate) increase_contrast: bool,
     pub(crate) show_borders: bool,
     pub(crate) reduce_motion: bool,
@@ -25,14 +25,11 @@ pub(crate) struct CompositionCapabilities {
 }
 
 impl CompositionCapabilities {
-    pub(crate) const fn new(
-        native_window_transparency: bool,
-        accessibility_allows_transparency: bool,
-    ) -> Self {
+    pub(crate) const fn new(native_window_opacity: bool, allows_reduced_opacity: bool) -> Self {
         Self {
-            native_window_transparency,
-            native_window_blur: native_window_transparency,
-            reduce_transparency: !accessibility_allows_transparency,
+            native_window_opacity,
+            native_window_blur: native_window_opacity,
+            require_opaque_surfaces: !allows_reduced_opacity,
             increase_contrast: false,
             show_borders: false,
             reduce_motion: false,
@@ -40,16 +37,16 @@ impl CompositionCapabilities {
         }
     }
 
-    const fn accessibility_allows_transparency(self) -> bool {
-        !self.reduce_transparency
+    const fn allows_reduced_opacity(self) -> bool {
+        !self.require_opaque_surfaces
     }
 
-    /// The missing desktop capability that keeps Transparency and Blur from changing the window.
+    /// The missing desktop capability that keeps Opacity and Blur from changing the window.
     /// Without desktop blur the window stays opaque because an application cannot blur the
     /// desktop behind its own window.
     pub(crate) const fn unavailable_window_effect(self) -> Option<UnavailableWindowEffect> {
-        if !self.native_window_transparency {
-            Some(UnavailableWindowEffect::Transparency)
+        if !self.native_window_opacity {
+            Some(UnavailableWindowEffect::Opacity)
         } else if !self.native_window_blur {
             Some(UnavailableWindowEffect::Blur)
         } else {
@@ -57,7 +54,7 @@ impl CompositionCapabilities {
         }
     }
 
-    /// The Transparency and Blur that take effect on this desktop. Both take their defaults while
+    /// The Opacity and Blur that take effect on this desktop. Both take their defaults while
     /// a window effect is unavailable; the retained choices are untouched.
     pub(crate) fn window_background(
         self,
@@ -71,7 +68,7 @@ impl CompositionCapabilities {
             preferences
         };
         WindowBackgroundChoices {
-            transparency: source.transparency,
+            opacity: source.opacity,
             blur: source.blur,
             unavailable,
         }
@@ -81,14 +78,14 @@ impl CompositionCapabilities {
 /// A desktop capability whose absence keeps the window opaque.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum UnavailableWindowEffect {
-    Transparency,
+    Opacity,
     Blur,
 }
 
-/// Transparency and Blur as they take effect on one desktop.
+/// Opacity and Blur as they take effect on one desktop.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct WindowBackgroundChoices {
-    pub(crate) transparency: f32,
+    pub(crate) opacity: f32,
     pub(crate) blur: bool,
     /// Why the retained choices cannot take effect, in which case these are the defaults.
     pub(crate) unavailable: Option<UnavailableWindowEffect>,
@@ -181,18 +178,18 @@ impl SurfaceMaterials {
         }
     }
 
-    /// What a resting surface still paints at the maximum setting. A resting surface's
+    /// What a resting surface still paints at minimum opacity. A resting surface's
     /// difference from the sheet carries the window's hierarchy, so it is never given up.
     const RESTING_RESIDUAL: f32 = 0.42;
-    /// How strongly a floating material constrains backdrop color at maximum transparency, with
+    /// How strongly a floating material constrains backdrop color at minimum opacity, with
     /// blur on or off.
     const FLOATING_RESIDUAL: f32 = 0.70;
     /// The most coverage a floating shell adds after the window's glass has engaged.
     const FLOATING_WASH_CEILING: u8 = 20;
-    /// How much already-painted in-window content a floating shell may retain at maximum
-    /// transparency. The remainder exposes the effective native window backdrop.
+    /// How much already-painted in-window content a floating shell may retain at minimum
+    /// opacity. The remainder exposes the effective native window backdrop.
     const FLOATING_BACKDROP_RETENTION: f32 = 0.15;
-    /// How much more ink a dark ladder spends at the maximum setting than over its own base,
+    /// How much more ink a dark ladder spends at minimum opacity than over its own base,
     /// because the admitted backdrop is lighter than the near-black base the rungs are solved over.
     const DARK_BACKING_GAIN: f64 = 0.5;
     /// How many times over bright Chrome's window tint gives up what the Setting leaves it.
@@ -200,9 +197,9 @@ impl SurfaceMaterials {
     /// Only the sheet reads this.
     const BRIGHT_SHEET_PASSES: i32 = 2;
 
-    /// The setting by which the window's glass behaves as glass: resting surfaces spend no more
-    /// than their ladder ceiling. The ceiling eases in from the opaque presentation below it, so
-    /// leaving 0 moves the surfaces continuously instead of stepping.
+    /// The admitted share by which the window's glass behaves as glass: resting surfaces spend
+    /// no more than their ladder ceiling. The ceiling eases in from the opaque presentation
+    /// below it, so reducing opacity from 1 moves the surfaces continuously instead of stepping.
     const GLASS_ENGAGED_AT: f32 = 0.12;
 
     /// The most a near-neutral resting surface may add over the window's sheet. Bright Chrome
@@ -223,9 +220,9 @@ impl SurfaceMaterials {
 
     /// The setting controls transmission through the window sheet, on the curve the Chrome
     /// resting on it needs to show the backdrop at all.
-    fn derive(transparency: f32, tone: ChromeTone) -> Self {
-        let amount = if transparency.is_finite() {
-            transparency.clamp(0.0, 1.0)
+    fn derive(opacity: f32, tone: ChromeTone) -> Self {
+        let amount = if opacity.is_finite() {
+            1.0 - opacity.clamp(0.0, 1.0)
         } else {
             0.0
         };
@@ -249,7 +246,7 @@ impl SurfaceMaterials {
         (self.admitted() / Self::GLASS_ENGAGED_AT).min(1.0)
     }
 
-    /// What one role keeps at the maximum setting, and how quickly it gives the rest up.
+    /// What one role keeps at minimum opacity, and how quickly it gives the rest up.
     fn transmission(role: SurfaceRole) -> (f32, f32) {
         match role {
             SurfaceRole::Sheet => (0.0, 1.0),
@@ -473,18 +470,17 @@ impl ResolvedWindowComposition {
         } else {
             WindowBackgroundAppearance::Transparent
         };
-        let requested_materials = SurfaceMaterials::derive(choices.transparency, tone);
-        let accessibility_allows_transparency = capabilities.accessibility_allows_transparency();
-        let floating_materials = if accessibility_allows_transparency {
+        let requested_materials = SurfaceMaterials::derive(choices.opacity, tone);
+        let allows_reduced_opacity = capabilities.allows_reduced_opacity();
+        let floating_materials = if allows_reduced_opacity {
             requested_materials
         } else {
             SurfaceMaterials::OPAQUE
         };
         // A window with no glass keeps its opaque backing, whatever backdrop was asked for: an
         // effect behind a fully painted window costs a backdrop for nothing.
-        let native_enabled = choices.adjustable()
-            && accessibility_allows_transparency
-            && !requested_materials.is_opaque();
+        let native_enabled =
+            choices.adjustable() && allows_reduced_opacity && !requested_materials.is_opaque();
         Self {
             capabilities,
             requested,
@@ -691,27 +687,27 @@ mod tests {
     use super::*;
     use crate::appearance::{ChromeColors, Color};
 
-    /// Without desktop transparency or blur, both choices take their defaults everywhere.
+    /// Without desktop opacity control or blur, both choices take their defaults everywhere.
     #[test]
     fn unavailable_window_effects_resolve_every_material_from_the_defaults() {
         use WindowBackgroundAppearance::{Blurred, Opaque, Transparent};
         let defaults = crate::appearance::preferences::WindowPreferences::default();
-        for (transparency, blur, unavailable) in [
-            (false, false, Some(UnavailableWindowEffect::Transparency)),
-            (false, true, Some(UnavailableWindowEffect::Transparency)),
+        for (native_opacity, blur, unavailable) in [
+            (false, false, Some(UnavailableWindowEffect::Opacity)),
+            (false, true, Some(UnavailableWindowEffect::Opacity)),
             (true, false, Some(UnavailableWindowEffect::Blur)),
             (true, true, None),
         ] {
             let capabilities = CompositionCapabilities {
-                native_window_transparency: transparency,
+                native_window_opacity: native_opacity,
                 native_window_blur: blur,
-                ..CompositionCapabilities::new(transparency, true)
+                ..CompositionCapabilities::new(native_opacity, true)
             };
-            for (retained_transparency, retained_blur) in
-                [(0.8, false), (0.8, true), (0.0, false), (0.0, true)]
+            for (retained_opacity, retained_blur) in
+                [(0.2, false), (0.2, true), (1.0, false), (1.0, true)]
             {
                 let preferences = crate::appearance::preferences::WindowPreferences {
-                    transparency: retained_transparency,
+                    opacity: retained_opacity,
                     blur: retained_blur,
                     ..Default::default()
                 };
@@ -722,23 +718,22 @@ mod tests {
                     ChromeTone::Dark,
                 );
                 let case = format!(
-                    "transparency={transparency} blur={blur} \
-                     retained=({retained_transparency}, {retained_blur})"
+                    "native_opacity={native_opacity} blur={blur} \
+                     retained=({retained_opacity}, {retained_blur})"
                 );
                 assert_eq!(choices.unavailable, unavailable, "{case}");
                 assert_eq!(choices.adjustable(), unavailable.is_none(), "{case}");
-                let (shown_transparency, shown_blur) = if unavailable.is_some() {
-                    (defaults.transparency, defaults.blur)
+                let (shown_opacity, shown_blur) = if unavailable.is_some() {
+                    (defaults.opacity, defaults.blur)
                 } else {
-                    (retained_transparency, retained_blur)
+                    (retained_opacity, retained_blur)
                 };
                 assert_eq!(
-                    (choices.transparency, choices.blur),
-                    (shown_transparency, shown_blur),
+                    (choices.opacity, choices.blur),
+                    (shown_opacity, shown_blur),
                     "{case}"
                 );
-                let shown_materials =
-                    SurfaceMaterials::derive(shown_transparency, ChromeTone::Dark);
+                let shown_materials = SurfaceMaterials::derive(shown_opacity, ChromeTone::Dark);
                 let window = match (unavailable, shown_materials.is_opaque(), shown_blur) {
                     (None, false, true) => Blurred,
                     (None, false, false) => Transparent,
@@ -770,20 +765,20 @@ mod tests {
         }
     }
 
-    /// Reduce Transparency keeps every material opaque, whether or not the desktop could present
-    /// the window effects.
+    /// Requiring opaque surfaces keeps every material opaque, whether or not the desktop could
+    /// present the window effects.
     #[test]
-    fn reduce_transparency_keeps_every_material_opaque_with_or_without_window_effects() {
+    fn requiring_opaque_surfaces_keeps_every_material_opaque_with_or_without_window_effects() {
         let preferences = crate::appearance::preferences::WindowPreferences {
-            transparency: 0.8,
+            opacity: 0.2,
             blur: true,
             ..Default::default()
         };
-        for (transparency, blur) in [(false, false), (true, false), (true, true)] {
+        for (native_opacity, blur) in [(false, false), (true, false), (true, true)] {
             let capabilities = CompositionCapabilities {
                 native_window_blur: blur,
-                reduce_transparency: true,
-                ..CompositionCapabilities::new(transparency, true)
+                require_opaque_surfaces: true,
+                ..CompositionCapabilities::new(native_opacity, true)
             };
             let resolved =
                 ResolvedWindowComposition::resolve(&preferences, capabilities, ChromeTone::Dark);
@@ -795,7 +790,7 @@ mod tests {
     }
 
     #[test]
-    fn increase_contrast_keeps_requested_transparency_until_reduce_transparency_is_enabled() {
+    fn increase_contrast_keeps_requested_opacity_until_opaque_surfaces_are_required() {
         let preferences = crate::appearance::preferences::WindowPreferences::default();
         let capabilities = CompositionCapabilities {
             increase_contrast: true,
@@ -816,7 +811,7 @@ mod tests {
         let reduced = ResolvedWindowComposition::resolve(
             &preferences,
             CompositionCapabilities {
-                reduce_transparency: true,
+                require_opaque_surfaces: true,
                 ..capabilities
             },
             ChromeTone::Dark,
@@ -828,7 +823,7 @@ mod tests {
     }
 
     #[test]
-    fn non_transparency_accessibility_capabilities_do_not_change_composition() {
+    fn unrelated_accessibility_capabilities_do_not_change_composition() {
         let preferences = crate::appearance::preferences::WindowPreferences::default();
         let baseline = ResolvedWindowComposition::resolve(
             &preferences,
@@ -836,9 +831,9 @@ mod tests {
             ChromeTone::Dark,
         );
         let capabilities = CompositionCapabilities {
-            native_window_transparency: true,
+            native_window_opacity: true,
             native_window_blur: true,
-            reduce_transparency: false,
+            require_opaque_surfaces: false,
             increase_contrast: false,
             show_borders: true,
             reduce_motion: true,
@@ -874,14 +869,14 @@ mod tests {
 
         assert_eq!(SurfaceMaterials::OPAQUE.edge(host, authored), authored);
         assert_eq!(
-            SurfaceMaterials::derive(1.0, ChromeTone::Dark).edge(host, absent),
+            SurfaceMaterials::derive(0.0, ChromeTone::Dark).edge(host, absent),
             absent
         );
     }
 
     #[test]
     fn material_edges_preserve_authored_alpha_composites_and_contrast_polarity() {
-        let material = SurfaceMaterials::derive(1.0, ChromeTone::Dark);
+        let material = SurfaceMaterials::derive(0.0, ChromeTone::Dark);
         for (host, authored, rises) in [
             (Color::rgb(0x202020), Color::rgba(0xe0e0e080), true),
             (Color::rgb(0xe0e0e0), Color::rgba(0x20202080), false),
@@ -929,7 +924,7 @@ mod tests {
             "opaque presentation must retain every authored edge exactly"
         );
 
-        let paint = colors.material_presentation(SurfaceMaterials::derive(1.0, ChromeTone::Dark));
+        let paint = colors.material_presentation(SurfaceMaterials::derive(0.0, ChromeTone::Dark));
         assert_eq!(paint.element_border, colors.element_border);
         assert_eq!(
             paint.input_border.source_over(colors.input_background),
@@ -970,7 +965,7 @@ mod tests {
         for presentation in [
             colors.opaque_presentation(),
             colors.floating_presentation(),
-            colors.material_presentation(SurfaceMaterials::derive(0.6, ChromeTone::Dark)),
+            colors.material_presentation(SurfaceMaterials::derive(0.4, ChromeTone::Dark)),
         ] {
             assert_eq!(
                 presentation.progress_track,
@@ -1026,7 +1021,7 @@ mod tests {
     #[test]
     fn overlay_reconstructs_neutral_and_chromatic_targets_without_a_full_tint() {
         // Use almost-opaque material to exercise the overlay path without appreciable fading.
-        let material = SurfaceMaterials::derive(1.0 / 255.0, ChromeTone::Dark);
+        let material = SurfaceMaterials::derive(1.0 - 1.0 / 255.0, ChromeTone::Dark);
         for (base, target) in [
             (0x141517, 0x25272b),
             (0x203040, 0x305020),
@@ -1059,8 +1054,8 @@ mod tests {
         ];
         for (base, rungs) in ladders {
             let base = Color::rgb(base);
-            let alphas = |transparency| {
-                let material = SurfaceMaterials::derive(transparency, ChromeTone::Dark);
+            let alphas = |opacity| {
+                let material = SurfaceMaterials::derive(opacity, ChromeTone::Dark);
                 rungs.map(|rung| {
                     material
                         .paint(SurfaceRole::Surface, base, Color::rgb(rung).with_alpha(255))
@@ -1068,18 +1063,18 @@ mod tests {
                 })
             };
             // Below glass engagement, a surface reproduces its authored color.
-            for transparency in [0.01, 0.05] {
-                let rungs = alphas(transparency);
+            for opacity in [0.99, 0.95] {
+                let rungs = alphas(opacity);
                 assert!(
                     rungs.windows(2).all(|pair| pair[0] <= pair[1]),
-                    "rungs must keep their authored order: {rungs:?} at {transparency}"
+                    "rungs must keep their authored order: {rungs:?} at {opacity}"
                 );
             }
-            for transparency in [0.15, 0.35, 0.7, 1.0] {
-                let rungs = alphas(transparency);
+            for opacity in [0.85, 0.65, 0.3, 0.0] {
+                let rungs = alphas(opacity);
                 assert!(
                     rungs.windows(2).all(|pair| pair[0] <= pair[1]),
-                    "rungs must keep their authored order: {rungs:?} at {transparency}"
+                    "rungs must keep their authored order: {rungs:?} at {opacity}"
                 );
                 assert!(
                     rungs.iter().all(|alpha| *alpha < 128),
@@ -1087,12 +1082,12 @@ mod tests {
                 );
                 assert!(
                     rungs[3] > rungs[1] && rungs[1] > 0,
-                    "the top of the ladder must stay above its middle at {transparency}"
+                    "the top of the ladder must stay above its middle at {opacity}"
                 );
             }
         }
         // Reproducing a white Pane exactly would spend the sheet's remaining transmission.
-        let bright = SurfaceMaterials::derive(0.35, ChromeTone::Dark);
+        let bright = SurfaceMaterials::derive(0.65, ChromeTone::Dark);
         let exact = u16::from(bright.alpha(SurfaceRole::Surface));
         let painted = u16::from(
             bright
@@ -1103,57 +1098,57 @@ mod tests {
     }
 
     #[test]
-    fn transmission_falls_smoothly_to_a_usable_maximum() {
+    fn surface_alpha_falls_smoothly_to_minimum_opacity() {
         let base = Color::rgb(0xdcdee3);
-        // A bright sheet clears twice as fast at the bottom of the range, which is the steepest
+        // A bright sheet clears twice as fast near maximum opacity, which is the steepest
         // the Stepper ever gets, so both appearances walk the whole of it.
         for tone in [ChromeTone::Dark, ChromeTone::Bright] {
             let mut previous = (255_u8, 255_u8, 255_u8);
             for glass in 0..=255_u8 {
-                let material = SurfaceMaterials::derive(f32::from(glass) / 255.0, tone);
+                let material = SurfaceMaterials::derive(1.0 - f32::from(glass) / 255.0, tone);
                 let sheet = material.alpha(SurfaceRole::Sheet);
                 let floating = material.alpha(SurfaceRole::Floating);
                 let raised = material.paint(SurfaceRole::Surface, base, Color::WHITE).a;
                 let current = (sheet, floating, raised);
                 assert!(
                     current.0 <= previous.0 && current.1 <= previous.1 && current.2 <= previous.2,
-                    "transmission must not reverse at {glass} in {tone:?}: \
+                    "surface alpha must not reverse at {glass} in {tone:?}: \
                      {previous:?} then {current:?}"
                 );
                 assert!(
                     previous.0 - current.0 <= 2 && previous.1 - current.1 <= 2,
-                    "transmission must not step at {glass} in {tone:?}: \
+                    "surface alpha must not step at {glass} in {tone:?}: \
                      {previous:?} then {current:?}"
                 );
                 previous = current;
             }
             assert_eq!(
-                SurfaceMaterials::derive(0.0, tone).alpha(SurfaceRole::Sheet),
+                SurfaceMaterials::derive(1.0, tone).alpha(SurfaceRole::Sheet),
                 255,
-                "an untouched setting keeps the opaque presentation in {tone:?}"
+                "maximum opacity keeps the opaque presentation in {tone:?}"
             );
             assert_eq!(
-                SurfaceMaterials::derive(1.0, tone).alpha(SurfaceRole::Sheet),
+                SurfaceMaterials::derive(0.0, tone).alpha(SurfaceRole::Sheet),
                 0,
-                "the maximum setting hands the desktop the whole of the window's tint"
+                "minimum opacity hands the desktop the whole of the window's tint"
             );
         }
         // A bright scheme paints near-white, so it must clear more of its tint than a dark one
         // for the same Setting to show any desktop at all.
-        let setting = 0.35;
+        let opacity = 0.65;
         assert!(
-            SurfaceMaterials::derive(setting, ChromeTone::Bright).alpha(SurfaceRole::Sheet)
-                < SurfaceMaterials::derive(setting, ChromeTone::Dark).alpha(SurfaceRole::Sheet),
+            SurfaceMaterials::derive(opacity, ChromeTone::Bright).alpha(SurfaceRole::Sheet)
+                < SurfaceMaterials::derive(opacity, ChromeTone::Dark).alpha(SurfaceRole::Sheet),
         );
-        let maximum = SurfaceMaterials::derive(1.0, ChromeTone::Dark);
+        let minimum = SurfaceMaterials::derive(0.0, ChromeTone::Dark);
         assert!(
-            maximum.alpha(SurfaceRole::Floating) >= 96,
+            minimum.alpha(SurfaceRole::Floating) >= 96,
             "a menu must still constrain the color of content it is drawn over"
         );
         // A pale desktop is the hardest backing for a bright scheme to lift off.
         let pale = Color::rgb(0xe0e0e0);
         for (rung, lift) in [(0xffffff_u32, 5_u8), (0xf6f8fb, 4), (0xe3e5e9, 2)] {
-            let surface = maximum
+            let surface = minimum
                 .paint(SurfaceRole::Surface, base, Color::rgb(rung))
                 .source_over(pale);
             assert!(
@@ -1169,7 +1164,7 @@ mod tests {
     fn stated_colors_keep_the_alpha_they_need() {
         let base = Color::rgb(0xdcdee3);
         // Almost-opaque material, so the overlay is read without appreciable fading.
-        let sheer = SurfaceMaterials::derive(1.0 / 255.0, ChromeTone::Dark);
+        let sheer = SurfaceMaterials::derive(1.0 - 1.0 / 255.0, ChromeTone::Dark);
         // Saturated actions and status fills, and a neutral panel authored far from the base.
         for target in [0x1a63bb, 0xc23b34, 0x22713f, 0x1c1c1e] {
             let target = Color::rgb(target);
@@ -1187,7 +1182,7 @@ mod tests {
             }
         }
         // A neutral surface walking away from the base leaves the ladder without a cliff.
-        let material = SurfaceMaterials::derive(0.35, ChromeTone::Dark);
+        let material = SurfaceMaterials::derive(0.65, ChromeTone::Dark);
         let opacity = |distance: u8| {
             let shade = 0xdc - distance;
             let target = Color::from_rgb_components(shade, shade + 2, shade + 7);
@@ -1208,7 +1203,7 @@ mod tests {
     /// a visible surface.
     #[test]
     fn authored_alpha_is_scaled_and_sentinels_stay_invisible() {
-        let material = SurfaceMaterials::derive(0.35, ChromeTone::Dark);
+        let material = SurfaceMaterials::derive(0.65, ChromeTone::Dark);
         let base = Color::rgb(0xdcdee3);
         for role in [
             SurfaceRole::Sheet,

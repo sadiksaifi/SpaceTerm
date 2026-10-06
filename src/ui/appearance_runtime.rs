@@ -30,7 +30,7 @@ impl Global for InstalledAppearance {}
 #[cfg(feature = "developer-tools")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AccessibilityPreviewFact {
-    ReduceTransparency,
+    RequireOpaqueSurfaces,
     IncreaseContrast,
     ShowBorders,
     ReduceMotion,
@@ -40,7 +40,7 @@ pub(crate) enum AccessibilityPreviewFact {
 #[cfg(feature = "developer-tools")]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct AccessibilityPreviewOverride {
-    reduce_transparency: Option<bool>,
+    require_opaque_surfaces: Option<bool>,
     increase_contrast: Option<bool>,
     show_borders: Option<bool>,
     reduce_motion: Option<bool>,
@@ -50,9 +50,9 @@ struct AccessibilityPreviewOverride {
 #[cfg(feature = "developer-tools")]
 impl AccessibilityPreviewOverride {
     fn apply(self, mut capabilities: CompositionCapabilities) -> CompositionCapabilities {
-        capabilities.reduce_transparency = self
-            .reduce_transparency
-            .unwrap_or(capabilities.reduce_transparency);
+        capabilities.require_opaque_surfaces = self
+            .require_opaque_surfaces
+            .unwrap_or(capabilities.require_opaque_surfaces);
         capabilities.increase_contrast = self
             .increase_contrast
             .unwrap_or(capabilities.increase_contrast);
@@ -67,7 +67,7 @@ impl AccessibilityPreviewOverride {
     fn set(&mut self, fact: AccessibilityPreviewFact, enabled: bool) {
         let value = Some(enabled);
         match fact {
-            AccessibilityPreviewFact::ReduceTransparency => self.reduce_transparency = value,
+            AccessibilityPreviewFact::RequireOpaqueSurfaces => self.require_opaque_surfaces = value,
             AccessibilityPreviewFact::IncreaseContrast => self.increase_contrast = value,
             AccessibilityPreviewFact::ShowBorders => self.show_borders = value,
             AccessibilityPreviewFact::ReduceMotion => self.reduce_motion = value,
@@ -167,9 +167,9 @@ pub(crate) fn refresh(cx: &mut App) -> Result<(), SettingsError> {
     let accessibility = platform.accessibility_display_options();
     let native_composition = platform.native_window_composition(cx);
     let capabilities = CompositionCapabilities {
-        native_window_transparency: native_composition.transparency,
+        native_window_opacity: native_composition.opacity,
         native_window_blur: native_composition.blur,
-        reduce_transparency: accessibility.reduce_transparency,
+        require_opaque_surfaces: accessibility.require_opaque_surfaces,
         increase_contrast: accessibility.increase_contrast,
         show_borders: accessibility.show_borders,
         reduce_motion: platform.prefers_reduced_motion(),
