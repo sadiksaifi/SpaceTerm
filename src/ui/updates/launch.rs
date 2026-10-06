@@ -291,15 +291,11 @@ impl Render for LaunchView {
                                         presentation.status,
                                     )),
                             )
-                            .children(
-                                presentation
-                                    .detail
-                                    .map(|detail| {
-                                        div()
-                                            .flex_none()
-                                            .child(Text::new("update-launch-detail".into(), detail))
-                                    }),
-                            ),
+                            .children(presentation.detail.map(|detail| {
+                                div()
+                                    .flex_none()
+                                    .child(Text::new("update-launch-detail".into(), detail))
+                            })),
                     ),
             );
         super::super::window_shell::render(activity.mount(content.into_any_element()), window, cx)

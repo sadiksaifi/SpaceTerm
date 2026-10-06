@@ -10,9 +10,9 @@ use super::terminal_accessibility::{
 use crate::terminal::AccessibilityNotifications;
 use gpui::{Pixels, Window};
 
-use crate::terminal::TerminalAccessibilityModel;
 #[cfg(all(target_os = "macos", any(not(test), feature = "native-tests")))]
 use super::terminal_accessibility::AccessibilityFocusSender;
+use crate::terminal::TerminalAccessibilityModel;
 #[cfg(all(target_os = "macos", any(not(test), feature = "native-tests")))]
 use crate::terminal::{AccessibilityDemandSender, AccessibilitySelectionSender};
 #[cfg(any(not(test), feature = "native-tests"))]
@@ -1038,7 +1038,8 @@ pub(crate) mod tests {
             font: &crate::appearance::ResolvedFontDescriptor,
             font_size: Pixels,
         ) -> Box<dyn TerminalAccessibilityAdapter> {
-            let mut element = native::MacosAccessibilityElement::new(window, model, font, font_size);
+            let mut element =
+                native::MacosAccessibilityElement::new(window, model, font, font_size);
             element.assume_on_screen();
             self.elements.borrow_mut().push(element.native_element());
             Box::new(element)
@@ -1166,7 +1167,11 @@ pub(crate) mod tests {
         cx.run_until_parked();
         let second = factory.elements.borrow()[1].clone();
         let focused = |cx: &mut gpui::VisualTestContext| {
-            cx.update(|window, cx| panes.each_ref().map(|pane| pane.read(cx).is_focused(window)))
+            cx.update(|window, cx| {
+                panes
+                    .each_ref()
+                    .map(|pane| pane.read(cx).is_focused(window))
+            })
         };
         assert_eq!(focused(cx), [true, false]);
         // SAFETY: The selector is part of NSAccessibility and the element is live.

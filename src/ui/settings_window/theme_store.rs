@@ -362,8 +362,11 @@ impl ThemeStore {
                     ),
                 )
                 .child(
-                    secondary("settings-theme-store-loading-caption", "Loading themes…".into())
-                        .debug_selector(|| "settings-theme-store-loading-caption".into()),
+                    secondary(
+                        "settings-theme-store-loading-caption",
+                        "Loading themes…".into(),
+                    )
+                    .debug_selector(|| "settings-theme-store-loading-caption".into()),
                 )
                 .into_any_element(),
             Listing::Failed(error) => {

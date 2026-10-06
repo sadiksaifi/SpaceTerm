@@ -1198,7 +1198,10 @@ mod tests {
             .iter()
             .map(|field| field["aria"]["label"].as_str().unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(fields, ["Alias", "Host name", "User", "Port", "Identity file"]);
+        assert_eq!(
+            fields,
+            ["Alias", "Host name", "User", "Port", "Identity file"]
+        );
         assert_eq!(tree.focused(), tree.find("Alias"));
         assert_eq!(tree.node("Choose Identity File")["aria"]["role"], "Button");
         assert!(tree.find_text("Alias is required.").is_none());

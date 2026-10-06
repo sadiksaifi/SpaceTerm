@@ -2823,7 +2823,11 @@ mod tests {
         assert_eq!(alert["aria"]["modal"], true);
 
         perform(cx, tree.node("Retry"), Action::Click);
-        assert!(A11yTree::read(cx).find("Remote connection failed").is_none());
+        assert!(
+            A11yTree::read(cx)
+                .find("Remote connection failed")
+                .is_none()
+        );
         // Authentication suspends the progress, which returns once it reports another phase.
         cx.update(|window, cx| {
             flow.update(cx, |flow, cx| {
@@ -2844,7 +2848,11 @@ mod tests {
         perform(cx, tree.node("Cancel"), Action::Click);
         cx.run_until_parked();
         assert_eq!(events.borrow().cancelled, 1);
-        assert!(A11yTree::read(cx).find("Remote connection progress").is_none());
+        assert!(
+            A11yTree::read(cx)
+                .find("Remote connection progress")
+                .is_none()
+        );
         assert!(cx.update(|window, cx| harness.read(cx).prior_focus.is_focused(window)));
     }
 

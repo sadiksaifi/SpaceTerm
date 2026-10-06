@@ -7,8 +7,8 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, accesskit, Bounds, Div, Edges, FocusHandle, Pixels, SharedString, Size, TitlebarOptions,
-    Window, WindowBounds, WindowKind, WindowOptions, div, px,
+    AnyElement, App, Bounds, Div, Edges, FocusHandle, Pixels, SharedString, Size, TitlebarOptions,
+    Window, WindowBounds, WindowKind, WindowOptions, accesskit, div, px,
 };
 use spaceterm_ui::{
     Button, ButtonMetrics, ButtonPaint, ButtonVariantStyle, ClientWindowControls, HoverFade, Icon,
@@ -618,9 +618,7 @@ pub(crate) fn render_footer_action(
                 .tab_stop(true)
                 .debug_selector(selector)
                 .leading(move |color| Icon::new(icon, glyph_size, color).into_any_element())
-                .on_activate(move |_, window, cx| {
-                    window.dispatch_action(action.boxed_clone(), cx)
-                }),
+                .on_activate(move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx)),
         )
         .into_any_element()
 }
@@ -718,7 +716,9 @@ fn render_navigation_list<T: SidebarOwner>(
                 .aria_selected(selected)
                 .aria_disabled(!available)
                 // The list holds keyboard focus, so its selection is the focused option.
-                .when(selected && list_holds_focus, |row| row.aria_active_descendant())
+                .when(selected && list_holds_focus, |row| {
+                    row.aria_active_descendant()
+                })
                 .when(available, |row| {
                     row.on_a11y_action(accesskit::Action::Click, move |_, window, cx| {
                         let _ = pressing.update(cx, |owner, cx| {

@@ -4544,7 +4544,12 @@ fn settings_publish_headings_row_titles_and_guidance_in_reading_order(cx: &mut T
             )
         })
         .collect::<Vec<_>>();
-    for heading in [("Font", 1), ("Typeface", 2), ("Weight", 2), ("Rendering", 2)] {
+    for heading in [
+        ("Font", 1),
+        ("Typeface", 2),
+        ("Weight", 2),
+        ("Rendering", 2),
+    ] {
         assert!(headings.contains(&heading), "{heading:?} in {headings:?}");
     }
 
@@ -4626,7 +4631,10 @@ fn save_status_and_the_failure_banner_publish_their_text(cx: &mut TestAppContext
         "Could not save your changes",
         "The change is still applied. Retry to write it to your settings file.",
     ] {
-        assert!(text.contains(&expected.to_owned()), "{expected:?} in {text:?}");
+        assert!(
+            text.contains(&expected.to_owned()),
+            "{expected:?} in {text:?}"
+        );
     }
 }
 
@@ -4636,6 +4644,8 @@ fn settings_focus_reaches_assistive_technology(cx: &mut TestAppContext) {
 
     let (_window, _harness, cx) = open_settings(cx);
     let tree = A11yTree::read(cx);
-    let focused = tree.focused().expect("the focused surface publishes a node");
+    let focused = tree
+        .focused()
+        .expect("the focused surface publishes a node");
     assert_eq!(focused["aria"]["role"], "Group");
 }

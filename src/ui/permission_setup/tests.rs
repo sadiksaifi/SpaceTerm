@@ -729,5 +729,8 @@ fn a_granted_guide_publishes_its_result_and_advice(cx: &mut TestAppContext) {
     let tree = spaceterm_ui::a11y_testing::A11yTree::read(guide_context(cx));
     tree.text(&format!("{name} is allowed."));
     tree.text("Restart any tool that was already running.");
-    assert_eq!(tree.node("Allow Screen Recording")["aria"]["role"], "Button");
+    assert_eq!(
+        tree.node("Allow Screen Recording")["aria"]["role"],
+        "Button"
+    );
 }

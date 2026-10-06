@@ -1379,12 +1379,18 @@ mod tests {
         perform(cx, button, Action::Click);
         assert_eq!(adapter.downloads.get(), 1);
         for (received, percent) in [(37, 37), (66, 66)] {
-            adapter.emit(UpdateEvent::Downloading { received, total: 100 });
+            adapter.emit(UpdateEvent::Downloading {
+                received,
+                total: 100,
+            });
             cx.run_until_parked();
             let tree = A11yTree::read(cx);
             let button = tree.node("Downloading 0.4.2");
             assert_eq!(node_id(button), id);
-            assert_eq!(button["aria"]["description"], format!("Downloading SpaceTerm 0.4.2, {percent}%"));
+            assert_eq!(
+                button["aria"]["description"],
+                format!("Downloading SpaceTerm 0.4.2, {percent}%")
+            );
             assert!(cx.debug_bounds("update-control-tooltip").is_none());
         }
 
@@ -1393,7 +1399,10 @@ mod tests {
         let tree = A11yTree::read(cx);
         let button = tree.node("Install 0.4.2");
         assert_eq!(node_id(button), id);
-        assert_eq!(button["aria"]["description"], "Restart to Install SpaceTerm 0.4.2");
+        assert_eq!(
+            button["aria"]["description"],
+            "Restart to Install SpaceTerm 0.4.2"
+        );
     }
 
     #[test]

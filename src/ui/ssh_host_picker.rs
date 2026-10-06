@@ -1289,7 +1289,11 @@ mod tests {
         events.borrow_mut().clear();
         let tree = A11yTree::read(cx);
         perform(cx, tree.node(ADD_HOST_LABEL), Action::Click);
-        assert!(events.borrow().contains(&SshHostPickerEvent::RequestAddHost));
+        assert!(
+            events
+                .borrow()
+                .contains(&SshHostPickerEvent::RequestAddHost)
+        );
     }
 
     #[gpui::test]

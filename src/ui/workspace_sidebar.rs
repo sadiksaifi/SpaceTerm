@@ -138,7 +138,9 @@ pub(super) struct WorkspaceSidebar {
 
 impl WorkspaceSidebar {
     pub(super) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let scrollbar = cx.new(|_| OverlayScrollbar::<f32>::new("workspace-scrollbar").accessibility_name("Workspace list"));
+        let scrollbar = cx.new(|_| {
+            OverlayScrollbar::<f32>::new("workspace-scrollbar").accessibility_name("Workspace list")
+        });
         cx.subscribe_in(
             &scrollbar,
             window,

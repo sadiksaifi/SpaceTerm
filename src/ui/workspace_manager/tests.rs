@@ -10289,6 +10289,10 @@ fn workspace_rows_publish_a_list_that_selects_on_press(cx: &mut TestAppContext) 
     let tree = A11yTree::read(cx);
     assert_eq!(selected(&tree), [true, false]);
 
-    perform(cx, tree.with_role("ListBoxOption")[0], Action::ShowContextMenu);
+    perform(
+        cx,
+        tree.with_role("ListBoxOption")[0],
+        Action::ShowContextMenu,
+    );
     assert_eq!(A11yTree::read(cx).with_role("Menu").len(), 1);
 }

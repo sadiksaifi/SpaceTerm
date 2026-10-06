@@ -72,14 +72,13 @@ use crate::terminal::{
 };
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, accesskit, Context, Edges, Entity, EventEmitter, MouseButton, Pixels, Render,
-    ScrollHandle, Task, Window, div, px, relative,
+    AnyElement, App, Context, Edges, Entity, EventEmitter, MouseButton, Pixels, Render,
+    ScrollHandle, Task, Window, accesskit, div, px, relative,
 };
 use spaceterm_ui::{
     Alert, AlertIntent, ButtonSize, ButtonTheme, ButtonVariant, ContextMenu, ContextMenuTarget,
-    CustomIconName,
-    HoverFade, Icon, IconButton, IconName, MenuEntry, MenuLifecycleEvent, MenuSize, ModalAction,
-    ModalActionRole, ModalId, Tooltip, WindowDragRegion, WindowDragRegionEvent,
+    CustomIconName, HoverFade, Icon, IconButton, IconName, MenuEntry, MenuLifecycleEvent, MenuSize,
+    ModalAction, ModalActionRole, ModalId, Tooltip, WindowDragRegion, WindowDragRegionEvent,
     WindowDragRegionResponse, WindowDragRegionStatus,
 };
 

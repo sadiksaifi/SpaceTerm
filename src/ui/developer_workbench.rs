@@ -397,7 +397,10 @@ impl DeveloperWorkbench {
             focus_handle.clone(),
             WINDOW_TITLE,
         );
-        let scrollbar = cx.new(|_| OverlayScrollbar::<f32>::new("workbench-scrollbar").accessibility_name("Workbench content"));
+        let scrollbar = cx.new(|_| {
+            OverlayScrollbar::<f32>::new("workbench-scrollbar")
+                .accessibility_name("Workbench content")
+        });
         cx.subscribe(
             &scrollbar,
             |workbench, _, event: &OverlayScrollbarEvent<f32>, cx| {

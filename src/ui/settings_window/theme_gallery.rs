@@ -254,7 +254,9 @@ impl SettingsWindow {
             .id(SharedString::from(selector.clone()))
             .role(accesskit::Role::RadioButton)
             .aria_label(label)
-            .when(!description.is_empty(), |card| card.aria_description(description))
+            .when(!description.is_empty(), |card| {
+                card.aria_description(description)
+            })
             .aria_toggled(accesskit::Toggled::from(selected))
             .aria_position_in_set(usize::from(slot == Appearance::Dark) + 1)
             .aria_size_of_set(2)

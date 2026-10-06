@@ -246,6 +246,8 @@ fn about_focus_reaches_assistive_technology(cx: &mut TestAppContext) {
     let opened = open(cx);
     let cx = &mut VisualTestContext::from_window(opened.into(), cx);
     let tree = A11yTree::read(cx);
-    let focused = tree.focused().expect("the focused surface publishes a node");
+    let focused = tree
+        .focused()
+        .expect("the focused surface publishes a node");
     assert_eq!(focused["aria"]["role"], "Group");
 }

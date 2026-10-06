@@ -201,7 +201,10 @@ fn get_more_themes_publishes_named_extensions_and_reports_the_install(cx: &mut T
         .into_iter()
         .filter_map(|label| label["aria"]["value"].as_str())
         .collect::<Vec<_>>();
-    assert!(text.contains(&"Installed 2 themes from Sample Themes."), "{text:?}");
+    assert!(
+        text.contains(&"Installed 2 themes from Sample Themes."),
+        "{text:?}"
+    );
     let actions = tree
         .children(tree.node("Sample Themes"))
         .into_iter()
