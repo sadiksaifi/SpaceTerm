@@ -620,6 +620,7 @@ type InternalActivation = Rc<dyn Fn(MenuActivationSource, &mut Window, &mut App)
 type PickerChangeHandler<T> = Rc<dyn Fn(&PickerChange<T>, &mut Window, &mut App)>;
 type MenuLifecycleHandler = Rc<dyn Fn(&MenuLifecycleEvent, &mut App)>;
 type ContextOpenHandler = Rc<dyn Fn(&ContextMenuOpenRequest, &mut Window, &mut App) -> bool>;
+type TargetPressHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 
 /// One semantic entry in a menu tree.
 #[derive(Clone)]
@@ -874,6 +875,46 @@ impl<A: Clone + 'static> RenderOnce for Menu<A> {
     }
 }
 
+/// What a context menu's content is to assistive technology.
+///
+/// A context menu with a target publishes its content as one node. That node takes the keyboard
+/// trigger's focus, answers a press, and opens the menu on an assistive technology request.
+pub struct ContextMenuTarget {
+    role: accesskit::Role,
+    label: SharedString,
+    description: Option<SharedString>,
+    selected: Option<bool>,
+    on_press: Option<TargetPressHandler>,
+}
+
+impl ContextMenuTarget {
+    pub fn new(role: accesskit::Role, label: impl Into<SharedString>) -> Self {
+        Self {
+            role,
+            label: label.into(),
+            description: None,
+            selected: None,
+            on_press: None,
+        }
+    }
+
+    pub fn description(mut self, description: impl Into<SharedString>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
+    pub fn selected(mut self, selected: bool) -> Self {
+        self.selected = Some(selected);
+        self
+    }
+
+    /// Runs the same operation as a primary press on the content.
+    pub fn on_press(mut self, handler: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        self.on_press = Some(Rc::new(handler));
+        self
+    }
+}
+
 /// A secondary-click menu attached to arbitrary trigger content.
 #[derive(IntoElement)]
 pub struct ContextMenu<T: IntoElement + 'static, A: Clone + 'static> {
@@ -919,6 +960,12 @@ impl<T: IntoElement + 'static, A: Clone + 'static> ContextMenu<T, A> {
     /// menu entries, and lifecycle as a secondary click; dismissal restores displaced focus.
     pub fn keyboard_trigger(mut self, focus: &FocusHandle) -> Self {
         self.core.context_focus = Some(focus.clone());
+        self
+    }
+
+    /// Publishes the content as the supplied target instead of leaving it to the content.
+    pub fn target(mut self, target: ContextMenuTarget) -> Self {
+        self.core.context_target = Some(target);
         self
     }
 
@@ -1446,6 +1493,7 @@ struct MenuControl<A> {
     on_lifecycle: Option<MenuLifecycleHandler>,
     on_context_open: Option<ContextOpenHandler>,
     context_focus: Option<FocusHandle>,
+    context_target: Option<ContextMenuTarget>,
     /// The value a Picker trigger publishes to assistive technology.
     accessibility_value: Option<SharedString>,
 }
@@ -1475,6 +1523,7 @@ impl<A> MenuControl<A> {
             on_lifecycle: None,
             on_context_open: None,
             context_focus: None,
+            context_target: None,
             accessibility_value: None,
         }
     }
@@ -1493,6 +1542,7 @@ impl<A: Clone + 'static> MenuControl<A> {
         let lifecycle = self.on_lifecycle;
         let context_open = self.on_context_open;
         let key_context_open = context_open.clone();
+        let request_open = context_open.clone();
         let context_focus = self.context_focus;
         let keyboard_context_enabled = context_focus.is_some();
         let entries = convert_entries(self.entries, &move |action: A, mark| {
@@ -1624,6 +1674,7 @@ impl<A: Clone + 'static> MenuControl<A> {
         .inset_0();
 
         let key_state = state.downgrade();
+        let request_state = state.downgrade();
         let open_state = state.downgrade();
         let fill_parent_width = self.fill_parent_width;
         let fill_parent_height = self.fill_parent_height;
@@ -1638,7 +1689,36 @@ impl<A: Clone + 'static> MenuControl<A> {
         let press_state = state.downgrade();
         let mut trigger = div()
             .id(self.id)
-            // A context menu's trigger is content that publishes its own semantics.
+            // A context menu's content publishes its own semantics unless it names a target.
+            .when_some(self.context_target, |trigger, target| {
+                trigger
+                    .role(target.role)
+                    .aria_label(target.label)
+                    .when_some(target.description, |trigger, description| {
+                        trigger.aria_description(description)
+                    })
+                    .when_some(target.selected, |trigger, selected| {
+                        trigger.aria_selected(selected)
+                    })
+                    .when_some(target.on_press, |trigger, press| {
+                        trigger.on_a11y_action(accesskit::Action::Click, move |_, window, cx| {
+                            press(window, cx)
+                        })
+                    })
+                    .when(enabled, |trigger| {
+                        trigger.on_a11y_action(
+                            accesskit::Action::ShowContextMenu,
+                            move |_, window, cx| {
+                                open_context_menu_below_trigger(
+                                    &request_state,
+                                    request_open.as_ref(),
+                                    window,
+                                    cx,
+                                );
+                            },
+                        )
+                    })
+            })
             .when(self.kind != TriggerKind::Context, |trigger| {
                 trigger
                     .role(if self.kind == TriggerKind::Picker {
@@ -1699,25 +1779,15 @@ impl<A: Clone + 'static> MenuControl<A> {
                 if !requested {
                     return;
                 }
-                let Some(position) = key_state
-                    .read_with(cx, |state, _| {
-                        state.trigger_bounds.map(|bounds| bounds.bottom_left())
-                    })
-                    .ok()
-                    .flatten()
-                else {
-                    return;
-                };
-                let request = ContextMenuOpenRequest { position };
-                if key_context_open
-                    .as_ref()
-                    .is_some_and(|handler| !handler(&request, window, cx))
-                {
-                    return;
+                if open_context_menu_below_trigger(
+                    &key_state,
+                    key_context_open.as_ref(),
+                    window,
+                    cx,
+                ) {
+                    window.prevent_default();
+                    cx.stop_propagation();
                 }
-                window.prevent_default();
-                open_menu(&key_state, Some(position), window, cx);
-                cx.stop_propagation();
             });
 
         // An open menu holds its trigger in the pressed paint, so hover shows only while closed.
@@ -2857,6 +2927,31 @@ fn toggle_menu(
     } else {
         open_menu(state, anchor, window, cx);
     }
+}
+
+/// Opens a context menu below its trigger, as a keyboard or assistive technology request does.
+/// Returns whether the request passed the caller's gate.
+fn open_context_menu_below_trigger(
+    state: &WeakEntity<MenuState>,
+    context_open: Option<&ContextOpenHandler>,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    let Some(position) = state
+        .read_with(cx, |state, _| {
+            state.trigger_bounds.map(|bounds| bounds.bottom_left())
+        })
+        .ok()
+        .flatten()
+    else {
+        return false;
+    };
+    let request = ContextMenuOpenRequest { position };
+    if context_open.is_some_and(|handler| !handler(&request, window, cx)) {
+        return false;
+    }
+    open_menu(state, Some(position), window, cx);
+    true
 }
 
 fn open_menu(
@@ -4514,6 +4609,65 @@ mod tests {
             }]
         );
         assert!(A11yTree::read(cx).with_role("Menu").is_empty());
+    }
+
+    #[gpui::test]
+    fn context_menus_publish_their_target_and_open_on_request(cx: &mut TestAppContext) {
+        use crate::a11y_testing::{A11yTree, perform, supports};
+        use gpui::accesskit::{Action, Role};
+
+        struct TargetRoot {
+            focus: FocusHandle,
+            presses: Rc<Cell<usize>>,
+        }
+        impl Render for TargetRoot {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let presses = self.presses.clone();
+                ContextMenu::new(
+                    "row-menu",
+                    "Row actions",
+                    div().w(px(80.0)).h(px(40.0)),
+                    vec![MenuEntry::action("Inspect", ())],
+                )
+                .keyboard_trigger(&self.focus)
+                .target(
+                    ContextMenuTarget::new(Role::ListBoxOption, "Row")
+                        .description("Detail")
+                        .selected(true)
+                        .on_press(move |_, _| presses.set(presses.get() + 1)),
+                )
+                .on_activate(|_, _, _| {})
+            }
+        }
+
+        cx.update(super::init);
+        cx.set_global(test_theme());
+        let presses = Rc::new(Cell::new(0));
+        let root_presses = presses.clone();
+        let (root, cx) = cx.add_window_view(move |_, cx| TargetRoot {
+            focus: cx.focus_handle(),
+            presses: root_presses,
+        });
+        cx.update(|window, cx| {
+            window.activate_window();
+            root.read(cx).focus.clone().focus(window, cx);
+        });
+
+        let tree = A11yTree::read(cx);
+        let target = tree.node("Row");
+        assert_eq!(target["aria"]["role"], "ListBoxOption");
+        assert_eq!(target["aria"]["description"], "Detail");
+        assert_eq!(target["aria"]["selected"], true);
+        assert_eq!(tree.focused().unwrap()["aria"]["label"], "Row");
+        assert!(supports(target, Action::ShowContextMenu));
+
+        perform(cx, target, Action::Click);
+        assert_eq!(presses.get(), 1);
+
+        perform(cx, tree.node("Row"), Action::ShowContextMenu);
+        let tree = A11yTree::read(cx);
+        assert_eq!(tree.with_role("Menu").len(), 1);
+        assert_eq!(tree.focused().unwrap()["aria"]["label"], "Inspect");
     }
 
     #[gpui::test]
