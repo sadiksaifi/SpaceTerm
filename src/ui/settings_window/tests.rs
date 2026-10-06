@@ -4342,3 +4342,24 @@ fn about_follows_the_sections_in_keyboard_order_and_activates_from_the_keyboard(
     cx.run_until_parked();
     assert!(list_focused(cx));
 }
+
+#[gpui::test]
+fn settings_sections_publish_a_list_that_selects_on_press(cx: &mut TestAppContext) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
+    let (window, _harness, cx) = open_settings(cx);
+    let tree = A11yTree::read(cx);
+    let list = tree.node("Sections");
+    assert_eq!(list["aria"]["role"], "ListBox");
+    let font = tree.node("Font");
+    assert_eq!(font["aria"]["role"], "ListBoxOption");
+    assert_eq!(font["aria"]["selected"], false);
+
+    perform(cx, font, Action::Click);
+    assert_eq!(
+        window.read_with(cx, |window, _| window.active_section),
+        SettingsSectionId::Font
+    );
+    assert_eq!(A11yTree::read(cx).node("Font")["aria"]["selected"], true);
+}
