@@ -13,7 +13,7 @@ use gpui::{
     Animation, AnimationExt as _, AnyElement, App, Bounds, CursorStyle, DisplayId,
     ExternalDragPayload, FileDragIcon, FileDragPaths, FontWeight, HighlightStyle, Pixels, Point,
     SharedString, StyledText, WeakEntity, Window, WindowBackgroundAppearance, WindowBounds,
-    WindowHandle, WindowKind, WindowOptions, canvas, div, img, px,
+    WindowHandle, WindowKind, WindowOptions, accesskit, canvas, div, img, px,
 };
 use spaceterm_ui::{
     Button, ButtonActivation, ButtonRole, ButtonSize, ButtonVariant, ControlHost, ControlMotion,
@@ -289,6 +289,8 @@ impl SetupGuide {
         div()
             .id("setup-guide-application")
             .debug_selector(|| "setup-guide-application".to_owned())
+            // A click only nudges the arrow, so the row publishes a group rather than a control.
+            .role(accesskit::Role::Group)
             .aria_label(name)
             .aria_description("Drag to the list above")
             .h(px(ROW_HEIGHT))
@@ -367,6 +369,11 @@ impl Render for SetupGuide {
     }
 }
 
+/// One sentence as assistive technology reads it, without its emphasis.
+fn plain(parts: &[(&str, bool)]) -> String {
+    parts.iter().map(|(part, _)| *part).collect()
+}
+
 /// One sentence whose `true` parts are semibold, the way the guide names what to drag and what it
 /// allows.
 fn emphasized(parts: &[(&str, bool)]) -> StyledText {
@@ -403,7 +410,7 @@ impl SetupGuide {
         let (symbol, message) = if presentation.granted {
             (
                 Icon::new(IconName::Check, glyph, gpui_color(colors.success)).into_any_element(),
-                emphasized(&[(name, true), (" is allowed.", false)]),
+                vec![(name, true), (" is allowed.", false)],
             )
         } else {
             let verb = if self.bundle.is_some() {
@@ -413,13 +420,13 @@ impl SetupGuide {
             };
             (
                 self.render_arrow(glyph, appearance, cx),
-                emphasized(&[
+                vec![
                     (verb, false),
                     (application, true),
                     (" to the list above to allow ", false),
                     (name, true),
                     (".", false),
-                ]),
+                ],
             )
         };
         let header = div()
@@ -431,16 +438,22 @@ impl SetupGuide {
             .child(div().flex_none().child(symbol))
             .child(
                 div()
+                    .id("setup-guide-message")
+                    .role(accesskit::Role::Label)
+                    .aria_label(plain(&message))
                     .debug_selector(|| "setup-guide-message".to_owned())
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .child(message),
+                    .child(emphasized(&message)),
             )
             .child(div().flex_none().child(self.render_close()));
 
         let detail = |text: String| {
             div()
+                .id("setup-guide-detail")
+                .role(accesskit::Role::Label)
+                .aria_label(text.clone())
                 .debug_selector(|| "setup-guide-detail".to_owned())
                 .flex_1()
                 .min_w_0()
@@ -451,6 +464,9 @@ impl SetupGuide {
         };
         let caption = |text: String| {
             div()
+                .id("setup-guide-caption")
+                .role(accesskit::Role::Label)
+                .aria_label(text.clone())
                 .debug_selector(|| "setup-guide-caption".to_owned())
                 .h(px(CAPTION_HEIGHT))
                 .flex()

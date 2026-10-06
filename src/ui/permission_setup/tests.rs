@@ -683,3 +683,53 @@ fn the_setup_names_accessibility_as_the_system_does(cx: &mut TestAppContext) {
         });
     }
 }
+
+/// The guide never takes focus, so assistive technology reads its instruction, the application
+/// to drag, and its caption as published text, and closes it through the same button.
+#[gpui::test]
+fn the_guide_publishes_its_instruction_and_the_application_row(cx: &mut TestAppContext) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
+    let fixture = install(NotGranted, NotGranted, cx);
+    fixture.start(&[ScreenRecording], cx);
+    fixture.show_settings(settings_frame(), cx);
+    let application = ApplicationIdentity::current().display_name();
+
+    let guide = guide_context(cx);
+    let tree = A11yTree::read(guide);
+    let instruction =
+        tree.node(&format!("Drag {application} to the list above to allow Screen Recording."));
+    assert_eq!(instruction["aria"]["role"], "Label");
+    let row = tree.node(application);
+    assert_eq!(row["aria"]["role"], "Group");
+    assert_eq!(row["aria"]["description"], "Drag to the list above");
+    let caption = tree.node(&format!(
+        "{application} removed any earlier entry. Or use the + button below the list."
+    ));
+    assert_eq!(caption["aria"]["role"], "Label");
+
+    perform(guide, tree.node("Close"), Action::Click);
+    guide.run_until_parked();
+    assert_eq!(fixture.current(cx), None);
+    assert!(self::guide(cx).is_none());
+}
+
+#[gpui::test]
+fn a_granted_guide_publishes_its_result_and_advice(cx: &mut TestAppContext) {
+    let fixture = install(NotGranted, NotGranted, cx);
+    fixture.start(&[Accessibility, ScreenRecording], cx);
+    fixture.show_settings(settings_frame(), cx);
+    fixture.access.set(Accessibility, Ok(Granted));
+    fixture.access.report_change();
+    cx.run_until_parked();
+
+    let name = fixture
+        .setup
+        .read_with(cx, |setup, _| setup.copy(Accessibility).name);
+    let tree = spaceterm_ui::a11y_testing::A11yTree::read(guide_context(cx));
+    assert_eq!(tree.node(&format!("{name} is allowed."))["aria"]["role"], "Label");
+    let advice = tree.node("Restart any tool that was already running.");
+    assert_eq!(advice["aria"]["role"], "Label");
+    assert_eq!(tree.node("Allow Screen Recording")["aria"]["role"], "Button");
+}
