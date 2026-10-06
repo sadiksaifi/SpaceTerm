@@ -741,7 +741,7 @@ impl TerminalPane {
         let backing_scale = BackingScale::new(window.scale_factor()).unwrap_or(BackingScale::ONE);
         let fallback_title: SharedString =
             normalized_pane_title("", &session_factory.fallback_title()).into();
-        let scrollbar = cx.new(|_| OverlayScrollbar::<u64>::new("terminal-scrollbar"));
+        let scrollbar = cx.new(|_| OverlayScrollbar::<u64>::new("terminal-scrollbar").accessibility_name("Scrollback"));
         let render_cache = cx.new(|_| TerminalGridCache::new());
         let fallback_render_cache = cx.new(|_| TerminalGridCache::new());
         let graphics_cache = cx.new(|_| TerminalGraphicsCache::default());

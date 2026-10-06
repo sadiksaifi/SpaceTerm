@@ -2049,6 +2049,10 @@ fn constrained_scaled_dialog_reaches_long_header_body_and_every_action_verticall
         bounds_contains(body, thumb),
         "the body scrollbar escaped its viewport: {thumb:?} outside {body:?}"
     );
+    assert_eq!(
+        crate::a11y_testing::A11yTree::read(&mut cx).node("Dialog content")["aria"]["role"],
+        "ScrollBar"
+    );
 
     let action_selectors = [
         "modal-action-constrained-dialog-save",

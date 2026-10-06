@@ -1753,8 +1753,11 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
                     }
                 }
             });
-        let scrollbar =
-            cx.new(|_| OverlayScrollbar::<f32>::new("command-palette-scrollbar").persistent());
+        let scrollbar = cx.new(|_| {
+            OverlayScrollbar::<f32>::new("command-palette-scrollbar")
+                .accessibility_name("Results")
+                .persistent()
+        });
         let scrollbar_subscription = cx.subscribe_in(
             &scrollbar,
             window,

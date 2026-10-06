@@ -608,6 +608,10 @@ fn open_palette_font_change_should_remeasure_offscreen_rows_without_losing_posit
     let editor = cx.debug_bounds("command-palette-editor").unwrap();
     let row = cx.debug_bounds("font-change-row-5").unwrap();
     let thumb = cx.debug_bounds("command-palette-scrollbar-thumb").unwrap();
+    assert_eq!(
+        crate::a11y_testing::A11yTree::read(cx).node("Results")["aria"]["role"],
+        "ScrollBar"
+    );
     let track_height = panel.size.height
         - editor.size.height
         - replacement.metrics.panel_padding * 2.0

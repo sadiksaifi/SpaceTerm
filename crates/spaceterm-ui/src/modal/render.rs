@@ -1635,7 +1635,10 @@ impl ModalFocusRing {
         let trailing = cx.focus_handle().tab_stop(true);
         let suppression = cx.focus_handle();
         let body_scroll = ScrollHandle::new();
-        let body_scrollbar = cx.new(|_| OverlayScrollbar::<f32>::new("modal-body-scrollbar"));
+        let body_scrollbar = cx.new(|_| {
+            OverlayScrollbar::<f32>::new("modal-body-scrollbar")
+                .accessibility_name("Dialog content")
+        });
         cx.subscribe_in(
             &body_scrollbar,
             window,

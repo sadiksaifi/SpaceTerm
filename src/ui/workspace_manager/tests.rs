@@ -7483,6 +7483,19 @@ fn workspace_scrollbar_should_reveal_when_the_list_scrolls(cx: &mut TestAppConte
     );
 }
 
+#[gpui::test]
+fn workspace_list_publishes_a_named_scroll_bar_before_it_is_revealed(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let (_manager, _records, cx) = workspace_manager(cx);
+    for _ in 0..24 {
+        cx.simulate_keystrokes("cmd-n");
+    }
+    let tree = A11yTree::read(cx);
+    assert_eq!(tree.node("Workspace list")["aria"]["role"], "ScrollBar");
+    assert_eq!(tree.with_role("ScrollBar").len(), 1);
+}
+
 fn workspace_order(manager: &Entity<WorkspaceManager>, cx: &mut VisualTestContext) -> Vec<u64> {
     manager.read_with(cx, |manager, _| {
         manager

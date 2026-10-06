@@ -6040,6 +6040,39 @@ fn terminal_context_menu_publishes_its_target_and_opens_from_accessibility(
 }
 
 #[gpui::test]
+fn terminal_scrollback_publishes_a_named_scroll_bar_that_requests_rows(cx: &mut TestAppContext) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
+    let (_pane, cx, records) = connected_terminal_pane(cx);
+    let screen = ScreenSnapshot::from_test_parts_at(
+        Arc::from([]),
+        ScrollbarSnapshot {
+            total_rows: 100,
+            visible_rows: 20,
+            offset_rows: 80,
+        },
+        "",
+        7,
+    );
+    let generation = screen.generation;
+    records
+        .last_event_sender()
+        .unwrap()
+        .try_send(TerminalSessionEvent::Screen(screen))
+        .unwrap();
+    let tree = A11yTree::read(cx);
+    let scrollbar = tree.node("Scrollback");
+    assert_eq!(scrollbar["aria"]["role"], "ScrollBar");
+    assert_eq!(scrollbar["aria"]["numeric_value"], 80.0);
+    perform(cx, scrollbar, Action::Decrement);
+    assert_eq!(
+        records.commands().last().map(|input| &input.command),
+        Some(&RecordedCommand::ScrollTo(60, generation))
+    );
+}
+
+#[gpui::test]
 fn terminal_notices_publish_bounded_status_classifications(cx: &mut TestAppContext) {
     use spaceterm_ui::a11y_testing::A11yTree;
 

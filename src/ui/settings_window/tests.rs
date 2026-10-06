@@ -3426,6 +3426,20 @@ fn live_chrome_preview_preserves_settings_search_editor_and_focus(cx: &mut TestA
     );
 }
 
+#[gpui::test]
+fn settings_content_publishes_a_named_scroll_bar_before_it_is_revealed(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let (_window, _harness, cx) = open_settings(cx);
+    cx.simulate_resize(gpui::size(
+        px(super::WINDOW_WIDTH),
+        px(super::WINDOW_HEIGHT),
+    ));
+    select_section(SettingsSectionId::Keybindings, cx);
+    let tree = A11yTree::read(cx);
+    assert_eq!(tree.node("Settings content")["aria"]["role"], "ScrollBar");
+}
+
 /// A described row beside a tall control keeps its label and guidance inside the row at the
 /// window's minimum width, rather than rising out of the group that clips it.
 #[gpui::test]

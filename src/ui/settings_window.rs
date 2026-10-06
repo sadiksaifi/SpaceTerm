@@ -431,7 +431,7 @@ impl SettingsWindow {
             },
         )
         .detach();
-        let scrollbar = cx.new(|_| OverlayScrollbar::<f32>::new("settings-scrollbar"));
+        let scrollbar = cx.new(|_| OverlayScrollbar::<f32>::new("settings-scrollbar").accessibility_name("Settings content"));
         cx.subscribe(
             &scrollbar,
             |settings, _, event: &OverlayScrollbarEvent<f32>, cx| {

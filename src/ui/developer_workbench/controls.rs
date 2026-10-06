@@ -86,9 +86,10 @@ impl ControlStates {
         let scrollbars = STATES
             .iter()
             .zip(SCROLLBAR_NAMES)
-            .map(|((_, state), name)| {
+            .map(|((label, state), name)| {
                 cx.new(|cx| {
                     let mut scrollbar = OverlayScrollbar::new(name)
+                        .accessibility_name(format!("{label} scrollbar"))
                         .persistent()
                         .preview_state(*state);
                     scrollbar.sync(ScrollMetrics::for_pixels(0.0, 60.0, 240.0, 60.0), cx);
