@@ -301,3 +301,22 @@ fn tab_in_read_only_text_moves_focus_instead_of_indenting(cx: &mut TestAppContex
     assert_eq!(value(&first, cx), "a");
     assert_eq!(value(&second, cx), "b");
 }
+
+#[gpui::test]
+fn text_areas_publish_a_multiline_field_with_its_value(cx: &mut TestAppContext) {
+    use crate::a11y_testing::A11yTree;
+
+    let (area, cx) = area(cx, "first\nsecond", |area| area.placeholder("Notes"));
+    let tree = A11yTree::read(cx);
+    let field = tree.node("Test area");
+    assert_eq!(field["aria"]["role"], "MultilineTextInput");
+    assert_eq!(field["aria"]["value"], "first\nsecond");
+    assert_eq!(field["aria"]["placeholder"], "Notes");
+    assert_eq!(tree.focused(), Some(field));
+
+    area.update(cx, |area, cx| area.set_editable(false, cx));
+    assert_eq!(
+        A11yTree::read(cx).node("Test area")["aria"]["read_only"],
+        true
+    );
+}

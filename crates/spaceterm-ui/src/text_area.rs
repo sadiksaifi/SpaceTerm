@@ -12,7 +12,7 @@ use gpui::{
     Focusable, Font, GlobalElementId, Hsla, InspectorElementId, IntoElement, KeyBinding, LayoutId,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render,
     ScrollWheelEvent, ShapedLine, SharedString, Style, Subscription, Task, TextRun, UTF16Selection,
-    Window, actions, div, fill, point, px, relative, size,
+    Window, accesskit, actions, div, fill, point, px, relative, size,
 };
 use zeroize::Zeroizing;
 
@@ -1448,6 +1448,13 @@ impl Render for TextArea {
         let selector = self.debug_selector.clone();
         let editor = div()
             .id(self.id.clone())
+            .role(accesskit::Role::MultilineTextInput)
+            .aria_label(self.accessibility_name.clone())
+            .aria_value(SharedString::from(self.buffer.text.as_str().to_owned()))
+            .when(!self.placeholder.is_empty(), |editor| {
+                editor.aria_placeholder(self.placeholder.clone())
+            })
+            .aria_read_only(!self.editable)
             .debug_selector(move || selector.to_string())
             .w_full()
             .min_w_0()

@@ -1737,3 +1737,43 @@ fn selecting_ligatures_and_joined_script_preserves_the_exact_shaped_geometry(
     cx.run_until_parked();
     assert_eq!(input.read_with(cx, |input, _| input.shape_count), shapes);
 }
+
+#[gpui::test]
+fn text_inputs_publish_their_name_value_placeholder_and_focus(cx: &mut TestAppContext) {
+    use crate::a11y_testing::A11yTree;
+
+    let (input, cx) = input(cx, "");
+    input.update(cx, |input, cx| input.set_placeholder("Host name", cx));
+    let tree = A11yTree::read(cx);
+    let field = tree.node("Test input");
+    assert_eq!(field["aria"]["role"], "TextInput");
+    assert_eq!(field["aria"]["placeholder"], "Host name");
+    assert_eq!(field["aria"]["value"], "");
+    assert_eq!(tree.focused(), Some(field));
+
+    cx.simulate_input("example.com");
+    input.update(cx, |input, cx| input.set_editable(false, cx));
+    let tree = A11yTree::read(cx);
+    let field = tree.node("Test input");
+    assert_eq!(field["aria"]["value"], "example.com");
+    assert_eq!(field["aria"]["read_only"], true);
+
+    input.update(cx, |input, cx| input.set_enabled(false, cx));
+    assert_eq!(
+        A11yTree::read(cx).node("Test input")["aria"]["disabled"],
+        true
+    );
+}
+
+#[gpui::test]
+fn obscured_inputs_publish_a_secure_field_without_their_value(cx: &mut TestAppContext) {
+    use crate::a11y_testing::A11yTree;
+
+    let (_, cx) = obscured_input(cx, "hunter2");
+    let tree = A11yTree::read(cx);
+    let field = tree.node("Secret");
+    assert_eq!(field["aria"]["role"], "PasswordInput");
+    assert!(field["aria"]["value"].is_null());
+    let published = cx.update(|window, _| window.debug_a11y_tree_json().unwrap());
+    assert!(!published.contains("hunter2"));
+}

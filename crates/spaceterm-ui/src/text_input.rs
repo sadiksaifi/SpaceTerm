@@ -12,7 +12,7 @@ use gpui::{
     Focusable, Font, Global, GlobalElementId, InspectorElementId, IntoElement, KeyBinding,
     LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
     Render, Rgba, ShapedLine, SharedString, Style, Subscription, Task, TextRun, UTF16Selection,
-    UnderlineStyle, Window, actions, div, fill, point, px, relative, size,
+    UnderlineStyle, Window, accesskit, actions, div, fill, point, px, relative, size,
 };
 use unicode_segmentation::UnicodeSegmentation as _;
 use zeroize::{Zeroize as _, Zeroizing};
@@ -2102,6 +2102,21 @@ impl Render for TextInput {
         let focus_anchor = ModalControlScope::register_current_focus_anchor(&self.focus_handle);
         let editor = div()
             .id(self.id.clone())
+            // An obscured value never leaves the input, so its field publishes no value.
+            .role(if exposes_content {
+                accesskit::Role::TextInput
+            } else {
+                accesskit::Role::PasswordInput
+            })
+            .aria_label(self.accessibility_name.clone())
+            .when(exposes_content, |editor| {
+                editor.aria_value(SharedString::from(self.buffer.text.as_str().to_owned()))
+            })
+            .when(!self.placeholder.is_empty(), |editor| {
+                editor.aria_placeholder(self.placeholder.clone())
+            })
+            .aria_disabled(!self.enabled)
+            .aria_read_only(!self.editable)
             .debug_selector(move || selector.to_string())
             .size_full()
             .font(font)
