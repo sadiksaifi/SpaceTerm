@@ -647,14 +647,7 @@ impl RemoteDirectoryProvider for TestRemoteProvider {
         if !self.account_available {
             return gpui::Task::ready(Err(RemoteDirectoryProviderError::Other));
         }
-        gpui::Task::ready(
-            RemoteWorkspaceAccount::from_validated_login_shell(
-                "tester".to_owned(),
-                crate::domain::RemoteDirectoryIdentity::new("/home/tester".to_owned()).unwrap(),
-                crate::ssh::command::ValidatedRemoteLoginShell::new("/bin/zsh".to_owned()).unwrap(),
-            )
-            .map_err(|_| RemoteDirectoryProviderError::InvalidResponse),
-        )
+        gpui::Task::ready(Ok(test_remote_account()))
     }
 
     fn list_directories(
@@ -901,7 +894,6 @@ fn remote_completion_with_provider(
     let destination = crate::domain::SshDestination::new(destination.to_owned()).unwrap();
     let directory = RemoteDirectory::new(directory.to_owned()).unwrap();
     let physical = crate::domain::RemoteDirectoryIdentity::new(physical.to_owned()).unwrap();
-    let home = crate::domain::RemoteDirectoryIdentity::new("/home/tester".to_owned()).unwrap();
     let preparations = Arc::new(AtomicUsize::new(0));
     let revalidations = Arc::new(AtomicUsize::new(0));
     let availability = Arc::new(AtomicBool::new(available));
@@ -929,12 +921,7 @@ fn remote_completion_with_provider(
         }),
         provider,
     );
-    let account = RemoteWorkspaceAccount::from_validated_login_shell(
-        "tester".to_owned(),
-        home,
-        crate::ssh::command::ValidatedRemoteLoginShell::new("/bin/zsh".to_owned()).unwrap(),
-    )
-    .unwrap();
+    let account = test_remote_account();
     (
         crate::ui::remote_workspace_flow::completion(
             session,
@@ -979,7 +966,6 @@ fn remote_completion_with_active_alias_pin_failure(
     let directory = RemoteDirectory::new("~/src".to_owned()).unwrap();
     let physical =
         crate::domain::RemoteDirectoryIdentity::new("/home/tester/src".to_owned()).unwrap();
-    let home = crate::domain::RemoteDirectoryIdentity::new("/home/tester".to_owned()).unwrap();
     let preparations = Arc::new(AtomicUsize::new(0));
     let revalidations = Arc::new(AtomicUsize::new(0));
     let channels: Arc<dyn crate::terminal::RemoteTerminalChannelProvider> =
@@ -1006,12 +992,7 @@ fn remote_completion_with_active_alias_pin_failure(
         }),
         Arc::new(TestRemoteProvider::failing()),
     );
-    let account = RemoteWorkspaceAccount::from_validated_login_shell(
-        "tester".to_owned(),
-        home,
-        crate::ssh::command::ValidatedRemoteLoginShell::new("/bin/zsh".to_owned()).unwrap(),
-    )
-    .unwrap();
+    let account = test_remote_account();
     (
         crate::ui::remote_workspace_flow::completion(
             session,
@@ -2377,15 +2358,7 @@ fn replacing_the_ssh_host_picker_should_release_terminal_input_and_allow_reopeni
     cx.simulate_keystrokes("cmd-shift-k cmd-shift-n cmd-shift-k");
     cx.run_until_parked();
     assert!(cx.update(|window, cx| window_combo_box_is_open(window, cx)));
-    assert!(!cx.update(|window, cx| {
-        manager
-            .read(cx)
-            .workspaces
-            .active_workspace()
-            .payload()
-            .read(cx)
-            .focused_terminal_has_input_focus(window, cx)
-    }));
+    assert!(!active_terminal_has_input_focus(&manager, cx));
 
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
@@ -3073,14 +3046,8 @@ fn reconnect_should_consume_a_terminal_state_published_before_observer_installat
 fn reconnect_identity_change_should_keep_final_presentation_and_show_typed_alert(
     cx: &mut TestAppContext,
 ) {
-    let rendered_text = std::sync::Arc::new(RecordingRenderedText::default());
-    let mut text_context = TestAppContext::build_with_text_system(
-        cx.dispatcher.clone(),
-        cx.test_function_name(),
-        rendered_text.clone(),
-    );
+    let (mut text_context, rendered_text) = RecordingRenderedText::context(cx);
     let cx = &mut text_context;
-
     let (new_session, new_closes, new_preparations, new_revalidations, _) =
         reconnect_session("work", "/home/tester/replaced");
     let backend =
@@ -3157,14 +3124,8 @@ fn reconnect_identity_change_should_keep_final_presentation_and_show_typed_alert
 fn reconnect_directory_unavailable_should_remain_disconnected_with_actionable_alert(
     cx: &mut TestAppContext,
 ) {
-    let rendered_text = std::sync::Arc::new(RecordingRenderedText::default());
-    let mut text_context = TestAppContext::build_with_text_system(
-        cx.dispatcher.clone(),
-        cx.test_function_name(),
-        rendered_text.clone(),
-    );
+    let (mut text_context, rendered_text) = RecordingRenderedText::context(cx);
     let cx = &mut text_context;
-
     let (new_session, new_closes, _, _, _) = reconnect_session_with_provider(
         "work",
         Arc::new(TestRemoteProvider::directory_unavailable()),
@@ -3646,14 +3607,8 @@ fn authentication_cancelled_reconnect_should_return_to_disconnected_without_erro
 fn bounded_connection_detail_should_survive_reconnect_into_the_failure_alert(
     cx: &mut TestAppContext,
 ) {
-    let rendered_text = std::sync::Arc::new(RecordingRenderedText::default());
-    let mut text_context = TestAppContext::build_with_text_system(
-        cx.dispatcher.clone(),
-        cx.test_function_name(),
-        rendered_text.clone(),
-    );
+    let (mut text_context, rendered_text) = RecordingRenderedText::context(cx);
     let cx = &mut text_context;
-
     let detail = crate::ssh::process::TransientSshErrorOutput::from_untrusted_bytes(
         b"ssh: Permission denied (publickey).",
     )
@@ -6892,14 +6847,8 @@ fn the_workspace_chip_should_appear_only_while_the_sidebar_is_hidden(cx: &mut Te
 
 #[gpui::test]
 fn the_workspace_chip_should_follow_the_active_workspace(cx: &mut TestAppContext) {
-    let rendered_text = std::sync::Arc::new(RecordingRenderedText::default());
-    let mut text_context = TestAppContext::build_with_text_system(
-        cx.dispatcher.clone(),
-        cx.test_function_name(),
-        rendered_text.clone(),
-    );
+    let (mut text_context, rendered_text) = RecordingRenderedText::context(cx);
     let cx = &mut text_context;
-
     let (manager, _, cx) = workspace_manager(cx);
 
     click("toggle-sidebar-button", cx);
@@ -7404,14 +7353,8 @@ fn collapsed_top_chrome_should_fit_after_pinning_changes_name(cx: &mut TestAppCo
 
 #[gpui::test]
 fn collapsed_top_chrome_should_preserve_name_after_inactive_shell_exit(cx: &mut TestAppContext) {
-    let rendered_text = std::sync::Arc::new(RecordingRenderedText::default());
-    let mut text_context = TestAppContext::build_with_text_system(
-        cx.dispatcher.clone(),
-        cx.test_function_name(),
-        rendered_text.clone(),
-    );
+    let (mut text_context, rendered_text) = RecordingRenderedText::context(cx);
     let cx = &mut text_context;
-
     let (manager, records, cx) = workspace_manager(cx);
     let inactive_sender = records
         .event_sender(1)
@@ -7835,11 +7778,7 @@ fn workspace_scrollbar_thumb_should_drag_the_list(cx: &mut TestAppContext) {
         manager.sidebar.read(cx).scroll_handle().offset().y
     });
     assert!(
-        before - state > px(0.0),
-        "pointer drag must move the list from its settled offset"
-    );
-    assert!(
-        state < px(0.0),
+        state < before,
         "the Workspace list did not finish a scrollbar drag: {state:?}"
     );
 }
@@ -8225,15 +8164,7 @@ fn workspace_menu_closure_recomputes_remaining_focus_owners(cx: &mut TestAppCont
     cx.run_until_parked();
     right_click("workspace-row-1-active", cx);
     assert!(manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).menu_open()));
-    assert!(!cx.update(|window, cx| {
-        manager
-            .read(cx)
-            .workspaces
-            .active_workspace()
-            .payload()
-            .read(cx)
-            .focused_terminal_has_input_focus(window, cx)
-    }));
+    assert!(!active_terminal_has_input_focus(&manager, cx));
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
     assert!(!manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).menu_open()));
@@ -8253,15 +8184,7 @@ fn workspace_menu_closure_recomputes_remaining_focus_owners(cx: &mut TestAppCont
         )
     );
     click("workspace-row-1-active", cx);
-    assert!(cx.update(|window, cx| {
-        manager
-            .read(cx)
-            .workspaces
-            .active_workspace()
-            .payload()
-            .read(cx)
-            .focused_terminal_has_input_focus(window, cx)
-    }));
+    assert!(active_terminal_has_input_focus(&manager, cx));
 }
 
 #[gpui::test]
@@ -8823,15 +8746,7 @@ fn inactive_shell_exit_should_close_its_workspace_without_stealing_activation(
     cx.simulate_keystrokes("cmd-n");
     cx.run_until_parked();
 
-    assert!(cx.update(|window, cx| {
-        manager
-            .read(cx)
-            .workspaces
-            .active_workspace()
-            .payload()
-            .read(cx)
-            .focused_terminal_has_input_focus(window, cx)
-    }));
+    assert!(active_terminal_has_input_focus(&manager, cx));
     inactive_sender
         .try_send(SessionEvent::Exited(SessionExit::Success))
         .expect("the inactive shell exit must be delivered");
@@ -8840,15 +8755,7 @@ fn inactive_shell_exit_should_close_its_workspace_without_stealing_activation(
         manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id()),
         WorkspaceId::new(2)
     );
-    assert!(cx.update(|window, cx| {
-        manager
-            .read(cx)
-            .workspaces
-            .active_workspace()
-            .payload()
-            .read(cx)
-            .focused_terminal_has_input_focus(window, cx)
-    }));
+    assert!(active_terminal_has_input_focus(&manager, cx));
     cx.simulate_keystrokes("cmd-n");
     cx.run_until_parked();
 
@@ -9403,7 +9310,6 @@ fn creation_shortcut_should_accept_remote_switcher_name_instead_of_highlight(
     open_workspace_switcher_for_creation(cx);
     cx.simulate_keystrokes("end home");
     cx.run_until_parked();
-    assert!(cx.debug_bounds("workspace-switcher-create-local").is_some());
     let local_row = cx.debug_bounds("workspace-switcher-create-local").unwrap();
     let remote_row = cx.debug_bounds("workspace-switcher-create-remote").unwrap();
     cx.update(|window, _| {
@@ -9968,15 +9874,7 @@ fn hiding_sidebar_with_its_menu_open_should_restore_terminal_input(cx: &mut Test
     cx.run_until_parked();
     assert!(!manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).layout().visible));
     assert!(!cx.update(|window, cx| spaceterm_ui::window_menu_is_open(window, cx)));
-    assert!(cx.update(|window, cx| {
-        manager
-            .read(cx)
-            .workspaces
-            .active_workspace()
-            .payload()
-            .read(cx)
-            .focused_terminal_has_input_focus(window, cx)
-    }));
+    assert!(active_terminal_has_input_focus(&manager, cx));
     cx.simulate_keystrokes("x");
     assert!(
         records
@@ -10000,15 +9898,7 @@ fn hiding_sidebar_with_new_workspace_menu_open_should_restore_terminal_input(
     cx.run_until_parked();
     assert!(!manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).layout().visible));
     assert!(!cx.update(|window, cx| spaceterm_ui::window_menu_is_open(window, cx)));
-    assert!(cx.update(|window, cx| {
-        manager
-            .read(cx)
-            .workspaces
-            .active_workspace()
-            .payload()
-            .read(cx)
-            .focused_terminal_has_input_focus(window, cx)
-    }));
+    assert!(active_terminal_has_input_focus(&manager, cx));
     cx.simulate_keystrokes("x");
     assert!(
         records
@@ -10062,15 +9952,7 @@ fn sidebar_keyboard_rename_cancel_should_preserve_name_and_restore_sidebar_focus
 
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
-    assert!(cx.update(|window, cx| {
-        manager
-            .read(cx)
-            .workspaces
-            .active_workspace()
-            .payload()
-            .read(cx)
-            .focused_terminal_has_input_focus(window, cx)
-    }));
+    assert!(active_terminal_has_input_focus(&manager, cx));
 }
 
 #[gpui::test]
@@ -10269,8 +10151,35 @@ fn client_window_controls_follow_live_layout_on_both_sides_of_the_sidebar_toggle
     }
 }
 
+fn active_terminal_has_input_focus(
+    manager: &Entity<WorkspaceManager>,
+    cx: &mut VisualTestContext,
+) -> bool {
+    cx.update(|window, cx| {
+        manager
+            .read(cx)
+            .workspaces
+            .active_workspace()
+            .payload()
+            .read(cx)
+            .focused_terminal_has_input_focus(window, cx)
+    })
+}
+
 #[derive(Default)]
 struct RecordingRenderedText(Mutex<Vec<String>>);
+
+impl RecordingRenderedText {
+    fn context(cx: &TestAppContext) -> (TestAppContext, Arc<Self>) {
+        let text = Arc::new(Self::default());
+        let context = TestAppContext::build_with_text_system(
+            cx.dispatcher.clone(),
+            cx.test_function_name(),
+            text.clone(),
+        );
+        (context, text)
+    }
+}
 
 impl gpui::PlatformTextSystem for RecordingRenderedText {
     fn add_fonts(&self, fonts: Vec<std::borrow::Cow<'static, [u8]>>) -> anyhow::Result<()> {

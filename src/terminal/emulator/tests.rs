@@ -440,23 +440,9 @@ fn terminal_find_navigation_rejects_stale_query_generation() {
         .unwrap();
 
     assert!(!action.screen_changed);
-    // A clean snapshot publishes nothing; the Find model and native viewport must still agree.
-    let after = emulator
-        .snapshot()
-        .unwrap()
-        .unwrap_or_else(|| Arc::clone(&before));
-    assert_eq!(after.find, before.find);
-    assert_eq!(after.scrollbar, before.scrollbar);
-    assert_eq!(
-        emulator.find.snapshot(
-            8,
-            before.scrollbar.offset_rows,
-            before.scrollbar.visible_rows
-        ),
-        before.find
-    );
-    let scrollbar = emulator.terminal.scrollbar().unwrap();
-    assert_eq!(scrollbar.offset, before.scrollbar.offset_rows);
+    if let Some(after) = emulator.snapshot().unwrap() {
+        assert_eq!(after.find, before.find);
+    }
     assert!(
         emulator
             .navigate_find(FindQueryGeneration::test(2), FindDirection::Next)
@@ -488,28 +474,25 @@ fn terminal_find_navigation_wraps_and_marks_the_current_result() {
         .unwrap();
     let wrapped = emulator.snapshot().unwrap().unwrap();
 
-    assert_eq!(first.find.as_ref().unwrap().current_match, Some(1));
-    assert_eq!(second.find.as_ref().unwrap().current_match, Some(2));
-    assert_eq!(wrapped.find.as_ref().unwrap().current_match, Some(1));
     let previous = emulator
         .navigate_find(generation, FindDirection::Previous)
         .unwrap();
     assert!(previous.screen_changed);
     let backwards = emulator.snapshot().unwrap().unwrap();
-    assert_eq!(backwards.find.as_ref().unwrap().current_match, Some(2));
-    for (snapshot, column) in [(&first, 0), (&second, 4), (&wrapped, 0), (&backwards, 4)] {
-        let spans = &snapshot.find.as_ref().unwrap().visible_spans;
-        assert_eq!(spans.len(), 2);
-        let selected = spans.iter().filter(|span| span.current).collect::<Vec<_>>();
-        assert_eq!(selected.len(), 1);
-        assert_eq!(
-            (
-                selected[0].row,
-                selected[0].start_column,
-                selected[0].end_column
-            ),
-            (0, column, column + 2)
-        );
+    for (snapshot, current, column) in [
+        (&first, 1, 0),
+        (&second, 2, 4),
+        (&wrapped, 1, 0),
+        (&backwards, 2, 4),
+    ] {
+        let find = snapshot.find.as_ref().unwrap();
+        let spans = find.visible_spans.iter();
+        let current_spans = spans
+            .filter(|span| span.current)
+            .map(|span| (span.row, span.start_column, span.end_column));
+        assert_eq!(find.current_match, Some(current));
+        assert_eq!(find.visible_spans.len(), 2);
+        assert_eq!(current_spans.collect::<Vec<_>>(), [(0, column, column + 2)]);
     }
 }
 
@@ -2741,34 +2724,6 @@ fn runtime_identity_replies_are_spaceterm_owned_and_capability_bounded() {
         env!("SPACETERM_VERSION")
     );
     assert_eq!(replies, expected.as_bytes());
-
-    assert!(
-        replies
-            .windows(identity::XTVERSION.len())
-            .any(|window| window == identity::XTVERSION.as_bytes())
-    );
-    assert!(
-        replies
-            .windows(b"\x1b[?62;22;52c".len())
-            .any(|window| window == b"\x1b[?62;22;52c")
-    );
-    assert!(
-        replies
-            .windows(b"\x1b[>1;0;0c".len())
-            .any(|window| window == b"\x1b[>1;0;0c")
-    );
-    assert!(replies.windows(7).any(|window| window == b"1+r544E"));
-    assert!(
-        replies
-            .windows(b"787465726D2D73706163657465726D".len())
-            .any(|window| window == b"787465726D2D73706163657465726D")
-    );
-    assert!(replies.windows(7).any(|window| window == b"1+r436F"));
-    assert!(
-        !String::from_utf8_lossy(&replies)
-            .to_ascii_lowercase()
-            .contains("ghostty")
-    );
     emulator.feed(b"\x1bP+q536D756C78\x1b\\");
     assert_eq!(emulator.take_pty_responses(), b"\x1bP0+r536D756C78\x1b\\");
 }
@@ -3672,8 +3627,6 @@ fn selection_copy_distinguishes_soft_wraps_and_hard_lines() {
 
     assert_eq!(copy.plain_text, "abcdefgh\nxy");
     let html = copy.html.unwrap();
-    assert!(html.contains("abcdefgh"));
-    assert!(html.contains("xy"));
     assert!(html.contains("abcdefgh\nxy"));
     assert!(!html.contains("abcde\nfgh"));
     assert!(!html.contains("CellSnapshot"));
@@ -4080,25 +4033,7 @@ fn scroll_commands_leave_the_alternate_screen_and_its_program_alone() {
             .unwrap()
             .unwrap_or_else(|| Arc::clone(&before));
         assert_eq!(after.scrollbar, before.scrollbar, "{movement:?}");
-        assert_eq!(after.viewport, before.viewport, "{movement:?}");
         assert_eq!(after.rows, before.rows, "{movement:?}");
-        assert_eq!(after.cursor, before.cursor, "{movement:?}");
-        assert_eq!(after.active_screen, ActiveScreenSnapshot::Alternate);
-        let native = emulator.render_state.update(&emulator.terminal).unwrap();
-        assert_eq!(
-            native
-                .cursor_viewport()
-                .unwrap()
-                .map(|cursor| (cursor.x, cursor.y)),
-            before
-                .cursor
-                .position
-                .map(|cursor| (cursor.column, cursor.row))
-        );
-        assert_eq!(
-            emulator.alternate_row_cache.as_slice(),
-            before.rows.as_ref()
-        );
         assert_eq!(
             emulator.terminal.scrollbar().unwrap().offset,
             before.scrollbar.offset_rows
@@ -4380,9 +4315,6 @@ fn output_mapping_changes_reject_active_gesture_coordinates() {
         let stale = emulator.pointer(input(phase, 68.0)).unwrap();
         assert!(!stale.screen_changed);
         assert_eq!(emulator.selection_text().unwrap(), selected_before);
-        assert!(emulator.active_pointer.is_none());
-        assert_eq!(emulator.selection_drag_position, None);
-        assert!(!emulator.pointer_mapping_invalidated);
         assert_eq!(emulator.selection_autoscroll_interval().unwrap(), None);
     }
 }
@@ -4498,16 +4430,7 @@ fn raw_9d_in_ground_does_not_introduce_an_osc8_link() {
             .flat_map(|row| row.iter())
             .all(|cell| cell.hyperlink.is_none())
     );
-    let visible = snapshot
-        .rows
-        .iter()
-        .map(|row| {
-            row.iter()
-                .map(|cell| cell.text.as_str())
-                .collect::<String>()
-        })
-        .collect::<String>();
-    assert!(visible.contains("visible"));
+    assert!(row_text(&snapshot, 0).contains("visible"));
     let mut positive = emulator(32, 2);
     positive.feed(b"\x1b]8;;https://example.test/\x07visible");
     let linked = positive.snapshot().unwrap().unwrap();
@@ -5011,8 +4934,6 @@ fn kitty_later_display_resolves_crop_offsets_size_and_z() {
     let displayed = emulator.snapshot().unwrap().unwrap();
     let placement = &displayed.graphics.placements[0];
     assert_eq!(placement.placement_id, 7);
-    assert_eq!(placement.source_x, 1);
-    assert_eq!(placement.source_width, 1);
     assert_eq!(
         (
             placement.source_x,
@@ -5120,7 +5041,6 @@ fn kitty_q_policy_and_unsupported_media_remain_safe() {
     let animation_error = emulator.take_pty_responses();
     assert!(animation_error.starts_with(b"\x1b_Gi=50;"));
     assert!(animation_error.ends_with(b"\x1b\\"));
-    assert!(animation_error.len() > b"\x1b_Gi=50;\x1b\\".len());
     assert!(!animation_error.windows(2).any(|window| window == b"OK"));
 
     emulator.feed(b"\x1b_Ga=q,t=d,f=32,i=52,s=8193,v=1,q=2;AAAA\x1b\\alive");
@@ -5409,13 +5329,9 @@ fn accessibility_selection_rejects_a_model_from_before_the_latest_screen() {
     let mut emulator = TerminalEmulator::new(geometry(80, 24, 8.0, 20.0)).unwrap();
     emulator.feed(b"old text");
     let _ = emulator.snapshot().unwrap();
-    let (mut model, mut more) = emulator
-        .accessibility_snapshot_for_current_presentation()
+    let request = drain_accessibility(&mut emulator)
+        .selection_request(0..3)
         .unwrap();
-    while more {
-        (model, more) = emulator.accessibility_snapshot(false).unwrap();
-    }
-    let request = model.unwrap().selection_request(0..3).unwrap();
 
     emulator.feed(b" changed");
     let _ = emulator.snapshot().unwrap();

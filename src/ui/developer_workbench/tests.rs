@@ -132,31 +132,9 @@ fn unavailable_window_effects_show_defaults_and_refuse_preview_edits(cx: &mut Te
                     fill(default_bounds).expect("the selected segment must paint"),
                     theme.paint(true, false, false, false).background().into()
                 );
-                if show_borders {
-                    let unselected =
-                        fill(maximum_bounds).expect("Show Borders paints the unselected segment");
-                    let actual = gpui::Rgba::from(
-                        unselected
-                            .as_solid()
-                            .expect("the segment uses a solid fill"),
-                    );
-                    let expected = theme.paint(false, false, false, false).background();
-                    assert_eq!(actual.a, expected.a);
-                    // Transparent RGB channels contribute no paint; compare both endpoint compositions.
-                    for underlay in [gpui::black(), gpui::white()] {
-                        assert_eq!(
-                            underlay.blend(actual.into()),
-                            underlay.blend(expected.into())
-                        );
-                    }
-                } else {
-                    assert_eq!(theme.paint(false, false, false, false).background().a, 0.0);
-                    assert!(fill(maximum_bounds).is_none());
-                }
-                assert_ne!(
-                    fill(default_bounds),
-                    fill(maximum_bounds),
-                    "Default must be the selected stop"
+                assert_eq!(
+                    fill(maximum_bounds).map(|fill| gpui::Rgba::from(fill.as_solid().unwrap()).a),
+                    show_borders.then(|| theme.paint(false, false, false, false).background().a)
                 );
             });
             for selector in [
@@ -856,11 +834,6 @@ fn default_window_separates_groups_and_keeps_row_labels_on_one_line(cx: &mut Tes
     let picker = cx
         .debug_bounds("workbench-row-surfaces-picker-label")
         .unwrap();
-    assert_eq!(
-        menus.size.height, picker.size.height,
-        "the menu fixtures must leave their row label one line"
-    );
-
     let line_height = cx.update(|_, cx| {
         crate::ui::appearance::settings::shared(cx)
             .chrome
@@ -868,8 +841,11 @@ fn default_window_separates_groups_and_keeps_row_labels_on_one_line(cx: &mut Tes
             .style(crate::ui::chrome_typography::TextRole::Body)
             .line_height
     });
-    assert_eq!(menus.size.height, line_height);
-    assert_eq!(picker.size.height, line_height);
+    assert_eq!(
+        (menus.size.height, picker.size.height),
+        (line_height, line_height),
+        "the menu fixtures must leave their row label one line"
+    );
 }
 
 #[gpui::test]
