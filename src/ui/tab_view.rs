@@ -5902,4 +5902,48 @@ mod tests {
         );
         assert!(records.dropped_session_ids().is_empty());
     }
+
+    #[gpui::test]
+    fn split_resize_handles_move_to_the_offset_assistive_technology_sets(cx: &mut TestAppContext) {
+        use gpui::accesskit::{Action, ActionData};
+        use spaceterm_ui::a11y_testing::{A11yTree, perform_with};
+
+        let (view, cx) = split_gap_view(cx);
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.split_pane(PaneId::new(1), SplitAxis::Horizontal, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        let extent = view.read_with(cx, |view, cx| {
+            let bounds = view.split_bounds.values().next().copied().unwrap();
+            split_content_extent(SplitAxis::Horizontal, bounds, pane_gap(cx)).unwrap()
+        });
+        let set_offset = |offset: f64, cx: &mut VisualTestContext| {
+            let tree = A11yTree::read(cx);
+            perform_with(
+                cx,
+                tree.node("Resize Pane split"),
+                Action::SetValue,
+                Some(ActionData::NumericValue(offset)),
+            );
+            cx.run_until_parked();
+        };
+        let published = |cx: &mut VisualTestContext| {
+            A11yTree::read(cx).node("Resize Pane split")["aria"]["numeric_value"]
+                .as_f64()
+                .unwrap()
+        };
+
+        set_offset(f64::from(extent * 0.25), cx);
+        assert_eq!(split_ratio(&view, cx), 0.25);
+        assert_eq!(published(cx), f64::from(extent * 0.25));
+
+        // The Tab keeps the second Pane at its minimum size, as it does for a drag.
+        set_offset(f64::from(extent * 10.0), cx);
+        let ratio = split_ratio(&view, cx);
+        assert!(ratio > 0.25 && ratio < 1.0, "{ratio}");
+        assert_eq!(published(cx), f64::from(extent * ratio));
+        assert_eq!(view.read_with(cx, |view, _| view.resizing_split_id), None);
+    }
 }
