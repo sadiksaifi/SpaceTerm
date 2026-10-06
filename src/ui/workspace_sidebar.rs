@@ -13,7 +13,6 @@ use super::{WORKSPACE_SIDEBAR_DEFAULT_WIDTH, WORKSPACE_SIDEBAR_MINIMUM_WIDTH};
 use crate::appearance::ChromeColors;
 use crate::appearance::Color;
 use crate::domain::{RemoteConnectionPhase, WorkspaceId};
-use std::ops::RangeInclusive;
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Context, DispatchPhase, Entity, EntityId, EventEmitter, FocusHandle,
@@ -27,6 +26,7 @@ use spaceterm_ui::{
     ResizeHandleEvent, ResizeHandleTarget, ResizeInputSource, ScrollMetrics, TextInput,
     TextInputEvent, TextInputVariant, Tooltip, TooltipTargetVisibility, dismiss_active_menu,
 };
+use std::ops::RangeInclusive;
 
 const CHROME_DIVIDER_SIZE: f32 = super::control_theme::resize_handle::VISIBLE_THICKNESS;
 const SIDEBAR_FOOTER_HORIZONTAL_PADDING: f32 = 4.0;

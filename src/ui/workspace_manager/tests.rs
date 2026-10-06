@@ -10502,13 +10502,13 @@ fn sidebar_resize_handle_moves_to_the_width_assistive_technology_sets(cx: &mut T
 
     set_width(10_000.0, cx);
     assert_eq!(layout(cx), (true, maximum));
-    assert_eq!(
-        sidebar_splitter_range(cx).0,
-        f64::from(f32::from(maximum))
-    );
+    assert_eq!(sidebar_splitter_range(cx).0, f64::from(f32::from(maximum)));
 
     set_width(-50.0, cx);
-    assert!(!layout(cx).0, "a width below the minimum collapses the sidebar");
+    assert!(
+        !layout(cx).0,
+        "a width below the minimum collapses the sidebar"
+    );
     assert!(manager.read_with(cx, |manager, cx| !manager.sidebar.read(cx).is_resizing()));
 }
 

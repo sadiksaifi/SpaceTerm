@@ -6065,7 +6065,10 @@ mod tests {
         let expected = expected_split_ranges(&view, cx);
         assert_eq!(expected.len(), 2);
         for (orientation, range) in &expected {
-            assert!(range.1 > 0.0 && range.1 < range.0 && range.0 < range.2, "{range:?}");
+            assert!(
+                range.1 > 0.0 && range.1 < range.0 && range.0 < range.2,
+                "{range:?}"
+            );
             assert_eq!(published_split_range(orientation, cx), *range);
         }
 
