@@ -138,7 +138,20 @@ impl<T> TabCollection<T> {
     ///
     /// The Active Tab stays put at either end of the Tab order instead of wrapping around.
     pub(crate) fn move_active_tab(&mut self, step: TabStep) -> bool {
-        let index = self.active_index();
+        self.step_index(self.active_index(), step)
+    }
+
+    /// Moves a Tab one step in the Tab order and reports whether the order changed.
+    ///
+    /// The Tab stays put at either end of the Tab order instead of wrapping around.
+    pub(crate) fn step_tab(&mut self, tab_id: TabId, step: TabStep) -> Result<bool, TabError> {
+        let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
+            return Err(TabError::TabNotFound(tab_id));
+        };
+        Ok(self.step_index(index, step))
+    }
+
+    fn step_index(&mut self, index: usize, step: TabStep) -> bool {
         let position = match step {
             TabStep::Previous => index.checked_sub(1),
             TabStep::Next => Some(index + 1).filter(|&position| position < self.tabs.len()),

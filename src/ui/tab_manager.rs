@@ -384,6 +384,8 @@ enum TabMenuCommand {
     NewTab,
     SplitRight,
     SplitDown,
+    MoveLeft,
+    MoveRight,
     Close,
 }
 
@@ -1102,6 +1104,17 @@ impl TabManager {
         }
     }
 
+    fn step_tab(&mut self, tab_id: TabId, step: TabStep, cx: &mut Context<Self>) {
+        match self.tabs.step_tab(tab_id, step) {
+            Ok(true) => {
+                cx.emit(TabManagerEvent::PresentationChanged);
+                cx.notify();
+            }
+            Ok(false) => {}
+            Err(error) => Self::report_tab_error("move", error),
+        }
+    }
+
     fn tab_position(&self, tab_id: TabId) -> Option<usize> {
         self.tabs
             .iter()
@@ -1410,6 +1423,8 @@ impl TabManager {
             TabMenuCommand::NewTab => self.create_tab(window, cx),
             TabMenuCommand::SplitRight => self.split_tab(tab_id, SplitAxis::Horizontal, window, cx),
             TabMenuCommand::SplitDown => self.split_tab(tab_id, SplitAxis::Vertical, window, cx),
+            TabMenuCommand::MoveLeft => self.step_tab(tab_id, TabStep::Previous, cx),
+            TabMenuCommand::MoveRight => self.step_tab(tab_id, TabStep::Next, cx),
             TabMenuCommand::Close => self.request_close_tab(tab_id, cx),
         }
     }
@@ -1854,6 +1869,8 @@ impl TabManager {
                     accessibility_name,
                     face,
                     tab_menu_entries(
+                        index == 0,
+                        index == last_index,
                         child_launch_available,
                         crate::desktop_profile::DesktopPresentation::get(cx),
                     ),
@@ -2299,6 +2316,8 @@ fn render_tab_identity(
 
 /// Every Tab command carries a symbol, so all labels share the icon column.
 fn tab_menu_entries(
+    first: bool,
+    last: bool,
     child_launch_available: bool,
     presentation: &crate::desktop_profile::DesktopPresentation,
 ) -> Vec<MenuEntry<TabMenuCommand>> {
@@ -2334,6 +2353,25 @@ fn tab_menu_entries(
         .disabled(!child_launch_available)
         .icon(|foreground, size| Icon::new(IconName::Rows2, size, foreground).into_any_element())
         .debug_selector("tab-menu-row-split-down"),
+        MenuEntry::separator(),
+        with_shortcut(
+            MenuEntry::action("Move Tab Left", TabMenuCommand::MoveLeft),
+            &MoveTabLeft,
+        )
+        .disabled(first)
+        .icon(|foreground, size| {
+            Icon::new(IconName::ArrowLeft, size, foreground).into_any_element()
+        })
+        .debug_selector("tab-menu-row-move-left"),
+        with_shortcut(
+            MenuEntry::action("Move Tab Right", TabMenuCommand::MoveRight),
+            &MoveTabRight,
+        )
+        .disabled(last)
+        .icon(|foreground, size| {
+            Icon::new(IconName::ArrowRight, size, foreground).into_any_element()
+        })
+        .debug_selector("tab-menu-row-move-right"),
         MenuEntry::separator(),
         with_shortcut(
             MenuEntry::action("Close Tab", TabMenuCommand::Close),
@@ -3594,6 +3632,39 @@ mod tests {
         assert!(events.borrow().is_empty());
         assert_eq!(manager.read_with(cx, hierarchy_identity), before);
         assert_eq!(records.starts().len(), 1);
+    }
+
+    #[gpui::test]
+    fn tab_menu_move_should_reorder_only_the_clicked_tab_and_stop_at_the_ends(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
+        click("create-tab-button", cx);
+
+        right_click("tab-item-1-inactive", cx);
+        click("tab-menu-row-move-right", cx);
+        assert_eq!(tab_order(&manager, cx), vec![2, 1, 3]);
+
+        right_click("tab-item-1-inactive", cx);
+        click("tab-menu-row-move-left", cx);
+        assert_eq!(tab_order(&manager, cx), vec![1, 2, 3]);
+
+        // The first Tab cannot move left, and the last Tab cannot move right.
+        for (tab, row) in [
+            ("tab-item-1-inactive", "tab-menu-row-move-left"),
+            ("tab-item-3-active", "tab-menu-row-move-right"),
+        ] {
+            right_click(tab, cx);
+            click(row, cx);
+            cx.simulate_keystrokes("escape");
+            cx.run_until_parked();
+        }
+        assert_eq!(tab_order(&manager, cx), vec![1, 2, 3]);
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager.tabs.active_tab_id()),
+            TabId::new(3)
+        );
     }
 
     #[gpui::test]
