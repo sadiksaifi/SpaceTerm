@@ -2211,7 +2211,7 @@ fn render_pane_caption(
             let pane_id = caption.pane_id;
             let mut paint = appearance.colors.caption(background, caption.focused);
             // Caption buttons already sit on the Pane. Add only their state color difference;
-            // repeating the Terminal background here would leave opaque squares on the glass.
+            // repeating the Pane background here would leave opaque squares on the glass.
             for control in [
                 &mut paint.control,
                 &mut paint.control_hover,

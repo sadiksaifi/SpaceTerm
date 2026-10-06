@@ -775,7 +775,7 @@ impl TabManager {
     }
 
     /// Commits a fully prepared Remote restart across the existing Tab hierarchy.
-    /// Session startup failures after the commit stay local to each Pane.
+    /// Terminal Session startup failures after the commit stay local to each Pane.
     pub(crate) fn commit_remote_restart(
         &mut self,
         prepared: PreparedTabManagerRemoteRestart,

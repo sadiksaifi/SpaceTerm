@@ -500,7 +500,7 @@ fn light_selected_navigation_keeps_one_step_across_the_setting() {
     }
 }
 
-/// The Light Terminal backing is the Terminal's own color under the window material, with no
+/// The Light Terminal backing is the Pane's own color under the window material, with no
 /// elevation rung of its own, and window activation does not change it.
 #[test]
 fn light_terminal_backing_applies_transparency_without_an_elevation_tint() {
