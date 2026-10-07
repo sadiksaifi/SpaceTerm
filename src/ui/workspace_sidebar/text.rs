@@ -84,7 +84,6 @@ pub(super) struct RowRepository {
 
 /// The repository's share of line 2 when the directory also needs room.
 const MAXIMUM_REPOSITORY_SHARE: f32 = 0.6;
-const REPOSITORY_SEPARATOR: &str = " · ";
 
 pub(super) fn detail(
     text: SharedString,
@@ -112,7 +111,7 @@ pub(super) fn detail(
                     .ceil()
             };
             let repository_width = repository.as_ref().map_or(px(0.0), |repository| {
-                (measure(repository.badge.text()) + measure(REPOSITORY_SEPARATOR))
+                (measure(repository.badge.text()) + appearance.spacing(GAP))
                     .min(row_width * MAXIMUM_REPOSITORY_SHARE)
             });
             let available = (row_width - repository_width).max(px(0.0));
@@ -187,7 +186,7 @@ pub(super) fn detail(
     .into_any_element()
 }
 
-/// A separator, then the branch or the Pull Request number that opens the Pull Request.
+/// The branch, or the Pull Request number that opens the Pull Request, at the end of line 2.
 /// Hovering the number shows the cached Pull Request facts and makes no lookup of its own.
 fn render_repository(
     repository: &RowRepository,
@@ -196,10 +195,6 @@ fn render_repository(
     appearance: &ChromeAppearance,
 ) -> AnyElement {
     let secondary = gpui_color(appearance.colors.row_secondary);
-    let separator = div()
-        .flex_shrink_0()
-        .text_color(secondary)
-        .child(REPOSITORY_SEPARATOR);
     let badge = match &repository.badge {
         SidebarBadge::Branch { text } => div()
             .id(("workspace-row-branch", id))
@@ -251,9 +246,10 @@ fn render_repository(
         .flex_shrink_0()
         .max_w(width)
         .min_w_0()
+        .ml_auto()
+        .pl(appearance.spacing(GAP))
         .flex()
         .items_center()
-        .child(separator)
         .child(badge)
         .into_any_element()
 }

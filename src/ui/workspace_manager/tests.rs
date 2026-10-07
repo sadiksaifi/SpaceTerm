@@ -297,7 +297,7 @@ fn sidebar_rows_should_keep_the_directory_and_pin_below_name_and_hide_machine_wh
 }
 
 #[gpui::test]
-fn sidebar_rows_follow_the_directory_with_the_branch_and_let_a_pull_request_open_in_the_browser(
+fn sidebar_rows_end_with_the_branch_and_let_a_pull_request_open_in_the_browser(
     cx: &mut TestAppContext,
 ) {
     use crate::repository_status::{
@@ -329,9 +329,11 @@ fn sidebar_rows_follow_the_directory_with_the_branch_and_let_a_pull_request_open
     cx.run_until_parked();
     let branch = cx.debug_bounds("workspace-row-branch-1").unwrap();
     let path = cx.debug_bounds("workspace-row-path-1").unwrap();
-    // Only the separator stands between the directory and the branch.
+    let row = cx.debug_bounds("workspace-row-1-active").unwrap();
+    // The directory leads line 2 and the branch ends it.
+    assert!(path.left() < branch.left());
     assert!(path.right() <= branch.left());
-    assert!(branch.left() - path.right() < px(24.0));
+    assert_eq!(branch.right(), row.right() - row_trailing_padding(cx));
     assert!(cx.debug_bounds("workspace-counts-1").is_none());
 
     manager.update(cx, |manager, cx| {
@@ -354,6 +356,7 @@ fn sidebar_rows_follow_the_directory_with_the_branch_and_let_a_pull_request_open
         .expect("the Pull Request number replaces the branch");
     let path = cx.debug_bounds("workspace-row-path-1").unwrap();
     assert!(path.right() <= number.left());
+    assert_eq!(number.right(), row.right() - row_trailing_padding(cx));
     let active = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
     cx.simulate_click(number.center(), Modifiers::none());
     cx.run_until_parked();
