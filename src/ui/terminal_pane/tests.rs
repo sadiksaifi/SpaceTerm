@@ -1633,7 +1633,8 @@ fn accesskit_terminal_pane_activation_publishes_text_focus_and_retires_hidden_pa
         .find(|(_, node)| node["aria"]["role"] == "Terminal")
         .expect("the Pane must publish a Terminal node after activation");
     assert_eq!(terminal["aria"]["label"], "Terminal Pane");
-    assert_eq!(tree["gpui_focus"], *terminal_id);
+    // The Pane holds keyboard focus; its Terminal is the focus reported to assistive clients.
+    assert_eq!(tree["active_descendant_focus"], *terminal_id);
     let runs: Vec<_> = nodes
         .values()
         .filter(|node| node["aria"]["role"] == "TextRun")

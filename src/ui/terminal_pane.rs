@@ -4671,8 +4671,7 @@ impl Render for TerminalPane {
             }
         });
 
-        let pane_root = div()
-            .debug_selector(move || native_context_selector.clone())
+        let terminal_text = div()
             .on_children_prepainted(move |children, window, cx| {
                 let Some(bounds) = children.first().copied() else {
                     return;
@@ -4682,6 +4681,11 @@ impl Render for TerminalPane {
                     pane.sync_native_accessibility(window, terminal_input_focused);
                 });
             })
+            .id("terminal-text")
+            .size_full()
+            .child(terminal_grid);
+        let pane_root = div()
+            .debug_selector(move || native_context_selector.clone())
             .id("terminal-pane")
             .debug_selector(|| "terminal-pane".to_owned())
             .font(appearance.typography.style(TextRole::Body).font.clone())
@@ -4729,7 +4733,18 @@ impl Render for TerminalPane {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up_out))
             .on_mouse_up_out(MouseButton::Middle, cx.listener(Self::on_mouse_up_out))
             .on_mouse_up_out(MouseButton::Right, cx.listener(Self::on_mouse_up_out))
-            .child(terminal_grid)
+            // The context target lies under the Pane's other contents, so assistive point queries
+            // and pointers reach the terminal text and controls above it first.
+            .child(
+                div()
+                    .absolute()
+                    .left(px(TERMINAL_SIDE_INSET))
+                    .right(px(TERMINAL_SIDE_INSET))
+                    .top_0()
+                    .bottom_0()
+                    .child(context_menu),
+            )
+            .child(self.accessibility_element.decorate_text(terminal_text))
             .child(scrollbar)
             .when_some(find_bar, |root, find_bar| root.child(find_bar))
             .when_some(repository_popover, |root, popover| root.child(popover))
@@ -4916,15 +4931,6 @@ impl Render for TerminalPane {
                         ),
                     )
                 },
-            )
-            .child(
-                div()
-                    .absolute()
-                    .left(px(TERMINAL_SIDE_INSET))
-                    .right(px(TERMINAL_SIDE_INSET))
-                    .top_0()
-                    .bottom_0()
-                    .child(context_menu),
             )
             .into_any_element()
     }

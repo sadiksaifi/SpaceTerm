@@ -10781,16 +10781,21 @@ fn pane_split_accessibility_scopes_contents_to_its_two_sides(cx: &mut TestAppCon
                     .iter()
                     .map(|node| node["aria"]["role"].as_str().unwrap())
                     .collect::<Vec<_>>(),
-                ["Group", "Terminal", "Splitter", "Group", "Terminal"],
+                [
+                    "Group", "Group", "Terminal", "Splitter", "Group", "Group", "Terminal"
+                ],
                 "{shortcut}, hidden sidebar: {hidden_sidebar}"
             );
-            for caption in [children[0], children[3]] {
+            for caption in [children[0], children[4]] {
                 assert!(
                     caption["aria"]["label"]
                         .as_str()
                         .unwrap()
                         .starts_with("Pane Caption, ")
                 );
+            }
+            for context in [children[1], children[5]] {
+                assert_eq!(context["aria"]["label"], "Terminal context actions");
             }
         }
         cx.simulate_keystrokes("cmd-b");
@@ -10827,8 +10832,14 @@ fn pane_split_accessibility_keeps_nested_splitters_between_their_own_sides(
             .into_iter()
             .filter(|node| node["aria"]["role"] == "Terminal")
             .collect::<Vec<_>>();
+        let contexts = tree
+            .in_order()
+            .into_iter()
+            .filter(|node| node["aria"]["label"] == "Terminal context actions")
+            .collect::<Vec<_>>();
         assert_eq!(captions.len(), 4);
         assert_eq!(terminals.len(), 4);
+        assert_eq!(contexts.len(), 4);
         let groups = tree
             .in_order()
             .into_iter()
@@ -10852,13 +10863,18 @@ fn pane_split_accessibility_keeps_nested_splitters_between_their_own_sides(
                 .unwrap();
             let mut expected = vec![
                 node_id(captions[index]),
+                node_id(contexts[index]),
                 node_id(terminals[index]),
                 node_id(splitter),
             ];
             if index < 2 {
                 expected.push(node_id(groups[index + 1]));
             } else {
-                expected.extend([node_id(captions[3]), node_id(terminals[3])]);
+                expected.extend([
+                    node_id(captions[3]),
+                    node_id(contexts[3]),
+                    node_id(terminals[3]),
+                ]);
             }
             assert_eq!(
                 children.into_iter().map(node_id).collect::<Vec<_>>(),
