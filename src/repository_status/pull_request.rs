@@ -29,7 +29,7 @@ const DEFAULT_REMOTE: &str = "origin";
 pub(crate) struct PullRequestQuery {
     pub(crate) repository: GitHubRepository,
     pub(crate) head_branch: Arc<str>,
-    /// The push remote's owner. Cross-repository pull requests must come from it.
+    /// The push remote's owner. When known, every pull request must come from it.
     pub(crate) head_owner: Option<Arc<str>>,
 }
 
@@ -182,7 +182,8 @@ struct ListedOwner {
 }
 
 /// The first listed pull request whose head is the queried branch, from the queried head owner
-/// when it comes from a fork, with an `https` URL on the queried host.
+/// when one is known and from the base repository otherwise, with an `https` URL on the queried
+/// host.
 pub(crate) fn parse_pull_requests(
     output: &[u8],
     query: &PullRequestQuery,
@@ -193,7 +194,7 @@ pub(crate) fn parse_pull_requests(
         .into_iter()
         .find(|listed| {
             listed.head_ref_name == *query.head_branch
-                && (!listed.is_cross_repository || from_head_owner(listed, query))
+                && from_head_owner(listed, query)
                 && is_pull_request_url(&listed.url, &query.repository.host)
         })
         .map(|listed| PullRequest {
@@ -211,9 +212,15 @@ pub(crate) fn parse_pull_requests(
 }
 
 fn from_head_owner(listed: &ListedPullRequest, query: &PullRequestQuery) -> bool {
-    match (&listed.head_repository_owner, &query.head_owner) {
-        (Some(owner), Some(expected)) => owner.login.eq_ignore_ascii_case(expected),
-        _ => false,
+    let Some(expected) = &query.head_owner else {
+        return !listed.is_cross_repository;
+    };
+    match &listed.head_repository_owner {
+        Some(owner) => owner.login.eq_ignore_ascii_case(expected),
+        // A same-repository pull request's head owner is the base repository's owner.
+        None => {
+            !listed.is_cross_repository && query.repository.owner.eq_ignore_ascii_case(expected)
+        }
     }
 }
 
@@ -562,6 +569,36 @@ mod tests {
                 base: "main".into(),
             })
         );
+    }
+
+    #[test]
+    fn a_fork_branch_should_not_match_the_base_repository_branch_of_the_same_name() {
+        let entries = [
+            listed(
+                1,
+                "feature",
+                false,
+                Some("org"),
+                "https://github.com/org/app/pull/1",
+            ),
+            listed(
+                2,
+                "feature",
+                true,
+                Some("me"),
+                "https://github.com/org/app/pull/2",
+            ),
+        ];
+
+        assert_eq!(
+            parse(&entries, &query(Some("me"))).map(|pr| pr.number),
+            Some(2)
+        );
+        assert_eq!(
+            parse(&entries, &query(Some("org"))).map(|pr| pr.number),
+            Some(1)
+        );
+        assert_eq!(parse(&entries, &query(None)).map(|pr| pr.number), Some(1));
     }
 
     #[test]
