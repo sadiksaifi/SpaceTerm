@@ -2831,24 +2831,27 @@ fn repository_status_popover_should_fit_a_short_window_and_keep_its_footer(
     assert!(footer.top() >= popover.top(), "{footer:?} {popover:?}");
 }
 
-/// Places one Pane in a short slot at the top of a tall window, as in a stack of Panes.
-struct ShortPaneRoot(Entity<TerminalPane>);
+/// Places one Pane in a short slot at the top or bottom of a tall window, as in a stack of Panes.
+struct ShortPaneRoot {
+    pane: Entity<TerminalPane>,
+    at_bottom: bool,
+}
 
 impl Render for ShortPaneRoot {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .size_full()
+        let slot = div()
+            .h(px(90.0))
+            .flex_shrink_0()
             .flex()
             .flex_col()
-            .child(
-                div()
-                    .h(px(90.0))
-                    .flex_shrink_0()
-                    .flex()
-                    .flex_col()
-                    .child(self.0.clone()),
-            )
-            .child(div().flex_1())
+            .child(self.pane.clone());
+        let filler = div().flex_1();
+        let root = div().size_full().flex().flex_col();
+        if self.at_bottom {
+            root.child(filler).child(slot)
+        } else {
+            root.child(slot).child(filler)
+        }
     }
 }
 
@@ -2859,7 +2862,10 @@ fn repository_status_popover_should_extend_past_a_short_pane_within_the_window(
     let (pane, cx, _) = connected_terminal_pane(cx);
     cx.simulate_resize(gpui::size(px(760.0), px(480.0)));
     cx.update(|window, cx| {
-        window.replace_root(cx, |_, _| ShortPaneRoot(pane.clone()));
+        window.replace_root(cx, |_, _| ShortPaneRoot {
+            pane: pane.clone(),
+            at_bottom: false,
+        });
     });
     cx.run_until_parked();
     open_crowded_repository_popover(&pane, cx);
@@ -2879,6 +2885,41 @@ fn repository_status_popover_should_extend_past_a_short_pane_within_the_window(
         "{popover:?} {pane_bounds:?}"
     );
     assert!(popover.bottom() <= window.height, "{popover:?} {window:?}");
+    assert!(
+        footer.bottom() <= popover.bottom() && footer.top() >= popover.top(),
+        "{footer:?} {popover:?}"
+    );
+}
+
+#[gpui::test]
+fn repository_status_popover_should_open_upward_rather_than_cover_find_in_a_bottom_pane(
+    cx: &mut TestAppContext,
+) {
+    let (pane, cx, _) = connected_terminal_pane(cx);
+    cx.simulate_resize(gpui::size(px(760.0), px(480.0)));
+    cx.update(|window, cx| {
+        window.replace_root(cx, |_, _| ShortPaneRoot {
+            pane: pane.clone(),
+            at_bottom: true,
+        });
+        pane.update(cx, |pane, cx| pane.open_find(&OpenTerminalFind, window, cx));
+    });
+    cx.run_until_parked();
+    open_crowded_repository_popover(&pane, cx);
+
+    let pane_bounds = cx.debug_bounds("terminal-pane").unwrap();
+    let find = cx.debug_bounds("terminal-find-bar").unwrap();
+    let popover = cx.debug_bounds("repository-status-popover").unwrap();
+    assert!(
+        popover.intersect(&find).size.height <= px(0.0),
+        "{popover:?} {find:?}"
+    );
+    assert!(
+        popover.bottom() <= pane_bounds.top(),
+        "{popover:?} {pane_bounds:?}"
+    );
+    assert!(popover.top() >= px(0.0), "{popover:?}");
+    let footer = cx.debug_bounds("repository-status-popover-footer").unwrap();
     assert!(
         footer.bottom() <= popover.bottom() && footer.top() >= popover.top(),
         "{footer:?} {popover:?}"

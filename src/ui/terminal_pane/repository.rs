@@ -31,6 +31,15 @@ const POPOVER_LABEL_WIDTH: f32 = 72.0;
 const POPOVER_INSET: f32 = 8.0;
 /// The height the Terminal Find bar takes above the popover while it is open.
 const FIND_BAR_CLEARANCE: f32 = 40.0;
+/// The room below a Pane's top under which its popover opens upward when there is more room above.
+const POPOVER_COMFORTABLE_HEIGHT: f32 = 240.0;
+
+/// Where the popover can go: the window's size and the Pane's top edge in window coordinates, as
+/// last painted.
+struct PopoverRoom {
+    viewport: gpui::Size<Pixels>,
+    pane_top: Option<Pixels>,
+}
 
 #[derive(Default)]
 pub(super) struct PaneRepositoryStatus {
@@ -207,7 +216,10 @@ impl TerminalPane {
             root,
             open.focus.clone(),
             self.find_input.is_some(),
-            window.viewport_size(),
+            PopoverRoom {
+                viewport: window.viewport_size(),
+                pane_top: self.grid_bounds.map(|bounds| bounds.top()),
+            },
             cx,
         ))
     }
@@ -315,7 +327,7 @@ fn render_popover(
     root: String,
     focus: FocusHandle,
     below_find_bar: bool,
-    viewport: gpui::Size<Pixels>,
+    room: PopoverRoom,
     cx: &mut Context<TerminalPane>,
 ) -> AnyElement {
     let appearance = crate::ui::appearance::shared_chrome(cx);
@@ -392,8 +404,7 @@ fn render_popover(
         .aria_label("Repository Status")
         .track_focus(&focus)
         .w(spacing(POPOVER_WIDTH))
-        .max_w(viewport.width - spacing(POPOVER_INSET) * 2.0)
-        .max_h(viewport.height - spacing(POPOVER_INSET) * 2.0)
+        .max_w(room.viewport.width - spacing(POPOVER_INSET) * 2.0)
         .p(spacing(10.0))
         .flex()
         .flex_col()
@@ -483,22 +494,36 @@ fn render_popover(
             .text_color(gpui_color(muted))
             .child(popover.footer),
     );
-    // The popover hangs from the Pane's top trailing corner and may extend past a short or narrow
-    // Pane; the window's edges bound it instead.
+    // The popover hangs from the Pane's top trailing corner, below the Find bar when it is open,
+    // and may extend past a short or narrow Pane. A Pane near the window's bottom has little room
+    // below, so its popover opens upward from the Pane's top edge instead and never covers the
+    // Pane's own Find bar. Either way the room on that side bounds its height.
+    let margin = spacing(POPOVER_INSET);
+    let below = spacing(
+        POPOVER_INSET
+            + if below_find_bar {
+                FIND_BAR_CLEARANCE
+            } else {
+                0.0
+            },
+    );
+    let pane_top = room.pane_top.unwrap_or_default();
+    let room_below = room.viewport.height - pane_top - below - margin;
+    let room_above = pane_top - margin;
+    let upward = room_below < spacing(POPOVER_COMFORTABLE_HEIGHT) && room_above > room_below;
+    let (anchor, offset, height) = if upward {
+        (gpui::Anchor::BottomRight, gpui::px(0.0), room_above)
+    } else {
+        (gpui::Anchor::TopRight, below, room_below)
+    };
     let placement = anchored()
-        .anchor(gpui::Anchor::TopRight)
-        .snap_to_window_with_margin(spacing(POPOVER_INSET))
-        .child(shell.mount(surface));
+        .anchor(anchor)
+        .offset(gpui::point(gpui::px(0.0), offset))
+        .snap_to_window_with_margin(margin)
+        .child(shell.mount(surface.max_h(height.max(gpui::px(0.0)))));
     div()
         .absolute()
-        .top(spacing(
-            POPOVER_INSET
-                + if below_find_bar {
-                    FIND_BAR_CLEARANCE
-                } else {
-                    0.0
-                },
-        ))
+        .top_0()
         .right(spacing(POPOVER_INSET))
         .size_0()
         .child(match shell.layer(false) {
