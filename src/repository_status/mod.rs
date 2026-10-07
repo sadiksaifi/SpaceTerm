@@ -503,13 +503,19 @@ pub(crate) trait RepositoryWatcher: Send + Sync + 'static {
 #[derive(Clone, Default, Eq, PartialEq)]
 pub(crate) struct RemoteRepositoryProbe {
     pub(crate) outcome: RemoteProbeOutcome,
+    /// Raw `git --version` output, for the version-dependent fsmonitor policy and tool status.
+    pub(crate) git_version: Vec<u8>,
+    /// The discovery `git rev-parse` exited with status 0. Inside a git directory or in a bare
+    /// repository it exits non-zero after printing its first lines.
+    pub(crate) discovery_succeeded: bool,
     /// `git rev-parse` discovery output, in the same layout the local probe uses.
     pub(crate) discovery: Vec<u8>,
     /// The remote account's physical home directory.
     pub(crate) physical_home: Vec<u8>,
     /// Headers-only `git status --porcelain=v2 --branch -z` output.
     pub(crate) status_headers: Vec<u8>,
-    /// `git config -z --get-regexp` output.
+    /// `git config -z` records (`key\nvalue\0`), in the `--get-regexp` layout. Only whole
+    /// records are kept.
     pub(crate) config: Vec<u8>,
     pub(crate) markers: OperationMarkers,
 }

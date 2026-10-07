@@ -47,10 +47,23 @@ impl<R: SshRemoteUtilityRunner> SshRemoteDirectoryProvider<R> {
         cancellation: SshCancellationToken,
         executor: BackgroundExecutor,
     ) -> Self {
-        Self {
-            client: Arc::new(SshRemoteUtilityClient::new(command, runner, cancellation)),
+        Self::with_client(
+            Arc::new(SshRemoteUtilityClient::new(command, runner, cancellation)),
             executor,
-        }
+        )
+    }
+
+    /// Creates a provider over a client other Control Connection readers share, so every reader
+    /// draws from the client's one utility session limit.
+    #[allow(
+        dead_code,
+        reason = "Remote Workspace composition shares the client in a later commit"
+    )]
+    pub(crate) const fn with_client(
+        client: Arc<SshRemoteUtilityClient<R>>,
+        executor: BackgroundExecutor,
+    ) -> Self {
+        Self { client, executor }
     }
 
     fn spawn_operation<T, F, Fut>(
@@ -247,9 +260,9 @@ impl Drop for CancelOperationOnDrop {
 
 fn map_error(error: RemoteUtilityError) -> RemoteDirectoryProviderError {
     match error {
-        RemoteUtilityError::Cancelled | RemoteUtilityError::Transport => {
-            RemoteDirectoryProviderError::ConnectionLost
-        }
+        RemoteUtilityError::Cancelled
+        | RemoteUtilityError::Transport
+        | RemoteUtilityError::TimedOut => RemoteDirectoryProviderError::ConnectionLost,
         RemoteUtilityError::SessionUnavailable => RemoteDirectoryProviderError::SessionUnavailable,
         RemoteUtilityError::Missing => RemoteDirectoryProviderError::Missing,
         RemoteUtilityError::NotDirectory => RemoteDirectoryProviderError::NotDirectory,
@@ -260,9 +273,9 @@ fn map_error(error: RemoteUtilityError) -> RemoteDirectoryProviderError {
         RemoteUtilityError::RequestTooLarge
         | RemoteUtilityError::OutputTooLarge
         | RemoteUtilityError::InvalidResponse => RemoteDirectoryProviderError::InvalidResponse,
-        RemoteUtilityError::CommandFailed(_) | RemoteUtilityError::RemoteFailed => {
-            RemoteDirectoryProviderError::Other
-        }
+        RemoteUtilityError::CommandFailed(_)
+        | RemoteUtilityError::RemoteFailed
+        | RemoteUtilityError::ToolMissing => RemoteDirectoryProviderError::Other,
     }
 }
 

@@ -15,6 +15,10 @@ use super::process::{
     SshProcessMechanismError, run_captured_process,
 };
 use crate::domain::RemoteDirectory;
+use crate::repository_status::{
+    ApplyMarkers, FsmonitorPolicy, MAXIMUM_MARKER_BYTES, OperationMarkers, RemoteProbeOutcome,
+    RemoteRepositoryCount, RemoteRepositoryProbe, StepMarkers,
+};
 
 pub(crate) const MAXIMUM_REMOTE_UTILITY_OUTPUT_BYTES: usize = 384 * 1024;
 const MAXIMUM_REMOTE_UTILITY_REQUEST_BYTES: usize = 32 * 1024;
@@ -22,6 +26,16 @@ const MAXIMUM_REMOTE_FIELD_BYTES: usize = 16 * 1024;
 const MAXIMUM_REMOTE_DIRECTORY_NAMES: usize = 1024;
 const MAXIMUM_REMOTE_DIRECTORY_ENTRIES_EXAMINED: usize = 1024;
 const MAXIMUM_REMOTE_PATH_BYTES: usize = 4096;
+/// Repository count status bytes kept from one remote read. The rest of the response stays well
+/// inside [`MAXIMUM_REMOTE_UTILITY_OUTPUT_BYTES`].
+pub(crate) const MAXIMUM_REMOTE_REPOSITORY_STATUS_BYTES: usize = 320 * 1024;
+/// Repository configuration bytes kept from one remote probe; the field limit for the whole record
+/// set. Exact keys come first so a cut drops only remote URLs.
+const MAXIMUM_REMOTE_REPOSITORY_CONFIG_BYTES: usize = MAXIMUM_REMOTE_FIELD_BYTES;
+const REPOSITORY_PROBE_KIND: &str = "repository-probe";
+const REPOSITORY_COUNT_KIND: &str = "repository-count";
+/// Operation marker presence flags, in the order the probe script emits them.
+const REPOSITORY_MARKER_FLAGS: usize = 12;
 const UTILITY_TIMEOUT: Duration = Duration::from_secs(60);
 /// Concurrent utility sessions allowed on one Control Connection.
 ///
@@ -256,6 +270,8 @@ pub(crate) enum RemoteUtilityError {
     CommandFailed(Option<i32>),
     #[error("remote utility transport failed")]
     Transport,
+    #[error("remote utility process exceeded its deadline")]
+    TimedOut,
     /// `ssh` failed while its Control Connection stayed live, usually because the server refused
     /// a session above its limit.
     #[error("remote utility session was unavailable")]
@@ -266,6 +282,8 @@ pub(crate) enum RemoteUtilityError {
     UnsupportedLoginShell,
     #[error("remote path does not exist")]
     Missing,
+    #[error("a remote program the operation needs is missing")]
+    ToolMissing,
     #[error("remote path is not a directory")]
     NotDirectory,
     #[error("remote path permission was denied")]
@@ -438,6 +456,55 @@ impl<R: SshRemoteUtilityRunner> SshRemoteUtilityClient<R> {
         parse_physical(&output)
     }
 
+    /// Reads the cheap facts about the repository containing `directory`.
+    ///
+    /// Raw git output is returned for the portable parsers. The probe never walks the work tree.
+    #[allow(
+        dead_code,
+        reason = "Repository Status composition reads remote repositories in a later commit"
+    )]
+    pub(crate) async fn probe_repository_with_cancellation(
+        &self,
+        directory: RemoteDirectory,
+        cancellation: SshCancellationToken,
+    ) -> Result<RemoteRepositoryProbe, RemoteUtilityError> {
+        let output = self
+            .execute(
+                build_repository_script(
+                    REPOSITORY_PROBE_KIND,
+                    directory.as_str(),
+                    FsmonitorPolicy::Disabled,
+                )?,
+                cancellation,
+            )
+            .await?;
+        parse_repository_probe(&output)
+    }
+
+    /// Reads the full status of the work tree rooted at `root`, cut at
+    /// [`MAXIMUM_REMOTE_REPOSITORY_STATUS_BYTES`].
+    #[allow(
+        dead_code,
+        reason = "Repository Status composition reads remote repositories in a later commit"
+    )]
+    pub(crate) async fn count_repository_with_cancellation(
+        &self,
+        root: &str,
+        fsmonitor: FsmonitorPolicy,
+        cancellation: SshCancellationToken,
+    ) -> Result<RemoteRepositoryCount, RemoteUtilityError> {
+        if !root.starts_with('/') || root.contains('\0') {
+            return Err(RemoteUtilityError::InvalidResponse);
+        }
+        let output = self
+            .execute(
+                build_repository_script(REPOSITORY_COUNT_KIND, root, fsmonitor)?,
+                cancellation,
+            )
+            .await?;
+        parse_repository_count(&output)
+    }
+
     async fn execute(
         &self,
         script: Vec<u8>,
@@ -477,8 +544,8 @@ impl<R: SshRemoteUtilityRunner> SshRemoteUtilityClient<R> {
             .map_err(|error| match error {
                 RemoteUtilityRunError::Cancelled => RemoteUtilityError::Cancelled,
                 RemoteUtilityRunError::OutputTooLarge => RemoteUtilityError::OutputTooLarge,
-                RemoteUtilityRunError::TimedOut
-                | RemoteUtilityRunError::Process(_)
+                RemoteUtilityRunError::TimedOut => RemoteUtilityError::TimedOut,
+                RemoteUtilityRunError::Process(_)
                 | RemoteUtilityRunError::WorkerUnavailable => RemoteUtilityError::Transport,
             })?;
         if output.exit.code() == Some(SSH_FAILURE_STATUS) {
@@ -531,7 +598,53 @@ fn build_path_script(operation: &str, path: &str) -> Result<Vec<u8>, RemoteUtili
         _ => unreachable!("remote utility operation is fixed by the caller"),
     };
     let script = format!(
-        "{COMMON_SCRIPT}\ninput_path={}\n{PATH_EXPANSION_SCRIPT}\n{operation_script}",
+        "{COMMON_SCRIPT}\ninput_path={}\n{PATH_EXPANSION_SCRIPT}{PATH_CLASSIFICATION_SCRIPT}\n{operation_script}",
+        quote_for_posix_shell(path)
+    )
+    .into_bytes();
+    if script.len() > MAXIMUM_REMOTE_UTILITY_REQUEST_BYTES {
+        return Err(RemoteUtilityError::RequestTooLarge);
+    }
+    Ok(script)
+}
+
+/// Builds a repository script. Only `path` is caller data; it reaches the script as one
+/// single-quoted assignment, as every other path operation does.
+fn build_repository_script(
+    kind: &str,
+    path: &str,
+    fsmonitor: FsmonitorPolicy,
+) -> Result<Vec<u8>, RemoteUtilityError> {
+    if path.len() > MAXIMUM_REMOTE_PATH_BYTES {
+        return Err(RemoteUtilityError::RequestTooLarge);
+    }
+    let operation_script = match kind {
+        REPOSITORY_PROBE_KIND => REPOSITORY_PROBE_SCRIPT
+            .replace(
+                "__MAXIMUM_CONFIG_BYTES__",
+                &MAXIMUM_REMOTE_REPOSITORY_CONFIG_BYTES.to_string(),
+            )
+            .replace(
+                "__MAXIMUM_MARKER_BYTES__",
+                &MAXIMUM_MARKER_BYTES.to_string(),
+            ),
+        REPOSITORY_COUNT_KIND => REPOSITORY_COUNT_SCRIPT
+            .replace(
+                "__MAXIMUM_STATUS_BYTES__",
+                &MAXIMUM_REMOTE_REPOSITORY_STATUS_BYTES.to_string(),
+            )
+            .replace(
+                "__STATUS_READ_BYTES__",
+                &(MAXIMUM_REMOTE_REPOSITORY_STATUS_BYTES + 1).to_string(),
+            ),
+        _ => unreachable!("remote utility operation is fixed by the caller"),
+    };
+    let git_fsmonitor = match fsmonitor {
+        FsmonitorPolicy::Disabled => "disabled",
+        FsmonitorPolicy::Builtin => "builtin",
+    };
+    let script = format!(
+        "{COMMON_SCRIPT}\ninput_path={}\n{PATH_EXPANSION_SCRIPT}repository_kind={kind}\ngit_fsmonitor={git_fsmonitor}\n{REPOSITORY_SCRIPT}{operation_script}",
         quote_for_posix_shell(path)
     )
     .into_bytes();
@@ -570,7 +683,9 @@ const PATH_EXPANSION_SCRIPT: &str = r#"case "$input_path" in
     *) emit_empty protocol invalid-path; exit 0 ;;
 esac
 [ -n "$remote_path" ] || { emit_empty protocol invalid-path; exit 0; }
-classify_remote_path() {
+"#;
+
+const PATH_CLASSIFICATION_SCRIPT: &str = r#"classify_remote_path() {
     path_status=missing
     candidate=$remote_path
     while :; do
@@ -767,6 +882,187 @@ emit_field "$physical_path"
 printf '.\n'
 "#;
 
+// Shared by both repository operations. Git output can hold NUL bytes, which shell variables
+// cannot, so it is staged in a private directory and copied into netstrings byte for byte.
+const REPOSITORY_SCRIPT: &str = r#"cd "$remote_path" 2>/dev/null || {
+    emit_empty "$repository_kind" directory-unavailable
+    exit 0
+}
+git_program=$(command -v git 2>/dev/null) || git_program=
+case "$git_program" in
+    /*) ;;
+    *) emit_empty "$repository_kind" git-missing; exit 0 ;;
+esac
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT \
+    GIT_CEILING_DIRECTORIES GIT_NAMESPACE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
+GIT_TERMINAL_PROMPT=0
+GIT_OPTIONAL_LOCKS=0
+GIT_PAGER=cat
+PAGER=cat
+GIT_NO_LAZY_FETCH=1
+export GIT_TERMINAL_PROMPT GIT_OPTIONAL_LOCKS GIT_PAGER PAGER GIT_NO_LAZY_FETCH
+# Git reads no input, because the script itself arrives on standard input.
+run_git() {
+    if [ "$git_fsmonitor" = builtin ]; then
+        "$git_program" --no-optional-locks --no-pager \
+            -c core.hooksPath=/dev/null -c color.ui=false -c core.quotePath=false \
+            -c status.relativePaths=false -c advice.statusHints=false \
+            -C . "$@" </dev/null 2>/dev/null
+    else
+        "$git_program" --no-optional-locks --no-pager -c core.fsmonitor=false \
+            -c core.hooksPath=/dev/null -c color.ui=false -c core.quotePath=false \
+            -c status.relativePaths=false -c advice.statusHints=false \
+            -C . "$@" </dev/null 2>/dev/null
+    fi
+}
+state_directory=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/spaceterm-repository.XXXXXXXXXX" 2>/dev/null) || {
+    emit_empty "$repository_kind" failed
+    exit 0
+}
+cleanup_repository_state() {
+    rm -rf "$state_directory"
+}
+cancel_repository_read() {
+    cleanup_repository_state
+    trap - EXIT HUP INT TERM
+    exit 129
+}
+trap cleanup_repository_state EXIT
+trap cancel_repository_read HUP INT TERM
+emit_file_field() {
+    field_length=$(LC_ALL=C wc -c < "$1" | tr -d '[:space:]') || exit 70
+    printf '%s:' "$field_length"
+    cat "$1" || exit 70
+    printf ','
+}
+"#;
+
+// The headers pathspec excludes every entry from the top of the work tree; a plain `:(exclude)*`
+// is relative to the probed directory and lets entries outside it through.
+// `git config` prints command-line `-c` values among its results, so configuration reads omit the
+// hardening overrides. Reading configuration runs no hook and no fsmonitor. Exact keys come first
+// so a cut at the field limit drops only remote URLs.
+const REPOSITORY_PROBE_SCRIPT: &str = r#"read_git_config() {
+    "$git_program" --no-optional-locks --no-pager -C . config -z "$@" </dev/null 2>/dev/null
+}
+append_config_value() {
+    if read_git_config --get "$1" > "$state_directory/config-value"; then
+        printf '%s\n' "$1" >> "$state_directory/config-records" || exit 70
+        cat "$state_directory/config-value" >> "$state_directory/config-records" || exit 70
+    fi
+}
+# Copies at most the marker limit from a regular file that is not a symbolic link.
+read_marker_step() {
+    if [ -f "$1" ] && [ ! -L "$1" ] && head -c __MAXIMUM_MARKER_BYTES__ "$1" > "$2" 2>/dev/null </dev/null; then
+        marker_flags=${marker_flags}1
+    else
+        : > "$2" || exit 70
+        marker_flags=${marker_flags}0
+    fi
+}
+read_marker_presence() {
+    if [ -e "$1" ] && [ ! -L "$1" ]; then
+        marker_flags=${marker_flags}1
+    else
+        marker_flags=${marker_flags}0
+    fi
+}
+# Files below a marker directory are read only when the directory itself is not a link.
+read_operation_markers() {
+    marker_flags=
+    if [ -d "$1/rebase-merge" ] && [ ! -L "$1/rebase-merge" ]; then
+        marker_flags=1
+        read_marker_step "$1/rebase-merge/msgnum" "$state_directory/merge-current"
+        read_marker_step "$1/rebase-merge/end" "$state_directory/merge-total"
+    else
+        marker_flags=000
+    fi
+    if [ -d "$1/rebase-apply" ] && [ ! -L "$1/rebase-apply" ]; then
+        marker_flags=${marker_flags}1
+        read_marker_step "$1/rebase-apply/next" "$state_directory/apply-current"
+        read_marker_step "$1/rebase-apply/last" "$state_directory/apply-total"
+        read_marker_presence "$1/rebase-apply/rebasing"
+        read_marker_presence "$1/rebase-apply/applying"
+    else
+        marker_flags=${marker_flags}00000
+    fi
+    read_marker_presence "$1/MERGE_HEAD"
+    read_marker_presence "$1/REVERT_HEAD"
+    read_marker_presence "$1/CHERRY_PICK_HEAD"
+    read_marker_presence "$1/BISECT_LOG"
+}
+for state_file in version discovery headers config-records config merge-current merge-total \
+    apply-current apply-total; do
+    : > "$state_directory/$state_file" || exit 70
+done
+marker_flags=000000000000
+run_git --version > "$state_directory/version"
+run_git rev-parse --is-inside-git-dir --is-bare-repository --absolute-git-dir --git-common-dir \
+    --show-toplevel --show-prefix > "$state_directory/discovery"
+discovery_status=$?
+physical_home_output=$([ -n "${HOME-}" ] && cd "$HOME" 2>/dev/null && { pwd -P && printf .; }) ||
+    physical_home_output=
+physical_home_with_separator=${physical_home_output%?}
+physical_home=${physical_home_with_separator%?}
+if [ "$discovery_status" -eq 0 ]; then
+    run_git status --porcelain=v2 --branch -z --untracked-files=no --ignore-submodules=all \
+        -- ':(top,exclude)*' > "$state_directory/headers"
+    branch_name=$(LC_ALL=C tr '\000' '\n' < "$state_directory/headers" |
+        LC_ALL=C sed -n 's/^# branch\.head //p')
+    append_config_value core.fsmonitor
+    append_config_value remote.pushdefault
+    if [ -n "$branch_name" ] && [ "$branch_name" != '(detached)' ]; then
+        append_config_value "branch.$branch_name.remote"
+        append_config_value "branch.$branch_name.merge"
+        append_config_value "branch.$branch_name.pushremote"
+    fi
+    read_git_config --get-regexp '^remote\..*\.url$' >> "$state_directory/config-records"
+    head -c __MAXIMUM_CONFIG_BYTES__ "$state_directory/config-records" > "$state_directory/config" ||
+        exit 70
+    git_directory=$(LC_ALL=C sed -n 3p "$state_directory/discovery")
+    case "$git_directory" in
+        /*) read_operation_markers "$git_directory" ;;
+    esac
+fi
+emit_header repository-probe ok
+emit_file_field "$state_directory/version"
+emit_field "$discovery_status"
+emit_file_field "$state_directory/discovery"
+emit_field "$physical_home"
+emit_file_field "$state_directory/headers"
+emit_file_field "$state_directory/config"
+emit_field "$marker_flags"
+emit_file_field "$state_directory/merge-current"
+emit_file_field "$state_directory/merge-total"
+emit_file_field "$state_directory/apply-current"
+emit_file_field "$state_directory/apply-total"
+printf '.\n'
+"#;
+
+// The pipeline stops git once one byte beyond the limit arrives, so a huge work tree costs at most
+// the limit in transfer and staging.
+const REPOSITORY_COUNT_SCRIPT: &str = r#"{
+    run_git status --porcelain=v2 --branch -z
+    printf '%s\n' "$?" > "$state_directory/status-exit"
+} | head -c __STATUS_READ_BYTES__ > "$state_directory/status-read"
+IFS= read -r status_exit < "$state_directory/status-exit" || status_exit=1
+status_length=$(LC_ALL=C wc -c < "$state_directory/status-read" | tr -d '[:space:]') || exit 70
+if [ "$status_length" -gt __MAXIMUM_STATUS_BYTES__ ]; then
+    head -c __MAXIMUM_STATUS_BYTES__ "$state_directory/status-read" > "$state_directory/status" ||
+        exit 70
+    status_truncated=1
+elif [ "$status_exit" = 0 ]; then
+    cat "$state_directory/status-read" > "$state_directory/status" || exit 70
+    status_truncated=0
+else
+    emit_empty repository-count failed
+    exit 0
+fi
+emit_header repository-count ok
+emit_file_field "$state_directory/status"
+printf '.\n%s\n' "$status_truncated"
+"#;
+
 fn parse_account(output: &[u8]) -> Result<RemoteAccountMetadata, RemoteUtilityError> {
     let mut response = ResponseParser::new(output, "account")?;
     response.require_ok()?;
@@ -874,6 +1170,174 @@ fn parse_physical(output: &[u8]) -> Result<String, RemoteUtilityError> {
         .ok_or(RemoteUtilityError::InvalidResponse)
 }
 
+fn parse_repository_probe(output: &[u8]) -> Result<RemoteRepositoryProbe, RemoteUtilityError> {
+    let mut response = ResponseParser::new(output, REPOSITORY_PROBE_KIND)?;
+    let outcome = match response.status {
+        b"ok" => None,
+        b"directory-unavailable" => Some(RemoteProbeOutcome::DirectoryUnavailable),
+        b"git-missing" => Some(RemoteProbeOutcome::GitMissing),
+        b"failed" => {
+            response.finish_fields(0)?;
+            return Err(RemoteUtilityError::RemoteFailed);
+        }
+        _ => return Err(RemoteUtilityError::InvalidResponse),
+    };
+    if let Some(outcome) = outcome {
+        response.finish_fields(0)?;
+        return Ok(RemoteRepositoryProbe {
+            outcome,
+            ..RemoteRepositoryProbe::default()
+        });
+    }
+    let fields = response.read_raw_fields(11)?;
+    response.require_end()?;
+    let [
+        git_version,
+        discovery_status,
+        discovery,
+        physical_home,
+        status_headers,
+        config,
+        marker_flags,
+        merge_current,
+        merge_total,
+        apply_current,
+        apply_total,
+    ] = fields[..]
+    else {
+        return Err(RemoteUtilityError::InvalidResponse);
+    };
+    let discovery_succeeded = parse_exit_status(discovery_status)? == 0;
+    let markers = parse_operation_markers(
+        marker_flags,
+        [merge_current, merge_total, apply_current, apply_total],
+    )?;
+    Ok(RemoteRepositoryProbe {
+        outcome: if discovery_succeeded || !discovery.is_empty() {
+            RemoteProbeOutcome::Repository
+        } else {
+            RemoteProbeOutcome::NotRepository
+        },
+        git_version: git_version.to_vec(),
+        discovery_succeeded,
+        discovery: discovery.to_vec(),
+        physical_home: physical_home.to_vec(),
+        status_headers: status_headers.to_vec(),
+        config: complete_config_records(config).to_vec(),
+        markers,
+    })
+}
+
+fn parse_exit_status(field: &[u8]) -> Result<u8, RemoteUtilityError> {
+    if field.is_empty()
+        || !field.iter().all(u8::is_ascii_digit)
+        || (field.len() > 1 && field.starts_with(b"0"))
+    {
+        return Err(RemoteUtilityError::InvalidResponse);
+    }
+    str::from_utf8(field)
+        .map_err(|_| RemoteUtilityError::InvalidResponse)?
+        .parse::<u8>()
+        .map_err(|_| RemoteUtilityError::InvalidResponse)
+}
+
+/// Drops a record the field limit cut short; every whole `git config -z` record ends with NUL.
+fn complete_config_records(config: &[u8]) -> &[u8] {
+    match config.iter().rposition(|byte| *byte == 0) {
+        Some(last) => &config[..=last],
+        None => &[],
+    }
+}
+
+/// Decodes the marker flags `rebase-merge/`, `msgnum`, `end`, `rebase-apply/`, `next`, `last`,
+/// `rebasing`, `applying`, `MERGE_HEAD`, `REVERT_HEAD`, `CHERRY_PICK_HEAD`, `BISECT_LOG` and the
+/// four step file contents.
+fn parse_operation_markers(
+    flags: &[u8],
+    steps: [&[u8]; 4],
+) -> Result<OperationMarkers, RemoteUtilityError> {
+    if flags.len() != REPOSITORY_MARKER_FLAGS {
+        return Err(RemoteUtilityError::InvalidResponse);
+    }
+    let flags = flags
+        .iter()
+        .map(|flag| match flag {
+            b'0' => Ok(false),
+            b'1' => Ok(true),
+            _ => Err(RemoteUtilityError::InvalidResponse),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let [merge_current, merge_total, apply_current, apply_total] = steps;
+    let step = |present: bool, content: &[u8]| -> Result<Option<Vec<u8>>, RemoteUtilityError> {
+        if content.len() > MAXIMUM_MARKER_BYTES || (!present && !content.is_empty()) {
+            return Err(RemoteUtilityError::InvalidResponse);
+        }
+        Ok(present.then(|| content.to_vec()))
+    };
+    let within = |directory: bool, members: &[bool]| directory || members.iter().all(|flag| !flag);
+    if !within(flags[0], &flags[1..3]) || !within(flags[3], &flags[4..8]) {
+        return Err(RemoteUtilityError::InvalidResponse);
+    }
+    Ok(OperationMarkers {
+        rebase_merge: flags[0]
+            .then(|| -> Result<_, RemoteUtilityError> {
+                Ok(StepMarkers {
+                    current: step(flags[1], merge_current)?,
+                    total: step(flags[2], merge_total)?,
+                })
+            })
+            .transpose()?,
+        rebase_apply: flags[3]
+            .then(|| -> Result<_, RemoteUtilityError> {
+                Ok(ApplyMarkers {
+                    step: StepMarkers {
+                        current: step(flags[4], apply_current)?,
+                        total: step(flags[5], apply_total)?,
+                    },
+                    rebasing: flags[6],
+                    applying: flags[7],
+                })
+            })
+            .transpose()?,
+        merge_head: flags[8],
+        revert_head: flags[9],
+        cherry_pick_head: flags[10],
+        bisect_log: flags[11],
+    })
+}
+
+fn parse_repository_count(output: &[u8]) -> Result<RemoteRepositoryCount, RemoteUtilityError> {
+    let mut response = ResponseParser::new(output, REPOSITORY_COUNT_KIND)?;
+    match response.status {
+        b"ok" => {}
+        status => {
+            let error = match status {
+                b"directory-unavailable" => RemoteUtilityError::Missing,
+                b"git-missing" => RemoteUtilityError::ToolMissing,
+                b"failed" => RemoteUtilityError::RemoteFailed,
+                _ => return Err(RemoteUtilityError::InvalidResponse),
+            };
+            response.finish_fields(0)?;
+            return Err(error);
+        }
+    }
+    let fields =
+        response.read_raw_fields_within(1, MAXIMUM_REMOTE_REPOSITORY_STATUS_BYTES)?;
+    let [status] = fields[..] else {
+        return Err(RemoteUtilityError::InvalidResponse);
+    };
+    let truncated = match response.read_line()? {
+        b"0" => false,
+        b"1" => true,
+        _ => return Err(RemoteUtilityError::InvalidResponse),
+    };
+    response.require_end()?;
+    Ok(RemoteRepositoryCount {
+        status: status.to_vec(),
+        truncated,
+    })
+}
+
 struct ResponseParser<'a> {
     input: &'a [u8],
     cursor: usize,
@@ -943,6 +1407,14 @@ impl<'a> ResponseParser<'a> {
         &mut self,
         maximum_count: usize,
     ) -> Result<Vec<&'a [u8]>, RemoteUtilityError> {
+        self.read_raw_fields_within(maximum_count, MAXIMUM_REMOTE_FIELD_BYTES)
+    }
+
+    fn read_raw_fields_within(
+        &mut self,
+        maximum_count: usize,
+        maximum_field_bytes: usize,
+    ) -> Result<Vec<&'a [u8]>, RemoteUtilityError> {
         let mut fields = Vec::new();
         loop {
             if self.remaining().starts_with(b".\n") {
@@ -952,11 +1424,14 @@ impl<'a> ResponseParser<'a> {
             if fields.len() >= maximum_count {
                 return Err(RemoteUtilityError::InvalidResponse);
             }
-            fields.push(self.read_netstring()?);
+            fields.push(self.read_netstring(maximum_field_bytes)?);
         }
     }
 
-    fn read_netstring(&mut self) -> Result<&'a [u8], RemoteUtilityError> {
+    fn read_netstring(
+        &mut self,
+        maximum_field_bytes: usize,
+    ) -> Result<&'a [u8], RemoteUtilityError> {
         let remaining = self.remaining();
         let colon = remaining
             .iter()
@@ -973,7 +1448,7 @@ impl<'a> ResponseParser<'a> {
             .map_err(|_| RemoteUtilityError::InvalidResponse)?
             .parse::<usize>()
             .map_err(|_| RemoteUtilityError::InvalidResponse)?;
-        if length > MAXIMUM_REMOTE_FIELD_BYTES {
+        if length > maximum_field_bytes {
             return Err(RemoteUtilityError::InvalidResponse);
         }
         let field_start = self.cursor + colon + 1;
@@ -1483,6 +1958,320 @@ mod tests {
                 .unwrap_err(),
             RemoteUtilityError::Cancelled
         );
+    }
+
+    mod repository {
+        use super::*;
+        use crate::ssh::fake_remote_utility_server::{
+            REPOSITORY_CONFIG, REPOSITORY_DISCOVERY, REPOSITORY_HEADERS, raw_response,
+            repository_count_response, repository_probe_fields, repository_probe_response,
+        };
+
+        fn probe_with(fields: &[&[u8]]) -> Result<RemoteRepositoryProbe, RemoteUtilityError> {
+            parse_repository_probe(&raw_response("repository-probe", "ok", fields, b""))
+        }
+
+        fn probe_replacing(
+            index: usize,
+            value: &[u8],
+        ) -> Result<RemoteRepositoryProbe, RemoteUtilityError> {
+            let mut fields = repository_probe_fields();
+            fields[index] = value;
+            probe_with(&fields)
+        }
+
+        fn script_text(runner: &FakeRunner, index: usize) -> String {
+            String::from_utf8(runner.state.lock().unwrap().scripts[index].clone()).unwrap()
+        }
+
+        #[gpui::test]
+        fn probe_should_round_trip_raw_git_output_and_markers(cx: &mut TestAppContext) {
+            let (client, runner) = client([success(repository_probe_response())]);
+
+            let probe = cx
+                .foreground_executor()
+                .block_test(client.probe_repository_with_cancellation(
+                    remote_directory("~/work's $(id)"),
+                    SshCancellationToken::default(),
+                ))
+                .unwrap();
+
+            assert_eq!(probe.outcome, RemoteProbeOutcome::Repository);
+            assert_eq!(probe.git_version, b"git version 2.47.0\n");
+            assert!(probe.discovery_succeeded);
+            assert_eq!(probe.discovery, REPOSITORY_DISCOVERY);
+            assert_eq!(probe.physical_home, b"/home/tester");
+            assert_eq!(probe.status_headers, REPOSITORY_HEADERS);
+            assert_eq!(probe.config, REPOSITORY_CONFIG);
+            assert_eq!(
+                probe.markers,
+                OperationMarkers {
+                    rebase_merge: Some(StepMarkers {
+                        current: Some(b"3\n".to_vec()),
+                        total: Some(b"7\n".to_vec()),
+                    }),
+                    merge_head: true,
+                    ..OperationMarkers::default()
+                }
+            );
+            let script = script_text(&runner, 0);
+            assert!(script.contains("input_path='~/work'\"'\"'s $(id)'\n"));
+            assert!(script.contains("git_fsmonitor=disabled\n"));
+            assert!(script.contains("-c core.fsmonitor=false"));
+            assert!(script.contains("emit_header repository-probe ok"));
+        }
+
+        #[test]
+        fn probe_should_classify_every_outcome() {
+            let mut not_repository = repository_probe_fields();
+            not_repository[1] = b"128";
+            not_repository[2] = b"";
+            not_repository[6] = b"000000000000";
+            not_repository[7] = b"";
+            not_repository[8] = b"";
+            let not_repository = probe_with(&not_repository).unwrap();
+            let mut hidden = repository_probe_fields();
+            hidden[1] = b"128";
+            hidden[2] = b"true\ntrue\n/srv/repo.git\n.\n";
+            let hidden = probe_with(&hidden).unwrap();
+
+            assert_eq!(not_repository.outcome, RemoteProbeOutcome::NotRepository);
+            assert!(!not_repository.discovery_succeeded);
+            assert_eq!(hidden.outcome, RemoteProbeOutcome::Repository);
+            assert!(!hidden.discovery_succeeded);
+            for (status, outcome) in [
+                (
+                    "directory-unavailable",
+                    RemoteProbeOutcome::DirectoryUnavailable,
+                ),
+                ("git-missing", RemoteProbeOutcome::GitMissing),
+            ] {
+                let probe =
+                    parse_repository_probe(&raw_response("repository-probe", status, &[], b""))
+                        .unwrap();
+                assert_eq!(
+                    probe,
+                    RemoteRepositoryProbe {
+                        outcome,
+                        ..RemoteRepositoryProbe::default()
+                    }
+                );
+            }
+            assert_eq!(
+                parse_repository_probe(&raw_response("repository-probe", "failed", &[], b""))
+                    .unwrap_err(),
+                RemoteUtilityError::RemoteFailed
+            );
+        }
+
+        #[test]
+        fn probe_should_keep_only_whole_configuration_records() {
+            assert_eq!(
+                probe_replacing(5, b"core.fsmonitor\ntrue\0remote.origin.url\nhttps://ex")
+                    .unwrap()
+                    .config,
+                b"core.fsmonitor\ntrue\0"
+            );
+            assert!(
+                probe_replacing(5, b"remote.origin.url\nhttps://ex")
+                    .unwrap()
+                    .config
+                    .is_empty()
+            );
+        }
+
+        #[test]
+        fn probe_should_decode_apply_markers_and_the_marker_limit() {
+            let full_marker = [b'9'; MAXIMUM_MARKER_BYTES];
+            let mut fields = repository_probe_fields();
+            fields[6] = b"000111110111";
+            fields[7] = b"";
+            fields[8] = b"";
+            fields[9] = b"2\n";
+            fields[10] = &full_marker;
+
+            assert_eq!(
+                probe_with(&fields).unwrap().markers,
+                OperationMarkers {
+                    rebase_apply: Some(ApplyMarkers {
+                        step: StepMarkers {
+                            current: Some(b"2\n".to_vec()),
+                            total: Some(full_marker.to_vec()),
+                        },
+                        rebasing: true,
+                        applying: true,
+                    }),
+                    revert_head: true,
+                    cherry_pick_head: true,
+                    bisect_log: true,
+                    ..OperationMarkers::default()
+                }
+            );
+        }
+
+        #[test]
+        fn probe_should_reject_malformed_responses() {
+            let oversized_field = vec![b'x'; MAXIMUM_REMOTE_FIELD_BYTES + 1];
+            let oversized_marker = vec![b'1'; MAXIMUM_MARKER_BYTES + 1];
+            for (index, value) in [
+                (1, b"".as_slice()),
+                (1, b"01"),
+                (1, b"256"),
+                (1, b"-1"),
+                (6, b"11100000100"),
+                (6, b"1110000010002"),
+                (6, b"11100000100x"),
+                // A step file below an absent marker directory.
+                (6, b"011000001000"),
+                (6, b"000010000000"),
+                // Step content without its presence flag.
+                (6, b"101000001000"),
+                (7, &oversized_marker),
+                (4, &oversized_field),
+            ] {
+                assert_eq!(
+                    probe_replacing(index, value).unwrap_err(),
+                    RemoteUtilityError::InvalidResponse,
+                    "field {index} accepted {:?}",
+                    String::from_utf8_lossy(value)
+                );
+            }
+            let fields = repository_probe_fields();
+            assert_eq!(
+                probe_with(&fields[..10]).unwrap_err(),
+                RemoteUtilityError::InvalidResponse
+            );
+            let mut trailing = repository_probe_response();
+            trailing.extend_from_slice(b"0\n");
+            for malformed in [
+                trailing,
+                raw_response("repository-probe", "unknown", &[], b""),
+                raw_response("repository-count", "ok", &fields, b""),
+                raw_response("repository-probe", "git-missing", &[b"x"], b""),
+            ] {
+                assert_eq!(
+                    parse_repository_probe(&malformed).unwrap_err(),
+                    RemoteUtilityError::InvalidResponse
+                );
+            }
+        }
+
+        #[gpui::test]
+        fn count_should_round_trip_status_and_truncation(cx: &mut TestAppContext) {
+            let cut = vec![b'?'; MAXIMUM_REMOTE_REPOSITORY_STATUS_BYTES];
+            let (client, runner) = client([
+                success(repository_count_response(b"? a\0? b\nc\0", false)),
+                success(repository_count_response(&cut, true)),
+            ]);
+
+            let whole = cx
+                .foreground_executor()
+                .block_test(client.count_repository_with_cancellation(
+                    "/srv/it's here",
+                    FsmonitorPolicy::Disabled,
+                    SshCancellationToken::default(),
+                ))
+                .unwrap();
+            let truncated = cx
+                .foreground_executor()
+                .block_test(client.count_repository_with_cancellation(
+                    "/srv/repo",
+                    FsmonitorPolicy::Builtin,
+                    SshCancellationToken::default(),
+                ))
+                .unwrap();
+
+            assert_eq!(whole.status, b"? a\0? b\nc\0");
+            assert!(!whole.truncated);
+            assert_eq!(truncated.status, cut);
+            assert!(truncated.truncated);
+            let disabled = script_text(&runner, 0);
+            assert!(disabled.contains("input_path='/srv/it'\"'\"'s here'\n"));
+            assert!(disabled.contains("git_fsmonitor=disabled\n"));
+            assert!(disabled.contains(&format!(
+                "head -c {} ",
+                MAXIMUM_REMOTE_REPOSITORY_STATUS_BYTES + 1
+            )));
+            assert!(script_text(&runner, 1).contains("git_fsmonitor=builtin\n"));
+        }
+
+        #[test]
+        fn count_should_map_failures_and_reject_malformed_responses() {
+            for (status, error) in [
+                ("directory-unavailable", RemoteUtilityError::Missing),
+                ("git-missing", RemoteUtilityError::ToolMissing),
+                ("failed", RemoteUtilityError::RemoteFailed),
+                ("unknown", RemoteUtilityError::InvalidResponse),
+            ] {
+                assert_eq!(
+                    parse_repository_count(&raw_response("repository-count", status, &[], b""))
+                        .unwrap_err(),
+                    error
+                );
+            }
+            let oversized = vec![b'x'; MAXIMUM_REMOTE_REPOSITORY_STATUS_BYTES + 1];
+            for malformed in [
+                repository_count_response(&oversized, true),
+                raw_response("repository-count", "ok", &[b"a", b"b"], b"0\n"),
+                raw_response("repository-count", "ok", &[], b"0\n"),
+                raw_response("repository-count", "ok", &[b"a"], b"2\n"),
+                raw_response("repository-count", "ok", &[b"a"], b""),
+                raw_response("repository-count", "ok", &[b"a"], b"0\n0\n"),
+                raw_response("repository-probe", "ok", &[b"a"], b"0\n"),
+            ] {
+                assert_eq!(
+                    parse_repository_count(&malformed).unwrap_err(),
+                    RemoteUtilityError::InvalidResponse
+                );
+            }
+        }
+
+        #[gpui::test]
+        fn count_should_refuse_roots_the_script_cannot_carry(cx: &mut TestAppContext) {
+            let (client, runner) = client([]);
+
+            for root in ["relative/repo", "~/repo", "/srv/nul\0byte"] {
+                assert_eq!(
+                    cx.foreground_executor()
+                        .block_test(client.count_repository_with_cancellation(
+                            root,
+                            FsmonitorPolicy::Disabled,
+                            SshCancellationToken::default(),
+                        ))
+                        .unwrap_err(),
+                    RemoteUtilityError::InvalidResponse
+                );
+            }
+            let long_root = format!("/{}", "x".repeat(MAXIMUM_REMOTE_PATH_BYTES));
+            assert_eq!(
+                cx.foreground_executor()
+                    .block_test(client.count_repository_with_cancellation(
+                        &long_root,
+                        FsmonitorPolicy::Disabled,
+                        SshCancellationToken::default(),
+                    ))
+                    .unwrap_err(),
+                RemoteUtilityError::RequestTooLarge
+            );
+            assert!(runner.state.lock().unwrap().scripts.is_empty());
+        }
+
+        #[gpui::test]
+        fn a_utility_deadline_should_stay_distinct_from_transport_failure(
+            cx: &mut TestAppContext,
+        ) {
+            let (client, _) = client([Err(RemoteUtilityRunError::TimedOut)]);
+
+            assert_eq!(
+                cx.foreground_executor()
+                    .block_test(client.probe_repository_with_cancellation(
+                        remote_directory("/srv/repo"),
+                        SshCancellationToken::default(),
+                    ))
+                    .unwrap_err(),
+                RemoteUtilityError::TimedOut
+            );
+        }
     }
 }
 
