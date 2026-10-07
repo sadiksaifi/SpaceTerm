@@ -1794,8 +1794,7 @@ impl TabView {
             .panes_with_ids()
             .map(|(pane_id, _)| {
                 let fade = HoverFade::new(("pane-hover", pane_id.get()), window, cx);
-                let revealed =
-                    pane_id == focused_pane_id || (window_active && fade.is_hovered(cx));
+                let revealed = pane_id == focused_pane_id || (window_active && fade.is_hovered(cx));
                 let reveal = spaceterm_ui::eased_flag(
                     ("pane-controls-reveal", pane_id.get()),
                     revealed,
@@ -4926,10 +4925,12 @@ mod tests {
         let focused_pane = cx.debug_bounds("pane-surface-2").unwrap();
         cx.simulate_mouse_move(focused_pane.center(), None, gpui::Modifiers::none());
         crate::ui::settle_hover(cx);
-        assert_eq!(view.read_with(cx, |view, _| view.focused_pane_id()), PaneId::new(2));
-        let segment_right = |cx: &mut VisualTestContext| {
-            cx.debug_bounds("pane-repository-1").unwrap().right()
-        };
+        assert_eq!(
+            view.read_with(cx, |view, _| view.focused_pane_id()),
+            PaneId::new(2)
+        );
+        let segment_right =
+            |cx: &mut VisualTestContext| cx.debug_bounds("pane-repository-1").unwrap().right();
         let controls = cx.debug_bounds("pane-controls-1-full").unwrap();
         assert!(
             (segment_right(cx) - controls.right()).abs() < px(0.5),
