@@ -69,6 +69,12 @@ pub(crate) fn compile_builtin_chrome(appearance: Appearance) -> ChromeColors {
     let warning_border = warning;
     let error_background = error.multiply_opacity(0x1a);
     let error_border = error;
+    // Repository marks reuse the status hues so an in-progress operation reads as a warning and
+    // an open Pull Request as success; a draft is deliberately quiet.
+    let repository_operation = warning;
+    let repository_changes = info;
+    let pull_request_open = success;
+    let pull_request_draft = text_muted;
     let input_background = authored.input_background;
     let input_surface = input_background.source_over(panel_background.source_over(root_surface));
     let input_text = contrast(text, input_surface, 4.5);
@@ -536,6 +542,10 @@ pub(crate) fn compile_builtin_chrome(appearance: Appearance) -> ChromeColors {
         tab_active_hover_icon,
         inactive_selection_border,
         tab_separator,
+        repository_operation,
+        repository_changes,
+        pull_request_open,
+        pull_request_draft,
     }
 }
 
@@ -557,6 +567,15 @@ fn contrast(foreground: Color, background: Color, minimum: f64) -> Color {
     }
 }
 
+/// The readable color nearest `foreground`, keeping its hue, so a muted tone that misses the
+/// minimum on `background` darkens or lightens only as far as it must instead of becoming black
+/// or white.
+fn nearest_readable(foreground: Color, background: Color, minimum: f64) -> Color {
+    foreground
+        .readable_preserving_chroma(&[background], minimum)
+        .unwrap_or_else(|| contrast(foreground, background, minimum))
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct SemanticPaint {
     pub(crate) background: Color,
@@ -575,6 +594,8 @@ pub(crate) struct CaptionPaint {
     pub(crate) attention: Color,
     pub(crate) busy: Color,
     pub(crate) error: Color,
+    pub(crate) repository_operation: Color,
+    pub(crate) repository_changes: Color,
     pub(crate) control: SemanticPaint,
     pub(crate) control_hover: SemanticPaint,
     pub(crate) control_pressed: SemanticPaint,
@@ -586,7 +607,7 @@ impl ChromeColors {
     /// It does not mutate the theme. All caption controls share this contextual policy.
     pub(crate) fn caption(&self, surface: Color, focused: bool) -> CaptionPaint {
         let surface = surface.source_over(self.background.with_alpha(255));
-        let foreground = contrast(
+        let foreground = nearest_readable(
             if focused {
                 self.text_secondary
             } else {
@@ -608,12 +629,14 @@ impl ChromeColors {
         CaptionPaint {
             background: surface,
             foreground,
-            secondary: contrast(self.text_muted, surface, 4.5),
+            secondary: nearest_readable(self.text_muted, surface, 4.5),
             icon: foreground,
             focus: contrast(self.border_focused, surface, 3.0),
             attention: contrast(self.warning, surface, 4.5),
             busy: contrast(self.info, surface, 4.5),
             error: contrast(self.error, surface, 4.5),
+            repository_operation: nearest_readable(self.repository_operation, surface, 4.5),
+            repository_changes: nearest_readable(self.repository_changes, surface, 4.5),
             control: paint(surface, foreground),
             control_hover: paint(surface.mix(foreground, 0.10), foreground),
             control_pressed: paint(surface.mix(foreground, 0.18), foreground),
@@ -644,6 +667,30 @@ impl ChromeColors {
             busy: contrast(self.info, surface, 3.0),
             error: contrast(self.error, surface, 3.0),
             paused: contrast(self.text_muted, surface, 3.0),
+        }
+    }
+}
+
+/// Pull Request states resolved for the surface their text currently rests on.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct PullRequestPaint {
+    /// The Pull Request number, a link to the Pull Request in either state.
+    pub(crate) link: Color,
+    /// The Open state label.
+    pub(crate) open: Color,
+    /// The Draft state label.
+    pub(crate) draft: Color,
+}
+
+impl ChromeColors {
+    /// Resolves Pull Request text colors against one surface composed over the opaque Chrome
+    /// background, so the number stays readable on resting, hovered, and selected rows.
+    pub(crate) fn pull_request(&self, surface: Color) -> PullRequestPaint {
+        let surface = surface.source_over(self.background.with_alpha(255));
+        PullRequestPaint {
+            link: contrast(self.link_text, surface, 4.5),
+            open: contrast(self.pull_request_open, surface, 4.5),
+            draft: contrast(self.pull_request_draft, surface, 4.5),
         }
     }
 }
@@ -739,6 +786,8 @@ mod tests {
                         caption.attention,
                         caption.busy,
                         caption.error,
+                        caption.repository_operation,
+                        caption.repository_changes,
                     ] {
                         assert!(text.contrast_ratio(surface) >= 4.5);
                     }
@@ -755,6 +804,39 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn pull_request_text_reads_on_every_row_surface() {
+        for appearance in [Appearance::Light, Appearance::Dark] {
+            let colors = builtin::chrome_base(appearance);
+            let base = colors.background.with_alpha(255);
+            for surface in [
+                colors.title_bar_background,
+                colors.row_hover_background,
+                colors.row_selected_background,
+                colors.row_selected_hover_background,
+                colors.elevated_surface_background,
+            ] {
+                let paint = colors.pull_request(surface);
+                let surface = surface.source_over(base);
+                assert!(paint.link.contrast_ratio(surface) >= 4.5);
+                assert!(paint.open.contrast_ratio(surface) >= 4.5);
+                assert!(paint.draft.contrast_ratio(surface) >= 4.5);
+            }
+            // The resting sidebar keeps the authored hue; a selected row may fall back to a
+            // neutral because the Open or Draft word, not color, carries the state.
+            assert_eq!(
+                colors.pull_request(colors.title_bar_background).open,
+                colors.pull_request_open,
+                "{appearance:?}"
+            );
+            assert_eq!(
+                colors.pull_request(colors.title_bar_background).link,
+                colors.link_text,
+                "{appearance:?}"
+            );
+        }
+    }
+
     #[test]
     fn status_marks_read_on_every_tab_surface_they_rest_on() {
         for appearance in [Appearance::Light, Appearance::Dark] {

@@ -1,0 +1,3 @@
+# Read Repository Status by running git and the GitHub CLI
+
+Repository Status runs the person's own git and parses one porcelain format, so results follow their git configuration and worktree layout; Remote Workspaces run the same git commands through a fixed utility script over the Control Connection, keeping OpenSSH as the only remote transport. Pull Requests come only from the local GitHub CLI, which owns GitHub credentials as OpenSSH owns SSH credentials, and lookups happen only when a branch, upstream, or window activation changes. We accept that clean filters and Git's built-in fsmonitor daemon may run under the person's configuration, while hooks and hook-program fsmonitors never do.

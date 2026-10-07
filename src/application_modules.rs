@@ -8,6 +8,7 @@ mod domain;
 mod host_fonts;
 mod keybindings;
 mod platform;
+mod repository_status;
 mod settings;
 mod ssh;
 mod terminal;

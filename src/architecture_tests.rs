@@ -228,6 +228,7 @@ fn portable_verification_cannot_select_native_adapters_or_host_mechanics() {
         "ui",
         "desktop_profile",
         "keybindings",
+        "repository_status",
         "ssh",
         "platform/local_filesystem",
         "terminal/session",

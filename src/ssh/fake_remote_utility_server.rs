@@ -15,7 +15,7 @@ use super::process::ProcessExit;
 use super::remote_directory_provider::SshRemoteDirectoryProvider;
 use super::remote_utility::{
     PreparedSshRemoteUtilityCommand, RemoteUtilityProcessOutput, RemoteUtilityRunError,
-    RemoteUtilitySession, SshRemoteUtilityRunner,
+    RemoteUtilitySession, SshRemoteUtilityClient, SshRemoteUtilityRunner,
 };
 use crate::domain::SshDestination;
 
@@ -86,6 +86,11 @@ impl FakeRemoteUtilityServer {
 
     /// Creates the provider a connected Remote Workspace would use for this connection.
     pub(crate) fn provider(&self) -> SshRemoteDirectoryProvider<Self> {
+        SshRemoteDirectoryProvider::with_client(self.client(), self.executor.clone())
+    }
+
+    /// Creates the utility client every reader of this connection shares.
+    pub(crate) fn client(&self) -> Arc<SshRemoteUtilityClient<Self>> {
         let command = SshCommandContext::new(
             OpenSshExecutable::for_test(),
             PathBuf::from("/private/config/spaceterm/ssh_config"),
@@ -94,12 +99,11 @@ impl FakeRemoteUtilityServer {
         )
         .unwrap()
         .remote_utility();
-        SshRemoteDirectoryProvider::new(
+        Arc::new(SshRemoteUtilityClient::new(
             PreparedSshRemoteUtilityCommand::new(command),
             Arc::new(self.clone()),
             self.connection.clone(),
-            self.executor.clone(),
-        )
+        ))
     }
 }
 
@@ -171,6 +175,10 @@ fn respond(script: &[u8]) -> Result<RemoteUtilityProcessOutput, RemoteUtilityRun
         response("list", &LISTED_DIRECTORIES, "0\n")
     } else if script.contains("emit_empty probe ok") {
         response("probe", &[], "")
+    } else if script.contains("emit_header repository-probe ok") {
+        repository_probe_response()
+    } else if script.contains("emit_header repository-count ok") {
+        repository_count_response(REPOSITORY_STATUS, false)
     } else {
         return Err(RemoteUtilityRunError::WorkerUnavailable);
     };
@@ -190,4 +198,57 @@ fn response(kind: &str, fields: &[&str], tail: &str) -> Vec<u8> {
     response.extend_from_slice(b".\n");
     response.extend_from_slice(tail.as_bytes());
     response
+}
+
+/// A probe of `/srv/repo` on `main`, stopped at rebase step 3 of 7 with a merge marker too.
+pub(crate) const REPOSITORY_DISCOVERY: &[u8] = b"false\nfalse\n/srv/repo/.git\n.git\n/srv/repo\n\n";
+pub(crate) const REPOSITORY_HEADERS: &[u8] =
+    b"# branch.oid 0123456789abcdef0123456789abcdef01234567\0# branch.head main\0";
+pub(crate) const REPOSITORY_CONFIG: &[u8] =
+    b"branch.main.remote\norigin\0remote.origin.url\nhttps://github.com/owner/repo.git\0";
+pub(crate) const REPOSITORY_STATUS: &[u8] =
+    b"# branch.oid 0123456789abcdef0123456789abcdef01234567\0# branch.head main\0? new\nline\0";
+
+/// Builds one utility response with raw byte fields.
+pub(crate) fn raw_response(kind: &str, status: &str, fields: &[&[u8]], tail: &[u8]) -> Vec<u8> {
+    let mut response = format!("SPACETERM-REMOTE/1\n{kind}\n{status}\n").into_bytes();
+    for field in fields {
+        response.extend_from_slice(format!("{}:", field.len()).as_bytes());
+        response.extend_from_slice(field);
+        response.push(b',');
+    }
+    response.extend_from_slice(b".\n");
+    response.extend_from_slice(tail);
+    response
+}
+
+/// Probe fields in wire order: git version, discovery exit status, discovery, physical home,
+/// status headers, configuration, marker flags, and the four step files.
+pub(crate) fn repository_probe_fields() -> [&'static [u8]; 11] {
+    [
+        b"git version 2.47.0\n",
+        b"0",
+        REPOSITORY_DISCOVERY,
+        b"/home/tester",
+        REPOSITORY_HEADERS,
+        REPOSITORY_CONFIG,
+        b"111000001000",
+        b"3\n",
+        b"7\n",
+        b"",
+        b"",
+    ]
+}
+
+pub(crate) fn repository_probe_response() -> Vec<u8> {
+    raw_response("repository-probe", "ok", &repository_probe_fields(), b"")
+}
+
+pub(crate) fn repository_count_response(status: &[u8], truncated: bool) -> Vec<u8> {
+    raw_response(
+        "repository-count",
+        "ok",
+        &[status],
+        if truncated { b"1\n" } else { b"0\n" },
+    )
 }

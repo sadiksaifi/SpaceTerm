@@ -94,7 +94,7 @@ pub use floating_surface::{
 };
 pub use focus_ring::{FocusRing, Ringed, RingedElement, focus_ring};
 pub use fuzzy::{FuzzyMatch, FuzzyTarget, fuzzy_filter, highlight_ranges};
-pub use hover_fade::{HoverFade, mix_rgba};
+pub use hover_fade::{HoverFade, eased_flag, mix_rgba};
 pub use icon::{CustomIconName, EmbeddedAssets, Icon, IconName};
 pub use list_row::{ListRowPaint, ListRowPaints};
 pub use menu::{

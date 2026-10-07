@@ -46,7 +46,7 @@ use surfaces::FloatingSurfaces;
 
 #[cfg(test)]
 pub(crate) use terminal::set_link_preview_fixture;
-pub(crate) use terminal::{caption_fixture, link_preview_fixture};
+pub(crate) use terminal::{caption_fixture, link_preview_fixture, repository_view_fixture};
 
 actions!(
     spaceterm,

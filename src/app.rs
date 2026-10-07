@@ -787,6 +787,9 @@ pub(crate) struct ApplicationCapabilities {
     pub(crate) theme_registry: Option<Arc<dyn crate::theme_registry::RegistryTransport>>,
     pub(crate) remote_workspace:
         Arc<dyn crate::ui::remote_workspace_flow::RemoteWorkspaceFlowBackendFactory>,
+    /// Runs git and the GitHub CLI for Repository Status.
+    pub(crate) repository_status:
+        Option<crate::ui::repository_status_store::RepositoryStatusAdapters>,
 }
 
 /// The startup-supplied file opener available to explicit local file selections.
@@ -1016,6 +1019,9 @@ pub(crate) fn initialize_application(
         crate::keybindings::runtime::follow(&settings, cx);
         if let Some(file) = &host.adapters.settings_file {
             crate::ui::settings_file::SettingsFile::install(settings.clone(), Rc::clone(file), cx);
+        }
+        if let Some(adapters) = &host.adapters.repository_status {
+            crate::ui::repository_status_store::install(&settings, adapters.clone(), cx);
         }
     }
     crate::ui::initialize_controls(cx).map_err(|_| RuntimeError::Initialization)?;
@@ -1294,6 +1300,7 @@ mod runtime_tests {
                 setup_guide: None,
                 theme_registry: None,
                 remote_workspace: Arc::new(UnavailableRemote),
+                repository_status: None,
             },
             services: Some(services),
             window_movement: movement,

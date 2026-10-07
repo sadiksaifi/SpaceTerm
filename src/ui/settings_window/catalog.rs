@@ -20,6 +20,8 @@ pub(crate) enum SettingsSectionId {
     Keybindings,
     /// Clipboard access and system permissions for terminal programs.
     Privacy,
+    /// Repository Status and Pull Requests, and the tools that provide them.
+    Git,
     /// The installed version, the latest check, and how SpaceTerm keeps itself current.
     Updates,
     /// Settings as a whole: the settings file, export and import, and Reset All.
@@ -28,12 +30,13 @@ pub(crate) enum SettingsSectionId {
 
 impl SettingsSectionId {
     /// Every section in presentation order.
-    pub(super) const ALL: [Self; 7] = [
+    pub(super) const ALL: [Self; 8] = [
         Self::Interface,
         Self::Font,
         Self::Themes,
         Self::Keybindings,
         Self::Privacy,
+        Self::Git,
         Self::Updates,
         Self::Advanced,
     ];
@@ -45,6 +48,7 @@ impl SettingsSectionId {
             Self::Themes => "Themes",
             Self::Keybindings => "Keybindings",
             Self::Privacy => "Privacy",
+            Self::Git => "Git",
             Self::Updates => "Updates",
             Self::Advanced => "Advanced",
         }
@@ -69,6 +73,9 @@ impl SettingsSectionId {
                 "Clipboard access and system permissions for programs running in SpaceTerm."
             }
             Self::Privacy => "Clipboard access for programs running in SpaceTerm.",
+            Self::Git => {
+                "The branch and changes of the repository each terminal pane is in, read with your own Git and GitHub CLI."
+            }
             Self::Updates => {
                 "SpaceTerm keeps itself current in the background and asks before it restarts."
             }
@@ -85,6 +92,7 @@ impl SettingsSectionId {
             Self::Themes => "settings-section-themes",
             Self::Keybindings => "settings-section-keybindings",
             Self::Privacy => "settings-section-privacy",
+            Self::Git => "settings-section-git",
             Self::Updates => "settings-section-updates",
             Self::Advanced => "settings-section-advanced",
         }
@@ -120,6 +128,12 @@ pub(super) enum SettingsRowId {
     AccessibilityAccess,
     ClipboardWrites,
     ClipboardReads,
+    ShowRepositoryStatus,
+    /// Whether SpaceTerm found a Git it can use, and its version.
+    GitTool,
+    ShowPullRequests,
+    /// Whether the GitHub CLI is installed and logged in.
+    GitHubCli,
     /// The installed version, the latest check, and the next step the update service offers.
     UpdateStatus,
     AutomaticUpdateDownloads,
@@ -168,6 +182,10 @@ impl SettingsRowId {
             | Self::AccessibilityAccess
             | Self::ClipboardWrites
             | Self::ClipboardReads
+            | Self::ShowRepositoryStatus
+            | Self::GitTool
+            | Self::ShowPullRequests
+            | Self::GitHubCli
             | Self::UpdateStatus
             | Self::AutomaticUpdateDownloads
             | Self::UpdateCheckInterval
@@ -516,6 +534,46 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         selector: "settings-row-clipboard-reads",
     },
     SettingsRowDescriptor {
+        id: SettingsRowId::ShowRepositoryStatus,
+        section: SettingsSectionId::Git,
+        group: "Repository Status",
+        label: "Show Repository Status",
+        keywords: &[
+            "git",
+            "branch",
+            "repository",
+            "changes",
+            "caption",
+            "version control",
+            "vcs",
+        ],
+        selector: "settings-row-show-repository-status",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::GitTool,
+        section: SettingsSectionId::Git,
+        group: "Repository Status",
+        label: "Git",
+        keywords: &["version", "install", "xcode", "command line tools", "path"],
+        selector: "settings-row-git-tool",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::ShowPullRequests,
+        section: SettingsSectionId::Git,
+        group: "Pull Requests",
+        label: "Show Pull Requests",
+        keywords: &["pull request", "pr", "github", "gh", "branch", "sidebar"],
+        selector: "settings-row-show-pull-requests",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::GitHubCli,
+        section: SettingsSectionId::Git,
+        group: "Pull Requests",
+        label: "GitHub CLI",
+        keywords: &["gh", "login", "auth", "sign in", "install", "enterprise"],
+        selector: "settings-row-github-cli",
+    },
+    SettingsRowDescriptor {
         id: SettingsRowId::UpdateStatus,
         section: SettingsSectionId::Updates,
         // The installed version leads the page and needs no title: it is what the page is about.
@@ -697,6 +755,7 @@ shortcut_rows! {
     FocusPreviousPane => "focus-previous-pane",
     FocusNextPane => "focus-next-pane",
     TogglePaneZoom => "toggle-pane-zoom",
+    ShowRepositoryStatus => "show-repository-status",
     OpenTerminalFind => "open-terminal-find",
     FindNext => "find-next",
     FindPrevious => "find-previous",
@@ -767,7 +826,7 @@ mod tests {
     }
 
     /// The complete preference row identity set, so the catalog cannot silently omit one.
-    const EVERY_PREFERENCE_ROW: [SettingsRowId; 26] = [
+    const EVERY_PREFERENCE_ROW: [SettingsRowId; 30] = [
         SettingsRowId::AppearanceMode,
         SettingsRowId::Opacity,
         SettingsRowId::Blur,
@@ -786,6 +845,10 @@ mod tests {
         SettingsRowId::AccessibilityAccess,
         SettingsRowId::ClipboardWrites,
         SettingsRowId::ClipboardReads,
+        SettingsRowId::ShowRepositoryStatus,
+        SettingsRowId::GitTool,
+        SettingsRowId::ShowPullRequests,
+        SettingsRowId::GitHubCli,
         SettingsRowId::UpdateStatus,
         SettingsRowId::AutomaticUpdateDownloads,
         SettingsRowId::UpdateCheckInterval,
@@ -1070,6 +1133,10 @@ mod tests {
                     | SettingsRowId::AccessibilityAccess
                     | SettingsRowId::ClipboardWrites
                     | SettingsRowId::ClipboardReads
+                    | SettingsRowId::ShowRepositoryStatus
+                    | SettingsRowId::GitTool
+                    | SettingsRowId::ShowPullRequests
+                    | SettingsRowId::GitHubCli
                     | SettingsRowId::UpdateStatus
                     | SettingsRowId::AutomaticUpdateDownloads
                     | SettingsRowId::UpdateCheckInterval
@@ -1099,6 +1166,22 @@ mod tests {
             ("restore", SettingsRowId::ImportSettings),
             ("reset all", SettingsRowId::ResetAllSettings),
             ("factory", SettingsRowId::ResetAllSettings),
+        ] {
+            assert!(
+                matching_rows(query).contains(&row),
+                "{query:?} should reach {row:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_git_query_reaches_the_git_rows() {
+        for (query, row) in [
+            ("git", SettingsRowId::ShowRepositoryStatus),
+            ("branch", SettingsRowId::ShowRepositoryStatus),
+            ("pull request", SettingsRowId::ShowPullRequests),
+            ("gh", SettingsRowId::GitHubCli),
+            ("command line tools", SettingsRowId::GitTool),
         ] {
             assert!(
                 matching_rows(query).contains(&row),

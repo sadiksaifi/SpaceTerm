@@ -46,8 +46,8 @@ use super::{
     FocusNextPane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, FocusPreviousPane,
     MoveTabLeft, MoveTabRight, NewRemoteWorkspace, NewWorkspace, NextTab, OpenLocalDirectory,
     OpenRemoteDirectory, OpenTerminalFind, PreviousTab, RemoteChildLaunchUnavailable,
-    ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop, SplitDown, SplitRight,
-    SwitchWorkspace, TERMINAL_KEY_CONTEXT, TabManager, TabManagerEvent, TogglePaneZoom,
+    ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop, ShowRepositoryStatus, SplitDown,
+    SplitRight, SwitchWorkspace, TERMINAL_KEY_CONTEXT, TabManager, TabManagerEvent, TogglePaneZoom,
     ToggleSidebar, ToggleSidebarFocus, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
 };
 use crate::appearance::Color;
@@ -111,6 +111,8 @@ struct RemoteWorkspaceRuntime {
     control_connection: Option<ConnectedControlConnection>,
     lifecycle: Option<ControlConnectionObserver>,
     alias_pin: Option<RemoteWorkspaceAliasPin>,
+    /// Lends the connection's reader to Repository Status while the connection lives.
+    repository_reader: Option<crate::ui::repository_status_store::RemoteReaderLease>,
 }
 
 impl RemoteWorkspaceRuntime {
@@ -125,12 +127,20 @@ impl RemoteWorkspaceRuntime {
             control_connection: Some(control_connection),
             lifecycle: Some(lifecycle),
             alias_pin,
+            repository_reader: None,
         }
+    }
+
+    /// Drops the connection and withdraws its reader, so Repository Status reads the machine
+    /// through another Workspace's live connection.
+    fn drop_connection(&mut self) {
+        self.repository_reader.take();
+        self.control_connection.take();
     }
 
     fn close(&mut self) {
         self.lifecycle.take();
-        self.control_connection.take();
+        self.drop_connection();
         self.alias_pin.take();
     }
 }
@@ -274,6 +284,7 @@ pub(crate) struct WorkspaceManager {
     update_control: Entity<super::updates::UpdateControl>,
     pending_final_tab_closes: BTreeSet<WorkspaceId>,
     close_confirmation: CloseConfirmation,
+    sidebar_repositories: repository::SidebarRepositories,
 }
 
 impl WorkspaceManager {
@@ -346,6 +357,8 @@ impl WorkspaceManager {
         if let Some(reason) = initial_directory_error {
             let _ = workspaces.set_directory_unavailable(workspaces.active_workspace_id(), reason);
         }
+        cx.on_release(|manager, cx| manager.release_sidebar_repositories(cx))
+            .detach();
         let sidebar = cx.new(|cx| WorkspaceSidebar::new(window, cx));
         cx.subscribe_in(
             &sidebar,
@@ -372,6 +385,12 @@ impl WorkspaceManager {
         };
         cx.observe_window_activation(window, |manager, window, cx| {
             manager.restore_remote_workspace_focus_after_activation(window, cx);
+            if window.is_window_active()
+                && let Some(store) =
+                    crate::ui::repository_status_store::InstalledRepositoryStatus::store(cx)
+            {
+                store.update(cx, |store, cx| store.window_activated(cx));
+            }
             cx.notify();
         })
         .detach();
@@ -407,6 +426,7 @@ impl WorkspaceManager {
             update_control: cx.new(super::updates::UpdateControl::new),
             pending_final_tab_closes: BTreeSet::new(),
             close_confirmation: CloseConfirmation::default(),
+            sidebar_repositories: repository::SidebarRepositories::default(),
         }
     }
 
@@ -1597,6 +1617,7 @@ impl WorkspaceManager {
             replaced.is_none(),
             "a new Remote Workspace owns one runtime"
         );
+        self.lend_repository_reader(workspace_id, cx);
         self.activate_remote_tab_manager(
             previous_workspace_id,
             previous_manager,
@@ -1759,7 +1780,7 @@ impl WorkspaceManager {
             return;
         }
         if let Some(runtime) = self.remote_workspace_runtimes.get_mut(&workspace_id) {
-            runtime.control_connection.take();
+            runtime.drop_connection();
         }
 
         cx.notify();
@@ -2121,6 +2142,7 @@ impl WorkspaceManager {
                         alias_pin,
                     ),
                 );
+                self.lend_repository_reader(workspace_id, cx);
                 let reduction = self.workspaces.reduce_remote_connection_state(
                     workspace_id,
                     RemoteConnectionState::connected(generation),
@@ -2231,6 +2253,33 @@ impl WorkspaceManager {
         );
 
         cx.notify();
+    }
+
+    /// Lends the Workspace's Control Connection reader to Repository Status for its machine.
+    fn lend_repository_reader(&mut self, workspace_id: WorkspaceId, cx: &App) {
+        let Some(store) = crate::ui::repository_status_store::InstalledRepositoryStatus::store(cx)
+        else {
+            return;
+        };
+        let Some(WorkspaceLocation::Remote { key, .. }) = self
+            .workspaces
+            .workspace(workspace_id)
+            .map(|workspace| workspace.location())
+        else {
+            return;
+        };
+        let machine = crate::repository_status::RemoteMachineKey::new(key.destination().as_str());
+        let Some(runtime) = self.remote_workspace_runtimes.get_mut(&workspace_id) else {
+            return;
+        };
+        let Some(reader) = runtime
+            .control_connection
+            .as_ref()
+            .and_then(ConnectedControlConnection::repository_reader)
+        else {
+            return;
+        };
+        runtime.repository_reader = Some(store.read(cx).remote_readers().lend(machine, reader));
     }
 
     fn close_remote_runtimes(&mut self) {
@@ -2998,7 +3047,7 @@ impl WorkspaceManager {
 
     /// The Active Workspace's identity, shown in the top-left chrome only while the sidebar is
     /// hidden.
-    fn workspace_chrome_identity(&self) -> (WorkspaceChromeIdentity, Tooltip) {
+    fn workspace_chrome_identity(&self, cx: &App) -> (WorkspaceChromeIdentity, Tooltip) {
         let workspace = self.workspaces.active_workspace();
         let remote_connection_phase = workspace
             .remote_connection_state()
@@ -3017,10 +3066,17 @@ impl WorkspaceManager {
                 .unwrap_or_else(|| path.clone()),
         };
 
+        let repository = self
+            .chip_repository_line(workspace.id(), cx)
+            .map(|line| format!("\n{line}"))
+            .unwrap_or_default();
         (
             chrome_identity(workspace),
             Tooltip::new("workspace-switcher-tooltip", "Switch Workspace")
-                .detail(format!("{}\n{tooltip_detail}", workspace.name()))
+                .detail(format!(
+                    "{}\n{tooltip_detail}{repository}",
+                    workspace.name()
+                ))
                 .debug_selector("workspace-switcher-tooltip"),
         )
     }
@@ -3057,7 +3113,7 @@ impl WorkspaceManager {
         let remote_unavailable_reason = self.remote_workspace_unavailable_reason.clone();
         let creation_shortcuts =
             WorkspaceCreation::ALL.map(|creation| creation.shortcut(presentation));
-        let collapsed_identity = (!sidebar_visible).then(|| self.workspace_chrome_identity());
+        let collapsed_identity = (!sidebar_visible).then(|| self.workspace_chrome_identity(cx));
         let switcher_surface =
             super::tab_manager::active_tab_surface(appearance, window.is_window_active());
         let title_bar_host =
@@ -3312,7 +3368,6 @@ impl WorkspaceManager {
         self.workspaces
             .iter()
             .map(|workspace| {
-                let (tab_count, pane_count) = workspace.payload().read(cx).aggregate_counts(cx);
                 let (path, directory_tooltip) = directory_labels(
                     workspace.location(),
                     workspace.local_display_directory(),
@@ -3341,8 +3396,7 @@ impl WorkspaceManager {
                         .remote_connection_state()
                         .map(RemoteConnectionState::phase),
                     available,
-                    tab_count,
-                    pane_count,
+                    repository: self.sidebar_badge(workspace.id(), cx),
                     active: workspace.id() == active_workspace_id,
                 }
             })
@@ -3358,6 +3412,7 @@ impl Drop for WorkspaceManager {
 
 impl Render for WorkspaceManager {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_sidebar_repositories(cx);
         let activity = super::appearance::window_activity(window);
         activity.mount(activity.with_scope(|| self.render_chrome(window, cx)))
     }
@@ -3501,6 +3556,7 @@ impl WorkspaceManager {
             .on_action(cx.listener(Self::forward_active_terminal_action::<FocusPreviousPane>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<FocusNextPane>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<TogglePaneZoom>))
+            .on_action(cx.listener(Self::forward_active_terminal_action::<ShowRepositoryStatus>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<OpenTerminalFind>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<FindNext>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<FindPrevious>))
@@ -3736,6 +3792,9 @@ impl WorkspaceManager {
             .assert_application_capabilities(expected);
     }
 }
+
+#[path = "workspace_manager/repository.rs"]
+mod repository;
 
 #[cfg(test)]
 #[path = "workspace_manager/tests.rs"]

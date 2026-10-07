@@ -118,6 +118,14 @@ fn native_factory_routes_local_launches_through_injected_factory() {
             .environment
             .contains(&("SPACETERM".into(), "1".into()))
     );
+    let prompt_owner = construction
+        .environment
+        .iter()
+        .find(|(name, _)| name == "SPACETERM_PROMPT_OWNER")
+        .map(|(_, value)| value.to_string_lossy().into_owned())
+        .expect("a local shell should receive its Prompt Owner");
+    assert_eq!(prompt_owner.len(), 32);
+    assert!(prompt_owner.bytes().all(|byte| byte.is_ascii_hexdigit()));
 }
 
 #[test]

@@ -24,14 +24,24 @@
 	<string>public.app-category.developer-tools</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>26.0</string>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>SpaceTerm reads the branch and changes of the Git repository a terminal pane is in on your Desktop.</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>SpaceTerm reads the branch and changes of the Git repository a terminal pane is in in Documents.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>SpaceTerm reads the branch and changes of the Git repository a terminal pane is in in Downloads.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © 2026 Sadik Saifi</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>SpaceTerm lets terminal applications you run use your microphone for voice input.</string>
+	<key>NSNetworkVolumesUsageDescription</key>
+	<string>SpaceTerm reads the branch and changes of the Git repository a terminal pane is in on a network volume.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>SpaceTerm reads the branch and changes of the Git repository a terminal pane is in on a removable volume.</string>
 	<key>SUAutomaticallyUpdate</key>
 	<false/>
 	<key>SUEnableAutomaticChecks</key>

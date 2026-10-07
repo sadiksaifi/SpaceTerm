@@ -1,8 +1,11 @@
 export module spaceterm {
   export def --env install [] {
     if (($env.SPACETERM_SHELL_INTEGRATION_VERSION? | default "") != "1") { return }
-    let prompt_hook = {|| print -n $"\u{1b}]7;file://localhost($env.PWD | url encode --all | str replace --all '%2F' '/')\u{7}\u{1b}]133;A;redraw=1\u{7}" }
-    let command_hook = {|| print -n "\u{1b}]133;B\u{7}\u{1b}]133;C\u{7}" }
+    # The session's Prompt Owner marks this shell's own prompt markers; only hex is accepted.
+    let owner = ($env.SPACETERM_PROMPT_OWNER? | default "")
+    let owner = if ($owner =~ '^[0-9a-f]+$') { $";spaceterm=($owner)" } else { "" }
+    let prompt_hook = {|| print -n $"\u{1b}]7;file://localhost($env.PWD | url encode --all | str replace --all '%2F' '/')\u{7}\u{1b}]133;A;redraw=1($owner)\u{7}" }
+    let command_hook = {|| print -n $"\u{1b}]133;B\u{7}\u{1b}]133;C($owner)\u{7}" }
     $env.config.hooks.pre_prompt = (($env.config.hooks.pre_prompt? | default []) | append $prompt_hook)
     $env.config.hooks.pre_execution = (($env.config.hooks.pre_execution? | default []) | append $command_hook)
   }

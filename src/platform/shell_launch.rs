@@ -148,7 +148,9 @@ impl ShellLaunchPlanner {
                 .iter()
                 .chain(self.host_runtime_environment)
                 .copied()
-                .chain(["TERMINFO"])
+                // A Prompt Owner inherited from another session would let that session's shell
+                // speak for this one; the session sets its own.
+                .chain(["TERMINFO", "SPACETERM_PROMPT_OWNER"])
                 .map(OsString::from)
                 .collect(),
             environment,
@@ -192,6 +194,12 @@ impl PreparedShellLaunch {
             integration: None,
             terminal_name: identity::TERM_FALLBACK,
         })
+    }
+
+    /// Sets one more variable for the shell, replacing any inherited value.
+    pub(crate) fn with_environment_value(mut self, name: &str, value: &str) -> Self {
+        self.environment.push((name.into(), value.into()));
+        self
     }
 
     pub(crate) fn terminal_name(&self) -> &'static str {

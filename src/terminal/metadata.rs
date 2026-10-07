@@ -195,7 +195,6 @@ impl RemoteTerminalMetadataContext {
         self
     }
 
-    #[cfg(test)]
     pub(crate) const fn destination(&self) -> &SshDestination {
         &self.destination
     }
@@ -220,6 +219,47 @@ impl RemoteTerminalMetadataContext {
     }
 }
 
+/// A per-session secret that SpaceTerm's shell integration attaches to its own prompt markers.
+///
+/// A nested shell, such as one inside `ssh` or `docker`, cannot know it, so its markers cannot end
+/// the owning shell's command and move the Repository Source Directory. Debug never shows it.
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) struct PromptOwner(Arc<str>);
+
+impl PromptOwner {
+    /// The variable that carries the secret to the shell integration.
+    pub(crate) const ENVIRONMENT: &str = "SPACETERM_PROMPT_OWNER";
+    /// The OSC 133 option that carries it back.
+    const OPTION: &str = "spaceterm";
+
+    /// 128 random bits, or none when the system has no randomness to give.
+    pub(crate) fn generate() -> Option<Self> {
+        let mut bytes = [0_u8; 16];
+        getrandom::fill(&mut bytes).ok()?;
+        Some(Self(Arc::from(
+            bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>(),
+        )))
+    }
+
+    pub(crate) fn value(&self) -> &str {
+        &self.0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fixture(value: &str) -> Self {
+        Self(Arc::from(value))
+    }
+}
+
+impl std::fmt::Debug for PromptOwner {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("PromptOwner(..)")
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 /// Local metadata may authorize local path actions. Remote directory strings carry no local
 /// filesystem authority.
@@ -228,6 +268,7 @@ pub(crate) enum TerminalMetadataContext {
         paths: LocalPathSemantics,
         initial_directory: Arc<str>,
         machine: LocalMachine,
+        prompt_owner: Option<PromptOwner>,
     },
     Remote(RemoteTerminalMetadataContext),
 }
@@ -257,6 +298,23 @@ impl TerminalMetadataContext {
             paths,
             initial_directory: Arc::from(initial_directory),
             machine,
+            prompt_owner: None,
+        }
+    }
+
+    /// Lets only prompt markers that carry `owner` move the Repository Source Directory, once the
+    /// shell has sent one.
+    pub(crate) fn with_prompt_owner(mut self, owner: PromptOwner) -> Self {
+        if let Self::Local { prompt_owner, .. } = &mut self {
+            *prompt_owner = Some(owner);
+        }
+        self
+    }
+
+    fn prompt_owner(&self) -> Option<&PromptOwner> {
+        match self {
+            Self::Local { prompt_owner, .. } => prompt_owner.as_ref(),
+            Self::Remote(_) => None,
         }
     }
 
@@ -369,6 +427,11 @@ pub(crate) struct TerminalMetadataSnapshot {
     pub(crate) freshness: MetadataFreshness,
     pub(crate) title: TitleMetadata,
     pub(crate) directory: DirectoryMetadata,
+    /// The Repository Source Directory: the reported directory as of the last prompt. Reports
+    /// that arrive while a command runs apply only when it finishes.
+    pub(crate) repository_directory: Arc<str>,
+    /// Completed commands since the session started.
+    pub(crate) finished_commands: u64,
     pub(crate) prompt_zone: PromptZone,
     pub(crate) command: Option<CommandMetadata>,
     /// Whether changing title frames provide recent animation evidence.
@@ -403,6 +466,14 @@ pub(crate) struct MetadataTracker {
     epoch: Instant,
     fallback_title: Arc<str>,
     command_started: Option<Instant>,
+    deferred_repository_directory: Option<Arc<str>>,
+    /// Whether a prompt marker carrying the session's Prompt Owner has arrived. From then on
+    /// only such markers move the Repository Source Directory.
+    prompt_owner_seen: bool,
+    /// The latest directory report since the owning shell's last prompt marker. The owning shell
+    /// reports its directory just before each prompt marker, so that marker commits it, and a
+    /// nested session's reports are replaced before then.
+    owner_reported_directory: Option<Arc<str>>,
     progress_expiry: Option<Instant>,
     title_animation: TitleActivity,
 }
@@ -437,10 +508,12 @@ impl MetadataTracker {
                     value: Arc::from(sanitize_title(fallback_title)),
                     provenance: TitleProvenance::Fallback,
                 },
+                repository_directory: Arc::from(initial_directory.as_str()),
                 directory: DirectoryMetadata {
                     path: Arc::from(initial_directory),
                     provenance: DirectoryProvenance::Initial,
                 },
+                finished_commands: 0,
                 prompt_zone: PromptZone::Unknown,
                 command: None,
                 title_activity: false,
@@ -450,6 +523,9 @@ impl MetadataTracker {
             epoch,
             fallback_title: Arc::from(sanitize_title(fallback_title)),
             command_started: None,
+            deferred_repository_directory: None,
+            prompt_owner_seen: false,
+            owner_reported_directory: None,
             progress_expiry: None,
             title_animation: TitleActivity::default(),
         }
@@ -494,7 +570,24 @@ impl MetadataTracker {
         let Some(directory) = parse_osc7_directory(value, &self.snapshot.context) else {
             return false;
         };
+        let command_running = if self.prompt_owner_seen {
+            self.owner_reported_directory = Some(Arc::clone(&directory.path));
+            true
+        } else {
+            let running = self
+                .snapshot
+                .command
+                .as_ref()
+                .is_some_and(|command| command.state == CommandState::Running);
+            if running {
+                self.deferred_repository_directory = Some(Arc::clone(&directory.path));
+            }
+            running
+        };
         self.update(|snapshot| {
+            if !command_running {
+                snapshot.repository_directory = Arc::clone(&directory.path);
+            }
             snapshot.directory = directory;
             if snapshot.title.provenance != TitleProvenance::TerminalControl
                 && let Some(title) = snapshot
@@ -549,7 +642,12 @@ impl MetadataTracker {
             return false;
         }
         let started = self.command_started.take().unwrap_or(self.epoch);
+        let deferred_directory = self.deferred_repository_directory.take();
         self.retire_command_reports(|snapshot| {
+            if let Some(directory) = deferred_directory {
+                snapshot.repository_directory = directory;
+            }
+            snapshot.finished_commands = snapshot.finished_commands.saturating_add(1);
             snapshot.command = Some(CommandMetadata {
                 line: snapshot
                     .command
@@ -563,12 +661,27 @@ impl MetadataTracker {
         })
     }
 
+    /// Returns the directory a prompt marker carrying the session's Prompt Owner commits.
+    fn observe_prompt_owner(&mut self, action: &str, fields: &[&str]) -> Option<Arc<str>> {
+        let owner = self.snapshot.context.prompt_owner()?;
+        if option(fields, PromptOwner::OPTION) != Some(owner.value()) {
+            return None;
+        }
+        self.prompt_owner_seen = true;
+        self.deferred_repository_directory = None;
+        match action {
+            "A" | "P" => self.owner_reported_directory.take(),
+            _ => None,
+        }
+    }
+
     pub(crate) fn apply_semantic_prompt(&mut self, value: &str, now: Instant) -> bool {
         let mut fields = value.split(';');
         let Some(action) = fields.next() else {
             return false;
         };
         let fields = fields.collect::<Vec<_>>();
+        let committed = self.observe_prompt_owner(action, &fields);
         match action {
             "A" | "P" => {
                 let completed = self
@@ -577,7 +690,12 @@ impl MetadataTracker {
                     .as_ref()
                     .is_some_and(|command| command.state == CommandState::Running)
                     && self.finish_command(None, now);
-                self.update(|snapshot| snapshot.prompt_zone = PromptZone::Prompt) || completed
+                self.update(|snapshot| {
+                    snapshot.prompt_zone = PromptZone::Prompt;
+                    if let Some(directory) = committed {
+                        snapshot.repository_directory = directory;
+                    }
+                }) || completed
             }
             "B" | "I" => self.update(|snapshot| snapshot.prompt_zone = PromptZone::CommandInput),
             "C" => {
@@ -1169,6 +1287,167 @@ mod tests {
         assert_eq!(stale.revision, live.revision + 1);
         assert!(!Arc::ptr_eq(&live, &stale));
     }
+    fn local_tracker(epoch: Instant) -> MetadataTracker {
+        MetadataTracker::new(
+            LocalPathSemantics::Posix,
+            "/initial",
+            "zsh",
+            LocalMachine::new(None, Some("mac.local"), None),
+            epoch,
+        )
+    }
+
+    #[test]
+    fn repository_source_follows_directory_reports_at_the_prompt() {
+        let mut tracker = local_tracker(Instant::now());
+        assert_eq!(&*tracker.snapshot().repository_directory, "/initial");
+
+        assert!(tracker.set_reported_directory("file://mac.local/project"));
+
+        assert_eq!(&*tracker.snapshot().repository_directory, "/project");
+    }
+
+    #[test]
+    fn repository_source_ignores_reports_while_a_command_runs_until_it_finishes() {
+        let epoch = Instant::now();
+        let mut tracker = local_tracker(epoch);
+        tracker.set_reported_directory("file://mac.local/project");
+        tracker.apply_semantic_prompt("C;cmdline=docker%20run", epoch);
+
+        assert!(tracker.set_reported_directory("file://localhost/container"));
+        assert_eq!(&*tracker.snapshot().directory.path, "/container");
+        assert_eq!(&*tracker.snapshot().repository_directory, "/project");
+
+        tracker.apply_semantic_prompt("D;0", epoch);
+        assert_eq!(&*tracker.snapshot().repository_directory, "/container");
+        tracker.set_reported_directory("file://mac.local/project");
+        assert_eq!(&*tracker.snapshot().repository_directory, "/project");
+    }
+
+    #[test]
+    fn a_prompt_without_completion_finishes_the_command_for_the_repository_source() {
+        let epoch = Instant::now();
+        let mut tracker = local_tracker(epoch);
+        tracker.apply_semantic_prompt("C", epoch);
+        tracker.set_reported_directory("file://mac.local/elsewhere");
+        assert_eq!(tracker.snapshot().finished_commands, 0);
+
+        tracker.apply_semantic_prompt("A", epoch);
+
+        assert_eq!(&*tracker.snapshot().repository_directory, "/elsewhere");
+        assert_eq!(tracker.snapshot().finished_commands, 1);
+    }
+
+    fn owned_local_tracker(epoch: Instant) -> MetadataTracker {
+        MetadataTracker::new_with_context(
+            TerminalMetadataContext::local(
+                LocalPathSemantics::Posix,
+                "/initial",
+                LocalMachine::new(None, Some("mac.local"), None),
+            )
+            .with_prompt_owner(PromptOwner::fixture("0f1e")),
+            "zsh",
+            epoch,
+        )
+    }
+
+    #[test]
+    fn a_nested_shell_should_not_move_the_repository_source_of_its_owning_shell() {
+        let epoch = Instant::now();
+        let mut tracker = owned_local_tracker(epoch);
+        tracker.set_reported_directory("file://mac.local/project");
+        tracker.apply_semantic_prompt("A;redraw=1;spaceterm=0f1e", epoch);
+        tracker.apply_semantic_prompt("C;cmdline=ssh%20host;spaceterm=0f1e", epoch);
+
+        // The remote shell reports its directory and prompts as its own commands finish.
+        for marker in ["D;0", "A;redraw=1", "D;0;spaceterm=forged"] {
+            tracker.set_reported_directory("file://localhost/srv/project");
+            tracker.apply_semantic_prompt(marker, epoch);
+            assert_eq!(&*tracker.snapshot().repository_directory, "/project");
+        }
+        tracker.set_reported_directory("file://localhost/srv/project");
+        assert_eq!(&*tracker.snapshot().directory.path, "/srv/project");
+
+        tracker.apply_semantic_prompt("D;0;spaceterm=0f1e", epoch);
+        assert_eq!(&*tracker.snapshot().repository_directory, "/project");
+        tracker.set_reported_directory("file://mac.local/project/next");
+        tracker.apply_semantic_prompt("A;redraw=1;spaceterm=0f1e", epoch);
+        assert_eq!(&*tracker.snapshot().repository_directory, "/project/next");
+    }
+
+    #[test]
+    fn a_nested_shell_should_not_move_the_repository_source_of_a_shell_without_command_markers() {
+        // Bash 3.2 does not expand PS0, so its owning shell never reports a command start.
+        let epoch = Instant::now();
+        let mut tracker = owned_local_tracker(epoch);
+        tracker.set_reported_directory("file://mac.local/project");
+        tracker.apply_semantic_prompt("A;redraw=last;spaceterm=0f1e", epoch);
+
+        tracker.set_reported_directory("file://localhost/srv/project");
+        tracker.apply_semantic_prompt("A;redraw=1", epoch);
+        assert_eq!(&*tracker.snapshot().directory.path, "/srv/project");
+        assert_eq!(&*tracker.snapshot().repository_directory, "/project");
+
+        tracker.apply_semantic_prompt("D;0;spaceterm=0f1e", epoch);
+        tracker.set_reported_directory("file://mac.local/project");
+        tracker.apply_semantic_prompt("A;redraw=last;spaceterm=0f1e", epoch);
+        assert_eq!(&*tracker.snapshot().repository_directory, "/project");
+    }
+
+    #[test]
+    fn a_shell_that_reports_its_directory_before_its_prompt_without_completion_should_move_it() {
+        // Nushell reports its directory just before its prompt marker and sends no completion.
+        let epoch = Instant::now();
+        let mut tracker = owned_local_tracker(epoch);
+        tracker.set_reported_directory("file://mac.local/project");
+        tracker.apply_semantic_prompt("A;redraw=1;spaceterm=0f1e", epoch);
+        tracker.apply_semantic_prompt("C;spaceterm=0f1e", epoch);
+
+        tracker.set_reported_directory("file://mac.local/other");
+        assert_eq!(&*tracker.snapshot().repository_directory, "/project");
+        tracker.apply_semantic_prompt("A;redraw=1;spaceterm=0f1e", epoch);
+
+        assert_eq!(&*tracker.snapshot().repository_directory, "/other");
+    }
+
+    #[test]
+    fn a_shell_that_never_sends_its_prompt_owner_should_keep_the_unowned_rule() {
+        let epoch = Instant::now();
+        let mut tracker = owned_local_tracker(epoch);
+        tracker.apply_semantic_prompt("C", epoch);
+        tracker.set_reported_directory("file://mac.local/elsewhere");
+        assert_eq!(&*tracker.snapshot().repository_directory, "/initial");
+
+        tracker.apply_semantic_prompt("D;0", epoch);
+
+        assert_eq!(&*tracker.snapshot().repository_directory, "/elsewhere");
+    }
+
+    #[test]
+    fn a_prompt_owner_should_never_appear_in_debug_output() {
+        let context = TerminalMetadataContext::local(
+            LocalPathSemantics::Posix,
+            "/initial",
+            LocalMachine::default(),
+        )
+        .with_prompt_owner(PromptOwner::fixture("0f1e"));
+
+        assert!(!format!("{context:?}").contains("0f1e"));
+    }
+
+    #[test]
+    fn finished_commands_count_each_completion_once() {
+        let epoch = Instant::now();
+        let mut tracker = local_tracker(epoch);
+        for _ in 0..2 {
+            tracker.apply_semantic_prompt("C", epoch);
+            tracker.apply_semantic_prompt("D;0", epoch);
+            tracker.apply_semantic_prompt("D;0", epoch);
+        }
+
+        assert_eq!(tracker.snapshot().finished_commands, 2);
+    }
+
     #[test]
     fn remote_osc7_accepts_machine_hostname_without_local_filesystem_authority() {
         let context = TerminalMetadataContext::Remote(RemoteTerminalMetadataContext::new(

@@ -53,7 +53,7 @@ macro_rules! commands {
         pub enum Command { $($command),+ }
 
         impl Command {
-            pub const ALL: [Self; 55] = [$(Self::$command),+];
+            pub const ALL: [Self; 56] = [$(Self::$command),+];
             pub const fn id(self) -> &'static str {
                 match self { $(Self::$command => $id),+ }
             }
@@ -117,6 +117,7 @@ commands! {
     FocusPreviousPane => ("focus_previous_pane", "Focus Previous Pane", Pane, Workspace, crate::ui::FocusPreviousPane),
     FocusNextPane => ("focus_next_pane", "Focus Next Pane", Pane, Workspace, crate::ui::FocusNextPane),
     TogglePaneZoom => ("toggle_pane_zoom", "Toggle Pane Zoom", Pane, Workspace, crate::ui::TogglePaneZoom),
+    ShowRepositoryStatus => ("show_repository_status", "Show Repository Status", Pane, Workspace, crate::ui::ShowRepositoryStatus),
     OpenTerminalFind => ("open_terminal_find", "Find", Terminal, Workspace, crate::ui::OpenTerminalFind),
     FindNext => ("find_next", "Find Next", Terminal, Workspace, crate::ui::FindNext),
     FindPrevious => ("find_previous", "Find Previous", Terminal, Workspace, crate::ui::FindPrevious),

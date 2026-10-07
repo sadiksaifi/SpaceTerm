@@ -12,7 +12,7 @@
   ],
   "properties": {
     "schema_version": {
-      "const": 4
+      "const": 5
     },
     "revision": {
       "type": "integer",
@@ -36,6 +36,9 @@
     },
     "clipboard": {
       "$ref": "#/$defs/clipboard"
+    },
+    "git": {
+      "$ref": "#/$defs/git"
     }
   },
   "$defs": {
@@ -565,6 +568,9 @@
         "toggle_pane_zoom": {
           "$ref": "#/$defs/shortcutOverride"
         },
+        "show_repository_status": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
         "open_terminal_find": {
           "$ref": "#/$defs/shortcutOverride"
         },
@@ -650,6 +656,20 @@
         "allow_read": {
           "type": "boolean",
           "default": false
+        }
+      }
+    },
+    "git": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "show_repository_status": {
+          "type": "boolean",
+          "default": true
+        },
+        "show_pull_requests": {
+          "type": "boolean",
+          "default": true
         }
       }
     }

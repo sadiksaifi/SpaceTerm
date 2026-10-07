@@ -173,6 +173,7 @@ pub(crate) fn profile(
             Command::TogglePaneZoom,
             Some(DefaultBinding::new("cmd-shift-enter", &[])),
         ),
+        (Command::ShowRepositoryStatus, None),
         (
             Command::OpenTerminalFind,
             Some(DefaultBinding::new("cmd-f", &[])),

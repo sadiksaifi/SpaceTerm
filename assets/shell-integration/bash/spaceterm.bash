@@ -20,6 +20,11 @@ fi
 if [[ $- == *i* && "$SPACETERM_SHELL_INTEGRATION_VERSION" == 1 && -z "${_SPACETERM_INTEGRATION_LOADED:-}" ]]; then
     _SPACETERM_INTEGRATION_LOADED=1
     _spaceterm_command_active=0
+    # The session's Prompt Owner marks this shell's own prompt markers; only hex is accepted.
+    case "${SPACETERM_PROMPT_OWNER:-}" in
+        ''|*[!0-9a-f]*) _spaceterm_owner= ;;
+        *) _spaceterm_owner=";spaceterm=$SPACETERM_PROMPT_OWNER" ;;
+    esac
     # Encode protocol fields bytewise so delimiters and UTF-8 survive OSC parsing.
     _spaceterm_encode() (
         LC_ALL=C
@@ -50,12 +55,12 @@ if [[ $- == *i* && "$SPACETERM_SHELL_INTEGRATION_VERSION" == 1 && -z "${_SPACETE
     _spaceterm_prompt() {
         local status=$?
         if (( _spaceterm_command_active )); then
-            printf '\e]133;D;%d\a' "$status"
+            printf '\e]133;D;%d%s\a' "$status" "$_spaceterm_owner"
         fi
-        printf '\e]7;file://localhost%s\a\e]133;A;redraw=last\a' "$(_spaceterm_encode "$PWD")"
+        printf '\e]7;file://localhost%s\a\e]133;A;redraw=last%s\a' "$(_spaceterm_encode "$PWD")" "$_spaceterm_owner"
         _spaceterm_command_active=1
     }
     PROMPT_COMMAND="_spaceterm_prompt${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
-    PS0='\[\e]133;C\a\]'
+    PS0='\[\e]133;C'"$_spaceterm_owner"'\a\]'
     PS1="${PS1}\[\e]133;B\a\]"
 fi

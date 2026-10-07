@@ -223,8 +223,7 @@ impl WorkspaceSidebar {
             pinned,
             remote_connection_phase,
             available,
-            tab_count,
-            pane_count,
+            repository,
             active,
         } = row;
         let row_background = row_background(appearance);
@@ -286,6 +285,14 @@ impl WorkspaceSidebar {
         let remote_status = remote_connection_phase.and_then(remote_connection_status);
         let remote_color =
             remote_connection_phase.map(|phase| remote_connection_color(phase, &row_colors));
+        // An unavailable directory and the Remote connection status take line 2 from the
+        // repository, as they take it from the directory.
+        let repository = repository.filter(|_| available && remote_status.is_none());
+        let pull_request_paint = appearance.colors.pull_request(if active {
+            appearance.colors.row_selected_background
+        } else {
+            crate::ui::workspace_frame::base_surface(&appearance.colors)
+        });
         let (detail, detail_color, detail_selector) = if !available {
             (
                 "Directory unavailable".into(),
@@ -468,7 +475,10 @@ impl WorkspaceSidebar {
                     ))
                     .child(text::detail(
                         detail,
-                        format!("{tab_count}T · {pane_count}P").into(),
+                        repository.map(|badge| text::RowRepository {
+                            badge,
+                            pull_request_paint,
+                        }),
                         pinned && detail_color.is_none(),
                         detail_paint,
                         detail_selector,

@@ -8,6 +8,7 @@ use super::terminal_status::{
 };
 use crate::domain::PinnedDirectory;
 use crate::domain::remote_workspace::RemoteRestartBatch;
+use crate::repository_status::presentation::{HeadGlyph, RepositoryCaption, RepositoryMark};
 use crate::terminal::metadata::CurrentDirectory;
 use crate::ui::appearance::gpui_color;
 use std::collections::BTreeMap;
@@ -19,8 +20,8 @@ use super::terminal_focus::{TerminalFocusBlocker, TerminalFocusCoordinator, Term
 use super::{
     ClosePane, FocusNextPane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
     FocusPreviousPane, PaneOrigin, PreparedRemotePaneRestart, RemoteChildLaunchUnavailable,
-    RemotePaneLifecycleError, SplitDown, SplitRight, TERMINAL_KEY_CONTEXT, TerminalPane,
-    TerminalPaneEvent, TogglePaneZoom,
+    RemotePaneLifecycleError, ShowRepositoryStatus, SplitDown, SplitRight, TERMINAL_KEY_CONTEXT,
+    TerminalPane, TerminalPaneEvent, TogglePaneZoom,
 };
 
 #[derive(Debug, Error)]
@@ -75,8 +76,11 @@ const PANE_CAPTION_HEIGHT: f32 = 32.0;
 const PANE_CAPTION_VERTICAL_PADDING: f32 = 4.0;
 const PANE_CAPTION_LEFT_PADDING: f32 = 10.0;
 const PANE_CAPTION_RIGHT_PADDING: f32 = 5.0;
-/// Width reserved by the middle dot that separates a directory from its status.
+/// Width reserved by the middle dot that separates a directory from its status, including the
+/// air on both sides.
 const PANE_CAPTION_SEPARATOR_WIDTH: f32 = 17.25;
+/// The air before a directory's status, which stays when the middle dot is dropped.
+const PANE_STATUS_LEADING_GAP: f32 = 5.0;
 const PANE_STATUS_ICON_GAP: f32 = 6.0;
 /// Width reserved by the chevron that separates a Pane's origin from its directory.
 const PANE_ORIGIN_SEPARATOR_WIDTH: f32 = 18.4;
@@ -87,6 +91,12 @@ const PANE_CONTROL_GAP: f32 = 2.0;
 /// open Close Pane glyph reads as wider.
 const PANE_CLOSE_OPTICAL_TRIM: f32 = 1.0;
 const PANE_CONTROL_LEADING_GAP: f32 = 6.0;
+/// The air between a Pane's identity and its Repository Status.
+const PANE_REPOSITORY_LEADING_GAP: f32 = 10.0;
+/// The air between the parts of the Repository Status segment.
+const PANE_REPOSITORY_PART_GAP: f32 = 4.0;
+/// The narrowest truncated branch worth showing.
+const PANE_REPOSITORY_MINIMUM_BRANCH_WIDTH: f32 = 36.0;
 /// The share of the accent color that fills the half of a Pane a dragged Pane would take.
 const PANE_DROP_TARGET_FILL_OPACITY: u8 = 56;
 /// The status glyph and its trailing air, which every Pane Caption keeps at every width.
@@ -111,20 +121,35 @@ struct CaptionLayout {
     show_user: bool,
     show_label: bool,
     show_splits: bool,
+    repository: RepositoryCaptionLayout,
 }
 
 /// How many caption segments beyond the Pane name a narrowing caption can give up.
-const CAPTION_LADDER: usize = 5;
+const CAPTION_LADDER: usize = 8;
 
-/// Rendered widths of the caption segments, including separators where present.
+/// Rendered widths of the caption segments, including separators and leading gaps where present.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct CaptionMetrics {
     user: Pixels,
     host: Pixels,
     directory: Pixels,
     name: Pixels,
+    /// The air before the status, kept with the name.
+    status_gap: Pixels,
+    /// The middle dot and the air after it.
     status_separator: Pixels,
     label: Pixels,
+    /// Repository Status widths, absent when the Pane shows none.
+    repository: Option<RepositoryCaptionMetrics>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct RepositoryCaptionMetrics {
+    /// The glyph and mark, which a caption with Repository Status always keeps.
+    anchor: Pixels,
+    branch: Pixels,
+    detail: Option<Pixels>,
+    divergence: Option<Pixels>,
 }
 
 impl CaptionMetrics {
@@ -147,37 +172,80 @@ impl CaptionMetrics {
             },
             directory: measure_caption_segment(&text.directory, window, appearance),
             name: measure_caption_segment(&text.name, window, appearance),
+            status_gap: if text.has_directory {
+                appearance.spacing(PANE_STATUS_LEADING_GAP)
+            } else {
+                px(0.0)
+            },
             status_separator: if text.has_directory {
-                appearance.spacing(PANE_CAPTION_SEPARATOR_WIDTH)
+                appearance.spacing(PANE_CAPTION_SEPARATOR_WIDTH - PANE_STATUS_LEADING_GAP)
             } else {
                 px(0.0)
             },
             label: measure_caption_segment(&text.label, window, appearance),
+            repository: text.repository.as_ref().map(|repository| {
+                let part = |text: &str| {
+                    appearance.spacing(PANE_REPOSITORY_PART_GAP)
+                        + measure_caption_segment(&text.to_owned().into(), window, appearance)
+                };
+                RepositoryCaptionMetrics {
+                    anchor: appearance.spacing(PANE_REPOSITORY_LEADING_GAP)
+                        + head_glyph_width(repository.glyph, appearance, |text| {
+                            measure_caption_segment(&text.to_owned().into(), window, appearance)
+                        })
+                        + repository.mark.map_or(px(0.0), |mark| part(mark.glyph())),
+                    branch: part(&repository.branch),
+                    detail: repository.detail.as_ref().map(|detail| part(&detail.text)),
+                    divergence: repository.divergence.as_deref().map(part),
+                }
+            }),
         }
     }
 
-    /// The droppable segments in the order a widening caption admits them.
-    const fn ladder(self) -> [Pixels; CAPTION_LADDER] {
+    /// The droppable segments in the order a widening caption admits them. An absent segment is
+    /// neither admitted nor ends the ladder.
+    fn ladder(self) -> [Option<Pixels>; CAPTION_LADDER] {
+        let repository = self.repository;
         [
-            self.status_separator,
-            self.host,
-            self.directory,
-            self.user,
-            self.label,
+            repository.map(|repository| repository.branch),
+            Some(self.status_separator),
+            repository.and_then(|repository| repository.detail),
+            Some(self.host),
+            Some(self.directory),
+            Some(self.user),
+            Some(self.label),
+            repository.and_then(|repository| repository.divergence),
         ]
     }
 }
 
+/// Which parts of the Repository Status segment fit. The glyph and mark are kept whenever the
+/// segment shows.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct RepositoryCaptionLayout {
+    /// The glyph and mark fit beside the name, the status, and every control the Pane shows.
+    show: bool,
+    show_branch: bool,
+    /// The widest the branch may be when it does not fit whole, in whole pixels.
+    branch_limit: Option<u32>,
+    show_detail: bool,
+    show_divergence: bool,
+}
+
 impl CaptionLayout {
+    /// `controls_reveal` is how far the Pane controls have eased into view; hidden controls free
+    /// their width for the caption's other segments.
     fn resolve(
         caption: &PaneCaption,
         width: Pixels,
+        controls_reveal: f32,
         window: &Window,
         appearance: &super::appearance::ChromeAppearance,
     ) -> Self {
         Self::from_metrics(
             caption.has_multiple_panes,
             width,
+            controls_reveal,
             CaptionMetrics::measure(&caption.text, window, appearance),
             appearance.spacing_scale,
             f32::from(appearance.icons.metrics(IconRole::Status).glyph_size),
@@ -192,6 +260,7 @@ impl CaptionLayout {
     fn from_metrics(
         has_multiple_panes: bool,
         width: Pixels,
+        controls_reveal: f32,
         metrics: CaptionMetrics,
         spacing_scale: f32,
         status_icon_size: f32,
@@ -201,7 +270,10 @@ impl CaptionLayout {
         let fixed_width =
             (PANE_CAPTION_LEFT_PADDING + PANE_CAPTION_RIGHT_PADDING + PANE_STATUS_ICON_GAP)
                 * spacing_scale
-                + status_icon_size;
+                + status_icon_size
+                + metrics
+                    .repository
+                    .map_or(0.0, |repository| f32::from(repository.anchor));
         let show_splits = width
             >= px(fixed_width
                 + PANE_CONTROL_LEADING_GAP * spacing_scale
@@ -217,33 +289,67 @@ impl CaptionLayout {
         } else {
             PANE_CONTROL_LEADING_GAP * spacing_scale
         };
+        let controls_extent = leading_gap
+            + controls_width(
+                control_count,
+                has_multiple_panes,
+                control_size,
+                spacing_scale,
+            );
+        // The name and status come before Repository Status. The check uses the revealed controls,
+        // so hovering a Pane never shows or hides the segment.
+        if metrics.repository.is_some()
+            && width < px(fixed_width + controls_extent) + metrics.name + metrics.status_gap
+        {
+            return Self::from_metrics(
+                has_multiple_panes,
+                width,
+                controls_reveal,
+                CaptionMetrics {
+                    repository: None,
+                    ..metrics
+                },
+                spacing_scale,
+                status_icon_size,
+                control_size,
+            );
+        }
         let available = (width
-            - px(fixed_width
-                + leading_gap
-                + controls_width(
-                    control_count,
-                    has_multiple_panes,
-                    control_size,
-                    spacing_scale,
-                )))
+            - px(fixed_width + controls_extent * controls_reveal.clamp(0.0, 1.0)))
         .max(px(0.0));
         // The name is always kept. Every other segment is admitted in priority order and the
         // first one that does not fit ends the ladder, so segments never reappear out of order.
-        let mut claimed = metrics.name;
+        // A branch that does not fit whole is truncated when its narrowest form fits, and ends the
+        // ladder either way.
+        let mut claimed = metrics.name + metrics.status_gap;
         let mut shown = [false; CAPTION_LADDER];
-        for (admitted, width) in shown.iter_mut().zip(metrics.ladder()) {
+        let mut branch_limit = None;
+        for (index, (admitted, width)) in shown.iter_mut().zip(metrics.ladder()).enumerate() {
+            let Some(width) = width else {
+                continue;
+            };
             if claimed + width > available {
+                // The branch's leading gap sits outside its width limit.
+                let remaining =
+                    f32::from(available - claimed) - PANE_REPOSITORY_PART_GAP * spacing_scale;
+                if index == 0 && remaining >= PANE_REPOSITORY_MINIMUM_BRANCH_WIDTH * spacing_scale {
+                    *admitted = true;
+                    branch_limit = Some(remaining.floor() as u32);
+                }
                 break;
             }
             claimed += width;
             *admitted = true;
         }
         let [
+            show_repository_branch,
             show_status_separator,
+            show_repository_detail,
             show_host,
             show_directory,
             show_user,
             show_label,
+            show_repository_divergence,
         ] = shown;
         Self {
             show_status_separator,
@@ -252,6 +358,13 @@ impl CaptionLayout {
             show_user,
             show_label,
             show_splits,
+            repository: RepositoryCaptionLayout {
+                show: metrics.repository.is_some(),
+                show_branch: show_repository_branch,
+                branch_limit,
+                show_detail: show_repository_detail,
+                show_divergence: show_repository_divergence,
+            },
         }
     }
 }
@@ -278,7 +391,9 @@ fn measure_caption_segment(
     if text.is_empty() {
         return px(0.0);
     }
-    appearance.typography.measure(TextRole::Body, text, window)
+    // Layout rounds each text box to whole pixels, so a fractional measure would let the ladder
+    // admit a segment that then squeezes the name.
+    px(f32::from(appearance.typography.measure(TextRole::Body, text, window)).ceil())
 }
 
 fn minimum_pane_width(appearance: &super::appearance::ChromeAppearance) -> f32 {
@@ -327,7 +442,8 @@ struct DraggedPane {
 /// The widest a lifted Pane Caption grows, so a wide Pane lifts a card rather than a bar.
 const LIFTED_CAPTION_MAXIMUM_WIDTH: f32 = 320.0;
 
-/// Each Pane's hover and how far it has eased, as read at the start of a frame.
+/// Each Pane's hover and how far its caption controls have eased into view, as read at the start
+/// of a frame.
 type PaneHovers = BTreeMap<PaneId, (HoverFade, f32)>;
 
 /// A Pane lifted by its caption, the edge of another Pane it takes if released now, and the drag
@@ -356,6 +472,10 @@ pub(crate) struct TabView {
     focus_branch_blocker: Option<TerminalFocusBlocker>,
     native_service_hierarchy_generation: u64,
     native_service_focus_signature: Option<(bool, PaneId, Option<TerminalFocusBlocker>)>,
+    /// Advances when a split, close, move, or zoom changes the Pane layout.
+    pane_layout_revision: u64,
+    /// The layout revision the caption controls last rendered for.
+    revealed_layout_revision: u64,
     close_tab_requested: bool,
     remote_lifecycle: RemoteHierarchyLifecycle,
     /// The Tab's own focus in the Tab bar, where assistive technology can rest on it.
@@ -438,6 +558,8 @@ impl TabView {
             focus_branch_blocker: None,
             native_service_hierarchy_generation: 0,
             native_service_focus_signature: None,
+            pane_layout_revision: 0,
+            revealed_layout_revision: 0,
             close_tab_requested: false,
             remote_lifecycle: RemoteHierarchyLifecycle::default(),
             tab_focus: cx.focus_handle(),
@@ -560,6 +682,19 @@ impl TabView {
 
     pub(crate) fn pane_count(&self) -> usize {
         self.tab.pane_count()
+    }
+
+    /// The Root Pane's machine and Repository Source Directory.
+    pub(crate) fn repository_source(
+        &self,
+        cx: &App,
+    ) -> Option<(
+        crate::repository_status::RepositoryMachine,
+        crate::repository_status::scheduler::SourceDirectory,
+    )> {
+        self.tab
+            .pane(self.tab.root_pane_id())
+            .and_then(|terminal| terminal.read(cx).repository_source())
     }
 
     pub(crate) fn automatic_directory(&self, cx: &App) -> Option<CurrentDirectory> {
@@ -1183,6 +1318,7 @@ impl TabView {
                 has_multiple_panes: true,
             },
             card_width,
+            1.0,
             window,
             appearance,
         );
@@ -1259,6 +1395,7 @@ impl TabView {
         {
             Ok(true) => {
                 self.advance_native_service_hierarchy_generation(cx);
+                self.pane_layout_revision += 1;
                 self.split_bounds.clear();
                 self.sync_terminal_focus(cx);
                 cx.emit(TabViewEvent::PresentationChanged {
@@ -1327,6 +1464,7 @@ impl TabView {
         match result {
             Ok(pane_id) => {
                 self.advance_native_service_hierarchy_generation(cx);
+                self.pane_layout_revision += 1;
                 if let Some(terminal) = self.tab.pane(pane_id) {
                     self.pane_titles.insert(pane_id, terminal.read(cx).title());
                     self.pane_captions
@@ -1385,6 +1523,7 @@ impl TabView {
                 ..
             }) => {
                 self.advance_native_service_hierarchy_generation(cx);
+                self.pane_layout_revision += 1;
                 closed_pane.update(cx, |terminal, _| {
                     terminal.set_accessibility_hierarchy(false);
                     terminal.close();
@@ -1414,6 +1553,7 @@ impl TabView {
             return;
         }
         self.advance_native_service_hierarchy_generation(cx);
+        self.pane_layout_revision += 1;
         self.sync_terminal_focus(cx);
         cx.emit(TabViewEvent::PresentationChanged {
             tab_id: self.tab.id(),
@@ -1699,14 +1839,34 @@ impl TabView {
         }
     }
 
-    /// Each Pane's hover, read once per frame.
-    fn pane_hovers(&self, window: &mut Window, cx: &mut App) -> PaneHovers {
+    /// Each Pane's hover and controls reveal, read once per frame.
+    ///
+    /// The Focused Pane always shows its caption controls. Another Pane shows them under the
+    /// pointer while the window is active. A reveal that changes with the Pane layout, such as
+    /// focus moving to a new split or a Pane leaving the pointer, takes effect with the layout
+    /// instead of easing after it.
+    fn pane_hovers(
+        &mut self,
+        window_active: bool,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> PaneHovers {
+        let focused_pane_id = self.tab.focused_pane_id();
+        let animate = self.revealed_layout_revision == self.pane_layout_revision;
+        self.revealed_layout_revision = self.pane_layout_revision;
         self.tab
             .panes_with_ids()
             .map(|(pane_id, _)| {
                 let fade = HoverFade::new(("pane-hover", pane_id.get()), window, cx);
-                let level = fade.level(window, cx);
-                (pane_id, (fade, level))
+                let revealed = pane_id == focused_pane_id || (window_active && fade.is_hovered(cx));
+                let reveal = spaceterm_ui::eased_flag(
+                    ("pane-controls-reveal", pane_id.get()),
+                    revealed,
+                    animate && !fade.moved_by_layout(cx),
+                    window,
+                    cx,
+                );
+                (pane_id, (fade, reveal))
             })
             .collect()
     }
@@ -1739,7 +1899,9 @@ impl TabView {
             .cloned()
             .unwrap_or_default();
         let hover = hovers.get(&pane_id).cloned();
-        let hover_level = hover.as_ref().map_or(0.0, |(_, level)| *level);
+        let controls_reveal = hover
+            .as_ref()
+            .map_or(if focused { 1.0 } else { 0.0 }, |(_, reveal)| *reveal);
         let attention = self.pane_attention.get(&pane_id).copied().unwrap_or(0) > 0;
         let drop_edge = self
             .pane_drag
@@ -1824,7 +1986,7 @@ impl TabView {
                     attention,
                     has_multiple_panes,
                 },
-                hover_level,
+                controls_reveal,
                 view.clone(),
                 appearance.clone(),
             ))
@@ -2006,7 +2168,7 @@ impl Render for TabView {
                 }
             },
         };
-        let hovers = self.pane_hovers(window, cx);
+        let hovers = self.pane_hovers(appearance.active, window, cx);
         let content = match zoom_state {
             ZoomState::Restored => {
                 self.render_tree(self.tab.root(), &hovers, view.clone(), &appearance, cx)
@@ -2163,6 +2325,7 @@ struct PaneCaptionText {
     glyph: Option<gpui::SharedString>,
     running: bool,
     progress: TerminalProgress,
+    repository: Option<RepositoryCaption>,
 }
 
 impl PaneCaptionText {
@@ -2181,6 +2344,7 @@ impl PaneCaptionText {
                 glyph: facts.glyph,
                 running: facts.running,
                 progress: facts.progress,
+                repository: facts.repository,
             };
         }
         let (leading, name) = split_directory_leaf(&facts.directory);
@@ -2193,6 +2357,7 @@ impl PaneCaptionText {
             glyph: facts.glyph,
             running: facts.running,
             progress: facts.progress,
+            repository: facts.repository,
         }
     }
 }
@@ -2224,7 +2389,7 @@ struct PaneCaption {
 
 fn render_pane_caption(
     caption: PaneCaption,
-    hover: f32,
+    controls_reveal: f32,
     view: gpui::WeakEntity<TabView>,
     appearance: std::sync::Arc<super::appearance::ChromeAppearance>,
 ) -> AnyElement {
@@ -2235,9 +2400,15 @@ fn render_pane_caption(
             let mut caption = caption;
             #[cfg(feature = "developer-tools")]
             {
-                caption.text = super::developer_workbench::caption_fixture(cx)
-                    .map(PaneCaptionText::from_facts)
-                    .unwrap_or(caption.text);
+                if let Some(facts) = super::developer_workbench::caption_fixture(cx) {
+                    let repository = caption.text.repository.take();
+                    caption.text = PaneCaptionText::from_facts(facts);
+                    caption.text.repository = repository;
+                }
+                if let Some(view) = super::developer_workbench::repository_view_fixture(cx) {
+                    caption.text.repository =
+                        RepositoryCaption::from_view(&view, std::time::Instant::now());
+                }
             }
             caption.text.glyph = drawable_reported_glyph(caption.text.glyph.as_ref(), |glyph| {
                 let caption_style = appearance.typography.style(TextRole::Body);
@@ -2263,10 +2434,16 @@ fn render_pane_caption(
                     control.background,
                 );
             }
-            let layout = CaptionLayout::resolve(&caption, bounds.size.width, window, &appearance);
+            let layout = CaptionLayout::resolve(
+                &caption,
+                bounds.size.width,
+                controls_reveal,
+                window,
+                &appearance,
+            );
             let content = render_pane_caption_content(
                 caption,
-                hover,
+                controls_reveal,
                 view,
                 crate::desktop_profile::DesktopPresentation::get(cx),
                 layout,
@@ -2314,7 +2491,7 @@ pub(super) fn drawable_reported_glyph(
 
 fn render_pane_caption_content(
     caption: PaneCaption,
-    hover: f32,
+    controls_reveal: f32,
     view: gpui::WeakEntity<TabView>,
     presentation: &crate::desktop_profile::DesktopPresentation,
     layout: CaptionLayout,
@@ -2323,7 +2500,7 @@ fn render_pane_caption_content(
 ) -> AnyElement {
     let PaneCaption {
         pane_id,
-        terminal: _,
+        terminal,
         text,
         focused,
         zoomed,
@@ -2363,12 +2540,50 @@ fn render_pane_caption_content(
         .flex()
         .items_center()
         .gap(appearance.spacing(PANE_CONTROL_GAP))
-        .ml(appearance.spacing(PANE_CONTROL_LEADING_GAP))
         .flex_shrink_0()
         // An unfocused Pane shows its controls only under the pointer.
-        .when(!focused, |controls| {
-            controls.opacity(if appearance.active { hover } else { 0.0 })
-        });
+        .opacity(controls_reveal);
+    let control_count = usize::from(layout.show_splits) * 2 + usize::from(has_multiple_panes) * 2;
+    // Hidden controls give up their width, so the segments before them slide to the trailing edge
+    // and back as the controls fade.
+    let controls_extent = if control_count == 0 {
+        0.0
+    } else {
+        let control_size = f32::from(
+            appearance
+                .icons
+                .interactive_target_size(InteractiveIconRole::Control),
+        );
+        appearance.spacing_scale * PANE_CONTROL_LEADING_GAP
+            + controls_width(
+                control_count,
+                has_multiple_panes,
+                control_size,
+                appearance.spacing_scale,
+            )
+    };
+    // The leading gap opens first and stays outside the clip, so a partly revealed control never
+    // touches the segment before it.
+    let slot_width = controls_reveal * controls_extent;
+    let leading_gap = slot_width.min(appearance.spacing_scale * PANE_CONTROL_LEADING_GAP);
+    let controls_clip = div()
+        .id(("pane-controls-clip", pane_id.get()))
+        .debug_selector(move || format!("pane-controls-clip-{}", pane_id.get()))
+        .flex_shrink_0()
+        .w(px(slot_width - leading_gap))
+        .h_full()
+        .flex()
+        .items_center()
+        // The controls enter from the trailing edge, and a partly hidden control takes no clicks.
+        .justify_end()
+        .overflow_hidden();
+    let controls_slot = div()
+        .flex_shrink_0()
+        .w(px(slot_width))
+        .h_full()
+        .flex()
+        .items_center()
+        .justify_end();
     let actions = [
         (
             PaneCaptionAction::SplitRight,
@@ -2448,6 +2663,7 @@ fn render_pane_caption_content(
         };
     }
     let caption_name = format!("Pane Caption, {}", text.name);
+    let repository = text.repository.clone();
     let caption_content =
         render_caption_identity(pane_id, text, attention, layout, appearance, &paint);
     let focus_pane = move |window: &mut Window, cx: &mut App| {
@@ -2488,8 +2704,150 @@ fn render_pane_caption_content(
             })
         })
         .child(caption_content)
-        .child(controls)
+        .when_some(
+            repository.filter(|_| layout.repository.show),
+            |row, repository| {
+                row.child(render_repository_segment(
+                    pane_id,
+                    &repository,
+                    (terminal.downgrade(), view.clone()),
+                    layout.repository,
+                    appearance,
+                    &paint,
+                ))
+            },
+        )
+        .child(controls_slot.child(controls_clip.child(controls)))
         .into_any_element()
+}
+
+/// The mark before a branch name or detached commit id, in the inherited text color.
+pub(super) fn render_head_glyph(
+    glyph: HeadGlyph,
+    appearance: &super::appearance::ChromeAppearance,
+) -> AnyElement {
+    let mark = div().flex_shrink_0().flex().items_center();
+    match glyph.text() {
+        Some(text) => mark.child(text),
+        None => mark.child(Icon::inherited(
+            IconName::GitBranch,
+            appearance.icons.metrics(IconRole::Caption).glyph_size,
+        )),
+    }
+    .into_any_element()
+}
+
+/// The width [`render_head_glyph`] takes, measuring a text mark with `measure`.
+pub(super) fn head_glyph_width(
+    glyph: HeadGlyph,
+    appearance: &super::appearance::ChromeAppearance,
+    measure: impl FnOnce(&str) -> Pixels,
+) -> Pixels {
+    glyph.text().map_or_else(
+        || appearance.icons.metrics(IconRole::Caption).glyph_size,
+        measure,
+    )
+}
+
+/// The Pane's Repository Status: glyph, branch, one mark, the detail, and the divergence.
+/// Color is never the only signal; the glyph, words, and the spoken label carry every state.
+fn render_repository_segment(
+    pane_id: PaneId,
+    repository: &RepositoryCaption,
+    (terminal, view): (gpui::WeakEntity<TerminalPane>, gpui::WeakEntity<TabView>),
+    layout: RepositoryCaptionLayout,
+    appearance: &super::appearance::ChromeAppearance,
+    paint: &crate::appearance::CaptionPaint,
+) -> AnyElement {
+    let text_color = if repository.dimmed {
+        paint.secondary
+    } else {
+        paint.foreground
+    };
+    let part = || {
+        div()
+            .flex_shrink_0()
+            .ml(appearance.spacing(PANE_REPOSITORY_PART_GAP))
+    };
+    // The segment opens the popover on click, so a press neither focuses the Pane nor starts a
+    // Pane drag; the click focuses the Pane first.
+    let show = move |window: &mut Window, cx: &mut App| {
+        let _ = view.update(cx, |view, cx| view.focus_pane(pane_id, cx));
+        let _ = terminal.update(cx, |terminal, cx| {
+            terminal.show_repository_status(&ShowRepositoryStatus, window, cx);
+        });
+    };
+    let accessible_show = show.clone();
+    let mut segment = div()
+        .id(("pane-repository", pane_id.get()))
+        .debug_selector(move || format!("pane-repository-{}", pane_id.get()))
+        .role(gpui::accesskit::Role::Button)
+        .aria_label(gpui::SharedString::from(
+            repository.accessible_label.clone(),
+        ))
+        .cursor_pointer()
+        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(move |_, window, cx| show(window, cx))
+        .on_a11y_action(gpui::accesskit::Action::Click, move |_, window, cx| {
+            accessible_show(window, cx);
+        })
+        .flex()
+        .items_center()
+        .min_w_0()
+        .flex_shrink_0()
+        .ml(appearance.spacing(PANE_REPOSITORY_LEADING_GAP))
+        .text_color(gpui_color(text_color))
+        .child(render_head_glyph(repository.glyph, appearance));
+    if layout.show_branch {
+        segment = segment.child(
+            part()
+                .debug_selector(move || format!("pane-repository-branch-{}", pane_id.get()))
+                .min_w_0()
+                .truncate()
+                .when_some(layout.branch_limit, |branch, limit| {
+                    branch.max_w(px(limit as f32))
+                })
+                .child(repository.branch.clone()),
+        );
+    }
+    if let Some(mark) = repository.mark {
+        let color = match mark {
+            RepositoryMark::Operation => paint.repository_operation,
+            RepositoryMark::Changes => paint.repository_changes,
+        };
+        segment = segment.child(
+            part()
+                .debug_selector(move || format!("pane-repository-mark-{}", pane_id.get()))
+                .text_color(gpui_color(if repository.dimmed {
+                    text_color
+                } else {
+                    color
+                }))
+                .child(mark.glyph()),
+        );
+    }
+    if layout.show_detail
+        && let Some(detail) = &repository.detail
+    {
+        segment = segment.child(
+            part()
+                .debug_selector(move || format!("pane-repository-detail-{}", pane_id.get()))
+                .when(detail.dimmed, |detail| {
+                    detail.text_color(gpui_color(paint.secondary))
+                })
+                .child(detail.text.clone()),
+        );
+    }
+    if layout.show_divergence
+        && let Some(divergence) = &repository.divergence
+    {
+        segment = segment.child(
+            part()
+                .debug_selector(move || format!("pane-repository-divergence-{}", pane_id.get()))
+                .child(divergence.clone()),
+        );
+    }
+    segment.into_any_element()
 }
 
 /// The Pane's identity as its caption shows it: origin, directory, name, status, and label.
@@ -2540,17 +2898,23 @@ fn render_caption_identity(
                             format!("pane-caption-status-separator-{}", pane_id.get())
                         })
                         .flex_shrink_0()
-                        .mx(appearance.spacing(5.0))
+                        .ml(appearance.spacing(5.0))
                         .text_color(gpui_color(color))
                         .child("·"),
                 )
             })
-            .child(render_pane_status(
-                pane_id,
-                (text.progress, text.glyph, attention),
-                paint,
-                appearance,
-            ))
+            .child(
+                div()
+                    .debug_selector(move || format!("pane-caption-status-{}", pane_id.get()))
+                    .flex_shrink_0()
+                    .ml(appearance.spacing(PANE_STATUS_LEADING_GAP))
+                    .child(render_pane_status(
+                        pane_id,
+                        (text.progress, text.glyph, attention),
+                        paint,
+                        appearance,
+                    )),
+            )
             .when(layout.show_label && !text.label.is_empty(), |row| {
                 row.child(
                     div()
@@ -3624,6 +3988,7 @@ mod tests {
             glyph: None,
             running: false,
             progress: TerminalProgress::None,
+            repository: None,
         })
     }
 
@@ -4378,6 +4743,78 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_narrowing_caption_with_a_branch_should_keep_its_name_whole_and_apart_from_its_status(
+        cx: &mut TestAppContext,
+    ) {
+        let (root, view, records, cx) = caption_view(cx);
+        let mut screen =
+            ScreenSnapshot::from_test_parts_at(Arc::from([]), Default::default(), "zsh", 1);
+        let metadata = Arc::make_mut(&mut Arc::make_mut(&mut screen).metadata);
+        metadata.context = crate::terminal::metadata::TerminalMetadataContext::local(
+            crate::local_path::LocalPathSemantics::Posix,
+            "/Users/tester",
+            crate::terminal::metadata::LocalMachine::new(
+                Some("tester"),
+                Some("workstation"),
+                Some("/Users/tester"),
+            ),
+        );
+        metadata.directory.path = Arc::from("/Users/tester");
+        records
+            .event_sender(1)
+            .unwrap()
+            .try_send(TerminalSessionEvent::Screen(screen))
+            .unwrap();
+        cx.run_until_parked();
+        view.update(cx, |view, cx| {
+            view.pane_captions
+                .entry(PaneId::new(1))
+                .or_default()
+                .repository = Some(RepositoryCaption {
+                glyph: HeadGlyph::Branch,
+                branch: "feat/workbench-fixture".into(),
+                mark: Some(RepositoryMark::Changes),
+                detail: None,
+                divergence: None,
+                dimmed: false,
+                accessible_label: "Repository Status, feat/workbench-fixture".into(),
+            });
+            cx.notify();
+        });
+        crate::ui::settle_hover(cx);
+        let name_width = cx.debug_bounds("pane-caption-name-1").unwrap().size.width;
+
+        let mut truncated = 0;
+        for width in (130..420).step_by(2) {
+            root.update(cx, |root, cx| {
+                root.width = px(width as f32);
+                cx.notify();
+            });
+            cx.run_until_parked();
+            let name = cx.debug_bounds("pane-caption-name-1").unwrap();
+            let status = cx.debug_bounds("pane-caption-status-1").unwrap();
+            let Some(branch) = cx.debug_bounds("pane-repository-branch-1") else {
+                continue;
+            };
+            assert!(
+                name.size.width >= name_width - px(0.5),
+                "at {width}: the branch {branch:?} squeezed the name {name:?}"
+            );
+            assert!(
+                status.left() - name.right() >= px(PANE_STATUS_LEADING_GAP - 0.5),
+                "at {width}: {name:?} {status:?}"
+            );
+            if cx.debug_bounds("pane-caption-status-separator-1").is_none() {
+                truncated += 1;
+            }
+        }
+        assert!(
+            truncated > 0,
+            "some widths show the branch without the middle dot"
+        );
+    }
+
+    #[gpui::test]
     fn caption_vertical_spacing_should_be_symmetric_in_both_densities(cx: &mut TestAppContext) {
         let (_, _, _, cx) = caption_view(cx);
         for spacing_scale in [1.0, 1.25] {
@@ -4605,11 +5042,21 @@ mod tests {
             host: px(60.0),
             directory: px(120.0),
             name: px(40.0),
-            status_separator: px(PANE_CAPTION_SEPARATOR_WIDTH),
+            status_gap: px(PANE_STATUS_LEADING_GAP),
+            status_separator: px(PANE_CAPTION_SEPARATOR_WIDTH - PANE_STATUS_LEADING_GAP),
             label: px(30.0),
+            repository: None,
         };
         let resolve = |width: f32| {
-            CaptionLayout::from_metrics(false, px(width), metrics, 1.0, 13.0, PANE_CONTROL_SIZE)
+            CaptionLayout::from_metrics(
+                false,
+                px(width),
+                1.0,
+                metrics,
+                1.0,
+                13.0,
+                PANE_CONTROL_SIZE,
+            )
         };
         let controls = PANE_CAPTION_LEFT_PADDING
             + PANE_CAPTION_RIGHT_PADDING
@@ -4623,6 +5070,7 @@ mod tests {
             show_user: user,
             show_label: label,
             show_splits: true,
+            repository: RepositoryCaptionLayout::default(),
         };
 
         assert_eq!(
@@ -4652,6 +5100,377 @@ mod tests {
         assert!(!resolve(controls - 1.0).show_splits);
     }
 
+    #[gpui::test]
+    fn repository_status_should_slide_aside_for_the_controls_of_a_focused_pane(
+        cx: &mut TestAppContext,
+    ) {
+        let (_, view, _, cx) = caption_view(cx);
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.split_focused(SplitAxis::Horizontal, window, cx);
+                view.pane_captions
+                    .entry(PaneId::new(1))
+                    .or_default()
+                    .repository = Some(RepositoryCaption {
+                    glyph: HeadGlyph::Branch,
+                    branch: "main".into(),
+                    mark: None,
+                    detail: None,
+                    divergence: None,
+                    dimmed: false,
+                    accessible_label: "Repository Status, main".into(),
+                });
+                cx.notify();
+            });
+        });
+        crate::ui::settle_hover(cx);
+        // The pointer rests over the Focused Pane, so the other Pane is not hovered.
+        let focused_pane = cx.debug_bounds("pane-surface-2").unwrap();
+        cx.simulate_mouse_move(focused_pane.center(), None, gpui::Modifiers::none());
+        crate::ui::settle_hover(cx);
+        assert_eq!(
+            view.read_with(cx, |view, _| view.focused_pane_id()),
+            PaneId::new(2)
+        );
+        let segment_right =
+            |cx: &mut VisualTestContext| cx.debug_bounds("pane-repository-1").unwrap().right();
+        let controls = cx.debug_bounds("pane-controls-1-full").unwrap();
+        assert!(
+            (segment_right(cx) - controls.right()).abs() < px(0.5),
+            "an unfocused Pane's hidden controls leave their place to the Repository Status",
+        );
+
+        view.update(cx, |view, cx| view.focus_pane(PaneId::new(1), cx));
+        crate::ui::settle_hover(cx);
+        assert!(
+            segment_right(cx) <= controls.left(),
+            "the Focused Pane's controls push the Repository Status before them",
+        );
+
+        view.update(cx, |view, cx| view.focus_pane(PaneId::new(2), cx));
+        crate::ui::settle_hover(cx);
+        assert!((segment_right(cx) - controls.right()).abs() < px(0.5));
+    }
+
+    #[gpui::test]
+    fn controls_growing_in_should_keep_their_gap_from_the_repository_status(
+        cx: &mut TestAppContext,
+    ) {
+        let (_, view, _, cx) = caption_view(cx);
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.split_focused(SplitAxis::Horizontal, window, cx);
+                view.pane_captions
+                    .entry(PaneId::new(1))
+                    .or_default()
+                    .repository = Some(RepositoryCaption {
+                    glyph: HeadGlyph::Branch,
+                    branch: "main".into(),
+                    mark: None,
+                    detail: None,
+                    divergence: Some("\u{2191}1".into()),
+                    dimmed: false,
+                    accessible_label: "Repository Status, main".into(),
+                });
+                cx.notify();
+            });
+        });
+        crate::ui::settle_hover(cx);
+        let focused_pane = cx.debug_bounds("pane-surface-2").unwrap();
+        cx.simulate_mouse_move(focused_pane.center(), None, gpui::Modifiers::none());
+        crate::ui::settle_hover(cx);
+
+        view.update(cx, |view, cx| view.focus_pane(PaneId::new(1), cx));
+        cx.run_until_parked();
+        let mut partly_revealed = false;
+        for _ in 0..12 {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(16));
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+            cx.run_until_parked();
+            let segment = cx.debug_bounds("pane-repository-1").unwrap();
+            let clip = cx.debug_bounds("pane-controls-clip-1").unwrap();
+            let controls = cx.debug_bounds("pane-controls-1-full").unwrap();
+            if clip.size.width > px(0.0) && clip.size.width < controls.size.width {
+                partly_revealed = true;
+            }
+            if clip.size.width > px(0.0) {
+                assert!(
+                    clip.left() - segment.right() >= px(PANE_CONTROL_LEADING_GAP - 0.5),
+                    "{segment:?} {clip:?}"
+                );
+            }
+        }
+        assert!(partly_revealed, "the controls ease in over several frames");
+    }
+
+    #[gpui::test]
+    fn a_split_should_move_the_repository_status_with_its_layout_instead_of_after_it(
+        cx: &mut TestAppContext,
+    ) {
+        let (_, view, _, cx) = caption_view(cx);
+        view.update(cx, |view, cx| {
+            view.pane_captions
+                .entry(PaneId::new(1))
+                .or_default()
+                .repository = Some(RepositoryCaption {
+                glyph: HeadGlyph::Branch,
+                branch: "main".into(),
+                mark: None,
+                detail: None,
+                divergence: None,
+                dimmed: false,
+                accessible_label: "Repository Status, main".into(),
+            });
+            cx.notify();
+        });
+        cx.simulate_event(gpui::MouseExitEvent {
+            position: gpui::point(px(0.0), px(0.0)),
+            pressed_button: None,
+            modifiers: gpui::Modifiers::none(),
+        });
+        crate::ui::settle_hover(cx);
+
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.split_focused(SplitAxis::Horizontal, window, cx);
+            });
+        });
+        // No time passes, so only a change made with the layout shows.
+        cx.run_until_parked();
+
+        assert_eq!(
+            view.read_with(cx, |view, _| view.focused_pane_id()),
+            PaneId::new(2)
+        );
+        let segment = cx.debug_bounds("pane-repository-1").unwrap();
+        let controls = cx.debug_bounds("pane-controls-1-full").unwrap();
+        assert!((segment.right() - controls.right()).abs() < px(0.5));
+    }
+
+    #[gpui::test]
+    fn a_caption_button_split_should_place_the_controls_it_moves_from_under_the_pointer_at_once(
+        cx: &mut TestAppContext,
+    ) {
+        let (_, view, _, cx) = caption_view(cx);
+        view.update(cx, |view, cx| {
+            view.pane_captions
+                .entry(PaneId::new(1))
+                .or_default()
+                .repository = Some(RepositoryCaption {
+                glyph: HeadGlyph::Branch,
+                branch: "main".into(),
+                mark: None,
+                detail: None,
+                divergence: None,
+                dimmed: false,
+                accessible_label: "Repository Status, main".into(),
+            });
+            cx.notify();
+        });
+        crate::ui::settle_hover(cx);
+        // The pointer rests on the Pane's trailing caption control, as after clicking Split.
+        let controls = cx.debug_bounds("pane-controls-1-full").unwrap();
+        let pointer = gpui::point(controls.right() - px(4.0), controls.center().y);
+        cx.simulate_mouse_move(pointer, None, gpui::Modifiers::none());
+        crate::ui::settle_hover(cx);
+
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.split_focused(SplitAxis::Horizontal, window, cx);
+            });
+        });
+        // The narrower Pane leaves the still pointer; its hover catches up one frame later.
+        cx.run_until_parked();
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        let placed = (
+            cx.debug_bounds("pane-repository-1").unwrap(),
+            cx.debug_bounds("pane-controls-1-full").unwrap(),
+        );
+
+        crate::ui::settle_hover(cx);
+        let settled = (
+            cx.debug_bounds("pane-repository-1").unwrap(),
+            cx.debug_bounds("pane-controls-1-full").unwrap(),
+        );
+        assert_eq!(placed, settled);
+    }
+
+    #[test]
+    fn narrowing_a_caption_should_keep_the_repository_branch_and_drop_its_counts_first() {
+        let repository = RepositoryCaptionMetrics {
+            anchor: px(20.0),
+            branch: px(50.0),
+            detail: Some(px(70.0)),
+            divergence: Some(px(30.0)),
+        };
+        let metrics = CaptionMetrics {
+            user: px(40.0),
+            host: px(60.0),
+            directory: px(120.0),
+            name: px(40.0),
+            status_gap: px(PANE_STATUS_LEADING_GAP),
+            status_separator: px(PANE_CAPTION_SEPARATOR_WIDTH - PANE_STATUS_LEADING_GAP),
+            label: px(30.0),
+            repository: Some(repository),
+        };
+        let controls = PANE_CAPTION_LEFT_PADDING
+            + PANE_CAPTION_RIGHT_PADDING
+            + PANE_STATUS_WIDTH
+            + PANE_CONTROL_LEADING_GAP
+            + controls_width(2, false, PANE_CONTROL_SIZE, 1.0)
+            + 20.0;
+        let resolve = |metrics, width: f32| {
+            CaptionLayout::from_metrics(
+                false,
+                px(width),
+                1.0,
+                metrics,
+                1.0,
+                13.0,
+                PANE_CONTROL_SIZE,
+            )
+        };
+        let shown = |layout: CaptionLayout| {
+            (
+                layout.repository.show_branch,
+                layout.show_status_separator,
+                layout.repository.show_detail,
+                layout.show_host,
+                layout.show_label,
+                layout.repository.show_divergence,
+            )
+        };
+
+        let full = resolve(metrics, controls + 457.25);
+        assert_eq!(shown(full), (true, true, true, true, true, true));
+        assert_eq!(full.repository.branch_limit, None);
+        assert_eq!(
+            shown(resolve(metrics, controls + 457.0)),
+            (true, true, true, true, true, false)
+        );
+        assert_eq!(
+            shown(resolve(metrics, controls + 177.25)),
+            (true, true, true, false, false, false)
+        );
+        assert_eq!(
+            shown(resolve(metrics, controls + 177.0)),
+            (true, true, false, false, false, false)
+        );
+        assert_eq!(
+            shown(resolve(metrics, controls + 90.0)),
+            (true, false, false, false, false, false)
+        );
+
+        let truncated = resolve(metrics, controls + 89.0);
+        assert!(truncated.repository.show_branch);
+        assert_eq!(truncated.repository.branch_limit, Some(40));
+        assert!(!truncated.show_status_separator);
+        assert!(!resolve(metrics, controls + 75.0).repository.show_branch);
+
+        let without_counts = CaptionMetrics {
+            repository: Some(RepositoryCaptionMetrics {
+                detail: None,
+                divergence: None,
+                ..repository
+            }),
+            ..metrics
+        };
+        assert_eq!(
+            shown(resolve(without_counts, controls + 167.25)),
+            (true, true, false, true, false, false)
+        );
+    }
+
+    #[test]
+    fn a_pane_too_narrow_for_its_name_beside_the_repository_glyph_should_hide_repository_status() {
+        let metrics = CaptionMetrics {
+            name: px(40.0),
+            status_gap: px(PANE_STATUS_LEADING_GAP),
+            status_separator: px(PANE_CAPTION_SEPARATOR_WIDTH - PANE_STATUS_LEADING_GAP),
+            repository: Some(RepositoryCaptionMetrics {
+                anchor: px(20.0),
+                branch: px(50.0),
+                detail: None,
+                divergence: None,
+            }),
+            ..CaptionMetrics::default()
+        };
+        let needed = PANE_CAPTION_LEFT_PADDING
+            + PANE_CAPTION_RIGHT_PADDING
+            + PANE_STATUS_WIDTH
+            + 20.0
+            + PANE_CONTROL_LEADING_GAP
+            + controls_width(4, true, PANE_CONTROL_SIZE, 1.0)
+            + 40.0
+            + PANE_STATUS_LEADING_GAP;
+        let resolve = |width: f32, reveal| {
+            CaptionLayout::from_metrics(
+                true,
+                px(width),
+                reveal,
+                metrics,
+                1.0,
+                13.0,
+                PANE_CONTROL_SIZE,
+            )
+        };
+
+        let roomy = resolve(needed + 0.5, 1.0);
+        assert!(roomy.repository.show && roomy.show_splits);
+        assert!(!roomy.repository.show_branch);
+        for reveal in [0.0, 1.0] {
+            assert!(
+                !resolve(needed - 0.5, reveal).repository.show,
+                "at reveal {reveal}"
+            );
+        }
+    }
+
+    #[test]
+    fn hidden_pane_controls_should_free_their_width_for_the_caption() {
+        let metrics = CaptionMetrics {
+            user: px(40.0),
+            host: px(60.0),
+            directory: px(120.0),
+            name: px(40.0),
+            status_gap: px(PANE_STATUS_LEADING_GAP),
+            status_separator: px(PANE_CAPTION_SEPARATOR_WIDTH - PANE_STATUS_LEADING_GAP),
+            label: px(30.0),
+            repository: Some(RepositoryCaptionMetrics {
+                anchor: px(20.0),
+                branch: px(50.0),
+                detail: Some(px(70.0)),
+                divergence: Some(px(30.0)),
+            }),
+        };
+        let controls = PANE_CONTROL_LEADING_GAP + controls_width(2, false, PANE_CONTROL_SIZE, 1.0);
+        let width = PANE_CAPTION_LEFT_PADDING
+            + PANE_CAPTION_RIGHT_PADDING
+            + PANE_STATUS_WIDTH
+            + 20.0
+            + controls
+            + 89.0;
+        let resolve = |reveal| {
+            CaptionLayout::from_metrics(
+                false,
+                px(width),
+                reveal,
+                metrics,
+                1.0,
+                13.0,
+                PANE_CONTROL_SIZE,
+            )
+        };
+
+        assert_eq!(resolve(1.0).repository.branch_limit, Some(40));
+        let hidden = resolve(0.0);
+        assert!(hidden.repository.show_branch);
+        assert_eq!(hidden.repository.branch_limit, None);
+        assert!(hidden.show_splits, "hidden controls keep their set");
+    }
+
     /// A narrow Pane Caption without status retains Split controls above their width threshold.
     #[test]
     fn narrow_caption_without_status_should_keep_split_controls_above_the_control_threshold() {
@@ -4665,7 +5484,15 @@ mod tests {
             + PANE_CONTROL_LEADING_GAP
             + controls_width(2, false, PANE_CONTROL_SIZE, 1.0);
         let resolve = |width: f32| {
-            CaptionLayout::from_metrics(false, px(width), metrics, 1.0, 13.0, PANE_CONTROL_SIZE)
+            CaptionLayout::from_metrics(
+                false,
+                px(width),
+                1.0,
+                metrics,
+                1.0,
+                13.0,
+                PANE_CONTROL_SIZE,
+            )
         };
 
         let narrow = resolve(controls + 10.0);

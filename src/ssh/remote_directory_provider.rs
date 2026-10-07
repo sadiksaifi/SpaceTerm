@@ -10,8 +10,7 @@ use gpui::{BackgroundExecutor, Task};
 use super::cancellation::SshCancellationToken;
 use super::command::ValidatedRemoteLoginShell;
 use super::remote_utility::{
-    PreparedSshRemoteUtilityCommand, RemoteDirectoryProbe, RemoteUtilityError,
-    SshRemoteUtilityClient, SshRemoteUtilityRunner,
+    RemoteDirectoryProbe, RemoteUtilityError, SshRemoteUtilityClient, SshRemoteUtilityRunner,
 };
 use crate::domain::{RemoteDirectory, RemoteDirectoryIdentity};
 use crate::ui::directory_picker::{
@@ -41,16 +40,26 @@ pub(crate) struct SshRemoteDirectoryProvider<R: SshRemoteUtilityRunner> {
 }
 
 impl<R: SshRemoteUtilityRunner> SshRemoteDirectoryProvider<R> {
+    #[cfg(test)]
     pub(crate) fn new(
-        command: PreparedSshRemoteUtilityCommand,
+        command: super::remote_utility::PreparedSshRemoteUtilityCommand,
         runner: Arc<R>,
         cancellation: SshCancellationToken,
         executor: BackgroundExecutor,
     ) -> Self {
-        Self {
-            client: Arc::new(SshRemoteUtilityClient::new(command, runner, cancellation)),
+        Self::with_client(
+            Arc::new(SshRemoteUtilityClient::new(command, runner, cancellation)),
             executor,
-        }
+        )
+    }
+
+    /// Creates a provider over a client other Control Connection readers share, so every reader
+    /// draws from the client's one utility session limit.
+    pub(crate) const fn with_client(
+        client: Arc<SshRemoteUtilityClient<R>>,
+        executor: BackgroundExecutor,
+    ) -> Self {
+        Self { client, executor }
     }
 
     fn spawn_operation<T, F, Fut>(
@@ -247,9 +256,9 @@ impl Drop for CancelOperationOnDrop {
 
 fn map_error(error: RemoteUtilityError) -> RemoteDirectoryProviderError {
     match error {
-        RemoteUtilityError::Cancelled | RemoteUtilityError::Transport => {
-            RemoteDirectoryProviderError::ConnectionLost
-        }
+        RemoteUtilityError::Cancelled
+        | RemoteUtilityError::Transport
+        | RemoteUtilityError::TimedOut => RemoteDirectoryProviderError::ConnectionLost,
         RemoteUtilityError::SessionUnavailable => RemoteDirectoryProviderError::SessionUnavailable,
         RemoteUtilityError::Missing => RemoteDirectoryProviderError::Missing,
         RemoteUtilityError::NotDirectory => RemoteDirectoryProviderError::NotDirectory,
@@ -260,9 +269,9 @@ fn map_error(error: RemoteUtilityError) -> RemoteDirectoryProviderError {
         RemoteUtilityError::RequestTooLarge
         | RemoteUtilityError::OutputTooLarge
         | RemoteUtilityError::InvalidResponse => RemoteDirectoryProviderError::InvalidResponse,
-        RemoteUtilityError::CommandFailed(_) | RemoteUtilityError::RemoteFailed => {
-            RemoteDirectoryProviderError::Other
-        }
+        RemoteUtilityError::CommandFailed(_)
+        | RemoteUtilityError::RemoteFailed
+        | RemoteUtilityError::ToolMissing => RemoteDirectoryProviderError::Other,
     }
 }
 
@@ -280,6 +289,7 @@ mod tests {
     use crate::ssh::command::{SshCommandContext, SshCommandSpec};
     use crate::ssh::fake_remote_utility_server::FakeRemoteUtilityServer;
     use crate::ssh::process::ProcessExit;
+    use crate::ssh::remote_utility::PreparedSshRemoteUtilityCommand;
     use crate::ssh::remote_utility::{
         RemoteUtilityProcessOutput, RemoteUtilityRunError, RemoteUtilitySession,
         SshRemoteUtilityRunner,

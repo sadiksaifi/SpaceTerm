@@ -16,6 +16,7 @@ fn legacy_settings_load_without_writing_and_save_as_canonical_opacity() {
     };
     let mut legacy = serde_json::to_value(document).unwrap();
     legacy["schema_version"] = serde_json::json!(3);
+    legacy.as_object_mut().unwrap().remove("git");
     let window = legacy["appearance"]["window"].as_object_mut().unwrap();
     window.remove("opacity");
     window.insert("transparency".into(), serde_json::json!(0.25));
@@ -43,7 +44,7 @@ fn legacy_settings_load_without_writing_and_save_as_canonical_opacity() {
 
     let saved: serde_json::Value =
         serde_json::from_slice(&storage.0.lock().unwrap().snapshot.as_ref().unwrap().0).unwrap();
-    assert_eq!(saved["schema_version"], 4);
+    assert_eq!(saved["schema_version"], 5);
     assert_eq!(saved["revision"], 13);
     assert_eq!(saved["appearance"]["window"]["opacity"], 0.75);
     assert!(saved["appearance"]["window"].get("transparency").is_none());
@@ -58,6 +59,7 @@ fn legacy_settings_load_without_writing_and_save_as_canonical_opacity() {
 fn saving_migrated_settings_preserves_a_competing_writer() {
     let mut legacy = serde_json::to_value(SettingsDocument::default()).unwrap();
     legacy["schema_version"] = serde_json::json!(3);
+    legacy.as_object_mut().unwrap().remove("git");
     let window = legacy["appearance"]["window"].as_object_mut().unwrap();
     window.remove("opacity");
     window.insert("transparency".into(), serde_json::json!(0.25));

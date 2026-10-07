@@ -20,6 +20,7 @@ mod macos_quick_look_window;
 pub(crate) mod macos_updates;
 pub(crate) mod microphone_access;
 pub(crate) mod permission_access;
+pub(crate) mod repository_watch;
 pub(crate) mod secure_filesystem;
 pub(crate) mod selected_file;
 pub(crate) mod settings_file;
@@ -206,6 +207,8 @@ pub(crate) mod testing;
 pub(crate) mod native_main_thread_tests;
 
 #[cfg(target_os = "macos")]
+mod macos_repository_tools;
+#[cfg(target_os = "macos")]
 mod macos_reserved_shortcuts;
 #[cfg(target_os = "macos")]
 mod macos_shortcut_glyphs;
@@ -235,6 +238,13 @@ pub(crate) mod unix_local_socket;
 mod unix_pty;
 #[cfg(all(any(target_os = "macos", target_os = "linux"), test))]
 pub(crate) mod unix_pty;
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub(crate) mod repository_marker_reader;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod repository_status_host;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub(crate) mod unix_repository_program;
 
 #[cfg(all(any(target_os = "macos", target_os = "linux"), not(test)))]
 mod unix_secure_filesystem;
@@ -304,6 +314,9 @@ mod linux_peer_credentials;
 
 #[cfg(target_os = "linux")]
 mod linux_pty_host;
+
+#[cfg(target_os = "linux")]
+mod linux_repository_tools;
 
 #[cfg(target_os = "linux")]
 mod linux_reserved_shortcuts;

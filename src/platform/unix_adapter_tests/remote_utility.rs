@@ -17,6 +17,9 @@ use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
+#[path = "remote_repository_utility.rs"]
+mod repository;
+
 #[test]
 fn dropping_native_utility_future_should_cancel_and_reap_the_private_group() {
     let pid_file =

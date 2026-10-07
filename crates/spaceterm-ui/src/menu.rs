@@ -4083,7 +4083,9 @@ mod tests {
             );
             cx.simulate_keystrokes("escape");
             cx.simulate_mouse_move(point(px(500.0), px(500.0)), None, Modifiers::none());
-            cx.run_until_parked();
+            // The trigger under the still pointer took its hover at once as the menu closed, and
+            // eases out after the pointer leaves.
+            crate::hover_fade::settle(cx);
             assert!(cx.update(|window, cx| window.focused(cx).is_none()));
             cx.update(|window, _| {
                 assert!(

@@ -2755,6 +2755,374 @@ fn terminal_click_restores_terminal_responder_without_closing_find(cx: &mut Test
     }));
 }
 
+/// A Repository Status with more facts and changes than a short Pane can show.
+fn crowded_repository_status() -> crate::repository_status::RepositoryStatus {
+    use crate::repository_status::{
+        ChangeEntry, ChangeKind, ChangeState, ChangeSummary, ChangeTotal, Freshness,
+        RepositoryHead, RepositoryKey, RepositoryMachine, RepositoryReadError, RepositoryRoot,
+        RepositoryStatus,
+    };
+
+    let entries = (0..20)
+        .map(|index| ChangeEntry {
+            kind: ChangeKind::Modified,
+            path: format!("src/file-{index}.rs").into(),
+        })
+        .collect();
+    RepositoryStatus {
+        key: RepositoryKey {
+            machine: RepositoryMachine::Local,
+            root: RepositoryRoot::Local(PathBuf::from("/Users/tester/Projects/tool")),
+        },
+        head: RepositoryHead::Branch("main".into()),
+        commit: Some("a1b2c3d".into()),
+        upstream: Some(crate::repository_status::Upstream {
+            name: "origin/main".into(),
+            divergence: None,
+        }),
+        operation: Some(crate::repository_status::RepositoryOperation::Merging),
+        changes: ChangeState::Known(ChangeSummary {
+            total: ChangeTotal::Exact(20),
+            modified: 20,
+            entries,
+            ..ChangeSummary::default()
+        }),
+        freshness: Freshness::Current,
+        read_at: std::time::Instant::now(),
+        pull_request: None,
+        read_failure: Some(RepositoryReadError::Unavailable),
+    }
+}
+
+fn open_crowded_repository_popover(pane: &Entity<TerminalPane>, cx: &mut VisualTestContext) {
+    use crate::repository_status::RepositoryView;
+    use crate::ui::ShowRepositoryStatus;
+
+    pane.update(cx, |pane, cx| {
+        pane.present_repository_view(
+            RepositoryView::Repository(Arc::new(crowded_repository_status())),
+            cx,
+        );
+    });
+    cx.dispatch_action(ShowRepositoryStatus);
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn repository_status_popover_should_fit_a_short_window_and_keep_its_footer(
+    cx: &mut TestAppContext,
+) {
+    let (pane, cx, _) = connected_terminal_pane(cx);
+    // Shorter than the popover's identity, facts, and footer together.
+    cx.simulate_resize(gpui::size(px(640.0), px(120.0)));
+    open_crowded_repository_popover(&pane, cx);
+
+    let pane_bounds = cx.debug_bounds("terminal-pane").unwrap();
+    let popover = cx.debug_bounds("repository-status-popover").unwrap();
+    let footer = cx.debug_bounds("repository-status-popover-footer").unwrap();
+    assert!(
+        popover.bottom() <= pane_bounds.bottom(),
+        "{popover:?} {pane_bounds:?}"
+    );
+    assert!(
+        footer.bottom() <= popover.bottom(),
+        "{footer:?} {popover:?}"
+    );
+    assert!(footer.top() >= popover.top(), "{footer:?} {popover:?}");
+}
+
+/// Places one Pane in a short slot at the top or bottom of a tall window, as in a stack of Panes.
+struct ShortPaneRoot {
+    pane: Entity<TerminalPane>,
+    at_bottom: bool,
+}
+
+impl Render for ShortPaneRoot {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let slot = div()
+            .h(px(90.0))
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .child(self.pane.clone());
+        let filler = div().flex_1();
+        let root = div().size_full().flex().flex_col();
+        if self.at_bottom {
+            root.child(filler).child(slot)
+        } else {
+            root.child(slot).child(filler)
+        }
+    }
+}
+
+#[gpui::test]
+fn repository_status_popover_should_extend_past_a_short_pane_within_the_window(
+    cx: &mut TestAppContext,
+) {
+    let (pane, cx, _) = connected_terminal_pane(cx);
+    cx.simulate_resize(gpui::size(px(760.0), px(480.0)));
+    cx.update(|window, cx| {
+        window.replace_root(cx, |_, _| ShortPaneRoot {
+            pane: pane.clone(),
+            at_bottom: false,
+        });
+    });
+    cx.run_until_parked();
+    open_crowded_repository_popover(&pane, cx);
+
+    let pane_bounds = cx.debug_bounds("terminal-pane").unwrap();
+    let popover = cx.debug_bounds("repository-status-popover").unwrap();
+    let footer = cx.debug_bounds("repository-status-popover-footer").unwrap();
+    let window = cx.update(|window, _| window.viewport_size());
+    assert!(pane_bounds.size.height <= px(90.0), "{pane_bounds:?}");
+    // The popover hangs from the Pane's top and is taller than the Pane, not squeezed into it.
+    assert!(
+        popover.top() > pane_bounds.top(),
+        "{popover:?} {pane_bounds:?}"
+    );
+    assert!(
+        popover.bottom() > pane_bounds.bottom(),
+        "{popover:?} {pane_bounds:?}"
+    );
+    assert!(popover.bottom() <= window.height, "{popover:?} {window:?}");
+    assert!(
+        footer.bottom() <= popover.bottom() && footer.top() >= popover.top(),
+        "{footer:?} {popover:?}"
+    );
+}
+
+#[gpui::test]
+fn repository_status_popover_should_open_upward_rather_than_cover_find_in_a_bottom_pane(
+    cx: &mut TestAppContext,
+) {
+    let (pane, cx, _) = connected_terminal_pane(cx);
+    cx.simulate_resize(gpui::size(px(760.0), px(480.0)));
+    cx.update(|window, cx| {
+        window.replace_root(cx, |_, _| ShortPaneRoot {
+            pane: pane.clone(),
+            at_bottom: true,
+        });
+        pane.update(cx, |pane, cx| pane.open_find(&OpenTerminalFind, window, cx));
+    });
+    cx.run_until_parked();
+    open_crowded_repository_popover(&pane, cx);
+
+    let pane_bounds = cx.debug_bounds("terminal-pane").unwrap();
+    let find = cx.debug_bounds("terminal-find-bar").unwrap();
+    let popover = cx.debug_bounds("repository-status-popover").unwrap();
+    assert!(
+        popover.intersect(&find).size.height <= px(0.0),
+        "{popover:?} {find:?}"
+    );
+    assert!(
+        popover.bottom() <= pane_bounds.top(),
+        "{popover:?} {pane_bounds:?}"
+    );
+    assert!(popover.top() >= px(0.0), "{popover:?}");
+    let footer = cx.debug_bounds("repository-status-popover-footer").unwrap();
+    assert!(
+        footer.bottom() <= popover.bottom() && footer.top() >= popover.top(),
+        "{footer:?} {popover:?}"
+    );
+}
+
+#[gpui::test]
+fn scrolling_the_repository_status_popover_should_not_scroll_the_terminal(cx: &mut TestAppContext) {
+    let (pane, cx, records) = connected_terminal_pane(cx);
+    cx.simulate_resize(gpui::size(px(640.0), px(160.0)));
+    open_crowded_repository_popover(&pane, cx);
+    let popover = cx.debug_bounds("repository-status-popover").unwrap();
+
+    cx.simulate_mouse_move(popover.center(), None, Modifiers::none());
+    cx.simulate_event(ScrollWheelEvent {
+        position: popover.center(),
+        delta: ScrollDelta::Lines(point(0.0, -3.0)),
+        modifiers: Modifiers::none(),
+        touch_phase: gpui::TouchPhase::Moved,
+    });
+    cx.run_until_parked();
+
+    assert!(
+        !records
+            .commands()
+            .iter()
+            .any(|call| matches!(call.command, RecordedCommand::Wheel(_)))
+    );
+    assert!(pane.read_with(cx, |pane, _| pane.repository_popover_open()));
+}
+
+#[gpui::test]
+fn repository_status_popover_holds_input_until_escape_returns_it(cx: &mut TestAppContext) {
+    use crate::repository_status::{
+        ChangeState, ChangeSummary, ChangeTotal, Freshness, RepositoryHead, RepositoryKey,
+        RepositoryMachine, RepositoryRoot, RepositoryStatus, RepositoryView,
+    };
+    use crate::ui::ShowRepositoryStatus;
+
+    let (pane, cx, records) = connected_terminal_pane(cx);
+    cx.dispatch_action(ShowRepositoryStatus);
+    cx.run_until_parked();
+    assert!(
+        !pane.read_with(cx, |pane, _| pane.repository_popover_open()),
+        "a Pane outside a repository has no popover"
+    );
+
+    let status = RepositoryStatus {
+        key: RepositoryKey {
+            machine: RepositoryMachine::Local,
+            root: RepositoryRoot::Local(PathBuf::from("/Users/tester/Projects/tool")),
+        },
+        head: RepositoryHead::Branch("main".into()),
+        commit: Some("a1b2c3d".into()),
+        upstream: None,
+        operation: None,
+        changes: ChangeState::Known(ChangeSummary {
+            total: ChangeTotal::Exact(2),
+            modified: 2,
+            ..ChangeSummary::default()
+        }),
+        freshness: Freshness::Current,
+        read_at: std::time::Instant::now(),
+        pull_request: None,
+        read_failure: None,
+    };
+    pane.update(cx, |pane, cx| {
+        pane.present_repository_view(RepositoryView::Repository(Arc::new(status)), cx);
+    });
+    let command_count = records.commands().len();
+    cx.dispatch_action(ShowRepositoryStatus);
+    cx.run_until_parked();
+
+    assert!(pane.read_with(cx, |pane, _| pane.repository_popover_open()));
+    assert!(cx.debug_bounds("repository-status-popover").is_some());
+    assert!(cx.update(|window, app| {
+        pane.read_with(app, |pane, _| !pane.focus_handle.is_focused(window))
+    }));
+    cx.simulate_keystrokes("a");
+    cx.run_until_parked();
+    assert!(
+        !records
+            .commands()
+            .into_iter()
+            .skip(command_count)
+            .any(|call| matches!(call.command, RecordedCommand::Key(_))),
+        "the popover keeps keys from the terminal"
+    );
+
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(!pane.read_with(cx, |pane, _| pane.repository_popover_open()));
+    assert!(cx.debug_bounds("repository-status-popover").is_none());
+    assert!(cx.update(|window, app| {
+        pane.read_with(app, |pane, _| pane.focus_handle.is_focused(window))
+    }));
+}
+
+#[gpui::test]
+fn hiding_repository_status_under_an_open_popover_should_return_input_to_the_terminal(
+    cx: &mut TestAppContext,
+) {
+    use crate::repository_status::{
+        ChangeState, Freshness, RepositoryHead, RepositoryKey, RepositoryMachine, RepositoryRoot,
+        RepositoryStatus, RepositoryView,
+    };
+    use crate::ui::ShowRepositoryStatus;
+
+    let (pane, cx, records) = connected_terminal_pane(cx);
+    let status = RepositoryStatus {
+        key: RepositoryKey {
+            machine: RepositoryMachine::Local,
+            root: RepositoryRoot::Local(PathBuf::from("/Users/tester/Projects/tool")),
+        },
+        head: RepositoryHead::Branch("main".into()),
+        commit: Some("a1b2c3d".into()),
+        upstream: None,
+        operation: None,
+        changes: ChangeState::NotCounted,
+        freshness: Freshness::Current,
+        read_at: std::time::Instant::now(),
+        pull_request: None,
+        read_failure: None,
+    };
+    pane.update(cx, |pane, cx| {
+        pane.present_repository_view(RepositoryView::Repository(Arc::new(status)), cx);
+    });
+    cx.dispatch_action(ShowRepositoryStatus);
+    cx.run_until_parked();
+    assert!(pane.read_with(cx, |pane, _| pane.repository_popover_open()));
+
+    // Settings turns Repository Status off while its own window is in front.
+    cx.deactivate_window();
+    pane.update(cx, |pane, cx| {
+        pane.present_repository_view(RepositoryView::Hidden, cx);
+    });
+    cx.run_until_parked();
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+
+    assert!(!pane.read_with(cx, |pane, _| pane.repository_popover_open()));
+    assert!(cx.update(|window, app| {
+        pane.read_with(app, |pane, _| pane.focus_handle.is_focused(window))
+    }));
+    let command_count = records.commands().len();
+    cx.simulate_keystrokes("a");
+    cx.run_until_parked();
+    assert!(
+        records
+            .commands()
+            .into_iter()
+            .skip(command_count)
+            .any(|call| matches!(call.command, RecordedCommand::Key(_))),
+        "typing reaches the terminal again"
+    );
+}
+
+#[gpui::test]
+fn repository_status_popover_should_stay_open_while_another_window_is_in_front(
+    cx: &mut TestAppContext,
+) {
+    use crate::repository_status::{
+        ChangeState, Freshness, RepositoryHead, RepositoryKey, RepositoryMachine, RepositoryRoot,
+        RepositoryStatus, RepositoryView,
+    };
+    use crate::ui::ShowRepositoryStatus;
+
+    let (pane, cx, _) = connected_terminal_pane(cx);
+    let status = RepositoryStatus {
+        key: RepositoryKey {
+            machine: RepositoryMachine::Local,
+            root: RepositoryRoot::Local(PathBuf::from("/Users/tester/Projects/tool")),
+        },
+        head: RepositoryHead::Branch("main".into()),
+        commit: Some("a1b2c3d".into()),
+        upstream: None,
+        operation: None,
+        changes: ChangeState::NotCounted,
+        freshness: Freshness::Current,
+        read_at: std::time::Instant::now(),
+        pull_request: None,
+        read_failure: None,
+    };
+    pane.update(cx, |pane, cx| {
+        pane.present_repository_view(RepositoryView::Repository(Arc::new(status)), cx);
+    });
+    cx.dispatch_action(ShowRepositoryStatus);
+    cx.run_until_parked();
+
+    cx.deactivate_window();
+    cx.run_until_parked();
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    assert!(pane.read_with(cx, |pane, _| pane.repository_popover_open()));
+
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(!pane.read_with(cx, |pane, _| pane.repository_popover_open()));
+    assert!(cx.update(|window, app| {
+        pane.read_with(app, |pane, _| pane.focus_handle.is_focused(window))
+    }));
+}
+
 #[gpui::test]
 fn terminal_find_submit_navigates_and_escape_cancels(cx: &mut TestAppContext) {
     let (pane, cx, records) = connected_terminal_pane(cx);

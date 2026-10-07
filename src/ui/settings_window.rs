@@ -5,6 +5,7 @@ mod advanced;
 mod catalog;
 mod clipboard;
 mod editor;
+mod git;
 mod import;
 mod keybindings;
 mod microphone;
@@ -329,6 +330,7 @@ enum RowReset {
     Appearance(ResetTarget),
     Update,
     Clipboard,
+    Git,
     Shortcut(crate::keybindings::Command),
 }
 
@@ -458,6 +460,11 @@ impl SettingsWindow {
                 cx.notify();
             },
         )
+        .detach();
+        // Tool discovery and the GitHub CLI login check finish after this window opens.
+        cx.observe_global::<crate::ui::repository_status_store::RepositoryTools>(|_, cx| {
+            cx.notify()
+        })
         .detach();
         // Authorization can change in System Settings while this window is in the background.
         // Leaving the window also ends searching by Shortcut, so chords pressed on return are not
@@ -702,6 +709,9 @@ impl SettingsWindow {
         if let Some(differs) = self.clipboard_preference_differs(row) {
             return differs.then_some(RowReset::Clipboard);
         }
+        if let Some(differs) = self.git_preference_differs(row) {
+            return differs.then_some(RowReset::Git);
+        }
         if matches!(row, SettingsRowId::Opacity | SettingsRowId::Blur)
             && !self.window_background(cx).adjustable()
         {
@@ -743,6 +753,7 @@ impl SettingsWindow {
                         RowReset::Appearance(target) => settings.editor.reset(target, cx),
                         RowReset::Update => settings.reset_update_preference(row, cx),
                         RowReset::Clipboard => settings.reset_clipboard_preference(row, cx),
+                        RowReset::Git => settings.reset_git_preference(row, cx),
                         RowReset::Shortcut(command) => settings.reset_shortcut(command, cx),
                     });
                 },
@@ -873,6 +884,7 @@ impl SettingsWindow {
                     SettingsSectionId::Themes => IconName::Palette,
                     SettingsSectionId::Keybindings => IconName::Keyboard,
                     SettingsSectionId::Privacy => IconName::Shield,
+                    SettingsSectionId::Git => IconName::GitBranch,
                     SettingsSectionId::Updates => IconName::Download,
                     SettingsSectionId::Advanced => IconName::Cog,
                 },
@@ -999,18 +1011,18 @@ impl SettingsWindow {
         } else {
             (None, None)
         };
-        // Rows keep catalog order, so one run of neighbouring rows sharing a group title is one
-        // card. A filtered view groups whatever survived the filter the same way.
+        // Each group title is one card. A search orders rows by how well they match, which can
+        // split a group's rows apart, so a later row joins the card its group already has.
         let mut groups: Vec<(&'static str, Vec<SettingsRowId>, Vec<AnyElement>)> = Vec::new();
         for row in rows {
             let title = row.descriptor().group;
             let rendered = self.render_row(row, appearance, window, cx);
-            match groups.last_mut() {
-                Some((current, ids, members)) if *current == title => {
+            match groups.iter_mut().find(|(current, _, _)| *current == title) {
+                Some((_, ids, members)) => {
                     ids.push(row);
                     members.push(rendered);
                 }
-                _ => groups.push((title, vec![row], vec![rendered])),
+                None => groups.push((title, vec![row], vec![rendered])),
             }
         }
         self.row_bounds.borrow_mut().clear();
@@ -1159,6 +1171,12 @@ impl SettingsWindow {
             }
             SettingsRowId::ClipboardWrites | SettingsRowId::ClipboardReads => {
                 self.render_clipboard_preference(row, cx)
+            }
+            SettingsRowId::ShowRepositoryStatus | SettingsRowId::ShowPullRequests => {
+                self.render_git_preference(row, cx)
+            }
+            SettingsRowId::GitTool | SettingsRowId::GitHubCli => {
+                self.render_git_tool(row, appearance, cx)
             }
             SettingsRowId::UpdateStatus => self.render_update_status(cx),
             SettingsRowId::AutomaticUpdateDownloads => self.render_automatic_update_downloads(cx),
@@ -2068,6 +2086,15 @@ impl SettingsWindow {
             SettingsRowId::ClipboardReads => Some(
                 "Programs in the focused pane can retrieve your clipboard text, including programs on remote machines.",
             ),
+            SettingsRowId::ShowRepositoryStatus => Some(
+                "Show the branch and changes in each pane's caption, and the branch on each sidebar row.",
+            ),
+            SettingsRowId::ShowPullRequests => Some(
+                "Show a branch's open pull request in the sidebar and the Repository Status popover.",
+            ),
+            SettingsRowId::GitTool | SettingsRowId::GitHubCli => {
+                Some(self.git_tool_presentation(row, cx).explanation)
+            }
             SettingsRowId::ExportSettings => {
                 Some("Save every setting, keyboard shortcut, and installed theme to a file.")
             }

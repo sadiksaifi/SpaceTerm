@@ -101,8 +101,8 @@ pub(super) struct WorkspaceRowViewModel {
     pub(super) pinned: bool,
     pub(super) remote_connection_phase: Option<RemoteConnectionPhase>,
     pub(super) available: bool,
-    pub(super) tab_count: usize,
-    pub(super) pane_count: usize,
+    /// The branch or Pull Request that ends line 2, after the directory.
+    pub(super) repository: Option<crate::repository_status::presentation::SidebarBadge>,
     pub(super) active: bool,
 }
 

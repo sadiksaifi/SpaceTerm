@@ -4487,3 +4487,43 @@ fn floating_standard_and_bare_inputs_resolve_against_their_actual_backgrounds() 
         );
     }
 }
+
+#[test]
+fn an_inactive_window_should_keep_its_captions_subdued() {
+    use crate::appearance::*;
+
+    for appearance in [Appearance::Light, Appearance::Dark] {
+        let resolved = ThemeCatalog::default()
+            .resolve(
+                AppearanceGeneration::INITIAL,
+                &AppearancePreferences {
+                    mode: if appearance == Appearance::Light {
+                        AppearanceMode::Light
+                    } else {
+                        AppearanceMode::Dark
+                    },
+                    ..AppearancePreferences::default()
+                },
+                SystemAppearance::available(appearance)
+                    .with_composition(CompositionCapabilities::new(true, true)),
+                &AvailableFonts::default(),
+            )
+            .unwrap();
+        let inactive = ChromeAppearance::prepare_for_activity(&resolved.chrome, false);
+        let surface = inactive.colors.background;
+        for focused in [true, false] {
+            let paint = inactive.colors.caption(surface, focused);
+            for color in [paint.foreground, paint.secondary] {
+                assert!(
+                    color.contrast_ratio(surface) >= 4.5,
+                    "{appearance:?} focused={focused} {color:?}"
+                );
+                // A muted tone that misses the floor moves only as far as it must.
+                assert!(
+                    color != Color::BLACK && color != Color::WHITE,
+                    "{appearance:?} focused={focused} {color:?}"
+                );
+            }
+        }
+    }
+}

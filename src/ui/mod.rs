@@ -19,6 +19,7 @@ pub(crate) mod permission_setup;
 mod remote_child_launch;
 pub(crate) mod remote_workspace_flow;
 mod render_lifecycle;
+pub(crate) mod repository_status_store;
 mod selection_chip;
 pub(crate) mod settings_file;
 pub(crate) mod settings_recovery;
@@ -108,6 +109,7 @@ actions!(
         FocusPreviousPane,
         FocusNextPane,
         TogglePaneZoom,
+        ShowRepositoryStatus,
         CreateTab,
         ActivateTab1,
         ActivateTab2,

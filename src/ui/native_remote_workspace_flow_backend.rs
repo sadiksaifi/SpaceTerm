@@ -39,7 +39,8 @@ use crate::ssh::process::{
     SshProcessSupervisor,
 };
 use crate::ssh::remote_directory_provider::SshRemoteDirectoryProvider;
-use crate::ssh::remote_utility::SshRemoteUtilityProcessRunner;
+use crate::ssh::remote_repository_provider::SshRemoteRepositoryProvider;
+use crate::ssh::remote_utility::{SshRemoteUtilityClient, SshRemoteUtilityProcessRunner};
 use crate::ssh::startup_environment::StartupSshEnvironment;
 use crate::terminal::{
     TerminalSessionChannelProvider, TerminalSessionChannelRevalidationError,
@@ -341,13 +342,19 @@ impl<A: SshProcessAdapter> RemoteWorkspaceFlowBackend for NativeRemoteWorkspaceF
                 process_adapter,
                 environment,
             ));
+            // Directory listings and repository reads share one utility session limit.
+            let utility_client = Arc::new(SshRemoteUtilityClient::new(
+                utility_command,
+                utility_runner,
+                cancellation.clone(),
+            ));
             let provider: Arc<dyn RemoteDirectoryProvider + Send + Sync> =
-                Arc::new(SshRemoteDirectoryProvider::new(
-                    utility_command,
-                    utility_runner,
-                    cancellation.clone(),
+                Arc::new(SshRemoteDirectoryProvider::with_client(
+                    Arc::clone(&utility_client),
                     executor.clone(),
                 ));
+            let repository_reader: Arc<dyn crate::repository_status::RemoteRepositoryReader> =
+                Arc::new(SshRemoteRepositoryProvider::new(utility_client));
             let control: Arc<Mutex<Option<Box<dyn NativeControlConnectionControl>>>> =
                 Arc::new(Mutex::new(Some(Box::new(connection))));
             let resources = Arc::new(NativeControlConnectionResources {
@@ -364,7 +371,8 @@ impl<A: SshProcessAdapter> RemoteWorkspaceFlowBackend for NativeRemoteWorkspaceF
                 lifecycle: Some(lifecycle),
                 utility: Arc::clone(&provider),
             };
-            Ok(ConnectedControlConnection::new(Box::new(owner), provider))
+            Ok(ConnectedControlConnection::new(Box::new(owner), provider)
+                .with_repository_reader(repository_reader))
         })
     }
 }

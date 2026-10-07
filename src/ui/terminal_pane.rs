@@ -1,4 +1,5 @@
 mod report;
+mod repository;
 
 use super::pane_lifecycle::PaneLifecycleDependencies;
 use super::terminal_focus::TerminalFocusBlocker;
@@ -467,6 +468,7 @@ impl PaneTerminalSessionLifecycle {
                         if presentation_changed {
                             cx.emit(TerminalPaneEvent::CaptionChanged);
                         }
+                        this.sync_repository_status(cx);
                         changed |= presentation_changed;
                         if changed && this.render_lifecycle.can_present() {
                             cx.notify();
@@ -658,6 +660,7 @@ pub(crate) struct TerminalPane {
     _attention_task: Option<Task<()>>,
     visibility_source: Option<Box<dyn WindowVisibilitySource>>,
     _visibility_task: Option<Task<()>>,
+    repository_status: repository::PaneRepositoryStatus,
 }
 
 impl TerminalPane {
@@ -758,6 +761,7 @@ impl TerminalPane {
         let fallback_render_cache = cx.new(|_| TerminalGridCache::new());
         let graphics_cache = cx.new(|_| TerminalGraphicsCache::default());
         cx.on_release(|pane, cx| {
+            pane.release_repository_status(cx);
             pane.close();
             pane.graphics_cache.update(cx, |cache, cx| cache.clear(cx));
         })
@@ -958,6 +962,7 @@ impl TerminalPane {
             _attention_task: None,
             visibility_source,
             _visibility_task: Some(visibility_task),
+            repository_status: repository::PaneRepositoryStatus::default(),
         }
     }
 
@@ -1038,6 +1043,7 @@ impl TerminalPane {
         if native_service_blocked {
             self.apply_terminal_input_focus(false);
         }
+        self.sync_repository_status(cx);
         true
     }
 
@@ -1474,6 +1480,10 @@ impl TerminalPane {
                 metadata,
                 self.terminal_session_available(),
             ),
+            repository: crate::repository_status::presentation::RepositoryCaption::from_view(
+                self.repository_view(),
+                std::time::Instant::now(),
+            ),
         }
     }
 
@@ -1598,6 +1608,7 @@ impl TerminalPane {
         if was_available != self.terminal_session_available() {
             cx.emit(TerminalPaneEvent::CaptionChanged);
         }
+        self.sync_repository_status(cx);
         cx.notify();
     }
 
@@ -1674,6 +1685,7 @@ impl TerminalPane {
             self.start_session(geometry, cx);
         }
         let _ = self.sync_terminal_input_focus(window, cx);
+        self.sync_repository_status(cx);
         cx.emit(TerminalPaneEvent::CaptionChanged);
         cx.notify();
         Ok(())
@@ -4470,6 +4482,7 @@ impl Render for TerminalPane {
             .filter(|snapshot| snapshot.generation == self.find_generation)
             .map_or_else(|| Arc::from([]), |snapshot| snapshot.visible_spans.clone());
         let find_bar = self.render_find_bar(window, cx);
+        let repository_popover = self.render_repository_popover(window, cx);
         // Every Pane-local surface below covers terminal cells. A panel that takes input is a
         // Notice; the hovered-link preview only reports, so it is the quieter Readout.
         let notice_shell = floating_shell(FloatingRole::Notice, cx);
@@ -4703,6 +4716,7 @@ impl Render for TerminalPane {
             .on_action(cx.listener(Self::find_next))
             .on_action(cx.listener(Self::find_previous))
             .on_action(cx.listener(Self::close_find))
+            .on_action(cx.listener(Self::show_repository_status))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_key_up(cx.listener(Self::on_key_up))
             .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
@@ -4718,6 +4732,7 @@ impl Render for TerminalPane {
             .child(terminal_grid)
             .child(scrollbar)
             .when_some(find_bar, |root, find_bar| root.child(find_bar))
+            .when_some(repository_popover, |root, popover| root.child(popover))
             .when(attention_visual, |root| {
                 root.child(
                     div()
@@ -5086,6 +5101,8 @@ pub(crate) struct PaneCaptionFacts {
     pub(crate) glyph: Option<SharedString>,
     pub(crate) running: bool,
     pub(crate) progress: super::terminal_status::TerminalProgress,
+    /// The Pane's Repository Status, or `None` when it shows none.
+    pub(crate) repository: Option<crate::repository_status::presentation::RepositoryCaption>,
 }
 
 /// The account and machine one Pane runs on. `remote` is the Local or Remote classification, never

@@ -151,6 +151,10 @@ fn compose(
             super::launch_host::running_executable(),
         ),
     ));
+    let repository_status = super::repository_status_host::repository_status_adapters(
+        &startup.home_directory,
+        Arc::new(super::macos_repository_tools::MacosRepositoryToolDiscovery::new()),
+    );
     HostComposition::new(HostCompositionParts {
         profile: desktop_profile(Rc::new(super::macos_locale::ApplicationLocale))?,
         home_directory: startup.home_directory,
@@ -201,6 +205,7 @@ fn compose(
                 as Arc<dyn crate::platform::setup_guide_host::SetupGuideHost>),
             theme_registry: Some(Arc::new(super::https_transport::HttpsTransport::new())),
             remote_workspace,
+            repository_status: Some(repository_status),
         },
         services: Some(Rc::new(super::macos_services::NativeServicesRegistration)),
         window_movement: Rc::new(super::macos_window_drag::WindowMovementFactory),

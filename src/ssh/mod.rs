@@ -12,6 +12,7 @@ pub(crate) mod managed_hosts;
 pub(crate) mod process;
 pub(crate) mod remote_account;
 pub(crate) mod remote_directory_provider;
+pub(crate) mod remote_repository_provider;
 pub(crate) mod remote_utility;
 pub(crate) mod startup_environment;
 

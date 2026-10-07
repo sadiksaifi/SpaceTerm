@@ -50,6 +50,12 @@ impl HoverFade {
         self.state.read(cx).transition.hovered
     }
 
+    /// Whether the latest hover change came from the layout moving under a still pointer, which
+    /// applies at once, rather than from the pointer moving.
+    pub fn moved_by_layout(&self, cx: &App) -> bool {
+        self.state.read(cx).moved_by_layout
+    }
+
     /// The invisible element that follows the pointer over the region.
     ///
     /// It never blocks the pointer, so the region's own controls keep their hit testing.
@@ -69,7 +75,7 @@ impl HoverFade {
                     let state = state.clone();
                     window.on_next_frame(move |_, cx| {
                         let measured = state.read(cx).measured;
-                        set_hovered(&state, measured, cx);
+                        set_hovered(&state, measured, HoverCause::Layout, cx);
                     });
                 }
                 let move_state = state.clone();
@@ -77,14 +83,14 @@ impl HoverFade {
                     if phase.capture() {
                         set_pointer_outside(window, false, cx);
                         let hovered = pointer_over(&hitbox, window, cx);
-                        set_hovered(&move_state, hovered, cx);
+                        set_hovered(&move_state, hovered, HoverCause::Pointer, cx);
                     }
                 });
                 let exit_state = state.clone();
                 window.on_mouse_event(move |_: &MouseExitEvent, phase, window, cx| {
                     if phase.capture() {
                         set_pointer_outside(window, true, cx);
-                        set_hovered(&exit_state, false, cx);
+                        set_hovered(&exit_state, false, HoverCause::Pointer, cx);
                     }
                 });
             },
@@ -92,6 +98,41 @@ impl HoverFade {
         .absolute()
         .inset_0()
     }
+}
+
+/// How far a flag has eased toward on, from 0 off to 1 on, such as controls that show while their
+/// Pane has focus.
+///
+/// Call it every render with a key unique in the window. The first render takes the flag's value
+/// at once; each later change eases like a hover unless `animate` is false. Frames continue until
+/// the transition settles.
+pub fn eased_flag(
+    key: impl Into<ElementId>,
+    on: bool,
+    animate: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> f32 {
+    let now = cx.background_executor().now();
+    let motion = if animate {
+        crate::control_motion(cx)
+    } else {
+        ControlMotion::Reduced
+    };
+    let state = window.use_keyed_state(key, cx, |_, _| HoverTransition {
+        hovered: on,
+        from: 0.0,
+        since: None,
+    });
+    let transition = state.update(cx, |transition, _| {
+        transition.set_hovered(on, now, motion);
+        *transition
+    });
+    let raw = transition.raw(now);
+    if raw != transition.target() {
+        window.request_animation_frame();
+    }
+    ease(raw)
 }
 
 /// Finishes every hover transition in progress, since test windows have no frame loop.
@@ -139,13 +180,30 @@ struct PointerOutside {
 
 impl Global for PointerOutside {}
 
-/// Measures the pointer over the region and starts the transition toward it.
-fn set_hovered(state: &Entity<HoverRegion>, hovered: bool, cx: &mut App) {
+/// What moved the pointer relative to a region.
+#[derive(Clone, Copy, PartialEq)]
+enum HoverCause {
+    /// The pointer moved or left the window.
+    Pointer,
+    /// The layout moved the region under a still pointer.
+    Layout,
+}
+
+/// Measures the pointer over the region and starts the transition toward it. A region the layout
+/// moved under a still pointer takes its new hover at once, like the layout change itself.
+fn set_hovered(state: &Entity<HoverRegion>, hovered: bool, cause: HoverCause, cx: &mut App) {
     let now = cx.background_executor().now();
-    let motion = crate::control_motion(cx);
+    let motion = match cause {
+        HoverCause::Pointer => crate::control_motion(cx),
+        HoverCause::Layout => ControlMotion::Reduced,
+    };
     state.update(cx, |region, cx| {
         region.measured = hovered;
-        if region.transition.set_hovered(hovered, now, motion) {
+        let changed = region.transition.set_hovered(hovered, now, motion);
+        if changed || cause == HoverCause::Pointer {
+            region.moved_by_layout = changed && cause == HoverCause::Layout;
+        }
+        if changed {
             cx.notify();
         }
     });
@@ -157,6 +215,8 @@ struct HoverRegion {
     /// Whether the pointer was over the region at the latest paint or pointer event.
     measured: bool,
     transition: HoverTransition,
+    /// Whether the layout, not the pointer, made the latest hover change.
+    moved_by_layout: bool,
 }
 
 /// Paints a resting color partway to its hovered color.
