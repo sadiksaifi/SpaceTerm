@@ -2,6 +2,8 @@
 
 A native desktop terminal multiplexer for macOS and Linux, coming soon for Windows.
 
+![SpaceTerm Screenshot](https://github.com/user-attachments/assets/5e1d29d7-0450-4984-b485-3c9f45fef473)
+
 ## Highlights
 
 - **Workspaces** for local and remote terminal work
