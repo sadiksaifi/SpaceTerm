@@ -1806,7 +1806,8 @@ impl TabView {
     ///
     /// The Focused Pane always shows its caption controls. Another Pane shows them under the
     /// pointer while the window is active. A reveal that changes with the Pane layout, such as
-    /// focus moving to a new split, takes effect with the layout instead of easing after it.
+    /// focus moving to a new split or a Pane leaving the pointer, takes effect with the layout
+    /// instead of easing after it.
     fn pane_hovers(
         &mut self,
         window_active: bool,
@@ -1824,7 +1825,7 @@ impl TabView {
                 let reveal = spaceterm_ui::eased_flag(
                     ("pane-controls-reveal", pane_id.get()),
                     revealed,
-                    animate,
+                    animate && !fade.moved_by_layout(cx),
                     window,
                     cx,
                 );
@@ -5062,6 +5063,55 @@ mod tests {
         let segment = cx.debug_bounds("pane-repository-1").unwrap();
         let controls = cx.debug_bounds("pane-controls-1-full").unwrap();
         assert!((segment.right() - controls.right()).abs() < px(0.5));
+    }
+
+    #[gpui::test]
+    fn a_caption_button_split_should_place_the_controls_it_moves_from_under_the_pointer_at_once(
+        cx: &mut TestAppContext,
+    ) {
+        let (_, view, _, cx) = caption_view(cx);
+        view.update(cx, |view, cx| {
+            view.pane_captions
+                .entry(PaneId::new(1))
+                .or_default()
+                .repository = Some(RepositoryCaption {
+                glyph: HeadGlyph::Branch,
+                branch: "main".into(),
+                mark: None,
+                detail: None,
+                divergence: None,
+                dimmed: false,
+                accessible_label: "Repository Status, main".into(),
+            });
+            cx.notify();
+        });
+        crate::ui::settle_hover(cx);
+        // The pointer rests on the Pane's trailing caption control, as after clicking Split.
+        let controls = cx.debug_bounds("pane-controls-1-full").unwrap();
+        let pointer = gpui::point(controls.right() - px(4.0), controls.center().y);
+        cx.simulate_mouse_move(pointer, None, gpui::Modifiers::none());
+        crate::ui::settle_hover(cx);
+
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.split_focused(SplitAxis::Horizontal, window, cx);
+            });
+        });
+        // The narrower Pane leaves the still pointer; its hover catches up one frame later.
+        cx.run_until_parked();
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        let placed = (
+            cx.debug_bounds("pane-repository-1").unwrap(),
+            cx.debug_bounds("pane-controls-1-full").unwrap(),
+        );
+
+        crate::ui::settle_hover(cx);
+        let settled = (
+            cx.debug_bounds("pane-repository-1").unwrap(),
+            cx.debug_bounds("pane-controls-1-full").unwrap(),
+        );
+        assert_eq!(placed, settled);
     }
 
     #[test]
