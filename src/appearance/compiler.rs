@@ -567,6 +567,15 @@ fn contrast(foreground: Color, background: Color, minimum: f64) -> Color {
     }
 }
 
+/// The readable color nearest `foreground`, keeping its hue, so a muted tone that misses the
+/// minimum on `background` darkens or lightens only as far as it must instead of becoming black
+/// or white.
+fn nearest_readable(foreground: Color, background: Color, minimum: f64) -> Color {
+    foreground
+        .readable_preserving_chroma(&[background], minimum)
+        .unwrap_or_else(|| contrast(foreground, background, minimum))
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct SemanticPaint {
     pub(crate) background: Color,
@@ -598,7 +607,7 @@ impl ChromeColors {
     /// It does not mutate the theme. All caption controls share this contextual policy.
     pub(crate) fn caption(&self, surface: Color, focused: bool) -> CaptionPaint {
         let surface = surface.source_over(self.background.with_alpha(255));
-        let foreground = contrast(
+        let foreground = nearest_readable(
             if focused {
                 self.text_secondary
             } else {
@@ -620,14 +629,14 @@ impl ChromeColors {
         CaptionPaint {
             background: surface,
             foreground,
-            secondary: contrast(self.text_muted, surface, 4.5),
+            secondary: nearest_readable(self.text_muted, surface, 4.5),
             icon: foreground,
             focus: contrast(self.border_focused, surface, 3.0),
             attention: contrast(self.warning, surface, 4.5),
             busy: contrast(self.info, surface, 4.5),
             error: contrast(self.error, surface, 4.5),
-            repository_operation: contrast(self.repository_operation, surface, 4.5),
-            repository_changes: contrast(self.repository_changes, surface, 4.5),
+            repository_operation: nearest_readable(self.repository_operation, surface, 4.5),
+            repository_changes: nearest_readable(self.repository_changes, surface, 4.5),
             control: paint(surface, foreground),
             control_hover: paint(surface.mix(foreground, 0.10), foreground),
             control_pressed: paint(surface.mix(foreground, 0.18), foreground),
