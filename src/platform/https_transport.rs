@@ -73,7 +73,11 @@ impl crate::updates::UpdateTransport for HttpsTransport {
             .call()
             .map_err(std::io::Error::other)?;
         Ok(Box::new(
-            response.into_body().into_with_config().limit(limit).reader(),
+            response
+                .into_body()
+                .into_with_config()
+                .limit(limit)
+                .reader(),
         ))
     }
 }

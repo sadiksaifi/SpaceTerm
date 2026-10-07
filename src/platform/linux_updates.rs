@@ -847,8 +847,18 @@ mod tests {
         archive(&[
             ("spaceterm/", tar::EntryType::Directory, b"", 0o755),
             ("spaceterm/bin/", tar::EntryType::Directory, b"", 0o755),
-            ("spaceterm/bin/spaceterm", tar::EntryType::Regular, binary, 0o755),
-            ("spaceterm/share/spaceterm/", tar::EntryType::Directory, b"", 0o755),
+            (
+                "spaceterm/bin/spaceterm",
+                tar::EntryType::Regular,
+                binary,
+                0o755,
+            ),
+            (
+                "spaceterm/share/spaceterm/",
+                tar::EntryType::Directory,
+                b"",
+                0o755,
+            ),
             (
                 "spaceterm/share/spaceterm/notes.txt",
                 tar::EntryType::Regular,
@@ -888,9 +898,19 @@ mod tests {
     #[test]
     fn linux_unpack_should_refuse_entries_outside_the_release_root() {
         for entries in [
-            vec![("spaceterm/../escape", tar::EntryType::Regular, &b"x"[..], 0o644)],
+            vec![(
+                "spaceterm/../escape",
+                tar::EntryType::Regular,
+                &b"x"[..],
+                0o644,
+            )],
             vec![("/etc/escape", tar::EntryType::Regular, &b"x"[..], 0o644)],
-            vec![("other/bin/spaceterm", tar::EntryType::Regular, &b"x"[..], 0o755)],
+            vec![(
+                "other/bin/spaceterm",
+                tar::EntryType::Regular,
+                &b"x"[..],
+                0o755,
+            )],
             vec![("spaceterm/link", tar::EntryType::Symlink, &b""[..], 0o777)],
         ] {
             let directory = Scratch::new();
@@ -1037,7 +1057,9 @@ mod tests {
         let signer = ReleaseSigner::new(3);
         let archive = release(b"new");
         let (shared, receiver) = shared(&fixture, served(&signer, "1.1.0", &archive), signer.key());
-        let generation = shared.begin(Phase::Idle, Phase::Checking, UpdateError::Check).unwrap();
+        let generation = shared
+            .begin(Phase::Idle, Phase::Checking, UpdateError::Check)
+            .unwrap();
         shared.check(generation);
         assert_eq!(
             drained(&receiver),
@@ -1062,7 +1084,9 @@ mod tests {
             served(&signer, "1.0.0", &release(b"same")),
             signer.key(),
         );
-        let generation = shared.begin(Phase::Idle, Phase::Checking, UpdateError::Check).unwrap();
+        let generation = shared
+            .begin(Phase::Idle, Phase::Checking, UpdateError::Check)
+            .unwrap();
         shared.check(generation);
         assert_eq!(drained(&receiver), ["UpToDate", "Finished"]);
     }
@@ -1076,7 +1100,9 @@ mod tests {
             served(&signer, "1.1.0", &release(b"new")),
             ReleaseSigner::new(4).key(),
         );
-        let generation = shared.begin(Phase::Idle, Phase::Checking, UpdateError::Check).unwrap();
+        let generation = shared
+            .begin(Phase::Idle, Phase::Checking, UpdateError::Check)
+            .unwrap();
         shared.check(generation);
         assert_eq!(drained(&receiver), ["Failed(Verification)", "Finished"]);
         assert_eq!(installed_contents(&fixture.installation), "old");
@@ -1092,7 +1118,9 @@ mod tests {
         tampered.resize(transport.0[url].len(), 0);
         transport.0.insert(url.to_owned(), tampered);
         let (shared, receiver) = shared(&fixture, transport, signer.key());
-        let generation = shared.begin(Phase::Idle, Phase::Checking, UpdateError::Check).unwrap();
+        let generation = shared
+            .begin(Phase::Idle, Phase::Checking, UpdateError::Check)
+            .unwrap();
         shared.check(generation);
         let Phase::Available(feed) = std::mem::take(&mut shared.lock().phase) else {
             panic!("the signed feed should verify");
@@ -1102,7 +1130,12 @@ mod tests {
         shared.download(&feed, generation);
         assert_eq!(
             drained(&receiver),
-            ["Downloading", "Verifying", "Failed(Verification)", "Finished"]
+            [
+                "Downloading",
+                "Verifying",
+                "Failed(Verification)",
+                "Finished"
+            ]
         );
         assert!(!fixture.installation.staged_tree().join("bin").exists());
         assert_eq!(installed_contents(&fixture.installation), "old");
@@ -1117,7 +1150,9 @@ mod tests {
             served(&signer, "1.1.0", &release(b"new")),
             signer.key(),
         );
-        let generation = shared.begin(Phase::Idle, Phase::Checking, UpdateError::Check).unwrap();
+        let generation = shared
+            .begin(Phase::Idle, Phase::Checking, UpdateError::Check)
+            .unwrap();
         shared.check(generation);
         let Phase::Available(feed) = std::mem::take(&mut shared.lock().phase) else {
             panic!("the signed release should be available");
@@ -1200,7 +1235,12 @@ mod tests {
         }
 
         fn open(&self, _: &str, _: u64) -> io::Result<Box<dyn Read + Send>> {
-            let gate = self.gate.lock().unwrap().take().ok_or(io::ErrorKind::NotFound)?;
+            let gate = self
+                .gate
+                .lock()
+                .unwrap()
+                .take()
+                .ok_or(io::ErrorKind::NotFound)?;
             Ok(Box::new(Stalled(gate)))
         }
     }

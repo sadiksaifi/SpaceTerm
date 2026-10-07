@@ -55,9 +55,7 @@ pub(crate) struct UpdateKey([u8; 32]);
 impl UpdateKey {
     /// The release identity's bundle template is the one source of the update trust root.
     pub(crate) fn release() -> Option<Self> {
-        Self::from_property_list(include_str!(
-            "../../packaging/macos/spaceterm/Info.plist"
-        ))
+        Self::from_property_list(include_str!("../../packaging/macos/spaceterm/Info.plist"))
     }
 
     fn from_property_list(plist: &str) -> Option<Self> {
@@ -145,10 +143,7 @@ impl ReleaseFeed {
         };
         Ok(Self {
             archive: ReleaseArchive {
-                url: format!(
-                    "{RELEASES}/download/v{}/{}",
-                    document.version, archive.name
-                ),
+                url: format!("{RELEASES}/download/v{}/{}", document.version, archive.name),
                 size: archive.size,
                 sha256,
                 signature,
@@ -187,7 +182,11 @@ fn decode_signature(value: &str) -> Option<[u8; 64]> {
 }
 
 fn decode_sha256(value: &str) -> Option<[u8; 32]> {
-    if value.len() != 64 || !value.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')) {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
         return None;
     }
     let mut digest = [0; 32];
@@ -302,10 +301,7 @@ mod tests {
         let signer = ReleaseSigner::new(7);
         for (platform, published) in [("darwin-arm64", NOW), ("linux-x86_64", NOW + 3600)] {
             let (feed, signature) = signer.feed(platform, "1.2.3", published, b"a");
-            assert_eq!(
-                verified(&feed, &signature),
-                Err(UpdateError::Verification)
-            );
+            assert_eq!(verified(&feed, &signature), Err(UpdateError::Verification));
         }
     }
 
@@ -319,7 +315,8 @@ mod tests {
             Err(UpdateError::Verification)
         );
         assert_eq!(
-            feed.archive.verify(&ReleaseSigner::new(8).key(), b"archive"),
+            feed.archive
+                .verify(&ReleaseSigner::new(8).key(), b"archive"),
             Err(UpdateError::Verification)
         );
     }
