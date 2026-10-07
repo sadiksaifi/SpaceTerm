@@ -77,12 +77,14 @@ fn disabled_content(c: &mut ChromeColors, host: Color, minimum: f64) {
 fn neutral_disabled_fills(c: &mut ChromeColors) {
     c.primary_disabled_background = c.element_disabled;
     c.destructive_disabled_background = c.element_disabled;
-    c.toggle_on_disabled_background = c.element_disabled;
     c.selection_disabled_background = c.element_disabled;
     c.primary_disabled_border = c.element_disabled_border;
     c.destructive_disabled_border = c.element_disabled_border;
-    c.toggle_on_disabled_border = c.element_disabled_border;
     c.selection_disabled_border = c.element_disabled_border;
+    // A disabled switch keeps its track whichever way it is set, since the window background
+    // vanishes on a grouped row. The thumb's side alone carries the value.
+    c.toggle_on_disabled_background = c.toggle_off_disabled_background;
+    c.toggle_on_disabled_border = c.toggle_off_disabled_border;
 }
 
 fn suppress_hover(c: &mut ChromeColors) {
@@ -499,11 +501,27 @@ mod tests {
             for fill in [
                 prepared.primary_disabled_background,
                 prepared.destructive_disabled_background,
-                prepared.toggle_on_disabled_background,
                 prepared.selection_disabled_background,
             ] {
                 assert_eq!(fill, prepared.element_disabled);
             }
+        }
+    }
+
+    #[test]
+    fn a_disabled_switch_should_keep_its_track_whichever_way_it_is_set() {
+        let source = ChromeColors::default();
+        for active in [true, false] {
+            let prepared = policy(active).colors(&source, source.background);
+            assert_eq!(
+                prepared.toggle_on_disabled_background,
+                prepared.toggle_off_disabled_background
+            );
+            assert_eq!(
+                prepared.toggle_on_disabled_border,
+                prepared.toggle_off_disabled_border
+            );
+            assert_ne!(prepared.toggle_on_disabled_background, prepared.background);
         }
     }
 
