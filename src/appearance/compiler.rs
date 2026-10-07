@@ -665,7 +665,11 @@ impl ChromeColors {
 /// Pull Request states resolved for the surface their text currently rests on.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct PullRequestPaint {
+    /// The Pull Request number, a link to the Pull Request in either state.
+    pub(crate) link: Color,
+    /// The Open state label.
     pub(crate) open: Color,
+    /// The Draft state label.
     pub(crate) draft: Color,
 }
 
@@ -675,6 +679,7 @@ impl ChromeColors {
     pub(crate) fn pull_request(&self, surface: Color) -> PullRequestPaint {
         let surface = surface.source_over(self.background.with_alpha(255));
         PullRequestPaint {
+            link: contrast(self.link_text, surface, 4.5),
             open: contrast(self.pull_request_open, surface, 4.5),
             draft: contrast(self.pull_request_draft, surface, 4.5),
         }
@@ -804,6 +809,7 @@ mod tests {
             ] {
                 let paint = colors.pull_request(surface);
                 let surface = surface.source_over(base);
+                assert!(paint.link.contrast_ratio(surface) >= 4.5);
                 assert!(paint.open.contrast_ratio(surface) >= 4.5);
                 assert!(paint.draft.contrast_ratio(surface) >= 4.5);
             }
@@ -812,6 +818,11 @@ mod tests {
             assert_eq!(
                 colors.pull_request(colors.title_bar_background).open,
                 colors.pull_request_open,
+                "{appearance:?}"
+            );
+            assert_eq!(
+                colors.pull_request(colors.title_bar_background).link,
+                colors.link_text,
                 "{appearance:?}"
             );
         }

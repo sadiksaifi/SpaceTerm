@@ -4,7 +4,7 @@ use spaceterm_ui::{Icon, IconName, Tooltip, TooltipTargetVisibility};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::appearance::PullRequestPaint;
-use crate::repository_status::presentation::{PullRequestState, SidebarBadge};
+use crate::repository_status::presentation::SidebarBadge;
 use crate::ui::appearance::ChromeAppearance;
 use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt, TextRole};
@@ -218,15 +218,13 @@ fn render_repository(
             .into_any_element(),
         SidebarBadge::PullRequest {
             text,
-            state,
             url,
             hover,
             accessible_label,
+            ..
         } => {
-            let color = match state {
-                PullRequestState::Open => repository.pull_request_paint.open,
-                PullRequestState::Draft => repository.pull_request_paint.draft,
-            };
+            // The number is a link in either state, as in the popover; the hover names the state.
+            let color = repository.pull_request_paint.link;
             let url = url.clone();
             let number = div()
                 .id(("workspace-row-pull-request", id))
