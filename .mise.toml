@@ -18,7 +18,7 @@ cocogitto = "7.0.0"
 git-cliff = "2.14.2"
 node = "24.21.0"
 zig = "0.16.0"
-"cargo:cargo-packager" = "0.11.8"
+"cargo:cargo-packager" = { version = "0.11.8", os = ["macos"] }
 "cargo:cargo-sweep" = "0.8.0"
 "npm:skills" = "1.7.0"
 "npm:tagsmith" = "1.2.0"

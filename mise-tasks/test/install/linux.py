@@ -279,6 +279,27 @@ shutil.copyfile(source, arguments[arguments.index("--output") + 1])
         self.assertFalse(os.path.lexists(icon))
         self.assertEqual(settings.read_text(), "{}")
 
+    def test_uninstall_refuses_while_an_updated_spaceterm_awaits_relaunch(self):
+        self.installed()
+        self.run_installed()
+        # The updater exchanged the running installation into its staging directory.
+        staging = self.install_dir / ".spaceterm.update"
+        staging.mkdir()
+        self.target.rename(staging / "tree")
+        shutil.copytree(staging / "tree", self.target, symlinks=True)
+        result = self.install("--uninstall")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("quit SpaceTerm", result.stderr)
+        self.assertTrue((staging / "tree/bin/spaceterm").is_file())
+
+    def test_installer_refuses_a_path_desktop_launchers_cannot_run(self):
+        install_dir = self.home / "percent%path"
+        archive = self.release_archive("spaceterm", "0.2.0")
+        result = self.install("--archive", str(archive), SPACETERM_INSTALL_DIR=str(install_dir))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("desktop launchers cannot run", result.stderr)
+        self.assertFalse(install_dir.exists())
+
     def test_uninstall_refuses_while_spaceterm_runs(self):
         self.installed()
         self.run_installed()

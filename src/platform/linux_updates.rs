@@ -13,6 +13,7 @@ use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use super::app_directories::AppDirectoryRoot;
 use super::app_paths::AppPaths;
@@ -36,6 +37,9 @@ const MAX_HISTORY_BYTES: usize = 4096;
 const MAX_UNPACKED_BYTES: u64 = 2 * MAX_ARCHIVE_BYTES;
 const MAX_ARCHIVE_ENTRIES: usize = 4096;
 const DOWNLOAD_CHUNK: usize = 64 * 1024;
+/// How long a download waits for a staging cleanup that holds the installation claim.
+const CLAIM_TIMEOUT: Duration = Duration::from_secs(10);
+const CLAIM_RETRY: Duration = Duration::from_millis(100);
 
 /// The executable a completed update asks the exiting process to become.
 #[derive(Clone, Default)]
@@ -137,18 +141,18 @@ impl UpdateAdapter for LinuxUpdates {
 
     fn check(&self) -> Result<(), UpdateError> {
         let shared = self.shared()?;
-        shared.begin(Phase::Idle, Phase::Checking, UpdateError::Check)?;
-        spawn(shared, |shared| shared.check())
+        let generation = shared.begin(Phase::Idle, Phase::Checking, UpdateError::Check)?;
+        spawn(shared, move |shared| shared.check(generation))
     }
 
     fn download(&self) -> Result<(), UpdateError> {
         let shared = self.shared()?;
-        let feed = {
+        let (feed, generation) = {
             let mut cycle = shared.lock();
             match std::mem::take(&mut cycle.phase) {
                 Phase::Available(feed) => {
                     cycle.phase = Phase::Downloading;
-                    feed
+                    (feed, cycle.generation)
                 }
                 phase => {
                     cycle.phase = phase;
@@ -161,7 +165,7 @@ impl UpdateAdapter for LinuxUpdates {
             shared.fail(UpdateError::ReadOnly);
             return Ok(());
         }
-        spawn(shared, move |shared| shared.download(&feed))
+        spawn(shared, move |shared| shared.download(&feed, generation))
     }
 
     fn install(&self) -> Result<(), UpdateError> {
@@ -212,16 +216,15 @@ impl UpdateAdapter for LinuxUpdates {
             return;
         };
         let mut cycle = shared.lock();
-        match cycle.phase {
-            Phase::Checking | Phase::Downloading => cycle.cancelled = true,
-            Phase::Available(_) | Phase::Ready => {
-                cycle.reset();
-                drop(cycle);
-                shared.discard_staging_in_background();
-                shared.send(UpdateEvent::Finished);
-            }
-            Phase::Idle | Phase::Installed => {}
+        if matches!(cycle.phase, Phase::Idle | Phase::Installed) {
+            return;
         }
+        // A worker still blocked on the network finds its cycle gone when it resumes, so
+        // cancellation and quit never wait for the network.
+        cycle.reset();
+        drop(cycle);
+        shared.discard_staging_in_background();
+        shared.send(UpdateEvent::Finished);
     }
 
     fn load_history(&self) -> UpdateHistory {
@@ -265,12 +268,17 @@ enum Phase {
 #[derive(Default)]
 struct Cycle {
     phase: Phase,
-    cancelled: bool,
+    /// Advances whenever a cycle ends. A worker acts only while its generation is current.
+    generation: u64,
+    /// The installation claim a download holds until its cycle ends or the process exits.
+    claim: Option<File>,
 }
 
 impl Cycle {
     fn reset(&mut self) {
-        *self = Self::default();
+        self.phase = Phase::Idle;
+        self.claim = None;
+        self.generation += 1;
     }
 }
 
@@ -291,14 +299,14 @@ impl Shared {
         self.cycle.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn begin(&self, from: Phase, to: Phase, error: UpdateError) -> Result<(), UpdateError> {
+    /// Moves an idle cycle forward and returns the generation its worker acts for.
+    fn begin(&self, from: Phase, to: Phase, error: UpdateError) -> Result<u64, UpdateError> {
         let mut cycle = self.lock();
         if std::mem::discriminant(&cycle.phase) != std::mem::discriminant(&from) {
             return Err(error);
         }
         cycle.phase = to;
-        cycle.cancelled = false;
-        Ok(())
+        Ok(cycle.generation)
     }
 
     fn send(&self, event: UpdateEvent) {
@@ -310,25 +318,24 @@ impl Shared {
         self.send(UpdateEvent::Finished);
     }
 
-    fn cancelled(&self) -> bool {
-        self.lock().cancelled
+    fn current(&self, generation: u64) -> bool {
+        self.lock().generation == generation
     }
 
-    /// Ends a cancelled cycle. Returns false when the cycle was not cancelled.
-    fn settle_cancellation(&self, cycle: &mut Cycle) -> bool {
-        if !cycle.cancelled {
-            return false;
+    /// Sends a worker's event only while its cycle is current, so nothing follows Finished.
+    fn send_current(&self, generation: u64, event: UpdateEvent) -> Result<(), UpdateError> {
+        let cycle = self.lock();
+        if cycle.generation != generation {
+            return Err(UpdateError::Download);
         }
-        cycle.reset();
-        self.discard_staging_in_background();
-        self.send(UpdateEvent::Finished);
-        true
+        self.send(event);
+        Ok(())
     }
 
-    fn check(&self) {
+    fn check(&self, generation: u64) {
         let result = self.fetch_feed();
         let mut cycle = self.lock();
-        if self.settle_cancellation(&mut cycle) {
+        if cycle.generation != generation {
             return;
         }
         match result {
@@ -377,10 +384,10 @@ impl Shared {
         )
     }
 
-    fn download(&self, feed: &ReleaseFeed) {
-        let result = self.prepare(feed);
+    fn download(&self, feed: &ReleaseFeed, generation: u64) {
+        let result = self.prepare(feed, generation);
         let mut cycle = self.lock();
-        if self.settle_cancellation(&mut cycle) {
+        if cycle.generation != generation {
             return;
         }
         match result {
@@ -399,13 +406,21 @@ impl Shared {
     }
 
     /// Downloads, verifies, and unpacks the archive into the staging directory.
-    fn prepare(&self, feed: &ReleaseFeed) -> Result<(), UpdateError> {
+    fn prepare(&self, feed: &ReleaseFeed, generation: u64) -> Result<(), UpdateError> {
+        let claim = self.claim(generation)?;
+        {
+            let mut cycle = self.lock();
+            if cycle.generation != generation {
+                return Err(UpdateError::Download);
+            }
+            cycle.claim = Some(claim);
+        }
         let installation = &self.installation;
         installation
             .create_staging()
             .map_err(|_| UpdateError::Installation)?;
-        let archive = self.fetch_archive(feed)?;
-        self.send(UpdateEvent::Verifying);
+        let archive = self.fetch_archive(feed, generation)?;
+        self.send_current(generation, UpdateEvent::Verifying)?;
         feed.archive.verify(&self.key, &archive)?;
         unpack(&archive, self.archive_root, &installation.staged_tree())
             .map_err(|_| UpdateError::Verification)?;
@@ -415,7 +430,27 @@ impl Shared {
         Ok(())
     }
 
-    fn fetch_archive(&self, feed: &ReleaseFeed) -> Result<Vec<u8>, UpdateError> {
+    /// Claims the installation, waiting briefly for a staging cleanup that holds the claim.
+    /// Another process's update holds it longer, so this download fails instead of sharing its
+    /// staging directory.
+    fn claim(&self, generation: u64) -> Result<File, UpdateError> {
+        let deadline = Instant::now() + CLAIM_TIMEOUT;
+        loop {
+            match self.installation.claim() {
+                Ok(claim) => return Ok(claim),
+                Err(error)
+                    if error.kind() == io::ErrorKind::WouldBlock
+                        && Instant::now() < deadline
+                        && self.current(generation) =>
+                {
+                    std::thread::sleep(CLAIM_RETRY);
+                }
+                Err(_) => return Err(UpdateError::Installation),
+            }
+        }
+    }
+
+    fn fetch_archive(&self, feed: &ReleaseFeed, generation: u64) -> Result<Vec<u8>, UpdateError> {
         let total = feed.archive.size;
         let mut reader = self
             .transport
@@ -424,12 +459,12 @@ impl Shared {
         let mut archive = Vec::with_capacity(total as usize);
         let mut chunk = vec![0; DOWNLOAD_CHUNK];
         let mut reported = None;
-        self.send(UpdateEvent::Downloading { received: 0, total });
+        self.send_current(generation, UpdateEvent::Downloading { received: 0, total })?;
         loop {
-            if self.cancelled() {
+            let read = reader.read(&mut chunk).map_err(|_| UpdateError::Download)?;
+            if !self.current(generation) {
                 return Err(UpdateError::Download);
             }
-            let read = reader.read(&mut chunk).map_err(|_| UpdateError::Download)?;
             if read == 0 {
                 break;
             }
@@ -442,7 +477,7 @@ impl Shared {
             let percent = received * 100 / total;
             if reported != Some(percent) {
                 reported = Some(percent);
-                self.send(UpdateEvent::Downloading { received, total });
+                self.send_current(generation, UpdateEvent::Downloading { received, total })?;
             }
         }
         if archive.len() as u64 != total {
@@ -457,7 +492,7 @@ impl Shared {
         let _ = std::thread::Builder::new()
             .name("spaceterm-update-cleanup".into())
             .spawn(move || {
-                let _ = installation.discard_staging();
+                let _ = installation.discard_unclaimed_staging();
             });
     }
 }
@@ -508,6 +543,26 @@ impl Installation {
     fn create_staging(&self) -> io::Result<()> {
         self.discard_staging()?;
         fs::DirBuilder::new().mode(0o700).create(&self.staging)
+    }
+
+    /// Claims the installation for one process's update: an advisory lock on the installation
+    /// directory, released when the returned file closes, including at exit and exec.
+    fn claim(&self) -> io::Result<File> {
+        use std::os::fd::AsRawFd as _;
+        let directory = File::open(&self.root)?;
+        // SAFETY: the descriptor is open for the duration of the call.
+        if unsafe { libc::flock(directory.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(directory)
+    }
+
+    /// Discards staging no update owns. While another process's update holds the claim, its
+    /// staging stays. Without the installation directory there is nothing to claim, so a tree an
+    /// interrupted replacement could not restore stays in staging too.
+    fn discard_unclaimed_staging(&self) -> io::Result<()> {
+        let _claim = self.claim()?;
+        self.discard_staging()
     }
 
     fn discard_staging(&self) -> io::Result<()> {
@@ -982,8 +1037,8 @@ mod tests {
         let signer = ReleaseSigner::new(3);
         let archive = release(b"new");
         let (shared, receiver) = shared(&fixture, served(&signer, "1.1.0", &archive), signer.key());
-        shared.begin(Phase::Idle, Phase::Checking, UpdateError::Check).unwrap();
-        shared.check();
+        let generation = shared.begin(Phase::Idle, Phase::Checking, UpdateError::Check).unwrap();
+        shared.check(generation);
         assert_eq!(
             drained(&receiver),
             ["ReleaseMetadata", "Available(\"1.1.0\")"]
@@ -992,7 +1047,7 @@ mod tests {
             panic!("the signed release should be available");
         };
         shared.lock().phase = Phase::Downloading;
-        shared.download(&feed);
+        shared.download(&feed, generation);
         assert_eq!(drained(&receiver), ["Downloading", "Verifying", "Ready"]);
         fixture.installation.replace().unwrap();
         assert_eq!(installed_contents(&fixture.installation), "new");
@@ -1007,8 +1062,8 @@ mod tests {
             served(&signer, "1.0.0", &release(b"same")),
             signer.key(),
         );
-        shared.begin(Phase::Idle, Phase::Checking, UpdateError::Check).unwrap();
-        shared.check();
+        let generation = shared.begin(Phase::Idle, Phase::Checking, UpdateError::Check).unwrap();
+        shared.check(generation);
         assert_eq!(drained(&receiver), ["UpToDate", "Finished"]);
     }
 
@@ -1021,8 +1076,8 @@ mod tests {
             served(&signer, "1.1.0", &release(b"new")),
             ReleaseSigner::new(4).key(),
         );
-        shared.begin(Phase::Idle, Phase::Checking, UpdateError::Check).unwrap();
-        shared.check();
+        let generation = shared.begin(Phase::Idle, Phase::Checking, UpdateError::Check).unwrap();
+        shared.check(generation);
         assert_eq!(drained(&receiver), ["Failed(Verification)", "Finished"]);
         assert_eq!(installed_contents(&fixture.installation), "old");
     }
@@ -1037,14 +1092,14 @@ mod tests {
         tampered.resize(transport.0[url].len(), 0);
         transport.0.insert(url.to_owned(), tampered);
         let (shared, receiver) = shared(&fixture, transport, signer.key());
-        shared.begin(Phase::Idle, Phase::Checking, UpdateError::Check).unwrap();
-        shared.check();
+        let generation = shared.begin(Phase::Idle, Phase::Checking, UpdateError::Check).unwrap();
+        shared.check(generation);
         let Phase::Available(feed) = std::mem::take(&mut shared.lock().phase) else {
             panic!("the signed feed should verify");
         };
         drained(&receiver);
         shared.lock().phase = Phase::Downloading;
-        shared.download(&feed);
+        shared.download(&feed, generation);
         assert_eq!(
             drained(&receiver),
             ["Downloading", "Verifying", "Failed(Verification)", "Finished"]
@@ -1054,7 +1109,7 @@ mod tests {
     }
 
     #[test]
-    fn linux_cancelled_download_should_finish_without_staging() {
+    fn linux_worker_of_a_cancelled_download_should_stay_silent_and_stage_nothing() {
         let fixture = installed("old");
         let signer = ReleaseSigner::new(3);
         let (shared, receiver) = shared(
@@ -1062,8 +1117,8 @@ mod tests {
             served(&signer, "1.1.0", &release(b"new")),
             signer.key(),
         );
-        shared.begin(Phase::Idle, Phase::Checking, UpdateError::Check).unwrap();
-        shared.check();
+        let generation = shared.begin(Phase::Idle, Phase::Checking, UpdateError::Check).unwrap();
+        shared.check(generation);
         let Phase::Available(feed) = std::mem::take(&mut shared.lock().phase) else {
             panic!("the signed release should be available");
         };
@@ -1071,11 +1126,12 @@ mod tests {
         {
             let mut cycle = shared.lock();
             cycle.phase = Phase::Downloading;
-            cycle.cancelled = true;
+            cycle.reset();
         }
-        shared.download(&feed);
-        assert_eq!(drained(&receiver), ["Downloading", "Finished"]);
+        shared.download(&feed, generation);
+        assert!(drained(&receiver).is_empty());
         assert!(matches!(shared.lock().phase, Phase::Idle));
+        assert!(!fixture.installation.staging.exists());
         assert_eq!(installed_contents(&fixture.installation), "old");
     }
 
@@ -1089,19 +1145,11 @@ mod tests {
         }
         let fixture = installed("old");
         let signer = ReleaseSigner::new(3);
-        let updates = LinuxUpdates {
-            dependencies: Some(Dependencies {
-                transport: Arc::new(served(&signer, "1.1.0", &release(b"new"))),
-                key: signer.key(),
-                platform: ReleasePlatform::new("linux-x86_64"),
-                installation: fixture.installation.clone(),
-                archive_root: ROOT,
-            }),
-            shared: RefCell::new(None),
-            history: HistoryFile::new(None),
-            relaunch: Relaunch::default(),
-            request_quit: Box::new(|| {}),
-        };
+        let updates = adapter(
+            &fixture,
+            served(&signer, "1.1.0", &release(b"new")),
+            signer.key(),
+        );
         let (events, receiver) = async_channel::unbounded();
         updates.start(events).unwrap();
         let shared = updates.shared().unwrap();
@@ -1118,6 +1166,112 @@ mod tests {
         assert_eq!(drained(&receiver), ["Failed(ReadOnly)", "Finished"]);
         assert!(matches!(shared.lock().phase, Phase::Idle));
         assert_eq!(installed_contents(&fixture.installation), "old");
+    }
+
+    fn adapter(
+        fixture: &Fixture,
+        transport: impl UpdateTransport + 'static,
+        key: UpdateKey,
+    ) -> LinuxUpdates {
+        LinuxUpdates {
+            dependencies: Some(Dependencies {
+                transport: Arc::new(transport),
+                key,
+                platform: ReleasePlatform::new("linux-x86_64"),
+                installation: fixture.installation.clone(),
+                archive_root: ROOT,
+            }),
+            shared: RefCell::new(None),
+            history: HistoryFile::new(None),
+            relaunch: Relaunch::default(),
+            request_quit: Box::new(|| {}),
+        }
+    }
+
+    /// Serves the release, but the archive body blocks until the test drops the gate.
+    struct StalledArchive {
+        release: ServedRelease,
+        gate: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    }
+
+    impl UpdateTransport for StalledArchive {
+        fn get(&self, url: &str, limit: usize) -> io::Result<Vec<u8>> {
+            self.release.get(url, limit)
+        }
+
+        fn open(&self, _: &str, _: u64) -> io::Result<Box<dyn Read + Send>> {
+            let gate = self.gate.lock().unwrap().take().ok_or(io::ErrorKind::NotFound)?;
+            Ok(Box::new(Stalled(gate)))
+        }
+    }
+
+    struct Stalled(std::sync::mpsc::Receiver<()>);
+
+    impl Read for Stalled {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            let _ = self.0.recv();
+            Err(io::ErrorKind::TimedOut.into())
+        }
+    }
+
+    #[test]
+    fn linux_cancel_should_finish_while_the_archive_download_stalls() {
+        let fixture = installed("old");
+        let signer = ReleaseSigner::new(3);
+        let (gate, stalled) = std::sync::mpsc::channel();
+        let updates = adapter(
+            &fixture,
+            StalledArchive {
+                release: served(&signer, "1.1.0", &release(b"new")),
+                gate: Mutex::new(Some(stalled)),
+            },
+            signer.key(),
+        );
+        let (events, receiver) = async_channel::unbounded();
+        updates.start(events).unwrap();
+        let shared = updates.shared().unwrap();
+        shared.lock().phase = Phase::Available(shared.fetch_feed().unwrap());
+        updates.download().unwrap();
+        // The worker reports the download, then blocks on the archive body.
+        assert!(matches!(
+            receiver.recv_blocking(),
+            Ok(UpdateEvent::Downloading { received: 0, .. })
+        ));
+        updates.cancel();
+        assert!(matches!(receiver.try_recv(), Ok(UpdateEvent::Finished)));
+        assert!(matches!(shared.lock().phase, Phase::Idle));
+        assert!(shared.lock().claim.is_none());
+        drop(gate);
+        assert_eq!(installed_contents(&fixture.installation), "old");
+    }
+
+    #[test]
+    fn linux_installation_claim_should_admit_one_update_at_a_time() {
+        let fixture = installed("old");
+        let installation = &fixture.installation;
+        let claim = installation.claim().unwrap();
+        assert_eq!(
+            installation.claim().unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        // Cleanup leaves the staging of an update that holds the claim.
+        installation.create_staging().unwrap();
+        assert!(installation.discard_unclaimed_staging().is_err());
+        assert!(installation.staging.exists());
+        drop(claim);
+        installation.discard_unclaimed_staging().unwrap();
+        assert!(!installation.staging.exists());
+    }
+
+    #[test]
+    fn linux_cleanup_should_keep_a_tree_that_rollback_could_not_restore() {
+        let fixture = installed("old");
+        let installation = &fixture.installation;
+        installation.create_staging().unwrap();
+        let previous = installation.staging.join("previous");
+        fs::rename(&installation.root, &previous).unwrap();
+        assert!(installation.discard_unclaimed_staging().is_err());
+        assert!(Installation::executable_in(&previous).is_file());
     }
 
     /// test:updater:linux signs a release with the release task and passes its directory here,

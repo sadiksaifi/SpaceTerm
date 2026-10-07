@@ -129,11 +129,13 @@ jobs:
     container: ubuntu:22.04
     timeout-minutes: 75
     steps:
-      - name: Install checkout and signing tools
+      - name: Install checkout, compiler, and signing tools
         timeout-minutes: 10
+        # mise compiles its Cargo tools, so the compiler and linker come before mise.
         run: |
           apt-get update
-          apt-get install --yes --no-install-recommends ca-certificates curl git openssl xz-utils
+          apt-get install --yes --no-install-recommends \
+            build-essential ca-certificates curl git openssl pkg-config xz-utils
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
@@ -142,11 +144,13 @@ jobs:
         # The container user differs from the owner of the mounted workspace.
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Install rustup
-        # The container has no Rust. rustup installs the toolchain rust-toolchain.toml pins.
+        # The container has no Rust. The default is the toolchain rust-toolchain.toml pins, so
+        # mise builds its Cargo tools with it outside the checkout too.
         timeout-minutes: 5
         run: |
+          toolchain="$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)"
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-            | sh -s -- -y --no-modify-path --profile minimal --default-toolchain none
+            | sh -s -- -y --no-modify-path --profile minimal --default-toolchain "$toolchain"
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - uses: jdx/mise-action@v5
       - name: Install Linux build packages

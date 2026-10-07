@@ -151,13 +151,15 @@ install_macos() {
 }
 
 # A running process keeps its executable open, and its name in /proc/PID/exe, so the check
-# matches the installed executable whichever launcher or symlink started it.
+# matches the installed executable whichever launcher or symlink started it. A process the
+# updater replaced but has not relaunched runs from the updater's staging directory.
 ensure_not_running_linux() {
     executable="$target/bin/spaceterm"
+    replaced="$(dirname "$target")/.$(basename "$target").update/"
     for link in /proc/[0-9]*/exe; do
-        if [ "$(readlink "$link" 2>/dev/null || true)" = "$executable" ]; then
-            die "quit $display_name, then run the installer again"
-        fi
+        case "$(readlink "$link" 2>/dev/null || true)" in
+            "$executable" | "$replaced"*) die "quit $display_name, then run the installer again" ;;
+        esac
     done
 }
 
@@ -191,12 +193,17 @@ has_vulkan() {
     return 1
 }
 
-# Desktop Entry Exec quoting, then string value escaping, and a literal percent for field codes.
-exec_value() {
+# GIO looks up a launcher's program before it expands field codes, so an escaped percent sign
+# in the path never matches the file.
+require_launchable() {
     case "$1" in
-        *[[:cntrl:]]*) die "the install path contains characters desktop launchers cannot run" ;;
+        *[[:cntrl:]%]*) die "the install path contains characters desktop launchers cannot run" ;;
     esac
-    quoted="$(printf '%s' "$1" | sed -e 's/[\\"`$]/\\&/g' -e 's/\\/\\\\/g' -e 's/%/%%/g')"
+}
+
+# Desktop Entry Exec quoting, then string value escaping.
+exec_value() {
+    quoted="$(printf '%s' "$1" | sed -e 's/[\\"`$]/\\&/g' -e 's/\\/\\\\/g')"
     printf '"%s"' "$quoted"
 }
 
@@ -210,6 +217,7 @@ linux_locations() {
         /*) ;;
         *) die "SPACETERM_INSTALL_DIR must be an absolute path" ;;
     esac
+    require_launchable "$install_dir"
     case "${XDG_DATA_HOME:-}" in
         /*) data_home="$XDG_DATA_HOME" ;;
         *) data_home="$HOME/.local/share" ;;
@@ -298,6 +306,7 @@ install_linux() {
 
     mkdir -p "$install_dir" || die "could not create $install_dir"
     install_dir="$(cd "$install_dir" && pwd -P)"
+    require_launchable "$install_dir"
     # Stage beside the destination so the final replacement is a rename on one filesystem.
     staging="$(mktemp -d "$install_dir/.spaceterm.install.XXXXXX")" \
         || die "could not write to $install_dir"
