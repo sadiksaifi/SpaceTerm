@@ -15,7 +15,7 @@ use super::process::ProcessExit;
 use super::remote_directory_provider::SshRemoteDirectoryProvider;
 use super::remote_utility::{
     PreparedSshRemoteUtilityCommand, RemoteUtilityProcessOutput, RemoteUtilityRunError,
-    RemoteUtilitySession, SshRemoteUtilityRunner,
+    RemoteUtilitySession, SshRemoteUtilityClient, SshRemoteUtilityRunner,
 };
 use crate::domain::SshDestination;
 
@@ -86,6 +86,11 @@ impl FakeRemoteUtilityServer {
 
     /// Creates the provider a connected Remote Workspace would use for this connection.
     pub(crate) fn provider(&self) -> SshRemoteDirectoryProvider<Self> {
+        SshRemoteDirectoryProvider::with_client(self.client(), self.executor.clone())
+    }
+
+    /// Creates the utility client every reader of this connection shares.
+    pub(crate) fn client(&self) -> Arc<SshRemoteUtilityClient<Self>> {
         let command = SshCommandContext::new(
             OpenSshExecutable::for_test(),
             PathBuf::from("/private/config/spaceterm/ssh_config"),
@@ -94,12 +99,11 @@ impl FakeRemoteUtilityServer {
         )
         .unwrap()
         .remote_utility();
-        SshRemoteDirectoryProvider::new(
+        Arc::new(SshRemoteUtilityClient::new(
             PreparedSshRemoteUtilityCommand::new(command),
             Arc::new(self.clone()),
             self.connection.clone(),
-            self.executor.clone(),
-        )
+        ))
     }
 }
 

@@ -55,10 +55,6 @@ impl<R: SshRemoteUtilityRunner> SshRemoteDirectoryProvider<R> {
 
     /// Creates a provider over a client other Control Connection readers share, so every reader
     /// draws from the client's one utility session limit.
-    #[allow(
-        dead_code,
-        reason = "Remote Workspace composition shares the client in a later commit"
-    )]
     pub(crate) const fn with_client(
         client: Arc<SshRemoteUtilityClient<R>>,
         executor: BackgroundExecutor,
