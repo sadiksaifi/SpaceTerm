@@ -110,6 +110,83 @@ fn bash_reports_reserved_and_unicode_directory_without_losing_exit_status() {
     assert_eq!(&*tracker.snapshot().directory.path, directory);
 }
 
+/// Runs a bash or zsh snippet after sourcing the integration with a Prompt Owner set, and
+/// returns its OSC reports and its whole output.
+fn owned_prompt_reports(
+    shell: &str,
+    integration: &str,
+    snippet: &str,
+    owner: &str,
+) -> (Vec<String>, String) {
+    let integration = resource_root().join(integration);
+    let flags: &[&str] = if shell == "/bin/zsh" {
+        &["-dfi", "-c"]
+    } else {
+        &["--noprofile", "--norc", "-ic"]
+    };
+    let output = Command::new(shell)
+        .args(flags)
+        .arg(format!(r#"source "$1"; {snippet}"#))
+        .arg("spaceterm")
+        .arg(integration)
+        .env("SPACETERM_SHELL_INTEGRATION_VERSION", "1")
+        .env("SPACETERM_PROMPT_OWNER", owner)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{shell} failed");
+    (
+        osc_reports(&output.stdout)
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+    )
+}
+
+#[test]
+fn bash_and_zsh_should_mark_their_own_prompt_markers_with_the_prompt_owner() {
+    let (zsh, _) = owned_prompt_reports(
+        "/bin/zsh",
+        "shell-integration/zsh/spaceterm-integration",
+        r#"_spaceterm_before_command "ls"; (exit 3); _spaceterm_before_prompt; print -rn -- "${(%)PS1}""#,
+        "0f1e",
+    );
+    assert_eq!(
+        zsh,
+        [
+            "133;C;cmdline=ls;spaceterm=0f1e",
+            "133;D;3;spaceterm=0f1e",
+            zsh[2].as_str(),
+            "133;A;redraw=1;spaceterm=0f1e",
+            "133;B",
+        ]
+    );
+    // Bash 3.2 cannot expand PS0, so its text is checked as written.
+    let (bash, output) = owned_prompt_reports(
+        "/bin/bash",
+        "shell-integration/bash/spaceterm.bash",
+        r#"_spaceterm_command_active=1; (exit 7); _spaceterm_prompt; printf '%s' "$PS0""#,
+        "0f1e",
+    );
+    assert_eq!(
+        bash,
+        [
+            "133;D;7;spaceterm=0f1e",
+            bash[1].as_str(),
+            "133;A;redraw=last;spaceterm=0f1e",
+        ]
+    );
+    assert!(output.ends_with(r"\[\e]133;C;spaceterm=0f1e\a\]"));
+    // A value that is not hex never reaches a marker or the prompt.
+    let (forged, _) = owned_prompt_reports(
+        "/bin/bash",
+        "shell-integration/bash/spaceterm.bash",
+        r#"_spaceterm_command_active=1; (exit 7); _spaceterm_prompt"#,
+        "$(touch x)",
+    );
+    assert_eq!(forged[0], "133;D;7");
+}
+
 #[test]
 fn bash_encodes_a_long_directory_without_blocking_prompt_rendering() {
     let integration = resource_root().join("shell-integration/bash/spaceterm.bash");

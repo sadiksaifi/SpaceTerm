@@ -1,4 +1,5 @@
 {
+use re
 use str
 
 if (not-eq $E:SPACETERM_SHELL_INTEGRATION_VERSION 1) { return }
@@ -18,14 +19,20 @@ fn spaceterm-encode {|value|
   }
 }
 
-fn spaceterm-prompt {
-  printf "\e]7;file://localhost%s\a\e]133;A;redraw=1\a" (spaceterm-encode $pwd)
+# The session's Prompt Owner marks this shell's own prompt markers; only hex is accepted.
+var spaceterm-owner = ''
+if (and (has-env SPACETERM_PROMPT_OWNER) (re:match '^[0-9a-f]+$' $E:SPACETERM_PROMPT_OWNER)) {
+  set spaceterm-owner = ';spaceterm='$E:SPACETERM_PROMPT_OWNER
 }
-fn spaceterm-command {|_| printf "\e]133;B\a\e]133;C\a" }
+
+fn spaceterm-prompt {
+  printf "\e]7;file://localhost%s\a\e]133;A;redraw=1%s\a" (spaceterm-encode $pwd) $spaceterm-owner
+}
+fn spaceterm-command {|_| printf "\e]133;B\a\e]133;C%s\a" $spaceterm-owner }
 fn spaceterm-finished {|info|
   var status = 0
   if (not-eq $nil $info[error]) { set status = 1 }
-  printf "\e]133;D;"$status"\a"
+  printf "\e]133;D;"$status"%s\a" $spaceterm-owner
 }
 
 set edit:before-readline = (conj $edit:before-readline $spaceterm-prompt~)

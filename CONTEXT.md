@@ -185,6 +185,9 @@ _Avoid_: git status, VCS status, git info
 **Repository Source Directory**: The directory Repository Status reads for a Pane: its Current Directory as of the last prompt.
 _Avoid_: git directory, prompt directory
 
+**Prompt Owner**: A random value each Local Terminal Session gives its shell, which SpaceTerm's shell integration attaches to the shell's own prompt markers. Once the shell has sent it, only markers that carry it move the Repository Source Directory, so a nested `ssh` or `docker` shell cannot.
+_Avoid_: shell token, session secret
+
 **Pull Request**: The open GitHub pull request whose head is a repository's current branch, found through the local GitHub CLI.
 _Avoid_: PR, merge request
 

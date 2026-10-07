@@ -5,6 +5,7 @@ enum TerminalSessionProcess {
     Local {
         planner: ShellLaunchPlanner,
         directory: std::path::PathBuf,
+        prompt_owner: Option<crate::terminal::metadata::PromptOwner>,
     },
     Remote {
         home: std::path::PathBuf,
@@ -15,7 +16,20 @@ enum TerminalSessionProcess {
 impl TerminalSessionProcess {
     fn prepare(self) -> Result<PreparedShellLaunch, NativePtyStartupFailure> {
         match self {
-            Self::Local { planner, directory } => Ok(planner.local(&directory)?),
+            Self::Local {
+                planner,
+                directory,
+                prompt_owner,
+            } => {
+                let launch = planner.local(&directory)?;
+                Ok(match prompt_owner {
+                    Some(owner) => launch.with_environment_value(
+                        crate::terminal::metadata::PromptOwner::ENVIRONMENT,
+                        owner.value(),
+                    ),
+                    None => launch,
+                })
+            }
             Self::Remote { home, command } => Ok(PreparedShellLaunch::remote(&home, command)?),
         }
     }
@@ -34,16 +48,22 @@ impl TerminalSessionLaunch {
         machine: LocalMachine,
         filesystem: &LocalFilesystemAuthority,
     ) -> Self {
+        let prompt_owner = crate::terminal::metadata::PromptOwner::generate();
+        let metadata = TerminalMetadataContext::local(
+            filesystem.path_semantics(),
+            &directory.to_string_lossy(),
+            machine,
+        );
         Self {
-            metadata: TerminalMetadataContext::local(
-                filesystem.path_semantics(),
-                &directory.to_string_lossy(),
-                machine,
-            ),
+            metadata: match &prompt_owner {
+                Some(owner) => metadata.with_prompt_owner(owner.clone()),
+                None => metadata,
+            },
             fallback_title: planner.fallback_title(),
             process: TerminalSessionProcess::Local {
                 planner,
                 directory: directory.to_owned(),
+                prompt_owner,
             },
         }
     }
