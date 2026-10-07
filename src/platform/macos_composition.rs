@@ -77,6 +77,10 @@ fn desktop_profile(
                 file_preview: "Quick Look",
                 operating_system_name: "macOS",
                 system_directory_selection: "Choose in Finder…",
+                read_only_update: (
+                    "Move SpaceTerm to Applications",
+                    "Install SpaceTerm in Applications before updating it.",
+                ),
             },
             Rc::new(super::macos_shortcut_glyphs::MacosShortcutFormatter),
             crate::desktop_profile::ShortcutSelection::NativeMenu,

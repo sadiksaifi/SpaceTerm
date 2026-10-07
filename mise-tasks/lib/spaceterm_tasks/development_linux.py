@@ -111,8 +111,8 @@ def srgb_hex(color: str) -> str:
     return "#" + "".join(f"{round(value * 255):02X}" for value in srgb)
 
 
-def development_icon_svg(document: Path) -> str:
-    """Flatten the Development icon document's light appearance into one scalable icon."""
+def icon_svg(document: Path) -> str:
+    """Flatten an icon document's light appearance into one scalable icon."""
     try:
         icon = json.loads((document / "icon.json").read_text(encoding="utf-8"))
         top, bottom = (srgb_hex(color) for color in icon["fill"]["linear-gradient"])
@@ -204,7 +204,7 @@ def register(prefix: Path, root: Path = ROOT) -> None:
     icon = prefix / "share" / "icons" / "hicolor" / "scalable" / "apps" / (APPLICATION_ID + ".svg")
     if any(ord(character) < 32 or ord(character) == 127 for character in str(icon)):
         raise ValueError("the source path contains characters unsupported by desktop launchers")
-    atomic_write(icon, development_icon_svg(root / ICON_DOCUMENT))
+    atomic_write(icon, icon_svg(root / ICON_DOCUMENT))
     template = (root / DESKTOP_ENTRY).read_text(encoding="utf-8")
     contents = template.replace("{exec}", exec_value(executable)).replace(
         "{icon}", icon_value(icon)

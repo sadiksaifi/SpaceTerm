@@ -1,7 +1,8 @@
 # SpaceTerm
 
-A native desktop terminal multiplexer for macOS and Linux. Workspaces organize terminal work,
-Tabs separate tasks, and split Pane Layouts keep shells visible together.
+A native desktop terminal multiplexer for macOS and Linux, coming soon for Windows.
+
+![SpaceTerm Screenshot](https://github.com/user-attachments/assets/5e1d29d7-0450-4984-b485-3c9f45fef473)
 
 ## Highlights
 
@@ -9,17 +10,14 @@ Tabs separate tasks, and split Pane Layouts keep shells visible together.
 - **Tabs and Panes** with recursive splits, focus, resize, and zoom
 - **Remote terminals** through your existing OpenSSH configuration
 - **Keyboard-first navigation** through the Command Palette and Workspace Switcher
-- **Terminal essentials** including Scrollback, Selection, find, hyperlinks, and safe paste handling
 
-## Install
-
-SpaceTerm requires macOS 26 or newer on Apple silicon.
+## Install macOS/Linux
 
 ```sh
 curl -fsSL https://github.com/sadiksaifi/SpaceTerm/releases/latest/download/install.sh | sh
 ```
 
-Or install with Homebrew:
+On a Mac, you can also install with Homebrew:
 
 ```sh
 brew install --cask sadiksaifi/tap/spaceterm

@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # MISE description="Set the GitHub Actions update signing secret from macOS Keychain"
-# MISE confirm="Replace the SPARKLE_PRIVATE_KEY secret of sadiksaifi/SpaceTerm?"
+# MISE confirm="Replace the UPDATE_SIGNING_KEY secret of sadiksaifi/SpaceTerm?"
 """Set the GitHub Actions update signing secret from macOS Keychain."""
 
 import argparse
@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 
 from spaceterm_tasks import TaskError, main, sparkle
-from spaceterm_tasks.release import public_key
+from spaceterm_tasks.release import SIGNING_SECRET, public_key
 
 
 def configure():
@@ -30,7 +30,7 @@ def configure():
         os.chmod(path, 0o600)
         with path.open("rb") as key:
             stored = subprocess.run(
-                ["gh", "secret", "set", "SPARKLE_PRIVATE_KEY", "--repo", "sadiksaifi/SpaceTerm"],
+                ["gh", "secret", "set", SIGNING_SECRET, "--repo", "sadiksaifi/SpaceTerm"],
                 stdin=key,
                 capture_output=True,
             )

@@ -1,16 +1,10 @@
 //! Application-owned update policy. The platform adapter owns transport and installation.
 
 #[cfg(feature = "developer-tools")]
-#[cfg_attr(
-    not(target_os = "macos"),
-    allow(
-        dead_code,
-        reason = "only the native updater host selects the development simulator"
-    )
-)]
 pub(crate) mod preview;
 
 pub(crate) mod policy;
+pub(crate) mod release_feed;
 
 use policy::{UpdateHistory, UpdatePreferences, UpdateStage};
 use std::rc::Rc;
@@ -47,7 +41,7 @@ pub(crate) enum UpdateState {
 }
 
 #[cfg_attr(
-    all(not(spaceterm_sparkle), not(test)),
+    all(not(spaceterm_sparkle), not(target_os = "linux"), not(test)),
     expect(
         dead_code,
         reason = "native failures are produced by the packaged updater"
@@ -65,12 +59,13 @@ pub(crate) enum UpdateError {
     Verification,
     #[error("The update could not be installed. Please try again.")]
     Installation,
-    #[error("Install SpaceTerm in Applications before updating it.")]
+    /// Desktop wording names the remedy, which differs by platform.
+    #[error("SpaceTerm can’t replace its installation.")]
     ReadOnly,
 }
 
 #[cfg_attr(
-    not(spaceterm_sparkle),
+    all(not(spaceterm_sparkle), not(target_os = "linux")),
     expect(
         dead_code,
         reason = "native events are produced by the packaged updater"
@@ -114,6 +109,22 @@ impl UpdateAdapter for UnavailableUpdates {
     fn install(&self) -> Result<(), UpdateError> {
         Err(UpdateError::Unavailable)
     }
+}
+
+/// Fetches release metadata and archives over HTTPS only. Callers classify failures without
+/// their native detail.
+#[cfg_attr(
+    not(target_os = "linux"),
+    expect(
+        dead_code,
+        reason = "only the Linux updater downloads release archives itself"
+    )
+)]
+pub(crate) trait UpdateTransport: Send + Sync {
+    /// Returns the body of a successful response, refusing one longer than `limit` bytes.
+    fn get(&self, url: &str, limit: usize) -> std::io::Result<Vec<u8>>;
+    /// Streams the body of a successful response, failing a read past `limit` bytes.
+    fn open(&self, url: &str, limit: u64) -> std::io::Result<Box<dyn std::io::Read + Send>>;
 }
 
 pub(crate) trait UpdateAdapter {

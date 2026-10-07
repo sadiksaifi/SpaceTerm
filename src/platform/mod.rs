@@ -331,3 +331,6 @@ mod linux_session_bus;
 
 #[cfg(target_os = "linux")]
 mod linux_ssh_executable;
+
+#[cfg(target_os = "linux")]
+mod linux_updates;

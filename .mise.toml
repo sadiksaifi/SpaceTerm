@@ -18,7 +18,7 @@ cocogitto = "7.0.0"
 git-cliff = "2.14.2"
 node = "24.21.0"
 zig = "0.16.0"
-"cargo:cargo-packager" = "0.11.8"
+"cargo:cargo-packager" = { version = "0.11.8", os = ["macos"] }
 "cargo:cargo-sweep" = "0.8.0"
 "npm:skills" = "1.7.0"
 "npm:tagsmith" = "1.2.0"
@@ -142,14 +142,14 @@ arg "[section]" help="Workbench section" default="appearance" {
 '''
 run = [{ task = "development:{{ os() }}", env = { SPACETERM_DEVELOPER_WORKBENCH = "{{usage.section}}" } }]
 
-[tasks."development:updates:macos"]
+[tasks."development:updates"]
 description = "Preview the real update UI in SpaceTerm Development with a simulated updater"
 usage = '''
 arg "[scenario]" help="Simulated updater state" default="available" {
   choices "available" "warning" "overdue" "startup-overdue" "startup-ready" "offline" "up-to-date" "check-error" "download-error" "verification-error" "install-error"
 }
 '''
-run = [{ task = "development:macos", env = { SPACETERM_UPDATE_PREVIEW = "{{usage.scenario}}" } }]
+run = [{ task = "development:{{ os() }}", env = { SPACETERM_UPDATE_PREVIEW = "{{usage.scenario}}" } }]
 
 [tasks."fmt:check"]
 description = "Check Rust and Python formatting"
@@ -178,7 +178,7 @@ run = ["ruff check", "ty check"]
 
 [tasks."lint:shell"]
 description = "Check the release installer"
-run = "shellcheck packaging/macos/install-release.sh"
+run = "shellcheck packaging/install.sh"
 
 [tasks."lint:plist:macos"]
 description = "Check the application identity property lists"
@@ -269,6 +269,9 @@ run = [
   { task = "test:native:linux" },
   { task = "engine:test" },
   { task = "engine:test:no-graphics" },
+  { task = "test:package:linux" },
+  { task = "test:install:linux" },
+  { task = "test:updater:linux" },
 ]
 
 [tasks."validate:portable"]

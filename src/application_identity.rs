@@ -104,13 +104,6 @@ impl ApplicationIdentity {
         self.application_id()
     }
 
-    #[cfg_attr(
-        not(target_os = "macos"),
-        allow(
-            dead_code,
-            reason = "only the native updater host consumes this identity policy"
-        )
-    )]
     pub(crate) const fn update_source(self) -> UpdateSource {
         self.update_source
     }

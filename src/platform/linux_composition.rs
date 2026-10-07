@@ -2,7 +2,7 @@
 use crate::app::{
     HostComposition, HostCompositionParts, StartupDependencies, StartupDependenciesError,
 };
-use crate::application_identity::ApplicationIdentity;
+use crate::application_identity::{ApplicationIdentity, UpdateSource};
 use crate::desktop_profile::{
     ControlKeybindingProfiles, DesktopPresentation, DesktopProfile, DesktopProfileError,
     DesktopWording, HostFeature,
@@ -31,12 +31,66 @@ pub(crate) fn main() {
     {
         return;
     }
+    let relaunch = super::linux_updates::Relaunch::default();
+    let installed = relaunch.clone();
     let code = crate::app::launch(capture_startup_dependencies(identity), |startup| {
-        compose(startup, identity, bus, events, desktop_events)
+        compose(startup, identity, bus, events, desktop_events, installed)
     });
     if code != 0 {
         std::process::exit(code);
     }
+    // An installed update quit the application to replace this process with the new release.
+    // If exec fails, the next launch starts the new release.
+    if let Some(executable) = relaunch.take() {
+        let _ = super::linux_updates::relaunch(&executable);
+    }
+}
+
+fn update_adapter(
+    identity: ApplicationIdentity,
+    events: super::linux_desktop_events::DesktopEventSender,
+    relaunch: super::linux_updates::Relaunch,
+) -> Rc<dyn crate::updates::UpdateAdapter> {
+    match identity.update_source() {
+        UpdateSource::SignedFeed => Rc::new(super::linux_updates::LinuxUpdates::new(
+            Arc::new(super::https_transport::HttpsTransport::new()),
+            identity,
+            update_history_paths(identity),
+            relaunch,
+            move || events.quit(),
+        )),
+        UpdateSource::Simulation => simulated_updates(),
+        UpdateSource::Unavailable => Rc::new(crate::updates::UnavailableUpdates),
+    }
+}
+
+/// The updater keeps its history in the private state directory of the identity.
+fn update_history_paths(identity: ApplicationIdentity) -> Option<Arc<super::app_paths::AppPaths>> {
+    let directories =
+        super::app_directories::AppDirectories::resolve(identity.directory_name()).ok()?;
+    super::app_paths::AppPaths::from_directories(
+        directories,
+        super::unix_local_socket::LOCAL_IPC_PATH_MAXIMUM,
+        Arc::new(super::unix_secure_filesystem::UnixSecureFilesystem),
+    )
+    .ok()
+    .map(Arc::new)
+}
+
+#[cfg(feature = "developer-tools")]
+fn simulated_updates() -> Rc<dyn crate::updates::UpdateAdapter> {
+    match std::env::var("SPACETERM_UPDATE_PREVIEW")
+        .ok()
+        .and_then(|value| crate::updates::preview::Scenario::parse(&value))
+    {
+        Some(scenario) => Rc::new(crate::updates::preview::PreviewUpdates::new(scenario)),
+        None => Rc::new(crate::updates::UnavailableUpdates),
+    }
+}
+
+#[cfg(not(feature = "developer-tools"))]
+fn simulated_updates() -> Rc<dyn crate::updates::UpdateAdapter> {
+    Rc::new(crate::updates::UnavailableUpdates)
 }
 
 fn capture_startup_dependencies(
@@ -116,11 +170,14 @@ fn desktop_profile(
                 file_preview: "Preview",
                 operating_system_name: "Linux",
                 system_directory_selection: "Choose Directory…",
+                read_only_update: (
+                    "Reinstall SpaceTerm to Update",
+                    "SpaceTerm can’t replace its installation folder. Install SpaceTerm with its install script, then try again.",
+                ),
             },
             Rc::new(super::linux_shortcut_text::LinuxShortcutFormatter),
             crate::desktop_profile::ShortcutSelection::TerminalSurface,
             &[
-                HostFeature::Updates,
                 HostFeature::MicrophoneAccess,
                 HostFeature::SystemPermissions,
             ],
@@ -136,7 +193,9 @@ fn compose(
     bus: Option<super::linux_session_bus::SessionBus>,
     events: super::linux_desktop_events::DesktopEventSender,
     desktop_events: super::linux_desktop_events::LinuxDesktopEvents,
+    relaunch: super::linux_updates::Relaunch,
 ) -> Result<HostComposition, DesktopProfileError> {
+    let updates = update_adapter(identity, events.clone(), relaunch);
     let appearance = Rc::new(super::linux_appearance::LinuxAppearancePlatform::new(
         bus.clone(),
     ));
@@ -201,7 +260,7 @@ fn compose(
         home_directory: startup.home_directory,
         session_factory,
         adapters: crate::app::ApplicationCapabilities {
-            updates: Rc::new(crate::updates::UnavailableUpdates),
+            updates,
             selected_files: Some(Arc::new(super::unix_selected_file::UnixSelectedFileOpener)),
             settings_file: Some(settings_file),
             application_menu: Rc::new(
@@ -294,7 +353,15 @@ mod tests {
         .unwrap();
         let (sender, events) =
             super::super::linux_desktop_events::LinuxDesktopEvents::new(identity);
-        let host = compose(startup, identity, None, sender, events).unwrap();
+        let host = compose(
+            startup,
+            identity,
+            None,
+            sender,
+            events,
+            super::super::linux_updates::Relaunch::default(),
+        )
+        .unwrap();
         cx.update(|cx| crate::app::initialize_application(cx, &host).unwrap());
         assert_eq!(
             cx.app_identity(),
@@ -367,8 +434,8 @@ mod tests {
                 presentation.wording().system_directory_selection,
                 "Choose Directory…"
             );
+            assert!(presentation.has_feature(HostFeature::Updates));
             for feature in [
-                HostFeature::Updates,
                 HostFeature::MicrophoneAccess,
                 HostFeature::SystemPermissions,
             ] {

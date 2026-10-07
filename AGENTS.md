@@ -1,6 +1,6 @@
 # SpaceTerm
 
-SpaceTerm is a native desktop terminal multiplexer.
+A native desktop terminal multiplexer for macOS and Linux, coming soon for Windows.
 
 ## Sources of truth
 

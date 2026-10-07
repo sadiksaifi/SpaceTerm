@@ -4,12 +4,10 @@ Only a release tag selects the SpaceTerm identity; every other package is SpaceT
 Preflight.
 """
 
-import filecmp
 import json
 import os
 import platform
 import plistlib
-import re
 import shutil
 import subprocess
 import sys
@@ -20,49 +18,27 @@ from pathlib import Path
 from spaceterm_tasks import ROOT, TaskError, sparkle
 from spaceterm_tasks.cargo import build_executable
 from spaceterm_tasks.macos_bundle import ICON_NAME, compile_icon, identity, identity_directory
+from spaceterm_tasks.packaging import (
+    DIST,
+    PREFLIGHT_VERSION,
+    TERMINFO,
+    checked,
+    packaged_environment,
+    release_version,
+    require_clean_checkout,
+    selected_identity,
+    verify_application_identity,
+    verify_askpass_helper_mode,
+    verify_resources,
+)
 
 STAGE = ROOT / "target" / "package-macos"
-DIST = ROOT / "dist"
-TERMINFO = ROOT / "assets" / "terminfo" / "xterm-spaceterm.terminfo"
-TERMINFO_IDENTITY = "xterm-spaceterm|SpaceTerm truthful xterm-compatible terminal"
 MINIMUM_MACOS = "26.0"
-PREFLIGHT_VERSION = "0.0.0"
-STABLE_TAG = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
-ASKPASS_HELPER_MODE = "broker-v1"
-
-
-def release_version(tag):
-    """Return a release tag's version. build.rs proves the tag is annotated, on HEAD, and clean."""
-    if not STABLE_TAG.fullmatch(tag):
-        raise TaskError("a release tag is v followed by a canonical stable SemVer")
-    return tag[1:]
-
-
-def selected_identity(release_tag):
-    return "spaceterm" if release_tag else "preflight"
-
-
-def checked(arguments, failure, **kwargs):
-    result = subprocess.run(arguments, capture_output=True, **kwargs)
-    if result.returncode:
-        raise TaskError(failure)
-    return result.stdout
 
 
 def require_apple_silicon():
     if sys.platform != "darwin" or platform.machine() != "arm64":
         raise TaskError("SpaceTerm packages only on Apple Silicon Macs")
-
-
-def require_clean_checkout():
-    """Packaging reads files Cargo never sees, and Cargo can reuse a build script's last check."""
-    status = checked(
-        ["git", "--no-optional-locks", "status", "--porcelain", "--untracked-files=normal"],
-        "Git could not report the checkout state",
-        cwd=ROOT,
-    )
-    if status.strip():
-        raise TaskError("a release package requires a clean checkout")
 
 
 def package(release_tag=None):
@@ -81,17 +57,12 @@ def package(release_tag=None):
         "tic could not compile the SpaceTerm terminfo entry",
     )
 
-    environment = {
-        key: value
-        for key, value in os.environ.items()
-        if key not in ("SPACETERM_RELEASE_TAG", "SPACETERM_SPARKLE_DIR")
-    }
-    # Leaves the SpaceTerm Development identity.
-    environment.update(MACOSX_DEPLOYMENT_TARGET=MINIMUM_MACOS, SPACETERM_PACKAGED="1")
+    environment = packaged_environment(release_tag, removed=("SPACETERM_SPARKLE_DIR",))
+    environment["MACOSX_DEPLOYMENT_TARGET"] = MINIMUM_MACOS
     config = tomllib.loads((identity_directory(name) / "Packager.toml").read_text())
     if release_tag:
         updater = sparkle.directory()
-        environment.update(SPACETERM_RELEASE_TAG=release_tag, SPACETERM_SPARKLE_DIR=str(updater))
+        environment["SPACETERM_SPARKLE_DIR"] = str(updater)
         config["macos"]["frameworks"] = [str(updater / "Sparkle.framework")]
     print(f"Building the Apple Silicon {template['CFBundleName']} executable")
     executable = build_executable("--release", "--locked", "--no-default-features", env=environment)
@@ -214,22 +185,7 @@ def verify_bundle(app, name, release_tag, label):
         for entry in json.loads(assets)
     ):
         raise TaskError(f"{label} asset catalog has no 1024-pixel {ICON_NAME} icon")
-    if not filecmp.cmp(
-        ROOT / "assets/THIRD-PARTY-NOTICES.txt",
-        resources / "THIRD-PARTY-NOTICES.txt",
-        shallow=False,
-    ):
-        raise TaskError(f"{label} third-party notices differ from the tracked resource")
-    if not same_tree(ROOT / "assets/shell-integration", resources / "shell-integration"):
-        raise TaskError(f"{label} shell integration differs from the tracked resources")
-    terminfo = checked(
-        ["infocmp", "-x", "-1", "xterm-spaceterm"],
-        f"{label} xterm-spaceterm entry is not discoverable",
-        env={**os.environ, "TERMINFO": str(resources / "terminfo")},
-        text=True,
-    )
-    if TERMINFO_IDENTITY not in terminfo:
-        raise TaskError(f"{label} terminfo entry has the wrong identity")
+    verify_resources(resources, label)
 
     signature = ["codesign", "--verify", "--strict", *(["--deep"] if release_tag else []), str(app)]
     checked(signature, f"{label} app signature verification failed")
@@ -247,55 +203,3 @@ def verify_bundle(app, name, release_tag, label):
         raise TaskError(f"{label} app entitlements differ from the {name} identity")
     if release_tag and not (contents / "Frameworks" / "Sparkle.framework").is_dir():
         raise TaskError(f"{label} updater framework is missing")
-
-
-def verify_application_identity(executable, expected, label):
-    # An old executable may launch the application instead of answering --version.
-    # Clear helper inputs and bound the query before inspecting its compiled name.
-    try:
-        result = subprocess.run([executable, "--version"], env={}, capture_output=True, timeout=5)
-    except (OSError, subprocess.TimeoutExpired):
-        raise TaskError(f"{label} executable application identity query failed") from None
-    name, _, version = result.stdout.removesuffix(b"\n").rpartition(b" ")
-    if (
-        result.returncode
-        or result.stderr
-        or name != expected.encode()
-        or not version
-        or any(byte in b" \t\r\n" for byte in version)
-    ):
-        raise TaskError(f"{label} executable application identity must be {expected}")
-
-
-def verify_askpass_helper_mode(executable, label):
-    """The packaged executable must enter AskPass helper mode before anything else."""
-    for prompt in ("SpaceTerm package verifier prompt", "--version"):
-        try:
-            result = subprocess.run(
-                [executable, prompt],
-                capture_output=True,
-                timeout=5,
-                env={"SPACETERM_SSH_ASKPASS_MODE": ASKPASS_HELPER_MODE},
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            raise TaskError(f"{label} AskPass helper mode did not finish") from None
-        if result.returncode != 2 or result.stdout or result.stderr:
-            raise TaskError(
-                f"{label} AskPass helper mode must reject missing transport "
-                "inputs silently with exit 2"
-            )
-
-
-def same_tree(expected, actual):
-    comparison = filecmp.dircmp(expected, actual, ignore=[])
-    if comparison.left_only or comparison.right_only or comparison.funny_files:
-        return False
-    _, mismatch, errors = filecmp.cmpfiles(expected, actual, comparison.common_files, shallow=False)
-    return (
-        not mismatch
-        and not errors
-        and all(
-            same_tree(expected / directory, actual / directory)
-            for directory in comparison.common_dirs
-        )
-    )
