@@ -219,9 +219,12 @@ impl CaptionMetrics {
     }
 }
 
-/// Which parts of the Repository Status segment fit. The glyph and mark are always kept.
+/// Which parts of the Repository Status segment fit. The glyph and mark are kept whenever the
+/// segment shows.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct RepositoryCaptionLayout {
+    /// The glyph and mark fit beside the name, the status, and every control the Pane shows.
+    show: bool,
     show_branch: bool,
     /// The widest the branch may be when it does not fit whole, in whole pixels.
     branch_limit: Option<u32>,
@@ -293,6 +296,24 @@ impl CaptionLayout {
                 control_size,
                 spacing_scale,
             );
+        // The name and status come before Repository Status. The check uses the revealed controls,
+        // so hovering a Pane never shows or hides the segment.
+        if metrics.repository.is_some()
+            && width < px(fixed_width + controls_extent) + metrics.name + metrics.status_gap
+        {
+            return Self::from_metrics(
+                has_multiple_panes,
+                width,
+                controls_reveal,
+                CaptionMetrics {
+                    repository: None,
+                    ..metrics
+                },
+                spacing_scale,
+                status_icon_size,
+                control_size,
+            );
+        }
         let available = (width
             - px(fixed_width + controls_extent * controls_reveal.clamp(0.0, 1.0)))
         .max(px(0.0));
@@ -338,6 +359,7 @@ impl CaptionLayout {
             show_label,
             show_splits,
             repository: RepositoryCaptionLayout {
+                show: metrics.repository.is_some(),
                 show_branch: show_repository_branch,
                 branch_limit,
                 show_detail: show_repository_detail,
@@ -2682,16 +2704,19 @@ fn render_pane_caption_content(
             })
         })
         .child(caption_content)
-        .when_some(repository, |row, repository| {
-            row.child(render_repository_segment(
-                pane_id,
-                &repository,
-                (terminal.downgrade(), view.clone()),
-                layout.repository,
-                appearance,
-                &paint,
-            ))
-        })
+        .when_some(
+            repository.filter(|_| layout.repository.show),
+            |row, repository| {
+                row.child(render_repository_segment(
+                    pane_id,
+                    &repository,
+                    (terminal.downgrade(), view.clone()),
+                    layout.repository,
+                    appearance,
+                    &paint,
+                ))
+            },
+        )
         .child(controls_slot.child(controls_clip.child(controls)))
         .into_any_element()
 }
@@ -5356,6 +5381,51 @@ mod tests {
             shown(resolve(without_counts, controls + 167.25)),
             (true, true, false, true, false, false)
         );
+    }
+
+    #[test]
+    fn a_pane_too_narrow_for_its_name_beside_the_repository_glyph_should_hide_repository_status() {
+        let metrics = CaptionMetrics {
+            name: px(40.0),
+            status_gap: px(PANE_STATUS_LEADING_GAP),
+            status_separator: px(PANE_CAPTION_SEPARATOR_WIDTH - PANE_STATUS_LEADING_GAP),
+            repository: Some(RepositoryCaptionMetrics {
+                anchor: px(20.0),
+                branch: px(50.0),
+                detail: None,
+                divergence: None,
+            }),
+            ..CaptionMetrics::default()
+        };
+        let needed = PANE_CAPTION_LEFT_PADDING
+            + PANE_CAPTION_RIGHT_PADDING
+            + PANE_STATUS_WIDTH
+            + 20.0
+            + PANE_CONTROL_LEADING_GAP
+            + controls_width(4, true, PANE_CONTROL_SIZE, 1.0)
+            + 40.0
+            + PANE_STATUS_LEADING_GAP;
+        let resolve = |width: f32, reveal| {
+            CaptionLayout::from_metrics(
+                true,
+                px(width),
+                reveal,
+                metrics,
+                1.0,
+                13.0,
+                PANE_CONTROL_SIZE,
+            )
+        };
+
+        let roomy = resolve(needed + 0.5, 1.0);
+        assert!(roomy.repository.show && roomy.show_splits);
+        assert!(!roomy.repository.show_branch);
+        for reveal in [0.0, 1.0] {
+            assert!(
+                !resolve(needed - 0.5, reveal).repository.show,
+                "at reveal {reveal}"
+            );
+        }
     }
 
     #[test]
