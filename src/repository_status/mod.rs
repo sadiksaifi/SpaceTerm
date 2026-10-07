@@ -15,6 +15,7 @@ pub(crate) mod operation;
 pub(crate) mod porcelain;
 pub(crate) mod presentation;
 pub(crate) mod scheduler;
+pub(crate) mod tools;
 
 use std::ffi::OsString;
 use std::fmt;
