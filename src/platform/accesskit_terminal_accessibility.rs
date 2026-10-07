@@ -363,6 +363,9 @@ impl PaneTree {
         {
             demand.request();
         }
+        // GPUI publishes the Pane's child elements, such as its scrollbar and Find bar, before
+        // this runs. They follow the text runs.
+        let element_children = builder.parent_node().children().to_vec();
         let namespace = builder.synthetic_node_id(());
         let nodes = self.project(namespace, |row| builder.synthetic_node_id(row));
         let caret_bounds = self.caret_bounds();
@@ -395,9 +398,19 @@ impl PaneTree {
                     builder.push_child(run.node, self.runs[&run.row].node.as_ref().clone());
                 }
             }
-            builder
-                .parent_node()
-                .set_shared_children(Arc::clone(&published.children));
+            let parent = builder.parent_node();
+            if element_children.is_empty() {
+                parent.set_shared_children(Arc::clone(&published.children));
+            } else {
+                parent.set_children(
+                    published
+                        .children
+                        .iter()
+                        .copied()
+                        .chain(element_children)
+                        .collect::<Vec<_>>(),
+                );
+            }
         }
     }
 
@@ -1067,6 +1080,64 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(values(cx).len(), 32);
         assert!(values(cx).iter().any(|value| value == "changed\n"));
+    }
+
+    #[gpui::test]
+    fn accesskit_publication_keeps_the_panes_child_elements(cx: &mut gpui::TestAppContext) {
+        use gpui::{InteractiveElement, IntoElement, ParentElement, Styled};
+        struct View {
+            tree: Rc<RefCell<PaneTree>>,
+        }
+        impl gpui::Render for View {
+            fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+                let tree = Rc::clone(&self.tree);
+                gpui::div()
+                    .id("pane")
+                    .role(Role::Terminal)
+                    .size_full()
+                    .child(
+                        gpui::div()
+                            .id("control")
+                            .role(Role::Button)
+                            .aria_label("Pane control")
+                            .size_full(),
+                    )
+                    .a11y_synthetic_children(move |builder| tree.borrow_mut().publish(builder))
+            }
+        }
+        let mut fixture = RetainedFixture::new(4);
+        let tree = Rc::new(RefCell::new(pane_tree(
+            fixture.snapshot(true, (0..4).collect()),
+        )));
+        let (view, cx) = cx.add_window_view(|_, _| View {
+            tree: Rc::clone(&tree),
+        });
+        cx.activate_accessibility();
+        cx.run_until_parked();
+        // The dump walks the tree from its root, so it omits any node no parent references.
+        let roles = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, _| {
+                let dump: serde_json::Value =
+                    serde_json::from_str(&window.debug_a11y_tree_json().unwrap()).unwrap();
+                let mut roles = dump["nodes"]
+                    .as_object()
+                    .unwrap()
+                    .values()
+                    .filter_map(|node| node["aria"]["role"].as_str().map(str::to_owned))
+                    .filter(|role| role == "Button" || role == "TextRun")
+                    .collect::<Vec<_>>();
+                roles.sort();
+                roles
+            })
+        };
+        let expected = ["Button", "TextRun", "TextRun", "TextRun", "TextRun"];
+        assert_eq!(roles(cx), expected);
+        fixture.rows[2].revision += 1;
+        fixture.rows[2].cells = vec![AccessibilityCell::new("changed", 7, false)];
+        tree.borrow_mut().model = fixture.snapshot(false, vec![2]);
+        view.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert_eq!(roles(cx), expected);
     }
 
     #[test]
