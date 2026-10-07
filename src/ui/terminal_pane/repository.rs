@@ -320,6 +320,7 @@ fn render_popover(
     let spacing = |value: f32| appearance.spacing(value);
     let divider = || {
         div()
+            .flex_shrink_0()
             .my(spacing(6.0))
             .h(shell.hairline())
             .bg(shell.divider())
@@ -380,18 +381,9 @@ fn render_popover(
         .role(gpui::accesskit::Role::Dialog)
         .aria_label("Repository Status")
         .track_focus(&focus)
-        .absolute()
-        .top(spacing(
-            POPOVER_INSET
-                + if below_find_bar {
-                    FIND_BAR_CLEARANCE
-                } else {
-                    0.0
-                },
-        ))
-        .right(spacing(POPOVER_INSET))
         .w(spacing(POPOVER_WIDTH))
-        .max_w(gpui::relative(0.94))
+        .max_w_full()
+        .max_h_full()
         .p(spacing(10.0))
         .flex()
         .flex_col()
@@ -409,21 +401,27 @@ fn render_popover(
         }))
         .child(
             div()
+                .flex_shrink_0()
                 .chrome_text(appearance.typography.style(TextRole::BodyEmphasis))
                 .truncate()
                 .child(popover.name),
         )
         .child(
             div()
+                .flex_shrink_0()
                 .chrome_text(appearance.typography.style(TextRole::Secondary))
                 .text_color(gpui_color(muted))
                 .truncate()
                 .child(root),
         )
         .child(divider())
-        .child(facts);
+        .child(facts.flex_shrink_0());
     if let Some(changes) = popover.changes {
+        // Only the change list scrolls, so identity, facts, and freshness stay in view.
         let mut list = div()
+            .id("repository-status-changes")
+            .min_h_0()
+            .overflow_y_scroll()
             .flex()
             .flex_col()
             .gap(spacing(2.0))
@@ -462,12 +460,31 @@ fn render_popover(
     }
     surface = surface.child(divider()).child(
         div()
+            .flex_shrink_0()
             .debug_selector(|| "repository-status-popover-footer".to_owned())
             .chrome_text(appearance.typography.style(TextRole::Secondary))
             .text_color(gpui_color(muted))
             .child(popover.footer),
     );
-    shell.mount(surface).into_any_element()
+    // The positioner spans the Pane below the inset, so the popover can grow no taller than it.
+    div()
+        .absolute()
+        .top(spacing(
+            POPOVER_INSET
+                + if below_find_bar {
+                    FIND_BAR_CLEARANCE
+                } else {
+                    0.0
+                },
+        ))
+        .right(spacing(POPOVER_INSET))
+        .bottom(spacing(POPOVER_INSET))
+        .left(spacing(POPOVER_INSET))
+        .flex()
+        .flex_col()
+        .items_end()
+        .child(shell.mount(surface))
+        .into_any_element()
 }
 
 /// The Pull Request number, which opens the Pull Request in the browser, and its state in words.

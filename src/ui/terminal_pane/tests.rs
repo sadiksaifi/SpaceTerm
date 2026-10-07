@@ -2756,6 +2756,56 @@ fn terminal_click_restores_terminal_responder_without_closing_find(cx: &mut Test
 }
 
 #[gpui::test]
+fn repository_status_popover_should_fit_a_short_pane_and_keep_its_footer(cx: &mut TestAppContext) {
+    use crate::repository_status::{
+        ChangeEntry, ChangeKind, ChangeState, ChangeSummary, ChangeTotal, Freshness,
+        RepositoryHead, RepositoryKey, RepositoryMachine, RepositoryReadError, RepositoryRoot,
+        RepositoryStatus, RepositoryView,
+    };
+    use crate::ui::ShowRepositoryStatus;
+
+    let (pane, cx, _) = connected_terminal_pane(cx);
+    cx.simulate_resize(gpui::size(px(640.0), px(260.0)));
+    let entries = (0..20)
+        .map(|index| ChangeEntry {
+            kind: ChangeKind::Modified,
+            path: format!("src/file-{index}.rs").into(),
+        })
+        .collect();
+    let status = RepositoryStatus {
+        key: RepositoryKey {
+            machine: RepositoryMachine::Local,
+            root: RepositoryRoot::Local(PathBuf::from("/Users/tester/Projects/tool")),
+        },
+        head: RepositoryHead::Branch("main".into()),
+        commit: Some("a1b2c3d".into()),
+        upstream: None,
+        operation: None,
+        changes: ChangeState::Known(ChangeSummary {
+            total: ChangeTotal::Exact(20),
+            modified: 20,
+            entries,
+            ..ChangeSummary::default()
+        }),
+        freshness: Freshness::Current,
+        read_at: std::time::Instant::now(),
+        pull_request: None,
+        read_failure: Some(RepositoryReadError::Unavailable),
+    };
+    pane.update(cx, |pane, cx| {
+        pane.present_repository_view(RepositoryView::Repository(Arc::new(status)), cx);
+    });
+    cx.dispatch_action(ShowRepositoryStatus);
+    cx.run_until_parked();
+
+    let pane_bounds = cx.debug_bounds("terminal-pane").unwrap();
+    let popover = cx.debug_bounds("repository-status-popover").unwrap();
+    let footer = cx.debug_bounds("repository-status-popover-footer").unwrap();
+    assert!(popover.bottom() <= pane_bounds.bottom(), "{popover:?} {pane_bounds:?}");
+    assert!(footer.bottom() <= popover.bottom(), "{footer:?} {popover:?}");
+}
+
+#[gpui::test]
 fn repository_status_popover_holds_input_until_escape_returns_it(cx: &mut TestAppContext) {
     use crate::repository_status::{
         ChangeState, ChangeSummary, ChangeTotal, Freshness, RepositoryHead, RepositoryKey,
