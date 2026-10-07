@@ -22,6 +22,7 @@ pub(crate) mod microphone_access;
 pub(crate) mod permission_access;
 pub(crate) mod secure_filesystem;
 pub(crate) mod selected_file;
+pub(crate) mod repository_watch;
 pub(crate) mod settings_file;
 pub(crate) mod setup_guide_host;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
