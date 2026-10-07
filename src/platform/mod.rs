@@ -236,6 +236,9 @@ mod unix_pty;
 #[cfg(all(any(target_os = "macos", target_os = "linux"), test))]
 pub(crate) mod unix_pty;
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub(crate) mod unix_repository_program;
+
 #[cfg(all(any(target_os = "macos", target_os = "linux"), not(test)))]
 mod unix_secure_filesystem;
 #[cfg(all(any(target_os = "macos", target_os = "linux"), test))]
