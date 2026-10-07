@@ -518,7 +518,23 @@ impl RepositoryScheduler {
                 Arc::make_mut(&mut repository.status).changes = ChangeState::Counting;
             }
         }
+        // The host keeps one wake, so each tick asks for the next deadline still pending.
+        if let Some(due) = self.next_deadline() {
+            self.effects.push(RepositoryEffect::WakeAt(due));
+        }
         self.finish()
+    }
+
+    /// The earliest pending debounce or counting indicator.
+    fn next_deadline(&self) -> Option<Instant> {
+        let repositories = self.repositories.values().flat_map(|repository| {
+            let indicator = (repository.status.changes == ChangeState::NotCounted)
+                .then(|| repository.count.map(|count| count.started + COUNTING_INDICATOR_DELAY))
+                .flatten();
+            [repository.debounce, indicator]
+        });
+        let interests = self.interests.values().map(|interest| interest.debounce);
+        repositories.chain(interests).flatten().min()
     }
 
     /// Turning Repository Status off clears every view and forgets every read. Turning it on
@@ -1960,6 +1976,33 @@ mod tests {
         harness.tick();
         let (_, directory) = harness.only_probe();
         assert_eq!(directory, remote("/srv/api"));
+    }
+
+    #[test]
+    fn a_tick_should_ask_for_the_next_remote_debounce_still_pending() {
+        let api = remote_key("/srv/api");
+        let web = remote_key("/srv/web");
+        let mut harness = Harness::new();
+        harness.register(PANE, remote_interest("/srv/api"));
+        harness.read(on_branch(&api, "main"), 0);
+        harness.register(OTHER, remote_interest("/srv/web"));
+        harness.read(on_branch(&web, "main"), 0);
+
+        harness.command_finished(PANE, 1);
+        harness.advance(500);
+        harness.command_finished(OTHER, 1);
+        assert_eq!(harness.wakes(), vec![harness.at(2_000), harness.at(2_500)]);
+
+        harness.advance(1_500);
+        harness.tick();
+        let (_, directory) = harness.only_probe();
+        assert_eq!(directory, remote("/srv/api"));
+        assert_eq!(harness.wakes(), vec![harness.at(2_500)]);
+
+        harness.advance(500);
+        harness.tick();
+        let (_, directory) = harness.only_probe();
+        assert_eq!(directory, remote("/srv/web"));
     }
 
     #[test]
