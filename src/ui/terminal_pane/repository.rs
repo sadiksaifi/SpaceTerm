@@ -128,8 +128,12 @@ impl TerminalPane {
         }
         let focus = cx.focus_handle();
         // Focus that moves anywhere else, such as another Pane, closes the popover and stays
-        // where it went.
-        let focus_out = cx.on_focus_out(&focus, window, |pane, _, _, cx| {
+        // where it went. Another window taking the keyboard, such as Settings, leaves the popover
+        // open and focused for when this window returns.
+        let focus_out = cx.on_focus_out(&focus, window, |pane, _, window, cx| {
+            if !window.is_window_active() {
+                return;
+            }
             if pane.repository_status.popover.take().is_some() {
                 cx.notify();
             }
@@ -149,7 +153,9 @@ impl TerminalPane {
         let Some(popover) = self.repository_status.popover.take() else {
             return;
         };
-        if popover.focus.contains_focused(window, cx) {
+        // A popover that already left the frame is no longer an ancestor of anything, so its own
+        // focus is checked directly.
+        if popover.focus.is_focused(window) || popover.focus.contains_focused(window, cx) {
             self.focus_handle.focus(window, cx);
         }
         self.advance_native_service_focus_epoch();

@@ -2884,6 +2884,111 @@ fn repository_status_popover_holds_input_until_escape_returns_it(cx: &mut TestAp
 }
 
 #[gpui::test]
+fn hiding_repository_status_under_an_open_popover_should_return_input_to_the_terminal(
+    cx: &mut TestAppContext,
+) {
+    use crate::repository_status::{
+        ChangeState, Freshness, RepositoryHead, RepositoryKey, RepositoryMachine, RepositoryRoot,
+        RepositoryStatus, RepositoryView,
+    };
+    use crate::ui::ShowRepositoryStatus;
+
+    let (pane, cx, records) = connected_terminal_pane(cx);
+    let status = RepositoryStatus {
+        key: RepositoryKey {
+            machine: RepositoryMachine::Local,
+            root: RepositoryRoot::Local(PathBuf::from("/Users/tester/Projects/tool")),
+        },
+        head: RepositoryHead::Branch("main".into()),
+        commit: Some("a1b2c3d".into()),
+        upstream: None,
+        operation: None,
+        changes: ChangeState::NotCounted,
+        freshness: Freshness::Current,
+        read_at: std::time::Instant::now(),
+        pull_request: None,
+        read_failure: None,
+    };
+    pane.update(cx, |pane, cx| {
+        pane.present_repository_view(RepositoryView::Repository(Arc::new(status)), cx);
+    });
+    cx.dispatch_action(ShowRepositoryStatus);
+    cx.run_until_parked();
+    assert!(pane.read_with(cx, |pane, _| pane.repository_popover_open()));
+
+    // Settings turns Repository Status off while its own window is in front.
+    cx.deactivate_window();
+    pane.update(cx, |pane, cx| {
+        pane.present_repository_view(RepositoryView::Hidden, cx);
+    });
+    cx.run_until_parked();
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+
+    assert!(!pane.read_with(cx, |pane, _| pane.repository_popover_open()));
+    assert!(cx.update(|window, app| {
+        pane.read_with(app, |pane, _| pane.focus_handle.is_focused(window))
+    }));
+    let command_count = records.commands().len();
+    cx.simulate_keystrokes("a");
+    cx.run_until_parked();
+    assert!(
+        records
+            .commands()
+            .into_iter()
+            .skip(command_count)
+            .any(|call| matches!(call.command, RecordedCommand::Key(_))),
+        "typing reaches the terminal again"
+    );
+}
+
+#[gpui::test]
+fn repository_status_popover_should_stay_open_while_another_window_is_in_front(
+    cx: &mut TestAppContext,
+) {
+    use crate::repository_status::{
+        ChangeState, Freshness, RepositoryHead, RepositoryKey, RepositoryMachine, RepositoryRoot,
+        RepositoryStatus, RepositoryView,
+    };
+    use crate::ui::ShowRepositoryStatus;
+
+    let (pane, cx, _) = connected_terminal_pane(cx);
+    let status = RepositoryStatus {
+        key: RepositoryKey {
+            machine: RepositoryMachine::Local,
+            root: RepositoryRoot::Local(PathBuf::from("/Users/tester/Projects/tool")),
+        },
+        head: RepositoryHead::Branch("main".into()),
+        commit: Some("a1b2c3d".into()),
+        upstream: None,
+        operation: None,
+        changes: ChangeState::NotCounted,
+        freshness: Freshness::Current,
+        read_at: std::time::Instant::now(),
+        pull_request: None,
+        read_failure: None,
+    };
+    pane.update(cx, |pane, cx| {
+        pane.present_repository_view(RepositoryView::Repository(Arc::new(status)), cx);
+    });
+    cx.dispatch_action(ShowRepositoryStatus);
+    cx.run_until_parked();
+
+    cx.deactivate_window();
+    cx.run_until_parked();
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    assert!(pane.read_with(cx, |pane, _| pane.repository_popover_open()));
+
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(!pane.read_with(cx, |pane, _| pane.repository_popover_open()));
+    assert!(cx.update(|window, app| {
+        pane.read_with(app, |pane, _| pane.focus_handle.is_focused(window))
+    }));
+}
+
+#[gpui::test]
 fn terminal_find_submit_navigates_and_escape_cancels(cx: &mut TestAppContext) {
     let (pane, cx, records) = connected_terminal_pane(cx);
     cx.dispatch_action(OpenTerminalFind);
