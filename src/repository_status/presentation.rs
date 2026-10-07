@@ -107,75 +107,6 @@ pub(crate) struct RepositoryCaption {
     pub(crate) accessible_label: String,
 }
 
-/// How many caption segments beyond the glyph and mark a narrowing segment can give up.
-pub(crate) const REPOSITORY_CAPTION_LADDER: usize = 3;
-
-/// Rendered widths of the caption segments, including their leading gaps.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(crate) struct RepositoryCaptionWidths {
-    /// The glyph and mark, which are never dropped.
-    pub(crate) anchor: f32,
-    pub(crate) branch: f32,
-    /// The narrowest truncated branch worth showing, such as one character and an ellipsis.
-    pub(crate) truncated_branch: f32,
-    pub(crate) detail: f32,
-    pub(crate) divergence: f32,
-}
-
-impl RepositoryCaptionWidths {
-    /// The droppable segments in the order a widening caption admits them.
-    const fn ladder(self) -> [f32; REPOSITORY_CAPTION_LADDER] {
-        [self.branch, self.detail, self.divergence]
-    }
-}
-
-/// Which caption segments fit. Narrowing drops the divergence, then the detail, then truncates
-/// the branch, then drops it, leaving the glyph and mark.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct RepositoryCaptionLayout {
-    pub(crate) show_branch: bool,
-    /// The branch is shown truncated with an ellipsis to the remaining width.
-    pub(crate) truncate_branch: bool,
-    pub(crate) show_detail: bool,
-    pub(crate) show_divergence: bool,
-}
-
-impl RepositoryCaptionLayout {
-    pub(crate) const FULL: Self = Self {
-        show_branch: true,
-        truncate_branch: false,
-        show_detail: true,
-        show_divergence: true,
-    };
-
-    pub(crate) fn from_widths(available: f32, widths: RepositoryCaptionWidths) -> Self {
-        // The glyph and mark are always kept. Every other segment is admitted in priority order
-        // and the first one that does not fit ends the ladder. A branch that does not fit whole
-        // is truncated when its narrowest form fits, and ends the ladder either way.
-        let mut claimed = widths.anchor;
-        let mut shown = [false; REPOSITORY_CAPTION_LADDER];
-        let mut truncate_branch = false;
-        for (index, (admitted, width)) in shown.iter_mut().zip(widths.ladder()).enumerate() {
-            if claimed + width > available {
-                if index == 0 && claimed + widths.truncated_branch <= available {
-                    *admitted = true;
-                    truncate_branch = true;
-                }
-                break;
-            }
-            claimed += width;
-            *admitted = true;
-        }
-        let [show_branch, show_detail, show_divergence] = shown;
-        Self {
-            show_branch,
-            truncate_branch,
-            show_detail,
-            show_divergence,
-        }
-    }
-}
-
 impl RepositoryCaption {
     /// The caption segment for a view, or `None` when Repository Status shows nothing.
     pub(crate) fn from_view(view: &RepositoryView, now: Instant) -> Option<Self> {
@@ -202,23 +133,17 @@ impl RepositoryCaption {
         })
     }
 
-    /// The segment as one line under `layout`, in the order the caption paints it.
-    pub(crate) fn text(&self, layout: RepositoryCaptionLayout) -> String {
-        let mut parts = vec![self.glyph];
-        if layout.show_branch {
-            parts.push(&self.branch);
-        }
+    /// The whole segment as one line, in the order the caption paints it.
+    #[cfg(test)]
+    pub(crate) fn text(&self) -> String {
+        let mut parts = vec![self.glyph, &self.branch];
         if let Some(mark) = self.mark {
             parts.push(mark.glyph());
         }
-        if layout.show_detail
-            && let Some(detail) = &self.detail
-        {
+        if let Some(detail) = &self.detail {
             parts.push(&detail.text);
         }
-        if layout.show_divergence
-            && let Some(divergence) = &self.divergence
-        {
+        if let Some(divergence) = &self.divergence {
             parts.push(divergence);
         }
         parts.join(" ")
@@ -716,7 +641,7 @@ mod tests {
 
     fn line(status: RepositoryStatus) -> String {
         let now = status.read_at;
-        caption(status, now).text(RepositoryCaptionLayout::FULL)
+        caption(status, now).text()
     }
 
     fn pull_request(draft: bool) -> PullRequest {
@@ -819,7 +744,7 @@ mod tests {
             status(RepositoryHead::Unborn("main".into()), modified(1), now),
             now,
         );
-        assert_eq!(unborn.text(RepositoryCaptionLayout::FULL), "⎇ main No commits");
+        assert_eq!(unborn.text(), "⎇ main No commits");
         assert_eq!(unborn.mark, None);
     }
 
@@ -877,7 +802,7 @@ mod tests {
         let mut repository = status(main_branch(), ChangeState::Counting, now);
         repository.upstream = upstream(1, 0);
         let counting = caption(repository, now);
-        assert_eq!(counting.text(RepositoryCaptionLayout::FULL), "⎇ main counting… ↑1");
+        assert_eq!(counting.text(), "⎇ main counting… ↑1");
         assert_eq!(
             counting.detail,
             Some(CaptionDetail {
@@ -899,37 +824,6 @@ mod tests {
         let mut repository = status(main_branch(), modified(1), now);
         repository.freshness = Freshness::LastKnown { as_of: now };
         assert!(caption(repository, now).dimmed);
-    }
-
-    #[test]
-    fn the_caption_narrows_in_ladder_order() {
-        let now = Instant::now();
-        let mut repository = status(main_branch(), modified(4), now);
-        repository.upstream = upstream(1, 2);
-        let caption = caption(repository, now);
-        let widths = RepositoryCaptionWidths {
-            anchor: 20.0,
-            branch: 40.0,
-            truncated_branch: 15.0,
-            detail: 60.0,
-            divergence: 30.0,
-        };
-        let text = |available| {
-            let layout = RepositoryCaptionLayout::from_widths(available, widths);
-            (layout, caption.text(layout))
-        };
-        assert_eq!(text(150.0), (RepositoryCaptionLayout::FULL, "⎇ main ● 4 changes ↑1 ↓2".to_owned()));
-        assert_eq!(text(149.0).1, "⎇ main ● 4 changes");
-        assert_eq!(text(119.0).1, "⎇ main ●");
-        let (truncated, spelled) = text(59.0);
-        assert!(truncated.show_branch && truncated.truncate_branch);
-        assert!(!truncated.show_detail && !truncated.show_divergence);
-        assert_eq!(spelled, "⎇ main ●");
-        assert!(text(35.0).0.show_branch);
-        let (mark_only, spelled) = text(34.0);
-        assert!(!mark_only.show_branch);
-        assert_eq!(spelled, "⎇ ●");
-        assert_eq!(text(0.0).1, "⎇ ●");
     }
 
     #[test]

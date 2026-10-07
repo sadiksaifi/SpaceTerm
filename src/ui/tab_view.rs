@@ -7,6 +7,7 @@ use super::terminal_status::{
     StatusColors, StatusGlyph, TerminalProgress, reported_glyph_is_drawable, reported_title,
 };
 use crate::domain::PinnedDirectory;
+use crate::repository_status::presentation::{RepositoryCaption, RepositoryMark};
 use crate::domain::remote_workspace::RemoteRestartBatch;
 use crate::terminal::metadata::CurrentDirectory;
 use crate::ui::appearance::gpui_color;
@@ -87,6 +88,12 @@ const PANE_CONTROL_GAP: f32 = 2.0;
 /// open Close Pane glyph reads as wider.
 const PANE_CLOSE_OPTICAL_TRIM: f32 = 1.0;
 const PANE_CONTROL_LEADING_GAP: f32 = 6.0;
+/// The air between a Pane's identity and its Repository Status.
+const PANE_REPOSITORY_LEADING_GAP: f32 = 10.0;
+/// The air between the parts of the Repository Status segment.
+const PANE_REPOSITORY_PART_GAP: f32 = 4.0;
+/// The narrowest truncated branch worth showing.
+const PANE_REPOSITORY_MINIMUM_BRANCH_WIDTH: f32 = 36.0;
 /// The share of the accent color that fills the half of a Pane a dragged Pane would take.
 const PANE_DROP_TARGET_FILL_OPACITY: u8 = 56;
 /// The status glyph and its trailing air, which every Pane Caption keeps at every width.
@@ -111,12 +118,13 @@ struct CaptionLayout {
     show_user: bool,
     show_label: bool,
     show_splits: bool,
+    repository: RepositoryCaptionLayout,
 }
 
 /// How many caption segments beyond the Pane name a narrowing caption can give up.
-const CAPTION_LADDER: usize = 5;
+const CAPTION_LADDER: usize = 8;
 
-/// Rendered widths of the caption segments, including separators where present.
+/// Rendered widths of the caption segments, including separators and leading gaps where present.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct CaptionMetrics {
     user: Pixels,
@@ -125,6 +133,17 @@ struct CaptionMetrics {
     name: Pixels,
     status_separator: Pixels,
     label: Pixels,
+    /// Repository Status widths, absent when the Pane shows none.
+    repository: Option<RepositoryCaptionMetrics>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct RepositoryCaptionMetrics {
+    /// The glyph and mark, which a caption with Repository Status always keeps.
+    anchor: Pixels,
+    branch: Pixels,
+    detail: Option<Pixels>,
+    divergence: Option<Pixels>,
 }
 
 impl CaptionMetrics {
@@ -153,19 +172,50 @@ impl CaptionMetrics {
                 px(0.0)
             },
             label: measure_caption_segment(&text.label, window, appearance),
+            repository: text.repository.as_ref().map(|repository| {
+                let part = |text: &str| {
+                    appearance.spacing(PANE_REPOSITORY_PART_GAP)
+                        + measure_caption_segment(&text.to_owned().into(), window, appearance)
+                };
+                RepositoryCaptionMetrics {
+                    anchor: appearance.spacing(PANE_REPOSITORY_LEADING_GAP)
+                        + measure_caption_segment(&repository.glyph.into(), window, appearance)
+                        + repository
+                            .mark
+                            .map_or(px(0.0), |mark| part(mark.glyph())),
+                    branch: part(&repository.branch),
+                    detail: repository.detail.as_ref().map(|detail| part(&detail.text)),
+                    divergence: repository.divergence.as_deref().map(part),
+                }
+            }),
         }
     }
 
-    /// The droppable segments in the order a widening caption admits them.
-    const fn ladder(self) -> [Pixels; CAPTION_LADDER] {
+    /// The droppable segments in the order a widening caption admits them. An absent segment is
+    /// neither admitted nor ends the ladder.
+    fn ladder(self) -> [Option<Pixels>; CAPTION_LADDER] {
+        let repository = self.repository;
         [
-            self.status_separator,
-            self.host,
-            self.directory,
-            self.user,
-            self.label,
+            repository.map(|repository| repository.branch),
+            Some(self.status_separator),
+            repository.and_then(|repository| repository.detail),
+            Some(self.host),
+            Some(self.directory),
+            Some(self.user),
+            Some(self.label),
+            repository.and_then(|repository| repository.divergence),
         ]
     }
+}
+
+/// Which parts of the Repository Status segment fit. The glyph and mark are always kept.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct RepositoryCaptionLayout {
+    show_branch: bool,
+    /// The widest the branch may be when it does not fit whole, in whole pixels.
+    branch_limit: Option<u32>,
+    show_detail: bool,
+    show_divergence: bool,
 }
 
 impl CaptionLayout {
@@ -201,7 +251,10 @@ impl CaptionLayout {
         let fixed_width =
             (PANE_CAPTION_LEFT_PADDING + PANE_CAPTION_RIGHT_PADDING + PANE_STATUS_ICON_GAP)
                 * spacing_scale
-                + status_icon_size;
+                + status_icon_size
+                + metrics
+                    .repository
+                    .map_or(0.0, |repository| f32::from(repository.anchor));
         let show_splits = width
             >= px(fixed_width
                 + PANE_CONTROL_LEADING_GAP * spacing_scale
@@ -229,21 +282,36 @@ impl CaptionLayout {
         .max(px(0.0));
         // The name is always kept. Every other segment is admitted in priority order and the
         // first one that does not fit ends the ladder, so segments never reappear out of order.
+        // A branch that does not fit whole is truncated when its narrowest form fits, and ends the
+        // ladder either way.
         let mut claimed = metrics.name;
         let mut shown = [false; CAPTION_LADDER];
-        for (admitted, width) in shown.iter_mut().zip(metrics.ladder()) {
+        let mut branch_limit = None;
+        for (index, (admitted, width)) in shown.iter_mut().zip(metrics.ladder()).enumerate() {
+            let Some(width) = width else {
+                continue;
+            };
             if claimed + width > available {
+                let remaining = f32::from(available - claimed);
+                if index == 0 && remaining >= PANE_REPOSITORY_MINIMUM_BRANCH_WIDTH * spacing_scale
+                {
+                    *admitted = true;
+                    branch_limit = Some(remaining.floor() as u32);
+                }
                 break;
             }
             claimed += width;
             *admitted = true;
         }
         let [
+            show_repository_branch,
             show_status_separator,
+            show_repository_detail,
             show_host,
             show_directory,
             show_user,
             show_label,
+            show_repository_divergence,
         ] = shown;
         Self {
             show_status_separator,
@@ -252,6 +320,12 @@ impl CaptionLayout {
             show_user,
             show_label,
             show_splits,
+            repository: RepositoryCaptionLayout {
+                show_branch: show_repository_branch,
+                branch_limit,
+                show_detail: show_repository_detail,
+                show_divergence: show_repository_divergence,
+            },
         }
     }
 }
@@ -2163,6 +2237,7 @@ struct PaneCaptionText {
     glyph: Option<gpui::SharedString>,
     running: bool,
     progress: TerminalProgress,
+    repository: Option<RepositoryCaption>,
 }
 
 impl PaneCaptionText {
@@ -2181,6 +2256,7 @@ impl PaneCaptionText {
                 glyph: facts.glyph,
                 running: facts.running,
                 progress: facts.progress,
+                repository: facts.repository,
             };
         }
         let (leading, name) = split_directory_leaf(&facts.directory);
@@ -2193,6 +2269,7 @@ impl PaneCaptionText {
             glyph: facts.glyph,
             running: facts.running,
             progress: facts.progress,
+            repository: facts.repository,
         }
     }
 }
@@ -2448,6 +2525,7 @@ fn render_pane_caption_content(
         };
     }
     let caption_name = format!("Pane Caption, {}", text.name);
+    let repository = text.repository.clone();
     let caption_content =
         render_caption_identity(pane_id, text, attention, layout, appearance, &paint);
     let focus_pane = move |window: &mut Window, cx: &mut App| {
@@ -2488,8 +2566,96 @@ fn render_pane_caption_content(
             })
         })
         .child(caption_content)
+        .when_some(repository, |row, repository| {
+            row.child(render_repository_segment(
+                pane_id,
+                &repository,
+                layout.repository,
+                appearance,
+                &paint,
+            ))
+        })
         .child(controls)
         .into_any_element()
+}
+
+/// The Pane's Repository Status: glyph, branch, one mark, the detail, and the divergence.
+/// Color is never the only signal; the glyph, words, and the spoken label carry every state.
+fn render_repository_segment(
+    pane_id: PaneId,
+    repository: &RepositoryCaption,
+    layout: RepositoryCaptionLayout,
+    appearance: &super::appearance::ChromeAppearance,
+    paint: &crate::appearance::CaptionPaint,
+) -> AnyElement {
+    let text_color = if repository.dimmed {
+        paint.secondary
+    } else {
+        paint.foreground
+    };
+    let part = || {
+        div()
+            .flex_shrink_0()
+            .ml(appearance.spacing(PANE_REPOSITORY_PART_GAP))
+    };
+    let mut segment = div()
+        .id(("pane-repository", pane_id.get()))
+        .debug_selector(move || format!("pane-repository-{}", pane_id.get()))
+        .role(gpui::accesskit::Role::Button)
+        .aria_label(gpui::SharedString::from(repository.accessible_label.clone()))
+        .flex()
+        .items_center()
+        .min_w_0()
+        .flex_shrink_0()
+        .ml(appearance.spacing(PANE_REPOSITORY_LEADING_GAP))
+        .text_color(gpui_color(text_color))
+        .child(div().flex_shrink_0().child(repository.glyph));
+    if layout.show_branch {
+        segment = segment.child(
+            part()
+                .debug_selector(move || format!("pane-repository-branch-{}", pane_id.get()))
+                .min_w_0()
+                .truncate()
+                .when_some(layout.branch_limit, |branch, limit| {
+                    branch.max_w(px(limit as f32))
+                })
+                .child(repository.branch.clone()),
+        );
+    }
+    if let Some(mark) = repository.mark {
+        let color = match mark {
+            RepositoryMark::Operation => paint.repository_operation,
+            RepositoryMark::Changes => paint.repository_changes,
+        };
+        segment = segment.child(
+            part()
+                .debug_selector(move || format!("pane-repository-mark-{}", pane_id.get()))
+                .text_color(gpui_color(if repository.dimmed { text_color } else { color }))
+                .child(mark.glyph()),
+        );
+    }
+    if layout.show_detail
+        && let Some(detail) = &repository.detail
+    {
+        segment = segment.child(
+            part()
+                .debug_selector(move || format!("pane-repository-detail-{}", pane_id.get()))
+                .when(detail.dimmed, |detail| {
+                    detail.text_color(gpui_color(paint.secondary))
+                })
+                .child(detail.text.clone()),
+        );
+    }
+    if layout.show_divergence
+        && let Some(divergence) = &repository.divergence
+    {
+        segment = segment.child(
+            part()
+                .debug_selector(move || format!("pane-repository-divergence-{}", pane_id.get()))
+                .child(divergence.clone()),
+        );
+    }
+    segment.into_any_element()
 }
 
 /// The Pane's identity as its caption shows it: origin, directory, name, status, and label.
@@ -3624,6 +3790,7 @@ mod tests {
             glyph: None,
             running: false,
             progress: TerminalProgress::None,
+            repository: None,
         })
     }
 
@@ -4607,6 +4774,7 @@ mod tests {
             name: px(40.0),
             status_separator: px(PANE_CAPTION_SEPARATOR_WIDTH),
             label: px(30.0),
+            repository: None,
         };
         let resolve = |width: f32| {
             CaptionLayout::from_metrics(false, px(width), metrics, 1.0, 13.0, PANE_CONTROL_SIZE)
@@ -4623,6 +4791,7 @@ mod tests {
             show_user: user,
             show_label: label,
             show_splits: true,
+            repository: RepositoryCaptionLayout::default(),
         };
 
         assert_eq!(
@@ -4650,6 +4819,83 @@ mod tests {
             layout(false, false, false, false, false)
         );
         assert!(!resolve(controls - 1.0).show_splits);
+    }
+
+    #[test]
+    fn narrowing_a_caption_should_keep_the_repository_branch_and_drop_its_counts_first() {
+        let repository = RepositoryCaptionMetrics {
+            anchor: px(20.0),
+            branch: px(50.0),
+            detail: Some(px(70.0)),
+            divergence: Some(px(30.0)),
+        };
+        let metrics = CaptionMetrics {
+            user: px(40.0),
+            host: px(60.0),
+            directory: px(120.0),
+            name: px(40.0),
+            status_separator: px(PANE_CAPTION_SEPARATOR_WIDTH),
+            label: px(30.0),
+            repository: Some(repository),
+        };
+        let controls = PANE_CAPTION_LEFT_PADDING
+            + PANE_CAPTION_RIGHT_PADDING
+            + PANE_STATUS_WIDTH
+            + PANE_CONTROL_LEADING_GAP
+            + controls_width(2, false, PANE_CONTROL_SIZE, 1.0)
+            + 20.0;
+        let resolve = |metrics, width: f32| {
+            CaptionLayout::from_metrics(false, px(width), metrics, 1.0, 13.0, PANE_CONTROL_SIZE)
+        };
+        let shown = |layout: CaptionLayout| {
+            (
+                layout.repository.show_branch,
+                layout.show_status_separator,
+                layout.repository.show_detail,
+                layout.show_host,
+                layout.show_label,
+                layout.repository.show_divergence,
+            )
+        };
+
+        let full = resolve(metrics, controls + 457.25);
+        assert_eq!(shown(full), (true, true, true, true, true, true));
+        assert_eq!(full.repository.branch_limit, None);
+        assert_eq!(
+            shown(resolve(metrics, controls + 457.0)),
+            (true, true, true, true, true, false)
+        );
+        assert_eq!(
+            shown(resolve(metrics, controls + 177.25)),
+            (true, true, true, false, false, false)
+        );
+        assert_eq!(
+            shown(resolve(metrics, controls + 177.0)),
+            (true, true, false, false, false, false)
+        );
+        assert_eq!(
+            shown(resolve(metrics, controls + 90.0)),
+            (true, false, false, false, false, false)
+        );
+
+        let truncated = resolve(metrics, controls + 89.0);
+        assert!(truncated.repository.show_branch);
+        assert_eq!(truncated.repository.branch_limit, Some(49));
+        assert!(!truncated.show_status_separator);
+        assert!(!resolve(metrics, controls + 75.0).repository.show_branch);
+
+        let without_counts = CaptionMetrics {
+            repository: Some(RepositoryCaptionMetrics {
+                detail: None,
+                divergence: None,
+                ..repository
+            }),
+            ..metrics
+        };
+        assert_eq!(
+            shown(resolve(without_counts, controls + 167.25)),
+            (true, true, false, true, false, false)
+        );
     }
 
     /// A narrow Pane Caption without status retains Split controls above their width threshold.

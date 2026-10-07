@@ -173,7 +173,8 @@ macro_rules! chrome_color_fields {
             outline_border, outline_hover_border, outline_pressed_border, outline_disabled_border,
             tab_hover_background, tab_hover_foreground, tab_hover_icon, tab_active_icon, tab_inactive_icon,
             tab_active_border, tab_active_hover_background, tab_active_hover_foreground, tab_active_hover_icon,
-            inactive_selection_border, tab_separator
+            inactive_selection_border, tab_separator,
+            repository_operation, repository_changes, pull_request_open, pull_request_draft
         }
     };
 }
@@ -197,7 +198,7 @@ mod zed;
 mod zed_tests;
 
 pub(crate) use color::Color;
-pub(crate) use compiler::{CaptionPaint, SemanticPaint, StatusPaint};
+pub(crate) use compiler::{CaptionPaint, PullRequestPaint, SemanticPaint, StatusPaint};
 pub(crate) use composition::{
     ChromeTone, CompositionCapabilities, ResolvedWindowComposition, SurfaceMaterials, SurfaceRole,
     UnavailableWindowEffect, WindowBackgroundAppearance, WindowBackgroundChoices,

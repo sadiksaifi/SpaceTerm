@@ -6,6 +6,9 @@ use gpui::{AnyElement, App, Global, Window};
 use spaceterm_ui::{Switch, ToggleSize};
 
 use super::DeveloperWorkbench;
+use crate::repository_status::presentation::{
+    BRANCH_GLYPH, CaptionDetail, RepositoryCaption, RepositoryMark,
+};
 use crate::ui::appearance::settings::SettingsAppearance;
 use crate::ui::sidebar_window::form::{FormGroup, FormRow, action_button};
 use crate::ui::terminal_pane::{PaneCaptionFacts, PaneOrigin};
@@ -61,6 +64,20 @@ pub(crate) fn caption_fixture(cx: &App) -> Option<PaneCaptionFacts> {
             glyph: None,
             running: false,
             progress: Default::default(),
+            repository: Some(RepositoryCaption {
+                glyph: BRANCH_GLYPH,
+                branch: "workbench-fixture".to_owned(),
+                mark: Some(RepositoryMark::Changes),
+                detail: Some(CaptionDetail {
+                    text: "4 changes".to_owned(),
+                    dimmed: false,
+                }),
+                divergence: Some("↑1 ↓2".to_owned()),
+                dimmed: false,
+                accessible_label: "Repository status: branch workbench-fixture, 4 changes, \
+                                   1 ahead, 2 behind."
+                    .to_owned(),
+            }),
         })
 }
 
