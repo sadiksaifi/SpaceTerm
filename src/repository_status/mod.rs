@@ -10,6 +10,8 @@
 // The shared vocabulary lands before every consumer; consumers arrive in later commits.
 #![allow(dead_code)]
 
+pub(crate) mod scheduler;
+
 use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -375,6 +377,8 @@ pub(crate) struct RepositoryStatus {
     pub(crate) freshness: Freshness,
     pub(crate) read_at: Instant,
     pub(crate) pull_request: Option<PullRequest>,
+    /// The most recent read failure, cleared by the next successful read.
+    pub(crate) read_failure: Option<RepositoryReadError>,
 }
 
 /// What one Pane or sidebar row presents.
