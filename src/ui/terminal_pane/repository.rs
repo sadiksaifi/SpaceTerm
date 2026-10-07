@@ -5,9 +5,10 @@ use std::time::Instant;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, Entity, FocusHandle, KeyDownEvent, Subscription, Window, div,
+    AnyElement, App, Context, Entity, FocusHandle, KeyDownEvent, Pixels, Subscription, Window,
+    anchored, deferred, div,
 };
-use spaceterm_ui::{Button, ButtonSize, ButtonVariant, FloatingRole};
+use spaceterm_ui::{Button, ButtonSize, ButtonVariant, FloatingLayer, FloatingRole};
 
 use super::{PaneTerminalState, TerminalFailure, TerminalPane, TerminalPaneEvent};
 use crate::repository_status::presentation::{PopoverPullRequest, RepositoryPopover};
@@ -25,7 +26,8 @@ use crate::ui::repository_status_store::{
 const POPOVER_WIDTH: f32 = 320.0;
 /// The width of the popover's row labels.
 const POPOVER_LABEL_WIDTH: f32 = 72.0;
-/// The distance between the popover and the Pane's edges.
+/// The distance between the popover and the Pane's top and trailing edges, and between the
+/// popover and the window's edges.
 const POPOVER_INSET: f32 = 8.0;
 /// The height the Terminal Find bar takes above the popover while it is open.
 const FIND_BAR_CLEARANCE: f32 = 40.0;
@@ -205,6 +207,7 @@ impl TerminalPane {
             root,
             open.focus.clone(),
             self.find_input.is_some(),
+            window.viewport_size(),
             cx,
         ))
     }
@@ -312,6 +315,7 @@ fn render_popover(
     root: String,
     focus: FocusHandle,
     below_find_bar: bool,
+    viewport: gpui::Size<Pixels>,
     cx: &mut Context<TerminalPane>,
 ) -> AnyElement {
     let appearance = crate::ui::appearance::shared_chrome(cx);
@@ -388,14 +392,16 @@ fn render_popover(
         .aria_label("Repository Status")
         .track_focus(&focus)
         .w(spacing(POPOVER_WIDTH))
-        .max_w_full()
-        .max_h_full()
+        .max_w(viewport.width - spacing(POPOVER_INSET) * 2.0)
+        .max_h(viewport.height - spacing(POPOVER_INSET) * 2.0)
         .p(spacing(10.0))
         .flex()
         .flex_col()
         .chrome_text(appearance.typography.style(TextRole::Body))
         .text_color(gpui_color(text))
         .block_mouse_except_scroll()
+        // The popover scrolls its own body; the terminal or a Pane beneath it never scrolls too.
+        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
         .on_key_down(cx.listener(|pane, event: &KeyDownEvent, window, cx| {
             if event.keystroke.key == "escape" && !event.keystroke.modifiers.modified() {
                 pane.close_repository_status(window, cx);
@@ -477,7 +483,12 @@ fn render_popover(
             .text_color(gpui_color(muted))
             .child(popover.footer),
     );
-    // The positioner spans the Pane below the inset, so the popover can grow no taller than it.
+    // The popover hangs from the Pane's top trailing corner like a macOS popover, and may extend
+    // past a short or narrow Pane; the window's edges bound it instead.
+    let placement = anchored()
+        .anchor(gpui::Anchor::TopRight)
+        .snap_to_window_with_margin(spacing(POPOVER_INSET))
+        .child(shell.mount(surface));
     div()
         .absolute()
         .top(spacing(
@@ -489,12 +500,13 @@ fn render_popover(
                 },
         ))
         .right(spacing(POPOVER_INSET))
-        .bottom(spacing(POPOVER_INSET))
-        .left(spacing(POPOVER_INSET))
-        .flex()
-        .flex_col()
-        .items_end()
-        .child(shell.mount(surface))
+        .size_0()
+        .child(match shell.layer(false) {
+            FloatingLayer::Deferred(priority) => deferred(placement)
+                .with_priority(priority)
+                .into_any_element(),
+            FloatingLayer::Normal => placement.into_any_element(),
+        })
         .into_any_element()
 }
 

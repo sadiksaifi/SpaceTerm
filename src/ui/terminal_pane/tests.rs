@@ -2755,25 +2755,21 @@ fn terminal_click_restores_terminal_responder_without_closing_find(cx: &mut Test
     }));
 }
 
-#[gpui::test]
-fn repository_status_popover_should_fit_a_short_pane_and_keep_its_footer(cx: &mut TestAppContext) {
+/// A Repository Status with more facts and changes than a short Pane can show.
+fn crowded_repository_status() -> crate::repository_status::RepositoryStatus {
     use crate::repository_status::{
         ChangeEntry, ChangeKind, ChangeState, ChangeSummary, ChangeTotal, Freshness,
         RepositoryHead, RepositoryKey, RepositoryMachine, RepositoryReadError, RepositoryRoot,
-        RepositoryStatus, RepositoryView,
+        RepositoryStatus,
     };
-    use crate::ui::ShowRepositoryStatus;
 
-    let (pane, cx, _) = connected_terminal_pane(cx);
-    // Shorter than the popover's identity, facts, and footer together.
-    cx.simulate_resize(gpui::size(px(640.0), px(120.0)));
     let entries = (0..20)
         .map(|index| ChangeEntry {
             kind: ChangeKind::Modified,
             path: format!("src/file-{index}.rs").into(),
         })
         .collect();
-    let status = RepositoryStatus {
+    RepositoryStatus {
         key: RepositoryKey {
             machine: RepositoryMachine::Local,
             root: RepositoryRoot::Local(PathBuf::from("/Users/tester/Projects/tool")),
@@ -2795,12 +2791,31 @@ fn repository_status_popover_should_fit_a_short_pane_and_keep_its_footer(cx: &mu
         read_at: std::time::Instant::now(),
         pull_request: None,
         read_failure: Some(RepositoryReadError::Unavailable),
-    };
+    }
+}
+
+fn open_crowded_repository_popover(pane: &Entity<TerminalPane>, cx: &mut VisualTestContext) {
+    use crate::repository_status::RepositoryView;
+    use crate::ui::ShowRepositoryStatus;
+
     pane.update(cx, |pane, cx| {
-        pane.present_repository_view(RepositoryView::Repository(Arc::new(status)), cx);
+        pane.present_repository_view(
+            RepositoryView::Repository(Arc::new(crowded_repository_status())),
+            cx,
+        );
     });
     cx.dispatch_action(ShowRepositoryStatus);
     cx.run_until_parked();
+}
+
+#[gpui::test]
+fn repository_status_popover_should_fit_a_short_window_and_keep_its_footer(
+    cx: &mut TestAppContext,
+) {
+    let (pane, cx, _) = connected_terminal_pane(cx);
+    // Shorter than the popover's identity, facts, and footer together.
+    cx.simulate_resize(gpui::size(px(640.0), px(120.0)));
+    open_crowded_repository_popover(&pane, cx);
 
     let pane_bounds = cx.debug_bounds("terminal-pane").unwrap();
     let popover = cx.debug_bounds("repository-status-popover").unwrap();
@@ -2814,6 +2829,85 @@ fn repository_status_popover_should_fit_a_short_pane_and_keep_its_footer(cx: &mu
         "{footer:?} {popover:?}"
     );
     assert!(footer.top() >= popover.top(), "{footer:?} {popover:?}");
+}
+
+/// Places one Pane in a short slot at the top of a tall window, as in a stack of Panes.
+struct ShortPaneRoot(Entity<TerminalPane>);
+
+impl Render for ShortPaneRoot {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(90.0))
+                    .flex_shrink_0()
+                    .flex()
+                    .flex_col()
+                    .child(self.0.clone()),
+            )
+            .child(div().flex_1())
+    }
+}
+
+#[gpui::test]
+fn repository_status_popover_should_extend_past_a_short_pane_within_the_window(
+    cx: &mut TestAppContext,
+) {
+    let (pane, cx, _) = connected_terminal_pane(cx);
+    cx.simulate_resize(gpui::size(px(760.0), px(480.0)));
+    cx.update(|window, cx| {
+        window.replace_root(cx, |_, _| ShortPaneRoot(pane.clone()));
+    });
+    cx.run_until_parked();
+    open_crowded_repository_popover(&pane, cx);
+
+    let pane_bounds = cx.debug_bounds("terminal-pane").unwrap();
+    let popover = cx.debug_bounds("repository-status-popover").unwrap();
+    let footer = cx.debug_bounds("repository-status-popover-footer").unwrap();
+    let window = cx.update(|window, _| window.viewport_size());
+    assert!(pane_bounds.size.height <= px(90.0), "{pane_bounds:?}");
+    // The popover hangs from the Pane's top and is taller than the Pane, not squeezed into it.
+    assert!(
+        popover.top() > pane_bounds.top(),
+        "{popover:?} {pane_bounds:?}"
+    );
+    assert!(
+        popover.bottom() > pane_bounds.bottom(),
+        "{popover:?} {pane_bounds:?}"
+    );
+    assert!(popover.bottom() <= window.height, "{popover:?} {window:?}");
+    assert!(
+        footer.bottom() <= popover.bottom() && footer.top() >= popover.top(),
+        "{footer:?} {popover:?}"
+    );
+}
+
+#[gpui::test]
+fn scrolling_the_repository_status_popover_should_not_scroll_the_terminal(cx: &mut TestAppContext) {
+    let (pane, cx, records) = connected_terminal_pane(cx);
+    cx.simulate_resize(gpui::size(px(640.0), px(160.0)));
+    open_crowded_repository_popover(&pane, cx);
+    let popover = cx.debug_bounds("repository-status-popover").unwrap();
+
+    cx.simulate_mouse_move(popover.center(), None, Modifiers::none());
+    cx.simulate_event(ScrollWheelEvent {
+        position: popover.center(),
+        delta: ScrollDelta::Lines(point(0.0, -3.0)),
+        modifiers: Modifiers::none(),
+        touch_phase: gpui::TouchPhase::Moved,
+    });
+    cx.run_until_parked();
+
+    assert!(
+        !records
+            .commands()
+            .iter()
+            .any(|call| matches!(call.command, RecordedCommand::Wheel(_)))
+    );
+    assert!(pane.read_with(cx, |pane, _| pane.repository_popover_open()));
 }
 
 #[gpui::test]
