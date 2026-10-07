@@ -5139,6 +5139,10 @@ fn caption_close_should_confirm_its_owning_pane_and_restore_focus_after_cancel(
     cx.simulate_keystrokes("cmd-d");
     redraw(cx);
     let (workspace_id, tab_manager) = active_tab_manager(&manager, cx);
+    // The unfocused Pane reveals its controls under the pointer before they take a click.
+    let pane = cx.debug_bounds("pane-surface-1").unwrap();
+    cx.simulate_mouse_move(pane.center(), None, Modifiers::none());
+    crate::ui::settle_hover(cx);
     click("pane-close-1", cx);
     redraw(cx);
     let pending = manager.read_with(cx, |manager, _| {
