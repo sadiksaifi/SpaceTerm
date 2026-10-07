@@ -220,6 +220,9 @@ impl ShellStartupDirectory {
         ));
         std::fs::create_dir(&path).unwrap();
         std::fs::write(path.join(".zshrc"), "").unwrap();
+        // Debian and Ubuntu run compinit from /etc/zsh/zshrc. On a host whose function
+        // directories zsh considers insecure, it waits for a y/n answer instead of prompting.
+        std::fs::write(path.join(".zshenv"), "skip_global_compinit=1\n").unwrap();
         Self(path)
     }
 
