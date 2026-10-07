@@ -559,7 +559,20 @@ fn process_exists(process: libc::pid_t) -> bool {
 
 #[test]
 fn repository_count_should_end_every_program_git_started_at_its_remote_deadline() {
-    let Some(fixture) = GitFixture::new("deadline") else {
+    assert_deadline_ends_the_clean_filter("deadline", "exec sleep 30");
+}
+
+#[test]
+fn repository_count_should_kill_a_program_that_ignores_its_remote_deadline() {
+    assert_deadline_ends_the_clean_filter(
+        "deadline-ignored",
+        "trap '' TERM\nwhile :; do sleep 1; done",
+    );
+}
+
+/// Runs a count whose clean filter blocks with `body` and checks the deadline ends the filter.
+fn assert_deadline_ends_the_clean_filter(name: &str, body: &str) {
+    let Some(fixture) = GitFixture::new(name) else {
         return;
     };
     let repository = fixture.repository("work");
@@ -568,7 +581,7 @@ fn repository_count_should_end_every_program_git_started_at_its_remote_deadline(
     fs::write(
         &filter,
         format!(
-            "#!/bin/sh\necho $$ > '{}'\nexec sleep 30\n",
+            "#!/bin/sh\necho $$ > '{}'\n{body}\n",
             filter_process.display()
         ),
     )

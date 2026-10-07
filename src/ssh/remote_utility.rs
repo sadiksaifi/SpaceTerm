@@ -951,7 +951,9 @@ trap cleanup_repository_state EXIT
 trap cancel_repository_read HUP INT TERM
 # Closing the SSH channel signals nothing to a session without a terminal, so the script ends its
 # own work before the local deadline. When the shell leads its process group, as under sshd, the
-# signal reaches every program git started; otherwise it reaches git and the script.
+# signals reach every program git started; otherwise they reach git and the script. A program
+# that ignores TERM gets KILL two seconds later, still before the local deadline. The watchdog
+# ignores TERM from then on, so neither its own signal nor the script's cleanup ends it first.
 script_process=$$
 case $(ps -o pgid= -p "$script_process" 2>/dev/null | tr -d '[:space:]') in
     "$script_process") script_group=1 ;;
@@ -962,12 +964,22 @@ esac
     sleep __REMOTE_DEADLINE_SECONDS__ &
     deadline_sleep=$!
     wait "$deadline_sleep" || exit 0
+    trap '' TERM
     if [ "$script_group" = 1 ]; then
         kill -TERM 0
+        sleep 2
+        kill -KILL 0
     else
+        running_git=
         IFS= read -r running_git < "$state_directory/running" &&
             kill -TERM "$running_git" 2>/dev/null
         kill -TERM "$script_process" 2>/dev/null
+        sleep 2
+        # While the script lives, the git it started is still its own child.
+        if kill -0 "$script_process" 2>/dev/null; then
+            [ -z "$running_git" ] || kill -KILL "$running_git" 2>/dev/null
+            kill -KILL "$script_process" 2>/dev/null
+        fi
     fi
 ) </dev/null >/dev/null 2>&1 &
 deadline_watchdog=$!
