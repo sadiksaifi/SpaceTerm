@@ -400,14 +400,6 @@ impl TerminalMetadataSnapshot {
             .then(|| self.context.current_directory(&self.directory.path))
             .flatten()
     }
-
-    /// The Repository Source Directory these facts establish, or none once they have gone stale.
-    #[allow(dead_code, reason = "the Repository Status store reads it")]
-    pub(crate) fn repository_source_directory(&self) -> Option<CurrentDirectory> {
-        (self.freshness == MetadataFreshness::Live)
-            .then(|| self.context.current_directory(&self.repository_directory))
-            .flatten()
-    }
 }
 
 pub(crate) struct MetadataTracker {
@@ -1219,10 +1211,6 @@ mod tests {
         assert!(tracker.set_reported_directory("file://mac.local/project"));
 
         assert_eq!(&*tracker.snapshot().repository_directory, "/project");
-        assert_eq!(
-            tracker.snapshot().repository_source_directory(),
-            Some(CurrentDirectory::Local("/project".into()))
-        );
     }
 
     #[test]
@@ -1267,14 +1255,6 @@ mod tests {
         }
 
         assert_eq!(tracker.snapshot().finished_commands, 2);
-    }
-
-    #[test]
-    fn stale_metadata_has_no_repository_source() {
-        let mut tracker = local_tracker(Instant::now());
-        tracker.mark_stale();
-
-        assert_eq!(tracker.snapshot().repository_source_directory(), None);
     }
 
     #[test]

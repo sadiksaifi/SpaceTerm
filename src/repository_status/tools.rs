@@ -14,11 +14,6 @@ pub(crate) fn parse_git_version(output: &[u8]) -> Option<ToolVersion> {
     parse_version(output, "git version ")
 }
 
-/// Parses `gh --version` output, such as `gh version 2.62.0 (2024-11-14)`.
-pub(crate) fn parse_github_cli_version(output: &[u8]) -> Option<ToolVersion> {
-    parse_version(output, "gh version ")
-}
-
 pub(crate) fn git_tool_status(version: ToolVersion) -> GitToolStatus {
     if version >= MINIMUM_GIT_VERSION {
         GitToolStatus::Ready(version)
@@ -86,13 +81,6 @@ mod tests {
     }
 
     #[test]
-    fn github_cli_versions_should_parse_from_the_first_line() {
-        let output = b"gh version 2.62.0 (2024-11-14)\nhttps://github.com/cli/cli/releases/tag/v2.62.0\n";
-
-        assert_eq!(parse_github_cli_version(output), Some(version(2, 62, 0)));
-    }
-
-    #[test]
     fn unrecognized_version_output_should_be_rejected() {
         for output in [
             &b""[..],
@@ -109,7 +97,6 @@ mod tests {
         ] {
             assert_eq!(parse_git_version(output), None, "{output:?}");
         }
-        assert_eq!(parse_github_cli_version(b"git version 2.39.5\n"), None);
     }
 
     #[test]

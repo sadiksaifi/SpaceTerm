@@ -7,9 +7,6 @@
 //! Values here can carry repository paths, branch names, and remote URLs for presentation. Errors
 //! never do: every error type is a payload-free classification.
 
-// The shared vocabulary lands before every consumer; consumers arrive in later commits.
-#![allow(dead_code)]
-
 pub(crate) mod discovery;
 mod display_text;
 pub(crate) mod local_read;
@@ -421,13 +418,6 @@ pub(crate) enum RepositoryView {
 }
 
 // Native boundary -------------------------------------------------------------------------------
-
-/// A program Repository Status runs.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) enum RepositoryTool {
-    Git,
-    GitHubCli,
-}
 
 /// One program run. Policy chooses every argument and environment entry; the runner adds
 /// nothing from the ambient environment.
