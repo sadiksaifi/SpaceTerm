@@ -201,8 +201,7 @@ fn response(kind: &str, fields: &[&str], tail: &str) -> Vec<u8> {
 }
 
 /// A probe of `/srv/repo` on `main`, stopped at rebase step 3 of 7 with a merge marker too.
-pub(crate) const REPOSITORY_DISCOVERY: &[u8] =
-    b"false\nfalse\n/srv/repo/.git\n.git\n/srv/repo\n\n";
+pub(crate) const REPOSITORY_DISCOVERY: &[u8] = b"false\nfalse\n/srv/repo/.git\n.git\n/srv/repo\n\n";
 pub(crate) const REPOSITORY_HEADERS: &[u8] =
     b"# branch.oid 0123456789abcdef0123456789abcdef01234567\0# branch.head main\0";
 pub(crate) const REPOSITORY_CONFIG: &[u8] =
@@ -253,4 +252,3 @@ pub(crate) fn repository_count_response(status: &[u8], truncated: bool) -> Vec<u
         if truncated { b"1\n" } else { b"0\n" },
     )
 }
-

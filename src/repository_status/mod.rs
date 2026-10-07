@@ -129,9 +129,13 @@ pub(crate) struct OperationStep {
 /// An unfinished multi-step git operation, in Starship's `git_state` precedence order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RepositoryOperation {
-    Rebasing { step: Option<OperationStep> },
+    Rebasing {
+        step: Option<OperationStep>,
+    },
     /// `git am`.
-    Applying { step: Option<OperationStep> },
+    Applying {
+        step: Option<OperationStep>,
+    },
     Merging,
     Reverting,
     CherryPicking,
@@ -390,7 +394,9 @@ pub(crate) enum ChangeState {
 pub(crate) enum Freshness {
     Current,
     /// Presented dimmed: a read failed, the Pane stopped, or the Control Connection is down.
-    LastKnown { as_of: Instant },
+    LastKnown {
+        as_of: Instant,
+    },
 }
 
 /// Everything Repository Status presents for one repository.

@@ -250,9 +250,11 @@ fn compose(
     ));
     let repository_status = super::repository_status_host::repository_status_adapters(
         &startup.home_directory,
-        Arc::new(super::linux_repository_tools::LinuxRepositoryToolDiscovery::new(
-            std::env::var_os("PATH").as_deref(),
-        )),
+        Arc::new(
+            super::linux_repository_tools::LinuxRepositoryToolDiscovery::new(
+                std::env::var_os("PATH").as_deref(),
+            ),
+        ),
     );
     let controls = super::linux_window_style::capture(
         bus.as_ref(),

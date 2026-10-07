@@ -342,7 +342,10 @@ mod tests {
             owner(Some("push"), Some("default")).as_deref(),
             Some("push-owner")
         );
-        assert_eq!(owner(None, Some("default")).as_deref(), Some("default-owner"));
+        assert_eq!(
+            owner(None, Some("default")).as_deref(),
+            Some("default-owner")
+        );
         assert_eq!(owner(None, None).as_deref(), Some("origin-owner"));
         assert_eq!(owner(Some("missing"), None), None);
     }
@@ -419,10 +422,16 @@ mod tests {
     #[test]
     fn environment_should_be_fixed_then_passthrough_without_overrides() {
         let passthrough = [
-            (OsString::from("HTTPS_PROXY"), OsString::from("http://proxy:8080")),
+            (
+                OsString::from("HTTPS_PROXY"),
+                OsString::from("http://proxy:8080"),
+            ),
             (OsString::from("PATH"), OsString::from("/evil")),
             (OsString::from("GH_PAGER"), OsString::from("less")),
-            (OsString::from("GH_CONFIG_DIR"), OsString::from("/config/gh")),
+            (
+                OsString::from("GH_CONFIG_DIR"),
+                OsString::from("/config/gh"),
+            ),
         ];
 
         let environment = github_cli_environment(
@@ -465,14 +474,23 @@ mod tests {
             (ProgramError::NotFound, PullRequestError::ToolMissing),
             (ProgramError::Cancelled, PullRequestError::Cancelled),
             (ProgramError::TimedOut, PullRequestError::Unavailable),
-            (ProgramError::OutputTooLarge, PullRequestError::InvalidResponse),
+            (
+                ProgramError::OutputTooLarge,
+                PullRequestError::InvalidResponse,
+            ),
             (ProgramError::Failed, PullRequestError::Unavailable),
         ] {
             assert_eq!(pull_request_program_error(error), expected);
         }
     }
 
-    fn listed(number: u32, head: &str, cross: bool, owner: Option<&str>, url: &str) -> serde_json::Value {
+    fn listed(
+        number: u32,
+        head: &str,
+        cross: bool,
+        owner: Option<&str>,
+        url: &str,
+    ) -> serde_json::Value {
         json!({
             "number": number,
             "title": format!("Title {number}"),
@@ -493,9 +511,27 @@ mod tests {
     #[test]
     fn the_first_matching_pull_request_should_be_returned() {
         let entries = [
-            listed(7, "other", false, Some("org"), "https://github.com/org/app/pull/7"),
-            listed(8, "feature", false, Some("org"), "https://github.com/org/app/pull/8"),
-            listed(9, "feature", false, Some("org"), "https://github.com/org/app/pull/9"),
+            listed(
+                7,
+                "other",
+                false,
+                Some("org"),
+                "https://github.com/org/app/pull/7",
+            ),
+            listed(
+                8,
+                "feature",
+                false,
+                Some("org"),
+                "https://github.com/org/app/pull/8",
+            ),
+            listed(
+                9,
+                "feature",
+                false,
+                Some("org"),
+                "https://github.com/org/app/pull/9",
+            ),
         ];
 
         assert_eq!(
@@ -514,12 +550,33 @@ mod tests {
     #[test]
     fn cross_repository_pull_requests_should_come_from_the_head_owner() {
         let entries = [
-            listed(1, "feature", true, Some("stranger"), "https://github.com/org/app/pull/1"),
-            listed(2, "feature", true, None, "https://github.com/org/app/pull/2"),
-            listed(3, "feature", true, Some("Me"), "https://github.com/org/app/pull/3"),
+            listed(
+                1,
+                "feature",
+                true,
+                Some("stranger"),
+                "https://github.com/org/app/pull/1",
+            ),
+            listed(
+                2,
+                "feature",
+                true,
+                None,
+                "https://github.com/org/app/pull/2",
+            ),
+            listed(
+                3,
+                "feature",
+                true,
+                Some("Me"),
+                "https://github.com/org/app/pull/3",
+            ),
         ];
 
-        assert_eq!(parse(&entries, &query(Some("me"))).map(|pr| pr.number), Some(3));
+        assert_eq!(
+            parse(&entries, &query(Some("me"))).map(|pr| pr.number),
+            Some(3)
+        );
         assert_eq!(parse(&entries, &query(None)), None);
     }
 
@@ -540,13 +597,25 @@ mod tests {
             let entries = [listed(1, "feature", false, None, url)];
             assert_eq!(parse(&entries, &query(None)), None, "{url:?}");
         }
-        let entries = [listed(1, "feature", false, None, "https://GitHub.com/org/app/pull/1")];
+        let entries = [listed(
+            1,
+            "feature",
+            false,
+            None,
+            "https://GitHub.com/org/app/pull/1",
+        )];
         assert!(parse(&entries, &query(None)).is_some());
     }
 
     #[test]
     fn titles_and_branch_names_should_be_sanitized_and_titles_bounded() {
-        let mut entry = listed(1, "feature", false, None, "https://github.com/org/app/pull/1");
+        let mut entry = listed(
+            1,
+            "feature",
+            false,
+            None,
+            "https://github.com/org/app/pull/1",
+        );
         entry["title"] = json!(format!("Fix\u{202e}\u{1b}[2J {}", "x".repeat(400)));
         entry["baseRefName"] = json!("ma\u{2066}in");
 

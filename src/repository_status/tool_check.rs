@@ -29,47 +29,52 @@ pub(crate) fn check_tools(
     deadline: Instant,
     cancellation: &SshCancellationToken,
 ) -> (GitToolStatus, GitHubCliStatus) {
-    let git = inventory.git.as_deref().map_or(GitToolStatus::NotFound, |git| {
-        let request = ProgramRequest {
-            executable: git.to_path_buf(),
-            arguments: vec!["--version".into()],
-            directory: home.to_path_buf(),
-            environment: git_environment(git, home),
-            stdout_limit: Some(TOOL_CHECK_OUTPUT_LIMIT),
-            deadline: Some(deadline),
-            keep_process_group_on_exit: false,
-        };
-        let mut output = Vec::new();
-        match runner.run(
-            &request,
-            &mut |chunk| output.extend_from_slice(chunk),
-            cancellation,
-        ) {
-            Ok(exit) if exit.success() => parse_git_version(&output)
-                .map_or(GitToolStatus::NotFound, git_tool_status),
-            _ => GitToolStatus::NotFound,
-        }
-    });
-    let github_cli = inventory
-        .github_cli
+    let git = inventory
+        .git
         .as_deref()
-        .map_or(GitHubCliStatus::NotFound, |github_cli| {
+        .map_or(GitToolStatus::NotFound, |git| {
             let request = ProgramRequest {
-                executable: github_cli.to_path_buf(),
-                arguments: auth_status_arguments(GITHUB_HOST),
+                executable: git.to_path_buf(),
+                arguments: vec!["--version".into()],
                 directory: home.to_path_buf(),
-                environment: github_cli_environment(github_cli, home, github_cli_passthrough),
+                environment: git_environment(git, home),
                 stdout_limit: Some(TOOL_CHECK_OUTPUT_LIMIT),
                 deadline: Some(deadline),
                 keep_process_group_on_exit: false,
             };
-            match runner.run(&request, &mut |_| {}, cancellation) {
-                Ok(exit) if exit.success() => GitHubCliStatus::SignedIn,
-                Ok(_) => GitHubCliStatus::SignedOut,
-                Err(ProgramError::NotFound) => GitHubCliStatus::NotFound,
-                Err(_) => GitHubCliStatus::Unavailable,
+            let mut output = Vec::new();
+            match runner.run(
+                &request,
+                &mut |chunk| output.extend_from_slice(chunk),
+                cancellation,
+            ) {
+                Ok(exit) if exit.success() => {
+                    parse_git_version(&output).map_or(GitToolStatus::NotFound, git_tool_status)
+                }
+                _ => GitToolStatus::NotFound,
             }
         });
+    let github_cli =
+        inventory
+            .github_cli
+            .as_deref()
+            .map_or(GitHubCliStatus::NotFound, |github_cli| {
+                let request = ProgramRequest {
+                    executable: github_cli.to_path_buf(),
+                    arguments: auth_status_arguments(GITHUB_HOST),
+                    directory: home.to_path_buf(),
+                    environment: github_cli_environment(github_cli, home, github_cli_passthrough),
+                    stdout_limit: Some(TOOL_CHECK_OUTPUT_LIMIT),
+                    deadline: Some(deadline),
+                    keep_process_group_on_exit: false,
+                };
+                match runner.run(&request, &mut |_| {}, cancellation) {
+                    Ok(exit) if exit.success() => GitHubCliStatus::SignedIn,
+                    Ok(_) => GitHubCliStatus::SignedOut,
+                    Err(ProgramError::NotFound) => GitHubCliStatus::NotFound,
+                    Err(_) => GitHubCliStatus::Unavailable,
+                }
+            });
     (git, github_cli)
 }
 

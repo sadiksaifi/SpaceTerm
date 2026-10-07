@@ -348,12 +348,11 @@ impl<A: SshProcessAdapter> RemoteWorkspaceFlowBackend for NativeRemoteWorkspaceF
                 utility_runner,
                 cancellation.clone(),
             ));
-            let provider: Arc<dyn RemoteDirectoryProvider + Send + Sync> = Arc::new(
-                SshRemoteDirectoryProvider::with_client(
+            let provider: Arc<dyn RemoteDirectoryProvider + Send + Sync> =
+                Arc::new(SshRemoteDirectoryProvider::with_client(
                     Arc::clone(&utility_client),
                     executor.clone(),
-                ),
-            );
+                ));
             let repository_reader: Arc<dyn crate::repository_status::RemoteRepositoryReader> =
                 Arc::new(SshRemoteRepositoryProvider::new(utility_client));
             let control: Arc<Mutex<Option<Box<dyn NativeControlConnectionControl>>>> =

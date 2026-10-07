@@ -4,8 +4,8 @@
 mod advanced;
 mod catalog;
 mod clipboard;
-mod git;
 mod editor;
+mod git;
 mod import;
 mod keybindings;
 mod microphone;

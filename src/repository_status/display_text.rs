@@ -40,7 +40,9 @@ mod tests {
 
     #[test]
     fn display_text_should_replace_controls_and_bidirectional_formatting() {
-        let text = display_text("a\tb\u{1b}c\u{7f}d\u{202e}e\u{2066}f\u{200f}g\u{061c}h\u{2028}i".as_bytes());
+        let text = display_text(
+            "a\tb\u{1b}c\u{7f}d\u{202e}e\u{2066}f\u{200f}g\u{061c}h\u{2028}i".as_bytes(),
+        );
 
         assert_eq!(
             &*text,
@@ -50,6 +52,9 @@ mod tests {
 
     #[test]
     fn display_text_should_decode_invalid_utf8_lossily_and_keep_ordinary_text() {
-        assert_eq!(&*display_text(b"caf\xc3\xa9 \xff/\xd7\x90.rs"), "café \u{fffd}/א.rs");
+        assert_eq!(
+            &*display_text(b"caf\xc3\xa9 \xff/\xd7\x90.rs"),
+            "café \u{fffd}/א.rs"
+        );
     }
 }

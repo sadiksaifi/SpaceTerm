@@ -10,8 +10,7 @@ use gpui::{BackgroundExecutor, Task};
 use super::cancellation::SshCancellationToken;
 use super::command::ValidatedRemoteLoginShell;
 use super::remote_utility::{
-    RemoteDirectoryProbe, RemoteUtilityError,
-    SshRemoteUtilityClient, SshRemoteUtilityRunner,
+    RemoteDirectoryProbe, RemoteUtilityError, SshRemoteUtilityClient, SshRemoteUtilityRunner,
 };
 use crate::domain::{RemoteDirectory, RemoteDirectoryIdentity};
 use crate::ui::directory_picker::{

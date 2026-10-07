@@ -185,8 +185,12 @@ fn generated_repository_scripts_should_be_valid_posix_shell_syntax() {
         .unwrap(),
         build_repository_script(REPOSITORY_COUNT_KIND, "/srv/repo", FsmonitorPolicy::Builtin)
             .unwrap(),
-        build_repository_script(REPOSITORY_COUNT_KIND, "/srv/repo", FsmonitorPolicy::Disabled)
-            .unwrap(),
+        build_repository_script(
+            REPOSITORY_COUNT_KIND,
+            "/srv/repo",
+            FsmonitorPolicy::Disabled,
+        )
+        .unwrap(),
     ] {
         let mut child = Command::new("/bin/sh")
             .arg("-n")
@@ -223,7 +227,10 @@ fn repository_probe_should_read_a_work_tree_without_walking_it() {
             "https://example.invalid/owner/repo.git",
         ],
     );
-    fixture.checked_git(&repository, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    fixture.checked_git(
+        &repository,
+        &["update-ref", "refs/remotes/origin/main", "HEAD"],
+    );
     fixture.checked_git(&repository, &["config", "branch.main.remote", "origin"]);
     fixture.checked_git(
         &repository,
@@ -263,7 +270,11 @@ fn repository_probe_should_read_a_work_tree_without_walking_it() {
     );
     let headers = records(&probe.status_headers);
     assert!(headers.iter().all(|record| record.starts_with(b"# ")));
-    assert!(headers.iter().any(|record| record.starts_with(b"# branch.oid ")));
+    assert!(
+        headers
+            .iter()
+            .any(|record| record.starts_with(b"# branch.oid "))
+    );
     assert!(headers.contains(&b"# branch.head main".as_slice()));
     assert!(headers.contains(&b"# branch.upstream origin/main".as_slice()));
     assert!(headers.contains(&b"# branch.ab +1 -0".as_slice()));
@@ -349,7 +360,10 @@ fn repository_probe_should_read_rebase_markers() {
     fixture.checked_git(&repository, &["commit", "-q", "-am", "main"]);
     fixture.checked_git(&repository, &["checkout", "-q", "topic"]);
     let rebase = fixture.git(&repository, &["rebase", "--merge", "main"]);
-    assert!(!rebase.status.success(), "the rebase must stop on a conflict");
+    assert!(
+        !rebase.status.success(),
+        "the rebase must stop on a conflict"
+    );
 
     let probe = fixture.probe(&repository);
 
@@ -459,17 +473,18 @@ fn repository_count_should_respect_untracked_configuration_and_keep_raw_names() 
     fs::write(repository.join("line\nbreak"), b"new\n").unwrap();
 
     let shown = fixture.count(&repository, FsmonitorPolicy::Disabled);
-    fixture.checked_git(
-        &repository,
-        &["config", "status.showUntrackedFiles", "no"],
-    );
+    fixture.checked_git(&repository, &["config", "status.showUntrackedFiles", "no"]);
     let hidden = fixture.count(&repository, FsmonitorPolicy::Builtin);
 
     assert!(!shown.truncated);
     assert!(contains(&shown.status, b"\0? line\nbreak\0"));
     assert!(records(&shown.status)[0].starts_with(b"# branch.oid "));
     assert!(!hidden.truncated);
-    assert!(!records(&hidden.status).iter().any(|record| record.starts_with(b"? ")));
+    assert!(
+        !records(&hidden.status)
+            .iter()
+            .any(|record| record.starts_with(b"? "))
+    );
     fixture.assert_no_staging_left();
 }
 

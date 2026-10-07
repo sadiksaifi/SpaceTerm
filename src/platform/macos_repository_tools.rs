@@ -16,7 +16,9 @@ const SYSTEM_STUB: &str = "/usr/bin/git";
 pub(crate) enum ToolCandidate {
     Fixed(PathBuf),
     /// `usr/bin/git` inside the developer directory a symbolic link names, read at discovery.
-    DeveloperDirectory { link: PathBuf },
+    DeveloperDirectory {
+        link: PathBuf,
+    },
 }
 
 /// Checks each candidate in order and keeps the first executable regular file.

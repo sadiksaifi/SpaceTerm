@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::{
-    ChangeState, ChangeSummary, FsmonitorPolicy, Freshness, GitHubCliStatus, ProbeOutcome,
+    ChangeState, ChangeSummary, Freshness, FsmonitorPolicy, GitHubCliStatus, ProbeOutcome,
     ProbedRepository, PullRequest, PullRequestError, RepositoryConfig, RepositoryHead,
     RepositoryKey, RepositoryMachine, RepositoryReadError, RepositoryRoot, RepositoryStatus,
     RepositoryStatusPreferences, RepositoryView, WatchDirectory,
@@ -160,7 +160,9 @@ pub(crate) enum RepositoryEffect {
         key: RepositoryKey,
         directories: Vec<WatchDirectory>,
     },
-    StopWatch { key: RepositoryKey },
+    StopWatch {
+        key: RepositoryKey,
+    },
     /// Call [`RepositoryScheduler::tick`] at or after this instant.
     WakeAt(Instant),
 }
@@ -438,7 +440,11 @@ impl RepositoryScheduler {
     }
 
     /// A watch on `key`'s git directories fired.
-    pub(crate) fn repository_changed(&mut self, key: &RepositoryKey, now: Instant) -> SchedulerUpdate {
+    pub(crate) fn repository_changed(
+        &mut self,
+        key: &RepositoryKey,
+        now: Instant,
+    ) -> SchedulerUpdate {
         self.request_repository(key, now, false);
         self.finish()
     }
@@ -540,7 +546,11 @@ impl RepositoryScheduler {
     }
 
     /// Pull Request lookups run only while the GitHub CLI is signed in.
-    pub(crate) fn set_github_cli(&mut self, status: GitHubCliStatus, now: Instant) -> SchedulerUpdate {
+    pub(crate) fn set_github_cli(
+        &mut self,
+        status: GitHubCliStatus,
+        now: Instant,
+    ) -> SchedulerUpdate {
         let pull_requests = self.pull_requests_enabled();
         self.github_cli = status;
         self.pull_requests_toggled(pull_requests, now);
@@ -564,9 +574,13 @@ impl RepositoryScheduler {
             return self.finish();
         };
         match result {
-            Ok(outcome) => {
-                self.apply_probe(&ticket.target, ticket.generation, outcome, &probe.for_keys, now)
-            }
+            Ok(outcome) => self.apply_probe(
+                &ticket.target,
+                ticket.generation,
+                outcome,
+                &probe.for_keys,
+                now,
+            ),
             Err(RepositoryReadError::Cancelled) => {}
             Err(error) => {
                 let mut keys: HashSet<RepositoryKey> = self
@@ -1366,10 +1380,7 @@ mod tests {
     }
 
     fn on_branch(key: &RepositoryKey, branch: &str) -> ProbeOutcome {
-        ProbeOutcome::Repository(Box::new(probed(
-            key,
-            RepositoryHead::Branch(branch.into()),
-        )))
+        ProbeOutcome::Repository(Box::new(probed(key, RepositoryHead::Branch(branch.into()))))
     }
 
     fn with_upstream(key: &RepositoryKey, branch: &str, ahead: u32) -> ProbeOutcome {
@@ -1410,11 +1421,17 @@ mod tests {
 
     impl Harness {
         fn new() -> Self {
-            Self::with(RepositoryStatusPreferences::default(), GitHubCliStatus::NotFound)
+            Self::with(
+                RepositoryStatusPreferences::default(),
+                GitHubCliStatus::NotFound,
+            )
         }
 
         fn signed_in() -> Self {
-            Self::with(RepositoryStatusPreferences::default(), GitHubCliStatus::SignedIn)
+            Self::with(
+                RepositoryStatusPreferences::default(),
+                GitHubCliStatus::SignedIn,
+            )
         }
 
         fn with(toggles: RepositoryStatusPreferences, github_cli: GitHubCliStatus) -> Self {
@@ -1690,7 +1707,10 @@ mod tests {
         let follow_up = harness.only_count();
         harness.advance(100);
         harness.finish_count(follow_up, Ok(changes(2)));
-        assert!(harness.counts().is_empty(), "the follow-up absorbs every trigger");
+        assert!(
+            harness.counts().is_empty(),
+            "the follow-up absorbs every trigger"
+        );
         assert_eq!(harness.status(PANE).changes, ChangeState::Known(changes(2)));
     }
 
@@ -1702,7 +1722,10 @@ mod tests {
         let (probe, _) = harness.only_probe();
         harness.advance(50);
         harness.command_finished(PANE, 1);
-        assert!(harness.probes().is_empty(), "one probe per directory runs at a time");
+        assert!(
+            harness.probes().is_empty(),
+            "one probe per directory runs at a time"
+        );
 
         harness.finish_probe(probe, Ok(on_branch(&key, "main")));
         let (again, directory) = harness.only_probe();
@@ -1749,7 +1772,10 @@ mod tests {
         let (older, _) = probes.remove(0);
         harness.finish_probe(newer, Ok(on_branch(&key, "dev")));
         harness.finish_probe(older, Ok(on_branch(&key, "main")));
-        assert_eq!(harness.status(PANE).head, RepositoryHead::Branch("dev".into()));
+        assert_eq!(
+            harness.status(PANE).head,
+            RepositoryHead::Branch("dev".into())
+        );
     }
 
     #[test]
@@ -1872,7 +1898,10 @@ mod tests {
         assert_eq!(status.freshness, Freshness::LastKnown { as_of: read_at });
         assert_eq!(status.read_failure, Some(RepositoryReadError::Unavailable));
         assert_eq!(status.changes, ChangeState::Known(changes(4)));
-        assert!(harness.effects.is_empty(), "no retry until the next trigger");
+        assert!(
+            harness.effects.is_empty(),
+            "no retry until the next trigger"
+        );
 
         harness.advance(100);
         harness.command_finished(PANE, 2);
@@ -1972,7 +2001,10 @@ mod tests {
 
         harness.set_visible(PANE, false);
         harness.set_visible(PANE, true);
-        assert!(harness.probes().is_empty(), "a current value is not read again");
+        assert!(
+            harness.probes().is_empty(),
+            "a current value is not read again"
+        );
     }
 
     #[test]
@@ -2216,7 +2248,10 @@ mod tests {
         harness.window_activated();
         harness.set_source(PANE, local("/src/other"));
         assert!(harness.probes().is_empty());
-        assert_eq!(harness.status(PANE).freshness, Freshness::LastKnown { as_of: read_at });
+        assert_eq!(
+            harness.status(PANE).freshness,
+            Freshness::LastKnown { as_of: read_at }
+        );
     }
 
     #[test]
@@ -2292,7 +2327,10 @@ mod tests {
             harness.lookups()
         };
         assert!(trigger(&mut harness, on_branch(&key, "main")).is_empty());
-        assert_eq!(trigger(&mut harness, with_upstream(&key, "main", 1)).len(), 1);
+        assert_eq!(
+            trigger(&mut harness, with_upstream(&key, "main", 1)).len(),
+            1
+        );
         let lookups = trigger(&mut harness, on_branch(&key, "dev"));
         assert_eq!(lookups.len(), 1);
         assert_eq!(&*lookups[0].1, "dev");
@@ -2300,10 +2338,17 @@ mod tests {
 
         harness.advance(100);
         harness.window_activated();
-        assert!(harness.lookups().is_empty(), "one lookup per branch runs at a time");
+        assert!(
+            harness.lookups().is_empty(),
+            "one lookup per branch runs at a time"
+        );
         let (lookup, _) = lookups.into_iter().next().unwrap();
         harness.finish_lookup(lookup, Ok(None));
-        assert_eq!(harness.lookups().len(), 1, "activation looks up again afterwards");
+        assert_eq!(
+            harness.lookups().len(),
+            1,
+            "activation looks up again afterwards"
+        );
     }
 
     #[test]

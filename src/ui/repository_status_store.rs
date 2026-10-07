@@ -294,7 +294,12 @@ impl RepositoryStatusStore {
         self.apply(update, cx);
     }
 
-    pub(crate) fn set_available(&mut self, id: InterestId, available: bool, cx: &mut Context<Self>) {
+    pub(crate) fn set_available(
+        &mut self,
+        id: InterestId,
+        available: bool,
+        cx: &mut Context<Self>,
+    ) {
         let update = self.scheduler.set_available(id, available, Instant::now());
         self.apply(update, cx);
     }
@@ -322,7 +327,10 @@ impl RepositoryStatusStore {
         if !self.preferences.show_repository_status {
             return;
         }
-        let tools = cx.try_global::<RepositoryTools>().copied().unwrap_or_default();
+        let tools = cx
+            .try_global::<RepositoryTools>()
+            .copied()
+            .unwrap_or_default();
         let git_missing = !matches!(tools.git, GitToolStatus::Ready(_));
         let github_cli_missing = self.preferences.pull_requests_enabled()
             && tools.github_cli != GitHubCliStatus::SignedIn;
@@ -338,7 +346,11 @@ impl RepositoryStatusStore {
         self.remote_readers.clone()
     }
 
-    fn set_preferences(&mut self, preferences: RepositoryStatusPreferences, cx: &mut Context<Self>) {
+    fn set_preferences(
+        &mut self,
+        preferences: RepositoryStatusPreferences,
+        cx: &mut Context<Self>,
+    ) {
         if self.preferences == preferences {
             return;
         }
@@ -385,7 +397,9 @@ impl RepositoryStatusStore {
                         move |store, result, cx| {
                             let result = result.unwrap_or(Err(RepositoryReadError::Unavailable));
                             let update =
-                                store.scheduler.probe_finished(ticket, result, Instant::now());
+                                store
+                                    .scheduler
+                                    .probe_finished(ticket, result, Instant::now());
                             store.apply(update, cx);
                         },
                         cx,
@@ -399,7 +413,9 @@ impl RepositoryStatusStore {
                         move |store, result, cx| {
                             let result = result.unwrap_or(Err(RepositoryReadError::Unavailable));
                             let update =
-                                store.scheduler.probe_finished(ticket, result, Instant::now());
+                                store
+                                    .scheduler
+                                    .probe_finished(ticket, result, Instant::now());
                             store.apply(update, cx);
                         },
                         cx,
@@ -460,7 +476,9 @@ impl RepositoryStatusStore {
                     work,
                     move |store, result, cx| {
                         let result = result.unwrap_or(Err(RepositoryReadError::Unavailable));
-                        let update = store.scheduler.count_finished(ticket, result, Instant::now());
+                        let update = store
+                            .scheduler
+                            .count_finished(ticket, result, Instant::now());
                         store.apply(update, cx);
                     },
                     cx,
@@ -528,7 +546,10 @@ impl RepositoryStatusStore {
             _ => None,
         };
         if let Some(github_cli) = github_cli {
-            let mut tools = cx.try_global::<RepositoryTools>().copied().unwrap_or_default();
+            let mut tools = cx
+                .try_global::<RepositoryTools>()
+                .copied()
+                .unwrap_or_default();
             tools.github_cli = github_cli;
             cx.set_global(tools);
         }
@@ -638,7 +659,11 @@ impl RepositoryStatusStore {
     }
 
     fn wake_at(&mut self, due: Instant, cx: &mut Context<Self>) {
-        if self.wake.as_ref().is_some_and(|(pending, _)| *pending <= due) {
+        if self
+            .wake
+            .as_ref()
+            .is_some_and(|(pending, _)| *pending <= due)
+        {
             return;
         }
         let delay = due.saturating_duration_since(Instant::now());

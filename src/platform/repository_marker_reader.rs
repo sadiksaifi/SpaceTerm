@@ -184,7 +184,12 @@ mod tests {
         fixture.write("rebase-apply/next", b"2\n");
         fixture.write("rebase-apply/last", b"5\n");
         fixture.write("rebase-apply/applying", b"");
-        for name in ["MERGE_HEAD", "REVERT_HEAD", "CHERRY_PICK_HEAD", "BISECT_LOG"] {
+        for name in [
+            "MERGE_HEAD",
+            "REVERT_HEAD",
+            "CHERRY_PICK_HEAD",
+            "BISECT_LOG",
+        ] {
             fixture.write(name, b"0123456789abcdef\n");
         }
 

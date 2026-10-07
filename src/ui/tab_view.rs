@@ -7,8 +7,8 @@ use super::terminal_status::{
     StatusColors, StatusGlyph, TerminalProgress, reported_glyph_is_drawable, reported_title,
 };
 use crate::domain::PinnedDirectory;
-use crate::repository_status::presentation::{RepositoryCaption, RepositoryMark};
 use crate::domain::remote_workspace::RemoteRestartBatch;
+use crate::repository_status::presentation::{RepositoryCaption, RepositoryMark};
 use crate::terminal::metadata::CurrentDirectory;
 use crate::ui::appearance::gpui_color;
 use std::collections::BTreeMap;
@@ -21,8 +21,7 @@ use super::{
     ClosePane, FocusNextPane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
     FocusPreviousPane, PaneOrigin, PreparedRemotePaneRestart, RemoteChildLaunchUnavailable,
     RemotePaneLifecycleError, ShowRepositoryStatus, SplitDown, SplitRight, TERMINAL_KEY_CONTEXT,
-    TerminalPane,
-    TerminalPaneEvent, TogglePaneZoom,
+    TerminalPane, TerminalPaneEvent, TogglePaneZoom,
 };
 
 #[derive(Debug, Error)]
@@ -181,9 +180,7 @@ impl CaptionMetrics {
                 RepositoryCaptionMetrics {
                     anchor: appearance.spacing(PANE_REPOSITORY_LEADING_GAP)
                         + measure_caption_segment(&repository.glyph.into(), window, appearance)
-                        + repository
-                            .mark
-                            .map_or(px(0.0), |mark| part(mark.glyph())),
+                        + repository.mark.map_or(px(0.0), |mark| part(mark.glyph())),
                     branch: part(&repository.branch),
                     detail: repository.detail.as_ref().map(|detail| part(&detail.text)),
                     divergence: repository.divergence.as_deref().map(part),
@@ -294,8 +291,7 @@ impl CaptionLayout {
             };
             if claimed + width > available {
                 let remaining = f32::from(available - claimed);
-                if index == 0 && remaining >= PANE_REPOSITORY_MINIMUM_BRANCH_WIDTH * spacing_scale
-                {
+                if index == 0 && remaining >= PANE_REPOSITORY_MINIMUM_BRANCH_WIDTH * spacing_scale {
                     *admitted = true;
                     branch_limit = Some(remaining.floor() as u32);
                 }
@@ -2633,7 +2629,9 @@ fn render_repository_segment(
         .id(("pane-repository", pane_id.get()))
         .debug_selector(move || format!("pane-repository-{}", pane_id.get()))
         .role(gpui::accesskit::Role::Button)
-        .aria_label(gpui::SharedString::from(repository.accessible_label.clone()))
+        .aria_label(gpui::SharedString::from(
+            repository.accessible_label.clone(),
+        ))
         .cursor_pointer()
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(move |_, window, cx| show(window, cx))
@@ -2667,7 +2665,11 @@ fn render_repository_segment(
         segment = segment.child(
             part()
                 .debug_selector(move || format!("pane-repository-mark-{}", pane_id.get()))
-                .text_color(gpui_color(if repository.dimmed { text_color } else { color }))
+                .text_color(gpui_color(if repository.dimmed {
+                    text_color
+                } else {
+                    color
+                }))
                 .child(mark.glyph()),
         );
     }

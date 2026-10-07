@@ -106,7 +106,10 @@ mod tests {
         else {
             panic!("expected a repository");
         };
-        assert_eq!(repository.root, RepositoryRoot::Remote("/home/dev/tool".into()));
+        assert_eq!(
+            repository.root,
+            RepositoryRoot::Remote("/home/dev/tool".into())
+        );
         assert_eq!(
             repository.git_directory,
             RepositoryRoot::Remote("/home/dev/tool/.git".into())
@@ -123,7 +126,10 @@ mod tests {
     #[test]
     fn remote_outcomes_without_a_repository_show_nothing_or_fail_quietly() {
         for (outcome, expected) in [
-            (RemoteProbeOutcome::NotRepository, Ok(ProbeOutcome::NotRepository)),
+            (
+                RemoteProbeOutcome::NotRepository,
+                Ok(ProbeOutcome::NotRepository),
+            ),
             (
                 RemoteProbeOutcome::DirectoryUnavailable,
                 Ok(ProbeOutcome::NotRepository),

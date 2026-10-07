@@ -238,11 +238,14 @@ fn render_repository(
                 })
                 .child(text.clone());
             let [heading, title, branches] = hover.lines();
-            Tooltip::new(("workspace-row-pull-request-tooltip", id), heading.to_owned())
-                .detail(format!("{title}\n{branches}"))
-                .debug_selector(format!("workspace-row-pull-request-tooltip-{id}"))
-                .attach(number, TooltipTargetVisibility::Visible)
-                .into_any_element()
+            Tooltip::new(
+                ("workspace-row-pull-request-tooltip", id),
+                heading.to_owned(),
+            )
+            .detail(format!("{title}\n{branches}"))
+            .debug_selector(format!("workspace-row-pull-request-tooltip-{id}"))
+            .attach(number, TooltipTargetVisibility::Visible)
+            .into_any_element()
         }
     };
     div()

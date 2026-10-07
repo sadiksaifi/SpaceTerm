@@ -120,7 +120,9 @@ mod tests {
                         total: 7
                     })
                 },
-                RepositoryOperation::Applying { step: applying_step },
+                RepositoryOperation::Applying {
+                    step: applying_step
+                },
                 RepositoryOperation::Merging,
                 RepositoryOperation::Reverting,
                 RepositoryOperation::CherryPicking,

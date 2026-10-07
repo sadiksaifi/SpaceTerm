@@ -120,7 +120,12 @@ impl ProgramGroup {
             .args(&request.arguments)
             .current_dir(&request.directory)
             .env_clear()
-            .envs(request.environment.iter().map(|(name, value)| (name, value)))
+            .envs(
+                request
+                    .environment
+                    .iter()
+                    .map(|(name, value)| (name, value)),
+            )
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -270,7 +275,8 @@ fn set_nonblocking(pipe: &ChildStdout) -> Result<(), ProgramError> {
     // SAFETY: the descriptor is the live stdout pipe owned by `pipe`.
     let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
     // SAFETY: as above; only the status flags change.
-    if flags == -1 || unsafe { libc::fcntl(descriptor, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1
+    if flags == -1
+        || unsafe { libc::fcntl(descriptor, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1
     {
         return Err(ProgramError::Failed);
     }
@@ -392,7 +398,10 @@ mod tests {
             {
                 return process;
             }
-            assert!(Instant::now() < deadline, "the fixture did not publish its process");
+            assert!(
+                Instant::now() < deadline,
+                "the fixture did not publish its process"
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
     }
@@ -683,7 +692,12 @@ mod tests {
         std::fs::create_dir_all(&home).unwrap();
         std::fs::create_dir_all(&repository).unwrap();
         std::fs::create_dir_all(&ran).unwrap();
-        fixture_git(&git, &home, &repository, &["-c", "init.defaultBranch=main", "init", "-q"]);
+        fixture_git(
+            &git,
+            &home,
+            &repository,
+            &["-c", "init.defaultBranch=main", "init", "-q"],
+        );
         std::fs::write(repository.join("tracked.txt"), "first\n").unwrap();
         fixture_git(&git, &home, &repository, &["add", "tracked.txt"]);
         fixture_git(

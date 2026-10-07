@@ -4,7 +4,9 @@
 use std::time::Instant;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, Entity, FocusHandle, KeyDownEvent, Subscription, Window, div};
+use gpui::{
+    AnyElement, App, Context, Entity, FocusHandle, KeyDownEvent, Subscription, Window, div,
+};
 use spaceterm_ui::{Button, ButtonSize, ButtonVariant, FloatingRole};
 
 use super::{PaneTerminalState, TerminalFailure, TerminalPane, TerminalPaneEvent};
@@ -119,7 +121,8 @@ impl TerminalPane {
             popover.focus.focus(window, cx);
             return;
         }
-        if RepositoryPopover::from_view(&self.presented_repository_view(cx), Instant::now()).is_none()
+        if RepositoryPopover::from_view(&self.presented_repository_view(cx), Instant::now())
+            .is_none()
         {
             return;
         }
@@ -185,7 +188,9 @@ impl TerminalPane {
             RepositoryPopover::from_view(&self.presented_repository_view(cx), Instant::now())
         else {
             // The Pane left its repository while the popover was open.
-            cx.defer_in(window, |pane, window, cx| pane.close_repository_status(window, cx));
+            cx.defer_in(window, |pane, window, cx| {
+                pane.close_repository_status(window, cx)
+            });
             return None;
         };
         let root = super::compact_home_directory(&popover.root, self.metadata().context.home());
@@ -331,7 +336,14 @@ fn render_popover(
                     .text_color(gpui_color(muted))
                     .child(label),
             )
-            .child(div().flex().items_baseline().min_w_0().gap(spacing(6.0)).child(value))
+            .child(
+                div()
+                    .flex()
+                    .items_baseline()
+                    .min_w_0()
+                    .gap(spacing(6.0))
+                    .child(value),
+            )
     };
     let value = |value: String| div().min_w_0().truncate().child(value).into_any_element();
 
@@ -370,7 +382,12 @@ fn render_popover(
         .track_focus(&focus)
         .absolute()
         .top(spacing(
-            POPOVER_INSET + if below_find_bar { FIND_BAR_CLEARANCE } else { 0.0 },
+            POPOVER_INSET
+                + if below_find_bar {
+                    FIND_BAR_CLEARANCE
+                } else {
+                    0.0
+                },
         ))
         .right(spacing(POPOVER_INSET))
         .w(spacing(POPOVER_WIDTH))
@@ -491,11 +508,6 @@ fn pull_request_value(
                 .text_color(gpui_color(color))
                 .child(pull_request.state.label()),
         )
-        .child(
-            div()
-                .min_w_0()
-                .truncate()
-                .child(pull_request.title),
-        )
+        .child(div().min_w_0().truncate().child(pull_request.title))
         .into_any_element()
 }

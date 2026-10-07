@@ -102,7 +102,10 @@ struct ReadTurn {
 }
 
 impl ReadTurn {
-    fn take(&self, cancellation: &SshCancellationToken) -> Result<HeldTurn<'_>, RepositoryReadError> {
+    fn take(
+        &self,
+        cancellation: &SshCancellationToken,
+    ) -> Result<HeldTurn<'_>, RepositoryReadError> {
         let mut busy = self.lock();
         loop {
             if cancellation.is_cancelled() {
@@ -154,7 +157,10 @@ fn sleep_unless_cancelled(
 }
 
 /// The client reports an ended Control Connection as cancellation, which is not the caller's.
-fn map_error(error: RemoteUtilityError, cancellation: &SshCancellationToken) -> RepositoryReadError {
+fn map_error(
+    error: RemoteUtilityError,
+    cancellation: &SshCancellationToken,
+) -> RepositoryReadError {
     match error {
         RemoteUtilityError::Cancelled if cancellation.is_cancelled() => {
             RepositoryReadError::Cancelled
@@ -188,8 +194,8 @@ mod tests {
     use crate::repository_status::RemoteProbeOutcome;
     use crate::ssh::command::{OpenSshExecutable, SshCommandContext, SshCommandSpec};
     use crate::ssh::fake_remote_utility_server::{
-        REPOSITORY_DISCOVERY, REPOSITORY_STATUS, raw_response,
-        repository_count_response, repository_probe_response,
+        REPOSITORY_DISCOVERY, REPOSITORY_STATUS, raw_response, repository_count_response,
+        repository_probe_response,
     };
     use crate::ssh::process::ProcessExit;
     use crate::ssh::remote_utility::{
@@ -318,7 +324,10 @@ mod tests {
 
     fn scripted(
         results: impl IntoIterator<Item = RunResult>,
-    ) -> (SshRemoteRepositoryProvider<ScriptedRunner>, Arc<ScriptedRunner>) {
+    ) -> (
+        SshRemoteRepositoryProvider<ScriptedRunner>,
+        Arc<ScriptedRunner>,
+    ) {
         let runner = Arc::new(ScriptedRunner::new(results));
         (
             SshRemoteRepositoryProvider::new(client(
@@ -329,7 +338,10 @@ mod tests {
         )
     }
 
-    fn held() -> (Arc<SshRemoteRepositoryProvider<HeldRunner>>, Arc<HeldRunner>) {
+    fn held() -> (
+        Arc<SshRemoteRepositoryProvider<HeldRunner>>,
+        Arc<HeldRunner>,
+    ) {
         let runner = Arc::new(HeldRunner::default());
         (
             Arc::new(SshRemoteRepositoryProvider::new(client(
@@ -422,12 +434,8 @@ mod tests {
             ("git-missing", RepositoryReadError::ToolMissing),
             ("directory-unavailable", RepositoryReadError::Unavailable),
         ] {
-            let (provider, _) = scripted([success(raw_response(
-                "repository-count",
-                status,
-                &[],
-                b"",
-            ))]);
+            let (provider, _) =
+                scripted([success(raw_response("repository-count", status, &[], b""))]);
             assert_eq!(count_result(&provider).unwrap_err(), error);
         }
     }

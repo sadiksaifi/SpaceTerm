@@ -100,12 +100,20 @@ impl WorkspaceManager {
     }
 
     /// What a row's second line shows before its directory.
-    pub(super) fn sidebar_badge(&self, workspace_id: WorkspaceId, cx: &App) -> Option<SidebarBadge> {
+    pub(super) fn sidebar_badge(
+        &self,
+        workspace_id: WorkspaceId,
+        cx: &App,
+    ) -> Option<SidebarBadge> {
         SidebarBadge::from_view(&self.row_view(workspace_id, cx)?)
     }
 
     /// The collapsed title-bar chip's tooltip line for a Workspace.
-    pub(super) fn chip_repository_line(&self, workspace_id: WorkspaceId, cx: &App) -> Option<String> {
+    pub(super) fn chip_repository_line(
+        &self,
+        workspace_id: WorkspaceId,
+        cx: &App,
+    ) -> Option<String> {
         chip_tooltip_line(&self.row_view(workspace_id, cx)?)
     }
 
@@ -149,20 +157,23 @@ impl WorkspaceManager {
                 cx,
             )
         });
-        let changes = cx.subscribe(store, move |manager, store, event: &RepositoryViewsChanged, cx| {
-            let Some(row) = manager.sidebar_repositories.rows.get(&workspace_id) else {
-                return;
-            };
-            if !event.contains(row.id) {
-                return;
-            }
-            let view = store.read(cx).view(row.id);
-            let views = &mut manager.sidebar_repositories.views;
-            if views.get(&workspace_id) != Some(&view) {
-                views.insert(workspace_id, view);
-                cx.notify();
-            }
-        });
+        let changes = cx.subscribe(
+            store,
+            move |manager, store, event: &RepositoryViewsChanged, cx| {
+                let Some(row) = manager.sidebar_repositories.rows.get(&workspace_id) else {
+                    return;
+                };
+                if !event.contains(row.id) {
+                    return;
+                }
+                let view = store.read(cx).view(row.id);
+                let views = &mut manager.sidebar_repositories.views;
+                if views.get(&workspace_id) != Some(&view) {
+                    views.insert(workspace_id, view);
+                    cx.notify();
+                }
+            },
+        );
         let view = store.read(cx).view(id);
         self.sidebar_repositories.views.insert(workspace_id, view);
         self.sidebar_repositories.rows.insert(
@@ -177,7 +188,11 @@ impl WorkspaceManager {
         cx.notify();
     }
 
-    fn row_facts(&self, workspace: &WorkspaceEntry<Entity<TabManager>>, cx: &App) -> Option<RowFacts> {
+    fn row_facts(
+        &self,
+        workspace: &WorkspaceEntry<Entity<TabManager>>,
+        cx: &App,
+    ) -> Option<RowFacts> {
         let location_machine = match workspace.location() {
             WorkspaceLocation::Local => RepositoryMachine::Local,
             WorkspaceLocation::Remote { key, .. } => {

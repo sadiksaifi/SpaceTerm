@@ -23,8 +23,8 @@ use super::{
     ActivateWorkspace7, ActivateWorkspace8, ActivateWorkspace9, ClosePane, CloseTab,
     CloseTerminalFind, CloseWorkspace, CopySelection, CreateTab, FindNext, FindPrevious,
     FocusNextPane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, FocusPreviousPane,
-    MoveTabLeft, MoveTabRight, NewWorkspace, NextTab, OpenTerminalFind, PreviousTab, SplitDown,
-    ShowRepositoryStatus, SplitRight, TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus,
+    MoveTabLeft, MoveTabRight, NewWorkspace, NextTab, OpenTerminalFind, PreviousTab,
+    ShowRepositoryStatus, SplitDown, SplitRight, TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus,
 };
 
 use crate::domain::PinnedDirectory;

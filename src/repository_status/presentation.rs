@@ -422,9 +422,7 @@ fn operation_text(operation: RepositoryOperation, changes: &ChangeState) -> Stri
     text
 }
 
-fn operation_name(
-    operation: RepositoryOperation,
-) -> (&'static str, Option<super::OperationStep>) {
+fn operation_name(operation: RepositoryOperation) -> (&'static str, Option<super::OperationStep>) {
     match operation {
         RepositoryOperation::Rebasing { step } => ("Rebasing", step),
         RepositoryOperation::Applying { step } => ("Applying", step),
@@ -485,7 +483,11 @@ fn accessible_label(status: &RepositoryStatus, now: Instant) -> String {
             },
         }
     }
-    if let Some(divergence) = status.upstream.as_ref().and_then(|upstream| upstream.divergence) {
+    if let Some(divergence) = status
+        .upstream
+        .as_ref()
+        .and_then(|upstream| upstream.divergence)
+    {
         if divergence.ahead > 0 {
             parts.push(format!("{} ahead", divergence.ahead));
         }
@@ -668,7 +670,10 @@ mod tests {
             sanitize_for_display("ma\u{1b}[31min\u{202e}txt\u{2066}\n", 100),
             "ma\u{FFFD}[31min\u{FFFD}txt\u{FFFD}\u{FFFD}"
         );
-        assert_eq!(sanitize_for_display("feature/ünïcode", 100), "feature/ünïcode");
+        assert_eq!(
+            sanitize_for_display("feature/ünïcode", 100),
+            "feature/ünïcode"
+        );
     }
 
     #[test]
@@ -696,8 +701,14 @@ mod tests {
     #[test]
     fn hidden_views_present_nothing() {
         let now = Instant::now();
-        assert_eq!(RepositoryCaption::from_view(&RepositoryView::Hidden, now), None);
-        assert_eq!(RepositoryPopover::from_view(&RepositoryView::Hidden, now), None);
+        assert_eq!(
+            RepositoryCaption::from_view(&RepositoryView::Hidden, now),
+            None
+        );
+        assert_eq!(
+            RepositoryPopover::from_view(&RepositoryView::Hidden, now),
+            None
+        );
         assert_eq!(SidebarBadge::from_view(&RepositoryView::Hidden), None);
         assert_eq!(chip_tooltip_line(&RepositoryView::Hidden), None);
     }
@@ -710,13 +721,19 @@ mod tests {
         assert_eq!(line(repository.clone()), "⎇ main ● 4 changes ↑1 ↓2");
         assert_eq!(caption(repository, now).mark, Some(RepositoryMark::Changes));
 
-        assert_eq!(line(status(main_branch(), modified(1), now)), "⎇ main ● 1 change");
+        assert_eq!(
+            line(status(main_branch(), modified(1), now)),
+            "⎇ main ● 1 change"
+        );
         assert_eq!(line(status(main_branch(), modified(0), now)), "⎇ main");
         let truncated = ChangeState::Known(ChangeSummary {
             total: ChangeTotal::AtLeast(3_000),
             ..ChangeSummary::default()
         });
-        assert_eq!(line(status(main_branch(), truncated, now)), "⎇ main ● 3000+ changes");
+        assert_eq!(
+            line(status(main_branch(), truncated, now)),
+            "⎇ main ● 3000+ changes"
+        );
     }
 
     #[test]
@@ -765,7 +782,10 @@ mod tests {
         };
         let step = |current, total| Some(OperationStep { current, total });
         assert_eq!(
-            with(RepositoryOperation::Rebasing { step: step(3, 7) }, modified(4)),
+            with(
+                RepositoryOperation::Rebasing { step: step(3, 7) },
+                modified(4)
+            ),
             "⎇ main ▲ Rebasing 3/7"
         );
         assert_eq!(
@@ -773,7 +793,10 @@ mod tests {
             "⎇ main ▲ Rebasing"
         );
         assert_eq!(
-            with(RepositoryOperation::Applying { step: step(2, 5) }, modified(0)),
+            with(
+                RepositoryOperation::Applying { step: step(2, 5) },
+                modified(0)
+            ),
             "⎇ main ▲ Applying 2/5"
         );
         let conflicts = ChangeState::Known(ChangeSummary {
@@ -1106,7 +1129,11 @@ mod tests {
         assert_eq!(&*url, "https://github.com/sadiksaifi/spaceterm/pull/478");
         assert_eq!(
             hover.lines(),
-            ["#478 · Draft", "Show Repository Status", "issue-441 into main"]
+            [
+                "#478 · Draft",
+                "Show Repository Status",
+                "issue-441 into main"
+            ]
         );
         assert_eq!(
             accessible_label,
@@ -1137,7 +1164,9 @@ mod tests {
         repository.pull_request = Some(pull_request);
         let repository = view(repository);
         assert_eq!(
-            RepositoryCaption::from_view(&repository, now).unwrap().branch,
+            RepositoryCaption::from_view(&repository, now)
+                .unwrap()
+                .branch,
             "evil\u{FFFD}nam\u{FFFD}e"
         );
         let Some(SidebarBadge::PullRequest { hover, .. }) = SidebarBadge::from_view(&repository)

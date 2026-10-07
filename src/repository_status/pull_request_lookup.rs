@@ -10,9 +10,7 @@ use super::pull_request::{
     PullRequestQuery, auth_status_arguments, github_cli_environment, parse_pull_requests,
     pull_request_arguments, pull_request_exit, pull_request_program_error,
 };
-use super::{
-    ProgramExit, ProgramRequest, PullRequest, PullRequestError, RepositoryProgramRunner,
-};
+use super::{ProgramExit, ProgramRequest, PullRequest, PullRequestError, RepositoryProgramRunner};
 use crate::ssh::cancellation::SshCancellationToken;
 
 pub(crate) const PULL_REQUEST_OUTPUT_LIMIT: usize = 256 * 1024;
@@ -58,7 +56,12 @@ impl GitHubCliLookup {
         cancellation: &SshCancellationToken,
     ) -> Result<Option<PullRequest>, PullRequestError> {
         let mut output = Vec::new();
-        let exit = self.run(pull_request_arguments(query), now, &mut output, cancellation)?;
+        let exit = self.run(
+            pull_request_arguments(query),
+            now,
+            &mut output,
+            cancellation,
+        )?;
         pull_request_exit(exit)?;
         parse_pull_requests(&output, query)
     }
@@ -178,9 +181,18 @@ mod tests {
             (exit(1, LISTED), Err(PullRequestError::Unavailable)),
             (exit(0, "[]"), Ok(None)),
             (exit(0, "{"), Err(PullRequestError::InvalidResponse)),
-            (Err(ProgramError::NotFound), Err(PullRequestError::ToolMissing)),
-            (Err(ProgramError::TimedOut), Err(PullRequestError::Unavailable)),
-            (Err(ProgramError::Cancelled), Err(PullRequestError::Cancelled)),
+            (
+                Err(ProgramError::NotFound),
+                Err(PullRequestError::ToolMissing),
+            ),
+            (
+                Err(ProgramError::TimedOut),
+                Err(PullRequestError::Unavailable),
+            ),
+            (
+                Err(ProgramError::Cancelled),
+                Err(PullRequestError::Cancelled),
+            ),
             (
                 Err(ProgramError::OutputTooLarge),
                 Err(PullRequestError::InvalidResponse),
@@ -204,8 +216,14 @@ mod tests {
             (exit(0, ""), Ok(true)),
             (exit(1, ""), Ok(false)),
             (exit(4, ""), Ok(false)),
-            (Err(ProgramError::NotFound), Err(PullRequestError::ToolMissing)),
-            (Err(ProgramError::Failed), Err(PullRequestError::Unavailable)),
+            (
+                Err(ProgramError::NotFound),
+                Err(PullRequestError::ToolMissing),
+            ),
+            (
+                Err(ProgramError::Failed),
+                Err(PullRequestError::Unavailable),
+            ),
         ] {
             let runner = FakeRunner::new([response]);
             let now = Instant::now();
@@ -218,10 +236,7 @@ mod tests {
 
             assert_eq!(result, expected);
             let request = &runner.requests()[0];
-            assert_eq!(
-                request.arguments,
-                auth_status_arguments("ghe.example.com")
-            );
+            assert_eq!(request.arguments, auth_status_arguments("ghe.example.com"));
             assert_eq!(request.deadline, Some(now + PULL_REQUEST_TIMEOUT));
             assert_eq!(request.stdout_limit, Some(PULL_REQUEST_OUTPUT_LIMIT));
         }

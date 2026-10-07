@@ -280,10 +280,7 @@ fn entry_fields<const N: usize>(field: &[u8]) -> Result<[&[u8]; 3], RepositoryRe
     }
     let status = parts.next().ok_or(RepositoryReadError::InvalidResponse)?;
     for _ in 2..N - 1 {
-        if parts
-            .next()
-            .is_none_or(|metadata| metadata.is_empty())
-        {
+        if parts.next().is_none_or(|metadata| metadata.is_empty()) {
             return Err(RepositoryReadError::InvalidResponse);
         }
     }
@@ -600,7 +597,9 @@ mod tests {
 
     #[test]
     fn entries_should_stop_at_the_cap_while_the_total_stays_exact() {
-        let output: String = (0..45).map(|index| format!("? file-{index}.rs\0")).collect();
+        let output: String = (0..45)
+            .map(|index| format!("? file-{index}.rs\0"))
+            .collect();
 
         let summary = changes(&output);
 

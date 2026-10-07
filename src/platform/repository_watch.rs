@@ -94,9 +94,7 @@ mod tests {
         }
     }
 
-    fn watch(
-        directories: Vec<WatchDirectory>,
-    ) -> (Box<dyn RepositoryWatch>, mpsc::Receiver<()>) {
+    fn watch(directories: Vec<WatchDirectory>) -> (Box<dyn RepositoryWatch>, mpsc::Receiver<()>) {
         let (sender, receiver) = mpsc::channel();
         let sender = std::sync::Mutex::new(sender);
         let watch = NotifyRepositoryWatcher::new()

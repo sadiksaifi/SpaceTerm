@@ -531,23 +531,23 @@ impl<R: SshRemoteUtilityRunner> SshRemoteUtilityClient<R> {
             }
             None => request_cancellation,
         };
-        let output = self
-            .runner
-            .run(
-                Arc::clone(&self.command.command),
-                script,
-                MAXIMUM_REMOTE_UTILITY_OUTPUT_BYTES,
-                operation_cancellation,
-                session,
-            )
-            .await
-            .map_err(|error| match error {
-                RemoteUtilityRunError::Cancelled => RemoteUtilityError::Cancelled,
-                RemoteUtilityRunError::OutputTooLarge => RemoteUtilityError::OutputTooLarge,
-                RemoteUtilityRunError::TimedOut => RemoteUtilityError::TimedOut,
-                RemoteUtilityRunError::Process(_)
-                | RemoteUtilityRunError::WorkerUnavailable => RemoteUtilityError::Transport,
-            })?;
+        let output =
+            self.runner
+                .run(
+                    Arc::clone(&self.command.command),
+                    script,
+                    MAXIMUM_REMOTE_UTILITY_OUTPUT_BYTES,
+                    operation_cancellation,
+                    session,
+                )
+                .await
+                .map_err(|error| match error {
+                    RemoteUtilityRunError::Cancelled => RemoteUtilityError::Cancelled,
+                    RemoteUtilityRunError::OutputTooLarge => RemoteUtilityError::OutputTooLarge,
+                    RemoteUtilityRunError::TimedOut => RemoteUtilityError::TimedOut,
+                    RemoteUtilityRunError::Process(_)
+                    | RemoteUtilityRunError::WorkerUnavailable => RemoteUtilityError::Transport,
+                })?;
         if output.exit.code() == Some(SSH_FAILURE_STATUS) {
             return Err(if self.connection_is_live() {
                 RemoteUtilityError::SessionUnavailable
@@ -1329,8 +1329,7 @@ fn parse_repository_count(output: &[u8]) -> Result<RemoteRepositoryCount, Remote
             return Err(error);
         }
     }
-    let fields =
-        response.read_raw_fields_within(1, MAXIMUM_REMOTE_REPOSITORY_STATUS_BYTES)?;
+    let fields = response.read_raw_fields_within(1, MAXIMUM_REMOTE_REPOSITORY_STATUS_BYTES)?;
     let [status] = fields[..] else {
         return Err(RemoteUtilityError::InvalidResponse);
     };
@@ -2265,9 +2264,7 @@ mod tests {
         }
 
         #[gpui::test]
-        fn a_utility_deadline_should_stay_distinct_from_transport_failure(
-            cx: &mut TestAppContext,
-        ) {
+        fn a_utility_deadline_should_stay_distinct_from_transport_failure(cx: &mut TestAppContext) {
             let (client, _) = client([Err(RemoteUtilityRunError::TimedOut)]);
 
             assert_eq!(

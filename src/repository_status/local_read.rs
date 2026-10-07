@@ -200,9 +200,7 @@ impl LocalRepositoryReader {
         Ok(ProbeOutcome::Repository(Box::new(ProbedRepository {
             root: RepositoryRoot::Local(root),
             git_directory: RepositoryRoot::Local(git_directory),
-            common_directory: RepositoryRoot::Local(PathBuf::from(
-                &*repository.common_directory,
-            )),
+            common_directory: RepositoryRoot::Local(PathBuf::from(&*repository.common_directory)),
             commit: short_commit(&headers),
             upstream: upstream(&headers),
             head,
@@ -219,11 +217,8 @@ impl LocalRepositoryReader {
         fsmonitor: FsmonitorPolicy,
         cancellation: &SshCancellationToken,
     ) -> Result<PorcelainSummary, RepositoryReadError> {
-        let mut request = self.request(
-            root,
-            git_arguments(root, fsmonitor, &COUNT_ARGUMENTS),
-            None,
-        );
+        let mut request =
+            self.request(root, git_arguments(root, fsmonitor, &COUNT_ARGUMENTS), None);
         request.keep_process_group_on_exit = fsmonitor == FsmonitorPolicy::Builtin;
         let mut parser = PorcelainParser::new();
         let exit = self.run(request, &mut |chunk| parser.push(chunk), cancellation)?;
@@ -767,10 +762,7 @@ mod tests {
         for (response, expected) in [
             (exit(128, ""), RepositoryReadError::Unavailable),
             (exit(0, "nonsense\0"), RepositoryReadError::InvalidResponse),
-            (
-                Err(ProgramError::TimedOut),
-                RepositoryReadError::TimedOut,
-            ),
+            (Err(ProgramError::TimedOut), RepositoryReadError::TimedOut),
         ] {
             let runner = FakeRunner::new([response]);
 

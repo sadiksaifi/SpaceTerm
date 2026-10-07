@@ -157,11 +157,7 @@ impl SettingsWindow {
             .into_any_element()
     }
 
-    pub(super) fn git_tool_presentation(
-        &self,
-        row: SettingsRowId,
-        cx: &App,
-    ) -> ToolPresentation {
+    pub(super) fn git_tool_presentation(&self, row: SettingsRowId, cx: &App) -> ToolPresentation {
         let tools = tools(cx);
         if row == SettingsRowId::GitHubCli {
             github_cli_presentation(tools.github_cli)
@@ -222,7 +218,10 @@ mod tests {
             patch: 6,
         }));
         assert_eq!(old.state.as_ref(), "2.14.6");
-        assert_eq!(old.explanation, "Repository Status needs Git 2.15 or later.");
+        assert_eq!(
+            old.explanation,
+            "Repository Status needs Git 2.15 or later."
+        );
         assert_eq!(
             git_presentation(GitToolStatus::NotFound).explanation,
             "Install Git to show Repository Status."

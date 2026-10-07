@@ -4107,7 +4107,14 @@ fn git_switches_save_reset_and_hiding_repository_status_locks_pull_requests(
 
     click("settings-show-repository-status", cx);
     settle(cx);
-    assert!(!harness.storage.document().unwrap().git.show_repository_status);
+    assert!(
+        !harness
+            .storage
+            .document()
+            .unwrap()
+            .git
+            .show_repository_status
+    );
     click("settings-show-pull-requests", cx);
     settle(cx);
     assert!(
@@ -4133,7 +4140,10 @@ fn git_tool_rows_follow_the_reported_tool_status(cx: &mut TestAppContext) {
     let (_window, _harness, cx) = open_settings(cx);
     select_section(SettingsSectionId::Git, cx);
     assert!(cx.debug_bounds("settings-git-tool-state-unknown").is_some());
-    assert!(cx.debug_bounds("settings-github-cli-state-unknown").is_some());
+    assert!(
+        cx.debug_bounds("settings-github-cli-state-unknown")
+            .is_some()
+    );
 
     cx.update(|_, cx| {
         cx.set_global(RepositoryTools {
@@ -4148,7 +4158,10 @@ fn git_tool_rows_follow_the_reported_tool_status(cx: &mut TestAppContext) {
     cx.run_until_parked();
 
     assert!(cx.debug_bounds("settings-git-tool-state-ready").is_some());
-    assert!(cx.debug_bounds("settings-github-cli-state-signed-out").is_some());
+    assert!(
+        cx.debug_bounds("settings-github-cli-state-signed-out")
+            .is_some()
+    );
 }
 
 #[gpui::test]

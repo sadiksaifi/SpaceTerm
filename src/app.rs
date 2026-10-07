@@ -788,7 +788,8 @@ pub(crate) struct ApplicationCapabilities {
     pub(crate) remote_workspace:
         Arc<dyn crate::ui::remote_workspace_flow::RemoteWorkspaceFlowBackendFactory>,
     /// Runs git and the GitHub CLI for Repository Status.
-    pub(crate) repository_status: Option<crate::ui::repository_status_store::RepositoryStatusAdapters>,
+    pub(crate) repository_status:
+        Option<crate::ui::repository_status_store::RepositoryStatusAdapters>,
 }
 
 /// The startup-supplied file opener available to explicit local file selections.

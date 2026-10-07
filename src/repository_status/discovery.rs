@@ -354,7 +354,11 @@ mod tests {
             "false\ntrue\n/src/bare.git\n.\n",
             "true\n",
         ] {
-            assert_eq!(discover(output, "/src"), Ok(Discovery::Hidden), "{output:?}");
+            assert_eq!(
+                discover(output, "/src"),
+                Ok(Discovery::Hidden),
+                "{output:?}"
+            );
         }
     }
 
@@ -365,14 +369,23 @@ mod tests {
 
         assert_eq!(
             discover(&at_home, HOME),
-            Ok(repository(HOME, "/Users/person/.git", "/Users/person/.git", ""))
+            Ok(repository(
+                HOME,
+                "/Users/person/.git",
+                "/Users/person/.git",
+                ""
+            ))
         );
         assert_eq!(
             discover(&below_home, "/Users/person/Projects"),
             Ok(Discovery::Hidden)
         );
         assert_eq!(
-            parse_discovery(below_home.as_bytes(), "/Users/person/Projects", "/Users/person/"),
+            parse_discovery(
+                below_home.as_bytes(),
+                "/Users/person/Projects",
+                "/Users/person/"
+            ),
             Ok(Discovery::Hidden)
         );
     }
@@ -525,11 +538,7 @@ mod tests {
             ),
             ("", FsmonitorPolicy::Disabled),
         ] {
-            assert_eq!(
-                config(record, None).fsmonitor,
-                expected,
-                "{record:?}"
-            );
+            assert_eq!(config(record, None).fsmonitor, expected, "{record:?}");
         }
     }
 
@@ -545,9 +554,13 @@ mod tests {
 
         assert_eq!(config.fsmonitor, FsmonitorPolicy::Disabled);
         assert_eq!(
-            parse_config(b"core.fsmonitor\ntrue\0", None, BUILTIN_FSMONITOR_GIT_VERSION)
-                .unwrap()
-                .fsmonitor,
+            parse_config(
+                b"core.fsmonitor\ntrue\0",
+                None,
+                BUILTIN_FSMONITOR_GIT_VERSION
+            )
+            .unwrap()
+            .fsmonitor,
             FsmonitorPolicy::Builtin
         );
     }
