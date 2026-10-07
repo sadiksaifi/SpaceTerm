@@ -94,6 +94,30 @@ impl HoverFade {
     }
 }
 
+/// How far a flag has eased toward on, from 0 off to 1 on, such as controls that show while their
+/// Pane has focus.
+///
+/// Call it every render with a key unique in the window. The first render takes the flag's value
+/// at once; each later change eases like a hover. Frames continue until the transition settles.
+pub fn eased_flag(key: impl Into<ElementId>, on: bool, window: &mut Window, cx: &mut App) -> f32 {
+    let now = cx.background_executor().now();
+    let motion = crate::control_motion(cx);
+    let state = window.use_keyed_state(key, cx, |_, _| HoverTransition {
+        hovered: on,
+        from: 0.0,
+        since: None,
+    });
+    let transition = state.update(cx, |transition, _| {
+        transition.set_hovered(on, now, motion);
+        *transition
+    });
+    let raw = transition.raw(now);
+    if raw != transition.target() {
+        window.request_animation_frame();
+    }
+    ease(raw)
+}
+
 /// Finishes every hover transition in progress, since test windows have no frame loop.
 #[cfg(test)]
 pub(crate) fn settle(cx: &mut gpui::VisualTestContext) {

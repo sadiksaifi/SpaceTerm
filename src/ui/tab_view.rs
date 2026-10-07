@@ -398,7 +398,8 @@ struct DraggedPane {
 /// The widest a lifted Pane Caption grows, so a wide Pane lifts a card rather than a bar.
 const LIFTED_CAPTION_MAXIMUM_WIDTH: f32 = 320.0;
 
-/// Each Pane's hover and how far it has eased, as read at the start of a frame.
+/// Each Pane's hover and how far its caption controls have eased into view, as read at the start
+/// of a frame.
 type PaneHovers = BTreeMap<PaneId, (HoverFade, f32)>;
 
 /// A Pane lifted by its caption, the edge of another Pane it takes if released now, and the drag
@@ -1783,14 +1784,25 @@ impl TabView {
         }
     }
 
-    /// Each Pane's hover, read once per frame.
-    fn pane_hovers(&self, window: &mut Window, cx: &mut App) -> PaneHovers {
+    /// Each Pane's hover and controls reveal, read once per frame.
+    ///
+    /// The Focused Pane always shows its caption controls. Another Pane shows them under the
+    /// pointer while the window is active.
+    fn pane_hovers(&self, window_active: bool, window: &mut Window, cx: &mut App) -> PaneHovers {
+        let focused_pane_id = self.tab.focused_pane_id();
         self.tab
             .panes_with_ids()
             .map(|(pane_id, _)| {
                 let fade = HoverFade::new(("pane-hover", pane_id.get()), window, cx);
-                let level = fade.level(window, cx);
-                (pane_id, (fade, level))
+                let revealed =
+                    pane_id == focused_pane_id || (window_active && fade.is_hovered(cx));
+                let reveal = spaceterm_ui::eased_flag(
+                    ("pane-controls-reveal", pane_id.get()),
+                    revealed,
+                    window,
+                    cx,
+                );
+                (pane_id, (fade, reveal))
             })
             .collect()
     }
@@ -1823,7 +1835,9 @@ impl TabView {
             .cloned()
             .unwrap_or_default();
         let hover = hovers.get(&pane_id).cloned();
-        let hover_level = hover.as_ref().map_or(0.0, |(_, level)| *level);
+        let controls_reveal = hover
+            .as_ref()
+            .map_or(if focused { 1.0 } else { 0.0 }, |(_, reveal)| *reveal);
         let attention = self.pane_attention.get(&pane_id).copied().unwrap_or(0) > 0;
         let drop_edge = self
             .pane_drag
@@ -1908,7 +1922,7 @@ impl TabView {
                     attention,
                     has_multiple_panes,
                 },
-                hover_level,
+                controls_reveal,
                 view.clone(),
                 appearance.clone(),
             ))
@@ -2090,7 +2104,7 @@ impl Render for TabView {
                 }
             },
         };
-        let hovers = self.pane_hovers(window, cx);
+        let hovers = self.pane_hovers(appearance.active, window, cx);
         let content = match zoom_state {
             ZoomState::Restored => {
                 self.render_tree(self.tab.root(), &hovers, view.clone(), &appearance, cx)
@@ -2311,7 +2325,7 @@ struct PaneCaption {
 
 fn render_pane_caption(
     caption: PaneCaption,
-    hover: f32,
+    controls_reveal: f32,
     view: gpui::WeakEntity<TabView>,
     appearance: std::sync::Arc<super::appearance::ChromeAppearance>,
 ) -> AnyElement {
@@ -2359,7 +2373,7 @@ fn render_pane_caption(
             let layout = CaptionLayout::resolve(&caption, bounds.size.width, window, &appearance);
             let content = render_pane_caption_content(
                 caption,
-                hover,
+                controls_reveal,
                 view,
                 crate::desktop_profile::DesktopPresentation::get(cx),
                 layout,
@@ -2407,7 +2421,7 @@ pub(super) fn drawable_reported_glyph(
 
 fn render_pane_caption_content(
     caption: PaneCaption,
-    hover: f32,
+    controls_reveal: f32,
     view: gpui::WeakEntity<TabView>,
     presentation: &crate::desktop_profile::DesktopPresentation,
     layout: CaptionLayout,
@@ -2459,9 +2473,27 @@ fn render_pane_caption_content(
         .ml(appearance.spacing(PANE_CONTROL_LEADING_GAP))
         .flex_shrink_0()
         // An unfocused Pane shows its controls only under the pointer.
-        .when(!focused, |controls| {
-            controls.opacity(if appearance.active { hover } else { 0.0 })
-        });
+        .opacity(controls_reveal);
+    let control_count = usize::from(layout.show_splits) * 2 + usize::from(has_multiple_panes) * 2;
+    // Hidden controls keep their place, so the Repository Status slides over it to the trailing
+    // edge and back as the controls fade.
+    let controls_extent = if control_count == 0 {
+        0.0
+    } else {
+        let control_size = f32::from(
+            appearance
+                .icons
+                .interactive_target_size(InteractiveIconRole::Control),
+        );
+        appearance.spacing_scale * PANE_CONTROL_LEADING_GAP
+            + controls_width(
+                control_count,
+                has_multiple_panes,
+                control_size,
+                appearance.spacing_scale,
+            )
+    };
+    let repository_offset = px((1.0 - controls_reveal) * controls_extent);
     let actions = [
         (
             PaneCaptionAction::SplitRight,
@@ -2583,14 +2615,20 @@ fn render_pane_caption_content(
         })
         .child(caption_content)
         .when_some(repository, |row, repository| {
-            row.child(render_repository_segment(
-                pane_id,
-                &repository,
-                (terminal.downgrade(), view.clone()),
-                layout.repository,
-                appearance,
-                &paint,
-            ))
+            row.child(
+                div()
+                    .relative()
+                    .left(repository_offset)
+                    .flex_shrink_0()
+                    .child(render_repository_segment(
+                        pane_id,
+                        &repository,
+                        (terminal.downgrade(), view.clone()),
+                        layout.repository,
+                        appearance,
+                        &paint,
+                    )),
+            )
         })
         .child(controls)
         .into_any_element()
@@ -4858,6 +4896,56 @@ mod tests {
             layout(false, false, false, false, false)
         );
         assert!(!resolve(controls - 1.0).show_splits);
+    }
+
+    #[gpui::test]
+    fn repository_status_should_slide_aside_for_the_controls_of_a_focused_pane(
+        cx: &mut TestAppContext,
+    ) {
+        let (_, view, _, cx) = caption_view(cx);
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.split_focused(SplitAxis::Horizontal, window, cx);
+                view.pane_captions
+                    .entry(PaneId::new(1))
+                    .or_default()
+                    .repository = Some(RepositoryCaption {
+                    glyph: "⎇",
+                    branch: "main".into(),
+                    mark: None,
+                    detail: None,
+                    divergence: None,
+                    dimmed: false,
+                    accessible_label: "Repository Status, main".into(),
+                });
+                cx.notify();
+            });
+        });
+        crate::ui::settle_hover(cx);
+        // The pointer rests over the Focused Pane, so the other Pane is not hovered.
+        let focused_pane = cx.debug_bounds("pane-surface-2").unwrap();
+        cx.simulate_mouse_move(focused_pane.center(), None, gpui::Modifiers::none());
+        crate::ui::settle_hover(cx);
+        assert_eq!(view.read_with(cx, |view, _| view.focused_pane_id()), PaneId::new(2));
+        let segment_right = |cx: &mut VisualTestContext| {
+            cx.debug_bounds("pane-repository-1").unwrap().right()
+        };
+        let controls = cx.debug_bounds("pane-controls-1-full").unwrap();
+        assert!(
+            (segment_right(cx) - controls.right()).abs() < px(0.5),
+            "an unfocused Pane's hidden controls leave their place to the Repository Status",
+        );
+
+        view.update(cx, |view, cx| view.focus_pane(PaneId::new(1), cx));
+        crate::ui::settle_hover(cx);
+        assert!(
+            segment_right(cx) <= controls.left(),
+            "the Focused Pane's controls push the Repository Status before them",
+        );
+
+        view.update(cx, |view, cx| view.focus_pane(PaneId::new(2), cx));
+        crate::ui::settle_hover(cx);
+        assert!((segment_right(cx) - controls.right()).abs() < px(0.5));
     }
 
     #[test]
