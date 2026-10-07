@@ -2503,7 +2503,6 @@ fn render_pane_caption_content(
         .flex()
         .items_center()
         .gap(appearance.spacing(PANE_CONTROL_GAP))
-        .ml(appearance.spacing(PANE_CONTROL_LEADING_GAP))
         .flex_shrink_0()
         // An unfocused Pane shows its controls only under the pointer.
         .opacity(controls_reveal);
@@ -2526,15 +2525,28 @@ fn render_pane_caption_content(
                 appearance.spacing_scale,
             )
     };
-    let controls_slot = div()
+    // The leading gap opens first and stays outside the clip, so a partly revealed control never
+    // touches the segment before it.
+    let slot_width = controls_reveal * controls_extent;
+    let leading_gap = slot_width.min(appearance.spacing_scale * PANE_CONTROL_LEADING_GAP);
+    let controls_clip = div()
+        .id(("pane-controls-clip", pane_id.get()))
+        .debug_selector(move || format!("pane-controls-clip-{}", pane_id.get()))
         .flex_shrink_0()
-        .w(px(controls_reveal * controls_extent))
+        .w(px(slot_width - leading_gap))
         .h_full()
         .flex()
         .items_center()
         // The controls enter from the trailing edge, and a partly hidden control takes no clicks.
         .justify_end()
         .overflow_hidden();
+    let controls_slot = div()
+        .flex_shrink_0()
+        .w(px(slot_width))
+        .h_full()
+        .flex()
+        .items_center()
+        .justify_end();
     let actions = [
         (
             PaneCaptionAction::SplitRight,
@@ -2665,7 +2677,7 @@ fn render_pane_caption_content(
                 &paint,
             ))
         })
-        .child(controls_slot.child(controls))
+        .child(controls_slot.child(controls_clip.child(controls)))
         .into_any_element()
 }
 
@@ -5019,6 +5031,58 @@ mod tests {
         view.update(cx, |view, cx| view.focus_pane(PaneId::new(2), cx));
         crate::ui::settle_hover(cx);
         assert!((segment_right(cx) - controls.right()).abs() < px(0.5));
+    }
+
+    #[gpui::test]
+    fn controls_growing_in_should_keep_their_gap_from_the_repository_status(
+        cx: &mut TestAppContext,
+    ) {
+        let (_, view, _, cx) = caption_view(cx);
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.split_focused(SplitAxis::Horizontal, window, cx);
+                view.pane_captions
+                    .entry(PaneId::new(1))
+                    .or_default()
+                    .repository = Some(RepositoryCaption {
+                    glyph: HeadGlyph::Branch,
+                    branch: "main".into(),
+                    mark: None,
+                    detail: None,
+                    divergence: Some("\u{2191}1".into()),
+                    dimmed: false,
+                    accessible_label: "Repository Status, main".into(),
+                });
+                cx.notify();
+            });
+        });
+        crate::ui::settle_hover(cx);
+        let focused_pane = cx.debug_bounds("pane-surface-2").unwrap();
+        cx.simulate_mouse_move(focused_pane.center(), None, gpui::Modifiers::none());
+        crate::ui::settle_hover(cx);
+
+        view.update(cx, |view, cx| view.focus_pane(PaneId::new(1), cx));
+        cx.run_until_parked();
+        let mut partly_revealed = false;
+        for _ in 0..12 {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(16));
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+            cx.run_until_parked();
+            let segment = cx.debug_bounds("pane-repository-1").unwrap();
+            let clip = cx.debug_bounds("pane-controls-clip-1").unwrap();
+            let controls = cx.debug_bounds("pane-controls-1-full").unwrap();
+            if clip.size.width > px(0.0) && clip.size.width < controls.size.width {
+                partly_revealed = true;
+            }
+            if clip.size.width > px(0.0) {
+                assert!(
+                    clip.left() - segment.right() >= px(PANE_CONTROL_LEADING_GAP - 0.5),
+                    "{segment:?} {clip:?}"
+                );
+            }
+        }
+        assert!(partly_revealed, "the controls ease in over several frames");
     }
 
     #[gpui::test]
