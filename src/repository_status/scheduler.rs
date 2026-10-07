@@ -539,7 +539,11 @@ impl RepositoryScheduler {
     fn next_deadline(&self) -> Option<Instant> {
         let repositories = self.repositories.values().flat_map(|repository| {
             let indicator = (repository.status.changes == ChangeState::NotCounted)
-                .then(|| repository.count.map(|count| count.started + COUNTING_INDICATOR_DELAY))
+                .then(|| {
+                    repository
+                        .count
+                        .map(|count| count.started + COUNTING_INDICATOR_DELAY)
+                })
                 .flatten();
             [repository.debounce, indicator]
         });
@@ -2523,7 +2527,11 @@ mod tests {
         assert_eq!(harness.status(PANE).pull_request, None);
         harness.advance(100);
         harness.window_activated();
-        assert_eq!(harness.lookups().len(), 1, "another host may still be signed in");
+        assert_eq!(
+            harness.lookups().len(),
+            1,
+            "another host may still be signed in"
+        );
 
         let update = harness
             .scheduler

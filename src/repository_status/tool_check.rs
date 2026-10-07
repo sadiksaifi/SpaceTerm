@@ -57,45 +57,50 @@ pub(crate) fn check_tools(
                 _ => GitToolStatus::NotFound,
             }
         });
-    let github_cli = inventory
-        .github_cli
-        .as_deref()
-        .map_or(GitHubCliStatus::NotFound, |github_cli| {
-            let run = |arguments: &[&str], output: &mut Vec<u8>| {
-                let request = ProgramRequest {
-                    executable: github_cli.to_path_buf(),
-                    arguments: arguments.iter().map(OsString::from).collect(),
-                    directory: home.to_path_buf(),
-                    environment: github_cli_environment(github_cli, home, github_cli_passthrough),
-                    stdout_limit: Some(TOOL_CHECK_OUTPUT_LIMIT),
-                    deadline: Some(deadline),
-                    keep_process_group_on_exit: false,
-                };
-                runner.run(
-                    &request,
-                    &mut |chunk| output.extend_from_slice(chunk),
-                    cancellation,
-                )
-            };
-            let mut output = Vec::new();
-            match run(&AUTH_STATUS_JSON_ARGUMENTS, &mut output) {
-                Ok(exit) if exit.success() => {
-                    return match any_host_signed_in(&output) {
-                        Some(true) => GitHubCliStatus::SignedIn,
-                        Some(false) => GitHubCliStatus::SignedOut,
-                        None => GitHubCliStatus::Unavailable,
+    let github_cli =
+        inventory
+            .github_cli
+            .as_deref()
+            .map_or(GitHubCliStatus::NotFound, |github_cli| {
+                let run = |arguments: &[&str], output: &mut Vec<u8>| {
+                    let request = ProgramRequest {
+                        executable: github_cli.to_path_buf(),
+                        arguments: arguments.iter().map(OsString::from).collect(),
+                        directory: home.to_path_buf(),
+                        environment: github_cli_environment(
+                            github_cli,
+                            home,
+                            github_cli_passthrough,
+                        ),
+                        stdout_limit: Some(TOOL_CHECK_OUTPUT_LIMIT),
+                        deadline: Some(deadline),
+                        keep_process_group_on_exit: false,
                     };
+                    runner.run(
+                        &request,
+                        &mut |chunk| output.extend_from_slice(chunk),
+                        cancellation,
+                    )
+                };
+                let mut output = Vec::new();
+                match run(&AUTH_STATUS_JSON_ARGUMENTS, &mut output) {
+                    Ok(exit) if exit.success() => {
+                        return match any_host_signed_in(&output) {
+                            Some(true) => GitHubCliStatus::SignedIn,
+                            Some(false) => GitHubCliStatus::SignedOut,
+                            None => GitHubCliStatus::Unavailable,
+                        };
+                    }
+                    Ok(_) => {}
+                    Err(error) => return github_cli_error(error),
                 }
-                Ok(_) => {}
-                Err(error) => return github_cli_error(error),
-            }
-            // A GitHub CLI without `--json` exits with an error; ask it the older way.
-            match run(&AUTH_STATUS_ARGUMENTS, &mut Vec::new()) {
-                Ok(exit) if exit.success() => GitHubCliStatus::SignedIn,
-                Ok(_) => GitHubCliStatus::SignedOut,
-                Err(error) => github_cli_error(error),
-            }
-        });
+                // A GitHub CLI without `--json` exits with an error; ask it the older way.
+                match run(&AUTH_STATUS_ARGUMENTS, &mut Vec::new()) {
+                    Ok(exit) if exit.success() => GitHubCliStatus::SignedIn,
+                    Ok(_) => GitHubCliStatus::SignedOut,
+                    Err(error) => github_cli_error(error),
+                }
+            });
     (git, github_cli)
 }
 

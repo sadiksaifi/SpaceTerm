@@ -2801,8 +2801,14 @@ fn repository_status_popover_should_fit_a_short_pane_and_keep_its_footer(cx: &mu
     let pane_bounds = cx.debug_bounds("terminal-pane").unwrap();
     let popover = cx.debug_bounds("repository-status-popover").unwrap();
     let footer = cx.debug_bounds("repository-status-popover-footer").unwrap();
-    assert!(popover.bottom() <= pane_bounds.bottom(), "{popover:?} {pane_bounds:?}");
-    assert!(footer.bottom() <= popover.bottom(), "{footer:?} {popover:?}");
+    assert!(
+        popover.bottom() <= pane_bounds.bottom(),
+        "{popover:?} {pane_bounds:?}"
+    );
+    assert!(
+        footer.bottom() <= popover.bottom(),
+        "{footer:?} {popover:?}"
+    );
 }
 
 #[gpui::test]
