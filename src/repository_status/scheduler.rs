@@ -871,7 +871,13 @@ impl RepositoryScheduler {
     /// once it finishes; a request at the same instant joins it.
     fn probe(&mut self, target: ProbeTarget, for_key: Option<&RepositoryKey>, now: Instant) {
         for interest in self.interests.values_mut() {
-            if interest.is_at(&target) || for_key.is_some_and(|key| interest.is_bound_to(key)) {
+            if interest.is_at(&target) {
+                interest.stale = false;
+                interest.directory_owed = false;
+            } else if for_key.is_some_and(|key| interest.is_bound_to(key))
+                && !interest.directory_owed
+            {
+                // Reading the repository does not probe a directory an Interest still owes.
                 interest.stale = false;
             }
         }
@@ -2186,6 +2192,30 @@ mod tests {
         harness.advance(2_000);
         harness.tick();
         assert!(harness.probes().is_empty());
+
+        harness.set_visible(PANE, true);
+        assert_eq!(harness.only_probe().1, remote("/srv/app/module"));
+    }
+
+    #[test]
+    fn a_hidden_remote_interest_that_moved_should_probe_its_new_directory_after_its_repository_was_read()
+     {
+        let key = remote_key("/srv/app");
+        let mut harness = Harness::new();
+        harness.register(PANE, remote_interest("/srv/app"));
+        harness.register(OTHER, remote_interest("/srv/app"));
+        harness.read(on_branch(&key, "main"), 0);
+
+        harness.set_visible(PANE, false);
+        harness.set_source(PANE, remote("/srv/app/module"));
+        // Another Pane still shows the repository and reads it again.
+        harness.command_finished(OTHER, 1);
+        harness.advance(2_000);
+        harness.tick();
+        let (ticket, directory) = harness.only_probe();
+        assert_eq!(directory, remote("/srv/app"));
+        harness.finish_probe(ticket, Ok(on_branch(&key, "main")));
+        harness.counts();
 
         harness.set_visible(PANE, true);
         assert_eq!(harness.only_probe().1, remote("/srv/app/module"));
