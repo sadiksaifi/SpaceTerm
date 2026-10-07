@@ -217,6 +217,9 @@ struct InterestState {
     binding: Binding,
     /// A trigger was skipped while this Interest could not read.
     stale: bool,
+    /// A directory probe was skipped while this Interest could not read, so the next trigger
+    /// probes its directory rather than reading the repository it was bound to.
+    directory_owed: bool,
     debounce: Option<Instant>,
     view: RepositoryView,
 }
@@ -233,6 +236,7 @@ impl InterestState {
             finished_commands: interest.finished_commands,
             binding: Binding::Unknown,
             stale: false,
+            directory_owed: false,
             debounce: None,
             view: RepositoryView::Hidden,
         }
@@ -733,16 +737,19 @@ impl RepositoryScheduler {
             &interest.binding,
             Binding::Repository(key) if !interest.directory.is_within(&key.root)
         );
-        match self.cached(&target, now) {
-            Some(Binding::Outside) => {
-                self.rebind(id, Binding::Outside);
-                return;
-            }
+        let cached = match self.cached(&target, now) {
+            Some(Binding::Outside) => Some(Binding::Outside),
             Some(Binding::Repository(key)) if self.repositories.contains_key(&key) => {
-                self.rebind(id, Binding::Repository(key));
-                return;
+                Some(Binding::Repository(key))
             }
-            _ => {}
+            _ => None,
+        };
+        if let Some(binding) = cached {
+            if let Some(interest) = self.interests.get_mut(&id) {
+                interest.directory_owed = false;
+            }
+            self.rebind(id, binding);
+            return;
         }
         if left {
             self.rebind(id, Binding::Unknown);
@@ -763,8 +770,10 @@ impl RepositoryScheduler {
             return;
         }
         match interest.binding.clone() {
-            Binding::Repository(key) => self.request_repository(&key, now, immediate),
-            Binding::Unknown | Binding::Outside => self.request_directory(id, now, immediate),
+            Binding::Repository(key) if !interest.directory_owed => {
+                self.request_repository(&key, now, immediate);
+            }
+            _ => self.request_directory(id, now, immediate),
         }
     }
 
@@ -784,6 +793,7 @@ impl RepositoryScheduler {
         if matches!(interest.machine, RepositoryMachine::Remote(_)) {
             if !interest.can_read() {
                 interest.stale = true;
+                interest.directory_owed = true;
                 return;
             }
             if !immediate {
@@ -796,6 +806,7 @@ impl RepositoryScheduler {
             }
         }
         interest.debounce = None;
+        interest.directory_owed = false;
         self.probe(target, None, now);
     }
 
@@ -2083,6 +2094,23 @@ mod tests {
         assert!(harness.probes().is_empty());
         harness.set_visible(PANE, true);
         assert_eq!(harness.only_probe().1, remote("/srv/api"));
+    }
+
+    #[test]
+    fn a_hidden_remote_interest_that_moved_should_probe_its_new_directory_when_shown() {
+        let key = remote_key("/srv/app");
+        let mut harness = Harness::new();
+        harness.register(PANE, remote_interest("/srv/app"));
+        harness.read(on_branch(&key, "main"), 0);
+
+        harness.set_visible(PANE, false);
+        harness.set_source(PANE, remote("/srv/app/module"));
+        harness.advance(2_000);
+        harness.tick();
+        assert!(harness.probes().is_empty());
+
+        harness.set_visible(PANE, true);
+        assert_eq!(harness.only_probe().1, remote("/srv/app/module"));
     }
 
     #[test]
