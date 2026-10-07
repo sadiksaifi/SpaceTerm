@@ -15,6 +15,7 @@ mod display_text;
 pub(crate) mod operation;
 pub(crate) mod porcelain;
 pub(crate) mod presentation;
+pub(crate) mod pull_request;
 pub(crate) mod remote_url;
 pub(crate) mod scheduler;
 pub(crate) mod tools;
@@ -334,6 +335,8 @@ pub(crate) enum PullRequestError {
     Unavailable,
     #[error("the GitHub CLI returned an invalid response")]
     InvalidResponse,
+    #[error("the Pull Request lookup was cancelled")]
+    Cancelled,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -440,6 +443,20 @@ impl fmt::Debug for ProgramRequest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("ProgramRequest(<redacted>)")
     }
+}
+
+/// `PATH` for a program run: the program's own directory, then the system directories.
+pub(crate) fn tool_search_path(executable: &Path) -> OsString {
+    let mut path = OsString::new();
+    if let Some(directory) = executable
+        .parent()
+        .filter(|directory| !directory.as_os_str().is_empty())
+    {
+        path.push(directory.as_os_str());
+        path.push(":");
+    }
+    path.push("/usr/bin:/bin");
+    path
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
