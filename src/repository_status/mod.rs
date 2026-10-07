@@ -10,6 +10,7 @@
 // The shared vocabulary lands before every consumer; consumers arrive in later commits.
 #![allow(dead_code)]
 
+pub(crate) mod presentation;
 pub(crate) mod scheduler;
 
 use std::ffi::OsString;
