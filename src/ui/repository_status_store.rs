@@ -565,8 +565,11 @@ impl RepositoryStatusStore {
         result: Result<Option<PullRequest>, PullRequestError>,
         cx: &mut Context<Self>,
     ) {
+        // A lookup's host may be the only one signed out, so check every host again.
+        if matches!(result, Err(PullRequestError::NotLoggedIn)) {
+            self.check_tools(cx);
+        }
         let github_cli = match result {
-            Err(PullRequestError::NotLoggedIn) => Some(GitHubCliStatus::SignedOut),
             Err(PullRequestError::ToolMissing) => Some(GitHubCliStatus::NotFound),
             _ => None,
         };

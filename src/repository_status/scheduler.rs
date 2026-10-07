@@ -687,8 +687,10 @@ impl RepositoryScheduler {
                 entry.value = value;
                 self.attach_pull_request(&ticket.key);
             }
+            // One host's login says nothing about the others; the host re-checks the CLI.
             Err(PullRequestError::NotLoggedIn) => {
-                return self.set_github_cli(GitHubCliStatus::SignedOut, now);
+                entry.value = None;
+                self.attach_pull_request(&ticket.key);
             }
             Err(PullRequestError::ToolMissing) => {
                 return self.set_github_cli(GitHubCliStatus::NotFound, now);
@@ -2491,6 +2493,14 @@ mod tests {
         let (lookup, _) = harness.lookups().remove(0);
         harness.finish_lookup(lookup, Err(PullRequestError::NotLoggedIn));
         assert_eq!(harness.status(PANE).pull_request, None);
+        harness.advance(100);
+        harness.window_activated();
+        assert_eq!(harness.lookups().len(), 1, "another host may still be signed in");
+
+        let update = harness
+            .scheduler
+            .set_github_cli(GitHubCliStatus::SignedOut, harness.now);
+        harness.record(update);
         harness.advance(100);
         harness.window_activated();
         assert!(harness.lookups().is_empty());
