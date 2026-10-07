@@ -186,6 +186,7 @@ lucide_sources! {
     Folder => "folder",
     FolderOutput => "folder-output",
     FolderPlus => "folder-plus",
+    GitBranch => "git-branch",
     Globe => "globe",
     ImageOff => "image-off",
     Info => "info",

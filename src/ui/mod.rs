@@ -18,6 +18,7 @@ pub(crate) mod pane_lifecycle;
 pub(crate) mod permission_setup;
 mod remote_child_launch;
 pub(crate) mod remote_workspace_flow;
+pub(crate) mod repository_status_store;
 mod render_lifecycle;
 mod selection_chip;
 pub(crate) mod settings_file;

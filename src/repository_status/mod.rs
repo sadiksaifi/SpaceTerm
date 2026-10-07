@@ -21,6 +21,10 @@ use thiserror::Error;
 use crate::domain::RemoteDirectory;
 use crate::ssh::cancellation::SshCancellationToken;
 
+mod preferences;
+
+pub(crate) use preferences::RepositoryStatusPreferences;
+
 /// The machine whose filesystem a repository lives on.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum RepositoryMachine {

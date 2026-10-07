@@ -20,7 +20,7 @@ fn legacy_transparency_exports_as_opacity() {
             .as_f64()
             .unwrap();
         assert_eq!(opacity, expected_opacity);
-        assert_eq!(exported["schema_version"], 4);
+        assert_eq!(exported["schema_version"], 5);
         assert!(
             exported["appearance"]["window"]
                 .get("transparency")
@@ -39,6 +39,7 @@ fn legacy_document(
 ) -> serde_json::Value {
     let mut legacy = serde_json::to_value(document).unwrap();
     legacy["schema_version"] = serde_json::json!(3);
+    legacy.as_object_mut().unwrap().remove("git");
     let window = legacy["appearance"]["window"].as_object_mut().unwrap();
     window.remove("opacity");
     window.insert("transparency".into(), transparency);
@@ -103,6 +104,8 @@ fn settings_versions_reject_ambiguous_or_mismatched_window_fields() {
     legacy_with_canonical_fields["schema_version"] = serde_json::json!(3);
     let mut canonical_with_legacy_fields = legacy;
     canonical_with_legacy_fields["schema_version"] = serde_json::json!(4);
+    let mut version_four_with_git = serde_json::to_value(SettingsDocument::default()).unwrap();
+    version_four_with_git["schema_version"] = serde_json::json!(4);
     let mut canonical_with_transparency = canonical;
     canonical_with_transparency["appearance"]["window"]["transparency"] = serde_json::json!(0.35);
 
@@ -112,6 +115,7 @@ fn settings_versions_reject_ambiguous_or_mismatched_window_fields() {
         legacy_with_canonical_fields,
         canonical_with_legacy_fields,
         canonical_with_transparency,
+        version_four_with_git,
     ] {
         assert_eq!(
             parse_settings(&serde_json::to_vec(&value).unwrap()),
@@ -489,9 +493,9 @@ fn native_settings_are_canonical_strict_and_round_trip() {
     document.appearance.terminal.themes.light = ThemeId::builtin("builtin.spaceterm.light");
     let encoded = export_settings(&document).unwrap();
     let encoded_value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
-    assert_eq!(encoded_value["schema_version"], 4);
+    assert_eq!(encoded_value["schema_version"], 5);
     assert_eq!(parse_settings(encoded.as_bytes()).unwrap(), document);
-    let unsupported = encoded.replacen("\"schema_version\": 4", "\"schema_version\": 2", 1);
+    let unsupported = encoded.replacen("\"schema_version\": 5", "\"schema_version\": 2", 1);
     assert!(matches!(
         parse_settings(unsupported.as_bytes()),
         Err(SettingsDocumentError::UnsupportedVersion)
@@ -651,4 +655,48 @@ fn clipboard_settings_round_trip_import_and_reset() {
     assert_eq!(imported.clipboard, document.clipboard);
     imported.reset_all();
     assert_eq!(imported.clipboard, Default::default());
+}
+
+#[test]
+fn version_four_documents_migrate_with_default_git_settings() {
+    let mut expected = reset_fixture();
+    expected.revision = 12;
+    expected.clipboard.allow_read = true;
+    let mut version_four = serde_json::to_value(&expected).unwrap();
+    version_four["schema_version"] = serde_json::json!(4);
+    version_four.as_object_mut().unwrap().remove("git");
+
+    let document = parse_settings(&serde_json::to_vec(&version_four).unwrap()).unwrap();
+
+    assert_eq!(document, expected);
+    assert_eq!(document.git, Default::default());
+    assert!(document.git.show_repository_status && document.git.show_pull_requests);
+    let exported: serde_json::Value =
+        serde_json::from_str(&export_settings(&document).unwrap()).unwrap();
+    assert_eq!(exported["schema_version"], 5);
+}
+
+#[test]
+fn git_settings_round_trip_import_and_reset() {
+    let mut document = SettingsDocument::default();
+    document.git.show_repository_status = false;
+    document.git.show_pull_requests = false;
+    let restored = parse_settings(export_settings(&document).unwrap().as_bytes()).unwrap();
+    assert_eq!(restored.git, document.git);
+    let mut imported = SettingsDocument::default();
+    imported.replace_settings(restored);
+    assert_eq!(imported.git, document.git);
+    imported.reset_all();
+    assert_eq!(imported.git, Default::default());
+}
+
+#[test]
+fn git_settings_reject_unknown_fields() {
+    let mut value = serde_json::to_value(SettingsDocument::default()).unwrap();
+    value["git"]["show_branch"] = serde_json::json!(true);
+
+    assert!(matches!(
+        parse_settings(&serde_json::to_vec(&value).unwrap()),
+        Err(SettingsDocumentError::InvalidJson)
+    ));
 }

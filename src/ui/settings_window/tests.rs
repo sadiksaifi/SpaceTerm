@@ -415,6 +415,7 @@ pub(super) fn select_section(section: SettingsSectionId, cx: &mut VisualTestCont
         SettingsSectionId::Themes => "settings-navigation-settings-section-themes",
         SettingsSectionId::Keybindings => "settings-navigation-settings-section-keybindings",
         SettingsSectionId::Privacy => "settings-navigation-settings-section-privacy",
+        SettingsSectionId::Git => "settings-navigation-settings-section-git",
         SettingsSectionId::Updates => "settings-navigation-settings-section-updates",
         SettingsSectionId::Advanced => "settings-navigation-settings-section-advanced",
     };
@@ -2642,6 +2643,10 @@ fn rendered_control_selector(row: SettingsRowId) -> Option<String> {
             SettingsRowId::AccessibilityAccess => "settings-accessibility-access-control",
             SettingsRowId::ClipboardWrites => "settings-clipboard-writes",
             SettingsRowId::ClipboardReads => "settings-clipboard-reads",
+            SettingsRowId::ShowRepositoryStatus => "settings-show-repository-status",
+            SettingsRowId::ShowPullRequests => "settings-show-pull-requests",
+            SettingsRowId::GitTool => "settings-row-git-tool-control",
+            SettingsRowId::GitHubCli => "settings-row-github-cli-control",
             // The fixture installs no update service, so this row presents no action control.
             SettingsRowId::UpdateStatus => return None,
             SettingsRowId::AutomaticUpdateDownloads => "settings-automatic-update-downloads",
@@ -4090,6 +4095,60 @@ fn an_unusable_import_file_is_explained_and_changes_nothing(cx: &mut TestAppCont
 
     assert_eq!(document_of(&window, cx), before);
     assert_eq!(harness.storage.writes(), writes);
+}
+
+#[gpui::test]
+fn git_switches_save_reset_and_hiding_repository_status_locks_pull_requests(
+    cx: &mut TestAppContext,
+) {
+    let (window, harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::Git, cx);
+    assert_eq!(document_of(&window, cx).git, Default::default());
+
+    click("settings-show-repository-status", cx);
+    settle(cx);
+    assert!(!harness.storage.document().unwrap().git.show_repository_status);
+    click("settings-show-pull-requests", cx);
+    settle(cx);
+    assert!(
+        harness.storage.document().unwrap().git.show_pull_requests,
+        "the Pull Requests switch is disabled while Repository Status is hidden"
+    );
+
+    click("settings-row-show-repository-status-reset", cx);
+    click("settings-show-pull-requests", cx);
+    settle(cx);
+    let saved = harness.storage.document().unwrap().git;
+    assert!(saved.show_repository_status);
+    assert!(!saved.show_pull_requests);
+    set_query(&window, "pull request", cx);
+    assert!(cx.debug_bounds("settings-row-show-pull-requests").is_some());
+}
+
+#[gpui::test]
+fn git_tool_rows_follow_the_reported_tool_status(cx: &mut TestAppContext) {
+    use crate::repository_status::{GitHubCliStatus, GitToolStatus, ToolVersion};
+    use crate::ui::repository_status_store::RepositoryTools;
+
+    let (_window, _harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::Git, cx);
+    assert!(cx.debug_bounds("settings-git-tool-state-unknown").is_some());
+    assert!(cx.debug_bounds("settings-github-cli-state-unknown").is_some());
+
+    cx.update(|_, cx| {
+        cx.set_global(RepositoryTools {
+            git: GitToolStatus::Ready(ToolVersion {
+                major: 2,
+                minor: 47,
+                patch: 0,
+            }),
+            github_cli: GitHubCliStatus::SignedOut,
+        });
+    });
+    cx.run_until_parked();
+
+    assert!(cx.debug_bounds("settings-git-tool-state-ready").is_some());
+    assert!(cx.debug_bounds("settings-github-cli-state-signed-out").is_some());
 }
 
 #[gpui::test]

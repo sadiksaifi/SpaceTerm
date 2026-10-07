@@ -10,7 +10,7 @@ use crate::appearance::{
 };
 use crate::keybindings::KeybindingPreferences;
 
-const SETTINGS_SCHEMA_VERSION: u32 = 4;
+const SETTINGS_SCHEMA_VERSION: u32 = 5;
 pub(super) const MAX_DOCUMENT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_DEPTH: usize = 32;
 
@@ -25,6 +25,8 @@ pub(crate) struct SettingsDocument {
     pub(crate) keybindings: KeybindingPreferences,
     #[serde(default)]
     pub(crate) clipboard: crate::terminal::native_services::clipboard::ClipboardPreferences,
+    #[serde(default)]
+    pub(crate) git: crate::repository_status::RepositoryStatusPreferences,
     pub(crate) appearance: AppearancePreferences,
     #[serde(default)]
     pub(crate) terminal_themes: Vec<TerminalTheme>,
@@ -38,6 +40,7 @@ impl Default for SettingsDocument {
             updates: Default::default(),
             keybindings: Default::default(),
             clipboard: Default::default(),
+            git: Default::default(),
             appearance: AppearancePreferences::default(),
             terminal_themes: Vec::new(),
         }
@@ -92,6 +95,7 @@ impl SettingsDocument {
         self.updates = defaults.updates;
         self.keybindings = defaults.keybindings;
         self.clipboard = defaults.clipboard;
+        self.git = defaults.git;
         self.terminal_themes = defaults.terminal_themes;
     }
 
@@ -102,6 +106,7 @@ impl SettingsDocument {
         self.updates = imported.updates;
         self.keybindings = imported.keybindings;
         self.clipboard = imported.clipboard;
+        self.git = imported.git;
         self.terminal_themes = imported.terminal_themes;
     }
 }
@@ -130,7 +135,11 @@ pub(crate) fn parse_settings(bytes: &[u8]) -> Result<SettingsDocument, SettingsD
         .get("schema_version")
         .and_then(serde_json::Value::as_u64)
     {
-        Some(3) => migrate_v3_settings(&mut value)?,
+        Some(3) => {
+            migrate_v3_settings(&mut value)?;
+            migrate_v4_settings(&mut value)?;
+        }
+        Some(4) => migrate_v4_settings(&mut value)?,
         Some(version) if version == u64::from(SETTINGS_SCHEMA_VERSION) => {}
         Some(_) => return Err(SettingsDocumentError::UnsupportedVersion),
         None => return Err(SettingsDocumentError::InvalidJson),
@@ -160,7 +169,22 @@ fn migrate_v3_settings(value: &mut serde_json::Value) -> Result<(), SettingsDocu
         return Err(SettingsDocumentError::InvalidAppearance);
     }
     window.insert("opacity".into(), serde_json::json!(1.0 - transparency));
-    value["schema_version"] = serde_json::json!(SETTINGS_SCHEMA_VERSION);
+    value["schema_version"] = serde_json::json!(4);
+    Ok(())
+}
+
+/// Version 5 adds the `git` preferences, which a version 4 document takes at their defaults.
+fn migrate_v4_settings(value: &mut serde_json::Value) -> Result<(), SettingsDocumentError> {
+    let document = value
+        .as_object_mut()
+        .ok_or(SettingsDocumentError::InvalidJson)?;
+    if document.contains_key("git") {
+        return Err(SettingsDocumentError::InvalidJson);
+    }
+    document.insert(
+        "schema_version".into(),
+        serde_json::json!(SETTINGS_SCHEMA_VERSION),
+    );
     Ok(())
 }
 
