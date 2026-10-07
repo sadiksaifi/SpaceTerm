@@ -27,7 +27,8 @@ pub(crate) const DISCOVERY_ARGUMENTS: [&str; 7] = [
     "--show-toplevel",
     "--show-prefix",
 ];
-/// Headers only: the exclude-everything pathspec keeps git from reporting any work tree entry.
+/// Headers only: the exclude-everything pathspec, anchored at the top level, keeps git from
+/// reporting any work tree entry.
 pub(crate) const HEADER_ARGUMENTS: [&str; 8] = [
     "status",
     "--porcelain=v2",
@@ -36,7 +37,7 @@ pub(crate) const HEADER_ARGUMENTS: [&str; 8] = [
     "--untracked-files=no",
     "--ignore-submodules=all",
     "--",
-    ":(exclude)*",
+    ":(top,exclude)*",
 ];
 pub(crate) const CONFIG_ARGUMENTS: [&str; 4] = [
     "config",
@@ -75,6 +76,20 @@ pub(crate) fn git_arguments(
     }
     arguments.extend(["-C".into(), directory.as_os_str().to_owned()]);
     arguments.extend(subcommand.iter().map(OsString::from));
+    arguments
+}
+
+/// Arguments for the configuration read, which carries no `-c` settings: `git config` lists
+/// command-line settings as configuration, so any override would hide the repository's own value.
+/// Reading configuration runs no hooks and no fsmonitor.
+pub(crate) fn config_arguments(directory: &Path) -> Vec<OsString> {
+    let mut arguments: Vec<OsString> = vec![
+        "--no-optional-locks".into(),
+        "--no-pager".into(),
+        "-C".into(),
+        directory.as_os_str().to_owned(),
+    ];
+    arguments.extend(CONFIG_ARGUMENTS.iter().map(OsString::from));
     arguments
 }
 
@@ -158,8 +173,7 @@ impl LocalRepositoryReader {
         let exit = self.run(
             self.request(
                 directory,
-                FsmonitorPolicy::Disabled,
-                &DISCOVERY_ARGUMENTS,
+                git_arguments(directory, FsmonitorPolicy::Disabled, &DISCOVERY_ARGUMENTS),
                 Some(PROBE_OUTPUT_LIMIT),
             ),
             &mut |chunk| output.extend_from_slice(chunk),
@@ -205,7 +219,11 @@ impl LocalRepositoryReader {
         fsmonitor: FsmonitorPolicy,
         cancellation: &SshCancellationToken,
     ) -> Result<PorcelainSummary, RepositoryReadError> {
-        let mut request = self.request(root, fsmonitor, &COUNT_ARGUMENTS, None);
+        let mut request = self.request(
+            root,
+            git_arguments(root, fsmonitor, &COUNT_ARGUMENTS),
+            None,
+        );
         request.keep_process_group_on_exit = fsmonitor == FsmonitorPolicy::Builtin;
         let mut parser = PorcelainParser::new();
         let exit = self.run(request, &mut |chunk| parser.push(chunk), cancellation)?;
@@ -224,8 +242,7 @@ impl LocalRepositoryReader {
         let exit = self.run(
             self.request(
                 root,
-                FsmonitorPolicy::Disabled,
-                &HEADER_ARGUMENTS,
+                git_arguments(root, FsmonitorPolicy::Disabled, &HEADER_ARGUMENTS),
                 Some(PROBE_OUTPUT_LIMIT),
             ),
             &mut |chunk| parser.push(chunk),
@@ -244,10 +261,8 @@ impl LocalRepositoryReader {
         cancellation: &SshCancellationToken,
     ) -> Result<super::RepositoryConfig, RepositoryReadError> {
         let mut parser = ConfigParser::new(branch, self.git_version);
-        // `git config` lists command-line settings too, so a `core.fsmonitor=false` override would
-        // hide the repository's own value. Reading configuration never starts fsmonitor.
         let exit = self.run(
-            self.request(root, FsmonitorPolicy::Builtin, &CONFIG_ARGUMENTS, None),
+            self.request(root, config_arguments(root), None),
             &mut |chunk| parser.push(chunk),
             cancellation,
         )?;
@@ -260,13 +275,12 @@ impl LocalRepositoryReader {
     fn request(
         &self,
         directory: &Path,
-        fsmonitor: FsmonitorPolicy,
-        subcommand: &[&str],
+        arguments: Vec<OsString>,
         stdout_limit: Option<usize>,
     ) -> ProgramRequest {
         ProgramRequest {
             executable: self.git.clone(),
-            arguments: git_arguments(directory, fsmonitor, subcommand),
+            arguments,
             directory: directory.to_path_buf(),
             environment: git_environment(&self.git, &self.physical_home),
             stdout_limit,
@@ -484,7 +498,23 @@ mod tests {
             Some(PROBE_OUTPUT_LIMIT),
             false,
         );
-        assert_git_request(&requests[2], "/src/app", false, &CONFIG_ARGUMENTS, None, false);
+        assert_eq!(
+            strings(&requests[2].arguments),
+            [
+                "--no-optional-locks",
+                "--no-pager",
+                "-C",
+                "/src/app",
+                "config",
+                "-z",
+                "--get-regexp",
+                CONFIG_ARGUMENTS[3],
+            ]
+        );
+        assert_eq!(requests[2].directory, Path::new("/src/app"));
+        assert_eq!(requests[2].environment, expected_environment());
+        assert_eq!(requests[2].stdout_limit, None);
+        assert!(!requests[2].keep_process_group_on_exit);
         assert_eq!(
             *markers.reads.lock().unwrap(),
             [PathBuf::from("/src/app/.git")]
@@ -497,7 +527,69 @@ mod tests {
             CONFIG_ARGUMENTS[3],
             "^(core\\.fsmonitor|remote\\.pushdefault|remote\\..*\\.url|branch\\..*\\.(remote|merge|pushremote))$"
         );
-        assert_eq!(HEADER_ARGUMENTS[6..], ["--", ":(exclude)*"]);
+        assert_eq!(HEADER_ARGUMENTS[6..], ["--", ":(top,exclude)*"]);
+    }
+
+    #[test]
+    fn header_and_config_reads_should_use_the_exact_corrected_arguments() {
+        let runner = FakeRunner::new([
+            exit(0, &discovery("src/")),
+            exit(0, &headers()),
+            exit(0, "core.fsmonitor\ntrue\0"),
+        ]);
+
+        let outcome = reader(&runner, &Arc::default())
+            .probe(Path::new("/src/app/src"), &SshCancellationToken::default())
+            .unwrap();
+
+        let requests = runner.requests();
+        assert_eq!(
+            strings(&requests[1].arguments),
+            [
+                "--no-optional-locks",
+                "--no-pager",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "color.ui=false",
+                "-c",
+                "core.quotePath=false",
+                "-c",
+                "status.relativePaths=false",
+                "-c",
+                "advice.statusHints=false",
+                "-C",
+                "/src/app",
+                "status",
+                "--porcelain=v2",
+                "--branch",
+                "-z",
+                "--untracked-files=no",
+                "--ignore-submodules=all",
+                "--",
+                ":(top,exclude)*",
+            ]
+        );
+        // No `-c` setting reaches `git config`, so the repository's own fsmonitor value survives.
+        assert_eq!(
+            strings(&requests[2].arguments),
+            [
+                "--no-optional-locks",
+                "--no-pager",
+                "-C",
+                "/src/app",
+                "config",
+                "-z",
+                "--get-regexp",
+                "^(core\\.fsmonitor|remote\\.pushdefault|remote\\..*\\.url|branch\\..*\\.(remote|merge|pushremote))$",
+            ]
+        );
+        let ProbeOutcome::Repository(repository) = outcome else {
+            panic!("expected a repository");
+        };
+        assert_eq!(repository.config.fsmonitor, FsmonitorPolicy::Builtin);
     }
 
     #[test]
