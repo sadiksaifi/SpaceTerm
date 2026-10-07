@@ -263,6 +263,21 @@ impl InterestState {
         matches!(&self.binding, Binding::Repository(bound) if bound == key)
     }
 
+    /// The repository this Interest reads by its root on a trigger. An Interest below its root
+    /// probes its own directory instead, since a command such as `git init` may have made that
+    /// directory a nested repository without moving it.
+    fn root_binding(&self) -> Option<&RepositoryKey> {
+        match &self.binding {
+            Binding::Repository(key)
+                if !self.directory_owed
+                    && self.directory == SourceDirectory::of_root(&key.root) =>
+            {
+                Some(key)
+            }
+            Binding::Repository(_) | Binding::Unknown | Binding::Outside => None,
+        }
+    }
+
     /// Whether a remote read may run for this Interest now.
     fn can_read(&self) -> bool {
         !self.stopped && self.visible && self.available
@@ -472,6 +487,7 @@ impl RepositoryScheduler {
             return self.finish();
         }
         let mut keys = Vec::new();
+        let mut lookups = Vec::new();
         let mut directories = Vec::new();
         for (id, interest) in &mut self.interests {
             if interest.stopped {
@@ -481,14 +497,21 @@ impl RepositoryScheduler {
                 interest.stale = true;
                 continue;
             }
-            match &interest.binding {
-                Binding::Repository(key) if !keys.contains(key) => keys.push(key.clone()),
-                Binding::Repository(_) => {}
-                Binding::Unknown | Binding::Outside => directories.push(*id),
+            if let Binding::Repository(key) = &interest.binding
+                && !lookups.contains(key)
+            {
+                lookups.push(key.clone());
+            }
+            match interest.root_binding() {
+                Some(key) if !keys.contains(key) => keys.push(key.clone()),
+                Some(_) => {}
+                None => directories.push(*id),
             }
         }
         for key in keys {
             self.request_repository(&key, now, false);
+        }
+        for key in lookups {
             if self.is_readable(&key) {
                 self.lookup_pull_request(&key, now);
             }
@@ -779,11 +802,9 @@ impl RepositoryScheduler {
         if interest.stopped {
             return;
         }
-        match interest.binding.clone() {
-            Binding::Repository(key) if !interest.directory_owed => {
-                self.request_repository(&key, now, immediate);
-            }
-            _ => self.request_directory(id, now, immediate),
+        match interest.root_binding().cloned() {
+            Some(key) => self.request_repository(&key, now, immediate),
+            None => self.request_directory(id, now, immediate),
         }
     }
 
@@ -2069,7 +2090,7 @@ mod tests {
         let key = remote_key("/srv/api");
         let mut harness = Harness::new();
         harness.register(PANE, remote_interest("/srv/api"));
-        harness.register(OTHER, remote_interest("/srv/api/web"));
+        harness.register(OTHER, remote_interest("/srv/api"));
         for (probe, _) in harness.probes() {
             harness.finish_probe(probe, Ok(on_branch(&key, "main")));
         }
@@ -2091,6 +2112,45 @@ mod tests {
         harness.tick();
         let (_, directory) = harness.only_probe();
         assert_eq!(directory, remote("/srv/api"));
+    }
+
+    #[test]
+    fn a_repository_created_below_a_pane_without_moving_it_should_be_found() {
+        let parent = local_key("/src/app");
+        let nested = local_key("/src/app/new");
+        let mut harness = Harness::new();
+        harness.register(PANE, local_interest("/src/app/new"));
+        harness.read(on_branch(&parent, "main"), 0);
+        assert_eq!(harness.status(PANE).key, parent);
+
+        // `git init` runs in the Pane's directory, which stays where it was.
+        harness.command_finished(PANE, 1);
+        let (probe, directory) = harness.only_probe();
+        assert_eq!(directory, local("/src/app/new"));
+        harness.finish_probe(probe, Ok(on_branch(&nested, "main")));
+        assert_eq!(harness.status(PANE).key, nested);
+    }
+
+    #[test]
+    fn window_activation_should_find_a_repository_created_below_a_pane() {
+        let parent = local_key("/src/app");
+        let mut harness = Harness::new();
+        harness.register(PANE, local_interest("/src/app"));
+        harness.register(OTHER, local_interest("/src/app/new"));
+        for (probe, _) in harness.probes() {
+            harness.finish_probe(probe, Ok(on_branch(&parent, "main")));
+        }
+        harness.counts();
+        harness.lookups();
+
+        harness.window_activated();
+        let mut directories: Vec<SourceDirectory> = harness
+            .probes()
+            .into_iter()
+            .map(|(_, directory)| directory)
+            .collect();
+        directories.sort_by_key(|directory| format!("{directory:?}"));
+        assert_eq!(directories, vec![local("/src/app"), local("/src/app/new")]);
     }
 
     #[test]
