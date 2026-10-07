@@ -843,6 +843,13 @@ impl HostComposition {
         self.appearance = Some((storage, platform));
         self
     }
+    /// Drops Repository Status, whose reads run on threads that a deterministic test executor
+    /// rejects.
+    #[cfg(test)]
+    pub(crate) fn without_repository_status(mut self) -> Self {
+        self.adapters.repository_status = None;
+        self
+    }
     pub(crate) fn new(
         parts: HostCompositionParts,
     ) -> Result<Self, crate::desktop_profile::DesktopProfileError> {

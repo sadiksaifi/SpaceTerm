@@ -370,7 +370,8 @@ mod tests {
             events,
             super::super::linux_updates::Relaunch::default(),
         )
-        .unwrap();
+        .unwrap()
+        .without_repository_status();
         cx.update(|cx| crate::app::initialize_application(cx, &host).unwrap());
         assert_eq!(
             cx.app_identity(),
