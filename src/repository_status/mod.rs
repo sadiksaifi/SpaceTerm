@@ -12,12 +12,15 @@
 
 pub(crate) mod discovery;
 mod display_text;
+pub(crate) mod local_read;
 pub(crate) mod operation;
 pub(crate) mod porcelain;
 pub(crate) mod presentation;
 pub(crate) mod pull_request;
 pub(crate) mod remote_url;
 pub(crate) mod scheduler;
+#[cfg(test)]
+mod testing;
 pub(crate) mod tools;
 
 use std::ffi::OsString;
