@@ -21,13 +21,17 @@ fn test_launch_planner(startup: &std::path::Path) -> ShellLaunchPlanner {
         },
     )
 }
+// Waits end as soon as their condition holds. A loaded CI runner can take several seconds to
+// start a real login shell while the rest of the suite runs.
+const REAL_SHELL_DEADLINE: Duration = Duration::from_secs(30);
+
 // Login startup can replace the line editor and discard input sent before the first prompt.
 // Wait for the shell integration's observed command-input boundary, not an arbitrary delay.
 fn wait_for_shell_prompt(
     session: &TerminalSession,
     events: &async_channel::Receiver<TerminalSessionEvent>,
 ) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + REAL_SHELL_DEADLINE;
     loop {
         if session.metadata_snapshot().is_some_and(|metadata| {
             metadata.prompt_zone == crate::terminal::metadata::PromptZone::CommandInput
@@ -98,7 +102,7 @@ fn real_shell_output_round_trips_through_the_pty_and_emulator() {
     // only the shell's output passes through the SGR sequence and becomes red.
     enter_command(&session, "printf '\\033[31mX\\033[0m\\n'");
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + REAL_SHELL_DEADLINE;
     let mut saw_red_x = false;
     while Instant::now() < deadline && !saw_red_x {
         match events.try_recv() {
@@ -155,7 +159,7 @@ fn real_shell_exit_command_emits_an_exited_event() {
 
     enter_command(&session, "exit");
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + REAL_SHELL_DEADLINE;
     let mut exit_status = None;
     while Instant::now() < deadline && exit_status.is_none() {
         match events.try_recv() {

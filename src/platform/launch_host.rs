@@ -278,19 +278,27 @@ mod tests {
         );
         std::fs::create_dir_all(&fixture.0).unwrap();
         let image = fixture.0.join("spaceterm");
-        std::fs::copy("/bin/sleep", &image).unwrap();
+        // A shell is one standalone image everywhere. A multicall coreutils, as on Ubuntu 26.04,
+        // picks its utility by name, so a copied sleep does not run as sleep.
+        let shell = std::fs::canonicalize("/bin/sh").unwrap();
+        std::fs::copy(&shell, &image).unwrap();
         // Another test thread can briefly hold the copy's descriptor across fork.
         let child = (0..50)
-            .find_map(
-                |_| match std::process::Command::new(&image).arg("30").spawn() {
+            .find_map(|_| {
+                // The shell waits on its open stdin until the fixture kills it.
+                match std::process::Command::new(&image)
+                    .args(["-c", "read line"])
+                    .stdin(std::process::Stdio::piped())
+                    .spawn()
+                {
                     Ok(child) => Some(child),
                     Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) => {
                         std::thread::sleep(std::time::Duration::from_millis(20));
                         None
                     }
                     Err(error) => panic!("{error}"),
-                },
-            )
+                }
+            })
             .expect("the copied image should start");
         let link = PathBuf::from(format!("/proc/{}/exe", child.id()));
         fixture.1 = Some(child);
@@ -308,7 +316,7 @@ mod tests {
         assert_eq!(running_executable_of(&link), Some(image.clone()));
 
         let replacement = fixture.0.join("replacement");
-        std::fs::copy("/bin/sleep", &replacement).unwrap();
+        std::fs::copy(&shell, &replacement).unwrap();
         std::fs::rename(&replacement, &image).unwrap();
         let reported = std::fs::read_link(&link).unwrap();
         assert_ne!(reported, image, "the kernel marks the replaced image");
