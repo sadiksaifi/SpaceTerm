@@ -111,7 +111,7 @@ struct RemoteWorkspaceRuntime {
     control_connection: Option<ConnectedControlConnection>,
     lifecycle: Option<ControlConnectionObserver>,
     alias_pin: Option<RemoteWorkspaceAliasPin>,
-    /// Lends the connection's reader to Repository Status while the runtime lives.
+    /// Lends the connection's reader to Repository Status while the connection lives.
     repository_reader: Option<crate::ui::repository_status_store::RemoteReaderLease>,
 }
 
@@ -131,10 +131,16 @@ impl RemoteWorkspaceRuntime {
         }
     }
 
-    fn close(&mut self) {
+    /// Drops the connection and withdraws its reader, so Repository Status reads the machine
+    /// through another Workspace's live connection.
+    fn drop_connection(&mut self) {
         self.repository_reader.take();
-        self.lifecycle.take();
         self.control_connection.take();
+    }
+
+    fn close(&mut self) {
+        self.lifecycle.take();
+        self.drop_connection();
         self.alias_pin.take();
     }
 }
@@ -1774,7 +1780,7 @@ impl WorkspaceManager {
             return;
         }
         if let Some(runtime) = self.remote_workspace_runtimes.get_mut(&workspace_id) {
-            runtime.control_connection.take();
+            runtime.drop_connection();
         }
 
         cx.notify();
