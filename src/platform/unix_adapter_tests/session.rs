@@ -32,6 +32,8 @@ fn wait_for_shell_prompt(
     events: &async_channel::Receiver<TerminalSessionEvent>,
 ) {
     let deadline = Instant::now() + REAL_SHELL_DEADLINE;
+    // The last screen shows what the shell printed instead of a prompt.
+    let mut screen = String::new();
     loop {
         if session.metadata_snapshot().is_some_and(|metadata| {
             metadata.prompt_zone == crate::terminal::metadata::PromptZone::CommandInput
@@ -40,7 +42,8 @@ fn wait_for_shell_prompt(
         }
         assert!(
             Instant::now() < deadline,
-            "shell did not publish its first input prompt"
+            "shell did not publish its first input prompt; screen: {:?}",
+            screen.trim_end()
         );
         match events.try_recv() {
             Ok(TerminalSessionEvent::Failed(failure)) => {
@@ -48,6 +51,9 @@ fn wait_for_shell_prompt(
             }
             Ok(TerminalSessionEvent::Exited(_)) | Err(async_channel::TryRecvError::Closed) => {
                 panic!("shell ended before its first prompt")
+            }
+            Ok(TerminalSessionEvent::Screen(snapshot)) => {
+                screen = super::tests::screen_text(&snapshot);
             }
             Ok(_) => {}
             Err(async_channel::TryRecvError::Empty) => thread::sleep(Duration::from_millis(10)),
@@ -214,6 +220,9 @@ impl ShellStartupDirectory {
         ));
         std::fs::create_dir(&path).unwrap();
         std::fs::write(path.join(".zshrc"), "").unwrap();
+        // Debian and Ubuntu run compinit from /etc/zsh/zshrc. On a host whose function
+        // directories zsh considers insecure, it waits for a y/n answer instead of prompting.
+        std::fs::write(path.join(".zshenv"), "skip_global_compinit=1\n").unwrap();
         Self(path)
     }
 
