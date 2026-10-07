@@ -8,7 +8,7 @@ use super::terminal_status::{
 };
 use crate::domain::PinnedDirectory;
 use crate::domain::remote_workspace::RemoteRestartBatch;
-use crate::repository_status::presentation::{RepositoryCaption, RepositoryMark};
+use crate::repository_status::presentation::{HeadGlyph, RepositoryCaption, RepositoryMark};
 use crate::terminal::metadata::CurrentDirectory;
 use crate::ui::appearance::gpui_color;
 use std::collections::BTreeMap;
@@ -179,7 +179,9 @@ impl CaptionMetrics {
                 };
                 RepositoryCaptionMetrics {
                     anchor: appearance.spacing(PANE_REPOSITORY_LEADING_GAP)
-                        + measure_caption_segment(&repository.glyph.into(), window, appearance)
+                        + head_glyph_width(repository.glyph, appearance, |text| {
+                            measure_caption_segment(&text.to_owned().into(), window, appearance)
+                        })
                         + repository.mark.map_or(px(0.0), |mark| part(mark.glyph())),
                     branch: part(&repository.branch),
                     detail: repository.detail.as_ref().map(|detail| part(&detail.text)),
@@ -2633,6 +2635,34 @@ fn render_pane_caption_content(
         .into_any_element()
 }
 
+/// The mark before a branch name or detached commit id, in the inherited text color.
+pub(super) fn render_head_glyph(
+    glyph: HeadGlyph,
+    appearance: &super::appearance::ChromeAppearance,
+) -> AnyElement {
+    let mark = div().flex_shrink_0().flex().items_center();
+    match glyph.text() {
+        Some(text) => mark.child(text),
+        None => mark.child(Icon::inherited(
+            IconName::GitBranch,
+            appearance.icons.metrics(IconRole::Caption).glyph_size,
+        )),
+    }
+    .into_any_element()
+}
+
+/// The width [`render_head_glyph`] takes, measuring a text mark with `measure`.
+pub(super) fn head_glyph_width(
+    glyph: HeadGlyph,
+    appearance: &super::appearance::ChromeAppearance,
+    measure: impl FnOnce(&str) -> Pixels,
+) -> Pixels {
+    glyph.text().map_or_else(
+        || appearance.icons.metrics(IconRole::Caption).glyph_size,
+        measure,
+    )
+}
+
 /// The Pane's Repository Status: glyph, branch, one mark, the detail, and the divergence.
 /// Color is never the only signal; the glyph, words, and the spoken label carry every state.
 fn render_repository_segment(
@@ -2681,7 +2711,7 @@ fn render_repository_segment(
         .flex_shrink_0()
         .ml(appearance.spacing(PANE_REPOSITORY_LEADING_GAP))
         .text_color(gpui_color(text_color))
-        .child(div().flex_shrink_0().child(repository.glyph));
+        .child(render_head_glyph(repository.glyph, appearance));
     if layout.show_branch {
         segment = segment.child(
             part()
@@ -4909,7 +4939,7 @@ mod tests {
                     .entry(PaneId::new(1))
                     .or_default()
                     .repository = Some(RepositoryCaption {
-                    glyph: "⎇",
+                    glyph: HeadGlyph::Branch,
                     branch: "main".into(),
                     mark: None,
                     detail: None,

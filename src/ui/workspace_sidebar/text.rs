@@ -84,6 +84,8 @@ pub(super) struct RowRepository {
 
 /// The repository's share of line 2 when the directory also needs room.
 const MAXIMUM_REPOSITORY_SHARE: f32 = 0.6;
+/// The space between the branch mark and the branch name.
+const BRANCH_GLYPH_GAP: f32 = 4.0;
 
 pub(super) fn detail(
     text: SharedString,
@@ -111,7 +113,14 @@ pub(super) fn detail(
                     .ceil()
             };
             let repository_width = repository.as_ref().map_or(px(0.0), |repository| {
-                (measure(repository.badge.text()) + appearance.spacing(GAP))
+                let glyph = match &repository.badge {
+                    SidebarBadge::Branch { glyph, .. } => {
+                        crate::ui::tab_view::head_glyph_width(*glyph, &appearance, measure)
+                            + appearance.spacing(BRANCH_GLYPH_GAP)
+                    }
+                    SidebarBadge::PullRequest { .. } => px(0.0),
+                };
+                (glyph + measure(repository.badge.text()) + appearance.spacing(GAP))
                     .min(row_width * MAXIMUM_REPOSITORY_SHARE)
             });
             let available = (row_width - repository_width).max(px(0.0));
@@ -196,13 +205,16 @@ fn render_repository(
 ) -> AnyElement {
     let secondary = gpui_color(appearance.colors.row_secondary);
     let badge = match &repository.badge {
-        SidebarBadge::Branch { text } => div()
+        SidebarBadge::Branch { glyph, text } => div()
             .id(("workspace-row-branch", id))
             .debug_selector(move || format!("workspace-row-branch-{id}"))
             .min_w_0()
-            .truncate()
+            .flex()
+            .items_center()
+            .gap(appearance.spacing(BRANCH_GLYPH_GAP))
             .text_color(secondary)
-            .child(text.clone())
+            .child(crate::ui::tab_view::render_head_glyph(*glyph, appearance))
+            .child(div().min_w_0().truncate().child(text.clone()))
             .into_any_element(),
         SidebarBadge::PullRequest {
             text,

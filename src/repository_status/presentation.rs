@@ -11,10 +11,24 @@ use super::{
     RepositoryOperation, RepositoryStatus, RepositoryView,
 };
 
-/// The icon before a branch name.
-pub(crate) const BRANCH_GLYPH: &str = "⎇";
-/// The icon before a detached commit id.
-pub(crate) const DETACHED_GLYPH: &str = "◆";
+/// The mark before a branch name or detached commit id.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum HeadGlyph {
+    /// The Git branch icon, before a branch name.
+    Branch,
+    /// `◆`, before a detached commit id.
+    Detached,
+}
+
+impl HeadGlyph {
+    /// The text the mark is drawn with, or `None` for the Git branch icon.
+    pub(crate) fn text(self) -> Option<&'static str> {
+        match self {
+            Self::Branch => None,
+            Self::Detached => Some("◆"),
+        }
+    }
+}
 
 /// The longest branch, upstream, commit, or repository name displayed, in characters.
 pub(crate) const MAXIMUM_NAME_CHARS: usize = 100;
@@ -92,8 +106,7 @@ pub(crate) struct CaptionDetail {
 /// The Pane Caption's Repository Status segment, split into the parts it drops independently.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RepositoryCaption {
-    /// [`BRANCH_GLYPH`] or [`DETACHED_GLYPH`].
-    pub(crate) glyph: &'static str,
+    pub(crate) glyph: HeadGlyph,
     /// The branch name or detached commit id.
     pub(crate) branch: String,
     pub(crate) mark: Option<RepositoryMark>,
@@ -133,10 +146,11 @@ impl RepositoryCaption {
         })
     }
 
-    /// The whole segment as one line, in the order the caption paints it.
+    /// The whole segment as one line, in the order the caption paints it. `⎇` stands for the Git
+    /// branch icon.
     #[cfg(test)]
     pub(crate) fn text(&self) -> String {
-        let mut parts = vec![self.glyph, &self.branch];
+        let mut parts = vec![self.glyph.text().unwrap_or("⎇"), &self.branch];
         if let Some(mark) = self.mark {
             parts.push(mark.glyph());
         }
@@ -266,11 +280,11 @@ impl RepositoryPopover {
     }
 }
 
-/// What a Workspace sidebar row's second line shows before its directory.
+/// What a Workspace sidebar row's second line shows after its directory.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum SidebarBadge {
-    /// Such as `⎇ main`.
-    Branch { text: String },
+    /// The branch name or detached commit id, after its mark.
+    Branch { glyph: HeadGlyph, text: String },
     /// An open or draft Pull Request replaces the branch.
     PullRequest {
         /// Such as `#478`.
@@ -299,19 +313,18 @@ impl PullRequestHover {
 }
 
 impl SidebarBadge {
-    /// The branch line or the Pull Request number.
+    /// The branch name, detached commit id, or Pull Request number.
     pub(crate) fn text(&self) -> &str {
         match self {
-            Self::Branch { text } | Self::PullRequest { text, .. } => text,
+            Self::Branch { text, .. } | Self::PullRequest { text, .. } => text,
         }
     }
 
     pub(crate) fn from_view(view: &RepositoryView) -> Option<Self> {
         let status = presented(view)?;
         let Some(pull_request) = &status.pull_request else {
-            return Some(Self::Branch {
-                text: branch_line(&status.head),
-            });
+            let (glyph, text) = head_text(&status.head);
+            return Some(Self::Branch { glyph, text });
         };
         let state = pull_request_state(pull_request);
         let title = sanitize_for_display(&pull_request.title, MAXIMUM_TITLE_CHARS);
@@ -337,9 +350,14 @@ impl SidebarBadge {
     }
 }
 
-/// The collapsed title-bar chip's tooltip line, such as `⎇ main`.
+/// The collapsed title-bar chip's tooltip line, in git's words, such as `On branch main`.
 pub(crate) fn chip_tooltip_line(view: &RepositoryView) -> Option<String> {
-    presented(view).map(|status| branch_line(&status.head))
+    presented(view).map(|status| match &status.head {
+        RepositoryHead::Branch(branch) | RepositoryHead::Unborn(branch) => {
+            format!("On branch {}", name_text(branch))
+        }
+        RepositoryHead::Detached(commit) => format!("HEAD detached at {}", name_text(commit)),
+    })
 }
 
 fn presented(view: &RepositoryView) -> Option<&RepositoryStatus> {
@@ -368,19 +386,13 @@ fn name_text(name: &str) -> String {
 }
 
 /// The glyph and the branch name or detached commit id.
-fn head_text(head: &RepositoryHead) -> (&'static str, String) {
+fn head_text(head: &RepositoryHead) -> (HeadGlyph, String) {
     match head {
         RepositoryHead::Branch(branch) | RepositoryHead::Unborn(branch) => {
-            (BRANCH_GLYPH, name_text(branch))
+            (HeadGlyph::Branch, name_text(branch))
         }
-        RepositoryHead::Detached(commit) => (DETACHED_GLYPH, name_text(commit)),
+        RepositoryHead::Detached(commit) => (HeadGlyph::Detached, name_text(commit)),
     }
-}
-
-/// The head as one line, such as `⎇ main`.
-fn branch_line(head: &RepositoryHead) -> String {
-    let (glyph, branch) = head_text(head);
-    format!("{glyph} {branch}")
 }
 
 /// An operation replaces the count, an unborn branch says so, and a slow first count is dimmed.
@@ -1098,7 +1110,8 @@ mod tests {
         assert_eq!(
             SidebarBadge::from_view(&view(status(main_branch(), modified(4), now))),
             Some(SidebarBadge::Branch {
-                text: "⎇ main".to_owned()
+                glyph: HeadGlyph::Branch,
+                text: "main".to_owned()
             })
         );
         assert_eq!(
@@ -1108,7 +1121,8 @@ mod tests {
                 now
             ))),
             Some(SidebarBadge::Branch {
-                text: "◆ a1b2c3d".to_owned()
+                glyph: HeadGlyph::Detached,
+                text: "a1b2c3d".to_owned()
             })
         );
 
@@ -1146,7 +1160,16 @@ mod tests {
         let now = Instant::now();
         assert_eq!(
             chip_tooltip_line(&view(status(main_branch(), modified(4), now))).as_deref(),
-            Some("⎇ main")
+            Some("On branch main")
+        );
+        assert_eq!(
+            chip_tooltip_line(&view(status(
+                RepositoryHead::Detached("a1b2c3d".into()),
+                modified(0),
+                now
+            )))
+            .as_deref(),
+            Some("HEAD detached at a1b2c3d")
         );
     }
 
