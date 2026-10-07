@@ -72,10 +72,13 @@ fn thread_spawner() -> ReadSpawner {
 #[derive(Clone, Default)]
 pub(crate) struct RemoteRepositoryReaders(Arc<Mutex<ReaderTable>>);
 
+/// A lent reader and the lease owner that lent it.
+type LentReader = (u64, Arc<dyn RemoteRepositoryReader>);
+
 #[derive(Default)]
 struct ReaderTable {
     next_owner: u64,
-    readers: HashMap<RemoteMachineKey, Vec<(u64, Arc<dyn RemoteRepositoryReader>)>>,
+    readers: HashMap<RemoteMachineKey, Vec<LentReader>>,
 }
 
 impl RemoteRepositoryReaders {
