@@ -279,18 +279,24 @@ mod tests {
         std::fs::create_dir_all(&fixture.0).unwrap();
         let image = fixture.0.join("spaceterm");
         std::fs::copy("/bin/sleep", &image).unwrap();
-        // Another test thread can briefly hold the copy's descriptor across fork.
+        // Another test thread can briefly hold the copy's descriptor across fork. A multicall
+        // coreutils, as on Ubuntu 26.04, chooses the utility by argv[0], not by the image name.
         let child = (0..50)
-            .find_map(
-                |_| match std::process::Command::new(&image).arg("30").spawn() {
+            .find_map(|_| {
+                use std::os::unix::process::CommandExt as _;
+                match std::process::Command::new(&image)
+                    .arg0("sleep")
+                    .arg("30")
+                    .spawn()
+                {
                     Ok(child) => Some(child),
                     Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) => {
                         std::thread::sleep(std::time::Duration::from_millis(20));
                         None
                     }
                     Err(error) => panic!("{error}"),
-                },
-            )
+                }
+            })
             .expect("the copied image should start");
         let link = PathBuf::from(format!("/proc/{}/exe", child.id()));
         fixture.1 = Some(child);
