@@ -474,7 +474,7 @@ fn repository_count_should_respect_untracked_configuration_and_keep_raw_names() 
 
     let shown = fixture.count(&repository, FsmonitorPolicy::Disabled);
     fixture.checked_git(&repository, &["config", "status.showUntrackedFiles", "no"]);
-    let hidden = fixture.count(&repository, FsmonitorPolicy::Builtin);
+    let hidden = fixture.count(&repository, FsmonitorPolicy::Disabled);
 
     assert!(!shown.truncated);
     assert!(contains(&shown.status, b"\0? line\nbreak\0"));

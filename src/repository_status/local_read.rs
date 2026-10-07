@@ -53,8 +53,8 @@ const PROBE_OUTPUT_LIMIT: usize = 64 * 1024;
 /// `git config` exits 1 when no key matches.
 const CONFIG_NO_MATCH_STATUS: i32 = 1;
 
-/// Hardened git arguments: no optional locks, pager, hooks, color, quoting, or hook-program
-/// fsmonitor, run in `directory`.
+/// Hardened git arguments: no optional locks, pager, hooks, transports, color, quoting, or
+/// hook-program fsmonitor, run in `directory`.
 pub(crate) fn git_arguments(
     directory: &Path,
     fsmonitor: FsmonitorPolicy,
@@ -63,14 +63,23 @@ pub(crate) fn git_arguments(
     let mut arguments: Vec<OsString> = vec!["--no-optional-locks".into(), "--no-pager".into()];
     let mut configuration = vec![
         "core.hooksPath=/dev/null",
+        // Git before 2.44 ignores `GIT_NO_LAZY_FETCH`; with no allowed transport, a partial
+        // clone's missing object fails the read instead of fetching.
+        "protocol.allow=never",
         "color.ui=false",
         "core.quotePath=false",
         "status.relativePaths=false",
         "advice.statusHints=false",
     ];
-    if fsmonitor == FsmonitorPolicy::Disabled {
-        configuration.insert(0, "core.fsmonitor=false");
-    }
+    // Pinning the probed policy keeps a value changed since the probe, such as a hook program,
+    // from taking effect.
+    configuration.insert(
+        0,
+        match fsmonitor {
+            FsmonitorPolicy::Disabled => "core.fsmonitor=false",
+            FsmonitorPolicy::Builtin => "core.fsmonitor=true",
+        },
+    );
     for setting in configuration {
         arguments.extend(["-c".into(), setting.into()]);
     }
@@ -346,14 +355,18 @@ mod tests {
             .collect()
     }
 
-    fn hardened(fsmonitor: bool, directory: &str, subcommand: &[&str]) -> Vec<String> {
-        let mut expected = vec!["--no-optional-locks", "--no-pager"];
-        if fsmonitor {
-            expected.extend(["-c", "core.fsmonitor=false"]);
-        }
+    fn hardened(fsmonitor_disabled: bool, directory: &str, subcommand: &[&str]) -> Vec<String> {
+        let mut expected = vec!["--no-optional-locks", "--no-pager", "-c"];
+        expected.push(if fsmonitor_disabled {
+            "core.fsmonitor=false"
+        } else {
+            "core.fsmonitor=true"
+        });
         expected.extend([
             "-c",
             "core.hooksPath=/dev/null",
+            "-c",
+            "protocol.allow=never",
             "-c",
             "color.ui=false",
             "-c",
@@ -548,6 +561,8 @@ mod tests {
                 "-c",
                 "core.hooksPath=/dev/null",
                 "-c",
+                "protocol.allow=never",
+                "-c",
                 "color.ui=false",
                 "-c",
                 "core.quotePath=false",
@@ -736,7 +751,7 @@ mod tests {
     }
 
     #[test]
-    fn count_with_builtin_fsmonitor_should_keep_its_daemon_and_omit_the_override() {
+    fn count_with_builtin_fsmonitor_should_keep_its_daemon_and_pin_the_builtin_monitor() {
         let runner = FakeRunner::new([exit(0, &headers())]);
 
         reader(&runner, &Arc::default())

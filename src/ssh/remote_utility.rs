@@ -908,14 +908,14 @@ export GIT_TERMINAL_PROMPT GIT_OPTIONAL_LOCKS GIT_PAGER PAGER GIT_NO_LAZY_FETCH
 # Git reads no input, because the script itself arrives on standard input.
 run_git() {
     if [ "$git_fsmonitor" = builtin ]; then
-        "$git_program" --no-optional-locks --no-pager \
-            -c core.hooksPath=/dev/null -c color.ui=false -c core.quotePath=false \
-            -c status.relativePaths=false -c advice.statusHints=false \
+        "$git_program" --no-optional-locks --no-pager -c core.fsmonitor=true \
+            -c core.hooksPath=/dev/null -c protocol.allow=never -c color.ui=false \
+            -c core.quotePath=false -c status.relativePaths=false -c advice.statusHints=false \
             -C . "$@" </dev/null 2>/dev/null
     else
         "$git_program" --no-optional-locks --no-pager -c core.fsmonitor=false \
-            -c core.hooksPath=/dev/null -c color.ui=false -c core.quotePath=false \
-            -c status.relativePaths=false -c advice.statusHints=false \
+            -c core.hooksPath=/dev/null -c protocol.allow=never -c color.ui=false \
+            -c core.quotePath=false -c status.relativePaths=false -c advice.statusHints=false \
             -C . "$@" </dev/null 2>/dev/null
     fi
 }
@@ -2199,7 +2199,9 @@ mod tests {
                 "head -c {} ",
                 MAXIMUM_REMOTE_REPOSITORY_STATUS_BYTES + 1
             )));
-            assert!(script_text(&runner, 1).contains("git_fsmonitor=builtin\n"));
+            let builtin = script_text(&runner, 1);
+            assert!(builtin.contains("git_fsmonitor=builtin\n"));
+            assert!(builtin.contains("-c core.fsmonitor=true"));
         }
 
         #[test]
