@@ -398,7 +398,15 @@ fn render_popover(
         }))
         .on_mouse_down_out(cx.listener(|pane, _, window, cx| {
             pane.close_repository_status(window, cx);
-        }))
+        }));
+    // Everything above the footer scrolls as one, so a short Pane keeps every fact reachable and
+    // the freshness footer in view.
+    let mut body = div()
+        .id("repository-status-body")
+        .min_h_0()
+        .overflow_y_scroll()
+        .flex()
+        .flex_col()
         .child(
             div()
                 .flex_shrink_0()
@@ -417,11 +425,8 @@ fn render_popover(
         .child(divider())
         .child(facts.flex_shrink_0());
     if let Some(changes) = popover.changes {
-        // Only the change list scrolls, so identity, facts, and freshness stay in view.
         let mut list = div()
-            .id("repository-status-changes")
-            .min_h_0()
-            .overflow_y_scroll()
+            .flex_shrink_0()
             .flex()
             .flex_col()
             .gap(spacing(2.0))
@@ -456,9 +461,9 @@ fn render_popover(
                     .child(more),
             );
         }
-        surface = surface.child(divider()).child(list);
+        body = body.child(divider()).child(list);
     }
-    surface = surface.child(divider()).child(
+    surface = surface.child(body).child(divider()).child(
         div()
             .flex_shrink_0()
             .debug_selector(|| "repository-status-popover-footer".to_owned())

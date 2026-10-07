@@ -2765,7 +2765,8 @@ fn repository_status_popover_should_fit_a_short_pane_and_keep_its_footer(cx: &mu
     use crate::ui::ShowRepositoryStatus;
 
     let (pane, cx, _) = connected_terminal_pane(cx);
-    cx.simulate_resize(gpui::size(px(640.0), px(260.0)));
+    // Shorter than the popover's identity, facts, and footer together.
+    cx.simulate_resize(gpui::size(px(640.0), px(120.0)));
     let entries = (0..20)
         .map(|index| ChangeEntry {
             kind: ChangeKind::Modified,
@@ -2779,8 +2780,11 @@ fn repository_status_popover_should_fit_a_short_pane_and_keep_its_footer(cx: &mu
         },
         head: RepositoryHead::Branch("main".into()),
         commit: Some("a1b2c3d".into()),
-        upstream: None,
-        operation: None,
+        upstream: Some(crate::repository_status::Upstream {
+            name: "origin/main".into(),
+            divergence: None,
+        }),
+        operation: Some(crate::repository_status::RepositoryOperation::Merging),
         changes: ChangeState::Known(ChangeSummary {
             total: ChangeTotal::Exact(20),
             modified: 20,
@@ -2809,6 +2813,7 @@ fn repository_status_popover_should_fit_a_short_pane_and_keep_its_footer(cx: &mu
         footer.bottom() <= popover.bottom(),
         "{footer:?} {popover:?}"
     );
+    assert!(footer.top() >= popover.top(), "{footer:?} {popover:?}");
 }
 
 #[gpui::test]
