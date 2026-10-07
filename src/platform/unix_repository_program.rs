@@ -36,7 +36,6 @@ const HIGHEST_SIGNAL: libc::c_int = 64;
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct UnixRepositoryProgramRunner;
 
-#[allow(dead_code, reason = "Repository Status composition selects it in a later change")]
 impl UnixRepositoryProgramRunner {
     pub(crate) const fn new() -> Self {
         Self

@@ -25,7 +25,6 @@ pub(crate) struct MacosRepositoryToolDiscovery {
     github_cli: Vec<PathBuf>,
 }
 
-#[allow(dead_code, reason = "Repository Status composition selects it in a later change")]
 impl MacosRepositoryToolDiscovery {
     /// Homebrew on Apple silicon and Intel, the `xcode-select` developer directory, Xcode, and
     /// Command Line Tools, in that order.

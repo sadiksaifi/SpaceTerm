@@ -111,6 +111,8 @@ struct RemoteWorkspaceRuntime {
     control_connection: Option<ConnectedControlConnection>,
     lifecycle: Option<ControlConnectionObserver>,
     alias_pin: Option<RemoteWorkspaceAliasPin>,
+    /// Lends the connection's reader to Repository Status while the runtime lives.
+    repository_reader: Option<crate::ui::repository_status_store::RemoteReaderLease>,
 }
 
 impl RemoteWorkspaceRuntime {
@@ -125,10 +127,12 @@ impl RemoteWorkspaceRuntime {
             control_connection: Some(control_connection),
             lifecycle: Some(lifecycle),
             alias_pin,
+            repository_reader: None,
         }
     }
 
     fn close(&mut self) {
+        self.repository_reader.take();
         self.lifecycle.take();
         self.control_connection.take();
         self.alias_pin.take();
@@ -372,6 +376,12 @@ impl WorkspaceManager {
         };
         cx.observe_window_activation(window, |manager, window, cx| {
             manager.restore_remote_workspace_focus_after_activation(window, cx);
+            if window.is_window_active()
+                && let Some(store) =
+                    crate::ui::repository_status_store::InstalledRepositoryStatus::store(cx)
+            {
+                store.update(cx, |store, cx| store.window_activated(cx));
+            }
             cx.notify();
         })
         .detach();
@@ -1597,6 +1607,7 @@ impl WorkspaceManager {
             replaced.is_none(),
             "a new Remote Workspace owns one runtime"
         );
+        self.lend_repository_reader(workspace_id, cx);
         self.activate_remote_tab_manager(
             previous_workspace_id,
             previous_manager,
@@ -2121,6 +2132,7 @@ impl WorkspaceManager {
                         alias_pin,
                     ),
                 );
+                self.lend_repository_reader(workspace_id, cx);
                 let reduction = self.workspaces.reduce_remote_connection_state(
                     workspace_id,
                     RemoteConnectionState::connected(generation),
@@ -2231,6 +2243,33 @@ impl WorkspaceManager {
         );
 
         cx.notify();
+    }
+
+    /// Lends the Workspace's Control Connection reader to Repository Status for its machine.
+    fn lend_repository_reader(&mut self, workspace_id: WorkspaceId, cx: &App) {
+        let Some(store) = crate::ui::repository_status_store::InstalledRepositoryStatus::store(cx)
+        else {
+            return;
+        };
+        let Some(WorkspaceLocation::Remote { key, .. }) = self
+            .workspaces
+            .workspace(workspace_id)
+            .map(|workspace| workspace.location())
+        else {
+            return;
+        };
+        let machine = crate::repository_status::RemoteMachineKey::new(key.destination().as_str());
+        let Some(runtime) = self.remote_workspace_runtimes.get_mut(&workspace_id) else {
+            return;
+        };
+        let Some(reader) = runtime
+            .control_connection
+            .as_ref()
+            .and_then(ConnectedControlConnection::repository_reader)
+        else {
+            return;
+        };
+        runtime.repository_reader = Some(store.read(cx).remote_readers().lend(machine, reader));
     }
 
     fn close_remote_runtimes(&mut self) {

@@ -15,7 +15,6 @@ pub(crate) struct LinuxRepositoryToolDiscovery {
     directories: Vec<PathBuf>,
 }
 
-#[allow(dead_code, reason = "Repository Status composition selects it in a later change")]
 impl LinuxRepositoryToolDiscovery {
     /// `path` is the PATH captured once at launch. `/usr/bin` is searched last.
     pub(crate) fn new(path: Option<&OsStr>) -> Self {

@@ -41,6 +41,7 @@ pub(crate) struct SshRemoteDirectoryProvider<R: SshRemoteUtilityRunner> {
 }
 
 impl<R: SshRemoteUtilityRunner> SshRemoteDirectoryProvider<R> {
+    #[cfg(test)]
     pub(crate) fn new(
         command: PreparedSshRemoteUtilityCommand,
         runner: Arc<R>,

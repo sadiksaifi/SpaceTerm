@@ -242,6 +242,8 @@ pub(crate) mod unix_pty;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub(crate) mod repository_marker_reader;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
+mod repository_status_host;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub(crate) mod unix_repository_program;
 
 #[cfg(all(any(target_os = "macos", target_os = "linux"), not(test)))]

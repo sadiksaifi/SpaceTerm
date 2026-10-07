@@ -195,7 +195,6 @@ impl RemoteTerminalMetadataContext {
         self
     }
 
-    #[cfg(test)]
     pub(crate) const fn destination(&self) -> &SshDestination {
         &self.destination
     }

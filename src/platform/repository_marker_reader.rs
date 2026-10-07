@@ -17,7 +17,6 @@ use crate::repository_status::{
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct UnixRepositoryMarkerReader;
 
-#[allow(dead_code, reason = "Repository Status composition selects it in a later change")]
 impl UnixRepositoryMarkerReader {
     pub(crate) const fn new() -> Self {
         Self

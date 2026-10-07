@@ -227,6 +227,7 @@ pub(crate) trait ControlConnectionOwner: Send + 'static {
 pub(crate) struct ConnectedControlConnection {
     owner: Option<Box<dyn ControlConnectionOwner>>,
     provider: Arc<dyn RemoteDirectoryProvider + Send + Sync>,
+    repository_reader: Option<Arc<dyn crate::repository_status::RemoteRepositoryReader>>,
 }
 
 impl ConnectedControlConnection {
@@ -238,11 +239,27 @@ impl ConnectedControlConnection {
         Self {
             owner: Some(owner),
             provider,
+            repository_reader: None,
         }
+    }
+
+    /// Adds the reader Repository Status uses on this connection's machine.
+    pub(crate) fn with_repository_reader(
+        mut self,
+        reader: Arc<dyn crate::repository_status::RemoteRepositoryReader>,
+    ) -> Self {
+        self.repository_reader = Some(reader);
+        self
     }
 
     pub(crate) fn provider(&self) -> Arc<dyn RemoteDirectoryProvider + Send + Sync> {
         Arc::clone(&self.provider)
+    }
+
+    pub(crate) fn repository_reader(
+        &self,
+    ) -> Option<Arc<dyn crate::repository_status::RemoteRepositoryReader>> {
+        self.repository_reader.clone()
     }
 
     /// Creates a provider that requires physical revalidation before every child reservation.
