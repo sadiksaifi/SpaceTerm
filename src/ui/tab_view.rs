@@ -430,6 +430,10 @@ pub(crate) struct TabView {
     focus_branch_blocker: Option<TerminalFocusBlocker>,
     native_service_hierarchy_generation: u64,
     native_service_focus_signature: Option<(bool, PaneId, Option<TerminalFocusBlocker>)>,
+    /// Advances when a split, close, move, or zoom changes the Pane layout.
+    pane_layout_revision: u64,
+    /// The layout revision the caption controls last rendered for.
+    revealed_layout_revision: u64,
     close_tab_requested: bool,
     remote_lifecycle: RemoteHierarchyLifecycle,
     /// The Tab's own focus in the Tab bar, where assistive technology can rest on it.
@@ -512,6 +516,8 @@ impl TabView {
             focus_branch_blocker: None,
             native_service_hierarchy_generation: 0,
             native_service_focus_signature: None,
+            pane_layout_revision: 0,
+            revealed_layout_revision: 0,
             close_tab_requested: false,
             remote_lifecycle: RemoteHierarchyLifecycle::default(),
             tab_focus: cx.focus_handle(),
@@ -1346,6 +1352,7 @@ impl TabView {
         {
             Ok(true) => {
                 self.advance_native_service_hierarchy_generation(cx);
+                self.pane_layout_revision += 1;
                 self.split_bounds.clear();
                 self.sync_terminal_focus(cx);
                 cx.emit(TabViewEvent::PresentationChanged {
@@ -1414,6 +1421,7 @@ impl TabView {
         match result {
             Ok(pane_id) => {
                 self.advance_native_service_hierarchy_generation(cx);
+                self.pane_layout_revision += 1;
                 if let Some(terminal) = self.tab.pane(pane_id) {
                     self.pane_titles.insert(pane_id, terminal.read(cx).title());
                     self.pane_captions
@@ -1472,6 +1480,7 @@ impl TabView {
                 ..
             }) => {
                 self.advance_native_service_hierarchy_generation(cx);
+                self.pane_layout_revision += 1;
                 closed_pane.update(cx, |terminal, _| {
                     terminal.set_accessibility_hierarchy(false);
                     terminal.close();
@@ -1501,6 +1510,7 @@ impl TabView {
             return;
         }
         self.advance_native_service_hierarchy_generation(cx);
+        self.pane_layout_revision += 1;
         self.sync_terminal_focus(cx);
         cx.emit(TabViewEvent::PresentationChanged {
             tab_id: self.tab.id(),
@@ -1789,9 +1799,17 @@ impl TabView {
     /// Each Pane's hover and controls reveal, read once per frame.
     ///
     /// The Focused Pane always shows its caption controls. Another Pane shows them under the
-    /// pointer while the window is active.
-    fn pane_hovers(&self, window_active: bool, window: &mut Window, cx: &mut App) -> PaneHovers {
+    /// pointer while the window is active. A reveal that changes with the Pane layout, such as
+    /// focus moving to a new split, takes effect with the layout instead of easing after it.
+    fn pane_hovers(
+        &mut self,
+        window_active: bool,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> PaneHovers {
         let focused_pane_id = self.tab.focused_pane_id();
+        let animate = self.revealed_layout_revision == self.pane_layout_revision;
+        self.revealed_layout_revision = self.pane_layout_revision;
         self.tab
             .panes_with_ids()
             .map(|(pane_id, _)| {
@@ -1800,6 +1818,7 @@ impl TabView {
                 let reveal = spaceterm_ui::eased_flag(
                     ("pane-controls-reveal", pane_id.get()),
                     revealed,
+                    animate,
                     window,
                     cx,
                 );
@@ -4977,6 +4996,50 @@ mod tests {
         view.update(cx, |view, cx| view.focus_pane(PaneId::new(2), cx));
         crate::ui::settle_hover(cx);
         assert!((segment_right(cx) - controls.right()).abs() < px(0.5));
+    }
+
+    #[gpui::test]
+    fn a_split_should_move_the_repository_status_with_its_layout_instead_of_after_it(
+        cx: &mut TestAppContext,
+    ) {
+        let (_, view, _, cx) = caption_view(cx);
+        view.update(cx, |view, cx| {
+            view.pane_captions
+                .entry(PaneId::new(1))
+                .or_default()
+                .repository = Some(RepositoryCaption {
+                glyph: HeadGlyph::Branch,
+                branch: "main".into(),
+                mark: None,
+                detail: None,
+                divergence: None,
+                dimmed: false,
+                accessible_label: "Repository Status, main".into(),
+            });
+            cx.notify();
+        });
+        cx.simulate_event(gpui::MouseExitEvent {
+            position: gpui::point(px(0.0), px(0.0)),
+            pressed_button: None,
+            modifiers: gpui::Modifiers::none(),
+        });
+        crate::ui::settle_hover(cx);
+
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.split_focused(SplitAxis::Horizontal, window, cx);
+            });
+        });
+        // No time passes, so only a change made with the layout shows.
+        cx.run_until_parked();
+
+        assert_eq!(
+            view.read_with(cx, |view, _| view.focused_pane_id()),
+            PaneId::new(2)
+        );
+        let segment = cx.debug_bounds("pane-repository-1").unwrap();
+        let controls = cx.debug_bounds("pane-controls-1-full").unwrap();
+        assert!((segment.right() - controls.right()).abs() < px(0.5));
     }
 
     #[test]

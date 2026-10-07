@@ -98,10 +98,21 @@ impl HoverFade {
 /// Pane has focus.
 ///
 /// Call it every render with a key unique in the window. The first render takes the flag's value
-/// at once; each later change eases like a hover. Frames continue until the transition settles.
-pub fn eased_flag(key: impl Into<ElementId>, on: bool, window: &mut Window, cx: &mut App) -> f32 {
+/// at once; each later change eases like a hover unless `animate` is false. Frames continue until
+/// the transition settles.
+pub fn eased_flag(
+    key: impl Into<ElementId>,
+    on: bool,
+    animate: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> f32 {
     let now = cx.background_executor().now();
-    let motion = crate::control_motion(cx);
+    let motion = if animate {
+        crate::control_motion(cx)
+    } else {
+        ControlMotion::Reduced
+    };
     let state = window.use_keyed_state(key, cx, |_, _| HoverTransition {
         hovered: on,
         from: 0.0,
