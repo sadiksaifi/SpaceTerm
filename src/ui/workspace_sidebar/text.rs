@@ -132,14 +132,6 @@ pub(super) fn detail(
                 .flex_1()
                 .flex()
                 .items_center()
-                .when_some(repository.as_ref(), |path, repository| {
-                    path.child(render_repository(
-                        repository,
-                        repository_width,
-                        id,
-                        &appearance,
-                    ))
-                })
                 .when(pinned, |path| {
                     path.child(
                         div()
@@ -157,7 +149,6 @@ pub(super) fn detail(
                 .child(
                     div()
                         .min_w_0()
-                        .flex_1()
                         .truncate()
                         .id(("workspace-row-detail", id))
                         .debug_selector(move || {
@@ -167,7 +158,15 @@ pub(super) fn detail(
                             status_normal.unwrap_or(appearance.colors.row_secondary),
                         ))
                         .child(fitted),
-                );
+                )
+                .when_some(repository.as_ref(), |path, repository| {
+                    path.child(render_repository(
+                        repository,
+                        repository_width,
+                        id,
+                        &appearance,
+                    ))
+                });
             let mut content = div()
                 .w_full()
                 .h_full()
@@ -188,7 +187,7 @@ pub(super) fn detail(
     .into_any_element()
 }
 
-/// The branch, or the Pull Request number that opens the Pull Request, followed by a separator.
+/// A separator, then the branch or the Pull Request number that opens the Pull Request.
 /// Hovering the number shows the cached Pull Request facts and makes no lookup of its own.
 fn render_repository(
     repository: &RowRepository,
@@ -254,8 +253,8 @@ fn render_repository(
         .min_w_0()
         .flex()
         .items_center()
-        .child(badge)
         .child(separator)
+        .child(badge)
         .into_any_element()
 }
 

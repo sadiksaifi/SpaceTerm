@@ -101,7 +101,7 @@ pub(super) struct WorkspaceRowViewModel {
     pub(super) pinned: bool,
     pub(super) remote_connection_phase: Option<RemoteConnectionPhase>,
     pub(super) available: bool,
-    /// The branch or Pull Request line 2 shows before the directory.
+    /// The branch or Pull Request line 2 shows after the directory.
     pub(super) repository: Option<crate::repository_status::presentation::SidebarBadge>,
     pub(super) active: bool,
 }
