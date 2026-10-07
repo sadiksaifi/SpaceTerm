@@ -810,7 +810,7 @@ fn receive_event(
     }
 }
 
-fn screen_text(screen: &ScreenSnapshot) -> String {
+pub(super) fn screen_text(screen: &ScreenSnapshot) -> String {
     screen
         .rows
         .iter()
