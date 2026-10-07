@@ -2756,6 +2756,73 @@ fn terminal_click_restores_terminal_responder_without_closing_find(cx: &mut Test
 }
 
 #[gpui::test]
+fn repository_status_popover_holds_input_until_escape_returns_it(cx: &mut TestAppContext) {
+    use crate::repository_status::{
+        ChangeState, ChangeSummary, ChangeTotal, Freshness, RepositoryHead, RepositoryKey,
+        RepositoryMachine, RepositoryRoot, RepositoryStatus, RepositoryView,
+    };
+    use crate::ui::ShowRepositoryStatus;
+
+    let (pane, cx, records) = connected_terminal_pane(cx);
+    cx.dispatch_action(ShowRepositoryStatus);
+    cx.run_until_parked();
+    assert!(
+        !pane.read_with(cx, |pane, _| pane.repository_popover_open()),
+        "a Pane outside a repository has no popover"
+    );
+
+    let status = RepositoryStatus {
+        key: RepositoryKey {
+            machine: RepositoryMachine::Local,
+            root: RepositoryRoot::Local(PathBuf::from("/Users/tester/Projects/tool")),
+        },
+        head: RepositoryHead::Branch("main".into()),
+        commit: Some("a1b2c3d".into()),
+        upstream: None,
+        operation: None,
+        changes: ChangeState::Known(ChangeSummary {
+            total: ChangeTotal::Exact(2),
+            modified: 2,
+            ..ChangeSummary::default()
+        }),
+        freshness: Freshness::Current,
+        read_at: std::time::Instant::now(),
+        pull_request: None,
+        read_failure: None,
+    };
+    pane.update(cx, |pane, cx| {
+        pane.present_repository_view(RepositoryView::Repository(Arc::new(status)), cx);
+    });
+    let command_count = records.commands().len();
+    cx.dispatch_action(ShowRepositoryStatus);
+    cx.run_until_parked();
+
+    assert!(pane.read_with(cx, |pane, _| pane.repository_popover_open()));
+    assert!(cx.debug_bounds("repository-status-popover").is_some());
+    assert!(cx.update(|window, app| {
+        pane.read_with(app, |pane, _| !pane.focus_handle.is_focused(window))
+    }));
+    cx.simulate_keystrokes("a");
+    cx.run_until_parked();
+    assert!(
+        !records
+            .commands()
+            .into_iter()
+            .skip(command_count)
+            .any(|call| matches!(call.command, RecordedCommand::Key(_))),
+        "the popover keeps keys from the terminal"
+    );
+
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(!pane.read_with(cx, |pane, _| pane.repository_popover_open()));
+    assert!(cx.debug_bounds("repository-status-popover").is_none());
+    assert!(cx.update(|window, app| {
+        pane.read_with(app, |pane, _| pane.focus_handle.is_focused(window))
+    }));
+}
+
+#[gpui::test]
 fn terminal_find_submit_navigates_and_escape_cancels(cx: &mut TestAppContext) {
     let (pane, cx, records) = connected_terminal_pane(cx);
     cx.dispatch_action(OpenTerminalFind);

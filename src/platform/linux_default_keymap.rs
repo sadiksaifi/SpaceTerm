@@ -188,6 +188,7 @@ pub(super) fn profile(
             Command::TogglePaneZoom,
             Some(DefaultBinding::new("ctrl-shift-enter", &[])),
         ),
+        (Command::ShowRepositoryStatus, None),
         (
             Command::OpenTerminalFind,
             Some(DefaultBinding::new("ctrl-shift-f", &[])),
@@ -456,7 +457,10 @@ mod tests {
             profile.refresh_layout(&testing::UnknownLayout).unwrap();
             let resolved = profile.resolve(&KeybindingPreferences::default());
             for command in Command::ALL {
-                let expected = if matches!(command, Command::CloseWorkspace | Command::About) {
+                let expected = if matches!(
+                    command,
+                    Command::CloseWorkspace | Command::ShowRepositoryStatus | Command::About
+                ) {
                     KeybindingState::Unassigned
                 } else {
                     KeybindingState::Default

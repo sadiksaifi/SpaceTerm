@@ -10,7 +10,7 @@ use gpui::{BackgroundExecutor, Task};
 use super::cancellation::SshCancellationToken;
 use super::command::ValidatedRemoteLoginShell;
 use super::remote_utility::{
-    PreparedSshRemoteUtilityCommand, RemoteDirectoryProbe, RemoteUtilityError,
+    RemoteDirectoryProbe, RemoteUtilityError,
     SshRemoteUtilityClient, SshRemoteUtilityRunner,
 };
 use crate::domain::{RemoteDirectory, RemoteDirectoryIdentity};
@@ -43,7 +43,7 @@ pub(crate) struct SshRemoteDirectoryProvider<R: SshRemoteUtilityRunner> {
 impl<R: SshRemoteUtilityRunner> SshRemoteDirectoryProvider<R> {
     #[cfg(test)]
     pub(crate) fn new(
-        command: PreparedSshRemoteUtilityCommand,
+        command: super::remote_utility::PreparedSshRemoteUtilityCommand,
         runner: Arc<R>,
         cancellation: SshCancellationToken,
         executor: BackgroundExecutor,
@@ -290,6 +290,7 @@ mod tests {
     use crate::ssh::command::{SshCommandContext, SshCommandSpec};
     use crate::ssh::fake_remote_utility_server::FakeRemoteUtilityServer;
     use crate::ssh::process::ProcessExit;
+    use crate::ssh::remote_utility::PreparedSshRemoteUtilityCommand;
     use crate::ssh::remote_utility::{
         RemoteUtilityProcessOutput, RemoteUtilityRunError, RemoteUtilitySession,
         SshRemoteUtilityRunner,

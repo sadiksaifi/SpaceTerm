@@ -4482,6 +4482,7 @@ impl Render for TerminalPane {
             .filter(|snapshot| snapshot.generation == self.find_generation)
             .map_or_else(|| Arc::from([]), |snapshot| snapshot.visible_spans.clone());
         let find_bar = self.render_find_bar(window, cx);
+        let repository_popover = self.render_repository_popover(window, cx);
         // Every Pane-local surface below covers terminal cells. A panel that takes input is a
         // Notice; the hovered-link preview only reports, so it is the quieter Readout.
         let notice_shell = floating_shell(FloatingRole::Notice, cx);
@@ -4715,6 +4716,7 @@ impl Render for TerminalPane {
             .on_action(cx.listener(Self::find_next))
             .on_action(cx.listener(Self::find_previous))
             .on_action(cx.listener(Self::close_find))
+            .on_action(cx.listener(Self::show_repository_status))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_key_up(cx.listener(Self::on_key_up))
             .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
@@ -4730,6 +4732,7 @@ impl Render for TerminalPane {
             .child(terminal_grid)
             .child(scrollbar)
             .when_some(find_bar, |root, find_bar| root.child(find_bar))
+            .when_some(repository_popover, |root, popover| root.child(popover))
             .when(attention_visual, |root| {
                 root.child(
                     div()

@@ -20,7 +20,8 @@ use super::terminal_focus::{TerminalFocusBlocker, TerminalFocusCoordinator, Term
 use super::{
     ClosePane, FocusNextPane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
     FocusPreviousPane, PaneOrigin, PreparedRemotePaneRestart, RemoteChildLaunchUnavailable,
-    RemotePaneLifecycleError, SplitDown, SplitRight, TERMINAL_KEY_CONTEXT, TerminalPane,
+    RemotePaneLifecycleError, ShowRepositoryStatus, SplitDown, SplitRight, TERMINAL_KEY_CONTEXT,
+    TerminalPane,
     TerminalPaneEvent, TogglePaneZoom,
 };
 
@@ -2312,9 +2313,15 @@ fn render_pane_caption(
             let mut caption = caption;
             #[cfg(feature = "developer-tools")]
             {
-                caption.text = super::developer_workbench::caption_fixture(cx)
-                    .map(PaneCaptionText::from_facts)
-                    .unwrap_or(caption.text);
+                if let Some(facts) = super::developer_workbench::caption_fixture(cx) {
+                    let repository = caption.text.repository.take();
+                    caption.text = PaneCaptionText::from_facts(facts);
+                    caption.text.repository = repository;
+                }
+                if let Some(view) = super::developer_workbench::repository_view_fixture(cx) {
+                    caption.text.repository =
+                        RepositoryCaption::from_view(&view, std::time::Instant::now());
+                }
             }
             caption.text.glyph = drawable_reported_glyph(caption.text.glyph.as_ref(), |glyph| {
                 let caption_style = appearance.typography.style(TextRole::Body);
@@ -2400,7 +2407,7 @@ fn render_pane_caption_content(
 ) -> AnyElement {
     let PaneCaption {
         pane_id,
-        terminal: _,
+        terminal,
         text,
         focused,
         zoomed,
@@ -2570,6 +2577,7 @@ fn render_pane_caption_content(
             row.child(render_repository_segment(
                 pane_id,
                 &repository,
+                (terminal.downgrade(), view.clone()),
                 layout.repository,
                 appearance,
                 &paint,
@@ -2584,6 +2592,7 @@ fn render_pane_caption_content(
 fn render_repository_segment(
     pane_id: PaneId,
     repository: &RepositoryCaption,
+    (terminal, view): (gpui::WeakEntity<TerminalPane>, gpui::WeakEntity<TabView>),
     layout: RepositoryCaptionLayout,
     appearance: &super::appearance::ChromeAppearance,
     paint: &crate::appearance::CaptionPaint,
@@ -2598,11 +2607,26 @@ fn render_repository_segment(
             .flex_shrink_0()
             .ml(appearance.spacing(PANE_REPOSITORY_PART_GAP))
     };
+    // The segment opens the popover on click, so a press neither focuses the Pane nor starts a
+    // Pane drag; the click focuses the Pane first.
+    let show = move |window: &mut Window, cx: &mut App| {
+        let _ = view.update(cx, |view, cx| view.focus_pane(pane_id, cx));
+        let _ = terminal.update(cx, |terminal, cx| {
+            terminal.show_repository_status(&ShowRepositoryStatus, window, cx);
+        });
+    };
+    let accessible_show = show.clone();
     let mut segment = div()
         .id(("pane-repository", pane_id.get()))
         .debug_selector(move || format!("pane-repository-{}", pane_id.get()))
         .role(gpui::accesskit::Role::Button)
         .aria_label(gpui::SharedString::from(repository.accessible_label.clone()))
+        .cursor_pointer()
+        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(move |_, window, cx| show(window, cx))
+        .on_a11y_action(gpui::accesskit::Action::Click, move |_, window, cx| {
+            accessible_show(window, cx);
+        })
         .flex()
         .items_center()
         .min_w_0()

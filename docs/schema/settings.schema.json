@@ -568,6 +568,9 @@
         "toggle_pane_zoom": {
           "$ref": "#/$defs/shortcutOverride"
         },
+        "show_repository_status": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
         "open_terminal_find": {
           "$ref": "#/$defs/shortcutOverride"
         },

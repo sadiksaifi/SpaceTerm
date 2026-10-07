@@ -755,6 +755,7 @@ shortcut_rows! {
     FocusPreviousPane => "focus-previous-pane",
     FocusNextPane => "focus-next-pane",
     TogglePaneZoom => "toggle-pane-zoom",
+    ShowRepositoryStatus => "show-repository-status",
     OpenTerminalFind => "open-terminal-find",
     FindNext => "find-next",
     FindPrevious => "find-previous",

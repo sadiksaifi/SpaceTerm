@@ -109,6 +109,7 @@ actions!(
         FocusPreviousPane,
         FocusNextPane,
         TogglePaneZoom,
+        ShowRepositoryStatus,
         CreateTab,
         ActivateTab1,
         ActivateTab2,

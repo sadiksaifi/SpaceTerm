@@ -6,8 +6,14 @@ use gpui::{AnyElement, App, Global, Window};
 use spaceterm_ui::{Switch, ToggleSize};
 
 use super::DeveloperWorkbench;
-use crate::repository_status::presentation::{
-    BRANCH_GLYPH, CaptionDetail, RepositoryCaption, RepositoryMark,
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Instant;
+
+use crate::repository_status::{
+    ChangeEntry, ChangeKind, ChangeState, ChangeSummary, ChangeTotal, Divergence, Freshness,
+    PullRequest, RepositoryHead, RepositoryKey, RepositoryMachine, RepositoryRoot,
+    RepositoryStatus, RepositoryView, Upstream,
 };
 use crate::ui::appearance::settings::SettingsAppearance;
 use crate::ui::sidebar_window::form::{FormGroup, FormRow, action_button};
@@ -17,6 +23,7 @@ use crate::ui::terminal_pane::{PaneCaptionFacts, PaneOrigin};
 struct TerminalFixtures {
     caption: bool,
     link_preview: bool,
+    repository: bool,
 }
 impl Global for TerminalFixtures {}
 
@@ -64,20 +71,65 @@ pub(crate) fn caption_fixture(cx: &App) -> Option<PaneCaptionFacts> {
             glyph: None,
             running: false,
             progress: Default::default(),
-            repository: Some(RepositoryCaption {
-                glyph: BRANCH_GLYPH,
-                branch: "workbench-fixture".to_owned(),
-                mark: Some(RepositoryMark::Changes),
-                detail: Some(CaptionDetail {
-                    text: "4 changes".to_owned(),
-                    dimmed: false,
+            repository: None,
+        })
+}
+
+pub(crate) fn set_repository_fixture(enabled: bool, cx: &mut App) {
+    cx.default_global::<TerminalFixtures>().repository = enabled;
+    cx.refresh_windows();
+}
+
+/// A synthetic repository with changes, divergence, and a draft Pull Request, in place of every
+/// Pane's Repository Status.
+pub(crate) fn repository_view_fixture(cx: &App) -> Option<RepositoryView> {
+    let change = |kind, path: &str| ChangeEntry {
+        kind,
+        path: path.into(),
+    };
+    fixtures(cx)
+        .is_some_and(|fixtures| fixtures.repository)
+        .then(|| {
+            RepositoryView::Repository(Arc::new(RepositoryStatus {
+                key: RepositoryKey {
+                    machine: RepositoryMachine::Local,
+                    root: RepositoryRoot::Local(PathBuf::from("/workbench/fixture")),
+                },
+                head: RepositoryHead::Branch("feat/workbench-fixture".into()),
+                commit: Some("a1b2c3d".into()),
+                upstream: Some(Upstream {
+                    name: "origin/feat/workbench-fixture".into(),
+                    divergence: Some(Divergence {
+                        ahead: 1,
+                        behind: 2,
+                    }),
                 }),
-                divergence: Some("↑1 ↓2".to_owned()),
-                dimmed: false,
-                accessible_label: "Repository status: branch workbench-fixture, 4 changes, \
-                                   1 ahead, 2 behind."
-                    .to_owned(),
-            }),
+                operation: None,
+                changes: ChangeState::Known(ChangeSummary {
+                    total: ChangeTotal::Exact(4),
+                    staged: 1,
+                    modified: 2,
+                    untracked: 1,
+                    entries: vec![
+                        change(ChangeKind::Staged, "src/fixture/caption.rs"),
+                        change(ChangeKind::Modified, "src/fixture/popover.rs"),
+                        change(ChangeKind::Modified, "src/fixture/sidebar.rs"),
+                        change(ChangeKind::Untracked, "notes.txt"),
+                    ],
+                    ..ChangeSummary::default()
+                }),
+                freshness: Freshness::Current,
+                read_at: Instant::now(),
+                pull_request: Some(PullRequest {
+                    number: 478,
+                    title: "Workbench fixture Pull Request".into(),
+                    draft: true,
+                    url: "https://example.invalid/pull/478".into(),
+                    head: "feat/workbench-fixture".into(),
+                    base: "main".into(),
+                }),
+                read_failure: None,
+            }))
         })
 }
 
@@ -89,6 +141,7 @@ pub(super) fn render(
     let appearance = &surface.chrome;
     let caption = fixtures(cx).is_some_and(|fixtures| fixtures.caption);
     let link_preview = fixtures(cx).is_some_and(|fixtures| fixtures.link_preview);
+    let repository = fixtures(cx).is_some_and(|fixtures| fixtures.repository);
     let fixtures = vec![
         FormRow::new(
             "workbench-row-terminal-caption",
@@ -120,6 +173,24 @@ pub(super) fn render(
             .on_change(|change, _, cx| set_link_preview_fixture(change.requested(), cx)),
         )
         .description("The focused Pane shows a hyperlink preview with no target.")
+        .render(appearance, window, cx)
+        .into_any_element(),
+        FormRow::new(
+            "workbench-row-terminal-repository",
+            "Repository Status fixture",
+            Switch::new(
+                "workbench-terminal-repository",
+                "Repository Status fixture",
+                repository,
+            )
+            .size(ToggleSize::Regular)
+            .label_hidden(true)
+            .debug_selector("workbench-terminal-repository")
+            .on_change(|change, _, cx| set_repository_fixture(change.requested(), cx)),
+        )
+        .description(
+            "Every Pane shows a synthetic repository with changes and a draft Pull Request.",
+        )
         .render(appearance, window, cx)
         .into_any_element(),
     ];

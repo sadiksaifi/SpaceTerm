@@ -94,6 +94,7 @@ mod tests {
             Command::CloseWorkspace,
             Command::MoveTabRight,
             Command::MoveTabLeft,
+            Command::ShowRepositoryStatus,
             Command::KeyboardShortcuts,
             Command::About,
         ];

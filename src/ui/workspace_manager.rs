@@ -47,7 +47,7 @@ use super::{
     MoveTabLeft, MoveTabRight, NewRemoteWorkspace, NewWorkspace, NextTab, OpenLocalDirectory,
     OpenRemoteDirectory, OpenTerminalFind, PreviousTab, RemoteChildLaunchUnavailable,
     ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop, SplitDown, SplitRight,
-    SwitchWorkspace, TERMINAL_KEY_CONTEXT, TabManager, TabManagerEvent, TogglePaneZoom,
+    ShowRepositoryStatus, SwitchWorkspace, TERMINAL_KEY_CONTEXT, TabManager, TabManagerEvent, TogglePaneZoom,
     ToggleSidebar, ToggleSidebarFocus, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
 };
 use crate::appearance::Color;
@@ -3540,6 +3540,9 @@ impl WorkspaceManager {
             .on_action(cx.listener(Self::forward_active_terminal_action::<FocusPreviousPane>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<FocusNextPane>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<TogglePaneZoom>))
+            .on_action(cx.listener(
+                Self::forward_active_terminal_action::<ShowRepositoryStatus>,
+            ))
             .on_action(cx.listener(Self::forward_active_terminal_action::<OpenTerminalFind>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<FindNext>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<FindPrevious>))
