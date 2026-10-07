@@ -1261,7 +1261,17 @@ impl RepositoryScheduler {
             return RepositoryView::Hidden;
         }
         if interest.stopped {
-            return interest.frozen.clone();
+            // A stopped Pane keeps its last view but still follows the Pull Requests setting.
+            return match &interest.frozen {
+                RepositoryView::Repository(status)
+                    if status.pull_request.is_some() && !self.pull_requests_enabled() =>
+                {
+                    let mut status = RepositoryStatus::clone(status);
+                    status.pull_request = None;
+                    RepositoryView::Repository(Arc::new(status))
+                }
+                frozen => frozen.clone(),
+            };
         }
         let Binding::Repository(key) = &interest.binding else {
             return RepositoryView::Hidden;
@@ -2731,6 +2741,27 @@ mod tests {
 
         harness.set_toggles(true, true);
         assert_eq!(harness.lookups().len(), 1);
+    }
+
+    #[test]
+    fn turning_off_pull_requests_should_clear_them_from_a_stopped_pane() {
+        let key = local_key("/src/app");
+        let mut harness = Harness::signed_in();
+        harness.register(PANE, local_interest("/src/app"));
+        harness.read(on_branch(&key, "main"), 0);
+        let (lookup, _) = harness.lookups().remove(0);
+        harness.finish_lookup(lookup, Ok(Some(pull_request(478))));
+        harness.set_stopped(PANE, true);
+        assert!(harness.status(PANE).pull_request.is_some());
+
+        harness.set_toggles(true, false);
+
+        assert_eq!(harness.changed, vec![PANE]);
+        assert_eq!(harness.status(PANE).pull_request, None);
+        assert!(matches!(
+            harness.status(PANE).freshness,
+            Freshness::LastKnown { .. }
+        ));
     }
 
     #[test]
