@@ -163,6 +163,11 @@ pub(crate) enum RepositoryEffect {
     StopWatch {
         key: RepositoryKey,
     },
+    /// Stop the count in flight for `key`. Nothing presents the repository any more, and its
+    /// result is rejected.
+    CancelCount {
+        key: RepositoryKey,
+    },
     /// Call [`RepositoryScheduler::tick`] at or after this instant.
     WakeAt(Instant),
 }
@@ -177,6 +182,7 @@ impl fmt::Debug for RepositoryEffect {
                 write!(formatter, "StartWatch({} directories)", directories.len())
             }
             Self::StopWatch { .. } => formatter.write_str("StopWatch"),
+            Self::CancelCount { .. } => formatter.write_str("CancelCount"),
             Self::WakeAt(instant) => write!(formatter, "WakeAt({instant:?})"),
         }
     }
@@ -1108,26 +1114,31 @@ impl RepositoryScheduler {
         }
     }
 
-    /// Forgets a repository nobody presents, stopping its watch. Its in-flight results are
-    /// rejected from then on.
+    /// Forgets a repository nobody presents, stopping its watch and count. Its in-flight
+    /// results are rejected from then on.
     fn release_if_unused(&mut self, key: &RepositoryKey) {
         if self.is_bound(key) {
             return;
         }
-        if let Some(repository) = self.repositories.remove(key)
-            && repository.watched
-        {
-            self.effects
-                .push(RepositoryEffect::StopWatch { key: key.clone() });
+        if let Some(repository) = self.repositories.remove(key) {
+            self.stop_repository(key.clone(), &repository);
         }
         self.pull_requests.retain(|(entry, _), _| entry != key);
     }
 
+    fn stop_repository(&mut self, key: RepositoryKey, repository: &RepositoryState) {
+        if repository.count.is_some() {
+            self.effects
+                .push(RepositoryEffect::CancelCount { key: key.clone() });
+        }
+        if repository.watched {
+            self.effects.push(RepositoryEffect::StopWatch { key });
+        }
+    }
+
     fn forget_everything(&mut self) {
-        for (key, repository) in self.repositories.drain() {
-            if repository.watched {
-                self.effects.push(RepositoryEffect::StopWatch { key });
-            }
+        for (key, repository) in std::mem::take(&mut self.repositories) {
+            self.stop_repository(key, &repository);
         }
         self.probes.clear();
         self.probe_cache.clear();
@@ -1625,6 +1636,13 @@ mod tests {
                 RepositoryEffect::StartWatch { key, directories } => {
                     Some((key.clone(), directories.clone()))
                 }
+                _ => None,
+            })
+        }
+
+        fn cancelled_counts(&mut self) -> Vec<RepositoryKey> {
+            self.drain(|effect| match effect {
+                RepositoryEffect::CancelCount { key } => Some(key.clone()),
                 _ => None,
             })
         }
@@ -2295,6 +2313,36 @@ mod tests {
             harness.status(PANE).freshness,
             Freshness::LastKnown { as_of: read_at }
         );
+    }
+
+    #[test]
+    fn releasing_a_repository_should_cancel_its_count_in_flight() {
+        let key = local_key("/src/app");
+        let mut harness = Harness::new();
+        harness.register(PANE, local_interest("/src/app"));
+        let (probe, _) = harness.only_probe();
+        harness.finish_probe(probe, Ok(on_branch(&key, "main")));
+        let count = harness.only_count();
+
+        harness.unregister(PANE);
+        assert_eq!(harness.cancelled_counts(), vec![key]);
+
+        harness.finish_count(count, Ok(changes(3)));
+        assert!(harness.cancelled_counts().is_empty());
+        assert!(harness.hidden(PANE));
+    }
+
+    #[test]
+    fn turning_off_repository_status_should_cancel_counts_in_flight() {
+        let key = local_key("/src/app");
+        let mut harness = Harness::new();
+        harness.register(PANE, local_interest("/src/app"));
+        let (probe, _) = harness.only_probe();
+        harness.finish_probe(probe, Ok(on_branch(&key, "main")));
+        harness.only_count();
+
+        harness.set_toggles(false, true);
+        assert_eq!(harness.cancelled_counts(), vec![key]);
     }
 
     #[test]

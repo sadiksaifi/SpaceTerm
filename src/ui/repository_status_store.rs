@@ -19,7 +19,8 @@ use crate::repository_status::pull_request_lookup::GitHubCliLookup;
 use crate::repository_status::remote_read::{remote_change_summary, remote_probe_outcome};
 use crate::repository_status::remote_url::{GitHubHost, github_host};
 use crate::repository_status::scheduler::{
-    Interest, InterestId, RepositoryEffect, RepositoryScheduler, SchedulerUpdate, SourceDirectory,
+    CountTicket, Interest, InterestId, RepositoryEffect, RepositoryScheduler, SchedulerUpdate,
+    SourceDirectory,
 };
 use crate::repository_status::tool_check::check_tools;
 use crate::repository_status::{
@@ -206,6 +207,8 @@ pub(crate) struct RepositoryStatusStore {
     remote_readers: RemoteRepositoryReaders,
     watches: HashMap<RepositoryKey, Box<dyn RepositoryWatch>>,
     watch_events: async_channel::Sender<RepositoryKey>,
+    /// Each count in flight and the token that stops it once nothing presents its repository.
+    counts: HashMap<RepositoryKey, (CountTicket, SshCancellationToken)>,
     /// Whether each unverified host is a GitHub host, asked once per app session.
     github_hosts: Arc<Mutex<HashMap<Arc<str>, bool>>>,
     wake: Option<(Instant, Task<()>)>,
@@ -252,6 +255,7 @@ impl RepositoryStatusStore {
             remote_readers: RemoteRepositoryReaders::default(),
             watches: HashMap::new(),
             watch_events,
+            counts: HashMap::new(),
             github_hosts: Arc::default(),
             wake: None,
             next_interest: 0,
@@ -438,6 +442,10 @@ impl RepositoryStatusStore {
                 key,
                 fsmonitor,
             } => {
+                let cancellation = SshCancellationToken::linked(
+                    &self.cancellation,
+                    &SshCancellationToken::default(),
+                );
                 let work: Box<dyn FnOnce() -> Result<ChangeSummary, RepositoryReadError> + Send> =
                     match (&key.machine, &key.root) {
                         (RepositoryMachine::Local, RepositoryRoot::Local(root)) => {
@@ -452,7 +460,7 @@ impl RepositoryStatusStore {
                                 return;
                             };
                             let root = root.clone();
-                            let cancellation = self.cancellation.clone();
+                            let cancellation = cancellation.clone();
                             Box::new(move || {
                                 reader
                                     .count(&root, fsmonitor, &cancellation)
@@ -462,7 +470,7 @@ impl RepositoryStatusStore {
                         (RepositoryMachine::Remote(machine), RepositoryRoot::Remote(root)) => {
                             let reader = self.remote_reader(machine);
                             let root = Arc::clone(root);
-                            let cancellation = self.cancellation.clone();
+                            let cancellation = cancellation.clone();
                             Box::new(move || {
                                 let reader =
                                     reader.ok_or(RepositoryReadError::ConnectionUnavailable)?;
@@ -475,9 +483,18 @@ impl RepositoryStatusStore {
                         }
                         _ => Box::new(|| Err(RepositoryReadError::InvalidResponse)),
                     };
+                self.counts
+                    .insert(key.clone(), (ticket.clone(), cancellation));
                 self.read(
                     work,
                     move |store, result, cx| {
+                        if store
+                            .counts
+                            .get(&key)
+                            .is_some_and(|(current, _)| *current == ticket)
+                        {
+                            store.counts.remove(&key);
+                        }
                         let result = result.unwrap_or(Err(RepositoryReadError::Unavailable));
                         let update = store
                             .scheduler
@@ -532,6 +549,11 @@ impl RepositoryStatusStore {
             }
             RepositoryEffect::StopWatch { key } => {
                 self.watches.remove(&key);
+            }
+            RepositoryEffect::CancelCount { key } => {
+                if let Some((_, cancellation)) = self.counts.remove(&key) {
+                    cancellation.cancel();
+                }
             }
             RepositoryEffect::WakeAt(due) => self.wake_at(due, cx),
         }
