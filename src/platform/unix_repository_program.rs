@@ -664,6 +664,8 @@ mod tests {
             .env("HOME", home)
             .env("PATH", "/usr/bin:/bin")
             .env("GIT_CONFIG_NOSYSTEM", "1")
+            // Setup never fetches a partial clone's missing objects behind a test's back.
+            .env("GIT_NO_LAZY_FETCH", "1")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -677,6 +679,127 @@ mod tests {
 
         std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[test]
+    fn unix_repository_program_hardened_git_never_fetches_through_a_repository_transport() {
+        use crate::repository_status::FsmonitorPolicy;
+        use crate::repository_status::local_read::{git_arguments, git_environment};
+
+        let Some(git) = installed_git() else {
+            eprintln!("skipping: git is not installed");
+            return;
+        };
+        let fixture = Fixture::new("transport");
+        let home = fixture.0.join("home");
+        let source = fixture.0.join("source");
+        let clone = fixture.0.join("clone");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&source).unwrap();
+        fixture_git(
+            &git,
+            &home,
+            &source,
+            &["-c", "init.defaultBranch=main", "init", "-q"],
+        );
+        fixture_git(
+            &git,
+            &home,
+            &source,
+            &["config", "uploadpack.allowFilter", "true"],
+        );
+        let lines: String = (1..=200).map(|line| format!("{line}\n")).collect();
+        std::fs::write(source.join("renamed"), &lines).unwrap();
+        fixture_git(&git, &home, &source, &["add", "renamed"]);
+        fixture_git(
+            &git,
+            &home,
+            &source,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "-m",
+                "base",
+            ],
+        );
+        let url = format!("file://{}", source.display());
+        fixture_git(
+            &git,
+            &home,
+            &fixture.0,
+            &[
+                "clone",
+                "-q",
+                "--filter=blob:none",
+                "--no-checkout",
+                &url,
+                "clone",
+            ],
+        );
+        fixture_git(
+            &git,
+            &home,
+            &clone,
+            &["config", "protocol.file.allow", "always"],
+        );
+        fixture_git(&git, &home, &clone, &["read-tree", "HEAD"]);
+        // A staged near-identical rename makes status compare against the missing blob.
+        std::fs::write(clone.join("moved"), format!("{lines}extra\n")).unwrap();
+        fixture_git(&git, &home, &clone, &["update-index", "--add", "moved"]);
+        fixture_git(
+            &git,
+            &home,
+            &clone,
+            &["update-index", "--force-remove", "renamed"],
+        );
+        let promised = Command::new(&git)
+            .args(["rev-parse", "HEAD:renamed"])
+            .current_dir(&clone)
+            .env_clear()
+            .env("HOME", &home)
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .output()
+            .unwrap()
+            .stdout;
+        let promised = String::from_utf8(promised).unwrap();
+        let missing = || {
+            !Command::new(&git)
+                .args(["cat-file", "-e", promised.trim()])
+                .current_dir(&clone)
+                .env_clear()
+                .env("HOME", &home)
+                .env("GIT_NO_LAZY_FETCH", "1")
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        };
+        assert!(missing(), "the fixture's blob should start out missing");
+        let mut request = request(&git.to_string_lossy(), &[]);
+        request.arguments = git_arguments(
+            &clone,
+            FsmonitorPolicy::Disabled,
+            &["status", "--porcelain=v2", "-z"],
+        );
+        request.directory = clone.clone();
+        // Git before 2.44 ignores `GIT_NO_LAZY_FETCH`.
+        request.environment = git_environment(&git, &home)
+            .into_iter()
+            .filter(|(name, _)| name != "GIT_NO_LAZY_FETCH")
+            .collect();
+
+        run(&request);
+
+        assert!(
+            missing(),
+            "the read fetched through the repository's transport"
+        );
     }
 
     #[test]

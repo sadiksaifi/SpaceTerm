@@ -64,7 +64,8 @@ pub(crate) fn git_arguments(
     let mut configuration = vec![
         "core.hooksPath=/dev/null",
         // Git before 2.44 ignores `GIT_NO_LAZY_FETCH`; with no allowed transport, a partial
-        // clone's missing object fails the read instead of fetching.
+        // clone's missing object fails the read instead of fetching. `GIT_ALLOW_PROTOCOL` in
+        // the environment also overrides a repository's `protocol.<name>.allow`.
         "protocol.allow=never",
         "color.ui=false",
         "core.quotePath=false",
@@ -116,6 +117,8 @@ pub(crate) fn git_environment(executable: &Path, home: &Path) -> Vec<(OsString, 
             ("GIT_PAGER", "cat"),
             ("PAGER", "cat"),
             ("GIT_NO_LAZY_FETCH", "1"),
+            // An empty list allows no transport, whatever the repository configures.
+            ("GIT_ALLOW_PROTOCOL", ""),
         ]
         .map(|(name, value)| (name.into(), value.into())),
     );
@@ -392,6 +395,7 @@ mod tests {
             ("GIT_PAGER", "cat"),
             ("PAGER", "cat"),
             ("GIT_NO_LAZY_FETCH", "1"),
+            ("GIT_ALLOW_PROTOCOL", ""),
         ]
         .map(|(name, value)| (name.into(), value.into()))
         .into()

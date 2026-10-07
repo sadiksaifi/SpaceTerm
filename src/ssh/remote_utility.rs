@@ -904,7 +904,9 @@ GIT_OPTIONAL_LOCKS=0
 GIT_PAGER=cat
 PAGER=cat
 GIT_NO_LAZY_FETCH=1
-export GIT_TERMINAL_PROMPT GIT_OPTIONAL_LOCKS GIT_PAGER PAGER GIT_NO_LAZY_FETCH
+# An empty list allows no transport, whatever the repository configures.
+GIT_ALLOW_PROTOCOL=
+export GIT_TERMINAL_PROMPT GIT_OPTIONAL_LOCKS GIT_PAGER PAGER GIT_NO_LAZY_FETCH GIT_ALLOW_PROTOCOL
 # Git reads no input, because the script itself arrives on standard input.
 run_git() {
     if [ "$git_fsmonitor" = builtin ]; then

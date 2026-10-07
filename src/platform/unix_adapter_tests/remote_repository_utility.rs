@@ -64,6 +64,8 @@ impl GitFixture {
             .env("GIT_COMMITTER_NAME", "SpaceTerm")
             .env("GIT_COMMITTER_EMAIL", "spaceterm@example.invalid")
             .env("GIT_EDITOR", "true")
+            // Setup never fetches a partial clone's missing objects behind a test's back.
+            .env("GIT_NO_LAZY_FETCH", "1")
             .stdin(Stdio::null())
             .output()
             .unwrap()
@@ -462,6 +464,68 @@ fn repository_reads_should_never_run_a_hook_program_fsmonitor() {
             .iter()
             .any(|record| record.starts_with(b"1 .M "))
     );
+}
+
+#[test]
+fn repository_count_should_not_fetch_through_a_transport_the_repository_allows() {
+    let Some(fixture) = GitFixture::new("transport") else {
+        return;
+    };
+    let source = fixture.path("source");
+    fs::create_dir_all(&source).unwrap();
+    fixture.checked_git(&source, &["init", "-q", "-b", "main"]);
+    fixture.checked_git(&source, &["config", "uploadpack.allowFilter", "true"]);
+    let lines: String = (1..=200).map(|line| format!("{line}\n")).collect();
+    fs::write(source.join("renamed"), &lines).unwrap();
+    fixture.checked_git(&source, &["add", "renamed"]);
+    fixture.checked_git(&source, &["commit", "-q", "-m", "base"]);
+    let url = format!("file://{}", source.display());
+    fixture.checked_git(
+        &fixture.root,
+        &[
+            "clone",
+            "-q",
+            "--filter=blob:none",
+            "--no-checkout",
+            &url,
+            "clone",
+        ],
+    );
+    let clone = fixture.path("clone");
+    fixture.checked_git(&clone, &["config", "protocol.file.allow", "always"]);
+    fixture.checked_git(&clone, &["read-tree", "HEAD"]);
+    // A staged near-identical rename makes status compare against the missing blob.
+    fs::write(clone.join("moved"), format!("{lines}extra\n")).unwrap();
+    fixture.checked_git(&clone, &["update-index", "--add", "moved"]);
+    fixture.checked_git(&clone, &["update-index", "--force-remove", "renamed"]);
+    let promised = fixture.git(&clone, &["rev-parse", "HEAD:renamed"]).stdout;
+    let promised = String::from_utf8(promised).unwrap();
+    let missing = || {
+        !fixture
+            .git(&clone, &["cat-file", "-e", promised.trim()])
+            .status
+            .success()
+    };
+    assert!(missing(), "the fixture's blob should start out missing");
+    // Git before 2.44 ignores `GIT_NO_LAZY_FETCH`.
+    let script = String::from_utf8(
+        build_repository_script(
+            REPOSITORY_COUNT_KIND,
+            clone.to_str().unwrap(),
+            FsmonitorPolicy::Disabled,
+        )
+        .unwrap(),
+    )
+    .unwrap()
+    .replace("GIT_NO_LAZY_FETCH=1", "GIT_NO_LAZY_FETCH=");
+
+    fixture.run(script.as_bytes());
+
+    assert!(
+        missing(),
+        "the count fetched through the repository's transport"
+    );
+    fixture.assert_no_staging_left();
 }
 
 #[test]
