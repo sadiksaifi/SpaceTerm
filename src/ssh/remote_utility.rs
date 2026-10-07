@@ -625,6 +625,10 @@ fn build_repository_script(
                 &MAXIMUM_REMOTE_REPOSITORY_CONFIG_BYTES.to_string(),
             )
             .replace(
+                "__MARKER_READ_BYTES__",
+                &(MAXIMUM_MARKER_BYTES + 1).to_string(),
+            )
+            .replace(
                 "__MAXIMUM_MARKER_BYTES__",
                 &MAXIMUM_MARKER_BYTES.to_string(),
             ),
@@ -951,9 +955,13 @@ append_config_value() {
         cat "$state_directory/config-value" >> "$state_directory/config-records" || exit 70
     fi
 }
-# Copies at most the marker limit from a regular file that is not a symbolic link.
+# Copies a regular file that is not a symbolic link. A file beyond the marker limit reads as
+# absent, as it does locally.
 read_marker_step() {
-    if [ -f "$1" ] && [ ! -L "$1" ] && head -c __MAXIMUM_MARKER_BYTES__ "$1" > "$2" 2>/dev/null </dev/null; then
+    if [ -f "$1" ] && [ ! -L "$1" ] &&
+        head -c __MARKER_READ_BYTES__ "$1" > "$2" 2>/dev/null </dev/null &&
+        marker_length=$(LC_ALL=C wc -c < "$2" | tr -d '[:space:]') &&
+        [ "$marker_length" -le __MAXIMUM_MARKER_BYTES__ ]; then
         marker_flags=${marker_flags}1
     else
         : > "$2" || exit 70

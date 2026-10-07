@@ -366,7 +366,7 @@ fn repository_probe_should_read_rebase_markers() {
 }
 
 #[test]
-fn repository_probe_should_ignore_symbolic_link_markers() {
+fn repository_probe_should_read_only_regular_markers_within_the_limit() {
     let Some(fixture) = GitFixture::new("marker-links") else {
         return;
     };
@@ -378,15 +378,26 @@ fn repository_probe_should_ignore_symbolic_link_markers() {
     fs::write(outside.join("end"), b"5\n").unwrap();
     symlink(&outside, git_directory.join("rebase-merge")).unwrap();
     symlink(git_directory.join("HEAD"), git_directory.join("MERGE_HEAD")).unwrap();
-    fs::create_dir_all(git_directory.join("rebase-apply")).unwrap();
-    symlink(outside.join("msgnum"), git_directory.join("rebase-apply/next")).unwrap();
-    fs::write(git_directory.join("rebase-apply/last"), [b'9'; 64]).unwrap();
+    let apply = git_directory.join("rebase-apply");
+    fs::create_dir_all(&apply).unwrap();
+    symlink(outside.join("msgnum"), apply.join("next")).unwrap();
+    fs::write(apply.join("last"), [b'9'; MAXIMUM_MARKER_BYTES]).unwrap();
+    symlink(outside.join("end"), apply.join("rebasing")).unwrap();
+    fs::write(apply.join("applying"), b"").unwrap();
     fs::write(git_directory.join("BISECT_LOG"), b"").unwrap();
 
-    let probe = fixture.probe(&repository);
+    let linked = fixture.probe(&repository);
+    fs::remove_file(apply.join("next")).unwrap();
+    let fifo = Command::new("mkfifo")
+        .arg(apply.join("next"))
+        .status()
+        .unwrap();
+    assert!(fifo.success());
+    fs::write(apply.join("last"), [b'9'; MAXIMUM_MARKER_BYTES + 1]).unwrap();
+    let irregular = fixture.probe(&repository);
 
     assert_eq!(
-        probe.markers,
+        linked.markers,
         OperationMarkers {
             rebase_apply: Some(ApplyMarkers {
                 step: StepMarkers {
@@ -394,11 +405,15 @@ fn repository_probe_should_ignore_symbolic_link_markers() {
                     total: Some(vec![b'9'; MAXIMUM_MARKER_BYTES]),
                 },
                 rebasing: false,
-                applying: false,
+                applying: true,
             }),
             bisect_log: true,
             ..OperationMarkers::default()
         }
+    );
+    assert_eq!(
+        irregular.markers.rebase_apply.unwrap().step,
+        StepMarkers::default()
     );
 }
 
