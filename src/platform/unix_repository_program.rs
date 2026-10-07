@@ -794,7 +794,8 @@ mod tests {
             .filter(|(name, _)| name != "GIT_NO_LAZY_FETCH")
             .collect();
 
-        run(&request);
+        // Only what the read fetched matters, not whether it succeeded.
+        let _ = run(&request);
 
         assert!(
             missing(),
