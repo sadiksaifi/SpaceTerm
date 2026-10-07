@@ -88,9 +88,10 @@ impl UpdateStatusPresentation {
                 format!("Version {version} installs when SpaceTerm restarts."),
                 Some(UpdateStatusAction::FinishInstall),
             ),
-            UpdateState::Failed { error } => {
-                (crate::ui::updates::failure_message(*error, wording), check_now)
-            }
+            UpdateState::Failed { error } => (
+                crate::ui::updates::failure_message(*error, wording),
+                check_now,
+            ),
         };
         Self {
             summary: summary.into(),
@@ -146,7 +147,12 @@ impl SettingsWindow {
         };
         let wording = DesktopPresentation::get(cx).wording();
         let updates = updates.read(cx);
-        UpdateStatusPresentation::resolve(updates.state(), updates.last_check(), unix_now(), wording)
+        UpdateStatusPresentation::resolve(
+            updates.state(),
+            updates.last_check(),
+            unix_now(),
+            wording,
+        )
     }
 
     pub(super) fn render_update_status(&mut self, cx: &mut Context<Self>) -> AnyElement {

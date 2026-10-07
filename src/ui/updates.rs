@@ -20,8 +20,8 @@ use spaceterm_ui::{
 use super::WorkspaceManager;
 use super::appearance::gpui_color;
 use super::settings_window::SettingsWindow;
-use crate::updates::policy::UpdateStage;
 use crate::desktop_profile::{DesktopPresentation, DesktopWording};
+use crate::updates::policy::UpdateStage;
 use crate::updates::{ApplicationUpdates, UpdateError, UpdateNotice, UpdateService, UpdateState};
 
 actions!(spaceterm, [CheckForUpdates, OpenReleaseNotes]);
@@ -1131,8 +1131,9 @@ mod tests {
             },
             UpdateState::Verifying { version: version() },
         ] {
-            let presentation = ControlPresentation::resolve(&state, PENDING, true, testing_wording())
-                .expect("a stopping update stays visible until the service settles");
+            let presentation =
+                ControlPresentation::resolve(&state, PENDING, true, testing_wording())
+                    .expect("a stopping update stays visible until the service settles");
             assert_eq!(presentation.label.as_ref(), "Stopping 0.4.2");
             assert_eq!(presentation.command, None);
             assert_eq!(presentation.glyph, ControlGlyph::Activity);
