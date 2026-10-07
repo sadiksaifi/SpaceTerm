@@ -106,10 +106,20 @@ jobs:
       - name: Install Linux build and test packages
         timeout-minutes: 10
         run: mise bootstrap packages apply --yes --update
+      - name: Check the development environment
+        run: mise doctor project
+      - name: Cache Rust builds
+        uses: actions/cache@v6
+        with:
+          path: |
+            target/debug
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/git/db
+          key: validate-linux-${{ runner.arch }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'rust-toolchain.toml', 'mise.lock', 'third_party/libghostty-vt-sys/build.rs', 'third_party/libghostty-vt-sys/patches/*.patch') }}
       - name: Validate
         timeout-minutes: 60
-        # Desktop notification and single-instance tests talk to a session bus.
-        run: dbus-run-session -- mise run validate:linux
+        run: mise run validate:linux
 
   package-linux:
     name: Package and sign x86_64 Linux
