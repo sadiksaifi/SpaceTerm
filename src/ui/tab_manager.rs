@@ -833,6 +833,7 @@ impl TabManager {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn aggregate_counts(&self, cx: &App) -> (usize, usize) {
         let panes = self
             .tabs
@@ -840,6 +841,17 @@ impl TabManager {
             .map(|(_, view)| view.read(cx).pane_count())
             .sum();
         (self.tabs.len(), panes)
+    }
+
+    /// The Root Tab's Root Pane machine and Repository Source Directory.
+    pub(crate) fn repository_source(
+        &self,
+        cx: &App,
+    ) -> Option<(
+        crate::repository_status::RepositoryMachine,
+        crate::repository_status::scheduler::SourceDirectory,
+    )> {
+        self.tabs.root_tab().read(cx).repository_source(cx)
     }
 
     pub(crate) fn automatic_directory(&self, cx: &App) -> Option<crate::domain::CurrentDirectory> {

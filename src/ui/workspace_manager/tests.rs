@@ -230,7 +230,7 @@ fn sidebar_should_follow_remote_root_across_tabs_pins_and_custom_names(cx: &mut 
 }
 
 #[gpui::test]
-fn sidebar_rows_should_keep_counts_and_pin_below_name_and_hide_machine_when_narrow(
+fn sidebar_rows_should_keep_the_directory_and_pin_below_name_and_hide_machine_when_narrow(
     cx: &mut TestAppContext,
 ) {
     let (manager, _, cx) = workspace_manager(cx);
@@ -268,10 +268,8 @@ fn sidebar_rows_should_keep_counts_and_pin_below_name_and_hide_machine_when_narr
     let machine = cx.debug_bounds("workspace-machine-2").unwrap();
     let path = cx.debug_bounds("workspace-row-path-2").unwrap();
     let pin = cx.debug_bounds("workspace-row-pin-2").unwrap();
-    let counts = cx.debug_bounds("workspace-counts-2").unwrap();
     assert!(machine.left() - name.right() >= px(8.0));
-    assert!(counts.top() >= name.bottom());
-    assert!(path.right() + px(8.0) <= counts.left());
+    assert!(path.top() >= name.bottom());
     assert!(pin.right() <= path.left());
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
@@ -291,11 +289,78 @@ fn sidebar_rows_should_keep_counts_and_pin_below_name_and_hide_machine_when_narr
     // Canvas children removed this frame can leave historical GPUI debug bounds behind.
     // The name occupying all available width verifies the machine and its gap are gone.
     assert_eq!(name.right(), row.right() - row_trailing_padding(cx));
-    let counts = cx.debug_bounds("workspace-counts-2").unwrap();
+    let path = cx.debug_bounds("workspace-row-path-2").unwrap();
     let pin = cx.debug_bounds("workspace-row-pin-2").unwrap();
-    assert!(counts.right() <= row.right());
-    assert!(pin.right() <= counts.left());
+    assert!(path.right() <= row.right());
+    assert!(pin.right() <= path.left());
     assert_eq!(row.size.height, px(SIDEBAR_ROW_HEIGHT));
+}
+
+#[gpui::test]
+fn sidebar_rows_lead_with_the_branch_and_let_a_pull_request_open_in_the_browser(
+    cx: &mut TestAppContext,
+) {
+    use crate::repository_status::{
+        ChangeState, Freshness, PullRequest, RepositoryHead, RepositoryKey, RepositoryMachine,
+        RepositoryRoot, RepositoryStatus, RepositoryView,
+    };
+
+    let (manager, _records, cx) = workspace_manager(cx);
+    let status = |pull_request: Option<PullRequest>| {
+        RepositoryView::Repository(Arc::new(RepositoryStatus {
+            key: RepositoryKey {
+                machine: RepositoryMachine::Local,
+                root: RepositoryRoot::Local(PathBuf::from("/projects/api")),
+            },
+            head: RepositoryHead::Branch("main".into()),
+            commit: Some("a1b2c3d".into()),
+            upstream: None,
+            operation: None,
+            changes: ChangeState::NotCounted,
+            freshness: Freshness::Current,
+            read_at: Instant::now(),
+            pull_request,
+            read_failure: None,
+        }))
+    };
+    manager.update(cx, |manager, cx| {
+        manager.present_sidebar_repository(WorkspaceId::new(1), status(None), cx);
+    });
+    cx.run_until_parked();
+    let branch = cx.debug_bounds("workspace-row-branch-1").unwrap();
+    let path = cx.debug_bounds("workspace-row-path-1").unwrap();
+    assert!(branch.right() <= path.left());
+    assert!(cx.debug_bounds("workspace-counts-1").is_none());
+
+    manager.update(cx, |manager, cx| {
+        manager.present_sidebar_repository(
+            WorkspaceId::new(1),
+            status(Some(PullRequest {
+                number: 478,
+                title: "Add Repository Status".into(),
+                draft: true,
+                url: "https://github.com/acme/api/pull/478".into(),
+                head: "main".into(),
+                base: "release".into(),
+            })),
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    let number = cx
+        .debug_bounds("workspace-row-pull-request-1")
+        .expect("the Pull Request number replaces the branch");
+    let active = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    cx.simulate_click(number.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        cx.opened_url().as_deref(),
+        Some("https://github.com/acme/api/pull/478")
+    );
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id()),
+        active
+    );
 }
 
 #[gpui::test]

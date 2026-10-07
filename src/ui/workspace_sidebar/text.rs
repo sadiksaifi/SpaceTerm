@@ -1,8 +1,10 @@
 use gpui::prelude::*;
 use gpui::{AnyElement, Pixels, SharedString, canvas, div, px};
-use spaceterm_ui::{Icon, IconName};
+use spaceterm_ui::{Icon, IconName, Tooltip, TooltipTargetVisibility};
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::appearance::PullRequestPaint;
+use crate::repository_status::presentation::{PullRequestState, SidebarBadge};
 use crate::ui::appearance::ChromeAppearance;
 use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt, TextRole};
@@ -74,9 +76,19 @@ fn machine_width(available: Pixels, name: Pixels, machine: Pixels) -> Option<Pix
     (remaining >= machine.min(px(48.0)) && remaining > px(0.0)).then_some(remaining)
 }
 
+/// The branch or Pull Request a row's second line shows before its directory.
+pub(super) struct RowRepository {
+    pub(super) badge: SidebarBadge,
+    pub(super) pull_request_paint: PullRequestPaint,
+}
+
+/// The repository's share of line 2 when the directory also needs room.
+const MAXIMUM_REPOSITORY_SHARE: f32 = 0.6;
+const REPOSITORY_SEPARATOR: &str = " · ";
+
 pub(super) fn detail(
     text: SharedString,
-    counts: SharedString,
+    repository: Option<RowRepository>,
     pinned: bool,
     status_paint: Option<WorkspaceStatusPaint>,
     selector: Option<String>,
@@ -87,18 +99,23 @@ pub(super) fn detail(
         + appearance.spacing(super::SIDEBAR_ROW_DETAIL_LINE_PADDING);
     canvas(
         move |bounds, window, cx| {
-            let counts_width = appearance
-                .typography
-                .measure(TextRole::Secondary, &counts, window)
-                .ceil();
             let pin_width = if pinned {
                 appearance.spacing(PIN_WIDTH)
             } else {
                 px(0.0)
             };
-            let available =
-                (bounds.size.width - counts_width - appearance.spacing(GAP) - pin_width)
-                    .max(px(0.0));
+            let row_width = (bounds.size.width - pin_width).max(px(0.0));
+            let measure = |value: &str| {
+                appearance
+                    .typography
+                    .measure(TextRole::Secondary, value, window)
+                    .ceil()
+            };
+            let repository_width = repository.as_ref().map_or(px(0.0), |repository| {
+                (measure(repository.badge.text()) + measure(REPOSITORY_SEPARATOR))
+                    .min(row_width * MAXIMUM_REPOSITORY_SHARE)
+            });
+            let available = (row_width - repository_width).max(px(0.0));
             let fitted = if status_paint.is_some() {
                 text
             } else {
@@ -115,6 +132,14 @@ pub(super) fn detail(
                 .flex_1()
                 .flex()
                 .items_center()
+                .when_some(repository.as_ref(), |path, repository| {
+                    path.child(render_repository(
+                        repository,
+                        repository_width,
+                        id,
+                        &appearance,
+                    ))
+                })
                 .when(pinned, |path| {
                     path.child(
                         div()
@@ -151,16 +176,6 @@ pub(super) fn detail(
                 .gap(appearance.spacing(GAP))
                 .chrome_text(appearance.typography.style(TextRole::Secondary))
                 .child(path)
-                .child(
-                    div()
-                        .w(counts_width)
-                        .flex_shrink_0()
-                        .whitespace_nowrap()
-                        .id(("workspace-counts", id))
-                        .debug_selector(move || format!("workspace-counts-{id}"))
-                        .text_color(gpui_color(appearance.colors.row_secondary))
-                        .child(counts),
-                )
                 .into_any_element();
             content.layout_as_root(bounds.size.map(gpui::AvailableSpace::Definite), window, cx);
             content.prepaint_at(bounds.origin, window, cx);
@@ -171,6 +186,74 @@ pub(super) fn detail(
     .w_full()
     .h(height)
     .into_any_element()
+}
+
+/// The branch, or the Pull Request number that opens the Pull Request, followed by a separator.
+/// Hovering the number shows the cached Pull Request facts and makes no lookup of its own.
+fn render_repository(
+    repository: &RowRepository,
+    width: Pixels,
+    id: u64,
+    appearance: &ChromeAppearance,
+) -> AnyElement {
+    let secondary = gpui_color(appearance.colors.row_secondary);
+    let separator = div()
+        .flex_shrink_0()
+        .text_color(secondary)
+        .child(REPOSITORY_SEPARATOR);
+    let badge = match &repository.badge {
+        SidebarBadge::Branch { text } => div()
+            .id(("workspace-row-branch", id))
+            .debug_selector(move || format!("workspace-row-branch-{id}"))
+            .min_w_0()
+            .truncate()
+            .text_color(secondary)
+            .child(text.clone())
+            .into_any_element(),
+        SidebarBadge::PullRequest {
+            text,
+            state,
+            url,
+            hover,
+            accessible_label,
+        } => {
+            let color = match state {
+                PullRequestState::Open => repository.pull_request_paint.open,
+                PullRequestState::Draft => repository.pull_request_paint.draft,
+            };
+            let url = url.clone();
+            let number = div()
+                .id(("workspace-row-pull-request", id))
+                .debug_selector(move || format!("workspace-row-pull-request-{id}"))
+                .role(gpui::accesskit::Role::Link)
+                .aria_label(SharedString::from(accessible_label.clone()))
+                .min_w_0()
+                .truncate()
+                .cursor_pointer()
+                .text_color(gpui_color(color))
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(move |_, _, cx| {
+                    cx.open_url(&url);
+                    cx.stop_propagation();
+                })
+                .child(text.clone());
+            let [heading, title, branches] = hover.lines();
+            Tooltip::new(("workspace-row-pull-request-tooltip", id), heading.to_owned())
+                .detail(format!("{title}\n{branches}"))
+                .debug_selector(format!("workspace-row-pull-request-tooltip-{id}"))
+                .attach(number, TooltipTargetVisibility::Visible)
+                .into_any_element()
+        }
+    };
+    div()
+        .flex_shrink_0()
+        .max_w(width)
+        .min_w_0()
+        .flex()
+        .items_center()
+        .child(badge)
+        .child(separator)
+        .into_any_element()
 }
 
 fn fit_trailing_path(text: &str, available: Pixels, measure: impl Fn(&str) -> Pixels) -> String {

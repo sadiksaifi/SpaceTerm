@@ -278,6 +278,7 @@ pub(crate) struct WorkspaceManager {
     update_control: Entity<super::updates::UpdateControl>,
     pending_final_tab_closes: BTreeSet<WorkspaceId>,
     close_confirmation: CloseConfirmation,
+    sidebar_repositories: repository::SidebarRepositories,
 }
 
 impl WorkspaceManager {
@@ -350,6 +351,8 @@ impl WorkspaceManager {
         if let Some(reason) = initial_directory_error {
             let _ = workspaces.set_directory_unavailable(workspaces.active_workspace_id(), reason);
         }
+        cx.on_release(|manager, cx| manager.release_sidebar_repositories(cx))
+            .detach();
         let sidebar = cx.new(|cx| WorkspaceSidebar::new(window, cx));
         cx.subscribe_in(
             &sidebar,
@@ -417,6 +420,7 @@ impl WorkspaceManager {
             update_control: cx.new(super::updates::UpdateControl::new),
             pending_final_tab_closes: BTreeSet::new(),
             close_confirmation: CloseConfirmation::default(),
+            sidebar_repositories: repository::SidebarRepositories::default(),
         }
     }
 
@@ -3037,7 +3041,7 @@ impl WorkspaceManager {
 
     /// The Active Workspace's identity, shown in the top-left chrome only while the sidebar is
     /// hidden.
-    fn workspace_chrome_identity(&self) -> (WorkspaceChromeIdentity, Tooltip) {
+    fn workspace_chrome_identity(&self, cx: &App) -> (WorkspaceChromeIdentity, Tooltip) {
         let workspace = self.workspaces.active_workspace();
         let remote_connection_phase = workspace
             .remote_connection_state()
@@ -3056,10 +3060,14 @@ impl WorkspaceManager {
                 .unwrap_or_else(|| path.clone()),
         };
 
+        let repository = self
+            .chip_repository_line(workspace.id(), cx)
+            .map(|line| format!("\n{line}"))
+            .unwrap_or_default();
         (
             chrome_identity(workspace),
             Tooltip::new("workspace-switcher-tooltip", "Switch Workspace")
-                .detail(format!("{}\n{tooltip_detail}", workspace.name()))
+                .detail(format!("{}\n{tooltip_detail}{repository}", workspace.name()))
                 .debug_selector("workspace-switcher-tooltip"),
         )
     }
@@ -3096,7 +3104,7 @@ impl WorkspaceManager {
         let remote_unavailable_reason = self.remote_workspace_unavailable_reason.clone();
         let creation_shortcuts =
             WorkspaceCreation::ALL.map(|creation| creation.shortcut(presentation));
-        let collapsed_identity = (!sidebar_visible).then(|| self.workspace_chrome_identity());
+        let collapsed_identity = (!sidebar_visible).then(|| self.workspace_chrome_identity(cx));
         let switcher_surface =
             super::tab_manager::active_tab_surface(appearance, window.is_window_active());
         let title_bar_host =
@@ -3351,7 +3359,6 @@ impl WorkspaceManager {
         self.workspaces
             .iter()
             .map(|workspace| {
-                let (tab_count, pane_count) = workspace.payload().read(cx).aggregate_counts(cx);
                 let (path, directory_tooltip) = directory_labels(
                     workspace.location(),
                     workspace.local_display_directory(),
@@ -3380,8 +3387,7 @@ impl WorkspaceManager {
                         .remote_connection_state()
                         .map(RemoteConnectionState::phase),
                     available,
-                    tab_count,
-                    pane_count,
+                    repository: self.sidebar_badge(workspace.id(), cx),
                     active: workspace.id() == active_workspace_id,
                 }
             })
@@ -3397,6 +3403,7 @@ impl Drop for WorkspaceManager {
 
 impl Render for WorkspaceManager {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_sidebar_repositories(cx);
         let activity = super::appearance::window_activity(window);
         activity.mount(activity.with_scope(|| self.render_chrome(window, cx)))
     }
@@ -3778,6 +3785,9 @@ impl WorkspaceManager {
             .assert_application_capabilities(expected);
     }
 }
+
+#[path = "workspace_manager/repository.rs"]
+mod repository;
 
 #[cfg(test)]
 #[path = "workspace_manager/tests.rs"]

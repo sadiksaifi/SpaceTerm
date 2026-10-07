@@ -637,6 +637,19 @@ impl TabView {
         self.tab.pane_count()
     }
 
+    /// The Root Pane's machine and Repository Source Directory.
+    pub(crate) fn repository_source(
+        &self,
+        cx: &App,
+    ) -> Option<(
+        crate::repository_status::RepositoryMachine,
+        crate::repository_status::scheduler::SourceDirectory,
+    )> {
+        self.tab
+            .pane(self.tab.root_pane_id())
+            .and_then(|terminal| terminal.read(cx).repository_source())
+    }
+
     pub(crate) fn automatic_directory(&self, cx: &App) -> Option<CurrentDirectory> {
         self.current_directory(self.tab.root_pane_id(), cx)
     }

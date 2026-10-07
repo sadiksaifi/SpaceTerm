@@ -299,6 +299,13 @@ impl PullRequestHover {
 }
 
 impl SidebarBadge {
+    /// The branch line or the Pull Request number.
+    pub(crate) fn text(&self) -> &str {
+        match self {
+            Self::Branch { text } | Self::PullRequest { text, .. } => text,
+        }
+    }
+
     pub(crate) fn from_view(view: &RepositoryView) -> Option<Self> {
         let status = presented(view)?;
         let Some(pull_request) = &status.pull_request else {

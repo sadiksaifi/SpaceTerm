@@ -81,7 +81,7 @@ pub(crate) fn set_repository_fixture(enabled: bool, cx: &mut App) {
 }
 
 /// A synthetic repository with changes, divergence, and a draft Pull Request, in place of every
-/// Pane's Repository Status.
+/// Pane's and sidebar row's Repository Status.
 pub(crate) fn repository_view_fixture(cx: &App) -> Option<RepositoryView> {
     let change = |kind, path: &str| ChangeEntry {
         kind,
@@ -189,7 +189,8 @@ pub(super) fn render(
             .on_change(|change, _, cx| set_repository_fixture(change.requested(), cx)),
         )
         .description(
-            "Every Pane shows a synthetic repository with changes and a draft Pull Request.",
+            "Every Pane and sidebar row shows a synthetic repository with changes and a draft \
+             Pull Request.",
         )
         .render(appearance, window, cx)
         .into_any_element(),

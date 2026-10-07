@@ -60,6 +60,12 @@ struct PaneRepositoryFacts {
 }
 
 impl TerminalPane {
+    /// The machine and Repository Source Directory this Pane reads, once it knows a directory.
+    pub(crate) fn repository_source(&self) -> Option<(RepositoryMachine, SourceDirectory)> {
+        self.repository_facts()
+            .map(|facts| (facts.machine, facts.directory))
+    }
+
     /// What this Pane's Repository Status presents.
     pub(crate) fn repository_view(&self) -> &RepositoryView {
         &self.repository_status.view
