@@ -15,9 +15,8 @@ use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Global, Task};
 use crate::domain::RemoteDirectory;
 use crate::repository_status::local_read::LocalRepositoryReader;
 use crate::repository_status::pull_request::pull_request_query;
-use crate::repository_status::pull_request_lookup::GitHubCliLookup;
+use crate::repository_status::pull_request_lookup::{GitHubCliLookup, GitHubHosts};
 use crate::repository_status::remote_read::{remote_change_summary, remote_probe_outcome};
-use crate::repository_status::remote_url::{GitHubHost, github_host};
 use crate::repository_status::scheduler::{
     CountTicket, Interest, InterestId, ProbeTicket, RepositoryEffect, RepositoryScheduler,
     SchedulerUpdate, SourceDirectory,
@@ -210,8 +209,7 @@ pub(crate) struct RepositoryStatusStore {
     /// Each count in flight and the token that stops it once nothing presents its repository.
     counts: HashMap<RepositoryKey, (CountTicket, SshCancellationToken)>,
     probes: HashMap<ProbeTicket, SshCancellationToken>,
-    /// Whether each unverified host is a GitHub host, asked once per app session.
-    github_hosts: Arc<Mutex<HashMap<Arc<str>, bool>>>,
+    github_hosts: Arc<GitHubHosts>,
     wake: Option<(Instant, Task<()>)>,
     next_interest: u64,
     cancellation: SshCancellationToken,
@@ -524,8 +522,7 @@ impl RepositoryStatusStore {
                         let Some(query) = pull_request_query(&config, &head) else {
                             return Ok(None);
                         };
-                        if !is_github_host(&lookup, &hosts, &query.repository.host, &cancellation)?
-                        {
+                        if !hosts.is_github_host(&lookup, &query.repository.host, &cancellation)? {
                             return Ok(None);
                         }
                         lookup.find_pull_request(&query, Instant::now(), &cancellation)
@@ -759,28 +756,4 @@ fn remote_probe(
     let remote = RemoteDirectory::new(directory.to_owned())
         .map_err(|_| RepositoryReadError::InvalidResponse)?;
     remote_probe_outcome(reader.probe(&remote, cancellation)?, directory)
-}
-
-fn is_github_host(
-    lookup: &GitHubCliLookup,
-    hosts: &Mutex<HashMap<Arc<str>, bool>>,
-    host: &Arc<str>,
-    cancellation: &SshCancellationToken,
-) -> Result<bool, PullRequestError> {
-    if github_host(host) == GitHubHost::Known {
-        return Ok(true);
-    }
-    if let Some(known) = hosts
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .get(host)
-    {
-        return Ok(*known);
-    }
-    let known = lookup.is_github_host(host, Instant::now(), cancellation)?;
-    hosts
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .insert(Arc::clone(host), known);
-    Ok(known)
 }

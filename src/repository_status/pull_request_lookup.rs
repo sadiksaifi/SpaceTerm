@@ -1,15 +1,17 @@
 //! The GitHub CLI call policy for Pull Request lookups.
 
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use super::pull_request::{
     PullRequestQuery, auth_status_arguments, github_cli_environment, parse_pull_requests,
     pull_request_arguments, pull_request_exit, pull_request_program_error,
 };
+use super::remote_url::{GitHubHost, github_host};
 use super::{ProgramExit, ProgramRequest, PullRequest, PullRequestError, RepositoryProgramRunner};
 use crate::ssh::cancellation::SshCancellationToken;
 
@@ -66,8 +68,7 @@ impl GitHubCliLookup {
         parse_pull_requests(&output, query)
     }
 
-    /// Whether the GitHub CLI is logged in to `host`, which makes it a GitHub host. Callers ask
-    /// once per host per app session.
+    /// Whether the GitHub CLI is logged in to `host`, which makes it a GitHub host.
     pub(crate) fn is_github_host(
         &self,
         host: &str,
@@ -109,6 +110,35 @@ impl GitHubCliLookup {
     }
 }
 
+/// The hosts the GitHub CLI confirmed as GitHub hosts during this app session. A host it was not
+/// logged in to, or could not reach, is asked again on the next lookup, so a later login or
+/// connection finds its Pull Requests.
+#[derive(Default)]
+pub(crate) struct GitHubHosts(Mutex<HashSet<Arc<str>>>);
+
+impl GitHubHosts {
+    /// Whether `host` is a GitHub host. Blocking when the GitHub CLI must be asked.
+    pub(crate) fn is_github_host(
+        &self,
+        lookup: &GitHubCliLookup,
+        host: &Arc<str>,
+        cancellation: &SshCancellationToken,
+    ) -> Result<bool, PullRequestError> {
+        if github_host(host) == GitHubHost::Known || self.confirmed().contains(host) {
+            return Ok(true);
+        }
+        let confirmed = lookup.is_github_host(host, Instant::now(), cancellation)?;
+        if confirmed {
+            self.confirmed().insert(Arc::clone(host));
+        }
+        Ok(confirmed)
+    }
+
+    fn confirmed(&self) -> std::sync::MutexGuard<'_, HashSet<Arc<str>>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -136,6 +166,39 @@ mod tests {
             head_branch: "feature".into(),
             head_owner: None,
         }
+    }
+
+    #[test]
+    fn a_host_the_github_cli_could_not_confirm_should_be_asked_again() {
+        let runner = FakeRunner::new([exit(1, ""), exit(0, "")]);
+        let lookup = lookup(&runner);
+        let hosts = GitHubHosts::default();
+        let host: Arc<str> = "git.example.com".into();
+        let cancellation = SshCancellationToken::default();
+
+        // Logged out of the host, or its network is unreachable.
+        assert!(!hosts.is_github_host(&lookup, &host, &cancellation).unwrap());
+        // The person logs in; the next lookup asks again and remembers the answer.
+        assert!(hosts.is_github_host(&lookup, &host, &cancellation).unwrap());
+        assert!(hosts.is_github_host(&lookup, &host, &cancellation).unwrap());
+        assert!(
+            hosts
+                .is_github_host(&lookup, &"github.com".into(), &cancellation)
+                .unwrap()
+        );
+
+        let arguments: Vec<_> = runner
+            .requests()
+            .into_iter()
+            .map(|request| request.arguments)
+            .collect();
+        assert_eq!(
+            arguments,
+            vec![
+                auth_status_arguments("git.example.com"),
+                auth_status_arguments("git.example.com"),
+            ]
+        );
     }
 
     const LISTED: &str = r#"[{"number":478,"title":"Add Repository Status","isDraft":true,
