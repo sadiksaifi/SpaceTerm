@@ -17,6 +17,7 @@ pub(crate) mod operation;
 pub(crate) mod porcelain;
 pub(crate) mod presentation;
 pub(crate) mod pull_request;
+pub(crate) mod pull_request_lookup;
 pub(crate) mod remote_url;
 pub(crate) mod scheduler;
 #[cfg(test)]
