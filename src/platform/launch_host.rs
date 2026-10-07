@@ -278,15 +278,17 @@ mod tests {
         );
         std::fs::create_dir_all(&fixture.0).unwrap();
         let image = fixture.0.join("spaceterm");
-        std::fs::copy("/bin/sleep", &image).unwrap();
-        // Another test thread can briefly hold the copy's descriptor across fork. A multicall
-        // coreutils, as on Ubuntu 26.04, chooses the utility by argv[0], not by the image name.
+        // A shell is one standalone image everywhere. A multicall coreutils, as on Ubuntu 26.04,
+        // picks its utility by name, so a copied sleep does not run as sleep.
+        let shell = std::fs::canonicalize("/bin/sh").unwrap();
+        std::fs::copy(&shell, &image).unwrap();
+        // Another test thread can briefly hold the copy's descriptor across fork.
         let child = (0..50)
             .find_map(|_| {
-                use std::os::unix::process::CommandExt as _;
+                // The shell waits on its open stdin until the fixture kills it.
                 match std::process::Command::new(&image)
-                    .arg0("sleep")
-                    .arg("30")
+                    .args(["-c", "read line"])
+                    .stdin(std::process::Stdio::piped())
                     .spawn()
                 {
                     Ok(child) => Some(child),
@@ -314,7 +316,7 @@ mod tests {
         assert_eq!(running_executable_of(&link), Some(image.clone()));
 
         let replacement = fixture.0.join("replacement");
-        std::fs::copy("/bin/sleep", &replacement).unwrap();
+        std::fs::copy(&shell, &replacement).unwrap();
         std::fs::rename(&replacement, &image).unwrap();
         let reported = std::fs::read_link(&link).unwrap();
         assert_ne!(reported, image, "the kernel marks the replaced image");
