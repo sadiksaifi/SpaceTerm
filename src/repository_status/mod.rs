@@ -10,6 +10,7 @@
 // The shared vocabulary lands before every consumer; consumers arrive in later commits.
 #![allow(dead_code)]
 
+pub(crate) mod discovery;
 mod display_text;
 pub(crate) mod operation;
 pub(crate) mod porcelain;
