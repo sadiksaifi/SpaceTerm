@@ -1011,18 +1011,18 @@ impl SettingsWindow {
         } else {
             (None, None)
         };
-        // Rows keep catalog order, so one run of neighbouring rows sharing a group title is one
-        // card. A filtered view groups whatever survived the filter the same way.
+        // Each group title is one card. A search orders rows by how well they match, which can
+        // split a group's rows apart, so a later row joins the card its group already has.
         let mut groups: Vec<(&'static str, Vec<SettingsRowId>, Vec<AnyElement>)> = Vec::new();
         for row in rows {
             let title = row.descriptor().group;
             let rendered = self.render_row(row, appearance, window, cx);
-            match groups.last_mut() {
-                Some((current, ids, members)) if *current == title => {
+            match groups.iter_mut().find(|(current, _, _)| *current == title) {
+                Some((_, ids, members)) => {
                     ids.push(row);
                     members.push(rendered);
                 }
-                _ => groups.push((title, vec![row], vec![rendered])),
+                None => groups.push((title, vec![row], vec![rendered])),
             }
         }
         self.row_bounds.borrow_mut().clear();

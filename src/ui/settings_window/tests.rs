@@ -4721,3 +4721,30 @@ fn settings_focus_reaches_assistive_technology(cx: &mut TestAppContext) {
         .expect("the focused surface publishes a node");
     assert_eq!(focused["aria"]["role"], "Group");
 }
+
+#[gpui::test]
+fn a_search_that_orders_a_group_apart_should_still_show_it_as_one_card(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let (window, _harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::Git, cx);
+    let _ = A11yTree::read(cx);
+    // Ordered by match, these rows alternate between the Repository Status and Pull Requests
+    // groups. Two cards for one group would publish the same accessibility node twice.
+    set_query(&window, "s", cx);
+    let rows = cx.update(|_, cx| window.read(cx).rows_for(SettingsSectionId::Git));
+    let groups: Vec<_> = rows.iter().map(|row| row.descriptor().group).collect();
+    assert_eq!(
+        groups,
+        [
+            "Repository Status",
+            "Pull Requests",
+            "Pull Requests",
+            "Repository Status"
+        ]
+    );
+
+    let tree = A11yTree::read(cx);
+    assert!(tree.find("Show Repository Status").is_some());
+    assert!(tree.find("Show Pull Requests").is_some());
+}
