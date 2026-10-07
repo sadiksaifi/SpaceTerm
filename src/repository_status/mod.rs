@@ -255,6 +255,9 @@ pub(crate) struct RepositoryConfig {
     /// `remote.<name>.url` pairs in configuration order.
     pub(crate) remotes: Vec<(Arc<str>, Arc<str>)>,
     pub(crate) push_default: Option<Arc<str>>,
+    /// `push.default` is `upstream` or `tracking`, so a plain `git push` publishes the branch to
+    /// its merge target rather than to its own name.
+    pub(crate) push_to_upstream: bool,
     pub(crate) branch_remote: Option<Arc<str>>,
     pub(crate) branch_merge: Option<Arc<str>>,
     pub(crate) branch_push_remote: Option<Arc<str>>,

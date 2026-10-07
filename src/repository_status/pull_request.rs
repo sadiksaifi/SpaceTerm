@@ -43,9 +43,10 @@ impl fmt::Debug for PullRequestQuery {
 /// remote is not a GitHub-shaped URL.
 ///
 /// The base remote is `upstream` when configured, else the branch's remote, else `origin`. The head
-/// branch is the branch's merge target without `refs/heads/`, else the local branch. The head owner
-/// comes from the push remote: the branch's push remote, else `remote.pushdefault`, else the
-/// branch's remote.
+/// branch is where a plain `git push` publishes, as the GitHub CLI reads it: the merge target
+/// without `refs/heads/` when `push.default` is `upstream` or `tracking`, else the local branch.
+/// The head owner comes from the push remote: the branch's push remote, else
+/// `remote.pushdefault`, else the branch's remote.
 pub(crate) fn pull_request_query(
     config: &RepositoryConfig,
     head: &RepositoryHead,
@@ -60,7 +61,7 @@ pub(crate) fn pull_request_query(
     };
     let repository = parse_remote_url(remote_url(config, base_remote)?)?;
     let head_branch = match config.branch_merge.as_deref() {
-        Some(merge) if !merge.is_empty() => {
+        Some(merge) if config.push_to_upstream && !merge.is_empty() => {
             let name = merge.strip_prefix("refs/heads/").unwrap_or(merge);
             (!name.is_empty()).then(|| Arc::from(name))?
         }
@@ -287,6 +288,7 @@ mod tests {
         let config = RepositoryConfig {
             branch_remote: Some("origin".into()),
             branch_merge: Some("refs/heads/topic".into()),
+            push_to_upstream: true,
             ..config(&[
                 ("origin", "git@github.com:me/app.git"),
                 ("upstream", "https://github.com/org/app.git"),
@@ -301,6 +303,19 @@ mod tests {
                 head_owner: Some("me".into()),
             })
         );
+    }
+
+    #[test]
+    fn query_should_name_the_pushed_branch_when_it_tracks_another_name() {
+        let config = RepositoryConfig {
+            branch_remote: Some("origin".into()),
+            branch_merge: Some("refs/heads/main".into()),
+            ..config(&[("origin", "git@github.com:me/app.git")])
+        };
+
+        let query = pull_request_query(&config, &branch("feature")).unwrap();
+
+        assert_eq!(&*query.head_branch, "feature");
     }
 
     #[test]
@@ -354,6 +369,7 @@ mod tests {
     fn head_branch_should_keep_a_merge_value_without_the_heads_prefix() {
         let config = RepositoryConfig {
             branch_merge: Some("release/2".into()),
+            push_to_upstream: true,
             ..config(&[("origin", "https://github.com/me/app")])
         };
 
@@ -389,6 +405,7 @@ mod tests {
         assert_eq!(pull_request_query(&local_tracking, &branch("main")), None);
         let empty_merge = RepositoryConfig {
             branch_merge: Some("refs/heads/".into()),
+            push_to_upstream: true,
             ..origin
         };
         assert_eq!(pull_request_query(&empty_merge, &branch("main")), None);

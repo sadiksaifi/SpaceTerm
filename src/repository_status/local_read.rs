@@ -43,7 +43,7 @@ pub(crate) const CONFIG_ARGUMENTS: [&str; 4] = [
     "config",
     "-z",
     "--get-regexp",
-    r"^(core\.fsmonitor|remote\.pushdefault|remote\..*\.url|branch\..*\.(remote|merge|pushremote))$",
+    r"^(core\.fsmonitor|push\.default|remote\.pushdefault|remote\..*\.url|branch\..*\.(remote|merge|pushremote))$",
 ];
 /// No untracked flag, so `status.showUntrackedFiles` applies.
 pub(crate) const COUNT_ARGUMENTS: [&str; 4] = ["status", "--porcelain=v2", "--branch", "-z"];
@@ -482,6 +482,7 @@ mod tests {
                     fsmonitor: FsmonitorPolicy::Builtin,
                     remotes: vec![("origin".into(), "git@github.com:me/app.git".into())],
                     push_default: None,
+                    push_to_upstream: false,
                     branch_remote: Some("origin".into()),
                     branch_merge: Some("refs/heads/main".into()),
                     branch_push_remote: None,
@@ -533,7 +534,7 @@ mod tests {
     fn probe_arguments_should_match_the_contract_spelling() {
         assert_eq!(
             CONFIG_ARGUMENTS[3],
-            "^(core\\.fsmonitor|remote\\.pushdefault|remote\\..*\\.url|branch\\..*\\.(remote|merge|pushremote))$"
+            "^(core\\.fsmonitor|push\\.default|remote\\.pushdefault|remote\\..*\\.url|branch\\..*\\.(remote|merge|pushremote))$"
         );
         assert_eq!(HEADER_ARGUMENTS[6..], ["--", ":(top,exclude)*"]);
     }
@@ -593,7 +594,7 @@ mod tests {
                 "config",
                 "-z",
                 "--get-regexp",
-                "^(core\\.fsmonitor|remote\\.pushdefault|remote\\..*\\.url|branch\\..*\\.(remote|merge|pushremote))$",
+                "^(core\\.fsmonitor|push\\.default|remote\\.pushdefault|remote\\..*\\.url|branch\\..*\\.(remote|merge|pushremote))$",
             ]
         );
         let ProbeOutcome::Repository(repository) = outcome else {

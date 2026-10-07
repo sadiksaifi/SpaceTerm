@@ -191,6 +191,10 @@ impl ConfigParser {
         let text = |value: &[u8]| -> Arc<str> { String::from_utf8_lossy(value).into() };
         if key == b"core.fsmonitor" {
             self.fsmonitor = value.is_none_or(is_git_true);
+        } else if key == b"push.default" {
+            self.config.push_to_upstream = value.is_some_and(|value| {
+                value.eq_ignore_ascii_case(b"upstream") || value.eq_ignore_ascii_case(b"tracking")
+            });
         } else if key == b"remote.pushdefault" {
             if let Some(value) = value {
                 self.config.push_default = Some(text(value));
@@ -441,6 +445,7 @@ mod tests {
         let output = "remote.origin.url\ngit@github.com:me/app.git\0\
              remote.upstream.url\nhttps://github.com/org/app\0\
              remote.my.fork.url\nhttps://example.com/fork\0\
+             push.default\nUpstream\0\
              remote.pushdefault\norigin\0\
              branch.main.remote\nupstream\0\
              branch.main.merge\nrefs/heads/main\0\
@@ -458,6 +463,7 @@ mod tests {
                     ("my.fork".into(), "https://example.com/fork".into()),
                 ],
                 push_default: Some("origin".into()),
+                push_to_upstream: true,
                 branch_remote: Some("origin".into()),
                 branch_merge: Some("refs/heads/feature.x".into()),
                 branch_push_remote: Some("fork".into()),

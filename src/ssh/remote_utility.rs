@@ -1018,6 +1018,7 @@ if [ "$discovery_status" -eq 0 ]; then
     branch_name=$(LC_ALL=C tr '\000' '\n' < "$state_directory/headers" |
         LC_ALL=C sed -n 's/^# branch\.head //p')
     append_config_value core.fsmonitor
+    append_config_value push.default
     append_config_value remote.pushdefault
     if [ -n "$branch_name" ] && [ "$branch_name" != '(detached)' ]; then
         append_config_value "branch.$branch_name.remote"
