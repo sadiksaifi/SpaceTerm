@@ -11,6 +11,7 @@
 #![allow(dead_code)]
 
 mod display_text;
+pub(crate) mod operation;
 pub(crate) mod porcelain;
 pub(crate) mod presentation;
 pub(crate) mod scheduler;
