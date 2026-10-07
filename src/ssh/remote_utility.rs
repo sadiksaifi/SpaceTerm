@@ -37,6 +37,8 @@ const REPOSITORY_COUNT_KIND: &str = "repository-count";
 /// Operation marker presence flags, in the order the probe script emits them.
 const REPOSITORY_MARKER_FLAGS: usize = 12;
 const UTILITY_TIMEOUT: Duration = Duration::from_secs(60);
+/// A repository read ends its own remote work this long after it starts, inside the local timeout.
+const REMOTE_REPOSITORY_DEADLINE: Duration = Duration::from_secs(50);
 /// Concurrent utility sessions allowed on one Control Connection.
 ///
 /// OpenSSH servers refuse sessions beyond `MaxSessions`, 10 by default, and Terminal Session
@@ -647,8 +649,12 @@ fn build_repository_script(
         FsmonitorPolicy::Disabled => "disabled",
         FsmonitorPolicy::Builtin => "builtin",
     };
+    let repository_script = REPOSITORY_SCRIPT.replace(
+        "__REMOTE_DEADLINE_SECONDS__",
+        &REMOTE_REPOSITORY_DEADLINE.as_secs().to_string(),
+    );
     let script = format!(
-        "{COMMON_SCRIPT}\ninput_path={}\n{PATH_EXPANSION_SCRIPT}repository_kind={kind}\ngit_fsmonitor={git_fsmonitor}\n{REPOSITORY_SCRIPT}{operation_script}",
+        "{COMMON_SCRIPT}\ninput_path={}\n{PATH_EXPANSION_SCRIPT}repository_kind={kind}\ngit_fsmonitor={git_fsmonitor}\n{repository_script}{operation_script}",
         quote_for_posix_shell(path)
     )
     .into_bytes();
@@ -907,25 +913,32 @@ GIT_NO_LAZY_FETCH=1
 # An empty list allows no transport, whatever the repository configures.
 GIT_ALLOW_PROTOCOL=
 export GIT_TERMINAL_PROMPT GIT_OPTIONAL_LOCKS GIT_PAGER PAGER GIT_NO_LAZY_FETCH GIT_ALLOW_PROTOCOL
-# Git reads no input, because the script itself arrives on standard input.
+# Git reads no input, because the script itself arrives on standard input. It runs in the
+# background so the deadline below can find it.
+bounded_git() {
+    "$git_program" "$@" </dev/null 2>/dev/null &
+    git_process=$!
+    printf '%s\n' "$git_process" > "$state_directory/running"
+    wait "$git_process"
+}
 run_git() {
     if [ "$git_fsmonitor" = builtin ]; then
-        "$git_program" --no-optional-locks --no-pager -c core.fsmonitor=true \
-            -c core.hooksPath=/dev/null -c protocol.allow=never -c color.ui=false \
-            -c core.quotePath=false -c status.relativePaths=false -c advice.statusHints=false \
-            -C . "$@" </dev/null 2>/dev/null
+        set -- -c core.fsmonitor=true -c core.hooksPath=/dev/null -c protocol.allow=never \
+            -c color.ui=false -c core.quotePath=false -c status.relativePaths=false \
+            -c advice.statusHints=false -C . "$@"
     else
-        "$git_program" --no-optional-locks --no-pager -c core.fsmonitor=false \
-            -c core.hooksPath=/dev/null -c protocol.allow=never -c color.ui=false \
-            -c core.quotePath=false -c status.relativePaths=false -c advice.statusHints=false \
-            -C . "$@" </dev/null 2>/dev/null
+        set -- -c core.fsmonitor=false -c core.hooksPath=/dev/null -c protocol.allow=never \
+            -c color.ui=false -c core.quotePath=false -c status.relativePaths=false \
+            -c advice.statusHints=false -C . "$@"
     fi
+    bounded_git --no-optional-locks --no-pager "$@"
 }
 state_directory=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/spaceterm-repository.XXXXXXXXXX" 2>/dev/null) || {
     emit_empty "$repository_kind" failed
     exit 0
 }
 cleanup_repository_state() {
+    kill "$deadline_watchdog" 2>/dev/null
     rm -rf "$state_directory"
 }
 cancel_repository_read() {
@@ -933,8 +946,31 @@ cancel_repository_read() {
     trap - EXIT HUP INT TERM
     exit 129
 }
+deadline_watchdog=
 trap cleanup_repository_state EXIT
 trap cancel_repository_read HUP INT TERM
+# Closing the SSH channel signals nothing to a session without a terminal, so the script ends its
+# own work before the local deadline. When the shell leads its process group, as under sshd, the
+# signal reaches every program git started; otherwise it reaches git and the script.
+script_process=$$
+case $(ps -o pgid= -p "$script_process" 2>/dev/null | tr -d '[:space:]') in
+    "$script_process") script_group=1 ;;
+    *) script_group=0 ;;
+esac
+(
+    trap 'kill "$deadline_sleep" 2>/dev/null; exit 0' TERM
+    sleep __REMOTE_DEADLINE_SECONDS__ &
+    deadline_sleep=$!
+    wait "$deadline_sleep" || exit 0
+    if [ "$script_group" = 1 ]; then
+        kill -TERM 0
+    else
+        IFS= read -r running_git < "$state_directory/running" &&
+            kill -TERM "$running_git" 2>/dev/null
+        kill -TERM "$script_process" 2>/dev/null
+    fi
+) </dev/null >/dev/null 2>&1 &
+deadline_watchdog=$!
 emit_file_field() {
     field_length=$(LC_ALL=C wc -c < "$1" | tr -d '[:space:]') || exit 70
     printf '%s:' "$field_length"
@@ -949,7 +985,7 @@ emit_file_field() {
 // hardening overrides. Reading configuration runs no hook and no fsmonitor. Exact keys come first
 // so a cut at the field limit drops only remote URLs.
 const REPOSITORY_PROBE_SCRIPT: &str = r#"read_git_config() {
-    "$git_program" --no-optional-locks --no-pager -C . config -z "$@" </dev/null 2>/dev/null
+    bounded_git --no-optional-locks --no-pager -C . config -z "$@"
 }
 append_config_value() {
     if read_git_config --get "$1" > "$state_directory/config-value"; then

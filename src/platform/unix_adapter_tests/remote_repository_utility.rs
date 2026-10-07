@@ -6,6 +6,7 @@ use std::io::Write;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 /// Where the fixtures look for git, in the order a person's PATH usually lists them.
 const GIT_DIRECTORIES: [&str; 4] = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
@@ -524,6 +525,96 @@ fn repository_count_should_not_fetch_through_a_transport_the_repository_allows()
     assert!(
         missing(),
         "the count fetched through the repository's transport"
+    );
+    fixture.assert_no_staging_left();
+}
+
+/// Runs `script` as sshd would, in a shell that leads its own process group, and returns how long
+/// it took.
+fn run_as_session_leader(fixture: &GitFixture, script: &[u8]) -> Duration {
+    use std::os::unix::process::CommandExt;
+
+    let started = Instant::now();
+    let mut child = Command::new("/bin/sh")
+        .current_dir(&fixture.root)
+        .env_clear()
+        .env("HOME", &fixture.home)
+        .env("PATH", &fixture.search_path)
+        .env("TMPDIR", &fixture.root)
+        .process_group(0)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(script).unwrap();
+    child.wait().unwrap();
+    started.elapsed()
+}
+
+fn process_exists(process: libc::pid_t) -> bool {
+    // SAFETY: signal 0 only checks that the process exists.
+    unsafe { libc::kill(process, 0) == 0 }
+}
+
+#[test]
+fn repository_count_should_end_every_program_git_started_at_its_remote_deadline() {
+    let Some(fixture) = GitFixture::new("deadline") else {
+        return;
+    };
+    let repository = fixture.repository("work");
+    let filter = fixture.path("blocking-filter");
+    let filter_process = fixture.path("filter-process");
+    fs::write(
+        &filter,
+        format!(
+            "#!/bin/sh\necho $$ > '{}'\nexec sleep 30\n",
+            filter_process.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&filter, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(
+        repository.join(".gitattributes"),
+        b"tracked filter=blocking\n",
+    )
+    .unwrap();
+    fixture.checked_git(
+        &repository,
+        &["config", "filter.blocking.clean", filter.to_str().unwrap()],
+    );
+    // A newer file of the same size makes status read it through the clean filter.
+    std::thread::sleep(Duration::from_millis(1100));
+    fs::write(repository.join("tracked"), b"next\n").unwrap();
+    let script = String::from_utf8(
+        build_repository_script(
+            REPOSITORY_COUNT_KIND,
+            repository.to_str().unwrap(),
+            FsmonitorPolicy::Disabled,
+        )
+        .unwrap(),
+    )
+    .unwrap()
+    .replace("sleep 50 &", "sleep 1 &");
+
+    let elapsed = run_as_session_leader(&fixture, script.as_bytes());
+
+    assert!(
+        elapsed < Duration::from_secs(20),
+        "the script outlived its deadline"
+    );
+    let process: libc::pid_t = fs::read_to_string(&filter_process)
+        .expect("the clean filter should have started")
+        .trim()
+        .parse()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while process_exists(process) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        !process_exists(process),
+        "the clean filter outlived the read"
     );
     fixture.assert_no_staging_left();
 }
