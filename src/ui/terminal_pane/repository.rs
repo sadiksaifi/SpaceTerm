@@ -483,8 +483,8 @@ fn render_popover(
             .text_color(gpui_color(muted))
             .child(popover.footer),
     );
-    // The popover hangs from the Pane's top trailing corner like a macOS popover, and may extend
-    // past a short or narrow Pane; the window's edges bound it instead.
+    // The popover hangs from the Pane's top trailing corner and may extend past a short or narrow
+    // Pane; the window's edges bound it instead.
     let placement = anchored()
         .anchor(gpui::Anchor::TopRight)
         .snap_to_window_with_margin(spacing(POPOVER_INSET))
