@@ -76,8 +76,11 @@ const PANE_CAPTION_HEIGHT: f32 = 32.0;
 const PANE_CAPTION_VERTICAL_PADDING: f32 = 4.0;
 const PANE_CAPTION_LEFT_PADDING: f32 = 10.0;
 const PANE_CAPTION_RIGHT_PADDING: f32 = 5.0;
-/// Width reserved by the middle dot that separates a directory from its status.
+/// Width reserved by the middle dot that separates a directory from its status, including the
+/// air on both sides.
 const PANE_CAPTION_SEPARATOR_WIDTH: f32 = 17.25;
+/// The air before a directory's status, which stays when the middle dot is dropped.
+const PANE_STATUS_LEADING_GAP: f32 = 5.0;
 const PANE_STATUS_ICON_GAP: f32 = 6.0;
 /// Width reserved by the chevron that separates a Pane's origin from its directory.
 const PANE_ORIGIN_SEPARATOR_WIDTH: f32 = 18.4;
@@ -131,6 +134,9 @@ struct CaptionMetrics {
     host: Pixels,
     directory: Pixels,
     name: Pixels,
+    /// The air before the status, kept with the name.
+    status_gap: Pixels,
+    /// The middle dot and the air after it.
     status_separator: Pixels,
     label: Pixels,
     /// Repository Status widths, absent when the Pane shows none.
@@ -166,8 +172,13 @@ impl CaptionMetrics {
             },
             directory: measure_caption_segment(&text.directory, window, appearance),
             name: measure_caption_segment(&text.name, window, appearance),
+            status_gap: if text.has_directory {
+                appearance.spacing(PANE_STATUS_LEADING_GAP)
+            } else {
+                px(0.0)
+            },
             status_separator: if text.has_directory {
-                appearance.spacing(PANE_CAPTION_SEPARATOR_WIDTH)
+                appearance.spacing(PANE_CAPTION_SEPARATOR_WIDTH - PANE_STATUS_LEADING_GAP)
             } else {
                 px(0.0)
             },
@@ -289,7 +300,7 @@ impl CaptionLayout {
         // first one that does not fit ends the ladder, so segments never reappear out of order.
         // A branch that does not fit whole is truncated when its narrowest form fits, and ends the
         // ladder either way.
-        let mut claimed = metrics.name;
+        let mut claimed = metrics.name + metrics.status_gap;
         let mut shown = [false; CAPTION_LADDER];
         let mut branch_limit = None;
         for (index, (admitted, width)) in shown.iter_mut().zip(metrics.ladder()).enumerate() {
@@ -297,7 +308,9 @@ impl CaptionLayout {
                 continue;
             };
             if claimed + width > available {
-                let remaining = f32::from(available - claimed);
+                // The branch's leading gap sits outside its width limit.
+                let remaining =
+                    f32::from(available - claimed) - PANE_REPOSITORY_PART_GAP * spacing_scale;
                 if index == 0 && remaining >= PANE_REPOSITORY_MINIMUM_BRANCH_WIDTH * spacing_scale {
                     *admitted = true;
                     branch_limit = Some(remaining.floor() as u32);
@@ -356,7 +369,9 @@ fn measure_caption_segment(
     if text.is_empty() {
         return px(0.0);
     }
-    appearance.typography.measure(TextRole::Body, text, window)
+    // Layout rounds each text box to whole pixels, so a fractional measure would let the ladder
+    // admit a segment that then squeezes the name.
+    px(f32::from(appearance.typography.measure(TextRole::Body, text, window)).ceil())
 }
 
 fn minimum_pane_width(appearance: &super::appearance::ChromeAppearance) -> f32 {
@@ -2858,17 +2873,23 @@ fn render_caption_identity(
                             format!("pane-caption-status-separator-{}", pane_id.get())
                         })
                         .flex_shrink_0()
-                        .mx(appearance.spacing(5.0))
+                        .ml(appearance.spacing(5.0))
                         .text_color(gpui_color(color))
                         .child("·"),
                 )
             })
-            .child(render_pane_status(
-                pane_id,
-                (text.progress, text.glyph, attention),
-                paint,
-                appearance,
-            ))
+            .child(
+                div()
+                    .debug_selector(move || format!("pane-caption-status-{}", pane_id.get()))
+                    .flex_shrink_0()
+                    .ml(appearance.spacing(PANE_STATUS_LEADING_GAP))
+                    .child(render_pane_status(
+                        pane_id,
+                        (text.progress, text.glyph, attention),
+                        paint,
+                        appearance,
+                    )),
+            )
             .when(layout.show_label && !text.label.is_empty(), |row| {
                 row.child(
                     div()
@@ -4697,6 +4718,78 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_narrowing_caption_with_a_branch_should_keep_its_name_whole_and_apart_from_its_status(
+        cx: &mut TestAppContext,
+    ) {
+        let (root, view, records, cx) = caption_view(cx);
+        let mut screen =
+            ScreenSnapshot::from_test_parts_at(Arc::from([]), Default::default(), "zsh", 1);
+        let metadata = Arc::make_mut(&mut Arc::make_mut(&mut screen).metadata);
+        metadata.context = crate::terminal::metadata::TerminalMetadataContext::local(
+            crate::local_path::LocalPathSemantics::Posix,
+            "/Users/tester",
+            crate::terminal::metadata::LocalMachine::new(
+                Some("tester"),
+                Some("workstation"),
+                Some("/Users/tester"),
+            ),
+        );
+        metadata.directory.path = Arc::from("/Users/tester");
+        records
+            .event_sender(1)
+            .unwrap()
+            .try_send(TerminalSessionEvent::Screen(screen))
+            .unwrap();
+        cx.run_until_parked();
+        view.update(cx, |view, cx| {
+            view.pane_captions
+                .entry(PaneId::new(1))
+                .or_default()
+                .repository = Some(RepositoryCaption {
+                glyph: HeadGlyph::Branch,
+                branch: "feat/workbench-fixture".into(),
+                mark: Some(RepositoryMark::Changes),
+                detail: None,
+                divergence: None,
+                dimmed: false,
+                accessible_label: "Repository Status, feat/workbench-fixture".into(),
+            });
+            cx.notify();
+        });
+        crate::ui::settle_hover(cx);
+        let name_width = cx.debug_bounds("pane-caption-name-1").unwrap().size.width;
+
+        let mut truncated = 0;
+        for width in (130..420).step_by(2) {
+            root.update(cx, |root, cx| {
+                root.width = px(width as f32);
+                cx.notify();
+            });
+            cx.run_until_parked();
+            let name = cx.debug_bounds("pane-caption-name-1").unwrap();
+            let status = cx.debug_bounds("pane-caption-status-1").unwrap();
+            let Some(branch) = cx.debug_bounds("pane-repository-branch-1") else {
+                continue;
+            };
+            assert!(
+                name.size.width >= name_width - px(0.5),
+                "at {width}: the branch {branch:?} squeezed the name {name:?}"
+            );
+            assert!(
+                status.left() - name.right() >= px(PANE_STATUS_LEADING_GAP - 0.5),
+                "at {width}: {name:?} {status:?}"
+            );
+            if cx.debug_bounds("pane-caption-status-separator-1").is_none() {
+                truncated += 1;
+            }
+        }
+        assert!(
+            truncated > 0,
+            "some widths show the branch without the middle dot"
+        );
+    }
+
+    #[gpui::test]
     fn caption_vertical_spacing_should_be_symmetric_in_both_densities(cx: &mut TestAppContext) {
         let (_, _, _, cx) = caption_view(cx);
         for spacing_scale in [1.0, 1.25] {
@@ -4924,7 +5017,8 @@ mod tests {
             host: px(60.0),
             directory: px(120.0),
             name: px(40.0),
-            status_separator: px(PANE_CAPTION_SEPARATOR_WIDTH),
+            status_gap: px(PANE_STATUS_LEADING_GAP),
+            status_separator: px(PANE_CAPTION_SEPARATOR_WIDTH - PANE_STATUS_LEADING_GAP),
             label: px(30.0),
             repository: None,
         };
@@ -5191,7 +5285,8 @@ mod tests {
             host: px(60.0),
             directory: px(120.0),
             name: px(40.0),
-            status_separator: px(PANE_CAPTION_SEPARATOR_WIDTH),
+            status_gap: px(PANE_STATUS_LEADING_GAP),
+            status_separator: px(PANE_CAPTION_SEPARATOR_WIDTH - PANE_STATUS_LEADING_GAP),
             label: px(30.0),
             repository: Some(repository),
         };
@@ -5245,7 +5340,7 @@ mod tests {
 
         let truncated = resolve(metrics, controls + 89.0);
         assert!(truncated.repository.show_branch);
-        assert_eq!(truncated.repository.branch_limit, Some(49));
+        assert_eq!(truncated.repository.branch_limit, Some(40));
         assert!(!truncated.show_status_separator);
         assert!(!resolve(metrics, controls + 75.0).repository.show_branch);
 
@@ -5270,7 +5365,8 @@ mod tests {
             host: px(60.0),
             directory: px(120.0),
             name: px(40.0),
-            status_separator: px(PANE_CAPTION_SEPARATOR_WIDTH),
+            status_gap: px(PANE_STATUS_LEADING_GAP),
+            status_separator: px(PANE_CAPTION_SEPARATOR_WIDTH - PANE_STATUS_LEADING_GAP),
             label: px(30.0),
             repository: Some(RepositoryCaptionMetrics {
                 anchor: px(20.0),
@@ -5298,7 +5394,7 @@ mod tests {
             )
         };
 
-        assert_eq!(resolve(1.0).repository.branch_limit, Some(49));
+        assert_eq!(resolve(1.0).repository.branch_limit, Some(40));
         let hidden = resolve(0.0);
         assert!(hidden.repository.show_branch);
         assert_eq!(hidden.repository.branch_limit, None);
