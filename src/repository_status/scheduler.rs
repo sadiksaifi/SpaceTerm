@@ -657,7 +657,11 @@ impl RepositoryScheduler {
             Err(PullRequestError::ToolMissing) => {
                 return self.set_github_cli(GitHubCliStatus::NotFound, now);
             }
-            Err(PullRequestError::Unavailable | PullRequestError::InvalidResponse) => {}
+            Err(
+                PullRequestError::Unavailable
+                | PullRequestError::InvalidResponse
+                | PullRequestError::Cancelled,
+            ) => {}
         }
         if again {
             self.lookup_pull_request(&ticket.key, now);
