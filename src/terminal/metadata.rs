@@ -369,6 +369,11 @@ pub(crate) struct TerminalMetadataSnapshot {
     pub(crate) freshness: MetadataFreshness,
     pub(crate) title: TitleMetadata,
     pub(crate) directory: DirectoryMetadata,
+    /// The Repository Source Directory: the reported directory as of the last prompt. Reports
+    /// that arrive while a command runs apply only when it finishes.
+    pub(crate) repository_directory: Arc<str>,
+    /// Completed commands since the session started.
+    pub(crate) finished_commands: u64,
     pub(crate) prompt_zone: PromptZone,
     pub(crate) command: Option<CommandMetadata>,
     /// Whether changing title frames provide recent animation evidence.
@@ -396,6 +401,14 @@ impl TerminalMetadataSnapshot {
             .then(|| self.context.current_directory(&self.directory.path))
             .flatten()
     }
+
+    /// The Repository Source Directory these facts establish, or none once they have gone stale.
+    #[allow(dead_code, reason = "the Repository Status store reads it")]
+    pub(crate) fn repository_source_directory(&self) -> Option<CurrentDirectory> {
+        (self.freshness == MetadataFreshness::Live)
+            .then(|| self.context.current_directory(&self.repository_directory))
+            .flatten()
+    }
 }
 
 pub(crate) struct MetadataTracker {
@@ -403,6 +416,7 @@ pub(crate) struct MetadataTracker {
     epoch: Instant,
     fallback_title: Arc<str>,
     command_started: Option<Instant>,
+    deferred_repository_directory: Option<Arc<str>>,
     progress_expiry: Option<Instant>,
     title_animation: TitleActivity,
 }
@@ -437,10 +451,12 @@ impl MetadataTracker {
                     value: Arc::from(sanitize_title(fallback_title)),
                     provenance: TitleProvenance::Fallback,
                 },
+                repository_directory: Arc::from(initial_directory.as_str()),
                 directory: DirectoryMetadata {
                     path: Arc::from(initial_directory),
                     provenance: DirectoryProvenance::Initial,
                 },
+                finished_commands: 0,
                 prompt_zone: PromptZone::Unknown,
                 command: None,
                 title_activity: false,
@@ -450,6 +466,7 @@ impl MetadataTracker {
             epoch,
             fallback_title: Arc::from(sanitize_title(fallback_title)),
             command_started: None,
+            deferred_repository_directory: None,
             progress_expiry: None,
             title_animation: TitleActivity::default(),
         }
@@ -494,7 +511,18 @@ impl MetadataTracker {
         let Some(directory) = parse_osc7_directory(value, &self.snapshot.context) else {
             return false;
         };
+        let command_running = self
+            .snapshot
+            .command
+            .as_ref()
+            .is_some_and(|command| command.state == CommandState::Running);
+        if command_running {
+            self.deferred_repository_directory = Some(Arc::clone(&directory.path));
+        }
         self.update(|snapshot| {
+            if !command_running {
+                snapshot.repository_directory = Arc::clone(&directory.path);
+            }
             snapshot.directory = directory;
             if snapshot.title.provenance != TitleProvenance::TerminalControl
                 && let Some(title) = snapshot
@@ -549,7 +577,12 @@ impl MetadataTracker {
             return false;
         }
         let started = self.command_started.take().unwrap_or(self.epoch);
+        let deferred_directory = self.deferred_repository_directory.take();
         self.retire_command_reports(|snapshot| {
+            if let Some(directory) = deferred_directory {
+                snapshot.repository_directory = directory;
+            }
+            snapshot.finished_commands = snapshot.finished_commands.saturating_add(1);
             snapshot.command = Some(CommandMetadata {
                 line: snapshot
                     .command
@@ -1169,6 +1202,82 @@ mod tests {
         assert_eq!(stale.revision, live.revision + 1);
         assert!(!Arc::ptr_eq(&live, &stale));
     }
+    fn local_tracker(epoch: Instant) -> MetadataTracker {
+        MetadataTracker::new(
+            LocalPathSemantics::Posix,
+            "/initial",
+            "zsh",
+            LocalMachine::new(None, Some("mac.local"), None),
+            epoch,
+        )
+    }
+
+    #[test]
+    fn repository_source_follows_directory_reports_at_the_prompt() {
+        let mut tracker = local_tracker(Instant::now());
+        assert_eq!(&*tracker.snapshot().repository_directory, "/initial");
+
+        assert!(tracker.set_reported_directory("file://mac.local/project"));
+
+        assert_eq!(&*tracker.snapshot().repository_directory, "/project");
+        assert_eq!(
+            tracker.snapshot().repository_source_directory(),
+            Some(CurrentDirectory::Local("/project".into()))
+        );
+    }
+
+    #[test]
+    fn repository_source_ignores_reports_while_a_command_runs_until_it_finishes() {
+        let epoch = Instant::now();
+        let mut tracker = local_tracker(epoch);
+        tracker.set_reported_directory("file://mac.local/project");
+        tracker.apply_semantic_prompt("C;cmdline=docker%20run", epoch);
+
+        assert!(tracker.set_reported_directory("file://localhost/container"));
+        assert_eq!(&*tracker.snapshot().directory.path, "/container");
+        assert_eq!(&*tracker.snapshot().repository_directory, "/project");
+
+        tracker.apply_semantic_prompt("D;0", epoch);
+        assert_eq!(&*tracker.snapshot().repository_directory, "/container");
+        tracker.set_reported_directory("file://mac.local/project");
+        assert_eq!(&*tracker.snapshot().repository_directory, "/project");
+    }
+
+    #[test]
+    fn a_prompt_without_completion_finishes_the_command_for_the_repository_source() {
+        let epoch = Instant::now();
+        let mut tracker = local_tracker(epoch);
+        tracker.apply_semantic_prompt("C", epoch);
+        tracker.set_reported_directory("file://mac.local/elsewhere");
+        assert_eq!(tracker.snapshot().finished_commands, 0);
+
+        tracker.apply_semantic_prompt("A", epoch);
+
+        assert_eq!(&*tracker.snapshot().repository_directory, "/elsewhere");
+        assert_eq!(tracker.snapshot().finished_commands, 1);
+    }
+
+    #[test]
+    fn finished_commands_count_each_completion_once() {
+        let epoch = Instant::now();
+        let mut tracker = local_tracker(epoch);
+        for _ in 0..2 {
+            tracker.apply_semantic_prompt("C", epoch);
+            tracker.apply_semantic_prompt("D;0", epoch);
+            tracker.apply_semantic_prompt("D;0", epoch);
+        }
+
+        assert_eq!(tracker.snapshot().finished_commands, 2);
+    }
+
+    #[test]
+    fn stale_metadata_has_no_repository_source() {
+        let mut tracker = local_tracker(Instant::now());
+        tracker.mark_stale();
+
+        assert_eq!(tracker.snapshot().repository_source_directory(), None);
+    }
+
     #[test]
     fn remote_osc7_accepts_machine_hostname_without_local_filesystem_authority() {
         let context = TerminalMetadataContext::Remote(RemoteTerminalMetadataContext::new(
