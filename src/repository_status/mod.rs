@@ -15,6 +15,7 @@ mod display_text;
 pub(crate) mod operation;
 pub(crate) mod porcelain;
 pub(crate) mod presentation;
+pub(crate) mod remote_url;
 pub(crate) mod scheduler;
 pub(crate) mod tools;
 
@@ -305,6 +306,21 @@ pub(crate) struct PullRequest {
     pub(crate) url: Arc<str>,
     pub(crate) head: Arc<str>,
     pub(crate) base: Arc<str>,
+}
+
+/// A GitHub repository named by a remote URL: the Pull Request lookup's `--repo` target.
+#[derive(Clone, Eq, Hash, PartialEq)]
+pub(crate) struct GitHubRepository {
+    /// Lowercase host name, such as `github.com` or an Enterprise host.
+    pub(crate) host: Arc<str>,
+    pub(crate) owner: Arc<str>,
+    pub(crate) name: Arc<str>,
+}
+
+impl fmt::Debug for GitHubRepository {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("GitHubRepository(<redacted>)")
+    }
 }
 
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
