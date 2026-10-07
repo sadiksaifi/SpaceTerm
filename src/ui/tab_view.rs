@@ -219,15 +219,19 @@ struct RepositoryCaptionLayout {
 }
 
 impl CaptionLayout {
+    /// `controls_reveal` is how far the Pane controls have eased into view; hidden controls free
+    /// their width for the caption's other segments.
     fn resolve(
         caption: &PaneCaption,
         width: Pixels,
+        controls_reveal: f32,
         window: &Window,
         appearance: &super::appearance::ChromeAppearance,
     ) -> Self {
         Self::from_metrics(
             caption.has_multiple_panes,
             width,
+            controls_reveal,
             CaptionMetrics::measure(&caption.text, window, appearance),
             appearance.spacing_scale,
             f32::from(appearance.icons.metrics(IconRole::Status).glyph_size),
@@ -242,6 +246,7 @@ impl CaptionLayout {
     fn from_metrics(
         has_multiple_panes: bool,
         width: Pixels,
+        controls_reveal: f32,
         metrics: CaptionMetrics,
         spacing_scale: f32,
         status_icon_size: f32,
@@ -270,15 +275,15 @@ impl CaptionLayout {
         } else {
             PANE_CONTROL_LEADING_GAP * spacing_scale
         };
+        let controls_extent = leading_gap
+            + controls_width(
+                control_count,
+                has_multiple_panes,
+                control_size,
+                spacing_scale,
+            );
         let available = (width
-            - px(fixed_width
-                + leading_gap
-                + controls_width(
-                    control_count,
-                    has_multiple_panes,
-                    control_size,
-                    spacing_scale,
-                )))
+            - px(fixed_width + controls_extent * controls_reveal.clamp(0.0, 1.0)))
         .max(px(0.0));
         // The name is always kept. Every other segment is admitted in priority order and the
         // first one that does not fit ends the ladder, so segments never reappear out of order.
@@ -1276,6 +1281,7 @@ impl TabView {
                 has_multiple_panes: true,
             },
             card_width,
+            1.0,
             window,
             appearance,
         );
@@ -2390,7 +2396,13 @@ fn render_pane_caption(
                     control.background,
                 );
             }
-            let layout = CaptionLayout::resolve(&caption, bounds.size.width, window, &appearance);
+            let layout = CaptionLayout::resolve(
+                &caption,
+                bounds.size.width,
+                controls_reveal,
+                window,
+                &appearance,
+            );
             let content = render_pane_caption_content(
                 caption,
                 controls_reveal,
@@ -2495,8 +2507,8 @@ fn render_pane_caption_content(
         // An unfocused Pane shows its controls only under the pointer.
         .opacity(controls_reveal);
     let control_count = usize::from(layout.show_splits) * 2 + usize::from(has_multiple_panes) * 2;
-    // Hidden controls keep their place, so the Repository Status slides over it to the trailing
-    // edge and back as the controls fade.
+    // Hidden controls give up their width, so the segments before them slide to the trailing edge
+    // and back as the controls fade.
     let controls_extent = if control_count == 0 {
         0.0
     } else {
@@ -2513,7 +2525,15 @@ fn render_pane_caption_content(
                 appearance.spacing_scale,
             )
     };
-    let repository_offset = px((1.0 - controls_reveal) * controls_extent);
+    let controls_slot = div()
+        .flex_shrink_0()
+        .w(px(controls_reveal * controls_extent))
+        .h_full()
+        .flex()
+        .items_center()
+        // The controls enter from the trailing edge, and a partly hidden control takes no clicks.
+        .justify_end()
+        .overflow_hidden();
     let actions = [
         (
             PaneCaptionAction::SplitRight,
@@ -2635,22 +2655,16 @@ fn render_pane_caption_content(
         })
         .child(caption_content)
         .when_some(repository, |row, repository| {
-            row.child(
-                div()
-                    .relative()
-                    .left(repository_offset)
-                    .flex_shrink_0()
-                    .child(render_repository_segment(
-                        pane_id,
-                        &repository,
-                        (terminal.downgrade(), view.clone()),
-                        layout.repository,
-                        appearance,
-                        &paint,
-                    )),
-            )
+            row.child(render_repository_segment(
+                pane_id,
+                &repository,
+                (terminal.downgrade(), view.clone()),
+                layout.repository,
+                appearance,
+                &paint,
+            ))
         })
-        .child(controls)
+        .child(controls_slot.child(controls))
         .into_any_element()
 }
 
@@ -4902,7 +4916,15 @@ mod tests {
             repository: None,
         };
         let resolve = |width: f32| {
-            CaptionLayout::from_metrics(false, px(width), metrics, 1.0, 13.0, PANE_CONTROL_SIZE)
+            CaptionLayout::from_metrics(
+                false,
+                px(width),
+                1.0,
+                metrics,
+                1.0,
+                13.0,
+                PANE_CONTROL_SIZE,
+            )
         };
         let controls = PANE_CAPTION_LEFT_PADDING
             + PANE_CAPTION_RIGHT_PADDING
@@ -5066,7 +5088,15 @@ mod tests {
             + controls_width(2, false, PANE_CONTROL_SIZE, 1.0)
             + 20.0;
         let resolve = |metrics, width: f32| {
-            CaptionLayout::from_metrics(false, px(width), metrics, 1.0, 13.0, PANE_CONTROL_SIZE)
+            CaptionLayout::from_metrics(
+                false,
+                px(width),
+                1.0,
+                metrics,
+                1.0,
+                13.0,
+                PANE_CONTROL_SIZE,
+            )
         };
         let shown = |layout: CaptionLayout| {
             (
@@ -5119,6 +5149,48 @@ mod tests {
         );
     }
 
+    #[test]
+    fn hidden_pane_controls_should_free_their_width_for_the_caption() {
+        let metrics = CaptionMetrics {
+            user: px(40.0),
+            host: px(60.0),
+            directory: px(120.0),
+            name: px(40.0),
+            status_separator: px(PANE_CAPTION_SEPARATOR_WIDTH),
+            label: px(30.0),
+            repository: Some(RepositoryCaptionMetrics {
+                anchor: px(20.0),
+                branch: px(50.0),
+                detail: Some(px(70.0)),
+                divergence: Some(px(30.0)),
+            }),
+        };
+        let controls = PANE_CONTROL_LEADING_GAP + controls_width(2, false, PANE_CONTROL_SIZE, 1.0);
+        let width = PANE_CAPTION_LEFT_PADDING
+            + PANE_CAPTION_RIGHT_PADDING
+            + PANE_STATUS_WIDTH
+            + 20.0
+            + controls
+            + 89.0;
+        let resolve = |reveal| {
+            CaptionLayout::from_metrics(
+                false,
+                px(width),
+                reveal,
+                metrics,
+                1.0,
+                13.0,
+                PANE_CONTROL_SIZE,
+            )
+        };
+
+        assert_eq!(resolve(1.0).repository.branch_limit, Some(49));
+        let hidden = resolve(0.0);
+        assert!(hidden.repository.show_branch);
+        assert_eq!(hidden.repository.branch_limit, None);
+        assert!(hidden.show_splits, "hidden controls keep their set");
+    }
+
     /// A narrow Pane Caption without status retains Split controls above their width threshold.
     #[test]
     fn narrow_caption_without_status_should_keep_split_controls_above_the_control_threshold() {
@@ -5132,7 +5204,15 @@ mod tests {
             + PANE_CONTROL_LEADING_GAP
             + controls_width(2, false, PANE_CONTROL_SIZE, 1.0);
         let resolve = |width: f32| {
-            CaptionLayout::from_metrics(false, px(width), metrics, 1.0, 13.0, PANE_CONTROL_SIZE)
+            CaptionLayout::from_metrics(
+                false,
+                px(width),
+                1.0,
+                metrics,
+                1.0,
+                13.0,
+                PANE_CONTROL_SIZE,
+            )
         };
 
         let narrow = resolve(controls + 10.0);
