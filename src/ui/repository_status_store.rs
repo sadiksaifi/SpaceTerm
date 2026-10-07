@@ -19,8 +19,8 @@ use crate::repository_status::pull_request_lookup::GitHubCliLookup;
 use crate::repository_status::remote_read::{remote_change_summary, remote_probe_outcome};
 use crate::repository_status::remote_url::{GitHubHost, github_host};
 use crate::repository_status::scheduler::{
-    CountTicket, Interest, InterestId, RepositoryEffect, RepositoryScheduler, SchedulerUpdate,
-    SourceDirectory,
+    CountTicket, Interest, InterestId, ProbeTicket, RepositoryEffect, RepositoryScheduler,
+    SchedulerUpdate, SourceDirectory,
 };
 use crate::repository_status::tool_check::check_tools;
 use crate::repository_status::{
@@ -209,6 +209,7 @@ pub(crate) struct RepositoryStatusStore {
     watch_events: async_channel::Sender<RepositoryKey>,
     /// Each count in flight and the token that stops it once nothing presents its repository.
     counts: HashMap<RepositoryKey, (CountTicket, SshCancellationToken)>,
+    probes: HashMap<ProbeTicket, SshCancellationToken>,
     /// Whether each unverified host is a GitHub host, asked once per app session.
     github_hosts: Arc<Mutex<HashMap<Arc<str>, bool>>>,
     wake: Option<(Instant, Task<()>)>,
@@ -256,6 +257,7 @@ impl RepositoryStatusStore {
             watches: HashMap::new(),
             watch_events,
             counts: HashMap::new(),
+            probes: HashMap::new(),
             github_hosts: Arc::default(),
             wake: None,
             next_interest: 0,
@@ -398,10 +400,11 @@ impl RepositoryStatusStore {
                     ) else {
                         return;
                     };
-                    let cancellation = self.cancellation.clone();
+                    let cancellation = self.probe_cancellation(&ticket);
                     self.read(
                         move || reader.probe(&directory, &cancellation),
                         move |store, result, cx| {
+                            store.probes.remove(&ticket);
                             let result = result.unwrap_or(Err(RepositoryReadError::Unavailable));
                             let update =
                                 store
@@ -414,10 +417,11 @@ impl RepositoryStatusStore {
                 }
                 (RepositoryMachine::Remote(machine), SourceDirectory::Remote(directory)) => {
                     let reader = self.remote_reader(&machine);
-                    let cancellation = self.cancellation.clone();
+                    let cancellation = self.probe_cancellation(&ticket);
                     self.read(
                         move || remote_probe(reader, &directory, &cancellation),
                         move |store, result, cx| {
+                            store.probes.remove(&ticket);
                             let result = result.unwrap_or(Err(RepositoryReadError::Unavailable));
                             let update =
                                 store
@@ -555,6 +559,14 @@ impl RepositoryStatusStore {
                     cancellation.cancel();
                 }
             }
+            RepositoryEffect::CancelProbe { ticket } => {
+                if let Some(cancellation) = self.probes.remove(&ticket) {
+                    cancellation.cancel();
+                }
+                self.tools.waiting.retain(|effect| {
+                    !matches!(effect, RepositoryEffect::Probe { ticket: waiting, .. } if *waiting == ticket)
+                });
+            }
             RepositoryEffect::WakeAt(due) => self.wake_at(due, cx),
         }
     }
@@ -585,6 +597,14 @@ impl RepositoryStatusStore {
             .scheduler
             .pull_request_finished(ticket, result, Instant::now());
         self.apply(update, cx);
+    }
+
+    /// A cancellation for one probe, also cancelled with the store.
+    fn probe_cancellation(&mut self, ticket: &ProbeTicket) -> SshCancellationToken {
+        let cancellation =
+            SshCancellationToken::linked(&self.cancellation, &SshCancellationToken::default());
+        self.probes.insert(ticket.clone(), cancellation.clone());
+        cancellation
     }
 
     /// The local reader, or `None` after queueing or failing `effect` when git is not ready.

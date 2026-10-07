@@ -101,7 +101,7 @@ struct ProbeTarget {
 }
 
 /// Identifies one probe effect. Pass it back unchanged with the result.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct ProbeTicket {
     target: ProbeTarget,
     generation: u64,
@@ -168,6 +168,11 @@ pub(crate) enum RepositoryEffect {
     CancelCount {
         key: RepositoryKey,
     },
+    /// Stop the probe `ticket` names. Nothing presents its directory any more, and its result is
+    /// rejected.
+    CancelProbe {
+        ticket: ProbeTicket,
+    },
     /// Call [`RepositoryScheduler::tick`] at or after this instant.
     WakeAt(Instant),
 }
@@ -183,6 +188,7 @@ impl fmt::Debug for RepositoryEffect {
             }
             Self::StopWatch { .. } => formatter.write_str("StopWatch"),
             Self::CancelCount { .. } => formatter.write_str("CancelCount"),
+            Self::CancelProbe { .. } => formatter.write_str("CancelProbe"),
             Self::WakeAt(instant) => write!(formatter, "WakeAt({instant:?})"),
         }
     }
@@ -899,6 +905,38 @@ impl RepositoryScheduler {
     }
 
     /// Whether a finished probe still has a reader that may read now.
+    /// Stops each probe whose directory no Interest is at and whose repositories are gone, or
+    /// every probe once Repository Status is off. A probe an Interest merely cannot read yet,
+    /// such as a hidden remote Pane's, keeps running.
+    fn cancel_obsolete_probes(&mut self) {
+        let obsolete: Vec<ProbeTarget> = self
+            .probes
+            .iter()
+            .filter(|(target, probe)| {
+                !self.toggles.show_repository_status
+                    || (!self
+                        .interests
+                        .values()
+                        .any(|interest| interest.is_at(target))
+                        && !probe
+                            .for_keys
+                            .iter()
+                            .any(|key| self.repositories.contains_key(key)))
+            })
+            .map(|(target, _)| target.clone())
+            .collect();
+        for target in obsolete {
+            if let Some(probe) = self.probes.remove(&target) {
+                self.effects.push(RepositoryEffect::CancelProbe {
+                    ticket: ProbeTicket {
+                        target,
+                        generation: probe.in_flight.generation,
+                    },
+                });
+            }
+        }
+    }
+
     fn is_wanted(&self, target: &ProbeTarget, for_keys: &HashSet<RepositoryKey>) -> bool {
         if !self.toggles.show_repository_status {
             return false;
@@ -1157,7 +1195,6 @@ impl RepositoryScheduler {
         for (key, repository) in std::mem::take(&mut self.repositories) {
             self.stop_repository(key, &repository);
         }
-        self.probes.clear();
         self.probe_cache.clear();
         self.pull_requests.clear();
         for interest in self.interests.values_mut() {
@@ -1169,6 +1206,7 @@ impl RepositoryScheduler {
 
     /// Recomputes every view and reports the ones that changed.
     fn finish(&mut self) -> SchedulerUpdate {
+        self.cancel_obsolete_probes();
         let views: Vec<(InterestId, RepositoryView)> = self
             .interests
             .iter()
@@ -1657,6 +1695,13 @@ mod tests {
             })
         }
 
+        fn cancelled_probes(&mut self) -> Vec<ProbeTicket> {
+            self.drain(|effect| match effect {
+                RepositoryEffect::CancelProbe { ticket } => Some(ticket.clone()),
+                _ => None,
+            })
+        }
+
         fn cancelled_counts(&mut self) -> Vec<RepositoryKey> {
             self.drain(|effect| match effect {
                 RepositoryEffect::CancelCount { key } => Some(key.clone()),
@@ -1716,6 +1761,35 @@ mod tests {
         assert_eq!(harness.changed, vec![PANE]);
         assert_eq!(harness.status(PANE).changes, ChangeState::Known(changes(4)));
         assert_eq!(harness.status(PANE).read_failure, None);
+    }
+
+    #[test]
+    fn a_probe_nothing_waits_for_should_be_stopped() {
+        let key = local_key("/src/app");
+        let mut harness = Harness::new();
+        harness.register(PANE, local_interest("/src/blocked"));
+        let (blocked, _) = harness.only_probe();
+        harness.register(OTHER, local_interest("/src/blocked"));
+        assert!(
+            harness.probes().is_empty(),
+            "the second Pane joins the probe"
+        );
+
+        harness.unregister(PANE);
+        assert!(
+            harness.cancelled_probes().is_empty(),
+            "another Pane still waits for the directory"
+        );
+        harness.unregister(OTHER);
+        assert_eq!(harness.cancelled_probes(), vec![blocked.clone()]);
+        // A late answer is rejected.
+        harness.finish_probe(blocked, Ok(on_branch(&key, "main")));
+        assert!(harness.counts().is_empty());
+
+        harness.register(PANE, local_interest("/src/blocked"));
+        let (blocked, _) = harness.only_probe();
+        harness.set_toggles(false, true);
+        assert_eq!(harness.cancelled_probes(), vec![blocked]);
     }
 
     #[test]
@@ -2405,6 +2479,7 @@ mod tests {
         assert_eq!(harness.changed, vec![PANE]);
         assert!(harness.hidden(PANE));
         assert_eq!(harness.watch_stops(), vec![key.clone()]);
+        assert_eq!(harness.cancelled_probes(), vec![probe.clone()]);
 
         harness.finish_probe(probe, Ok(on_branch(&key, "main")));
         harness.command_finished(PANE, 2);
