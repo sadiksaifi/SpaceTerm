@@ -16,7 +16,7 @@ use super::{
     ChangeState, ChangeSummary, FsmonitorPolicy, Freshness, GitHubCliStatus, ProbeOutcome,
     ProbedRepository, PullRequest, PullRequestError, RepositoryConfig, RepositoryHead,
     RepositoryKey, RepositoryMachine, RepositoryReadError, RepositoryRoot, RepositoryStatus,
-    RepositoryView, WatchDirectory,
+    RepositoryStatusPreferences, RepositoryView, WatchDirectory,
 };
 
 /// How long remote triggers for one repository or Interest gather before one read runs.
@@ -92,23 +92,6 @@ pub(crate) struct Interest {
     pub(crate) available: bool,
     /// The Pane's finished command count at registration. Sidebar rows pass 0.
     pub(crate) finished_commands: u64,
-}
-
-/// The Settings that gate Repository Status and Pull Requests.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct RepositoryStatusToggles {
-    pub(crate) show_repository_status: bool,
-    /// Effective only while `show_repository_status` is on.
-    pub(crate) show_pull_requests: bool,
-}
-
-impl Default for RepositoryStatusToggles {
-    fn default() -> Self {
-        Self {
-            show_repository_status: true,
-            show_pull_requests: true,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -307,7 +290,7 @@ struct PullRequestState {
 
 /// Schedules every Repository Status read for one application.
 pub(crate) struct RepositoryScheduler {
-    toggles: RepositoryStatusToggles,
+    toggles: RepositoryStatusPreferences,
     github_cli: GitHubCliStatus,
     interests: BTreeMap<InterestId, InterestState>,
     repositories: HashMap<RepositoryKey, RepositoryState>,
@@ -319,7 +302,7 @@ pub(crate) struct RepositoryScheduler {
 }
 
 impl RepositoryScheduler {
-    pub(crate) fn new(toggles: RepositoryStatusToggles, github_cli: GitHubCliStatus) -> Self {
+    pub(crate) fn new(toggles: RepositoryStatusPreferences, github_cli: GitHubCliStatus) -> Self {
         Self {
             toggles,
             github_cli,
@@ -536,7 +519,7 @@ impl RepositoryScheduler {
     /// reads every Interest again.
     pub(crate) fn set_toggles(
         &mut self,
-        toggles: RepositoryStatusToggles,
+        toggles: RepositoryStatusPreferences,
         now: Instant,
     ) -> SchedulerUpdate {
         let pull_requests = self.pull_requests_enabled();
@@ -1172,9 +1155,7 @@ impl RepositoryScheduler {
 
 impl RepositoryScheduler {
     fn pull_requests_enabled(&self) -> bool {
-        self.toggles.show_repository_status
-            && self.toggles.show_pull_requests
-            && self.github_cli == GitHubCliStatus::SignedIn
+        self.toggles.pull_requests_enabled() && self.github_cli == GitHubCliStatus::SignedIn
     }
 
     fn pull_requests_toggled(&mut self, was_enabled: bool, now: Instant) {
@@ -1425,14 +1406,14 @@ mod tests {
 
     impl Harness {
         fn new() -> Self {
-            Self::with(RepositoryStatusToggles::default(), GitHubCliStatus::NotFound)
+            Self::with(RepositoryStatusPreferences::default(), GitHubCliStatus::NotFound)
         }
 
         fn signed_in() -> Self {
-            Self::with(RepositoryStatusToggles::default(), GitHubCliStatus::SignedIn)
+            Self::with(RepositoryStatusPreferences::default(), GitHubCliStatus::SignedIn)
         }
 
-        fn with(toggles: RepositoryStatusToggles, github_cli: GitHubCliStatus) -> Self {
+        fn with(toggles: RepositoryStatusPreferences, github_cli: GitHubCliStatus) -> Self {
             let start = Instant::now();
             Self {
                 scheduler: RepositoryScheduler::new(toggles, github_cli),
@@ -1509,7 +1490,7 @@ mod tests {
         }
 
         fn set_toggles(&mut self, show_repository_status: bool, show_pull_requests: bool) {
-            let toggles = RepositoryStatusToggles {
+            let toggles = RepositoryStatusPreferences {
                 show_repository_status,
                 show_pull_requests,
             };
@@ -2274,7 +2255,7 @@ mod tests {
     #[test]
     fn a_failed_pane_registered_while_off_reads_when_turned_on() {
         let mut harness = Harness::with(
-            RepositoryStatusToggles {
+            RepositoryStatusPreferences {
                 show_repository_status: false,
                 show_pull_requests: true,
             },
