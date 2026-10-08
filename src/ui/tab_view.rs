@@ -4111,9 +4111,19 @@ mod tests {
         TestTerminalSessionRecords,
         &mut VisualTestContext,
     ) {
+        let fonts = cx.update(|cx| crate::host_fonts::HostFonts::get(cx));
         cx.update(crate::ui::init).unwrap();
         cx.update(|cx| {
-            let active = Arc::new(super::super::appearance::ChromeAppearance::default());
+            // UI initialization installs a default profile; retain the fixture's font families.
+            cx.set_global(fonts);
+            let resolved = super::super::appearance_runtime::current(cx);
+            let active = Arc::new(super::super::appearance::ChromeAppearance {
+                typography: ChromeTypography::prepare(
+                    &resolved.chrome.typography,
+                    resolved.chrome.density,
+                ),
+                ..Default::default()
+            });
             let mut inactive = (*active).clone();
             inactive.active = false;
             cx.set_global(super::super::appearance::InstalledChrome {
