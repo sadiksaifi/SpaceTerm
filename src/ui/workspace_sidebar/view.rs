@@ -1449,7 +1449,6 @@ impl WorkspaceSidebar {
                     Icon::new(IconName::Copy, size, foreground).into_any_element()
                 })
                 .debug_selector("worktree-menu-row-copy-path"),
-            MenuEntry::separator(),
             MenuEntry::action("Close Tabs", WorktreeMenuCommand::CloseTabs)
                 .disabled(!worktree.has_tabs)
                 .icon(|foreground, size| {
@@ -1457,12 +1456,14 @@ impl WorkspaceSidebar {
                 })
                 .debug_selector("worktree-menu-row-close-tabs"),
         ];
-        entries.extend(remove_worktree_entry(
+        if let Some(remove) = remove_worktree_entry(
             WorktreeMenuCommand::Remove,
             worktree.removal,
             None,
             "worktree-menu-row-remove",
-        ));
+        ) {
+            entries.extend([MenuEntry::separator(), remove]);
+        }
         self.row_menu(
             key,
             format!("{selector}-menu"),
@@ -1696,7 +1697,15 @@ fn workspace_menu_entries(
             .debug_selector("workspace-menu-row-reconnect"),
         );
     }
-    entries.push(MenuEntry::separator());
+    entries.push(
+        MenuEntry::action(
+            "Close Workspace",
+            RowMenuCommand::Workspace(WorkspaceMenuCommand::Close),
+        )
+        .icon(|foreground, size| Icon::new(IconName::X, size, foreground).into_any_element())
+        .debug_selector("workspace-menu-row-close"),
+    );
+    // Remove Worktree deletes a directory, so it alone sits apart, below the divider.
     if let Some((worktree_id, name, removal)) = active_worktree
         && let Some(entry) = remove_worktree_entry(
             RowMenuCommand::Worktree(worktree_id, WorktreeMenuCommand::Remove),
@@ -1705,15 +1714,8 @@ fn workspace_menu_entries(
             "workspace-menu-row-remove-worktree",
         )
     {
-        entries.push(entry);
+        entries.extend([MenuEntry::separator(), entry]);
     }
-    entries.extend([MenuEntry::action(
-        "Close Workspace",
-        RowMenuCommand::Workspace(WorkspaceMenuCommand::Close),
-    )
-    .destructive(true)
-    .icon(|foreground, size| Icon::new(IconName::X, size, foreground).into_any_element())
-    .debug_selector("workspace-menu-row-close")]);
     entries
 }
 

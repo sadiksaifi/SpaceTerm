@@ -12495,3 +12495,71 @@ fn close_confirmation_restores_accessibility_focus_after_escape_and_cancel(
         assert!(records.dropped_session_ids().is_empty());
     }
 }
+
+#[gpui::test]
+fn row_menus_should_place_only_remove_worktree_below_the_divider(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        crate::ui::worktree_store::testing::install(cx);
+    });
+    let (manager, _records, cx) = workspace_manager(cx);
+    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
+    let linked_root = fixture.path().join("shell-integration");
+    // The Root Pane is in the linked Worktree, so the collapsed row stands for a removable one.
+    present_worktrees_containing(cx, &[&linked_root], 1);
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let linked = manager.read_with(cx, |manager, cx| {
+        manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows[1].worktree_id
+    });
+    let bounds = |selector: &'static str, cx: &mut VisualTestContext| {
+        cx.debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} was not rendered"))
+    };
+    // Rows of one group touch; a divider leaves a gap between two rows.
+    let gap = |above: &'static str, below: &'static str, cx: &mut VisualTestContext| {
+        f32::from(bounds(below, cx).top() - bounds(above, cx).bottom())
+    };
+
+    let row = worktree_row(workspace_id, linked, cx);
+    right_click(row, cx);
+    let worktree_menu = (
+        gap(
+            "worktree-menu-row-copy-path",
+            "worktree-menu-row-close-tabs",
+            cx,
+        ),
+        gap(
+            "worktree-menu-row-close-tabs",
+            "worktree-menu-row-remove",
+            cx,
+        ) > 0.0,
+    );
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    click(
+        format!("workspace-disclosure-{}-expanded", workspace_id.get()).leak(),
+        cx,
+    );
+    right_click(
+        format!("workspace-row-{}-active", workspace_id.get()).leak(),
+        cx,
+    );
+    let workspace_menu = (
+        gap(
+            "workspace-menu-row-pin-directory",
+            "workspace-menu-row-close",
+            cx,
+        ),
+        gap(
+            "workspace-menu-row-close",
+            "workspace-menu-row-remove-worktree",
+            cx,
+        ) > 0.0,
+    );
+
+    assert_eq!(
+        (worktree_menu, workspace_menu),
+        ((0.0, true), (0.0, true)),
+        "Close Tabs and Close Workspace stay in the first group, and Remove Worktree sits alone \
+         below the divider"
+    );
+}
