@@ -2787,8 +2787,17 @@ impl WorkspaceManager {
                 workspace_id,
                 focus_pane,
             } => {
-                if self.activate_workspace(workspace_id, window, cx) && focus_pane {
-                    self.focus(window, cx);
+                if self.activate_workspace(workspace_id, window, cx) {
+                    // An expanded row stands for the Tabs outside its Worktrees.
+                    if self
+                        .worktree_section(workspace_id, cx)
+                        .is_some_and(|section| section.expanded)
+                    {
+                        self.show_unscoped_tabs(workspace_id, focus_pane, window, cx);
+                    }
+                    if focus_pane {
+                        self.focus(window, cx);
+                    }
                 }
             }
             SidebarEvent::Command {

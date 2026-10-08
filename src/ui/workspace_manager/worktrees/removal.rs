@@ -14,6 +14,7 @@ use crate::close_confirmation::CloseTarget;
 use crate::domain::{WorkspaceId, WorktreeId, WorktreeKey};
 use crate::terminal::native_services::clipboard::TextClipboardTarget;
 use crate::ui::workspace_sidebar::WorktreeRemoval;
+use crate::worktrees::git::{RemovalCheck, WorktreeIdentity, WorktreeRemoveError};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RemovalAction {
@@ -32,6 +33,16 @@ struct RemovalTarget {
     missing: bool,
     tabs: usize,
     running: bool,
+}
+
+/// A removal the person confirmed. `force` is set only when they chose to discard changes, and
+/// `identity` names the Worktree they saw, when it was read.
+struct ConfirmedRemoval {
+    generation: u64,
+    workspace_id: WorkspaceId,
+    worktree_id: WorktreeId,
+    force: bool,
+    identity: Option<WorktreeIdentity>,
 }
 
 impl WorkspaceManager {
@@ -90,7 +101,10 @@ impl WorkspaceManager {
             let Some(main) = self.main_worktree_id(workspace_id, worktree_id) else {
                 return false;
             };
-            if !self.new_worktree_tab(workspace_id, main, window, cx) {
+            // A Tab that fails to start reports itself; keep every Tab of the Worktree then.
+            if !self.new_worktree_tab(workspace_id, main, window, cx)
+                || !manager.read(cx).has_tabs_outside(worktree_id)
+            {
                 return false;
             }
         }
@@ -140,15 +154,15 @@ impl WorkspaceManager {
             self.present_worktree_removal(generation, workspace_id, worktree_id, None, window, cx);
             return;
         }
-        let check = store.update(cx, |store, cx| store.has_changes(target.root, cx));
+        let check = store.update(cx, |store, cx| store.check_removal(target.root, cx));
         cx.spawn(async move |_, cx| {
-            let changes = check.await;
+            let check = check.await;
             let _ = window_handle.update(cx, |manager, window, cx| {
                 manager.present_worktree_removal(
                     generation,
                     workspace_id,
                     worktree_id,
-                    changes,
+                    check,
                     window,
                     cx,
                 );
@@ -167,7 +181,7 @@ impl WorkspaceManager {
         generation: u64,
         workspace_id: WorkspaceId,
         worktree_id: WorktreeId,
-        changes: Option<bool>,
+        check: Option<RemovalCheck>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -181,7 +195,8 @@ impl WorkspaceManager {
             self.sidebar_worktrees.removal = None;
             return;
         };
-        let discard = changes == Some(true);
+        let discard = check.as_ref().is_some_and(|check| check.changes);
+        let identity = check.map(|check| check.identity);
         let title = format!("Remove Worktree \u{201c}{}\u{201d}?", target.name);
         let mut message = Vec::new();
         if discard {
@@ -247,10 +262,13 @@ impl WorkspaceManager {
             let _ = window_handle.update(cx, |manager, window, cx| {
                 if confirmed {
                     manager.commit_worktree_removal(
-                        generation,
-                        workspace_id,
-                        worktree_id,
-                        discard,
+                        ConfirmedRemoval {
+                            generation,
+                            workspace_id,
+                            worktree_id,
+                            force: discard,
+                            identity: identity.clone(),
+                        },
                         window,
                         cx,
                     );
@@ -265,17 +283,63 @@ impl WorkspaceManager {
         }
     }
 
-    /// Closes the Worktree's Tabs, then has git delete its directory. Only a confirmed discard
-    /// passes `--force`.
+    /// Checks that the confirmed Worktree is still at its location, then closes its Tabs and has
+    /// git delete its directory. Only a confirmed discard passes `--force`, and git checks the
+    /// Worktree again right before deleting it.
     fn commit_worktree_removal(
         &mut self,
-        generation: u64,
-        workspace_id: WorkspaceId,
-        worktree_id: WorktreeId,
-        force: bool,
+        confirmed: ConfirmedRemoval,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.sidebar_worktrees.removal != Some(confirmed.generation) {
+            return;
+        }
+        let (Some(target), Some(store), Some(window_handle)) = (
+            self.removal_target(confirmed.workspace_id, confirmed.worktree_id, cx),
+            self.sidebar_worktrees
+                .workspaces
+                .get(&confirmed.workspace_id)
+                .map(|worktrees| worktrees.store.clone()),
+            window.window_handle().downcast::<WorkspaceManager>(),
+        ) else {
+            self.sidebar_worktrees.removal = None;
+            return;
+        };
+        let Some(expected) = confirmed.identity.clone() else {
+            self.remove_confirmed_worktree(confirmed, window, cx);
+            return;
+        };
+        let name = target.name.clone();
+        let check = store.update(cx, |store, cx| store.is_worktree(target.root, expected, cx));
+        cx.spawn(async move |_, cx| {
+            let result = check.await;
+            let _ = window_handle.update(cx, |manager, window, cx| match result {
+                Ok(()) => manager.remove_confirmed_worktree(confirmed, window, cx),
+                Err(error) => {
+                    if manager.sidebar_worktrees.removal == Some(confirmed.generation) {
+                        manager.sidebar_worktrees.removal = None;
+                        present_removal_failure(&name, confirmed.force, error, window, cx);
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn remove_confirmed_worktree(
+        &mut self,
+        confirmed: ConfirmedRemoval,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ConfirmedRemoval {
+            generation,
+            workspace_id,
+            worktree_id,
+            force,
+            identity: expected,
+        } = confirmed;
         if self.sidebar_worktrees.removal != Some(generation) {
             return;
         }
@@ -296,7 +360,14 @@ impl WorkspaceManager {
         }
         let name = target.name.clone();
         let removal = store.update(cx, |store, cx| {
-            store.remove(target.main_root, target.common, target.root, force, cx)
+            store.remove(
+                target.main_root,
+                target.common,
+                target.root,
+                force,
+                expected,
+                cx,
+            )
         });
         cx.spawn(async move |_, cx| {
             let result = removal.await;
@@ -304,8 +375,8 @@ impl WorkspaceManager {
                 if manager.sidebar_worktrees.removal == Some(generation) {
                     manager.sidebar_worktrees.removal = None;
                 }
-                if result.is_err() {
-                    present_removal_failure(&name, force, window, cx);
+                if let Err(error) = result {
+                    present_removal_failure(&name, force, error, window, cx);
                 }
                 cx.notify();
             });
@@ -365,14 +436,21 @@ impl WorkspaceManager {
 fn present_removal_failure(
     name: &SharedString,
     forced: bool,
+    error: WorktreeRemoveError,
     window: &mut Window,
     cx: &mut Context<WorkspaceManager>,
 ) {
-    let message = if forced {
-        "Git couldn\u{2019}t delete its directory. A file in it may be in use."
-    } else {
-        "Git couldn\u{2019}t delete its directory. If it changed after you confirmed, remove it \
-         again to discard the changes."
+    let message = match (error, forced) {
+        (WorktreeRemoveError::Replaced, _) => {
+            "A different Worktree is now at its location, so nothing was removed."
+        }
+        (WorktreeRemoveError::Failed, true) => {
+            "Git couldn\u{2019}t delete its directory. A file in it may be in use."
+        }
+        (WorktreeRemoveError::Failed, false) => {
+            "Git couldn\u{2019}t delete its directory. If it changed after you confirmed, remove \
+             it again to discard the changes."
+        }
     };
     let title = format!("Couldn\u{2019}t Remove \u{201c}{name}\u{201d}");
     if let Err(error) = Alert::new(

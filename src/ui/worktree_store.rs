@@ -22,7 +22,8 @@ use crate::worktrees::catalog::{
     CatalogEffect, CatalogUpdate, WorktreeCatalog, WorktreeInterestId, WorktreeListing,
 };
 use crate::worktrees::git::{
-    BranchList, LocalWorktreeGit, WorktreeBranch, WorktreeCreateError, WorktreeRemoveError,
+    BranchList, LocalWorktreeGit, RemovalCheck, WorktreeBranch, WorktreeCreateError,
+    WorktreeIdentity, WorktreeRemoveError,
 };
 
 /// Some interest's Worktrees changed.
@@ -202,25 +203,54 @@ impl WorktreeStore {
         })
     }
 
-    /// Whether the Worktree at `path` has changes that removing it discards, or `None` when git
+    /// Which Worktree is at `path` and whether removing it discards changes, or `None` when git
     /// cannot tell.
-    pub(crate) fn has_changes(&self, path: PathBuf, cx: &mut Context<Self>) -> Task<Option<bool>> {
+    pub(crate) fn check_removal(
+        &self,
+        path: PathBuf,
+        cx: &mut Context<Self>,
+    ) -> Task<Option<RemovalCheck>> {
         let cancellation = self.cancellation.clone();
-        let task = self.run_git(move |git| git.has_changes(&path, &cancellation).ok(), cx);
+        let task = self.run_git(move |git| git.check_removal(&path, &cancellation).ok(), cx);
         cx.spawn(async move |_, _| task.await.flatten())
     }
 
-    /// Removes the Worktree at `path`, then reads the repository's listings again.
+    /// Whether the Worktree at `path` is still the one `expected` identifies.
+    pub(crate) fn is_worktree(
+        &self,
+        path: PathBuf,
+        expected: WorktreeIdentity,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), WorktreeRemoveError>> {
+        let cancellation = self.cancellation.clone();
+        let task = self.run_git(
+            move |git| git.is_worktree(&path, &expected, &cancellation),
+            cx,
+        );
+        cx.spawn(async move |_, _| task.await.unwrap_or(Err(WorktreeRemoveError::Failed)))
+    }
+
+    /// Removes the Worktree at `path`, then reads the repository's listings again. With
+    /// `expected`, git removes nothing unless the Worktree there is still that one.
     pub(crate) fn remove(
         &self,
         root: PathBuf,
         common: PathBuf,
         path: PathBuf,
         force: bool,
+        expected: Option<WorktreeIdentity>,
         cx: &mut Context<Self>,
     ) -> Task<Result<(), WorktreeRemoveError>> {
         let task = self.run_git(
-            move |git| git.remove(&root, &path, force, &SshCancellationToken::default()),
+            move |git| {
+                git.remove(
+                    &root,
+                    &path,
+                    force,
+                    expected.as_ref(),
+                    &SshCancellationToken::default(),
+                )
+            },
             cx,
         );
         cx.spawn(async move |store, cx| {

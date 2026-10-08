@@ -11015,6 +11015,116 @@ fn worktree_menus_should_offer_removal_only_where_git_allows_it(cx: &mut TestApp
 }
 
 #[gpui::test]
+fn a_worktree_should_hold_a_pinned_directory_chosen_through_a_symbolic_link(
+    cx: &mut TestAppContext,
+) {
+    use crate::domain::RepositoryIdentity;
+    use crate::ui::workspace_sidebar::WorktreeRemoval;
+    use crate::worktrees::WorktreeSnapshot;
+    use crate::worktrees::listing::{WorktreeHead, WorktreeRecord};
+
+    cx.update(|cx| {
+        crate::ui::worktree_store::testing::install(cx);
+    });
+    let base = temporary_directory("pinned-worktree-link");
+    let main = base.join("main");
+    let linked = base.join("linked");
+    // git names the Worktree holding the Pinned Directory by another spelling, as it does when
+    // the Pinned Directory was chosen through a symbolic link to the Worktree.
+    let pinned = base.join("alias").join("sub");
+    fs::create_dir_all(&main).unwrap();
+    fs::create_dir_all(&linked).unwrap();
+    fs::create_dir_all(&pinned).unwrap();
+    let (manager, _records, cx) =
+        workspace_manager_with_directory_selection([Ok(Some(pinned.clone()))], cx);
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.transient.pin_target = Some(PinTarget::Workspace(workspace_id));
+            manager.choose_local_pin_directory(PinTarget::Workspace(workspace_id), window, cx);
+        })
+    });
+    cx.run_until_parked();
+    let record = |root: &Path, branch: &str| WorktreeRecord {
+        root: root.to_path_buf(),
+        head: WorktreeHead::Branch(branch.into()),
+        locked: false,
+        missing: false,
+    };
+    let snapshot = WorktreeSnapshot {
+        repository: RepositoryIdentity::new(main.clone()),
+        current: Some(1),
+        common_directory: main.join(".git"),
+        worktrees: vec![record(&main, "main"), record(&linked, "feature/login")],
+    };
+    let store =
+        cx.update(|_, cx| crate::ui::worktree_store::InstalledWorktrees::store(cx).unwrap());
+    store.update(cx, |store, cx| store.present(&pinned, Some(snapshot), cx));
+    cx.run_until_parked();
+
+    let removal = manager.read_with(cx, |manager, cx| {
+        manager
+            .worktree_section(workspace_id, cx)
+            .expect("the pinned repository lists its Worktrees")
+            .groups[0]
+            .rows[1]
+            .removal
+    });
+    let _ = fs::remove_dir_all(&base);
+    assert_eq!(removal, WorktreeRemoval::HoldsPinnedDirectory);
+}
+
+#[gpui::test]
+fn a_missing_worktree_row_should_offer_its_menu_to_assistive_technology(cx: &mut TestAppContext) {
+    use crate::domain::RepositoryIdentity;
+    use crate::worktrees::WorktreeSnapshot;
+    use crate::worktrees::listing::{WorktreeHead, WorktreeRecord};
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
+    cx.update(|cx| {
+        crate::ui::worktree_store::testing::install(cx);
+    });
+    let (_manager, _records, cx) = workspace_manager(cx);
+    let main = std::env::temp_dir();
+    let record = |root: PathBuf, branch: &str, missing: bool| WorktreeRecord {
+        root,
+        head: WorktreeHead::Branch(branch.into()),
+        locked: false,
+        missing,
+    };
+    let snapshot = WorktreeSnapshot {
+        repository: RepositoryIdentity::new(main.clone()),
+        current: Some(0),
+        common_directory: main.join(".git"),
+        worktrees: vec![
+            record(main.clone(), "main", false),
+            record(
+                temporary_directory("missing-worktree"),
+                "feature/gone",
+                true,
+            ),
+        ],
+    };
+    let store =
+        cx.update(|_, cx| crate::ui::worktree_store::InstalledWorktrees::store(cx).unwrap());
+    store.update(cx, |store, cx| store.present(&main, Some(snapshot), cx));
+    cx.run_until_parked();
+
+    let tree = A11yTree::read(cx);
+    let items = tree.with_role("TreeItem");
+    assert_eq!(
+        items.len(),
+        3,
+        "the Workspace, its Main Worktree, and the Missing one"
+    );
+    perform(cx, items[2], Action::ShowContextMenu);
+    let tree = A11yTree::read(cx);
+    assert_eq!(tree.with_role("Menu").len(), 1);
+    assert!(tree.find("Remove Worktree\u{2026}").is_some());
+}
+
+#[gpui::test]
 fn worktree_rows_should_copy_their_path_and_close_their_tabs(cx: &mut TestAppContext) {
     cx.update(|cx| {
         crate::ui::worktree_store::testing::install(cx);
@@ -11069,6 +11179,76 @@ fn worktree_rows_should_copy_their_path_and_close_their_tabs(cx: &mut TestAppCon
         }),
         "the closed Worktree keeps its row"
     );
+}
+
+#[gpui::test]
+fn closing_a_worktrees_tabs_should_keep_them_when_no_other_tab_can_open(cx: &mut TestAppContext) {
+    use crate::domain::RepositoryIdentity;
+    use crate::worktrees::WorktreeSnapshot;
+    use crate::worktrees::listing::{WorktreeHead, WorktreeRecord};
+
+    cx.update(|cx| {
+        crate::ui::worktree_store::testing::install(cx);
+    });
+    let (manager, _records, cx) = workspace_manager(cx);
+    // A second Workspace keeps the window open, so closing the first would show in the count.
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| manager.create_local_workspace(window, cx));
+    });
+    cx.run_until_parked();
+    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
+    let linked_root = fixture.path().join("shell-integration");
+    // The Main Worktree's directory is gone, so no Tab can open there.
+    let main = temporary_directory("absent-main-worktree");
+    let record = |root: &Path, branch: &str| WorktreeRecord {
+        root: root.to_path_buf(),
+        head: WorktreeHead::Branch(branch.into()),
+        locked: false,
+        missing: false,
+    };
+    let snapshot = WorktreeSnapshot {
+        repository: RepositoryIdentity::new(main.clone()),
+        current: Some(1),
+        common_directory: main.join(".git"),
+        worktrees: vec![record(&main, "main"), record(&linked_root, "feature/login")],
+    };
+    let store =
+        cx.update(|_, cx| crate::ui::worktree_store::InstalledWorktrees::store(cx).unwrap());
+    store.update(cx, |store, cx| {
+        store.present(&std::env::temp_dir(), Some(snapshot), cx)
+    });
+    cx.run_until_parked();
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let linked = manager.read_with(cx, |manager, cx| {
+        manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows[1].worktree_id
+    });
+    let tab_ids = |cx: &mut VisualTestContext| {
+        manager.read_with(cx, |manager, cx| {
+            manager
+                .workspaces
+                .active_workspace()
+                .payload()
+                .read(cx)
+                .tab_ids()
+        })
+    };
+    let before = tab_ids(cx);
+    right_click(worktree_row(workspace_id, linked, cx), cx);
+    click("worktree-menu-row-close-tabs", cx);
+    if cx
+        .debug_bounds("modal-action-close-confirmation-confirm")
+        .is_some()
+    {
+        click("modal-action-close-confirmation-confirm", cx);
+    }
+    cx.run_until_parked();
+
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager.workspaces.len()),
+        2,
+        "the Workspace stays open"
+    );
+    assert_eq!(tab_ids(cx), before, "the Worktree's Tabs stay open");
 }
 
 #[gpui::test]
@@ -11368,6 +11548,92 @@ fn leaving_a_repository_should_keep_worktrees_with_tabs_under_their_former_repos
         None,
         "the Root Tab follows its Root Pane out of the repository"
     );
+}
+
+#[gpui::test]
+fn the_root_tab_should_stay_reachable_after_its_workspace_leaves_a_repository(
+    cx: &mut TestAppContext,
+) {
+    cx.update(|cx| {
+        crate::ui::worktree_store::testing::install(cx);
+    });
+    let (manager, _records, cx) = workspace_manager(cx);
+    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
+    present_worktrees(cx, &[&fixture.path().join("shell-integration")]);
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let linked_id = manager.read_with(cx, |manager, cx| {
+        manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows[1].worktree_id
+    });
+    let open_linked = |cx: &mut VisualTestContext| {
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.open_worktree(workspace_id, linked_id, true, window, cx)
+            })
+        });
+        cx.run_until_parked();
+    };
+    let active_worktree = |cx: &mut VisualTestContext| {
+        manager.read_with(cx, |manager, cx| {
+            manager
+                .workspaces
+                .active_workspace()
+                .payload()
+                .read(cx)
+                .active_worktree()
+        })
+    };
+    open_linked(cx);
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            let tabs = manager.workspaces.active_workspace().payload().clone();
+            let root_tab = tabs.read(cx).tab_ids()[0];
+            tabs.update(cx, |tabs, cx| {
+                tabs.activate_tab_for_test(root_tab, window, cx)
+            });
+        })
+    });
+    let store =
+        cx.update(|_, cx| crate::ui::worktree_store::InstalledWorktrees::store(cx).unwrap());
+    store.update(cx, |store, cx| {
+        store.present(&std::env::temp_dir(), None, cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(active_worktree(cx), None);
+
+    open_linked(cx);
+    assert_eq!(active_worktree(cx), Some(linked_id));
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.handle_sidebar_event(
+                SidebarEvent::Activate {
+                    workspace_id,
+                    focus_pane: false,
+                },
+                window,
+                cx,
+            )
+        })
+    });
+    assert_eq!(
+        active_worktree(cx),
+        None,
+        "the expanded Workspace row shows the Root Tab again"
+    );
+
+    open_linked(cx);
+    assert!(cx.update(|_, cx| manager.read(cx).steps_worktrees(cx)));
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| manager.step_worktree(true, window, cx))
+    });
+    assert_eq!(
+        active_worktree(cx),
+        None,
+        "Next Worktree steps from the last Worktree back to the Root Tab"
+    );
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| manager.step_worktree(true, window, cx))
+    });
+    assert_eq!(active_worktree(cx), Some(linked_id));
 }
 
 #[gpui::test]

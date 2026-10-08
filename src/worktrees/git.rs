@@ -105,8 +105,29 @@ pub(crate) enum WorktreeCreateError {
 /// Why git did not remove a Worktree.
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
 pub(crate) enum WorktreeRemoveError {
+    #[error("a different Worktree now has the confirmed location")]
+    Replaced,
     #[error("git could not remove the Worktree")]
     Failed,
+}
+
+/// Git's administrative directory for one Worktree. A Worktree moved elsewhere keeps it, and a
+/// new Worktree created at the old location gets another, so it tells the two apart.
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) struct WorktreeIdentity(String);
+
+impl std::fmt::Debug for WorktreeIdentity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("WorktreeIdentity(..)")
+    }
+}
+
+/// What removing a Worktree would act on, read before the person confirms.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RemovalCheck {
+    pub(crate) identity: WorktreeIdentity,
+    /// Removing it discards modified tracked files or untracked files.
+    pub(crate) changes: bool,
 }
 
 /// Runs git for one machine's Worktrees. Blocking; callers use a dedicated thread.
@@ -237,31 +258,53 @@ impl LocalWorktreeGit {
         }
     }
 
-    /// Whether the Worktree at `path` has changes that removing it discards: modified tracked
-    /// files or untracked files. Git removes ignored files without asking, so they don't count.
-    pub(crate) fn has_changes(
+    /// Reads which Worktree is at `path` and whether it has changes that removing it discards:
+    /// modified tracked files or untracked files. Git removes ignored files without asking, so
+    /// they don't count.
+    pub(crate) fn check_removal(
         &self,
         path: &Path,
         cancellation: &SshCancellationToken,
-    ) -> Result<bool, WorktreeRemoveError> {
+    ) -> Result<RemovalCheck, WorktreeRemoveError> {
+        let identity = self.identity(path, cancellation)?;
         let mut output = Vec::new();
-        match self.git(path, &CHANGES_ARGUMENTS, &mut output, cancellation) {
-            Ok(exit) if exit.success() => Ok(!output.is_empty()),
+        let changes = match self.git(path, &CHANGES_ARGUMENTS, &mut output, cancellation) {
+            Ok(exit) if exit.success() => !output.is_empty(),
             // More changes than the output limit holds are still changes.
-            Err(RepositoryReadError::OutputTooLarge) => Ok(true),
-            _ => Err(WorktreeRemoveError::Failed),
+            Err(RepositoryReadError::OutputTooLarge) => true,
+            _ => return Err(WorktreeRemoveError::Failed),
+        };
+        Ok(RemovalCheck { identity, changes })
+    }
+
+    /// Whether the Worktree at `path` is still the one `expected` identifies.
+    pub(crate) fn is_worktree(
+        &self,
+        path: &Path,
+        expected: &WorktreeIdentity,
+        cancellation: &SshCancellationToken,
+    ) -> Result<(), WorktreeRemoveError> {
+        if self.identity(path, cancellation)? == *expected {
+            Ok(())
+        } else {
+            Err(WorktreeRemoveError::Replaced)
         }
     }
 
     /// Removes the Worktree at `path` and keeps its branch. Without `force`, git refuses a
-    /// Worktree with changes.
+    /// Worktree with changes. With `expected`, it first checks that the Worktree at `path` is
+    /// still the confirmed one, so a confirmation never removes a replacement.
     pub(crate) fn remove(
         &self,
         root: &Path,
         path: &Path,
         force: bool,
+        expected: Option<&WorktreeIdentity>,
         cancellation: &SshCancellationToken,
     ) -> Result<(), WorktreeRemoveError> {
+        if let Some(expected) = expected {
+            self.is_worktree(path, expected, cancellation)?;
+        }
         let path = path.to_str().ok_or(WorktreeRemoveError::Failed)?;
         let mut arguments = vec!["worktree", "remove"];
         if force {
@@ -270,6 +313,23 @@ impl LocalWorktreeGit {
         arguments.extend(["--", path]);
         match self.git(root, &arguments, &mut Vec::new(), cancellation) {
             Ok(exit) if exit.success() => Ok(()),
+            _ => Err(WorktreeRemoveError::Failed),
+        }
+    }
+
+    fn identity(
+        &self,
+        path: &Path,
+        cancellation: &SshCancellationToken,
+    ) -> Result<WorktreeIdentity, WorktreeRemoveError> {
+        let mut output = Vec::new();
+        match self.git(path, &IDENTITY_ARGUMENTS, &mut output, cancellation) {
+            Ok(exit) if exit.success() => String::from_utf8(output)
+                .ok()
+                .map(|directory| directory.trim_end_matches('\n').to_owned())
+                .filter(|directory| !directory.is_empty())
+                .map(WorktreeIdentity)
+                .ok_or(WorktreeRemoveError::Failed),
             _ => Err(WorktreeRemoveError::Failed),
         }
     }
@@ -415,6 +475,7 @@ impl LocalWorktreeGit {
 
 /// Lists modified tracked files and untracked files, one record per path.
 const CHANGES_ARGUMENTS: [&str; 4] = ["status", "--porcelain", "-z", "--untracked-files=normal"];
+const IDENTITY_ARGUMENTS: [&str; 2] = ["rev-parse", "--absolute-git-dir"];
 
 /// Newest first, so the branches people work on lead the pickers.
 const BRANCH_ARGUMENTS: [&str; 5] = [
@@ -786,26 +847,38 @@ mod tests {
 
     #[test]
     fn changes_should_count_modified_and_untracked_files_and_an_overflowing_listing() {
+        const ADMIN: &str = "/src/app/.git/worktrees/x\n";
         let runner = FakeRunner::new([
+            exit(0, ADMIN),
             exit(0, ""),
+            exit(0, ADMIN),
             exit(0, "?? notes.txt\0"),
+            exit(0, ADMIN),
             Err(ProgramError::OutputTooLarge),
+            exit(0, ADMIN),
+            exit(128, ""),
             exit(128, ""),
         ]);
         let git = git(&runner, 47);
-        let changes = || git.has_changes(Path::new("/wt/app/x"), &SshCancellationToken::default());
+        let changes = || {
+            git.check_removal(Path::new("/wt/app/x"), &SshCancellationToken::default())
+                .map(|check| check.changes)
+        };
 
         assert_eq!(
-            [changes(), changes(), changes(), changes()],
+            [changes(), changes(), changes(), changes(), changes()],
             [
                 Ok(false),
                 Ok(true),
                 Ok(true),
+                Err(WorktreeRemoveError::Failed),
                 Err(WorktreeRemoveError::Failed)
             ]
         );
+        let requests = runner.requests();
+        assert_eq!(tail(&requests[0], 2), ["rev-parse", "--absolute-git-dir"]);
         assert_eq!(
-            tail(&runner.requests()[0], 4),
+            tail(&requests[1], 4),
             ["status", "--porcelain", "-z", "--untracked-files=normal"]
         );
     }
@@ -819,6 +892,7 @@ mod tests {
                 Path::new("/src/app"),
                 Path::new("/wt/app/x"),
                 force,
+                None,
                 &SshCancellationToken::default(),
             )
         };
@@ -835,5 +909,39 @@ mod tests {
             tail(&requests[1], 5),
             ["worktree", "remove", "--force", "--", "/wt/app/x"]
         );
+    }
+
+    #[test]
+    fn remove_should_refuse_a_different_worktree_at_the_confirmed_location() {
+        let runner = FakeRunner::new([
+            exit(0, "/src/app/.git/worktrees/x\n"),
+            exit(0, "/src/app/.git/worktrees/x\n"),
+            exit(0, "/src/app/.git/worktrees/x1\n"),
+            exit(0, "/src/app/.git/worktrees/x\n"),
+            exit(0, ""),
+        ]);
+        let git = git(&runner, 47);
+        let cancellation = SshCancellationToken::default();
+        let path = Path::new("/wt/app/x");
+        let confirmed = git.check_removal(path, &cancellation).unwrap().identity;
+        let remove = || {
+            git.remove(
+                Path::new("/src/app"),
+                path,
+                true,
+                Some(&confirmed),
+                &cancellation,
+            )
+        };
+
+        assert_eq!(remove(), Err(WorktreeRemoveError::Replaced));
+        assert_eq!(remove(), Ok(()));
+        let requests = runner.requests();
+        assert_eq!(requests.len(), 5, "a replacement is never removed");
+        assert_eq!(
+            tail(&requests[4], 5),
+            ["worktree", "remove", "--force", "--", "/wt/app/x"]
+        );
+        assert_eq!(format!("{confirmed:?}"), "WorktreeIdentity(..)");
     }
 }

@@ -1391,8 +1391,8 @@ impl WorkspaceSidebar {
             .description(description)
             .selected(selected)
             .level(2)
-            .set_position(position, size)
-            .disabled(!openable);
+            .set_position(position, size);
+        // A Worktree that can't open keeps its menu, which still copies and removes it.
         let target = if openable {
             target.on_press(move |_, cx| {
                 let _ = press_sidebar.update(cx, |sidebar, cx| {

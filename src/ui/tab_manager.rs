@@ -1321,6 +1321,34 @@ impl TabManager {
         self.tabs.active_scope()
     }
 
+    /// Whether any Tab sits outside every Worktree, as the Root Tab does after its Workspace
+    /// leaves a repository.
+    pub(crate) fn has_unscoped_tabs(&self) -> bool {
+        self.tabs.tabs_in(None).next().is_some()
+    }
+
+    /// Shows the most recent Tab outside every Worktree when a Worktree's Tabs are shown.
+    /// Returns whether the Active Tab changed. Showing the Tab moves focus to it only when
+    /// `focus` is set.
+    pub(crate) fn show_unscoped_tabs(
+        &mut self,
+        focus: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.tabs.active_scope().is_none() {
+            return false;
+        }
+        let Some(tab_id) = self
+            .tabs
+            .most_recent_tab_in(None)
+            .or_else(|| self.tabs.tabs_in(None).map(|(tab_id, _)| tab_id).next())
+        else {
+            return false;
+        };
+        self.activate_tab_focusing(tab_id, focus, window, cx)
+    }
+
     /// The directory of the focused Pane in a Worktree's most recently active Tab.
     pub(crate) fn worktree_directory(
         &self,

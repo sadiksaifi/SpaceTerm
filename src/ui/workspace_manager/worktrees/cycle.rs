@@ -1,6 +1,7 @@
 //! Next Worktree and Previous Worktree: stepping through the Active Workspace's Worktrees that
-//! have Tabs, in sidebar order. A Worktree without Tabs is skipped, so stepping never starts a
-//! Terminal Session.
+//! have Tabs, in sidebar order. Tabs outside every Worktree come first, as the Workspace row that
+//! stands for them precedes its Worktree rows. A Worktree without Tabs is skipped, so stepping
+//! never starts a Terminal Session.
 
 use gpui::{App, Context, Window};
 
@@ -8,15 +9,11 @@ use super::super::WorkspaceManager;
 use crate::domain::WorktreeId;
 
 impl WorkspaceManager {
-    /// Whether the Active Workspace has more than one Worktree with Tabs to step between.
+    /// Whether the Active Workspace has more than one Worktree with Tabs, or Tabs outside every
+    /// Worktree and a Worktree with Tabs, to step between.
     pub(in crate::ui::workspace_manager) fn steps_worktrees(&self, cx: &App) -> bool {
-        self.workspaces
-            .active_workspace()
-            .payload()
-            .read(cx)
-            .worktree_tab_counts()
-            .len()
-            > 1
+        let manager = self.workspaces.active_workspace().payload().read(cx);
+        manager.worktree_tab_counts().len() + usize::from(manager.has_unscoped_tabs()) > 1
     }
 
     /// Shows the next or previous Worktree with Tabs, wrapping at either end, and focuses its
@@ -31,19 +28,29 @@ impl WorkspaceManager {
         let Some(section) = self.worktree_section(workspace_id, cx) else {
             return;
         };
-        let open: Vec<WorktreeId> = section
-            .rows()
-            .filter(|row| row.has_tabs)
-            .map(|row| row.worktree_id)
+        let manager = self.workspaces.active_workspace().payload().read(cx);
+        let unscoped = manager.has_unscoped_tabs();
+        let active = manager.active_worktree();
+        // `None` stands for the Tabs outside every Worktree.
+        let open: Vec<Option<WorktreeId>> = unscoped
+            .then_some(None)
+            .into_iter()
+            .chain(
+                section
+                    .rows()
+                    .filter(|row| row.has_tabs)
+                    .map(|row| Some(row.worktree_id)),
+            )
             .collect();
-        let active = section
-            .rows()
-            .find(|row| row.active)
-            .and_then(|row| open.iter().position(|id| *id == row.worktree_id));
-        let Some(target) = step(open.len(), active, forward).map(|index| open[index]) else {
+        let position = open.iter().position(|id| *id == active);
+        let Some(target) = step(open.len(), position, forward).map(|index| open[index]) else {
             return;
         };
-        if self.open_worktree(workspace_id, target, true, window, cx) {
+        let shown = match target {
+            Some(worktree_id) => self.open_worktree(workspace_id, worktree_id, true, window, cx),
+            None => self.show_unscoped_tabs(workspace_id, true, window, cx),
+        };
+        if shown {
             self.focus(window, cx);
         }
         cx.notify();
