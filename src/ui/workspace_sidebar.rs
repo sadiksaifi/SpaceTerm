@@ -957,6 +957,11 @@ impl WorkspaceSidebar {
                         worktree_id,
                         focus_pane: true,
                     });
+                } else if let Some(section) = section {
+                    // A git Workspace row is a tree parent, so Return and Space toggle it.
+                    self.cursor = Some(key);
+                    self.set_expanded(key.workspace_id(), !section.expanded, window, cx);
+                    return;
                 } else if event.keystroke.key == "enter" {
                     cx.emit(SidebarEvent::FocusPane);
                 } else {

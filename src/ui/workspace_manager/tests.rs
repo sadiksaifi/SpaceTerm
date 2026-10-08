@@ -10714,6 +10714,42 @@ fn a_disclosure_chevron_should_trail_the_workspace_name(cx: &mut TestAppContext)
 }
 
 #[gpui::test]
+fn a_focused_git_workspace_row_should_collapse_and_expand_from_the_keyboard(
+    cx: &mut TestAppContext,
+) {
+    cx.update(|cx| {
+        crate::ui::worktree_store::testing::install(cx);
+    });
+    let (manager, _records, cx) = workspace_manager(cx);
+    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
+    present_worktrees(cx, &[&fixture.path().join("shell-integration")]);
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let expanded = |cx: &mut VisualTestContext| {
+        manager.read_with(cx, |manager, cx| {
+            manager.worktree_section(workspace_id, cx).unwrap().expanded
+        })
+    };
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| manager.toggle_sidebar_focus(window, cx));
+    });
+    cx.simulate_keystrokes("up");
+    cx.run_until_parked();
+    let mut states = vec![expanded(cx)];
+
+    for key in ["enter", "space", "left", "left", "right", "right"] {
+        cx.simulate_keystrokes(key);
+        cx.run_until_parked();
+        states.push(expanded(cx));
+    }
+
+    assert_eq!(states, [true, false, true, false, false, true, true]);
+    assert!(
+        cx.update(|window, cx| manager.read(cx).sidebar.read(cx).is_focused(window)),
+        "toggling keeps the keyboard in the sidebar"
+    );
+}
+
+#[gpui::test]
 fn worktree_rows_should_match_a_two_line_workspace_row_height(cx: &mut TestAppContext) {
     cx.update(|cx| {
         crate::ui::worktree_store::testing::install(cx);
