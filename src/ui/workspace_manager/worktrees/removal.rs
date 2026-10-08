@@ -89,10 +89,9 @@ impl WorkspaceManager {
         };
         let (tab_ids, outside) = {
             let manager = manager.read(cx);
-            (
-                manager.worktree_tab_ids(worktree_id),
-                manager.has_tabs_outside(worktree_id),
-            )
+            let tab_ids = manager.worktree_tab_ids(worktree_id);
+            let outside = manager.has_tabs_besides(&tab_ids);
+            (tab_ids, outside)
         };
         if tab_ids.is_empty() {
             return true;
@@ -101,9 +100,10 @@ impl WorkspaceManager {
             let Some(main) = self.main_worktree_id(workspace_id, worktree_id) else {
                 return false;
             };
-            // A Tab that fails to start reports itself; keep every Tab of the Worktree then.
+            // A Tab that fails to start reports itself; keep every Tab of the Worktree then. The
+            // Main Worktree's own Tabs close around its new one.
             if !self.new_worktree_tab(workspace_id, main, window, cx)
-                || !manager.read(cx).has_tabs_outside(worktree_id)
+                || !manager.read(cx).has_tabs_besides(&tab_ids)
             {
                 return false;
             }

@@ -12627,3 +12627,46 @@ fn removing_a_worktree_that_cannot_be_checked_should_report_it_and_keep_its_tabs
     );
     assert!(!manager.read_with(cx, |manager, _| manager.worktree_removal_pending()));
 }
+
+#[gpui::test]
+fn closing_the_tabs_of_a_main_worktree_holding_every_tab_should_leave_one_new_tab(
+    cx: &mut TestAppContext,
+) {
+    cx.update(|cx| {
+        crate::ui::worktree_store::testing::install(cx);
+    });
+    let (manager, _records, cx) = workspace_manager(cx);
+    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
+    // The Root Pane is in the Main Worktree, so it holds every Tab.
+    present_worktrees(cx, &[&fixture.path().join("shell-integration")]);
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let main = manager.read_with(cx, |manager, cx| {
+        manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows[0].worktree_id
+    });
+    let tabs = |cx: &mut VisualTestContext| {
+        manager.read_with(cx, |manager, cx| {
+            let tabs = manager.workspaces.active_workspace().payload().read(cx);
+            (tabs.worktree_tab_counts(), tabs.worktree_tab_ids(main))
+        })
+    };
+    let (_, before) = tabs(cx);
+    right_click(worktree_row(workspace_id, main, cx), cx);
+    click("worktree-menu-row-close-tabs", cx);
+    if cx
+        .debug_bounds("modal-action-close-confirmation-confirm")
+        .is_some()
+    {
+        click("modal-action-close-confirmation-confirm", cx);
+    }
+    let (counts, after) = tabs(cx);
+
+    assert_eq!(
+        counts.into_iter().collect::<Vec<_>>(),
+        vec![(main, 1)],
+        "one Tab remains, in the Main Worktree"
+    );
+    assert!(
+        after.iter().all(|tab| !before.contains(tab)),
+        "every Tab the Main Worktree held closes: {before:?} {after:?}"
+    );
+}

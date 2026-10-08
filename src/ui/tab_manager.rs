@@ -1367,11 +1367,11 @@ impl TabManager {
         self.tabs.scope_of(tab_id).ok().flatten()
     }
 
-    /// Whether any Tab sits outside a Worktree, so closing that Worktree's Tabs leaves a Tab.
-    pub(crate) fn has_tabs_outside(&self, id: WorktreeId) -> bool {
+    /// Whether any Tab is not among `tab_ids`, so closing them leaves a Tab.
+    pub(crate) fn has_tabs_besides(&self, tab_ids: &[TabId]) -> bool {
         self.tabs
             .iter()
-            .any(|(tab_id, _)| self.tab_worktree(tab_id) != Some(id))
+            .any(|(tab_id, _)| !tab_ids.contains(&tab_id))
     }
 
     /// The Tabs of a Worktree, in Tab order.
