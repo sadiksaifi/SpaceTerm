@@ -292,7 +292,7 @@ impl WorkspaceManager {
                     .find(|record| record.root == key.root())
             })
             .and_then(branch_of);
-        let default_base = active.or_else(|| snapshot.worktrees.first().and_then(branch_of));
+        let default_base = active.or_else(|| snapshot.worktrees.iter().find_map(branch_of));
         let checked_out = snapshot
             .worktrees
             .iter()
@@ -666,17 +666,22 @@ impl WorkspaceManager {
             WorktreeListing::Pending => return,
             WorktreeListing::Outside => None,
             WorktreeListing::Listed(snapshot) => {
+                // A bare repository is listed first but has no files, so it holds no Tabs.
                 let mut ids = Vec::new();
                 for record in &snapshot.worktrees {
+                    if record.head == WorktreeHead::Bare {
+                        ids.push(None);
+                        continue;
+                    }
                     let key = WorktreeKey::new(snapshot.repository.clone(), record.root.clone());
                     let Ok(id) = worktrees.registry.id_for(&key) else {
                         return;
                     };
                     worktrees.records.insert(id, record.clone());
-                    ids.push(id);
+                    ids.push(Some(id));
                 }
                 snapshot.current.and_then(|index| {
-                    Some((ids[index], snapshot.worktrees.get(index)?.root.clone()))
+                    Some((ids[index]?, snapshot.worktrees.get(index)?.root.clone()))
                 })
             }
         };

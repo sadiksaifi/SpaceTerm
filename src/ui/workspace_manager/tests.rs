@@ -12670,3 +12670,113 @@ fn closing_the_tabs_of_a_main_worktree_holding_every_tab_should_leave_one_new_ta
         "every Tab the Main Worktree held closes: {before:?} {after:?}"
     );
 }
+
+#[gpui::test]
+fn closing_every_tab_in_a_bare_repository_layout_should_open_the_next_tab_in_another_worktree(
+    cx: &mut TestAppContext,
+) {
+    use crate::domain::RepositoryIdentity;
+    use crate::worktrees::WorktreeSnapshot;
+    use crate::worktrees::listing::{WorktreeHead, WorktreeRecord};
+
+    cx.update(|cx| {
+        crate::ui::worktree_store::testing::install(cx);
+    });
+    let (manager, _records, cx) = workspace_manager(cx);
+    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
+    let first = fixture.path().join("one");
+    let second = fixture.path().join("two");
+    std::fs::create_dir(&first).unwrap();
+    std::fs::create_dir(&second).unwrap();
+    // git lists the bare repository first; the test home is in the first linked Worktree.
+    let bare = std::env::temp_dir();
+    let record = |root: &std::path::Path, head: WorktreeHead| WorktreeRecord {
+        root: root.to_path_buf(),
+        head,
+        locked: false,
+        missing: false,
+    };
+    let snapshot = WorktreeSnapshot {
+        repository: RepositoryIdentity::new(bare.clone()),
+        current: Some(1),
+        common_directory: bare.clone(),
+        worktrees: vec![
+            record(&bare, WorktreeHead::Bare),
+            record(&first, WorktreeHead::Branch("one".into())),
+            record(&second, WorktreeHead::Branch("two".into())),
+        ],
+    };
+    let store =
+        cx.update(|_, cx| crate::ui::worktree_store::InstalledWorktrees::store(cx).unwrap());
+    store.update(cx, |store, cx| {
+        store.present(&bare, Some(snapshot.clone()), cx)
+    });
+    cx.run_until_parked();
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let rows = manager.read_with(cx, |manager, cx| {
+        manager.worktree_section(workspace_id, cx).unwrap().groups[0]
+            .rows
+            .iter()
+            .map(|row| (row.worktree_id, row.label.to_string()))
+            .collect::<Vec<_>>()
+    });
+    let (one, two) = (rows[0].0, rows[1].0);
+    let tabs = |cx: &mut VisualTestContext| {
+        manager.read_with(cx, |manager, cx| {
+            let tabs = manager.workspaces.active_workspace().payload().read(cx);
+            (
+                tabs.worktree_tab_counts().into_iter().collect::<Vec<_>>(),
+                tabs.tab_ids(),
+            )
+        })
+    };
+    let before = tabs(cx);
+
+    right_click(worktree_row(workspace_id, one, cx), cx);
+    click("worktree-menu-row-close-tabs", cx);
+    if cx
+        .debug_bounds("modal-action-close-confirmation-confirm")
+        .is_some()
+    {
+        click("modal-action-close-confirmation-confirm", cx);
+    }
+    let closed = tabs(cx);
+    // The new Root Pane is in the second Worktree, so git lists that one as current next.
+    store.update(cx, |store, cx| {
+        store.present(
+            &bare,
+            Some(WorktreeSnapshot {
+                current: Some(2),
+                ..snapshot
+            }),
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    let after = tabs(cx);
+    let rows_after = manager.read_with(cx, |manager, cx| {
+        manager.worktree_section(workspace_id, cx).unwrap().groups[0]
+            .rows
+            .len()
+    });
+
+    assert_eq!(
+        rows.iter()
+            .map(|(_, label)| label.as_str())
+            .collect::<Vec<_>>(),
+        ["one", "two"],
+        "the bare repository has no row"
+    );
+    assert_eq!(before.0, vec![(one, 1)]);
+    assert_eq!(closed.1.len(), 1, "the Workspace keeps one Tab");
+    assert!(
+        !before.1.contains(&closed.1[0]),
+        "the first Worktree's Tab closes around a new one"
+    );
+    assert_eq!(
+        after.0,
+        vec![(two, 1)],
+        "the new Tab is in another Worktree"
+    );
+    assert_eq!(rows_after, 2, "no Tab opens in the bare repository");
+}

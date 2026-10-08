@@ -15,6 +15,7 @@ use crate::domain::{WorkspaceId, WorktreeId, WorktreeKey};
 use crate::terminal::native_services::clipboard::TextClipboardTarget;
 use crate::ui::workspace_sidebar::WorktreeRemoval;
 use crate::worktrees::git::{RemovalCheck, RemovalExpectation, WorktreeRemoveError};
+use crate::worktrees::listing::WorktreeHead;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RemovalAction {
@@ -79,7 +80,8 @@ impl WorkspaceManager {
     }
 
     /// Closes every Tab of a Worktree and keeps its row. A Workspace always keeps a Tab, so when
-    /// the Worktree holds them all, a Tab opens in the Main Worktree first.
+    /// the Worktree holds them all, a Tab opens first in the Main Worktree, or in a bare
+    /// repository, in another Worktree. Without one, no Tab closes.
     pub(in crate::ui::workspace_manager) fn close_worktree_tabs(
         &mut self,
         workspace_id: WorkspaceId,
@@ -104,12 +106,12 @@ impl WorkspaceManager {
             return true;
         }
         if !outside {
-            let Some(main) = self.main_worktree_id(workspace_id, worktree_id) else {
+            let Some(fallback) = self.fallback_worktree_id(workspace_id, worktree_id, cx) else {
                 return false;
             };
             // A Tab that fails to start reports itself; keep every Tab of the Worktree then. The
             // Main Worktree's own Tabs close around its new one.
-            if !self.new_worktree_tab(workspace_id, main, window, cx)
+            if !self.new_worktree_tab(workspace_id, fallback, window, cx)
                 || !manager.read(cx).has_tabs_besides(&tab_ids)
             {
                 return false;
@@ -454,20 +456,35 @@ impl WorkspaceManager {
         })
     }
 
-    /// The Main Worktree of the repository a Worktree belongs to.
-    fn main_worktree_id(
+    /// The Worktree that receives a Tab when `worktree_id` holds every Tab of the Workspace: the
+    /// Main Worktree, or, in a bare repository, which has none, another listed Worktree.
+    fn fallback_worktree_id(
         &self,
         workspace_id: WorkspaceId,
         worktree_id: WorktreeId,
+        cx: &App,
     ) -> Option<WorktreeId> {
-        let registry = &self
-            .sidebar_worktrees
-            .workspaces
-            .get(&workspace_id)?
-            .registry;
-        let repository = registry.key(worktree_id)?.repository().clone();
+        let worktrees = self.sidebar_worktrees.workspaces.get(&workspace_id)?;
+        let registry = &worktrees.registry;
+        let key = registry.key(worktree_id)?;
+        let repository = key.repository().clone();
         let main_root = repository.main_root().to_path_buf();
-        registry.id(&WorktreeKey::new(repository, main_root))
+        if let Some(main) = registry.id(&WorktreeKey::new(repository.clone(), main_root)) {
+            return Some(main);
+        }
+        let snapshot = worktrees.listed(cx)?;
+        if snapshot.repository != repository {
+            return None;
+        }
+        snapshot
+            .worktrees
+            .iter()
+            .filter(|record| {
+                record.head != WorktreeHead::Bare && !record.missing && record.root != key.root()
+            })
+            .find_map(|record| {
+                registry.id(&WorktreeKey::new(repository.clone(), record.root.clone()))
+            })
     }
 }
 
