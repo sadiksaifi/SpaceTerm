@@ -248,14 +248,17 @@ fn compose(
             super::launch_host::running_executable(),
         ),
     ));
-    let repository_status = super::repository_status_host::repository_status_adapters(
-        &startup.home_directory,
-        Arc::new(
-            super::linux_repository_tools::LinuxRepositoryToolDiscovery::new(
-                std::env::var_os("PATH").as_deref(),
+    // Repository Status reads run on threads that the deterministic test executor rejects.
+    let repository_status = (!cfg!(test)).then(|| {
+        super::repository_status_host::repository_status_adapters(
+            &startup.home_directory,
+            Arc::new(
+                super::linux_repository_tools::LinuxRepositoryToolDiscovery::new(
+                    std::env::var_os("PATH").as_deref(),
+                ),
             ),
-        ),
-    );
+        )
+    });
     let controls = super::linux_window_style::capture(
         bus.as_ref(),
         &super::app_directories::DesktopResourceDirectories::capture(),
@@ -300,7 +303,7 @@ fn compose(
             setup_guide: None,
             theme_registry: Some(Arc::new(super::https_transport::HttpsTransport::new())),
             remote_workspace,
-            repository_status: Some(repository_status),
+            repository_status,
         },
         services: None,
         window_movement: Rc::new(super::linux_window_drag::LinuxWindowMovementFactory),
@@ -370,8 +373,7 @@ mod tests {
             events,
             super::super::linux_updates::Relaunch::default(),
         )
-        .unwrap()
-        .without_repository_status();
+        .unwrap();
         cx.update(|cx| crate::app::initialize_application(cx, &host).unwrap());
         assert_eq!(
             cx.app_identity(),
