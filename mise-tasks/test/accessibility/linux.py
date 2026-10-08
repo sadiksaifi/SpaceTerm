@@ -333,15 +333,27 @@ class Input:
         else:
             import dbus
 
-            # Shell restricts its screenshot API to screenshot clients.
-            name = dbus.service.BusName("org.gnome.Screenshot", bus=self.bus)
+            # Shell permits MediaKeys on both installed screenshot APIs; newer
+            # installations no longer permit org.gnome.Screenshot. This name
+            # belongs only to our verified private bus. Never replace or queue
+            # behind another owner.
+            try:
+                name = dbus.service.BusName(
+                    "org.gnome.SettingsDaemon.MediaKeys", bus=self.bus, do_not_queue=True
+                )
+            except dbus.DBusException:
+                raise SmokeFailure("private_screenshot_client_name_unavailable") from None
             screenshot = dbus.Interface(
                 self.bus.get_object("org.gnome.Shell", "/org/gnome/Shell/Screenshot"),
                 "org.gnome.Shell.Screenshot",
             )
-            success, _ = screenshot.Screenshot(False, False, str(destination))
-            require(success, "screenshot_failed")
-            del name
+            try:
+                success, _ = screenshot.Screenshot(False, False, str(destination))
+                require(success, "screenshot_failed")
+            except dbus.DBusException:
+                raise SmokeFailure("screenshot_api_failed") from None
+            finally:
+                del name
         require(destination.is_file(), "screenshot_missing")
 
     def window_geometry(self):
@@ -697,7 +709,7 @@ def measure_churn(probe, input_driver, output, measurements):
     return measurements
 
 
-ORCA_BOOTSTRAP = """import json, pathlib, sys
+ORCA_BOOTSTRAP = """import importlib.util, json, pathlib, sys
 import gi
 gi.require_version("Atspi", "2.0")
 from gi.repository import Atspi
@@ -706,17 +718,25 @@ sys.path.insert(1, "/usr/lib/python3/dist-packages")
 # Preserve the installed CLI import order to avoid partially initialized KeyBindings.
 from orca import debug
 from orca import debugging_tools_manager
+registry_api = importlib.util.find_spec("orca.gsettings_registry") is not None
+if registry_api:
+    from orca import gsettings_registry
 from orca import messages
-from orca import settings
+if not registry_api:
+    from orca import settings
 from orca import script_manager
-from orca import settings_manager
+if registry_api:
+    from orca import speech_manager
+else:
+    from orca import settings_manager
 gi.require_version("Gdk", "3.0")
 from gi.repository import Gdk
 display = Gdk.Display.get_default()
 display_type = display.__gtype__.name if display is not None else ""
 display_proof = {"initialized": display is not None,
                  "wayland_display": display_type == "GdkWaylandDisplay",
-                 "x11_display": display_type == "GdkX11Display"}
+                 "x11_display": display_type == "GdkX11Display",
+                 "gsettings_registry_api": registry_api}
 display_proof["expected_backend"] = display_proof[sys.argv[3] + "_display"]
 pathlib.Path(sys.argv[4]).write_text(json.dumps(display_proof, indent=2))
 if not display_proof["expected_backend"]:
@@ -724,11 +744,16 @@ if not display_proof["expected_backend"]:
 debug.debugLevel = debug.LEVEL_ALL
 # Line-buffer the private observation FIFO so idle key-release evidence is delivered.
 debug.debugFile = open(sys.argv[2], "w", buffering=1)
-manager = settings_manager.get_manager()
-manager.activate(sys.argv[1], {"enableSpeech": True, "enableBraille": False})
-sys.path.insert(0, manager.get_prefs_dir())
+if registry_api:
+    registry = gsettings_registry.get_registry()
+    registry.set_runtime_value("speech", "enable", True)
+    registry.set_runtime_value("braille", "enabled", False)
+else:
+    manager = settings_manager.get_manager()
+    manager.activate(sys.argv[1], {"enableSpeech": True, "enableBraille": False})
+    sys.path.insert(0, manager.get_prefs_dir())
 from orca import orca
-raise SystemExit(orca.main())
+raise SystemExit(orca.main(prefs_dir=sys.argv[1]) if registry_api else orca.main())
 """
 
 
@@ -783,9 +808,11 @@ def start_orca(processes, probe, output, startup):
     startup["stream"] = stream
     preferences = output / "orca-preferences"
     preferences.mkdir()
-    # Use the installed Orca48.1 core main with its exact CLI debug/settings
-    # initialization. Its launcher --replace/--setup kills every same-user Orca,
-    # and even ordinary launcher startup globally pgrep-reads other instances.
+    # Use the installed Orca core main with its CLI debug/settings initialization.
+    # Detect the settings API: older installations use settings_manager, while
+    # newer ones use gsettings_registry and pass preferences to core main.
+    # The launcher --replace/--setup kills every same-user Orca, and even ordinary
+    # launcher startup globally pgrep-reads other instances.
     # Isolated Python imports installed modules; private preferences contain no
     # user customization. No Orca handlers, predicates or speech are replaced.
     bootstrap = output / "orca-bootstrap.py"
@@ -1550,7 +1577,7 @@ def private_session(args):
         typed_count = typed_text.characterCount
         input_driver.character(True)
         try:
-            # Orca's Terminal key echo runs on release and queries published text.
+            # Orca echoes Terminal keys after release or a matching text insertion.
             # Hold the genuine key until the paced AT-SPI insertion and caret
             # converge, so a 2ms synthetic key cannot outrun native publication.
             probe.wait(

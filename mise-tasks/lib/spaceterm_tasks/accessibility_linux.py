@@ -452,7 +452,7 @@ class OrcaOutput:
                     self.keyboard_counts["typed_key_" + kind.lower() + "_events"] += 1
             self.terminal_keyboard_event |= (
                 b"TERMINAL: Presenting keyboard event" in line and line.endswith(b"q")
-            )
+            ) or b"TYPING ECHO PRESENTER: Echoing delayed terminal press." in line
         # Installed debug.py timestamps logical records and indents every
         # embedded newline by exactly 18 spaces. Inspect only verified speech
         # record parts; retain counts/booleans, never the speech text.
@@ -460,9 +460,16 @@ class OrcaOutput:
         if record is not None:
             body = record[1]
             self.speech_backend["factory_success"] += int(
-                body.startswith(b"SPEECH: Using speech server factory:")
+                body.startswith(
+                    (
+                        b"SPEECH: Using speech server factory:",
+                        b"SPEECH MANAGER: Using speech server factory:",
+                    )
+                )
             )
-            self.speech_backend["not_available"] += int(body.startswith(b"SPEECH: Not available"))
+            self.speech_backend["not_available"] += int(
+                body.startswith((b"SPEECH: Not available", b"SPEECH MANAGER: Speech not available"))
+            )
             self.speech_record = body.startswith(b"SPEECH OUTPUT:")
             self.speech_record_phase = self.probe.phase
             self.speech_record_bytes = 0

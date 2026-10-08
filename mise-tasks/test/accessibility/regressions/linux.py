@@ -24,9 +24,10 @@ import sys
 import tempfile
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 from spaceterm_tasks import accessibility_linux
 
@@ -97,6 +98,7 @@ def parser_regression(smoke, directory, proof):
     )
     cases = (
         ("singleline", ["SPEECH OUTPUT: 'spaceterm-a11y'"], 4096, True),
+        ("speech_manager_factory", ["SPEECH OUTPUT: 'spaceterm-a11y'"], 4096, True),
         (
             "multiline",
             ["SPEECH OUTPUT: 'first fixture line\nspaceterm-a11y\nlast fixture line'"],
@@ -136,13 +138,20 @@ def parser_regression(smoke, directory, proof):
             output = smoke.OrcaOutput(output_dir, context, "spaceterm-a11y")
             writer = os.open(output.fifo, os.O_WRONLY)
             fragmenter = FragmentWriter(writer, output.stream, width)
-            namespace = {"datetime": datetime, "debugLevel": 0, "debugFile": fragmenter}
+            namespace: dict[str, Any] = {
+                "datetime": datetime,
+                "timezone": timezone,
+                "_printing": threading.local(),
+                "debugLevel": 0,
+                "debugFile": fragmenter,
+            }
             exec(
                 compile(ast.Module(body=[formatter], type_ignores=[]), str(orca_debug), "exec"),
                 namespace,
             )
+            factory_prefix = "SPEECH MANAGER" if name == "speech_manager_factory" else "SPEECH"
             namespace["_print_text"](
-                0, "SPEECH: Using speech server factory: speechdispatcherfactory", True
+                0, factory_prefix + ": Using speech server factory: speechdispatcherfactory", True
             )
             for record in records:
                 namespace["_print_text"](0, record, True)
