@@ -587,24 +587,37 @@ impl WorkspaceSidebar {
                         ))
                     }),
             )
-            .when(creates_worktrees && !lifted && !renaming, |row| {
-                row.child(new_worktree_button(
-                    workspace_id,
-                    // The button keeps its place while hidden, so the row never shifts.
-                    if selected { 1.0 } else { hover },
-                    sidebar.clone(),
-                    appearance,
-                ))
-            })
             .when_some(expanded, |row, expanded| {
-                row.child(self.render_disclosure(
-                    workspace_id,
-                    expanded,
-                    !lifted,
-                    row_colors.row_icon,
-                    sidebar.clone(),
-                    appearance,
-                ))
+                // The "+" sits against the chevron and only on an expanded row, above the
+                // Worktrees it adds to. A collapsed row offers New Worktree from its menu.
+                row.child(
+                    div()
+                        .flex_shrink_0()
+                        .h_full()
+                        .flex()
+                        .items_center()
+                        .when(
+                            expanded && creates_worktrees && !lifted && !renaming,
+                            |trailing| {
+                                trailing.child(new_worktree_button(
+                                    workspace_id,
+                                    // The button keeps its place while hidden, so the row never
+                                    // shifts.
+                                    if selected { 1.0 } else { hover },
+                                    sidebar.clone(),
+                                    appearance,
+                                ))
+                            },
+                        )
+                        .child(self.render_disclosure(
+                            workspace_id,
+                            expanded,
+                            !lifted,
+                            row_colors.row_icon,
+                            sidebar.clone(),
+                            appearance,
+                        )),
+                )
             })
             // Rows rest on the continuous base surface without separators. The hover and selection
             // chips alone give each Workspace its shape; collection focus never adds a row ring.
@@ -1539,7 +1552,7 @@ fn new_worktree_entry<A: Clone>(
 
 const NEW_WORKTREE_LABEL: &str = "New Worktree\u{2026}";
 
-/// The "+" a git Workspace row shows under the pointer and while selected.
+/// The "+" an expanded git Workspace row shows under the pointer and while selected.
 fn new_worktree_button(
     workspace_id: WorkspaceId,
     reveal: f32,

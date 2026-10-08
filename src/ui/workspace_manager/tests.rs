@@ -10823,15 +10823,31 @@ fn a_git_workspace_should_create_a_worktree_and_open_its_first_tab_once_listed(
 
     let outside_repository = offered(cx);
     let command_outside = command_available(cx);
+    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
+    let linked = fixture.path().join("linked");
     present_worktrees(cx, &[]);
-    let in_repository = offered(cx);
+    let main_only = offered(cx);
     let command_inside = command_available(cx);
+    present_worktrees(cx, &[&linked]);
+    click(
+        format!("workspace-disclosure-{}-expanded", workspace_id.get()).leak(),
+        cx,
+    );
+    let collapsed = offered(cx);
+    click(
+        format!("workspace-disclosure-{}-collapsed", workspace_id.get()).leak(),
+        cx,
+    );
+    let expanded = offered(cx);
+    let plus_bounds = cx.debug_bounds(plus).expect("the New Worktree button");
+    let chevron = cx
+        .debug_bounds(format!("workspace-disclosure-{}-expanded", workspace_id.get()).leak())
+        .expect("the expanded disclosure");
     click(plus, cx);
     let form = manager
         .read_with(cx, |manager, _| manager.worktree_form())
         .expect("the New Worktree dialog");
     let presented = form.read_with(cx, |form, _| form.is_open());
-    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
     let created = fixture.path().join("shell-integration");
     form.update(cx, |_, cx| {
         cx.emit(crate::ui::worktree_form::WorktreeFormEvent::Created(
@@ -10840,12 +10856,30 @@ fn a_git_workspace_should_create_a_worktree_and_open_its_first_tab_once_listed(
     });
     cx.run_until_parked();
     let before_listing = tabs(cx);
-    present_worktrees(cx, &[&created]);
+    present_worktrees(cx, &[&linked, &created]);
 
     assert_eq!(
-        (outside_repository, in_repository, presented),
-        ((false, false), (true, true), true),
-        "only a Workspace in a repository offers New Worktree, from its menu and its row"
+        (
+            outside_repository,
+            main_only,
+            collapsed,
+            expanded,
+            presented
+        ),
+        (
+            (false, false),
+            (true, false),
+            (true, false),
+            (true, true),
+            true
+        ),
+        "only a Workspace in a repository offers New Worktree: from its menu, and from its row \
+         while expanded"
+    );
+    assert_eq!(
+        plus_bounds.right(),
+        chevron.left(),
+        "the New Worktree button sits against the disclosure chevron"
     );
     assert_eq!(
         (command_outside, command_inside),
