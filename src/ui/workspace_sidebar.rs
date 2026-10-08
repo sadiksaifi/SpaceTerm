@@ -131,13 +131,15 @@ impl WorkspaceRowViewModel {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct WorktreeSection {
     pub(super) expanded: bool,
+    /// The listed repository's Main Worktree, as the expanded Workspace row describes it.
+    pub(super) repository: Option<SharedString>,
     /// The read repository's Worktrees first, then each former repository's Worktrees that still
     /// have Tabs.
     pub(super) groups: Vec<WorktreeGroup>,
 }
 
 impl WorktreeSection {
-    fn rows(&self) -> impl Iterator<Item = &WorktreeRowViewModel> {
+    pub(super) fn rows(&self) -> impl Iterator<Item = &WorktreeRowViewModel> {
         self.groups.iter().flat_map(|group| &group.rows)
     }
 }
@@ -152,10 +154,21 @@ pub(super) struct WorktreeGroup {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct WorktreeRowViewModel {
     pub(super) worktree_id: WorktreeId,
+    /// The Worktree directory's name, which titles the row.
+    pub(super) name: SharedString,
     /// The branch name, or the detached commit id.
     pub(super) label: SharedString,
     pub(super) detached: bool,
+    /// The Worktree's root.
     pub(super) path: SharedString,
+    /// The directory line 2 shows: the last-used Pane's, else the root, compacted against home.
+    pub(super) directory: SharedString,
+    /// The full directory line 2 shows.
+    pub(super) directory_tooltip: SharedString,
+    /// The branch or Pull Request that ends line 2.
+    pub(super) repository: Option<crate::repository_status::presentation::SidebarBadge>,
+    /// The repository's Main Worktree, which is never removed.
+    pub(super) main: bool,
     pub(super) has_tabs: bool,
     /// The Worktree holds the Workspace's Active Tab.
     pub(super) active: bool,

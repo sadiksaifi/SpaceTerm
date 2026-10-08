@@ -9,10 +9,13 @@ use std::sync::Arc;
 use gpui::{App, Context, Entity, SharedString, Subscription, Window};
 
 use super::WorkspaceManager;
+use super::repository::{RowFacts, RowKey};
 use crate::domain::{
-    RepositoryIdentity, WorkspaceEntry, WorkspaceId, WorktreeId, WorktreeKey, WorktreeRegistry,
+    CurrentDirectory, RepositoryIdentity, WorkspaceEntry, WorkspaceId, WorktreeId, WorktreeKey,
+    WorktreeRegistry,
 };
 use crate::repository_status::RepositoryMachine;
+use crate::repository_status::presentation::{HeadGlyph, SidebarBadge};
 use crate::repository_status::scheduler::SourceDirectory;
 use crate::ui::TabManager;
 use crate::ui::workspace_sidebar::{WorktreeGroup, WorktreeRowViewModel, WorktreeSection};
@@ -171,11 +174,28 @@ impl WorkspaceManager {
                 WorktreeHead::Detached(commit) => (commit.clone(), true),
                 WorktreeHead::Bare => (String::new(), false),
             };
+            let directory = self.worktree_row_directory(workspace_id, id, &record.root, cx);
+            // The listing names the branch until the Worktree's status is read.
+            let repository = self.worktree_badge(workspace_id, id, cx).or_else(|| {
+                (!label.is_empty()).then(|| SidebarBadge::Branch {
+                    glyph: HeadGlyph::from_detached(detached),
+                    text: label.clone(),
+                })
+            });
             WorktreeRowViewModel {
                 worktree_id: id,
+                name: directory_name(&record.root),
                 label: label.into(),
                 detached,
                 path: record.root.display().to_string().into(),
+                directory: super::compact_home_path(&directory, &self.local_home_directory_path)
+                    .into(),
+                directory_tooltip: directory.display().to_string().into(),
+                repository,
+                main: worktrees
+                    .registry
+                    .key(id)
+                    .is_some_and(|key| key.root() == key.repository().main_root()),
                 has_tabs: counts.contains_key(&id),
                 active: active == Some(id),
                 locked: record.locked,
@@ -239,8 +259,66 @@ impl WorkspaceManager {
         }
         Some(WorktreeSection {
             expanded: worktrees.expanded.unwrap_or(true),
+            repository: snapshot.as_ref().map(|snapshot| {
+                super::compact_home_path(
+                    snapshot.repository.main_root(),
+                    &self.local_home_directory_path,
+                )
+                .into()
+            }),
             groups,
         })
+    }
+
+    /// The Repository Status each disclosed Worktree row reads: its last-used directory, while the
+    /// row is disclosed or is the Active Worktree its collapsed Workspace row shows.
+    pub(super) fn worktree_row_facts(&self, cx: &App) -> Vec<(RowKey, RowFacts)> {
+        let mut facts = Vec::new();
+        for (&workspace_id, worktrees) in &self.sidebar_worktrees.workspaces {
+            let Some(section) = self.worktree_section(workspace_id, cx) else {
+                continue;
+            };
+            for row in section.rows().filter(|row| !row.missing) {
+                let Some(key) = worktrees.registry.key(row.worktree_id) else {
+                    continue;
+                };
+                let directory =
+                    self.worktree_row_directory(workspace_id, row.worktree_id, key.root(), cx);
+                facts.push((
+                    RowKey::Worktree(workspace_id, row.worktree_id),
+                    RowFacts {
+                        machine: RepositoryMachine::Local,
+                        directory: SourceDirectory::Local(directory),
+                        available: true,
+                        visible: section.expanded || row.active,
+                    },
+                ));
+            }
+        }
+        facts
+    }
+
+    /// The directory of the Pane last used in a Worktree, else the Worktree's root.
+    fn worktree_row_directory(
+        &self,
+        workspace_id: WorkspaceId,
+        worktree_id: WorktreeId,
+        root: &std::path::Path,
+        cx: &App,
+    ) -> PathBuf {
+        self.workspaces
+            .workspace(workspace_id)
+            .and_then(|workspace| {
+                match workspace
+                    .payload()
+                    .read(cx)
+                    .worktree_directory(worktree_id, cx)?
+                {
+                    CurrentDirectory::Local(directory) => Some(directory),
+                    CurrentDirectory::Remote(_) => None,
+                }
+            })
+            .unwrap_or_else(|| root.to_path_buf())
     }
 
     fn worktree_has_tabs(&self, workspace_id: WorkspaceId, id: WorktreeId, cx: &App) -> bool {
@@ -360,11 +438,15 @@ impl WorkspaceManager {
 
 /// The repository's name as a divider shows it: its Main Worktree's last component.
 fn repository_name(repository: &RepositoryIdentity) -> SharedString {
-    repository
-        .main_root()
+    directory_name(repository.main_root())
+}
+
+/// A directory's last component, or the whole path for a root.
+fn directory_name(directory: &std::path::Path) -> SharedString {
+    directory
         .file_name()
         .map_or_else(
-            || repository.main_root().display().to_string(),
+            || directory.display().to_string(),
             |name| name.to_string_lossy().into_owned(),
         )
         .into()

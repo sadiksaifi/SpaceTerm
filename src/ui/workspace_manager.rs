@@ -3404,10 +3404,39 @@ impl WorkspaceManager {
                         (false, format!("{directory_tooltip}: {reason}"))
                     }
                 };
+                let mut path: gpui::SharedString = path.into();
+                let mut tooltip = tooltip;
+                let mut repository = self.sidebar_badge(workspace.id(), cx);
+                let worktrees = self.worktree_section(workspace.id(), cx);
+                // A disclosing row describes the Workspace. Its directory and branch belong to
+                // its Worktrees, and a collapsed row shows its Active Worktree's.
+                if let Some(section) = worktrees.as_ref().filter(|_| available) {
+                    let pinned = workspace
+                        .local_display_directory()
+                        .filter(|_| workspace.pinned_directory().is_some());
+                    let active = section
+                        .rows()
+                        .find(|worktree| worktree.active)
+                        .filter(|_| !section.expanded);
+                    tooltip = match active {
+                        Some(worktree) => {
+                            path = worktree.directory.clone();
+                            repository = worktree.repository.clone();
+                            format!("Worktree {}: {}", worktree.name, worktree.directory_tooltip)
+                        }
+                        None => section
+                            .repository
+                            .as_ref()
+                            .map_or_else(String::new, |root| format!("Repository: {root}")),
+                    };
+                    if let Some(pinned) = pinned {
+                        tooltip.push_str(&format!("\nPinned Directory: {}", pinned.display()));
+                    }
+                }
                 WorkspaceRowViewModel {
                     workspace_id: workspace.id(),
                     name: workspace.name().to_owned().into(),
-                    path: path.into(),
+                    path,
                     machine: match workspace.location() {
                         WorkspaceLocation::Local => None,
                         WorkspaceLocation::Remote { key, .. } => {
@@ -3420,8 +3449,8 @@ impl WorkspaceManager {
                         .remote_connection_state()
                         .map(RemoteConnectionState::phase),
                     available,
-                    repository: self.sidebar_badge(workspace.id(), cx),
-                    worktrees: self.worktree_section(workspace.id(), cx),
+                    repository,
+                    worktrees,
                     active: workspace.id() == active_workspace_id,
                 }
             })

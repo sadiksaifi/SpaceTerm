@@ -1,5 +1,4 @@
 use super::*;
-use crate::repository_status::presentation::HeadGlyph;
 use crate::ui::appearance::gpui_color;
 use crate::ui::chrome_geometry::RadiusRole;
 use crate::ui::chrome_icons::IconRole;
@@ -31,8 +30,10 @@ const DISCLOSURE_WIDTH: f32 = 12.0;
 const DISCLOSURE_GAP: f32 = 2.0;
 const ICON_COLUMN_WIDTH: f32 = 18.0;
 const ROW_CONTENT_GAP: f32 = 10.0;
-/// The minimum height of a Worktree row, which holds one line.
-const WORKTREE_ROW_HEIGHT: f32 = 28.0;
+/// The minimum height of a row that holds one line.
+const SINGLE_LINE_ROW_HEIGHT: f32 = 32.0;
+/// How far a Worktree row's content starts inside its Workspace's.
+const WORKTREE_LEVEL_INDENT: f32 = 14.0;
 const FORMER_REPOSITORY_ROW_HEIGHT: f32 = 22.0;
 
 /// The chip carrying a Workspace row's hover and persistent selection. An emphasized selection
@@ -150,15 +151,20 @@ fn row_paint(
     (chip, row_colors)
 }
 
-/// Where a Worktree row's content starts: under its Workspace's title.
+/// Where a Worktree row's icon starts: one level inside its Workspace's icon.
 fn worktree_indent(appearance: &crate::ui::appearance::ChromeAppearance, cx: &App) -> Pixels {
     row_padding(appearance, cx).0
-        + appearance
-            .spacing(DISCLOSURE_WIDTH + DISCLOSURE_GAP + ICON_COLUMN_WIDTH + ROW_CONTENT_GAP)
+        + appearance.spacing(DISCLOSURE_WIDTH + DISCLOSURE_GAP + WORKTREE_LEVEL_INDENT)
 }
 
-fn worktree_row_height(appearance: &crate::ui::appearance::ChromeAppearance) -> Pixels {
-    appearance.spacing(WORKTREE_ROW_HEIGHT).max(
+/// Where a Worktree row's text starts, after its icon.
+fn worktree_text_indent(appearance: &crate::ui::appearance::ChromeAppearance, cx: &App) -> Pixels {
+    worktree_indent(appearance, cx) + appearance.spacing(ICON_COLUMN_WIDTH + ROW_CONTENT_GAP)
+}
+
+/// The height of a row that holds one line: an expanded Workspace's.
+fn single_line_row_height(appearance: &crate::ui::appearance::ChromeAppearance) -> Pixels {
+    appearance.spacing(SINGLE_LINE_ROW_HEIGHT).max(
         appearance
             .typography
             .style(TextRole::Navigation)
@@ -328,6 +334,10 @@ impl WorkspaceSidebar {
         let level = f64::from(hover);
         let (chip, row_colors) = row_paint(selected, emphasized, hover, appearance, cx);
         let expanded = worktrees.as_ref().map(|section| section.expanded);
+        // A disclosing row describes the Workspace: its pin moves to line 1, and while expanded
+        // its one line leaves each directory and branch to the Worktree rows below it.
+        let disclosing = expanded.is_some();
+        let single_line = expanded == Some(true);
         // Text helpers consume no materials or surfaces. Give only those helpers the promoted
         // Panel-host row colors while all surface composition keeps the root appearance.
         let mut row_text_appearance = appearance.clone();
@@ -391,7 +401,11 @@ impl WorkspaceSidebar {
                 ))
             });
         let target_name = name.clone();
-        let target_detail = detail.clone();
+        let target_detail = if single_line {
+            tooltip.clone()
+        } else {
+            detail.clone()
+        };
         let accessibility_name = remote_status.map_or_else(
             || format!("Workspace actions for {name}"),
             |status| format!("Workspace actions for {name}, connection {status}"),
@@ -429,6 +443,8 @@ impl WorkspaceSidebar {
             "Workspace unavailable"
         } else if remote_status.is_some() {
             "Remote Workspace connection"
+        } else if disclosing {
+            "Workspace"
         } else if pinned {
             "Pinned Directory"
         } else {
@@ -455,7 +471,11 @@ impl WorkspaceSidebar {
             })
             .relative()
             .w_full()
-            .h(row_height(appearance))
+            .h(if single_line {
+                single_line_row_height(appearance)
+            } else {
+                row_height(appearance)
+            })
             .flex_shrink_0()
             .pl(row_padding_leading)
             .pr(row_padding_trailing)
@@ -546,21 +566,24 @@ impl WorkspaceSidebar {
                         name,
                         first_line,
                         if renaming { None } else { machine },
+                        pinned && disclosing && !renaming,
                         workspace_id.get(),
                         row_text_appearance.clone(),
                     ))
-                    .child(text::detail(
-                        detail,
-                        repository.map(|badge| text::RowRepository {
-                            badge,
-                            pull_request_paint,
-                        }),
-                        pinned && detail_color.is_none(),
-                        detail_paint,
-                        detail_selector,
-                        workspace_id.get(),
-                        row_text_appearance,
-                    )),
+                    .when(!single_line, |lines| {
+                        lines.child(text::detail(
+                            detail,
+                            repository.map(|badge| text::RowRepository {
+                                badge,
+                                pull_request_paint,
+                            }),
+                            pinned && !disclosing && detail_color.is_none(),
+                            detail_paint,
+                            detail_selector,
+                            workspace_id.get(),
+                            row_text_appearance,
+                        ))
+                    }),
             )
             // Rows rest on the continuous base surface without separators. The hover and selection
             // chips alone give each Workspace its shape; collection focus never adds a row ring.
@@ -1076,7 +1099,7 @@ impl WorkspaceSidebar {
                         .flex_shrink_0()
                         .flex()
                         .items_end()
-                        .pl(worktree_indent(appearance, cx))
+                        .pl(worktree_text_indent(appearance, cx))
                         .pr(row_padding(appearance, cx).1)
                         .truncate()
                         .chrome_text(appearance.typography.style(TextRole::Secondary))
@@ -1128,26 +1151,71 @@ impl WorkspaceSidebar {
         let (chip, row_colors) = row_paint(selected, emphasized, hover, appearance, cx);
         let openable = worktree.openable();
         // A Worktree with no Tabs reads as secondary until it is opened.
-        let label_color = if worktree.has_tabs && !worktree.missing {
+        let title_color = if worktree.has_tabs && !worktree.missing {
             row_colors.row_foreground
         } else {
             row_colors.row_secondary
         };
-        let icon_size = appearance.icons.metrics(IconRole::Row).glyph_size;
+        let mut text_appearance = appearance.clone();
+        text_appearance.colors = row_colors.clone();
+        let text_id = worktree_text_id(workspace_id, worktree_id);
         let selector = format!("worktree-row-{}-{worktree_id}", workspace_id.get());
-        let label = worktree.label.clone();
-        let mut description = worktree.path.to_string();
+        let head = if worktree.detached {
+            format!("Detached at {}", worktree.label)
+        } else {
+            format!("Branch {}", worktree.label)
+        };
+        let mut states = Vec::new();
+        if worktree.main {
+            states.push("Main Worktree");
+        }
         if worktree.missing {
-            description.push_str(", missing");
+            states.push("Missing");
         } else if worktree.locked {
-            description.push_str(", locked");
+            states.push("Locked");
         }
         if !worktree.has_tabs {
-            description.push_str(", no tabs");
+            states.push("No Tabs");
         }
+        let description = std::iter::once(head.as_str())
+            .chain(std::iter::once(worktree.directory_tooltip.as_ref()))
+            .chain(states.iter().copied())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let tooltip_detail = std::iter::once(worktree.name.as_ref())
+            .chain([head.as_str(), worktree.directory_tooltip.as_ref()])
+            .chain(
+                states
+                    .iter()
+                    .copied()
+                    .filter(|state| *state != "Main Worktree"),
+            )
+            .collect::<Vec<_>>()
+            .join("\n");
+        // A Missing Worktree's directory gives way to its state, as an unavailable Workspace's does.
+        let (detail, detail_paint, detail_selector) = if worktree.missing {
+            (
+                SharedString::from("Directory missing"),
+                Some(workspace_row_status_paint(
+                    row_colors.warning,
+                    selected,
+                    4.5,
+                    &row_colors,
+                )),
+                format!("{selector}-missing"),
+            )
+        } else {
+            (worktree.directory.clone(), None, format!("{selector}-path"))
+        };
+        let pull_request_paint = appearance.colors.pull_request(if selected {
+            appearance.colors.row_selected_background
+        } else {
+            crate::ui::workspace_frame::base_surface(&appearance.colors)
+        });
         let id = SharedString::from(selector.clone());
         let click_sidebar = sidebar.clone();
         let press_sidebar = sidebar;
+        let icon_size = appearance.icons.metrics(IconRole::Row).glyph_size;
         let row = div()
             .id(id)
             .debug_selector({
@@ -1160,11 +1228,7 @@ impl WorkspaceSidebar {
                 }
             })
             .role(accesskit::Role::TreeItem)
-            .aria_label(if worktree.detached {
-                SharedString::from(format!("Detached at {label}"))
-            } else {
-                label.clone()
-            })
+            .aria_label(worktree.name.clone())
             .aria_description(SharedString::from(description))
             .aria_level(2)
             .aria_position_in_set(position)
@@ -1185,13 +1249,13 @@ impl WorkspaceSidebar {
             })
             .relative()
             .w_full()
-            .h(worktree_row_height(appearance))
+            .h(row_height(appearance))
             .flex_shrink_0()
             .pl(worktree_indent(appearance, cx))
             .pr(row_padding(appearance, cx).1)
             .flex()
             .items_center()
-            .gap(appearance.spacing(6.0))
+            .gap(appearance.spacing(ROW_CONTENT_GAP))
             .block_mouse_except_scroll()
             .when_some(row_background(appearance), |row, background| {
                 row.bg(gpui_color(background))
@@ -1212,55 +1276,85 @@ impl WorkspaceSidebar {
             })
             .child(
                 div()
-                    .w(icon_size)
+                    .w(appearance.spacing(ICON_COLUMN_WIDTH))
                     .flex_shrink_0()
                     .flex()
+                    .items_center()
                     .justify_center()
-                    .text_color(gpui_color(row_colors.row_icon))
-                    .map(
-                        |mark| match HeadGlyph::from_detached(worktree.detached).text() {
-                            Some(text) => mark
-                                .chrome_text(appearance.typography.style(TextRole::Secondary))
-                                .child(text),
-                            None => mark.child(Icon::inherited(IconName::GitBranch, icon_size)),
+                    .text_color(gpui_color(
+                        detail_paint.map_or(row_colors.row_icon, |paint| paint.normal),
+                    ))
+                    .child(Icon::inherited(
+                        if worktree.locked && !worktree.missing {
+                            IconName::Lock
+                        } else {
+                            IconName::Folder
                         },
-                    ),
+                        icon_size,
+                    )),
             )
             .child(
                 div()
                     .min_w_0()
                     .flex_1()
-                    .truncate()
-                    .chrome_text(appearance.typography.style(TextRole::Navigation))
-                    .text_color(gpui_color(label_color))
-                    .child(label),
+                    .flex()
+                    .flex_col()
+                    .gap(appearance.spacing(SIDEBAR_ROW_LINE_GAP))
+                    .child(text::title(
+                        worktree.name.clone(),
+                        div()
+                            .debug_selector({
+                                let selector = selector.clone();
+                                move || format!("{selector}-name")
+                            })
+                            .w_full()
+                            .truncate()
+                            .chrome_text(appearance.typography.style(TextRole::Navigation))
+                            .text_color(gpui_color(title_color))
+                            .child(worktree.name.clone())
+                            .into_any_element(),
+                        None,
+                        false,
+                        text_id,
+                        text_appearance.clone(),
+                    ))
+                    .child(text::detail(
+                        detail,
+                        worktree
+                            .repository
+                            .clone()
+                            .filter(|_| !worktree.missing)
+                            .map(|badge| text::RowRepository {
+                                badge,
+                                pull_request_paint,
+                            }),
+                        false,
+                        detail_paint,
+                        Some(detail_selector),
+                        text_id,
+                        text_appearance,
+                    )),
             )
-            .when(worktree.missing, |row| {
-                row.child(
-                    div()
-                        .flex_shrink_0()
-                        .chrome_text(appearance.typography.style(TextRole::Secondary))
-                        .text_color(gpui_color(row_colors.row_secondary))
-                        .child("Missing"),
-                )
-            })
-            .when(worktree.locked && !worktree.missing, |row| {
-                row.child(
-                    div()
-                        .flex_shrink_0()
-                        .text_color(gpui_color(row_colors.row_icon))
-                        .child(Icon::inherited(IconName::Lock, icon_size)),
-                )
-            })
             .child(fade.fade.tracker());
         Tooltip::new(
             SharedString::from(format!("{selector}-tooltip")),
-            "Worktree",
+            if worktree.main {
+                "Main Worktree"
+            } else {
+                "Worktree"
+            },
         )
-        .detail(worktree.path.clone())
+        .detail(tooltip_detail)
+        .debug_selector(format!("{selector}-tooltip"))
         .attach(row, TooltipTargetVisibility::Visible)
         .into_any_element()
     }
+}
+
+/// The element id a Worktree row's text uses. Workspace rows use their Workspace id, so a Worktree
+/// row takes the upper half of the id space.
+fn worktree_text_id(workspace_id: WorkspaceId, worktree_id: WorktreeId) -> u64 {
+    (1 << 63) | ((workspace_id.get() & 0x7fff_ffff) << 32) | (worktree_id.get() & 0xffff_ffff)
 }
 
 /// The footer creation menu's rows, built from the shared creation descriptors.

@@ -1321,6 +1321,19 @@ impl TabManager {
         self.tabs.active_scope()
     }
 
+    /// The directory of the focused Pane in a Worktree's most recently active Tab.
+    pub(crate) fn worktree_directory(
+        &self,
+        id: WorktreeId,
+        cx: &App,
+    ) -> Option<crate::domain::CurrentDirectory> {
+        let view = self
+            .tabs
+            .tab(self.tabs.most_recent_tab_in(Some(id))?)?
+            .read(cx);
+        view.current_directory(view.focused_pane_id(), cx)
+    }
+
     /// The number of Tabs each Worktree holds. Tabs outside any Worktree are not counted.
     pub(crate) fn worktree_tab_counts(&self) -> std::collections::BTreeMap<WorktreeId, usize> {
         let mut counts = std::collections::BTreeMap::new();

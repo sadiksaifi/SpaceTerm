@@ -10521,7 +10521,7 @@ fn git_workspace_rows_should_disclose_worktrees_that_open_lazily(cx: &mut TestAp
     let feature = tree
         .with_role("TreeItem")
         .into_iter()
-        .find(|item| item["aria"]["label"] == "feature/login")
+        .find(|item| item["aria"]["label"] == "shell-integration")
         .expect("the linked Worktree's row");
     assert_eq!(
         (
@@ -10533,12 +10533,17 @@ fn git_workspace_rows_should_disclose_worktrees_that_open_lazily(cx: &mut TestAp
     perform(cx, feature, Action::Click);
     cx.run_until_parked();
 
+    let main = std::env::temp_dir()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     assert_eq!(
         disclosed,
         [
             ("Default".to_owned(), 1, false),
-            ("main".to_owned(), 2, true),
-            ("feature/login".to_owned(), 2, false),
+            (main.clone(), 2, true),
+            ("shell-integration".to_owned(), 2, false),
         ],
         "two Worktrees disclose under the Workspace, and the Active Worktree carries the selection"
     );
@@ -10554,8 +10559,8 @@ fn git_workspace_rows_should_disclose_worktrees_that_open_lazily(cx: &mut TestAp
             .collect::<Vec<_>>(),
         [
             ("Default".to_owned(), false),
-            ("main".to_owned(), false),
-            ("feature/login".to_owned(), true),
+            (main, false),
+            ("shell-integration".to_owned(), true),
         ]
     );
     assert_eq!(
@@ -10596,6 +10601,88 @@ fn a_repository_without_linked_worktrees_should_keep_a_plain_workspace_row(
             .collect::<Vec<_>>(),
         [("Default", true)],
         "the Main Worktree alone discloses nothing"
+    );
+}
+
+#[gpui::test]
+fn worktree_rows_should_carry_the_directory_and_branch_that_a_collapsed_row_shows(
+    cx: &mut TestAppContext,
+) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
+    cx.update(|cx| {
+        crate::ui::worktree_store::testing::install(cx);
+    });
+    let (manager, _records, cx) = workspace_manager(cx);
+    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
+    let linked = fixture.path().join("shell-integration");
+    present_worktrees(cx, &[&linked]);
+    let (workspace_id, home) = manager.read_with(cx, |manager, _| {
+        (
+            manager.workspaces.active_workspace_id(),
+            manager.local_home_directory_path.clone(),
+        )
+    });
+    let main = std::env::temp_dir();
+    let items = |cx: &mut VisualTestContext| {
+        A11yTree::read(cx)
+            .with_role("TreeItem")
+            .iter()
+            .map(|item| {
+                (
+                    item["aria"]["label"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned(),
+                    item["aria"]["description"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let expanded = items(cx);
+    let tree = A11yTree::read(cx);
+    let feature = tree
+        .with_role("TreeItem")
+        .into_iter()
+        .find(|item| item["aria"]["label"] == "shell-integration")
+        .expect("the linked Worktree's row");
+    perform(cx, feature, Action::Click);
+    cx.run_until_parked();
+    manager.update(cx, |manager, cx| {
+        manager.set_worktrees_expanded(workspace_id, false);
+        cx.notify();
+    });
+    cx.run_until_parked();
+
+    let name = |path: &Path| path.file_name().unwrap().to_string_lossy().into_owned();
+    assert_eq!(
+        expanded,
+        [
+            (
+                "Default".to_owned(),
+                format!("Repository: {}", compact_home_path(&main, &home)),
+            ),
+            (
+                name(&main),
+                format!("Branch main, {}, Main Worktree", main.display()),
+            ),
+            (
+                "shell-integration".to_owned(),
+                format!("Branch feature/login, {}, No Tabs", linked.display()),
+            ),
+        ],
+        "an expanded Workspace row describes its repository, and each Worktree row its own \
+         directory and branch"
+    );
+    assert_eq!(
+        items(cx),
+        [("Default".to_owned(), compact_home_path(&linked, &home))],
+        "a collapsed Workspace row shows its Active Worktree's directory"
     );
 }
 
@@ -10647,12 +10734,12 @@ fn the_keyboard_should_walk_worktrees_and_open_one_only_on_return(cx: &mut TestA
     assert_eq!(
         steps,
         [
-            step(3, "feature/login", &[1]),
+            step(3, "shell-integration", &[1]),
             step(3, "Default", &[1]),
             step(1, "Default", &[1]),
             step(3, "Default", &[1]),
-            step(3, "feature/login", &[1]),
-            step(3, "feature/login", &[1, 1]),
+            step(3, "shell-integration", &[1]),
+            step(3, "shell-integration", &[1, 1]),
         ],
         "arrows stand on a Worktree with no Tabs without opening it, Left and Right collapse and \
          expand, and Return opens it"
@@ -10721,6 +10808,7 @@ fn leaving_a_repository_should_keep_worktrees_with_tabs_under_their_former_repos
         section,
         WorktreeSection {
             expanded: true,
+            repository: None,
             groups: vec![WorktreeGroup {
                 former_repository: Some(former.into()),
                 rows: vec![crate::ui::workspace_sidebar::WorktreeRowViewModel {
