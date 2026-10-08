@@ -183,8 +183,7 @@ impl ChromeTypography {
 
     /// Preserves a measured width when GPUI snaps explicit lengths to device pixels.
     pub(crate) fn round_measurement_up(width: Pixels, window: &Window) -> Pixels {
-        let scale = window.scale_factor();
-        px((f32::from(width) * scale).ceil() / scale)
+        spaceterm_ui::reserve_measured_width(width, [], window)
     }
 
     pub(crate) fn measure(&self, role: TextRole, value: &str, window: &Window) -> Pixels {

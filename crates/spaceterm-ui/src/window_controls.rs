@@ -145,7 +145,13 @@ impl ClientWindowControls {
             return px(0.0);
         }
         let metrics = DesktopWindowStyle::current(cx).control_metrics();
-        px(count as f32 * metrics.target + (count - 1) as f32 * metrics.gap + metrics.edge_margin)
+        crate::reserve_measured_width(
+            px(0.0),
+            std::iter::repeat_n(px(metrics.target), count)
+                .chain(std::iter::repeat_n(px(metrics.gap), count - 1))
+                .chain([px(metrics.edge_margin)]),
+            window,
+        )
     }
 }
 
