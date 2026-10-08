@@ -162,7 +162,7 @@ impl InstalledRepositoryStatus {
 pub(crate) fn install(settings: &Settings, adapters: RepositoryStatusAdapters, cx: &mut App) {
     let store = cx.new(|cx| {
         RepositoryStatusStore::new(
-            settings.snapshot().candidate.git,
+            settings.snapshot().candidate.git.repository_status(),
             adapters,
             thread_spawner(),
             cx,
@@ -174,7 +174,7 @@ pub(crate) fn install(settings: &Settings, adapters: RepositoryStatusAdapters, c
     cx.spawn(async move |cx| {
         while changed.recv().await.is_ok() {
             while changed.try_recv().is_ok() {}
-            let preferences = followed.snapshot().candidate.git;
+            let preferences = followed.snapshot().candidate.git.repository_status();
             if weak
                 .update(cx, |store, cx| store.set_preferences(preferences, cx))
                 .is_err()

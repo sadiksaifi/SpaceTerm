@@ -44,7 +44,7 @@ fn legacy_settings_load_without_writing_and_save_as_canonical_opacity() {
 
     let saved: serde_json::Value =
         serde_json::from_slice(&storage.0.lock().unwrap().snapshot.as_ref().unwrap().0).unwrap();
-    assert_eq!(saved["schema_version"], 5);
+    assert_eq!(saved["schema_version"], 6);
     assert_eq!(saved["revision"], 13);
     assert_eq!(saved["appearance"]["window"]["opacity"], 0.75);
     assert!(saved["appearance"]["window"].get("transparency").is_none());
