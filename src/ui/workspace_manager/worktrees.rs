@@ -31,6 +31,7 @@ use crate::worktrees::catalog::{WorktreeInterestId, WorktreeListing};
 use crate::worktrees::git::{BranchList, WorktreeBranch, WorktreeCreateError};
 use crate::worktrees::listing::{WorktreeHead, WorktreeRecord};
 
+mod cycle;
 mod removal;
 
 #[derive(Default)]

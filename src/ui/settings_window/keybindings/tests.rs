@@ -526,6 +526,8 @@ fn an_override_reserved_here_is_explained_and_its_default_stays_active(cx: &mut 
         retained(&window, Command::CloseWorkspace, cx),
         Some(Some(shortcut("cmd-q")))
     );
+    // Focus scrolls the row, which sits below the first screen of Commands, into view.
+    focus_recorder(&window, Command::CreateTab, cx);
     click("settings-row-shortcut-create-tab-reset", cx);
     assert_eq!(retained(&window, Command::CreateTab, cx), None);
     assert_eq!(description(&window, Command::CreateTab, cx), None);
@@ -598,6 +600,8 @@ fn a_displaced_default_and_its_inactive_override_are_both_explained(cx: &mut Tes
             .cloned()),
         None
     );
+    // Focus scrolls the row, which sits below the first screen of Commands, into view.
+    focus_recorder(&window, Command::CreateTab, cx);
     click("settings-row-shortcut-create-tab-reset", cx);
 
     assert_eq!(retained(&window, Command::CreateTab, cx), None);

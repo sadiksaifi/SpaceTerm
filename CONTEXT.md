@@ -98,6 +98,8 @@ _Avoid_: Hotkey, key equivalent
 
 **Move Tab Right** / **Move Tab Left**: The Commands moving the Active Tab among its Workspace's Tabs, within the Active Worktree.
 
+**Next Worktree** / **Previous Worktree**: The Commands activating the neighboring Worktree that has Tabs, in sidebar order, wrapping at either end.
+
 **Focused Pane**: The Pane selected by a Tab for Pane actions and focus restoration.
 
 **Terminal Input Focus**: A Pane's current eligibility to accept terminal input.

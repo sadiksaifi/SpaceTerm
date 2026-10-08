@@ -14,9 +14,9 @@ use crate::ui::{
     ClosePane, CloseTab, CloseWorkspace, CreateTab, DecreaseTerminalFontSize,
     ExportTerminalDiagnostics, FindNext, FindPrevious, FocusPaneDown, FocusPaneLeft,
     FocusPaneRight, FocusPaneUp, IncreaseTerminalFontSize, MoveTabLeft, MoveTabRight, NewWorkspace,
-    NextTab, OpenTerminalFind, PreviousTab, ResetTerminalFontSize, ScrollPageDown, ScrollPageUp,
-    ScrollToBottom, ScrollToTop, SplitDown, SplitRight, SwitchWorkspace, TogglePaneZoom,
-    ToggleSidebar, ToggleSidebarFocus,
+    NextTab, NextWorktree, OpenTerminalFind, PreviousTab, PreviousWorktree, ResetTerminalFontSize,
+    ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop, SplitDown, SplitRight,
+    SwitchWorkspace, TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus,
 };
 
 pub(crate) const TOGGLE_PANE_ZOOM_TITLE: &str = "Toggle Pane Zoom";
@@ -173,6 +173,9 @@ pub(crate) fn window_menu() -> Menu {
             MenuItem::action("Move Tab Left", MoveTabLeft),
             MenuItem::action("Move Tab Right", MoveTabRight),
             MenuItem::separator(),
+            MenuItem::action("Previous Worktree", PreviousWorktree),
+            MenuItem::action("Next Worktree", NextWorktree),
+            MenuItem::separator(),
             MenuItem::action("Bring All to Front", BringAllWindowsToFront),
         ],
     }
@@ -198,7 +201,7 @@ mod tests {
     use super::*;
     use crate::keybindings::{Command, KeybindingPreferences, Shortcut};
 
-    const MENU_COMMANDS: [(&str, &str, Command); 9] = [
+    const MENU_COMMANDS: [(&str, &str, Command); 11] = [
         (
             "SpaceTerm",
             "Keyboard Shortcuts…",
@@ -212,6 +215,8 @@ mod tests {
         ("Window", "Next Tab", Command::NextTab),
         ("Window", "Move Tab Left", Command::MoveTabLeft),
         ("Window", "Move Tab Right", Command::MoveTabRight),
+        ("Window", "Previous Worktree", Command::PreviousWorktree),
+        ("Window", "Next Worktree", Command::NextWorktree),
     ];
 
     fn menu_action<'a>(menus: &'a [Menu], menu: &str, title: &str) -> &'a dyn Action {
@@ -287,6 +292,9 @@ mod tests {
                 "Move Tab Left",
                 "Move Tab Right",
                 "|",
+                "Previous Worktree",
+                "Next Worktree",
+                "|",
                 "Bring All to Front"
             ]
         );
@@ -316,7 +324,7 @@ mod tests {
     }
 
     fn shortcuts(
-        expected: [(&'static str, Option<&str>); 9],
+        expected: [(&'static str, Option<&str>); 11],
     ) -> Vec<(&'static str, Option<Shortcut>)> {
         expected
             .into_iter()
@@ -338,6 +346,8 @@ mod tests {
                 ("Next Tab", Some("cmd-}")),
                 ("Move Tab Left", None),
                 ("Move Tab Right", None),
+                ("Previous Worktree", Some("cmd-alt-[")),
+                ("Next Worktree", Some("cmd-alt-]")),
             ])
         );
     }
@@ -360,6 +370,8 @@ mod tests {
                 ("Next Tab", Some("ctrl-tab")),
                 ("Move Tab Left", None),
                 ("Move Tab Right", Some("cmd-alt-shift-right")),
+                ("Previous Worktree", Some("cmd-alt-[")),
+                ("Next Worktree", Some("cmd-alt-]")),
             ])
         );
     }

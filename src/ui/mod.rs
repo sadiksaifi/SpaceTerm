@@ -144,6 +144,8 @@ actions!(
         OpenLocalDirectory,
         OpenRemoteDirectory,
         NewWorktree,
+        NextWorktree,
+        PreviousWorktree,
         ToggleSidebar,
         ToggleSidebarFocus,
         OpenTerminalFind,

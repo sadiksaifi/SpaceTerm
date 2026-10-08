@@ -740,6 +740,8 @@ shortcut_rows! {
     OpenLocalDirectory => "open-local-directory",
     OpenRemoteDirectory => "open-remote-directory",
     NewWorktree => "new-worktree",
+    NextWorktree => "next-worktree",
+    PreviousWorktree => "previous-worktree",
     CloseWorkspace => "close-workspace",
     ActivateWorkspace1 => "activate-workspace-1",
     ActivateWorkspace2 => "activate-workspace-2",

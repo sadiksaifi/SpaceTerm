@@ -674,6 +674,10 @@ impl WorkspaceSidebar {
         let active = self.rows.iter().find(|row| row.active);
         let identity = WorkspaceChromeIdentity {
             name: active.map_or_else(String::new, |row| row.name.to_string()),
+            worktree: active
+                .and_then(|row| row.worktrees.as_ref())
+                .and_then(|section| section.rows().find(|row| row.active))
+                .map(|row| row.name.to_string()),
             pinned: active.is_some_and(|row| row.pinned),
             status: active.and_then(|row| {
                 WorkspaceChromeStatus::resolve(row.available, row.remote_connection_phase)

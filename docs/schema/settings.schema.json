@@ -466,6 +466,12 @@
         "new_worktree": {
           "$ref": "#/$defs/shortcutOverride"
         },
+        "next_worktree": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "previous_worktree": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
         "close_workspace": {
           "$ref": "#/$defs/shortcutOverride"
         },

@@ -45,11 +45,11 @@ use super::{
     CloseTerminalFind, CloseWorkspace, CopySelection, CreateTab, FindNext, FindPrevious,
     FocusNextPane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, FocusPreviousPane,
     MoveTabLeft, MoveTabRight, NewRemoteWorkspace, NewWorkspace, NewWorktree, NextTab,
-    OpenLocalDirectory, OpenRemoteDirectory, OpenTerminalFind, PreviousTab,
-    RemoteChildLaunchUnavailable, ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop,
-    ShowRepositoryStatus, SplitDown, SplitRight, SwitchWorkspace, TERMINAL_KEY_CONTEXT, TabManager,
-    TabManagerEvent, TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus,
-    WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
+    NextWorktree, OpenLocalDirectory, OpenRemoteDirectory, OpenTerminalFind, PreviousTab,
+    PreviousWorktree, RemoteChildLaunchUnavailable, ScrollPageDown, ScrollPageUp, ScrollToBottom,
+    ScrollToTop, ShowRepositoryStatus, SplitDown, SplitRight, SwitchWorkspace,
+    TERMINAL_KEY_CONTEXT, TabManager, TabManagerEvent, TogglePaneZoom, ToggleSidebar,
+    ToggleSidebarFocus, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
 };
 use crate::appearance::Color;
 use crate::close_confirmation::{
@@ -851,7 +851,7 @@ impl WorkspaceManager {
         };
         let chrome = WorkspaceChromeLayout::resolve(
             self.sidebar.read(cx).layout(),
-            &chrome_identity(workspace),
+            &self.chrome_identity(workspace_id, cx),
             window,
             cx,
         );
@@ -2939,6 +2939,19 @@ impl WorkspaceManager {
         self.new_worktree(workspace_id, window, cx);
     }
 
+    fn on_next_worktree(&mut self, _: &NextWorktree, window: &mut Window, cx: &mut Context<Self>) {
+        self.step_worktree(true, window, cx);
+    }
+
+    fn on_previous_worktree(
+        &mut self,
+        _: &PreviousWorktree,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.step_worktree(false, window, cx);
+    }
+
     fn on_open_local_directory(
         &mut self,
         _: &OpenLocalDirectory,
@@ -3118,6 +3131,28 @@ impl WorkspaceManager {
         window.dispatch_action(action.boxed_clone(), cx);
     }
 
+    /// A Workspace's collapsed title-bar identity, naming its Active Worktree when its row
+    /// discloses Worktrees.
+    fn chrome_identity(&self, workspace_id: WorkspaceId, cx: &App) -> WorkspaceChromeIdentity {
+        let Some(workspace) = self.workspaces.workspace(workspace_id) else {
+            return WorkspaceChromeIdentity {
+                name: String::new(),
+                worktree: None,
+                pinned: false,
+                status: None,
+            };
+        };
+        WorkspaceChromeIdentity {
+            worktree: self.worktree_section(workspace_id, cx).and_then(|section| {
+                section
+                    .rows()
+                    .find(|row| row.active)
+                    .map(|row| row.name.to_string())
+            }),
+            ..chrome_identity(workspace)
+        }
+    }
+
     /// The Active Workspace's identity, shown in the top-left chrome only while the sidebar is
     /// hidden.
     fn workspace_chrome_identity(&self, cx: &App) -> (WorkspaceChromeIdentity, Tooltip) {
@@ -3144,7 +3179,7 @@ impl WorkspaceManager {
             .map(|line| format!("\n{line}"))
             .unwrap_or_default();
         (
-            chrome_identity(workspace),
+            self.chrome_identity(workspace.id(), cx),
             Tooltip::new("workspace-switcher-tooltip", "Switch Workspace")
                 .detail(format!(
                     "{}\n{tooltip_detail}{repository}",
@@ -3531,8 +3566,12 @@ impl WorkspaceManager {
         let active_tab_manager = self.workspaces.active_workspace().payload().clone();
         let workspace = self.workspaces.active_workspace();
         let sidebar_layout = self.sidebar.read(cx).layout();
-        let chrome =
-            WorkspaceChromeLayout::resolve(sidebar_layout, &chrome_identity(workspace), window, cx);
+        let chrome = WorkspaceChromeLayout::resolve(
+            sidebar_layout,
+            &self.chrome_identity(workspace.id(), cx),
+            window,
+            cx,
+        );
         let update_control = gpui::AnyView::from(self.update_control.clone());
         let close_owner = cx.weak_entity();
         let close: spaceterm_ui::WindowCloseHandler = Rc::new(move |window, cx| {
@@ -3556,7 +3595,8 @@ impl WorkspaceManager {
         // The New Worktree Command is available only where it can act, so its menu item disables
         // elsewhere.
         let new_worktree = self.creates_worktrees(self.workspaces.active_workspace_id(), cx);
-        let content = Self::workspace_action_scope(new_worktree, cx)
+        let step_worktrees = self.steps_worktrees(cx);
+        let content = Self::workspace_action_scope(new_worktree, step_worktrees, cx)
             .id("workspace-manager")
             .bg(gpui_color(super::appearance::chrome(cx).surface(
                 crate::appearance::SurfaceRole::Sheet,
@@ -3602,7 +3642,7 @@ impl WorkspaceManager {
                 ),
             )
             .child(self.render_top_left_chrome(chrome, manager.clone(), window, cx));
-        let transients = Self::workspace_action_scope(new_worktree, cx)
+        let transients = Self::workspace_action_scope(new_worktree, step_worktrees, cx)
             .absolute()
             .inset_0()
             .children(self.remote_workspace_flow.iter().cloned())
@@ -3614,11 +3654,20 @@ impl WorkspaceManager {
 impl WorkspaceManager {
     /// Keeps ordinary content and complete transient owners on the same action routes while leaving
     /// the active modal outside those routes.
-    fn workspace_action_scope(new_worktree: bool, cx: &Context<Self>) -> gpui::Div {
+    fn workspace_action_scope(
+        new_worktree: bool,
+        step_worktrees: bool,
+        cx: &Context<Self>,
+    ) -> gpui::Div {
         div()
             .key_context(TERMINAL_KEY_CONTEXT)
             .when(new_worktree, |scope| {
                 scope.on_action(cx.listener(Self::on_new_worktree))
+            })
+            .when(step_worktrees, |scope| {
+                scope
+                    .on_action(cx.listener(Self::on_next_worktree))
+                    .on_action(cx.listener(Self::on_previous_worktree))
             })
             .on_action(cx.listener(Self::on_switch_workspace))
             .on_action(cx.listener(Self::on_new_workspace))
@@ -3777,10 +3826,11 @@ fn remote_workspace_reconnect_error_content(
     }
 }
 
-/// The collapsed title-bar identity a Workspace presents.
+/// The collapsed title-bar identity a Workspace presents, before its Active Worktree.
 fn chrome_identity<T>(workspace: &WorkspaceEntry<T>) -> WorkspaceChromeIdentity {
     WorkspaceChromeIdentity {
         name: workspace.name().to_owned(),
+        worktree: None,
         pinned: workspace.pinned_directory().is_some(),
         status: WorkspaceChromeStatus::resolve(
             matches!(workspace.availability(), DirectoryAvailability::Available),

@@ -302,6 +302,18 @@ const MENU_ITEM_ICONS: &[MenuItemIcon] = &[
     MenuItemIcon {
         menu: "Window",
         submenu: None,
+        item: "Previous Worktree",
+        symbol: "chevron.backward.2",
+    },
+    MenuItemIcon {
+        menu: "Window",
+        submenu: None,
+        item: "Next Worktree",
+        symbol: "chevron.forward.2",
+    },
+    MenuItemIcon {
+        menu: "Window",
+        submenu: None,
         item: "Bring All to Front",
         symbol: "macwindow.on.rectangle",
     },
@@ -875,6 +887,9 @@ mod tests {
                     "Next Tab",
                     "Move Tab Left",
                     "Move Tab Right",
+                    "|",
+                    "Previous Worktree",
+                    "Next Worktree",
                     "|",
                     "Bring All to Front",
                 ]

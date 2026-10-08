@@ -7077,6 +7077,7 @@ fn collapsed_top_chrome_should_ignore_a_larger_resized_sidebar_width(cx: &mut Te
         WorkspaceChromeLayout::collapsed_width(
             &WorkspaceChromeIdentity {
                 name: "A Workspace Name That Must Be Truncated".to_owned(),
+                worktree: None,
                 pinned: false,
                 status: None,
             },
@@ -11136,6 +11137,91 @@ fn removing_a_worktree_should_confirm_then_close_its_tabs_before_git_runs(cx: &m
     assert!(
         !manager.read_with(cx, |manager, _| manager.worktree_removal_pending()),
         "a finished removal allows another"
+    );
+}
+
+#[gpui::test]
+fn worktree_commands_should_cycle_worktrees_with_tabs_and_the_hidden_sidebar_chrome_names_one(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    cx.update(|cx| {
+        crate::ui::worktree_store::testing::install(cx);
+    });
+    let (manager, _records, cx) = workspace_manager(cx);
+    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
+    let integration = fixture.path().join("shell-integration");
+    present_worktrees(cx, &[&integration.join("bash"), &integration.join("zsh")]);
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let (main, unopened, zsh) = manager.read_with(cx, |manager, cx| {
+        let rows = &manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows;
+        (
+            rows[0].worktree_id,
+            rows[1].worktree_id,
+            rows[2].worktree_id,
+        )
+    });
+    let active = |cx: &mut VisualTestContext| {
+        manager.read_with(cx, |manager, cx| {
+            manager
+                .workspaces
+                .active_workspace()
+                .payload()
+                .read(cx)
+                .active_worktree()
+        })
+    };
+    let step = |keystroke: &str, cx: &mut VisualTestContext| {
+        cx.simulate_keystrokes(keystroke);
+        cx.run_until_parked();
+        active(cx)
+    };
+
+    let alone = step("alt-cmd-]", cx);
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.open_worktree(workspace_id, zsh, true, window, cx)
+        })
+    });
+    cx.run_until_parked();
+    let forward = [step("alt-cmd-]", cx), step("alt-cmd-]", cx)];
+    let backward = step("alt-cmd-[", cx);
+    let shown_with_sidebar = cx.debug_bounds("workspace-chip-worktree").is_some();
+    cx.simulate_keystrokes("cmd-b");
+    cx.run_until_parked();
+    let hidden_step = step("alt-cmd-[", cx);
+    let workspace_name = manager.read_with(cx, |manager, _| {
+        manager.workspaces.active_workspace().name().to_owned()
+    });
+    let chip_names = A11yTree::read(cx)
+        .find(&format!("Switch Workspace, {workspace_name}, Worktree zsh"))
+        .is_some();
+
+    assert_eq!(
+        alone,
+        Some(main),
+        "one Worktree with Tabs has nothing to step to"
+    );
+    assert_eq!(
+        forward,
+        [Some(main), Some(zsh)],
+        "Next Worktree wraps and skips the Worktree without Tabs"
+    );
+    assert_ne!(backward, Some(unopened));
+    assert_eq!(backward, Some(main), "Previous Worktree steps back");
+    assert_eq!(
+        hidden_step,
+        Some(zsh),
+        "the Commands work with the sidebar hidden"
+    );
+    assert!(
+        !shown_with_sidebar,
+        "the sidebar names the Active Worktree while it is shown"
+    );
+    assert!(
+        cx.debug_bounds("workspace-chip-worktree").is_some() && chip_names,
+        "the hidden sidebar's Workspace chip names the Active Worktree"
     );
 }
 
