@@ -4008,14 +4008,14 @@ impl TerminalPane {
                                 .aria_label("Terminal Find results")
                                 .aria_value(SharedString::from(result_label.clone()))
                                 .debug_selector(|| "terminal-find-result-label".to_owned())
-                                .w(appearance.typography.measure(
-                                    TextRole::Secondary,
-                                    &result_label,
-                                    window,
-                                ))
+                                // Text bounds round up; reserve the full line before pixel snapping.
+                                .w(appearance
+                                    .typography
+                                    .measure(TextRole::Secondary, &result_label, window)
+                                    .ceil())
                                 .max_w_full()
                                 .flex_shrink_0()
-                                .whitespace_normal()
+                                .whitespace_nowrap()
                                 .chrome_text(appearance.typography.style(TextRole::Secondary))
                                 .text_color(gpui_color(floating_colors.text_muted))
                                 .child(result_label),

@@ -2656,6 +2656,66 @@ fn terminal_find_reflows_all_actions_inside_a_narrow_pane_with_fixed_chrome_type
 }
 
 #[gpui::test]
+fn terminal_find_result_labels_stay_on_one_line(cx: &mut TestAppContext) {
+    let (pane, cx, _) = connected_terminal_pane(cx);
+    cx.dispatch_action(OpenTerminalFind);
+    let input = terminal_find_input(&pane, cx);
+    replace_terminal_find_input(&input, "hello", cx);
+
+    for density in [
+        crate::appearance::ChromeDensity::Compact,
+        crate::appearance::ChromeDensity::Comfortable,
+    ] {
+        cx.update(|_, cx| {
+            let mut preferences = crate::appearance::AppearancePreferences::default();
+            preferences.window.density = density;
+            publish_terminal_preferences(preferences, cx);
+            let resolved = super::super::appearance_runtime::current(cx);
+            let chrome = super::super::appearance::ChromeAppearance::prepare(&resolved.chrome);
+            install_uniform_chrome(chrome, cx);
+        });
+        for width in [800.0, 130.0] {
+            cx.simulate_resize(gpui::size(px(width), px(420.0)));
+            for (current_match, total_matches, label) in [
+                (Some(1), 2, "1/2"),
+                (Some(12), 345, "12/345"),
+                (None, 0, "No matches"),
+            ] {
+                pane.update(cx, |pane, cx| {
+                    Arc::make_mut(&mut pane.screen).find =
+                        Some(Arc::new(crate::terminal::TerminalFindSnapshot {
+                            generation: pane.find_generation,
+                            total_matches,
+                            current_match,
+                            visible_spans: Arc::from([]),
+                        }));
+                    cx.notify();
+                });
+                cx.run_until_parked();
+                let bounds = cx.debug_bounds("terminal-find-result-label").unwrap();
+                let (line_height, text_width) = cx.update(|window, cx| {
+                    let appearance = super::super::appearance::shared_chrome(cx);
+                    (
+                        appearance.typography.style(TextRole::Secondary).line_height,
+                        appearance
+                            .typography
+                            .measure(TextRole::Secondary, label, window),
+                    )
+                });
+                assert_eq!(
+                    bounds.size.height, line_height,
+                    "{density:?}, Pane width {width}: {label:?} must occupy one Secondary line"
+                );
+                assert!(
+                    bounds.size.width >= text_width.ceil(),
+                    "{density:?}, Pane width {width}: {label:?} needs {text_width:?}, got {bounds:?}"
+                );
+            }
+        }
+    }
+}
+
+#[gpui::test]
 fn terminal_find_field_contains_fixed_chrome_line_height_in_both_densities(
     cx: &mut TestAppContext,
 ) {
