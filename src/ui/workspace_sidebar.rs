@@ -223,7 +223,7 @@ impl WorktreeRowViewModel {
 }
 
 /// One row the keyboard can stand on.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum SidebarRowKey {
     Workspace(WorkspaceId),
     Worktree(WorkspaceId, WorktreeId),
@@ -255,6 +255,9 @@ pub(super) struct WorkspaceSidebar {
     remote_unavailable: Option<String>,
     layout: SidebarLayout,
     scroll_handle: ScrollHandle,
+    /// Each row's top and bottom within its Workspace group, as last painted. A group is one
+    /// scroll child, so revealing a row inside a tall group needs the row's own span.
+    row_spans: std::collections::HashMap<SidebarRowKey, (Pixels, Pixels)>,
     scrollbar: Entity<OverlayScrollbar<f32>>,
     focus: FocusHandle,
     /// Whether the keyboard brought focus to the sidebar, so its selection is emphasized. Pointer
@@ -319,6 +322,7 @@ impl WorkspaceSidebar {
                 width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
             },
             scroll_handle: ScrollHandle::new(),
+            row_spans: std::collections::HashMap::new(),
             scrollbar,
             focus,
             focus_visible: false,
@@ -1032,9 +1036,7 @@ impl WorkspaceSidebar {
         moved: bool,
         cx: &mut Context<Self>,
     ) {
-        if let Some(index) = self.row_position(key.workspace_id()) {
-            self.scroll_handle.scroll_to_item(index);
-        }
+        self.reveal_key(key);
         if !moved {
             return;
         }
@@ -1159,6 +1161,53 @@ impl WorkspaceSidebar {
             self.cancel_rename(cx);
         }
     }
+    /// Scrolls the least distance that shows a row whole, or the top of a row taller than the
+    /// list. Before the row is painted, the list shows its Workspace group instead.
+    fn reveal_key(&self, key: SidebarRowKey) {
+        let Some(index) = self.row_position(key.workspace_id()) else {
+            return;
+        };
+        let (Some(group), Some(&(top, bottom))) = (
+            self.scroll_handle.bounds_for_item(index),
+            self.row_spans.get(&key),
+        ) else {
+            self.scroll_handle.scroll_to_item(index);
+            return;
+        };
+        let viewport = self.scroll_handle.bounds();
+        let mut offset = self.scroll_handle.offset();
+        let (top, bottom) = (group.top() + top, group.top() + bottom);
+        if top + offset.y < viewport.top() || bottom - top > viewport.size.height {
+            offset.y = viewport.top() - top;
+        } else if bottom + offset.y > viewport.bottom() {
+            offset.y = viewport.bottom() - bottom;
+        } else {
+            return;
+        }
+        self.scroll_handle.set_offset(offset);
+    }
+
+    /// Records where a Workspace group painted its rows. `keys` names each child of the group in
+    /// order; a divider has no key.
+    fn record_row_spans(
+        &mut self,
+        workspace_id: WorkspaceId,
+        keys: &[Option<SidebarRowKey>],
+        children: &[gpui::Bounds<Pixels>],
+    ) {
+        self.row_spans
+            .retain(|key, _| key.workspace_id() != workspace_id);
+        let Some(origin) = children.first().map(|bounds| bounds.top()) else {
+            return;
+        };
+        for (key, bounds) in keys.iter().zip(children) {
+            if let Some(key) = key {
+                self.row_spans
+                    .insert(*key, (bounds.top() - origin, bounds.bottom() - origin));
+            }
+        }
+    }
+
     pub(super) fn reveal_row(&self, index: usize, cx: &mut Context<Self>) {
         self.scroll_handle.scroll_to_item(index);
         cx.notify();

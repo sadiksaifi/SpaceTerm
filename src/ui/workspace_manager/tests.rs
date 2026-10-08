@@ -11406,6 +11406,63 @@ fn worktree_commands_should_cycle_worktrees_with_tabs_and_the_hidden_sidebar_chr
 }
 
 #[gpui::test]
+fn the_keyboard_should_reveal_each_worktree_row_of_a_group_taller_than_the_list(
+    cx: &mut TestAppContext,
+) {
+    cx.update(|cx| {
+        crate::ui::worktree_store::testing::install(cx);
+    });
+    let (manager, _records, cx) = workspace_manager(cx);
+    let roots: Vec<PathBuf> = (0..24)
+        .map(|index| std::env::temp_dir().join(format!("spaceterm-tall-group-{index}")))
+        .collect();
+    let linked: Vec<&Path> = roots.iter().map(PathBuf::as_path).collect();
+    present_worktrees(cx, &linked);
+    cx.simulate_resize(gpui::size(px(1000.0), px(400.0)));
+    redraw(cx);
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let rows = manager.read_with(cx, |manager, cx| {
+        manager
+            .worktree_section(workspace_id, cx)
+            .unwrap()
+            .rows()
+            .map(|row| row.worktree_id)
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(rows.len(), 25);
+    let sidebar_focus =
+        manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).focus_handle());
+    cx.update(|window, cx| sidebar_focus.focus(window, cx));
+    cx.run_until_parked();
+    let list = cx.debug_bounds("workspace-list").unwrap();
+    let group = cx
+        .debug_bounds(format!("workspace-group-{}", workspace_id.get()).leak())
+        .unwrap();
+    assert!(
+        group.size.height > list.size.height,
+        "the Workspace group is taller than the list"
+    );
+
+    let mut hidden = Vec::new();
+    // The Main Worktree holds the Root Tab, so the walk starts on it.
+    for (index, &worktree_id) in rows.iter().enumerate().skip(1) {
+        cx.simulate_keystrokes("down");
+        redraw(cx);
+        let selector = worktree_row(workspace_id, worktree_id, cx);
+        let row = cx.debug_bounds(selector).unwrap();
+        if row.top() < list.top() || row.bottom() > list.bottom() {
+            hidden.push(index);
+        }
+    }
+    cx.simulate_keystrokes("up");
+    redraw(cx);
+    let selector = worktree_row(workspace_id, rows[rows.len() - 2], cx);
+    let row = cx.debug_bounds(selector).unwrap();
+    assert_eq!(hidden, Vec::<usize>::new(), "every selected row is in view");
+    assert!(row.top() >= list.top() && row.bottom() <= list.bottom());
+}
+
+#[gpui::test]
 fn the_keyboard_should_walk_worktrees_and_open_one_only_on_return(cx: &mut TestAppContext) {
     use spaceterm_ui::a11y_testing::A11yTree;
 

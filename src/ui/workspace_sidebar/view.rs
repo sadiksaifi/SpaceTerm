@@ -839,7 +839,7 @@ impl WorkspaceSidebar {
                 appearance,
                 cx,
             );
-            let children = disclosed
+            let (worktree_keys, children): (Vec<_>, Vec<_>) = disclosed
                 .map(|section| {
                     self.render_worktrees(
                         workspace_id,
@@ -851,9 +851,21 @@ impl WorkspaceSidebar {
                         cx,
                     )
                 })
-                .unwrap_or_default();
+                .unwrap_or_default()
+                .into_iter()
+                .unzip();
+            let keys: Vec<Option<SidebarRowKey>> =
+                std::iter::once(Some(SidebarRowKey::Workspace(workspace_id)))
+                    .chain(worktree_keys)
+                    .collect();
+            let measure_sidebar = sidebar.clone();
             rows = rows.child(
                 div()
+                    .on_children_prepainted(move |bounds, _, cx| {
+                        let _ = measure_sidebar.update(cx, |sidebar, _| {
+                            sidebar.record_row_spans(workspace_id, &keys, &bounds);
+                        });
+                    })
                     .id(("workspace-group", workspace_id.get()))
                     .debug_selector(move || format!("workspace-group-{}", workspace_id.get()))
                     .w_full()
@@ -1139,13 +1151,14 @@ impl WorkspaceSidebar {
         window: &Window,
         appearance: &crate::ui::appearance::ChromeAppearance,
         cx: &App,
-    ) -> Vec<AnyElement> {
+    ) -> Vec<(Option<SidebarRowKey>, AnyElement)> {
         let mut fades = fades.into_iter();
         let mut elements = Vec::new();
         let colors = appearance.host_colors(spaceterm_ui::ControlHost::Panel);
         for group in &section.groups {
             if let Some(name) = &group.former_repository {
-                elements.push(
+                elements.push((
+                    None,
                     div()
                         .debug_selector({
                             let name = name.clone();
@@ -1164,22 +1177,25 @@ impl WorkspaceSidebar {
                         .text_color(gpui_color(colors.row_secondary))
                         .child(name.clone())
                         .into_any_element(),
-                );
+                ));
             }
             let size = group.rows.len();
             for (index, worktree) in group.rows.iter().enumerate() {
                 let Some(fade) = fades.next() else {
                     break;
                 };
-                elements.push(self.render_worktree_row(
-                    workspace_id,
-                    worktree,
-                    (index + 1, size),
-                    fade,
-                    sidebar.clone(),
-                    window,
-                    appearance,
-                    cx,
+                elements.push((
+                    Some(SidebarRowKey::Worktree(workspace_id, worktree.worktree_id)),
+                    self.render_worktree_row(
+                        workspace_id,
+                        worktree,
+                        (index + 1, size),
+                        fade,
+                        sidebar.clone(),
+                        window,
+                        appearance,
+                        cx,
+                    ),
                 ));
             }
         }
