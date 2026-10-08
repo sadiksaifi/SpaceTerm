@@ -99,6 +99,15 @@ impl WorkspaceWorktrees {
             WorktreeListing::Pending | WorktreeListing::Outside => None,
         }
     }
+
+    /// The snapshot the row shows. After the Workspace's directory changes, it stays the last
+    /// listed one until git lists the new directory, so the row doesn't regroup in between.
+    fn presented(&self, cx: &App) -> Option<Arc<WorktreeSnapshot>> {
+        match self.store.read(cx).presented(self.interest) {
+            WorktreeListing::Listed(snapshot) => Some(snapshot),
+            WorktreeListing::Pending | WorktreeListing::Outside => None,
+        }
+    }
 }
 
 impl WorkspaceManager {
@@ -241,7 +250,7 @@ impl WorkspaceManager {
         self.sidebar_worktrees
             .workspaces
             .get(&workspace_id)
-            .is_some_and(|worktrees| worktrees.listed(cx).is_some())
+            .is_some_and(|worktrees| worktrees.presented(cx).is_some())
     }
 
     /// Presents the New Worktree dialog for a Workspace's repository.
@@ -414,7 +423,7 @@ impl WorkspaceManager {
         let manager = self.workspaces.workspace(workspace_id)?.payload().read(cx);
         let counts = manager.worktree_tab_counts();
         let active = manager.active_worktree();
-        let snapshot = worktrees.listed(cx);
+        let snapshot = worktrees.presented(cx);
         let pinned = self.local_pinned_directory(workspace_id);
         // A pinned Workspace lists the repository of its Pinned Directory, so git's current
         // Worktree holds it, through any symbolic link the Pinned Directory was chosen by.

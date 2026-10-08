@@ -68,6 +68,9 @@ struct Entry {
 #[derive(Default)]
 pub(crate) struct WorktreeCatalog {
     interests: BTreeMap<WorktreeInterestId, PathBuf>,
+    /// What each moved interest presented before its move, shown until its new directory's
+    /// first read finishes.
+    previous: BTreeMap<WorktreeInterestId, WorktreeListing>,
     entries: BTreeMap<PathBuf, Entry>,
     /// Each watched common directory and the directories its watch covers.
     watches: BTreeMap<PathBuf, Vec<WatchDirectory>>,
@@ -91,6 +94,19 @@ impl WorktreeCatalog {
         }
     }
 
+    /// What `id` shows: its listing, or while a moved interest's new directory is first read,
+    /// what it showed before the move, so a shell changing directory doesn't empty the row.
+    pub(crate) fn presented(&self, id: WorktreeInterestId) -> WorktreeListing {
+        match self.listing(id) {
+            WorktreeListing::Pending => self
+                .previous
+                .get(&id)
+                .cloned()
+                .unwrap_or(WorktreeListing::Pending),
+            listing => listing,
+        }
+    }
+
     /// Starts or moves an interest. Reading the same directory as another interest shares its read.
     pub(crate) fn set_directory(
         &mut self,
@@ -100,7 +116,11 @@ impl WorktreeCatalog {
         if self.interests.get(&id) == Some(&directory) {
             return CatalogUpdate::default();
         }
+        let previous = self.presented(id);
         let mut update = self.unregister(id);
+        if previous != WorktreeListing::Pending {
+            self.previous.insert(id, previous);
+        }
         self.interests.insert(id, directory.clone());
         if self.entries.contains_key(&directory) {
             update.changed = true;
@@ -113,6 +133,7 @@ impl WorktreeCatalog {
     }
 
     pub(crate) fn unregister(&mut self, id: WorktreeInterestId) -> CatalogUpdate {
+        self.previous.remove(&id);
         let Some(directory) = self.interests.remove(&id) else {
             return CatalogUpdate::default();
         };
@@ -313,6 +334,29 @@ mod tests {
                 _ => None,
             })
             .expect("a read")
+    }
+
+    #[test]
+    fn a_moved_interest_should_present_its_last_listing_until_the_new_directory_is_read() {
+        let mut catalog = WorktreeCatalog::default();
+        let (directory, generation) = read_of(&catalog.set_directory(ROW, "/src/app".into()));
+        catalog.read_finished(&directory, generation, Ok(Some(snapshot(&["/src/app"]))));
+        let before = catalog.presented(ROW);
+
+        let (moved, generation) = read_of(&catalog.set_directory(ROW, "/src/app/lib".into()));
+        let while_reading = (catalog.listing(ROW), catalog.presented(ROW));
+        catalog.read_finished(&moved, generation, Ok(None));
+
+        assert!(matches!(before, WorktreeListing::Listed(_)));
+        assert_eq!(while_reading, (WorktreeListing::Pending, before));
+        assert_eq!(catalog.presented(ROW), WorktreeListing::Outside);
+        catalog.unregister(ROW);
+        catalog.set_directory(ROW, "/src/other".into());
+        assert_eq!(
+            catalog.presented(ROW),
+            WorktreeListing::Pending,
+            "a new interest has nothing to show yet"
+        );
     }
 
     #[test]

@@ -117,6 +117,11 @@ impl WorktreeStore {
         self.catalog.listing(id)
     }
 
+    /// What `id`'s row shows, which keeps its last listing while a moved interest is read.
+    pub(crate) fn presented(&self, id: WorktreeInterestId) -> WorktreeListing {
+        self.catalog.presented(id)
+    }
+
     /// Where the person wants new Worktrees.
     pub(crate) fn path_template(&self) -> String {
         self.settings.as_ref().map_or_else(
