@@ -26,9 +26,6 @@ pub(super) struct RowFade {
 
 /// The width of the trailing column that holds a git Workspace's disclosure chevron.
 const DISCLOSURE_WIDTH: f32 = 16.0;
-/// How far an active Workspace's group fill moves from the sidebar toward the selection color.
-/// The Active Worktree's chip keeps the full selection color, so it stands out inside the group.
-const GROUP_FILL_WEIGHT: f64 = 0.5;
 const ICON_COLUMN_WIDTH: f32 = 18.0;
 const ROW_CONTENT_GAP: f32 = 10.0;
 /// The minimum height of a row that holds one line.
@@ -157,60 +154,6 @@ fn worktree_indent(appearance: &crate::ui::appearance::ChromeAppearance, cx: &Ap
     row_padding(appearance, cx).0 + appearance.spacing(WORKTREE_LEVEL_INDENT)
 }
 
-/// One row's share of the fill that groups an active, expanded Workspace with its Worktrees.
-#[derive(Clone, Copy)]
-pub(super) struct GroupSegment {
-    pub(super) first: bool,
-    pub(super) last: bool,
-}
-
-impl GroupSegment {
-    /// The segments of a group of `rows` rows, in order.
-    pub(super) fn of(rows: usize) -> impl Iterator<Item = Self> {
-        (0..rows).map(move |index| Self {
-            first: index == 0,
-            last: index + 1 == rows,
-        })
-    }
-
-    /// Paints the segment under the row's chip. Each row paints its own share, so a row's own
-    /// background never covers the group's fill.
-    fn render(self, appearance: &crate::ui::appearance::ChromeAppearance, cx: &App) -> AnyElement {
-        let colors = appearance.host_colors(spaceterm_ui::ControlHost::Panel);
-        let selection = if appearance.active {
-            appearance.unfocused_selection_colors(spaceterm_ui::ControlHost::Panel)
-        } else {
-            colors
-        };
-        let fill = ChipPaint {
-            fill: Some(
-                colors
-                    .row_background
-                    .fade(selection.row_selected_background, GROUP_FILL_WEIGHT),
-            ),
-            rim: None,
-            hover_fill: None,
-            hover_rim: None,
-        }
-        .raised_on(appearance, colors.row_background)
-        .fill;
-        let frame = crate::ui::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
-        let inset_y = appearance.spacing(SIDEBAR_ROW_SELECTION_INSET_Y);
-        let radius = frame.chip_radius();
-        div()
-            .debug_selector(|| "workspace-group-fill".to_owned())
-            .absolute()
-            .left(frame.sidebar_chip_leading_inset())
-            .right(frame.sidebar_chip_trailing_inset())
-            .top(if self.first { inset_y } else { px(0.0) })
-            .bottom(if self.last { inset_y } else { px(0.0) })
-            .when(self.first, |fill| fill.rounded_t(radius))
-            .when(self.last, |fill| fill.rounded_b(radius))
-            .when_some(fill, |segment, fill| segment.bg(gpui_color(fill)))
-            .into_any_element()
-    }
-}
-
 /// Where a Worktree row's text starts, after its icon.
 fn worktree_text_indent(appearance: &crate::ui::appearance::ChromeAppearance, cx: &App) -> Pixels {
     worktree_indent(appearance, cx) + appearance.spacing(ICON_COLUMN_WIDTH + ROW_CONTENT_GAP)
@@ -229,25 +172,15 @@ fn single_line_row_height(appearance: &crate::ui::appearance::ChromeAppearance) 
 }
 
 fn row_height(appearance: &crate::ui::appearance::ChromeAppearance) -> Pixels {
-    appearance
-        .spacing(SIDEBAR_ROW_HEIGHT)
-        .max(two_line_content_height(appearance))
-}
-
-/// A Worktree row fits its two lines, so a disclosed group stays compact under its Workspace.
-fn worktree_row_height(appearance: &crate::ui::appearance::ChromeAppearance) -> Pixels {
-    two_line_content_height(appearance) + appearance.spacing(2.0 * SIDEBAR_ROW_SELECTION_INSET_Y)
-}
-
-fn two_line_content_height(appearance: &crate::ui::appearance::ChromeAppearance) -> Pixels {
-    appearance
+    let content_height = appearance
         .typography
         .style(TextRole::Navigation)
         .line_height
         + appearance.typography.style(TextRole::Secondary).line_height
         + appearance.spacing(
             SIDEBAR_ROW_TITLE_LINE_PADDING + SIDEBAR_ROW_DETAIL_LINE_PADDING + SIDEBAR_ROW_LINE_GAP,
-        )
+        );
+    appearance.spacing(SIDEBAR_ROW_HEIGHT).max(content_height)
 }
 
 /// Resolves the rename frame after the row enters its Panel control host.
@@ -363,7 +296,6 @@ impl WorkspaceSidebar {
         row: WorkspaceRowViewModel,
         role: RowRole,
         hover: RowHover,
-        segment: Option<GroupSegment>,
         sidebar: WeakEntity<Self>,
         presentation: &crate::desktop_profile::DesktopPresentation,
         window: &Window,
@@ -551,9 +483,6 @@ impl WorkspaceSidebar {
             .when(!lifted, |row| row.block_mouse_except_scroll())
             .when_some(row_background, |row, background| {
                 row.bg(gpui_color(background))
-            })
-            .when_some(segment, |row, segment| {
-                row.child(segment.render(appearance, cx))
             })
             .child(chip.render(
                 format!("{element_name}-selection-{}", workspace_id.get()),
@@ -862,12 +791,6 @@ impl WorkspaceSidebar {
         for (row, fade) in self.rows.iter().zip(hovers) {
             let workspace_id = row.workspace_id;
             let disclosed = row.worktrees.as_ref().filter(|section| section.expanded);
-            // The active Workspace's fill groups it with the Worktrees it discloses.
-            let mut segments = disclosed
-                .filter(|_| row.active)
-                .map(|section| GroupSegment::of(1 + section.visible_rows()))
-                .into_iter()
-                .flatten();
             let parent = self.render_workspace_row(
                 row.clone(),
                 RowRole::InList,
@@ -875,7 +798,6 @@ impl WorkspaceSidebar {
                     level: fade.level,
                     tracker: Some(fade.fade),
                 },
-                segments.next(),
                 sidebar.clone(),
                 presentation,
                 window,
@@ -888,7 +810,6 @@ impl WorkspaceSidebar {
                         workspace_id,
                         section,
                         fade.worktrees,
-                        &mut segments,
                         sidebar.clone(),
                         window,
                         appearance,
@@ -1179,7 +1100,6 @@ impl WorkspaceSidebar {
         workspace_id: WorkspaceId,
         section: &WorktreeSection,
         fades: Vec<RowFade>,
-        segments: &mut impl Iterator<Item = GroupSegment>,
         sidebar: WeakEntity<Self>,
         window: &Window,
         appearance: &crate::ui::appearance::ChromeAppearance,
@@ -1190,7 +1110,6 @@ impl WorkspaceSidebar {
         let colors = appearance.host_colors(spaceterm_ui::ControlHost::Panel);
         for group in &section.groups {
             if let Some(name) = &group.former_repository {
-                let segment = segments.next();
                 elements.push(
                     div()
                         .debug_selector({
@@ -1203,9 +1122,6 @@ impl WorkspaceSidebar {
                         .flex_shrink_0()
                         .flex()
                         .items_end()
-                        .when_some(segment, |label, segment| {
-                            label.child(segment.render(appearance, cx))
-                        })
                         .pl(worktree_text_indent(appearance, cx))
                         .pr(row_padding(appearance, cx).1)
                         .truncate()
@@ -1225,7 +1141,6 @@ impl WorkspaceSidebar {
                     worktree,
                     (index + 1, size),
                     fade,
-                    segments.next(),
                     sidebar.clone(),
                     window,
                     appearance,
@@ -1246,7 +1161,6 @@ impl WorkspaceSidebar {
         worktree: &WorktreeRowViewModel,
         (position, size): (usize, usize),
         fade: RowFade,
-        segment: Option<GroupSegment>,
         sidebar: WeakEntity<Self>,
         window: &Window,
         appearance: &crate::ui::appearance::ChromeAppearance,
@@ -1339,7 +1253,7 @@ impl WorkspaceSidebar {
             })
             .relative()
             .w_full()
-            .h(worktree_row_height(appearance))
+            .h(row_height(appearance))
             .flex_shrink_0()
             .pl(worktree_indent(appearance, cx))
             .pr(row_padding(appearance, cx).1)
@@ -1349,9 +1263,6 @@ impl WorkspaceSidebar {
             .block_mouse_except_scroll()
             .when_some(row_background(appearance), |row, background| {
                 row.bg(gpui_color(background))
-            })
-            .when_some(segment, |row, segment| {
-                row.child(segment.render(appearance, cx))
             })
             .child(chip.render(format!("{selector}-selection"), hover))
             .when(openable, |row| {

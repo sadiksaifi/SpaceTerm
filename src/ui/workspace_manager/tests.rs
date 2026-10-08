@@ -10687,7 +10687,7 @@ fn worktree_rows_should_carry_the_directory_and_branch_that_a_collapsed_row_show
 }
 
 #[gpui::test]
-fn an_active_expanded_workspace_should_share_one_fill_with_its_worktrees(cx: &mut TestAppContext) {
+fn a_disclosure_chevron_should_trail_the_workspace_name(cx: &mut TestAppContext) {
     cx.update(|cx| {
         crate::ui::worktree_store::testing::install(cx);
     });
@@ -10706,7 +10706,30 @@ fn an_active_expanded_workspace_should_share_one_fill_with_its_worktrees(cx: &mu
     let group = cx
         .debug_bounds(format!("workspace-group-{id}").leak())
         .expect("the Workspace group");
-    let grouped = cx.debug_bounds("workspace-group-fill").is_some();
+
+    assert!(
+        disclosure.left() >= name.right() && disclosure.right() > group.right() - px(40.0),
+        "the chevron trails the Workspace name at the row's end"
+    );
+}
+
+#[gpui::test]
+fn worktree_rows_should_match_a_two_line_workspace_row_height(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        crate::ui::worktree_store::testing::install(cx);
+    });
+    let (manager, _records, cx) = workspace_manager(cx);
+    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
+    present_worktrees(cx, &[&fixture.path().join("shell-integration")]);
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let linked = manager.read_with(cx, |manager, cx| {
+        manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows[1].worktree_id
+    });
+    redraw(cx);
+    let id = workspace_id.get();
+    let worktree = cx
+        .debug_bounds(format!("worktree-row-{id}-{linked}-unselected").leak())
+        .expect("the linked Worktree row");
 
     manager.update(cx, |manager, cx| {
         manager.set_worktrees_expanded(workspace_id, false);
@@ -10714,16 +10737,11 @@ fn an_active_expanded_workspace_should_share_one_fill_with_its_worktrees(cx: &mu
     });
     cx.run_until_parked();
     redraw(cx);
+    let workspace = cx
+        .debug_bounds(format!("workspace-row-{id}-active").leak())
+        .expect("the collapsed Workspace row");
 
-    assert!(grouped, "the active Workspace's group carries one fill");
-    assert!(
-        disclosure.left() >= name.right() && disclosure.right() > group.right() - px(40.0),
-        "the chevron trails the Workspace name at the row's end"
-    );
-    assert!(
-        cx.debug_bounds("workspace-group-fill").is_none(),
-        "a collapsed Workspace is selected by its own chip"
-    );
+    assert_eq!(worktree.size.height, workspace.size.height);
 }
 
 #[gpui::test]
