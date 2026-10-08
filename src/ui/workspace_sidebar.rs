@@ -12,7 +12,7 @@ use super::workspace_status::{WorkspaceStatusPaint, resolve as resolve_workspace
 use super::{WORKSPACE_SIDEBAR_DEFAULT_WIDTH, WORKSPACE_SIDEBAR_MINIMUM_WIDTH};
 use crate::appearance::ChromeColors;
 use crate::appearance::Color;
-use crate::domain::{RemoteConnectionPhase, WorkspaceId};
+use crate::domain::{RemoteConnectionPhase, WorkspaceId, WorktreeId};
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Context, DispatchPhase, Entity, EntityId, EventEmitter, FocusHandle,
@@ -40,6 +40,16 @@ pub(super) enum SidebarEvent {
     Command {
         workspace_id: WorkspaceId,
         command: WorkspaceMenuCommand,
+    },
+    /// Shows a Worktree's Tabs, opening its first Tab when it has none.
+    ActivateWorktree {
+        workspace_id: WorkspaceId,
+        worktree_id: WorktreeId,
+        focus_pane: bool,
+    },
+    SetWorktreesExpanded {
+        workspace_id: WorkspaceId,
+        expanded: bool,
     },
     Rename {
         workspace_id: WorkspaceId,
@@ -103,7 +113,77 @@ pub(super) struct WorkspaceRowViewModel {
     pub(super) available: bool,
     /// The branch or Pull Request that ends line 2, after the directory.
     pub(super) repository: Option<crate::repository_status::presentation::SidebarBadge>,
+    /// The Worktrees a git Workspace discloses under its row.
+    pub(super) worktrees: Option<WorktreeSection>,
     pub(super) active: bool,
+}
+
+impl WorkspaceRowViewModel {
+    /// Whether the row's own chip carries the selection, rather than its Active Worktree's row.
+    fn selected(&self) -> bool {
+        self.active
+            && !self.worktrees.as_ref().is_some_and(|section| {
+                section.expanded && section.rows().any(|worktree| worktree.active)
+            })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct WorktreeSection {
+    pub(super) expanded: bool,
+    /// The read repository's Worktrees first, then each former repository's Worktrees that still
+    /// have Tabs.
+    pub(super) groups: Vec<WorktreeGroup>,
+}
+
+impl WorktreeSection {
+    fn rows(&self) -> impl Iterator<Item = &WorktreeRowViewModel> {
+        self.groups.iter().flat_map(|group| &group.rows)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct WorktreeGroup {
+    /// The name of a repository the Workspace no longer reads, shown above its Worktrees.
+    pub(super) former_repository: Option<SharedString>,
+    pub(super) rows: Vec<WorktreeRowViewModel>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct WorktreeRowViewModel {
+    pub(super) worktree_id: WorktreeId,
+    /// The branch name, or the detached commit id.
+    pub(super) label: SharedString,
+    pub(super) detached: bool,
+    pub(super) path: SharedString,
+    pub(super) has_tabs: bool,
+    /// The Worktree holds the Workspace's Active Tab.
+    pub(super) active: bool,
+    pub(super) locked: bool,
+    /// Git no longer has the Worktree's directory.
+    pub(super) missing: bool,
+}
+
+impl WorktreeRowViewModel {
+    /// Whether activating the row shows Tabs: an existing Tab, or a first Tab in its directory.
+    pub(super) fn openable(&self) -> bool {
+        self.has_tabs || !self.missing
+    }
+}
+
+/// One row the keyboard can stand on.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SidebarRowKey {
+    Workspace(WorkspaceId),
+    Worktree(WorkspaceId, WorktreeId),
+}
+
+impl SidebarRowKey {
+    const fn workspace_id(self) -> WorkspaceId {
+        match self {
+            Self::Workspace(workspace_id) | Self::Worktree(workspace_id, _) => workspace_id,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -130,6 +210,9 @@ pub(super) struct WorkspaceSidebar {
     /// paths that focus the sidebar, like the scrollbar and a secondary click, clear it.
     focus_visible: bool,
     menu: Option<WorkspaceId>,
+    /// The row the keyboard stands on when it is not the derived selection: a Worktree with no
+    /// Tabs yet, or a Workspace whose Active Worktree's row is disclosed.
+    cursor: Option<SidebarRowKey>,
     new_workspace_menu_open: bool,
     rename: Option<WorkspaceRenameState>,
     resize_origin: Option<SidebarLayout>,
@@ -171,7 +254,8 @@ impl WorkspaceSidebar {
             cx.emit(SidebarEvent::FocusChanged);
         })
         .detach();
-        cx.on_blur(&focus, window, |_, _, cx| {
+        cx.on_blur(&focus, window, |sidebar: &mut Self, _, cx| {
+            sidebar.cursor = None;
             cx.notify();
             cx.emit(SidebarEvent::FocusChanged);
         })
@@ -188,6 +272,7 @@ impl WorkspaceSidebar {
             focus,
             focus_visible: false,
             menu: None,
+            cursor: None,
             new_workspace_menu_open: false,
             rename: None,
             resize_origin: None,
@@ -514,6 +599,12 @@ impl WorkspaceSidebar {
     ) {
         self.rows = rows;
         self.remote_unavailable = remote_unavailable;
+        if self
+            .cursor
+            .is_some_and(|cursor| !self.visible_keys().iter().any(|(key, _)| *key == cursor))
+        {
+            self.cursor = None;
+        }
         cx.notify();
     }
     fn collapsed_top_chrome_width(&self, window: &Window, cx: &App) -> Pixels {
@@ -792,15 +883,60 @@ impl WorkspaceSidebar {
         if !self.focus.is_focused(window) || event.keystroke.modifiers.modified() {
             return;
         }
-        let Some(current) = self.rows.iter().position(|row| row.active) else {
+        let keys = self.visible_keys();
+        let Some(current) = self.keyboard_position(&keys) else {
             return;
         };
+        let key = keys[current].0;
+        let section = self
+            .rows
+            .iter()
+            .find(|row| row.workspace_id == key.workspace_id())
+            .and_then(|row| row.worktrees.as_ref());
         let next = match event.keystroke.key.as_str() {
             "up" => current.saturating_sub(1),
-            "down" => (current + 1).min(self.rows.len() - 1),
+            "down" => (current + 1).min(keys.len() - 1),
             "home" => 0,
-            "end" => self.rows.len() - 1,
-            "enter" | "escape" => {
+            "end" => keys.len() - 1,
+            "right" => match (key, section) {
+                (SidebarRowKey::Workspace(workspace_id), Some(section)) if !section.expanded => {
+                    self.cursor = Some(key);
+                    self.set_expanded(workspace_id, true, window, cx);
+                    return;
+                }
+                (SidebarRowKey::Workspace(_), Some(_)) => (current + 1).min(keys.len() - 1),
+                _ => current,
+            },
+            "left" => match (key, section) {
+                (SidebarRowKey::Workspace(workspace_id), Some(section)) if section.expanded => {
+                    self.cursor = Some(key);
+                    self.set_expanded(workspace_id, false, window, cx);
+                    return;
+                }
+                (SidebarRowKey::Worktree(workspace_id, _), _) => keys
+                    .iter()
+                    .position(|(key, _)| *key == SidebarRowKey::Workspace(workspace_id))
+                    .unwrap_or(current),
+                _ => current,
+            },
+            "enter" | "space" => {
+                if let SidebarRowKey::Worktree(workspace_id, worktree_id) = key {
+                    self.cursor = None;
+                    cx.emit(SidebarEvent::ActivateWorktree {
+                        workspace_id,
+                        worktree_id,
+                        focus_pane: true,
+                    });
+                } else if event.keystroke.key == "enter" {
+                    cx.emit(SidebarEvent::FocusPane);
+                } else {
+                    return;
+                }
+                window.prevent_default();
+                cx.stop_propagation();
+                return;
+            }
+            "escape" => {
                 cx.emit(SidebarEvent::FocusPane);
                 window.prevent_default();
                 cx.stop_propagation();
@@ -809,16 +945,110 @@ impl WorkspaceSidebar {
             _ => return,
         };
         self.focus_visible = true;
-        self.scroll_handle.scroll_to_item(next);
-        if next != current {
-            cx.emit(SidebarEvent::Activate {
-                workspace_id: self.rows[next].workspace_id,
-                focus_pane: false,
-            });
-        }
+        self.land_on(keys[next], next != current, cx);
         window.prevent_default();
         cx.stop_propagation();
         cx.notify();
+    }
+
+    /// Moves the keyboard to a row. A Workspace or a Worktree with Tabs becomes active; a
+    /// Worktree with no Tabs only holds the keyboard until Return or Space opens it. A Workspace
+    /// keeps the keyboard even when its Active Worktree's row is disclosed below it.
+    fn land_on(
+        &mut self,
+        (key, opens): (SidebarRowKey, bool),
+        moved: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(index) = self.row_position(key.workspace_id()) {
+            self.scroll_handle.scroll_to_item(index);
+        }
+        if !moved {
+            return;
+        }
+        self.cursor = None;
+        match key {
+            SidebarRowKey::Workspace(workspace_id) => {
+                self.cursor = Some(key);
+                cx.emit(SidebarEvent::Activate {
+                    workspace_id,
+                    focus_pane: false,
+                });
+            }
+            SidebarRowKey::Worktree(workspace_id, worktree_id) if opens => {
+                cx.emit(SidebarEvent::ActivateWorktree {
+                    workspace_id,
+                    worktree_id,
+                    focus_pane: false,
+                });
+            }
+            SidebarRowKey::Worktree(..) => self.cursor = Some(key),
+        }
+    }
+
+    fn set_expanded(
+        &mut self,
+        workspace_id: WorkspaceId,
+        expanded: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !expanded
+            && matches!(self.cursor, Some(SidebarRowKey::Worktree(cursor, _)) if cursor == workspace_id)
+        {
+            self.cursor = None;
+        }
+        cx.emit(SidebarEvent::SetWorktreesExpanded {
+            workspace_id,
+            expanded,
+        });
+        window.prevent_default();
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    /// Every row the keyboard can stand on, in order, and whether landing there opens Tabs.
+    fn visible_keys(&self) -> Vec<(SidebarRowKey, bool)> {
+        let mut keys = Vec::new();
+        for row in &self.rows {
+            keys.push((SidebarRowKey::Workspace(row.workspace_id), true));
+            let Some(section) = row.worktrees.as_ref().filter(|section| section.expanded) else {
+                continue;
+            };
+            keys.extend(section.rows().map(|worktree| {
+                (
+                    SidebarRowKey::Worktree(row.workspace_id, worktree.worktree_id),
+                    worktree.has_tabs,
+                )
+            }));
+        }
+        keys
+    }
+
+    /// The row that carries the selection: the keyboard's row, else the Active Worktree's row
+    /// when its Workspace is expanded, else the active Workspace's row.
+    fn selected_key(&self) -> Option<SidebarRowKey> {
+        if self.cursor.is_some() {
+            return self.cursor;
+        }
+        let row = self.rows.iter().find(|row| row.active)?;
+        if row.selected() {
+            return Some(SidebarRowKey::Workspace(row.workspace_id));
+        }
+        let worktree = row
+            .worktrees
+            .as_ref()?
+            .rows()
+            .find(|worktree| worktree.active)?;
+        Some(SidebarRowKey::Worktree(
+            row.workspace_id,
+            worktree.worktree_id,
+        ))
+    }
+
+    fn keyboard_position(&self, keys: &[(SidebarRowKey, bool)]) -> Option<usize> {
+        let selected = self.selected_key()?;
+        keys.iter().position(|(key, _)| *key == selected)
     }
 }
 
@@ -883,6 +1113,7 @@ impl WorkspaceSidebar {
             if let Some(index) = self.rows.iter().position(|row| row.active) {
                 self.reveal_row(index, cx);
             }
+            self.cursor = None;
             cx.defer_in(window, |sidebar, window, cx| {
                 sidebar.focus_visible = true;
                 sidebar.focus.focus(window, cx);

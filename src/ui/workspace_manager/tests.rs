@@ -10447,8 +10447,276 @@ fn assert_rendered_text(
     }
 }
 
+/// A repository whose Main Worktree is the test home, with one linked Worktree at `linked`.
+fn present_worktrees(cx: &mut VisualTestContext, linked: &Path) {
+    use crate::domain::RepositoryIdentity;
+    use crate::worktrees::WorktreeSnapshot;
+    use crate::worktrees::listing::{WorktreeHead, WorktreeRecord};
+
+    let main = std::env::temp_dir();
+    let record = |root: &Path, branch: &str| WorktreeRecord {
+        root: root.to_path_buf(),
+        head: WorktreeHead::Branch(branch.into()),
+        locked: false,
+        missing: false,
+    };
+    let snapshot = WorktreeSnapshot {
+        repository: RepositoryIdentity::new(main.clone()),
+        current: Some(0),
+        common_directory: main.join(".git"),
+        worktrees: vec![record(&main, "main"), record(linked, "feature/login")],
+    };
+    let store =
+        cx.update(|_, cx| crate::ui::worktree_store::InstalledWorktrees::store(cx).unwrap());
+    store.update(cx, |store, cx| store.present(&main, Some(snapshot), cx));
+    cx.run_until_parked();
+}
+
 #[gpui::test]
-fn workspace_rows_publish_a_list_that_selects_on_press(cx: &mut TestAppContext) {
+fn git_workspace_rows_should_disclose_worktrees_that_open_lazily(cx: &mut TestAppContext) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
+    cx.update(|cx| {
+        crate::ui::worktree_store::testing::install(cx);
+    });
+    let (manager, records, cx) = workspace_manager(cx);
+    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
+    let linked = fixture.path().join("shell-integration");
+    present_worktrees(cx, &linked);
+    let items = |cx: &mut VisualTestContext| {
+        A11yTree::read(cx)
+            .with_role("TreeItem")
+            .iter()
+            .map(|item| {
+                (
+                    item["aria"]["label"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned(),
+                    item["aria"]["level"].as_u64().unwrap_or_default(),
+                    item["aria"]["selected"] == true,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let tabs = |cx: &mut VisualTestContext| {
+        manager.read_with(cx, |manager, cx| {
+            manager
+                .workspaces
+                .active_workspace()
+                .payload()
+                .read(cx)
+                .worktree_tab_counts()
+                .into_values()
+                .collect::<Vec<_>>()
+        })
+    };
+
+    let disclosed = items(cx);
+    let tabs_before = tabs(cx);
+    let tree = A11yTree::read(cx);
+    let feature = tree
+        .with_role("TreeItem")
+        .into_iter()
+        .find(|item| item["aria"]["label"] == "feature/login")
+        .expect("the linked Worktree's row");
+    assert_eq!(
+        (
+            feature["aria"]["position_in_set"].as_u64(),
+            feature["aria"]["size_of_set"].as_u64()
+        ),
+        (Some(2), Some(2))
+    );
+    perform(cx, feature, Action::Click);
+    cx.run_until_parked();
+
+    assert_eq!(
+        disclosed,
+        [
+            ("Default".to_owned(), 1, false),
+            ("main".to_owned(), 2, true),
+            ("feature/login".to_owned(), 2, false),
+        ],
+        "two Worktrees disclose under the Workspace, and the Active Worktree carries the selection"
+    );
+    assert_eq!(
+        tabs_before,
+        [1],
+        "the Root Tab belongs to the Main Worktree"
+    );
+    assert_eq!(
+        items(cx)
+            .into_iter()
+            .map(|(label, _, selected)| (label, selected))
+            .collect::<Vec<_>>(),
+        [
+            ("Default".to_owned(), false),
+            ("main".to_owned(), false),
+            ("feature/login".to_owned(), true),
+        ]
+    );
+    assert_eq!(
+        tabs(cx),
+        [1, 1],
+        "opening a Worktree with no Tabs opens its first Tab"
+    );
+    assert_eq!(
+        records
+            .starts()
+            .last()
+            .and_then(|start| start.local_working_directory())
+            .map(|directory| directory.path().to_owned()),
+        Some(linked)
+    );
+}
+
+#[gpui::test]
+fn the_keyboard_should_walk_worktrees_and_open_one_only_on_return(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    cx.update(|cx| {
+        crate::ui::worktree_store::testing::install(cx);
+    });
+    let (manager, _records, cx) = workspace_manager(cx);
+    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
+    present_worktrees(cx, &fixture.path().join("shell-integration"));
+    let sidebar_focus =
+        manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).focus_handle());
+    cx.update(|window, cx| sidebar_focus.focus(window, cx));
+    cx.run_until_parked();
+    let state = |cx: &mut VisualTestContext| {
+        let tree = A11yTree::read(cx);
+        let items = tree.with_role("TreeItem");
+        let selected = items
+            .iter()
+            .find(|item| item["aria"]["selected"] == true)
+            .and_then(|item| item["aria"]["label"].as_str())
+            .unwrap_or_default()
+            .to_owned();
+        let tab_counts = manager.read_with(cx, |manager, cx| {
+            manager
+                .workspaces
+                .active_workspace()
+                .payload()
+                .read(cx)
+                .worktree_tab_counts()
+                .into_values()
+                .collect::<Vec<_>>()
+        });
+        (items.len(), selected, tab_counts)
+    };
+
+    let mut steps = Vec::new();
+    for keys in ["down", "left", "left", "right", "down down", "enter"] {
+        cx.simulate_keystrokes(keys);
+        cx.run_until_parked();
+        steps.push(state(cx));
+    }
+
+    let step =
+        |items: usize, selected: &str, tabs: &[usize]| (items, selected.to_owned(), tabs.to_vec());
+    assert_eq!(
+        steps,
+        [
+            step(3, "feature/login", &[1]),
+            step(3, "Default", &[1]),
+            step(1, "Default", &[1]),
+            step(3, "Default", &[1]),
+            step(3, "feature/login", &[1]),
+            step(3, "feature/login", &[1, 1]),
+        ],
+        "arrows stand on a Worktree with no Tabs without opening it, Left and Right collapse and \
+         expand, and Return opens it"
+    );
+    assert!(
+        cx.update(|window, _| !sidebar_focus.is_focused(window)),
+        "Return moves focus to the new Tab"
+    );
+}
+
+#[gpui::test]
+fn leaving_a_repository_should_keep_worktrees_with_tabs_under_their_former_repository(
+    cx: &mut TestAppContext,
+) {
+    use crate::ui::workspace_sidebar::{WorktreeGroup, WorktreeSection};
+
+    cx.update(|cx| {
+        crate::ui::worktree_store::testing::install(cx);
+    });
+    let (manager, _records, cx) = workspace_manager(cx);
+    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
+    present_worktrees(cx, &fixture.path().join("shell-integration"));
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let section = |cx: &mut VisualTestContext| {
+        manager.read_with(cx, |manager, cx| manager.worktree_section(workspace_id, cx))
+    };
+    let linked_id = section(cx).unwrap().groups[0].rows[1].worktree_id;
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.open_worktree(workspace_id, linked_id, true, window, cx)
+        })
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            let root_tab = manager
+                .workspaces
+                .active_workspace()
+                .payload()
+                .read(cx)
+                .tab_ids()[0];
+            manager
+                .workspaces
+                .active_workspace()
+                .payload()
+                .update(cx, |tabs, cx| {
+                    tabs.activate_tab_for_test(root_tab, window, cx)
+                });
+        })
+    });
+
+    let store =
+        cx.update(|_, cx| crate::ui::worktree_store::InstalledWorktrees::store(cx).unwrap());
+    store.update(cx, |store, cx| {
+        store.present(&std::env::temp_dir(), None, cx)
+    });
+    cx.run_until_parked();
+
+    let section = section(cx).expect("a Worktree with Tabs keeps the disclosure");
+    let former = std::env::temp_dir()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(
+        section,
+        WorktreeSection {
+            expanded: true,
+            groups: vec![WorktreeGroup {
+                former_repository: Some(former.into()),
+                rows: vec![crate::ui::workspace_sidebar::WorktreeRowViewModel {
+                    active: false,
+                    ..section.groups[0].rows[0].clone()
+                }],
+            }],
+        }
+    );
+    assert_eq!(section.groups[0].rows[0].worktree_id, linked_id);
+    assert_eq!(
+        manager.read_with(cx, |manager, cx| manager
+            .workspaces
+            .active_workspace()
+            .payload()
+            .read(cx)
+            .active_worktree()),
+        None,
+        "the Root Tab follows its Root Pane out of the repository"
+    );
+}
+
+#[gpui::test]
+fn workspace_rows_publish_a_tree_that_selects_on_press(cx: &mut TestAppContext) {
     use gpui::accesskit::Action;
     use spaceterm_ui::a11y_testing::{A11yTree, perform};
 
@@ -10460,11 +10728,16 @@ fn workspace_rows_publish_a_list_that_selects_on_press(cx: &mut TestAppContext) 
 
     let tree = A11yTree::read(cx);
     let list = tree.node("Workspaces");
-    assert_eq!(list["aria"]["role"], "ListBox");
-    let rows = tree.with_role("ListBoxOption");
+    assert_eq!(list["aria"]["role"], "Tree");
+    let rows = tree.with_role("TreeItem");
     assert_eq!(rows.len(), 2);
+    assert!(
+        rows.iter()
+            .all(|row| row["aria"]["level"] == 1 && row["aria"]["expanded"].is_null()),
+        "Workspaces outside a repository are top-level items with nothing to expand"
+    );
     let selected = |tree: &A11yTree| {
-        tree.with_role("ListBoxOption")
+        tree.with_role("TreeItem")
             .iter()
             .map(|row| row["aria"]["selected"] == true)
             .collect::<Vec<_>>()
@@ -10475,11 +10748,7 @@ fn workspace_rows_publish_a_list_that_selects_on_press(cx: &mut TestAppContext) 
     let tree = A11yTree::read(cx);
     assert_eq!(selected(&tree), [true, false]);
 
-    perform(
-        cx,
-        tree.with_role("ListBoxOption")[0],
-        Action::ShowContextMenu,
-    );
+    perform(cx, tree.with_role("TreeItem")[0], Action::ShowContextMenu);
     assert_eq!(A11yTree::read(cx).with_role("Menu").len(), 1);
 }
 

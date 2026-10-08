@@ -68,10 +68,6 @@ impl WorktreeKey {
     pub(crate) fn root(&self) -> &Path {
         &self.root
     }
-
-    pub(crate) fn is_main(&self) -> bool {
-        self.root == self.repository.main_root
-    }
 }
 
 impl fmt::Debug for WorktreeKey {
@@ -166,7 +162,6 @@ mod tests {
             registry.key(relisted),
             Some(&key("/src/app", "/wt/feature"))
         );
-        assert!(registry.key(main).unwrap().is_main());
     }
 
     #[test]

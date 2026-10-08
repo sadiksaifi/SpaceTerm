@@ -285,6 +285,7 @@ pub(crate) struct WorkspaceManager {
     pending_final_tab_closes: BTreeSet<WorkspaceId>,
     close_confirmation: CloseConfirmation,
     sidebar_repositories: repository::SidebarRepositories,
+    sidebar_worktrees: worktrees::SidebarWorktrees,
 }
 
 impl WorkspaceManager {
@@ -357,8 +358,11 @@ impl WorkspaceManager {
         if let Some(reason) = initial_directory_error {
             let _ = workspaces.set_directory_unavailable(workspaces.active_workspace_id(), reason);
         }
-        cx.on_release(|manager, cx| manager.release_sidebar_repositories(cx))
-            .detach();
+        cx.on_release(|manager, cx| {
+            manager.release_sidebar_repositories(cx);
+            manager.release_sidebar_worktrees(cx);
+        })
+        .detach();
         let sidebar = cx.new(|cx| WorkspaceSidebar::new(window, cx));
         cx.subscribe_in(
             &sidebar,
@@ -390,6 +394,9 @@ impl WorkspaceManager {
                     crate::ui::repository_status_store::InstalledRepositoryStatus::store(cx)
             {
                 store.update(cx, |store, cx| store.window_activated(cx));
+            }
+            if window.is_window_active() {
+                Self::worktrees_window_activated(cx);
             }
             cx.notify();
         })
@@ -427,6 +434,7 @@ impl WorkspaceManager {
             pending_final_tab_closes: BTreeSet::new(),
             close_confirmation: CloseConfirmation::default(),
             sidebar_repositories: repository::SidebarRepositories::default(),
+            sidebar_worktrees: worktrees::SidebarWorktrees::default(),
         }
     }
 
@@ -2796,6 +2804,22 @@ impl WorkspaceManager {
                 self.focus(window, cx);
                 self.start_workspace_creation(creation, String::new(), window, cx)
             }
+            SidebarEvent::ActivateWorktree {
+                workspace_id,
+                worktree_id,
+                focus_pane,
+            } => {
+                if self.activate_workspace(workspace_id, window, cx)
+                    && self.open_worktree(workspace_id, worktree_id, focus_pane, window, cx)
+                    && focus_pane
+                {
+                    self.focus(window, cx);
+                }
+            }
+            SidebarEvent::SetWorktreesExpanded {
+                workspace_id,
+                expanded,
+            } => self.set_worktrees_expanded(workspace_id, expanded),
             SidebarEvent::LayoutChanged => self.synchronize_tab_manager_layouts(window, cx),
             SidebarEvent::FocusPane => self.focus(window, cx),
             SidebarEvent::FocusChanged => {}
@@ -3397,6 +3421,7 @@ impl WorkspaceManager {
                         .map(RemoteConnectionState::phase),
                     available,
                     repository: self.sidebar_badge(workspace.id(), cx),
+                    worktrees: self.worktree_section(workspace.id(), cx),
                     active: workspace.id() == active_workspace_id,
                 }
             })
@@ -3413,6 +3438,7 @@ impl Drop for WorkspaceManager {
 impl Render for WorkspaceManager {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_sidebar_repositories(cx);
+        self.sync_sidebar_worktrees(cx);
         let activity = super::appearance::window_activity(window);
         activity.mount(activity.with_scope(|| self.render_chrome(window, cx)))
     }
@@ -3795,6 +3821,7 @@ impl WorkspaceManager {
 
 #[path = "workspace_manager/repository.rs"]
 mod repository;
+mod worktrees;
 
 #[cfg(test)]
 #[path = "workspace_manager/tests.rs"]

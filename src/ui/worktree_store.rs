@@ -15,9 +15,10 @@ use super::repository_status_store::{ReadSpawner, RepositoryStatusAdapters, thre
 use crate::repository_status::tool_check::check_tools;
 use crate::repository_status::{GitToolStatus, RepositoryWatch, ToolInventory};
 use crate::ssh::cancellation::SshCancellationToken;
+#[cfg(test)]
 use crate::worktrees::WorktreeSnapshot;
 use crate::worktrees::catalog::{
-    CatalogEffect, CatalogUpdate, WorktreeCatalog, WorktreeInterestId,
+    CatalogEffect, CatalogUpdate, WorktreeCatalog, WorktreeInterestId, WorktreeListing,
 };
 use crate::worktrees::git::LocalWorktreeGit;
 
@@ -98,9 +99,9 @@ impl WorktreeStore {
         }
     }
 
-    /// The Worktrees `id` presents now: `None` before the first read and outside a repository.
-    pub(crate) fn snapshot(&self, id: WorktreeInterestId) -> Option<Arc<WorktreeSnapshot>> {
-        self.catalog.snapshot(id)
+    /// The Worktrees `id` presents now.
+    pub(crate) fn listing(&self, id: WorktreeInterestId) -> WorktreeListing {
+        self.catalog.listing(id)
     }
 
     /// Starts following the Worktrees of the repository containing `directory`.
@@ -290,3 +291,71 @@ impl WorktreeStore {
 }
 
 const GIT_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+#[cfg(test)]
+pub(crate) mod testing {
+    //! A store whose listings tests present directly. It finds no git, so nothing runs.
+
+    use std::path::Path;
+
+    use super::*;
+    use crate::repository_status::testing::FakeRunner;
+    use crate::repository_status::{
+        OperationMarkers, RepositoryMarkerReader, RepositoryToolDiscovery, RepositoryWatchError,
+        RepositoryWatcher, WatchDirectory,
+    };
+
+    struct NoTools;
+
+    impl RepositoryToolDiscovery for NoTools {
+        fn discover(&self) -> ToolInventory {
+            ToolInventory {
+                git: None,
+                github_cli: None,
+            }
+        }
+    }
+
+    impl RepositoryMarkerReader for NoTools {
+        fn read(&self, _: &Path) -> OperationMarkers {
+            OperationMarkers::default()
+        }
+    }
+
+    impl RepositoryWatcher for NoTools {
+        fn watch(
+            &self,
+            _: Vec<WatchDirectory>,
+            _: Box<dyn Fn() + Send + Sync>,
+        ) -> Result<Box<dyn RepositoryWatch>, RepositoryWatchError> {
+            Err(RepositoryWatchError)
+        }
+    }
+
+    pub(crate) fn install(cx: &mut App) -> Entity<WorktreeStore> {
+        let adapters = RepositoryStatusAdapters {
+            runner: FakeRunner::new([]),
+            discovery: Arc::new(NoTools),
+            markers: Arc::new(NoTools),
+            watcher: Arc::new(NoTools),
+            physical_home: "/home/person".into(),
+            github_cli_environment: Vec::new(),
+        };
+        let store = cx.new(|cx| WorktreeStore::new(adapters, Arc::new(|_| false), cx));
+        cx.set_global(InstalledWorktrees(store.clone()));
+        store
+    }
+
+    impl WorktreeStore {
+        /// Presents `snapshot` to every interest reading `directory`.
+        pub(crate) fn present(
+            &mut self,
+            directory: &Path,
+            snapshot: Option<WorktreeSnapshot>,
+            cx: &mut Context<Self>,
+        ) {
+            let update = self.catalog.present(directory, snapshot);
+            self.apply(update, cx);
+        }
+    }
+}

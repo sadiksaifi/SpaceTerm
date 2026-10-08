@@ -108,10 +108,6 @@ impl<T> TabCollection<T> {
             .map(|tab| (tab.id, &tab.payload))
     }
 
-    pub(crate) fn has_tabs_in(&self, scope: Option<WorktreeId>) -> bool {
-        self.tabs.iter().any(|tab| tab.scope == scope)
-    }
-
     /// The most recently activated Tab of one Worktree.
     pub(crate) fn most_recent_tab_in(&self, scope: Option<WorktreeId>) -> Option<TabId> {
         self.activation_order
@@ -770,7 +766,7 @@ mod tests {
             (
                 active_tab_id,
                 tabs.active_scope(),
-                tabs.has_tabs_in(FEATURE)
+                tabs.tabs_in(FEATURE).next().is_some()
             ),
             (TabId::new(1), MAIN, false)
         );

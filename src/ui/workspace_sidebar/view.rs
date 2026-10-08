@@ -1,4 +1,5 @@
 use super::*;
+use crate::repository_status::presentation::HeadGlyph;
 use crate::ui::appearance::gpui_color;
 use crate::ui::chrome_geometry::RadiusRole;
 use crate::ui::chrome_icons::IconRole;
@@ -20,7 +21,19 @@ pub(super) struct RowHover {
 pub(super) struct RowFade {
     fade: HoverFade,
     level: f32,
+    /// Each disclosed Worktree row's hover, in list order.
+    worktrees: Vec<RowFade>,
 }
+
+/// The width of the column that holds a git Workspace's disclosure chevron. Every row keeps it so
+/// titles stay aligned.
+const DISCLOSURE_WIDTH: f32 = 12.0;
+const DISCLOSURE_GAP: f32 = 2.0;
+const ICON_COLUMN_WIDTH: f32 = 18.0;
+const ROW_CONTENT_GAP: f32 = 10.0;
+/// The minimum height of a Worktree row, which holds one line.
+const WORKTREE_ROW_HEIGHT: f32 = 28.0;
+const FORMER_REPOSITORY_ROW_HEIGHT: f32 = 22.0;
 
 /// The chip carrying a Workspace row's hover and persistent selection. An emphasized selection
 /// marks a sidebar with keyboard focus.
@@ -80,6 +93,78 @@ fn row_padding(appearance: &crate::ui::appearance::ChromeAppearance, cx: &App) -
     (
         frame.sidebar_chip_leading_inset() + air,
         frame.sidebar_chip_trailing_inset() + air,
+    )
+}
+
+/// A row's chip and the Panel-host row colors its text and icons use, promoted for a selected row
+/// and eased toward hover paint.
+fn row_paint(
+    selected: bool,
+    emphasized: bool,
+    hover: f32,
+    appearance: &crate::ui::appearance::ChromeAppearance,
+    cx: &App,
+) -> (SelectionChip, crate::appearance::ChromeColors) {
+    let mut row_colors = appearance
+        .host_colors(spaceterm_ui::ControlHost::Panel)
+        .clone();
+    // The chip's paints are read before the selected colors are promoted below, because that
+    // promotion is what the row's text and icons consume. A keyboard-focused sidebar emphasizes
+    // its selection in the accent color, like an AppKit source list, and draws no focus ring.
+    let selection_colors = if emphasized {
+        crate::ui::selection_chip::emphasized_selection_colors(&row_colors)
+    } else if appearance.active {
+        appearance
+            .unfocused_selection_colors(spaceterm_ui::ControlHost::Panel)
+            .clone()
+    } else {
+        row_colors.clone()
+    };
+    let chip = row_chip(
+        selected,
+        emphasized,
+        appearance,
+        &row_colors,
+        &selection_colors,
+        cx,
+    );
+    if selected {
+        row_colors.row_selected_background = selection_colors.row_selected_background;
+        row_colors.row_selected_hover_background = selection_colors.row_selected_hover_background;
+        row_colors.row_foreground = selection_colors.row_selected_foreground;
+        row_colors.row_secondary = selection_colors.row_selected_secondary;
+        row_colors.row_icon = selection_colors.row_selected_icon;
+        row_colors.row_hover_foreground = selection_colors.row_selected_hover_foreground;
+        row_colors.row_hover_secondary = selection_colors.row_selected_hover_secondary;
+        row_colors.row_hover_icon = selection_colors.row_selected_hover_icon;
+    }
+    // Text and icons follow the chip's hover paint.
+    let level = f64::from(hover);
+    row_colors.row_foreground = row_colors
+        .row_foreground
+        .fade(row_colors.row_hover_foreground, level);
+    row_colors.row_secondary = row_colors
+        .row_secondary
+        .fade(row_colors.row_hover_secondary, level);
+    row_colors.row_icon = row_colors.row_icon.fade(row_colors.row_hover_icon, level);
+    (chip, row_colors)
+}
+
+/// Where a Worktree row's content starts: under its Workspace's title.
+fn worktree_indent(appearance: &crate::ui::appearance::ChromeAppearance, cx: &App) -> Pixels {
+    row_padding(appearance, cx).0
+        + appearance
+            .spacing(DISCLOSURE_WIDTH + DISCLOSURE_GAP + ICON_COLUMN_WIDTH + ROW_CONTENT_GAP)
+}
+
+fn worktree_row_height(appearance: &crate::ui::appearance::ChromeAppearance) -> Pixels {
+    appearance.spacing(WORKTREE_ROW_HEIGHT).max(
+        appearance
+            .typography
+            .style(TextRole::Navigation)
+            .line_height
+            + appearance
+                .spacing(SIDEBAR_ROW_TITLE_LINE_PADDING + 2.0 * SIDEBAR_ROW_SELECTION_INSET_Y),
     )
 }
 
@@ -224,59 +309,25 @@ impl WorkspaceSidebar {
             remote_connection_phase,
             available,
             repository,
+            worktrees,
             active,
         } = row;
         let row_background = row_background(appearance);
-        let mut row_colors = appearance
-            .host_colors(spaceterm_ui::ControlHost::Panel)
-            .clone();
-        // The chip's paints are read before the selected colors are promoted below, because that
-        // promotion is what the row's text and icons consume. A keyboard-focused sidebar emphasizes
-        // its selection in the accent color, like an AppKit source list, and draws no focus ring.
         let emphasized = appearance.active && self.has_visible_focus(window);
-        let selection_colors = if emphasized {
-            crate::ui::selection_chip::emphasized_selection_colors(&row_colors)
-        } else if appearance.active {
-            appearance
-                .unfocused_selection_colors(spaceterm_ui::ControlHost::Panel)
-                .clone()
-        } else {
-            row_colors.clone()
-        };
         let lifted = role == RowRole::Lifted;
+        let selected = if lifted {
+            active
+        } else {
+            self.selected_key() == Some(SidebarRowKey::Workspace(workspace_id))
+        };
         let RowHover {
             level: hover,
             tracker,
         } = hover;
         let hover = if appearance.active { hover } else { 0.0 };
-        let chip = row_chip(
-            active,
-            emphasized,
-            appearance,
-            &row_colors,
-            &selection_colors,
-            cx,
-        );
-        if active {
-            row_colors.row_selected_background = selection_colors.row_selected_background;
-            row_colors.row_selected_hover_background =
-                selection_colors.row_selected_hover_background;
-            row_colors.row_foreground = selection_colors.row_selected_foreground;
-            row_colors.row_secondary = selection_colors.row_selected_secondary;
-            row_colors.row_icon = selection_colors.row_selected_icon;
-            row_colors.row_hover_foreground = selection_colors.row_selected_hover_foreground;
-            row_colors.row_hover_secondary = selection_colors.row_selected_hover_secondary;
-            row_colors.row_hover_icon = selection_colors.row_selected_hover_icon;
-        }
-        // Text and icons follow the chip's hover paint.
         let level = f64::from(hover);
-        row_colors.row_foreground = row_colors
-            .row_foreground
-            .fade(row_colors.row_hover_foreground, level);
-        row_colors.row_secondary = row_colors
-            .row_secondary
-            .fade(row_colors.row_hover_secondary, level);
-        row_colors.row_icon = row_colors.row_icon.fade(row_colors.row_hover_icon, level);
+        let (chip, row_colors) = row_paint(selected, emphasized, hover, appearance, cx);
+        let expanded = worktrees.as_ref().map(|section| section.expanded);
         // Text helpers consume no materials or surfaces. Give only those helpers the promoted
         // Panel-host row colors while all surface composition keeps the root appearance.
         let mut row_text_appearance = appearance.clone();
@@ -288,7 +339,7 @@ impl WorkspaceSidebar {
         // An unavailable directory and the Remote connection status take line 2 from the
         // repository, as they take it from the directory.
         let repository = repository.filter(|_| available && remote_status.is_none());
-        let pull_request_paint = appearance.colors.pull_request(if active {
+        let pull_request_paint = appearance.colors.pull_request(if selected {
             appearance.colors.row_selected_background
         } else {
             crate::ui::workspace_frame::base_surface(&appearance.colors)
@@ -319,7 +370,12 @@ impl WorkspaceSidebar {
             ..paint
         };
         let detail_paint = detail_color.map(|color| {
-            under_pointer(workspace_row_status_paint(color, active, 4.5, &row_colors))
+            under_pointer(workspace_row_status_paint(
+                color,
+                selected,
+                4.5,
+                &row_colors,
+            ))
         });
         // The row icon carries one status in the same precedence as the collapsed identity: an
         // unavailable directory first, then the Remote connection.
@@ -327,7 +383,12 @@ impl WorkspaceSidebar {
             .then_some(row_colors.warning)
             .or(remote_color)
             .map(|color| {
-                under_pointer(workspace_row_status_paint(color, active, 3.0, &row_colors))
+                under_pointer(workspace_row_status_paint(
+                    color,
+                    selected,
+                    3.0,
+                    &row_colors,
+                ))
             });
         let target_name = name.clone();
         let target_detail = detail.clone();
@@ -401,7 +462,7 @@ impl WorkspaceSidebar {
             .flex()
             .flex_row()
             .items_center()
-            .gap(appearance.spacing(10.0))
+            .gap(appearance.spacing(ROW_CONTENT_GAP))
             .when(!lifted, |row| row.block_mouse_except_scroll())
             .when_some(row_background, |row, background| {
                 row.bg(gpui_color(background))
@@ -412,7 +473,8 @@ impl WorkspaceSidebar {
             ))
             .when(!lifted, |row| {
                 row.on_click(move |_, _, cx| {
-                    let _ = click_sidebar.update(cx, |_, cx| {
+                    let _ = click_sidebar.update(cx, |sidebar, cx| {
+                        sidebar.cursor = None;
                         cx.emit(SidebarEvent::Activate {
                             workspace_id,
                             focus_pane: true,
@@ -439,24 +501,38 @@ impl WorkspaceSidebar {
             })
             .child(
                 div()
-                    .w(appearance.spacing(18.0))
                     .flex_shrink_0()
                     .flex()
                     .items_center()
-                    .justify_center()
+                    .gap(appearance.spacing(DISCLOSURE_GAP))
+                    .child(self.render_disclosure(
+                        workspace_id,
+                        expanded.filter(|_| !lifted),
+                        row_colors.row_icon,
+                        sidebar.clone(),
+                        appearance,
+                    ))
                     .child(
                         div()
-                            .text_color(gpui_color(
-                                icon_paint.map_or(row_colors.row_icon, |paint| paint.normal),
-                            ))
-                            .child(Icon::inherited(
-                                if remote_connection_phase.is_some() {
-                                    IconName::Globe
-                                } else {
-                                    IconName::Terminal
-                                },
-                                appearance.icons.metrics(IconRole::Row).glyph_size,
-                            )),
+                            .w(appearance.spacing(ICON_COLUMN_WIDTH))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                div()
+                                    .text_color(gpui_color(
+                                        icon_paint
+                                            .map_or(row_colors.row_icon, |paint| paint.normal),
+                                    ))
+                                    .child(Icon::inherited(
+                                        if remote_connection_phase.is_some() {
+                                            IconName::Globe
+                                        } else {
+                                            IconName::Terminal
+                                        },
+                                        appearance.icons.metrics(IconRole::Row).glyph_size,
+                                    )),
+                            ),
                     ),
             )
             .child(
@@ -510,17 +586,23 @@ impl WorkspaceSidebar {
         }
 
         let press_sidebar = sidebar.clone();
-        let target = ContextMenuTarget::new(accesskit::Role::ListBoxOption, target_name)
+        let target = ContextMenuTarget::new(accesskit::Role::TreeItem, target_name)
             .description(target_detail)
-            .selected(active)
-            .on_press(move |_, cx| {
-                let _ = press_sidebar.update(cx, |_, cx| {
-                    cx.emit(SidebarEvent::Activate {
-                        workspace_id,
-                        focus_pane: true,
-                    });
+            .selected(selected)
+            .level(1);
+        let target = match expanded {
+            Some(expanded) => target.expanded(expanded),
+            None => target,
+        };
+        let target = target.on_press(move |_, cx| {
+            let _ = press_sidebar.update(cx, |sidebar, cx| {
+                sidebar.cursor = None;
+                cx.emit(SidebarEvent::Activate {
+                    workspace_id,
+                    focus_pane: true,
                 });
             });
+        });
         let open_sidebar = sidebar.clone();
         let lifecycle_sidebar = sidebar.clone();
         let lifecycle_window = window.window_handle();
@@ -578,9 +660,32 @@ impl WorkspaceSidebar {
             .map(|row| {
                 let fade =
                     HoverFade::new(("workspace-row-hover", row.workspace_id.get()), window, cx);
+                let worktrees = row
+                    .worktrees
+                    .iter()
+                    .filter(|section| section.expanded)
+                    .flat_map(|section| section.rows())
+                    .map(|worktree| {
+                        let fade = HoverFade::new(
+                            SharedString::from(format!(
+                                "worktree-row-hover-{}-{}",
+                                row.workspace_id.get(),
+                                worktree.worktree_id
+                            )),
+                            window,
+                            cx,
+                        );
+                        RowFade {
+                            level: fade.level(window, cx),
+                            fade,
+                            worktrees: Vec::new(),
+                        }
+                    })
+                    .collect();
                 RowFade {
                     level: fade.level(window, cx),
                     fade,
+                    worktrees,
                 }
             })
             .collect()
@@ -602,7 +707,7 @@ impl WorkspaceSidebar {
         let owner = sidebar.entity_id();
         let mut rows = div()
             .id("workspace-list")
-            .role(accesskit::Role::ListBox)
+            .role(accesskit::Role::Tree)
             .aria_label("Workspaces")
             .debug_selector(|| "workspace-list".to_owned())
             .w_full()
@@ -637,8 +742,11 @@ impl WorkspaceSidebar {
                 sidebar.finish_workspace_drag(pointer, cx);
             });
         });
+        // Each Workspace and its Worktrees are one scroll child, so reordering, revealing, and
+        // drag previews stay indexed by Workspace.
         for (row, fade) in self.rows.iter().zip(hovers) {
-            rows = rows.child(self.render_workspace_row(
+            let workspace_id = row.workspace_id;
+            let parent = self.render_workspace_row(
                 row.clone(),
                 RowRole::InList,
                 RowHover {
@@ -650,7 +758,34 @@ impl WorkspaceSidebar {
                 window,
                 appearance,
                 cx,
-            ));
+            );
+            let children = row
+                .worktrees
+                .as_ref()
+                .filter(|section| section.expanded)
+                .map(|section| {
+                    self.render_worktrees(
+                        workspace_id,
+                        section,
+                        fade.worktrees,
+                        sidebar.clone(),
+                        window,
+                        appearance,
+                        cx,
+                    )
+                })
+                .unwrap_or_default();
+            rows = rows.child(
+                div()
+                    .id(("workspace-group", workspace_id.get()))
+                    .debug_selector(move || format!("workspace-group-{}", workspace_id.get()))
+                    .w_full()
+                    .flex_shrink_0()
+                    .flex()
+                    .flex_col()
+                    .child(parent)
+                    .children(children),
+            );
         }
 
         let scrollbar = self.scrollbar.clone();
@@ -859,6 +994,272 @@ impl RenderOnce for SidebarResizeHandle {
             self.divider_position,
             window,
         ))
+    }
+}
+
+impl WorkspaceSidebar {
+    /// The chevron that shows or hides a git Workspace's Worktrees. Other rows keep its column
+    /// empty so every title starts at the same edge.
+    fn render_disclosure(
+        &self,
+        workspace_id: WorkspaceId,
+        expanded: Option<bool>,
+        color: Color,
+        sidebar: WeakEntity<Self>,
+        appearance: &crate::ui::appearance::ChromeAppearance,
+    ) -> AnyElement {
+        let column = div()
+            .id(("workspace-disclosure", workspace_id.get()))
+            .w(appearance.spacing(DISCLOSURE_WIDTH))
+            .h_full()
+            .flex()
+            .items_center()
+            .justify_center();
+        let Some(expanded) = expanded else {
+            return column.into_any_element();
+        };
+        column
+            .debug_selector(move || {
+                format!(
+                    "workspace-disclosure-{}-{}",
+                    workspace_id.get(),
+                    if expanded { "expanded" } else { "collapsed" }
+                )
+            })
+            .cursor_pointer()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(move |_, window, cx| {
+                let _ = sidebar.update(cx, |sidebar, cx| {
+                    sidebar.set_expanded(workspace_id, !expanded, window, cx);
+                });
+                cx.stop_propagation();
+            })
+            .child(div().text_color(gpui_color(color)).child(Icon::inherited(
+                if expanded {
+                    IconName::ChevronDown
+                } else {
+                    IconName::ChevronRight
+                },
+                appearance.icons.metrics(IconRole::Caption).glyph_size,
+            )))
+            .into_any_element()
+    }
+
+    /// A git Workspace's disclosed Worktree rows, and a label above each former repository's.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one group render step needs its section, hovers, owner, and host geometry"
+    )]
+    fn render_worktrees(
+        &self,
+        workspace_id: WorkspaceId,
+        section: &WorktreeSection,
+        fades: Vec<RowFade>,
+        sidebar: WeakEntity<Self>,
+        window: &Window,
+        appearance: &crate::ui::appearance::ChromeAppearance,
+        cx: &App,
+    ) -> Vec<AnyElement> {
+        let mut fades = fades.into_iter();
+        let mut elements = Vec::new();
+        let colors = appearance.host_colors(spaceterm_ui::ControlHost::Panel);
+        for group in &section.groups {
+            if let Some(name) = &group.former_repository {
+                elements.push(
+                    div()
+                        .debug_selector({
+                            let name = name.clone();
+                            move || format!("worktree-former-repository-{name}")
+                        })
+                        .w_full()
+                        .h(appearance.spacing(FORMER_REPOSITORY_ROW_HEIGHT))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_end()
+                        .pl(worktree_indent(appearance, cx))
+                        .pr(row_padding(appearance, cx).1)
+                        .truncate()
+                        .chrome_text(appearance.typography.style(TextRole::Secondary))
+                        .text_color(gpui_color(colors.row_secondary))
+                        .child(name.clone())
+                        .into_any_element(),
+                );
+            }
+            let size = group.rows.len();
+            for (index, worktree) in group.rows.iter().enumerate() {
+                let Some(fade) = fades.next() else {
+                    break;
+                };
+                elements.push(self.render_worktree_row(
+                    workspace_id,
+                    worktree,
+                    (index + 1, size),
+                    fade,
+                    sidebar.clone(),
+                    window,
+                    appearance,
+                    cx,
+                ));
+            }
+        }
+        elements
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one row render step needs its model, set position, hover, owner, and host geometry"
+    )]
+    fn render_worktree_row(
+        &self,
+        workspace_id: WorkspaceId,
+        worktree: &WorktreeRowViewModel,
+        (position, size): (usize, usize),
+        fade: RowFade,
+        sidebar: WeakEntity<Self>,
+        window: &Window,
+        appearance: &crate::ui::appearance::ChromeAppearance,
+        cx: &App,
+    ) -> AnyElement {
+        let worktree_id = worktree.worktree_id;
+        let key = SidebarRowKey::Worktree(workspace_id, worktree_id);
+        let selected = self.selected_key() == Some(key);
+        let emphasized = appearance.active && self.has_visible_focus(window);
+        let hover = if appearance.active { fade.level } else { 0.0 };
+        let (chip, row_colors) = row_paint(selected, emphasized, hover, appearance, cx);
+        let openable = worktree.openable();
+        // A Worktree with no Tabs reads as secondary until it is opened.
+        let label_color = if worktree.has_tabs && !worktree.missing {
+            row_colors.row_foreground
+        } else {
+            row_colors.row_secondary
+        };
+        let icon_size = appearance.icons.metrics(IconRole::Row).glyph_size;
+        let selector = format!("worktree-row-{}-{worktree_id}", workspace_id.get());
+        let label = worktree.label.clone();
+        let mut description = worktree.path.to_string();
+        if worktree.missing {
+            description.push_str(", missing");
+        } else if worktree.locked {
+            description.push_str(", locked");
+        }
+        if !worktree.has_tabs {
+            description.push_str(", no tabs");
+        }
+        let id = SharedString::from(selector.clone());
+        let click_sidebar = sidebar.clone();
+        let press_sidebar = sidebar;
+        let row = div()
+            .id(id)
+            .debug_selector({
+                let selector = selector.clone();
+                move || {
+                    format!(
+                        "{selector}-{}",
+                        if selected { "selected" } else { "unselected" }
+                    )
+                }
+            })
+            .role(accesskit::Role::TreeItem)
+            .aria_label(if worktree.detached {
+                SharedString::from(format!("Detached at {label}"))
+            } else {
+                label.clone()
+            })
+            .aria_description(SharedString::from(description))
+            .aria_level(2)
+            .aria_position_in_set(position)
+            .aria_size_of_set(size)
+            .aria_selected(selected)
+            .aria_disabled(!openable)
+            .when(openable, |row| {
+                row.on_a11y_action(accesskit::Action::Click, move |_, _, cx| {
+                    let _ = press_sidebar.update(cx, |sidebar, cx| {
+                        sidebar.cursor = None;
+                        cx.emit(SidebarEvent::ActivateWorktree {
+                            workspace_id,
+                            worktree_id,
+                            focus_pane: true,
+                        });
+                    });
+                })
+            })
+            .relative()
+            .w_full()
+            .h(worktree_row_height(appearance))
+            .flex_shrink_0()
+            .pl(worktree_indent(appearance, cx))
+            .pr(row_padding(appearance, cx).1)
+            .flex()
+            .items_center()
+            .gap(appearance.spacing(6.0))
+            .block_mouse_except_scroll()
+            .when_some(row_background(appearance), |row, background| {
+                row.bg(gpui_color(background))
+            })
+            .child(chip.render(format!("{selector}-selection"), hover))
+            .when(openable, |row| {
+                row.on_click(move |_, _, cx| {
+                    let _ = click_sidebar.update(cx, |sidebar, cx| {
+                        sidebar.cursor = None;
+                        cx.emit(SidebarEvent::ActivateWorktree {
+                            workspace_id,
+                            worktree_id,
+                            focus_pane: true,
+                        });
+                    });
+                    cx.stop_propagation();
+                })
+            })
+            .child(
+                div()
+                    .w(icon_size)
+                    .flex_shrink_0()
+                    .flex()
+                    .justify_center()
+                    .text_color(gpui_color(row_colors.row_icon))
+                    .map(
+                        |mark| match HeadGlyph::from_detached(worktree.detached).text() {
+                            Some(text) => mark
+                                .chrome_text(appearance.typography.style(TextRole::Secondary))
+                                .child(text),
+                            None => mark.child(Icon::inherited(IconName::GitBranch, icon_size)),
+                        },
+                    ),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .truncate()
+                    .chrome_text(appearance.typography.style(TextRole::Navigation))
+                    .text_color(gpui_color(label_color))
+                    .child(label),
+            )
+            .when(worktree.missing, |row| {
+                row.child(
+                    div()
+                        .flex_shrink_0()
+                        .chrome_text(appearance.typography.style(TextRole::Secondary))
+                        .text_color(gpui_color(row_colors.row_secondary))
+                        .child("Missing"),
+                )
+            })
+            .when(worktree.locked && !worktree.missing, |row| {
+                row.child(
+                    div()
+                        .flex_shrink_0()
+                        .text_color(gpui_color(row_colors.row_icon))
+                        .child(Icon::inherited(IconName::Lock, icon_size)),
+                )
+            })
+            .child(fade.fade.tracker());
+        Tooltip::new(
+            SharedString::from(format!("{selector}-tooltip")),
+            "Worktree",
+        )
+        .detail(worktree.path.clone())
+        .attach(row, TooltipTargetVisibility::Visible)
+        .into_any_element()
     }
 }
 

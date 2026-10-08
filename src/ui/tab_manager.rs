@@ -1145,6 +1145,16 @@ impl TabManager {
     }
 
     #[cfg(test)]
+    pub(crate) fn activate_tab_for_test(
+        &mut self,
+        tab_id: TabId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_tab(tab_id, window, cx);
+    }
+
+    #[cfg(test)]
     pub(crate) fn active_tab_view(&self) -> Entity<TabView> {
         self.tabs.active_tab().clone()
     }
@@ -1311,13 +1321,6 @@ impl TabManager {
         self.tabs.active_scope()
     }
 
-    /// The Root Tab's Worktree.
-    pub(crate) fn root_tab_worktree(&self) -> Option<WorktreeId> {
-        self.tabs
-            .scope_of(self.tabs.root_tab_id())
-            .expect("the Root Tab must belong to the Workspace")
-    }
-
     /// The number of Tabs each Worktree holds. Tabs outside any Worktree are not counted.
     pub(crate) fn worktree_tab_counts(&self) -> std::collections::BTreeMap<WorktreeId, usize> {
         let mut counts = std::collections::BTreeMap::new();
@@ -1378,17 +1381,19 @@ impl TabManager {
         cx.notify();
     }
 
-    /// Shows a Worktree's Tabs, opening its first Tab in `root` when it has none.
+    /// Shows a Worktree's Tabs, opening its first Tab in `root` when it has none. Showing an
+    /// existing Tab moves focus to it only when `focus` is set; a new Tab always takes focus.
     pub(crate) fn open_worktree(
         &mut self,
         id: WorktreeId,
         root: std::path::PathBuf,
+        focus: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.worktree_roots.insert(id, root);
         if let Some(tab_id) = self.tabs.most_recent_tab_in(Some(id)) {
-            self.activate_tab(tab_id, window, cx);
+            self.activate_tab_focusing(tab_id, focus, window, cx);
             return;
         }
         if self.remote_lifecycle.disconnected_generation().is_some() {
@@ -1435,6 +1440,16 @@ impl TabManager {
     }
 
     fn activate_tab(&mut self, tab_id: TabId, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.activate_tab_focusing(tab_id, true, window, cx)
+    }
+
+    fn activate_tab_focusing(
+        &mut self,
+        tab_id: TabId,
+        focus: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let Some(next_tab) = self.tabs.tab(tab_id).cloned() else {
             eprintln!("cannot activate unknown Tab {tab_id}");
             return false;
@@ -1453,8 +1468,10 @@ impl TabManager {
         next_tab.update(cx, |view, cx| {
             view.set_focus_branch(self.active, blocker, cx);
         });
-        if self.active {
+        if self.active && focus {
             next_tab.update(cx, |view, cx| view.activate(window, cx));
+        } else if self.active {
+            next_tab.update(cx, |view, cx| view.activate_without_focus(cx));
         } else {
             next_tab.update(cx, |view, cx| view.deactivate(cx));
         }
@@ -4559,7 +4576,7 @@ mod tests {
 
         cx.update(|window, cx| {
             manager.update(cx, |manager, cx| {
-                manager.open_worktree(linked_id, linked.clone(), window, cx);
+                manager.open_worktree(linked_id, linked.clone(), true, window, cx);
             });
         });
         cx.run_until_parked();
@@ -4571,13 +4588,13 @@ mod tests {
         let after_command_one = active(cx);
         cx.update(|window, cx| {
             manager.update(cx, |manager, cx| {
-                manager.open_worktree(main_id, main.clone(), window, cx);
+                manager.open_worktree(main_id, main.clone(), true, window, cx);
             });
         });
         let main_tabs = visible(cx);
         cx.update(|window, cx| {
             manager.update(cx, |manager, cx| {
-                manager.open_worktree(linked_id, linked.clone(), window, cx);
+                manager.open_worktree(linked_id, linked.clone(), true, window, cx);
             });
         });
 

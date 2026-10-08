@@ -38,6 +38,16 @@ pub(crate) enum CatalogEffect {
     },
 }
 
+/// What an interest knows about its directory's Worktrees.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum WorktreeListing {
+    /// No read has finished yet.
+    Pending,
+    /// The directory is not in a work tree repository.
+    Outside,
+    Listed(Arc<WorktreeSnapshot>),
+}
+
 /// The effects to run and whether any interest's snapshot changed.
 #[derive(Debug, Default, Eq, PartialEq)]
 pub(crate) struct CatalogUpdate {
@@ -48,6 +58,8 @@ pub(crate) struct CatalogUpdate {
 #[derive(Default)]
 struct Entry {
     snapshot: Option<Arc<WorktreeSnapshot>>,
+    /// A read has succeeded, so a `None` snapshot means the directory is outside a repository.
+    listed: bool,
     reading: Option<ReadGeneration>,
     /// A change arrived during the read in flight, so read once more when it finishes.
     stale: bool,
@@ -63,10 +75,20 @@ pub(crate) struct WorktreeCatalog {
 }
 
 impl WorktreeCatalog {
-    /// The Worktrees `id` presents now: `None` before the first read and outside a repository.
-    pub(crate) fn snapshot(&self, id: WorktreeInterestId) -> Option<Arc<WorktreeSnapshot>> {
-        let directory = self.interests.get(&id)?;
-        self.entries.get(directory)?.snapshot.clone()
+    /// The Worktrees `id` presents now.
+    pub(crate) fn listing(&self, id: WorktreeInterestId) -> WorktreeListing {
+        let Some(entry) = self
+            .interests
+            .get(&id)
+            .and_then(|directory| self.entries.get(directory))
+        else {
+            return WorktreeListing::Pending;
+        };
+        match &entry.snapshot {
+            Some(snapshot) => WorktreeListing::Listed(Arc::clone(snapshot)),
+            None if entry.listed => WorktreeListing::Outside,
+            None => WorktreeListing::Pending,
+        }
     }
 
     /// Starts or moves an interest. Reading the same directory as another interest shares its read.
@@ -145,8 +167,9 @@ impl WorktreeCatalog {
         // A failed read keeps the last snapshot rather than hiding open Worktrees.
         if let Ok(snapshot) = result {
             let snapshot = snapshot.map(Arc::new);
-            if entry.snapshot != snapshot {
+            if entry.snapshot != snapshot || !entry.listed {
                 entry.snapshot = snapshot;
+                entry.listed = true;
                 update.changed = true;
             }
         }
@@ -155,6 +178,25 @@ impl WorktreeCatalog {
         }
         update.effects.extend(self.reconcile_watches());
         update
+    }
+
+    /// Presents `snapshot` for `directory` as if a read had just listed it.
+    #[cfg(test)]
+    pub(crate) fn present(
+        &mut self,
+        directory: &std::path::Path,
+        snapshot: Option<WorktreeSnapshot>,
+    ) -> CatalogUpdate {
+        let Some(entry) = self.entries.get_mut(directory) else {
+            return CatalogUpdate::default();
+        };
+        entry.reading = None;
+        entry.snapshot = snapshot.map(Arc::new);
+        entry.listed = true;
+        CatalogUpdate {
+            effects: self.reconcile_watches(),
+            changed: true,
+        }
     }
 
     fn refresh(&mut self, directories: Vec<PathBuf>) -> CatalogUpdate {
@@ -297,8 +339,8 @@ mod tests {
                 changed: true,
             }
         );
-        assert_eq!(catalog.snapshot(OTHER_ROW), catalog.snapshot(ROW));
-        assert!(catalog.snapshot(ROW).is_some());
+        assert_eq!(catalog.listing(OTHER_ROW), catalog.listing(ROW));
+        assert!(matches!(catalog.listing(ROW), WorktreeListing::Listed(_)));
     }
 
     #[test]
@@ -348,7 +390,7 @@ mod tests {
             catalog.read_finished(&directory, second, Err(RepositoryReadError::Unavailable));
 
         assert_eq!((late, failed.changed), (CatalogUpdate::default(), false));
-        assert!(catalog.snapshot(ROW).is_some());
+        assert!(matches!(catalog.listing(ROW), WorktreeListing::Listed(_)));
     }
 
     #[test]
@@ -371,6 +413,9 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(catalog.snapshot(ROW), None);
+        assert_eq!(catalog.listing(ROW), WorktreeListing::Pending);
+        let (directory, generation) = read_of(&moved);
+        catalog.read_finished(&directory, generation, Ok(None));
+        assert_eq!(catalog.listing(ROW), WorktreeListing::Outside);
     }
 }

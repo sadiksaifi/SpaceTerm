@@ -193,6 +193,26 @@ impl WorkspaceManager {
         workspace: &WorkspaceEntry<Entity<TabManager>>,
         cx: &App,
     ) -> Option<RowFacts> {
+        let (machine, directory) = self.row_source(workspace, cx)?;
+        let connected = workspace
+            .remote_connection_state()
+            .map(RemoteConnectionState::phase)
+            .is_none_or(|phase| phase == RemoteConnectionPhase::Connected);
+        Some(RowFacts {
+            machine,
+            directory,
+            available: connected
+                && matches!(workspace.availability(), DirectoryAvailability::Available),
+        })
+    }
+
+    /// The directory a row reads and its machine: the Pinned Directory, else the Root Pane's
+    /// Repository Source Directory, else home.
+    pub(super) fn row_source(
+        &self,
+        workspace: &WorkspaceEntry<Entity<TabManager>>,
+        cx: &App,
+    ) -> Option<(RepositoryMachine, SourceDirectory)> {
         let location_machine = match workspace.location() {
             WorkspaceLocation::Local => RepositoryMachine::Local,
             WorkspaceLocation::Remote { key, .. } => {
@@ -224,15 +244,6 @@ impl WorkspaceManager {
                     Some((location_machine, home))
                 })?,
         };
-        let connected = workspace
-            .remote_connection_state()
-            .map(RemoteConnectionState::phase)
-            .is_none_or(|phase| phase == RemoteConnectionPhase::Connected);
-        Some(RowFacts {
-            machine,
-            directory,
-            available: connected
-                && matches!(workspace.availability(), DirectoryAvailability::Available),
-        })
+        Some((machine, directory))
     }
 }
