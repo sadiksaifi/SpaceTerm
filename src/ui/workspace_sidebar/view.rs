@@ -1697,15 +1697,8 @@ fn workspace_menu_entries(
             .debug_selector("workspace-menu-row-reconnect"),
         );
     }
-    entries.push(
-        MenuEntry::action(
-            "Close Workspace",
-            RowMenuCommand::Workspace(WorkspaceMenuCommand::Close),
-        )
-        .icon(|foreground, size| Icon::new(IconName::X, size, foreground).into_any_element())
-        .debug_selector("workspace-menu-row-close"),
-    );
-    // Remove Worktree deletes a directory, so it alone sits apart, below the divider.
+    // The destructive commands sit together below the divider.
+    entries.push(MenuEntry::separator());
     if let Some((worktree_id, name, removal)) = active_worktree
         && let Some(entry) = remove_worktree_entry(
             RowMenuCommand::Worktree(worktree_id, WorktreeMenuCommand::Remove),
@@ -1714,8 +1707,17 @@ fn workspace_menu_entries(
             "workspace-menu-row-remove-worktree",
         )
     {
-        entries.extend([MenuEntry::separator(), entry]);
+        entries.push(entry);
     }
+    entries.push(
+        MenuEntry::action(
+            "Close Workspace",
+            RowMenuCommand::Workspace(WorkspaceMenuCommand::Close),
+        )
+        .destructive(true)
+        .icon(|foreground, size| Icon::new(IconName::X, size, foreground).into_any_element())
+        .debug_selector("workspace-menu-row-close"),
+    );
     entries
 }
 

@@ -12497,7 +12497,7 @@ fn close_confirmation_restores_accessibility_focus_after_escape_and_cancel(
 }
 
 #[gpui::test]
-fn row_menus_should_place_only_remove_worktree_below_the_divider(cx: &mut TestAppContext) {
+fn row_menus_should_place_their_destructive_commands_below_the_divider(cx: &mut TestAppContext) {
     cx.update(|cx| {
         crate::ui::worktree_store::testing::install(cx);
     });
@@ -12546,20 +12546,20 @@ fn row_menus_should_place_only_remove_worktree_below_the_divider(cx: &mut TestAp
     let workspace_menu = (
         gap(
             "workspace-menu-row-pin-directory",
-            "workspace-menu-row-close",
-            cx,
-        ),
-        gap(
-            "workspace-menu-row-close",
             "workspace-menu-row-remove-worktree",
             cx,
         ) > 0.0,
+        gap(
+            "workspace-menu-row-remove-worktree",
+            "workspace-menu-row-close",
+            cx,
+        ),
     );
 
     assert_eq!(
         (worktree_menu, workspace_menu),
-        ((0.0, true), (0.0, true)),
-        "Close Tabs and Close Workspace stay in the first group, and Remove Worktree sits alone \
+        ((0.0, true), (true, 0.0)),
+        "Close Tabs stays in the first group; Remove Worktree and Close Workspace sit together \
          below the divider"
     );
 }
