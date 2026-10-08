@@ -231,16 +231,16 @@ impl WorkspaceManager {
             former_repository: Some(repository_name(repository)),
             rows,
         }));
-        if groups.is_empty() {
+        // A repository's Main Worktree alone leaves the row as it is outside a git repository.
+        if groups.iter().map(|group| group.rows.len()).sum::<usize>() < 2
+            && groups.iter().all(|group| group.former_repository.is_none())
+        {
             return None;
         }
-        // Collapsed while the Main Worktree is all there is. A former repository's Worktrees hold
-        // running Tabs, so they start disclosed.
-        let expanded = worktrees.expanded.unwrap_or_else(|| {
-            groups.iter().any(|group| group.former_repository.is_some())
-                || groups.iter().map(|group| group.rows.len()).sum::<usize>() > 1
-        });
-        Some(WorktreeSection { expanded, groups })
+        Some(WorktreeSection {
+            expanded: worktrees.expanded.unwrap_or(true),
+            groups,
+        })
     }
 
     fn worktree_has_tabs(&self, workspace_id: WorkspaceId, id: WorktreeId, cx: &App) -> bool {

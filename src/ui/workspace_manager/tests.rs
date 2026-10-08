@@ -10447,8 +10447,8 @@ fn assert_rendered_text(
     }
 }
 
-/// A repository whose Main Worktree is the test home, with one linked Worktree at `linked`.
-fn present_worktrees(cx: &mut VisualTestContext, linked: &Path) {
+/// A repository whose Main Worktree is the test home, with a linked Worktree at each `linked`.
+fn present_worktrees(cx: &mut VisualTestContext, linked: &[&Path]) {
     use crate::domain::RepositoryIdentity;
     use crate::worktrees::WorktreeSnapshot;
     use crate::worktrees::listing::{WorktreeHead, WorktreeRecord};
@@ -10464,7 +10464,9 @@ fn present_worktrees(cx: &mut VisualTestContext, linked: &Path) {
         repository: RepositoryIdentity::new(main.clone()),
         current: Some(0),
         common_directory: main.join(".git"),
-        worktrees: vec![record(&main, "main"), record(linked, "feature/login")],
+        worktrees: std::iter::once(record(&main, "main"))
+            .chain(linked.iter().map(|root| record(root, "feature/login")))
+            .collect(),
     };
     let store =
         cx.update(|_, cx| crate::ui::worktree_store::InstalledWorktrees::store(cx).unwrap());
@@ -10483,7 +10485,7 @@ fn git_workspace_rows_should_disclose_worktrees_that_open_lazily(cx: &mut TestAp
     let (manager, records, cx) = workspace_manager(cx);
     let fixture = crate::terminal::testing::ShellResourcesFixture::new();
     let linked = fixture.path().join("shell-integration");
-    present_worktrees(cx, &linked);
+    present_worktrees(cx, &[&linked]);
     let items = |cx: &mut VisualTestContext| {
         A11yTree::read(cx)
             .with_role("TreeItem")
@@ -10572,6 +10574,32 @@ fn git_workspace_rows_should_disclose_worktrees_that_open_lazily(cx: &mut TestAp
 }
 
 #[gpui::test]
+fn a_repository_without_linked_worktrees_should_keep_a_plain_workspace_row(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    cx.update(|cx| {
+        crate::ui::worktree_store::testing::install(cx);
+    });
+    let (_manager, _records, cx) = workspace_manager(cx);
+    present_worktrees(cx, &[]);
+
+    let tree = A11yTree::read(cx);
+    let rows = tree.with_role("TreeItem");
+    assert_eq!(
+        rows.iter()
+            .map(|row| (
+                row["aria"]["label"].as_str().unwrap_or_default(),
+                row["aria"]["expanded"].is_null()
+            ))
+            .collect::<Vec<_>>(),
+        [("Default", true)],
+        "the Main Worktree alone discloses nothing"
+    );
+}
+
+#[gpui::test]
 fn the_keyboard_should_walk_worktrees_and_open_one_only_on_return(cx: &mut TestAppContext) {
     use spaceterm_ui::a11y_testing::A11yTree;
 
@@ -10580,7 +10608,7 @@ fn the_keyboard_should_walk_worktrees_and_open_one_only_on_return(cx: &mut TestA
     });
     let (manager, _records, cx) = workspace_manager(cx);
     let fixture = crate::terminal::testing::ShellResourcesFixture::new();
-    present_worktrees(cx, &fixture.path().join("shell-integration"));
+    present_worktrees(cx, &[&fixture.path().join("shell-integration")]);
     let sidebar_focus =
         manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).focus_handle());
     cx.update(|window, cx| sidebar_focus.focus(window, cx));
@@ -10646,7 +10674,7 @@ fn leaving_a_repository_should_keep_worktrees_with_tabs_under_their_former_repos
     });
     let (manager, _records, cx) = workspace_manager(cx);
     let fixture = crate::terminal::testing::ShellResourcesFixture::new();
-    present_worktrees(cx, &fixture.path().join("shell-integration"));
+    present_worktrees(cx, &[&fixture.path().join("shell-integration")]);
     let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
     let section = |cx: &mut VisualTestContext| {
         manager.read_with(cx, |manager, cx| manager.worktree_section(workspace_id, cx))
