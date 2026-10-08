@@ -32,7 +32,11 @@ struct RemovalTarget {
     main_root: PathBuf,
     common: PathBuf,
     missing: bool,
+    /// Every Workspace holding Tabs in the Worktree, with the Worktree's id there.
+    holders: Vec<(WorkspaceId, WorktreeId)>,
     tabs: usize,
+    /// The Tabs that other Workspaces hold in the Worktree, counted in `tabs` too.
+    other_tabs: usize,
     running: bool,
 }
 
@@ -229,7 +233,15 @@ impl WorkspaceManager {
             Ok(check) => check,
             Err(error) => {
                 self.sidebar_worktrees.removal = None;
-                present_removal_failure(&target.name, false, error, window, cx);
+                present_removal_failure(
+                    &target.name,
+                    RemovalFailure::Git {
+                        error,
+                        forced: false,
+                    },
+                    window,
+                    cx,
+                );
                 return;
             }
         };
@@ -244,11 +256,16 @@ impl WorkspaceManager {
         // Git removes a Worktree holding a submodule only with `--force`.
         let force = discard || submodules;
         if target.tabs > 0 {
-            if target.tabs == 1 {
-                message.push("Closes 1 Tab.".to_owned());
+            let closes = if target.tabs == 1 {
+                "Closes 1 Tab".to_owned()
             } else {
-                message.push(format!("Closes {} Tabs.", target.tabs));
-            }
+                format!("Closes {} Tabs", target.tabs)
+            };
+            message.push(match target.other_tabs {
+                0 => format!("{closes}."),
+                1 => format!("{closes}, including 1 in another Workspace."),
+                others => format!("{closes}, including {others} in other Workspaces."),
+            });
             if target.running {
                 message.push(if target.tabs == 1 {
                     "The command running in it will stop.".to_owned()
@@ -359,7 +376,15 @@ impl WorkspaceManager {
                 Err(error) => {
                     if manager.sidebar_worktrees.removal == Some(confirmed.generation) {
                         manager.sidebar_worktrees.removal = None;
-                        present_removal_failure(&name, confirmed.force, error, window, cx);
+                        present_removal_failure(
+                            &name,
+                            RemovalFailure::Git {
+                                error,
+                                forced: confirmed.force,
+                            },
+                            window,
+                            cx,
+                        );
                     }
                 }
             });
@@ -394,9 +419,22 @@ impl WorkspaceManager {
             self.sidebar_worktrees.removal = None;
             return;
         };
-        if !self.close_worktree_tabs(workspace_id, worktree_id, window, cx) {
+        // A Workspace always keeps a Tab, so a Workspace whose every Tab is in the Worktree needs
+        // another Worktree to open one in. Without one, nothing closes and nothing is removed.
+        if !target
+            .holders
+            .iter()
+            .all(|&(holder, id)| self.can_close_worktree_tabs(holder, id, cx))
+        {
             self.sidebar_worktrees.removal = None;
+            present_removal_failure(&target.name, RemovalFailure::TabsKept, window, cx);
             return;
+        }
+        for &(holder, id) in &target.holders {
+            if !self.close_worktree_tabs(holder, id, window, cx) {
+                self.sidebar_worktrees.removal = None;
+                return;
+            }
         }
         let name = target.name.clone();
         let removal = store.update(cx, |store, cx| {
@@ -416,7 +454,15 @@ impl WorkspaceManager {
                     manager.sidebar_worktrees.removal = None;
                 }
                 if let Err(error) = result {
-                    present_removal_failure(&name, force, error, window, cx);
+                    present_removal_failure(
+                        &name,
+                        RemovalFailure::Git {
+                            error,
+                            forced: force,
+                        },
+                        window,
+                        cx,
+                    );
                 }
                 cx.notify();
             });
@@ -439,11 +485,21 @@ impl WorkspaceManager {
         let worktrees = self.sidebar_worktrees.workspaces.get(&workspace_id)?;
         let snapshot = worktrees.listed(cx)?;
         let key = worktrees.registry.key(worktree_id)?;
+        let holders = self.worktree_holders(key);
         let hierarchy = self.close_hierarchy(cx);
-        let close = CloseTarget::Worktree {
-            workspace_id,
-            worktree_id,
-        };
+        let (mut tabs, mut other_tabs, mut running) = (0, 0, false);
+        for &(holder, id) in &holders {
+            let close = CloseTarget::Worktree {
+                workspace_id: holder,
+                worktree_id: id,
+            };
+            let count = hierarchy.affected_tab_count(close);
+            tabs += count;
+            if holder != workspace_id {
+                other_tabs += count;
+            }
+            running |= hierarchy.requires_confirmation(close) == Some(true);
+        }
         Some(RemovalTarget {
             name: row.name.clone(),
             branch: (!row.detached && !row.label.is_empty()).then(|| row.label.clone()),
@@ -451,9 +507,43 @@ impl WorkspaceManager {
             main_root: snapshot.repository.main_root().to_path_buf(),
             common: snapshot.common_directory.clone(),
             missing: row.missing,
-            tabs: hierarchy.affected_tab_count(close),
-            running: hierarchy.requires_confirmation(close) == Some(true),
+            holders,
+            tabs,
+            other_tabs,
+            running,
         })
+    }
+
+    /// Every Workspace that knows the Worktree at `key`, with the Worktree's id there. Workspaces
+    /// in the same repository each list its Worktrees, so one Worktree can hold Tabs in several.
+    fn worktree_holders(&self, key: &WorktreeKey) -> Vec<(WorkspaceId, WorktreeId)> {
+        self.sidebar_worktrees
+            .workspaces
+            .iter()
+            .filter_map(|(&workspace_id, worktrees)| {
+                Some((workspace_id, worktrees.registry.id(key)?))
+            })
+            .collect()
+    }
+
+    /// Whether `close_worktree_tabs` can close a Worktree's Tabs: the Workspace keeps a Tab
+    /// outside it, or has another Worktree to open one in.
+    fn can_close_worktree_tabs(
+        &self,
+        workspace_id: WorkspaceId,
+        worktree_id: WorktreeId,
+        cx: &App,
+    ) -> bool {
+        let Some(workspace) = self.workspaces.workspace(workspace_id) else {
+            return false;
+        };
+        let manager = workspace.payload().read(cx);
+        let tab_ids = manager.worktree_tab_ids(worktree_id);
+        tab_ids.is_empty()
+            || manager.has_tabs_besides(&tab_ids)
+            || self
+                .fallback_worktree_id(workspace_id, worktree_id, cx)
+                .is_some()
     }
 
     /// The Worktree that receives a Tab when `worktree_id` holds every Tab of the Workspace: the
@@ -488,24 +578,44 @@ impl WorkspaceManager {
     }
 }
 
+/// Why a confirmed removal stopped.
+#[derive(Clone, Copy)]
+enum RemovalFailure {
+    /// Git, or the check before it, refused. `forced` is whether the removal passed `--force`.
+    Git {
+        error: WorktreeRemoveError,
+        forced: bool,
+    },
+    /// A Workspace holds only the Worktree's Tabs and has no other Worktree to keep a Tab in.
+    TabsKept,
+}
+
 fn present_removal_failure(
     name: &SharedString,
-    forced: bool,
-    error: WorktreeRemoveError,
+    failure: RemovalFailure,
     window: &mut Window,
     cx: &mut Context<WorkspaceManager>,
 ) {
-    let message = match (error, forced) {
-        (WorktreeRemoveError::Replaced, _) => {
-            "A different Worktree is now at its location, so nothing was removed."
+    let message = match failure {
+        RemovalFailure::TabsKept => {
+            "Closing its Tabs would leave a Workspace with no Tab, so nothing was removed."
         }
-        (WorktreeRemoveError::Unchecked, _) => {
-            "SpaceTerm couldn\u{2019}t check it for changes, so nothing was removed."
-        }
-        (WorktreeRemoveError::Failed, true) => {
-            "Git couldn\u{2019}t delete its directory. A file in it may be in use."
-        }
-        (WorktreeRemoveError::Failed, false) => {
+        RemovalFailure::Git {
+            error: WorktreeRemoveError::Replaced,
+            ..
+        } => "A different Worktree is now at its location, so nothing was removed.",
+        RemovalFailure::Git {
+            error: WorktreeRemoveError::Unchecked,
+            ..
+        } => "SpaceTerm couldn\u{2019}t check it for changes, so nothing was removed.",
+        RemovalFailure::Git {
+            error: WorktreeRemoveError::Failed,
+            forced: true,
+        } => "Git couldn\u{2019}t delete its directory. A file in it may be in use.",
+        RemovalFailure::Git {
+            error: WorktreeRemoveError::Failed,
+            forced: false,
+        } => {
             "Git couldn\u{2019}t delete its directory. If it changed after you confirmed, remove \
              it again to discard the changes."
         }

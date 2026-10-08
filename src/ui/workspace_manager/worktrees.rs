@@ -424,14 +424,24 @@ impl WorkspaceManager {
         let counts = manager.worktree_tab_counts();
         let active = manager.active_worktree();
         let snapshot = worktrees.presented(cx);
-        let pinned = self.local_pinned_directory(workspace_id);
-        // A pinned Workspace lists the repository of its Pinned Directory, so git's current
-        // Worktree holds it, through any symbolic link the Pinned Directory was chosen by.
-        let pinned_root = pinned
-            .as_ref()
-            .and(snapshot.as_ref())
-            .and_then(|snapshot| snapshot.worktrees.get(snapshot.current?))
-            .map(|record| record.root.clone());
+        // Every Workspace's Pinned Directory, with the Worktree holding it. A pinned Workspace
+        // lists the repository of its Pinned Directory, so git's current Worktree holds it,
+        // through any symbolic link the Pinned Directory was chosen by.
+        let pins: Vec<(PathBuf, Option<PathBuf>)> = self
+            .sidebar_worktrees
+            .workspaces
+            .iter()
+            .filter_map(|(&id, worktrees)| {
+                let pinned = self.local_pinned_directory(id)?;
+                let root = worktrees.presented(cx).and_then(|snapshot| {
+                    snapshot
+                        .worktrees
+                        .get(snapshot.current?)
+                        .map(|record| record.root.clone())
+                });
+                Some((pinned, root))
+            })
+            .collect();
         // `listed` says whether the repository the Workspace reads lists the Worktree now.
         let row = |id: WorktreeId, record: &WorktreeRecord, missing: bool, listed: bool| {
             let (label, detached) = match &record.head {
@@ -457,11 +467,9 @@ impl WorkspaceManager {
                 WorktreeRemoval::Main
             } else if record.locked {
                 WorktreeRemoval::Locked
-            } else if pinned_root.as_ref() == Some(&record.root)
-                || pinned
-                    .as_ref()
-                    .is_some_and(|pinned| pinned.starts_with(&record.root))
-            {
+            } else if pins.iter().any(|(pinned, root)| {
+                root.as_ref() == Some(&record.root) || pinned.starts_with(&record.root)
+            }) {
                 WorktreeRemoval::HoldsPinnedDirectory
             } else {
                 WorktreeRemoval::Allowed

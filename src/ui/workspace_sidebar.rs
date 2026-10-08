@@ -114,7 +114,7 @@ pub(super) enum WorktreeRemoval {
     /// The repository's Main Worktree.
     Main,
     Locked,
-    /// The Workspace's Pinned Directory is inside the Worktree.
+    /// A Workspace's Pinned Directory is inside the Worktree.
     HoldsPinnedDirectory,
     /// The repository the Workspace reads doesn't list the Worktree, so only its Tabs remain.
     Unlisted,

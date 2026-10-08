@@ -11065,7 +11065,7 @@ fn worktree_menus_should_offer_removal_only_where_git_allows_it(cx: &mut TestApp
 }
 
 #[gpui::test]
-fn a_worktree_should_hold_a_pinned_directory_chosen_through_a_symbolic_link(
+fn a_worktree_should_hold_a_pinned_directory_chosen_through_a_symbolic_link_for_every_workspace(
     cx: &mut TestAppContext,
 ) {
     use crate::domain::RepositoryIdentity;
@@ -11109,19 +11109,45 @@ fn a_worktree_should_hold_a_pinned_directory_chosen_through_a_symbolic_link(
     };
     let store =
         cx.update(|_, cx| crate::ui::worktree_store::InstalledWorktrees::store(cx).unwrap());
-    store.update(cx, |store, cx| store.present(&pinned, Some(snapshot), cx));
+    store.update(cx, |store, cx| {
+        store.present(&pinned, Some(snapshot.clone()), cx)
+    });
+    // Another Workspace lists the same repository from its Main Worktree.
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| manager.create_local_workspace(window, cx));
+    });
+    cx.run_until_parked();
+    let other = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    store.update(cx, |store, cx| {
+        store.present(
+            &std::env::temp_dir(),
+            Some(WorktreeSnapshot {
+                current: Some(0),
+                ..snapshot
+            }),
+            cx,
+        );
+    });
     cx.run_until_parked();
 
-    let removal = manager.read_with(cx, |manager, cx| {
-        manager
-            .worktree_section(workspace_id, cx)
-            .expect("the pinned repository lists its Worktrees")
-            .groups[0]
-            .rows[1]
-            .removal
-    });
+    let removal = |workspace_id: WorkspaceId, cx: &mut VisualTestContext| {
+        manager.read_with(cx, |manager, cx| {
+            manager
+                .worktree_section(workspace_id, cx)
+                .expect("the pinned repository lists its Worktrees")
+                .groups[0]
+                .rows[1]
+                .removal
+        })
+    };
+    let (pinned_removal, other_removal) = (removal(workspace_id, cx), removal(other, cx));
     let _ = fs::remove_dir_all(&base);
-    assert_eq!(removal, WorktreeRemoval::HoldsPinnedDirectory);
+    assert_eq!(pinned_removal, WorktreeRemoval::HoldsPinnedDirectory);
+    assert_eq!(
+        other_removal,
+        WorktreeRemoval::HoldsPinnedDirectory,
+        "another Workspace's Pinned Directory keeps the Worktree too"
+    );
 }
 
 #[gpui::test]
@@ -12779,4 +12805,141 @@ fn closing_every_tab_in_a_bare_repository_layout_should_open_the_next_tab_in_ano
         "the new Tab is in another Worktree"
     );
     assert_eq!(rows_after, 2, "no Tab opens in the bare repository");
+}
+
+#[gpui::test]
+fn removing_a_worktree_should_close_its_tabs_in_every_workspace(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    cx.update(|cx| {
+        crate::ui::worktree_store::testing::install_with_removal_git(cx);
+    });
+    let (manager, _records, cx) = workspace_manager(cx);
+    let first = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| manager.create_local_workspace(window, cx));
+    });
+    cx.run_until_parked();
+    let second = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
+    // Both Workspaces start in the same repository, so each lists the linked Worktree.
+    present_worktrees(cx, &[&fixture.path().join("shell-integration")]);
+    let linked = |workspace_id: WorkspaceId, cx: &mut VisualTestContext| {
+        manager.read_with(cx, |manager, cx| {
+            manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows[1].worktree_id
+        })
+    };
+    let (first_linked, second_linked) = (linked(first, cx), linked(second, cx));
+    let linked_tabs = |cx: &mut VisualTestContext| {
+        manager.read_with(cx, |manager, cx| {
+            [(first, first_linked), (second, second_linked)].map(|(workspace_id, worktree_id)| {
+                manager
+                    .workspaces
+                    .workspace(workspace_id)
+                    .unwrap()
+                    .payload()
+                    .read(cx)
+                    .worktree_tab_ids(worktree_id)
+                    .len()
+            })
+        })
+    };
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.open_worktree(second, second_linked, true, window, cx);
+            manager.activate_workspace(first, window, cx);
+            manager.open_worktree(first, first_linked, true, window, cx);
+        });
+    });
+    cx.run_until_parked();
+    let before = linked_tabs(cx);
+
+    right_click(worktree_row(first, first_linked, cx), cx);
+    click("worktree-menu-row-remove", cx);
+    let message = A11yTree::read(cx)
+        .find_text(
+            "Closes 2 Tabs, including 1 in another Workspace. Commands running in them will \
+             stop. The branch \u{201c}feature/login\u{201d} is kept.",
+        )
+        .is_some();
+    click("modal-action-worktree-removal-confirm", cx);
+    let after = linked_tabs(cx);
+
+    assert_eq!(before, [1, 1]);
+    assert!(
+        message,
+        "the alert counts the Tabs other Workspaces hold in the Worktree"
+    );
+    assert_eq!(after, [0, 0], "every Workspace's Tabs in it close");
+}
+
+#[gpui::test]
+fn removing_a_worktree_with_no_other_to_keep_a_tab_in_should_report_it_and_keep_its_tabs(
+    cx: &mut TestAppContext,
+) {
+    use crate::domain::RepositoryIdentity;
+    use crate::worktrees::WorktreeSnapshot;
+    use crate::worktrees::listing::{WorktreeHead, WorktreeRecord};
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    cx.update(|cx| {
+        crate::ui::worktree_store::testing::install_with_removal_git(cx);
+    });
+    let (manager, _records, cx) = workspace_manager(cx);
+    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
+    let only = fixture.path().join("one");
+    std::fs::create_dir(&only).unwrap();
+    // A bare repository has no Main Worktree, and the other Worktree is missing.
+    let bare = std::env::temp_dir();
+    let record = |root: &std::path::Path, head: WorktreeHead| WorktreeRecord {
+        root: root.to_path_buf(),
+        head,
+        locked: false,
+        missing: false,
+    };
+    let snapshot = WorktreeSnapshot {
+        repository: RepositoryIdentity::new(bare.clone()),
+        current: Some(1),
+        common_directory: bare.clone(),
+        worktrees: vec![
+            record(&bare, WorktreeHead::Bare),
+            record(&only, WorktreeHead::Branch("one".into())),
+            WorktreeRecord {
+                missing: true,
+                ..record(
+                    &fixture.path().join("two"),
+                    WorktreeHead::Branch("two".into()),
+                )
+            },
+        ],
+    };
+    let store =
+        cx.update(|_, cx| crate::ui::worktree_store::InstalledWorktrees::store(cx).unwrap());
+    store.update(cx, |store, cx| store.present(&bare, Some(snapshot), cx));
+    cx.run_until_parked();
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let one = manager.read_with(cx, |manager, cx| {
+        manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows[0].worktree_id
+    });
+    let tab_ids = |cx: &mut VisualTestContext| {
+        manager.read_with(cx, |manager, cx| {
+            manager
+                .workspaces
+                .active_workspace()
+                .payload()
+                .read(cx)
+                .tab_ids()
+        })
+    };
+    let before = tab_ids(cx);
+
+    right_click(worktree_row(workspace_id, one, cx), cx);
+    click("worktree-menu-row-remove", cx);
+    click("modal-action-worktree-removal-confirm", cx);
+    let reported = A11yTree::read(cx)
+        .find_text("Closing its Tabs would leave a Workspace with no Tab, so nothing was removed.")
+        .is_some();
+
+    assert!(reported, "the refusal is reported");
+    assert_eq!(tab_ids(cx), before, "the Worktree's Tabs stay open");
 }
