@@ -12,6 +12,7 @@ use std::time::Instant;
 use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Global, Task};
 
 use super::repository_status_store::{ReadSpawner, RepositoryStatusAdapters, thread_spawner};
+use crate::platform::local_filesystem::LocalFilesystemAuthority;
 use crate::repository_status::tool_check::check_tools;
 use crate::repository_status::{GitToolStatus, RepositoryWatch, ToolInventory};
 use crate::settings::Settings;
@@ -204,14 +205,18 @@ impl WorktreeStore {
     }
 
     /// Which Worktree is at `path` and whether removing it discards changes, or `None` when git
-    /// cannot tell.
+    /// cannot tell. `filesystem` retains the Worktree's directory for the later checks.
     pub(crate) fn check_removal(
         &self,
         path: PathBuf,
+        filesystem: LocalFilesystemAuthority,
         cx: &mut Context<Self>,
     ) -> Task<Option<RemovalCheck>> {
         let cancellation = self.cancellation.clone();
-        let task = self.run_git(move |git| git.check_removal(&path, &cancellation).ok(), cx);
+        let task = self.run_git(
+            move |git| git.check_removal(&path, &filesystem, &cancellation).ok(),
+            cx,
+        );
         cx.spawn(async move |_, _| task.await.flatten())
     }
 

@@ -154,7 +154,10 @@ impl WorkspaceManager {
             self.present_worktree_removal(generation, workspace_id, worktree_id, None, window, cx);
             return;
         }
-        let check = store.update(cx, |store, cx| store.check_removal(target.root, cx));
+        let filesystem = self.local_filesystem.clone();
+        let check = store.update(cx, |store, cx| {
+            store.check_removal(target.root, filesystem, cx)
+        });
         cx.spawn(async move |_, cx| {
             let check = check.await;
             let _ = window_handle.update(cx, |manager, window, cx| {

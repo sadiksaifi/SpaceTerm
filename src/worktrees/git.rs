@@ -9,7 +9,8 @@ use thiserror::Error;
 use super::listing::{WorktreeHead, WorktreeRecord, parse_worktree_list};
 use super::ref_format::validate_branch_name;
 use super::{WorktreeSnapshot, fixed};
-use crate::domain::RepositoryIdentity;
+use crate::domain::{RepositoryIdentity, ValidatedLocalDirectory};
+use crate::platform::local_filesystem::{LocalFilesystemAuthority, LocalFilesystemError};
 use crate::repository_status::discovery::{Discovery, parse_discovery};
 use crate::repository_status::local_read::{
     DISCOVERY_ARGUMENTS, git_arguments, git_environment, repository_program_error,
@@ -111,10 +112,16 @@ pub(crate) enum WorktreeRemoveError {
     Failed,
 }
 
-/// Git's administrative directory for one Worktree. A Worktree moved elsewhere keeps it, and a
-/// new Worktree created at the old location gets another, so it tells the two apart.
-#[derive(Clone, Eq, PartialEq)]
-pub(crate) struct WorktreeIdentity(String);
+/// One Worktree as it was when the person was asked to remove it: git's administrative
+/// directory for it and its retained directory. Git names the administrative directory after the
+/// Worktree's folder, so a Worktree recreated at the same location can reuse it; the retained
+/// directory tells that replacement apart.
+#[derive(Clone)]
+pub(crate) struct WorktreeIdentity {
+    administrative: String,
+    directory: ValidatedLocalDirectory,
+    filesystem: LocalFilesystemAuthority,
+}
 
 impl std::fmt::Debug for WorktreeIdentity {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -123,7 +130,7 @@ impl std::fmt::Debug for WorktreeIdentity {
 }
 
 /// What removing a Worktree would act on, read before the person confirms.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub(crate) struct RemovalCheck {
     pub(crate) identity: WorktreeIdentity,
     /// Removing it discards modified tracked files or untracked files.
@@ -264,9 +271,17 @@ impl LocalWorktreeGit {
     pub(crate) fn check_removal(
         &self,
         path: &Path,
+        filesystem: &LocalFilesystemAuthority,
         cancellation: &SshCancellationToken,
     ) -> Result<RemovalCheck, WorktreeRemoveError> {
-        let identity = self.identity(path, cancellation)?;
+        let directory = filesystem
+            .validate_directory(path)
+            .map_err(|_| WorktreeRemoveError::Failed)?;
+        let identity = WorktreeIdentity {
+            administrative: self.administrative_directory(path, cancellation)?,
+            directory,
+            filesystem: filesystem.clone(),
+        };
         let mut output = Vec::new();
         let changes = match self.git(path, &CHANGES_ARGUMENTS, &mut output, cancellation) {
             Ok(exit) if exit.success() => !output.is_empty(),
@@ -277,14 +292,28 @@ impl LocalWorktreeGit {
         Ok(RemovalCheck { identity, changes })
     }
 
-    /// Whether the Worktree at `path` is still the one `expected` identifies.
+    /// Whether the Worktree at `path` is still the one `expected` identifies: the same directory,
+    /// which git still administers from the same place.
     pub(crate) fn is_worktree(
         &self,
         path: &Path,
         expected: &WorktreeIdentity,
         cancellation: &SshCancellationToken,
     ) -> Result<(), WorktreeRemoveError> {
-        if self.identity(path, cancellation)? == *expected {
+        if expected.directory.path() != path {
+            return Err(WorktreeRemoveError::Replaced);
+        }
+        match expected
+            .filesystem
+            .revalidate_directory(&expected.directory)
+        {
+            Ok(_) => {}
+            Err(LocalFilesystemError::IdentityChanged) => {
+                return Err(WorktreeRemoveError::Replaced);
+            }
+            Err(_) => return Err(WorktreeRemoveError::Failed),
+        }
+        if self.administrative_directory(path, cancellation)? == expected.administrative {
             Ok(())
         } else {
             Err(WorktreeRemoveError::Replaced)
@@ -317,18 +346,17 @@ impl LocalWorktreeGit {
         }
     }
 
-    fn identity(
+    fn administrative_directory(
         &self,
         path: &Path,
         cancellation: &SshCancellationToken,
-    ) -> Result<WorktreeIdentity, WorktreeRemoveError> {
+    ) -> Result<String, WorktreeRemoveError> {
         let mut output = Vec::new();
         match self.git(path, &IDENTITY_ARGUMENTS, &mut output, cancellation) {
             Ok(exit) if exit.success() => String::from_utf8(output)
                 .ok()
                 .map(|directory| directory.trim_end_matches('\n').to_owned())
                 .filter(|directory| !directory.is_empty())
-                .map(WorktreeIdentity)
                 .ok_or(WorktreeRemoveError::Failed),
             _ => Err(WorktreeRemoveError::Failed),
         }
@@ -860,8 +888,10 @@ mod tests {
             exit(128, ""),
         ]);
         let git = git(&runner, 47);
+        let filesystem = LocalFilesystemAuthority::testing();
+        let location = std::env::temp_dir();
         let changes = || {
-            git.check_removal(Path::new("/wt/app/x"), &SshCancellationToken::default())
+            git.check_removal(&location, &filesystem, &SshCancellationToken::default())
                 .map(|check| check.changes)
         };
 
@@ -922,8 +952,12 @@ mod tests {
         ]);
         let git = git(&runner, 47);
         let cancellation = SshCancellationToken::default();
-        let path = Path::new("/wt/app/x");
-        let confirmed = git.check_removal(path, &cancellation).unwrap().identity;
+        let location = std::env::temp_dir();
+        let path = location.as_path();
+        let confirmed = git
+            .check_removal(path, &LocalFilesystemAuthority::testing(), &cancellation)
+            .unwrap()
+            .identity;
         let remove = || {
             git.remove(
                 Path::new("/src/app"),
@@ -940,8 +974,45 @@ mod tests {
         assert_eq!(requests.len(), 5, "a replacement is never removed");
         assert_eq!(
             tail(&requests[4], 5),
-            ["worktree", "remove", "--force", "--", "/wt/app/x"]
+            [
+                "worktree",
+                "remove",
+                "--force",
+                "--",
+                path.to_str().unwrap()
+            ]
         );
         assert_eq!(format!("{confirmed:?}"), "WorktreeIdentity(..)");
+    }
+
+    #[test]
+    fn remove_should_not_run_git_once_the_confirmed_directory_is_gone() {
+        let location =
+            std::env::temp_dir().join(format!("spaceterm-worktree-gone-{}", std::process::id()));
+        std::fs::create_dir_all(&location).unwrap();
+        let runner = FakeRunner::new([exit(0, "/src/app/.git/worktrees/x\n"), exit(0, "")]);
+        let git = git(&runner, 47);
+        let cancellation = SshCancellationToken::default();
+        let confirmed = git
+            .check_removal(
+                &location,
+                &LocalFilesystemAuthority::testing(),
+                &cancellation,
+            )
+            .unwrap()
+            .identity;
+        std::fs::remove_dir(&location).unwrap();
+
+        assert_eq!(
+            git.remove(
+                Path::new("/src/app"),
+                &location,
+                true,
+                Some(&confirmed),
+                &cancellation,
+            ),
+            Err(WorktreeRemoveError::Failed)
+        );
+        assert_eq!(runner.requests().len(), 2, "git never runs a removal");
     }
 }
