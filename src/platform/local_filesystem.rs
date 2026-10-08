@@ -219,6 +219,11 @@ impl LocalFilesystemAuthority {
         Ok(current)
     }
 
+    /// Whether anything, of any kind, is at `path`. A symbolic link counts without being followed.
+    pub(crate) fn has_entry(&self, path: &Path) -> bool {
+        validate_absolute_path(self.paths, path).is_ok() && fs::symlink_metadata(path).is_ok()
+    }
+
     /// Whether `path` lies inside `root` on disk, following symbolic links in either, so a
     /// directory chosen through a link still belongs to the directory it resolves into.
     pub(crate) fn physically_contains(&self, root: &Path, path: &Path) -> bool {

@@ -1,5 +1,6 @@
 //! Native evidence that a Worktree removal never reaches a Worktree recreated at the confirmed
-//! location, although git gives the replacement the same administrative directory.
+//! location, although git gives the replacement the same administrative directory, and that a
+//! Worktree holding a submodule is removed through `--force`.
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -20,8 +21,8 @@ struct Fixture {
 }
 
 impl Fixture {
-    /// Returns `None` when the host has no runnable git.
-    fn new() -> Option<Self> {
+    /// Returns `None` when the host has no runnable git. Each test names its own fixture.
+    fn new(name: &str) -> Option<Self> {
         let git = GIT_DIRECTORIES
             .into_iter()
             .map(|directory| Path::new(directory).join("git"))
@@ -36,10 +37,8 @@ impl Fixture {
                         .status()
                         .is_ok_and(|status| status.success())
             })?;
-        let root = short_temporary_root().join(format!(
-            "spaceterm-worktree-replacement-{}",
-            std::process::id()
-        ));
+        let root = short_temporary_root()
+            .join(format!("spaceterm-worktree-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("home")).unwrap();
         Some(Self { root, git })
@@ -76,7 +75,7 @@ impl Drop for Fixture {
 
 #[test]
 fn removal_should_refuse_a_worktree_recreated_at_the_confirmed_location() {
-    let Some(fixture) = Fixture::new() else {
+    let Some(fixture) = Fixture::new("replacement") else {
         eprintln!("skipping: the host has no runnable git");
         return;
     };
@@ -150,6 +149,74 @@ fn removal_should_refuse_a_worktree_recreated_at_the_confirmed_location() {
             &RemovalExpectation::Worktree(replacement.identity),
             &cancellation,
         ),
+        Ok(())
+    );
+    assert!(!location.exists());
+}
+
+#[test]
+fn removal_should_force_a_clean_worktree_holding_a_submodule() {
+    let Some(fixture) = Fixture::new("submodule") else {
+        eprintln!("skipping: the host has no runnable git");
+        return;
+    };
+    let library = fixture.root.join("lib");
+    let repository = fixture.root.join("app");
+    let location = fixture.root.join("topic");
+    for directory in [&library, &repository] {
+        fs::create_dir_all(directory).unwrap();
+        fixture.git(directory, &["init", "-q", "-b", "main"]);
+        fixture.git(directory, &["config", "commit.gpgsign", "false"]);
+        fixture.git(directory, &["commit", "-q", "--allow-empty", "-m", "base"]);
+    }
+    let local_transport = ["-c", "protocol.file.allow=always"];
+    let library_text = library.to_str().unwrap();
+    fixture.git(
+        &repository,
+        &[
+            &local_transport[..],
+            &["submodule", "add", "-q", library_text, "lib"],
+        ]
+        .concat(),
+    );
+    fixture.git(&repository, &["commit", "-q", "-m", "submodule"]);
+    let location_text = location.to_str().unwrap();
+    fixture.git(
+        &repository,
+        &["worktree", "add", "-q", "-b", "topic", location_text],
+    );
+    fixture.git(
+        &location,
+        &[
+            &local_transport[..],
+            &["submodule", "update", "-q", "--init"],
+        ]
+        .concat(),
+    );
+    let git = LocalWorktreeGit::new(
+        Arc::new(UnixRepositoryProgramRunner::new()),
+        fixture.git.clone(),
+        fixture.root.join("home"),
+        ToolVersion {
+            major: 2,
+            minor: 0,
+            patch: 0,
+        },
+    );
+    let cancellation = SshCancellationToken::default();
+    let check = git
+        .check_removal(&location, &local_filesystem(), &cancellation)
+        .unwrap();
+    let expected = RemovalExpectation::Worktree(check.identity.clone());
+
+    assert_eq!((check.changes, check.submodules), (false, true));
+    assert_eq!(
+        git.remove(&repository, &location, false, &expected, &cancellation),
+        Err(WorktreeRemoveError::Failed),
+        "git refuses a Worktree holding a submodule without --force"
+    );
+    assert_eq!(
+        git.remove(&repository, &location, true, &expected, &cancellation),
         Ok(())
     );
     assert!(!location.exists());

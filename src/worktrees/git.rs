@@ -156,6 +156,8 @@ pub(crate) struct RemovalCheck {
     pub(crate) identity: WorktreeIdentity,
     /// Removing it discards modified tracked files or untracked files.
     pub(crate) changes: bool,
+    /// It holds a checked-out submodule, which git removes only with `--force`.
+    pub(crate) submodules: bool,
 }
 
 /// Runs git for one machine's Worktrees. Blocking; callers use a dedicated thread.
@@ -310,7 +312,48 @@ impl LocalWorktreeGit {
             Err(RepositoryReadError::OutputTooLarge) => true,
             _ => return Err(WorktreeRemoveError::Failed),
         };
-        Ok(RemovalCheck { identity, changes })
+        let submodules =
+            self.has_submodules(path, &identity.administrative, filesystem, cancellation);
+        Ok(RemovalCheck {
+            identity,
+            changes,
+            submodules,
+        })
+    }
+
+    /// Whether the Worktree at `path` holds a checked-out submodule. As git judges it, one does
+    /// when the Worktree's administrative directory keeps submodule repositories, or when a path
+    /// `.gitmodules` names has a `.git`.
+    fn has_submodules(
+        &self,
+        path: &Path,
+        administrative: &str,
+        filesystem: &LocalFilesystemAuthority,
+        cancellation: &SshCancellationToken,
+    ) -> bool {
+        if filesystem
+            .validate_directory(&Path::new(administrative).join("modules"))
+            .is_ok()
+        {
+            return true;
+        }
+        let mut output = Vec::new();
+        match self.git(path, &SUBMODULE_PATH_ARGUMENTS, &mut output, cancellation) {
+            Ok(exit) if exit.success() => {}
+            // No `.gitmodules`, or none of its entries names a path.
+            _ => return false,
+        }
+        output
+            .split(|byte| *byte == 0)
+            .filter_map(|entry| entry.splitn(2, |byte| *byte == b'\n').nth(1))
+            .filter_map(|submodule| std::str::from_utf8(submodule).ok())
+            .map(Path::new)
+            .filter(|submodule| {
+                submodule
+                    .components()
+                    .all(|component| matches!(component, std::path::Component::Normal(_)))
+            })
+            .any(|submodule| filesystem.has_entry(&path.join(submodule).join(".git")))
     }
 
     /// Whether the Worktree at `path` is still the one `expected` identifies: the same directory,
@@ -545,6 +588,14 @@ impl LocalWorktreeGit {
 /// Lists modified tracked files and untracked files, one record per path.
 const CHANGES_ARGUMENTS: [&str; 4] = ["status", "--porcelain", "-z", "--untracked-files=normal"];
 const IDENTITY_ARGUMENTS: [&str; 2] = ["rev-parse", "--absolute-git-dir"];
+const SUBMODULE_PATH_ARGUMENTS: [&str; 6] = [
+    "config",
+    "--file",
+    ".gitmodules",
+    "-z",
+    "--get-regexp",
+    r"^submodule\..*\.path$",
+];
 
 /// Newest first, so the branches people work on lead the pickers.
 const BRANCH_ARGUMENTS: [&str; 5] = [
@@ -917,13 +968,17 @@ mod tests {
     #[test]
     fn changes_should_count_modified_and_untracked_files_and_an_overflowing_listing() {
         const ADMIN: &str = "/src/app/.git/worktrees/x\n";
+        // Each checked Worktree also reads `.gitmodules`, which these lack.
         let runner = FakeRunner::new([
             exit(0, ADMIN),
             exit(0, ""),
+            exit(1, ""),
             exit(0, ADMIN),
             exit(0, "?? notes.txt\0"),
+            exit(1, ""),
             exit(0, ADMIN),
             Err(ProgramError::OutputTooLarge),
+            exit(1, ""),
             exit(0, ADMIN),
             exit(128, ""),
             exit(128, ""),
@@ -951,6 +1006,62 @@ mod tests {
         assert_eq!(
             tail(&requests[1], 4),
             ["status", "--porcelain", "-z", "--untracked-files=normal"]
+        );
+    }
+
+    #[test]
+    fn a_checked_out_submodule_should_need_force_however_git_keeps_it() {
+        let root = std::env::temp_dir().join(format!(
+            "spaceterm-worktree-submodules-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let worktree = root.join("wt");
+        let administrative = root.join("admin");
+        std::fs::create_dir_all(worktree.join("lib/.git")).unwrap();
+        std::fs::create_dir_all(administrative.join("modules")).unwrap();
+        let admin = format!("{}\n", administrative.display());
+        let elsewhere = format!("{}\n", root.join("other").display());
+        let runner = FakeRunner::new([
+            // Its administrative directory keeps the submodule's repository.
+            exit(0, &admin),
+            exit(0, ""),
+            // `.gitmodules` names a path with a `.git`.
+            exit(0, &elsewhere),
+            exit(0, ""),
+            exit(0, "submodule.lib.path\nlib\0"),
+            // `.gitmodules` names only paths without a `.git`, or escaping the Worktree.
+            exit(0, &elsewhere),
+            exit(0, ""),
+            exit(
+                0,
+                "submodule.a.path\nmissing\0submodule.b.path\n../wt/lib\0",
+            ),
+        ]);
+        let git = git(&runner, 47);
+        let filesystem = LocalFilesystemAuthority::testing();
+        let submodules = || {
+            git.check_removal(&worktree, &filesystem, &SshCancellationToken::default())
+                .map(|check| (check.changes, check.submodules))
+        };
+
+        let checks = [submodules(), submodules(), submodules()];
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(
+            checks,
+            [Ok((false, true)), Ok((false, true)), Ok((false, false))]
+        );
+        assert_eq!(
+            tail(&runner.requests()[4], 6),
+            [
+                "config",
+                "--file",
+                ".gitmodules",
+                "-z",
+                "--get-regexp",
+                r"^submodule\..*\.path$"
+            ]
         );
     }
 
@@ -987,7 +1098,8 @@ mod tests {
     fn remove_should_refuse_a_different_worktree_at_the_confirmed_location() {
         let runner = FakeRunner::new([
             exit(0, "/src/app/.git/worktrees/x\n"),
-            exit(0, "/src/app/.git/worktrees/x\n"),
+            exit(0, ""),
+            exit(1, ""),
             exit(0, "/src/app/.git/worktrees/x1\n"),
             exit(0, "/src/app/.git/worktrees/x\n"),
             exit(0, ""),
@@ -1013,9 +1125,9 @@ mod tests {
         assert_eq!(remove(), Err(WorktreeRemoveError::Replaced));
         assert_eq!(remove(), Ok(()));
         let requests = runner.requests();
-        assert_eq!(requests.len(), 5, "a replacement is never removed");
+        assert_eq!(requests.len(), 6, "a replacement is never removed");
         assert_eq!(
-            tail(&requests[4], 5),
+            tail(&requests[5], 5),
             [
                 "worktree",
                 "remove",
@@ -1032,7 +1144,11 @@ mod tests {
         let location =
             std::env::temp_dir().join(format!("spaceterm-worktree-gone-{}", std::process::id()));
         std::fs::create_dir_all(&location).unwrap();
-        let runner = FakeRunner::new([exit(0, "/src/app/.git/worktrees/x\n"), exit(0, "")]);
+        let runner = FakeRunner::new([
+            exit(0, "/src/app/.git/worktrees/x\n"),
+            exit(0, ""),
+            exit(1, ""),
+        ]);
         let git = git(&runner, 47);
         let cancellation = SshCancellationToken::default();
         let confirmed = git
@@ -1055,7 +1171,7 @@ mod tests {
             ),
             Err(WorktreeRemoveError::Failed)
         );
-        assert_eq!(runner.requests().len(), 2, "git never runs a removal");
+        assert_eq!(runner.requests().len(), 3, "git never runs a removal");
     }
 
     #[test]

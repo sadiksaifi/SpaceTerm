@@ -35,8 +35,15 @@ struct RemovalTarget {
     running: bool,
 }
 
-/// A removal the person confirmed. `force` is set only when they chose to discard changes, and
-/// `expected` is what they saw at the Worktree's location.
+/// What a removal confirmation asks about.
+struct Confirmable {
+    expected: RemovalExpectation,
+    changes: bool,
+    submodules: bool,
+}
+
+/// A removal the person confirmed. `force` is set only when they chose to discard changes or the
+/// Worktree holds a submodule, and `expected` is what they saw at the Worktree's location.
 struct ConfirmedRemoval {
     generation: u64,
     workspace_id: WorkspaceId,
@@ -152,10 +159,11 @@ impl WorkspaceManager {
         // A Missing Worktree has no files to check; git removes it without force while its
         // location stays empty.
         if target.missing {
-            let check = Ok((
-                RemovalExpectation::Absent(self.local_filesystem.clone()),
-                false,
-            ));
+            let check = Ok(Confirmable {
+                expected: RemovalExpectation::Absent(self.local_filesystem.clone()),
+                changes: false,
+                submodules: false,
+            });
             self.present_worktree_removal(generation, workspace_id, worktree_id, check, window, cx);
             return;
         }
@@ -166,8 +174,10 @@ impl WorkspaceManager {
         cx.spawn(async move |_, cx| {
             let check = check
                 .await
-                .map(|RemovalCheck { identity, changes }| {
-                    (RemovalExpectation::Worktree(identity), changes)
+                .map(|check: RemovalCheck| Confirmable {
+                    expected: RemovalExpectation::Worktree(check.identity),
+                    changes: check.changes,
+                    submodules: check.submodules,
                 })
                 .ok_or(WorktreeRemoveError::Unchecked);
             let _ = window_handle.update(cx, |manager, window, cx| {
@@ -194,7 +204,7 @@ impl WorkspaceManager {
         generation: u64,
         workspace_id: WorkspaceId,
         worktree_id: WorktreeId,
-        check: Result<(RemovalExpectation, bool), WorktreeRemoveError>,
+        check: Result<Confirmable, WorktreeRemoveError>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -209,7 +219,11 @@ impl WorkspaceManager {
             return;
         };
         // Without a check, a confirmation could not tell the Worktree from a replacement.
-        let (expected, discard) = match check {
+        let Confirmable {
+            expected,
+            changes: discard,
+            submodules,
+        } = match check {
             Ok(check) => check,
             Err(error) => {
                 self.sidebar_worktrees.removal = None;
@@ -222,6 +236,11 @@ impl WorkspaceManager {
         if discard {
             message.push("Its uncommitted changes and untracked files will be deleted.".to_owned());
         }
+        if submodules {
+            message.push("Its submodules\u{2019} checkouts will be deleted.".to_owned());
+        }
+        // Git removes a Worktree holding a submodule only with `--force`.
+        let force = discard || submodules;
         if target.tabs > 0 {
             if target.tabs == 1 {
                 message.push("Closes 1 Tab.".to_owned());
@@ -286,7 +305,7 @@ impl WorkspaceManager {
                             generation,
                             workspace_id,
                             worktree_id,
-                            force: discard,
+                            force,
                             expected: expected.clone(),
                         },
                         window,
@@ -304,7 +323,7 @@ impl WorkspaceManager {
     }
 
     /// Checks that the confirmed Worktree is still at its location, then closes its Tabs and has
-    /// git delete its directory. Only a confirmed discard passes `--force`, and git checks the
+    /// git delete its directory. Only a confirmed discard or submodule passes `--force`, and git checks the
     /// Worktree again right before deleting it.
     fn commit_worktree_removal(
         &mut self,
