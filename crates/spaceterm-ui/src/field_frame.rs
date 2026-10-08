@@ -126,9 +126,18 @@ pub(crate) fn themed_field_frame(
     let pinned = false;
     #[cfg(feature = "control-preview")]
     let pinned = state.preview_focused;
+    // The editor inside tracks its own handle. Tracking it here too would put the field in the
+    // tab order twice, so Shift-Tab would return to the same field. A press on the frame's
+    // padding still reaches the editor.
+    let press_focus = focus.clone();
+    let enabled = !state.disabled;
     let frame = themed_field_surface(theme, id, state)
         .rounded(corner_radius)
-        .track_focus(focus);
+        .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+            if enabled {
+                press_focus.focus(window, cx);
+            }
+        });
     // The ring resolves focus while painting, so the caller need not know whether the editor is
     // focused when it builds its layout.
     let ring = (!state.disabled).then(|| {
@@ -312,5 +321,71 @@ mod tests {
                 .iter()
                 .all(|quad| quad.border_color != ring.into())
         }));
+    }
+
+    struct EditorPair {
+        editors: [FocusHandle; 2],
+    }
+
+    impl gpui::Render for EditorPair {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let theme = FieldFrameTheme::new(
+                gpui::rgba(0x202020ff),
+                gpui::rgba(0x555555ff),
+                gpui::rgba(0xcc0000ff),
+                gpui::rgba(0x202020ff),
+                gpui::rgba(0x333333ff),
+                gpui::rgba(0x00aa00ff),
+            );
+            div()
+                .size_full()
+                .children(self.editors.iter().enumerate().map(|(index, editor)| {
+                    themed_field_frame(
+                        theme,
+                        ("field", index),
+                        editor,
+                        FieldState::default(),
+                        px(6.0),
+                    )
+                    .debug_selector(move || format!("field-{index}"))
+                    .w(px(200.0))
+                    .h(px(32.0))
+                    .p(px(8.0))
+                    .child(div().size_full().track_focus(editor))
+                }))
+        }
+    }
+
+    #[gpui::test]
+    fn framed_editors_should_each_be_one_tab_stop_and_take_presses_on_the_frame(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let editors = [
+                cx.focus_handle().tab_stop(true),
+                cx.focus_handle().tab_stop(true),
+            ];
+            editors[1].focus(window, cx);
+            EditorPair { editors }
+        });
+        let editors = root.read_with(cx, |root, _| root.editors.clone());
+        cx.run_until_parked();
+
+        cx.update(|window, cx| window.focus_prev(cx));
+        let backward = cx.update(|window, _| editors[0].is_focused(window));
+        let frame = cx
+            .debug_bounds("field-1")
+            .expect("the second frame renders");
+        cx.simulate_click(
+            frame.origin + gpui::point(px(2.0), px(2.0)),
+            gpui::Modifiers::none(),
+        );
+        let pressed = cx.update(|window, _| editors[1].is_focused(window));
+
+        assert_eq!((backward, pressed), (true, true));
     }
 }

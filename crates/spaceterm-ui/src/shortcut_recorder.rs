@@ -321,6 +321,8 @@ impl Render for ShortcutRecorder {
             state,
             field.corner_radius,
         )
+        // The recorder has no editor inside, so its frame is the focus target.
+        .track_focus(&self.focus_handle)
         .role(accesskit::Role::Button)
         .aria_label(self.accessibility_name.clone())
         .aria_value(
