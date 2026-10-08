@@ -476,6 +476,35 @@ impl WorkspaceSidebar {
         } else {
             "workspace-row"
         };
+        // The chevron, and the "+" of an expanded row, trail the name on line 1, so line 2 runs
+        // to the row's end like a row without Worktrees. A collapsed row offers New Worktree from
+        // its menu.
+        let trailing = expanded.map(|expanded| {
+            div()
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .when(
+                    expanded && creates_worktrees && !lifted && !renaming,
+                    |trailing| {
+                        trailing.child(new_worktree_button(
+                            workspace_id,
+                            // The button keeps its place while hidden, so the row never shifts.
+                            if selected { 1.0 } else { hover },
+                            sidebar.clone(),
+                            appearance,
+                        ))
+                    },
+                )
+                .child(self.render_disclosure(
+                    workspace_id,
+                    expanded,
+                    !lifted,
+                    row_colors.row_icon,
+                    sidebar.clone(),
+                    appearance,
+                ))
+        });
         let row_content = div()
             .id((element_name, workspace_id.get()))
             .debug_selector(move || {
@@ -564,14 +593,20 @@ impl WorkspaceSidebar {
                     .flex()
                     .flex_col()
                     .gap(appearance.spacing(SIDEBAR_ROW_LINE_GAP))
-                    .child(text::title(
-                        name,
-                        first_line,
-                        if renaming { None } else { machine },
-                        pinned && disclosing && !renaming,
-                        workspace_id.get(),
-                        row_text_appearance.clone(),
-                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .gap(appearance.spacing(ROW_CONTENT_GAP))
+                            .child(div().min_w_0().flex_1().child(text::title(
+                                name,
+                                first_line,
+                                if renaming { None } else { machine },
+                                pinned && disclosing && !renaming,
+                                workspace_id.get(),
+                                row_text_appearance.clone(),
+                            )))
+                            .children(trailing),
+                    )
                     .when(!single_line, |lines| {
                         lines.child(text::detail(
                             detail,
@@ -587,38 +622,6 @@ impl WorkspaceSidebar {
                         ))
                     }),
             )
-            .when_some(expanded, |row, expanded| {
-                // The "+" sits against the chevron and only on an expanded row, above the
-                // Worktrees it adds to. A collapsed row offers New Worktree from its menu.
-                row.child(
-                    div()
-                        .flex_shrink_0()
-                        .h_full()
-                        .flex()
-                        .items_center()
-                        .when(
-                            expanded && creates_worktrees && !lifted && !renaming,
-                            |trailing| {
-                                trailing.child(new_worktree_button(
-                                    workspace_id,
-                                    // The button keeps its place while hidden, so the row never
-                                    // shifts.
-                                    if selected { 1.0 } else { hover },
-                                    sidebar.clone(),
-                                    appearance,
-                                ))
-                            },
-                        )
-                        .child(self.render_disclosure(
-                            workspace_id,
-                            expanded,
-                            !lifted,
-                            row_colors.row_icon,
-                            sidebar.clone(),
-                            appearance,
-                        )),
-                )
-            })
             // Rows rest on the continuous base surface without separators. The hover and selection
             // chips alone give each Workspace its shape; collection focus never adds a row ring.
             .children(markers)
