@@ -7,7 +7,7 @@ use spaceterm_ui::{ButtonSize, ButtonTheme, ComboBoxTheme, CustomIconName, Icon,
 
 use super::appearance::{ChromeAppearance, chrome};
 use super::chrome_icons::IconRole;
-use super::chrome_typography::{ChromeTextStyleExt as _, ChromeTypography, TextRole};
+use super::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use super::workspace_sidebar::SidebarLayout;
 use super::workspace_status::{WorkspaceStatusPaint, resolve as resolve_workspace_status};
 use crate::appearance::Color;
@@ -85,32 +85,49 @@ impl WorkspaceChromeLayout {
         let pin_size = appearance.icons.metrics(IconRole::Caption).glyph_size;
         let identity_size = appearance.icons.metrics(IconRole::Chrome).glyph_size;
         let pin_width = if identity.pinned {
-            pin_size + appearance.spacing(PIN_NAME_GAP)
+            spaceterm_ui::reserve_measured_width(
+                px(0.0),
+                [pin_size, appearance.spacing(PIN_NAME_GAP)],
+                window,
+            )
         } else {
             px(0.0)
         };
         // The status mark never gives up its room: a long name truncates before it.
         let status_width = if identity.status.is_some() {
-            appearance.spacing(SWITCHER_IDENTITY_GAP) + status_mark_size(appearance)
+            spaceterm_ui::reserve_measured_width(
+                px(0.0),
+                [
+                    appearance.spacing(SWITCHER_IDENTITY_GAP),
+                    status_mark_size(appearance),
+                ],
+                window,
+            )
         } else {
             px(0.0)
         };
         // The collapsed switcher trigger stops at the Tab item maximum, so a long Workspace
         // name truncates where a long Tab title does. Outer spacing never consumes label room.
-        let switcher_maximum = appearance.spacing(super::tab_manager::TAB_ITEM_MAXIMUM_WIDTH);
+        let switcher_maximum =
+            window.pixel_snap(appearance.spacing(super::tab_manager::TAB_ITEM_MAXIMUM_WIDTH));
         let chrome_theme = cx.global::<ComboBoxTheme>();
-        let content_maximum = switcher_maximum
-            - chrome_theme.custom_trigger_width(px(0.0))
-            - appearance.spacing(SWITCHER_HORIZONTAL_PADDING * 2.0)
-            - identity_size
-            - appearance.spacing(SWITCHER_IDENTITY_GAP)
-            - status_width;
-        let identity_width = (name_width + pin_width).min(content_maximum.max(px(0.0)));
-        let content_width = appearance.spacing(SWITCHER_HORIZONTAL_PADDING * 2.0)
-            + identity_size
-            + appearance.spacing(SWITCHER_IDENTITY_GAP)
-            + identity_width
-            + status_width;
+        let content_fixed = spaceterm_ui::reserve_measured_width(
+            px(0.0),
+            [
+                appearance.spacing(SWITCHER_HORIZONTAL_PADDING),
+                appearance.spacing(SWITCHER_HORIZONTAL_PADDING),
+                identity_size,
+                appearance.spacing(SWITCHER_IDENTITY_GAP),
+                status_width,
+            ],
+            window,
+        );
+        let content_maximum =
+            switcher_maximum - chrome_theme.custom_trigger_width(px(0.0), window) - content_fixed;
+        let identity_width = spaceterm_ui::reserve_measured_width(name_width, [pin_width], window)
+            .min(content_maximum.max(px(0.0)));
+        let content_width =
+            spaceterm_ui::reserve_measured_width(px(0.0), [identity_width, content_fixed], window);
         let edge_reserve = trailing_reserve(appearance, cx);
         let client_controls_width = spaceterm_ui::ClientWindowControls::width(
             spaceterm_ui::WindowControlSide::Left,
@@ -120,18 +137,23 @@ impl WorkspaceChromeLayout {
         let leading_width = if client_controls_width > px(0.0) {
             // The group width already includes the native window margin. Reserve its gap to
             // the toggle separately from the toggle's gap to the switcher.
-            client_controls_width + edge_reserve
+            spaceterm_ui::reserve_measured_width(
+                px(0.0),
+                [client_controls_width, edge_reserve],
+                window,
+            )
         } else {
             leading_clearance(window.is_fullscreen(), edge_reserve, cx)
         };
-        ChromeTypography::round_measurement_up(
-            (leading_width
-                + edge_reserve
-                + edge_reserve
-                + cx.global::<ButtonTheme>().icon_button_size(TOGGLE_SIZE)
-                + cx.global::<ComboBoxTheme>()
-                    .custom_trigger_width(content_width))
-            .ceil(),
+        spaceterm_ui::reserve_measured_width(
+            px(0.0),
+            [
+                leading_width,
+                edge_reserve,
+                edge_reserve,
+                cx.global::<ButtonTheme>().icon_button_size(TOGGLE_SIZE),
+                chrome_theme.custom_trigger_width(content_width, window),
+            ],
             window,
         )
     }

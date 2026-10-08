@@ -6103,6 +6103,89 @@ fn collapsed_workspace_switcher_should_match_tab_height(cx: &mut TestAppContext)
     }
 }
 
+#[gpui::test]
+fn collapsed_workspace_name_should_fit_at_fractional_scales(cx: &mut TestAppContext) {
+    let name = "Measured Workspace";
+    let (mut text_context, _) = RecordingRenderedText::context_with_measurement(cx, name, px(27.0));
+    let (manager, _records, cx) = workspace_manager(&mut text_context);
+    manager.update(cx, |manager, cx| {
+        manager
+            .workspaces
+            .rename_workspace(WorkspaceId::new(1), name.to_owned())
+            .unwrap();
+        cx.notify();
+    });
+    cx.update(|window, cx| {
+        window.toggle_fullscreen();
+        manager.update(cx, |manager, cx| manager.toggle_sidebar(window, cx));
+    });
+    let mut failures = Vec::new();
+    for scale in [1.25, 1.5, 1.75] {
+        cx.simulate_scale_factor_change(scale);
+        cx.run_until_parked();
+        let measured = cx.update(|window, cx| {
+            crate::ui::appearance::chrome(cx).typography.measure(
+                TextRole::BodyEmphasis,
+                name,
+                window,
+            )
+        });
+        assert_eq!(measured, px(27.0));
+        let label = cx
+            .debug_bounds("workspace-chip-label")
+            .expect("collapsed name");
+        if label.size.width < measured {
+            failures.push((scale, name, measured, label));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "complete collapsed switcher must fit its name: {failures:?}"
+    );
+}
+
+#[gpui::test]
+fn workspace_popup_name_should_fit_at_fractional_scales(cx: &mut TestAppContext) {
+    let name = "Widest Workspace without a shortcut";
+    let (mut text_context, _) =
+        RecordingRenderedText::context_with_measurement(cx, name, px(266.9));
+    let (manager, _records, cx) = workspace_manager(&mut text_context);
+    for _ in 0..9 {
+        cx.simulate_keystrokes("cmd-n");
+    }
+    manager.update(cx, |manager, cx| {
+        manager
+            .workspaces
+            .rename_workspace(WorkspaceId::new(10), name.to_owned())
+            .unwrap();
+        cx.notify();
+    });
+    cx.run_until_parked();
+    click("workspace-switcher", cx);
+    let mut failures = Vec::new();
+    for scale in [1.25, 1.5, 1.75] {
+        cx.simulate_scale_factor_change(scale);
+        cx.run_until_parked();
+        let measured = cx.update(|window, cx| {
+            crate::ui::appearance::chrome(cx)
+                .typography
+                .measure(TextRole::Body, name, window)
+        });
+        assert_eq!(measured, px(266.9));
+        assert!(cx.debug_bounds("combo-box-row-9-shortcut").is_none());
+        let label = cx
+            .debug_bounds("combo-box-row-9-label")
+            .expect("tenth Workspace label");
+        if label.size.width < measured {
+            failures.push((scale, measured, label));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "complete Workspace popup must fit its widest row below the width limit: {failures:?}"
+    );
+}
+
 /// The Workspace identity keeps its glyph in both sidebar states.
 #[gpui::test]
 fn workspace_identity_should_keep_its_icon_when_the_sidebar_is_hidden(cx: &mut TestAppContext) {
@@ -6446,7 +6529,7 @@ fn dragging_the_collapsed_handle_should_reopen_from_the_top_chrome_edge(cx: &mut
     let chrome = cx
         .debug_bounds("workspace-top-chrome")
         .expect("the collapsed top-left chrome was not rendered");
-    let requested_width = chrome.size.width + px(40.0);
+    let requested_width = (chrome.size.width + px(40.0)).max(px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH));
 
     drag_to(
         "workspace-sidebar-resize-handle",
@@ -10248,9 +10331,23 @@ fn active_terminal_has_input_focus(
 }
 
 #[derive(Default)]
-struct RecordingRenderedText(Mutex<Vec<String>>);
+struct RecordingRenderedText(Mutex<Vec<String>>, Option<(String, Pixels)>);
 
 impl RecordingRenderedText {
+    fn context_with_measurement(
+        cx: &TestAppContext,
+        text: &str,
+        width: Pixels,
+    ) -> (TestAppContext, Arc<Self>) {
+        let text_system = Arc::new(Self(Mutex::default(), Some((text.to_owned(), width))));
+        let context = TestAppContext::build_with_text_system(
+            cx.dispatcher.clone(),
+            cx.test_function_name(),
+            text_system.clone(),
+        );
+        (context, text_system)
+    }
+
     fn context(cx: &TestAppContext) -> (TestAppContext, Arc<Self>) {
         let text = Arc::new(Self::default());
         let context = TestAppContext::build_with_text_system(
@@ -10303,7 +10400,20 @@ impl gpui::PlatformTextSystem for RecordingRenderedText {
     }
     fn layout_line(&self, text: &str, size: Pixels, runs: &[gpui::FontRun]) -> gpui::LineLayout {
         self.0.lock().unwrap().push(text.to_owned());
-        gpui::NoopTextSystem.layout_line(text, size, runs)
+        let mut layout = gpui::NoopTextSystem.layout_line(text, size, runs);
+        // The platform font boundary supplies deterministic fractional advances to layout tests.
+        if let Some((label, width)) = &self.1
+            && text == label
+        {
+            let ratio = *width / layout.width;
+            for run in &mut layout.runs {
+                for glyph in &mut run.glyphs {
+                    glyph.position.x *= ratio;
+                }
+            }
+            layout.width = *width;
+        }
+        layout
     }
     fn recommended_rendering_mode(
         &self,

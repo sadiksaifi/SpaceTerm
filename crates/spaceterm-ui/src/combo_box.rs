@@ -934,8 +934,9 @@ impl ComboBoxTheme {
 
     /// Measures a custom trigger's outer width, including its themed borders.
     /// The caller's content width must include any caller-owned padding.
-    pub fn custom_trigger_width(self, content_width: Pixels) -> Pixels {
-        content_width + self.metrics.border_width * 2.0
+    pub fn custom_trigger_width(self, content_width: Pixels, window: &Window) -> Pixels {
+        let border = crate::text_measurement::snap_border_width(self.metrics.border_width, window);
+        crate::reserve_measured_width(content_width, [border, border], window)
     }
 
     pub fn ordinary_borders(mut self, borders: crate::ControlBorderStates) -> Self {
@@ -3375,7 +3376,7 @@ fn natural_menu_width<I, C>(
     window: &Window,
 ) -> Pixels {
     let measure = |text: &SharedString, size: Pixels, font: &gpui::Font| {
-        window
+        let width = window
             .text_system()
             .shape_line(
                 text.clone(),
@@ -3390,19 +3391,35 @@ fn natural_menu_width<I, C>(
                 }],
                 None,
             )
-            .width
-            // Layout snaps each text element to whole pixels; rounding each one up keeps a
-            // shortcut that snaps wider from taking width the label needs.
-            .ceil()
+            .width;
+        crate::reserve_measured_width(width, [], window)
     };
-    let fixed = theme.metrics.border_width * 2.0
-        + theme.metrics.panel_padding * 2.0
-        + row_border_width(theme) * 2.0
-        + theme.metrics.horizontal_padding * 2.0;
+    let border = crate::text_measurement::snap_border_width(theme.metrics.border_width, window);
+    let row_border = crate::text_measurement::snap_border_width(row_border_width(theme), window);
+    let fixed = crate::reserve_measured_width(
+        px(0.0),
+        [
+            border,
+            border,
+            theme.metrics.panel_padding,
+            theme.metrics.panel_padding,
+            row_border,
+            row_border,
+            theme.metrics.horizontal_padding,
+            theme.metrics.horizontal_padding,
+        ],
+        window,
+    );
+    let leading_metrics = theme.metrics.leading_column_metrics();
+    let leading_metrics = LeadingColumnMetrics {
+        state_width: window.pixel_snap(leading_metrics.state_width),
+        icon_width: window.pixel_snap(leading_metrics.icon_width),
+        column_gap: window.pixel_snap(leading_metrics.column_gap),
+    };
     let widest = items.iter().fold(px(0.0), |widest, item| {
         let leading = columns
             .of(&item.id)
-            .label_offset(theme.metrics.leading_column_metrics(), theme.metrics.gap);
+            .label_offset(leading_metrics, window.pixel_snap(theme.metrics.gap));
         let label = measure(&item.label, theme.metrics.label_size, typography.regular());
         let description = item.description.as_ref().map_or(px(0.0), |description| {
             measure(
@@ -3418,21 +3435,37 @@ fn natural_menu_width<I, C>(
                 | ComboBoxAccessory::Status(text)
                 | ComboBoxAccessory::Shortcut(text) => text,
             };
-            theme.metrics.gap + measure(text, theme.metrics.secondary_size, typography.regular())
+            crate::reserve_measured_width(
+                px(0.0),
+                [
+                    theme.metrics.gap,
+                    measure(text, theme.metrics.secondary_size, typography.regular()),
+                ],
+                window,
+            )
         });
         let shortcut = item.shortcut.as_ref().map_or(px(0.0), |shortcut| {
-            px(MENU_SHORTCUT_GAP)
-                + measure(
-                    shortcut,
-                    theme.metrics.secondary_size,
-                    combo_box_shortcut_font(typography),
-                )
+            crate::reserve_measured_width(
+                px(0.0),
+                [
+                    theme.metrics.gap,
+                    (px(MENU_SHORTCUT_GAP) - theme.metrics.gap).max(px(0.0)),
+                    measure(
+                        shortcut,
+                        theme.metrics.secondary_size,
+                        combo_box_shortcut_font(typography),
+                    ),
+                ],
+                window,
+            )
         });
-        widest.max(fixed + leading + text + accessory + shortcut)
+        widest.max(crate::reserve_measured_width(
+            px(0.0),
+            [fixed, leading, text, accessory, shortcut],
+            window,
+        ))
     });
-    // Scaled metrics can be fractional; round up so the panel snaps no narrower than its rows.
     widest
-        .ceil()
         .max(px(MENU_MINIMUM_WIDTH))
         .min(px(MENU_MAXIMUM_WIDTH))
 }

@@ -45,6 +45,8 @@ mod shortcut_recorder;
 mod text_area;
 mod text_editing;
 mod text_input;
+mod text_measurement;
+pub use text_measurement::reserve_measured_width;
 mod toggle;
 mod tooltip;
 mod window_controls;

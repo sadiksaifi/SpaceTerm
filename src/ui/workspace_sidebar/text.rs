@@ -103,7 +103,7 @@ pub(super) fn detail(
     canvas(
         move |bounds, window, cx| {
             let pin_width = if pinned {
-                appearance.spacing(PIN_WIDTH)
+                window.pixel_snap(appearance.spacing(PIN_WIDTH))
             } else {
                 px(0.0)
             };
@@ -118,15 +118,24 @@ pub(super) fn detail(
                 )
             };
             let repository_width = repository.as_ref().map_or(px(0.0), |repository| {
-                let glyph = match &repository.badge {
-                    SidebarBadge::Branch { glyph, .. } => {
-                        crate::ui::tab_view::head_glyph_width(*glyph, &appearance, measure)
-                            + appearance.spacing(BRANCH_GLYPH_GAP)
-                    }
-                    SidebarBadge::PullRequest { .. } => px(0.0),
+                let (glyph, glyph_gap) = match &repository.badge {
+                    SidebarBadge::Branch { glyph, .. } => (
+                        crate::ui::tab_view::head_glyph_width(*glyph, &appearance, measure),
+                        appearance.spacing(BRANCH_GLYPH_GAP),
+                    ),
+                    SidebarBadge::PullRequest { .. } => (px(0.0), px(0.0)),
                 };
-                (glyph + measure(repository.badge.text()) + appearance.spacing(GAP))
-                    .min(row_width * MAXIMUM_REPOSITORY_SHARE)
+                spaceterm_ui::reserve_measured_width(
+                    px(0.0),
+                    [
+                        glyph,
+                        glyph_gap,
+                        measure(repository.badge.text()),
+                        appearance.spacing(GAP),
+                    ],
+                    window,
+                )
+                .min(row_width * MAXIMUM_REPOSITORY_SHARE)
             });
             let available = (row_width - repository_width).max(px(0.0));
             let fitted = if status_paint.is_some() {
@@ -297,6 +306,63 @@ fn fit_trailing_path(text: &str, available: Pixels, measure: impl Fn(&str) -> Pi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct RepositoryBadgeFixture;
+
+    impl gpui::Render for RepositoryBadgeFixture {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let appearance = ChromeAppearance::default();
+            div().w(px(400.0)).child(detail(
+                "~/project".into(),
+                Some(RowRepository {
+                    badge: SidebarBadge::Branch {
+                        glyph: crate::repository_status::presentation::HeadGlyph::Branch,
+                        text: "aaaaa".into(),
+                    },
+                    pull_request_paint: appearance
+                        .colors
+                        .pull_request(appearance.colors.panel_background),
+                }),
+                false,
+                None,
+                None,
+                1,
+                appearance,
+            ))
+        }
+    }
+
+    #[gpui::test]
+    fn repository_badge_should_fit_at_fractional_scales(cx: &mut gpui::TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_, _| RepositoryBadgeFixture);
+        let mut failures = Vec::new();
+        for scale in [1.21, 1.25, 1.5, 1.75] {
+            cx.simulate_scale_factor_change(scale);
+            cx.run_until_parked();
+            let required = cx.update(|window, _| {
+                let appearance = ChromeAppearance::default();
+                window.pixel_snap(appearance.icons.metrics(IconRole::Caption).glyph_size)
+                    + window.pixel_snap(appearance.spacing(BRANCH_GLYPH_GAP))
+                    + appearance
+                        .typography
+                        .measure(TextRole::Secondary, "aaaaa", window)
+            });
+            let badge = cx
+                .debug_bounds("workspace-row-branch-1")
+                .expect("branch badge");
+            if badge.size.width < required {
+                failures.push((scale, required, badge));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "repository badge must fit its glyph, gap, and text: {failures:?}"
+        );
+    }
 
     struct MachineLabelFixture {
         machine: &'static str,
