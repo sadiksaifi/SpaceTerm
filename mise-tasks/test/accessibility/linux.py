@@ -41,13 +41,17 @@ from spaceterm_tasks.accessibility_linux import (
     FrameOutput,
     OrcaOutput,
     Processes,
+    Readiness,
+    ReadinessStep,
     SmokeFailure,
     cleanup_private_processes,
     create_private_runtime,
+    orca_registered,
     require,
     require_prerequisites,
     require_private_runtime,
     retire_direct_child,
+    wait_until,
 )
 from spaceterm_tasks.cargo import build_executable
 
@@ -127,19 +131,7 @@ class Probe:
             observer()
 
     def wait(self, predicate, classification, timeout=30):
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            self.drain()
-            try:
-                value = predicate()
-                if value:
-                    return value
-            except Exception as error:
-                # AT-SPI objects can be transient during initial registration.
-                if isinstance(error, SmokeFailure):
-                    raise
-            time.sleep(0.02)
-        raise SmokeFailure(classification)
+        return wait_until(self.drain, predicate, classification, time.monotonic() + timeout)
 
     def settle(self, seconds=0.3):
         deadline = time.monotonic() + seconds
@@ -148,7 +140,10 @@ class Probe:
             time.sleep(0.01)
 
     def find_terminal(self):
-        stack = [self.atspi.Registry.getDesktop(0)]
+        window = self.find_window(self.application_pid)
+        if window is None:
+            return None
+        stack = [window]
         visited = 0
         while stack and visited < 5000:
             accessible = stack.pop()
@@ -287,7 +282,7 @@ class Input:
             self.key(0xFFE1)
             # Private GNOME starts in its overview; return to the app Window.
             self.key(0xFF1B)
-            self.probe.settle()
+            self.probe.drain()
 
     def key(self, keysym):
         for pressed in (True, False):
@@ -433,7 +428,7 @@ print("\\033[?1049l", end="", flush=True)
 """
 
 
-def validate_tree(probe, input_driver, output, fixture_speech):
+def validate_tree(probe, input_driver, output, fixture_speech, readiness):
     terminal = probe.terminal
     atspi = probe.atspi
     probe.wait(lambda: terminal.getState().contains(atspi.STATE_FOCUSED), "terminal_not_focused")
@@ -531,7 +526,7 @@ def validate_tree(probe, input_driver, output, fixture_speech):
             and evidence["returned_range_bounded"],
             "terminal_line_boundary_invalid",
         )
-    probe.wait(fixture_speech, "orca_terminal_speech_missing")
+    readiness.wait(ReadinessStep.FIXTURE_SPEECH, fixture_speech)
     shell = probe.end()
     coordinates = atspi.DESKTOP_COORDS if input_driver.backend == "x11" else atspi.WINDOW_COORDS
     pane = terminal.queryComponent().getExtents(coordinates)
@@ -757,7 +752,7 @@ raise SystemExit(orca.main(prefs_dir=sys.argv[1]) if registry_api else orca.main
 """
 
 
-def start_orca(processes, probe, output, startup):
+def start_orca(processes, probe, output, startup, readiness):
     configuration = output / "speech-config"
     configuration.mkdir()
     logs = output / "speech-logs"
@@ -792,7 +787,7 @@ def start_orca(processes, probe, output, startup):
             str(socket.parent / "speechd.pid"),
         ]
     )
-    probe.wait(socket.exists, "private_speech_dispatcher_missing")
+    readiness.wait(ReadinessStep.SPEECH_DISPATCHER, socket.exists)
     os.environ["SPEECHD_ADDRESS"] = "unix_socket:" + str(socket)
     import speechd
 
@@ -835,7 +830,8 @@ def start_orca(processes, probe, output, startup):
         helper = processes.start(
             ["Xvfb", f":{DISPLAY_NUMBER}", "-screen", "0", "128x128x24", "-nolisten", "tcp"]
         )
-        probe.wait(
+        readiness.wait(
+            ReadinessStep.ORCA_KEYMAP_DISPLAY,
             lambda: (
                 subprocess.run(
                     ["xdpyinfo"],
@@ -846,7 +842,6 @@ def start_orca(processes, probe, output, startup):
                 ).returncode
                 == 0
             ),
-            "orca_private_keymap_display_timeout",
         )
         require(helper.poll() is None, "orca_private_keymap_display_exited")
     display_proof_file = output / "orca-display-proof.json"
@@ -901,7 +896,7 @@ def start_orca(processes, probe, output, startup):
         proof["environment"] = checks
         return checks if all(checks.values()) else None
 
-    probe.wait(private_reader_environment, "orca_environment_not_private")
+    readiness.wait(ReadinessStep.ORCA_ENVIRONMENT, private_reader_environment)
     if keymap_helper:
         helper_entries = Path(f"/proc/{helper.pid}/environ").read_bytes().split(bytes([0]))
         helper_environment = dict(entry.split(b"=", 1) for entry in helper_entries if b"=" in entry)
@@ -924,14 +919,56 @@ def start_orca(processes, probe, output, startup):
             ),
             "orca_keymap_helper_not_private",
         )
-    probe.wait(display_proof_file.exists, "orca_display_proof_missing")
-    proof["gdk_display"] = json.loads(display_proof_file.read_text())
+
+    def reader_display():
+        require(child.poll() is None, "orca_process_exited")
+        if not display_proof_file.exists():
+            return None
+        return json.loads(display_proof_file.read_text())
+
+    proof["gdk_display"] = readiness.wait(ReadinessStep.ORCA_DISPLAY, reader_display)
     require(proof["gdk_display"]["expected_backend"], "orca_display_backend_invalid")
 
-    # Orca buffers its debug file. App events flush the final startup block, so
-    # readiness is verified by terminal-script speech after the app launches.
-    probe.settle(1)
-    require(child.poll() is None, "orca_process_exited")
+    def reader_signal(predicate):
+        require(child.poll() is None, "orca_process_exited")
+        require(stream.speech_backend["not_available"] == 0, "orca_speech_backend_unavailable")
+        return predicate()
+
+    # The display proof precedes Orca initialization. Its line-buffered debug
+    # record is emitted after listener and keyboard watcher initialization.
+    readiness.wait(ReadinessStep.ORCA_EVENT_LOOP, lambda: reader_signal(lambda: stream.started))
+    import dbus
+
+    session = dbus.SessionBus()
+    accessibility = dbus.Interface(
+        session.get_object("org.a11y.Bus", "/org/a11y/bus"), "org.a11y.Bus"
+    )
+    accessibility_bus = dbus.bus.BusConnection(str(accessibility.GetAddress(timeout=2)))
+    try:
+        registry = dbus.Interface(
+            accessibility_bus.get_object("org.a11y.atspi.Registry", "/org/a11y/atspi/registry"),
+            "org.a11y.atspi.Registry",
+        )
+        manager = dbus.Interface(
+            accessibility_bus.get_object("org.freedesktop.DBus", "/org/freedesktop/DBus"),
+            "org.freedesktop.DBus",
+        )
+        readiness.wait(
+            ReadinessStep.ORCA_ATSPI_REGISTRATION,
+            lambda: reader_signal(
+                lambda: orca_registered(
+                    registry.GetRegisteredEvents(timeout=2),
+                    child.pid,
+                    lambda name: int(manager.GetConnectionUnixProcessID(name, timeout=2)),
+                )
+            ),
+        )
+    finally:
+        accessibility_bus.close()
+    readiness.wait(
+        ReadinessStep.ORCA_SPEECH_BACKEND,
+        lambda: reader_signal(lambda: stream.speech_backend["factory_success"] > 0),
+    )
     startup["complete"] = True
     return child, stream, proof
 
@@ -1360,8 +1397,7 @@ def runtime_child_environment(child):
         "DBUS_SYSTEM_BUS_ADDRESS",
     )
     checks = {key: actual.get(key.encode()) == os.environ[key].encode() for key in keys}
-    require(all(checks.values()), "runtime_child_environment_not_private")
-    return checks
+    return checks if all(checks.values()) else None
 
 
 def isolation_only_session(args):
@@ -1494,9 +1530,16 @@ def private_session(args):
                 timeout=60,
             )
         require(display.poll() is None, "display_process_exited")
-        report["display_environment"] = runtime_child_environment(display)
+        readiness = Readiness(probe.drain)
+        report["readiness"] = {
+            "overall_timeout_seconds": round(readiness.deadline - readiness.started),
+            "observed_ms": readiness.observed,
+        }
+        report["display_environment"] = readiness.wait(
+            ReadinessStep.DISPLAY_ENVIRONMENT, lambda: runtime_child_environment(display)
+        )
         orca_process, orca_stream, report["orca_launch"] = start_orca(
-            processes, probe, output, orca_startup
+            processes, probe, output, orca_startup, readiness
         )
         # Desktop and reader startup can update these properties themselves.
         properties.Set("org.a11y.Status", "IsEnabled", dbus.Boolean(True))
@@ -1519,7 +1562,9 @@ def private_session(args):
         require(all(expected_backend.values()), "application_backend_environment_invalid")
         application = processes.start([str(args.binary)], stderr=frame_output.writer)
         probe.application_pid = application.pid
-        report["application_private_environment"] = runtime_child_environment(application)
+        report["application_private_environment"] = readiness.wait(
+            ReadinessStep.APPLICATION_ENVIRONMENT, lambda: runtime_child_environment(application)
+        )
         app_entries = Path(f"/proc/{application.pid}/environ").read_bytes().split(bytes([0]))
         app_environment = dict(entry.split(b"=", 1) for entry in app_entries if b"=" in entry)
         actual_backend = {"headless_override_absent": b"ZED_HEADLESS" not in app_environment}
@@ -1549,28 +1594,48 @@ def private_session(args):
             require(application.poll() is None, "application_process_exited")
             return probe.find_window(application.pid)
 
-        probe.wait(application_window, "window_accessibility_missing", timeout=60)
+        window = readiness.wait(ReadinessStep.APPLICATION_WINDOW, application_window, timeout=60)
         report["window_accessibility_published"] = True
-        probe.terminal = probe.wait(
-            probe.find_terminal, "terminal_accessibility_missing", timeout=60
+        probe.terminal = readiness.wait(
+            ReadinessStep.TERMINAL_OBJECT, probe.find_terminal, timeout=60
         )
         report["terminal_accessibility_published"] = True
         if args.private_session == "x11":
             run(["xdotool", "search", "--onlyvisible", "--class", "spaceterm", "windowfocus"])
         input_driver = Input(args.private_session, probe)
 
-        def orca_fixture_speech():
+        def orca_terminal_script():
             require(orca_process.poll() is None, "orca_process_exited")
             require(
                 orca_stream.speech_backend["not_available"] == 0, "orca_speech_backend_unavailable"
             )
+            return orca_stream.active_terminal_script
+
+        def orca_fixture_speech():
             return (
-                orca_stream.terminal_script
+                orca_terminal_script()
                 and orca_stream.marker_spoken
                 and orca_stream.speech_backend["factory_success"] > 0
             )
 
-        report["tree"] = validate_tree(probe, input_driver, output, orca_fixture_speech)
+        def focused_terminal():
+            require(application.poll() is None, "application_process_exited")
+            probe.terminal.clear_cache()
+            return probe.terminal.getState().contains(probe.atspi.STATE_FOCUSED)
+
+        def focused_window():
+            require(application.poll() is None, "application_process_exited")
+            window.clear_cache()
+            return window.getState().contains(probe.atspi.STATE_ACTIVE)
+
+        readiness.wait(ReadinessStep.APPLICATION_WINDOW_FOCUS, focused_window)
+        readiness.wait(ReadinessStep.TERMINAL_FOCUS, focused_terminal)
+        readiness.wait(ReadinessStep.ORCA_TERMINAL_SCRIPT, orca_terminal_script)
+        readiness.wait(
+            ReadinessStep.ORCA_TERMINAL_PRESENTATION,
+            lambda: orca_terminal_script() and orca_stream.terminal_presented,
+        )
+        report["tree"] = validate_tree(probe, input_driver, output, orca_fixture_speech, readiness)
         probe.begin("keyboard_echo")
         typed_text = probe.terminal.queryText()
         typed_caret = typed_text.caretOffset

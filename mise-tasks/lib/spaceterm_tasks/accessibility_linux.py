@@ -14,6 +14,7 @@ import subprocess
 import tempfile
 import time
 from collections import Counter
+from enum import Enum
 from pathlib import Path
 
 
@@ -24,6 +25,73 @@ class SmokeFailure(Exception):
 def require(condition, classification):
     if not condition:
         raise SmokeFailure(classification)
+
+
+class ReadinessStep(Enum):
+    DISPLAY_ENVIRONMENT = "display_environment"
+    SPEECH_DISPATCHER = "speech_dispatcher"
+    ORCA_ENVIRONMENT = "orca_environment"
+    ORCA_KEYMAP_DISPLAY = "orca_keymap_display"
+    ORCA_DISPLAY = "orca_display"
+    ORCA_EVENT_LOOP = "orca_event_loop"
+    ORCA_ATSPI_REGISTRATION = "orca_atspi_registration"
+    ORCA_SPEECH_BACKEND = "orca_speech_backend"
+    APPLICATION_ENVIRONMENT = "application_environment"
+    APPLICATION_WINDOW = "application_window"
+    APPLICATION_WINDOW_FOCUS = "application_window_focus"
+    TERMINAL_OBJECT = "terminal_object"
+    TERMINAL_FOCUS = "terminal_focus"
+    ORCA_TERMINAL_SCRIPT = "orca_terminal_script"
+    ORCA_TERMINAL_PRESENTATION = "orca_terminal_presentation"
+    FIXTURE_SPEECH = "fixture_speech"
+
+
+def wait_until(drain, predicate, classification, deadline):
+    """Pump observations until a signal arrives within the absolute deadline."""
+    while time.monotonic() < deadline:
+        drain()
+        try:
+            value = predicate()
+            if value and time.monotonic() < deadline:
+                return value
+        except SmokeFailure:
+            raise
+        except Exception:
+            # AT-SPI objects and bus connections can be transient at startup.
+            pass
+        time.sleep(min(0.02, max(0, deadline - time.monotonic())))
+    raise SmokeFailure(classification)
+
+
+class Readiness:
+    """Give startup and first fixture speech one bounded observation budget."""
+
+    def __init__(self, drain, timeout=120):
+        self.drain = drain
+        self.started = time.monotonic()
+        self.deadline = self.started + timeout
+        self.observed = {}
+
+    def wait(self, step: ReadinessStep, predicate, timeout=30):
+        value = wait_until(
+            self.drain,
+            predicate,
+            "readiness_timeout:" + step.value,
+            min(self.deadline, time.monotonic() + timeout),
+        )
+        self.observed[step.value] = round((time.monotonic() - self.started) * 1000)
+        return value
+
+
+def orca_registered(events, pid, owner_pid):
+    """Require focus and inserted-text subscriptions owned by this reader PID."""
+    registered = set()
+    for name, event in events:
+        normalized = event.replace("-", "").lower().rstrip(":")
+        if normalized in ("object:statechanged:focused", "object:textchanged:insert"):
+            if owner_pid(name) == pid:
+                registered.add(normalized)
+    return registered == {"object:statechanged:focused", "object:textchanged:insert"}
 
 
 def require_prerequisites(backend):
@@ -382,6 +450,8 @@ class OrcaOutput:
         self.marker = marker.encode()
         self.started = False
         self.terminal_script = False
+        self.active_terminal_script = False
+        self.terminal_presented = False
         self.marker_spoken = False
         self.typed_character_spoken = False
         self.terminal_keyboard_event = False
@@ -442,10 +512,11 @@ class OrcaOutput:
         if b"TERMINAL: Adjusted insertion:" in line and self.marker in line:
             self.routing_counts["adjusted_insert_contains_exact_fixture_marker"] += 1
         self.started |= b"ORCA: Starting Atspi main event loop" in line
-        self.terminal_script |= (
-            b"SCRIPT MANAGER: Setting active script to" in line
-            and b"module=orca.scripts.terminal.script" in line
-        )
+        if b"SCRIPT MANAGER: Deactivating" in line:
+            self.active_terminal_script = False
+        if b"SCRIPT MANAGER: Setting active script to" in line:
+            self.active_terminal_script = b"module=orca.scripts.terminal.script" in line
+            self.terminal_script |= self.active_terminal_script
         if self.probe.phase == "keyboard_echo":
             for kind in ("PRESSED", "RELEASED"):
                 if b"vvvvv PROCESS ATSPI_KEY_" + kind.encode() + b"_EVENT: 'q' " in line:
@@ -475,6 +546,7 @@ class OrcaOutput:
             self.speech_record_bytes = 0
             if self.speech_record:
                 self.counts["speech_records"] += 1
+                self.terminal_presented |= self.active_terminal_script
                 self.typed_character_spoken |= (
                     self.probe.phase == "keyboard_echo" and body.startswith(b"SPEECH OUTPUT: 'q'")
                 )
@@ -531,6 +603,7 @@ class OrcaOutput:
         return {
             "atspi_main_loop_started": self.started,
             "terminal_script_selected": self.terminal_script,
+            "terminal_presentation_observed": self.terminal_presented,
             "fixture_output_spoken": self.marker_spoken,
             "speech_backend": dict(self.speech_backend),
             "speech_backend_initialized": self.speech_backend["factory_success"] > 0
