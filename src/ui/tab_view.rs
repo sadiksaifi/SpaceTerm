@@ -1,6 +1,6 @@
 use super::chrome_geometry::concentric_outset;
 use super::chrome_icons::{IconRole, InteractiveIconRole};
-use super::chrome_typography::{ChromeTextStyleExt as _, TextRole};
+use super::chrome_typography::{ChromeTextStyleExt as _, ChromeTypography, TextRole};
 use super::drag_and_drop::{DragPreview, DragSession, drag_release_observer, grab_point};
 use super::pane_lifecycle::{PaneConstruction, RemoteHierarchyLifecycle};
 use super::terminal_status::{
@@ -391,9 +391,13 @@ fn measure_caption_segment(
     if text.is_empty() {
         return px(0.0);
     }
-    // Layout rounds each text box to whole pixels, so a fractional measure would let the ladder
-    // admit a segment that then squeezes the name.
-    px(f32::from(appearance.typography.measure(TextRole::Body, text, window)).ceil())
+    // GPUI rounds intrinsic text bounds up to logical pixels; preserve that reservation when
+    // snapping to device pixels so the ladder cannot squeeze the name.
+    let width = appearance
+        .typography
+        .measure(TextRole::Body, text, window)
+        .ceil();
+    ChromeTypography::round_measurement_up(width, window)
 }
 
 fn minimum_pane_width(appearance: &super::appearance::ChromeAppearance) -> f32 {
