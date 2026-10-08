@@ -14,13 +14,14 @@ use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Global, Task};
 use super::repository_status_store::{ReadSpawner, RepositoryStatusAdapters, thread_spawner};
 use crate::repository_status::tool_check::check_tools;
 use crate::repository_status::{GitToolStatus, RepositoryWatch, ToolInventory};
+use crate::settings::Settings;
 use crate::ssh::cancellation::SshCancellationToken;
 #[cfg(test)]
 use crate::worktrees::WorktreeSnapshot;
 use crate::worktrees::catalog::{
     CatalogEffect, CatalogUpdate, WorktreeCatalog, WorktreeInterestId, WorktreeListing,
 };
-use crate::worktrees::git::LocalWorktreeGit;
+use crate::worktrees::git::{BranchList, LocalWorktreeGit, WorktreeBranch, WorktreeCreateError};
 
 /// Some interest's Worktrees changed.
 pub(crate) struct WorktreesChanged;
@@ -35,8 +36,13 @@ impl InstalledWorktrees {
     }
 }
 
-pub(crate) fn install(adapters: RepositoryStatusAdapters, cx: &mut App) {
-    let store = cx.new(|cx| WorktreeStore::new(adapters, thread_spawner(), cx));
+pub(crate) fn install(settings: &Settings, adapters: RepositoryStatusAdapters, cx: &mut App) {
+    let settings = settings.clone();
+    let store = cx.new(|cx| {
+        let mut store = WorktreeStore::new(adapters, thread_spawner(), cx);
+        store.settings = Some(settings);
+        store
+    });
     cx.set_global(InstalledWorktrees(store));
 }
 
@@ -58,6 +64,8 @@ pub(crate) struct WorktreeStore {
     watch_events: async_channel::Sender<PathBuf>,
     next_interest: u64,
     cancellation: SshCancellationToken,
+    /// Supplies the Worktree Path Template.
+    settings: Option<Settings>,
     _watch_task: Task<()>,
 }
 
@@ -95,6 +103,7 @@ impl WorktreeStore {
             watch_events,
             next_interest: 0,
             cancellation: SshCancellationToken::default(),
+            settings: None,
             _watch_task: watch_task,
         }
     }
@@ -102,6 +111,21 @@ impl WorktreeStore {
     /// The Worktrees `id` presents now.
     pub(crate) fn listing(&self, id: WorktreeInterestId) -> WorktreeListing {
         self.catalog.listing(id)
+    }
+
+    /// Where the person wants new Worktrees.
+    pub(crate) fn path_template(&self) -> String {
+        self.settings.as_ref().map_or_else(
+            || crate::worktrees::path_template::DEFAULT_WORKTREE_PATH_TEMPLATE.to_owned(),
+            |settings| {
+                settings
+                    .snapshot()
+                    .candidate
+                    .git
+                    .worktree_path_template
+                    .clone()
+            },
+        )
     }
 
     /// Starts following the Worktrees of the repository containing `directory`.
@@ -141,6 +165,56 @@ impl WorktreeStore {
     pub(crate) fn repository_changed(&mut self, common: &PathBuf, cx: &mut Context<Self>) {
         let update = self.catalog.repository_changed(common);
         self.apply(update, cx);
+    }
+
+    /// Lists the branches a new Worktree of the repository at `root` can use, or `None` when git
+    /// cannot read them.
+    pub(crate) fn branches(
+        &self,
+        root: PathBuf,
+        cx: &mut Context<Self>,
+    ) -> Task<Option<BranchList>> {
+        let cancellation = self.cancellation.clone();
+        let task = self.run_git(move |git| git.branches(&root, &cancellation).ok(), cx);
+        cx.spawn(async move |_, _| task.await.flatten())
+    }
+
+    /// Creates a Worktree at `path`, then reads again every listing of the repository sharing
+    /// `common`. A started write runs to its end.
+    pub(crate) fn create(
+        &self,
+        root: PathBuf,
+        common: PathBuf,
+        path: PathBuf,
+        branch: WorktreeBranch,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), WorktreeCreateError>> {
+        let task = self.run_git(
+            move |git| git.create(&root, &path, &branch, &SshCancellationToken::default()),
+            cx,
+        );
+        cx.spawn(async move |store, cx| {
+            let result = task.await.unwrap_or(Err(WorktreeCreateError::Failed));
+            let _ = store.update(cx, |store, cx| store.repository_changed(&common, cx));
+            result
+        })
+    }
+
+    /// Runs `work` with the checked git on its own thread, or finishes with `None` when no git
+    /// is ready or the thread did not finish.
+    fn run_git<T: Send + 'static>(
+        &self,
+        work: impl FnOnce(&LocalWorktreeGit) -> T + Send + 'static,
+        cx: &mut Context<Self>,
+    ) -> Task<Option<T>> {
+        let Some(git) = self.git.git.clone() else {
+            return Task::ready(None);
+        };
+        let (sender, receiver) = async_channel::bounded(1);
+        let _ = (self.spawn)(Box::new(move || {
+            let _ = sender.send_blocking(work(&git));
+        }));
+        cx.spawn(async move |_, _| receiver.recv().await.ok())
     }
 
     fn apply(&mut self, update: CatalogUpdate, cx: &mut Context<Self>) {

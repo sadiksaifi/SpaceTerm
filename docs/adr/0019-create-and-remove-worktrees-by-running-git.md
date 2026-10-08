@@ -1,0 +1,3 @@
+# Create and remove Worktrees by running git
+
+SpaceTerm creates and removes Worktrees by running the person's own git with the hardening Repository Status reads use, so git stays the one owner of the repository's administrative files. These are SpaceTerm's only repository writes, and they happen only when the person confirms one in a dialog. Writes use branches already fetched and never reach the network, and they work only in local Workspaces. Hooks never run, so a `post-checkout` hook's setup does not happen. Clean and smudge filters run under the person's configuration, as they do for reads. A started write runs to its end, and removing a Worktree that has changes passes `--force` only after the person chooses to discard them.

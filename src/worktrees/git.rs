@@ -4,7 +4,10 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use super::listing::{WorktreeRecord, parse_worktree_list};
+use thiserror::Error;
+
+use super::listing::{WorktreeHead, WorktreeRecord, parse_worktree_list};
+use super::ref_format::validate_branch_name;
 use super::{WorktreeSnapshot, fixed};
 use crate::domain::RepositoryIdentity;
 use crate::repository_status::discovery::{Discovery, parse_discovery};
@@ -25,6 +28,79 @@ const NUL_LIST_VERSION: ToolVersion = ToolVersion {
 };
 /// Discovery prints a few short paths; a listing holds a few hundred bytes per Worktree.
 const OUTPUT_LIMIT: usize = 1024 * 1024;
+
+/// The branches a new Worktree can check out or start from, most recently committed first.
+#[derive(Clone, Default, Eq, PartialEq)]
+pub(crate) struct BranchList {
+    /// Local branch names, such as `feature/login`.
+    pub(crate) local: Vec<String>,
+    /// Remote-tracking branch names already fetched, such as `origin/main`.
+    pub(crate) remote: Vec<String>,
+}
+
+impl std::fmt::Debug for BranchList {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BranchList")
+            .field("local", &self.local.len())
+            .field("remote", &self.remote.len())
+            .finish()
+    }
+}
+
+/// The branch a new Worktree checks out.
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) enum WorktreeBranch {
+    /// A new branch `name` starting at `base`, a local or remote-tracking branch name. The new
+    /// branch tracks nothing.
+    New { name: String, base: BranchName },
+    /// A local branch no Worktree has checked out.
+    Existing { name: String },
+    /// A new local branch `name` that tracks the remote-tracking branch `remote`.
+    Remote { remote: String, name: String },
+}
+
+impl std::fmt::Debug for WorktreeBranch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::New { .. } => "New",
+            Self::Existing { .. } => "Existing",
+            Self::Remote { .. } => "Remote",
+        })
+    }
+}
+
+/// A local or remote-tracking branch, by its short name.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum BranchName {
+    Local(String),
+    Remote(String),
+}
+
+impl BranchName {
+    fn full_name(&self) -> String {
+        match self {
+            Self::Local(name) => format!("refs/heads/{name}"),
+            Self::Remote(name) => format!("refs/remotes/{name}"),
+        }
+    }
+}
+
+/// Why git did not create a Worktree. Checks before the write classify it, because the runner
+/// discards git's messages.
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+pub(crate) enum WorktreeCreateError {
+    #[error("git refuses the branch name")]
+    InvalidName,
+    #[error("a branch with the name already exists")]
+    BranchExists,
+    #[error("another Worktree has the branch checked out")]
+    BranchCheckedOut,
+    #[error("the branch no longer exists")]
+    BranchMissing,
+    #[error("git could not create the Worktree")]
+    Failed,
+}
 
 /// Runs git for one machine's Worktrees. Blocking; callers use a dedicated thread.
 pub(crate) struct LocalWorktreeGit {
@@ -99,6 +175,174 @@ impl LocalWorktreeGit {
         )))
     }
 
+    /// Lists the local and fetched remote-tracking branches of the repository at `root`.
+    pub(crate) fn branches(
+        &self,
+        root: &Path,
+        cancellation: &SshCancellationToken,
+    ) -> Result<BranchList, RepositoryReadError> {
+        let mut output = Vec::new();
+        let exit = self.git(root, &BRANCH_ARGUMENTS, &mut output, cancellation)?;
+        if !exit.success() {
+            return Err(RepositoryReadError::Unavailable);
+        }
+        parse_branches(&output)
+    }
+
+    /// Creates a Worktree at `path` from the repository at `root`. Git creates missing parent
+    /// directories. Hooks do not run, so no `post-checkout` setup happens.
+    pub(crate) fn create(
+        &self,
+        root: &Path,
+        path: &Path,
+        branch: &WorktreeBranch,
+        cancellation: &SshCancellationToken,
+    ) -> Result<(), WorktreeCreateError> {
+        let path = path.to_str().ok_or(WorktreeCreateError::Failed)?;
+        match branch {
+            WorktreeBranch::New { name, base } => {
+                self.require_new_branch(root, name, cancellation)?;
+                let base = base.full_name();
+                self.require_ref(root, &base, cancellation)?;
+                self.add(
+                    root,
+                    &["--no-track", "-b", name, "--", path, &base],
+                    cancellation,
+                )
+            }
+            WorktreeBranch::Existing { name } => {
+                self.require_ref(root, &format!("refs/heads/{name}"), cancellation)?;
+                if self.checked_out(root, name, cancellation)? {
+                    return Err(WorktreeCreateError::BranchCheckedOut);
+                }
+                self.add(root, &["--", path, name], cancellation)
+            }
+            WorktreeBranch::Remote { remote, name } => {
+                self.require_new_branch(root, name, cancellation)?;
+                let remote = format!("refs/remotes/{remote}");
+                self.require_ref(root, &remote, cancellation)?;
+                self.add(
+                    root,
+                    &["--track", "-b", name, "--", path, &remote],
+                    cancellation,
+                )
+            }
+        }
+    }
+
+    fn add(
+        &self,
+        root: &Path,
+        options: &[&str],
+        cancellation: &SshCancellationToken,
+    ) -> Result<(), WorktreeCreateError> {
+        let mut arguments = vec!["worktree", "add"];
+        arguments.extend_from_slice(options);
+        match self.git(root, &arguments, &mut Vec::new(), cancellation) {
+            Ok(exit) if exit.success() => Ok(()),
+            _ => Err(WorktreeCreateError::Failed),
+        }
+    }
+
+    /// Checks that git accepts `name` for a new branch and that no branch has it.
+    fn require_new_branch(
+        &self,
+        root: &Path,
+        name: &str,
+        cancellation: &SshCancellationToken,
+    ) -> Result<(), WorktreeCreateError> {
+        validate_branch_name(name).map_err(|_| WorktreeCreateError::InvalidName)?;
+        let format = self
+            .git(
+                root,
+                &["check-ref-format", "--branch", name],
+                &mut Vec::new(),
+                cancellation,
+            )
+            .map_err(|_| WorktreeCreateError::Failed)?;
+        if !format.success() {
+            return Err(WorktreeCreateError::InvalidName);
+        }
+        match self.ref_exists(root, &format!("refs/heads/{name}"), cancellation)? {
+            true => Err(WorktreeCreateError::BranchExists),
+            false => Ok(()),
+        }
+    }
+
+    fn require_ref(
+        &self,
+        root: &Path,
+        full_name: &str,
+        cancellation: &SshCancellationToken,
+    ) -> Result<(), WorktreeCreateError> {
+        match self.ref_exists(root, full_name, cancellation)? {
+            true => Ok(()),
+            false => Err(WorktreeCreateError::BranchMissing),
+        }
+    }
+
+    fn ref_exists(
+        &self,
+        root: &Path,
+        full_name: &str,
+        cancellation: &SshCancellationToken,
+    ) -> Result<bool, WorktreeCreateError> {
+        // `show-ref --verify --quiet` exits 0 for an existing ref and 1 for a missing one.
+        let exit = self
+            .git(
+                root,
+                &["show-ref", "--verify", "--quiet", full_name],
+                &mut Vec::new(),
+                cancellation,
+            )
+            .map_err(|_| WorktreeCreateError::Failed)?;
+        match exit.code {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => Err(WorktreeCreateError::Failed),
+        }
+    }
+
+    fn checked_out(
+        &self,
+        root: &Path,
+        branch: &str,
+        cancellation: &SshCancellationToken,
+    ) -> Result<bool, WorktreeCreateError> {
+        let nul = self.git_version >= NUL_LIST_VERSION;
+        let mut list = vec!["worktree", "list", "--porcelain"];
+        if nul {
+            list.push("-z");
+        }
+        let mut output = Vec::new();
+        let exit = self
+            .git(root, &list, &mut output, cancellation)
+            .map_err(|_| WorktreeCreateError::Failed)?;
+        if !exit.success() {
+            return Err(WorktreeCreateError::Failed);
+        }
+        let worktrees = parse_worktree_list(&output, if nul { 0 } else { b'\n' })
+            .map_err(|_| WorktreeCreateError::Failed)?;
+        Ok(worktrees
+            .iter()
+            .any(|worktree| matches!(&worktree.head, WorktreeHead::Branch(name) if name == branch)))
+    }
+
+    fn git(
+        &self,
+        directory: &Path,
+        subcommand: &[&str],
+        output: &mut Vec<u8>,
+        cancellation: &SshCancellationToken,
+    ) -> Result<ProgramExit, RepositoryReadError> {
+        self.run(
+            directory,
+            git_arguments(directory, FsmonitorPolicy::Disabled, subcommand),
+            output,
+            cancellation,
+        )
+    }
+
     fn run(
         &self,
         directory: &Path,
@@ -123,6 +367,33 @@ impl LocalWorktreeGit {
             )
             .map_err(repository_program_error)
     }
+}
+
+/// Newest first, so the branches people work on lead the pickers.
+const BRANCH_ARGUMENTS: [&str; 5] = [
+    "for-each-ref",
+    "--sort=-committerdate",
+    "--format=%(refname)",
+    "refs/heads",
+    "refs/remotes",
+];
+
+/// Parses one full reference name per line. A remote's `HEAD` names no branch of its own.
+fn parse_branches(output: &[u8]) -> Result<BranchList, RepositoryReadError> {
+    let text = std::str::from_utf8(output).map_err(|_| RepositoryReadError::InvalidResponse)?;
+    let mut branches = BranchList::default();
+    for line in text.lines().filter(|line| !line.is_empty()) {
+        if let Some(name) = line.strip_prefix("refs/heads/") {
+            branches.local.push(name.to_owned());
+        } else if let Some(name) = line.strip_prefix("refs/remotes/") {
+            if !matches!(name.split_once('/'), Some((_, "HEAD")) | None) {
+                branches.remote.push(name.to_owned());
+            }
+        } else {
+            return Err(RepositoryReadError::InvalidResponse);
+        }
+    }
+    Ok(branches)
 }
 
 fn snapshot(
@@ -256,5 +527,212 @@ mod tests {
             ),
             (None, None, 2)
         );
+    }
+
+    fn tail(request: &ProgramRequest, count: usize) -> Vec<String> {
+        request.arguments[request.arguments.len() - count..]
+            .iter()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn branches_should_list_local_and_fetched_remote_branches_without_remote_heads() {
+        let runner = FakeRunner::new([exit(
+            0,
+            "refs/heads/feature/login\nrefs/remotes/origin/HEAD\nrefs/heads/main\n\
+             refs/remotes/origin/main\nrefs/remotes/upstream/fix/HEAD\n",
+        )]);
+
+        let branches = git(&runner, 47)
+            .branches(Path::new("/src/app"), &SshCancellationToken::default())
+            .unwrap();
+
+        assert_eq!(
+            tail(&runner.requests()[0], 7),
+            [
+                "-C",
+                "/src/app",
+                "for-each-ref",
+                "--sort=-committerdate",
+                "--format=%(refname)",
+                "refs/heads",
+                "refs/remotes"
+            ]
+        );
+        assert_eq!(
+            (branches.local, branches.remote),
+            (
+                vec!["feature/login".to_owned(), "main".to_owned()],
+                vec!["origin/main".to_owned(), "upstream/fix/HEAD".to_owned()]
+            )
+        );
+    }
+
+    #[test]
+    fn creating_from_a_new_branch_should_check_the_name_and_base_then_add_without_tracking() {
+        let runner = FakeRunner::new([exit(0, ""), exit(1, ""), exit(0, ""), exit(0, "")]);
+
+        let result = git(&runner, 47).create(
+            Path::new("/src/app"),
+            Path::new("/wt/app/feature-login"),
+            &WorktreeBranch::New {
+                name: "feature/login".into(),
+                base: BranchName::Remote("origin/main".into()),
+            },
+            &SshCancellationToken::default(),
+        );
+
+        let requests = runner.requests();
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            tail(&requests[0], 3),
+            ["check-ref-format", "--branch", "feature/login"]
+        );
+        assert_eq!(
+            tail(&requests[1], 4),
+            [
+                "show-ref",
+                "--verify",
+                "--quiet",
+                "refs/heads/feature/login"
+            ]
+        );
+        assert_eq!(
+            tail(&requests[2], 4),
+            [
+                "show-ref",
+                "--verify",
+                "--quiet",
+                "refs/remotes/origin/main"
+            ]
+        );
+        assert_eq!(
+            tail(&requests[3], 8),
+            [
+                "worktree",
+                "add",
+                "--no-track",
+                "-b",
+                "feature/login",
+                "--",
+                "/wt/app/feature-login",
+                "refs/remotes/origin/main"
+            ]
+        );
+        assert!(
+            requests[3]
+                .arguments
+                .contains(&"core.hooksPath=/dev/null".into())
+        );
+    }
+
+    #[test]
+    fn creating_from_an_existing_branch_should_add_it_by_name_unless_checked_out() {
+        let listing = format!(
+            "worktree /src/app\0HEAD {OID}\0branch refs/heads/main\0\0\
+             worktree /wt/app/fix\0HEAD {OID}\0branch refs/heads/fix\0\0"
+        );
+        let runner = FakeRunner::new([
+            exit(0, ""),
+            exit(0, &listing),
+            exit(0, ""),
+            exit(0, ""),
+            exit(0, &listing),
+        ]);
+        let git = git(&runner, 47);
+        let create = |name: &str| {
+            git.create(
+                Path::new("/src/app"),
+                Path::new("/wt/app/x"),
+                &WorktreeBranch::Existing { name: name.into() },
+                &SshCancellationToken::default(),
+            )
+        };
+
+        assert_eq!(create("feature"), Ok(()));
+        assert_eq!(
+            tail(&runner.requests()[2], 5),
+            ["worktree", "add", "--", "/wt/app/x", "feature"]
+        );
+        assert_eq!(create("fix"), Err(WorktreeCreateError::BranchCheckedOut));
+        assert_eq!(runner.requests().len(), 5);
+    }
+
+    #[test]
+    fn creating_from_a_remote_branch_should_track_it_with_a_new_local_branch() {
+        let runner = FakeRunner::new([exit(0, ""), exit(1, ""), exit(0, ""), exit(0, "")]);
+
+        let result = git(&runner, 47).create(
+            Path::new("/src/app"),
+            Path::new("/wt/app/fix"),
+            &WorktreeBranch::Remote {
+                remote: "origin/fix".into(),
+                name: "fix".into(),
+            },
+            &SshCancellationToken::default(),
+        );
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            tail(&runner.requests()[3], 8),
+            [
+                "worktree",
+                "add",
+                "--track",
+                "-b",
+                "fix",
+                "--",
+                "/wt/app/fix",
+                "refs/remotes/origin/fix"
+            ]
+        );
+    }
+
+    #[test]
+    fn create_should_classify_refusals_before_writing() {
+        let new = |name: &str| WorktreeBranch::New {
+            name: name.into(),
+            base: BranchName::Local("main".into()),
+        };
+        for (branch, responses, error) in [
+            (new("bad name"), vec![], WorktreeCreateError::InvalidName),
+            (
+                new("x"),
+                vec![exit(1, "")],
+                WorktreeCreateError::InvalidName,
+            ),
+            (
+                new("x"),
+                vec![exit(0, ""), exit(0, "")],
+                WorktreeCreateError::BranchExists,
+            ),
+            (
+                new("x"),
+                vec![exit(0, ""), exit(1, ""), exit(1, "")],
+                WorktreeCreateError::BranchMissing,
+            ),
+            (
+                new("x"),
+                vec![exit(0, ""), exit(1, ""), exit(0, ""), exit(128, "")],
+                WorktreeCreateError::Failed,
+            ),
+            (
+                WorktreeBranch::Existing {
+                    name: "gone".into(),
+                },
+                vec![exit(1, "")],
+                WorktreeCreateError::BranchMissing,
+            ),
+        ] {
+            let runner = FakeRunner::new(responses);
+            let result = git(&runner, 47).create(
+                Path::new("/src/app"),
+                Path::new("/wt/app/x"),
+                &branch,
+                &SshCancellationToken::default(),
+            );
+            assert_eq!(result, Err(error), "{branch:?}");
+        }
     }
 }

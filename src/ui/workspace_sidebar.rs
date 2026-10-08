@@ -86,6 +86,8 @@ pub(super) const TERMINAL_CONTENT_MINIMUM_WIDTH: f32 = 240.0;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum WorkspaceMenuCommand {
     NewTab,
+    /// Presents the New Worktree dialog for the Workspace's repository.
+    NewWorktree,
     PinDirectory,
     UnpinDirectory,
     Reconnect,
@@ -127,6 +129,8 @@ pub(super) struct WorkspaceRowViewModel {
     pub(super) repository: Option<crate::repository_status::presentation::SidebarBadge>,
     /// The Worktrees a git Workspace discloses under its row.
     pub(super) worktrees: Option<WorktreeSection>,
+    /// The Workspace reads a local repository, so it can create Worktrees.
+    pub(super) creates_worktrees: bool,
     pub(super) active: bool,
 }
 

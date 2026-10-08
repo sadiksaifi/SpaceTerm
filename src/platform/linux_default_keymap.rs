@@ -51,6 +51,7 @@ pub(super) fn profile(
             Command::OpenRemoteDirectory,
             Some(DefaultBinding::new("ctrl-shift-alt-o", &[])),
         ),
+        (Command::NewWorktree, None),
         (Command::CloseWorkspace, None),
         (
             Command::ActivateWorkspace1,

@@ -313,6 +313,7 @@ impl WorkspaceSidebar {
             available,
             repository,
             worktrees,
+            creates_worktrees,
             active,
         } = row;
         let row_background = row_background(appearance);
@@ -568,6 +569,15 @@ impl WorkspaceSidebar {
                         ))
                     }),
             )
+            .when(creates_worktrees && !lifted && !renaming, |row| {
+                row.child(new_worktree_button(
+                    workspace_id,
+                    // The button keeps its place while hidden, so the row never shifts.
+                    if selected { 1.0 } else { hover },
+                    sidebar.clone(),
+                    appearance,
+                ))
+            })
             .when_some(expanded, |row, expanded| {
                 row.child(self.render_disclosure(
                     workspace_id,
@@ -630,7 +640,13 @@ impl WorkspaceSidebar {
                 accessibility_name,
                 row,
                 // An expanded Workspace's Tabs belong to its Worktrees, whose rows open them.
-                workspace_menu_entries(!single_line, pinned, remote_connection_phase, presentation),
+                workspace_menu_entries(
+                    !single_line,
+                    creates_worktrees,
+                    pinned,
+                    remote_connection_phase,
+                    presentation,
+                ),
                 target,
                 sidebar,
                 window,
@@ -1422,6 +1438,70 @@ fn new_tab_entry<A: Clone>(
     .debug_selector(selector)
 }
 
+/// "New Worktree…", which presents the New Worktree dialog.
+fn new_worktree_entry<A: Clone>(
+    command: A,
+    selector: &'static str,
+    presentation: &crate::desktop_profile::DesktopPresentation,
+) -> MenuEntry<A> {
+    let entry = MenuEntry::action(NEW_WORKTREE_LABEL, command);
+    match presentation.shortcut(&crate::ui::NewWorktree) {
+        Some(shortcut) => entry.shortcut(shortcut),
+        None => entry,
+    }
+    .icon(|foreground, size| Icon::new(IconName::GitBranch, size, foreground).into_any_element())
+    .debug_selector(selector)
+}
+
+const NEW_WORKTREE_LABEL: &str = "New Worktree\u{2026}";
+
+/// The "+" a git Workspace row shows under the pointer and while selected.
+fn new_worktree_button(
+    workspace_id: WorkspaceId,
+    reveal: f32,
+    sidebar: WeakEntity<WorkspaceSidebar>,
+    appearance: &crate::ui::appearance::ChromeAppearance,
+) -> AnyElement {
+    let glyph_size = appearance.icons.metrics(IconRole::Caption).glyph_size;
+    div()
+        .flex_shrink_0()
+        .opacity(reveal)
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .child(
+            IconButton::new(
+                ("workspace-new-worktree", workspace_id.get()),
+                NEW_WORKTREE_LABEL,
+                move |foreground| {
+                    Icon::new(IconName::Plus, glyph_size, foreground).into_any_element()
+                },
+            )
+            .variant(ButtonVariant::Ghost)
+            .size(ButtonSize::Small)
+            .tab_stop(false)
+            .preserve_ancestor_hover()
+            .debug_selector(format!("workspace-new-worktree-{}", workspace_id.get()))
+            .tooltip(
+                Tooltip::new(
+                    ("workspace-new-worktree-tooltip", workspace_id.get()),
+                    NEW_WORKTREE_LABEL,
+                )
+                .debug_selector(format!(
+                    "workspace-new-worktree-tooltip-{}",
+                    workspace_id.get()
+                )),
+            )
+            .on_activate(move |_, _, cx| {
+                let _ = sidebar.update(cx, |_, cx| {
+                    cx.emit(SidebarEvent::Command {
+                        workspace_id,
+                        command: WorkspaceMenuCommand::NewWorktree,
+                    });
+                });
+            }),
+        )
+        .into_any_element()
+}
+
 /// The footer creation menu's rows, built from the shared creation descriptors.
 fn new_workspace_menu_entries(
     presentation: &crate::desktop_profile::DesktopPresentation,
@@ -1452,6 +1532,7 @@ fn new_workspace_menu_entries(
 /// Every Workspace command carries a symbol, so all labels share the icon column.
 fn workspace_menu_entries(
     new_tab: bool,
+    new_worktree: bool,
     pinned: bool,
     remote_connection_phase: Option<RemoteConnectionPhase>,
     presentation: &crate::desktop_profile::DesktopPresentation,
@@ -1461,6 +1542,13 @@ fn workspace_menu_entries(
         entries.push(new_tab_entry(
             RowMenuCommand::Workspace(WorkspaceMenuCommand::NewTab),
             "workspace-menu-row-new-tab",
+            presentation,
+        ));
+    }
+    if new_worktree {
+        entries.push(new_worktree_entry(
+            RowMenuCommand::Workspace(WorkspaceMenuCommand::NewWorktree),
+            "workspace-menu-row-new-worktree",
             presentation,
         ));
     }

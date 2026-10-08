@@ -10781,6 +10781,92 @@ fn worktree_rows_should_match_a_two_line_workspace_row_height(cx: &mut TestAppCo
 }
 
 #[gpui::test]
+fn a_git_workspace_should_create_a_worktree_and_open_its_first_tab_once_listed(
+    cx: &mut TestAppContext,
+) {
+    cx.update(|cx| {
+        crate::ui::worktree_store::testing::install(cx);
+    });
+    let (manager, records, cx) = workspace_manager(cx);
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let workspace_row: &'static str = format!("workspace-row-{}-active", workspace_id.get()).leak();
+    let plus: &'static str = format!("workspace-new-worktree-{}", workspace_id.get()).leak();
+    let offered = |cx: &mut VisualTestContext| {
+        right_click(workspace_row, cx);
+        let offered = cx.debug_bounds("workspace-menu-row-new-worktree").is_some();
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        (offered, cx.debug_bounds(plus).is_some())
+    };
+    let tabs = |cx: &mut VisualTestContext| {
+        manager.read_with(cx, |manager, cx| {
+            manager
+                .workspaces
+                .active_workspace()
+                .payload()
+                .read(cx)
+                .worktree_tab_counts()
+                .into_values()
+                .collect::<Vec<_>>()
+        })
+    };
+
+    let command_available = |cx: &mut VisualTestContext| {
+        cx.update(|window, cx| window.is_action_available(&crate::ui::NewWorktree, cx))
+    };
+
+    let outside_repository = offered(cx);
+    let command_outside = command_available(cx);
+    present_worktrees(cx, &[]);
+    let in_repository = offered(cx);
+    let command_inside = command_available(cx);
+    click(plus, cx);
+    let form = manager
+        .read_with(cx, |manager, _| manager.worktree_form())
+        .expect("the New Worktree dialog");
+    let presented = form.read_with(cx, |form, _| form.is_open());
+    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
+    let created = fixture.path().join("shell-integration");
+    form.update(cx, |_, cx| {
+        cx.emit(crate::ui::worktree_form::WorktreeFormEvent::Created(
+            created.clone(),
+        ));
+    });
+    cx.run_until_parked();
+    let before_listing = tabs(cx);
+    present_worktrees(cx, &[&created]);
+
+    assert_eq!(
+        (outside_repository, in_repository, presented),
+        ((false, false), (true, true), true),
+        "only a Workspace in a repository offers New Worktree, from its menu and its row"
+    );
+    assert_eq!(
+        (command_outside, command_inside),
+        (false, true),
+        "the New Worktree Command and its menu item act only in a repository"
+    );
+    assert_eq!(
+        (before_listing, tabs(cx)),
+        (vec![1], vec![1, 1]),
+        "the created Worktree's first Tab opens once git lists it"
+    );
+    assert_eq!(
+        records
+            .starts()
+            .last()
+            .and_then(|start| start.local_working_directory())
+            .map(|directory| directory.path().to_owned()),
+        Some(created)
+    );
+    assert!(manager.read_with(cx, |manager, cx| {
+        manager
+            .worktree_section(workspace_id, cx)
+            .is_some_and(|section| section.expanded)
+    }));
+}
+
+#[gpui::test]
 fn worktree_rows_should_open_tabs_from_their_own_menu(cx: &mut TestAppContext) {
     cx.update(|cx| {
         crate::ui::worktree_store::testing::install(cx);

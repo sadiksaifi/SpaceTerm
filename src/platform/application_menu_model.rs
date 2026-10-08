@@ -71,6 +71,7 @@ pub(crate) fn file_menu() -> Menu {
             MenuItem::action("Switch Workspace", SwitchWorkspace),
             MenuItem::separator(),
             MenuItem::action("New Tab", CreateTab),
+            MenuItem::action("New Worktree…", crate::ui::NewWorktree),
             MenuItem::separator(),
             MenuItem::action("Close Pane", ClosePane),
             MenuItem::action("Close Tab", CloseTab),

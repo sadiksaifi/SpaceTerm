@@ -91,6 +91,7 @@ mod tests {
         .unwrap();
         let resolved = profile.resolve(&KeybindingPreferences::default());
         let unassigned = [
+            Command::NewWorktree,
             Command::CloseWorkspace,
             Command::MoveTabRight,
             Command::MoveTabLeft,

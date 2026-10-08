@@ -10,6 +10,7 @@ pub(crate) mod catalog;
 pub(crate) mod git;
 pub(crate) mod listing;
 pub(crate) mod path_template;
+pub(crate) mod ref_format;
 
 use std::fmt;
 use std::path::{Path, PathBuf};

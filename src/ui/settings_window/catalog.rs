@@ -739,6 +739,7 @@ shortcut_rows! {
     NewRemoteWorkspace => "new-remote-workspace",
     OpenLocalDirectory => "open-local-directory",
     OpenRemoteDirectory => "open-remote-directory",
+    NewWorktree => "new-worktree",
     CloseWorkspace => "close-workspace",
     ActivateWorkspace1 => "activate-workspace-1",
     ActivateWorkspace2 => "activate-workspace-2",

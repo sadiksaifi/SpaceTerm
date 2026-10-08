@@ -4,9 +4,10 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui::{App, Context, Entity, SharedString, Subscription, Window};
+use gpui::{App, AppContext as _, Context, Entity, SharedString, Subscription, Task, Window};
 
 use super::WorkspaceManager;
 use super::repository::{RowFacts, RowKey};
@@ -19,14 +20,55 @@ use crate::repository_status::presentation::{HeadGlyph, SidebarBadge};
 use crate::repository_status::scheduler::SourceDirectory;
 use crate::ui::TabManager;
 use crate::ui::workspace_sidebar::{WorktreeGroup, WorktreeRowViewModel, WorktreeSection};
+use crate::ui::worktree_form::{
+    LocationProbe, WorktreeForm, WorktreeFormBackend, WorktreeFormContext, WorktreeFormEvent,
+};
 use crate::ui::worktree_store::{InstalledWorktrees, WorktreeStore, WorktreesChanged};
 use crate::worktrees::WorktreeSnapshot;
 use crate::worktrees::catalog::{WorktreeInterestId, WorktreeListing};
+use crate::worktrees::git::{BranchList, WorktreeBranch, WorktreeCreateError};
 use crate::worktrees::listing::{WorktreeHead, WorktreeRecord};
 
 #[derive(Default)]
 pub(super) struct SidebarWorktrees {
     workspaces: BTreeMap<WorkspaceId, WorkspaceWorktrees>,
+    form: Option<Entity<WorktreeForm>>,
+    created: Option<CreatedWorktree>,
+}
+
+/// A Worktree git created whose first Tab opens once the listing shows it.
+struct CreatedWorktree {
+    workspace_id: WorkspaceId,
+    path: PathBuf,
+    /// The roots listed before the create. Git may spell the new root differently from the
+    /// typed path, so the one new root also names it.
+    known: Vec<PathBuf>,
+    _changes: Subscription,
+}
+
+/// Runs the New Worktree dialog's git work through the shared store.
+struct StoreFormBackend {
+    store: Entity<WorktreeStore>,
+    root: PathBuf,
+    common: PathBuf,
+}
+
+impl WorktreeFormBackend for StoreFormBackend {
+    fn branches(&self, cx: &mut App) -> Task<Option<BranchList>> {
+        let root = self.root.clone();
+        self.store.update(cx, |store, cx| store.branches(root, cx))
+    }
+
+    fn create(
+        &self,
+        path: PathBuf,
+        branch: WorktreeBranch,
+        cx: &mut App,
+    ) -> Task<Result<(), WorktreeCreateError>> {
+        let (root, common) = (self.root.clone(), self.common.clone());
+        self.store
+            .update(cx, |store, cx| store.create(root, common, path, branch, cx))
+    }
 }
 
 struct WorkspaceWorktrees {
@@ -163,6 +205,162 @@ impl WorkspaceManager {
                 .update(cx, |manager, cx| manager.create_tab(window, cx));
         }
         true
+    }
+
+    /// Whether a Workspace reads a local repository, where it can create Worktrees.
+    pub(super) fn creates_worktrees(&self, workspace_id: WorkspaceId, cx: &App) -> bool {
+        self.sidebar_worktrees
+            .workspaces
+            .get(&workspace_id)
+            .is_some_and(|worktrees| worktrees.listed(cx).is_some())
+    }
+
+    /// Presents the New Worktree dialog for a Workspace's repository.
+    pub(super) fn new_worktree(
+        &mut self,
+        workspace_id: WorkspaceId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self
+            .sidebar_worktrees
+            .form
+            .as_ref()
+            .is_some_and(|form| form.read(cx).is_open())
+        {
+            return false;
+        }
+        let Some(worktrees) = self.sidebar_worktrees.workspaces.get(&workspace_id) else {
+            return false;
+        };
+        let Some(snapshot) = worktrees.listed(cx) else {
+            return false;
+        };
+        let store = worktrees.store.clone();
+        let branch_of = |record: &WorktreeRecord| match &record.head {
+            WorktreeHead::Branch(branch) => Some(branch.clone()),
+            WorktreeHead::Detached(_) | WorktreeHead::Bare => None,
+        };
+        // A new branch starts from the Active Worktree's branch, else the Main Worktree's.
+        let active = self
+            .workspaces
+            .workspace(workspace_id)
+            .and_then(|workspace| workspace.payload().read(cx).active_worktree())
+            .and_then(|id| worktrees.registry.key(id))
+            .and_then(|key| {
+                snapshot
+                    .worktrees
+                    .iter()
+                    .find(|record| record.root == key.root())
+            })
+            .and_then(branch_of);
+        let default_base = active.or_else(|| snapshot.worktrees.first().and_then(branch_of));
+        let checked_out = snapshot
+            .worktrees
+            .iter()
+            .filter_map(|record| {
+                Some((
+                    branch_of(record)?,
+                    directory_name(&record.root).to_string().into(),
+                ))
+            })
+            .collect();
+        let context = WorktreeFormContext {
+            repository_name: directory_name(snapshot.repository.main_root()).to_string(),
+            template: store.read(cx).path_template(),
+            home: self.local_home_directory_path.clone(),
+            checked_out,
+            default_base,
+        };
+        let backend = Rc::new(StoreFormBackend {
+            store: store.clone(),
+            root: snapshot.repository.main_root().to_path_buf(),
+            common: snapshot.common_directory.clone(),
+        });
+        let filesystem = self.local_filesystem.clone();
+        let probe: LocationProbe =
+            Rc::new(move |path: &std::path::Path| filesystem.probe_new_directory(path));
+        let known: Vec<PathBuf> = snapshot
+            .worktrees
+            .iter()
+            .map(|record| record.root.clone())
+            .collect();
+        let form = cx.new(|cx| WorktreeForm::new(backend, context, probe, window, cx));
+        cx.subscribe_in(&form, window, move |manager, _, event, window, cx| {
+            if let WorktreeFormEvent::Created(path) = event {
+                let changes = cx.subscribe_in(
+                    &store,
+                    window,
+                    |manager, _, _: &WorktreesChanged, window, cx| {
+                        manager.open_created_worktree(window, cx);
+                    },
+                );
+                manager.set_worktrees_expanded(workspace_id, true);
+                manager.sidebar_worktrees.created = Some(CreatedWorktree {
+                    workspace_id,
+                    path: path.clone(),
+                    known: known.clone(),
+                    _changes: changes,
+                });
+                manager.open_created_worktree(window, cx);
+            }
+        })
+        .detach();
+        let presented = form.update(cx, |form, cx| form.present(window, cx));
+        self.sidebar_worktrees.form = Some(form);
+        presented
+    }
+
+    #[cfg(test)]
+    pub(super) fn worktree_form(&self) -> Option<Entity<WorktreeForm>> {
+        self.sidebar_worktrees.form.clone()
+    }
+
+    /// Opens the first Tab of the Worktree the dialog created once its listing shows it.
+    fn open_created_worktree(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(created) = &self.sidebar_worktrees.created else {
+            return;
+        };
+        let workspace_id = created.workspace_id;
+        self.sync_sidebar_worktrees(cx);
+        let Some(created) = &self.sidebar_worktrees.created else {
+            return;
+        };
+        let Some(worktrees) = self.sidebar_worktrees.workspaces.get(&workspace_id) else {
+            self.sidebar_worktrees.created = None;
+            return;
+        };
+        let Some(snapshot) = worktrees.listed(cx) else {
+            return;
+        };
+        let added: Vec<&WorktreeRecord> = snapshot
+            .worktrees
+            .iter()
+            .filter(|record| !created.known.contains(&record.root))
+            .collect();
+        let record = snapshot
+            .worktrees
+            .iter()
+            .find(|record| record.root == created.path)
+            .or_else(|| match added[..] {
+                [record] => Some(record),
+                _ => None,
+            });
+        let Some(id) = record.and_then(|record| {
+            worktrees.registry.id(&WorktreeKey::new(
+                snapshot.repository.clone(),
+                record.root.clone(),
+            ))
+        }) else {
+            return;
+        };
+        self.sidebar_worktrees.created = None;
+        if self.activate_workspace(workspace_id, window, cx)
+            && self.open_worktree(workspace_id, id, true, window, cx)
+        {
+            self.focus(window, cx);
+        }
+        cx.notify();
     }
 
     pub(super) fn set_worktrees_expanded(&mut self, workspace_id: WorkspaceId, expanded: bool) {

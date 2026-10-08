@@ -51,6 +51,7 @@ pub(crate) fn profile(
             Command::OpenRemoteDirectory,
             Some(DefaultBinding::new("cmd-shift-o", &[])),
         ),
+        (Command::NewWorktree, None),
         (Command::CloseWorkspace, None),
         (
             Command::ActivateWorkspace1,

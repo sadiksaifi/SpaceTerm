@@ -463,6 +463,9 @@
         "open_remote_directory": {
           "$ref": "#/$defs/shortcutOverride"
         },
+        "new_worktree": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
         "close_workspace": {
           "$ref": "#/$defs/shortcutOverride"
         },

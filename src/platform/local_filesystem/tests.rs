@@ -295,6 +295,32 @@ fn child_directory_listing_names_only_directories_and_stops_at_its_limit() {
 }
 
 #[test]
+fn a_new_directory_may_go_only_where_nothing_or_an_empty_directory_is() {
+    let root = Fixture::new();
+    let authority = LocalFilesystemAuthority::testing();
+    let empty = root.0.join("empty");
+    fs::create_dir(&empty).unwrap();
+    fs::create_dir(root.0.join("full")).unwrap();
+    fs::write(root.0.join("full/notes.txt"), b"").unwrap();
+
+    for (path, expected) in [
+        (root.0.join("absent/child"), Ok(NewDirectoryTarget::Free)),
+        (empty, Ok(NewDirectoryTarget::Free)),
+        (root.0.join("full"), Ok(NewDirectoryTarget::Occupied)),
+        (
+            root.0.join("full/notes.txt"),
+            Ok(NewDirectoryTarget::Occupied),
+        ),
+        (
+            PathBuf::from("relative"),
+            Err(LocalFilesystemError::NotAbsolute),
+        ),
+    ] {
+        assert_eq!(authority.probe_new_directory(&path), expected);
+    }
+}
+
+#[test]
 fn directory_probe_and_creation_classify_the_exact_path() {
     let root = Fixture::new();
     let authority = LocalFilesystemAuthority::testing();

@@ -44,11 +44,12 @@ use super::{
     ActivateWorkspace7, ActivateWorkspace8, ActivateWorkspace9, ClosePane, CloseTab,
     CloseTerminalFind, CloseWorkspace, CopySelection, CreateTab, FindNext, FindPrevious,
     FocusNextPane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, FocusPreviousPane,
-    MoveTabLeft, MoveTabRight, NewRemoteWorkspace, NewWorkspace, NextTab, OpenLocalDirectory,
-    OpenRemoteDirectory, OpenTerminalFind, PreviousTab, RemoteChildLaunchUnavailable,
-    ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop, ShowRepositoryStatus, SplitDown,
-    SplitRight, SwitchWorkspace, TERMINAL_KEY_CONTEXT, TabManager, TabManagerEvent, TogglePaneZoom,
-    ToggleSidebar, ToggleSidebarFocus, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
+    MoveTabLeft, MoveTabRight, NewRemoteWorkspace, NewWorkspace, NewWorktree, NextTab,
+    OpenLocalDirectory, OpenRemoteDirectory, OpenTerminalFind, PreviousTab,
+    RemoteChildLaunchUnavailable, ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop,
+    ShowRepositoryStatus, SplitDown, SplitRight, SwitchWorkspace, TERMINAL_KEY_CONTEXT, TabManager,
+    TabManagerEvent, TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus,
+    WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
 };
 use crate::appearance::Color;
 use crate::close_confirmation::{
@@ -2870,6 +2871,9 @@ impl WorkspaceManager {
                 self.sync_terminal_focus_blocker(window, cx);
                 cx.notify();
             }
+            WorkspaceMenuCommand::NewWorktree => {
+                self.new_worktree(workspace_id, window, cx);
+            }
             WorkspaceMenuCommand::Reconnect => {
                 self.start_remote_workspace_reconnect(workspace_id, window, cx)
             }
@@ -2899,6 +2903,11 @@ impl WorkspaceManager {
         cx: &mut Context<Self>,
     ) {
         self.run_workspace_creation(WorkspaceCreation::Remote, window, cx);
+    }
+
+    fn on_new_worktree(&mut self, _: &NewWorktree, window: &mut Window, cx: &mut Context<Self>) {
+        let workspace_id = self.workspaces.active_workspace_id();
+        self.new_worktree(workspace_id, window, cx);
     }
 
     fn on_open_local_directory(
@@ -3462,6 +3471,7 @@ impl WorkspaceManager {
                     available,
                     repository,
                     worktrees,
+                    creates_worktrees: available && self.creates_worktrees(workspace.id(), cx),
                     active: workspace.id() == active_workspace_id,
                 }
             })
@@ -3514,7 +3524,10 @@ impl WorkspaceManager {
         self.sidebar.update(cx, |sidebar, cx| {
             sidebar.set_rows(rows, remote_unavailable, cx)
         });
-        let content = Self::workspace_action_scope(cx)
+        // The New Worktree Command is available only where it can act, so its menu item disables
+        // elsewhere.
+        let new_worktree = self.creates_worktrees(self.workspaces.active_workspace_id(), cx);
+        let content = Self::workspace_action_scope(new_worktree, cx)
             .id("workspace-manager")
             .bg(gpui_color(super::appearance::chrome(cx).surface(
                 crate::appearance::SurfaceRole::Sheet,
@@ -3560,7 +3573,7 @@ impl WorkspaceManager {
                 ),
             )
             .child(self.render_top_left_chrome(chrome, manager.clone(), window, cx));
-        let transients = Self::workspace_action_scope(cx)
+        let transients = Self::workspace_action_scope(new_worktree, cx)
             .absolute()
             .inset_0()
             .children(self.remote_workspace_flow.iter().cloned())
@@ -3572,9 +3585,12 @@ impl WorkspaceManager {
 impl WorkspaceManager {
     /// Keeps ordinary content and complete transient owners on the same action routes while leaving
     /// the active modal outside those routes.
-    fn workspace_action_scope(cx: &Context<Self>) -> gpui::Div {
+    fn workspace_action_scope(new_worktree: bool, cx: &Context<Self>) -> gpui::Div {
         div()
             .key_context(TERMINAL_KEY_CONTEXT)
+            .when(new_worktree, |scope| {
+                scope.on_action(cx.listener(Self::on_new_worktree))
+            })
             .on_action(cx.listener(Self::on_switch_workspace))
             .on_action(cx.listener(Self::on_new_workspace))
             .on_action(cx.listener(Self::on_new_remote_workspace))

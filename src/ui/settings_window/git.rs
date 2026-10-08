@@ -131,7 +131,7 @@ pub(super) fn git_presentation(status: GitToolStatus) -> ToolPresentation {
         GitToolStatus::Ready(version) => (
             version_text(version),
             "settings-git-tool-state-ready",
-            "SpaceTerm reads repositories with this Git and never changes them.",
+            "SpaceTerm reads repositories with this Git. It changes one only when you create or remove a Worktree.",
         ),
         GitToolStatus::TooOld(version) => (
             version_text(version),
