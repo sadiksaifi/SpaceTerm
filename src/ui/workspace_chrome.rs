@@ -7,7 +7,7 @@ use spaceterm_ui::{ButtonSize, ButtonTheme, ComboBoxTheme, CustomIconName, Icon,
 
 use super::appearance::{ChromeAppearance, chrome};
 use super::chrome_icons::IconRole;
-use super::chrome_typography::{ChromeTextStyleExt as _, TextRole};
+use super::chrome_typography::{ChromeTextStyleExt as _, ChromeTypography, TextRole};
 use super::workspace_sidebar::SidebarLayout;
 use super::workspace_status::{WorkspaceStatusPaint, resolve as resolve_workspace_status};
 use crate::appearance::Color;
@@ -124,13 +124,16 @@ impl WorkspaceChromeLayout {
         } else {
             leading_clearance(window.is_fullscreen(), edge_reserve, cx)
         };
-        (leading_width
-            + edge_reserve
-            + edge_reserve
-            + cx.global::<ButtonTheme>().icon_button_size(TOGGLE_SIZE)
-            + cx.global::<ComboBoxTheme>()
-                .custom_trigger_width(content_width))
-        .ceil()
+        ChromeTypography::round_measurement_up(
+            (leading_width
+                + edge_reserve
+                + edge_reserve
+                + cx.global::<ButtonTheme>().icon_button_size(TOGGLE_SIZE)
+                + cx.global::<ComboBoxTheme>()
+                    .custom_trigger_width(content_width))
+            .ceil(),
+            window,
+        )
     }
 
     pub(super) fn render_controls(

@@ -3284,6 +3284,61 @@ mod tests {
     };
     use crate::ui::RemoteChildLaunchUnavailable;
 
+    struct CaptionSegmentFixture {
+        text: &'static str,
+    }
+
+    impl Render for CaptionSegmentFixture {
+        fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let appearance = super::super::appearance::ChromeAppearance::default();
+            div()
+                .debug_selector(|| "fractional-caption-segment".to_owned())
+                .w(measure_caption_segment(
+                    &self.text.into(),
+                    window,
+                    &appearance,
+                ))
+                .chrome_text(appearance.typography.style(TextRole::Body))
+                .truncate()
+                .child(self.text)
+        }
+    }
+
+    #[gpui::test]
+    fn caption_segment_keeps_its_full_width_at_fractional_scales(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, _| CaptionSegmentFixture { text: "A aa" });
+        let appearance = super::super::appearance::ChromeAppearance::default();
+        let mut failures = Vec::new();
+        for (scale, text) in [(1.25, "A aa"), (1.5, "A aa"), (1.75, "A aaaaa")] {
+            cx.simulate_scale_factor_change(scale);
+            view.update(cx, |view, cx| {
+                view.text = text;
+                cx.notify();
+            });
+            cx.run_until_parked();
+            let intrinsic = cx.update(|window, _| {
+                appearance
+                    .typography
+                    .measure(TextRole::Body, text, window)
+                    .ceil()
+            });
+            // The caption ladder must reserve all 29 or 51 intrinsic logical pixels after snapping.
+            let intrinsic_device = f32::from(intrinsic) * scale;
+            assert_eq!(f32::from(intrinsic) as u32 % 2, 1);
+            assert!((intrinsic_device - 0.5).ceil() < intrinsic_device);
+            let segment = cx
+                .debug_bounds("fractional-caption-segment")
+                .expect("caption segment");
+            if segment.size.width < intrinsic {
+                failures.push((scale, text, segment, intrinsic));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "caption ladder must reserve the full segment: {failures:?}"
+        );
+    }
+
     fn prepared_appearance(
         appearance: crate::appearance::Appearance,
         opacity: f32,

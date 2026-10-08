@@ -7,7 +7,7 @@ use crate::appearance::PullRequestPaint;
 use crate::repository_status::presentation::SidebarBadge;
 use crate::ui::appearance::ChromeAppearance;
 use crate::ui::chrome_icons::IconRole;
-use crate::ui::chrome_typography::{ChromeTextStyleExt, TextRole};
+use crate::ui::chrome_typography::{ChromeTextStyleExt, ChromeTypography, TextRole};
 use crate::ui::workspace_status::WorkspaceStatusPaint;
 
 use crate::ui::appearance::gpui_color;
@@ -33,10 +33,12 @@ pub(super) fn title(
                 .typography
                 .measure(TextRole::Navigation, &name, window);
             let machine = machine.and_then(|machine| {
-                let full_width =
+                let full_width = ChromeTypography::round_measurement_up(
                     appearance
                         .typography
-                        .measure(TextRole::Secondary, &machine, window);
+                        .measure(TextRole::Secondary, &machine, window),
+                    window,
+                );
                 machine_width(bounds.size.width, name_width, full_width)
                     .map(|width| (machine, width))
             });
@@ -107,10 +109,13 @@ pub(super) fn detail(
             };
             let row_width = (bounds.size.width - pin_width).max(px(0.0));
             let measure = |value: &str| {
-                appearance
-                    .typography
-                    .measure(TextRole::Secondary, value, window)
-                    .ceil()
+                ChromeTypography::round_measurement_up(
+                    appearance
+                        .typography
+                        .measure(TextRole::Secondary, value, window)
+                        .ceil(),
+                    window,
+                )
             };
             let repository_width = repository.as_ref().map_or(px(0.0), |repository| {
                 let glyph = match &repository.badge {
@@ -292,6 +297,59 @@ fn fit_trailing_path(text: &str, available: Pixels, measure: impl Fn(&str) -> Pi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct MachineLabelFixture {
+        machine: &'static str,
+    }
+
+    impl gpui::Render for MachineLabelFixture {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            div().w(px(400.0)).child(title(
+                "Workspace".into(),
+                div().child("Workspace").into_any_element(),
+                Some(self.machine.into()),
+                1,
+                ChromeAppearance::default(),
+            ))
+        }
+    }
+
+    #[gpui::test]
+    fn machine_label_does_not_truncate_at_fractional_scales(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, _| MachineLabelFixture { machine: "A aaa" });
+        let mut failures = Vec::new();
+        for (scale, machine) in [(1.25, "A aaa"), (1.5, "A aaa"), (1.75, "A aa")] {
+            cx.simulate_scale_factor_change(scale);
+            view.update(cx, |view, cx| {
+                view.machine = machine;
+                cx.notify();
+            });
+            cx.run_until_parked();
+            let measured = cx.update(|window, _| {
+                ChromeAppearance::default()
+                    .typography
+                    .measure(TextRole::Secondary, machine, window)
+            });
+            // 33 and 27 logical pixels are odd. The unrounded text widths snap down at these scales.
+            assert_eq!(f32::from(measured.ceil()) as u32 % 2, 1);
+            let device_width = f32::from(measured) * scale;
+            assert!((device_width - 0.5).ceil() < device_width);
+            let label = cx
+                .debug_bounds("workspace-machine-1")
+                .expect("machine label");
+            if label.size.width < measured {
+                failures.push((scale, machine, measured, label));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "machine labels must fit without truncation: {failures:?}"
+        );
+    }
 
     #[test]
     fn machine_should_shrink_then_hide_before_name_shrinks() {

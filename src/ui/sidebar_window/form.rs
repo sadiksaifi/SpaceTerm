@@ -358,10 +358,13 @@ impl FormRow {
             .as_ref()
             .filter(|_| !above)
             .map(|description| {
-                appearance
-                    .typography
-                    .measure(TextRole::Secondary, description, window)
-                    .ceil()
+                ChromeTypography::round_measurement_up(
+                    appearance
+                        .typography
+                        .measure(TextRole::Secondary, description, window)
+                        .ceil(),
+                    window,
+                )
             })
             .map_or(px(0.0), |width| {
                 let label_with_reset =
@@ -793,6 +796,89 @@ pub(crate) fn action_button(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct FormLabelFixture {
+        label: &'static str,
+        appearance: ChromeAppearance,
+    }
+
+    impl gpui::Render for FormLabelFixture {
+        fn render(
+            &mut self,
+            window: &mut Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            div().w(px(800.0)).child(
+                FormRow::new("fractional-form", self.label, div().w(px(80.0)).h(px(24.0))).render(
+                    &self.appearance,
+                    window,
+                    cx,
+                ),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn form_label_stays_on_one_line_at_fractional_scales(cx: &mut gpui::TestAppContext) {
+        let mut preferences = crate::appearance::AppearancePreferences::default();
+        preferences.window.density = crate::appearance::ChromeDensity::Comfortable;
+        let resolved = crate::appearance::ThemeCatalog::default()
+            .resolve(
+                crate::appearance::AppearanceGeneration::INITIAL,
+                &preferences,
+                crate::appearance::SystemAppearance::available(crate::appearance::Appearance::Dark),
+                &crate::appearance::AvailableFonts::default(),
+            )
+            .expect("fixture appearance");
+        let appearance = ChromeAppearance::prepare(&resolved.chrome);
+        let (view, cx) = cx.add_window_view(|_, _| FormLabelFixture {
+            label: "Use bright colors when displaying bold terminal outputs",
+            appearance: appearance.clone(),
+        });
+        let mut failures = Vec::new();
+        for (scale, label) in [
+            (
+                1.25,
+                "Use bright colors when displaying bold terminal outputs",
+            ),
+            (
+                1.5,
+                "Use bright colors when displaying bold terminal outputs",
+            ),
+            (1.75, "A row"),
+        ] {
+            cx.simulate_scale_factor_change(scale);
+            view.update(cx, |view, cx| {
+                view.label = label;
+                cx.notify();
+            });
+            cx.run_until_parked();
+            let measured =
+                cx.update(|window, _| appearance.typography.measure(TextRole::Body, label, window));
+            // Comfortable Body text rounds to 429 and 39 logical pixels; both snap down here.
+            let intrinsic = f32::from(measured.ceil());
+            assert_eq!(
+                intrinsic as u32 % 2,
+                1,
+                "{label:?}: {measured:?}, {:?}",
+                appearance.typography.style(TextRole::Body)
+            );
+            assert!((intrinsic * scale - 0.5).ceil() < intrinsic * scale);
+            let bounds = cx
+                .debug_bounds("fractional-form-label")
+                .expect("form label");
+            let line_height = f32::from(label_line_height(&appearance)) * scale;
+            let height = f32::from(bounds.size.height) * scale;
+            if height < line_height.floor() || height > line_height.ceil() {
+                failures.push((scale, label, bounds));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "form labels must occupy one line: {failures:?}"
+        );
+    }
+
     #[test]
     fn stepper_divider_uses_materialized_card_field_state() {
         let mut appearance = ChromeAppearance::default();
