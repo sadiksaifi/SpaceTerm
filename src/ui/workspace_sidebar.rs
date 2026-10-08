@@ -51,6 +51,11 @@ pub(super) enum SidebarEvent {
         workspace_id: WorkspaceId,
         expanded: bool,
     },
+    WorktreeCommand {
+        workspace_id: WorkspaceId,
+        worktree_id: WorktreeId,
+        command: WorktreeMenuCommand,
+    },
     Rename {
         workspace_id: WorkspaceId,
         name: String,
@@ -85,6 +90,13 @@ pub(super) enum WorkspaceMenuCommand {
     UnpinDirectory,
     Reconnect,
     Close,
+}
+
+/// What a Worktree row's menu asks of the application.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum WorktreeMenuCommand {
+    /// Opens another Tab in the Worktree, or its first.
+    NewTab,
 }
 
 #[derive(Clone, Copy)]
@@ -230,7 +242,7 @@ pub(super) struct WorkspaceSidebar {
     /// Whether the keyboard brought focus to the sidebar, so its selection is emphasized. Pointer
     /// paths that focus the sidebar, like the scrollbar and a secondary click, clear it.
     focus_visible: bool,
-    menu: Option<WorkspaceId>,
+    menu: Option<SidebarRowKey>,
     /// The row the keyboard stands on when it is not the derived selection: a Worktree with no
     /// Tabs yet, or a Workspace whose Active Worktree's row is disclosed.
     cursor: Option<SidebarRowKey>,
@@ -364,13 +376,19 @@ impl WorkspaceSidebar {
 }
 
 impl WorkspaceSidebar {
+    /// Opens a row's menu. A Workspace row's menu activates it; a Worktree row's menu only moves
+    /// the selection, so a Worktree with no Tabs stays unopened.
     fn request_menu(
         &mut self,
-        workspace_id: WorkspaceId,
+        key: SidebarRowKey,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !self.rows.iter().any(|row| row.workspace_id == workspace_id) {
+        if !self
+            .visible_keys()
+            .iter()
+            .any(|(visible, _)| *visible == key)
+        {
             return false;
         }
         // The keyboard opens the menu only from the focused sidebar, so a request from anywhere
@@ -378,29 +396,28 @@ impl WorkspaceSidebar {
         self.focus_visible &= self.focus.is_focused(window);
         self.focus.focus(window, cx);
         self.rename = None;
-        self.menu = Some(workspace_id);
+        self.menu = Some(key);
         cx.emit(SidebarEvent::Activate {
-            workspace_id,
+            workspace_id: key.workspace_id(),
             focus_pane: false,
         });
+        if let SidebarRowKey::Worktree(..) = key {
+            self.cursor = Some(key);
+        }
         cx.notify();
         true
     }
 
-    pub(super) fn handle_menu_lifecycle(
+    fn handle_menu_lifecycle(
         &mut self,
-        workspace_id: WorkspaceId,
+        key: SidebarRowKey,
         event: MenuLifecycleEvent,
         _: &Window,
         cx: &mut Context<Self>,
     ) {
         match event {
-            MenuLifecycleEvent::Opened => self.menu = Some(workspace_id),
-            MenuLifecycleEvent::Closed(_)
-                if self.menu.is_some_and(|target| target == workspace_id) =>
-            {
-                self.menu = None
-            }
+            MenuLifecycleEvent::Opened => self.menu = Some(key),
+            MenuLifecycleEvent::Closed(_) if self.menu == Some(key) => self.menu = None,
             MenuLifecycleEvent::Closed(_) => return,
         }
         cx.emit(SidebarEvent::FocusChanged);

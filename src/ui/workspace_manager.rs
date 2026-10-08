@@ -10,7 +10,7 @@ use super::workspace_sidebar::{
 };
 use super::workspace_sidebar::{
     SidebarEvent, WorkspaceMenuCommand, WorkspaceRowViewModel, WorkspaceSidebar,
-    remote_connection_status,
+    WorktreeMenuCommand, remote_connection_status,
 };
 use crate::platform::terminal_accessibility::TerminalAccessibilityAdapterFactory;
 use crate::ssh::remote_account::RemoteWorkspaceAccount;
@@ -2820,6 +2820,17 @@ impl WorkspaceManager {
                 workspace_id,
                 expanded,
             } => self.set_worktrees_expanded(workspace_id, expanded),
+            SidebarEvent::WorktreeCommand {
+                workspace_id,
+                worktree_id,
+                command: WorktreeMenuCommand::NewTab,
+            } => {
+                if self.activate_workspace(workspace_id, window, cx)
+                    && self.new_worktree_tab(workspace_id, worktree_id, window, cx)
+                {
+                    self.focus(window, cx);
+                }
+            }
             SidebarEvent::LayoutChanged => self.synchronize_tab_manager_layouts(window, cx),
             SidebarEvent::FocusPane => self.focus(window, cx),
             SidebarEvent::FocusChanged => {}

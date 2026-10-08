@@ -145,6 +145,26 @@ impl WorkspaceManager {
         true
     }
 
+    /// Opens another Tab in a Worktree, or its first Tab when it has none.
+    pub(super) fn new_worktree_tab(
+        &mut self,
+        workspace_id: WorkspaceId,
+        worktree_id: WorktreeId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let had_tabs = self.worktree_has_tabs(workspace_id, worktree_id, cx);
+        if !self.open_worktree(workspace_id, worktree_id, true, window, cx) {
+            return false;
+        }
+        if had_tabs && let Some(workspace) = self.workspaces.workspace(workspace_id) {
+            workspace
+                .payload()
+                .update(cx, |manager, cx| manager.create_tab(window, cx));
+        }
+        true
+    }
+
     pub(super) fn set_worktrees_expanded(&mut self, workspace_id: WorkspaceId, expanded: bool) {
         if let Some(worktrees) = self.sidebar_worktrees.workspaces.get_mut(&workspace_id) {
             worktrees.expanded = Some(expanded);

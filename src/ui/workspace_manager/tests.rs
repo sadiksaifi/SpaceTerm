@@ -10727,6 +10727,73 @@ fn an_active_expanded_workspace_should_share_one_fill_with_its_worktrees(cx: &mu
 }
 
 #[gpui::test]
+fn worktree_rows_should_open_tabs_from_their_own_menu(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        crate::ui::worktree_store::testing::install(cx);
+    });
+    let (manager, _records, cx) = workspace_manager(cx);
+    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
+    present_worktrees(cx, &[&fixture.path().join("shell-integration")]);
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let linked = manager.read_with(cx, |manager, cx| {
+        manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows[1].worktree_id
+    });
+    let tabs = |cx: &mut VisualTestContext| {
+        manager.read_with(cx, |manager, cx| {
+            manager
+                .workspaces
+                .active_workspace()
+                .payload()
+                .read(cx)
+                .worktree_tab_counts()
+                .into_values()
+                .collect::<Vec<_>>()
+        })
+    };
+    let workspace_row: &'static str = format!("workspace-row-{}-active", workspace_id.get()).leak();
+    let linked_row = |state: &str| -> &'static str {
+        format!("worktree-row-{}-{linked}-{state}", workspace_id.get()).leak()
+    };
+    let new_tab_offered = |row: &'static str, cx: &mut VisualTestContext| {
+        right_click(row, cx);
+        let offered = cx.debug_bounds("workspace-menu-row-new-tab").is_some();
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        offered
+    };
+
+    let expanded_offers_new_tab = new_tab_offered(workspace_row, cx);
+    right_click(linked_row("unselected"), cx);
+    let after_menu = tabs(cx);
+    click("worktree-menu-row-new-tab", cx);
+    let after_first = tabs(cx);
+    right_click(linked_row("selected"), cx);
+    click("worktree-menu-row-new-tab", cx);
+    let after_second = tabs(cx);
+    manager.update(cx, |manager, cx| {
+        manager.set_worktrees_expanded(workspace_id, false);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let collapsed_offers_new_tab = new_tab_offered(workspace_row, cx);
+
+    assert!(
+        !expanded_offers_new_tab,
+        "an expanded Workspace leaves New Tab to its Worktree rows"
+    );
+    assert_eq!(
+        (after_menu, after_first, after_second),
+        (vec![1], vec![1, 1], vec![1, 2]),
+        "opening the menu leaves the Worktree unopened, and New Tab opens its first Tab, then \
+         another"
+    );
+    assert!(
+        collapsed_offers_new_tab,
+        "a collapsed Workspace opens a Tab in its Active Worktree"
+    );
+}
+
+#[gpui::test]
 fn the_keyboard_should_walk_worktrees_and_open_one_only_on_return(cx: &mut TestAppContext) {
     use spaceterm_ui::a11y_testing::A11yTree;
 

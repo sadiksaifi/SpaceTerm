@@ -690,54 +690,82 @@ impl WorkspaceSidebar {
                 });
             });
         });
-        let open_sidebar = sidebar.clone();
-        let lifecycle_sidebar = sidebar.clone();
-        let lifecycle_window = window.window_handle();
-        let activate_sidebar = sidebar;
         div()
             .id(("workspace-menu", workspace_id.get()))
             .debug_selector(move || format!("workspace-menu-{}", workspace_id.get()))
             .w_full()
             .flex_shrink_0()
-            .child(
-                ContextMenu::new(
-                    ("workspace-menu-controls", workspace_id.get()),
-                    accessibility_name,
-                    row,
-                    workspace_menu_entries(pinned, remote_connection_phase, presentation),
-                )
-                .size(MenuSize::Wide)
-                .when(active, |menu| menu.keyboard_trigger(&self.focus))
-                .target(target)
-                .debug_selector(format!("workspace-menu-controls-{}", workspace_id.get()))
-                .on_open_request(move |_, window, cx| {
-                    open_sidebar
-                        .update(cx, |sidebar, cx| {
-                            sidebar.request_menu(workspace_id, window, cx)
-                        })
-                        .unwrap_or(false)
-                })
-                .on_lifecycle(move |event, cx| {
-                    let sidebar = lifecycle_sidebar.clone();
-                    let event = *event;
-                    // Menu lifecycle delivery can occur while its Window is borrowed.
-                    // Resolve ownership after that delivery, using the current Window facts.
-                    cx.defer(move |cx| {
-                        let _ = lifecycle_window.update(cx, |_, window, cx| {
-                            let _ = sidebar.update(cx, |sidebar, cx| {
-                                sidebar.handle_menu_lifecycle(workspace_id, event, window, cx);
-                            });
-                        });
-                    });
-                })
-                .on_activate(move |activation, window, cx| {
-                    let command = *activation.action();
-                    let _ = activate_sidebar.update(cx, |sidebar, cx| {
-                        sidebar.perform_menu_command(workspace_id, command, window, cx);
-                    });
-                }),
-            )
+            .child(self.row_menu(
+                SidebarRowKey::Workspace(workspace_id),
+                format!("workspace-menu-controls-{}", workspace_id.get()),
+                accessibility_name,
+                row,
+                // An expanded Workspace's Tabs belong to its Worktrees, whose rows open them.
+                workspace_menu_entries(!single_line, pinned, remote_connection_phase, presentation),
+                target,
+                sidebar,
+                window,
+                move |sidebar, command, window, cx| {
+                    sidebar.perform_menu_command(workspace_id, command, window, cx);
+                },
+            ))
             .into_any_element()
+    }
+
+    /// Decorates a row with its context menu, which the keyboard opens from the selected row.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one menu decoration needs its row, entries, target, owner, and command handler"
+    )]
+    fn row_menu<A: Copy + 'static>(
+        &self,
+        key: SidebarRowKey,
+        selector: String,
+        accessibility_name: String,
+        row: AnyElement,
+        entries: Vec<MenuEntry<A>>,
+        target: ContextMenuTarget,
+        sidebar: WeakEntity<Self>,
+        window: &Window,
+        perform: impl Fn(&mut Self, A, &mut Window, &mut Context<Self>) + 'static,
+    ) -> AnyElement {
+        let open_sidebar = sidebar.clone();
+        let lifecycle_sidebar = sidebar.clone();
+        let lifecycle_window = window.window_handle();
+        let keyboard = self.selected_key() == Some(key);
+        ContextMenu::new(
+            SharedString::from(selector.clone()),
+            accessibility_name,
+            row,
+            entries,
+        )
+        .size(MenuSize::Wide)
+        .when(keyboard, |menu| menu.keyboard_trigger(&self.focus))
+        .target(target)
+        .debug_selector(selector)
+        .on_open_request(move |_, window, cx| {
+            open_sidebar
+                .update(cx, |sidebar, cx| sidebar.request_menu(key, window, cx))
+                .unwrap_or(false)
+        })
+        .on_lifecycle(move |event, cx| {
+            let sidebar = lifecycle_sidebar.clone();
+            let event = *event;
+            // Menu lifecycle delivery can occur while its Window is borrowed.
+            // Resolve ownership after that delivery, using the current Window facts.
+            cx.defer(move |cx| {
+                let _ = lifecycle_window.update(cx, |_, window, cx| {
+                    let _ = sidebar.update(cx, |sidebar, cx| {
+                        sidebar.handle_menu_lifecycle(key, event, window, cx);
+                    });
+                });
+            });
+        })
+        .on_activate(move |activation, window, cx| {
+            let command = *activation.action();
+            let _ = sidebar.update(cx, |sidebar, cx| perform(sidebar, command, window, cx));
+        })
+        .into_any_element()
     }
 
     /// Each row's hover, in list order.
@@ -1295,7 +1323,8 @@ impl WorkspaceSidebar {
         });
         let id = SharedString::from(selector.clone());
         let click_sidebar = sidebar.clone();
-        let press_sidebar = sidebar;
+        let press_sidebar = sidebar.clone();
+        let menu_sidebar = sidebar;
         let icon_size = appearance.icons.metrics(IconRole::Row).glyph_size;
         let row = div()
             .id(id)
@@ -1307,26 +1336,6 @@ impl WorkspaceSidebar {
                         if selected { "selected" } else { "unselected" }
                     )
                 }
-            })
-            .role(accesskit::Role::TreeItem)
-            .aria_label(worktree.name.clone())
-            .aria_description(SharedString::from(description))
-            .aria_level(2)
-            .aria_position_in_set(position)
-            .aria_size_of_set(size)
-            .aria_selected(selected)
-            .aria_disabled(!openable)
-            .when(openable, |row| {
-                row.on_a11y_action(accesskit::Action::Click, move |_, _, cx| {
-                    let _ = press_sidebar.update(cx, |sidebar, cx| {
-                        sidebar.cursor = None;
-                        cx.emit(SidebarEvent::ActivateWorktree {
-                            workspace_id,
-                            worktree_id,
-                            focus_pane: true,
-                        });
-                    });
-                })
             })
             .relative()
             .w_full()
@@ -1420,7 +1429,7 @@ impl WorkspaceSidebar {
                     )),
             )
             .child(fade.fade.tracker());
-        Tooltip::new(
+        let row = Tooltip::new(
             SharedString::from(format!("{selector}-tooltip")),
             if worktree.main {
                 "Main Worktree"
@@ -1431,7 +1440,53 @@ impl WorkspaceSidebar {
         .detail(tooltip_detail)
         .debug_selector(format!("{selector}-tooltip"))
         .attach(row, TooltipTargetVisibility::Visible)
-        .into_any_element()
+        .into_any_element();
+        let target = ContextMenuTarget::new(accesskit::Role::TreeItem, worktree.name.clone())
+            .description(description)
+            .selected(selected)
+            .level(2)
+            .set_position(position, size)
+            .disabled(!openable);
+        let target = if openable {
+            target.on_press(move |_, cx| {
+                let _ = press_sidebar.update(cx, |sidebar, cx| {
+                    sidebar.cursor = None;
+                    cx.emit(SidebarEvent::ActivateWorktree {
+                        workspace_id,
+                        worktree_id,
+                        focus_pane: true,
+                    });
+                });
+            })
+        } else {
+            target
+        };
+        let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
+        let entries = vec![
+            new_tab_entry(
+                WorktreeMenuCommand::NewTab,
+                "worktree-menu-row-new-tab",
+                presentation,
+            )
+            .disabled(!openable),
+        ];
+        self.row_menu(
+            key,
+            format!("{selector}-menu"),
+            format!("Worktree actions for {}", worktree.name),
+            row,
+            entries,
+            target,
+            menu_sidebar,
+            window,
+            move |_, command, _, cx| {
+                cx.emit(SidebarEvent::WorktreeCommand {
+                    workspace_id,
+                    worktree_id,
+                    command,
+                });
+            },
+        )
     }
 }
 
@@ -1439,6 +1494,21 @@ impl WorkspaceSidebar {
 /// row takes the upper half of the id space.
 fn worktree_text_id(workspace_id: WorkspaceId, worktree_id: WorktreeId) -> u64 {
     (1 << 63) | ((workspace_id.get() & 0x7fff_ffff) << 32) | (worktree_id.get() & 0xffff_ffff)
+}
+
+/// "New Tab", with the Shortcut that creates a Tab.
+fn new_tab_entry<A: Clone>(
+    command: A,
+    selector: &'static str,
+    presentation: &crate::desktop_profile::DesktopPresentation,
+) -> MenuEntry<A> {
+    let entry = MenuEntry::action("New Tab", command);
+    match presentation.shortcut(&crate::ui::CreateTab) {
+        Some(shortcut) => entry.shortcut(shortcut),
+        None => entry,
+    }
+    .icon(|foreground, size| Icon::new(IconName::SquarePlus, size, foreground).into_any_element())
+    .debug_selector(selector)
 }
 
 /// The footer creation menu's rows, built from the shared creation descriptors.
@@ -1470,32 +1540,26 @@ fn new_workspace_menu_entries(
 
 /// Every Workspace command carries a symbol, so all labels share the icon column.
 fn workspace_menu_entries(
+    new_tab: bool,
     pinned: bool,
     remote_connection_phase: Option<RemoteConnectionPhase>,
     presentation: &crate::desktop_profile::DesktopPresentation,
 ) -> Vec<MenuEntry<RowMenuCommand>> {
-    let shortcut = presentation.shortcut(&crate::ui::CreateTab);
-    let mut entries = vec![
-        {
-            let entry = MenuEntry::action(
-                "New Tab",
-                RowMenuCommand::Workspace(WorkspaceMenuCommand::NewTab),
-            );
-            match shortcut {
-                Some(shortcut) => entry.shortcut(shortcut),
-                None => entry,
-            }
-        }
-        .icon(|foreground, size| {
-            Icon::new(IconName::SquarePlus, size, foreground).into_any_element()
-        })
-        .debug_selector("workspace-menu-row-new-tab"),
+    let mut entries = Vec::new();
+    if new_tab {
+        entries.push(new_tab_entry(
+            RowMenuCommand::Workspace(WorkspaceMenuCommand::NewTab),
+            "workspace-menu-row-new-tab",
+            presentation,
+        ));
+    }
+    entries.push(
         MenuEntry::action("Rename Workspace", RowMenuCommand::Rename)
             .icon(|foreground, size| {
                 Icon::new(IconName::Pencil, size, foreground).into_any_element()
             })
             .debug_selector("workspace-menu-row-rename"),
-    ];
+    );
     entries.push(
         MenuEntry::action(
             if pinned {
