@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 #[cfg(test)]
 use super::appearance::chrome;
 use super::chrome_icons::IconRole;
-use super::chrome_typography::{ChromeTextStyleExt as _, TextRole};
+use super::chrome_typography::{ChromeTextStyleExt as _, ChromeTypography, TextRole};
 use super::render_lifecycle::{RenderLifecycle, ScaleChange, SurfaceVisibility};
 use super::terminal_context_menu::{TerminalContextMenuCommand, terminal_context_menu_entries};
 use super::terminal_element::{
@@ -4008,14 +4008,17 @@ impl TerminalPane {
                                 .aria_label("Terminal Find results")
                                 .aria_value(SharedString::from(result_label.clone()))
                                 .debug_selector(|| "terminal-find-result-label".to_owned())
-                                .w(appearance.typography.measure(
-                                    TextRole::Secondary,
-                                    &result_label,
+                                .w(ChromeTypography::round_measurement_up(
+                                    appearance.typography.measure(
+                                        TextRole::Secondary,
+                                        &result_label,
+                                        window,
+                                    ),
                                     window,
                                 ))
                                 .max_w_full()
                                 .flex_shrink_0()
-                                .whitespace_normal()
+                                .truncate()
                                 .chrome_text(appearance.typography.style(TextRole::Secondary))
                                 .text_color(gpui_color(floating_colors.text_muted))
                                 .child(result_label),
@@ -4798,12 +4801,10 @@ impl Render for TerminalPane {
                     // A definite width keeps GPUI's wrapped text measurement out of the
                     // intrinsic flex pass, which can retain a zero-width line layout.
                     let status_icon_size = appearance.icons.metrics(IconRole::Status).glyph_size;
-                    let message_width =
-                        appearance
-                            .typography
-                            .measure(TextRole::Body, &status, window)
-                            + status_icon_size
-                            + appearance.spacing(8.0);
+                    let message_width = ChromeTypography::round_measurement_up(
+                        appearance.typography.measure(TextRole::Body, &status, window),
+                        window,
+                    ) + status_icon_size + appearance.spacing(8.0);
                     let action_width = if diagnostics_available {
                         appearance
                             .typography
@@ -4816,6 +4817,7 @@ impl Render for TerminalPane {
                     } else {
                         px(0.0)
                     };
+                    let action_width = ChromeTypography::round_measurement_up(action_width, window);
                     let width = message_width.max(action_width)
                         + appearance.spacing(20.0)
                         + notice_shell.hairline() * 4.0;

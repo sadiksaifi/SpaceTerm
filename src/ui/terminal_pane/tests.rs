@@ -2611,7 +2611,7 @@ fn losing_focused_pane_status_closes_terminal_find(cx: &mut TestAppContext) {
 fn terminal_find_reflows_all_actions_inside_a_narrow_pane_with_fixed_chrome_type(
     cx: &mut TestAppContext,
 ) {
-    let (_, cx, _) = connected_terminal_pane(cx);
+    let (pane, cx, _) = connected_terminal_pane(cx);
     cx.update(|_, cx| {
         let mut preferences = crate::appearance::AppearancePreferences::default();
 
@@ -2653,6 +2653,113 @@ fn terminal_find_reflows_all_actions_inside_a_narrow_pane_with_fixed_chrome_type
         label.size.height < px(70.0),
         "result words must not wrap one character per line"
     );
+
+    cx.activate_accessibility();
+    cx.simulate_resize(gpui::size(px(90.0), px(420.0)));
+    pane.update(cx, |pane, cx| {
+        Arc::make_mut(&mut pane.screen).find =
+            Some(Arc::new(crate::terminal::TerminalFindSnapshot {
+                generation: pane.find_generation,
+                total_matches: 67890,
+                current_match: Some(12345),
+                visible_spans: Arc::from([]),
+            }));
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let label = cx.debug_bounds("terminal-find-result-label").unwrap();
+    let bar = cx.debug_bounds("terminal-find-bar").unwrap();
+    let (line_height, text_width, tree) = cx.update(|window, cx| {
+        let appearance = super::super::appearance::shared_chrome(cx);
+        (
+            appearance.typography.style(TextRole::Secondary).line_height,
+            appearance
+                .typography
+                .measure(TextRole::Secondary, "12345/67890", window),
+            window
+                .debug_a11y_tree_json()
+                .expect("Find accessibility tree"),
+        )
+    });
+    assert!(
+        label.size.width < text_width,
+        "the label must exercise overflow"
+    );
+    assert_eq!(label.size.height, line_height);
+    assert!(label.left() >= bar.left() && label.right() <= bar.right());
+    assert!(
+        tree.contains("12345/67890"),
+        "accessibility must retain the full result"
+    );
+}
+
+#[gpui::test]
+fn terminal_find_result_labels_stay_on_one_line(cx: &mut TestAppContext) {
+    let (pane, cx, _) = connected_terminal_pane(cx);
+    cx.dispatch_action(OpenTerminalFind);
+    let input = terminal_find_input(&pane, cx);
+    replace_terminal_find_input(&input, "hello", cx);
+
+    for scale in [1.0, 1.25, 1.5, 1.75, 2.0] {
+        cx.simulate_scale_factor_change(scale);
+        for density in [
+            crate::appearance::ChromeDensity::Compact,
+            crate::appearance::ChromeDensity::Comfortable,
+        ] {
+            cx.update(|_, cx| {
+                let mut preferences = crate::appearance::AppearancePreferences::default();
+                preferences.window.density = density;
+                publish_terminal_preferences(preferences, cx);
+                let resolved = super::super::appearance_runtime::current(cx);
+                let chrome = super::super::appearance::ChromeAppearance::prepare(&resolved.chrome);
+                install_uniform_chrome(chrome, cx);
+            });
+            for width in [800.0, 130.0] {
+                cx.simulate_resize(gpui::size(px(width), px(420.0)));
+                for (current_match, total_matches, label) in [
+                    (Some(1), 2, "1/2"),
+                    (Some(1), 23, "1/23"),
+                    (Some(12), 345, "12/345"),
+                    (Some(12), 34567, "12/34567"),
+                    (None, 0, "No matches"),
+                ] {
+                    pane.update(cx, |pane, cx| {
+                        Arc::make_mut(&mut pane.screen).find =
+                            Some(Arc::new(crate::terminal::TerminalFindSnapshot {
+                                generation: pane.find_generation,
+                                total_matches,
+                                current_match,
+                                visible_spans: Arc::from([]),
+                            }));
+                        cx.notify();
+                    });
+                    cx.run_until_parked();
+                    let bounds = cx.debug_bounds("terminal-find-result-label").unwrap();
+                    let (line_height, text_width) = cx.update(|window, cx| {
+                        let appearance = super::super::appearance::shared_chrome(cx);
+                        (
+                            appearance.typography.style(TextRole::Secondary).line_height,
+                            appearance
+                                .typography
+                                .measure(TextRole::Secondary, label, window),
+                        )
+                    });
+                    // Absolute edge snapping can round one line's height either way.
+                    let line_device_height = f32::from(line_height) * scale;
+                    let device_height = f32::from(bounds.size.height) * scale;
+                    assert!(
+                        device_height >= line_device_height.floor()
+                            && device_height <= line_device_height.ceil(),
+                        "Scale {scale}, {density:?}, Pane width {width}: {label:?} must occupy one Secondary line: {bounds:?}"
+                    );
+                    assert!(
+                        bounds.size.width * scale >= text_width * scale,
+                        "Scale {scale}, {density:?}, Pane width {width}: {label:?} needs {text_width:?}, got {bounds:?}"
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[gpui::test]
@@ -4553,6 +4660,7 @@ fn terminal_status_preserves_message_width_and_wraps_inside_shell(cx: &mut TestA
         window.replace_root(cx, |_, _| StatusLayoutProbe { pane: pane.clone() });
     });
     cx.simulate_resize(gpui::size(px(900.0), px(580.0)));
+    cx.simulate_scale_factor_change(1.0);
     pane.update(cx, |pane, cx| {
         pane.status = Some(MESSAGE.to_owned());
         pane.status_intent = StatusIntent::Warning;
@@ -4568,9 +4676,11 @@ fn terminal_status_preserves_message_width_and_wraps_inside_shell(cx: &mut TestA
     let wide_message = cx.debug_bounds("terminal-status-message").unwrap();
     let wide_shell = cx.debug_bounds("terminal-status").unwrap();
     assert!(
-        wide_message.size.width + px(1.0) >= expected_width,
+        wide_message.size.width >= expected_width,
         "A wide Pane must allocate the full message width: {wide_message:?}, expected {expected_width:?}"
     );
+    let line_height = cx.update(|_, cx| chrome(cx).typography.style(TextRole::Body).line_height);
+    assert_eq!(wide_message.size.height, line_height);
     assert!(wide_shell.contains(&wide_message.origin));
     assert!(wide_message.right() <= wide_shell.right());
     assert!(wide_message.bottom() <= wide_shell.bottom());

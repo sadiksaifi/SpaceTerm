@@ -18,7 +18,9 @@ use crate::ui::appearance::ChromeAppearance;
 use crate::ui::appearance::settings::{SettingsAppearance, SettingsSurfaceRole};
 use crate::ui::chrome_geometry::{HAIRLINE, RadiusRole};
 use crate::ui::chrome_icons::{IconRole, InteractiveIconRole};
-use crate::ui::chrome_typography::{ChromeTextStyle, ChromeTextStyleExt as _, TextRole};
+use crate::ui::chrome_typography::{
+    ChromeTextStyle, ChromeTextStyleExt as _, ChromeTypography, TextRole,
+};
 
 /// One stepper step, negative for decrement and positive for increment.
 type StepHandler = Rc<dyn Fn(i32, &mut Window, &mut App)>;
@@ -319,10 +321,12 @@ impl FormRow {
         let label_role = TextRole::Body;
         // Unsized text is measured once without a width and never rewraps, so the label starts from
         // its one-line width.
-        let label_width = appearance
-            .typography
-            .measure(label_role, self.label, window)
-            .ceil();
+        let label_width = ChromeTypography::round_measurement_up(
+            appearance
+                .typography
+                .measure(label_role, self.label, window),
+            window,
+        );
         let reset_slot_width = reset_slot_width(appearance);
         let above = self.layout == FormRowLayout::Above;
         let full = self.layout == FormRowLayout::Full;
