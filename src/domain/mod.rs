@@ -2,6 +2,8 @@ pub(crate) mod remote_workspace;
 mod tab;
 mod tab_collection;
 mod workspace_collection;
+#[allow(dead_code, reason = "Worktree listing and activation use it next")]
+mod worktree;
 
 pub(crate) use crate::close_confirmation::{
     ClosePaneOutcome, CloseTabOutcome, CloseWorkspaceOutcome, FinalTabCloseOutcome,
@@ -19,6 +21,7 @@ pub(crate) use workspace_collection::{
     ValidatedLocalDirectory, WorkspaceCollection, WorkspaceEntry, WorkspaceError, WorkspaceId,
     WorkspaceLocation,
 };
+pub(crate) use worktree::WorktreeId;
 
 pub(crate) use remote_workspace::{
     RemoteConnectionPhase, RemoteConnectionReduction, RemoteConnectionState,
