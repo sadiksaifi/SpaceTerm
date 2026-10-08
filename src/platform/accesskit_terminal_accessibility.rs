@@ -14,7 +14,8 @@ use gpui::{
 };
 
 use super::terminal_accessibility::{
-    TerminalAccessibilityAdapter, TerminalAccessibilityAdapterFactory, TerminalAccessibilityUpdate,
+    AccessibilityFocusSender, TerminalAccessibilityAdapter, TerminalAccessibilityAdapterFactory,
+    TerminalAccessibilityUpdate,
 };
 use crate::terminal::{
     AccessibilityDemandSender, AccessibilityGeometry, AccessibilityNotifications,
@@ -45,6 +46,7 @@ impl TerminalAccessibilityAdapterFactory for AccessKitTerminalAccessibilityAdapt
                 },
                 selection_sender: None,
                 demand_sender: None,
+                focus_sender: None,
                 runs: HashMap::new(),
                 published: None,
                 publication_has_same_topology: false,
@@ -63,6 +65,7 @@ impl TerminalAccessibilityAdapter for AccessKitTerminalAccessibility {
         if !presented {
             tree.selection_sender = None;
             tree.demand_sender = None;
+            tree.focus_sender = None;
             tree.published = None;
             tree.runs.clear();
         }
@@ -84,6 +87,7 @@ impl TerminalAccessibilityAdapter for AccessKitTerminalAccessibility {
         };
         tree.selection_sender = update.selection_sender.filter(|_| tree.visible);
         tree.demand_sender = update.demand_sender.filter(|_| tree.visible);
+        tree.focus_sender = update.focus_sender.filter(|_| tree.visible);
         // AccessKit derives value, selection and focus events from the published tree.
         // Repeated focus notifications without a focus change need no native event.
         if tree.visible {
@@ -97,13 +101,32 @@ impl TerminalAccessibilityAdapter for AccessKitTerminalAccessibility {
         if !self.0.borrow().presented {
             return pane;
         }
+        // The Pane holds keyboard focus and presents its Terminal and controls in its place.
+        pane.role(Role::Group).a11y_synthetic_children(|builder| {
+            builder.parent_node().set_role(Role::GenericContainer);
+        })
+    }
+
+    fn decorate_text(&self, text: Stateful<Div>) -> Stateful<Div> {
+        if !self.0.borrow().presented {
+            return text;
+        }
         let publication = Rc::clone(&self.0);
         let selection = Rc::clone(&self.0);
-        pane.role(Role::Terminal)
+        let focus = Rc::clone(&self.0);
+        // AccessKit reads a Terminal's text from its children, so they are text runs only.
+        text.role(Role::Terminal)
             .aria_label("Terminal Pane")
+            .aria_active_descendant()
             .a11y_synthetic_children(move |builder| publication.borrow_mut().publish(builder))
             .on_a11y_action(Action::SetTextSelection, move |data, _, _| {
                 selection.borrow().select(data)
+            })
+            // The Pane holds the focus handle, so it takes focus on the Terminal's behalf.
+            .on_a11y_action(Action::Focus, move |_, _, _| {
+                if let Some(sender) = &focus.borrow().focus_sender {
+                    sender.request();
+                }
             })
     }
 }
@@ -187,6 +210,7 @@ struct PaneTree {
     geometry: Geometry,
     selection_sender: Option<AccessibilitySelectionSender>,
     demand_sender: Option<AccessibilityDemandSender>,
+    focus_sender: Option<AccessibilityFocusSender>,
     runs: HashMap<AccessibilityRowId, CachedRun>,
     published: Option<PublishedDocument>,
     publication_has_same_topology: bool,
@@ -363,6 +387,10 @@ impl PaneTree {
         {
             demand.request();
         }
+        debug_assert!(
+            builder.parent_node().children().is_empty(),
+            "the Terminal's children are its text runs only"
+        );
         let namespace = builder.synthetic_node_id(());
         let nodes = self.project(namespace, |row| builder.synthetic_node_id(row));
         let caret_bounds = self.caret_bounds();
@@ -549,6 +577,7 @@ mod tests {
             },
             selection_sender: None,
             demand_sender: None,
+            focus_sender: None,
             runs: HashMap::new(),
             published: None,
             publication_has_same_topology: false,
@@ -1067,6 +1096,95 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(values(cx).len(), 32);
         assert!(values(cx).iter().any(|value| value == "changed\n"));
+    }
+
+    #[gpui::test]
+    fn accesskit_terminal_text_excludes_the_panes_controls(cx: &mut gpui::TestAppContext) {
+        use gpui::{FocusHandle, InteractiveElement, IntoElement, ParentElement, Styled};
+        struct View {
+            adapter: AccessKitTerminalAccessibility,
+            focus: FocusHandle,
+            control: bool,
+        }
+        impl gpui::Render for View {
+            fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+                let pane = self
+                    .adapter
+                    .decorate(gpui::div().id("pane").track_focus(&self.focus).size_full())
+                    .child(
+                        self.adapter
+                            .decorate_text(gpui::div().id("text").size_full()),
+                    );
+                if self.control {
+                    pane.child(
+                        gpui::div()
+                            .id("control")
+                            .role(Role::Button)
+                            .aria_label("Pane control")
+                            .size_full(),
+                    )
+                } else {
+                    pane
+                }
+            }
+        }
+        let mut fixture = RetainedFixture::new(4);
+        let tree = Rc::new(RefCell::new(pane_tree(
+            fixture.snapshot(true, (0..4).collect()),
+        )));
+        let (view, cx) = cx.add_window_view(|_, cx| View {
+            adapter: AccessKitTerminalAccessibility(Rc::clone(&tree)),
+            focus: cx.focus_handle(),
+            control: false,
+        });
+        cx.activate_accessibility();
+        cx.update(|window, cx| {
+            let focus = view.read(cx).focus.clone();
+            window.focus(&focus, cx);
+        });
+        cx.run_until_parked();
+        // Returns the roles of the Terminal's children, whether the published tree reaches the
+        // control, and whether the Terminal is the reported focus.
+        let published = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, _| {
+                let dump: serde_json::Value =
+                    serde_json::from_str(&window.debug_a11y_tree_json().unwrap()).unwrap();
+                let nodes = dump["nodes"].as_object().unwrap();
+                let (terminal, node) = nodes
+                    .iter()
+                    .find(|(_, node)| node["aria"]["role"] == "Terminal")
+                    .unwrap();
+                let children = node["children"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|child| nodes[child.as_str().unwrap()]["aria"]["role"].clone())
+                    .collect::<Vec<_>>();
+                let control = nodes.values().any(|node| node["aria"]["role"] == "Button");
+                (
+                    children,
+                    control,
+                    dump["active_descendant_focus"] == *terminal,
+                )
+            })
+        };
+        let runs = vec![serde_json::json!("TextRun"); 4];
+        assert_eq!(published(cx), (runs.clone(), false, true));
+        view.update(cx, |view, cx| {
+            view.control = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(published(cx), (runs.clone(), true, true));
+        fixture.rows[2].revision += 1;
+        fixture.rows[2].cells = vec![AccessibilityCell::new("changed", 7, false)];
+        tree.borrow_mut().model = fixture.snapshot(false, vec![2]);
+        view.update(cx, |view, cx| {
+            view.control = false;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(published(cx), (runs, false, true));
     }
 
     #[test]

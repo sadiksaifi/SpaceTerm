@@ -1596,6 +1596,9 @@ fn accessibility_model(index: usize) -> Arc<TerminalAccessibilityModel> {
 fn accesskit_terminal_pane_activation_publishes_text_focus_and_retires_hidden_panes(
     cx: &mut TestAppContext,
 ) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
     cx.update(crate::ui::init).unwrap();
     let records = TestTerminalSessionRecords::default();
     let session_factory = WorkspaceTerminalSessionFactory::new_local(
@@ -1633,7 +1636,8 @@ fn accesskit_terminal_pane_activation_publishes_text_focus_and_retires_hidden_pa
         .find(|(_, node)| node["aria"]["role"] == "Terminal")
         .expect("the Pane must publish a Terminal node after activation");
     assert_eq!(terminal["aria"]["label"], "Terminal Pane");
-    assert_eq!(tree["gpui_focus"], *terminal_id);
+    // The Pane holds keyboard focus; its Terminal is the focus reported to assistive clients.
+    assert_eq!(tree["active_descendant_focus"], *terminal_id);
     let runs: Vec<_> = nodes
         .values()
         .filter(|node| node["aria"]["role"] == "TextRun")
@@ -1652,8 +1656,10 @@ fn accesskit_terminal_pane_activation_publishes_text_focus_and_retires_hidden_pa
     });
     cx.update(|window, cx| window.blur(cx));
     cx.run_until_parked();
-    pane.read_with(cx, |pane, _| pane.accessibility_focus_sender.request());
-    let tree = spaceterm_ui::a11y_testing::A11yTree::read(cx);
+    assert_eq!(focus_requests.get(), 0);
+    let tree = A11yTree::read(cx);
+    perform(cx, tree.node("Terminal Pane"), Action::Focus);
+    let tree = A11yTree::read(cx);
     assert_eq!(tree.focused().unwrap()["aria"]["role"], "Terminal");
     assert_eq!(focus_requests.get(), 1);
     pane.update(cx, |pane, cx| {
@@ -8443,6 +8449,105 @@ mod permission_requests {
             }
         });
         cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn terminal_context_menu_secondary_click_targets_grid_but_not_controls(
+        cx: &mut TestAppContext,
+    ) {
+        let (pane, cx, records) = connected_terminal_pane(cx);
+        records
+            .last_event_sender()
+            .unwrap()
+            .try_send(TerminalSessionEvent::Screen(
+                ScreenSnapshot::from_test_parts_at(
+                    Arc::from([]),
+                    ScrollbarSnapshot {
+                        total_rows: 100,
+                        visible_rows: 20,
+                        offset_rows: 80,
+                    },
+                    "",
+                    7,
+                ),
+            ))
+            .unwrap();
+        cx.run_until_parked();
+        let grid = pane.read_with(cx, |pane, _| {
+            pane.grid_bounds.expect("terminal grid was painted")
+        });
+
+        cx.simulate_mouse_down(grid.center(), MouseButton::Right, Modifiers::none());
+        cx.simulate_mouse_up(grid.center(), MouseButton::Right, Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("terminal-context-menu").is_some());
+        assert!(
+            cx.debug_bounds("terminal-context-menu-row-find-enabled")
+                .is_some()
+        );
+        assert!(pane.read_with(cx, |pane, _| pane.context_menu.is_some()));
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("terminal-context-menu-row-find-enabled")
+                .is_none()
+        );
+        assert!(pane.read_with(cx, |pane, _| pane.context_menu.is_none()));
+
+        pane.update(cx, |pane, cx| pane.reveal_scrollbar(cx));
+        cx.run_until_parked();
+        let thumb = cx
+            .debug_bounds("terminal-scrollbar-thumb-hitbox")
+            .expect("overflowing Scrollback must show a thumb");
+        let click = thumb.center();
+        assert!(grid.contains(&click));
+        cx.simulate_mouse_down(click, MouseButton::Right, Modifiers::none());
+        cx.simulate_mouse_up(click, MouseButton::Right, Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("terminal-context-menu-row-find-enabled")
+                .is_none()
+        );
+        assert!(pane.read_with(cx, |pane, _| pane.context_menu.is_none()));
+
+        cx.dispatch_action(OpenTerminalFind);
+        cx.run_until_parked();
+        let click = cx
+            .debug_bounds("terminal-find-bar")
+            .expect("Terminal Find must be open")
+            .center();
+        assert!(grid.contains(&click));
+        cx.simulate_mouse_down(click, MouseButton::Right, Modifiers::none());
+        cx.simulate_mouse_up(click, MouseButton::Right, Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("terminal-context-menu-row-find-enabled")
+                .is_none()
+        );
+        assert!(pane.read_with(cx, |pane, _| pane.context_menu.is_none()));
+
+        cx.dispatch_action(CloseTerminalFind);
+        install_setup(
+            &pane,
+            PermissionAuthorization::NotGranted,
+            PermissionAuthorization::NotGranted,
+            cx,
+        );
+        request(&pane, &[Accessibility], cx);
+        let click = cx
+            .debug_bounds("permission-request")
+            .expect("Permission Request must be visible")
+            .center();
+        assert!(grid.contains(&click));
+        cx.simulate_mouse_down(click, MouseButton::Right, Modifiers::none());
+        cx.simulate_mouse_up(click, MouseButton::Right, Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("terminal-context-menu-row-find-enabled")
+                .is_none()
+        );
+        assert!(pane.read_with(cx, |pane, _| pane.context_menu.is_none()));
     }
 
     #[gpui::test]
