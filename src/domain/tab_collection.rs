@@ -71,7 +71,6 @@ impl<T> TabCollection<T> {
         tab
     }
 
-    #[allow(dead_code, reason = "Worktree activation uses it next")]
     pub(crate) const fn root_tab_id(&self) -> TabId {
         self.root_tab_id
     }
@@ -97,12 +96,10 @@ impl<T> TabCollection<T> {
         self.tabs[self.active_index()].scope
     }
 
-    #[allow(dead_code, reason = "Worktree activation uses it next")]
     pub(crate) fn scope_of(&self, tab_id: TabId) -> Result<Option<WorktreeId>, TabError> {
         Ok(self.tabs[self.index_of(tab_id)?].scope)
     }
 
-    #[allow(dead_code, reason = "Worktree activation uses it next")]
     /// The Tabs of one Worktree, in Tab order.
     pub(crate) fn tabs_in(&self, scope: Option<WorktreeId>) -> impl Iterator<Item = (TabId, &T)> {
         self.tabs
@@ -111,12 +108,10 @@ impl<T> TabCollection<T> {
             .map(|tab| (tab.id, &tab.payload))
     }
 
-    #[allow(dead_code, reason = "Worktree activation uses it next")]
     pub(crate) fn has_tabs_in(&self, scope: Option<WorktreeId>) -> bool {
         self.tabs.iter().any(|tab| tab.scope == scope)
     }
 
-    #[allow(dead_code, reason = "Worktree activation uses it next")]
     /// The most recently activated Tab of one Worktree.
     pub(crate) fn most_recent_tab_in(&self, scope: Option<WorktreeId>) -> Option<TabId> {
         self.activation_order
@@ -127,6 +122,7 @@ impl<T> TabCollection<T> {
     }
 
     /// Creates and activates a Tab in the Active Worktree.
+    #[cfg(test)]
     pub(crate) fn create_tab(
         &mut self,
         create_payload: impl FnOnce(TabId) -> T,
@@ -160,7 +156,6 @@ impl<T> TabCollection<T> {
         Ok(tab_id)
     }
 
-    #[allow(dead_code, reason = "Worktree activation uses it next")]
     /// Moves a Tab into another Worktree, after that Worktree's last Tab.
     pub(crate) fn set_tab_scope(
         &mut self,

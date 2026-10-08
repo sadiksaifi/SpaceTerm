@@ -731,6 +731,11 @@ impl TabView {
         self.session_factory.set_pinned_directory(directory);
     }
 
+    /// Scopes this Tab's later Panes to a Worktree's root, or to the Workspace with `None`.
+    pub(crate) fn set_worktree_root(&mut self, root: Option<std::path::PathBuf>) {
+        self.session_factory.set_worktree_root(root);
+    }
+
     pub(crate) fn tab_focus(&self) -> &FocusHandle {
         &self.tab_focus
     }
