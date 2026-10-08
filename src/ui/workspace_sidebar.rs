@@ -99,11 +99,32 @@ pub(super) enum WorkspaceMenuCommand {
 pub(super) enum WorktreeMenuCommand {
     /// Opens another Tab in the Worktree, or its first.
     NewTab,
+    /// Copies the Worktree's root.
+    CopyPath,
+    /// Closes every Tab of the Worktree and keeps its row.
+    CloseTabs,
+    /// Asks to delete the Worktree's directory and closes its Tabs. The branch stays.
+    Remove,
+}
+
+/// Whether a Worktree row offers Remove Worktree, and why not.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum WorktreeRemoval {
+    Allowed,
+    /// The repository's Main Worktree.
+    Main,
+    Locked,
+    /// The Workspace's Pinned Directory is inside the Worktree.
+    HoldsPinnedDirectory,
+    /// The repository the Workspace reads doesn't list the Worktree, so only its Tabs remain.
+    Unlisted,
 }
 
 #[derive(Clone, Copy)]
 enum RowMenuCommand {
     Workspace(WorkspaceMenuCommand),
+    /// A collapsed Workspace row acts on its Active Worktree.
+    Worktree(WorktreeId, WorktreeMenuCommand),
     Rename,
 }
 
@@ -191,6 +212,7 @@ pub(super) struct WorktreeRowViewModel {
     pub(super) locked: bool,
     /// Git no longer has the Worktree's directory.
     pub(super) missing: bool,
+    pub(super) removal: WorktreeRemoval,
 }
 
 impl WorktreeRowViewModel {
@@ -546,6 +568,13 @@ impl WorkspaceSidebar {
                 workspace_id,
                 command,
             }),
+            RowMenuCommand::Worktree(worktree_id, command) => {
+                cx.emit(SidebarEvent::WorktreeCommand {
+                    workspace_id,
+                    worktree_id,
+                    command,
+                });
+            }
         }
     }
     fn finish_rename(

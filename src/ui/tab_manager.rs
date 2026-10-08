@@ -1334,6 +1334,26 @@ impl TabManager {
         view.current_directory(view.focused_pane_id(), cx)
     }
 
+    /// The Worktree a Tab belongs to.
+    pub(crate) fn tab_worktree(&self, tab_id: TabId) -> Option<WorktreeId> {
+        self.tabs.scope_of(tab_id).ok().flatten()
+    }
+
+    /// Whether any Tab sits outside a Worktree, so closing that Worktree's Tabs leaves a Tab.
+    pub(crate) fn has_tabs_outside(&self, id: WorktreeId) -> bool {
+        self.tabs
+            .iter()
+            .any(|(tab_id, _)| self.tab_worktree(tab_id) != Some(id))
+    }
+
+    /// The Tabs of a Worktree, in Tab order.
+    pub(crate) fn worktree_tab_ids(&self, id: WorktreeId) -> Vec<TabId> {
+        self.tabs
+            .tabs_in(Some(id))
+            .map(|(tab_id, _)| tab_id)
+            .collect()
+    }
+
     /// The number of Tabs each Worktree holds. Tabs outside any Worktree are not counted.
     pub(crate) fn worktree_tab_counts(&self) -> std::collections::BTreeMap<WorktreeId, usize> {
         let mut counts = std::collections::BTreeMap::new();

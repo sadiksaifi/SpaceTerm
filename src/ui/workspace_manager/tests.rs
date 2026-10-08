@@ -10449,6 +10449,11 @@ fn assert_rendered_text(
 
 /// A repository whose Main Worktree is the test home, with a linked Worktree at each `linked`.
 fn present_worktrees(cx: &mut VisualTestContext, linked: &[&Path]) {
+    present_worktrees_containing(cx, linked, 0);
+}
+
+/// Like `present_worktrees`, with the test home inside the listed Worktree at `current`.
+fn present_worktrees_containing(cx: &mut VisualTestContext, linked: &[&Path], current: usize) {
     use crate::domain::RepositoryIdentity;
     use crate::worktrees::WorktreeSnapshot;
     use crate::worktrees::listing::{WorktreeHead, WorktreeRecord};
@@ -10462,7 +10467,7 @@ fn present_worktrees(cx: &mut VisualTestContext, linked: &[&Path]) {
     };
     let snapshot = WorktreeSnapshot {
         repository: RepositoryIdentity::new(main.clone()),
-        current: Some(0),
+        current: Some(current),
         common_directory: main.join(".git"),
         worktrees: std::iter::once(record(&main, "main"))
             .chain(linked.iter().map(|root| record(root, "feature/login")))
@@ -10930,6 +10935,207 @@ fn worktree_rows_should_open_tabs_from_their_own_menu(cx: &mut TestAppContext) {
     assert!(
         collapsed_offers_new_tab,
         "a collapsed Workspace opens a Tab in its Active Worktree"
+    );
+}
+
+/// The rendered selector of a Worktree row, whichever selection state it shows.
+fn worktree_row(
+    workspace_id: WorkspaceId,
+    worktree_id: crate::domain::WorktreeId,
+    cx: &mut VisualTestContext,
+) -> &'static str {
+    ["selected", "unselected"]
+        .into_iter()
+        .map(|state| -> &'static str {
+            format!("worktree-row-{}-{worktree_id}-{state}", workspace_id.get()).leak()
+        })
+        .find(|selector| cx.debug_bounds(selector).is_some())
+        .unwrap_or_else(|| panic!("worktree row {worktree_id} was not rendered"))
+}
+
+#[gpui::test]
+fn worktree_menus_should_offer_removal_only_where_git_allows_it(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    cx.update(|cx| {
+        crate::ui::worktree_store::testing::install(cx);
+    });
+    let (manager, _records, cx) = workspace_manager(cx);
+    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
+    present_worktrees(cx, &[&fixture.path().join("shell-integration")]);
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let (main, linked) = manager.read_with(cx, |manager, cx| {
+        let rows = &manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows;
+        (rows[0].worktree_id, rows[1].worktree_id)
+    });
+    let row = |worktree, cx: &mut VisualTestContext| worktree_row(workspace_id, worktree, cx);
+    let removal = |row: &'static str, label: &str, cx: &mut VisualTestContext| {
+        right_click(row, cx);
+        let tree = A11yTree::read(cx);
+        let entry = tree
+            .find(label)
+            .map(|entry| entry["aria"]["disabled"] == true);
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        entry
+    };
+
+    let main_entry = removal(row(main, cx), "Main Worktree Can\u{2019}t Be Removed", cx);
+    let linked_entry = removal(row(linked, cx), "Remove Worktree\u{2026}", cx);
+    right_click(row(linked, cx), cx);
+    click("worktree-menu-row-new-tab", cx);
+    manager.update(cx, |manager, cx| {
+        manager.set_worktrees_expanded(workspace_id, false);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let workspace_row: &'static str = format!("workspace-row-{}-active", workspace_id.get()).leak();
+    let collapsed_entry = removal(
+        workspace_row,
+        "Remove Worktree \u{201c}shell-integration\u{201d}\u{2026}",
+        cx,
+    );
+
+    assert_eq!(
+        main_entry,
+        Some(true),
+        "the Main Worktree states why it can't be removed"
+    );
+    assert_eq!(
+        linked_entry,
+        Some(false),
+        "a linked Worktree can be removed"
+    );
+    assert_eq!(
+        collapsed_entry,
+        Some(false),
+        "a collapsed Workspace offers to remove its Active Worktree by name"
+    );
+}
+
+#[gpui::test]
+fn worktree_rows_should_copy_their_path_and_close_their_tabs(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        crate::ui::worktree_store::testing::install(cx);
+    });
+    let (manager, _records, cx) = workspace_manager(cx);
+    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
+    let linked_root = fixture.path().join("shell-integration");
+    // The Root Pane is in the linked Worktree, so it holds the Root Tab and main has none.
+    present_worktrees_containing(cx, &[&linked_root], 1);
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let linked = manager.read_with(cx, |manager, cx| {
+        manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows[1].worktree_id
+    });
+    let row = |cx: &mut VisualTestContext| worktree_row(workspace_id, linked, cx);
+    let tabs = |cx: &mut VisualTestContext| {
+        manager.read_with(cx, |manager, cx| {
+            let tabs = manager.workspaces.active_workspace().payload().read(cx);
+            (tabs.worktree_tab_counts(), tabs.tab_ids())
+        })
+    };
+    right_click(row(cx), cx);
+    click("worktree-menu-row-copy-path", cx);
+    let copied = cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()));
+    right_click(row(cx), cx);
+    click("worktree-menu-row-new-tab", cx);
+    let before = tabs(cx);
+    right_click(row(cx), cx);
+    click("worktree-menu-row-close-tabs", cx);
+    let asked = tabs(cx);
+    click("modal-action-close-confirmation-confirm", cx);
+    let after = tabs(cx);
+
+    assert_eq!(copied, Some(linked_root.display().to_string()));
+    assert_eq!(
+        before.0.clone().into_iter().collect::<Vec<_>>(),
+        vec![(linked, 2)],
+        "the linked Worktree holds every Tab"
+    );
+    assert_eq!(asked, before, "running Tabs close only after confirmation");
+    assert_eq!(after.1.len(), 1, "the Workspace keeps one Tab");
+    assert!(
+        !before.1.contains(&after.1[0]),
+        "the kept Tab is a new one, opened before the Worktree's Tabs closed"
+    );
+    assert!(
+        manager.read_with(cx, |manager, cx| {
+            manager
+                .worktree_section(workspace_id, cx)
+                .unwrap()
+                .rows()
+                .any(|row| row.worktree_id == linked)
+        }),
+        "the closed Worktree keeps its row"
+    );
+}
+
+#[gpui::test]
+fn removing_a_worktree_should_confirm_then_close_its_tabs_before_git_runs(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    cx.update(|cx| {
+        crate::ui::worktree_store::testing::install(cx);
+    });
+    let (manager, _records, cx) = workspace_manager(cx);
+    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
+    present_worktrees(cx, &[&fixture.path().join("shell-integration")]);
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let linked = manager.read_with(cx, |manager, cx| {
+        manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows[1].worktree_id
+    });
+    let row = |cx: &mut VisualTestContext| worktree_row(workspace_id, linked, cx);
+    let linked_tabs = |cx: &mut VisualTestContext| {
+        manager.read_with(cx, |manager, cx| {
+            manager
+                .workspaces
+                .active_workspace()
+                .payload()
+                .read(cx)
+                .worktree_tab_ids(linked)
+                .len()
+        })
+    };
+    right_click(row(cx), cx);
+    click("worktree-menu-row-new-tab", cx);
+
+    right_click(row(cx), cx);
+    click("worktree-menu-row-remove", cx);
+    let tree = A11yTree::read(cx);
+    let asked = tree.with_role("AlertDialog").len();
+    let message = tree
+        .find_text(
+            "Closes 1 Tab. The command running in it will stop. The branch \u{201c}feature/login\u{201d} \
+             is kept.",
+        )
+        .is_some();
+    let tabs_while_asking = linked_tabs(cx);
+    click("modal-action-worktree-removal-cancel", cx);
+    let tabs_after_cancel = linked_tabs(cx);
+    right_click(row(cx), cx);
+    click("worktree-menu-row-remove", cx);
+    click("modal-action-worktree-removal-confirm", cx);
+    let tabs_after_confirm = linked_tabs(cx);
+    // The test store has no git, so the removal fails after the Tabs close.
+    let failure_reported = cx
+        .debug_bounds("modal-action-worktree-removal-failed-ok")
+        .is_some();
+    click("modal-action-worktree-removal-failed-ok", cx);
+
+    assert_eq!(asked, 1, "removal asks first");
+    assert!(
+        message,
+        "the alert names the Tabs it closes and the kept branch"
+    );
+    assert_eq!(
+        (tabs_while_asking, tabs_after_cancel, tabs_after_confirm),
+        (1, 1, 0),
+        "only a confirmed removal closes the Worktree's Tabs"
+    );
+    assert!(failure_reported, "a failed git removal is reported");
+    assert!(
+        !manager.read_with(cx, |manager, _| manager.worktree_removal_pending()),
+        "a finished removal allows another"
     );
 }
 

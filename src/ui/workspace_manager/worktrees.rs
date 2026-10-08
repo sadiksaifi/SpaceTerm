@@ -12,14 +12,16 @@ use gpui::{App, AppContext as _, Context, Entity, SharedString, Subscription, Ta
 use super::WorkspaceManager;
 use super::repository::{RowFacts, RowKey};
 use crate::domain::{
-    CurrentDirectory, RepositoryIdentity, WorkspaceEntry, WorkspaceId, WorktreeId, WorktreeKey,
-    WorktreeRegistry,
+    CurrentDirectory, PinnedDirectory, RepositoryIdentity, WorkspaceEntry, WorkspaceId, WorktreeId,
+    WorktreeKey, WorktreeRegistry,
 };
 use crate::repository_status::RepositoryMachine;
 use crate::repository_status::presentation::{HeadGlyph, SidebarBadge};
 use crate::repository_status::scheduler::SourceDirectory;
 use crate::ui::TabManager;
-use crate::ui::workspace_sidebar::{WorktreeGroup, WorktreeRowViewModel, WorktreeSection};
+use crate::ui::workspace_sidebar::{
+    WorktreeGroup, WorktreeRemoval, WorktreeRowViewModel, WorktreeSection,
+};
 use crate::ui::worktree_form::{
     LocationProbe, WorktreeForm, WorktreeFormBackend, WorktreeFormContext, WorktreeFormEvent,
 };
@@ -29,11 +31,16 @@ use crate::worktrees::catalog::{WorktreeInterestId, WorktreeListing};
 use crate::worktrees::git::{BranchList, WorktreeBranch, WorktreeCreateError};
 use crate::worktrees::listing::{WorktreeHead, WorktreeRecord};
 
+mod removal;
+
 #[derive(Default)]
 pub(super) struct SidebarWorktrees {
     workspaces: BTreeMap<WorkspaceId, WorkspaceWorktrees>,
     form: Option<Entity<WorktreeForm>>,
     created: Option<CreatedWorktree>,
+    /// The removal being checked, confirmed, or run. One runs at a time.
+    removal: Option<u64>,
+    removal_generation: u64,
 }
 
 /// A Worktree git created whose first Tab opens once the listing shows it.
@@ -386,7 +393,9 @@ impl WorkspaceManager {
         let counts = manager.worktree_tab_counts();
         let active = manager.active_worktree();
         let snapshot = worktrees.listed(cx);
-        let row = |id: WorktreeId, record: &WorktreeRecord, missing: bool| {
+        let pinned = self.local_pinned_directory(workspace_id);
+        // `listed` says whether the repository the Workspace reads lists the Worktree now.
+        let row = |id: WorktreeId, record: &WorktreeRecord, missing: bool, listed: bool| {
             let (label, detached) = match &record.head {
                 WorktreeHead::Branch(branch) => (branch.clone(), false),
                 WorktreeHead::Detached(commit) => (commit.clone(), true),
@@ -400,6 +409,24 @@ impl WorkspaceManager {
                     text: label.clone(),
                 })
             });
+            let main = worktrees
+                .registry
+                .key(id)
+                .is_some_and(|key| key.root() == key.repository().main_root());
+            let removal = if !listed {
+                WorktreeRemoval::Unlisted
+            } else if main {
+                WorktreeRemoval::Main
+            } else if record.locked {
+                WorktreeRemoval::Locked
+            } else if pinned
+                .as_ref()
+                .is_some_and(|pinned| pinned.starts_with(&record.root))
+            {
+                WorktreeRemoval::HoldsPinnedDirectory
+            } else {
+                WorktreeRemoval::Allowed
+            };
             WorktreeRowViewModel {
                 worktree_id: id,
                 name: directory_name(&record.root),
@@ -410,14 +437,12 @@ impl WorkspaceManager {
                     .into(),
                 directory_tooltip: directory.display().to_string().into(),
                 repository,
-                main: worktrees
-                    .registry
-                    .key(id)
-                    .is_some_and(|key| key.root() == key.repository().main_root()),
+                main,
                 has_tabs: counts.contains_key(&id),
                 active: active == Some(id),
                 locked: record.locked,
                 missing: missing || record.missing,
+                removal,
             }
         };
         let mut groups = Vec::new();
@@ -429,7 +454,7 @@ impl WorkspaceManager {
                 .filter(|record| record.head != WorktreeHead::Bare)
                 .filter_map(|record| {
                     let key = WorktreeKey::new(snapshot.repository.clone(), record.root.clone());
-                    Some(row(worktrees.registry.id(&key)?, record, false))
+                    Some(row(worktrees.registry.id(&key)?, record, false, true))
                 })
                 .collect();
             // A Worktree removed outside SpaceTerm keeps its row while its Tabs stay open.
@@ -441,7 +466,7 @@ impl WorkspaceManager {
                     if key.repository() != &snapshot.repository || listed {
                         return None;
                     }
-                    Some(row(id, worktrees.records.get(&id)?, true))
+                    Some(row(id, worktrees.records.get(&id)?, true, false))
                 })
                 .collect();
             rows.extend(removed);
@@ -462,7 +487,7 @@ impl WorkspaceManager {
                 former
                     .entry(key.repository())
                     .or_default()
-                    .push(row(id, record, false));
+                    .push(row(id, record, false, false));
             }
         }
         groups.extend(former.into_iter().map(|(repository, rows)| WorktreeGroup {
@@ -537,6 +562,18 @@ impl WorkspaceManager {
                 }
             })
             .unwrap_or_else(|| root.to_path_buf())
+    }
+
+    /// A local Workspace's Pinned Directory.
+    fn local_pinned_directory(&self, workspace_id: WorkspaceId) -> Option<PathBuf> {
+        match self
+            .workspaces
+            .workspace(workspace_id)?
+            .pinned_directory()?
+        {
+            PinnedDirectory::Local(directory) => Some(directory.path().to_path_buf()),
+            PinnedDirectory::Remote { .. } => None,
+        }
     }
 
     fn worktree_has_tabs(&self, workspace_id: WorkspaceId, id: WorktreeId, cx: &App) -> bool {

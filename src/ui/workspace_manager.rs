@@ -2389,8 +2389,15 @@ impl WorkspaceManager {
     fn close_hierarchy(&self, cx: &App) -> CloseHierarchy {
         let mut hierarchy = CloseHierarchy::default();
         for workspace in self.workspaces.iter() {
-            for (tab, pane, terminal) in workspace.payload().read(cx).terminal_panes(cx) {
-                hierarchy.insert(workspace.id(), tab, pane, terminal.close_facts());
+            let manager = workspace.payload().read(cx);
+            for (tab, pane, terminal) in manager.terminal_panes(cx) {
+                hierarchy.insert(
+                    workspace.id(),
+                    manager.tab_worktree(tab),
+                    tab,
+                    pane,
+                    terminal.close_facts(),
+                );
             }
         }
         hierarchy
@@ -2523,6 +2530,12 @@ impl WorkspaceManager {
                 manager.update(cx, |manager, cx| {
                     manager.close_tab_authorized(tab_id, window, cx)
                 });
+            }
+            CloseTarget::Worktree {
+                workspace_id,
+                worktree_id,
+            } => {
+                self.close_worktree_tabs(workspace_id, worktree_id, window, cx);
             }
             CloseTarget::Workspace(workspace_id) => {
                 if self.workspaces.workspace(workspace_id).is_some() {
@@ -2824,14 +2837,30 @@ impl WorkspaceManager {
             SidebarEvent::WorktreeCommand {
                 workspace_id,
                 worktree_id,
-                command: WorktreeMenuCommand::NewTab,
-            } => {
-                if self.activate_workspace(workspace_id, window, cx)
-                    && self.new_worktree_tab(workspace_id, worktree_id, window, cx)
-                {
-                    self.focus(window, cx);
+                command,
+            } => match command {
+                WorktreeMenuCommand::NewTab => {
+                    if self.activate_workspace(workspace_id, window, cx)
+                        && self.new_worktree_tab(workspace_id, worktree_id, window, cx)
+                    {
+                        self.focus(window, cx);
+                    }
                 }
-            }
+                WorktreeMenuCommand::CopyPath => {
+                    self.copy_worktree_path(workspace_id, worktree_id, cx)
+                }
+                WorktreeMenuCommand::CloseTabs => self.request_close(
+                    CloseTarget::Worktree {
+                        workspace_id,
+                        worktree_id,
+                    },
+                    window,
+                    cx,
+                ),
+                WorktreeMenuCommand::Remove => {
+                    self.request_worktree_removal(workspace_id, worktree_id, window, cx);
+                }
+            },
             SidebarEvent::LayoutChanged => self.synchronize_tab_manager_layouts(window, cx),
             SidebarEvent::FocusPane => self.focus(window, cx),
             SidebarEvent::FocusChanged => {}

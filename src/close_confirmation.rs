@@ -1,4 +1,4 @@
-use crate::domain::{PaneId, TabId, WorkspaceId};
+use crate::domain::{PaneId, TabId, WorkspaceId, WorktreeId};
 use crate::terminal::PaneTerminalState;
 use crate::terminal::metadata::TerminalMetadataSnapshot;
 
@@ -8,6 +8,8 @@ use crate::terminal::metadata::{CommandState, MetadataFreshness, PromptZone};
 pub(crate) enum CloseScope {
     Pane,
     Tab,
+    /// Every Tab of one Worktree.
+    Worktree,
     Workspace,
     Window,
 }
@@ -17,6 +19,7 @@ impl CloseScope {
         match self {
             Self::Pane => "Close Pane?",
             Self::Tab => "Close Tab?",
+            Self::Worktree => "Close Tabs?",
             Self::Workspace => "Close Workspace?",
             Self::Window => "Close Window?",
         }
@@ -26,6 +29,7 @@ impl CloseScope {
         match self {
             Self::Pane => "Close Pane",
             Self::Tab => "Close Tab",
+            Self::Worktree => "Close Tabs",
             Self::Workspace => "Close Workspace",
             Self::Window => "Close Window",
         }
@@ -43,6 +47,10 @@ pub(crate) enum CloseTarget {
         workspace_id: WorkspaceId,
         tab_id: TabId,
     },
+    Worktree {
+        workspace_id: WorkspaceId,
+        worktree_id: WorktreeId,
+    },
     Workspace(WorkspaceId),
     Window,
 }
@@ -52,6 +60,7 @@ impl CloseTarget {
         match self {
             Self::Pane { .. } => CloseScope::Pane,
             Self::Tab { .. } => CloseScope::Tab,
+            Self::Worktree { .. } => CloseScope::Worktree,
             Self::Workspace(_) => CloseScope::Workspace,
             Self::Window => CloseScope::Window,
         }
@@ -135,19 +144,35 @@ impl PaneCloseFacts<'_> {
 /// An immutable inventory is the single scope-resolution surface for every close request.
 #[derive(Default)]
 pub(crate) struct CloseHierarchy {
-    panes: Vec<(WorkspaceId, TabId, PaneId, bool)>,
+    panes: Vec<HierarchyPane>,
+}
+
+/// One Pane, where it sits, and whether closing it stops running work.
+#[derive(Clone, Copy)]
+struct HierarchyPane {
+    workspace: WorkspaceId,
+    worktree: Option<WorktreeId>,
+    tab: TabId,
+    pane: PaneId,
+    running: bool,
 }
 
 impl CloseHierarchy {
     pub(crate) fn insert(
         &mut self,
         workspace: WorkspaceId,
+        worktree: Option<WorktreeId>,
         tab: TabId,
         pane: PaneId,
         facts: PaneCloseFacts<'_>,
     ) {
-        self.panes
-            .push((workspace, tab, pane, facts.requires_confirmation()));
+        self.panes.push(HierarchyPane {
+            workspace,
+            worktree,
+            tab,
+            pane,
+            running: facts.requires_confirmation(),
+        });
     }
 
     pub(crate) fn affected_pane_count(&self, target: CloseTarget) -> usize {
@@ -158,7 +183,13 @@ impl CloseHierarchy {
         let mut workspaces = Vec::new();
         let mut tabs = Vec::new();
         let mut has_running_work = false;
-        for &(workspace, tab, _, running) in &self.panes {
+        for &HierarchyPane {
+            workspace,
+            tab,
+            running,
+            ..
+        } in &self.panes
+        {
             if !workspaces.contains(&workspace) {
                 workspaces.push(workspace);
             }
@@ -176,45 +207,51 @@ impl CloseHierarchy {
     }
 
     pub(crate) fn application_pane_facts(&self) -> impl Iterator<Item = ApplicationPaneFacts> + '_ {
-        self.panes
-            .iter()
-            .map(
-                |&(workspace_id, tab_id, pane_id, has_running_work)| ApplicationPaneFacts {
-                    workspace_id,
-                    tab_id,
-                    pane_id,
-                    has_running_work,
-                },
-            )
+        self.panes.iter().map(|pane| ApplicationPaneFacts {
+            workspace_id: pane.workspace,
+            tab_id: pane.tab,
+            pane_id: pane.pane,
+            has_running_work: pane.running,
+        })
     }
 
-    fn matching_panes(
-        &self,
-        target: CloseTarget,
-    ) -> impl Iterator<Item = &(WorkspaceId, TabId, PaneId, bool)> {
-        self.panes
-            .iter()
-            .filter(move |&&(workspace, tab, pane, _)| match target {
-                CloseTarget::Pane {
-                    workspace_id,
-                    tab_id,
-                    pane_id,
-                } => (workspace, tab, pane) == (workspace_id, tab_id, pane_id),
-                CloseTarget::Tab {
-                    workspace_id,
-                    tab_id,
-                } => (workspace, tab) == (workspace_id, tab_id),
-                CloseTarget::Workspace(id) => workspace == id,
-                CloseTarget::Window => true,
-            })
+    /// The number of Tabs `target` closes.
+    pub(crate) fn affected_tab_count(&self, target: CloseTarget) -> usize {
+        let mut tabs = Vec::new();
+        for pane in self.matching_panes(target) {
+            if !tabs.contains(&(pane.workspace, pane.tab)) {
+                tabs.push((pane.workspace, pane.tab));
+            }
+        }
+        tabs.len()
+    }
+
+    fn matching_panes(&self, target: CloseTarget) -> impl Iterator<Item = &HierarchyPane> {
+        self.panes.iter().filter(move |pane| match target {
+            CloseTarget::Pane {
+                workspace_id,
+                tab_id,
+                pane_id,
+            } => (pane.workspace, pane.tab, pane.pane) == (workspace_id, tab_id, pane_id),
+            CloseTarget::Tab {
+                workspace_id,
+                tab_id,
+            } => (pane.workspace, pane.tab) == (workspace_id, tab_id),
+            CloseTarget::Worktree {
+                workspace_id,
+                worktree_id,
+            } => pane.workspace == workspace_id && pane.worktree == Some(worktree_id),
+            CloseTarget::Workspace(id) => pane.workspace == id,
+            CloseTarget::Window => true,
+        })
     }
 
     pub(crate) fn requires_confirmation(&self, target: CloseTarget) -> Option<bool> {
         let mut found = matches!(target, CloseTarget::Window);
         let mut requires = false;
-        for &(_, _, _, running) in self.matching_panes(target) {
+        for pane in self.matching_panes(target) {
             found = true;
-            requires |= running;
+            requires |= pane.running;
         }
         found.then_some(requires)
     }
@@ -442,6 +479,7 @@ mod tests {
             let mut hierarchy = CloseHierarchy::default();
             hierarchy.insert(
                 WorkspaceId::new(1),
+                None,
                 TabId::new(1),
                 PaneId::new(1),
                 PaneCloseFacts {
@@ -476,6 +514,7 @@ mod tests {
             let mut hierarchy = CloseHierarchy::default();
             hierarchy.insert(
                 WorkspaceId::new(1),
+                None,
                 TabId::new(1),
                 PaneId::new(1),
                 PaneCloseFacts {
@@ -495,17 +534,25 @@ mod tests {
 
     #[test]
     fn close_confirmation_aggregates_exact_scopes_and_rejects_stale_settlement() {
+        let pane = |id, running| HierarchyPane {
+            workspace: WorkspaceId::new(1),
+            worktree: Some(WorktreeId::new(1)),
+            tab: TabId::new(1),
+            pane: PaneId::new(id),
+            running,
+        };
         let mut hierarchy = CloseHierarchy {
-            panes: vec![
-                (WorkspaceId::new(1), TabId::new(1), PaneId::new(1), true),
-                (WorkspaceId::new(1), TabId::new(1), PaneId::new(2), false),
-            ],
+            panes: vec![pane(1, true), pane(2, false)],
         };
         for scope in [
             target(1),
             CloseTarget::Tab {
                 workspace_id: WorkspaceId::new(1),
                 tab_id: TabId::new(1),
+            },
+            CloseTarget::Worktree {
+                workspace_id: WorkspaceId::new(1),
+                worktree_id: WorktreeId::new(1),
             },
             CloseTarget::Workspace(WorkspaceId::new(1)),
             CloseTarget::Window,

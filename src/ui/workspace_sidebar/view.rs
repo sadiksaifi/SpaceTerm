@@ -336,6 +336,24 @@ impl WorkspaceSidebar {
         // its one line leaves each directory and branch to the Worktree rows below it.
         let disclosing = expanded.is_some();
         let single_line = expanded == Some(true);
+        // A collapsed row stands for its Active Worktree, so its menu removes that Worktree.
+        let collapsed_worktree = worktrees
+            .as_ref()
+            .filter(|section| !section.expanded)
+            .and_then(|section| section.rows().find(|worktree| worktree.active))
+            .filter(|worktree| {
+                !matches!(
+                    worktree.removal,
+                    WorktreeRemoval::Main | WorktreeRemoval::Unlisted
+                )
+            })
+            .map(|worktree| {
+                (
+                    worktree.worktree_id,
+                    worktree.name.clone(),
+                    worktree.removal,
+                )
+            });
         // Text helpers consume no materials or surfaces. Give only those helpers the promoted
         // Panel-host row colors while all surface composition keeps the root appearance.
         let mut row_text_appearance = appearance.clone();
@@ -643,6 +661,7 @@ impl WorkspaceSidebar {
                 workspace_menu_entries(
                     !single_line,
                     creates_worktrees,
+                    collapsed_worktree,
                     pinned,
                     remote_connection_phase,
                     presentation,
@@ -1389,14 +1408,32 @@ impl WorkspaceSidebar {
             target
         };
         let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
-        let entries = vec![
+        let mut entries = vec![
             new_tab_entry(
                 WorktreeMenuCommand::NewTab,
                 "worktree-menu-row-new-tab",
                 presentation,
             )
             .disabled(!openable),
+            MenuEntry::action("Copy Path", WorktreeMenuCommand::CopyPath)
+                .icon(|foreground, size| {
+                    Icon::new(IconName::Copy, size, foreground).into_any_element()
+                })
+                .debug_selector("worktree-menu-row-copy-path"),
+            MenuEntry::separator(),
+            MenuEntry::action("Close Tabs", WorktreeMenuCommand::CloseTabs)
+                .disabled(!worktree.has_tabs)
+                .icon(|foreground, size| {
+                    Icon::new(IconName::X, size, foreground).into_any_element()
+                })
+                .debug_selector("worktree-menu-row-close-tabs"),
         ];
+        entries.extend(remove_worktree_entry(
+            WorktreeMenuCommand::Remove,
+            worktree.removal,
+            None,
+            "worktree-menu-row-remove",
+        ));
         self.row_menu(
             key,
             format!("{selector}-menu"),
@@ -1436,6 +1473,37 @@ fn new_tab_entry<A: Clone>(
     }
     .icon(|foreground, size| Icon::new(IconName::SquarePlus, size, foreground).into_any_element())
     .debug_selector(selector)
+}
+
+/// "Remove Worktree…", named when a Workspace row stands for the Worktree. A Worktree that can't
+/// be removed says why in place of the action; one git no longer lists offers none.
+fn remove_worktree_entry<A: Clone>(
+    command: A,
+    removal: WorktreeRemoval,
+    name: Option<&str>,
+    selector: &'static str,
+) -> Option<MenuEntry<A>> {
+    let reason = match removal {
+        WorktreeRemoval::Allowed => None,
+        WorktreeRemoval::Main => Some("Main Worktree Can\u{2019}t Be Removed"),
+        WorktreeRemoval::Locked => Some("Locked Worktree Can\u{2019}t Be Removed"),
+        WorktreeRemoval::HoldsPinnedDirectory => Some("Unpin the Directory to Remove"),
+        WorktreeRemoval::Unlisted => return None,
+    };
+    let label = match (reason, name) {
+        (Some(reason), _) => SharedString::from(reason),
+        (None, Some(name)) => format!("Remove Worktree \u{201c}{name}\u{201d}\u{2026}").into(),
+        (None, None) => SharedString::from("Remove Worktree\u{2026}"),
+    };
+    Some(
+        MenuEntry::action(label, command)
+            .disabled(reason.is_some())
+            .destructive(reason.is_none())
+            .icon(|foreground, size| {
+                Icon::new(IconName::Trash2, size, foreground).into_any_element()
+            })
+            .debug_selector(selector),
+    )
 }
 
 /// "New Worktree…", which presents the New Worktree dialog.
@@ -1533,6 +1601,7 @@ fn new_workspace_menu_entries(
 fn workspace_menu_entries(
     new_tab: bool,
     new_worktree: bool,
+    active_worktree: Option<(WorktreeId, SharedString, WorktreeRemoval)>,
     pinned: bool,
     remote_connection_phase: Option<RemoteConnectionPhase>,
     presentation: &crate::desktop_profile::DesktopPresentation,
@@ -1598,16 +1667,24 @@ fn workspace_menu_entries(
             .debug_selector("workspace-menu-row-reconnect"),
         );
     }
-    entries.extend([
-        MenuEntry::separator(),
-        MenuEntry::action(
-            "Close Workspace",
-            RowMenuCommand::Workspace(WorkspaceMenuCommand::Close),
+    entries.push(MenuEntry::separator());
+    if let Some((worktree_id, name, removal)) = active_worktree
+        && let Some(entry) = remove_worktree_entry(
+            RowMenuCommand::Worktree(worktree_id, WorktreeMenuCommand::Remove),
+            removal,
+            Some(&name),
+            "workspace-menu-row-remove-worktree",
         )
-        .destructive(true)
-        .icon(|foreground, size| Icon::new(IconName::X, size, foreground).into_any_element())
-        .debug_selector("workspace-menu-row-close"),
-    ]);
+    {
+        entries.push(entry);
+    }
+    entries.extend([MenuEntry::action(
+        "Close Workspace",
+        RowMenuCommand::Workspace(WorkspaceMenuCommand::Close),
+    )
+    .destructive(true)
+    .icon(|foreground, size| Icon::new(IconName::X, size, foreground).into_any_element())
+    .debug_selector("workspace-menu-row-close")]);
     entries
 }
 

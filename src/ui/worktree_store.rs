@@ -21,7 +21,9 @@ use crate::worktrees::WorktreeSnapshot;
 use crate::worktrees::catalog::{
     CatalogEffect, CatalogUpdate, WorktreeCatalog, WorktreeInterestId, WorktreeListing,
 };
-use crate::worktrees::git::{BranchList, LocalWorktreeGit, WorktreeBranch, WorktreeCreateError};
+use crate::worktrees::git::{
+    BranchList, LocalWorktreeGit, WorktreeBranch, WorktreeCreateError, WorktreeRemoveError,
+};
 
 /// Some interest's Worktrees changed.
 pub(crate) struct WorktreesChanged;
@@ -195,6 +197,34 @@ impl WorktreeStore {
         );
         cx.spawn(async move |store, cx| {
             let result = task.await.unwrap_or(Err(WorktreeCreateError::Failed));
+            let _ = store.update(cx, |store, cx| store.repository_changed(&common, cx));
+            result
+        })
+    }
+
+    /// Whether the Worktree at `path` has changes that removing it discards, or `None` when git
+    /// cannot tell.
+    pub(crate) fn has_changes(&self, path: PathBuf, cx: &mut Context<Self>) -> Task<Option<bool>> {
+        let cancellation = self.cancellation.clone();
+        let task = self.run_git(move |git| git.has_changes(&path, &cancellation).ok(), cx);
+        cx.spawn(async move |_, _| task.await.flatten())
+    }
+
+    /// Removes the Worktree at `path`, then reads the repository's listings again.
+    pub(crate) fn remove(
+        &self,
+        root: PathBuf,
+        common: PathBuf,
+        path: PathBuf,
+        force: bool,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), WorktreeRemoveError>> {
+        let task = self.run_git(
+            move |git| git.remove(&root, &path, force, &SshCancellationToken::default()),
+            cx,
+        );
+        cx.spawn(async move |store, cx| {
+            let result = task.await.unwrap_or(Err(WorktreeRemoveError::Failed));
             let _ = store.update(cx, |store, cx| store.repository_changed(&common, cx));
             result
         })
