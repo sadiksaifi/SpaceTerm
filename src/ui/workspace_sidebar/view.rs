@@ -476,35 +476,52 @@ impl WorkspaceSidebar {
         } else {
             "workspace-row"
         };
-        // The chevron, and the "+" of an expanded row, trail the name on line 1, so line 2 runs
-        // to the row's end like a row without Worktrees. A collapsed row offers New Worktree from
-        // its menu.
-        let trailing = expanded.map(|expanded| {
-            div()
-                .flex_shrink_0()
-                .flex()
-                .items_center()
-                .when(
-                    expanded && creates_worktrees && !lifted && !renaming,
-                    |trailing| {
-                        trailing.child(new_worktree_button(
-                            workspace_id,
-                            // The button keeps its place while hidden, so the row never shifts.
-                            if selected { 1.0 } else { hover },
-                            sidebar.clone(),
-                            appearance,
-                        ))
-                    },
-                )
-                .child(self.render_disclosure(
-                    workspace_id,
-                    expanded,
-                    !lifted,
-                    row_colors.row_icon,
-                    sidebar.clone(),
-                    appearance,
-                ))
+        // An expanded row's one line ends with the "+" and the chevron. A collapsed row centers
+        // its chevron over both lines and keeps its place clear on line 1 only, so line 2 runs to
+        // the row's end like a row without Worktrees. A collapsed row offers New Worktree from its
+        // menu.
+        let disclosure = expanded.map(|expanded| {
+            self.render_disclosure(
+                workspace_id,
+                expanded,
+                !lifted,
+                row_colors.row_icon,
+                sidebar.clone(),
+                appearance,
+            )
         });
+        let (inline_trailing, collapsed_disclosure) = match (expanded, disclosure) {
+            (Some(true), Some(disclosure)) => (
+                Some(
+                    div()
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .when(creates_worktrees && !lifted && !renaming, |trailing| {
+                            trailing.child(new_worktree_button(
+                                workspace_id,
+                                // The button keeps its place while hidden, so the row never
+                                // shifts.
+                                if selected { 1.0 } else { hover },
+                                sidebar.clone(),
+                                appearance,
+                            ))
+                        })
+                        .child(disclosure)
+                        .into_any_element(),
+                ),
+                None,
+            ),
+            (_, disclosure) => (
+                disclosure.as_ref().map(|_| {
+                    div()
+                        .w(appearance.spacing(DISCLOSURE_WIDTH))
+                        .flex_shrink_0()
+                        .into_any_element()
+                }),
+                disclosure,
+            ),
+        };
         let row_content = div()
             .id((element_name, workspace_id.get()))
             .debug_selector(move || {
@@ -605,7 +622,7 @@ impl WorkspaceSidebar {
                                 workspace_id.get(),
                                 row_text_appearance.clone(),
                             )))
-                            .children(trailing),
+                            .children(inline_trailing),
                     )
                     .when(!single_line, |lines| {
                         lines.child(text::detail(
@@ -624,6 +641,23 @@ impl WorkspaceSidebar {
             )
             // Rows rest on the continuous base surface without separators. The hover and selection
             // chips alone give each Workspace its shape; collection focus never adds a row ring.
+            .when_some(collapsed_disclosure, |row, disclosure| {
+                // A square target, so the end of line 2 stays the row's own.
+                row.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .right(row_padding_trailing)
+                        .flex()
+                        .items_center()
+                        .child(
+                            div()
+                                .h(appearance.spacing(DISCLOSURE_WIDTH))
+                                .child(disclosure),
+                        ),
+                )
+            })
             .children(markers)
             .when_some(tracker, |row, tracker| row.child(tracker.tracker()));
         if lifted {

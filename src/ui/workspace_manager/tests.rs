@@ -10728,10 +10728,17 @@ fn a_disclosure_chevron_should_trail_the_workspace_name(cx: &mut TestAppContext)
         disclosure.left() >= name.right() && disclosure.right() > group.right() - px(40.0),
         "the chevron trails the Workspace name at the row's end"
     );
+    let row = cx
+        .debug_bounds(format!("workspace-row-{id}-active").leak())
+        .expect("the collapsed Workspace row");
     assert_eq!(
         (collapsed.center().y, branch.right()),
-        (collapsed_name.center().y, collapsed.right()),
-        "a collapsed row's chevron trails line 1, so line 2 runs to the row's end"
+        (row.center().y, collapsed.right()),
+        "a collapsed row centers its chevron, and line 2 runs to the row's end beneath it"
+    );
+    assert!(
+        collapsed_name.right() <= collapsed.left(),
+        "line 1 keeps the chevron's place clear"
     );
 }
 
