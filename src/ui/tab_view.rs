@@ -1,3 +1,7 @@
+#[cfg(all(test, target_os = "linux", feature = "native-tests"))]
+#[path = "../platform/linux_adapter_tests/repository_caption.rs"]
+mod linux_adapter_tests;
+
 use super::chrome_geometry::concentric_outset;
 use super::chrome_icons::{IconRole, InteractiveIconRole};
 use super::chrome_typography::{ChromeTextStyleExt as _, ChromeTypography, TextRole};
@@ -233,8 +237,8 @@ struct RepositoryCaptionLayout {
 }
 
 impl CaptionLayout {
-    /// `controls_reveal` is how far the Pane controls have eased into view; hidden controls free
-    /// their width for the caption's other segments.
+    /// `controls_reveal` is how far the Pane controls have eased into view. Repository Status keeps
+    /// their full width because even hidden controls publish their button frames to accessibility.
     fn resolve(
         caption: &PaneCaption,
         width: Pixels,
@@ -314,9 +318,12 @@ impl CaptionLayout {
                 control_size,
             );
         }
-        let available = (width
-            - px(fixed_width + controls_extent * controls_reveal.clamp(0.0, 1.0)))
-        .max(px(0.0));
+        let controls_allocation = if metrics.repository.is_some() {
+            controls_extent
+        } else {
+            controls_extent * controls_reveal.clamp(0.0, 1.0)
+        };
+        let available = (width - px(fixed_width + controls_allocation)).max(px(0.0));
         // The name is always kept. Every other segment is admitted in priority order and the
         // first one that does not fit ends the ladder, so segments never reappear out of order.
         // A branch that does not fit whole is truncated when its narrowest form fits, and ends the
@@ -2548,8 +2555,8 @@ fn render_pane_caption_content(
         // An unfocused Pane shows its controls only under the pointer.
         .opacity(controls_reveal);
     let control_count = usize::from(layout.show_splits) * 2 + usize::from(has_multiple_panes) * 2;
-    // Hidden controls give up their width, so the segments before them slide to the trailing edge
-    // and back as the controls fade.
+    // CaptionLayout reserves the controls' space while Repository Status shows. Other captions
+    // give hidden controls' width to their identity.
     let controls_extent = if control_count == 0 {
         0.0
     } else {
@@ -2583,7 +2590,11 @@ fn render_pane_caption_content(
         .overflow_hidden();
     let controls_slot = div()
         .flex_shrink_0()
-        .w(px(slot_width))
+        .w(px(if layout.repository.show {
+            controls_extent
+        } else {
+            slot_width
+        }))
         .h_full()
         .flex()
         .items_center()
@@ -4100,9 +4111,19 @@ mod tests {
         TestTerminalSessionRecords,
         &mut VisualTestContext,
     ) {
+        let fonts = cx.update(|cx| crate::host_fonts::HostFonts::get(cx));
         cx.update(crate::ui::init).unwrap();
         cx.update(|cx| {
-            let active = Arc::new(super::super::appearance::ChromeAppearance::default());
+            // UI initialization installs a default profile; retain the fixture's font families.
+            cx.set_global(fonts);
+            let resolved = super::super::appearance_runtime::current(cx);
+            let active = Arc::new(super::super::appearance::ChromeAppearance {
+                typography: ChromeTypography::prepare(
+                    &resolved.chrome.typography,
+                    resolved.chrome.density,
+                ),
+                ..Default::default()
+            });
             let mut inactive = (*active).clone();
             inactive.active = false;
             cx.set_global(super::super::appearance::InstalledChrome {
@@ -5105,7 +5126,143 @@ mod tests {
     }
 
     #[gpui::test]
-    fn repository_status_should_slide_aside_for_the_controls_of_a_focused_pane(
+    fn a_long_repository_branch_should_keep_its_segment_inside_the_caption_before_controls(
+        cx: &mut TestAppContext,
+    ) {
+        assert_long_repository_branch_bounds(cx, Some(RepositoryMark::Changes));
+    }
+
+    pub(super) fn assert_long_repository_branch_bounds(
+        cx: &mut TestAppContext,
+        mark: Option<RepositoryMark>,
+    ) {
+        let (root, view, records, cx) = caption_view(cx);
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.split_focused(SplitAxis::Horizontal, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |view, _| view.pane_count()), 2);
+        let mut screen =
+            ScreenSnapshot::from_test_parts_at(Arc::from([]), Default::default(), "zsh", 1);
+        let metadata = Arc::make_mut(&mut Arc::make_mut(&mut screen).metadata);
+        metadata.context = crate::terminal::metadata::TerminalMetadataContext::local(
+            crate::local_path::LocalPathSemantics::Posix,
+            "/home/tester",
+            crate::terminal::metadata::LocalMachine::new(
+                Some("tester"),
+                Some("workstation"),
+                Some("/home/tester"),
+            ),
+        );
+        metadata.directory.path = Arc::from("/home/tester/api");
+        records
+            .event_sender(1)
+            .unwrap()
+            .try_send(TerminalSessionEvent::Screen(screen))
+            .unwrap();
+        cx.run_until_parked();
+        view.update(cx, |view, cx| {
+            view.pane_captions
+                .entry(PaneId::new(1))
+                .or_default()
+                .repository = Some(RepositoryCaption {
+                glyph: HeadGlyph::Branch,
+                branch: "fix/linux-terminal-accessibility-child-elements".into(),
+                mark,
+                detail: mark.map(|_| crate::repository_status::presentation::CaptionDetail {
+                    text: "3 changed".into(),
+                    dimmed: false,
+                }),
+                divergence: Some("\u{2191}2 \u{2193}1".into()),
+                dimmed: false,
+                accessible_label: "Repository Status, long branch, 3 changed".into(),
+            });
+            cx.notify();
+        });
+        cx.run_until_parked();
+        view.update(cx, |view, cx| view.focus_pane(PaneId::new(1), cx));
+        crate::ui::settle_hover(cx);
+        let mut branches = 0;
+        let mut segments = 0;
+        let mut overlaps = Vec::new();
+        for width in [
+            2000.0, 1280.0, 840.0, 654.0, 520.0, 400.0, 320.0, 260.0, 200.0,
+        ] {
+            root.update(cx, |root, cx| {
+                root.width = px(width);
+                cx.notify();
+            });
+            cx.run_until_parked();
+            let other_pane = cx.debug_bounds("pane-surface-2").unwrap();
+            cx.simulate_mouse_move(other_pane.center(), None, gpui::Modifiers::none());
+            view.update(cx, |view, cx| view.focus_pane(PaneId::new(2), cx));
+            crate::ui::settle_hover(cx);
+            if let Some(segment) = cx.debug_bounds("pane-repository-1") {
+                let control = cx
+                    .debug_bounds("pane-split-right-1")
+                    .or_else(|| cx.debug_bounds("pane-toggle-zoom-1"))
+                    .unwrap();
+                if segment.right() > control.left() {
+                    overlaps.push(format!(
+                        "at {width}: unfocused segment {segment:?} overlaps control {control:?}"
+                    ));
+                }
+            }
+            view.update(cx, |view, cx| view.focus_pane(PaneId::new(1), cx));
+            cx.run_until_parked();
+            for _ in 0..12 {
+                cx.executor()
+                    .advance_clock(std::time::Duration::from_millis(16));
+                cx.update(|window, cx| window.simulate_next_frame(cx));
+                cx.run_until_parked();
+                if let Some(segment) = cx.debug_bounds("pane-repository-1") {
+                    let clip = cx.debug_bounds("pane-controls-clip-1").unwrap();
+                    if clip.size.width > px(0.0) {
+                        assert!(
+                            segment.right() <= clip.left(),
+                            "at {width}: {segment:?} overlaps revealing controls {clip:?}"
+                        );
+                    }
+                }
+            }
+            crate::ui::settle_hover(cx);
+            let caption = cx.debug_bounds("pane-caption-1-focused").unwrap();
+            let Some(segment) = cx.debug_bounds("pane-repository-1") else {
+                continue;
+            };
+            segments += 1;
+            assert!(
+                segment.left() >= caption.left() && segment.right() <= caption.right(),
+                "at {width}: segment {segment:?} exceeds caption {caption:?}"
+            );
+            let control = cx
+                .debug_bounds("pane-split-right-1")
+                .or_else(|| cx.debug_bounds("pane-toggle-zoom-1"))
+                .unwrap();
+            assert!(
+                segment.right() <= control.left(),
+                "at {width}: segment {segment:?} overlaps first control {control:?}"
+            );
+            if let Some(branch) = cx.debug_bounds("pane-repository-branch-1") {
+                branches += 1;
+                assert!(
+                    branch.right() <= segment.right(),
+                    "at {width}: {branch:?} {segment:?}"
+                );
+            }
+        }
+        assert!(
+            segments >= 5,
+            "several narrow and wide Panes show Repository Status"
+        );
+        assert!(branches >= 3, "several widths exercise branch truncation");
+        assert!(overlaps.is_empty(), "{}", overlaps.join("\n"));
+    }
+
+    #[gpui::test]
+    fn repository_status_should_reserve_control_space_in_focused_and_unfocused_panes(
         cx: &mut TestAppContext,
     ) {
         let (_, view, _, cx) = caption_view(cx);
@@ -5139,21 +5296,16 @@ mod tests {
         let segment_right =
             |cx: &mut VisualTestContext| cx.debug_bounds("pane-repository-1").unwrap().right();
         let controls = cx.debug_bounds("pane-controls-1-full").unwrap();
-        assert!(
-            (segment_right(cx) - controls.right()).abs() < px(0.5),
-            "an unfocused Pane's hidden controls leave their place to the Repository Status",
-        );
+        let unfocused_right = segment_right(cx);
+        assert!(unfocused_right <= controls.left());
 
         view.update(cx, |view, cx| view.focus_pane(PaneId::new(1), cx));
         crate::ui::settle_hover(cx);
-        assert!(
-            segment_right(cx) <= controls.left(),
-            "the Focused Pane's controls push the Repository Status before them",
-        );
+        assert_eq!(segment_right(cx), unfocused_right);
 
         view.update(cx, |view, cx| view.focus_pane(PaneId::new(2), cx));
         crate::ui::settle_hover(cx);
-        assert!((segment_right(cx) - controls.right()).abs() < px(0.5));
+        assert_eq!(segment_right(cx), unfocused_right);
     }
 
     #[gpui::test]
@@ -5249,7 +5401,7 @@ mod tests {
         );
         let segment = cx.debug_bounds("pane-repository-1").unwrap();
         let controls = cx.debug_bounds("pane-controls-1-full").unwrap();
-        assert!((segment.right() - controls.right()).abs() < px(0.5));
+        assert!(segment.right() <= controls.left());
     }
 
     #[gpui::test]
@@ -5433,7 +5585,7 @@ mod tests {
     }
 
     #[test]
-    fn hidden_pane_controls_should_free_their_width_for_the_caption() {
+    fn repository_status_should_keep_its_control_budget_when_controls_are_hidden() {
         let metrics = CaptionMetrics {
             user: px(40.0),
             host: px(60.0),
@@ -5456,7 +5608,7 @@ mod tests {
             + 20.0
             + controls
             + 89.0;
-        let resolve = |reveal| {
+        let resolve = |metrics, reveal| {
             CaptionLayout::from_metrics(
                 false,
                 px(width),
@@ -5468,11 +5620,19 @@ mod tests {
             )
         };
 
-        assert_eq!(resolve(1.0).repository.branch_limit, Some(40));
-        let hidden = resolve(0.0);
+        assert_eq!(resolve(metrics, 1.0).repository.branch_limit, Some(40));
+        let hidden = resolve(metrics, 0.0);
         assert!(hidden.repository.show_branch);
-        assert_eq!(hidden.repository.branch_limit, None);
+        assert_eq!(hidden.repository.branch_limit, Some(40));
         assert!(hidden.show_splits, "hidden controls keep their set");
+        assert_eq!(resolve(metrics, 0.5).repository, hidden.repository);
+
+        let without_repository = CaptionMetrics {
+            repository: None,
+            ..metrics
+        };
+        assert!(!resolve(without_repository, 1.0).show_host);
+        assert!(resolve(without_repository, 0.0).show_host);
     }
 
     /// A narrow Pane Caption without status retains Split controls above their width threshold.
