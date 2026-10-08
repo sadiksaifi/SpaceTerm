@@ -58,7 +58,7 @@ pub(crate) struct RepositoryStatusAdapters {
 /// Runs one blocking read away from the UI thread.
 pub(crate) type ReadSpawner = Arc<dyn Fn(Box<dyn FnOnce() + Send>) -> bool + Send + Sync>;
 
-fn thread_spawner() -> ReadSpawner {
+pub(crate) fn thread_spawner() -> ReadSpawner {
     Arc::new(|work| {
         std::thread::Builder::new()
             .name("repository-status".into())

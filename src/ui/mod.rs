@@ -45,6 +45,7 @@ mod workspace_frame;
 mod workspace_manager;
 mod workspace_sidebar;
 mod workspace_status;
+pub(crate) mod worktree_store;
 
 use gpui::{App, actions};
 

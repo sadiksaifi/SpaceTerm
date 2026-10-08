@@ -21,7 +21,7 @@ pub(crate) use workspace_collection::{
     ValidatedLocalDirectory, WorkspaceCollection, WorkspaceEntry, WorkspaceError, WorkspaceId,
     WorkspaceLocation,
 };
-pub(crate) use worktree::WorktreeId;
+pub(crate) use worktree::{RepositoryIdentity, WorktreeId};
 
 pub(crate) use remote_workspace::{
     RemoteConnectionPhase, RemoteConnectionReduction, RemoteConnectionState,

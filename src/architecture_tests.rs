@@ -230,6 +230,7 @@ fn portable_verification_cannot_select_native_adapters_or_host_mechanics() {
         "keybindings",
         "repository_status",
         "ssh",
+        "worktrees",
         "platform/local_filesystem",
         "terminal/session",
         "terminal/native_services",

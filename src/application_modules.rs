@@ -15,6 +15,7 @@ mod terminal;
 mod theme_registry;
 mod ui;
 mod updates;
+mod worktrees;
 
 mod desktop_profile;
 

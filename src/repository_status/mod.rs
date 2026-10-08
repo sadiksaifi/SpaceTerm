@@ -19,7 +19,7 @@ pub(crate) mod remote_read;
 pub(crate) mod remote_url;
 pub(crate) mod scheduler;
 #[cfg(test)]
-mod testing;
+pub(crate) mod testing;
 pub(crate) mod tool_check;
 pub(crate) mod tools;
 

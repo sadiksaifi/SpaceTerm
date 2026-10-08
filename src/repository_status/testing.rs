@@ -7,24 +7,24 @@ use super::{ProgramError, ProgramExit, ProgramRequest, RepositoryProgramRunner};
 use crate::ssh::cancellation::SshCancellationToken;
 
 /// An exit status and the stdout chunks delivered before it, or a runner failure.
-pub(super) type FakeResponse = Result<(Option<i32>, Vec<Vec<u8>>), ProgramError>;
+pub(crate) type FakeResponse = Result<(Option<i32>, Vec<Vec<u8>>), ProgramError>;
 
 /// Records every request and answers from a script, delivering stdout in the given chunks.
 #[derive(Default)]
-pub(super) struct FakeRunner {
+pub(crate) struct FakeRunner {
     responses: Mutex<VecDeque<FakeResponse>>,
     requests: Mutex<Vec<ProgramRequest>>,
 }
 
 impl FakeRunner {
-    pub(super) fn new(responses: impl IntoIterator<Item = FakeResponse>) -> Arc<Self> {
+    pub(crate) fn new(responses: impl IntoIterator<Item = FakeResponse>) -> Arc<Self> {
         Arc::new(Self {
             responses: Mutex::new(responses.into_iter().collect()),
             requests: Mutex::default(),
         })
     }
 
-    pub(super) fn requests(&self) -> Vec<ProgramRequest> {
+    pub(crate) fn requests(&self) -> Vec<ProgramRequest> {
         self.requests.lock().unwrap().clone()
     }
 }
@@ -50,6 +50,6 @@ impl RepositoryProgramRunner for FakeRunner {
     }
 }
 
-pub(super) fn exit(code: i32, stdout: &str) -> FakeResponse {
+pub(crate) fn exit(code: i32, stdout: &str) -> FakeResponse {
     Ok((Some(code), vec![stdout.as_bytes().to_vec()]))
 }
