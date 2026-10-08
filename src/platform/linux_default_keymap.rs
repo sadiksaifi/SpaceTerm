@@ -468,7 +468,10 @@ mod tests {
             for command in Command::ALL {
                 let expected = if matches!(
                     command,
-                    Command::CloseWorkspace | Command::ShowRepositoryStatus | Command::About
+                    Command::CloseWorkspace
+                        | Command::ShowRepositoryStatus
+                        | Command::NewWorktree
+                        | Command::About
                 ) {
                     KeybindingState::Unassigned
                 } else {
