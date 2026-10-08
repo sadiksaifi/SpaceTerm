@@ -45,6 +45,7 @@ from spaceterm_tasks.accessibility_linux import (
     cleanup_private_processes,
     create_private_runtime,
     require,
+    require_prerequisites,
     require_private_runtime,
     retire_direct_child,
 )
@@ -1711,6 +1712,7 @@ def prepare_binary(args, output):
             "source_executable_sha256_invalid",
         )
     binary = args.binary
+    require_prerequisites(args.backend)
     if binary is None:
         try:
             binary = build_executable("--locked", env={**os.environ, "CARGO_BUILD_JOBS": "2"})
@@ -1793,7 +1795,10 @@ def main():
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGHUP, interrupted)
     # Verify kernel support before starting any private bus/display/reader.
-    capability_descriptor = os.pidfd_open(os.getpid())
+    try:
+        capability_descriptor = os.pidfd_open(os.getpid())
+    except OSError:
+        raise SmokeFailure("pidfd_cleanup_required") from None
     os.close(capability_descriptor)
     output = (
         args.output_dir.resolve()

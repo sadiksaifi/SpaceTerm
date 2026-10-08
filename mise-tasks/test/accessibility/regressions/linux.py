@@ -584,6 +584,7 @@ def main():
             proof[name]["failure"] = (
                 str(error) if isinstance(error, AssertionError) else type(error).__name__
             )
+            print(f"{name}: failed ({proof[name]['failure']})", file=sys.stderr)
         finally:
             save(directory / "proof.json", proof[name])
             save(run_dir / "proof.json", proof)

@@ -26,6 +26,57 @@ def require(condition, classification):
         raise SmokeFailure(classification)
 
 
+def require_prerequisites(backend):
+    """Reject missing harness dependencies before building or starting a private session."""
+    tools = [
+        "dbus-daemon",
+        "dbus-run-session",
+        "gsettings",
+        "tic",
+        "zsh",
+        "speech-dispatcher",
+        "aplay",
+        "Xvfb",
+        "xdpyinfo",
+        "xkbcomp",
+        "/usr/libexec/at-spi-bus-launcher",
+        "/usr/libexec/dconf-service",
+        "/usr/lib/speech-dispatcher-modules/sd_dummy",
+    ]
+    if backend in ("both", "x11"):
+        tools.extend(("xdotool", "import"))
+    if backend in ("both", "wayland"):
+        tools.append("gnome-shell")
+    for tool in tools:
+        require(shutil.which(tool) is not None, "prerequisite_tool_missing:" + Path(tool).name)
+    schema_names = ["org.gnome.desktop.interface", "org.gnome.desktop.a11y.applications"]
+    if backend in ("both", "wayland"):
+        schema_names.append("org.gnome.shell")
+    # These bindings belong to the system interpreter, not mise's Python.
+    probe = subprocess.run(
+        [
+            "/usr/bin/python3",
+            "-I",
+            "-c",
+            "import dbus, pyatspi, speechd, orca, gi, sys; "
+            "gi.require_version('Gdk', '3.0'); "
+            "from gi.repository import Gdk, Gio, GLib; "
+            "schemas = Gio.SettingsSchemaSource.get_default(); "
+            "assert schemas is not None; "
+            "assert all(schemas.lookup(name, True) is not None for name in sys.argv[1:])",
+            *schema_names,
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=10,
+    )
+    require(probe.returncode == 0, "prerequisite_system_python_bindings_or_schemas_missing")
+    require(
+        any(Path("/usr/share/vulkan/icd.d").glob("lvp_icd*.json")),
+        "lavapipe_driver_missing",
+    )
+
+
 class Processes:
     def __init__(self, registry):
         self.children = []

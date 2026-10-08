@@ -80,6 +80,23 @@ hint = "Run mise run setup:packages"
 "apt:zsh" = { os = "linux" }
 "apt:python3-gi" = { os = "linux" }
 "apt:gir1.2-glib-2.0" = { os = "linux" }
+"apt:python3-pyatspi" = { os = "linux" }
+"apt:python3-dbus" = { os = "linux" }
+"apt:python3-speechd" = { os = "linux" }
+"apt:at-spi2-core" = { os = "linux" }
+"apt:dconf-service" = { os = "linux" }
+"apt:libglib2.0-bin" = { os = "linux" }
+"apt:gsettings-desktop-schemas" = { os = "linux" }
+"apt:gir1.2-gtk-3.0" = { os = "linux" }
+"apt:xvfb" = { os = "linux" }
+"apt:x11-utils" = { os = "linux" }
+"apt:x11-xkb-utils" = { os = "linux" }
+"apt:xdotool" = { os = "linux" }
+"apt:imagemagick" = { os = "linux" }
+"apt:gnome-shell" = { os = "linux" }
+"apt:orca" = { os = "linux" }
+"apt:speech-dispatcher" = { os = "linux" }
+"apt:alsa-utils" = { os = "linux" }
 
 # Task conventions:
 # - Name tasks <entry>[:<narrowing>...][:<platform>] from CONTEXT.md terms or the wrapped tool's
@@ -264,6 +281,8 @@ run = [
   { task = "fmt:check" },
   { task = "lint" },
   { task = "check" },
+  { task = "test:accessibility:linux", args = ["--backend", "both"] },
+  { task = "test:accessibility:regressions:linux" },
   { task = "test" },
   { task = "test:rustdoc" },
   { task = "test:native:linux" },
