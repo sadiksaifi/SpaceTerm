@@ -219,6 +219,20 @@ impl LocalFilesystemAuthority {
         Ok(current)
     }
 
+    /// Whether `path` lies inside `root` on disk, following symbolic links in either, so a
+    /// directory chosen through a link still belongs to the directory it resolves into.
+    pub(crate) fn physically_contains(&self, root: &Path, path: &Path) -> bool {
+        if validate_absolute_path(self.paths, root).is_err()
+            || validate_absolute_path(self.paths, path).is_err()
+        {
+            return false;
+        }
+        match (fs::canonicalize(root), fs::canonicalize(path)) {
+            (Ok(root), Ok(path)) => path.starts_with(root),
+            _ => false,
+        }
+    }
+
     /// Lists the names of `directory`'s child directories, following symbolic links, and stops
     /// after `limit` names. Names that are not valid UTF-8 are omitted.
     pub(crate) fn list_child_directories(

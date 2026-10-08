@@ -359,3 +359,32 @@ fn child_directory_listing_follows_links_to_directories_only() {
 
     assert_eq!(names, ["alias", "target"]);
 }
+
+#[test]
+fn physical_containment_follows_symbolic_links_on_either_side() {
+    let root = Fixture::new();
+    let worktree = root.0.join("worktree");
+    let inside = worktree.join("inside");
+    let elsewhere = root.0.join("elsewhere");
+    fs::create_dir_all(&inside).unwrap();
+    fs::create_dir(&elsewhere).unwrap();
+    let alias = root.0.join("alias");
+    symlink(&worktree, &alias).unwrap();
+    let escape = worktree.join("escape");
+    symlink(&elsewhere, &escape).unwrap();
+    let authority = LocalFilesystemAuthority::new(
+        crate::local_path::LocalPathSemantics::Posix,
+        Arc::new(crate::platform::unix_local_identity::UnixLocalIdentity),
+    );
+
+    assert_eq!(
+        [
+            authority.physically_contains(&worktree, &inside),
+            authority.physically_contains(&worktree, &alias.join("inside")),
+            authority.physically_contains(&alias, &inside),
+            authority.physically_contains(&worktree, &escape),
+            authority.physically_contains(&worktree, &worktree.join("missing")),
+        ],
+        [true, true, true, false, false]
+    );
+}

@@ -18,4 +18,5 @@ pub(crate) fn local_filesystem() -> crate::platform::local_filesystem::LocalFile
 }
 
 mod selected_file;
+mod worktree_launch;
 mod worktrees;
