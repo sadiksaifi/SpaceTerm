@@ -884,6 +884,9 @@ pub struct ContextMenuTarget {
     label: SharedString,
     description: Option<SharedString>,
     selected: Option<bool>,
+    expanded: Option<bool>,
+    level: Option<usize>,
+    set_position: Option<(usize, usize)>,
     disabled: bool,
     on_press: Option<TargetPressHandler>,
 }
@@ -895,6 +898,9 @@ impl ContextMenuTarget {
             label: label.into(),
             description: None,
             selected: None,
+            expanded: None,
+            level: None,
+            set_position: None,
             disabled: false,
             on_press: None,
         }
@@ -907,6 +913,24 @@ impl ContextMenuTarget {
 
     pub fn selected(mut self, selected: bool) -> Self {
         self.selected = Some(selected);
+        self
+    }
+
+    /// Publishes whether a tree item's children are shown.
+    pub fn expanded(mut self, expanded: bool) -> Self {
+        self.expanded = Some(expanded);
+        self
+    }
+
+    /// Publishes a tree item's depth, starting at 1.
+    pub fn level(mut self, level: usize) -> Self {
+        self.level = Some(level);
+        self
+    }
+
+    /// Publishes the content's 1-based position among `size` siblings.
+    pub fn set_position(mut self, position: usize, size: usize) -> Self {
+        self.set_position = Some((position, size));
         self
     }
 
@@ -1712,6 +1736,15 @@ impl<A: Clone + 'static> MenuControl<A> {
                     })
                     .when_some(target.selected, |trigger, selected| {
                         trigger.aria_selected(selected)
+                    })
+                    .when_some(target.expanded, |trigger, expanded| {
+                        trigger.aria_expanded(expanded)
+                    })
+                    .when_some(target.level, |trigger, level| trigger.aria_level(level))
+                    .when_some(target.set_position, |trigger, (position, size)| {
+                        trigger
+                            .aria_position_in_set(position)
+                            .aria_size_of_set(size)
                     })
                     .aria_disabled(target.disabled)
                     .when_some(target.on_press.filter(|_| available), |trigger, press| {
