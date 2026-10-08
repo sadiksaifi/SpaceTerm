@@ -142,6 +142,14 @@ impl WorktreeSection {
     pub(super) fn rows(&self) -> impl Iterator<Item = &WorktreeRowViewModel> {
         self.groups.iter().flat_map(|group| &group.rows)
     }
+
+    /// The rows the section discloses, counting each former repository's label.
+    fn visible_rows(&self) -> usize {
+        self.groups
+            .iter()
+            .map(|group| group.rows.len() + usize::from(group.former_repository.is_some()))
+            .sum()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -694,6 +702,7 @@ impl WorkspaceSidebar {
                     level: 1.0,
                     tracker: None,
                 },
+                None,
                 sidebar,
                 presentation,
                 window,
