@@ -11306,7 +11306,7 @@ fn removing_a_worktree_should_confirm_then_close_its_tabs_before_git_runs(cx: &m
     use spaceterm_ui::a11y_testing::A11yTree;
 
     cx.update(|cx| {
-        crate::ui::worktree_store::testing::install(cx);
+        crate::ui::worktree_store::testing::install_with_removal_git(cx);
     });
     let (manager, _records, cx) = workspace_manager(cx);
     let fixture = crate::terminal::testing::ShellResourcesFixture::new();
@@ -12578,4 +12578,52 @@ fn row_menus_should_place_their_destructive_commands_below_the_divider(cx: &mut 
         "Close Tabs stays in the first group; Remove Worktree and Close Workspace sit together \
          below the divider"
     );
+}
+
+#[gpui::test]
+fn removing_a_worktree_that_cannot_be_checked_should_report_it_and_keep_its_tabs(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    cx.update(|cx| {
+        // This store has no git, so the check before confirmation fails.
+        crate::ui::worktree_store::testing::install(cx);
+    });
+    let (manager, _records, cx) = workspace_manager(cx);
+    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
+    present_worktrees(cx, &[&fixture.path().join("shell-integration")]);
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let linked = manager.read_with(cx, |manager, cx| {
+        manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows[1].worktree_id
+    });
+    right_click(worktree_row(workspace_id, linked, cx), cx);
+    click("worktree-menu-row-new-tab", cx);
+    right_click(worktree_row(workspace_id, linked, cx), cx);
+    click("worktree-menu-row-remove", cx);
+
+    let tree = A11yTree::read(cx);
+    let reported = tree
+        .find_text("SpaceTerm couldn\u{2019}t check it for changes, so nothing was removed.")
+        .is_some();
+    let asked = cx
+        .debug_bounds("modal-action-worktree-removal-confirm")
+        .is_some();
+    click("modal-action-worktree-removal-failed-ok", cx);
+
+    assert_eq!((reported, asked), (true, false));
+    assert_eq!(
+        manager.read_with(cx, |manager, cx| {
+            manager
+                .workspaces
+                .active_workspace()
+                .payload()
+                .read(cx)
+                .worktree_tab_ids(linked)
+                .len()
+        }),
+        1,
+        "the Worktree keeps its Tab"
+    );
+    assert!(!manager.read_with(cx, |manager, _| manager.worktree_removal_pending()));
 }

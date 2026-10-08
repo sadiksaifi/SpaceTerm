@@ -23,8 +23,8 @@ use crate::worktrees::catalog::{
     CatalogEffect, CatalogUpdate, WorktreeCatalog, WorktreeInterestId, WorktreeListing,
 };
 use crate::worktrees::git::{
-    BranchList, LocalWorktreeGit, RemovalCheck, WorktreeBranch, WorktreeCreateError,
-    WorktreeIdentity, WorktreeRemoveError,
+    BranchList, LocalWorktreeGit, RemovalCheck, RemovalExpectation, WorktreeBranch,
+    WorktreeCreateError, WorktreeRemoveError,
 };
 
 /// Some interest's Worktrees changed.
@@ -220,30 +220,30 @@ impl WorktreeStore {
         cx.spawn(async move |_, _| task.await.flatten())
     }
 
-    /// Whether the Worktree at `path` is still the one `expected` identifies.
-    pub(crate) fn is_worktree(
+    /// Whether `path` still shows what the person confirmed removing.
+    pub(crate) fn confirm_location(
         &self,
         path: PathBuf,
-        expected: WorktreeIdentity,
+        expected: RemovalExpectation,
         cx: &mut Context<Self>,
     ) -> Task<Result<(), WorktreeRemoveError>> {
         let cancellation = self.cancellation.clone();
         let task = self.run_git(
-            move |git| git.is_worktree(&path, &expected, &cancellation),
+            move |git| git.confirm_location(&path, &expected, &cancellation),
             cx,
         );
         cx.spawn(async move |_, _| task.await.unwrap_or(Err(WorktreeRemoveError::Failed)))
     }
 
-    /// Removes the Worktree at `path`, then reads the repository's listings again. With
-    /// `expected`, git removes nothing unless the Worktree there is still that one.
+    /// Removes the Worktree at `path`, then reads the repository's listings again. Git removes
+    /// nothing unless `path` still shows what the person confirmed.
     pub(crate) fn remove(
         &self,
         root: PathBuf,
         common: PathBuf,
         path: PathBuf,
         force: bool,
-        expected: Option<WorktreeIdentity>,
+        expected: RemovalExpectation,
         cx: &mut Context<Self>,
     ) -> Task<Result<(), WorktreeRemoveError>> {
         let task = self.run_git(
@@ -252,7 +252,7 @@ impl WorktreeStore {
                     &root,
                     &path,
                     force,
-                    expected.as_ref(),
+                    &expected,
                     &SshCancellationToken::default(),
                 )
             },
@@ -482,6 +482,65 @@ pub(crate) mod testing {
         };
         let store = cx.new(|cx| WorktreeStore::new(adapters, Arc::new(|_| false), cx));
         cx.set_global(InstalledWorktrees(store.clone()));
+        store
+    }
+
+    /// A git that answers only removal's commands: every Worktree is administered from
+    /// `/repository/.git/worktrees/x` and clean, and `worktree remove` fails. Everything else
+    /// fails, so listings come only from `present`.
+    struct RemovalGit;
+
+    impl crate::repository_status::RepositoryProgramRunner for RemovalGit {
+        fn run(
+            &self,
+            request: &crate::repository_status::ProgramRequest,
+            stdout: &mut dyn FnMut(&[u8]),
+            _: &SshCancellationToken,
+        ) -> Result<crate::repository_status::ProgramExit, crate::repository_status::ProgramError>
+        {
+            let arguments: Vec<&str> = request
+                .arguments
+                .iter()
+                .filter_map(|argument| argument.to_str())
+                .collect();
+            let code = match arguments.as_slice() {
+                [.., "rev-parse", "--absolute-git-dir"] => {
+                    stdout(b"/repository/.git/worktrees/x\n");
+                    0
+                }
+                [
+                    ..,
+                    "status",
+                    "--porcelain",
+                    "-z",
+                    "--untracked-files=normal",
+                ] => 0,
+                _ => 128,
+            };
+            Ok(crate::repository_status::ProgramExit { code: Some(code) })
+        }
+    }
+
+    /// Like `install`, with a git that can check a Worktree for removal and runs at once.
+    pub(crate) fn install_with_removal_git(cx: &mut App) -> Entity<WorktreeStore> {
+        let store = install(cx);
+        store.update(cx, |store, _| {
+            store.spawn = Arc::new(|work| {
+                work();
+                true
+            });
+            store.git.checked = true;
+            store.git.git = Some(Arc::new(LocalWorktreeGit::new(
+                Arc::new(RemovalGit),
+                "/usr/bin/git".into(),
+                "/home/person".into(),
+                crate::repository_status::ToolVersion {
+                    major: 2,
+                    minor: 47,
+                    patch: 0,
+                },
+            )));
+        });
         store
     }
 

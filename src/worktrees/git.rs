@@ -108,6 +108,8 @@ pub(crate) enum WorktreeCreateError {
 pub(crate) enum WorktreeRemoveError {
     #[error("a different Worktree now has the confirmed location")]
     Replaced,
+    #[error("the Worktree could not be checked before removal")]
+    Unchecked,
     #[error("git could not remove the Worktree")]
     Failed,
 }
@@ -126,6 +128,25 @@ pub(crate) struct WorktreeIdentity {
 impl std::fmt::Debug for WorktreeIdentity {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("WorktreeIdentity(..)")
+    }
+}
+
+/// What the person saw at a Worktree's location when they confirmed its removal. A removal
+/// acts only while the location still shows it.
+#[derive(Clone)]
+pub(crate) enum RemovalExpectation {
+    /// The checked Worktree.
+    Worktree(WorktreeIdentity),
+    /// No directory: git lists the Worktree as missing.
+    Absent(LocalFilesystemAuthority),
+}
+
+impl std::fmt::Debug for RemovalExpectation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Worktree(_) => "RemovalExpectation::Worktree(..)",
+            Self::Absent(_) => "RemovalExpectation::Absent(..)",
+        })
     }
 }
 
@@ -320,20 +341,40 @@ impl LocalWorktreeGit {
         }
     }
 
+    /// Whether `path` still shows what the person confirmed: the same Worktree, or still no
+    /// directory for a missing one.
+    pub(crate) fn confirm_location(
+        &self,
+        path: &Path,
+        expected: &RemovalExpectation,
+        cancellation: &SshCancellationToken,
+    ) -> Result<(), WorktreeRemoveError> {
+        match expected {
+            RemovalExpectation::Worktree(identity) => {
+                self.is_worktree(path, identity, cancellation)
+            }
+            RemovalExpectation::Absent(filesystem) => match filesystem.validate_directory(path) {
+                Err(LocalFilesystemError::Missing) => Ok(()),
+                Ok(_) | Err(LocalFilesystemError::NotDirectory) => {
+                    Err(WorktreeRemoveError::Replaced)
+                }
+                Err(_) => Err(WorktreeRemoveError::Failed),
+            },
+        }
+    }
+
     /// Removes the Worktree at `path` and keeps its branch. Without `force`, git refuses a
-    /// Worktree with changes. With `expected`, it first checks that the Worktree at `path` is
-    /// still the confirmed one, so a confirmation never removes a replacement.
+    /// Worktree with changes. It first checks that `path` still shows what the person confirmed,
+    /// so a confirmation never removes a replacement.
     pub(crate) fn remove(
         &self,
         root: &Path,
         path: &Path,
         force: bool,
-        expected: Option<&WorktreeIdentity>,
+        expected: &RemovalExpectation,
         cancellation: &SshCancellationToken,
     ) -> Result<(), WorktreeRemoveError> {
-        if let Some(expected) = expected {
-            self.is_worktree(path, expected, cancellation)?;
-        }
+        self.confirm_location(path, expected, cancellation)?;
         let path = path.to_str().ok_or(WorktreeRemoveError::Failed)?;
         let mut arguments = vec!["worktree", "remove"];
         if force {
@@ -917,12 +958,13 @@ mod tests {
     fn remove_should_pass_force_only_when_asked_and_report_failure() {
         let runner = FakeRunner::new([exit(0, ""), exit(0, ""), exit(128, "")]);
         let git = git(&runner, 47);
+        let missing = RemovalExpectation::Absent(LocalFilesystemAuthority::testing());
         let remove = |force| {
             git.remove(
                 Path::new("/src/app"),
                 Path::new("/wt/app/x"),
                 force,
-                None,
+                &missing,
                 &SshCancellationToken::default(),
             )
         };
@@ -963,7 +1005,7 @@ mod tests {
                 Path::new("/src/app"),
                 path,
                 true,
-                Some(&confirmed),
+                &RemovalExpectation::Worktree(confirmed.clone()),
                 &cancellation,
             )
         };
@@ -1008,11 +1050,30 @@ mod tests {
                 Path::new("/src/app"),
                 &location,
                 true,
-                Some(&confirmed),
+                &RemovalExpectation::Worktree(confirmed),
                 &cancellation,
             ),
             Err(WorktreeRemoveError::Failed)
         );
         assert_eq!(runner.requests().len(), 2, "git never runs a removal");
+    }
+
+    #[test]
+    fn remove_should_refuse_a_directory_where_a_missing_worktree_was_confirmed() {
+        let runner = FakeRunner::new([]);
+        let git = git(&runner, 47);
+        let location = std::env::temp_dir();
+
+        assert_eq!(
+            git.remove(
+                Path::new("/src/app"),
+                &location,
+                true,
+                &RemovalExpectation::Absent(LocalFilesystemAuthority::testing()),
+                &SshCancellationToken::default(),
+            ),
+            Err(WorktreeRemoveError::Replaced)
+        );
+        assert!(runner.requests().is_empty(), "git never runs a removal");
     }
 }

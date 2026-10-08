@@ -14,7 +14,7 @@ use crate::close_confirmation::CloseTarget;
 use crate::domain::{WorkspaceId, WorktreeId, WorktreeKey};
 use crate::terminal::native_services::clipboard::TextClipboardTarget;
 use crate::ui::workspace_sidebar::WorktreeRemoval;
-use crate::worktrees::git::{RemovalCheck, WorktreeIdentity, WorktreeRemoveError};
+use crate::worktrees::git::{RemovalCheck, RemovalExpectation, WorktreeRemoveError};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RemovalAction {
@@ -36,13 +36,13 @@ struct RemovalTarget {
 }
 
 /// A removal the person confirmed. `force` is set only when they chose to discard changes, and
-/// `identity` names the Worktree they saw, when it was read.
+/// `expected` is what they saw at the Worktree's location.
 struct ConfirmedRemoval {
     generation: u64,
     workspace_id: WorkspaceId,
     worktree_id: WorktreeId,
     force: bool,
-    identity: Option<WorktreeIdentity>,
+    expected: RemovalExpectation,
 }
 
 impl WorkspaceManager {
@@ -149,9 +149,14 @@ impl WorkspaceManager {
             self.sidebar_worktrees.removal_generation.wrapping_add(1);
         let generation = self.sidebar_worktrees.removal_generation;
         self.sidebar_worktrees.removal = Some(generation);
-        // A Missing Worktree has no files to check; git removes it without force.
+        // A Missing Worktree has no files to check; git removes it without force while its
+        // location stays empty.
         if target.missing {
-            self.present_worktree_removal(generation, workspace_id, worktree_id, None, window, cx);
+            let check = Ok((
+                RemovalExpectation::Absent(self.local_filesystem.clone()),
+                false,
+            ));
+            self.present_worktree_removal(generation, workspace_id, worktree_id, check, window, cx);
             return;
         }
         let filesystem = self.local_filesystem.clone();
@@ -159,7 +164,12 @@ impl WorkspaceManager {
             store.check_removal(target.root, filesystem, cx)
         });
         cx.spawn(async move |_, cx| {
-            let check = check.await;
+            let check = check
+                .await
+                .map(|RemovalCheck { identity, changes }| {
+                    (RemovalExpectation::Worktree(identity), changes)
+                })
+                .ok_or(WorktreeRemoveError::Unchecked);
             let _ = window_handle.update(cx, |manager, window, cx| {
                 manager.present_worktree_removal(
                     generation,
@@ -184,7 +194,7 @@ impl WorkspaceManager {
         generation: u64,
         workspace_id: WorkspaceId,
         worktree_id: WorktreeId,
-        check: Option<RemovalCheck>,
+        check: Result<(RemovalExpectation, bool), WorktreeRemoveError>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -198,8 +208,15 @@ impl WorkspaceManager {
             self.sidebar_worktrees.removal = None;
             return;
         };
-        let discard = check.as_ref().is_some_and(|check| check.changes);
-        let identity = check.map(|check| check.identity);
+        // Without a check, a confirmation could not tell the Worktree from a replacement.
+        let (expected, discard) = match check {
+            Ok(check) => check,
+            Err(error) => {
+                self.sidebar_worktrees.removal = None;
+                present_removal_failure(&target.name, false, error, window, cx);
+                return;
+            }
+        };
         let title = format!("Remove Worktree \u{201c}{}\u{201d}?", target.name);
         let mut message = Vec::new();
         if discard {
@@ -270,7 +287,7 @@ impl WorkspaceManager {
                             workspace_id,
                             worktree_id,
                             force: discard,
-                            identity: identity.clone(),
+                            expected: expected.clone(),
                         },
                         window,
                         cx,
@@ -309,12 +326,11 @@ impl WorkspaceManager {
             self.sidebar_worktrees.removal = None;
             return;
         };
-        let Some(expected) = confirmed.identity.clone() else {
-            self.remove_confirmed_worktree(confirmed, window, cx);
-            return;
-        };
         let name = target.name.clone();
-        let check = store.update(cx, |store, cx| store.is_worktree(target.root, expected, cx));
+        let expected = confirmed.expected.clone();
+        let check = store.update(cx, |store, cx| {
+            store.confirm_location(target.root, expected, cx)
+        });
         cx.spawn(async move |_, cx| {
             let result = check.await;
             let _ = window_handle.update(cx, |manager, window, cx| match result {
@@ -341,7 +357,7 @@ impl WorkspaceManager {
             workspace_id,
             worktree_id,
             force,
-            identity: expected,
+            expected,
         } = confirmed;
         if self.sidebar_worktrees.removal != Some(generation) {
             return;
@@ -446,6 +462,9 @@ fn present_removal_failure(
     let message = match (error, forced) {
         (WorktreeRemoveError::Replaced, _) => {
             "A different Worktree is now at its location, so nothing was removed."
+        }
+        (WorktreeRemoveError::Unchecked, _) => {
+            "SpaceTerm couldn\u{2019}t check it for changes, so nothing was removed."
         }
         (WorktreeRemoveError::Failed, true) => {
             "Git couldn\u{2019}t delete its directory. A file in it may be in use."

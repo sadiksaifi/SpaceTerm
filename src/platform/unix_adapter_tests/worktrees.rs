@@ -9,7 +9,7 @@ use super::{local_filesystem, short_temporary_root};
 use crate::platform::unix_repository_program::UnixRepositoryProgramRunner;
 use crate::repository_status::ToolVersion;
 use crate::ssh::cancellation::SshCancellationToken;
-use crate::worktrees::git::{LocalWorktreeGit, WorktreeRemoveError};
+use crate::worktrees::git::{LocalWorktreeGit, RemovalExpectation, WorktreeRemoveError};
 
 /// Where the fixture looks for git, in the order a person's PATH usually lists them.
 const GIT_DIRECTORIES: [&str; 4] = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
@@ -127,7 +127,7 @@ fn removal_should_refuse_a_worktree_recreated_at_the_confirmed_location() {
             &repository,
             &location,
             true,
-            Some(&confirmed.identity),
+            &RemovalExpectation::Worktree(confirmed.identity.clone()),
             &cancellation,
         ),
         Err(WorktreeRemoveError::Replaced)
@@ -147,7 +147,7 @@ fn removal_should_refuse_a_worktree_recreated_at_the_confirmed_location() {
             &repository,
             &location,
             true,
-            Some(&replacement.identity),
+            &RemovalExpectation::Worktree(replacement.identity),
             &cancellation,
         ),
         Ok(())
