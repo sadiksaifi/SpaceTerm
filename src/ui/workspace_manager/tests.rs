@@ -10439,6 +10439,36 @@ fn assert_rendered_text(
     }
 }
 
+fn selected_tree_item_labels(cx: &mut VisualTestContext) -> Vec<String> {
+    spaceterm_ui::a11y_testing::A11yTree::read(cx)
+        .with_role("TreeItem")
+        .iter()
+        .filter(|item| item["aria"]["selected"] == true)
+        .map(|item| {
+            item["aria"]["label"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .collect()
+}
+
+fn active_workspace_worktree_tab_counts(
+    manager: &Entity<WorkspaceManager>,
+    cx: &mut VisualTestContext,
+) -> Vec<usize> {
+    manager.read_with(cx, |manager, cx| {
+        manager
+            .workspaces
+            .active_workspace()
+            .payload()
+            .read(cx)
+            .worktree_tab_counts()
+            .into_values()
+            .collect()
+    })
+}
+
 /// A repository whose Main Worktree is the test home, with a linked Worktree at each `linked`.
 fn present_worktrees(cx: &mut VisualTestContext, linked: &[&Path]) {
     present_worktrees_containing(cx, linked, 0);
@@ -10499,21 +10529,9 @@ fn git_workspace_rows_should_disclose_worktrees_that_open_lazily(cx: &mut TestAp
             })
             .collect::<Vec<_>>()
     };
-    let tabs = |cx: &mut VisualTestContext| {
-        manager.read_with(cx, |manager, cx| {
-            manager
-                .workspaces
-                .active_workspace()
-                .payload()
-                .read(cx)
-                .worktree_tab_counts()
-                .into_values()
-                .collect::<Vec<_>>()
-        })
-    };
 
     let disclosed = items(cx);
-    let tabs_before = tabs(cx);
+    let tabs_before = active_workspace_worktree_tab_counts(&manager, cx);
     let tree = A11yTree::read(cx);
     let feature = tree
         .with_role("TreeItem")
@@ -10561,7 +10579,7 @@ fn git_workspace_rows_should_disclose_worktrees_that_open_lazily(cx: &mut TestAp
         ]
     );
     assert_eq!(
-        tabs(cx),
+        active_workspace_worktree_tab_counts(&manager, cx),
         [1, 1],
         "opening a Worktree with no Tabs opens its first Tab"
     );
@@ -10858,18 +10876,6 @@ fn a_git_workspace_should_create_a_worktree_and_open_its_first_tab_once_listed(
         cx.run_until_parked();
         (offered, cx.debug_bounds(plus).is_some())
     };
-    let tabs = |cx: &mut VisualTestContext| {
-        manager.read_with(cx, |manager, cx| {
-            manager
-                .workspaces
-                .active_workspace()
-                .payload()
-                .read(cx)
-                .worktree_tab_counts()
-                .into_values()
-                .collect::<Vec<_>>()
-        })
-    };
 
     let command_available = |cx: &mut VisualTestContext| {
         cx.update(|window, cx| window.is_action_available(&crate::ui::NewWorktree, cx))
@@ -10909,7 +10915,7 @@ fn a_git_workspace_should_create_a_worktree_and_open_its_first_tab_once_listed(
         ));
     });
     cx.run_until_parked();
-    let before_listing = tabs(cx);
+    let before_listing = active_workspace_worktree_tab_counts(&manager, cx);
     present_worktrees(cx, &[&linked, &created]);
 
     assert_eq!(
@@ -10941,7 +10947,10 @@ fn a_git_workspace_should_create_a_worktree_and_open_its_first_tab_once_listed(
         "the New Worktree Command and its menu item act only in a repository"
     );
     assert_eq!(
-        (before_listing, tabs(cx)),
+        (
+            before_listing,
+            active_workspace_worktree_tab_counts(&manager, cx)
+        ),
         (vec![1], vec![1, 1]),
         "the created Worktree's first Tab opens once git lists it"
     );
@@ -10972,18 +10981,6 @@ fn worktree_rows_should_open_tabs_from_their_own_menu(cx: &mut TestAppContext) {
     let linked = manager.read_with(cx, |manager, cx| {
         manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows[1].worktree_id
     });
-    let tabs = |cx: &mut VisualTestContext| {
-        manager.read_with(cx, |manager, cx| {
-            manager
-                .workspaces
-                .active_workspace()
-                .payload()
-                .read(cx)
-                .worktree_tab_counts()
-                .into_values()
-                .collect::<Vec<_>>()
-        })
-    };
     let workspace_row: &'static str = format!("workspace-row-{}-active", workspace_id.get()).leak();
     let linked_row = |state: &str| -> &'static str {
         format!("worktree-row-{}-{linked}-{state}", workspace_id.get()).leak()
@@ -10998,12 +10995,12 @@ fn worktree_rows_should_open_tabs_from_their_own_menu(cx: &mut TestAppContext) {
 
     let expanded_offers_new_tab = new_tab_offered(workspace_row, cx);
     right_click(linked_row("unselected"), cx);
-    let after_menu = tabs(cx);
+    let after_menu = active_workspace_worktree_tab_counts(&manager, cx);
     click("worktree-menu-row-new-tab", cx);
-    let after_first = tabs(cx);
+    let after_first = active_workspace_worktree_tab_counts(&manager, cx);
     right_click(linked_row("selected"), cx);
     click("worktree-menu-row-new-tab", cx);
-    let after_second = tabs(cx);
+    let after_second = active_workspace_worktree_tab_counts(&manager, cx);
     manager.update(cx, |manager, cx| {
         manager.set_worktrees_expanded(workspace_id, false);
         cx.notify();
@@ -11411,7 +11408,6 @@ fn removing_a_worktree_should_confirm_then_close_its_tabs_before_git_runs(cx: &m
     click("worktree-menu-row-remove", cx);
     click("modal-action-worktree-removal-confirm", cx);
     let tabs_after_confirm = linked_tabs(cx);
-    // The test store has no git, so the removal fails after the Tabs close.
     let failure_reported = cx
         .debug_bounds("modal-action-worktree-removal-failed-ok")
         .is_some();
@@ -11599,16 +11595,7 @@ fn the_keyboard_should_walk_worktrees_and_open_one_only_on_return(cx: &mut TestA
             .and_then(|item| item["aria"]["label"].as_str())
             .unwrap_or_default()
             .to_owned();
-        let tab_counts = manager.read_with(cx, |manager, cx| {
-            manager
-                .workspaces
-                .active_workspace()
-                .payload()
-                .read(cx)
-                .worktree_tab_counts()
-                .into_values()
-                .collect::<Vec<_>>()
-        });
+        let tab_counts = active_workspace_worktree_tab_counts(&manager, cx);
         (items.len(), selected, tab_counts)
     };
 
@@ -11641,90 +11628,11 @@ fn the_keyboard_should_walk_worktrees_and_open_one_only_on_return(cx: &mut TestA
 }
 
 #[gpui::test]
-fn leaving_a_repository_should_keep_worktrees_with_tabs_under_their_former_repository(
+fn the_root_tab_should_stay_reachable_after_its_workspace_leaves_a_repository(
     cx: &mut TestAppContext,
 ) {
     use crate::ui::workspace_sidebar::{WorktreeGroup, WorktreeSection};
 
-    cx.update(|cx| {
-        crate::ui::worktree_store::testing::install(cx);
-    });
-    let (manager, _records, cx) = workspace_manager(cx);
-    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
-    present_worktrees(cx, &[&fixture.path().join("shell-integration")]);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
-    let section = |cx: &mut VisualTestContext| {
-        manager.read_with(cx, |manager, cx| manager.worktree_section(workspace_id, cx))
-    };
-    let linked_id = section(cx).unwrap().groups[0].rows[1].worktree_id;
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.open_worktree(workspace_id, linked_id, true, window, cx)
-        })
-    });
-    cx.run_until_parked();
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            let root_tab = manager
-                .workspaces
-                .active_workspace()
-                .payload()
-                .read(cx)
-                .tab_ids()[0];
-            manager
-                .workspaces
-                .active_workspace()
-                .payload()
-                .update(cx, |tabs, cx| {
-                    tabs.activate_tab_for_test(root_tab, window, cx)
-                });
-        })
-    });
-
-    let store =
-        cx.update(|_, cx| crate::ui::worktree_store::InstalledWorktrees::store(cx).unwrap());
-    store.update(cx, |store, cx| {
-        store.present(&std::env::temp_dir(), None, cx)
-    });
-    cx.run_until_parked();
-
-    let section = section(cx).expect("a Worktree with Tabs keeps the disclosure");
-    let former = std::env::temp_dir()
-        .file_name()
-        .unwrap()
-        .to_string_lossy()
-        .into_owned();
-    assert_eq!(
-        section,
-        WorktreeSection {
-            expanded: true,
-            repository: None,
-            groups: vec![WorktreeGroup {
-                former_repository: Some(former.into()),
-                rows: vec![crate::ui::workspace_sidebar::WorktreeRowViewModel {
-                    active: false,
-                    ..section.groups[0].rows[0].clone()
-                }],
-            }],
-        }
-    );
-    assert_eq!(section.groups[0].rows[0].worktree_id, linked_id);
-    assert_eq!(
-        manager.read_with(cx, |manager, cx| manager
-            .workspaces
-            .active_workspace()
-            .payload()
-            .read(cx)
-            .active_worktree()),
-        None,
-        "the Root Tab follows its Root Pane out of the repository"
-    );
-}
-
-#[gpui::test]
-fn the_root_tab_should_stay_reachable_after_its_workspace_leaves_a_repository(
-    cx: &mut TestAppContext,
-) {
     cx.update(|cx| {
         crate::ui::worktree_store::testing::install(cx);
     });
@@ -11769,6 +11677,39 @@ fn the_root_tab_should_stay_reachable_after_its_workspace_leaves_a_repository(
         store.present(&std::env::temp_dir(), None, cx)
     });
     cx.run_until_parked();
+    let section = manager
+        .read_with(cx, |manager, cx| manager.worktree_section(workspace_id, cx))
+        .expect("a Worktree with Tabs keeps the disclosure");
+    let former = std::env::temp_dir()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(
+        section,
+        WorktreeSection {
+            expanded: true,
+            repository: None,
+            groups: vec![WorktreeGroup {
+                former_repository: Some(former.into()),
+                rows: vec![crate::ui::workspace_sidebar::WorktreeRowViewModel {
+                    active: false,
+                    ..section.groups[0].rows[0].clone()
+                }],
+            }],
+        }
+    );
+    assert_eq!(section.groups[0].rows[0].worktree_id, linked_id);
+    assert_eq!(
+        manager.read_with(cx, |manager, cx| manager
+            .workspaces
+            .active_workspace()
+            .payload()
+            .read(cx)
+            .active_worktree()),
+        None,
+        "the Root Tab follows its Root Pane out of the repository"
+    );
     assert_eq!(active_worktree(cx), None);
 
     open_linked(cx);
@@ -12986,8 +12927,6 @@ fn removing_a_worktree_with_no_other_to_keep_a_tab_in_should_report_it_and_keep_
 fn a_worktree_menu_should_keep_the_selection_and_return_typing_to_the_pane(
     cx: &mut TestAppContext,
 ) {
-    use spaceterm_ui::a11y_testing::A11yTree;
-
     cx.update(|cx| {
         crate::ui::worktree_store::testing::install_with_removal_git(cx);
     });
@@ -13002,19 +12941,6 @@ fn a_worktree_menu_should_keep_the_selection_and_return_typing_to_the_pane(
         let rows = &manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows;
         (rows[0].worktree_id, rows[1].worktree_id)
     });
-    let selected = |cx: &mut VisualTestContext| {
-        A11yTree::read(cx)
-            .with_role("TreeItem")
-            .iter()
-            .filter(|item| item["aria"]["selected"] == true)
-            .map(|item| {
-                item["aria"]["label"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_owned()
-            })
-            .collect::<Vec<_>>()
-    };
     let label = |worktree_id: crate::domain::WorktreeId, cx: &mut VisualTestContext| {
         manager.read_with(cx, |manager, cx| {
             manager
@@ -13034,7 +12960,7 @@ fn a_worktree_menu_should_keep_the_selection_and_return_typing_to_the_pane(
     // The linked Worktree's new Tab is active. A secondary click on the Main Worktree's row
     // opens its menu and keeps the selection.
     right_click(worktree_row(workspace_id, main, cx), cx);
-    let selected_with_menu = selected(cx);
+    let selected_with_menu = selected_tree_item_labels(cx);
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
     let typing_after_escape = active_terminal_has_input_focus(&manager, cx);
@@ -13049,7 +12975,7 @@ fn a_worktree_menu_should_keep_the_selection_and_return_typing_to_the_pane(
     right_click(worktree_row(workspace_id, linked, cx), cx);
     click("worktree-menu-row-close-tabs", cx);
     click("modal-action-close-confirmation-confirm", cx);
-    let selected_after_close = selected(cx);
+    let selected_after_close = selected_tree_item_labels(cx);
     let typing_after_close = active_terminal_has_input_focus(&manager, cx);
 
     assert!(
@@ -13139,8 +13065,6 @@ fn an_inactive_workspace_menu_should_open_its_tab_there_and_rename_it_in_place(
 
 #[gpui::test]
 fn a_menu_should_keep_the_keyboards_row_in_a_focused_sidebar(cx: &mut TestAppContext) {
-    use spaceterm_ui::a11y_testing::A11yTree;
-
     cx.update(|cx| {
         crate::ui::worktree_store::testing::install(cx);
     });
@@ -13156,44 +13080,25 @@ fn a_menu_should_keep_the_keyboards_row_in_a_focused_sidebar(cx: &mut TestAppCon
         let rows = &manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows;
         (rows[1].worktree_id, rows[2].worktree_id)
     });
-    let selected = |cx: &mut VisualTestContext| {
-        A11yTree::read(cx)
-            .with_role("TreeItem")
-            .iter()
-            .filter(|item| item["aria"]["selected"] == true)
-            .map(|item| {
-                item["aria"]["label"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_owned()
-            })
-            .collect::<Vec<_>>()
-    };
     // The keyboard lands on a Worktree with no Tabs, which only moves its row.
     cx.simulate_keystrokes("cmd-shift-e down");
     cx.run_until_parked();
-    let landed = selected(cx);
+    let landed = selected_tree_item_labels(cx);
 
     right_click(worktree_row(workspace_id, zsh, cx), cx);
     redraw(cx);
-    eprintln!(
-        "PROBE focused={:?} menu={:?}",
-        cx.update(|window, cx| manager.read(cx).sidebar.read(cx).is_focused(window)),
-        cx.update(|_, cx| manager.read(cx).sidebar.read(cx).menu_open())
-    );
-    let with_pointer_menu = selected(cx);
-    eprintln!("PROBE landed={landed:?} with={with_pointer_menu:?}");
+    let with_pointer_menu = selected_tree_item_labels(cx);
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
-    let after_pointer_menu = selected(cx);
+    let after_pointer_menu = selected_tree_item_labels(cx);
     let sidebar_focused =
         cx.update(|window, cx| manager.read(cx).sidebar.read(cx).is_focused(window));
     cx.simulate_keystrokes("shift-f10");
     cx.run_until_parked();
-    let with_keyboard_menu = selected(cx);
+    let with_keyboard_menu = selected_tree_item_labels(cx);
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
-    let after_keyboard_menu = selected(cx);
+    let after_keyboard_menu = selected_tree_item_labels(cx);
 
     assert_eq!(landed.len(), 1);
     assert!(
