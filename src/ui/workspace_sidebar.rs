@@ -134,6 +134,8 @@ struct WorkspaceRenameState {
     input: Entity<TextInput>,
     focus_handle: FocusHandle,
     context_menu_open: bool,
+    /// Whether finishing returns focus to the sidebar rather than the Pane.
+    return_to_sidebar: bool,
 }
 
 #[derive(Clone)]
@@ -264,6 +266,9 @@ pub(super) struct WorkspaceSidebar {
     /// paths that focus the sidebar, like the scrollbar and a secondary click, clear it.
     focus_visible: bool,
     menu: Option<SidebarRowKey>,
+    /// Whether the sidebar had focus when the open menu was requested, so a rename it starts
+    /// returns focus to where it was.
+    menu_from_sidebar: bool,
     /// The row the keyboard stands on when it is not the derived selection: a Worktree with no
     /// Tabs yet, or a Workspace whose Active Worktree's row is disclosed.
     cursor: Option<SidebarRowKey>,
@@ -327,6 +332,7 @@ impl WorkspaceSidebar {
             focus,
             focus_visible: false,
             menu: None,
+            menu_from_sidebar: false,
             cursor: None,
             new_workspace_menu_open: false,
             rename: None,
@@ -413,19 +419,12 @@ impl WorkspaceSidebar {
         {
             return false;
         }
-        // The keyboard opens the menu only from the focused sidebar, so a request from anywhere
-        // else is a secondary click.
-        self.focus_visible &= self.focus.is_focused(window);
-        self.focus.focus(window, cx);
+        // Like a source list, a secondary click leaves the selection and focus where they were and
+        // outlines the row its menu acts on, so closing the menu or its alert returns typing to
+        // the Pane. The keyboard opens the menu only on the selected row of the focused sidebar.
+        self.menu_from_sidebar = self.focus.is_focused(window);
         self.rename = None;
         self.menu = Some(key);
-        cx.emit(SidebarEvent::Activate {
-            workspace_id: key.workspace_id(),
-            focus_pane: false,
-        });
-        if let SidebarRowKey::Worktree(..) = key {
-            self.cursor = Some(key);
-        }
         cx.notify();
         true
     }
@@ -554,6 +553,7 @@ impl WorkspaceSidebar {
                     focus_handle: input.read(cx).focus_handle(),
                     input,
                     context_menu_open: false,
+                    return_to_sidebar: self.menu_from_sidebar,
                 });
                 cx.emit(SidebarEvent::FocusChanged);
                 cx.notify();
@@ -604,9 +604,14 @@ impl WorkspaceSidebar {
                 name: value,
             });
         }
+        let return_to_sidebar = rename.return_to_sidebar;
         self.rename = None;
         if restore_sidebar_focus {
-            self.focus.focus(window, cx);
+            if return_to_sidebar {
+                self.focus.focus(window, cx);
+            } else {
+                cx.emit(SidebarEvent::FocusPane);
+            }
         }
         cx.emit(SidebarEvent::FocusChanged);
 

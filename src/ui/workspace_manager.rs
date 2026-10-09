@@ -2901,10 +2901,14 @@ impl WorkspaceManager {
                 self.apply_directory_pin(workspace_id, None, window, cx);
             }
             WorkspaceMenuCommand::NewTab => {
-                if let Some(workspace) = self.workspaces.workspace(workspace_id) {
+                // A secondary click doesn't activate its row's Workspace, so the new Tab does.
+                if self.activate_workspace(workspace_id, window, cx)
+                    && let Some(workspace) = self.workspaces.workspace(workspace_id)
+                {
                     workspace
                         .payload()
                         .update(cx, |manager, cx| manager.create_tab(window, cx));
+                    self.focus(window, cx);
                 }
                 self.sync_terminal_focus_blocker(window, cx);
                 cx.notify();

@@ -331,6 +331,11 @@ impl WorkspaceSidebar {
         let hover = if appearance.active { hover } else { 0.0 };
         let level = f64::from(hover);
         let (chip, row_colors) = row_paint(selected, emphasized, hover, appearance, cx);
+        let chip = if lifted {
+            chip
+        } else {
+            self.outline_menu_target(chip, SidebarRowKey::Workspace(workspace_id), appearance)
+        };
         let expanded = worktrees.as_ref().map(|section| section.expanded);
         // A disclosing row describes the Workspace: its pin moves to line 1, and while expanded
         // its one line leaves each directory and branch to the Worktree rows below it.
@@ -690,6 +695,24 @@ impl WorkspaceSidebar {
                 },
             ))
             .into_any_element()
+    }
+
+    /// Outlines the row a secondary click opened the menu of, which keeps the selection elsewhere.
+    fn outline_menu_target(
+        &self,
+        chip: SelectionChip,
+        key: SidebarRowKey,
+        appearance: &crate::ui::appearance::ChromeAppearance,
+    ) -> SelectionChip {
+        if self.menu == Some(key) && self.selected_key() != Some(key) {
+            chip.outlined(
+                appearance
+                    .host_colors(spaceterm_ui::ControlHost::Panel)
+                    .primary_background,
+            )
+        } else {
+            chip
+        }
     }
 
     /// Decorates a row with its context menu, which the keyboard opens from the selected row.
@@ -1239,6 +1262,7 @@ impl WorkspaceSidebar {
         let emphasized = appearance.active && self.has_visible_focus(window);
         let hover = if appearance.active { fade.level } else { 0.0 };
         let (chip, row_colors) = row_paint(selected, emphasized, hover, appearance, cx);
+        let chip = self.outline_menu_target(chip, key, appearance);
         let openable = worktree.openable();
         // A Worktree with no Tabs reads as secondary until it is opened.
         let title_color = if worktree.has_tabs && !worktree.missing {

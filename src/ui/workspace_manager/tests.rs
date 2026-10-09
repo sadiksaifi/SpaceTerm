@@ -4850,8 +4850,8 @@ fn workspace_switcher_should_replace_an_open_workspace_context_menu(cx: &mut Tes
     });
     assert_eq!(
         restored,
-        (true, Some(TerminalFocusBlocker::Sidebar)),
-        "closing the replacement palette must not restore the invisible menu focus owner"
+        (false, None),
+        "closing the replacement palette returns focus to the Pane the menu displaced"
     );
 }
 
@@ -8122,7 +8122,7 @@ fn a_focused_sidebar_emphasizes_the_active_workspace(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn a_secondary_click_does_not_emphasize_the_sidebar_it_focuses(cx: &mut TestAppContext) {
+fn a_secondary_click_should_leave_focus_in_the_pane(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
@@ -8130,16 +8130,12 @@ fn a_secondary_click_does_not_emphasize_the_sidebar_it_focuses(cx: &mut TestAppC
     right_click("workspace-row-1-active", cx);
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
-    assert!(cx.update(|window, cx| manager.read(cx).sidebar.read(cx).is_focused(window)));
+    assert!(!cx.update(|window, cx| manager.read(cx).sidebar.read(cx).is_focused(window)));
+    assert!(active_terminal_has_input_focus(&manager, cx));
     assert!(
         !active_row_is_emphasized(cx),
         "only the keyboard emphasizes the sidebar selection"
     );
-
-    // Keyboard navigation within the focused sidebar restores the emphasis.
-    cx.simulate_keystrokes("home");
-    cx.run_until_parked();
-    assert!(active_row_is_emphasized(cx));
 }
 
 #[gpui::test]
@@ -8281,15 +8277,17 @@ fn clicking_the_active_workspace_should_restore_terminal_focus_from_the_sidebar(
 }
 
 #[gpui::test]
-fn right_clicking_an_inactive_workspace_should_keep_menu_focus_off_the_terminal(
+fn right_clicking_an_inactive_workspace_should_open_its_menu_without_activating_it(
     cx: &mut TestAppContext,
 ) {
     let (manager, _records, cx) = workspace_manager(cx);
+    cx.update(|window, _| window.activate_window());
     cx.simulate_keystrokes("cmd-n");
     cx.run_until_parked();
 
     right_click("workspace-row-1-inactive", cx);
 
+    // The menu acts on the first Workspace without activating it.
     let state = cx.update(|window, cx| {
         let manager = manager.read(cx);
         (
@@ -8304,7 +8302,7 @@ fn right_clicking_an_inactive_workspace_should_keep_menu_focus_off_the_terminal(
                 .focused_terminal_is_focused(window, cx),
         )
     });
-    assert_eq!(state, (WorkspaceId::new(1), false, true, false));
+    assert_eq!(state, (WorkspaceId::new(2), false, true, false));
     assert!(cx.debug_bounds("menu-panel-0").is_some());
 
     cx.simulate_keystrokes("escape");
@@ -8317,10 +8315,8 @@ fn right_clicking_an_inactive_workspace_should_keep_menu_focus_off_the_terminal(
             manager.terminal_focus_blocker(window, cx),
         )
     });
-    assert_eq!(
-        dismissed,
-        (false, true, Some(TerminalFocusBlocker::Sidebar))
-    );
+    assert_eq!(dismissed, (false, false, None));
+    assert!(active_terminal_has_input_focus(&manager, cx));
 }
 
 #[gpui::test]
@@ -8343,13 +8339,8 @@ fn workspace_menu_closure_recomputes_remaining_focus_owners(cx: &mut TestAppCont
                 manager.workspaces.active_workspace_id(),
             )
         }),
-        (
-            true,
-            Some(TerminalFocusBlocker::Sidebar),
-            WorkspaceId::new(1)
-        )
+        (false, None, WorkspaceId::new(1))
     );
-    click("workspace-row-1-active", cx);
     assert!(active_terminal_has_input_focus(&manager, cx));
 }
 
@@ -12942,4 +12933,159 @@ fn removing_a_worktree_with_no_other_to_keep_a_tab_in_should_report_it_and_keep_
 
     assert!(reported, "the refusal is reported");
     assert_eq!(tab_ids(cx), before, "the Worktree's Tabs stay open");
+}
+
+#[gpui::test]
+fn a_worktree_menu_should_keep_the_selection_and_return_typing_to_the_pane(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    cx.update(|cx| {
+        crate::ui::worktree_store::testing::install_with_removal_git(cx);
+    });
+    let (manager, _records, cx) = workspace_manager(cx);
+    // Activation lists the Worktrees again, so it comes before the presented listing.
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
+    present_worktrees(cx, &[&fixture.path().join("shell-integration")]);
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let (main, linked) = manager.read_with(cx, |manager, cx| {
+        let rows = &manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows;
+        (rows[0].worktree_id, rows[1].worktree_id)
+    });
+    let selected = |cx: &mut VisualTestContext| {
+        A11yTree::read(cx)
+            .with_role("TreeItem")
+            .iter()
+            .filter(|item| item["aria"]["selected"] == true)
+            .map(|item| {
+                item["aria"]["label"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>()
+    };
+    let label = |worktree_id: crate::domain::WorktreeId, cx: &mut VisualTestContext| {
+        manager.read_with(cx, |manager, cx| {
+            manager
+                .worktree_section(workspace_id, cx)
+                .unwrap()
+                .rows()
+                .find(|row| row.worktree_id == worktree_id)
+                .unwrap()
+                .name
+                .to_string()
+        })
+    };
+    let (main_label, linked_label) = (label(main, cx), label(linked, cx));
+
+    right_click(worktree_row(workspace_id, linked, cx), cx);
+    click("worktree-menu-row-new-tab", cx);
+    // The linked Worktree's new Tab is active. A secondary click on the Main Worktree's row
+    // opens its menu and keeps the selection.
+    right_click(worktree_row(workspace_id, main, cx), cx);
+    let selected_with_menu = selected(cx);
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    let typing_after_escape = active_terminal_has_input_focus(&manager, cx);
+
+    // Cancelling a removal returns typing to the Pane.
+    right_click(worktree_row(workspace_id, linked, cx), cx);
+    click("worktree-menu-row-remove", cx);
+    click("modal-action-worktree-removal-cancel", cx);
+    let typing_after_cancel = active_terminal_has_input_focus(&manager, cx);
+
+    // Closing the linked Worktree's Tabs selects the Main Worktree, which holds the next Tab.
+    right_click(worktree_row(workspace_id, linked, cx), cx);
+    click("worktree-menu-row-close-tabs", cx);
+    click("modal-action-close-confirmation-confirm", cx);
+    let selected_after_close = selected(cx);
+    let typing_after_close = active_terminal_has_input_focus(&manager, cx);
+
+    assert!(
+        selected_with_menu
+            .iter()
+            .any(|label| label.starts_with(&linked_label))
+    );
+    assert!(
+        !selected_with_menu
+            .iter()
+            .any(|label| label.starts_with(&main_label))
+    );
+    assert!(typing_after_escape, "Escape returns typing to the Pane");
+    assert!(typing_after_cancel, "Cancel returns typing to the Pane");
+    assert!(
+        selected_after_close
+            .iter()
+            .any(|label| label.starts_with(&main_label))
+            && !selected_after_close
+                .iter()
+                .any(|label| label.starts_with(&linked_label)),
+        "the selection follows the Active Tab: {selected_after_close:?}"
+    );
+    assert!(
+        typing_after_close,
+        "closing the Tabs returns typing to the Pane"
+    );
+}
+
+#[gpui::test]
+fn an_inactive_workspace_menu_should_open_its_tab_there_and_rename_it_in_place(
+    cx: &mut TestAppContext,
+) {
+    let (manager, _records, cx) = workspace_manager(cx);
+    cx.update(|window, _| window.activate_window());
+    cx.simulate_keystrokes("cmd-n");
+    cx.run_until_parked();
+
+    right_click("workspace-row-1-inactive", cx);
+    click("workspace-menu-row-rename", cx);
+    cx.simulate_keystrokes("cmd-a D e v enter");
+    cx.run_until_parked();
+    let renamed = manager.read_with(cx, |manager, _| {
+        (
+            manager.workspaces.active_workspace_id(),
+            manager
+                .workspaces
+                .workspace(WorkspaceId::new(1))
+                .unwrap()
+                .name()
+                .to_owned(),
+        )
+    });
+    let typing_after_rename = active_terminal_has_input_focus(&manager, cx);
+
+    right_click("workspace-row-1-inactive", cx);
+    click("workspace-menu-row-new-tab", cx);
+    let opened = manager.read_with(cx, |manager, cx| {
+        (
+            manager.workspaces.active_workspace_id(),
+            manager
+                .workspaces
+                .active_workspace()
+                .payload()
+                .read(cx)
+                .tab_ids()
+                .len(),
+        )
+    });
+
+    assert_eq!(
+        renamed,
+        (WorkspaceId::new(2), "Dev".to_owned()),
+        "renaming leaves the active Workspace active"
+    );
+    assert!(
+        typing_after_rename,
+        "a finished rename returns typing to the Pane"
+    );
+    assert_eq!(
+        opened,
+        (WorkspaceId::new(1), 2),
+        "New Tab opens in its row's Workspace and shows it"
+    );
+    assert!(active_terminal_has_input_focus(&manager, cx));
 }
