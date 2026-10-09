@@ -37,7 +37,7 @@ pub(crate) trait WorktreeFormBackend {
         path: PathBuf,
         branch: WorktreeBranch,
         cx: &mut App,
-    ) -> Task<Result<(), WorktreeCreateError>>;
+    ) -> Task<Result<PathBuf, WorktreeCreateError>>;
 }
 
 /// Checks whether a new directory may go at a path.
@@ -517,7 +517,6 @@ impl WorktreeForm {
         cx: &mut Context<Self>,
     ) {
         self.pending = true;
-        self.pending_path = Some(path.clone());
         self.set_editable(false, cx);
         let generation = self.generation;
         let task = self.backend.create(path, branch, cx);
@@ -537,14 +536,15 @@ impl WorktreeForm {
     fn settle_create(
         &mut self,
         generation: u64,
-        result: Result<(), WorktreeCreateError>,
+        result: Result<PathBuf, WorktreeCreateError>,
         primary: DialogPendingCompletion,
         cx: &mut Context<Self>,
     ) -> Option<Settlement> {
         if !self.open || !self.pending || self.generation != generation {
             return None;
         }
-        if result.is_ok() {
+        if let Ok(path) = result {
+            self.pending_path = Some(path);
             return Some(Settlement::Success { primary });
         }
         self.pending = false;
@@ -567,7 +567,7 @@ impl WorktreeForm {
                 Some(FormField::Branch),
                 "This branch no longer exists.".into(),
             ),
-            Err(WorktreeCreateError::Failed) | Ok(()) => (None, CREATE_FAILED.into()),
+            Err(WorktreeCreateError::Failed) | Ok(_) => (None, CREATE_FAILED.into()),
         };
         self.errors = FormErrors::default();
         match field {
@@ -1051,9 +1051,15 @@ mod tests {
             path: PathBuf,
             branch: WorktreeBranch,
             _: &mut App,
-        ) -> Task<Result<(), WorktreeCreateError>> {
-            self.created.borrow_mut().push((path, branch));
-            Task::ready(self.results.borrow_mut().pop().unwrap_or(Ok(())))
+        ) -> Task<Result<PathBuf, WorktreeCreateError>> {
+            self.created.borrow_mut().push((path.clone(), branch));
+            Task::ready(
+                self.results
+                    .borrow_mut()
+                    .pop()
+                    .unwrap_or(Ok(()))
+                    .map(|()| path),
+            )
         }
     }
 

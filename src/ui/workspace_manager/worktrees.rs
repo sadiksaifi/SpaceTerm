@@ -48,9 +48,6 @@ pub(super) struct SidebarWorktrees {
 struct CreatedWorktree {
     workspace_id: WorkspaceId,
     path: PathBuf,
-    /// The roots listed before the create. Git may spell the new root differently from the
-    /// typed path, so the one new root also names it.
-    known: Vec<PathBuf>,
     _changes: Subscription,
 }
 
@@ -72,7 +69,7 @@ impl WorktreeFormBackend for StoreFormBackend {
         path: PathBuf,
         branch: WorktreeBranch,
         cx: &mut App,
-    ) -> Task<Result<(), WorktreeCreateError>> {
+    ) -> Task<Result<PathBuf, WorktreeCreateError>> {
         let (root, common) = (self.root.clone(), self.common.clone());
         self.store
             .update(cx, |store, cx| store.create(root, common, path, branch, cx))
@@ -318,11 +315,6 @@ impl WorkspaceManager {
         let filesystem = self.local_filesystem.clone();
         let probe: LocationProbe =
             Rc::new(move |path: &std::path::Path| filesystem.probe_new_directory(path));
-        let known: Vec<PathBuf> = snapshot
-            .worktrees
-            .iter()
-            .map(|record| record.root.clone())
-            .collect();
         let form = cx.new(|cx| WorktreeForm::new(backend, context, probe, window, cx));
         cx.subscribe_in(&form, window, move |manager, _, event, window, cx| {
             if let WorktreeFormEvent::Created(path) = event {
@@ -337,7 +329,6 @@ impl WorkspaceManager {
                 manager.sidebar_worktrees.created = Some(CreatedWorktree {
                     workspace_id,
                     path: path.clone(),
-                    known: known.clone(),
                     _changes: changes,
                 });
                 manager.open_created_worktree(window, cx);
@@ -371,19 +362,10 @@ impl WorkspaceManager {
         let Some(snapshot) = worktrees.listed(cx) else {
             return;
         };
-        let added: Vec<&WorktreeRecord> = snapshot
-            .worktrees
-            .iter()
-            .filter(|record| !created.known.contains(&record.root))
-            .collect();
         let record = snapshot
             .worktrees
             .iter()
-            .find(|record| record.root == created.path)
-            .or_else(|| match added[..] {
-                [record] => Some(record),
-                _ => None,
-            });
+            .find(|record| record.root == created.path);
         let Some(id) = record.and_then(|record| {
             worktrees.registry.id(&WorktreeKey::new(
                 snapshot.repository.clone(),

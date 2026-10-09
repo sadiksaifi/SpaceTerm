@@ -10915,8 +10915,10 @@ fn a_git_workspace_should_create_a_worktree_and_open_its_first_tab_once_listed(
         ));
     });
     cx.run_until_parked();
+    let unrelated = fixture.path().join("unrelated");
+    present_worktrees(cx, &[&linked, &unrelated]);
     let before_listing = active_workspace_worktree_tab_counts(&manager, cx);
-    present_worktrees(cx, &[&linked, &created]);
+    present_worktrees(cx, &[&linked, &unrelated, &created]);
 
     assert_eq!(
         (

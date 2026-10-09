@@ -197,9 +197,12 @@ impl WorktreeStore {
         path: PathBuf,
         branch: WorktreeBranch,
         cx: &mut Context<Self>,
-    ) -> Task<Result<(), WorktreeCreateError>> {
+    ) -> Task<Result<PathBuf, WorktreeCreateError>> {
         let task = self.run_git(
-            move |git| git.create(&root, &path, &branch, &SshCancellationToken::default()),
+            move |git| {
+                git.create(&root, &path, &branch, &SshCancellationToken::default())?;
+                path.canonicalize().map_err(|_| WorktreeCreateError::Failed)
+            },
             cx,
         );
         cx.spawn(async move |store, cx| {
