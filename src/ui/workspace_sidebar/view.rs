@@ -697,14 +697,15 @@ impl WorkspaceSidebar {
             .into_any_element()
     }
 
-    /// Outlines the row a secondary click opened the menu of, which keeps the selection elsewhere.
+    /// Outlines the row whose menu is open. A secondary click leaves the selection where it was,
+    /// so the outline is what names the row the menu acts on.
     fn outline_menu_target(
         &self,
         chip: SelectionChip,
         key: SidebarRowKey,
         appearance: &crate::ui::appearance::ChromeAppearance,
     ) -> SelectionChip {
-        if self.menu == Some(key) && self.selected_key() != Some(key) {
+        if self.menu == Some(key) {
             chip.outlined(
                 appearance
                     .host_colors(spaceterm_ui::ControlHost::Panel)

@@ -314,7 +314,10 @@ impl WorkspaceSidebar {
         })
         .detach();
         cx.on_blur(&focus, window, |sidebar: &mut Self, _, cx| {
-            sidebar.cursor = None;
+            // A menu borrows focus and returns it, so the keyboard keeps its row meanwhile.
+            if sidebar.menu.is_none() {
+                sidebar.cursor = None;
+            }
             cx.notify();
             cx.emit(SidebarEvent::FocusChanged);
         })
@@ -433,12 +436,18 @@ impl WorkspaceSidebar {
         &mut self,
         key: SidebarRowKey,
         event: MenuLifecycleEvent,
-        _: &Window,
+        window: &Window,
         cx: &mut Context<Self>,
     ) {
         match event {
             MenuLifecycleEvent::Opened => self.menu = Some(key),
-            MenuLifecycleEvent::Closed(_) if self.menu == Some(key) => self.menu = None,
+            MenuLifecycleEvent::Closed(_) if self.menu == Some(key) => {
+                self.menu = None;
+                // The keyboard's row outlives the menu only in the sidebar that kept focus.
+                if !self.focus.is_focused(window) {
+                    self.cursor = None;
+                }
+            }
             MenuLifecycleEvent::Closed(_) => return,
         }
         cx.emit(SidebarEvent::FocusChanged);

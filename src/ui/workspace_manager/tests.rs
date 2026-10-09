@@ -13089,3 +13089,82 @@ fn an_inactive_workspace_menu_should_open_its_tab_there_and_rename_it_in_place(
     );
     assert!(active_terminal_has_input_focus(&manager, cx));
 }
+
+#[gpui::test]
+fn a_menu_should_keep_the_keyboards_row_in_a_focused_sidebar(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    cx.update(|cx| {
+        crate::ui::worktree_store::testing::install(cx);
+    });
+    let (manager, _records, cx) = workspace_manager(cx);
+    // Focus moves only in an active window.
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
+    let integration = fixture.path().join("shell-integration");
+    present_worktrees(cx, &[&integration.join("bash"), &integration.join("zsh")]);
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let (bash, zsh) = manager.read_with(cx, |manager, cx| {
+        let rows = &manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows;
+        (rows[1].worktree_id, rows[2].worktree_id)
+    });
+    let selected = |cx: &mut VisualTestContext| {
+        A11yTree::read(cx)
+            .with_role("TreeItem")
+            .iter()
+            .filter(|item| item["aria"]["selected"] == true)
+            .map(|item| {
+                item["aria"]["label"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>()
+    };
+    // The keyboard lands on a Worktree with no Tabs, which only moves its row.
+    cx.simulate_keystrokes("cmd-shift-e down");
+    cx.run_until_parked();
+    let landed = selected(cx);
+
+    right_click(worktree_row(workspace_id, zsh, cx), cx);
+    redraw(cx);
+    eprintln!(
+        "PROBE focused={:?} menu={:?}",
+        cx.update(|window, cx| manager.read(cx).sidebar.read(cx).is_focused(window)),
+        cx.update(|_, cx| manager.read(cx).sidebar.read(cx).menu_open())
+    );
+    let with_pointer_menu = selected(cx);
+    eprintln!("PROBE landed={landed:?} with={with_pointer_menu:?}");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    let after_pointer_menu = selected(cx);
+    let sidebar_focused =
+        cx.update(|window, cx| manager.read(cx).sidebar.read(cx).is_focused(window));
+    cx.simulate_keystrokes("shift-f10");
+    cx.run_until_parked();
+    let with_keyboard_menu = selected(cx);
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    let after_keyboard_menu = selected(cx);
+
+    assert_eq!(landed.len(), 1);
+    assert!(
+        landed[0].starts_with("bash"),
+        "the keyboard's row is the first linked Worktree: {landed:?} {bash:?}"
+    );
+    assert_eq!(
+        with_pointer_menu, landed,
+        "a secondary click keeps the keyboard's row"
+    );
+    assert_eq!(after_pointer_menu, landed);
+    assert!(
+        sidebar_focused,
+        "the menu returns focus to the sidebar it borrowed it from"
+    );
+    assert_eq!(
+        with_keyboard_menu, landed,
+        "Shift-F10 opens the selected row's menu"
+    );
+    assert_eq!(after_keyboard_menu, landed);
+}
