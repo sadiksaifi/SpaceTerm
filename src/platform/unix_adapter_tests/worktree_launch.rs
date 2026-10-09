@@ -53,3 +53,32 @@ fn unix_worktree_launches_should_follow_links_into_the_worktree() {
         "a directory reached through a link into the Worktree stays its starting directory"
     );
 }
+
+#[test]
+fn unix_worktree_launches_should_reject_a_symbolic_link_to_an_outside_directory() {
+    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
+    let home = fixture.path();
+    let worktree = home.join("shell-integration");
+    let escape = worktree.join("shared");
+    symlink(home, &escape).unwrap();
+    let authority = local_filesystem();
+    let mut factory = WorkspaceTerminalSessionFactory::new_local_with_authority(
+        Rc::new(TestTerminalSessionFactory::new(
+            TestTerminalSessionRecords::default(),
+        )),
+        authority.validate_directory(home).unwrap(),
+        authority.clone(),
+    );
+    factory.set_worktree_root(Some(worktree.clone()));
+
+    let source = factory
+        .for_source_directory(Some(CurrentDirectory::Local(escape.clone())))
+        .unwrap();
+    assert_eq!(source.local_working_directory(), Some(worktree.as_path()));
+
+    factory.set_pinned_directory(Some(PinnedDirectory::Local(
+        authority.validate_directory(&escape).unwrap(),
+    )));
+    let pinned = factory.for_source_directory(None).unwrap();
+    assert_eq!(pinned.local_working_directory(), Some(worktree.as_path()));
+}

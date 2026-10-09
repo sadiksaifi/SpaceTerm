@@ -372,18 +372,17 @@ impl WorkspaceTerminalSessionFactory {
                     .as_ref()
                     .ok_or(LocalDirectoryError::Other)?;
                 if let Some(root) = &self.worktree_root {
-                    // Git names the root by its physical path, while a pin or a shell keeps the
-                    // spelling it was reached by.
+                    if let Some(PinnedDirectory::Local(directory)) = &self.pinned_directory {
+                        authority.revalidate_directory(directory)?;
+                    }
                     let directory = match (&self.pinned_directory, source) {
                         (Some(PinnedDirectory::Local(directory)), _)
-                            if directory.path().starts_with(root)
-                                || authority.physically_contains(root, directory.path()) =>
+                            if authority.physically_contains(root, directory.path()) =>
                         {
                             directory.clone()
                         }
                         (_, Some(CurrentDirectory::Local(path)))
-                            if path.starts_with(root)
-                                || authority.physically_contains(root, &path) =>
+                            if authority.physically_contains(root, &path) =>
                         {
                             authority.validate_directory(&path)?
                         }
