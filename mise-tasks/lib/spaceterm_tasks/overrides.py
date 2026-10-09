@@ -19,6 +19,7 @@ ACCESSKIT_CRATES = {
     "accesskit_consumer": "consumer",
     "accesskit_atspi_common": "platforms/atspi-common",
     "accesskit_macos": "platforms/macos",
+    "accesskit_unix": "platforms/unix",
 }
 
 
