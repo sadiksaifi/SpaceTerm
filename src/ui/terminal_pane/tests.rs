@@ -5770,6 +5770,140 @@ fn reported_terminal_title_should_replace_the_shell_fallback() {
     );
 }
 
+#[gpui::test]
+fn insertion_bounds_follow_presented_cursor_while_accessibility_is_idle(cx: &mut TestAppContext) {
+    let (pane, cx, _) = connected_terminal_pane(cx);
+    let stale = pane.read_with(cx, |pane, _| Arc::clone(&pane.accessibility));
+    let mut screen = text_screen(10, &["first row", "second row", "third row"]);
+    Arc::make_mut(&mut screen).cursor.position = Some(crate::terminal::CursorPositionSnapshot {
+        row: 2,
+        column: 3,
+        width_cells: 1,
+    });
+    pane.update(cx, |pane, cx| {
+        pane.screen = screen;
+        cx.notify();
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        pane.update(cx, |pane, cx| {
+            assert!(Arc::ptr_eq(&stale, &pane.accessibility));
+            let grid = pane.grid_bounds.unwrap();
+            let cell = pane.presented_cell_size();
+            let insertion = pane.selected_text_range(false, window, cx).unwrap().range;
+            assert_eq!(
+                pane.bounds_for_range(insertion, grid, window, cx),
+                Some(Bounds::new(
+                    point(
+                        grid.origin.x + px(3.0 * cell.width),
+                        grid.origin.y + px(2.0 * cell.height)
+                    ),
+                    size(px(0.0), px(cell.height)),
+                )),
+            );
+        })
+    });
+}
+
+#[gpui::test]
+fn insertion_bounds_preserve_presented_hidden_cursor_and_reject_offscreen_cursor(
+    cx: &mut TestAppContext,
+) {
+    let (pane, cx, _) = connected_terminal_pane(cx);
+    let mut screen = text_screen(10, &["first row", "second row"]);
+    Arc::make_mut(&mut screen).cursor.position = Some(crate::terminal::CursorPositionSnapshot {
+        row: 1,
+        column: 2,
+        width_cells: 1,
+    });
+    Arc::make_mut(&mut screen).cursor.visible = false;
+    pane.update(cx, |pane, cx| {
+        pane.screen = screen;
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let query = |pane: &Entity<TerminalPane>, cx: &mut VisualTestContext| {
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                let insertion = pane.selected_text_range(false, window, cx).unwrap().range;
+                pane.bounds_for_range(insertion, pane.grid_bounds.unwrap(), window, cx)
+            })
+        })
+    };
+    let presented = query(&pane, cx).expect("a hidden cursor still has an insertion position");
+    pane.update(cx, |pane, _| {
+        Arc::make_mut(&mut pane.screen).cursor.position = None
+    });
+    assert_eq!(
+        query(&pane, cx),
+        Some(presented),
+        "unpainted state must not move the native anchor"
+    );
+    pane.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+    assert_eq!(
+        query(&pane, cx),
+        None,
+        "an offscreen cursor has no insertion rectangle"
+    );
+}
+
+#[gpui::test]
+fn insertion_geometry_does_not_replace_selection_or_other_document_ranges(cx: &mut TestAppContext) {
+    let (pane, cx, _) = connected_terminal_pane(cx);
+    let mut screen = text_screen(10, &["first row", "second row"]);
+    Arc::make_mut(&mut screen).cursor.position = Some(crate::terminal::CursorPositionSnapshot {
+        row: 1,
+        column: 2,
+        width_cells: 1,
+    });
+    pane.update(cx, |pane, cx| {
+        pane.accessibility = Arc::new(TerminalAccessibilityModel::from_screen(&screen));
+        pane.screen = screen;
+        cx.notify();
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        pane.update(cx, |pane, cx| {
+            let grid = pane.grid_bounds.unwrap();
+            let cell = pane.presented_cell_size();
+            let geometry = AccessibilityGeometry::new(
+                f32::from(grid.origin.x),
+                f32::from(grid.origin.y),
+                cell.width,
+                cell.height,
+            )
+            .unwrap();
+            for range in [0..0, 0..3] {
+                let (x, y, width, height) = pane
+                    .accessibility
+                    .bounds_for_range(range.clone(), geometry)
+                    .unwrap();
+                assert_eq!(
+                    pane.bounds_for_range(range, grid, window, cx),
+                    Some(Bounds::new(
+                        point(px(x), px(y)),
+                        size(px(width), px(height))
+                    ))
+                );
+            }
+            let insertion = pane.accessibility.cursor_range();
+            Arc::make_mut(&mut pane.screen).selection_present = true;
+            let (x, y, width, height) = pane
+                .accessibility
+                .bounds_for_range(insertion.clone(), geometry)
+                .unwrap();
+            assert_eq!(
+                pane.bounds_for_range(insertion, grid, window, cx),
+                Some(Bounds::new(
+                    point(px(x), px(y)),
+                    size(px(width), px(height))
+                ))
+            );
+        })
+    });
+}
+
 #[test]
 fn ime_candidate_bounds_follow_wrapped_wide_preedit_caret() {
     let element_bounds = Bounds::new(point(px(10.0), px(20.0)), size(px(50.0), px(60.0)));
@@ -7209,21 +7343,47 @@ fn glyph_failure_presents_the_last_valid_frame(
 ) -> Vec<gpui::GlyphId> {
     let (handle, mut cx, records, atlas) = headless_pane();
     let events = records.last_event_sender().unwrap();
+    let mut old_screen = text_screen(1, old);
+    Arc::make_mut(&mut old_screen).cursor.position =
+        Some(crate::terminal::CursorPositionSnapshot {
+            row: 0,
+            column: 1,
+            width_cells: 1,
+        });
     events
-        .try_send(TerminalSessionEvent::Screen(text_screen(1, old)))
+        .try_send(TerminalSessionEvent::Screen(old_screen))
         .unwrap();
     cx.run_until_parked();
     let retained = drawn_sprites(handle, &mut cx, false);
+    let insertion_bounds = |handle: gpui::WindowHandle<TerminalPane>,
+                            cx: &mut gpui::HeadlessAppContext| {
+        handle
+            .update(cx, |pane, window, cx| {
+                let range = pane.selected_text_range(true, window, cx).unwrap().range;
+                pane.bounds_for_range(range, pane.grid_bounds.unwrap(), window, cx)
+            })
+            .unwrap()
+    };
+    let retained_insertion = insertion_bounds(handle, &mut cx);
+    assert!(retained_insertion.is_some());
     atlas.glyph_lookups.lock().unwrap().clear();
     *atlas.fail_glyph.lock().unwrap() = Some(gpui::GlyphId(failing as u32));
+    let mut new_screen = text_screen(2, new);
+    Arc::make_mut(&mut new_screen).cursor.position =
+        Some(crate::terminal::CursorPositionSnapshot {
+            row: 0,
+            column: 2,
+            width_cells: 1,
+        });
     events
-        .try_send(TerminalSessionEvent::Screen(text_screen(2, new)))
+        .try_send(TerminalSessionEvent::Screen(new_screen))
         .unwrap();
     cx.run_until_parked();
     let bottom = retained.last().unwrap().1.bottom();
     let mut submitted = drawn_sprites(handle, &mut cx, false);
     submitted.retain(|(_, bounds)| bounds.origin.y < bottom);
     assert_eq!(submitted, retained);
+    assert_eq!(insertion_bounds(handle, &mut cx), retained_insertion);
     assert_eq!(
         handle
             .read_with(&cx, |pane, _| (

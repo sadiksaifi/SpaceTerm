@@ -602,6 +602,7 @@ pub(crate) struct TerminalPane {
     backing_scale: BackingScale,
     last_geometry: Option<TerminalGeometry>,
     grid_bounds: Option<Bounds<Pixels>>,
+    presented_input_geometry: Option<PresentedInputGeometry>,
     pressed_button: Option<PointerButton>,
     selection_copy_pending: bool,
     pointer_modifiers: InputModifiers,
@@ -918,6 +919,7 @@ impl TerminalPane {
             backing_scale,
             last_geometry: None,
             grid_bounds: None,
+            presented_input_geometry: None,
             pressed_button: None,
             selection_copy_pending: false,
             pointer_modifiers: InputModifiers::default(),
@@ -4139,6 +4141,30 @@ fn find_icon_button(
     .into_any_element()
 }
 
+#[derive(Clone, Copy, PartialEq)]
+pub(super) struct PresentedInputGeometry {
+    pub(super) session_epoch: u64,
+    pub(super) cursor: Option<crate::terminal::CursorPositionSnapshot>,
+    pub(super) selection_present: bool,
+    pub(super) grid: Bounds<Pixels>,
+    pub(super) cell: LogicalCellSize,
+}
+
+impl TerminalPane {
+    pub(super) fn present_input_geometry(
+        &mut self,
+        geometry: Option<PresentedInputGeometry>,
+        window: &mut Window,
+    ) {
+        if self.presented_input_geometry != geometry {
+            self.presented_input_geometry = geometry;
+            if self.focus_handle.is_focused(window) {
+                window.invalidate_character_coordinates();
+            }
+        }
+    }
+}
+
 impl EventEmitter<TerminalPaneEvent> for TerminalPane {}
 
 impl EntityInputHandler for TerminalPane {
@@ -4269,6 +4295,28 @@ impl EntityInputHandler for TerminalPane {
                 px(cell.width),
                 px(cell.height),
                 layout.caret,
+            ));
+        }
+        // Accessibility publication is demand-paced. Its insertion offset remains the native
+        // document identity, but only the submitted frame can locate that insertion on screen.
+        if range_utf16.is_empty()
+            && range_utf16 == self.accessibility.cursor_range()
+            && self.accessibility.selection_range().is_none()
+            && !self.screen.selection_present
+        {
+            let presented = self.presented_input_geometry?;
+            if presented.session_epoch != self.terminal_session.session_epoch
+                || presented.selection_present
+            {
+                return None;
+            }
+            let cursor = presented.cursor?;
+            return Some(Bounds::new(
+                point(
+                    presented.grid.origin.x + px(f32::from(cursor.column) * presented.cell.width),
+                    presented.grid.origin.y + px(f32::from(cursor.row) * presented.cell.height),
+                ),
+                size(px(0.0), px(presented.cell.height)),
             ));
         }
         let grid = self.grid_bounds?;
@@ -4576,6 +4624,11 @@ impl Render for TerminalPane {
             &display_screen,
             display_render_cache,
             TerminalGridConfiguration {
+                input_session_epoch: if displaying_current {
+                    self.screen_session_epoch
+                } else {
+                    self.last_valid_screen_session_epoch
+                },
                 terminal_input_focused,
                 terminal_fonts: self.terminal_fonts.clone(),
                 terminal_appearance: Arc::clone(&self.appearance.terminal),
@@ -4609,6 +4662,7 @@ impl Render for TerminalPane {
                 .then(|| {
                     (
                         Arc::clone(&self.last_valid_screen),
+                        self.last_valid_screen_session_epoch,
                         self.fallback_render_cache.clone(),
                         fallback_graphics,
                     )
