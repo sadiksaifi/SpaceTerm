@@ -237,8 +237,8 @@ struct RepositoryCaptionLayout {
 }
 
 impl CaptionLayout {
-    /// `controls_reveal` is how far the Pane controls have eased into view. Repository Status keeps
-    /// their full width because even hidden controls publish their button frames to accessibility.
+    /// `controls_reveal` is how far the Pane controls have eased into view; hidden controls free
+    /// their width for the caption's other segments.
     fn resolve(
         caption: &PaneCaption,
         width: Pixels,
@@ -318,12 +318,9 @@ impl CaptionLayout {
                 control_size,
             );
         }
-        let controls_allocation = if metrics.repository.is_some() {
-            controls_extent
-        } else {
-            controls_extent * controls_reveal.clamp(0.0, 1.0)
-        };
-        let available = (width - px(fixed_width + controls_allocation)).max(px(0.0));
+        let available = (width
+            - px(fixed_width + controls_extent * controls_reveal.clamp(0.0, 1.0)))
+        .max(px(0.0));
         // The name is always kept. Every other segment is admitted in priority order and the
         // first one that does not fit ends the ladder, so segments never reappear out of order.
         // A branch that does not fit whole is truncated when its narrowest form fits, and ends the
@@ -2569,10 +2566,18 @@ fn render_pane_caption_content(
         .gap(appearance.spacing(PANE_CONTROL_GAP))
         .flex_shrink_0()
         // An unfocused Pane shows its controls only under the pointer.
-        .opacity(controls_reveal);
+        .opacity(controls_reveal)
+        // Hidden controls overhang the segment that took their width, so assistive technology must
+        // not find their frames there. The Focused Pane's controls are exposed as soon as it gains
+        // focus. Only a node with a role publishes that it is hidden.
+        .when(!focused && controls_reveal <= 0.0, |controls| {
+            controls
+                .role(gpui::accesskit::Role::Group)
+                .aria_hidden(true)
+        });
     let control_count = usize::from(layout.show_splits) * 2 + usize::from(has_multiple_panes) * 2;
-    // CaptionLayout reserves the controls' space while Repository Status shows. Other captions
-    // give hidden controls' width to their identity.
+    // Hidden controls give up their width, so the segments before them slide to the trailing edge
+    // and back as the controls fade.
     let controls_extent = if control_count == 0 {
         0.0
     } else {
@@ -2606,11 +2611,7 @@ fn render_pane_caption_content(
         .overflow_hidden();
     let controls_slot = div()
         .flex_shrink_0()
-        .w(px(if layout.repository.show {
-            controls_extent
-        } else {
-            slot_width
-        }))
+        .w(px(slot_width))
         .h_full()
         .flex()
         .items_center()
@@ -5271,13 +5272,10 @@ mod tests {
             view.update(cx, |view, cx| view.focus_pane(PaneId::new(2), cx));
             crate::ui::settle_hover(cx);
             if let Some(segment) = cx.debug_bounds("pane-repository-1") {
-                let control = cx
-                    .debug_bounds("pane-split-right-1")
-                    .or_else(|| cx.debug_bounds("pane-toggle-zoom-1"))
-                    .unwrap();
-                if segment.right() > control.left() {
+                let caption = cx.debug_bounds("pane-caption-1-unfocused").unwrap();
+                if segment.right() > caption.right() {
                     overlaps.push(format!(
-                        "at {width}: unfocused segment {segment:?} overlaps control {control:?}"
+                        "at {width}: unfocused segment {segment:?} exceeds caption {caption:?}"
                     ));
                 }
             }
@@ -5333,9 +5331,11 @@ mod tests {
     }
 
     #[gpui::test]
-    fn repository_status_should_reserve_control_space_in_focused_and_unfocused_panes(
+    fn repository_status_should_take_the_place_of_an_unfocused_panes_hidden_controls(
         cx: &mut TestAppContext,
     ) {
+        use spaceterm_ui::a11y_testing::A11yTree;
+
         let (_, view, _, cx) = caption_view(cx);
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
@@ -5366,17 +5366,32 @@ mod tests {
         );
         let segment_right =
             |cx: &mut VisualTestContext| cx.debug_bounds("pane-repository-1").unwrap().right();
+        // Hidden controls publish no frame that assistive technology could find under the
+        // Repository Status, so only the Focused Pane's controls are exposed.
+        let exposed_closes = |cx: &mut VisualTestContext| {
+            let tree = A11yTree::read(cx);
+            tree.with_role("Button")
+                .into_iter()
+                .filter(|node| node["aria"]["label"] == "Close Pane" && tree.exposed(node))
+                .count()
+        };
         let controls = cx.debug_bounds("pane-controls-1-full").unwrap();
-        let unfocused_right = segment_right(cx);
-        assert!(unfocused_right <= controls.left());
+        assert!(
+            (segment_right(cx) - controls.right()).abs() < px(0.5),
+            "an unfocused Pane's hidden controls leave their place to the Repository Status",
+        );
+        assert_eq!(exposed_closes(cx), 1);
 
         view.update(cx, |view, cx| view.focus_pane(PaneId::new(1), cx));
         crate::ui::settle_hover(cx);
-        assert_eq!(segment_right(cx), unfocused_right);
+        assert!(
+            segment_right(cx) <= controls.left(),
+            "the Focused Pane's controls push the Repository Status before them",
+        );
 
         view.update(cx, |view, cx| view.focus_pane(PaneId::new(2), cx));
         crate::ui::settle_hover(cx);
-        assert_eq!(segment_right(cx), unfocused_right);
+        assert!((segment_right(cx) - controls.right()).abs() < px(0.5));
     }
 
     #[gpui::test]
@@ -5472,7 +5487,7 @@ mod tests {
         );
         let segment = cx.debug_bounds("pane-repository-1").unwrap();
         let controls = cx.debug_bounds("pane-controls-1-full").unwrap();
-        assert!(segment.right() <= controls.left());
+        assert!((segment.right() - controls.right()).abs() < px(0.5));
     }
 
     #[gpui::test]
@@ -5656,7 +5671,7 @@ mod tests {
     }
 
     #[test]
-    fn repository_status_should_keep_its_control_budget_when_controls_are_hidden() {
+    fn hidden_pane_controls_should_free_their_width_for_the_caption() {
         let metrics = CaptionMetrics {
             user: px(40.0),
             host: px(60.0),
@@ -5694,9 +5709,8 @@ mod tests {
         assert_eq!(resolve(metrics, 1.0).repository.branch_limit, Some(40));
         let hidden = resolve(metrics, 0.0);
         assert!(hidden.repository.show_branch);
-        assert_eq!(hidden.repository.branch_limit, Some(40));
+        assert_eq!(hidden.repository.branch_limit, None);
         assert!(hidden.show_splits, "hidden controls keep their set");
-        assert_eq!(resolve(metrics, 0.5).repository, hidden.repository);
 
         let without_repository = CaptionMetrics {
             repository: None,
