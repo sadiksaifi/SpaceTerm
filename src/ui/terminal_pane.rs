@@ -2390,6 +2390,22 @@ impl TerminalPane {
         if !self.synchronize_terminal_input_focus(window, cx) {
             return;
         }
+        if window.is_offering_key_equivalent() {
+            return;
+        }
+        #[cfg(target_os = "macos")]
+        if event.keystroke.key == "space"
+            && event.keystroke.modifiers
+                == (gpui::Modifiers {
+                    control: true,
+                    platform: true,
+                    ..gpui::Modifiers::default()
+                })
+        {
+            window.show_character_palette();
+            cx.stop_propagation();
+            return;
+        }
         // A bare Escape pair leaves fullscreen while each press still reaches the session. Presses
         // an overlay or IME composition owns never count.
         let bare_escape = event.keystroke.key == "escape"

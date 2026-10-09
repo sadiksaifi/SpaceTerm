@@ -1001,6 +1001,10 @@ impl TextArea {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if window.is_offering_key_equivalent() {
+            cx.propagate();
+            return;
+        }
         if self.can_edit() {
             window.show_character_palette();
             cx.stop_propagation();

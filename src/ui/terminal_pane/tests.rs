@@ -5762,6 +5762,70 @@ fn event(key: &str, key_char: Option<&str>, modifiers: Modifiers) -> KeyDownEven
     }
 }
 
+#[gpui::test]
+fn native_key_equivalents_defer_raw_input_and_unclaimed_keys_preserve_repeats(
+    cx: &mut TestAppContext,
+) {
+    let (_, cx, records) = connected_terminal_pane(cx);
+    let start = records.commands().len();
+    let mut key = event("e", Some("e"), Modifiers::function());
+    assert!(!cx.simulate_key_equivalent(key.clone()));
+    assert!(key_presses_since(&records, start).is_empty());
+    // A native menu claim ends after the offer. Its release must not reach Kitty input.
+    cx.simulate_event(KeyUpEvent {
+        keystroke: key.keystroke.clone(),
+    });
+    assert!(key_presses_since(&records, start).is_empty());
+    // When AppKit declines, the ordinary key-down path owns delivery.
+    assert!(!cx.simulate_key_equivalent(key.clone()));
+    cx.simulate_event(key.clone());
+    key.is_held = true;
+    assert!(!cx.simulate_key_equivalent(key.clone()));
+    cx.simulate_event(key.clone());
+    cx.simulate_event(KeyUpEvent {
+        keystroke: key.keystroke,
+    });
+    assert_eq!(
+        key_presses_since(&records, start)
+            .iter()
+            .map(|key| key.2)
+            .collect::<Vec<_>>(),
+        [KeyAction::Press, KeyAction::Repeat, KeyAction::Release]
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[gpui::test]
+fn character_palette_compatibility_shortcut_runs_only_after_native_decline(
+    cx: &mut TestAppContext,
+) {
+    let (_, cx, records) = connected_terminal_pane(cx);
+    let start = records.commands().len();
+    let key = event(
+        "space",
+        Some(" "),
+        Modifiers {
+            control: true,
+            platform: true,
+            ..Modifiers::default()
+        },
+    );
+    let palette_requests = |cx: &VisualTestContext| {
+        cx.window_requests()
+            .iter()
+            .filter(|request| matches!(request, gpui::TestWindowRequest::ShowCharacterPalette))
+            .count()
+    };
+    assert!(!cx.simulate_key_equivalent(key.clone()));
+    assert_eq!(palette_requests(cx), 0);
+    cx.simulate_event(key.clone());
+    cx.simulate_event(KeyUpEvent {
+        keystroke: key.keystroke,
+    });
+    assert_eq!(palette_requests(cx), 1);
+    assert!(key_presses_since(&records, start).is_empty());
+}
+
 #[test]
 fn reported_terminal_title_should_replace_the_shell_fallback() {
     assert_eq!(
