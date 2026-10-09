@@ -2547,8 +2547,7 @@ fn render_pane_caption_content(
         button_paint(paint.control_disabled),
     );
     // The native Window may become active before GPUI dispatches its accepts-first-mouse event, so
-    // an opacity-zero unfocused Pane control is disabled before pointer-down to avoid its stale
-    // hitbox.
+    // a hidden unfocused Pane control is disabled before pointer-down to avoid its stale hitbox.
     let caption_action_available = focused || appearance.active;
     let focus_view = view.clone();
     let drag_view = view.clone();
@@ -2565,11 +2564,11 @@ fn render_pane_caption_content(
         .items_center()
         .gap(appearance.spacing(PANE_CONTROL_GAP))
         .flex_shrink_0()
-        // An unfocused Pane shows its controls only under the pointer.
-        .opacity(controls_reveal)
-        // Until fully revealed, the controls overhang the segment that took their width, so
-        // assistive technology must not find their frames there. Only a node with a role publishes
-        // that it is hidden.
+        // An unfocused Pane shows its controls only under the pointer; they slide in with the
+        // clip that reveals them.
+        // Until fully revealed, the controls overhang the clip that slides them in, so assistive
+        // technology must not find their frames there. Only a node with a role publishes that it
+        // is hidden.
         .when(controls_reveal < 1.0, |controls| {
             controls
                 .role(gpui::accesskit::Role::Group)
@@ -2577,7 +2576,7 @@ fn render_pane_caption_content(
         });
     let control_count = usize::from(layout.show_splits) * 2 + usize::from(has_multiple_panes) * 2;
     // Hidden controls give up their width, so the segments before them slide to the trailing edge
-    // and back as the controls fade.
+    // and back as the controls slide out and in.
     let controls_extent = if control_count == 0 {
         0.0
     } else {
@@ -2606,8 +2605,9 @@ fn render_pane_caption_content(
         .h_full()
         .flex()
         .items_center()
-        // The controls enter from the trailing edge, and a partly hidden control takes no clicks.
-        .justify_end()
+        // The controls slide in from the trailing edge, and a partly hidden control takes no
+        // clicks.
+        .justify_start()
         .overflow_hidden();
     let controls_slot = div()
         .flex_shrink_0()
@@ -4311,6 +4311,10 @@ mod tests {
             .debug_bounds(selector)
             .expect("caption control must exist")
             .center();
+        first_mouse_click(control, cx);
+    }
+
+    fn first_mouse_click(control: Point<Pixels>, cx: &mut VisualTestContext) {
         cx.simulate_event(MouseDownEvent {
             button: MouseButton::Left,
             position: control,
@@ -4461,11 +4465,15 @@ mod tests {
             "the visible focused-Pane action remains available on the activation click",
         );
 
-        first_mouse_click_caption_control("pane-split-down-1", cx);
+        // Hidden controls wait past their caption's trailing edge, so the click aims where Split
+        // Down slides in.
+        let hidden = cx.debug_bounds("pane-split-down-1").unwrap().center();
+        let controls = cx.debug_bounds("pane-controls-1-full").unwrap();
+        first_mouse_click(gpui::point(hidden.x - controls.size.width, hidden.y), cx);
         assert_eq!(
             view.read_with(cx, |view, _| (view.pane_count(), view.focused_pane_id())),
             (2, PaneId::new(1)),
-            "the activation click may focus its Pane but must not invoke its opacity-zero action",
+            "the activation click may focus its Pane but must not invoke its hidden action",
         );
     }
 
@@ -5377,15 +5385,16 @@ mod tests {
                 .filter(|node| node["aria"]["label"] == "Close Pane" && tree.exposed(node))
                 .count()
         };
-        let controls = cx.debug_bounds("pane-controls-1-full").unwrap();
+        let trailing = cx.debug_bounds("pane-controls-clip-1").unwrap().right();
         assert!(
-            (segment_right(cx) - controls.right()).abs() < px(0.5),
+            (segment_right(cx) - trailing).abs() < px(0.5),
             "an unfocused Pane's hidden controls leave their place to the Repository Status",
         );
         assert_eq!(exposed_closes(cx), 1);
 
         view.update(cx, |view, cx| view.focus_pane(PaneId::new(1), cx));
         crate::ui::settle_hover(cx);
+        let controls = cx.debug_bounds("pane-controls-1-full").unwrap();
         assert!(
             segment_right(cx) <= controls.left(),
             "the Focused Pane's controls push the Repository Status before them",
@@ -5393,7 +5402,7 @@ mod tests {
 
         view.update(cx, |view, cx| view.focus_pane(PaneId::new(2), cx));
         crate::ui::settle_hover(cx);
-        assert!((segment_right(cx) - controls.right()).abs() < px(0.5));
+        assert!((segment_right(cx) - trailing).abs() < px(0.5));
     }
 
     #[gpui::test]
@@ -5439,8 +5448,13 @@ mod tests {
             let controls = cx.debug_bounds("pane-controls-1-full").unwrap();
             if clip.size.width > px(0.0) && clip.size.width < controls.size.width {
                 partly_revealed = true;
+                // The revealing controls slide in with their clip's leading edge.
+                assert!(
+                    (controls.left() - clip.left()).abs() < px(0.5),
+                    "{controls:?} {clip:?}"
+                );
                 // Only the hovered Pane's settled controls are exposed; the revealing ones overhang
-                // the Repository Status.
+                // their clip.
                 let tree = A11yTree::read(cx);
                 let exposed = tree
                     .with_role("Button")
@@ -5499,8 +5513,8 @@ mod tests {
             PaneId::new(2)
         );
         let segment = cx.debug_bounds("pane-repository-1").unwrap();
-        let controls = cx.debug_bounds("pane-controls-1-full").unwrap();
-        assert!((segment.right() - controls.right()).abs() < px(0.5));
+        let trailing = cx.debug_bounds("pane-controls-clip-1").unwrap().right();
+        assert!((segment.right() - trailing).abs() < px(0.5));
     }
 
     #[gpui::test]
