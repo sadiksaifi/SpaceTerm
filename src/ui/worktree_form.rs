@@ -9,10 +9,10 @@ use gpui::{
     accesskit, div, px,
 };
 use spaceterm_ui::{
-    ComboBox, ComboBoxItem, Dialog, DialogCloseDecision, DialogCompletion, DialogInitialFocus,
-    DialogOutcome, DialogPendingCompletion, DialogSize, ModalAction, ModalActionRole, ModalId,
-    SegmentedControl, SegmentedOption, TextInput, TextInputEscapeBehavior, TextInputEvent,
-    TextInputReturnBehavior, TextInputVariant,
+    ComboBox, ComboBoxItem, Dialog, DialogCloseDecision, DialogInitialFocus, DialogOutcome,
+    DialogPendingCompletion, DialogSize, ModalAction, ModalActionRole, ModalId, SegmentedControl,
+    SegmentedOption, TextInput, TextInputEscapeBehavior, TextInputEvent, TextInputReturnBehavior,
+    TextInputVariant,
 };
 
 use super::appearance::{ChromeAppearance, gpui_color};
@@ -137,7 +137,6 @@ pub(crate) struct WorktreeForm {
     generation: u64,
     pending_path: Option<PathBuf>,
     pending_cancel: Option<DialogPendingCompletion>,
-    presentation: Option<DialogCompletion>,
     _branches: Task<()>,
 }
 
@@ -190,7 +189,6 @@ impl WorktreeForm {
             generation: 0,
             pending_path: None,
             pending_cancel: None,
-            presentation: None,
             _branches: Task::ready(()),
         };
         form.propose(cx);
@@ -258,10 +256,9 @@ impl WorktreeForm {
                 let _ = result_owner.update(cx, |form, cx| form.finish_dialog(outcome, cx));
             },
         );
-        let Ok(completion) = completion else {
+        let Ok(_) = completion else {
             return false;
         };
-        self.presentation = Some(completion);
         self.open = true;
         cx.notify();
         true
@@ -593,7 +590,6 @@ impl WorktreeForm {
         }
         self.open = false;
         self.pending = false;
-        self.presentation = None;
         self.pending_cancel = None;
         self.generation = self.generation.wrapping_add(1);
         self.set_editable(true, cx);

@@ -407,8 +407,6 @@ impl WorkspaceSidebar {
 }
 
 impl WorkspaceSidebar {
-    /// Opens a row's menu. A Workspace row's menu activates it; a Worktree row's menu only moves
-    /// the selection, so a Worktree with no Tabs stays unopened.
     fn request_menu(
         &mut self,
         key: SidebarRowKey,

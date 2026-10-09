@@ -13,7 +13,7 @@ pub(crate) mod path_template;
 pub(crate) mod ref_format;
 
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::domain::RepositoryIdentity;
 use listing::WorktreeRecord;
@@ -38,14 +38,5 @@ impl fmt::Debug for WorktreeSnapshot {
             .field("current", &self.current)
             .field("worktrees", &self.worktrees)
             .finish_non_exhaustive()
-    }
-}
-
-/// A path without trailing separators, for comparing git's spellings of one directory.
-fn fixed(path: &Path) -> &Path {
-    let text = path.as_os_str().to_str().unwrap_or_default();
-    match text.trim_end_matches('/') {
-        "" => path,
-        trimmed => Path::new(trimmed),
     }
 }

@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-/// Gives each repository its own folder and each branch its own directory in it.
 pub(crate) const DEFAULT_WORKTREE_PATH_TEMPLATE: &str = "~/.worktrees/{repository}/{branch}";
 
 /// Keeps a template a short line a person can read and edit.
@@ -106,7 +105,6 @@ fn parse(template: &str) -> Result<(bool, Vec<Piece<'_>>), WorktreePathTemplateE
     Ok((from_home, pieces))
 }
 
-/// One directory name for a value that may contain slashes.
 fn flatten(value: &str) -> String {
     value.replace('/', "-")
 }

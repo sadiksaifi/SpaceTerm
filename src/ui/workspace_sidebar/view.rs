@@ -24,13 +24,10 @@ pub(super) struct RowFade {
     worktrees: Vec<RowFade>,
 }
 
-/// The width of the trailing column that holds a git Workspace's disclosure chevron.
 const DISCLOSURE_WIDTH: f32 = 16.0;
 const ICON_COLUMN_WIDTH: f32 = 18.0;
 const ROW_CONTENT_GAP: f32 = 10.0;
-/// The minimum height of a row that holds one line.
 const SINGLE_LINE_ROW_HEIGHT: f32 = 32.0;
-/// How far a Worktree row's content starts inside its Workspace's.
 const WORKTREE_LEVEL_INDENT: f32 = 14.0;
 const FORMER_REPOSITORY_ROW_HEIGHT: f32 = 22.0;
 

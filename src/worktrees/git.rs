@@ -6,9 +6,9 @@ use std::sync::Arc;
 
 use thiserror::Error;
 
+use super::WorktreeSnapshot;
 use super::listing::{WorktreeHead, WorktreeRecord, parse_worktree_list};
 use super::ref_format::validate_branch_name;
-use super::{WorktreeSnapshot, fixed};
 use crate::domain::{RepositoryIdentity, ValidatedLocalDirectory};
 use crate::platform::local_filesystem::{LocalFilesystemAuthority, LocalFilesystemError};
 use crate::repository_status::discovery::{Discovery, parse_discovery};
@@ -217,22 +217,7 @@ impl LocalWorktreeGit {
             return Err(RepositoryReadError::Unavailable);
         }
         let current = PathBuf::from(&*repository.toplevel);
-        let nul = self.git_version >= NUL_LIST_VERSION;
-        let mut list = vec!["worktree", "list", "--porcelain"];
-        if nul {
-            list.push("-z");
-        }
-        let mut output = Vec::new();
-        let exit = self.run(
-            &current,
-            git_arguments(&current, FsmonitorPolicy::Disabled, &list),
-            &mut output,
-            cancellation,
-        )?;
-        if !exit.success() {
-            return Err(RepositoryReadError::Unavailable);
-        }
-        let worktrees = parse_worktree_list(&output, if nul { 0 } else { b'\n' })?;
+        let worktrees = self.list_records(&current, cancellation)?;
         Ok(Some(snapshot(
             worktrees,
             current,
@@ -551,23 +536,30 @@ impl LocalWorktreeGit {
         branch: &str,
         cancellation: &SshCancellationToken,
     ) -> Result<bool, WorktreeCreateError> {
+        let worktrees = self
+            .list_records(root, cancellation)
+            .map_err(|_| WorktreeCreateError::Failed)?;
+        Ok(worktrees
+            .iter()
+            .any(|worktree| matches!(&worktree.head, WorktreeHead::Branch(name) if name == branch)))
+    }
+
+    fn list_records(
+        &self,
+        root: &Path,
+        cancellation: &SshCancellationToken,
+    ) -> Result<Vec<WorktreeRecord>, RepositoryReadError> {
         let nul = self.git_version >= NUL_LIST_VERSION;
         let mut list = vec!["worktree", "list", "--porcelain"];
         if nul {
             list.push("-z");
         }
         let mut output = Vec::new();
-        let exit = self
-            .git(root, &list, &mut output, cancellation)
-            .map_err(|_| WorktreeCreateError::Failed)?;
+        let exit = self.git(root, &list, &mut output, cancellation)?;
         if !exit.success() {
-            return Err(WorktreeCreateError::Failed);
+            return Err(RepositoryReadError::Unavailable);
         }
-        let worktrees = parse_worktree_list(&output, if nul { 0 } else { b'\n' })
-            .map_err(|_| WorktreeCreateError::Failed)?;
-        Ok(worktrees
-            .iter()
-            .any(|worktree| matches!(&worktree.head, WorktreeHead::Branch(name) if name == branch)))
+        parse_worktree_list(&output, if nul { 0 } else { b'\n' })
     }
 
     fn git(
@@ -662,11 +654,10 @@ fn snapshot(
     common_directory: PathBuf,
 ) -> WorktreeSnapshot {
     let repository = RepositoryIdentity::new(worktrees[0].root.clone());
-    let current = fixed(&current);
     WorktreeSnapshot {
         current: worktrees
             .iter()
-            .position(|worktree| fixed(&worktree.root) == current),
+            .position(|worktree| worktree.root == current),
         repository,
         common_directory,
         worktrees,

@@ -5,7 +5,6 @@
 
 use thiserror::Error;
 
-/// Why git would refuse a branch name.
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
 pub(crate) enum BranchNameError {
     #[error("the name is empty")]
@@ -24,7 +23,6 @@ pub(crate) enum BranchNameError {
     Reserved,
 }
 
-/// Checks that git accepts `name` as a new branch name.
 pub(crate) fn validate_branch_name(name: &str) -> Result<(), BranchNameError> {
     if name.is_empty() {
         return Err(BranchNameError::Empty);

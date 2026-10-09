@@ -538,7 +538,7 @@ impl WorkspaceManager {
             }
         }
         groups.extend(former.into_iter().map(|(repository, rows)| WorktreeGroup {
-            former_repository: Some(repository_name(repository)),
+            former_repository: Some(directory_name(repository.main_root())),
             rows,
         }));
         // A repository's Main Worktree alone leaves the row as it is outside a git repository.
@@ -737,11 +737,6 @@ impl WorkspaceManager {
             _ => None,
         }
     }
-}
-
-/// The repository's name as a divider shows it: its Main Worktree's last component.
-fn repository_name(repository: &RepositoryIdentity) -> SharedString {
-    directory_name(repository.main_root())
 }
 
 /// A directory's last component, or the whole path for a root.
