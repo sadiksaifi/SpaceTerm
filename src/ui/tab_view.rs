@@ -2567,10 +2567,10 @@ fn render_pane_caption_content(
         .flex_shrink_0()
         // An unfocused Pane shows its controls only under the pointer.
         .opacity(controls_reveal)
-        // Hidden controls overhang the segment that took their width, so assistive technology must
-        // not find their frames there. The Focused Pane's controls are exposed as soon as it gains
-        // focus. Only a node with a role publishes that it is hidden.
-        .when(!focused && controls_reveal <= 0.0, |controls| {
+        // Until fully revealed, the controls overhang the segment that took their width, so
+        // assistive technology must not find their frames there. Only a node with a role publishes
+        // that it is hidden.
+        .when(controls_reveal < 1.0, |controls| {
             controls
                 .role(gpui::accesskit::Role::Group)
                 .aria_hidden(true)
@@ -4273,6 +4273,8 @@ mod tests {
             PaneId::new(1)
         );
         assert!(cx.update(|window, cx| view.read(cx).focused_terminal_has_input_focus(window, cx)));
+        // The controls are exposed once their reveal settles.
+        crate::ui::settle_hover(cx);
         let tree = A11yTree::read(cx);
         let controls = tree.children(tree.node("Pane Caption, Primary shell"));
         let control = |name| {
@@ -5398,6 +5400,8 @@ mod tests {
     fn controls_growing_in_should_keep_their_gap_from_the_repository_status(
         cx: &mut TestAppContext,
     ) {
+        use spaceterm_ui::a11y_testing::A11yTree;
+
         let (_, view, _, cx) = caption_view(cx);
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
@@ -5435,6 +5439,15 @@ mod tests {
             let controls = cx.debug_bounds("pane-controls-1-full").unwrap();
             if clip.size.width > px(0.0) && clip.size.width < controls.size.width {
                 partly_revealed = true;
+                // Only the hovered Pane's settled controls are exposed; the revealing ones overhang
+                // the Repository Status.
+                let tree = A11yTree::read(cx);
+                let exposed = tree
+                    .with_role("Button")
+                    .into_iter()
+                    .filter(|node| node["aria"]["label"] == "Close Pane" && tree.exposed(node))
+                    .count();
+                assert_eq!(exposed, 1);
             }
             if clip.size.width > px(0.0) {
                 assert!(
