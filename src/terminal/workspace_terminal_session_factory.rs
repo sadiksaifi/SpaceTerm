@@ -376,12 +376,14 @@ impl WorkspaceTerminalSessionFactory {
                     // spelling it was reached by.
                     let directory = match (&self.pinned_directory, source) {
                         (Some(PinnedDirectory::Local(directory)), _)
-                            if authority.physically_contains(root, directory.path()) =>
+                            if directory.path().starts_with(root)
+                                || authority.physically_contains(root, directory.path()) =>
                         {
                             directory.clone()
                         }
                         (_, Some(CurrentDirectory::Local(path)))
-                            if authority.physically_contains(root, &path) =>
+                            if path.starts_with(root)
+                                || authority.physically_contains(root, &path) =>
                         {
                             authority.validate_directory(&path)?
                         }
@@ -873,11 +875,14 @@ mod tests {
             authority.validate_directory(&pin).unwrap(),
         )));
         std::fs::remove_dir(&pin).unwrap();
-        assert!(
-            factory
-                .for_source_directory(Some(CurrentDirectory::Local(fixture.path().to_owned())))
-                .is_err()
-        );
+        for root in [None, Some(fixture.path().to_owned())] {
+            factory.set_worktree_root(root);
+            assert!(
+                factory
+                    .for_source_directory(Some(CurrentDirectory::Local(fixture.path().to_owned())))
+                    .is_err()
+            );
+        }
     }
 
     #[test]
