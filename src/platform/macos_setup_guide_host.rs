@@ -16,7 +16,8 @@ use objc2_app_kit::{
     NSFontAttributeName, NSFontWeight, NSFontWeightBold, NSFontWeightMedium, NSFontWeightRegular,
     NSFontWeightSemibold, NSForegroundColorAttributeName, NSGlassEffectView,
     NSGlassEffectViewStyle, NSGraphicsContext, NSImage, NSLineBreakMode, NSMutableParagraphStyle,
-    NSParagraphStyleAttributeName, NSRunningApplication, NSView, NSWindowOrderingMode, NSWorkspace,
+    NSPanel, NSParagraphStyleAttributeName, NSRunningApplication, NSView, NSWindowOrderingMode,
+    NSWorkspace,
 };
 use objc2_foundation::{
     NSArray, NSAttributedString, NSBundle, NSDictionary, NSNumber, NSPoint, NSRect, NSSize,
@@ -84,7 +85,7 @@ impl SetupGuideHost for MacosSetupGuideHost {
         })
     }
 
-    fn install_glass(&self, window: &gpui::Window, corner_radius: Pixels) -> bool {
+    fn configure_window(&self, window: &gpui::Window, corner_radius: Pixels) -> bool {
         let Some(mtm) = MainThreadMarker::new() else {
             return false;
         };
@@ -96,10 +97,16 @@ impl SetupGuideHost for MacosSetupGuideHost {
         };
         // SAFETY: GPUI owns this live NSView for the synchronous call.
         let rendering_view = unsafe { &*handle.ns_view.as_ptr().cast::<NSView>() };
-        let Some(content_view) = rendering_view
-            .window()
-            .and_then(|window| window.contentView())
-        else {
+        let Some(native_window) = rendering_view.window() else {
+            return false;
+        };
+        let Ok(panel) = native_window.downcast::<NSPanel>() else {
+            return false;
+        };
+        // Nonactivating GPUI panels can still take keyboard focus when clicked. The guide has
+        // no native text input, so clicking or starting a drag must leave focus with System Settings.
+        panel.setBecomesKeyOnlyIfNeeded(true);
+        let Some(content_view) = panel.contentView() else {
             return false;
         };
         // An ordinary, unmodified glass view below GPUI's rendering view, which paints the guide
@@ -400,8 +407,93 @@ fn font_weight(weight: f32) -> NSFontWeight {
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::platform) mod tests {
     use super::*;
+
+    #[cfg(all(test, feature = "native-tests"))]
+    pub(in crate::platform) fn guide_mouse_click_preserves_keyboard_focus() {
+        use gpui::{
+            AppContext as _, VisualTestAppContext, WindowBounds, WindowKind, WindowOptions,
+        };
+        use objc2_app_kit::{
+            NSBackingStoreType, NSEvent, NSEventModifierFlags, NSEventType, NSPanel,
+            NSWindowStyleMask,
+        };
+
+        let mtm = MainThreadMarker::new().expect("native fixture runs on the main thread");
+        let mut cx = VisualTestAppContext::new(gpui_platform::current_platform(false));
+        let guide = cx.update(|cx| {
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                        point(px(-10000.0), px(-10000.0)),
+                        size(px(400.0), px(114.0)),
+                    ))),
+                    titlebar: None,
+                    focus: false,
+                    show: true,
+                    kind: WindowKind::PopUp,
+                    ..WindowOptions::default()
+                },
+                |window, cx| {
+                    MacosSetupGuideHost.configure_window(window, px(16.0));
+                    cx.new(|_| gpui::EmptyView)
+                },
+            )
+            .expect("native guide opens")
+        });
+        let panel = guide
+            .update(&mut cx, |_, window, _| {
+                let handle = window.window_handle().expect("native window handle");
+                let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+                    panic!("AppKit window");
+                };
+                // SAFETY: GPUI owns the live rendering view throughout this fixture.
+                let view = unsafe { &*handle.ns_view.as_ptr().cast::<NSView>() };
+                view.window().expect("guide's native window")
+            })
+            .expect("guide is open");
+        let input_window = NSPanel::initWithContentRect_styleMask_backing_defer(
+            NSPanel::alloc(mtm),
+            NSRect::new(NSPoint::new(-10000.0, -10000.0), NSSize::new(400.0, 300.0)),
+            NSWindowStyleMask::Titled | NSWindowStyleMask::NonactivatingPanel,
+            NSBackingStoreType::Buffered,
+            false,
+        );
+        // SAFETY: The fixture retains the window until after closing it.
+        unsafe { input_window.setReleasedWhenClosed(false) };
+        input_window.orderFront(None);
+        input_window.makeKeyWindow();
+        assert!(input_window.isKeyWindow(), "input window starts with focus");
+
+        for event_type in [NSEventType::LeftMouseDown, NSEventType::LeftMouseUp] {
+            let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+                event_type,
+                NSPoint::new(100.0, 40.0),
+                NSEventModifierFlags::empty(),
+                0.0,
+                panel.windowNumber(),
+                None,
+                0,
+                1,
+                1.0,
+            )
+            .expect("native mouse event");
+            panel.sendEvent(&event);
+        }
+        let input_kept_focus = input_window.isKeyWindow();
+        let guide_took_focus = panel.isKeyWindow();
+        guide
+            .update(&mut cx, |_, window, _| window.remove_window())
+            .expect("guide closes");
+        input_window.close();
+        cx.update(|cx| cx.quit());
+
+        assert!(
+            input_kept_focus && !guide_took_focus,
+            "clicking the guide must preserve keyboard focus in the input window"
+        );
+    }
 
     fn window(owner: i32, layer: i64, x: f64, y: f64, width: f64, height: f64) -> ListedWindow {
         ListedWindow {
