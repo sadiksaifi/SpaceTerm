@@ -36,7 +36,10 @@ __pycache__/
 .opencode
 .claude
 .pi
-.agents
+.agents/*
+!.agents/skills/
+.agents/skills/*
+!.agents/skills/spaceterm-release/
 
 # Editor temporary files
 *.swp
