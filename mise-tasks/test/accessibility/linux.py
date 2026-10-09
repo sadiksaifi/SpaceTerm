@@ -1632,8 +1632,8 @@ def private_session(args):
         readiness.wait(ReadinessStep.TERMINAL_FOCUS, focused_terminal)
         readiness.wait(ReadinessStep.ORCA_TERMINAL_SCRIPT, orca_terminal_script)
         readiness.wait(
-            ReadinessStep.ORCA_TERMINAL_PRESENTATION,
-            lambda: orca_terminal_script() and orca_stream.terminal_presented,
+            ReadinessStep.ORCA_TERMINAL_FOCUS_PROCESSED,
+            lambda: orca_terminal_script() and orca_stream.terminal_focus_processed,
         )
         report["tree"] = validate_tree(probe, input_driver, output, orca_fixture_speech, readiness)
         probe.begin("keyboard_echo")

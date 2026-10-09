@@ -144,8 +144,9 @@ class AccessibilityReadinessTests(unittest.TestCase):
         self.assertFalse(orca_registered(events, 40, unexpected_query))
 
 
-class OrcaPresentationReadinessTests(unittest.TestCase):
+class OrcaFocusReadinessTests(unittest.TestCase):
     TERMINAL = "SCRIPT MANAGER: Setting active script to [module=orca.scripts.terminal.script]"
+    FINISHED = "^^^^^ FINISHED PRIORITY-0 OBJECT EVENT OBJECT:STATE-CHANGED:FOCUSED ^^^^^"
 
     def observed(self, records):
         with tempfile.TemporaryDirectory() as directory:
@@ -153,29 +154,68 @@ class OrcaPresentationReadinessTests(unittest.TestCase):
             output = OrcaOutput(Path(directory), probe, "spaceterm-a11y")
             descriptor = os.open(output.fifo, os.O_WRONLY)
             try:
-                data = "".join("12:34:56.000000 - " + record + "\n" for record in records)
-                os.write(descriptor, data.encode())
-                return output.summary().get("terminal_presentation_observed", False)
+                os.write(descriptor, ("\n".join(records) + "\n").encode())
+                output.summary()
+                return output.terminal_focus_processed
             finally:
                 os.close(descriptor)
                 output.close()
 
-    def test_genuine_terminal_script_speech_establishes_presentation_readiness(self):
-        self.assertTrue(self.observed([self.TERMINAL, "SPEECH OUTPUT: 'fixture focus'"]))
+    def record(self, body):
+        return "12:34:56.000000 - " + body
 
-    def test_startup_speech_before_terminal_script_selection_is_insufficient(self):
-        self.assertFalse(self.observed(["SPEECH OUTPUT: 'Screen reader on'", self.TERMINAL]))
+    def test_blank_terminal_becomes_ready_when_orca_finishes_processing_focus(self):
+        self.assertTrue(
+            self.observed(
+                [
+                    self.record(self.TERMINAL),
+                    self.record("TOTAL PROCESSING TIME: 0.0010"),
+                    self.FINISHED,
+                ]
+            )
+        )
 
-    def test_nonspeech_record_does_not_establish_presentation_readiness(self):
-        self.assertFalse(self.observed([self.TERMINAL, "DEFAULT: SPEECH OUTPUT: 'fixture focus'"]))
-
-    def test_speech_after_terminal_script_deactivation_is_insufficient(self):
+    def test_selection_and_initial_speech_do_not_prove_focus_processing_finished(self):
         self.assertFalse(
             self.observed(
                 [
-                    self.TERMINAL,
-                    "SCRIPT MANAGER: Deactivating terminal",
-                    "SPEECH OUTPUT: 'other app'",
+                    self.record(self.TERMINAL),
+                    self.record("SPEECH OUTPUT: 'terminal'"),
+                ]
+            )
+        )
+
+    def test_focus_processed_before_terminal_selection_is_insufficient(self):
+        self.assertFalse(self.observed([self.record(self.FINISHED), self.record(self.TERMINAL)]))
+
+    def test_deactivation_invalidates_previous_focus_completion(self):
+        self.assertFalse(
+            self.observed(
+                [
+                    self.record(self.TERMINAL),
+                    self.record(self.FINISHED),
+                    self.record("SCRIPT MANAGER: Deactivating terminal"),
+                    self.record(self.TERMINAL),
+                ]
+            )
+        )
+
+    def test_other_event_completion_is_insufficient(self):
+        self.assertFalse(
+            self.observed(
+                [
+                    self.record(self.TERMINAL),
+                    self.record(self.FINISHED.replace("FOCUSED", "ACTIVE")),
+                ]
+            )
+        )
+
+    def test_quoted_completion_marker_is_insufficient(self):
+        self.assertFalse(
+            self.observed(
+                [
+                    self.record(self.TERMINAL),
+                    self.record("SPEECH OUTPUT: '" + self.FINISHED + "'"),
                 ]
             )
         )

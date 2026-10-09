@@ -42,7 +42,7 @@ class ReadinessStep(Enum):
     TERMINAL_OBJECT = "terminal_object"
     TERMINAL_FOCUS = "terminal_focus"
     ORCA_TERMINAL_SCRIPT = "orca_terminal_script"
-    ORCA_TERMINAL_PRESENTATION = "orca_terminal_presentation"
+    ORCA_TERMINAL_FOCUS_PROCESSED = "orca_terminal_focus_processed"
     FIXTURE_SPEECH = "fixture_speech"
 
 
@@ -451,7 +451,7 @@ class OrcaOutput:
         self.started = False
         self.terminal_script = False
         self.active_terminal_script = False
-        self.terminal_presented = False
+        self.terminal_focus_processed = False
         self.marker_spoken = False
         self.typed_character_spoken = False
         self.terminal_keyboard_event = False
@@ -512,8 +512,21 @@ class OrcaOutput:
         if b"TERMINAL: Adjusted insertion:" in line and self.marker in line:
             self.routing_counts["adjusted_insert_contains_exact_fixture_marker"] += 1
         self.started |= b"ORCA: Starting Atspi main event loop" in line
+        debug_part = re.match(rb"^(?:[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6} - | {18})?(.*)$", line)
+        if debug_part is not None and self.active_terminal_script:
+            completed = (
+                re.fullmatch(
+                    rb"\^\^\^\^\^ FINISHED PRIORITY-[0-9]+ OBJECT EVENT "
+                    rb"OBJECT:STATE-CHANGED:FOCUSED \^\^\^\^\^",
+                    debug_part[1],
+                )
+                is not None
+            )
+            self.terminal_focus_processed |= completed
+            self.counts["terminal_focus_completions"] += int(completed)
         if b"SCRIPT MANAGER: Deactivating" in line:
             self.active_terminal_script = False
+            self.terminal_focus_processed = False
         if b"SCRIPT MANAGER: Setting active script to" in line:
             self.active_terminal_script = b"module=orca.scripts.terminal.script" in line
             self.terminal_script |= self.active_terminal_script
@@ -546,7 +559,6 @@ class OrcaOutput:
             self.speech_record_bytes = 0
             if self.speech_record:
                 self.counts["speech_records"] += 1
-                self.terminal_presented |= self.active_terminal_script
                 self.typed_character_spoken |= (
                     self.probe.phase == "keyboard_echo" and body.startswith(b"SPEECH OUTPUT: 'q'")
                 )
@@ -603,7 +615,7 @@ class OrcaOutput:
         return {
             "atspi_main_loop_started": self.started,
             "terminal_script_selected": self.terminal_script,
-            "terminal_presentation_observed": self.terminal_presented,
+            "terminal_focus_processed": self.counts["terminal_focus_completions"] > 0,
             "fixture_output_spoken": self.marker_spoken,
             "speech_backend": dict(self.speech_backend),
             "speech_backend_initialized": self.speech_backend["factory_success"] > 0
