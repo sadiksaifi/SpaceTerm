@@ -2050,14 +2050,12 @@ impl Element for TerminalGridElement {
             && !candidate_submission_started
             && let Some(fallback) = &prepaint.fallback
             && fallback.preflight(window, cx).is_ok()
-        {
-            if fallback
+            && fallback
                 .submit(fallback.grid_bounds, true, window, cx)
                 .is_ok()
-                && let Some(element) = &self.fallback
-            {
-                presented_input = Some(element.input_geometry(fallback.grid_bounds));
-            }
+            && let Some(element) = &self.fallback
+        {
+            presented_input = Some(element.input_geometry(fallback.grid_bounds));
         }
         let Some(pane) = self.input.upgrade() else {
             return;
