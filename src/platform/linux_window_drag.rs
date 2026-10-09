@@ -4,7 +4,8 @@ use std::rc::Rc;
 use gpui::Window;
 
 use super::window_movement::{
-    OperatingSystemWindowDragError, OperatingSystemWindowDragPlatform, WindowMovementFactory,
+    OperatingSystemWindowDragError, OperatingSystemWindowDragPlatform, WindowMoveStart,
+    WindowMovementFactory,
 };
 
 pub(super) struct LinuxWindowMovementFactory;
@@ -18,8 +19,11 @@ impl WindowMovementFactory for LinuxWindowMovementFactory {
 struct LinuxWindowDragPlatform;
 
 impl OperatingSystemWindowDragPlatform for LinuxWindowDragPlatform {
-    fn interaction_started(&self) -> Result<(), OperatingSystemWindowDragError> {
-        Ok(())
+    fn interaction_started(
+        &self,
+        _: &Window,
+    ) -> Result<WindowMoveStart, OperatingSystemWindowDragError> {
+        Ok(WindowMoveStart::AwaitMovement)
     }
 
     fn start_window_move(&self, window: &Window) -> Result<(), OperatingSystemWindowDragError> {

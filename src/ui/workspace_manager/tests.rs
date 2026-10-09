@@ -5653,6 +5653,47 @@ fn right_click(selector: &'static str, cx: &mut VisualTestContext) {
 }
 
 #[gpui::test]
+fn chrome_mouse_down_handoff_should_restore_terminal_focus_without_a_pointer_release(
+    cx: &mut TestAppContext,
+) {
+    let (manager, platform, cx) = workspace_manager_with_operating_system_window_drag_platform(cx);
+    platform.handoff_on_press();
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+
+    // Both Chrome owners use the same native adapter but retain their own interaction status.
+    for selector in ["workspace-top-chrome-drag-region", "tab-bar-drag-region"] {
+        let bounds = cx
+            .debug_bounds(selector)
+            .expect("Chrome drag region must be rendered");
+        let press = bounds.center();
+        cx.simulate_mouse_down(press, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.update(|window, cx| {
+                manager
+                    .read(cx)
+                    .workspaces
+                    .active_workspace()
+                    .payload()
+                    .read(cx)
+                    .focused_terminal_has_input_focus(window, cx)
+            }),
+            "Terminal Input Focus did not recover after {selector}; native counts: {:?}",
+            platform.counts()
+        );
+        assert!(cx.update(|window, cx| {
+            manager
+                .update(cx, |manager, cx| manager.native_service_status(window, cx))
+                .capabilities
+                .return_text
+        }));
+    }
+
+    assert_eq!(platform.counts(), (2, 2, 2));
+}
+
+#[gpui::test]
 fn workspace_chrome_should_forward_threshold_crossing_and_double_activation_to_platform_policy(
     cx: &mut TestAppContext,
 ) {

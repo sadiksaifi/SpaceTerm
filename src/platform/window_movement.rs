@@ -21,8 +21,20 @@ pub(crate) enum OperatingSystemWindowDragError {
     NativeWindow,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum WindowMoveStart {
+    #[default]
+    AwaitMovement,
+    Started,
+}
+
 pub(crate) trait OperatingSystemWindowDragPlatform {
-    fn interaction_started(&self) -> Result<(), OperatingSystemWindowDragError>;
+    /// Called synchronously from the primary mouse-down callback. A host may start its native
+    /// interaction now or wait for `start_window_move` after the control's movement threshold.
+    fn interaction_started(
+        &self,
+        window: &Window,
+    ) -> Result<WindowMoveStart, OperatingSystemWindowDragError>;
     fn start_window_move(&self, window: &Window) -> Result<(), OperatingSystemWindowDragError>;
     fn show_window_menu(&self, _: &Window, _: gpui::Point<gpui::Pixels>) {}
     fn interaction_finished(&self);
@@ -34,10 +46,15 @@ pub(crate) struct RecordingOperatingSystemWindowDragPlatform {
     interaction_starts: Cell<usize>,
     move_requests: Cell<usize>,
     interaction_finishes: Cell<usize>,
+    immediate_handoff: Cell<bool>,
 }
 
 #[cfg(test)]
 impl RecordingOperatingSystemWindowDragPlatform {
+    pub(crate) fn handoff_on_press(&self) {
+        self.immediate_handoff.set(true);
+    }
+
     pub(crate) fn counts(&self) -> (usize, usize, usize) {
         (
             self.interaction_starts.get(),
@@ -49,10 +66,18 @@ impl RecordingOperatingSystemWindowDragPlatform {
 
 #[cfg(test)]
 impl OperatingSystemWindowDragPlatform for RecordingOperatingSystemWindowDragPlatform {
-    fn interaction_started(&self) -> Result<(), OperatingSystemWindowDragError> {
+    fn interaction_started(
+        &self,
+        window: &Window,
+    ) -> Result<WindowMoveStart, OperatingSystemWindowDragError> {
         self.interaction_starts
             .set(self.interaction_starts.get() + 1);
-        Ok(())
+        if self.immediate_handoff.get() {
+            self.start_window_move(window)?;
+            Ok(WindowMoveStart::Started)
+        } else {
+            Ok(WindowMoveStart::AwaitMovement)
+        }
     }
 
     fn start_window_move(&self, _: &Window) -> Result<(), OperatingSystemWindowDragError> {

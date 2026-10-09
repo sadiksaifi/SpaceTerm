@@ -64,7 +64,7 @@ use crate::domain::{
 #[cfg(test)]
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
 use crate::platform::window_movement::{
-    OperatingSystemWindowDragError, OperatingSystemWindowDragPlatform,
+    OperatingSystemWindowDragError, OperatingSystemWindowDragPlatform, WindowMoveStart,
 };
 use crate::terminal::{
     NativeServiceOrigin, NativeServiceStatus, PreparedWorkspaceTerminalLaunch,
@@ -959,14 +959,21 @@ impl TabManager {
     ) -> WindowDragRegionResponse {
         match event {
             WindowDragRegionEvent::InteractionStarted { .. } => {
-                if let Err(error) = self
+                let response = match self
                     .operating_system_window_drag_platform
-                    .interaction_started()
+                    .interaction_started(window)
                 {
-                    Self::report_operating_system_window_drag_error("begin", error);
-                }
+                    Ok(WindowMoveStart::Started) => {
+                        WindowDragRegionResponse::OperatingSystemWindowMoveStarted
+                    }
+                    Ok(WindowMoveStart::AwaitMovement) => WindowDragRegionResponse::Continue,
+                    Err(error) => {
+                        Self::report_operating_system_window_drag_error("begin", error);
+                        WindowDragRegionResponse::Continue
+                    }
+                };
                 self.sync_terminal_focus_blocker(cx);
-                WindowDragRegionResponse::Continue
+                response
             }
             WindowDragRegionEvent::MoveRequested { .. } => {
                 match self

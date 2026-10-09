@@ -17,7 +17,7 @@ use spaceterm_ui::{
 };
 
 use crate::platform::window_movement::{
-    OperatingSystemWindowDragError, OperatingSystemWindowDragPlatform,
+    OperatingSystemWindowDragError, OperatingSystemWindowDragPlatform, WindowMoveStart,
 };
 use crate::ui::appearance::settings::{SettingsAppearance, SettingsSurfaceRole};
 use crate::ui::appearance::{ChromeAppearance, gpui_color};
@@ -310,10 +310,16 @@ impl WindowMovement {
                 if !spaceterm_ui::window_modal_is_open(window, cx) {
                     self.window_focus.focus(window, cx);
                 }
-                if let Err(error) = self.platform.interaction_started() {
-                    self.report("begin", error);
+                match self.platform.interaction_started(window) {
+                    Ok(WindowMoveStart::Started) => {
+                        WindowDragRegionResponse::OperatingSystemWindowMoveStarted
+                    }
+                    Ok(WindowMoveStart::AwaitMovement) => WindowDragRegionResponse::Continue,
+                    Err(error) => {
+                        self.report("begin", error);
+                        WindowDragRegionResponse::Continue
+                    }
                 }
-                WindowDragRegionResponse::Continue
             }
             WindowDragRegionEvent::MoveRequested { .. } => {
                 match self.platform.start_window_move(window) {
