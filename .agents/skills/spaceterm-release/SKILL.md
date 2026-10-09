@@ -1,6 +1,6 @@
 ---
 name: spaceterm-release
-description: Release SpaceTerm with a major, minor, or patch bump, repairing failed attempts until publication succeeds.
+description: Use when the user asks to release SpaceTerm with a major, minor, or patch bump.
 ---
 
 # SpaceTerm release
