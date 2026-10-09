@@ -84,6 +84,9 @@ impl WindowDragFinishReason {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WindowDragRegionEvent {
     /// The region took ownership of a primary-pointer press.
+    ///
+    /// The application may hand off native movement here when the host requires the mouse-down
+    /// callback, before the control's movement threshold is crossed.
     InteractionStarted {
         /// Stable identity for this interaction.
         interaction: WindowDragInteractionId,
@@ -315,7 +318,13 @@ impl RenderOnce for WindowDragRegion {
                         }
                     };
                     window.prevent_default();
-                    emit_events(down_handler.clone(), events, window, cx);
+                    let response = emit_events(down_handler.clone(), events, window, cx);
+                    if response == WindowDragRegionResponse::OperatingSystemWindowMoveStarted {
+                        let events = down_state.update(cx, |state, _| {
+                            state.finish(WindowDragFinishReason::OperatingSystemWindowMoveStarted)
+                        });
+                        emit_events(down_handler.clone(), events, window, cx);
+                    }
                     cx.stop_propagation();
                 });
 
@@ -426,7 +435,11 @@ fn emit_events(
     let mut move_response = WindowDragRegionResponse::Continue;
     for event in events {
         let response = handler(&event, window, cx);
-        if matches!(event, WindowDragRegionEvent::MoveRequested { .. }) {
+        if matches!(
+            event,
+            WindowDragRegionEvent::InteractionStarted { .. }
+                | WindowDragRegionEvent::MoveRequested { .. }
+        ) {
             move_response = response;
         }
     }
@@ -556,7 +569,10 @@ impl WindowDragRegionState {
     }
 
     fn double_activation(&mut self) -> Vec<WindowDragRegionEvent> {
-        if !matches!(self.pointer, PointerLifecycle::Idle) {
+        if !matches!(
+            self.pointer,
+            PointerLifecycle::Idle | PointerLifecycle::CancelledUntilRelease
+        ) {
             return Vec::new();
         }
         self.pointer = PointerLifecycle::CancelledUntilRelease;
@@ -835,6 +851,7 @@ mod tests {
         overlay: bool,
         capture_overlay: bool,
         middle_activation: bool,
+        handoff_on_press: bool,
     }
 
     impl Render for TestRoot {
@@ -844,6 +861,7 @@ mod tests {
             let parent_up_events = Rc::clone(&self.parent_events);
             let parent_moves = Rc::clone(&self.parent_moves);
             let child_presses = Rc::clone(&self.child_presses);
+            let handoff_on_press = self.handoff_on_press;
             let content = div().relative().size_full().child(
                 div()
                     .id("window-drag-child")
@@ -867,7 +885,16 @@ mod tests {
             .middle_activation(self.middle_activation)
             .pointer_insets(self.pointer_insets)
             .debug_selector("test-window-drag-region")
-            .on_event(move |event, _, _| region_events.borrow_mut().push(*event));
+            .on_event(move |event, _, _| {
+                region_events.borrow_mut().push(*event);
+                if handoff_on_press
+                    && matches!(event, WindowDragRegionEvent::InteractionStarted { .. })
+                {
+                    WindowDragRegionResponse::OperatingSystemWindowMoveStarted
+                } else {
+                    WindowDragRegionResponse::Continue
+                }
+            });
 
             div()
                 .relative()
@@ -993,6 +1020,7 @@ mod tests {
             overlay: false,
             capture_overlay: false,
             middle_activation: false,
+            handoff_on_press: false,
         });
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
@@ -1009,6 +1037,92 @@ mod tests {
     fn region_bounds(cx: &mut VisualTestContext) -> gpui::Bounds<Pixels> {
         cx.debug_bounds("test-window-drag-region")
             .expect("window drag region was not rendered")
+    }
+
+    #[gpui::test]
+    fn mouse_down_handoff_should_finish_once_and_suppress_the_remaining_pointer_stream(
+        cx: &mut TestAppContext,
+    ) {
+        let DragWindow {
+            root,
+            events,
+            parent_events,
+            parent_moves,
+            cx,
+            ..
+        } = drag_window(cx);
+        root.update(cx, |root, cx| {
+            root.handoff_on_press = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let start = point(
+            region_bounds(cx).left() + px(20.0),
+            region_bounds(cx).center().y,
+        );
+
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+        assert!(matches!(
+            events.borrow().as_slice(),
+            [
+                WindowDragRegionEvent::InteractionStarted { .. },
+                WindowDragRegionEvent::InteractionFinished {
+                    reason: WindowDragFinishReason::OperatingSystemWindowMoveStarted,
+                    ..
+                },
+            ]
+        ));
+        cx.simulate_mouse_move(
+            point(start.x + px(20.0), start.y),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.simulate_mouse_up(start, MouseButton::Left, Modifiers::none());
+        assert_eq!(events.borrow().len(), 2);
+        assert_eq!(
+            (*parent_moves.borrow(), parent_events.borrow().len()),
+            (0, 0)
+        );
+    }
+
+    #[gpui::test]
+    fn double_activation_should_survive_a_mouse_down_handoff_that_consumes_release(
+        cx: &mut TestAppContext,
+    ) {
+        let DragWindow {
+            root, events, cx, ..
+        } = drag_window(cx);
+        root.update(cx, |root, cx| {
+            root.handoff_on_press = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let start = point(
+            region_bounds(cx).left() + px(20.0),
+            region_bounds(cx).center().y,
+        );
+
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+        // AppKit may consume mouse-up, leaving the next down as the first event we receive.
+        cx.simulate_event(MouseDownEvent {
+            button: MouseButton::Left,
+            position: start,
+            modifiers: Modifiers::none(),
+            click_count: 2,
+            first_mouse: false,
+        });
+
+        assert!(matches!(
+            events.borrow().as_slice(),
+            [
+                WindowDragRegionEvent::InteractionStarted { .. },
+                WindowDragRegionEvent::InteractionFinished {
+                    reason: WindowDragFinishReason::OperatingSystemWindowMoveStarted,
+                    ..
+                },
+                WindowDragRegionEvent::DoubleActivationRequested,
+            ]
+        ));
     }
 
     #[gpui::test]
