@@ -129,11 +129,26 @@ pub(crate) fn emphasized_selection_colors(
 pub(crate) struct SelectionChip {
     shape: ChipShape,
     paint: ChipPaint,
+    outline: Option<Color>,
 }
+
+/// The width of the outline that marks the item a context menu acts on.
+const MENU_TARGET_OUTLINE: f32 = 2.0;
 
 impl SelectionChip {
     pub(crate) fn new(shape: ChipShape, paint: ChipPaint) -> Self {
-        Self { shape, paint }
+        Self {
+            shape,
+            paint,
+            outline: None,
+        }
+    }
+
+    /// Outlines the chip in `color`, as a source list marks the item its context menu acts on
+    /// without selecting it.
+    pub(crate) const fn outlined(mut self, color: Color) -> Self {
+        self.outline = Some(color);
+        self
     }
 
     fn body(shape: ChipShape) -> gpui::Div {
@@ -159,8 +174,13 @@ impl SelectionChip {
         Self::body(self.shape)
             .debug_selector(move || selector.clone())
             .when_some(fill, |chip, fill| chip.bg(gpui_color(fill)))
-            .when_some(rim, |chip, rim| {
-                chip.border(px(HAIRLINE)).border_color(gpui_color(rim))
+            .when_some(self.outline.or(rim), |chip, edge| {
+                let width = if self.outline.is_some() {
+                    MENU_TARGET_OUTLINE
+                } else {
+                    HAIRLINE
+                };
+                chip.border(px(width)).border_color(gpui_color(edge))
             })
             .into_any_element()
     }

@@ -1022,6 +1022,7 @@ pub(crate) fn initialize_application(
         }
         if let Some(adapters) = &host.adapters.repository_status {
             crate::ui::repository_status_store::install(&settings, adapters.clone(), cx);
+            crate::ui::worktree_store::install(&settings, adapters.clone(), cx);
         }
     }
     crate::ui::initialize_controls(cx).map_err(|_| RuntimeError::Initialization)?;

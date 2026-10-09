@@ -123,6 +123,8 @@ ctrl-shift-n	None	terminal::NewWorkspace
 ctrl-alt-shift-n	None	terminal::NewRemoteWorkspace
 ctrl-shift-o	None	terminal::OpenLocalDirectory
 ctrl-alt-shift-o	None	terminal::OpenRemoteDirectory
+ctrl-alt-}	Some(Identifier("TerminalPane"))	terminal::NextWorktree
+ctrl-alt-{	Some(Identifier("TerminalPane"))	terminal::PreviousWorktree
 ctrl-alt-1	Some(Identifier("TerminalPane"))	terminal::ActivateWorkspace1
 ctrl-alt-2	Some(Identifier("TerminalPane"))	terminal::ActivateWorkspace2
 ctrl-alt-3	Some(Identifier("TerminalPane"))	terminal::ActivateWorkspace3

@@ -134,6 +134,8 @@ pub(super) enum SettingsRowId {
     ShowPullRequests,
     /// Whether the GitHub CLI is installed and logged in.
     GitHubCli,
+    /// The Worktree Path Template, where a new Worktree's directory goes.
+    WorktreeLocation,
     /// The installed version, the latest check, and the next step the update service offers.
     UpdateStatus,
     AutomaticUpdateDownloads,
@@ -186,6 +188,7 @@ impl SettingsRowId {
             | Self::GitTool
             | Self::ShowPullRequests
             | Self::GitHubCli
+            | Self::WorktreeLocation
             | Self::UpdateStatus
             | Self::AutomaticUpdateDownloads
             | Self::UpdateCheckInterval
@@ -574,6 +577,22 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         selector: "settings-row-github-cli",
     },
     SettingsRowDescriptor {
+        id: SettingsRowId::WorktreeLocation,
+        section: SettingsSectionId::Git,
+        group: "Worktrees",
+        label: "New Worktree Location",
+        keywords: &[
+            "worktree",
+            "path",
+            "folder",
+            "directory",
+            "template",
+            "branch",
+            "repository",
+        ],
+        selector: "settings-row-worktree-location",
+    },
+    SettingsRowDescriptor {
         id: SettingsRowId::UpdateStatus,
         section: SettingsSectionId::Updates,
         // The installed version leads the page and needs no title: it is what the page is about.
@@ -720,6 +739,9 @@ shortcut_rows! {
     NewRemoteWorkspace => "new-remote-workspace",
     OpenLocalDirectory => "open-local-directory",
     OpenRemoteDirectory => "open-remote-directory",
+    NewWorktree => "new-worktree",
+    NextWorktree => "next-worktree",
+    PreviousWorktree => "previous-worktree",
     CloseWorkspace => "close-workspace",
     ActivateWorkspace1 => "activate-workspace-1",
     ActivateWorkspace2 => "activate-workspace-2",
@@ -826,7 +848,7 @@ mod tests {
     }
 
     /// The complete preference row identity set, so the catalog cannot silently omit one.
-    const EVERY_PREFERENCE_ROW: [SettingsRowId; 30] = [
+    const EVERY_PREFERENCE_ROW: [SettingsRowId; 31] = [
         SettingsRowId::AppearanceMode,
         SettingsRowId::Opacity,
         SettingsRowId::Blur,
@@ -849,6 +871,7 @@ mod tests {
         SettingsRowId::GitTool,
         SettingsRowId::ShowPullRequests,
         SettingsRowId::GitHubCli,
+        SettingsRowId::WorktreeLocation,
         SettingsRowId::UpdateStatus,
         SettingsRowId::AutomaticUpdateDownloads,
         SettingsRowId::UpdateCheckInterval,
@@ -1137,6 +1160,7 @@ mod tests {
                     | SettingsRowId::GitTool
                     | SettingsRowId::ShowPullRequests
                     | SettingsRowId::GitHubCli
+                    | SettingsRowId::WorktreeLocation
                     | SettingsRowId::UpdateStatus
                     | SettingsRowId::AutomaticUpdateDownloads
                     | SettingsRowId::UpdateCheckInterval
@@ -1181,6 +1205,7 @@ mod tests {
             ("branch", SettingsRowId::ShowRepositoryStatus),
             ("pull request", SettingsRowId::ShowPullRequests),
             ("gh", SettingsRowId::GitHubCli),
+            ("worktree", SettingsRowId::WorktreeLocation),
             ("command line tools", SettingsRowId::GitTool),
         ] {
             assert!(

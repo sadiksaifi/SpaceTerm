@@ -3,6 +3,35 @@ use crate::platform::launch_host::resource_root;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+/// The variables a SpaceTerm Terminal Session gives its shell. Tests run from a SpaceTerm
+/// terminal inherit them, which would mark every report with that terminal's prompt owner.
+const SESSION_VARIABLES: [&str; 15] = [
+    "SPACETERM",
+    "SPACETERM_BASH_ENV",
+    "SPACETERM_BASH_HOME",
+    "SPACETERM_BASH_INJECT",
+    "SPACETERM_BASH_INTEGRATION",
+    "SPACETERM_ELVISH_INTEGRATION",
+    "SPACETERM_ELVISH_RC",
+    "SPACETERM_INTEGRATION_LOADED",
+    "SPACETERM_PROMPT_OWNER",
+    "SPACETERM_SHELL_INTEGRATION_VERSION",
+    "SPACETERM_SHELL_INTEGRATION_XDG_DIR",
+    "SPACETERM_SH_ENV",
+    "SPACETERM_SH_HOME",
+    "SPACETERM_SH_INTEGRATION",
+    "SPACETERM_ZSH_ZDOTDIR",
+];
+
+/// A command that runs without the Terminal Session variables of the terminal running the tests.
+fn session_free_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut command = Command::new(program);
+    for variable in SESSION_VARIABLES {
+        command.env_remove(variable);
+    }
+    command
+}
+
 #[test]
 fn zsh_reports_reserved_and_unicode_metadata_without_changing_protocol_structure() {
     use crate::local_path::LocalPathSemantics;
@@ -12,7 +41,7 @@ fn zsh_reports_reserved_and_unicode_metadata_without_changing_protocol_structure
     let integration = resource_root().join("shell-integration/zsh/spaceterm-integration");
     let directory = "/tmp/space #?;%20/हैलो";
     let command = "printf '%s' 'हैलो'; echo %20\n\u{7}\u{1b}]0;forged";
-    let output = Command::new("/bin/zsh")
+    let output = session_free_command("/bin/zsh")
         .args([
             "-dfi", "-c",
             r#"builtin source -- "$1"; PWD=$2; _spaceterm_report_directory; _spaceterm_before_command "$3""#,
@@ -55,7 +84,7 @@ fn zsh_reports_reserved_and_unicode_metadata_without_changing_protocol_structure
 #[test]
 fn zsh_metadata_encoding_ignores_a_user_defined_printf_function() {
     let integration = resource_root().join("shell-integration/zsh/spaceterm-integration");
-    let output = Command::new("/bin/zsh")
+    let output = session_free_command("/bin/zsh")
         .args([
             "-dfi",
             "-c",
@@ -81,7 +110,7 @@ fn bash_reports_reserved_and_unicode_directory_without_losing_exit_status() {
 
     let integration = resource_root().join("shell-integration/bash/spaceterm.bash");
     let directory = "/tmp/space #?;%20/हैलो";
-    let output = Command::new("/bin/bash")
+    let output = session_free_command("/bin/bash")
         .args([
             "--noprofile",
             "--norc",
@@ -124,7 +153,7 @@ fn owned_prompt_reports(
     } else {
         &["--noprofile", "--norc", "-ic"]
     };
-    let output = Command::new(shell)
+    let output = session_free_command(shell)
         .args(flags)
         .arg(format!(r#"source "$1"; {snippet}"#))
         .arg("spaceterm")
@@ -191,7 +220,7 @@ fn bash_and_zsh_should_mark_their_own_prompt_markers_with_the_prompt_owner() {
 fn bash_encodes_a_long_directory_without_blocking_prompt_rendering() {
     let integration = resource_root().join("shell-integration/bash/spaceterm.bash");
     let directory = format!("/tmp/{}", "a".repeat(4000));
-    let mut child = Command::new("/bin/bash")
+    let mut child = session_free_command("/bin/bash")
         .args([
             "--noprofile",
             "--norc",
@@ -334,7 +363,7 @@ fn elvish_reports_reserved_and_unicode_directory() {
 /// Run `argv` with a controlling terminal through the host `script(1)`.
 #[cfg(target_os = "macos")]
 fn controlling_terminal_command(argv: &[&std::ffi::OsStr]) -> Command {
-    let mut command = Command::new("/usr/bin/script");
+    let mut command = session_free_command("/usr/bin/script");
     command.args(["-q", "/dev/null"]).args(argv);
     command
 }
@@ -353,7 +382,7 @@ fn controlling_terminal_command(argv: &[&std::ffi::OsStr]) -> Command {
         })
         .collect::<Vec<_>>()
         .join(" ");
-    let mut command = Command::new("/usr/bin/script");
+    let mut command = session_free_command("/usr/bin/script");
     command
         .args(["-q", "-e", "-c"])
         .arg(quoted)
@@ -362,8 +391,8 @@ fn controlling_terminal_command(argv: &[&std::ffi::OsStr]) -> Command {
 }
 
 fn installed_shell(name: &str) -> Option<Command> {
-    match Command::new(name).arg("--version").output() {
-        Ok(_) => Some(Command::new(name)),
+    match session_free_command(name).arg("--version").output() {
+        Ok(_) => Some(session_free_command(name)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             eprintln!("{name} is not installed; skipping its runtime protocol check");
             None
@@ -488,7 +517,7 @@ fn every_supported_resource_uses_the_same_version_and_protocol_marks() {
     ] {
         for version in [Some("1"), Some("0"), Some("2"), None] {
             let fixture = DirectoryFixture::new();
-            let mut command = Command::new(shell);
+            let mut command = session_free_command(shell);
             command
                 .args(arguments)
                 .arg(script)
@@ -514,7 +543,7 @@ fn every_supported_resource_uses_the_same_version_and_protocol_marks() {
 #[test]
 fn zsh_prompt_hook_renders_protocol_marker_once_without_changing_printable_prompt() {
     let integration = resource_root().join("shell-integration/zsh/spaceterm-integration");
-    let output = Command::new("/bin/zsh")
+    let output = session_free_command("/bin/zsh")
         .args([
             "-dfi",
             "-c",

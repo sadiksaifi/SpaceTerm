@@ -74,6 +74,12 @@ const MENU_ITEM_ICONS: &[MenuItemIcon] = &[
     MenuItemIcon {
         menu: "File",
         submenu: None,
+        item: "New Worktree…",
+        symbol: "arrow.triangle.branch",
+    },
+    MenuItemIcon {
+        menu: "File",
+        submenu: None,
         item: "Close Pane",
         symbol: "xmark.square",
     },
@@ -292,6 +298,18 @@ const MENU_ITEM_ICONS: &[MenuItemIcon] = &[
         submenu: None,
         item: "Move Tab Right",
         symbol: "arrow.right.square",
+    },
+    MenuItemIcon {
+        menu: "Window",
+        submenu: None,
+        item: "Previous Worktree",
+        symbol: "chevron.backward.2",
+    },
+    MenuItemIcon {
+        menu: "Window",
+        submenu: None,
+        item: "Next Worktree",
+        symbol: "chevron.forward.2",
     },
     MenuItemIcon {
         menu: "Window",
@@ -870,6 +888,9 @@ mod tests {
                     "Move Tab Left",
                     "Move Tab Right",
                     "|",
+                    "Previous Worktree",
+                    "Next Worktree",
+                    "|",
                     "Bring All to Front",
                 ]
                 .map(str::to_owned)
@@ -898,6 +919,7 @@ mod tests {
                 "Switch Workspace",
                 "|",
                 "New Tab",
+                "New Worktree…",
                 "|",
                 "Close Pane",
                 "Close Tab",
@@ -925,6 +947,7 @@ mod tests {
                 crate::ui::OpenRemoteDirectory.name(),
                 SwitchWorkspace.name(),
                 CreateTab.name(),
+                crate::ui::NewWorktree.name(),
                 ClosePane.name(),
                 CloseTab.name(),
                 CloseWorkspace.name(),

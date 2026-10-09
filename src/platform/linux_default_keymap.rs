@@ -51,6 +51,15 @@ pub(super) fn profile(
             Command::OpenRemoteDirectory,
             Some(DefaultBinding::new("ctrl-shift-alt-o", &[])),
         ),
+        (Command::NewWorktree, None),
+        (
+            Command::NextWorktree,
+            Some(DefaultBinding::new("ctrl-alt-shift-]", &[])),
+        ),
+        (
+            Command::PreviousWorktree,
+            Some(DefaultBinding::new("ctrl-alt-shift-[", &[])),
+        ),
         (Command::CloseWorkspace, None),
         (
             Command::ActivateWorkspace1,
@@ -459,7 +468,10 @@ mod tests {
             for command in Command::ALL {
                 let expected = if matches!(
                     command,
-                    Command::CloseWorkspace | Command::ShowRepositoryStatus | Command::About
+                    Command::CloseWorkspace
+                        | Command::ShowRepositoryStatus
+                        | Command::NewWorktree
+                        | Command::About
                 ) {
                     KeybindingState::Unassigned
                 } else {
@@ -525,6 +537,8 @@ mod tests {
             (Command::NewRemoteWorkspace, &["ctrl-alt-shift-n"]),
             (Command::CreateTab, &["ctrl-shift-t"]),
             (Command::CloseTab, &["ctrl-alt-shift-w"]),
+            (Command::NextWorktree, &["ctrl-alt-}"]),
+            (Command::PreviousWorktree, &["ctrl-alt-{"]),
             (Command::ActivateWorkspace1, &["ctrl-alt-1"]),
             (Command::ActivateWorkspace9, &["ctrl-alt-9"]),
             (Command::ActivateTab1, &["alt-1"]),

@@ -1,7 +1,7 @@
 use crate::close_confirmation::{CloseContinuation, CloseTabOutcome, HierarchyClose};
 use thiserror::Error;
 
-use super::TabId;
+use super::{TabId, WorktreeId};
 
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
 pub(crate) enum TabError {
@@ -15,6 +15,7 @@ pub(crate) enum TabError {
 
 struct TabEntry<T> {
     id: TabId,
+    scope: Option<WorktreeId>,
     payload: T,
 }
 
@@ -25,10 +26,17 @@ pub(crate) enum TabStep {
     Next,
 }
 
+/// A Workspace's Tabs in one order, each tagged with the Worktree it belongs to.
+///
+/// Tabs of one Worktree stay adjacent in the order. Navigation, reordering, and positions act
+/// within the Active Tab's Worktree, the Active Worktree; a Tab with no Worktree belongs to the
+/// Workspace itself. Closing the final Tab of the whole collection still closes the Workspace.
 pub(crate) struct TabCollection<T> {
     tabs: Vec<TabEntry<T>>,
     active_tab_id: TabId,
     root_tab_id: TabId,
+    /// Tabs from least to most recently activated.
+    activation_order: Vec<TabId>,
     next_tab_id: u64,
 }
 
@@ -38,10 +46,12 @@ impl<T> TabCollection<T> {
         Self {
             tabs: vec![TabEntry {
                 id: initial_tab_id,
+                scope: None,
                 payload: create_initial_payload(initial_tab_id),
             }],
             active_tab_id: initial_tab_id,
             root_tab_id: initial_tab_id,
+            activation_order: vec![initial_tab_id],
             next_tab_id: 2,
         }
     }
@@ -61,6 +71,10 @@ impl<T> TabCollection<T> {
         tab
     }
 
+    pub(crate) const fn root_tab_id(&self) -> TabId {
+        self.root_tab_id
+    }
+
     pub(crate) fn root_tab(&self) -> &T {
         self.tab(self.root_tab_id)
             .expect("the Root Tab must belong to the Workspace")
@@ -77,103 +91,187 @@ impl<T> TabCollection<T> {
         self.tabs.iter().map(|tab| (tab.id, &tab.payload))
     }
 
+    /// The Active Tab's Worktree.
+    pub(crate) fn active_scope(&self) -> Option<WorktreeId> {
+        self.tabs[self.active_index()].scope
+    }
+
+    pub(crate) fn scope_of(&self, tab_id: TabId) -> Result<Option<WorktreeId>, TabError> {
+        Ok(self.tabs[self.index_of(tab_id)?].scope)
+    }
+
+    /// The Tabs of one Worktree, in Tab order.
+    pub(crate) fn tabs_in(&self, scope: Option<WorktreeId>) -> impl Iterator<Item = (TabId, &T)> {
+        self.tabs
+            .iter()
+            .filter(move |tab| tab.scope == scope)
+            .map(|tab| (tab.id, &tab.payload))
+    }
+
+    /// The most recently activated Tab of one Worktree.
+    pub(crate) fn most_recent_tab_in(&self, scope: Option<WorktreeId>) -> Option<TabId> {
+        self.activation_order
+            .iter()
+            .rev()
+            .copied()
+            .find(|&tab_id| self.scope_of(tab_id) == Ok(scope))
+    }
+
+    /// Creates and activates a Tab in the Active Worktree.
+    #[cfg(test)]
     pub(crate) fn create_tab(
         &mut self,
         create_payload: impl FnOnce(TabId) -> T,
     ) -> Result<TabId, TabError> {
+        self.create_tab_in(self.active_scope(), create_payload)
+    }
+
+    /// Creates and activates a Tab after the last Tab of `scope`, or at the end when it has none.
+    pub(crate) fn create_tab_in(
+        &mut self,
+        scope: Option<WorktreeId>,
+        create_payload: impl FnOnce(TabId) -> T,
+    ) -> Result<TabId, TabError> {
         let (tab_id, next_tab_id) = self.next_tab_id()?;
         let payload = create_payload(tab_id);
-        self.tabs.push(TabEntry {
-            id: tab_id,
-            payload,
-        });
-        self.active_tab_id = tab_id;
+        let position = self
+            .tabs
+            .iter()
+            .rposition(|tab| tab.scope == scope)
+            .map_or(self.tabs.len(), |index| index + 1);
+        self.tabs.insert(
+            position,
+            TabEntry {
+                id: tab_id,
+                scope,
+                payload,
+            },
+        );
         self.next_tab_id = next_tab_id;
+        self.set_active(tab_id);
         Ok(tab_id)
     }
 
-    pub(crate) fn activate_tab(&mut self, tab_id: TabId) -> Result<(), TabError> {
-        if !self.tabs.iter().any(|tab| tab.id == tab_id) {
-            return Err(TabError::TabNotFound(tab_id));
+    /// Moves a Tab into another Worktree, after that Worktree's last Tab.
+    pub(crate) fn set_tab_scope(
+        &mut self,
+        tab_id: TabId,
+        scope: Option<WorktreeId>,
+    ) -> Result<(), TabError> {
+        let index = self.index_of(tab_id)?;
+        if self.tabs[index].scope == scope {
+            return Ok(());
         }
-
-        self.active_tab_id = tab_id;
+        let mut tab = self.tabs.remove(index);
+        tab.scope = scope;
+        let position = self
+            .tabs
+            .iter()
+            .rposition(|tab| tab.scope == scope)
+            .map_or(self.tabs.len(), |index| index + 1);
+        self.tabs.insert(position, tab);
         Ok(())
     }
 
-    /// Moves a Tab to `position` in the Tab order and reports whether the order changed.
+    pub(crate) fn activate_tab(&mut self, tab_id: TabId) -> Result<(), TabError> {
+        self.index_of(tab_id)?;
+        self.set_active(tab_id);
+        Ok(())
+    }
+
+    /// Moves a Tab to `position` among its Worktree's Tabs and reports whether the order changed.
     ///
     /// The Active Tab and the Root Tab keep their identities; only presentation order changes.
     pub(crate) fn move_tab(&mut self, tab_id: TabId, position: usize) -> Result<bool, TabError> {
-        let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
-            return Err(TabError::TabNotFound(tab_id));
-        };
-        if position >= self.tabs.len() {
+        let index = self.index_of(tab_id)?;
+        let siblings = self.indices_in(self.tabs[index].scope);
+        let Some(&target) = siblings.get(position) else {
             return Err(TabError::PositionOutOfRange {
                 position,
-                len: self.tabs.len(),
+                len: siblings.len(),
             });
-        }
-        if index == position {
+        };
+        if index == target {
             return Ok(false);
         }
 
         let tab = self.tabs.remove(index);
-        self.tabs.insert(position, tab);
+        self.tabs.insert(target, tab);
         Ok(true)
     }
 
-    /// The Tab one step from the Active Tab, wrapping around the ends of the Tab order.
+    /// The Tab one step from the Active Tab, wrapping around the ends of the Active Worktree.
     pub(crate) fn neighbor_of_active_tab(&self, step: TabStep) -> TabId {
-        let index = self.active_index();
-        let len = self.tabs.len();
+        let siblings = self.indices_in(self.active_scope());
+        let len = siblings.len();
+        let index = siblings
+            .iter()
+            .position(|&index| self.tabs[index].id == self.active_tab_id)
+            .expect("the Active Tab must belong to the Active Worktree");
         let neighbor = match step {
             TabStep::Previous => (index + len - 1) % len,
             TabStep::Next => (index + 1) % len,
         };
-        self.tabs[neighbor].id
+        self.tabs[siblings[neighbor]].id
     }
 
-    /// Moves the Active Tab one step in the Tab order and reports whether the order changed.
+    /// Moves the Active Tab one step within its Worktree and reports whether the order changed.
     ///
-    /// The Active Tab stays put at either end of the Tab order instead of wrapping around.
+    /// The Active Tab stays put at either end of its Worktree instead of wrapping around.
     pub(crate) fn move_active_tab(&mut self, step: TabStep) -> bool {
         self.step_index(self.active_index(), step)
     }
 
-    /// Moves a Tab one step in the Tab order and reports whether the order changed.
+    /// Moves a Tab one step within its Worktree and reports whether the order changed.
     ///
-    /// The Tab stays put at either end of the Tab order instead of wrapping around.
+    /// The Tab stays put at either end of its Worktree instead of wrapping around.
     pub(crate) fn step_tab(&mut self, tab_id: TabId, step: TabStep) -> Result<bool, TabError> {
-        let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
-            return Err(TabError::TabNotFound(tab_id));
-        };
+        let index = self.index_of(tab_id)?;
         Ok(self.step_index(index, step))
     }
 
     fn step_index(&mut self, index: usize, step: TabStep) -> bool {
+        let scope = self.tabs[index].scope;
         let position = match step {
             TabStep::Previous => index.checked_sub(1),
             TabStep::Next => Some(index + 1).filter(|&position| position < self.tabs.len()),
         };
-        let Some(position) = position else {
+        let Some(position) = position.filter(|&position| self.tabs[position].scope == scope) else {
             return false;
         };
         self.tabs.swap(index, position);
         true
     }
 
-    fn active_index(&self) -> usize {
+    fn indices_in(&self, scope: Option<WorktreeId>) -> Vec<usize> {
         self.tabs
             .iter()
-            .position(|tab| tab.id == self.active_tab_id)
+            .enumerate()
+            .filter(|(_, tab)| tab.scope == scope)
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    fn index_of(&self, tab_id: TabId) -> Result<usize, TabError> {
+        self.tabs
+            .iter()
+            .position(|tab| tab.id == tab_id)
+            .ok_or(TabError::TabNotFound(tab_id))
+    }
+
+    fn active_index(&self) -> usize {
+        self.index_of(self.active_tab_id)
             .expect("the Active Tab ID must always reference an owned Tab")
     }
 
+    fn set_active(&mut self, tab_id: TabId) {
+        self.activation_order.retain(|&id| id != tab_id);
+        self.activation_order.push(tab_id);
+        self.active_tab_id = tab_id;
+    }
+
     pub(crate) fn close_tab(&mut self, tab_id: TabId) -> Result<CloseTabOutcome<T>, TabError> {
-        let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
-            return Err(TabError::TabNotFound(tab_id));
-        };
+        let index = self.index_of(tab_id)?;
         if HierarchyClose::Tab.resolve(self.tabs.len()) == CloseContinuation::Parent {
             return Ok(CloseTabOutcome::CloseWorkspace {
                 final_tab_id: tab_id,
@@ -181,12 +279,29 @@ impl<T> TabCollection<T> {
         }
 
         let closed_tab = self.tabs.remove(index);
+        self.activation_order.retain(|&id| id != tab_id);
+        let scope = closed_tab.scope;
         if self.root_tab_id == tab_id {
-            self.root_tab_id = self.tabs[0].id;
+            self.root_tab_id = self
+                .tabs
+                .iter()
+                .find(|tab| tab.scope == scope)
+                .unwrap_or(&self.tabs[0])
+                .id;
         }
         if self.active_tab_id == tab_id {
-            let fallback_index = index.min(self.tabs.len() - 1);
-            self.active_tab_id = self.tabs[fallback_index].id;
+            let siblings = self.indices_in(scope);
+            let fallback = match siblings.iter().position(|&sibling| sibling >= index) {
+                Some(position) => self.tabs[siblings[position]].id,
+                None => match siblings.last() {
+                    Some(&sibling) => self.tabs[sibling].id,
+                    None => *self
+                        .activation_order
+                        .last()
+                        .expect("a remaining Tab must have been activated"),
+                },
+            };
+            self.set_active(fallback);
         }
 
         Ok(CloseTabOutcome::TabClosed {
@@ -535,5 +650,168 @@ mod tests {
 
         drop(tabs);
         assert_eq!(drops.get(), 2);
+    }
+
+    fn scoped(tabs: &TabCollection<&'static str>, scope: Option<WorktreeId>) -> Vec<&'static str> {
+        tabs.tabs_in(scope).map(|(_, tab)| *tab).collect()
+    }
+
+    const MAIN: Option<WorktreeId> = Some(WorktreeId::new(1));
+    const FEATURE: Option<WorktreeId> = Some(WorktreeId::new(2));
+
+    /// main-1, main-2 in the main Worktree, then feature-1, feature-2 in another Worktree.
+    fn two_worktrees() -> TabCollection<&'static str> {
+        let mut tabs = TabCollection::new(|_| "main-1");
+        tabs.set_tab_scope(TabId::new(1), MAIN).unwrap();
+        tabs.create_tab(|_| "main-2").unwrap();
+        tabs.create_tab_in(FEATURE, |_| "feature-1").unwrap();
+        tabs.create_tab(|_| "feature-2").unwrap();
+        tabs
+    }
+
+    #[test]
+    fn new_tabs_should_join_the_active_worktree_after_its_last_tab() {
+        let mut tabs = two_worktrees();
+        tabs.activate_tab(TabId::new(1)).unwrap();
+
+        let created = tabs.create_tab(|_| "main-3").unwrap();
+
+        assert_eq!(
+            (
+                order(&tabs),
+                scoped(&tabs, MAIN),
+                scoped(&tabs, FEATURE),
+                tabs.active_tab_id(),
+                tabs.active_scope(),
+            ),
+            (
+                vec!["main-1", "main-2", "main-3", "feature-1", "feature-2"],
+                vec!["main-1", "main-2", "main-3"],
+                vec!["feature-1", "feature-2"],
+                created,
+                MAIN,
+            )
+        );
+    }
+
+    #[test]
+    fn tab_navigation_should_stay_within_the_active_worktree() {
+        let mut tabs = two_worktrees();
+        let feature_1 = TabId::new(3);
+        let feature_2 = TabId::new(4);
+
+        let wrapped = tabs.neighbor_of_active_tab(TabStep::Next);
+        let previous = tabs.neighbor_of_active_tab(TabStep::Previous);
+        let stepped_past_the_end = tabs.move_active_tab(TabStep::Next);
+        let stepped_back = tabs.move_active_tab(TabStep::Previous);
+        let stepped_past_the_start = tabs.move_active_tab(TabStep::Previous);
+
+        assert_eq!(
+            (
+                wrapped,
+                previous,
+                stepped_past_the_end,
+                stepped_back,
+                stepped_past_the_start,
+                scoped(&tabs, FEATURE),
+                scoped(&tabs, MAIN),
+            ),
+            (
+                feature_1,
+                feature_1,
+                false,
+                true,
+                false,
+                vec!["feature-2", "feature-1"],
+                vec!["main-1", "main-2"],
+            )
+        );
+        assert_eq!(tabs.active_tab_id(), feature_2);
+    }
+
+    #[test]
+    fn move_tab_should_take_a_position_within_the_tabs_worktree() {
+        let mut tabs = two_worktrees();
+
+        let moved = tabs.move_tab(TabId::new(3), 1).unwrap();
+        let beyond = tabs.move_tab(TabId::new(3), 2);
+
+        assert_eq!(
+            (moved, beyond, scoped(&tabs, FEATURE), scoped(&tabs, MAIN)),
+            (
+                true,
+                Err(TabError::PositionOutOfRange {
+                    position: 2,
+                    len: 2
+                }),
+                vec!["feature-2", "feature-1"],
+                vec!["main-1", "main-2"],
+            )
+        );
+    }
+
+    #[test]
+    fn closing_a_worktrees_last_tab_should_return_to_the_most_recent_tab_elsewhere() {
+        let mut tabs = two_worktrees();
+        tabs.activate_tab(TabId::new(1)).unwrap();
+        tabs.activate_tab(TabId::new(4)).unwrap();
+        tabs.close_tab(TabId::new(3)).unwrap();
+
+        let outcome = tabs.close_tab(TabId::new(4)).unwrap();
+
+        let CloseTabOutcome::TabClosed { active_tab_id, .. } = outcome else {
+            panic!("closing one of multiple Tabs must remove it")
+        };
+        assert_eq!(
+            (
+                active_tab_id,
+                tabs.active_scope(),
+                tabs.tabs_in(FEATURE).next().is_some()
+            ),
+            (TabId::new(1), MAIN, false)
+        );
+    }
+
+    #[test]
+    fn closing_the_root_tab_should_promote_a_tab_in_its_worktree() {
+        let mut tabs = TabCollection::new(|_| "feature-1");
+        tabs.set_tab_scope(TabId::new(1), FEATURE).unwrap();
+        tabs.create_tab_in(MAIN, |_| "main-1").unwrap();
+        tabs.create_tab_in(FEATURE, |_| "feature-2").unwrap();
+
+        tabs.close_tab(TabId::new(1)).unwrap();
+
+        assert_eq!(tabs.root_tab(), &"feature-2");
+    }
+
+    #[test]
+    fn the_final_tab_should_still_close_the_workspace_when_other_worktrees_are_empty() {
+        let mut tabs = two_worktrees();
+        for tab_id in [1, 2, 3] {
+            tabs.close_tab(TabId::new(tab_id)).unwrap();
+        }
+
+        let outcome = tabs.close_tab(TabId::new(4)).unwrap();
+
+        assert!(matches!(
+            outcome,
+            CloseTabOutcome::CloseWorkspace { final_tab_id } if final_tab_id == TabId::new(4)
+        ));
+    }
+
+    #[test]
+    fn most_recent_tab_in_should_name_the_last_activated_tab_of_a_worktree() {
+        let mut tabs = two_worktrees();
+        tabs.activate_tab(TabId::new(3)).unwrap();
+        tabs.activate_tab(TabId::new(2)).unwrap();
+
+        assert_eq!(
+            (
+                tabs.most_recent_tab_in(FEATURE),
+                tabs.most_recent_tab_in(MAIN),
+                tabs.most_recent_tab_in(None),
+            ),
+            (Some(TabId::new(3)), Some(TabId::new(2)), None)
+        );
     }
 }

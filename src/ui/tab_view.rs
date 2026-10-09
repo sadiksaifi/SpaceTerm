@@ -703,8 +703,19 @@ impl TabView {
         crate::repository_status::RepositoryMachine,
         crate::repository_status::scheduler::SourceDirectory,
     )> {
+        self.pane_repository_source(self.tab.root_pane_id(), cx)
+    }
+
+    pub(crate) fn pane_repository_source(
+        &self,
+        pane_id: PaneId,
+        cx: &App,
+    ) -> Option<(
+        crate::repository_status::RepositoryMachine,
+        crate::repository_status::scheduler::SourceDirectory,
+    )> {
         self.tab
-            .pane(self.tab.root_pane_id())
+            .pane(pane_id)
             .and_then(|terminal| terminal.read(cx).repository_source())
     }
 
@@ -729,6 +740,11 @@ impl TabView {
 
     pub(crate) fn set_pinned_directory(&mut self, directory: Option<PinnedDirectory>) {
         self.session_factory.set_pinned_directory(directory);
+    }
+
+    /// Scopes this Tab's later Panes to a Worktree's root, or to the Workspace with `None`.
+    pub(crate) fn set_worktree_root(&mut self, root: Option<std::path::PathBuf>) {
+        self.session_factory.set_worktree_root(root);
     }
 
     pub(crate) fn tab_focus(&self) -> &FocusHandle {

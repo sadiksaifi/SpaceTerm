@@ -10,7 +10,7 @@ use super::workspace_sidebar::{
 };
 use super::workspace_sidebar::{
     SidebarEvent, WorkspaceMenuCommand, WorkspaceRowViewModel, WorkspaceSidebar,
-    remote_connection_status,
+    WorktreeMenuCommand, remote_connection_status,
 };
 use crate::platform::terminal_accessibility::TerminalAccessibilityAdapterFactory;
 use crate::ssh::remote_account::RemoteWorkspaceAccount;
@@ -44,11 +44,12 @@ use super::{
     ActivateWorkspace7, ActivateWorkspace8, ActivateWorkspace9, ClosePane, CloseTab,
     CloseTerminalFind, CloseWorkspace, CopySelection, CreateTab, FindNext, FindPrevious,
     FocusNextPane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, FocusPreviousPane,
-    MoveTabLeft, MoveTabRight, NewRemoteWorkspace, NewWorkspace, NextTab, OpenLocalDirectory,
-    OpenRemoteDirectory, OpenTerminalFind, PreviousTab, RemoteChildLaunchUnavailable,
-    ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop, ShowRepositoryStatus, SplitDown,
-    SplitRight, SwitchWorkspace, TERMINAL_KEY_CONTEXT, TabManager, TabManagerEvent, TogglePaneZoom,
-    ToggleSidebar, ToggleSidebarFocus, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
+    MoveTabLeft, MoveTabRight, NewRemoteWorkspace, NewWorkspace, NewWorktree, NextTab,
+    NextWorktree, OpenLocalDirectory, OpenRemoteDirectory, OpenTerminalFind, PreviousTab,
+    PreviousWorktree, RemoteChildLaunchUnavailable, ScrollPageDown, ScrollPageUp, ScrollToBottom,
+    ScrollToTop, ShowRepositoryStatus, SplitDown, SplitRight, SwitchWorkspace,
+    TERMINAL_KEY_CONTEXT, TabManager, TabManagerEvent, TogglePaneZoom, ToggleSidebar,
+    ToggleSidebarFocus, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
 };
 use crate::appearance::Color;
 use crate::close_confirmation::{
@@ -285,6 +286,7 @@ pub(crate) struct WorkspaceManager {
     pending_final_tab_closes: BTreeSet<WorkspaceId>,
     close_confirmation: CloseConfirmation,
     sidebar_repositories: repository::SidebarRepositories,
+    sidebar_worktrees: worktrees::SidebarWorktrees,
 }
 
 impl WorkspaceManager {
@@ -357,8 +359,11 @@ impl WorkspaceManager {
         if let Some(reason) = initial_directory_error {
             let _ = workspaces.set_directory_unavailable(workspaces.active_workspace_id(), reason);
         }
-        cx.on_release(|manager, cx| manager.release_sidebar_repositories(cx))
-            .detach();
+        cx.on_release(|manager, cx| {
+            manager.release_sidebar_repositories(cx);
+            manager.release_sidebar_worktrees(cx);
+        })
+        .detach();
         let sidebar = cx.new(|cx| WorkspaceSidebar::new(window, cx));
         cx.subscribe_in(
             &sidebar,
@@ -390,6 +395,9 @@ impl WorkspaceManager {
                     crate::ui::repository_status_store::InstalledRepositoryStatus::store(cx)
             {
                 store.update(cx, |store, cx| store.window_activated(cx));
+            }
+            if window.is_window_active() {
+                Self::worktrees_window_activated(cx);
             }
             cx.notify();
         })
@@ -427,6 +435,7 @@ impl WorkspaceManager {
             pending_final_tab_closes: BTreeSet::new(),
             close_confirmation: CloseConfirmation::default(),
             sidebar_repositories: repository::SidebarRepositories::default(),
+            sidebar_worktrees: worktrees::SidebarWorktrees::default(),
         }
     }
 
@@ -842,7 +851,7 @@ impl WorkspaceManager {
         };
         let chrome = WorkspaceChromeLayout::resolve(
             self.sidebar.read(cx).layout(),
-            &chrome_identity(workspace),
+            &self.chrome_identity(workspace_id, cx),
             window,
             cx,
         );
@@ -2380,8 +2389,15 @@ impl WorkspaceManager {
     fn close_hierarchy(&self, cx: &App) -> CloseHierarchy {
         let mut hierarchy = CloseHierarchy::default();
         for workspace in self.workspaces.iter() {
-            for (tab, pane, terminal) in workspace.payload().read(cx).terminal_panes(cx) {
-                hierarchy.insert(workspace.id(), tab, pane, terminal.close_facts());
+            let manager = workspace.payload().read(cx);
+            for (tab, pane, terminal) in manager.terminal_panes(cx) {
+                hierarchy.insert(
+                    workspace.id(),
+                    manager.tab_worktree(tab),
+                    tab,
+                    pane,
+                    terminal.close_facts(),
+                );
             }
         }
         hierarchy
@@ -2514,6 +2530,12 @@ impl WorkspaceManager {
                 manager.update(cx, |manager, cx| {
                     manager.close_tab_authorized(tab_id, window, cx)
                 });
+            }
+            CloseTarget::Worktree {
+                workspace_id,
+                worktree_id,
+            } => {
+                self.close_worktree_tabs(workspace_id, worktree_id, window, cx);
             }
             CloseTarget::Workspace(workspace_id) => {
                 if self.workspaces.workspace(workspace_id).is_some() {
@@ -2765,8 +2787,17 @@ impl WorkspaceManager {
                 workspace_id,
                 focus_pane,
             } => {
-                if self.activate_workspace(workspace_id, window, cx) && focus_pane {
-                    self.focus(window, cx);
+                if self.activate_workspace(workspace_id, window, cx) {
+                    // An expanded row stands for the Tabs outside its Worktrees.
+                    if self
+                        .worktree_section(workspace_id, cx)
+                        .is_some_and(|section| section.expanded)
+                    {
+                        self.show_unscoped_tabs(workspace_id, focus_pane, window, cx);
+                    }
+                    if focus_pane {
+                        self.focus(window, cx);
+                    }
                 }
             }
             SidebarEvent::Command {
@@ -2796,6 +2827,49 @@ impl WorkspaceManager {
                 self.focus(window, cx);
                 self.start_workspace_creation(creation, String::new(), window, cx)
             }
+            SidebarEvent::ActivateWorktree {
+                workspace_id,
+                worktree_id,
+                focus_pane,
+            } => {
+                if self.activate_workspace(workspace_id, window, cx)
+                    && self.open_worktree(workspace_id, worktree_id, focus_pane, window, cx)
+                    && focus_pane
+                {
+                    self.focus(window, cx);
+                }
+            }
+            SidebarEvent::SetWorktreesExpanded {
+                workspace_id,
+                expanded,
+            } => self.set_worktrees_expanded(workspace_id, expanded),
+            SidebarEvent::WorktreeCommand {
+                workspace_id,
+                worktree_id,
+                command,
+            } => match command {
+                WorktreeMenuCommand::NewTab => {
+                    if self.activate_workspace(workspace_id, window, cx)
+                        && self.new_worktree_tab(workspace_id, worktree_id, window, cx)
+                    {
+                        self.focus(window, cx);
+                    }
+                }
+                WorktreeMenuCommand::CopyPath => {
+                    self.copy_worktree_path(workspace_id, worktree_id, cx)
+                }
+                WorktreeMenuCommand::CloseTabs => self.request_close(
+                    CloseTarget::Worktree {
+                        workspace_id,
+                        worktree_id,
+                    },
+                    window,
+                    cx,
+                ),
+                WorktreeMenuCommand::Remove => {
+                    self.request_worktree_removal(workspace_id, worktree_id, window, cx);
+                }
+            },
             SidebarEvent::LayoutChanged => self.synchronize_tab_manager_layouts(window, cx),
             SidebarEvent::FocusPane => self.focus(window, cx),
             SidebarEvent::FocusChanged => {}
@@ -2827,13 +2901,20 @@ impl WorkspaceManager {
                 self.apply_directory_pin(workspace_id, None, window, cx);
             }
             WorkspaceMenuCommand::NewTab => {
-                if let Some(workspace) = self.workspaces.workspace(workspace_id) {
+                // A secondary click doesn't activate its row's Workspace, so the new Tab does.
+                if self.activate_workspace(workspace_id, window, cx)
+                    && let Some(workspace) = self.workspaces.workspace(workspace_id)
+                {
                     workspace
                         .payload()
                         .update(cx, |manager, cx| manager.create_tab(window, cx));
+                    self.focus(window, cx);
                 }
                 self.sync_terminal_focus_blocker(window, cx);
                 cx.notify();
+            }
+            WorkspaceMenuCommand::NewWorktree => {
+                self.new_worktree(workspace_id, window, cx);
             }
             WorkspaceMenuCommand::Reconnect => {
                 self.start_remote_workspace_reconnect(workspace_id, window, cx)
@@ -2864,6 +2945,24 @@ impl WorkspaceManager {
         cx: &mut Context<Self>,
     ) {
         self.run_workspace_creation(WorkspaceCreation::Remote, window, cx);
+    }
+
+    fn on_new_worktree(&mut self, _: &NewWorktree, window: &mut Window, cx: &mut Context<Self>) {
+        let workspace_id = self.workspaces.active_workspace_id();
+        self.new_worktree(workspace_id, window, cx);
+    }
+
+    fn on_next_worktree(&mut self, _: &NextWorktree, window: &mut Window, cx: &mut Context<Self>) {
+        self.step_worktree(true, window, cx);
+    }
+
+    fn on_previous_worktree(
+        &mut self,
+        _: &PreviousWorktree,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.step_worktree(false, window, cx);
     }
 
     fn on_open_local_directory(
@@ -3045,6 +3144,28 @@ impl WorkspaceManager {
         window.dispatch_action(action.boxed_clone(), cx);
     }
 
+    /// A Workspace's collapsed title-bar identity, naming its Active Worktree when its row
+    /// discloses Worktrees.
+    fn chrome_identity(&self, workspace_id: WorkspaceId, cx: &App) -> WorkspaceChromeIdentity {
+        let Some(workspace) = self.workspaces.workspace(workspace_id) else {
+            return WorkspaceChromeIdentity {
+                name: String::new(),
+                worktree: None,
+                pinned: false,
+                status: None,
+            };
+        };
+        WorkspaceChromeIdentity {
+            worktree: self.worktree_section(workspace_id, cx).and_then(|section| {
+                section
+                    .rows()
+                    .find(|row| row.active)
+                    .map(|row| row.name.to_string())
+            }),
+            ..chrome_identity(workspace)
+        }
+    }
+
     /// The Active Workspace's identity, shown in the top-left chrome only while the sidebar is
     /// hidden.
     fn workspace_chrome_identity(&self, cx: &App) -> (WorkspaceChromeIdentity, Tooltip) {
@@ -3071,7 +3192,7 @@ impl WorkspaceManager {
             .map(|line| format!("\n{line}"))
             .unwrap_or_default();
         (
-            chrome_identity(workspace),
+            self.chrome_identity(workspace.id(), cx),
             Tooltip::new("workspace-switcher-tooltip", "Switch Workspace")
                 .detail(format!(
                     "{}\n{tooltip_detail}{repository}",
@@ -3380,10 +3501,39 @@ impl WorkspaceManager {
                         (false, format!("{directory_tooltip}: {reason}"))
                     }
                 };
+                let mut path: gpui::SharedString = path.into();
+                let mut tooltip = tooltip;
+                let mut repository = self.sidebar_badge(workspace.id(), cx);
+                let worktrees = self.worktree_section(workspace.id(), cx);
+                // A disclosing row describes the Workspace. Its directory and branch belong to
+                // its Worktrees, and a collapsed row shows its Active Worktree's.
+                if let Some(section) = worktrees.as_ref().filter(|_| available) {
+                    let pinned = workspace
+                        .local_display_directory()
+                        .filter(|_| workspace.pinned_directory().is_some());
+                    let active = section
+                        .rows()
+                        .find(|worktree| worktree.active)
+                        .filter(|_| !section.expanded);
+                    tooltip = match active {
+                        Some(worktree) => {
+                            path = worktree.directory.clone();
+                            repository = worktree.repository.clone();
+                            format!("Worktree {}: {}", worktree.name, worktree.directory_tooltip)
+                        }
+                        None => section
+                            .repository
+                            .as_ref()
+                            .map_or_else(String::new, |root| format!("Repository: {root}")),
+                    };
+                    if let Some(pinned) = pinned {
+                        tooltip.push_str(&format!("\nPinned Directory: {}", pinned.display()));
+                    }
+                }
                 WorkspaceRowViewModel {
                     workspace_id: workspace.id(),
                     name: workspace.name().to_owned().into(),
-                    path: path.into(),
+                    path,
                     machine: match workspace.location() {
                         WorkspaceLocation::Local => None,
                         WorkspaceLocation::Remote { key, .. } => {
@@ -3396,7 +3546,9 @@ impl WorkspaceManager {
                         .remote_connection_state()
                         .map(RemoteConnectionState::phase),
                     available,
-                    repository: self.sidebar_badge(workspace.id(), cx),
+                    repository,
+                    worktrees,
+                    creates_worktrees: available && self.creates_worktrees(workspace.id(), cx),
                     active: workspace.id() == active_workspace_id,
                 }
             })
@@ -3413,6 +3565,7 @@ impl Drop for WorkspaceManager {
 impl Render for WorkspaceManager {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_sidebar_repositories(cx);
+        self.sync_sidebar_worktrees(cx);
         let activity = super::appearance::window_activity(window);
         activity.mount(activity.with_scope(|| self.render_chrome(window, cx)))
     }
@@ -3426,8 +3579,12 @@ impl WorkspaceManager {
         let active_tab_manager = self.workspaces.active_workspace().payload().clone();
         let workspace = self.workspaces.active_workspace();
         let sidebar_layout = self.sidebar.read(cx).layout();
-        let chrome =
-            WorkspaceChromeLayout::resolve(sidebar_layout, &chrome_identity(workspace), window, cx);
+        let chrome = WorkspaceChromeLayout::resolve(
+            sidebar_layout,
+            &self.chrome_identity(workspace.id(), cx),
+            window,
+            cx,
+        );
         let update_control = gpui::AnyView::from(self.update_control.clone());
         let close_owner = cx.weak_entity();
         let close: spaceterm_ui::WindowCloseHandler = Rc::new(move |window, cx| {
@@ -3448,7 +3605,11 @@ impl WorkspaceManager {
         self.sidebar.update(cx, |sidebar, cx| {
             sidebar.set_rows(rows, remote_unavailable, cx)
         });
-        let content = Self::workspace_action_scope(cx)
+        // The New Worktree Command is available only where it can act, so its menu item disables
+        // elsewhere.
+        let new_worktree = self.creates_worktrees(self.workspaces.active_workspace_id(), cx);
+        let step_worktrees = self.steps_worktrees(cx);
+        let content = Self::workspace_action_scope(new_worktree, step_worktrees, cx)
             .id("workspace-manager")
             .bg(gpui_color(super::appearance::chrome(cx).surface(
                 crate::appearance::SurfaceRole::Sheet,
@@ -3494,7 +3655,7 @@ impl WorkspaceManager {
                 ),
             )
             .child(self.render_top_left_chrome(chrome, manager.clone(), window, cx));
-        let transients = Self::workspace_action_scope(cx)
+        let transients = Self::workspace_action_scope(new_worktree, step_worktrees, cx)
             .absolute()
             .inset_0()
             .children(self.remote_workspace_flow.iter().cloned())
@@ -3506,9 +3667,21 @@ impl WorkspaceManager {
 impl WorkspaceManager {
     /// Keeps ordinary content and complete transient owners on the same action routes while leaving
     /// the active modal outside those routes.
-    fn workspace_action_scope(cx: &Context<Self>) -> gpui::Div {
+    fn workspace_action_scope(
+        new_worktree: bool,
+        step_worktrees: bool,
+        cx: &Context<Self>,
+    ) -> gpui::Div {
         div()
             .key_context(TERMINAL_KEY_CONTEXT)
+            .when(new_worktree, |scope| {
+                scope.on_action(cx.listener(Self::on_new_worktree))
+            })
+            .when(step_worktrees, |scope| {
+                scope
+                    .on_action(cx.listener(Self::on_next_worktree))
+                    .on_action(cx.listener(Self::on_previous_worktree))
+            })
             .on_action(cx.listener(Self::on_switch_workspace))
             .on_action(cx.listener(Self::on_new_workspace))
             .on_action(cx.listener(Self::on_new_remote_workspace))
@@ -3666,10 +3839,11 @@ fn remote_workspace_reconnect_error_content(
     }
 }
 
-/// The collapsed title-bar identity a Workspace presents.
+/// The collapsed title-bar identity a Workspace presents, before its Active Worktree.
 fn chrome_identity<T>(workspace: &WorkspaceEntry<T>) -> WorkspaceChromeIdentity {
     WorkspaceChromeIdentity {
         name: workspace.name().to_owned(),
+        worktree: None,
         pinned: workspace.pinned_directory().is_some(),
         status: WorkspaceChromeStatus::resolve(
             matches!(workspace.availability(), DirectoryAvailability::Available),
@@ -3795,6 +3969,7 @@ impl WorkspaceManager {
 
 #[path = "workspace_manager/repository.rs"]
 mod repository;
+mod worktrees;
 
 #[cfg(test)]
 #[path = "workspace_manager/tests.rs"]

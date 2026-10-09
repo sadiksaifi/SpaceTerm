@@ -154,6 +154,15 @@ pub(crate) trait LocalIdentitySource: Send + Sync {
     fn identify(&self, path: &Path) -> Result<LocalIdentityObservation, LocalFilesystemError>;
 }
 
+/// Whether a path can take a new directory.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NewDirectoryTarget {
+    /// Nothing is at the path, or an empty directory is.
+    Free,
+    /// A file, a link, or a directory with entries is at the path.
+    Occupied,
+}
+
 #[derive(Clone)]
 pub(crate) struct LocalFilesystemAuthority {
     paths: crate::local_path::LocalPathSemantics,
@@ -210,6 +219,25 @@ impl LocalFilesystemAuthority {
         Ok(current)
     }
 
+    /// Whether anything, of any kind, is at `path`. A symbolic link counts without being followed.
+    pub(crate) fn has_entry(&self, path: &Path) -> bool {
+        validate_absolute_path(self.paths, path).is_ok() && fs::symlink_metadata(path).is_ok()
+    }
+
+    /// Whether `path` lies inside `root` on disk, following symbolic links in either, so a
+    /// directory chosen through a link still belongs to the directory it resolves into.
+    pub(crate) fn physically_contains(&self, root: &Path, path: &Path) -> bool {
+        if validate_absolute_path(self.paths, root).is_err()
+            || validate_absolute_path(self.paths, path).is_err()
+        {
+            return false;
+        }
+        match (fs::canonicalize(root), fs::canonicalize(path)) {
+            (Ok(root), Ok(path)) => path.starts_with(root),
+            _ => false,
+        }
+    }
+
     /// Lists the names of `directory`'s child directories, following symbolic links, and stops
     /// after `limit` names. Names that are not valid UTF-8 are omitted.
     pub(crate) fn list_child_directories(
@@ -257,6 +285,31 @@ impl LocalFilesystemAuthority {
             return Err(LocalFilesystemError::NotDirectory);
         }
         fs::read_dir(path).map(drop).map_err(classify_io_error)
+    }
+
+    /// Whether a new directory may go at `path`: nothing is there, or an empty directory is.
+    pub(crate) fn probe_new_directory(
+        &self,
+        path: &Path,
+    ) -> Result<NewDirectoryTarget, LocalFilesystemError> {
+        validate_absolute_path(self.paths, path)?;
+        let metadata = match fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                return match classify_io_error(error) {
+                    LocalFilesystemError::Missing => Ok(NewDirectoryTarget::Free),
+                    error => Err(error),
+                };
+            }
+        };
+        if !metadata.is_dir() {
+            return Ok(NewDirectoryTarget::Occupied);
+        }
+        let mut entries = fs::read_dir(path).map_err(classify_io_error)?;
+        Ok(match entries.next() {
+            None => NewDirectoryTarget::Free,
+            Some(_) => NewDirectoryTarget::Occupied,
+        })
     }
 
     pub(crate) fn create_directory_all(&self, path: &Path) -> Result<(), LocalFilesystemError> {

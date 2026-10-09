@@ -20,7 +20,7 @@ fn legacy_transparency_exports_as_opacity() {
             .as_f64()
             .unwrap();
         assert_eq!(opacity, expected_opacity);
-        assert_eq!(exported["schema_version"], 5);
+        assert_eq!(exported["schema_version"], 6);
         assert!(
             exported["appearance"]["window"]
                 .get("transparency")
@@ -493,9 +493,9 @@ fn native_settings_are_canonical_strict_and_round_trip() {
     document.appearance.terminal.themes.light = ThemeId::builtin("builtin.spaceterm.light");
     let encoded = export_settings(&document).unwrap();
     let encoded_value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
-    assert_eq!(encoded_value["schema_version"], 5);
+    assert_eq!(encoded_value["schema_version"], 6);
     assert_eq!(parse_settings(encoded.as_bytes()).unwrap(), document);
-    let unsupported = encoded.replacen("\"schema_version\": 5", "\"schema_version\": 2", 1);
+    let unsupported = encoded.replacen("\"schema_version\": 6", "\"schema_version\": 2", 1);
     assert!(matches!(
         parse_settings(unsupported.as_bytes()),
         Err(SettingsDocumentError::UnsupportedVersion)
@@ -673,7 +673,48 @@ fn version_four_documents_migrate_with_default_git_settings() {
     assert!(document.git.show_repository_status && document.git.show_pull_requests);
     let exported: serde_json::Value =
         serde_json::from_str(&export_settings(&document).unwrap()).unwrap();
-    assert_eq!(exported["schema_version"], 5);
+    assert_eq!(exported["schema_version"], 6);
+}
+
+#[test]
+fn version_five_documents_migrate_with_the_default_worktree_path_template() {
+    let mut expected = reset_fixture();
+    expected.revision = 12;
+    expected.git.show_pull_requests = false;
+    let mut version_five = serde_json::to_value(&expected).unwrap();
+    version_five["schema_version"] = serde_json::json!(5);
+    version_five["git"]
+        .as_object_mut()
+        .unwrap()
+        .remove("worktree_path_template");
+    let mut early_template = version_five.clone();
+    early_template["git"]["worktree_path_template"] = serde_json::json!("~/wt/{branch}");
+
+    let document = parse_settings(&serde_json::to_vec(&version_five).unwrap()).unwrap();
+
+    assert_eq!(document, expected);
+    assert_eq!(
+        document.git.worktree_path_template,
+        "~/.worktrees/{repository}/{branch}"
+    );
+    let exported: serde_json::Value =
+        serde_json::from_str(&export_settings(&document).unwrap()).unwrap();
+    assert_eq!(exported["schema_version"], 6);
+    assert!(matches!(
+        parse_settings(&serde_json::to_vec(&early_template).unwrap()),
+        Err(SettingsDocumentError::InvalidJson)
+    ));
+}
+
+#[test]
+fn git_settings_reject_a_worktree_path_template_without_a_branch() {
+    let mut value = serde_json::to_value(SettingsDocument::default()).unwrap();
+    value["git"]["worktree_path_template"] = serde_json::json!("~/wt/{repository}");
+
+    assert!(matches!(
+        parse_settings(&serde_json::to_vec(&value).unwrap()),
+        Err(SettingsDocumentError::InvalidGit)
+    ));
 }
 
 #[test]
@@ -681,6 +722,7 @@ fn git_settings_round_trip_import_and_reset() {
     let mut document = SettingsDocument::default();
     document.git.show_repository_status = false;
     document.git.show_pull_requests = false;
+    document.git.worktree_path_template = "/src/wt/{repository}-{branch}".to_owned();
     let restored = parse_settings(export_settings(&document).unwrap().as_bytes()).unwrap();
     assert_eq!(restored.git, document.git);
     let mut imported = SettingsDocument::default();

@@ -12,7 +12,7 @@
   ],
   "properties": {
     "schema_version": {
-      "const": 5
+      "const": 6
     },
     "revision": {
       "type": "integer",
@@ -463,6 +463,15 @@
         "open_remote_directory": {
           "$ref": "#/$defs/shortcutOverride"
         },
+        "new_worktree": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "next_worktree": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
+        "previous_worktree": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
         "close_workspace": {
           "$ref": "#/$defs/shortcutOverride"
         },
@@ -670,6 +679,13 @@
         "show_pull_requests": {
           "type": "boolean",
           "default": true
+        },
+        "worktree_path_template": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "pattern": "^(~/|/)",
+          "default": "~/.worktrees/{repository}/{branch}"
         }
       }
     }

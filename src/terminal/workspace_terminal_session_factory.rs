@@ -167,6 +167,8 @@ pub(crate) struct WorkspaceTerminalSessionFactory {
     local_filesystem: Option<LocalFilesystemAuthority>,
     launch_context: WorkspaceTerminalLaunchContext,
     pinned_directory: Option<PinnedDirectory>,
+    /// The local Worktree root a Worktree's Tabs start inside, as git reports it.
+    worktree_root: Option<std::path::PathBuf>,
     expected_remote_identity: Option<RemoteDirectoryIdentity>,
 }
 
@@ -192,6 +194,7 @@ impl WorkspaceTerminalSessionFactory {
         Self {
             session_factory,
             pinned_directory: None,
+            worktree_root: None,
             expected_remote_identity: None,
             local_filesystem: Some(local_filesystem),
             launch_context: WorkspaceTerminalLaunchContext::Local(LocalTerminalLaunchPlan::new(
@@ -215,6 +218,7 @@ impl WorkspaceTerminalSessionFactory {
         Self {
             session_factory,
             pinned_directory: None,
+            worktree_root: None,
             expected_remote_identity: Some(initial_directory_identity),
             local_filesystem: None,
             launch_context: WorkspaceTerminalLaunchContext::Remote(
@@ -346,6 +350,14 @@ impl WorkspaceTerminalSessionFactory {
         self.pinned_directory = directory;
     }
 
+    /// Scopes later launches to one local Worktree, or to the Workspace with `None`.
+    ///
+    /// Inside a Worktree, a launch starts in the Pinned Directory or the source directory only
+    /// when it lies inside the Worktree root, and otherwise in the root itself.
+    pub(crate) fn set_worktree_root(&mut self, root: Option<std::path::PathBuf>) {
+        self.worktree_root = root;
+    }
+
     /// Captures and validates the starting directory before asynchronous launch work begins.
     /// The workspace factory retains immutable home; this clone owns only one launch selection.
     pub(crate) fn for_source_directory(
@@ -359,6 +371,27 @@ impl WorkspaceTerminalSessionFactory {
                     .local_filesystem
                     .as_ref()
                     .ok_or(LocalDirectoryError::Other)?;
+                if let Some(root) = &self.worktree_root {
+                    if let Some(PinnedDirectory::Local(directory)) = &self.pinned_directory {
+                        authority.revalidate_directory(directory)?;
+                    }
+                    let directory = match (&self.pinned_directory, source) {
+                        (Some(PinnedDirectory::Local(directory)), _)
+                            if authority.physically_contains(root, directory.path()) =>
+                        {
+                            directory.clone()
+                        }
+                        (_, Some(CurrentDirectory::Local(path)))
+                            if authority.physically_contains(root, &path) =>
+                        {
+                            authority.validate_directory(&path)?
+                        }
+                        _ => authority.validate_directory(root)?,
+                    };
+                    *plan = LocalTerminalLaunchPlan::new(directory);
+                    selected.validate_starting_directory()?;
+                    return Ok(selected);
+                }
                 let directory = match (&self.pinned_directory, source) {
                     (Some(PinnedDirectory::Local(directory)), _) => directory.clone(),
                     (Some(PinnedDirectory::Remote { .. }), _)
@@ -777,6 +810,54 @@ mod tests {
     }
 
     #[test]
+    fn worktree_launches_should_start_inside_their_worktree() {
+        let fixture = crate::terminal::testing::ShellResourcesFixture::new();
+        let home = fixture.path().to_path_buf();
+        let worktree = home.join("shell-integration");
+        let inside = worktree.join("bash");
+        let outside = home.clone();
+        let authority = LocalFilesystemAuthority::testing();
+        let mut factory = WorkspaceTerminalSessionFactory::new_local_with_authority(
+            Rc::new(TestTerminalSessionFactory::new(
+                TestTerminalSessionRecords::default(),
+            )),
+            authority.validate_directory(&home).unwrap(),
+            authority.clone(),
+        );
+        factory.set_pinned_directory(Some(PinnedDirectory::Local(
+            authority.validate_directory(&home).unwrap(),
+        )));
+        factory.set_worktree_root(Some(worktree.clone()));
+        let selected = |factory: &WorkspaceTerminalSessionFactory,
+                        source: Option<&std::path::PathBuf>| {
+            factory
+                .for_source_directory(source.map(|path| CurrentDirectory::Local(path.clone())))
+                .unwrap()
+                .local_working_directory()
+                .map(std::path::Path::to_path_buf)
+        };
+
+        assert_eq!(
+            (
+                selected(&factory, Some(&inside)),
+                selected(&factory, Some(&outside)),
+                selected(&factory, None),
+            ),
+            (
+                Some(inside.clone()),
+                Some(worktree.clone()),
+                Some(worktree.clone())
+            )
+        );
+        factory.set_pinned_directory(Some(PinnedDirectory::Local(
+            authority.validate_directory(&inside).unwrap(),
+        )));
+        assert_eq!(selected(&factory, Some(&outside)), Some(inside));
+        factory.set_worktree_root(Some(home.join("missing")));
+        assert!(factory.for_source_directory(None).is_err());
+    }
+
+    #[test]
     fn unavailable_explicit_pin_should_never_fall_back_to_source_or_home() {
         let fixture = crate::terminal::testing::ShellResourcesFixture::new();
         let authority = LocalFilesystemAuthority::testing();
@@ -793,11 +874,14 @@ mod tests {
             authority.validate_directory(&pin).unwrap(),
         )));
         std::fs::remove_dir(&pin).unwrap();
-        assert!(
-            factory
-                .for_source_directory(Some(CurrentDirectory::Local(fixture.path().to_owned())))
-                .is_err()
-        );
+        for root in [None, Some(fixture.path().to_owned())] {
+            factory.set_worktree_root(root);
+            assert!(
+                factory
+                    .for_source_directory(Some(CurrentDirectory::Local(fixture.path().to_owned())))
+                    .is_err()
+            );
+        }
     }
 
     #[test]

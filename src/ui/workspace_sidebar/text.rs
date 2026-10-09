@@ -15,10 +15,12 @@ use crate::ui::appearance::gpui_color;
 const GAP: f32 = 8.0;
 const PIN_WIDTH: f32 = 16.0;
 
+/// A row's first line. `pinned` marks a Workspace whose row leaves line 2 to its Worktrees.
 pub(super) fn title(
     name: SharedString,
     name_element: AnyElement,
     machine: Option<SharedString>,
+    pinned: bool,
     id: u64,
     appearance: ChromeAppearance,
 ) -> AnyElement {
@@ -48,6 +50,7 @@ pub(super) fn title(
                 .flex()
                 .items_center()
                 .child(div().min_w_0().flex_1().child(name_element))
+                .when(pinned, |row| row.child(pin(id, &appearance)))
                 .when_some(machine, |row, (machine, width)| {
                     row.gap(appearance.spacing(GAP)).child(
                         div()
@@ -71,6 +74,21 @@ pub(super) fn title(
     .w_full()
     .h(height)
     .into_any_element()
+}
+
+/// The mark of a Pinned Directory.
+fn pin(id: u64, appearance: &ChromeAppearance) -> AnyElement {
+    div()
+        .w(appearance.spacing(PIN_WIDTH))
+        .flex_shrink_0()
+        .id(("workspace-row-pin", id))
+        .debug_selector(move || format!("workspace-row-pin-{id}"))
+        .text_color(gpui_color(appearance.colors.row_secondary))
+        .child(Icon::inherited(
+            IconName::Pin,
+            appearance.icons.metrics(IconRole::Caption).glyph_size,
+        ))
+        .into_any_element()
 }
 
 fn machine_width(available: Pixels, name: Pixels, machine: Pixels) -> Option<Pixels> {
@@ -154,20 +172,7 @@ pub(super) fn detail(
                 .flex_1()
                 .flex()
                 .items_center()
-                .when(pinned, |path| {
-                    path.child(
-                        div()
-                            .w(appearance.spacing(PIN_WIDTH))
-                            .flex_shrink_0()
-                            .id(("workspace-row-pin", id))
-                            .debug_selector(move || format!("workspace-row-pin-{id}"))
-                            .text_color(gpui_color(appearance.colors.row_secondary))
-                            .child(Icon::inherited(
-                                IconName::Pin,
-                                appearance.icons.metrics(IconRole::Caption).glyph_size,
-                            )),
-                    )
-                })
+                .when(pinned, |path| path.child(pin(id, &appearance)))
                 .child(
                     div()
                         .min_w_0()
@@ -378,6 +383,7 @@ mod tests {
                 "Workspace".into(),
                 div().child("Workspace").into_any_element(),
                 Some(self.machine.into()),
+                false,
                 1,
                 ChromeAppearance::default(),
             ))

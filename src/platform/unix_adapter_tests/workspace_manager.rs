@@ -190,3 +190,79 @@ fn replaced_pinned_directory_blocks_both_child_actions_without_closing_terminal_
     assert_eq!(records.dropped_session_ids(), original_drops);
     fs::remove_dir_all(root).unwrap();
 }
+
+#[gpui::test]
+fn removal_should_protect_a_symbolic_link_pin_without_its_worktree_listing(
+    cx: &mut TestAppContext,
+) {
+    use crate::ui::workspace_sidebar::WorktreeRemoval;
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    cx.update(|cx| {
+        crate::ui::worktree_store::testing::install_with_removal_git(cx);
+    });
+    let base = temporary_directory("pinned-worktree-link");
+    let linked = base.join("linked");
+    let pinned = base.join("alias").join("sub");
+    fs::create_dir_all(linked.join("sub")).unwrap();
+    symlink(&linked, base.join("alias")).unwrap();
+    let (manager, _records, cx) =
+        workspace_manager_with_directory_selection([Ok(Some(pinned.clone()))], cx);
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    choose_pin_directory(&manager, cx);
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| manager.create_local_workspace(window, cx));
+    });
+    cx.run_until_parked();
+    let other = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    present_worktrees(cx, &[&linked]);
+    let removable = manager.read_with(cx, |manager, cx| {
+        assert!(manager.worktree_section(workspace_id, cx).is_none());
+        let section = manager.worktree_section(other, cx).unwrap();
+        let row = &section.groups[0].rows[1];
+        assert_eq!(row.removal, WorktreeRemoval::Allowed);
+        row.worktree_id
+    });
+
+    for pin_at_confirmation in [false, true] {
+        if pin_at_confirmation {
+            cx.update(|window, cx| {
+                manager.update(cx, |manager, cx| {
+                    manager.apply_directory_pin(workspace_id, None, window, cx);
+                });
+            });
+            cx.run_until_parked();
+        }
+        right_click(worktree_row(other, removable, cx), cx);
+        click("worktree-menu-row-remove", cx);
+        if pin_at_confirmation {
+            cx.update(|window, cx| {
+                manager.update(cx, |manager, cx| {
+                    let directory = manager
+                        .local_filesystem
+                        .validate_directory(&pinned)
+                        .unwrap();
+                    manager.apply_directory_pin(
+                        workspace_id,
+                        Some(PinnedDirectory::Local(directory)),
+                        window,
+                        cx,
+                    );
+                });
+            });
+            cx.run_until_parked();
+            click("modal-action-worktree-removal-confirm", cx);
+        }
+        assert!(
+            A11yTree::read(cx)
+                .find_text("It holds a Pinned Directory, so nothing was removed.")
+                .is_some()
+        );
+        assert!(
+            cx.debug_bounds("modal-action-worktree-removal-confirm")
+                .is_none()
+        );
+        click("modal-action-worktree-removal-failed-ok", cx);
+    }
+    fs::remove_dir_all(base).unwrap();
+}

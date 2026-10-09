@@ -21,6 +21,14 @@ pub(crate) enum HeadGlyph {
 }
 
 impl HeadGlyph {
+    pub(crate) const fn from_detached(detached: bool) -> Self {
+        if detached {
+            Self::Detached
+        } else {
+            Self::Branch
+        }
+    }
+
     /// The text the mark is drawn with, or `None` for the Git branch icon.
     pub(crate) fn text(self) -> Option<&'static str> {
         match self {

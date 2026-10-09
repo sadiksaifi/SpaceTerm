@@ -20,7 +20,16 @@ pub(super) struct RowHover {
 pub(super) struct RowFade {
     fade: HoverFade,
     level: f32,
+    /// Each disclosed Worktree row's hover, in list order.
+    worktrees: Vec<RowFade>,
 }
+
+const DISCLOSURE_WIDTH: f32 = 16.0;
+const ICON_COLUMN_WIDTH: f32 = 18.0;
+const ROW_CONTENT_GAP: f32 = 10.0;
+const SINGLE_LINE_ROW_HEIGHT: f32 = 32.0;
+const WORKTREE_LEVEL_INDENT: f32 = 14.0;
+const FORMER_REPOSITORY_ROW_HEIGHT: f32 = 22.0;
 
 /// The chip carrying a Workspace row's hover and persistent selection. An emphasized selection
 /// marks a sidebar with keyboard focus.
@@ -80,6 +89,82 @@ fn row_padding(appearance: &crate::ui::appearance::ChromeAppearance, cx: &App) -
     (
         frame.sidebar_chip_leading_inset() + air,
         frame.sidebar_chip_trailing_inset() + air,
+    )
+}
+
+/// A row's chip and the Panel-host row colors its text and icons use, promoted for a selected row
+/// and eased toward hover paint.
+fn row_paint(
+    selected: bool,
+    emphasized: bool,
+    hover: f32,
+    appearance: &crate::ui::appearance::ChromeAppearance,
+    cx: &App,
+) -> (SelectionChip, crate::appearance::ChromeColors) {
+    let mut row_colors = appearance
+        .host_colors(spaceterm_ui::ControlHost::Panel)
+        .clone();
+    // The chip's paints are read before the selected colors are promoted below, because that
+    // promotion is what the row's text and icons consume. A keyboard-focused sidebar emphasizes
+    // its selection in the accent color, like an AppKit source list, and draws no focus ring.
+    let selection_colors = if emphasized {
+        crate::ui::selection_chip::emphasized_selection_colors(&row_colors)
+    } else if appearance.active {
+        appearance
+            .unfocused_selection_colors(spaceterm_ui::ControlHost::Panel)
+            .clone()
+    } else {
+        row_colors.clone()
+    };
+    let chip = row_chip(
+        selected,
+        emphasized,
+        appearance,
+        &row_colors,
+        &selection_colors,
+        cx,
+    );
+    if selected {
+        row_colors.row_selected_background = selection_colors.row_selected_background;
+        row_colors.row_selected_hover_background = selection_colors.row_selected_hover_background;
+        row_colors.row_foreground = selection_colors.row_selected_foreground;
+        row_colors.row_secondary = selection_colors.row_selected_secondary;
+        row_colors.row_icon = selection_colors.row_selected_icon;
+        row_colors.row_hover_foreground = selection_colors.row_selected_hover_foreground;
+        row_colors.row_hover_secondary = selection_colors.row_selected_hover_secondary;
+        row_colors.row_hover_icon = selection_colors.row_selected_hover_icon;
+    }
+    // Text and icons follow the chip's hover paint.
+    let level = f64::from(hover);
+    row_colors.row_foreground = row_colors
+        .row_foreground
+        .fade(row_colors.row_hover_foreground, level);
+    row_colors.row_secondary = row_colors
+        .row_secondary
+        .fade(row_colors.row_hover_secondary, level);
+    row_colors.row_icon = row_colors.row_icon.fade(row_colors.row_hover_icon, level);
+    (chip, row_colors)
+}
+
+/// Where a Worktree row's icon starts: one level inside its Workspace's icon.
+fn worktree_indent(appearance: &crate::ui::appearance::ChromeAppearance, cx: &App) -> Pixels {
+    row_padding(appearance, cx).0 + appearance.spacing(WORKTREE_LEVEL_INDENT)
+}
+
+/// Where a Worktree row's text starts, after its icon.
+fn worktree_text_indent(appearance: &crate::ui::appearance::ChromeAppearance, cx: &App) -> Pixels {
+    worktree_indent(appearance, cx) + appearance.spacing(ICON_COLUMN_WIDTH + ROW_CONTENT_GAP)
+}
+
+/// The height of a row that holds one line: an expanded Workspace's.
+fn single_line_row_height(appearance: &crate::ui::appearance::ChromeAppearance) -> Pixels {
+    appearance.spacing(SINGLE_LINE_ROW_HEIGHT).max(
+        appearance
+            .typography
+            .style(TextRole::Navigation)
+            .line_height
+            + appearance
+                .spacing(SIDEBAR_ROW_TITLE_LINE_PADDING + 2.0 * SIDEBAR_ROW_SELECTION_INSET_Y),
     )
 }
 
@@ -224,59 +309,53 @@ impl WorkspaceSidebar {
             remote_connection_phase,
             available,
             repository,
+            worktrees,
+            creates_worktrees,
             active,
         } = row;
         let row_background = row_background(appearance);
-        let mut row_colors = appearance
-            .host_colors(spaceterm_ui::ControlHost::Panel)
-            .clone();
-        // The chip's paints are read before the selected colors are promoted below, because that
-        // promotion is what the row's text and icons consume. A keyboard-focused sidebar emphasizes
-        // its selection in the accent color, like an AppKit source list, and draws no focus ring.
         let emphasized = appearance.active && self.has_visible_focus(window);
-        let selection_colors = if emphasized {
-            crate::ui::selection_chip::emphasized_selection_colors(&row_colors)
-        } else if appearance.active {
-            appearance
-                .unfocused_selection_colors(spaceterm_ui::ControlHost::Panel)
-                .clone()
-        } else {
-            row_colors.clone()
-        };
         let lifted = role == RowRole::Lifted;
+        let selected = if lifted {
+            active
+        } else {
+            self.selected_key() == Some(SidebarRowKey::Workspace(workspace_id))
+        };
         let RowHover {
             level: hover,
             tracker,
         } = hover;
         let hover = if appearance.active { hover } else { 0.0 };
-        let chip = row_chip(
-            active,
-            emphasized,
-            appearance,
-            &row_colors,
-            &selection_colors,
-            cx,
-        );
-        if active {
-            row_colors.row_selected_background = selection_colors.row_selected_background;
-            row_colors.row_selected_hover_background =
-                selection_colors.row_selected_hover_background;
-            row_colors.row_foreground = selection_colors.row_selected_foreground;
-            row_colors.row_secondary = selection_colors.row_selected_secondary;
-            row_colors.row_icon = selection_colors.row_selected_icon;
-            row_colors.row_hover_foreground = selection_colors.row_selected_hover_foreground;
-            row_colors.row_hover_secondary = selection_colors.row_selected_hover_secondary;
-            row_colors.row_hover_icon = selection_colors.row_selected_hover_icon;
-        }
-        // Text and icons follow the chip's hover paint.
         let level = f64::from(hover);
-        row_colors.row_foreground = row_colors
-            .row_foreground
-            .fade(row_colors.row_hover_foreground, level);
-        row_colors.row_secondary = row_colors
-            .row_secondary
-            .fade(row_colors.row_hover_secondary, level);
-        row_colors.row_icon = row_colors.row_icon.fade(row_colors.row_hover_icon, level);
+        let (chip, row_colors) = row_paint(selected, emphasized, hover, appearance, cx);
+        let chip = if lifted {
+            chip
+        } else {
+            self.outline_menu_target(chip, SidebarRowKey::Workspace(workspace_id), appearance)
+        };
+        let expanded = worktrees.as_ref().map(|section| section.expanded);
+        // A disclosing row describes the Workspace: its pin moves to line 1, and while expanded
+        // its one line leaves each directory and branch to the Worktree rows below it.
+        let disclosing = expanded.is_some();
+        let single_line = expanded == Some(true);
+        // A collapsed row stands for its Active Worktree, so its menu removes that Worktree.
+        let collapsed_worktree = worktrees
+            .as_ref()
+            .filter(|section| !section.expanded)
+            .and_then(|section| section.rows().find(|worktree| worktree.active))
+            .filter(|worktree| {
+                !matches!(
+                    worktree.removal,
+                    WorktreeRemoval::Main | WorktreeRemoval::Unlisted
+                )
+            })
+            .map(|worktree| {
+                (
+                    worktree.worktree_id,
+                    worktree.name.clone(),
+                    worktree.removal,
+                )
+            });
         // Text helpers consume no materials or surfaces. Give only those helpers the promoted
         // Panel-host row colors while all surface composition keeps the root appearance.
         let mut row_text_appearance = appearance.clone();
@@ -288,7 +367,7 @@ impl WorkspaceSidebar {
         // An unavailable directory and the Remote connection status take line 2 from the
         // repository, as they take it from the directory.
         let repository = repository.filter(|_| available && remote_status.is_none());
-        let pull_request_paint = appearance.colors.pull_request(if active {
+        let pull_request_paint = appearance.colors.pull_request(if selected {
             appearance.colors.row_selected_background
         } else {
             crate::ui::workspace_frame::base_surface(&appearance.colors)
@@ -319,7 +398,12 @@ impl WorkspaceSidebar {
             ..paint
         };
         let detail_paint = detail_color.map(|color| {
-            under_pointer(workspace_row_status_paint(color, active, 4.5, &row_colors))
+            under_pointer(workspace_row_status_paint(
+                color,
+                selected,
+                4.5,
+                &row_colors,
+            ))
         });
         // The row icon carries one status in the same precedence as the collapsed identity: an
         // unavailable directory first, then the Remote connection.
@@ -327,10 +411,19 @@ impl WorkspaceSidebar {
             .then_some(row_colors.warning)
             .or(remote_color)
             .map(|color| {
-                under_pointer(workspace_row_status_paint(color, active, 3.0, &row_colors))
+                under_pointer(workspace_row_status_paint(
+                    color,
+                    selected,
+                    3.0,
+                    &row_colors,
+                ))
             });
         let target_name = name.clone();
-        let target_detail = detail.clone();
+        let target_detail = if single_line {
+            tooltip.clone()
+        } else {
+            detail.clone()
+        };
         let accessibility_name = remote_status.map_or_else(
             || format!("Workspace actions for {name}"),
             |status| format!("Workspace actions for {name}, connection {status}"),
@@ -368,6 +461,8 @@ impl WorkspaceSidebar {
             "Workspace unavailable"
         } else if remote_status.is_some() {
             "Remote Workspace connection"
+        } else if disclosing {
+            "Workspace"
         } else if pinned {
             "Pinned Directory"
         } else {
@@ -383,6 +478,35 @@ impl WorkspaceSidebar {
         } else {
             "workspace-row"
         };
+        // The chevron, and the "+" of an expanded row, trail the name on line 1, so line 2 runs
+        // to the row's end like a row without Worktrees. A collapsed row offers New Worktree from
+        // its menu.
+        let trailing = expanded.map(|expanded| {
+            div()
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .when(
+                    expanded && creates_worktrees && !lifted && !renaming,
+                    |trailing| {
+                        trailing.child(new_worktree_button(
+                            workspace_id,
+                            // The button keeps its place while hidden, so the row never shifts.
+                            if selected { 1.0 } else { hover },
+                            sidebar.clone(),
+                            appearance,
+                        ))
+                    },
+                )
+                .child(self.render_disclosure(
+                    workspace_id,
+                    expanded,
+                    !lifted,
+                    row_colors.row_icon,
+                    sidebar.clone(),
+                    appearance,
+                ))
+        });
         let row_content = div()
             .id((element_name, workspace_id.get()))
             .debug_selector(move || {
@@ -394,14 +518,18 @@ impl WorkspaceSidebar {
             })
             .relative()
             .w_full()
-            .h(row_height(appearance))
+            .h(if single_line {
+                single_line_row_height(appearance)
+            } else {
+                row_height(appearance)
+            })
             .flex_shrink_0()
             .pl(row_padding_leading)
             .pr(row_padding_trailing)
             .flex()
             .flex_row()
             .items_center()
-            .gap(appearance.spacing(10.0))
+            .gap(appearance.spacing(ROW_CONTENT_GAP))
             .when(!lifted, |row| row.block_mouse_except_scroll())
             .when_some(row_background, |row, background| {
                 row.bg(gpui_color(background))
@@ -412,7 +540,8 @@ impl WorkspaceSidebar {
             ))
             .when(!lifted, |row| {
                 row.on_click(move |_, _, cx| {
-                    let _ = click_sidebar.update(cx, |_, cx| {
+                    let _ = click_sidebar.update(cx, |sidebar, cx| {
+                        sidebar.cursor = None;
                         cx.emit(SidebarEvent::Activate {
                             workspace_id,
                             focus_pane: true,
@@ -439,7 +568,7 @@ impl WorkspaceSidebar {
             })
             .child(
                 div()
-                    .w(appearance.spacing(18.0))
+                    .w(appearance.spacing(ICON_COLUMN_WIDTH))
                     .flex_shrink_0()
                     .flex()
                     .items_center()
@@ -466,25 +595,34 @@ impl WorkspaceSidebar {
                     .flex()
                     .flex_col()
                     .gap(appearance.spacing(SIDEBAR_ROW_LINE_GAP))
-                    .child(text::title(
-                        name,
-                        first_line,
-                        if renaming { None } else { machine },
-                        workspace_id.get(),
-                        row_text_appearance.clone(),
-                    ))
-                    .child(text::detail(
-                        detail,
-                        repository.map(|badge| text::RowRepository {
-                            badge,
-                            pull_request_paint,
-                        }),
-                        pinned && detail_color.is_none(),
-                        detail_paint,
-                        detail_selector,
-                        workspace_id.get(),
-                        row_text_appearance,
-                    )),
+                    .child(
+                        div()
+                            .flex()
+                            .gap(appearance.spacing(ROW_CONTENT_GAP))
+                            .child(div().min_w_0().flex_1().child(text::title(
+                                name,
+                                first_line,
+                                if renaming { None } else { machine },
+                                pinned && disclosing && !renaming,
+                                workspace_id.get(),
+                                row_text_appearance.clone(),
+                            )))
+                            .children(trailing),
+                    )
+                    .when(!single_line, |lines| {
+                        lines.child(text::detail(
+                            detail,
+                            repository.map(|badge| text::RowRepository {
+                                badge,
+                                pull_request_paint,
+                            }),
+                            pinned && !disclosing && detail_color.is_none(),
+                            detail_paint,
+                            detail_selector,
+                            workspace_id.get(),
+                            row_text_appearance,
+                        ))
+                    }),
             )
             // Rows rest on the continuous base surface without separators. The hover and selection
             // chips alone give each Workspace its shape; collection focus never adds a row ring.
@@ -510,65 +648,125 @@ impl WorkspaceSidebar {
         }
 
         let press_sidebar = sidebar.clone();
-        let target = ContextMenuTarget::new(accesskit::Role::ListBoxOption, target_name)
+        let target = ContextMenuTarget::new(accesskit::Role::TreeItem, target_name)
             .description(target_detail)
-            .selected(active)
-            .on_press(move |_, cx| {
-                let _ = press_sidebar.update(cx, |_, cx| {
-                    cx.emit(SidebarEvent::Activate {
-                        workspace_id,
-                        focus_pane: true,
-                    });
+            .selected(selected)
+            .level(1);
+        let target = match expanded {
+            Some(expanded) => target.expanded(expanded),
+            None => target,
+        };
+        let target = target.on_press(move |_, cx| {
+            let _ = press_sidebar.update(cx, |sidebar, cx| {
+                sidebar.cursor = None;
+                cx.emit(SidebarEvent::Activate {
+                    workspace_id,
+                    focus_pane: true,
                 });
             });
-        let open_sidebar = sidebar.clone();
-        let lifecycle_sidebar = sidebar.clone();
-        let lifecycle_window = window.window_handle();
-        let activate_sidebar = sidebar;
+        });
         div()
             .id(("workspace-menu", workspace_id.get()))
             .debug_selector(move || format!("workspace-menu-{}", workspace_id.get()))
             .w_full()
             .flex_shrink_0()
-            .child(
-                ContextMenu::new(
-                    ("workspace-menu-controls", workspace_id.get()),
-                    accessibility_name,
-                    row,
-                    workspace_menu_entries(pinned, remote_connection_phase, presentation),
-                )
-                .size(MenuSize::Wide)
-                .when(active, |menu| menu.keyboard_trigger(&self.focus))
-                .target(target)
-                .debug_selector(format!("workspace-menu-controls-{}", workspace_id.get()))
-                .on_open_request(move |_, window, cx| {
-                    open_sidebar
-                        .update(cx, |sidebar, cx| {
-                            sidebar.request_menu(workspace_id, window, cx)
-                        })
-                        .unwrap_or(false)
-                })
-                .on_lifecycle(move |event, cx| {
-                    let sidebar = lifecycle_sidebar.clone();
-                    let event = *event;
-                    // Menu lifecycle delivery can occur while its Window is borrowed.
-                    // Resolve ownership after that delivery, using the current Window facts.
-                    cx.defer(move |cx| {
-                        let _ = lifecycle_window.update(cx, |_, window, cx| {
-                            let _ = sidebar.update(cx, |sidebar, cx| {
-                                sidebar.handle_menu_lifecycle(workspace_id, event, window, cx);
-                            });
-                        });
-                    });
-                })
-                .on_activate(move |activation, window, cx| {
-                    let command = *activation.action();
-                    let _ = activate_sidebar.update(cx, |sidebar, cx| {
-                        sidebar.perform_menu_command(workspace_id, command, window, cx);
-                    });
-                }),
-            )
+            .child(self.row_menu(
+                SidebarRowKey::Workspace(workspace_id),
+                format!("workspace-menu-controls-{}", workspace_id.get()),
+                accessibility_name,
+                row,
+                // An expanded Workspace's Tabs belong to its Worktrees, whose rows open them.
+                workspace_menu_entries(
+                    !single_line,
+                    creates_worktrees,
+                    collapsed_worktree,
+                    pinned,
+                    remote_connection_phase,
+                    presentation,
+                ),
+                target,
+                sidebar,
+                window,
+                move |sidebar, command, window, cx| {
+                    sidebar.perform_menu_command(workspace_id, command, window, cx);
+                },
+            ))
             .into_any_element()
+    }
+
+    /// Outlines the row whose menu is open. A secondary click leaves the selection where it was,
+    /// so the outline is what names the row the menu acts on.
+    fn outline_menu_target(
+        &self,
+        chip: SelectionChip,
+        key: SidebarRowKey,
+        appearance: &crate::ui::appearance::ChromeAppearance,
+    ) -> SelectionChip {
+        if self.menu == Some(key) {
+            chip.outlined(
+                appearance
+                    .host_colors(spaceterm_ui::ControlHost::Panel)
+                    .primary_background,
+            )
+        } else {
+            chip
+        }
+    }
+
+    /// Decorates a row with its context menu, which the keyboard opens from the selected row.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one menu decoration needs its row, entries, target, owner, and command handler"
+    )]
+    fn row_menu<A: Copy + 'static>(
+        &self,
+        key: SidebarRowKey,
+        selector: String,
+        accessibility_name: String,
+        row: AnyElement,
+        entries: Vec<MenuEntry<A>>,
+        target: ContextMenuTarget,
+        sidebar: WeakEntity<Self>,
+        window: &Window,
+        perform: impl Fn(&mut Self, A, &mut Window, &mut Context<Self>) + 'static,
+    ) -> AnyElement {
+        let open_sidebar = sidebar.clone();
+        let lifecycle_sidebar = sidebar.clone();
+        let lifecycle_window = window.window_handle();
+        let keyboard = self.selected_key() == Some(key);
+        ContextMenu::new(
+            SharedString::from(selector.clone()),
+            accessibility_name,
+            row,
+            entries,
+        )
+        .size(MenuSize::Wide)
+        .when(keyboard, |menu| menu.keyboard_trigger(&self.focus))
+        .target(target)
+        .debug_selector(selector)
+        .on_open_request(move |_, window, cx| {
+            open_sidebar
+                .update(cx, |sidebar, cx| sidebar.request_menu(key, window, cx))
+                .unwrap_or(false)
+        })
+        .on_lifecycle(move |event, cx| {
+            let sidebar = lifecycle_sidebar.clone();
+            let event = *event;
+            // Menu lifecycle delivery can occur while its Window is borrowed.
+            // Resolve ownership after that delivery, using the current Window facts.
+            cx.defer(move |cx| {
+                let _ = lifecycle_window.update(cx, |_, window, cx| {
+                    let _ = sidebar.update(cx, |sidebar, cx| {
+                        sidebar.handle_menu_lifecycle(key, event, window, cx);
+                    });
+                });
+            });
+        })
+        .on_activate(move |activation, window, cx| {
+            let command = *activation.action();
+            let _ = sidebar.update(cx, |sidebar, cx| perform(sidebar, command, window, cx));
+        })
+        .into_any_element()
     }
 
     /// Each row's hover, in list order.
@@ -578,9 +776,32 @@ impl WorkspaceSidebar {
             .map(|row| {
                 let fade =
                     HoverFade::new(("workspace-row-hover", row.workspace_id.get()), window, cx);
+                let worktrees = row
+                    .worktrees
+                    .iter()
+                    .filter(|section| section.expanded)
+                    .flat_map(|section| section.rows())
+                    .map(|worktree| {
+                        let fade = HoverFade::new(
+                            SharedString::from(format!(
+                                "worktree-row-hover-{}-{}",
+                                row.workspace_id.get(),
+                                worktree.worktree_id
+                            )),
+                            window,
+                            cx,
+                        );
+                        RowFade {
+                            level: fade.level(window, cx),
+                            fade,
+                            worktrees: Vec::new(),
+                        }
+                    })
+                    .collect();
                 RowFade {
                     level: fade.level(window, cx),
                     fade,
+                    worktrees,
                 }
             })
             .collect()
@@ -602,7 +823,7 @@ impl WorkspaceSidebar {
         let owner = sidebar.entity_id();
         let mut rows = div()
             .id("workspace-list")
-            .role(accesskit::Role::ListBox)
+            .role(accesskit::Role::Tree)
             .aria_label("Workspaces")
             .debug_selector(|| "workspace-list".to_owned())
             .w_full()
@@ -637,8 +858,12 @@ impl WorkspaceSidebar {
                 sidebar.finish_workspace_drag(pointer, cx);
             });
         });
+        // Each Workspace and its Worktrees are one scroll child, so reordering, revealing, and
+        // drag previews stay indexed by Workspace.
         for (row, fade) in self.rows.iter().zip(hovers) {
-            rows = rows.child(self.render_workspace_row(
+            let workspace_id = row.workspace_id;
+            let disclosed = row.worktrees.as_ref().filter(|section| section.expanded);
+            let parent = self.render_workspace_row(
                 row.clone(),
                 RowRole::InList,
                 RowHover {
@@ -650,7 +875,43 @@ impl WorkspaceSidebar {
                 window,
                 appearance,
                 cx,
-            ));
+            );
+            let (worktree_keys, children): (Vec<_>, Vec<_>) = disclosed
+                .map(|section| {
+                    self.render_worktrees(
+                        workspace_id,
+                        section,
+                        fade.worktrees,
+                        sidebar.clone(),
+                        window,
+                        appearance,
+                        cx,
+                    )
+                })
+                .unwrap_or_default()
+                .into_iter()
+                .unzip();
+            let keys: Vec<Option<SidebarRowKey>> =
+                std::iter::once(Some(SidebarRowKey::Workspace(workspace_id)))
+                    .chain(worktree_keys)
+                    .collect();
+            let measure_sidebar = sidebar.clone();
+            rows = rows.child(
+                div()
+                    .on_children_prepainted(move |bounds, _, cx| {
+                        let _ = measure_sidebar.update(cx, |sidebar, _| {
+                            sidebar.record_row_spans(workspace_id, &keys, &bounds);
+                        });
+                    })
+                    .id(("workspace-group", workspace_id.get()))
+                    .debug_selector(move || format!("workspace-group-{}", workspace_id.get()))
+                    .w_full()
+                    .flex_shrink_0()
+                    .flex()
+                    .flex_col()
+                    .child(parent)
+                    .children(children),
+            );
         }
 
         let scrollbar = self.scrollbar.clone();
@@ -862,6 +1123,508 @@ impl RenderOnce for SidebarResizeHandle {
     }
 }
 
+impl WorkspaceSidebar {
+    /// The trailing chevron that shows or hides a git Workspace's Worktrees. The lifted copy of
+    /// a dragged row draws it without taking input.
+    fn render_disclosure(
+        &self,
+        workspace_id: WorkspaceId,
+        expanded: bool,
+        interactive: bool,
+        color: Color,
+        sidebar: WeakEntity<Self>,
+        appearance: &crate::ui::appearance::ChromeAppearance,
+    ) -> AnyElement {
+        let icon = div().text_color(gpui_color(color)).child(Icon::inherited(
+            if expanded {
+                IconName::ChevronDown
+            } else {
+                IconName::ChevronRight
+            },
+            appearance.icons.metrics(IconRole::Caption).glyph_size,
+        ));
+        let column = div()
+            .id(("workspace-disclosure", workspace_id.get()))
+            .w(appearance.spacing(DISCLOSURE_WIDTH))
+            .h_full()
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_center();
+        if !interactive {
+            return column.child(icon).into_any_element();
+        }
+        column
+            .debug_selector(move || {
+                format!(
+                    "workspace-disclosure-{}-{}",
+                    workspace_id.get(),
+                    if expanded { "expanded" } else { "collapsed" }
+                )
+            })
+            .cursor_pointer()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(move |_, window, cx| {
+                let _ = sidebar.update(cx, |sidebar, cx| {
+                    sidebar.set_expanded(workspace_id, !expanded, window, cx);
+                });
+                cx.stop_propagation();
+            })
+            .child(icon)
+            .into_any_element()
+    }
+
+    /// A git Workspace's disclosed Worktree rows, and a label above each former repository's.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one group render step needs its section, hovers, owner, and host geometry"
+    )]
+    fn render_worktrees(
+        &self,
+        workspace_id: WorkspaceId,
+        section: &WorktreeSection,
+        fades: Vec<RowFade>,
+        sidebar: WeakEntity<Self>,
+        window: &Window,
+        appearance: &crate::ui::appearance::ChromeAppearance,
+        cx: &App,
+    ) -> Vec<(Option<SidebarRowKey>, AnyElement)> {
+        let mut fades = fades.into_iter();
+        let mut elements = Vec::new();
+        let colors = appearance.host_colors(spaceterm_ui::ControlHost::Panel);
+        for group in &section.groups {
+            if let Some(name) = &group.former_repository {
+                elements.push((
+                    None,
+                    div()
+                        .debug_selector({
+                            let name = name.clone();
+                            move || format!("worktree-former-repository-{name}")
+                        })
+                        .relative()
+                        .w_full()
+                        .h(appearance.spacing(FORMER_REPOSITORY_ROW_HEIGHT))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_end()
+                        .pl(worktree_text_indent(appearance, cx))
+                        .pr(row_padding(appearance, cx).1)
+                        .truncate()
+                        .chrome_text(appearance.typography.style(TextRole::Secondary))
+                        .text_color(gpui_color(colors.row_secondary))
+                        .child(name.clone())
+                        .into_any_element(),
+                ));
+            }
+            let size = group.rows.len();
+            for (index, worktree) in group.rows.iter().enumerate() {
+                let Some(fade) = fades.next() else {
+                    break;
+                };
+                elements.push((
+                    Some(SidebarRowKey::Worktree(workspace_id, worktree.worktree_id)),
+                    self.render_worktree_row(
+                        workspace_id,
+                        worktree,
+                        (index + 1, size),
+                        fade,
+                        sidebar.clone(),
+                        window,
+                        appearance,
+                        cx,
+                    ),
+                ));
+            }
+        }
+        elements
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one row render step needs its model, set position, hover, owner, and host geometry"
+    )]
+    fn render_worktree_row(
+        &self,
+        workspace_id: WorkspaceId,
+        worktree: &WorktreeRowViewModel,
+        (position, size): (usize, usize),
+        fade: RowFade,
+        sidebar: WeakEntity<Self>,
+        window: &Window,
+        appearance: &crate::ui::appearance::ChromeAppearance,
+        cx: &App,
+    ) -> AnyElement {
+        let worktree_id = worktree.worktree_id;
+        let key = SidebarRowKey::Worktree(workspace_id, worktree_id);
+        let selected = self.selected_key() == Some(key);
+        let emphasized = appearance.active && self.has_visible_focus(window);
+        let hover = if appearance.active { fade.level } else { 0.0 };
+        let (chip, row_colors) = row_paint(selected, emphasized, hover, appearance, cx);
+        let chip = self.outline_menu_target(chip, key, appearance);
+        let openable = worktree.openable();
+        // A Worktree with no Tabs reads as secondary until it is opened.
+        let title_color = if worktree.has_tabs && !worktree.missing {
+            row_colors.row_foreground
+        } else {
+            row_colors.row_secondary
+        };
+        let mut text_appearance = appearance.clone();
+        text_appearance.colors = row_colors.clone();
+        let text_id = worktree_text_id(workspace_id, worktree_id);
+        let selector = format!("worktree-row-{}-{worktree_id}", workspace_id.get());
+        let head = if worktree.detached {
+            format!("Detached at {}", worktree.label)
+        } else {
+            format!("Branch {}", worktree.label)
+        };
+        let mut states = Vec::new();
+        if worktree.main {
+            states.push("Main Worktree");
+        }
+        if worktree.missing {
+            states.push("Missing");
+        } else if worktree.locked {
+            states.push("Locked");
+        }
+        if !worktree.has_tabs {
+            states.push("No Tabs");
+        }
+        let description = std::iter::once(head.as_str())
+            .chain(std::iter::once(worktree.directory_tooltip.as_ref()))
+            .chain(states.iter().copied())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let tooltip_detail = std::iter::once(worktree.name.as_ref())
+            .chain([head.as_str(), worktree.directory_tooltip.as_ref()])
+            .chain(
+                states
+                    .iter()
+                    .copied()
+                    .filter(|state| *state != "Main Worktree"),
+            )
+            .collect::<Vec<_>>()
+            .join("\n");
+        // A Missing Worktree's directory gives way to its state, as an unavailable Workspace's does.
+        let (detail, detail_paint, detail_selector) = if worktree.missing {
+            (
+                SharedString::from("Directory missing"),
+                Some(workspace_row_status_paint(
+                    row_colors.warning,
+                    selected,
+                    4.5,
+                    &row_colors,
+                )),
+                format!("{selector}-missing"),
+            )
+        } else {
+            (worktree.directory.clone(), None, format!("{selector}-path"))
+        };
+        let pull_request_paint = appearance.colors.pull_request(if selected {
+            appearance.colors.row_selected_background
+        } else {
+            crate::ui::workspace_frame::base_surface(&appearance.colors)
+        });
+        let id = SharedString::from(selector.clone());
+        let click_sidebar = sidebar.clone();
+        let press_sidebar = sidebar.clone();
+        let menu_sidebar = sidebar;
+        let icon_size = appearance.icons.metrics(IconRole::Row).glyph_size;
+        let row = div()
+            .id(id)
+            .debug_selector({
+                let selector = selector.clone();
+                move || {
+                    format!(
+                        "{selector}-{}",
+                        if selected { "selected" } else { "unselected" }
+                    )
+                }
+            })
+            .relative()
+            .w_full()
+            .h(row_height(appearance))
+            .flex_shrink_0()
+            .pl(worktree_indent(appearance, cx))
+            .pr(row_padding(appearance, cx).1)
+            .flex()
+            .items_center()
+            .gap(appearance.spacing(ROW_CONTENT_GAP))
+            .block_mouse_except_scroll()
+            .when_some(row_background(appearance), |row, background| {
+                row.bg(gpui_color(background))
+            })
+            .child(chip.render(format!("{selector}-selection"), hover))
+            .when(openable, |row| {
+                row.on_click(move |_, _, cx| {
+                    let _ = click_sidebar.update(cx, |sidebar, cx| {
+                        sidebar.cursor = None;
+                        cx.emit(SidebarEvent::ActivateWorktree {
+                            workspace_id,
+                            worktree_id,
+                            focus_pane: true,
+                        });
+                    });
+                    cx.stop_propagation();
+                })
+            })
+            .child(
+                div()
+                    .w(appearance.spacing(ICON_COLUMN_WIDTH))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(gpui_color(
+                        detail_paint.map_or(row_colors.row_icon, |paint| paint.normal),
+                    ))
+                    .child(Icon::inherited(
+                        if worktree.locked && !worktree.missing {
+                            IconName::Lock
+                        } else {
+                            IconName::Folder
+                        },
+                        icon_size,
+                    )),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .gap(appearance.spacing(SIDEBAR_ROW_LINE_GAP))
+                    .child(text::title(
+                        worktree.name.clone(),
+                        div()
+                            .debug_selector({
+                                let selector = selector.clone();
+                                move || format!("{selector}-name")
+                            })
+                            .w_full()
+                            .truncate()
+                            .chrome_text(appearance.typography.style(TextRole::Navigation))
+                            .text_color(gpui_color(title_color))
+                            .child(worktree.name.clone())
+                            .into_any_element(),
+                        None,
+                        false,
+                        text_id,
+                        text_appearance.clone(),
+                    ))
+                    .child(text::detail(
+                        detail,
+                        worktree
+                            .repository
+                            .clone()
+                            .filter(|_| !worktree.missing)
+                            .map(|badge| text::RowRepository {
+                                badge,
+                                pull_request_paint,
+                            }),
+                        false,
+                        detail_paint,
+                        Some(detail_selector),
+                        text_id,
+                        text_appearance,
+                    )),
+            )
+            .child(fade.fade.tracker());
+        let row = Tooltip::new(
+            SharedString::from(format!("{selector}-tooltip")),
+            if worktree.main {
+                "Main Worktree"
+            } else {
+                "Worktree"
+            },
+        )
+        .detail(tooltip_detail)
+        .debug_selector(format!("{selector}-tooltip"))
+        .attach(row, TooltipTargetVisibility::Visible)
+        .into_any_element();
+        let target = ContextMenuTarget::new(accesskit::Role::TreeItem, worktree.name.clone())
+            .description(description)
+            .selected(selected)
+            .level(2)
+            .set_position(position, size);
+        // A Worktree that can't open keeps its menu, which still copies and removes it.
+        let target = if openable {
+            target.on_press(move |_, cx| {
+                let _ = press_sidebar.update(cx, |sidebar, cx| {
+                    sidebar.cursor = None;
+                    cx.emit(SidebarEvent::ActivateWorktree {
+                        workspace_id,
+                        worktree_id,
+                        focus_pane: true,
+                    });
+                });
+            })
+        } else {
+            target
+        };
+        let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
+        let mut entries = vec![
+            new_tab_entry(
+                WorktreeMenuCommand::NewTab,
+                "worktree-menu-row-new-tab",
+                presentation,
+            )
+            .disabled(!openable),
+            MenuEntry::action("Copy Path", WorktreeMenuCommand::CopyPath)
+                .icon(|foreground, size| {
+                    Icon::new(IconName::Copy, size, foreground).into_any_element()
+                })
+                .debug_selector("worktree-menu-row-copy-path"),
+            MenuEntry::action("Close Tabs", WorktreeMenuCommand::CloseTabs)
+                .disabled(!worktree.has_tabs)
+                .icon(|foreground, size| {
+                    Icon::new(IconName::X, size, foreground).into_any_element()
+                })
+                .debug_selector("worktree-menu-row-close-tabs"),
+        ];
+        if let Some(remove) = remove_worktree_entry(
+            WorktreeMenuCommand::Remove,
+            worktree.removal,
+            None,
+            "worktree-menu-row-remove",
+        ) {
+            entries.extend([MenuEntry::separator(), remove]);
+        }
+        self.row_menu(
+            key,
+            format!("{selector}-menu"),
+            format!("Worktree actions for {}", worktree.name),
+            row,
+            entries,
+            target,
+            menu_sidebar,
+            window,
+            move |_, command, _, cx| {
+                cx.emit(SidebarEvent::WorktreeCommand {
+                    workspace_id,
+                    worktree_id,
+                    command,
+                });
+            },
+        )
+    }
+}
+
+/// The element id a Worktree row's text uses. Workspace rows use their Workspace id, so a Worktree
+/// row takes the upper half of the id space.
+fn worktree_text_id(workspace_id: WorkspaceId, worktree_id: WorktreeId) -> u64 {
+    (1 << 63) | ((workspace_id.get() & 0x7fff_ffff) << 32) | (worktree_id.get() & 0xffff_ffff)
+}
+
+/// "New Tab", with the Shortcut that creates a Tab.
+fn new_tab_entry<A: Clone>(
+    command: A,
+    selector: &'static str,
+    presentation: &crate::desktop_profile::DesktopPresentation,
+) -> MenuEntry<A> {
+    let entry = MenuEntry::action("New Tab", command);
+    match presentation.shortcut(&crate::ui::CreateTab) {
+        Some(shortcut) => entry.shortcut(shortcut),
+        None => entry,
+    }
+    .icon(|foreground, size| Icon::new(IconName::SquarePlus, size, foreground).into_any_element())
+    .debug_selector(selector)
+}
+
+/// "Remove Worktree…", named when a Workspace row stands for the Worktree. A Worktree that can't
+/// be removed says why in place of the action; one git no longer lists offers none.
+fn remove_worktree_entry<A: Clone>(
+    command: A,
+    removal: WorktreeRemoval,
+    name: Option<&str>,
+    selector: &'static str,
+) -> Option<MenuEntry<A>> {
+    let reason = match removal {
+        WorktreeRemoval::Allowed => None,
+        WorktreeRemoval::Main => Some("Main Worktree Can\u{2019}t Be Removed"),
+        WorktreeRemoval::Locked => Some("Locked Worktree Can\u{2019}t Be Removed"),
+        WorktreeRemoval::HoldsPinnedDirectory => Some("Unpin the Directory to Remove"),
+        WorktreeRemoval::Unlisted => return None,
+    };
+    let label = match (reason, name) {
+        (Some(reason), _) => SharedString::from(reason),
+        (None, Some(name)) => format!("Remove Worktree \u{201c}{name}\u{201d}\u{2026}").into(),
+        (None, None) => SharedString::from("Remove Worktree\u{2026}"),
+    };
+    Some(
+        MenuEntry::action(label, command)
+            .disabled(reason.is_some())
+            .destructive(reason.is_none())
+            .icon(|foreground, size| {
+                Icon::new(IconName::Trash2, size, foreground).into_any_element()
+            })
+            .debug_selector(selector),
+    )
+}
+
+/// "New Worktree…", which presents the New Worktree dialog.
+fn new_worktree_entry<A: Clone>(
+    command: A,
+    selector: &'static str,
+    presentation: &crate::desktop_profile::DesktopPresentation,
+) -> MenuEntry<A> {
+    let entry = MenuEntry::action(NEW_WORKTREE_LABEL, command);
+    match presentation.shortcut(&crate::ui::NewWorktree) {
+        Some(shortcut) => entry.shortcut(shortcut),
+        None => entry,
+    }
+    .icon(|foreground, size| Icon::new(IconName::GitBranch, size, foreground).into_any_element())
+    .debug_selector(selector)
+}
+
+const NEW_WORKTREE_LABEL: &str = "New Worktree\u{2026}";
+
+/// The "+" an expanded git Workspace row shows under the pointer and while selected.
+fn new_worktree_button(
+    workspace_id: WorkspaceId,
+    reveal: f32,
+    sidebar: WeakEntity<WorkspaceSidebar>,
+    appearance: &crate::ui::appearance::ChromeAppearance,
+) -> AnyElement {
+    let glyph_size = appearance.icons.metrics(IconRole::Caption).glyph_size;
+    div()
+        .flex_shrink_0()
+        .opacity(reveal)
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .child(
+            IconButton::new(
+                ("workspace-new-worktree", workspace_id.get()),
+                NEW_WORKTREE_LABEL,
+                move |foreground| {
+                    Icon::new(IconName::Plus, glyph_size, foreground).into_any_element()
+                },
+            )
+            .variant(ButtonVariant::Ghost)
+            .size(ButtonSize::Small)
+            .tab_stop(false)
+            .preserve_ancestor_hover()
+            .debug_selector(format!("workspace-new-worktree-{}", workspace_id.get()))
+            .tooltip(
+                Tooltip::new(
+                    ("workspace-new-worktree-tooltip", workspace_id.get()),
+                    NEW_WORKTREE_LABEL,
+                )
+                .debug_selector(format!(
+                    "workspace-new-worktree-tooltip-{}",
+                    workspace_id.get()
+                )),
+            )
+            .on_activate(move |_, _, cx| {
+                let _ = sidebar.update(cx, |_, cx| {
+                    cx.emit(SidebarEvent::Command {
+                        workspace_id,
+                        command: WorkspaceMenuCommand::NewWorktree,
+                    });
+                });
+            }),
+        )
+        .into_any_element()
+}
+
 /// The footer creation menu's rows, built from the shared creation descriptors.
 fn new_workspace_menu_entries(
     presentation: &crate::desktop_profile::DesktopPresentation,
@@ -891,38 +1654,41 @@ fn new_workspace_menu_entries(
 
 /// Every Workspace command carries a symbol, so all labels share the icon column.
 fn workspace_menu_entries(
+    new_tab: bool,
+    new_worktree: bool,
+    active_worktree: Option<(WorktreeId, SharedString, WorktreeRemoval)>,
     pinned: bool,
     remote_connection_phase: Option<RemoteConnectionPhase>,
     presentation: &crate::desktop_profile::DesktopPresentation,
 ) -> Vec<MenuEntry<RowMenuCommand>> {
-    let shortcut = presentation.shortcut(&crate::ui::CreateTab);
-    let mut entries = vec![
-        {
-            let entry = MenuEntry::action(
-                "New Tab",
-                RowMenuCommand::Workspace(WorkspaceMenuCommand::NewTab),
-            );
-            match shortcut {
-                Some(shortcut) => entry.shortcut(shortcut),
-                None => entry,
-            }
-        }
-        .icon(|foreground, size| {
-            Icon::new(IconName::SquarePlus, size, foreground).into_any_element()
-        })
-        .debug_selector("workspace-menu-row-new-tab"),
+    let mut entries = Vec::new();
+    if new_tab {
+        entries.push(new_tab_entry(
+            RowMenuCommand::Workspace(WorkspaceMenuCommand::NewTab),
+            "workspace-menu-row-new-tab",
+            presentation,
+        ));
+    }
+    if new_worktree {
+        entries.push(new_worktree_entry(
+            RowMenuCommand::Workspace(WorkspaceMenuCommand::NewWorktree),
+            "workspace-menu-row-new-worktree",
+            presentation,
+        ));
+    }
+    entries.push(
         MenuEntry::action("Rename Workspace", RowMenuCommand::Rename)
             .icon(|foreground, size| {
                 Icon::new(IconName::Pencil, size, foreground).into_any_element()
             })
             .debug_selector("workspace-menu-row-rename"),
-    ];
+    );
     entries.push(
         MenuEntry::action(
             if pinned {
                 "Change Pinned Directory"
             } else {
-                "Pin workspace to a directory"
+                "Pin to Directory"
             },
             RowMenuCommand::Workspace(WorkspaceMenuCommand::PinDirectory),
         )
@@ -956,8 +1722,19 @@ fn workspace_menu_entries(
             .debug_selector("workspace-menu-row-reconnect"),
         );
     }
-    entries.extend([
-        MenuEntry::separator(),
+    // The destructive commands sit together below the divider.
+    entries.push(MenuEntry::separator());
+    if let Some((worktree_id, name, removal)) = active_worktree
+        && let Some(entry) = remove_worktree_entry(
+            RowMenuCommand::Worktree(worktree_id, WorktreeMenuCommand::Remove),
+            removal,
+            Some(&name),
+            "workspace-menu-row-remove-worktree",
+        )
+    {
+        entries.push(entry);
+    }
+    entries.push(
         MenuEntry::action(
             "Close Workspace",
             RowMenuCommand::Workspace(WorkspaceMenuCommand::Close),
@@ -965,7 +1742,7 @@ fn workspace_menu_entries(
         .destructive(true)
         .icon(|foreground, size| Icon::new(IconName::X, size, foreground).into_any_element())
         .debug_selector("workspace-menu-row-close"),
-    ]);
+    );
     entries
 }
 

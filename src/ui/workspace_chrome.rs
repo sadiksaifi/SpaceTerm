@@ -24,6 +24,7 @@ pub(super) fn leading_clearance(fullscreen: bool, frame_space: Pixels, cx: &App)
 const SWITCHER_HORIZONTAL_PADDING: f32 = 10.0;
 const SWITCHER_IDENTITY_GAP: f32 = 8.0;
 const PIN_NAME_GAP: f32 = 5.0;
+const WORKTREE_SEPARATOR_GAP: f32 = 4.0;
 /// Diameter of the collapsed identity's status dot.
 const STATUS_DOT_SIZE: f32 = 6.0;
 
@@ -83,6 +84,21 @@ impl WorkspaceChromeLayout {
                 .typography
                 .measure(TextRole::BodyEmphasis, &identity.name, window);
         let pin_size = appearance.icons.metrics(IconRole::Caption).glyph_size;
+        // The Active Worktree follows the name after a chevron, as a path does.
+        let worktree_width = identity.worktree.as_ref().map_or(px(0.0), |worktree| {
+            let worktree_width = appearance
+                .typography
+                .measure(TextRole::Body, worktree, window);
+            spaceterm_ui::reserve_measured_width(
+                worktree_width,
+                [
+                    appearance.spacing(PIN_NAME_GAP),
+                    pin_size,
+                    appearance.spacing(WORKTREE_SEPARATOR_GAP),
+                ],
+                window,
+            )
+        });
         let identity_size = appearance.icons.metrics(IconRole::Chrome).glyph_size;
         let pin_width = if identity.pinned {
             spaceterm_ui::reserve_measured_width(
@@ -124,8 +140,9 @@ impl WorkspaceChromeLayout {
         );
         let content_maximum =
             switcher_maximum - chrome_theme.custom_trigger_width(px(0.0), window) - content_fixed;
-        let identity_width = spaceterm_ui::reserve_measured_width(name_width, [pin_width], window)
-            .min(content_maximum.max(px(0.0)));
+        let identity_width =
+            spaceterm_ui::reserve_measured_width(name_width, [pin_width, worktree_width], window)
+                .min(content_maximum.max(px(0.0)));
         let content_width =
             spaceterm_ui::reserve_measured_width(px(0.0), [identity_width, content_fixed], window);
         let edge_reserve = trailing_reserve(appearance, cx);
@@ -362,6 +379,8 @@ impl WorkspaceChromeStatus {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct WorkspaceChromeIdentity {
     pub(super) name: String,
+    /// The Active Worktree's folder name, in a Workspace that lists Worktrees.
+    pub(super) worktree: Option<String>,
     pub(super) pinned: bool,
     pub(super) status: Option<WorkspaceChromeStatus>,
 }
@@ -407,7 +426,31 @@ impl WorkspaceChromeIdentity {
                     .truncate()
                     .text_color(switcher_color)
                     .child(self.name),
-            );
+            )
+            .when_some(self.worktree, |chip, worktree| {
+                chip.child(
+                    div()
+                        .debug_selector(|| "workspace-chip-worktree".to_owned())
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .min_w_0()
+                        .gap(appearance.spacing(WORKTREE_SEPARATOR_GAP))
+                        .chrome_text(appearance.typography.style(TextRole::Body))
+                        .child(div().flex_shrink_0().child(Icon::new(
+                            IconName::ChevronRight,
+                            appearance.icons.metrics(IconRole::Caption).glyph_size,
+                            switcher_color,
+                        )))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(switcher_color)
+                                .child(worktree),
+                        ),
+                )
+            });
         div()
             .relative()
             .flex()
@@ -434,10 +477,14 @@ impl WorkspaceChromeIdentity {
     }
 
     pub(super) fn accessibility_name(&self) -> String {
-        self.status.map_or_else(
-            || format!("Switch Workspace, {}", self.name),
-            |status| format!("Switch Workspace, {}, {}", self.name, status.label()),
-        )
+        let mut name = format!("Switch Workspace, {}", self.name);
+        if let Some(worktree) = &self.worktree {
+            name.push_str(&format!(", Worktree {worktree}"));
+        }
+        if let Some(status) = self.status {
+            name.push_str(&format!(", {}", status.label()));
+        }
+        name
     }
 }
 
@@ -607,6 +654,7 @@ mod tests {
 
         let identity = |status| WorkspaceChromeIdentity {
             name: "Workspace".to_owned(),
+            worktree: None,
             pinned: false,
             status,
         };

@@ -45,6 +45,8 @@ mod workspace_frame;
 mod workspace_manager;
 mod workspace_sidebar;
 mod workspace_status;
+mod worktree_form;
+pub(crate) mod worktree_store;
 
 use gpui::{App, actions};
 
@@ -141,6 +143,9 @@ actions!(
         NewRemoteWorkspace,
         OpenLocalDirectory,
         OpenRemoteDirectory,
+        NewWorktree,
+        NextWorktree,
+        PreviousWorktree,
         ToggleSidebar,
         ToggleSidebarFocus,
         OpenTerminalFind,

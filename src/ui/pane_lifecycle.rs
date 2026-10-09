@@ -70,6 +70,13 @@ impl PaneConstruction {
         }
     }
 
+    /// The clipboard that application actions such as Copy Path write.
+    pub(crate) fn text_clipboard(
+        &self,
+    ) -> &Rc<dyn crate::terminal::native_services::clipboard::TextClipboard> {
+        &self.native_services.text_clipboard
+    }
+
     pub(crate) fn create(
         &self,
         session_factory: WorkspaceTerminalSessionFactory,

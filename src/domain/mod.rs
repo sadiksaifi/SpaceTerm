@@ -2,6 +2,7 @@ pub(crate) mod remote_workspace;
 mod tab;
 mod tab_collection;
 mod workspace_collection;
+mod worktree;
 
 pub(crate) use crate::close_confirmation::{
     ClosePaneOutcome, CloseTabOutcome, CloseWorkspaceOutcome, FinalTabCloseOutcome,
@@ -19,6 +20,7 @@ pub(crate) use workspace_collection::{
     ValidatedLocalDirectory, WorkspaceCollection, WorkspaceEntry, WorkspaceError, WorkspaceId,
     WorkspaceLocation,
 };
+pub(crate) use worktree::{RepositoryIdentity, WorktreeId, WorktreeKey, WorktreeRegistry};
 
 pub(crate) use remote_workspace::{
     RemoteConnectionPhase, RemoteConnectionReduction, RemoteConnectionState,

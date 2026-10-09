@@ -18,7 +18,7 @@ SpaceTerm organizes terminal work into Workspaces, Tabs, Pane Layouts, and Pane-
 
 **Pinned Directory**: An explicitly selected directory that sets a Workspace's identity and the directory of its new Terminal Sessions.
 
-**Tab**: An ordered work area belonging to one Workspace and owning one Pane Layout.
+**Tab**: An ordered work area belonging to one Workspace and owning one Pane Layout. In a Workspace that lists Worktrees, each Tab also belongs to one Worktree.
 _Avoid_: Window, Terminal Session
 
 **Pane Layout**: The recursive arrangement of Panes and Splits in a Tab.
@@ -94,9 +94,11 @@ _Avoid_: Hotkey, key equivalent
 
 **Active Tab**: The Tab presented within a Workspace.
 
-**Next Tab** / **Previous Tab**: The Commands activating the neighboring Tab in Workspace order.
+**Next Tab** / **Previous Tab**: The Commands activating the neighboring Tab in Workspace order, within the Active Worktree.
 
-**Move Tab Right** / **Move Tab Left**: The Commands moving the Active Tab among its Workspace's Tabs.
+**Move Tab Right** / **Move Tab Left**: The Commands moving the Active Tab among its Workspace's Tabs, within the Active Worktree.
+
+**Next Worktree** / **Previous Worktree**: The Commands activating the neighboring Worktree that has Tabs, in sidebar order, wrapping at either end.
 
 **Focused Pane**: The Pane selected by a Tab for Pane actions and focus restoration.
 
@@ -190,6 +192,17 @@ _Avoid_: shell token, session secret
 
 **Pull Request**: The open GitHub pull request whose head is a repository's current branch, found through the local GitHub CLI.
 _Avoid_: PR, merge request
+
+**Worktree**: One of a git repository's working trees, listed under a Local Workspace whose directory is in that repository. Its Tabs start inside it.
+_Avoid_: checkout, working copy
+
+**Main Worktree**: The Worktree git lists first, which holds the repository's own working tree. It cannot be removed.
+
+**Active Worktree**: The Worktree of the Active Tab. The tab strip shows only its Tabs.
+
+**Missing Worktree**: A Worktree git still lists whose directory no longer exists. It opens no Tabs.
+
+**Worktree Location**: The Settings template naming the directory of a new Worktree from its repository and branch.
 
 ## Appearance
 
