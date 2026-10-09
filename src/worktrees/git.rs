@@ -108,6 +108,8 @@ pub(crate) enum WorktreeCreateError {
 pub(crate) enum WorktreeRemoveError {
     #[error("a different Worktree now has the confirmed location")]
     Replaced,
+    #[error("the Worktree changed after removal was confirmed")]
+    Changed,
     #[error("the Worktree could not be checked before removal")]
     Unchecked,
     #[error("git could not remove the Worktree")]
@@ -136,7 +138,10 @@ impl std::fmt::Debug for WorktreeIdentity {
 #[derive(Clone)]
 pub(crate) enum RemovalExpectation {
     /// The checked Worktree.
-    Worktree(WorktreeIdentity),
+    Worktree {
+        identity: WorktreeIdentity,
+        require_clean: bool,
+    },
     /// No directory: git lists the Worktree as missing.
     Absent(LocalFilesystemAuthority),
 }
@@ -144,7 +149,7 @@ pub(crate) enum RemovalExpectation {
 impl std::fmt::Debug for RemovalExpectation {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
-            Self::Worktree(_) => "RemovalExpectation::Worktree(..)",
+            Self::Worktree { .. } => "RemovalExpectation::Worktree(..)",
             Self::Absent(_) => "RemovalExpectation::Absent(..)",
         })
     }
@@ -305,13 +310,7 @@ impl LocalWorktreeGit {
             directory,
             filesystem: filesystem.clone(),
         };
-        let mut output = Vec::new();
-        let changes = match self.git(path, &CHANGES_ARGUMENTS, &mut output, cancellation) {
-            Ok(exit) if exit.success() => !output.is_empty(),
-            // More changes than the output limit holds are still changes.
-            Err(RepositoryReadError::OutputTooLarge) => true,
-            _ => return Err(WorktreeRemoveError::Failed),
-        };
+        let changes = self.has_changes(path, cancellation)?;
         let submodules =
             self.has_submodules(path, &identity.administrative, filesystem, cancellation);
         Ok(RemovalCheck {
@@ -319,6 +318,20 @@ impl LocalWorktreeGit {
             changes,
             submodules,
         })
+    }
+
+    fn has_changes(
+        &self,
+        path: &Path,
+        cancellation: &SshCancellationToken,
+    ) -> Result<bool, WorktreeRemoveError> {
+        let mut output = Vec::new();
+        match self.git(path, &CHANGES_ARGUMENTS, &mut output, cancellation) {
+            Ok(exit) if exit.success() => Ok(!output.is_empty()),
+            // More changes than the output limit holds are still changes.
+            Err(RepositoryReadError::OutputTooLarge) => Ok(true),
+            _ => Err(WorktreeRemoveError::Failed),
+        }
     }
 
     /// Whether the Worktree at `path` holds a checked-out submodule. As git judges it, one does
@@ -393,8 +406,19 @@ impl LocalWorktreeGit {
         cancellation: &SshCancellationToken,
     ) -> Result<(), WorktreeRemoveError> {
         match expected {
-            RemovalExpectation::Worktree(identity) => {
-                self.is_worktree(path, identity, cancellation)
+            RemovalExpectation::Worktree {
+                identity,
+                require_clean,
+            } => {
+                self.is_worktree(path, identity, cancellation)?;
+                if *require_clean
+                    && self
+                        .has_changes(path, cancellation)
+                        .map_err(|_| WorktreeRemoveError::Unchecked)?
+                {
+                    return Err(WorktreeRemoveError::Changed);
+                }
+                Ok(())
             }
             RemovalExpectation::Absent(filesystem) => match filesystem.validate_directory(path) {
                 Err(LocalFilesystemError::Missing) => Ok(()),
@@ -1117,7 +1141,10 @@ mod tests {
                 Path::new("/src/app"),
                 path,
                 true,
-                &RemovalExpectation::Worktree(confirmed.clone()),
+                &RemovalExpectation::Worktree {
+                    identity: confirmed.clone(),
+                    require_clean: false,
+                },
                 &cancellation,
             )
         };
@@ -1166,7 +1193,10 @@ mod tests {
                 Path::new("/src/app"),
                 &location,
                 true,
-                &RemovalExpectation::Worktree(confirmed),
+                &RemovalExpectation::Worktree {
+                    identity: confirmed,
+                    require_clean: false,
+                },
                 &cancellation,
             ),
             Err(WorktreeRemoveError::Failed)

@@ -126,7 +126,10 @@ fn removal_should_refuse_a_worktree_recreated_at_the_confirmed_location() {
             &repository,
             &location,
             true,
-            &RemovalExpectation::Worktree(confirmed.identity.clone()),
+            &RemovalExpectation::Worktree {
+                identity: confirmed.identity.clone(),
+                require_clean: false,
+            },
             &cancellation,
         ),
         Err(WorktreeRemoveError::Replaced)
@@ -146,7 +149,10 @@ fn removal_should_refuse_a_worktree_recreated_at_the_confirmed_location() {
             &repository,
             &location,
             true,
-            &RemovalExpectation::Worktree(replacement.identity),
+            &RemovalExpectation::Worktree {
+                identity: replacement.identity,
+                require_clean: false,
+            },
             &cancellation,
         ),
         Ok(())
@@ -207,7 +213,10 @@ fn removal_should_force_a_clean_worktree_holding_a_submodule() {
     let check = git
         .check_removal(&location, &local_filesystem(), &cancellation)
         .unwrap();
-    let expected = RemovalExpectation::Worktree(check.identity.clone());
+    let expected = RemovalExpectation::Worktree {
+        identity: check.identity.clone(),
+        require_clean: check.submodules && !check.changes,
+    };
 
     assert_eq!((check.changes, check.submodules), (false, true));
     assert_eq!(
@@ -215,6 +224,17 @@ fn removal_should_force_a_clean_worktree_holding_a_submodule() {
         Err(WorktreeRemoveError::Failed),
         "git refuses a Worktree holding a submodule without --force"
     );
+    fs::write(location.join("notes"), b"unsaved\n").unwrap();
+    assert_eq!(
+        git.confirm_location(&location, &expected, &cancellation),
+        Err(WorktreeRemoveError::Changed)
+    );
+    assert_eq!(
+        git.remove(&repository, &location, true, &expected, &cancellation),
+        Err(WorktreeRemoveError::Changed)
+    );
+    assert_eq!(fs::read(location.join("notes")).unwrap(), b"unsaved\n");
+    fs::remove_file(location.join("notes")).unwrap();
     assert_eq!(
         git.remove(&repository, &location, true, &expected, &cancellation),
         Ok(())

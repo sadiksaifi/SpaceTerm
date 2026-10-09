@@ -181,7 +181,10 @@ impl WorkspaceManager {
             let check = check
                 .await
                 .map(|check: RemovalCheck| Confirmable {
-                    expected: RemovalExpectation::Worktree(check.identity),
+                    expected: RemovalExpectation::Worktree {
+                        identity: check.identity,
+                        require_clean: check.submodules && !check.changes,
+                    },
                     changes: check.changes,
                     submodules: check.submodules,
                 })
@@ -604,6 +607,13 @@ fn present_removal_failure(
             error: WorktreeRemoveError::Replaced,
             ..
         } => "A different Worktree is now at its location, so nothing was removed.",
+        RemovalFailure::Git {
+            error: WorktreeRemoveError::Changed,
+            ..
+        } => {
+            "It changed after you confirmed, so nothing was removed. Remove it again to review \
+             the changes."
+        }
         RemovalFailure::Git {
             error: WorktreeRemoveError::Unchecked,
             ..
