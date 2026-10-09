@@ -1688,7 +1688,7 @@ fn workspace_menu_entries(
             if pinned {
                 "Change Pinned Directory"
             } else {
-                "Pin workspace to a directory"
+                "Pin to Directory"
             },
             RowMenuCommand::Workspace(WorkspaceMenuCommand::PinDirectory),
         )
