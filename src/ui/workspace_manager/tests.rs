@@ -10684,6 +10684,53 @@ fn worktree_rows_should_carry_the_directory_and_branch_that_a_collapsed_row_show
 }
 
 #[gpui::test]
+fn a_nested_shell_should_not_change_the_directory_of_a_worktree_row(cx: &mut TestAppContext) {
+    use crate::terminal::metadata::{MetadataTracker, PromptOwner, TerminalMetadataContext};
+
+    cx.update(|cx| {
+        crate::ui::worktree_store::testing::install(cx);
+    });
+    let (manager, records, cx) = workspace_manager(cx);
+    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
+    present_worktrees(cx, &[&fixture.path().join("shell-integration")]);
+    cx.simulate_keystrokes("cmd-d");
+    cx.run_until_parked();
+    let directory = fixture.path().join("shell-integration/bash");
+    let epoch = Instant::now();
+    let mut tracker = MetadataTracker::new_with_context(
+        TerminalMetadataContext::local(
+            crate::local_path::LocalPathSemantics::Posix,
+            directory.to_str().unwrap(),
+            Default::default(),
+        )
+        .with_prompt_owner(PromptOwner::fixture("0f1e")),
+        "zsh",
+        epoch,
+    );
+    tracker.apply_semantic_prompt("A;redraw=1;spaceterm=0f1e", epoch);
+    tracker.apply_semantic_prompt("C;cmdline=ssh%20host;spaceterm=0f1e", epoch);
+    tracker.set_reported_directory("file://localhost/srv/project");
+    tracker.apply_semantic_prompt("A;redraw=1", epoch);
+    records.report_metadata(records.starts().last().unwrap().session_id, |metadata| {
+        *metadata = (*tracker.snapshot()).clone();
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        manager.read_with(cx, |manager, cx| {
+            manager
+                .worktree_section(manager.workspaces.active_workspace_id(), cx)
+                .unwrap()
+                .groups[0]
+                .rows[0]
+                .directory_tooltip
+                .to_string()
+        }),
+        directory.to_str().unwrap()
+    );
+}
+
+#[gpui::test]
 fn a_disclosure_chevron_should_trail_the_workspace_name(cx: &mut TestAppContext) {
     cx.update(|cx| {
         crate::ui::worktree_store::testing::install(cx);

@@ -1349,17 +1349,23 @@ impl TabManager {
         self.activate_tab_focusing(tab_id, focus, window, cx)
     }
 
-    /// The directory of the focused Pane in a Worktree's most recently active Tab.
+    /// The local Repository Source Directory of the focused Pane in a Worktree's most recently active Tab.
     pub(crate) fn worktree_directory(
         &self,
         id: WorktreeId,
         cx: &App,
-    ) -> Option<crate::domain::CurrentDirectory> {
+    ) -> Option<std::path::PathBuf> {
         let view = self
             .tabs
             .tab(self.tabs.most_recent_tab_in(Some(id))?)?
             .read(cx);
-        view.current_directory(view.focused_pane_id(), cx)
+        match view.pane_repository_source(view.focused_pane_id(), cx)? {
+            (
+                crate::repository_status::RepositoryMachine::Local,
+                crate::repository_status::scheduler::SourceDirectory::Local(directory),
+            ) => Some(directory),
+            _ => None,
+        }
     }
 
     /// The Worktree a Tab belongs to.

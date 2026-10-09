@@ -703,8 +703,19 @@ impl TabView {
         crate::repository_status::RepositoryMachine,
         crate::repository_status::scheduler::SourceDirectory,
     )> {
+        self.pane_repository_source(self.tab.root_pane_id(), cx)
+    }
+
+    pub(crate) fn pane_repository_source(
+        &self,
+        pane_id: PaneId,
+        cx: &App,
+    ) -> Option<(
+        crate::repository_status::RepositoryMachine,
+        crate::repository_status::scheduler::SourceDirectory,
+    )> {
         self.tab
-            .pane(self.tab.root_pane_id())
+            .pane(pane_id)
             .and_then(|terminal| terminal.read(cx).repository_source())
     }
 

@@ -12,8 +12,8 @@ use gpui::{App, AppContext as _, Context, Entity, SharedString, Subscription, Ta
 use super::WorkspaceManager;
 use super::repository::{RowFacts, RowKey};
 use crate::domain::{
-    CurrentDirectory, PinnedDirectory, RepositoryIdentity, WorkspaceEntry, WorkspaceId, WorktreeId,
-    WorktreeKey, WorktreeRegistry,
+    PinnedDirectory, RepositoryIdentity, WorkspaceEntry, WorkspaceId, WorktreeId, WorktreeKey,
+    WorktreeRegistry,
 };
 use crate::repository_status::RepositoryMachine;
 use crate::repository_status::presentation::{HeadGlyph, SidebarBadge};
@@ -599,14 +599,10 @@ impl WorkspaceManager {
         self.workspaces
             .workspace(workspace_id)
             .and_then(|workspace| {
-                match workspace
+                workspace
                     .payload()
                     .read(cx)
-                    .worktree_directory(worktree_id, cx)?
-                {
-                    CurrentDirectory::Local(directory) => Some(directory),
-                    CurrentDirectory::Remote(_) => None,
-                }
+                    .worktree_directory(worktree_id, cx)
             })
             .unwrap_or_else(|| root.to_path_buf())
     }
