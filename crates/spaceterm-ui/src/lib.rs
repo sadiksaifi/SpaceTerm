@@ -151,11 +151,12 @@ pub use shortcut_recorder::{
 pub use text_area::{TextArea, TextAreaEvent, install_text_area_keybindings};
 pub use text_input::{
     Copy as EditCopy, Cut as EditCut, Paste as EditPaste, Redo as EditRedo,
-    SelectAll as EditSelectAll, TextInput, TextInputChangeSource, TextInputComposition,
-    TextInputContentMode, TextInputEscapeBehavior, TextInputEvent, TextInputHomeEndBehavior,
-    TextInputKeybindingProfile, TextInputMetrics, TextInputPaint, TextInputReturnBehavior,
-    TextInputSelection, TextInputTabBehavior, TextInputTheme, TextInputValueChanged,
-    TextInputVariant, TextInputVariants, Undo as EditUndo, install_text_input_keybindings,
+    SelectAll as EditSelectAll, ShowCharacterPalette, TextInput, TextInputChangeSource,
+    TextInputComposition, TextInputContentMode, TextInputEscapeBehavior, TextInputEvent,
+    TextInputHomeEndBehavior, TextInputKeybindingProfile, TextInputMetrics, TextInputPaint,
+    TextInputReturnBehavior, TextInputSelection, TextInputTabBehavior, TextInputTheme,
+    TextInputValueChanged, TextInputVariant, TextInputVariants, Undo as EditUndo,
+    install_text_input_keybindings,
 };
 pub use toggle::{
     Checkbox, CheckboxChange, CheckboxState, Switch, SwitchChange, ToggleActivationSource,

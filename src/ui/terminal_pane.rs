@@ -2386,24 +2386,26 @@ impl TerminalPane {
         self.accessibility = accessibility;
     }
 
+    fn show_character_palette(
+        &mut self,
+        _: &spaceterm_ui::ShowCharacterPalette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if window.is_offering_key_equivalent() || !self.synchronize_terminal_input_focus(window, cx)
+        {
+            cx.propagate();
+            return;
+        }
+        window.show_character_palette();
+        cx.stop_propagation();
+    }
+
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if !self.synchronize_terminal_input_focus(window, cx) {
             return;
         }
         if window.is_offering_key_equivalent() {
-            return;
-        }
-        #[cfg(target_os = "macos")]
-        if event.keystroke.key == "space"
-            && event.keystroke.modifiers
-                == (gpui::Modifiers {
-                    control: true,
-                    platform: true,
-                    ..gpui::Modifiers::default()
-                })
-        {
-            window.show_character_palette();
-            cx.stop_propagation();
             return;
         }
         // A bare Escape pair leaves fullscreen while each press still reaches the session. Presses
@@ -4777,6 +4779,7 @@ impl Render for TerminalPane {
             .on_action(cx.listener(Self::paste_clipboard))
             .on_action(cx.listener(Self::paste_selection))
             .on_action(cx.listener(Self::edit_paste))
+            .on_action(cx.listener(Self::show_character_palette))
             .on_action(cx.listener(Self::export_diagnostics))
             .on_drop(cx.listener(Self::insert_dropped_files))
             .on_action(cx.listener(Self::set_up_permission_request))

@@ -5768,7 +5768,7 @@ fn native_key_equivalents_defer_raw_input_and_unclaimed_keys_preserve_repeats(
 ) {
     let (_, cx, records) = connected_terminal_pane(cx);
     let start = records.commands().len();
-    let mut key = event("e", Some("e"), Modifiers::function());
+    let mut key = event("e", None, Modifiers::function());
     assert!(!cx.simulate_key_equivalent(key.clone()));
     assert!(key_presses_since(&records, start).is_empty());
     // A native menu claim ends after the offer. Its release must not reach Kitty input.
@@ -5794,7 +5794,6 @@ fn native_key_equivalents_defer_raw_input_and_unclaimed_keys_preserve_repeats(
     );
 }
 
-#[cfg(target_os = "macos")]
 #[gpui::test]
 fn character_palette_compatibility_shortcut_runs_only_after_native_decline(
     cx: &mut TestAppContext,

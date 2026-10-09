@@ -220,6 +220,7 @@ escape	Some(Identifier("Settings"))	spaceterm::ClearSettingsSearch
 cmd-w	Some(Identifier("About"))	spaceterm::CloseAboutWindow
 cmd-c	Some(Identifier("TerminalPane"))	spaceterm_text_input::Copy
 cmd-v	Some(Identifier("TerminalPane"))	spaceterm_text_input::Paste
+ctrl-cmd-space	Some(Identifier("TerminalPane"))	spaceterm_text_input::ShowCharacterPalette
 cmd-,	None	spaceterm::OpenSettings
 cmd-q	None	spaceterm::QuitApplication
 cmd-h	None	spaceterm::HideApplication

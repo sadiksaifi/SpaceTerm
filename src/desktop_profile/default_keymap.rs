@@ -249,6 +249,11 @@ fn fixed_bindings() -> Vec<KeyBinding> {
     let bindings = vec![
         KeyBinding::new("cmd-c", EditCopy, Some(TERMINAL_KEY_CONTEXT)),
         KeyBinding::new("cmd-v", EditPaste, Some(TERMINAL_KEY_CONTEXT)),
+        KeyBinding::new(
+            "ctrl-cmd-space",
+            spaceterm_ui::ShowCharacterPalette,
+            Some(TERMINAL_KEY_CONTEXT),
+        ),
         KeyBinding::new("cmd-,", crate::ui::settings_window::OpenSettings, None),
         KeyBinding::new("cmd-q", QuitApplication, None),
         KeyBinding::new("cmd-h", HideApplication, None),
