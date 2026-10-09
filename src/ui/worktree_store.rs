@@ -519,6 +519,7 @@ pub(crate) mod testing {
                     "--porcelain",
                     "-z",
                     "--untracked-files=normal",
+                    "--ignore-submodules=none",
                 ] => 0,
                 _ => 128,
             };

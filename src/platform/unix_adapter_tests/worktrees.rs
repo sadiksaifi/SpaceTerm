@@ -175,6 +175,9 @@ fn removal_should_force_a_clean_worktree_holding_a_submodule() {
         fixture.git(directory, &["config", "commit.gpgsign", "false"]);
         fixture.git(directory, &["commit", "-q", "--allow-empty", "-m", "base"]);
     }
+    fs::write(library.join("tracked"), b"base\n").unwrap();
+    fixture.git(&library, &["add", "tracked"]);
+    fixture.git(&library, &["commit", "-q", "-m", "tracked"]);
     let local_transport = ["-c", "protocol.file.allow=always"];
     let library_text = library.to_str().unwrap();
     fixture.git(
@@ -199,6 +202,7 @@ fn removal_should_force_a_clean_worktree_holding_a_submodule() {
         ]
         .concat(),
     );
+    fixture.git(&location, &["config", "submodule.lib.ignore", "all"]);
     let git = LocalWorktreeGit::new(
         Arc::new(UnixRepositoryProgramRunner::new()),
         fixture.git.clone(),
@@ -224,7 +228,12 @@ fn removal_should_force_a_clean_worktree_holding_a_submodule() {
         Err(WorktreeRemoveError::Failed),
         "git refuses a Worktree holding a submodule without --force"
     );
-    fs::write(location.join("notes"), b"unsaved\n").unwrap();
+    fs::write(location.join("lib/tracked"), b"unsaved\n").unwrap();
+    assert!(
+        git.check_removal(&location, &local_filesystem(), &cancellation)
+            .unwrap()
+            .changes
+    );
     assert_eq!(
         git.confirm_location(&location, &expected, &cancellation),
         Err(WorktreeRemoveError::Changed)
@@ -233,8 +242,11 @@ fn removal_should_force_a_clean_worktree_holding_a_submodule() {
         git.remove(&repository, &location, true, &expected, &cancellation),
         Err(WorktreeRemoveError::Changed)
     );
-    assert_eq!(fs::read(location.join("notes")).unwrap(), b"unsaved\n");
-    fs::remove_file(location.join("notes")).unwrap();
+    assert_eq!(
+        fs::read(location.join("lib/tracked")).unwrap(),
+        b"unsaved\n"
+    );
+    fs::write(location.join("lib/tracked"), b"base\n").unwrap();
     assert_eq!(
         git.remove(&repository, &location, true, &expected, &cancellation),
         Ok(())

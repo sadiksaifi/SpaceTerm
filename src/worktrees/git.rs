@@ -610,7 +610,13 @@ impl LocalWorktreeGit {
 }
 
 /// Lists modified tracked files and untracked files, one record per path.
-const CHANGES_ARGUMENTS: [&str; 4] = ["status", "--porcelain", "-z", "--untracked-files=normal"];
+const CHANGES_ARGUMENTS: [&str; 5] = [
+    "status",
+    "--porcelain",
+    "-z",
+    "--untracked-files=normal",
+    "--ignore-submodules=none",
+];
 const IDENTITY_ARGUMENTS: [&str; 2] = ["rev-parse", "--absolute-git-dir"];
 const SUBMODULE_PATH_ARGUMENTS: [&str; 6] = [
     "config",
@@ -1028,8 +1034,14 @@ mod tests {
         let requests = runner.requests();
         assert_eq!(tail(&requests[0], 2), ["rev-parse", "--absolute-git-dir"]);
         assert_eq!(
-            tail(&requests[1], 4),
-            ["status", "--porcelain", "-z", "--untracked-files=normal"]
+            tail(&requests[1], 5),
+            [
+                "status",
+                "--porcelain",
+                "-z",
+                "--untracked-files=normal",
+                "--ignore-submodules=none"
+            ]
         );
     }
 
