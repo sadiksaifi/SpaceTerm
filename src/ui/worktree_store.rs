@@ -5,7 +5,7 @@
 //! adapters host composition injected.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -209,20 +209,25 @@ impl WorktreeStore {
         })
     }
 
-    /// Which Worktree is at `path` and whether removing it discards changes, or `None` when git
+    /// Which Worktree is at `path` and whether removing it discards changes, or an error when git
     /// cannot tell. `filesystem` retains the Worktree's directory for the later checks.
     pub(crate) fn check_removal(
         &self,
         path: PathBuf,
         filesystem: LocalFilesystemAuthority,
+        pinned_directories: Vec<PathBuf>,
         cx: &mut Context<Self>,
-    ) -> Task<Option<RemovalCheck>> {
+    ) -> Task<Result<RemovalCheck, WorktreeRemoveError>> {
         let cancellation = self.cancellation.clone();
         let task = self.run_git(
-            move |git| git.check_removal(&path, &filesystem, &cancellation).ok(),
+            move |git| {
+                protect_pinned_directories(&path, &pinned_directories, &filesystem)?;
+                git.check_removal(&path, &filesystem, &cancellation)
+                    .map_err(|_| WorktreeRemoveError::Unchecked)
+            },
             cx,
         );
-        cx.spawn(async move |_, _| task.await.flatten())
+        cx.spawn(async move |_, _| task.await.unwrap_or(Err(WorktreeRemoveError::Unchecked)))
     }
 
     /// Whether `path` still shows what the person confirmed removing.
@@ -230,11 +235,16 @@ impl WorktreeStore {
         &self,
         path: PathBuf,
         expected: RemovalExpectation,
+        filesystem: LocalFilesystemAuthority,
+        pinned_directories: Vec<PathBuf>,
         cx: &mut Context<Self>,
     ) -> Task<Result<(), WorktreeRemoveError>> {
         let cancellation = self.cancellation.clone();
         let task = self.run_git(
-            move |git| git.confirm_location(&path, &expected, &cancellation),
+            move |git| {
+                protect_pinned_directories(&path, &pinned_directories, &filesystem)?;
+                git.confirm_location(&path, &expected, &cancellation)
+            },
             cx,
         );
         cx.spawn(async move |_, _| task.await.unwrap_or(Err(WorktreeRemoveError::Failed)))
@@ -431,6 +441,21 @@ impl WorktreeStore {
             let _ = store.update(cx, |store, cx| finish(store, result, cx));
         })
         .detach();
+    }
+}
+
+fn protect_pinned_directories(
+    root: &Path,
+    pinned_directories: &[PathBuf],
+    filesystem: &LocalFilesystemAuthority,
+) -> Result<(), WorktreeRemoveError> {
+    if pinned_directories
+        .iter()
+        .any(|pinned| filesystem.physically_contains(root, pinned))
+    {
+        Err(WorktreeRemoveError::HoldsPinnedDirectory)
+    } else {
+        Ok(())
     }
 }
 

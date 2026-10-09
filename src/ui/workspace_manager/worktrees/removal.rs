@@ -32,6 +32,7 @@ struct RemovalTarget {
     main_root: PathBuf,
     common: PathBuf,
     missing: bool,
+    pinned_directories: Vec<PathBuf>,
     /// Every Workspace holding Tabs in the Worktree, with the Worktree's id there.
     holders: Vec<(WorkspaceId, WorktreeId)>,
     tabs: usize,
@@ -175,20 +176,17 @@ impl WorkspaceManager {
         }
         let filesystem = self.local_filesystem.clone();
         let check = store.update(cx, |store, cx| {
-            store.check_removal(target.root, filesystem, cx)
+            store.check_removal(target.root, filesystem, target.pinned_directories, cx)
         });
         cx.spawn(async move |_, cx| {
-            let check = check
-                .await
-                .map(|check: RemovalCheck| Confirmable {
-                    expected: RemovalExpectation::Worktree {
-                        identity: check.identity,
-                        require_clean: check.submodules && !check.changes,
-                    },
-                    changes: check.changes,
-                    submodules: check.submodules,
-                })
-                .ok_or(WorktreeRemoveError::Unchecked);
+            let check = check.await.map(|check: RemovalCheck| Confirmable {
+                expected: RemovalExpectation::Worktree {
+                    identity: check.identity,
+                    require_clean: check.submodules && !check.changes,
+                },
+                changes: check.changes,
+                submodules: check.submodules,
+            });
             let _ = window_handle.update(cx, |manager, window, cx| {
                 manager.present_worktree_removal(
                     generation,
@@ -369,8 +367,15 @@ impl WorkspaceManager {
         };
         let name = target.name.clone();
         let expected = confirmed.expected.clone();
+        let filesystem = self.local_filesystem.clone();
         let check = store.update(cx, |store, cx| {
-            store.confirm_location(target.root, expected, cx)
+            store.confirm_location(
+                target.root,
+                expected,
+                filesystem,
+                target.pinned_directories,
+                cx,
+            )
         });
         cx.spawn(async move |_, cx| {
             let result = check.await;
@@ -510,6 +515,11 @@ impl WorkspaceManager {
             main_root: snapshot.repository.main_root().to_path_buf(),
             common: snapshot.common_directory.clone(),
             missing: row.missing,
+            pinned_directories: self
+                .workspaces
+                .iter()
+                .filter_map(|workspace| self.local_pinned_directory(workspace.id()))
+                .collect(),
             holders,
             tabs,
             other_tabs,
@@ -603,6 +613,10 @@ fn present_removal_failure(
         RemovalFailure::TabsKept => {
             "Closing its Tabs would leave a Workspace with no Tab, so nothing was removed."
         }
+        RemovalFailure::Git {
+            error: WorktreeRemoveError::HoldsPinnedDirectory,
+            ..
+        } => "It holds a Pinned Directory, so nothing was removed.",
         RemovalFailure::Git {
             error: WorktreeRemoveError::Replaced,
             ..

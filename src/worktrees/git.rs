@@ -106,6 +106,8 @@ pub(crate) enum WorktreeCreateError {
 /// Why git did not remove a Worktree.
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
 pub(crate) enum WorktreeRemoveError {
+    #[error("the Worktree holds a Pinned Directory")]
+    HoldsPinnedDirectory,
     #[error("a different Worktree now has the confirmed location")]
     Replaced,
     #[error("the Worktree changed after removal was confirmed")]
