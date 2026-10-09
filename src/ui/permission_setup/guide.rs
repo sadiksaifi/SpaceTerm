@@ -90,7 +90,7 @@ pub(super) fn open(
         },
         |window, cx| {
             window.set_window_title("Setup Guide");
-            let glass = host.install_glass(window, RadiusRole::SurfaceLarge.pixels());
+            let glass = host.configure_window(window, RadiusRole::SurfaceLarge.pixels());
             cx.new(|_| SetupGuide {
                 presentation,
                 bundle,

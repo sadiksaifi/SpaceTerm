@@ -70,11 +70,10 @@ pub(crate) trait SetupGuideHost: Send + Sync {
     /// main thread.
     fn application_bundle(&self) -> Option<ApplicationBundle>;
 
-    /// Places the Operating System's glass material behind the guide's content, rounded to
-    /// `corner_radius`, so the guide floats on System Settings like part of it. Returns `false`
-    /// when the host has no such material; the guide then paints its own surface. It is called on
-    /// the main thread, once for each guide window.
-    fn install_glass(&self, window: &gpui::Window, corner_radius: Pixels) -> bool;
+    /// Keeps mouse interaction with the guide from taking keyboard focus and places native glass
+    /// behind its content, rounded to `corner_radius`. Returns whether glass was installed; the
+    /// guide paints its own surface otherwise. Called on the main thread once per guide window.
+    fn configure_window(&self, window: &gpui::Window, corner_radius: Pixels) -> bool;
 
     /// Draws `row` with the running application's icon, or returns `None` when the host cannot;
     /// the drag then shows the application's icon alone. It is called on the main thread.
@@ -131,7 +130,7 @@ pub(crate) mod testing {
             self.bundle.clone()
         }
 
-        fn install_glass(&self, _: &gpui::Window, _: Pixels) -> bool {
+        fn configure_window(&self, _: &gpui::Window, _: Pixels) -> bool {
             self.glass.fetch_add(1, Ordering::Relaxed);
             false
         }

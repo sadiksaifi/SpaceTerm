@@ -37,6 +37,8 @@ pub(crate) fn run() {
 
     native_test!(super::macos_keyboard_layout::tests::native_layouts_resolve_dispatch_and_system_reservations);
 
+    native_test!(super::macos_setup_guide_host::tests::guide_mouse_click_preserves_keyboard_focus);
+
     native_test!(super::macos_accessibility::tests::bundled_font_metadata_does_not_require_system_installation);
     gpui_test!(
         super::macos_accessibility::tests::presented_pane_attaches_its_text_area_to_the_pane_node
@@ -95,5 +97,5 @@ pub(crate) fn run() {
     native_test!(
         macos_pasteboard::tests::native_text_clipboard_preserves_utf8_and_rejects_oversized_text
     );
-    println!("33 native main-thread tests passed");
+    println!("34 native main-thread tests passed");
 }
