@@ -12,6 +12,7 @@ use spaceterm_ui::{
 use super::super::WorkspaceManager;
 use crate::close_confirmation::CloseTarget;
 use crate::domain::{WorkspaceId, WorktreeId, WorktreeKey};
+use crate::repository_status::presentation::{MAXIMUM_NAME_CHARS, sanitize_for_display};
 use crate::terminal::native_services::clipboard::TextClipboardTarget;
 use crate::ui::workspace_sidebar::WorktreeRemoval;
 use crate::worktrees::git::{RemovalCheck, RemovalExpectation, WorktreeRemoveError};
@@ -246,7 +247,10 @@ impl WorkspaceManager {
                 return;
             }
         };
-        let title = format!("Remove Worktree \u{201c}{}\u{201d}?", target.name);
+        let title = format!(
+            "Remove Worktree \u{201c}{}\u{201d}?",
+            sanitize_for_display(&target.name, MAXIMUM_NAME_CHARS)
+        );
         let mut message = Vec::new();
         if discard {
             message.push("Its uncommitted changes and untracked files will be deleted.".to_owned());
@@ -276,7 +280,10 @@ impl WorkspaceManager {
             }
         }
         match &target.branch {
-            Some(branch) => message.push(format!("The branch \u{201c}{branch}\u{201d} is kept.")),
+            Some(branch) => message.push(format!(
+                "The branch \u{201c}{}\u{201d} is kept.",
+                sanitize_for_display(branch, MAXIMUM_NAME_CHARS)
+            )),
             None => message.push("Its commits stay in the repository.".to_owned()),
         }
         let result = Alert::new(
@@ -644,7 +651,10 @@ fn present_removal_failure(
              it again to discard the changes."
         }
     };
-    let title = format!("Couldn\u{2019}t Remove \u{201c}{name}\u{201d}");
+    let title = format!(
+        "Couldn\u{2019}t Remove \u{201c}{}\u{201d}",
+        sanitize_for_display(name, MAXIMUM_NAME_CHARS)
+    );
     if let Err(error) = Alert::new(
         ModalId::new("worktree-removal-failed"),
         title.clone(),

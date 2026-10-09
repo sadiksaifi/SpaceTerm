@@ -18,6 +18,7 @@ use spaceterm_ui::{
 use super::appearance::{ChromeAppearance, gpui_color};
 use super::chrome_typography::{ChromeTextStyleExt, TextRole};
 use crate::platform::local_filesystem::{LocalFilesystemError, NewDirectoryTarget};
+use crate::repository_status::presentation::{MAXIMUM_NAME_CHARS, sanitize_for_display};
 use crate::worktrees::git::{BranchList, BranchName, WorktreeBranch, WorktreeCreateError};
 use crate::worktrees::path_template::expand;
 use crate::worktrees::ref_format::{BranchNameError, validate_branch_name};
@@ -798,11 +799,17 @@ impl WorktreeForm {
             return Vec::new();
         };
         let local = branches.local.iter().map(|name| {
-            ComboBoxItem::new(Choice::Base(BranchName::Local(name.clone())), name.clone())
+            ComboBoxItem::new(
+                Choice::Base(BranchName::Local(name.clone())),
+                sanitize_for_display(name, MAXIMUM_NAME_CHARS),
+            )
         });
         let remote = branches.remote.iter().map(|name| {
-            ComboBoxItem::new(Choice::Base(BranchName::Remote(name.clone())), name.clone())
-                .description("Remote branch")
+            ComboBoxItem::new(
+                Choice::Base(BranchName::Remote(name.clone())),
+                sanitize_for_display(name, MAXIMUM_NAME_CHARS),
+            )
+            .description("Remote branch")
         });
         local.chain(remote).collect()
     }
@@ -827,11 +834,17 @@ impl WorktreeForm {
             .into_iter()
             .chain(taken)
             .map(|name| {
-                let item = ComboBoxItem::new(Choice::Existing(name.clone()), name.clone())
-                    .debug_selector(format!("new-worktree-branch-{name}"));
+                let item = ComboBoxItem::new(
+                    Choice::Existing(name.clone()),
+                    sanitize_for_display(name, MAXIMUM_NAME_CHARS),
+                )
+                .debug_selector(format!("new-worktree-branch-{name}"));
                 match checked_out_in(name) {
                     Some(directory) => item
-                        .description(format!("Checked out in {directory}"))
+                        .description(format!(
+                            "Checked out in {}",
+                            sanitize_for_display(directory, MAXIMUM_NAME_CHARS)
+                        ))
                         .disabled(true),
                     None => item,
                 }
@@ -846,7 +859,12 @@ impl WorktreeForm {
         branches
             .remote
             .iter()
-            .map(|name| ComboBoxItem::new(Choice::Remote(name.clone()), name.clone()))
+            .map(|name| {
+                ComboBoxItem::new(
+                    Choice::Remote(name.clone()),
+                    sanitize_for_display(name, MAXIMUM_NAME_CHARS),
+                )
+            })
             .collect()
     }
 
@@ -1160,6 +1178,50 @@ mod tests {
             .expect("the Create action");
         cx.simulate_click(bounds.center(), Modifiers::none());
         cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn branch_picker_should_sanitize_labels_and_keep_raw_branch_choices(cx: &mut TestAppContext) {
+        let (form, _, cx) = form_window(Rc::new(ScriptedBackend::default()), true, cx);
+        let local = "feature/\u{202e}search".to_owned();
+        let remote = format!("origin/{local}");
+        form.update(cx, |form, cx| {
+            form.branches_loaded(
+                Some(BranchList {
+                    local: vec![local.clone()],
+                    remote: vec![remote.clone()],
+                }),
+                cx,
+            );
+        });
+
+        let choices = form.read_with(cx, |form, _| {
+            form.base_items()
+                .into_iter()
+                .chain(form.existing_items())
+                .chain(form.remote_items())
+                .map(|item| (item.id().clone(), item.label().to_owned()))
+                .collect::<Vec<_>>()
+        });
+
+        assert_eq!(
+            choices,
+            [
+                (
+                    Choice::Base(BranchName::Local(local.clone())),
+                    "feature/\u{fffd}search".into()
+                ),
+                (
+                    Choice::Base(BranchName::Remote(remote.clone())),
+                    "origin/feature/\u{fffd}search".into()
+                ),
+                (Choice::Existing(local), "feature/\u{fffd}search".into()),
+                (
+                    Choice::Remote(remote),
+                    "origin/feature/\u{fffd}search".into()
+                ),
+            ]
+        );
     }
 
     #[gpui::test]

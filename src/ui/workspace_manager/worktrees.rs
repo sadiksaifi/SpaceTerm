@@ -16,7 +16,9 @@ use crate::domain::{
     WorktreeRegistry,
 };
 use crate::repository_status::RepositoryMachine;
-use crate::repository_status::presentation::{HeadGlyph, SidebarBadge};
+use crate::repository_status::presentation::{
+    HeadGlyph, MAXIMUM_NAME_CHARS, SidebarBadge, sanitize_for_display,
+};
 use crate::repository_status::scheduler::SourceDirectory;
 use crate::ui::TabManager;
 use crate::ui::workspace_sidebar::{
@@ -427,10 +429,11 @@ impl WorkspaceManager {
         // `listed` says whether the repository the Workspace reads lists the Worktree now.
         let row = |id: WorktreeId, record: &WorktreeRecord, missing: bool, listed: bool| {
             let (label, detached) = match &record.head {
-                WorktreeHead::Branch(branch) => (branch.clone(), false),
-                WorktreeHead::Detached(commit) => (commit.clone(), true),
-                WorktreeHead::Bare => (String::new(), false),
+                WorktreeHead::Branch(branch) => (branch.as_str(), false),
+                WorktreeHead::Detached(commit) => (commit.as_str(), true),
+                WorktreeHead::Bare => ("", false),
             };
+            let label = sanitize_for_display(label, MAXIMUM_NAME_CHARS);
             let directory = self.worktree_row_directory(workspace_id, id, &record.root, cx);
             // The listing names the branch until the Worktree's status is read.
             let repository = self.worktree_badge(workspace_id, id, cx).or_else(|| {
@@ -458,7 +461,8 @@ impl WorkspaceManager {
             };
             WorktreeRowViewModel {
                 worktree_id: id,
-                name: directory_name(&record.root),
+                name: sanitize_for_display(&directory_name(&record.root), MAXIMUM_NAME_CHARS)
+                    .into(),
                 label: label.into(),
                 detached,
                 path: record.root.display().to_string().into(),
