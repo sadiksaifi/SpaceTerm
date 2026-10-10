@@ -63,6 +63,51 @@ struct NotifyRepositoryWatch(#[allow(dead_code, reason = "held for its drop")] R
 
 impl RepositoryWatch for NotifyRepositoryWatch {}
 
+#[cfg(test)]
+mod change_tests {
+    use notify::event::{CreateKind, ModifyKind, RemoveKind};
+
+    use super::*;
+
+    #[test]
+    fn reads_and_other_nonwriting_access_do_not_report_changes() {
+        for kind in [
+            AccessKind::Any,
+            AccessKind::Read,
+            AccessKind::Open(AccessMode::Any),
+            AccessKind::Open(AccessMode::Read),
+            AccessKind::Open(AccessMode::Write),
+            AccessKind::Open(AccessMode::Other),
+            AccessKind::Close(AccessMode::Any),
+            AccessKind::Close(AccessMode::Read),
+            AccessKind::Close(AccessMode::Other),
+            AccessKind::Other,
+        ] {
+            assert!(!is_change(EventKind::Access(kind)), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn closing_a_writer_reports_a_change() {
+        assert!(is_change(EventKind::Access(AccessKind::Close(
+            AccessMode::Write
+        ))));
+    }
+
+    #[test]
+    fn filesystem_changes_and_rescans_report_changes() {
+        for kind in [
+            EventKind::Any,
+            EventKind::Create(CreateKind::Any),
+            EventKind::Modify(ModifyKind::Any),
+            EventKind::Remove(RemoveKind::Any),
+            EventKind::Other,
+        ] {
+            assert!(is_change(kind), "{kind:?}");
+        }
+    }
+}
+
 #[cfg(all(test, feature = "native-tests"))]
 mod tests {
     use std::path::PathBuf;
@@ -139,8 +184,10 @@ mod tests {
         assert!(changes.recv_timeout(Duration::from_secs(5)).is_ok());
     }
 
+    // inotify reports access events; FSEvents only reports changes and can deliver setup late.
+    #[cfg(target_os = "linux")]
     #[test]
-    fn unix_repository_watch_ignores_reads_of_watched_files() {
+    fn linux_repository_watch_ignores_reads_of_watched_files() {
         let fixture = Fixture::new();
         let head = fixture.0.join("HEAD");
         std::fs::write(&head, "ref: refs/heads/main\n").unwrap();
