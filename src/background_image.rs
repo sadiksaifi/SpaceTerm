@@ -186,6 +186,16 @@ pub(crate) struct LoadedBackgroundImage {
     pub(crate) bytes: Arc<[u8]>,
 }
 
+#[cfg(all(test, feature = "native-tests", target_os = "macos"))]
+impl LoadedBackgroundImage {
+    pub(crate) fn of_bytes(bytes: &[u8]) -> Self {
+        Self {
+            id: BackgroundImageId::of(bytes),
+            bytes: bytes.into(),
+        }
+    }
+}
+
 /// Copies, reads and discards Background Images in the application data directory.
 pub(crate) struct BackgroundImageStore {
     paths: Arc<AppPaths>,

@@ -64,6 +64,9 @@ pub(crate) fn run() {
     );
     gpui_test!(macos_window_backdrop::tests::the_background_image_survives_redraws_and_resizing);
     gpui_test!(
+        macos_window_backdrop::tests::the_decoded_background_image_goes_with_its_last_window
+    );
+    gpui_test!(
         macos_application_quit::tests::native_hook_cancels_policy_then_consumes_one_confirmation
     );
     gpui_test!(macos_services::tests::service_type_classifies_nil_and_empty_nsstring_as_absent);

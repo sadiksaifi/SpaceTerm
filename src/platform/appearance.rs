@@ -58,15 +58,15 @@ pub(crate) trait AppearancePlatform {
     fn accessibility_display_options(&self) -> AccessibilityDisplayOptions {
         AccessibilityDisplayOptions::default()
     }
-    /// Presents `image`, the encoded bytes of the Background Image, behind one Window's content
-    /// and beneath its backdrop, or removes the image when `image` is `None`.
+    /// Presents `image`, the loaded Background Image, behind one Window's content and beneath its
+    /// backdrop, or removes the image when `image` is `None`.
     ///
     /// The window owner calls this once per change. Only Workspace windows present an image, and
-    /// every one of them receives the same shared bytes, so an Adapter may decode them once.
+    /// every one of them receives the same copy, so an Adapter may decode it once per id.
     fn apply_window_background_image(
         &self,
         window: &gpui::Window,
-        image: Option<&std::sync::Arc<[u8]>>,
+        image: Option<&crate::background_image::LoadedBackgroundImage>,
     ) {
         let _ = (window, image);
     }
@@ -186,11 +186,11 @@ pub(crate) mod testing {
         fn apply_window_background_image(
             &self,
             _: &gpui::Window,
-            image: Option<&std::sync::Arc<[u8]>>,
+            image: Option<&crate::background_image::LoadedBackgroundImage>,
         ) {
             self.background_images
                 .borrow_mut()
-                .push(image.map(|bytes| bytes.to_vec()));
+                .push(image.map(|image| image.bytes.to_vec()));
         }
         fn system_appearance(&self) -> Option<Appearance> {
             self.fact.get()

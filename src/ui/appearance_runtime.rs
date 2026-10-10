@@ -585,7 +585,7 @@ impl WindowAppearanceOwner {
         if let Some(runtime) = cx.try_global::<AppearanceRuntime>() {
             runtime
                 .platform
-                .apply_window_background_image(window, image.as_ref().map(|image| &image.bytes));
+                .apply_window_background_image(window, image.as_ref());
         }
         self.background_image = Some(id);
     }

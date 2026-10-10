@@ -7,9 +7,8 @@
 //! blends within the window, so it softens and tints the image exactly as it would the desktop.
 
 use std::cell::RefCell;
-use std::sync::Arc;
 
-use objc2::rc::Retained;
+use objc2::rc::{Retained, Weak};
 use objc2::runtime::AnyObject;
 use objc2::{AllocAnyThread, MainThreadMarker, MainThreadOnly, msg_send};
 use objc2_app_kit::{
@@ -20,6 +19,7 @@ use objc2_foundation::{NSData, NSString};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use crate::appearance::ChromeTone;
+use crate::background_image::{BackgroundImageId, LoadedBackgroundImage};
 use crate::platform::appearance::WindowBackdrop;
 
 const BACKDROP_IDENTIFIER: &str = "dev.spaceterm.window-backdrop";
@@ -39,8 +39,9 @@ pub(crate) fn apply(window: &gpui::Window, backdrop: WindowBackdrop) {
     }
 }
 
-/// Encoded bytes and the image the system decoded from them, if it could.
-type DecodedImage = (Arc<[u8]>, Option<Retained<NSImage>>);
+/// One copy and the image the system decoded from it, if it could. The windows presenting the
+/// image own it, so it is released with the last of them.
+type DecodedImage = (BackgroundImageId, Option<Weak<NSImage>>);
 
 thread_local! {
     /// The Background Image every Workspace window presents, decoded once and shared by them.
@@ -49,7 +50,7 @@ thread_local! {
 
 /// Installs, replaces, or removes the Background Image beneath one window's material. Bytes the
 /// system cannot decode present no image.
-pub(crate) fn apply_background_image(window: &gpui::Window, image: Option<&Arc<[u8]>>) {
+pub(crate) fn apply_background_image(window: &gpui::Window, image: Option<&LoadedBackgroundImage>) {
     if let Some((content_view, mtm)) = content_view(window) {
         apply_image_to_content_view(&content_view, image, mtm);
     }
@@ -93,7 +94,7 @@ fn apply_to_content_view(
 
 fn apply_image_to_content_view(
     content_view: &NSView,
-    image: Option<&Arc<[u8]>>,
+    image: Option<&LoadedBackgroundImage>,
     mtm: MainThreadMarker,
 ) {
     let image = decoded(image);
@@ -107,21 +108,25 @@ fn apply_image_to_content_view(
     blend_with_background_image(content_view);
 }
 
-/// Decodes `bytes` once for every window, and releases the decoded image once none presents it.
-fn decoded(bytes: Option<&Arc<[u8]>>) -> Option<Retained<NSImage>> {
+/// Decodes one copy once for every window that presents it while any of them does.
+fn decoded(image: Option<&LoadedBackgroundImage>) -> Option<Retained<NSImage>> {
     DECODED.with_borrow_mut(|cached| {
-        let Some(bytes) = bytes else {
+        let Some(image) = image else {
             *cached = None;
             return None;
         };
-        if let Some((cached_bytes, image)) = cached.as_ref()
-            && Arc::ptr_eq(cached_bytes, bytes)
-        {
-            return image.clone();
+        match cached.as_ref() {
+            Some((id, None)) if *id == image.id => return None,
+            Some((id, Some(decoded))) if *id == image.id => {
+                if let Some(decoded) = decoded.load() {
+                    return Some(decoded);
+                }
+            }
+            _ => {}
         }
-        let image = NSImage::initWithData(NSImage::alloc(), &NSData::with_bytes(bytes));
-        *cached = Some((Arc::clone(bytes), image.clone()));
-        image
+        let decoded = NSImage::initWithData(NSImage::alloc(), &NSData::with_bytes(&image.bytes));
+        *cached = Some((image.id, decoded.as_ref().map(Weak::from_retained)));
+        decoded
     })
 }
 
@@ -324,7 +329,7 @@ pub(in crate::platform) mod tests {
     /// A 1x1 PNG the system decodes.
     const PIXEL: &[u8] = b"\x89\x50\x4e\x47\x0d\x0a\x1a\x0a\x00\x00\x00\x0d\x49\x48\x44\x52\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90\x77\x53\xde\x00\x00\x00\x0c\x49\x44\x41\x54\x78\x9c\x63\xf8\xdf\xc0\x00\x00\x04\x01\x01\x80\xc5\x2a\x18\x5d\x00\x00\x00\x00\x49\x45\x4e\x44\xae\x42\x60\x82";
 
-    fn apply_image(content_view: &NSView, image: Option<&Arc<[u8]>>) {
+    fn apply_image(content_view: &NSView, image: Option<&LoadedBackgroundImage>) {
         super::apply_image_to_content_view(
             content_view,
             image,
@@ -359,7 +364,7 @@ pub(in crate::platform) mod tests {
             };
             let blending = |content: &ContentView| content.backdrop().unwrap().blendingMode();
 
-            let pixel: Arc<[u8]> = PIXEL.into();
+            let pixel = LoadedBackgroundImage::of_bytes(PIXEL);
             apply_to_content_view(&content.0, dark);
             apply_image(&content.0, Some(&pixel));
             apply_image(&content.0, Some(&pixel));
@@ -373,7 +378,10 @@ pub(in crate::platform) mod tests {
             assert_eq!(order(&content), ["image", "material", "renderer"]);
             assert_eq!(blending(&content), NSVisualEffectBlendingMode::WithinWindow);
 
-            apply_image(&content.0, Some(&Arc::from(b"not an image".as_slice())));
+            apply_image(
+                &content.0,
+                Some(&LoadedBackgroundImage::of_bytes(b"not an image")),
+            );
             assert_eq!(order(&content), ["material", "renderer"]);
             assert_eq!(blending(&content), NSVisualEffectBlendingMode::BehindWindow);
             apply_to_content_view(&content.0, None);
@@ -399,7 +407,7 @@ pub(in crate::platform) mod tests {
             };
             unsafe { window.setReleasedWhenClosed(false) };
             let content_view = window.contentView().expect("a window has a content view");
-            let pixel: Arc<[u8]> = PIXEL.into();
+            let pixel = LoadedBackgroundImage::of_bytes(PIXEL);
             apply_image(&content_view, Some(&pixel));
             let image = identified_subview(&content_view, BACKGROUND_IMAGE_IDENTIFIER).unwrap();
             let contents = |view: &NSView| unsafe {
@@ -424,6 +432,39 @@ pub(in crate::platform) mod tests {
                 "a redraw must not clear the image"
             );
             window.close();
+        });
+    }
+
+    /// The decoded image belongs to the windows that present it, so it goes with the last one.
+    pub(in crate::platform) fn the_decoded_background_image_goes_with_its_last_window(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|_| {
+            let pixel = LoadedBackgroundImage::of_bytes(PIXEL);
+            let cached = || {
+                DECODED.with_borrow(|cached| {
+                    cached
+                        .as_ref()
+                        .and_then(|(_, decoded)| decoded.as_ref()?.load())
+                        .is_some()
+                })
+            };
+            objc2::rc::autoreleasepool(|_| {
+                let content = ContentView::new(NSSize::new(320.0, 180.0));
+                apply_image(&content.0, Some(&pixel));
+                assert!(cached());
+                // SAFETY: CATransaction is a live Core Animation class, and committing the
+                // implicit transaction releases the layers it retained.
+                let _: () = unsafe { msg_send![objc2::class!(CATransaction), flush] };
+            });
+            assert!(!cached(), "no window presents the image any longer");
+
+            // A window that opens later decodes the image again.
+            let content = ContentView::new(NSSize::new(320.0, 180.0));
+            apply_image(&content.0, Some(&pixel));
+            assert!(identified_subview(&content.0, BACKGROUND_IMAGE_IDENTIFIER).is_some());
+            assert!(cached());
+            apply_image(&content.0, None);
         });
     }
 
