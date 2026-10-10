@@ -1,4 +1,4 @@
-//! The Background Image row: choose an image for Workspace windows, or remove it.
+//! The Background Image row: choose an image for Workspace windows. The row's reset removes it.
 //!
 //! Choosing reads the file off the UI thread and keeps SpaceTerm's own copy, so the Settings name
 //! the copy by its digest and never the chosen path.
@@ -6,13 +6,12 @@
 use std::sync::Arc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, Window, div};
+use gpui::{AnyElement, Window};
 use spaceterm_ui::{Alert, AlertIntent, ModalAction, ModalActionRole, ModalId};
 
 use super::SettingsWindow;
 use super::import::{ImportError, read_selected_file};
 use crate::background_image::{BackgroundImageError, BackgroundImageId, MAXIMUM_BYTES};
-use crate::ui::appearance::ChromeAppearance;
 use crate::ui::background_image_runtime;
 use crate::ui::sidebar_window::form::action_button;
 
@@ -62,52 +61,19 @@ impl SettingsWindow {
         }
     }
 
-    pub(super) fn render_background_image(
-        &mut self,
-        appearance: &ChromeAppearance,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let editable = self.editor.editable();
+    pub(super) fn render_background_image(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let owner = cx.weak_entity();
-        let choose = action_button(
+        action_button(
             "settings-background-image-choose",
             "Choose…",
-            editable,
+            self.editor.editable(),
             move |window, cx| {
                 let _ = owner.update(cx, |settings, cx| {
                     settings.choose_background_image(window, cx);
                 });
             },
-        );
-        let chosen = self
-            .editor
-            .document()
-            .appearance
-            .window
-            .background_image
-            .is_some();
-        let owner = cx.weak_entity();
-        let remove = chosen.then(|| {
-            action_button(
-                "settings-background-image-remove",
-                "Remove",
-                editable,
-                move |_, cx| {
-                    let _ = owner.update(cx, |settings, cx| {
-                        settings.edit(|draft| draft.appearance.window.background_image = None, cx);
-                    });
-                },
-            )
-        });
-        div()
-            .debug_selector(|| "settings-background-image".to_owned())
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(appearance.spacing(8.0))
-            .children(remove)
-            .child(choose)
-            .into_any_element()
+        )
+        .into_any_element()
     }
 
     /// Asks for an image, keeps a copy of it, and names that copy in the Settings.

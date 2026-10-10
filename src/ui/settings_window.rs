@@ -1169,7 +1169,7 @@ impl SettingsWindow {
             SettingsRowId::AppearanceMode => self.render_appearance_mode(cx),
             SettingsRowId::Opacity => self.render_opacity(appearance, cx),
             SettingsRowId::Blur => self.render_blur(cx),
-            SettingsRowId::BackgroundImage => self.render_background_image(appearance, cx),
+            SettingsRowId::BackgroundImage => self.render_background_image(cx),
             SettingsRowId::TerminalTheme => self.render_current_theme(appearance, window, cx),
             SettingsRowId::Density => self.render_density(cx),
             SettingsRowId::TerminalFontFamily => self.render_terminal_font(appearance, cx),

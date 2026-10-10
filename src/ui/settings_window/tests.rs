@@ -2633,7 +2633,7 @@ fn rendered_control_selector(row: SettingsRowId) -> Option<String> {
             SettingsRowId::AppearanceMode => "settings-appearance-mode",
             SettingsRowId::Opacity => "settings-opacity",
             SettingsRowId::Blur => "settings-blur",
-            SettingsRowId::BackgroundImage => "settings-background-image",
+            SettingsRowId::BackgroundImage => "settings-background-image-choose",
             SettingsRowId::Density => "settings-density",
             SettingsRowId::TerminalTheme => "settings-current-theme",
             SettingsRowId::TerminalFontFamily => "settings-terminal-font-family",
@@ -4851,14 +4851,16 @@ fn a_desktop_presenting_background_images_offers_to_choose_one(cx: &mut TestAppC
             .is_some()
     );
     assert!(
-        cx.debug_bounds("settings-background-image-remove")
-            .is_none()
+        cx.debug_bounds("settings-row-background-image-reset")
+            .is_none(),
+        "no image is chosen, so there is nothing to reset"
     );
 }
 
-/// A chosen image is named by its copy until the person removes it, and then the copy goes too.
+/// A chosen image is named by its copy until the person resets the row, and then the copy goes
+/// too.
 #[gpui::test]
-fn a_chosen_image_is_retained_until_it_is_removed(cx: &mut TestAppContext) {
+fn a_chosen_image_is_retained_until_the_row_is_reset(cx: &mut TestAppContext) {
     let (window, harness, store, cx) = open_settings_presenting_background_images(cx);
     let id = store
         .install(crate::background_image::testing::PNG)
@@ -4879,7 +4881,7 @@ fn a_chosen_image_is_retained_until_it_is_removed(cx: &mut TestAppContext) {
         Some(id)
     );
 
-    click("settings-background-image-remove", cx);
+    click("settings-row-background-image-reset", cx);
     settle(cx);
     assert_eq!(
         harness
@@ -4889,7 +4891,7 @@ fn a_chosen_image_is_retained_until_it_is_removed(cx: &mut TestAppContext) {
         None
     );
     assert!(
-        cx.debug_bounds("settings-background-image-remove")
+        cx.debug_bounds("settings-row-background-image-reset")
             .is_none()
     );
     assert_eq!(
@@ -4930,9 +4932,9 @@ fn an_unusable_image_is_explained_and_changes_nothing(cx: &mut TestAppContext) {
     assert_eq!(harness.storage.writes(), 0);
 }
 
-/// Removing the image while a choice is still copying one keeps it removed.
+/// Resetting the row while a choice is still copying an image keeps the image removed.
 #[gpui::test]
-fn a_choice_that_completes_after_a_remove_changes_nothing(cx: &mut TestAppContext) {
+fn a_choice_that_completes_after_a_reset_changes_nothing(cx: &mut TestAppContext) {
     let (window, harness, store, cx) = open_settings_presenting_background_images(cx);
     let first = store
         .install(crate::background_image::testing::PNG)
@@ -4949,7 +4951,7 @@ fn a_choice_that_completes_after_a_remove_changes_nothing(cx: &mut TestAppContex
     settle(cx);
 
     let slow = window.update(cx, |settings, _| settings.begin_background_image_choice());
-    click("settings-background-image-remove", cx);
+    click("settings-row-background-image-reset", cx);
     cx.update(|native, cx| {
         window.update(cx, |settings, cx| {
             settings.finish_background_image(slow, Ok(second), native, cx);
