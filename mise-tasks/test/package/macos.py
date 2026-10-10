@@ -70,6 +70,7 @@ class PackageTests(unittest.TestCase):
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 if sys.argv[1] != "build" or "--locked" not in sys.argv:
     os.execv({cargo!r}, [{cargo!r}, *sys.argv[1:]])
@@ -81,6 +82,10 @@ Path(os.environ["BUILD_RECORD"]).write_text(json.dumps({{
         "MACOS_SIGNING_CERTIFICATE_P12", "MACOS_SIGNING_CERTIFICATE_PASSWORD",
         "APPLE_CERTIFICATE", "APPLE_CERTIFICATE_PASSWORD", "UPDATE_SIGNING_KEY",
     ) if name in os.environ],
+    "signing_available": os.environ["BUILD_SIGNING_FINGERPRINT"] in subprocess.run(
+        ["security", "find-identity", "-p", "codesigning"],
+        capture_output=True, text=True, check=True,
+    ).stdout,
 }}))
 print(json.dumps({{"reason": "compiler-artifact", "target": {{"name": "spaceterm"}},
                   "executable": os.environ["BUILD_EXECUTABLE"]}}))
@@ -94,6 +99,7 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
             "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
             "PYTHONPATH": str(self.root / "mise-tasks/lib"),
             "BUILD_RECORD": str(self.record),
+            "BUILD_SIGNING_FINGERPRINT": self.fingerprint,
         }
         self.artifact = self.root / "target/aarch64-apple-darwin/release/spaceterm"
         self.env["BUILD_EXECUTABLE"] = str(self.artifact)
@@ -190,6 +196,7 @@ int main(int argc, char **argv) {{
         self.assertNotEqual(self.executable_uuid(bundled), self.executable_uuid(self.stale))
         self.assertEqual(json.loads(self.record.read_text())["release_tag"], "v0.0.1")
         self.assertEqual(json.loads(self.record.read_text())["private_inputs"], [])
+        self.assertFalse(json.loads(self.record.read_text())["signing_available"])
         for value in self.credentials.values():
             self.assertNotIn(value, result.stdout + result.stderr)
         requirement = self.run_command(

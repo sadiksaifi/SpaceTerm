@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import tomllib
+from contextlib import nullcontext
 from pathlib import Path
 
 from spaceterm_tasks import ROOT, TaskError, macos_signing, sparkle
@@ -49,10 +50,8 @@ def package(release_tag=None):
         fingerprint = tomllib.loads(
             (identity_directory("spaceterm") / "Packager.toml").read_text()
         )["macos"]["signing-identity"]
-        with macos_signing.release_keychain(fingerprint, os.environ):
-            package_bundle(release_tag)
-    else:
-        package_bundle()
+        macos_signing.signing_credentials(fingerprint, os.environ)
+    package_bundle(release_tag)
 
 
 def package_bundle(release_tag=None):
@@ -95,11 +94,17 @@ def package_bundle(release_tag=None):
     with tempfile.TemporaryDirectory(dir=DIST, prefix=".package.") as temporary:
         output = Path(temporary) / "output"
         print(f"Packaging {app_name}.app and {app_name}.dmg with cargo-packager")
-        packaged = subprocess.run(
-            ["cargo", "packager", "--config", json.dumps(config), "--out-dir", str(output)],
-            cwd=ROOT,
-            env={"CI": "true", **environment},
+        signing = (
+            macos_signing.release_keychain(config["macos"]["signing-identity"], os.environ)
+            if release_tag
+            else nullcontext()
         )
+        with signing:
+            packaged = subprocess.run(
+                ["cargo", "packager", "--config", json.dumps(config), "--out-dir", str(output)],
+                cwd=ROOT,
+                env={"CI": "true", **environment},
+            )
         app = output / f"{app_name}.app"
         dmg = output / f"{app_name}_{version}_aarch64.dmg"
         if packaged.returncode or not app.is_dir() or not dmg.is_file():

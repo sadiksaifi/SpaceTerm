@@ -3,7 +3,7 @@
 #
 #   curl -fsSL https://github.com/sadiksaifi/SpaceTerm/releases/latest/download/install.sh | sh
 #
-# macOS: curl does not quarantine downloads, so Gatekeeper does not block the ad hoc signed app.
+# macOS: curl does not quarantine downloads, so Gatekeeper does not block the self-signed app.
 # SPACETERM_INSTALL_DIR selects a directory other than /Applications.
 #
 # Linux: SpaceTerm installs into ~/.local/lib/spaceterm with a launcher in ~/.local/bin and a

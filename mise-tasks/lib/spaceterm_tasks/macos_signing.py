@@ -58,9 +58,8 @@ def security(arguments, environment):
     return result.stdout
 
 
-@contextmanager
-def release_keychain(fingerprint, environment):
-    """Require the pinned private identity; restore the search list and delete all imports."""
+def signing_credentials(fingerprint, environment):
+    """Reject missing or malformed inputs without making a signing key available."""
     certificate_requirement(fingerprint)
     encoded = environment.get("MACOS_SIGNING_CERTIFICATE_P12", "")
     password = environment.get("MACOS_SIGNING_CERTIFICATE_PASSWORD", "")
@@ -72,6 +71,13 @@ def release_keychain(fingerprint, environment):
         raise TaskError("release signing certificate must be valid Base64") from None
     if not certificate:
         raise TaskError("release signing certificate is empty")
+    return certificate, password
+
+
+@contextmanager
+def release_keychain(fingerprint, environment):
+    """Require the pinned private identity; restore the search list and delete all imports."""
+    certificate, password = signing_credentials(fingerprint, environment)
     clean = signing_environment(environment)
     original = shlex.split(security(["list-keychains", "-d", "user"], clean).decode())
     with tempfile.TemporaryDirectory(prefix="spaceterm-release-signing-") as temporary:
@@ -93,6 +99,7 @@ def release_keychain(fingerprint, environment):
                     str(keychain),
                     "-P",
                     password,
+                    "-x",
                     "-T",
                     "/usr/bin/codesign",
                 ],
