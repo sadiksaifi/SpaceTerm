@@ -2,6 +2,7 @@ mod about;
 mod app;
 mod appearance;
 mod application_identity;
+mod background_image;
 mod bundled_font;
 mod close_confirmation;
 mod domain;
