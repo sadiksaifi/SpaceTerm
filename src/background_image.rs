@@ -183,6 +183,13 @@ pub(crate) enum Discarded {
 #[derive(Clone)]
 pub(crate) struct LoadedBackgroundImage {
     pub(crate) id: BackgroundImageId,
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(
+            dead_code,
+            reason = "only the macOS backdrop Adapter presents image bytes"
+        )
+    )]
     pub(crate) bytes: Arc<[u8]>,
 }
 
@@ -208,6 +215,13 @@ pub(crate) struct BackgroundImageStore {
 }
 
 impl BackgroundImageStore {
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(
+            dead_code,
+            reason = "only macOS composition creates a background image store"
+        )
+    )]
     pub(crate) fn new(paths: Arc<AppPaths>, inspector: Arc<dyn ImageInspector>) -> Self {
         Self {
             paths,
