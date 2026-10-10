@@ -159,6 +159,18 @@ impl TerminalFocusCoordinator {
             && facts.application_active
             && facts.blocker.is_none()
     }
+
+    /// Whether input method text addressed to the Pane reaches terminal input. The host routes
+    /// such text through the input context the Pane activated and keeps that context current
+    /// only for its active application's text target, so host activation facts do not apply:
+    /// a host input method accessory such as an emoji picker holds key status while it commits.
+    pub(crate) const fn accepts_input_method_text(facts: TerminalFocusFacts) -> bool {
+        facts.active_workspace
+            && facts.active_tab
+            && facts.focused_pane
+            && facts.responder
+            && facts.blocker.is_none()
+    }
 }
 
 #[cfg(test)]
@@ -287,6 +299,45 @@ mod tests {
 
         for facts in cases {
             assert!(!TerminalFocusCoordinator::is_focused(facts));
+        }
+    }
+
+    #[test]
+    fn input_method_text_ignores_host_activation_but_requires_pane_ownership() {
+        let focused = TerminalFocusFacts::focused();
+        assert!(TerminalFocusCoordinator::accepts_input_method_text(
+            TerminalFocusFacts {
+                operating_system_window_key: false,
+                application_active: false,
+                ..focused
+            }
+        ));
+
+        let cases = [
+            TerminalFocusFacts {
+                active_workspace: false,
+                ..focused
+            },
+            TerminalFocusFacts {
+                active_tab: false,
+                ..focused
+            },
+            TerminalFocusFacts {
+                focused_pane: false,
+                ..focused
+            },
+            TerminalFocusFacts {
+                responder: false,
+                ..focused
+            },
+            TerminalFocusFacts {
+                blocker: Some(TerminalFocusBlocker::Modal),
+                ..focused
+            },
+        ];
+
+        for facts in cases {
+            assert!(!TerminalFocusCoordinator::accepts_input_method_text(facts));
         }
     }
 

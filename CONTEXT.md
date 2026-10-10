@@ -104,6 +104,8 @@ _Avoid_: Hotkey, key equivalent
 
 **Terminal Input Focus**: A Pane's current eligibility to accept terminal input.
 
+**Input Method Text**: Text the host's text input system delivers to a Pane, such as an input method commit or an emoji picker selection. The Focused Pane accepts it without Terminal Input Focus.
+
 **Zoomed Pane**: The Focused Pane presented alone while its Pane Layout remains intact.
 
 **Workspace Switcher**: The transient chooser for activating an existing Workspace or naming a new one.

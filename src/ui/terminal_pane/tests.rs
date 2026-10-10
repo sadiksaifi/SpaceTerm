@@ -6177,6 +6177,87 @@ fn cancellation_and_focus_loss_discard_marked_text_without_bytes(cx: &mut TestAp
 }
 
 #[gpui::test]
+fn input_method_text_reaches_the_session_while_a_host_accessory_holds_key_status(
+    cx: &mut TestAppContext,
+) {
+    let (pane, cx, records) = connected_terminal_pane(cx);
+    // A host emoji picker takes key status from the Operating-System Window while the Pane's
+    // input context stays current.
+    cx.deactivate_window();
+    cx.run_until_parked();
+    assert!(!cx.update(|window, app| pane.read(app).terminal_input_focused(window, app)));
+
+    cx.update(|window, app| {
+        pane.update(app, |pane, pane_cx| {
+            pane.replace_text_in_range(None, "😂", window, pane_cx);
+        });
+    });
+
+    let commits = records
+        .commands()
+        .into_iter()
+        .filter_map(|call| match call.command {
+            RecordedCommand::Key(input) if input.is_input_method_commit() => input.text,
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(commits, ["😂"]);
+}
+
+#[gpui::test]
+fn input_method_text_is_dropped_without_pane_focus_while_the_window_is_not_key(
+    cx: &mut TestAppContext,
+) {
+    let (pane, cx, records) = connected_terminal_pane(cx);
+    cx.update(|_window, app| {
+        pane.update(app, |pane, app| {
+            pane.set_product_focus(
+                TerminalProductFocus {
+                    focused_pane: false,
+                    ..TerminalProductFocus::default()
+                },
+                app,
+            );
+        });
+    });
+    cx.deactivate_window();
+    cx.run_until_parked();
+
+    cx.update(|window, app| {
+        pane.update(app, |pane, pane_cx| {
+            pane.replace_text_in_range(None, "😂", window, pane_cx);
+        });
+    });
+
+    assert!(
+        records
+            .commands()
+            .iter()
+            .all(|call| !matches!(call.command, RecordedCommand::Key(_)))
+    );
+}
+
+#[gpui::test]
+fn insertion_range_answers_while_a_host_accessory_holds_key_status(cx: &mut TestAppContext) {
+    let (pane, cx, _) = connected_terminal_pane(cx);
+    let insertion = |pane: &Entity<TerminalPane>, cx: &mut VisualTestContext| {
+        cx.update(|window, app| {
+            pane.update(app, |pane, pane_cx| {
+                pane.selected_text_range(false, window, pane_cx)
+                    .map(|selection| selection.range)
+            })
+        })
+    };
+    let focused = insertion(&pane, cx);
+    assert!(focused.is_some());
+
+    cx.deactivate_window();
+    cx.run_until_parked();
+
+    assert_eq!(insertion(&pane, cx), focused);
+}
+
+#[gpui::test]
 fn raw_key_callbacks_are_suppressed_while_marked_text_is_active(cx: &mut TestAppContext) {
     let (pane, cx, records) = connected_terminal_pane(cx);
     cx.update(|window, app| {

@@ -1219,6 +1219,7 @@ impl TerminalPane {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn terminal_input_focused(&self, window: &Window, cx: &App) -> bool {
         self.terminal_input_focused_with_activity(
             window,
@@ -1233,10 +1234,35 @@ impl TerminalPane {
         activity: SurfaceActivity,
         modal_open: bool,
     ) -> bool {
+        self.focus_facts(window, activity, modal_open)
+            .is_some_and(TerminalFocusCoordinator::is_focused)
+    }
+
+    /// Whether input method text that the host addresses to this Pane reaches its Terminal
+    /// Session. Such text arrives through the input context the Pane activated, which the host
+    /// keeps current while a host input method accessory such as an emoji picker holds key
+    /// status, so Terminal Input Focus is not required.
+    fn accepts_input_method_text(&self, window: &Window, cx: &App) -> bool {
+        self.focus_facts(
+            window,
+            self.current_activity(window, cx),
+            window_modal_is_open(window, cx),
+        )
+        .is_some_and(TerminalFocusCoordinator::accepts_input_method_text)
+    }
+
+    /// The ownership facts the coordinator judges, or None while the Terminal Session takes no
+    /// input at all.
+    fn focus_facts(
+        &self,
+        window: &Window,
+        activity: SurfaceActivity,
+        modal_open: bool,
+    ) -> Option<TerminalFocusFacts> {
         if self.terminal_session.remote_input_blocked || self.native_attention_pane.is_none() {
-            return false;
+            return None;
         }
-        TerminalFocusCoordinator::is_focused(TerminalFocusFacts {
+        Some(TerminalFocusFacts {
             active_workspace: self.product_focus.active_workspace,
             active_tab: self.product_focus.active_tab,
             focused_pane: self.product_focus.focused_pane,
@@ -4212,9 +4238,9 @@ impl EntityInputHandler for TerminalPane {
         &mut self,
         ignore_disabled_input: bool,
         window: &mut Window,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
-        if !ignore_disabled_input && !self.terminal_input_focused(window, _cx) {
+        if !ignore_disabled_input && !self.accepts_input_method_text(window, cx) {
             return None;
         }
         let range = if self.ime.marked_text().is_some() {
@@ -4253,7 +4279,9 @@ impl EntityInputHandler for TerminalPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.synchronize_terminal_input_focus(window, cx) {
+        if !self.synchronize_terminal_input_focus(window, cx)
+            && !self.accepts_input_method_text(window, cx)
+        {
             self.ime.cancel();
             self.invalidate_preedit_layout();
             return;
@@ -4277,7 +4305,9 @@ impl EntityInputHandler for TerminalPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.synchronize_terminal_input_focus(window, cx) {
+        if !self.synchronize_terminal_input_focus(window, cx)
+            && !self.accepts_input_method_text(window, cx)
+        {
             self.ime.cancel();
             self.invalidate_preedit_layout();
             return;
