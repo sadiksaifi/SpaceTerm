@@ -602,6 +602,7 @@ pub(crate) struct TerminalPane {
     backing_scale: BackingScale,
     last_geometry: Option<TerminalGeometry>,
     grid_bounds: Option<Bounds<Pixels>>,
+    presented_input_geometry: Option<PresentedInputGeometry>,
     pressed_button: Option<PointerButton>,
     selection_copy_pending: bool,
     pointer_modifiers: InputModifiers,
@@ -918,6 +919,7 @@ impl TerminalPane {
             backing_scale,
             last_geometry: None,
             grid_bounds: None,
+            presented_input_geometry: None,
             pressed_button: None,
             selection_copy_pending: false,
             pointer_modifiers: InputModifiers::default(),
@@ -1217,6 +1219,7 @@ impl TerminalPane {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn terminal_input_focused(&self, window: &Window, cx: &App) -> bool {
         self.terminal_input_focused_with_activity(
             window,
@@ -1231,10 +1234,35 @@ impl TerminalPane {
         activity: SurfaceActivity,
         modal_open: bool,
     ) -> bool {
+        self.focus_facts(window, activity, modal_open)
+            .is_some_and(TerminalFocusCoordinator::is_focused)
+    }
+
+    /// Whether input method text that the host addresses to this Pane reaches its Terminal
+    /// Session. Such text arrives through the input context the Pane activated, which the host
+    /// keeps current while a host input method accessory such as an emoji picker holds key
+    /// status, so Terminal Input Focus is not required.
+    fn accepts_input_method_text(&self, window: &Window, cx: &App) -> bool {
+        self.focus_facts(
+            window,
+            self.current_activity(window, cx),
+            window_modal_is_open(window, cx),
+        )
+        .is_some_and(TerminalFocusCoordinator::accepts_input_method_text)
+    }
+
+    /// The ownership facts the coordinator judges, or None while the Terminal Session takes no
+    /// input at all.
+    fn focus_facts(
+        &self,
+        window: &Window,
+        activity: SurfaceActivity,
+        modal_open: bool,
+    ) -> Option<TerminalFocusFacts> {
         if self.terminal_session.remote_input_blocked || self.native_attention_pane.is_none() {
-            return false;
+            return None;
         }
-        TerminalFocusCoordinator::is_focused(TerminalFocusFacts {
+        Some(TerminalFocusFacts {
             active_workspace: self.product_focus.active_workspace,
             active_tab: self.product_focus.active_tab,
             focused_pane: self.product_focus.focused_pane,
@@ -2384,8 +2412,26 @@ impl TerminalPane {
         self.accessibility = accessibility;
     }
 
+    fn show_character_palette(
+        &mut self,
+        _: &spaceterm_ui::ShowCharacterPalette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if window.is_offering_key_equivalent() || !self.synchronize_terminal_input_focus(window, cx)
+        {
+            cx.propagate();
+            return;
+        }
+        window.show_character_palette();
+        cx.stop_propagation();
+    }
+
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if !self.synchronize_terminal_input_focus(window, cx) {
+            return;
+        }
+        if window.is_offering_key_equivalent() {
             return;
         }
         // A bare Escape pair leaves fullscreen while each press still reaches the session. Presses
@@ -4139,6 +4185,30 @@ fn find_icon_button(
     .into_any_element()
 }
 
+#[derive(Clone, Copy, PartialEq)]
+pub(super) struct PresentedInputGeometry {
+    pub(super) session_epoch: u64,
+    pub(super) cursor: Option<crate::terminal::CursorPositionSnapshot>,
+    pub(super) selection_present: bool,
+    pub(super) grid: Bounds<Pixels>,
+    pub(super) cell: LogicalCellSize,
+}
+
+impl TerminalPane {
+    pub(super) fn present_input_geometry(
+        &mut self,
+        geometry: Option<PresentedInputGeometry>,
+        window: &mut Window,
+    ) {
+        if self.presented_input_geometry != geometry {
+            self.presented_input_geometry = geometry;
+            if self.focus_handle.is_focused(window) {
+                window.invalidate_character_coordinates();
+            }
+        }
+    }
+}
+
 impl EventEmitter<TerminalPaneEvent> for TerminalPane {}
 
 impl EntityInputHandler for TerminalPane {
@@ -4168,9 +4238,9 @@ impl EntityInputHandler for TerminalPane {
         &mut self,
         ignore_disabled_input: bool,
         window: &mut Window,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
-        if !ignore_disabled_input && !self.terminal_input_focused(window, _cx) {
+        if !ignore_disabled_input && !self.accepts_input_method_text(window, cx) {
             return None;
         }
         let range = if self.ime.marked_text().is_some() {
@@ -4209,7 +4279,9 @@ impl EntityInputHandler for TerminalPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.synchronize_terminal_input_focus(window, cx) {
+        if !self.synchronize_terminal_input_focus(window, cx)
+            && !self.accepts_input_method_text(window, cx)
+        {
             self.ime.cancel();
             self.invalidate_preedit_layout();
             return;
@@ -4233,7 +4305,9 @@ impl EntityInputHandler for TerminalPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.synchronize_terminal_input_focus(window, cx) {
+        if !self.synchronize_terminal_input_focus(window, cx)
+            && !self.accepts_input_method_text(window, cx)
+        {
             self.ime.cancel();
             self.invalidate_preedit_layout();
             return;
@@ -4269,6 +4343,28 @@ impl EntityInputHandler for TerminalPane {
                 px(cell.width),
                 px(cell.height),
                 layout.caret,
+            ));
+        }
+        // Accessibility publication is demand-paced. Its insertion offset remains the native
+        // document identity, but only the submitted frame can locate that insertion on screen.
+        if range_utf16.is_empty()
+            && range_utf16 == self.accessibility.cursor_range()
+            && self.accessibility.selection_range().is_none()
+            && !self.screen.selection_present
+        {
+            let presented = self.presented_input_geometry?;
+            if presented.session_epoch != self.terminal_session.session_epoch
+                || presented.selection_present
+            {
+                return None;
+            }
+            let cursor = presented.cursor?;
+            return Some(Bounds::new(
+                point(
+                    presented.grid.origin.x + px(f32::from(cursor.column) * presented.cell.width),
+                    presented.grid.origin.y + px(f32::from(cursor.row) * presented.cell.height),
+                ),
+                size(px(0.0), px(presented.cell.height)),
             ));
         }
         let grid = self.grid_bounds?;
@@ -4576,6 +4672,11 @@ impl Render for TerminalPane {
             &display_screen,
             display_render_cache,
             TerminalGridConfiguration {
+                input_session_epoch: if displaying_current {
+                    self.screen_session_epoch
+                } else {
+                    self.last_valid_screen_session_epoch
+                },
                 terminal_input_focused,
                 terminal_fonts: self.terminal_fonts.clone(),
                 terminal_appearance: Arc::clone(&self.appearance.terminal),
@@ -4609,6 +4710,7 @@ impl Render for TerminalPane {
                 .then(|| {
                     (
                         Arc::clone(&self.last_valid_screen),
+                        self.last_valid_screen_session_epoch,
                         self.fallback_render_cache.clone(),
                         fallback_graphics,
                     )
@@ -4707,6 +4809,7 @@ impl Render for TerminalPane {
             .on_action(cx.listener(Self::paste_clipboard))
             .on_action(cx.listener(Self::paste_selection))
             .on_action(cx.listener(Self::edit_paste))
+            .on_action(cx.listener(Self::show_character_palette))
             .on_action(cx.listener(Self::export_diagnostics))
             .on_drop(cx.listener(Self::insert_dropped_files))
             .on_action(cx.listener(Self::set_up_permission_request))

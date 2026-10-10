@@ -5762,12 +5762,209 @@ fn event(key: &str, key_char: Option<&str>, modifiers: Modifiers) -> KeyDownEven
     }
 }
 
+#[gpui::test]
+fn native_key_equivalents_defer_raw_input_and_unclaimed_keys_preserve_repeats(
+    cx: &mut TestAppContext,
+) {
+    let (_, cx, records) = connected_terminal_pane(cx);
+    let start = records.commands().len();
+    let mut key = event("e", None, Modifiers::function());
+    assert!(!cx.simulate_key_equivalent(key.clone()));
+    assert!(key_presses_since(&records, start).is_empty());
+    // A native menu claim ends after the offer. Its release must not reach Kitty input.
+    cx.simulate_event(KeyUpEvent {
+        keystroke: key.keystroke.clone(),
+    });
+    assert!(key_presses_since(&records, start).is_empty());
+    // When AppKit declines, the ordinary key-down path owns delivery.
+    assert!(!cx.simulate_key_equivalent(key.clone()));
+    cx.simulate_event(key.clone());
+    key.is_held = true;
+    assert!(!cx.simulate_key_equivalent(key.clone()));
+    cx.simulate_event(key.clone());
+    cx.simulate_event(KeyUpEvent {
+        keystroke: key.keystroke,
+    });
+    assert_eq!(
+        key_presses_since(&records, start)
+            .iter()
+            .map(|key| key.2)
+            .collect::<Vec<_>>(),
+        [KeyAction::Press, KeyAction::Repeat, KeyAction::Release]
+    );
+}
+
+#[gpui::test]
+fn character_palette_compatibility_shortcut_runs_only_after_native_decline(
+    cx: &mut TestAppContext,
+) {
+    let (_, cx, records) = connected_terminal_pane(cx);
+    let start = records.commands().len();
+    let key = event(
+        "space",
+        Some(" "),
+        Modifiers {
+            control: true,
+            platform: true,
+            ..Modifiers::default()
+        },
+    );
+    let palette_requests = |cx: &VisualTestContext| {
+        cx.window_requests()
+            .iter()
+            .filter(|request| matches!(request, gpui::TestWindowRequest::ShowCharacterPalette))
+            .count()
+    };
+    assert!(!cx.simulate_key_equivalent(key.clone()));
+    assert_eq!(palette_requests(cx), 0);
+    cx.simulate_event(key.clone());
+    cx.simulate_event(KeyUpEvent {
+        keystroke: key.keystroke,
+    });
+    assert_eq!(palette_requests(cx), 1);
+    assert!(key_presses_since(&records, start).is_empty());
+}
+
 #[test]
 fn reported_terminal_title_should_replace_the_shell_fallback() {
     assert_eq!(
         normalized_pane_title("  Claude Code  ", "zsh"),
         "Claude Code"
     );
+}
+
+#[gpui::test]
+fn insertion_bounds_follow_presented_cursor_while_accessibility_is_idle(cx: &mut TestAppContext) {
+    let (pane, cx, _) = connected_terminal_pane(cx);
+    let stale = pane.read_with(cx, |pane, _| Arc::clone(&pane.accessibility));
+    let mut screen = text_screen(10, &["first row", "second row", "third row"]);
+    Arc::make_mut(&mut screen).cursor.position = Some(crate::terminal::CursorPositionSnapshot {
+        row: 2,
+        column: 3,
+        width_cells: 1,
+    });
+    pane.update(cx, |pane, cx| {
+        pane.screen = screen;
+        cx.notify();
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        pane.update(cx, |pane, cx| {
+            assert!(Arc::ptr_eq(&stale, &pane.accessibility));
+            let grid = pane.grid_bounds.unwrap();
+            let cell = pane.presented_cell_size();
+            let insertion = pane.selected_text_range(false, window, cx).unwrap().range;
+            assert_eq!(
+                pane.bounds_for_range(insertion, grid, window, cx),
+                Some(Bounds::new(
+                    point(
+                        grid.origin.x + px(3.0 * cell.width),
+                        grid.origin.y + px(2.0 * cell.height)
+                    ),
+                    size(px(0.0), px(cell.height)),
+                )),
+            );
+        })
+    });
+}
+
+#[gpui::test]
+fn insertion_bounds_preserve_presented_hidden_cursor_and_reject_offscreen_cursor(
+    cx: &mut TestAppContext,
+) {
+    let (pane, cx, _) = connected_terminal_pane(cx);
+    let mut screen = text_screen(10, &["first row", "second row"]);
+    Arc::make_mut(&mut screen).cursor.position = Some(crate::terminal::CursorPositionSnapshot {
+        row: 1,
+        column: 2,
+        width_cells: 1,
+    });
+    Arc::make_mut(&mut screen).cursor.visible = false;
+    pane.update(cx, |pane, cx| {
+        pane.screen = screen;
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let query = |pane: &Entity<TerminalPane>, cx: &mut VisualTestContext| {
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                let insertion = pane.selected_text_range(false, window, cx).unwrap().range;
+                pane.bounds_for_range(insertion, pane.grid_bounds.unwrap(), window, cx)
+            })
+        })
+    };
+    let presented = query(&pane, cx).expect("a hidden cursor still has an insertion position");
+    pane.update(cx, |pane, _| {
+        Arc::make_mut(&mut pane.screen).cursor.position = None
+    });
+    assert_eq!(
+        query(&pane, cx),
+        Some(presented),
+        "unpainted state must not move the native anchor"
+    );
+    pane.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+    assert_eq!(
+        query(&pane, cx),
+        None,
+        "an offscreen cursor has no insertion rectangle"
+    );
+}
+
+#[gpui::test]
+fn insertion_geometry_does_not_replace_selection_or_other_document_ranges(cx: &mut TestAppContext) {
+    let (pane, cx, _) = connected_terminal_pane(cx);
+    let mut screen = text_screen(10, &["first row", "second row"]);
+    Arc::make_mut(&mut screen).cursor.position = Some(crate::terminal::CursorPositionSnapshot {
+        row: 1,
+        column: 2,
+        width_cells: 1,
+    });
+    pane.update(cx, |pane, cx| {
+        pane.accessibility = Arc::new(TerminalAccessibilityModel::from_screen(&screen));
+        pane.screen = screen;
+        cx.notify();
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        pane.update(cx, |pane, cx| {
+            let grid = pane.grid_bounds.unwrap();
+            let cell = pane.presented_cell_size();
+            let geometry = AccessibilityGeometry::new(
+                f32::from(grid.origin.x),
+                f32::from(grid.origin.y),
+                cell.width,
+                cell.height,
+            )
+            .unwrap();
+            for range in [0..0, 0..3] {
+                let (x, y, width, height) = pane
+                    .accessibility
+                    .bounds_for_range(range.clone(), geometry)
+                    .unwrap();
+                assert_eq!(
+                    pane.bounds_for_range(range, grid, window, cx),
+                    Some(Bounds::new(
+                        point(px(x), px(y)),
+                        size(px(width), px(height))
+                    ))
+                );
+            }
+            let insertion = pane.accessibility.cursor_range();
+            Arc::make_mut(&mut pane.screen).selection_present = true;
+            let (x, y, width, height) = pane
+                .accessibility
+                .bounds_for_range(insertion.clone(), geometry)
+                .unwrap();
+            assert_eq!(
+                pane.bounds_for_range(insertion, grid, window, cx),
+                Some(Bounds::new(
+                    point(px(x), px(y)),
+                    size(px(width), px(height))
+                ))
+            );
+        })
+    });
 }
 
 #[test]
@@ -5977,6 +6174,87 @@ fn cancellation_and_focus_loss_discard_marked_text_without_bytes(cx: &mut TestAp
             .iter()
             .all(|call| !matches!(call.command, RecordedCommand::Key(_)))
     );
+}
+
+#[gpui::test]
+fn input_method_text_reaches_the_session_while_a_host_accessory_holds_key_status(
+    cx: &mut TestAppContext,
+) {
+    let (pane, cx, records) = connected_terminal_pane(cx);
+    // A host emoji picker takes key status from the Operating-System Window while the Pane's
+    // input context stays current.
+    cx.deactivate_window();
+    cx.run_until_parked();
+    assert!(!cx.update(|window, app| pane.read(app).terminal_input_focused(window, app)));
+
+    cx.update(|window, app| {
+        pane.update(app, |pane, pane_cx| {
+            pane.replace_text_in_range(None, "😂", window, pane_cx);
+        });
+    });
+
+    let commits = records
+        .commands()
+        .into_iter()
+        .filter_map(|call| match call.command {
+            RecordedCommand::Key(input) if input.is_input_method_commit() => input.text,
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(commits, ["😂"]);
+}
+
+#[gpui::test]
+fn input_method_text_is_dropped_without_pane_focus_while_the_window_is_not_key(
+    cx: &mut TestAppContext,
+) {
+    let (pane, cx, records) = connected_terminal_pane(cx);
+    cx.update(|_window, app| {
+        pane.update(app, |pane, app| {
+            pane.set_product_focus(
+                TerminalProductFocus {
+                    focused_pane: false,
+                    ..TerminalProductFocus::default()
+                },
+                app,
+            );
+        });
+    });
+    cx.deactivate_window();
+    cx.run_until_parked();
+
+    cx.update(|window, app| {
+        pane.update(app, |pane, pane_cx| {
+            pane.replace_text_in_range(None, "😂", window, pane_cx);
+        });
+    });
+
+    assert!(
+        records
+            .commands()
+            .iter()
+            .all(|call| !matches!(call.command, RecordedCommand::Key(_)))
+    );
+}
+
+#[gpui::test]
+fn insertion_range_answers_while_a_host_accessory_holds_key_status(cx: &mut TestAppContext) {
+    let (pane, cx, _) = connected_terminal_pane(cx);
+    let insertion = |pane: &Entity<TerminalPane>, cx: &mut VisualTestContext| {
+        cx.update(|window, app| {
+            pane.update(app, |pane, pane_cx| {
+                pane.selected_text_range(false, window, pane_cx)
+                    .map(|selection| selection.range)
+            })
+        })
+    };
+    let focused = insertion(&pane, cx);
+    assert!(focused.is_some());
+
+    cx.deactivate_window();
+    cx.run_until_parked();
+
+    assert_eq!(insertion(&pane, cx), focused);
 }
 
 #[gpui::test]
@@ -7209,21 +7487,47 @@ fn glyph_failure_presents_the_last_valid_frame(
 ) -> Vec<gpui::GlyphId> {
     let (handle, mut cx, records, atlas) = headless_pane();
     let events = records.last_event_sender().unwrap();
+    let mut old_screen = text_screen(1, old);
+    Arc::make_mut(&mut old_screen).cursor.position =
+        Some(crate::terminal::CursorPositionSnapshot {
+            row: 0,
+            column: 1,
+            width_cells: 1,
+        });
     events
-        .try_send(TerminalSessionEvent::Screen(text_screen(1, old)))
+        .try_send(TerminalSessionEvent::Screen(old_screen))
         .unwrap();
     cx.run_until_parked();
     let retained = drawn_sprites(handle, &mut cx, false);
+    let insertion_bounds = |handle: gpui::WindowHandle<TerminalPane>,
+                            cx: &mut gpui::HeadlessAppContext| {
+        handle
+            .update(cx, |pane, window, cx| {
+                let range = pane.selected_text_range(true, window, cx).unwrap().range;
+                pane.bounds_for_range(range, pane.grid_bounds.unwrap(), window, cx)
+            })
+            .unwrap()
+    };
+    let retained_insertion = insertion_bounds(handle, &mut cx);
+    assert!(retained_insertion.is_some());
     atlas.glyph_lookups.lock().unwrap().clear();
     *atlas.fail_glyph.lock().unwrap() = Some(gpui::GlyphId(failing as u32));
+    let mut new_screen = text_screen(2, new);
+    Arc::make_mut(&mut new_screen).cursor.position =
+        Some(crate::terminal::CursorPositionSnapshot {
+            row: 0,
+            column: 2,
+            width_cells: 1,
+        });
     events
-        .try_send(TerminalSessionEvent::Screen(text_screen(2, new)))
+        .try_send(TerminalSessionEvent::Screen(new_screen))
         .unwrap();
     cx.run_until_parked();
     let bottom = retained.last().unwrap().1.bottom();
     let mut submitted = drawn_sprites(handle, &mut cx, false);
     submitted.retain(|(_, bounds)| bounds.origin.y < bottom);
     assert_eq!(submitted, retained);
+    assert_eq!(insertion_bounds(handle, &mut cx), retained_insertion);
     assert_eq!(
         handle
             .read_with(&cx, |pane, _| (

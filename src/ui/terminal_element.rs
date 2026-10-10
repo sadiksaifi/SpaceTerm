@@ -27,7 +27,7 @@ use super::terminal_graphics::{
     GraphicsAttemptToken, GraphicsLayer, GraphicsPaintPlan, PreparedGraphics, TerminalGraphicsCache,
 };
 use super::terminal_ime::PreeditLayout;
-use super::terminal_pane::{OperationToken, TerminalPane};
+use super::terminal_pane::{OperationToken, PresentedInputGeometry, TerminalPane};
 use super::terminal_symbols::{
     DevicePoint, SymbolPlanCache, SymbolPrimitive, TerminalSymbol, terminal_symbol,
 };
@@ -428,6 +428,7 @@ pub(crate) struct TerminalGridElement {
     preedit: Option<PreeditLayout>,
     focus_handle: FocusHandle,
     input: gpui::WeakEntity<TerminalPane>,
+    input_session_epoch: u64,
     blink_phase_visible: bool,
     find_spans: Arc<[FindHighlightSpan]>,
     graphics: PreparedGraphics,
@@ -445,6 +446,7 @@ pub(crate) struct TerminalGridElement {
 
 pub(crate) struct TerminalGridConfiguration {
     pub(crate) terminal_input_focused: bool,
+    pub(crate) input_session_epoch: u64,
     pub(crate) font_family: SharedString,
     pub(crate) terminal_fonts: TerminalFonts,
     pub(crate) terminal_appearance: Arc<ResolvedTerminalAppearance>,
@@ -466,12 +468,34 @@ pub(crate) struct TerminalGridConfiguration {
     pub(crate) active_hyperlink: Option<(u64, CellGridPosition)>,
     pub(crate) fallback: Option<(
         Arc<ScreenSnapshot>,
+        u64,
         Entity<TerminalGridCache>,
         PreparedGraphics,
     )>,
 }
 
 impl TerminalGridElement {
+    fn input_geometry(&self, grid: Bounds<Pixels>) -> PresentedInputGeometry {
+        let cursor = self.presentation.cursor.position.filter(|position| {
+            self.presentation
+                .rows
+                .get(usize::from(position.row))
+                .and_then(|row| row.get(usize::from(position.column)))
+                .is_some()
+                && f32::from(position.row) * f32::from(self.line_height)
+                    < f32::from(grid.size.height)
+                && f32::from(position.column) * f32::from(self.cell_width)
+                    < f32::from(grid.size.width)
+        });
+        PresentedInputGeometry {
+            session_epoch: self.input_session_epoch,
+            cursor,
+            selection_present: self.presentation.selection_present,
+            grid,
+            cell: LogicalCellSize::new(f32::from(self.cell_width), f32::from(self.line_height)),
+        }
+    }
+
     pub(crate) fn new(
         screen: &Arc<ScreenSnapshot>,
         cache: Entity<TerminalGridCache>,
@@ -481,15 +505,14 @@ impl TerminalGridElement {
         let source_presentation = Arc::clone(screen);
         let screen =
             ScreenSnapshot::projected_for_renderer(screen, &configuration.terminal_appearance);
-        let fallback = configuration
-            .fallback
-            .take()
-            .map(|(screen, fallback_cache, graphics)| {
+        let fallback = configuration.fallback.take().map(
+            |(screen, session_epoch, fallback_cache, graphics)| {
                 Box::new(Self::new(
                     &screen,
                     fallback_cache,
                     TerminalGridConfiguration {
                         terminal_input_focused: configuration.terminal_input_focused,
+                        input_session_epoch: session_epoch,
                         font_family: configuration.font_family.clone(),
                         terminal_fonts: configuration.terminal_fonts.clone(),
                         terminal_appearance: Arc::clone(&configuration.terminal_appearance),
@@ -513,7 +536,8 @@ impl TerminalGridElement {
                     },
                     cx,
                 ))
-            });
+            },
+        );
         let cursor = screen.cursor.position.and_then(|position| {
             screen
                 .rows
@@ -563,6 +587,7 @@ impl TerminalGridElement {
             terminal_fonts: configuration.terminal_fonts,
             preedit: configuration.preedit,
             focus_handle: configuration.focus_handle,
+            input_session_epoch: configuration.input_session_epoch,
             input: configuration.input.downgrade(),
             blink_phase_visible: configuration.blink_phase_visible,
             find_spans: configuration.find_spans,
@@ -1996,6 +2021,7 @@ impl Element for TerminalGridElement {
             failure = cursor.preflight(window, cx).err();
         }
         let mut candidate_submission_started = false;
+        let mut presented_input = None;
         if failure.is_none() {
             candidate_submission_started = true;
             match prepaint
@@ -2003,6 +2029,7 @@ impl Element for TerminalGridElement {
                 .submit(prepaint.candidate.grid_bounds, true, window, cx)
             {
                 Ok(()) => {
+                    presented_input = Some(self.input_geometry(prepaint.candidate.grid_bounds));
                     if let Some(layer) = &self.cursor_layer {
                         layer.set(prepaint.cursor.clone());
                     }
@@ -2023,16 +2050,26 @@ impl Element for TerminalGridElement {
             && !candidate_submission_started
             && let Some(fallback) = &prepaint.fallback
             && fallback.preflight(window, cx).is_ok()
+            && fallback
+                .submit(fallback.grid_bounds, true, window, cx)
+                .is_ok()
+            && let Some(element) = &self.fallback
         {
-            _ = fallback.submit(fallback.grid_bounds, true, window, cx);
+            presented_input = Some(element.input_geometry(fallback.grid_bounds));
         }
         let Some(pane) = self.input.upgrade() else {
             return;
         };
+        pane.update(cx, |pane, _| {
+            pane.present_input_geometry(presented_input, window)
+        });
         TerminalPane::capture_pointer_drag(&pane, window);
         window.handle_input(
             &self.focus_handle,
-            ElementInputHandler::new(prepaint.candidate.grid_bounds, pane.clone()),
+            ElementInputHandler::new(
+                presented_input.map_or(prepaint.candidate.grid_bounds, |geometry| geometry.grid),
+                pane.clone(),
+            ),
             cx,
         );
         let presentation = Arc::clone(&self.presentation);
