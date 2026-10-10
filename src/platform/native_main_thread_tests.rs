@@ -60,6 +60,9 @@ pub(crate) fn run() {
     );
     gpui_test!(macos_window_backdrop::tests::changing_tone_replaces_the_material_in_place);
     gpui_test!(
+        macos_window_backdrop::tests::background_image_lies_beneath_a_material_that_blends_within_the_window
+    );
+    gpui_test!(
         macos_application_quit::tests::native_hook_cancels_policy_then_consumes_one_confirmation
     );
     gpui_test!(macos_services::tests::service_type_classifies_nil_and_empty_nsstring_as_absent);

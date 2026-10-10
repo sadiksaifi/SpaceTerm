@@ -1,26 +1,5 @@
-use std::sync::Arc;
-
+use super::testing::{OTHER_PNG, PNG, store};
 use super::*;
-use crate::platform::app_directories::AppDirectoryEnvironment;
-use crate::platform::testing::RecordingFilesystem;
-
-const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR";
-const OTHER_PNG: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\x01";
-
-fn store() -> (BackgroundImageStore, Arc<RecordingFilesystem>) {
-    let filesystem = Arc::new(RecordingFilesystem::default());
-    let paths = crate::platform::testing::resolve_app_paths(
-        &AppDirectoryEnvironment {
-            home: Some("/home/test".into()),
-            ..Default::default()
-        },
-        Some("/runtime".into()),
-        200,
-        filesystem.clone(),
-    )
-    .unwrap();
-    (BackgroundImageStore::new(Arc::new(paths)), filesystem)
-}
 
 #[test]
 fn an_installed_image_loads_back_under_its_digest() {

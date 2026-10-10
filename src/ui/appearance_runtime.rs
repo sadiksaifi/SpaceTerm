@@ -551,10 +551,46 @@ impl WindowTrafficLightOwner {
 pub(crate) struct WindowAppearanceOwner {
     effective: Option<crate::appearance::WindowBackgroundAppearance>,
     backdrop: Option<crate::platform::appearance::WindowBackdrop>,
+    /// Whether this window presents the Background Image. Only Workspace windows do.
+    presents_background_image: bool,
+    background_image: Option<Option<crate::background_image::BackgroundImageId>>,
 }
 
 impl WindowAppearanceOwner {
+    /// The owner of a Workspace window, which presents the Background Image behind its content.
+    pub(crate) fn workspace() -> Self {
+        Self {
+            presents_background_image: true,
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn apply(&mut self, window: &mut gpui::Window, cx: &App) {
+        self.apply_backdrop(window, cx);
+        if self.presents_background_image {
+            self.apply_background_image(window, cx);
+        }
+    }
+
+    /// An opaque window paints over anything behind its content, so it presents no image.
+    fn apply_background_image(&mut self, window: &gpui::Window, cx: &App) {
+        let image = (current(cx).chrome.composition.effective
+            != crate::appearance::WindowBackgroundAppearance::Opaque)
+            .then(|| super::background_image_runtime::presented(cx))
+            .flatten();
+        let id = image.as_ref().map(|image| image.id);
+        if self.background_image == Some(id) {
+            return;
+        }
+        if let Some(runtime) = cx.try_global::<AppearanceRuntime>() {
+            runtime
+                .platform
+                .apply_window_background_image(window, image.as_ref().map(|image| &*image.bytes));
+        }
+        self.background_image = Some(id);
+    }
+
+    fn apply_backdrop(&mut self, window: &mut gpui::Window, cx: &App) {
         let chrome = current(cx).chrome.clone();
         let effective = chrome.composition.effective;
         if self.effective != Some(effective) {

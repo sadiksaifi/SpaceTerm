@@ -8,6 +8,35 @@
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+pub(crate) mod testing {
+    use std::sync::Arc;
+
+    use super::BackgroundImageStore;
+    use crate::platform::app_directories::AppDirectoryEnvironment;
+    use crate::platform::testing::RecordingFilesystem;
+
+    /// The smallest bytes the store accepts as an image.
+    pub(crate) const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR";
+    pub(crate) const OTHER_PNG: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\x01";
+
+    /// A store over an in-memory private filesystem.
+    pub(crate) fn store() -> (BackgroundImageStore, Arc<RecordingFilesystem>) {
+        let filesystem = Arc::new(RecordingFilesystem::default());
+        let paths = crate::platform::testing::resolve_app_paths(
+            &AppDirectoryEnvironment {
+                home: Some("/home/test".into()),
+                ..Default::default()
+            },
+            Some("/runtime".into()),
+            200,
+            filesystem.clone(),
+        )
+        .unwrap();
+        (BackgroundImageStore::new(Arc::new(paths)), filesystem)
+    }
+}
+
 use std::ffi::OsString;
 use std::sync::Arc;
 
