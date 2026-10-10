@@ -2,6 +2,7 @@
 //! It is application scoped so it stays reachable when no Workspace window exists.
 
 mod advanced;
+mod background_image;
 mod catalog;
 mod clipboard;
 mod editor;
@@ -522,10 +523,13 @@ impl SettingsWindow {
                 section_feature(*section).is_none_or(|feature| presentation.has_feature(feature))
             })
             .collect();
+        // Only a desktop whose Workspace windows can present a Background Image keeps its copies.
+        let presents_background_image = super::background_image_runtime::store(cx).is_some();
         let omitted_rows = catalog::rows()
             .map(|row| row.id)
             .filter(|row| {
                 row_feature(*row).is_some_and(|feature| !presentation.has_feature(feature))
+                    || (*row == SettingsRowId::BackgroundImage && !presents_background_image)
             })
             .collect();
         Self {
@@ -1162,6 +1166,7 @@ impl SettingsWindow {
             SettingsRowId::AppearanceMode => self.render_appearance_mode(cx),
             SettingsRowId::Opacity => self.render_opacity(appearance, cx),
             SettingsRowId::Blur => self.render_blur(cx),
+            SettingsRowId::BackgroundImage => self.render_background_image(appearance, cx),
             SettingsRowId::TerminalTheme => self.render_current_theme(appearance, window, cx),
             SettingsRowId::Density => self.render_density(cx),
             SettingsRowId::TerminalFontFamily => self.render_terminal_font(appearance, cx),
@@ -2086,6 +2091,18 @@ impl SettingsWindow {
                     },
                 )
             }
+            SettingsRowId::BackgroundImage => Some(
+                if super::appearance_runtime::current(cx)
+                    .chrome
+                    .composition
+                    .effective
+                    == crate::appearance::WindowBackgroundAppearance::Opaque
+                {
+                    "Shown behind terminal windows in place of the desktop. Decrease Opacity below 1 to see it."
+                } else {
+                    "Shown behind terminal windows in place of the desktop, with the same opacity and blur."
+                },
+            ),
             SettingsRowId::TerminalFontFamily => Some("Only monospaced families are listed."),
             SettingsRowId::AutomaticUpdateDownloads
             | SettingsRowId::UpdateCheckInterval

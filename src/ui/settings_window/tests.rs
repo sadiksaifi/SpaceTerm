@@ -343,7 +343,7 @@ fn open_settings_with_drag(
     storage: Arc<MemoryStorage>,
     window_drag: Rc<dyn OperatingSystemWindowDragPlatform>,
 ) -> (Entity<SettingsWindow>, Harness, &mut VisualTestContext) {
-    open_settings_with_capabilities(cx, storage, window_drag, None)
+    open_settings_with_capabilities(cx, storage, window_drag, None, None)
 }
 
 pub(super) fn open_settings_with_registry(
@@ -355,6 +355,7 @@ pub(super) fn open_settings_with_registry(
         MemoryStorage::with_document(&SettingsDocument::default()),
         Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
         Some(ZedThemeRegistry::new(transport)),
+        None,
     )
 }
 
@@ -363,6 +364,7 @@ fn open_settings_with_capabilities(
     storage: Arc<MemoryStorage>,
     window_drag: Rc<dyn OperatingSystemWindowDragPlatform>,
     registry: Option<ZedThemeRegistry>,
+    background_images: Option<Arc<crate::background_image::BackgroundImageStore>>,
 ) -> (Entity<SettingsWindow>, Harness, &mut VisualTestContext) {
     let settings = crate::settings::Settings::load(storage.clone());
     let platform = RecordingAppearancePlatform::default();
@@ -370,6 +372,9 @@ fn open_settings_with_capabilities(
     cx.update(|cx| {
         appearance_runtime::install(settings.clone(), Rc::new(platform.clone()), cx)
             .expect("appearance runtime should install");
+        if let Some(store) = background_images {
+            crate::ui::background_image_runtime::install(settings.clone(), store, cx);
+        }
         crate::ui::init(cx).expect("UI initialization should succeed");
     });
     let (window, cx) = cx.add_window_view(|window, cx| {
@@ -2628,6 +2633,7 @@ fn rendered_control_selector(row: SettingsRowId) -> Option<String> {
             SettingsRowId::AppearanceMode => "settings-appearance-mode",
             SettingsRowId::Opacity => "settings-opacity",
             SettingsRowId::Blur => "settings-blur",
+            SettingsRowId::BackgroundImage => "settings-background-image",
             SettingsRowId::Density => "settings-density",
             SettingsRowId::TerminalTheme => "settings-current-theme",
             SettingsRowId::TerminalFontFamily => "settings-terminal-font-family",
@@ -4798,4 +4804,125 @@ fn a_search_that_orders_a_group_apart_should_still_show_it_as_one_card(cx: &mut 
     let tree = A11yTree::read(cx);
     assert!(tree.find("Show Repository Status").is_some());
     assert!(tree.find("Show Pull Requests").is_some());
+}
+
+fn open_settings_presenting_background_images(
+    cx: &mut TestAppContext,
+) -> (
+    Entity<SettingsWindow>,
+    Harness,
+    Arc<crate::background_image::BackgroundImageStore>,
+    &mut VisualTestContext,
+) {
+    let store = Arc::new(crate::background_image::testing::store().0);
+    let (window, harness, cx) = open_settings_with_capabilities(
+        cx,
+        MemoryStorage::with_document(&SettingsDocument::default()),
+        Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
+        None,
+        Some(Arc::clone(&store)),
+    );
+    (window, harness, store, cx)
+}
+
+/// A desktop whose windows cannot present a Background Image offers no row to choose one.
+#[gpui::test]
+fn a_desktop_without_background_images_offers_no_row(cx: &mut TestAppContext) {
+    let (window, _harness, cx) = open_settings(cx);
+    assert!(
+        !window
+            .read_with(cx, |window, _| window
+                .rows_for(SettingsSectionId::Interface))
+            .contains(&SettingsRowId::BackgroundImage)
+    );
+}
+
+#[gpui::test]
+fn a_desktop_presenting_background_images_offers_to_choose_one(cx: &mut TestAppContext) {
+    let (window, _harness, _store, cx) = open_settings_presenting_background_images(cx);
+    assert!(
+        window
+            .read_with(cx, |window, _| window
+                .rows_for(SettingsSectionId::Interface))
+            .contains(&SettingsRowId::BackgroundImage)
+    );
+    assert!(
+        cx.debug_bounds("settings-background-image-choose")
+            .is_some()
+    );
+    assert!(
+        cx.debug_bounds("settings-background-image-remove")
+            .is_none()
+    );
+}
+
+/// A chosen image is named by its copy until the person removes it, and then the copy goes too.
+#[gpui::test]
+fn a_chosen_image_is_retained_until_it_is_removed(cx: &mut TestAppContext) {
+    let (window, harness, store, cx) = open_settings_presenting_background_images(cx);
+    let id = store
+        .install(crate::background_image::testing::PNG)
+        .expect("the fixture image is kept");
+
+    cx.update(|native, cx| {
+        window.update(cx, |settings, cx| {
+            settings.finish_background_image(Ok(id), native, cx);
+        });
+    });
+    settle(cx);
+    assert_eq!(
+        harness
+            .storage
+            .document()
+            .and_then(|document| document.appearance.window.background_image),
+        Some(id)
+    );
+
+    click("settings-background-image-remove", cx);
+    settle(cx);
+    assert_eq!(
+        harness
+            .storage
+            .document()
+            .and_then(|document| document.appearance.window.background_image),
+        None
+    );
+    assert!(
+        cx.debug_bounds("settings-background-image-remove")
+            .is_none()
+    );
+    assert_eq!(
+        store.load(id).err(),
+        Some(crate::background_image::BackgroundImageError::Missing),
+        "the copy no Settings name is discarded"
+    );
+}
+
+#[gpui::test]
+fn an_unusable_image_is_explained_and_changes_nothing(cx: &mut TestAppContext) {
+    let (window, harness, _store, cx) = open_settings_presenting_background_images(cx);
+    let before = document_of(&window, cx);
+
+    cx.update(|native, cx| {
+        window.update(cx, |settings, cx| {
+            settings.finish_background_image(
+                Err(super::background_image::ChooseError::Keep(
+                    crate::background_image::BackgroundImageError::UnsupportedFormat,
+                )),
+                native,
+                cx,
+            );
+        });
+    });
+    cx.run_until_parked();
+
+    assert!(
+        cx.debug_bounds("modal-action-settings-background-image-failed-ok")
+            .is_some(),
+        "the failure should be explained"
+    );
+    click("modal-action-settings-background-image-failed-ok", cx);
+    settle(cx);
+    assert_eq!(document_of(&window, cx), before);
+    assert_eq!(harness.storage.writes(), 0);
 }

@@ -106,6 +106,8 @@ pub(super) enum SettingsRowId {
     AppearanceMode,
     Opacity,
     Blur,
+    /// The image Workspace windows present in place of the desktop.
+    BackgroundImage,
     Density,
     /// The Terminal Theme in use, or both slots under Auto.
     TerminalTheme,
@@ -167,6 +169,7 @@ impl SettingsRowId {
             Self::AppearanceMode => ResetTarget::AppearanceMode,
             Self::Opacity => ResetTarget::Opacity,
             Self::Blur => ResetTarget::Blur,
+            Self::BackgroundImage => ResetTarget::BackgroundImage,
             Self::Density => ResetTarget::Density,
             Self::TerminalTheme => ResetTarget::TerminalTheme(appearance),
             Self::TerminalFontFamily => ResetTarget::TerminalFontFamily,
@@ -317,6 +320,14 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         label: "Blur",
         keywords: &["blurred", "background", "window", "glass"],
         selector: "settings-row-blur",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::BackgroundImage,
+        section: SettingsSectionId::Interface,
+        group: "Window",
+        label: "Background image",
+        keywords: &["wallpaper", "picture", "photo", "backdrop"],
+        selector: "settings-row-background-image",
     },
     SettingsRowDescriptor {
         id: SettingsRowId::TerminalFontFamily,
@@ -848,10 +859,11 @@ mod tests {
     }
 
     /// The complete preference row identity set, so the catalog cannot silently omit one.
-    const EVERY_PREFERENCE_ROW: [SettingsRowId; 31] = [
+    const EVERY_PREFERENCE_ROW: [SettingsRowId; 32] = [
         SettingsRowId::AppearanceMode,
         SettingsRowId::Opacity,
         SettingsRowId::Blur,
+        SettingsRowId::BackgroundImage,
         SettingsRowId::Density,
         SettingsRowId::TerminalTheme,
         SettingsRowId::TerminalFontFamily,
@@ -1003,6 +1015,17 @@ mod tests {
             matching_rows("terminal theme"),
             vec![SettingsRowId::TerminalTheme]
         );
+    }
+
+    #[test]
+    fn a_wallpaper_query_reaches_the_background_image() {
+        for query in ["background image", "wallpaper", "photo"] {
+            assert_eq!(
+                matching_rows(query).first(),
+                Some(&SettingsRowId::BackgroundImage),
+                "{query:?} should rank the background image first"
+            );
+        }
     }
 
     #[test]
