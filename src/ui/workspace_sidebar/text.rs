@@ -14,6 +14,8 @@ use crate::ui::appearance::gpui_color;
 
 const GAP: f32 = 8.0;
 const PIN_WIDTH: f32 = 16.0;
+/// The space between a name and the pin that follows it.
+const NAME_PIN_GAP: f32 = 4.0;
 
 /// A row's first line. `pinned` marks a Workspace whose row leaves line 2 to its Worktrees.
 pub(super) fn title(
@@ -31,9 +33,17 @@ pub(super) fn title(
         + appearance.spacing(super::SIDEBAR_ROW_TITLE_LINE_PADDING);
     canvas(
         move |bounds, window, cx| {
-            let name_width = appearance
-                .typography
-                .measure(TextRole::Navigation, &name, window);
+            let name_width = ChromeTypography::round_measurement_up(
+                appearance
+                    .typography
+                    .measure(TextRole::Navigation, &name, window),
+                window,
+            );
+            let pin_width = if pinned {
+                window.pixel_snap(appearance.spacing(NAME_PIN_GAP + PIN_WIDTH))
+            } else {
+                px(0.0)
+            };
             let machine = machine.and_then(|machine| {
                 let full_width = ChromeTypography::round_measurement_up(
                     appearance
@@ -41,23 +51,40 @@ pub(super) fn title(
                         .measure(TextRole::Secondary, &machine, window),
                     window,
                 );
-                machine_width(bounds.size.width, name_width, full_width)
+                machine_width(bounds.size.width, name_width + pin_width, full_width)
                     .map(|width| (machine, width))
             });
+            // A pin follows the name it marks, so the name takes only its text's width and the
+            // rest of the line stays empty.
+            let name_column = div().min_w_0().child(name_element);
+            let name_column = if pinned {
+                name_column.w(name_width).flex_shrink_1()
+            } else {
+                name_column.flex_1()
+            };
             let mut content = div()
                 .w_full()
                 .h_full()
                 .flex()
                 .items_center()
-                .child(div().min_w_0().flex_1().child(name_element))
-                .when(pinned, |row| row.child(pin(id, &appearance)))
+                .child(name_column)
+                .when(pinned, |row| {
+                    row.child(
+                        div()
+                            .flex_shrink_0()
+                            .pl(appearance.spacing(NAME_PIN_GAP))
+                            .child(pin(id, &appearance)),
+                    )
+                    .child(div().flex_1())
+                })
                 .when_some(machine, |row, (machine, width)| {
-                    row.gap(appearance.spacing(GAP)).child(
+                    row.child(
                         div()
                             .id(("workspace-machine", id))
                             .debug_selector(move || format!("workspace-machine-{id}"))
                             .w(width)
                             .flex_shrink_0()
+                            .ml(appearance.spacing(GAP))
                             .truncate()
                             .chrome_text(appearance.typography.style(TextRole::Secondary))
                             .text_color(gpui_color(appearance.colors.row_secondary))
