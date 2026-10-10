@@ -72,6 +72,8 @@ jobs:
         timeout-minutes: 35
         env:
           RELEASE_TAG: ${{ needs.tag.outputs.tag }}
+          MACOS_SIGNING_CERTIFICATE_P12: ${{ secrets.MACOS_SIGNING_CERTIFICATE_P12 }}
+          MACOS_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_SIGNING_CERTIFICATE_PASSWORD }}
         run: mise run release:package:macos "$RELEASE_TAG"
       - name: Sign and verify update assets
         timeout-minutes: 10

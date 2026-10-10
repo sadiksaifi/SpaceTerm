@@ -16,7 +16,8 @@ resources = [
 
 [macos]
 minimum-system-version = "26.0"
-signing-identity = "-"
+# Pin the certificate, not its name: replacing it changes the System Permission identity.
+signing-identity = "9E07CD5C15C5C862A21B93EA55D4303BC19B7366"
 entitlements = "packaging/macos/spaceterm/Entitlements.plist"
 
 [dmg]

@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# MISE description="Exercise signed ad hoc updates, cancellation, rejection, and relaunch in isolated bundles"
+# MISE description="Exercise authenticated updates and certificate identity transitions in isolated bundles"
 """Exercise Sparkle signature rejection, cancellation, installation and relaunch in temp apps."""
 
 import base64
@@ -12,11 +12,14 @@ import subprocess
 import tempfile
 import threading
 import time
+from contextlib import ExitStack
 from pathlib import Path
 
 from spaceterm_tasks import ROOT
 from spaceterm_tasks import sparkle as SPARKLE
+from spaceterm_tasks.macos_signing import release_keychain, verify_release_signature
 from spaceterm_tasks.release import verify_feed
+from tests.macos_signing_fixture import certificate
 
 
 def run(*arguments, **kwargs):
@@ -30,8 +33,13 @@ class QuietHandler(http.server.SimpleHTTPRequestHandler):
 
 def main():
     sparkle = SPARKLE.directory()
-    with tempfile.TemporaryDirectory(prefix="spaceterm-updater-test-") as temporary:
+    with (
+        tempfile.TemporaryDirectory(prefix="spaceterm-updater-test-") as temporary,
+        ExitStack() as signing,
+    ):
         root = Path(temporary)
+        fingerprint, credentials = certificate(root / "signing")
+        signing.enter_context(release_keychain(fingerprint, {**os.environ, **credentials}))
         server = http.server.ThreadingHTTPServer(
             ("127.0.0.1", 0), functools.partial(QuietHandler, directory=root)
         )
@@ -80,12 +88,19 @@ def main():
                 "-o",
                 str(binary),
             )
-            for mode in ("tampered", "cancel", "install", "quit"):
-                directory = root / mode
+            for scenario, mode, signed_old, signed_new in (
+                ("tampered", "tampered", False, False),
+                ("cancel", "cancel", False, False),
+                ("install", "install", False, False),
+                ("quit", "quit", False, False),
+                ("certificate-install", "install", True, True),
+                ("identity-transition", "install", False, True),
+            ):
+                directory = root / scenario
                 directory.mkdir()
                 log = directory / "events"
                 log.touch()
-                feed_url = f"http://127.0.0.1:{server.server_port}/{mode}/appcast.xml"
+                feed_url = f"http://127.0.0.1:{server.server_port}/{scenario}/appcast.xml"
                 apps = []
                 for version, name in (("0.1.0", "Installed"), ("0.1.1", "New")):
                     app = directory / name / "SpaceTermUpdateTest.app"
@@ -99,7 +114,7 @@ def main():
                         str(contents / "Frameworks/Sparkle.framework"),
                     )
                     plist = {
-                        "CFBundleIdentifier": f"io.github.sadiksaifi.spaceterm.updater-test.{mode}",
+                        "CFBundleIdentifier": f"io.github.sadiksaifi.spaceterm.updater-test.{scenario}",
                         "CFBundleName": "SpaceTermUpdateTest",
                         "CFBundleExecutable": "Fixture",
                         "CFBundlePackageType": "APPL",
@@ -118,13 +133,13 @@ def main():
                         "SPTTestMode": mode,
                     }
                     (contents / "Info.plist").write_bytes(plistlib.dumps(plist))
-                    # No Apple identity: the fixture deliberately exercises ad hoc application updates.
+                    signed = signed_old if version == "0.1.0" else signed_new
                     run(
                         "codesign",
                         "--force",
                         "--deep",
                         "--sign",
-                        "-",
+                        fingerprint if signed else "-",
                         "--timestamp=none",
                         "--options",
                         "runtime",
@@ -132,6 +147,10 @@ def main():
                         str(entitlements),
                         str(app),
                     )
+                    if signed:
+                        verify_release_signature(
+                            app, fingerprint, plist["CFBundleIdentifier"], scenario
+                        )
                     apps.append(app)
                 archive = directory / "SpaceTerm-0.1.1-darwin-arm64.dmg"
                 run(
@@ -182,7 +201,7 @@ def main():
                 # Exercise the production generator and verifier, then serve the fixture locally.
                 feed.write_text(
                     feed.read_text().replace(
-                        prefix, f"http://127.0.0.1:{server.server_port}/{mode}/"
+                        prefix, f"http://127.0.0.1:{server.server_port}/{scenario}/"
                     )
                 )
                 run(str(sparkle / "bin/sign_update"), "--ed-key-file", "-", str(feed), input=key)
@@ -243,7 +262,11 @@ def main():
                         assert (
                             "confirmed" in events and "relaunched" in events and version == "0.1.1"
                         ), events
-                    print(f"{mode}: passed", flush=True)
+                    if signed_new and version == "0.1.1":
+                        verify_release_signature(
+                            apps[0], fingerprint, plist["CFBundleIdentifier"], scenario
+                        )
+                    print(f"{scenario}: passed", flush=True)
                 finally:
                     if process.poll() is None:
                         process.terminate()

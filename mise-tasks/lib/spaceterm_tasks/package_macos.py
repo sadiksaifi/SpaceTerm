@@ -13,9 +13,10 @@ import subprocess
 import sys
 import tempfile
 import tomllib
+from contextlib import nullcontext
 from pathlib import Path
 
-from spaceterm_tasks import ROOT, TaskError, sparkle
+from spaceterm_tasks import ROOT, TaskError, macos_signing, sparkle
 from spaceterm_tasks.cargo import build_executable
 from spaceterm_tasks.macos_bundle import ICON_NAME, compile_icon, identity, identity_directory
 from spaceterm_tasks.packaging import (
@@ -46,6 +47,14 @@ def package(release_tag=None):
     require_apple_silicon()
     if release_tag:
         require_clean_checkout()
+        fingerprint = tomllib.loads(
+            (identity_directory("spaceterm") / "Packager.toml").read_text()
+        )["macos"]["signing-identity"]
+        macos_signing.signing_credentials(fingerprint, os.environ)
+    package_bundle(release_tag)
+
+
+def package_bundle(release_tag=None):
     name = selected_identity(release_tag)
     template = identity(name)
     version = release_version(release_tag) if release_tag else PREFLIGHT_VERSION
@@ -57,7 +66,9 @@ def package(release_tag=None):
         "tic could not compile the SpaceTerm terminfo entry",
     )
 
-    environment = packaged_environment(release_tag, removed=("SPACETERM_SPARKLE_DIR",))
+    environment = macos_signing.signing_environment(
+        packaged_environment(release_tag, removed=("SPACETERM_SPARKLE_DIR",))
+    )
     environment["MACOSX_DEPLOYMENT_TARGET"] = MINIMUM_MACOS
     config = tomllib.loads((identity_directory(name) / "Packager.toml").read_text())
     if release_tag:
@@ -83,11 +94,17 @@ def package(release_tag=None):
     with tempfile.TemporaryDirectory(dir=DIST, prefix=".package.") as temporary:
         output = Path(temporary) / "output"
         print(f"Packaging {app_name}.app and {app_name}.dmg with cargo-packager")
-        packaged = subprocess.run(
-            ["cargo", "packager", "--config", json.dumps(config), "--out-dir", str(output)],
-            cwd=ROOT,
-            env={"CI": "true", **environment},
+        signing = (
+            macos_signing.release_keychain(config["macos"]["signing-identity"], os.environ)
+            if release_tag
+            else nullcontext()
         )
+        with signing:
+            packaged = subprocess.run(
+                ["cargo", "packager", "--config", json.dumps(config), "--out-dir", str(output)],
+                cwd=ROOT,
+                env={"CI": "true", **environment},
+            )
         app = output / f"{app_name}.app"
         dmg = output / f"{app_name}_{version}_aarch64.dmg"
         if packaged.returncode or not app.is_dir() or not dmg.is_file():
@@ -192,7 +209,12 @@ def verify_bundle(app, name, release_tag, label):
     details = subprocess.run(
         ["codesign", "--display", "--verbose=4", str(app)], capture_output=True, text=True
     ).stderr
-    if "Signature=adhoc" not in details:
+    if release_tag:
+        config = tomllib.loads((identity_directory(name) / "Packager.toml").read_text())
+        macos_signing.verify_release_signature(
+            app, config["macos"]["signing-identity"], template["CFBundleIdentifier"], label
+        )
+    elif "Signature=adhoc" not in details:
         raise TaskError(f"{label} app is not ad hoc signed")
     entitlements = checked(
         ["codesign", "--display", "--entitlements", ":-", str(app)],
