@@ -255,6 +255,20 @@ impl Settings {
         receiver
     }
 
+    /// The committed document and any candidate a preview or a started commit may still retain,
+    /// including a commit whose preview owner has gone.
+    pub(crate) fn retainable_documents(&self) -> Vec<Arc<SettingsDocument>> {
+        let state = self.0.lock();
+        let mut documents = vec![Arc::clone(&state.committed)];
+        match &state.transaction {
+            Transaction::Idle => {}
+            Transaction::Preview { candidate, .. } | Transaction::Committing { candidate, .. } => {
+                documents.push(Arc::clone(candidate));
+            }
+        }
+        documents
+    }
+
     pub(crate) fn snapshot(&self) -> SettingsSnapshot {
         let state = self.0.lock();
         let candidate = match &state.transaction {

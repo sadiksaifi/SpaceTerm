@@ -267,6 +267,8 @@ pub(crate) struct SettingsWindow {
     /// it has no equivalent for; an unavailable feature keeps its rows to explain why.
     available_sections: Vec<SettingsSectionId>,
     omitted_rows: Vec<SettingsRowId>,
+    /// Counts Background Image choices, so only the latest one applies.
+    background_image_choices: u64,
     permission_access: PermissionAccessRows,
     _permission_changes: Option<PermissionAccessChanges>,
     theme_gallery: ThemeGallery,
@@ -549,6 +551,7 @@ impl SettingsWindow {
             window_movement,
             available_sections,
             omitted_rows,
+            background_image_choices: 0,
             microphone_access: MicrophoneAccessRow::new(permissions.microphone),
             permission_access: PermissionAccessRows::new(
                 permissions.system_permissions,

@@ -1,12 +1,14 @@
 //! Application-owned Background Image presentation for every Workspace window.
 //!
 //! The runtime loads the copy the previewed Settings name off the UI thread, so a Workspace
-//! window shows a changed image while the Settings Window is still saving it. When the committed
-//! Settings stop naming a copy, the runtime discards it, unless the preview still names it.
+//! window shows a changed image while the Settings Window is still saving it. It owns every copy
+//! a Settings Document has named or a choice has kept, and discards a copy once no retained or
+//! pending document names it. While a choice is still copying an image, nothing is discarded.
 
 #[cfg(test)]
 mod tests;
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use gpui::{App, AppContext as _, BorrowAppContext as _, Global, Task};
@@ -27,8 +29,10 @@ pub(crate) struct BackgroundImageRuntime {
     /// The copy the previewed Settings name, loaded or loading.
     requested: Option<BackgroundImageId>,
     presented: Option<PresentedBackgroundImage>,
-    /// The copy the committed Settings name, which the runtime keeps until they stop naming it.
-    committed: Option<BackgroundImageId>,
+    /// The copies this runtime discards once nothing names them.
+    owned: HashSet<BackgroundImageId>,
+    /// Choices still copying an image, which may name a copy this runtime is about to discard.
+    choosing: usize,
     load: Option<Task<()>>,
     _subscription: Task<()>,
 }
@@ -39,25 +43,20 @@ pub(crate) fn install(settings: Settings, store: Arc<BackgroundImageStore>, cx: 
     let subscription = cx.spawn(async move |cx| {
         while changed.recv().await.is_ok() {
             while changed.try_recv().is_ok() {}
-            cx.update(sync);
+            cx.update(|cx| sync(false, cx));
         }
     });
-    let committed = settings
-        .snapshot()
-        .committed
-        .appearance
-        .window
-        .background_image;
     cx.set_global(BackgroundImageRuntime {
         settings,
         store,
         requested: None,
         presented: None,
-        committed,
+        owned: HashSet::new(),
+        choosing: 0,
         load: None,
         _subscription: subscription,
     });
-    sync(cx);
+    sync(false, cx);
 }
 
 /// The image Workspace windows present now.
@@ -72,26 +71,71 @@ pub(crate) fn store(cx: &App) -> Option<Arc<BackgroundImageStore>> {
         .map(|runtime| Arc::clone(&runtime.store))
 }
 
-fn sync(cx: &mut App) {
-    let runtime = cx.global_mut::<BackgroundImageRuntime>();
-    let snapshot = runtime.settings.snapshot();
-    let store = Arc::clone(&runtime.store);
-    let requested = snapshot.candidate.appearance.window.background_image;
-    let committed = snapshot.committed.appearance.window.background_image;
-    let retired = std::mem::replace(&mut runtime.committed, committed)
-        .filter(|previous| Some(*previous) != committed && Some(*previous) != requested);
-    let request_changed = runtime.requested != requested;
-    runtime.requested = requested;
-    if let Some(retired) = retired {
-        let store = Arc::clone(&store);
-        cx.background_spawn(async move {
-            let _ = store.discard(retired);
-        })
-        .detach();
+/// Holds every discard until [`end_choice`], because the image being copied may be one this
+/// runtime would otherwise discard before the Settings name it again.
+pub(crate) fn begin_choice(cx: &mut App) {
+    if let Some(runtime) = cx.try_global::<BackgroundImageRuntime>() {
+        let choosing = runtime.choosing + 1;
+        cx.global_mut::<BackgroundImageRuntime>().choosing = choosing;
     }
-    if !request_changed {
+}
+
+/// Ends a choice. The runtime owns the copy it kept, and discards it unless the Settings name it.
+/// A copy that the Settings already named but that failed to load is loaded again.
+pub(crate) fn end_choice(kept: Option<BackgroundImageId>, cx: &mut App) {
+    if cx.try_global::<BackgroundImageRuntime>().is_none() {
         return;
     }
+    let runtime = cx.global_mut::<BackgroundImageRuntime>();
+    runtime.choosing = runtime.choosing.saturating_sub(1);
+    let reload = kept.is_some_and(|id| {
+        runtime.owned.insert(id);
+        runtime.requested == Some(id)
+            && runtime.presented.as_ref().map(|image| image.id) != Some(id)
+    });
+    sync(reload, cx);
+}
+
+fn sync(reload: bool, cx: &mut App) {
+    let runtime = cx.global_mut::<BackgroundImageRuntime>();
+    let store = Arc::clone(&runtime.store);
+    let requested = runtime
+        .settings
+        .snapshot()
+        .candidate
+        .appearance
+        .window
+        .background_image;
+    let named = runtime
+        .settings
+        .retainable_documents()
+        .iter()
+        .filter_map(|document| document.appearance.window.background_image)
+        .collect::<HashSet<_>>();
+    runtime.owned.extend(&named);
+    if runtime.choosing == 0 {
+        let retired = runtime
+            .owned
+            .iter()
+            .filter(|id| !named.contains(id))
+            .map(|&id| store.retire(id))
+            .collect::<Vec<_>>();
+        runtime.owned.retain(|id| named.contains(id));
+        if !retired.is_empty() {
+            let store = Arc::clone(&store);
+            cx.background_spawn(async move {
+                for retirement in retired {
+                    let _ = store.discard(retirement);
+                }
+            })
+            .detach();
+        }
+    }
+    let runtime = cx.global_mut::<BackgroundImageRuntime>();
+    if runtime.requested == requested && !reload {
+        return;
+    }
+    runtime.requested = requested;
     let Some(id) = requested else {
         cx.update_global::<BackgroundImageRuntime, _>(|runtime, _| {
             runtime.load = None;

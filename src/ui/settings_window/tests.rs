@@ -4866,7 +4866,8 @@ fn a_chosen_image_is_retained_until_it_is_removed(cx: &mut TestAppContext) {
 
     cx.update(|native, cx| {
         window.update(cx, |settings, cx| {
-            settings.finish_background_image(Ok(id), native, cx);
+            let choice = settings.begin_background_image_choice();
+            settings.finish_background_image(choice, Ok(id), native, cx);
         });
     });
     settle(cx);
@@ -4905,7 +4906,9 @@ fn an_unusable_image_is_explained_and_changes_nothing(cx: &mut TestAppContext) {
 
     cx.update(|native, cx| {
         window.update(cx, |settings, cx| {
+            let choice = settings.begin_background_image_choice();
             settings.finish_background_image(
+                choice,
                 Err(super::background_image::ChooseError::Keep(
                     crate::background_image::BackgroundImageError::UnsupportedFormat,
                 )),
@@ -4925,4 +4928,40 @@ fn an_unusable_image_is_explained_and_changes_nothing(cx: &mut TestAppContext) {
     settle(cx);
     assert_eq!(document_of(&window, cx), before);
     assert_eq!(harness.storage.writes(), 0);
+}
+
+/// Removing the image while a choice is still copying one keeps it removed.
+#[gpui::test]
+fn a_choice_that_completes_after_a_remove_changes_nothing(cx: &mut TestAppContext) {
+    let (window, harness, store, cx) = open_settings_presenting_background_images(cx);
+    let first = store
+        .install(crate::background_image::testing::PNG)
+        .expect("the fixture image is kept");
+    let second = store
+        .install(crate::background_image::testing::OTHER_PNG)
+        .expect("the fixture image is kept");
+    cx.update(|native, cx| {
+        window.update(cx, |settings, cx| {
+            let choice = settings.begin_background_image_choice();
+            settings.finish_background_image(choice, Ok(first), native, cx);
+        });
+    });
+    settle(cx);
+
+    let slow = window.update(cx, |settings, _| settings.begin_background_image_choice());
+    click("settings-background-image-remove", cx);
+    cx.update(|native, cx| {
+        window.update(cx, |settings, cx| {
+            settings.finish_background_image(slow, Ok(second), native, cx);
+        });
+    });
+    settle(cx);
+
+    assert_eq!(
+        harness
+            .storage
+            .document()
+            .and_then(|document| document.appearance.window.background_image),
+        None
+    );
 }

@@ -60,8 +60,11 @@ fn a_previewed_image_is_presented_before_it_is_saved(cx: &mut TestAppContext) {
     drop(token);
     cx.run_until_parked();
     assert_eq!(presented_bytes(cx), None);
-    // Cancelling a preview never touches the committed Settings, so the copy stays.
-    assert!(store.load(id).is_ok());
+    assert_eq!(
+        store.load(id),
+        Err(BackgroundImageError::Missing),
+        "a copy only a cancelled preview named is discarded"
+    );
 }
 
 #[gpui::test]
@@ -69,10 +72,56 @@ fn a_missing_copy_presents_nothing(cx: &mut TestAppContext) {
     let settings = Settings::load(Arc::new(MemoryStorage::default()));
     let store = Arc::new(store().0);
     let id = store.install(PNG).unwrap();
-    store.discard(id).unwrap();
+    store.discard(store.retire(id)).unwrap();
     commit(&settings, Some(id));
     cx.update(|cx| install(settings.clone(), Arc::clone(&store), cx));
     cx.run_until_parked();
 
     assert_eq!(presented_bytes(cx), None);
+}
+
+/// A choice may copy the very image the runtime is about to discard; nothing is discarded until
+/// the choice ends, and then only what no Settings name.
+#[gpui::test]
+fn a_copy_is_kept_while_a_choice_is_in_progress(cx: &mut TestAppContext) {
+    let settings = Settings::load(Arc::new(MemoryStorage::default()));
+    let store = Arc::new(store().0);
+    let first = store.install(PNG).unwrap();
+    commit(&settings, Some(first));
+    cx.update(|cx| install(settings.clone(), Arc::clone(&store), cx));
+    cx.run_until_parked();
+
+    cx.update(begin_choice);
+    commit(&settings, None);
+    cx.run_until_parked();
+    assert!(store.load(first).is_ok(), "the choice may name it again");
+
+    let kept = store.install(OTHER_PNG).unwrap();
+    cx.update(|cx| end_choice(Some(kept), cx));
+    cx.run_until_parked();
+    assert_eq!(store.load(first), Err(BackgroundImageError::Missing));
+    assert_eq!(
+        store.load(kept),
+        Err(BackgroundImageError::Missing),
+        "a copy the Settings never named is discarded once the choice ends"
+    );
+}
+
+/// Choosing the image the Settings already name restores a copy that went missing.
+#[gpui::test]
+fn choosing_the_named_image_again_restores_a_missing_copy(cx: &mut TestAppContext) {
+    let settings = Settings::load(Arc::new(MemoryStorage::default()));
+    let store = Arc::new(store().0);
+    let id = store.install(PNG).unwrap();
+    store.discard(store.retire(id)).unwrap();
+    commit(&settings, Some(id));
+    cx.update(|cx| install(settings.clone(), Arc::clone(&store), cx));
+    cx.run_until_parked();
+    assert_eq!(presented_bytes(cx), None);
+
+    cx.update(begin_choice);
+    assert_eq!(store.install(PNG), Ok(id));
+    cx.update(|cx| end_choice(Some(id), cx));
+    cx.run_until_parked();
+    assert_eq!(presented_bytes(cx).as_deref(), Some(PNG));
 }

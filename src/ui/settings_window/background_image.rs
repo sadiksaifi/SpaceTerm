@@ -31,7 +31,10 @@ impl ChooseError {
                 "That image is larger than 32 MB."
             }
             Self::Keep(BackgroundImageError::UnsupportedFormat) => {
-                "That file is not a PNG, JPEG, HEIC, or WebP image."
+                "That file is not a PNG, JPEG, HEIC, or WebP image that opens."
+            }
+            Self::Keep(BackgroundImageError::TooManyPixels) => {
+                "That image has more than 64 megapixels."
             }
             Self::Keep(
                 BackgroundImageError::Missing
@@ -42,7 +45,23 @@ impl ChooseError {
     }
 }
 
+/// One Choose in progress. It applies only while it is the latest choice and the Settings still
+/// name the image they named when it began, so a later Remove, reset, or choice wins.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct BackgroundImageChoice {
+    generation: u64,
+    before: Option<BackgroundImageId>,
+}
+
 impl SettingsWindow {
+    pub(super) fn begin_background_image_choice(&mut self) -> BackgroundImageChoice {
+        self.background_image_choices = self.background_image_choices.wrapping_add(1);
+        BackgroundImageChoice {
+            generation: self.background_image_choices,
+            before: self.editor.document().appearance.window.background_image,
+        }
+    }
+
     pub(super) fn render_background_image(
         &mut self,
         appearance: &ChromeAppearance,
@@ -101,6 +120,8 @@ impl SettingsWindow {
             present_failure(ChooseError::Read(ImportError::Unreadable), window, cx);
             return;
         };
+        let choice = self.begin_background_image_choice();
+        let app = cx.to_async();
         let selection = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: true,
             directories: false,
@@ -114,6 +135,10 @@ impl SettingsWindow {
             let Some(path) = paths.into_iter().next() else {
                 return;
             };
+            // From here the runtime keeps every copy, so it cannot discard the one this choice
+            // keeps before the Settings name it. It owns that copy once the choice ends, even
+            // when this window closed first.
+            app.update(background_image_runtime::begin_choice);
             let kept = cx
                 .background_executor()
                 .spawn(async move {
@@ -123,18 +148,25 @@ impl SettingsWindow {
                 })
                 .await;
             let _ = owner.update_in(cx, |settings, window, cx| {
-                settings.finish_background_image(kept, window, cx);
+                settings.finish_background_image(choice, kept, window, cx);
             });
+            app.update(|cx| background_image_runtime::end_choice(kept.ok(), cx));
         })
         .detach();
     }
 
     pub(super) fn finish_background_image(
         &mut self,
+        choice: BackgroundImageChoice,
         kept: Result<BackgroundImageId, ChooseError>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if choice.generation != self.background_image_choices
+            || choice.before != self.editor.document().appearance.window.background_image
+        {
+            return;
+        }
         match kept {
             Ok(id) => self.edit(
                 move |draft| draft.appearance.window.background_image = Some(id),
