@@ -96,7 +96,7 @@ jobs:
     name: Validate Linux
     needs: tag
     runs-on: ubuntu-26.04
-    timeout-minutes: 75
+    timeout-minutes: 100
     steps:
       - uses: actions/checkout@v7
         with:
@@ -104,7 +104,7 @@ jobs:
           submodules: recursive
       - uses: jdx/mise-action@v5
       - name: Install Linux build and test packages
-        timeout-minutes: 10
+        timeout-minutes: 30
         run: mise bootstrap packages apply --yes --update
       - name: Check the development environment
         run: mise doctor project
