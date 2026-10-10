@@ -16,6 +16,8 @@ const GAP: f32 = 8.0;
 const PIN_WIDTH: f32 = 16.0;
 /// The space between a name and the pin that follows it.
 const NAME_PIN_GAP: f32 = 4.0;
+/// How much smaller than a caption icon the pin draws, so it annotates the text it marks.
+const PIN_GLYPH_REDUCTION: f32 = 2.0;
 
 /// A row's first line. `pinned` marks a Workspace whose row leaves line 2 to its Worktrees.
 pub(super) fn title(
@@ -113,7 +115,7 @@ fn pin(id: u64, appearance: &ChromeAppearance) -> AnyElement {
         .text_color(gpui_color(appearance.colors.row_secondary))
         .child(Icon::inherited(
             IconName::Pin,
-            appearance.icons.metrics(IconRole::Caption).glyph_size,
+            appearance.icons.metrics(IconRole::Caption).glyph_size - px(PIN_GLYPH_REDUCTION),
         ))
         .into_any_element()
 }
