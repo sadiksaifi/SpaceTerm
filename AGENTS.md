@@ -25,3 +25,4 @@ A native desktop terminal multiplexer for macOS and Linux, coming soon for Windo
 ## Work
 
 - Run commands with `mise run` and follow the task conventions in [`.mise.toml`](.mise.toml).
+- For Zed and AccessKit fork work, first check `../zed` and `../accesskit` relative to the SpaceTerm repository root. If a needed fork is missing, run `git clone https://github.com/sadiksaifi/zed ../zed` for Zed or `git clone https://github.com/sadiksaifi/accesskit ../accesskit` for AccessKit from that root.
