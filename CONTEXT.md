@@ -230,6 +230,8 @@ _Avoid_: checkout, working copy
 
 **Blur**: Softening of content behind window backgrounds and floating surfaces.
 
+**Background Image**: An image a person chose that Workspace windows present behind their content in place of the desktop. Opacity and Blur apply to it as they do to the desktop.
+
 **Surface Material**: The translucency and neutral shading of a background fill.
 
 **Developer Workbench**: The Development window for previewing appearance and interface controls.
