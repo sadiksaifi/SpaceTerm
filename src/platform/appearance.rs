@@ -61,8 +61,13 @@ pub(crate) trait AppearancePlatform {
     /// Presents `image`, the encoded bytes of the Background Image, behind one Window's content
     /// and beneath its backdrop, or removes the image when `image` is `None`.
     ///
-    /// The window owner calls this once per change. Only Workspace windows present an image.
-    fn apply_window_background_image(&self, window: &gpui::Window, image: Option<&[u8]>) {
+    /// The window owner calls this once per change. Only Workspace windows present an image, and
+    /// every one of them receives the same shared bytes, so an Adapter may decode them once.
+    fn apply_window_background_image(
+        &self,
+        window: &gpui::Window,
+        image: Option<&std::sync::Arc<[u8]>>,
+    ) {
         let _ = (window, image);
     }
     /// Installs, replaces or removes the native backdrop behind one Window's content.
@@ -178,10 +183,14 @@ pub(crate) mod testing {
         fn apply_window_backdrop(&self, _: &gpui::Window, backdrop: WindowBackdrop) {
             self.backdrops.borrow_mut().push(backdrop);
         }
-        fn apply_window_background_image(&self, _: &gpui::Window, image: Option<&[u8]>) {
+        fn apply_window_background_image(
+            &self,
+            _: &gpui::Window,
+            image: Option<&std::sync::Arc<[u8]>>,
+        ) {
             self.background_images
                 .borrow_mut()
-                .push(image.map(<[u8]>::to_vec));
+                .push(image.map(|bytes| bytes.to_vec()));
         }
         fn system_appearance(&self) -> Option<Appearance> {
             self.fact.get()

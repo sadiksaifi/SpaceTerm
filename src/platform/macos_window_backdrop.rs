@@ -6,6 +6,9 @@
 //! A Background Image is a layer-backed view at the very bottom. While it is present the material
 //! blends within the window, so it softens and tints the image exactly as it would the desktop.
 
+use std::cell::RefCell;
+use std::sync::Arc;
+
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{AllocAnyThread, MainThreadMarker, MainThreadOnly, msg_send};
@@ -36,9 +39,17 @@ pub(crate) fn apply(window: &gpui::Window, backdrop: WindowBackdrop) {
     }
 }
 
+/// Encoded bytes and the image the system decoded from them, if it could.
+type DecodedImage = (Arc<[u8]>, Option<Retained<NSImage>>);
+
+thread_local! {
+    /// The Background Image every Workspace window presents, decoded once and shared by them.
+    static DECODED: RefCell<Option<DecodedImage>> = const { RefCell::new(None) };
+}
+
 /// Installs, replaces, or removes the Background Image beneath one window's material. Bytes the
 /// system cannot decode present no image.
-pub(crate) fn apply_background_image(window: &gpui::Window, image: Option<&[u8]>) {
+pub(crate) fn apply_background_image(window: &gpui::Window, image: Option<&Arc<[u8]>>) {
     if let Some((content_view, mtm)) = content_view(window) {
         apply_image_to_content_view(&content_view, image, mtm);
     }
@@ -80,9 +91,12 @@ fn apply_to_content_view(
     blend_with_background_image(content_view);
 }
 
-fn apply_image_to_content_view(content_view: &NSView, image: Option<&[u8]>, mtm: MainThreadMarker) {
-    let image =
-        image.and_then(|bytes| NSImage::initWithData(NSImage::alloc(), &NSData::with_bytes(bytes)));
+fn apply_image_to_content_view(
+    content_view: &NSView,
+    image: Option<&Arc<[u8]>>,
+    mtm: MainThreadMarker,
+) {
+    let image = decoded(image);
     let installed = identified_subview(content_view, BACKGROUND_IMAGE_IDENTIFIER);
     match (image, installed) {
         (None, Some(installed)) => installed.removeFromSuperview(),
@@ -91,6 +105,24 @@ fn apply_image_to_content_view(content_view: &NSView, image: Option<&[u8]>, mtm:
         (Some(image), None) => install_image(content_view, &image, mtm),
     }
     blend_with_background_image(content_view);
+}
+
+/// Decodes `bytes` once for every window, and releases the decoded image once none presents it.
+fn decoded(bytes: Option<&Arc<[u8]>>) -> Option<Retained<NSImage>> {
+    DECODED.with_borrow_mut(|cached| {
+        let Some(bytes) = bytes else {
+            *cached = None;
+            return None;
+        };
+        if let Some((cached_bytes, image)) = cached.as_ref()
+            && Arc::ptr_eq(cached_bytes, bytes)
+        {
+            return image.clone();
+        }
+        let image = NSImage::initWithData(NSImage::alloc(), &NSData::with_bytes(bytes));
+        *cached = Some((Arc::clone(bytes), image.clone()));
+        image
+    })
 }
 
 /// The material softens the desktop, or the Background Image when one lies beneath it.
@@ -292,7 +324,7 @@ pub(in crate::platform) mod tests {
     /// A 1x1 PNG the system decodes.
     const PIXEL: &[u8] = b"\x89\x50\x4e\x47\x0d\x0a\x1a\x0a\x00\x00\x00\x0d\x49\x48\x44\x52\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90\x77\x53\xde\x00\x00\x00\x0c\x49\x44\x41\x54\x78\x9c\x63\xf8\xdf\xc0\x00\x00\x04\x01\x01\x80\xc5\x2a\x18\x5d\x00\x00\x00\x00\x49\x45\x4e\x44\xae\x42\x60\x82";
 
-    fn apply_image(content_view: &NSView, image: Option<&[u8]>) {
+    fn apply_image(content_view: &NSView, image: Option<&Arc<[u8]>>) {
         super::apply_image_to_content_view(
             content_view,
             image,
@@ -327,9 +359,10 @@ pub(in crate::platform) mod tests {
             };
             let blending = |content: &ContentView| content.backdrop().unwrap().blendingMode();
 
+            let pixel: Arc<[u8]> = PIXEL.into();
             apply_to_content_view(&content.0, dark);
-            apply_image(&content.0, Some(PIXEL));
-            apply_image(&content.0, Some(PIXEL));
+            apply_image(&content.0, Some(&pixel));
+            apply_image(&content.0, Some(&pixel));
             assert_eq!(order(&content), ["image", "material", "renderer"]);
             assert_eq!(blending(&content), NSVisualEffectBlendingMode::WithinWindow);
 
@@ -340,10 +373,57 @@ pub(in crate::platform) mod tests {
             assert_eq!(order(&content), ["image", "material", "renderer"]);
             assert_eq!(blending(&content), NSVisualEffectBlendingMode::WithinWindow);
 
-            apply_image(&content.0, Some(b"not an image"));
+            apply_image(&content.0, Some(&Arc::from(b"not an image".as_slice())));
             assert_eq!(order(&content), ["material", "renderer"]);
             assert_eq!(blending(&content), NSVisualEffectBlendingMode::BehindWindow);
             apply_to_content_view(&content.0, None);
+        });
+    }
+
+    /// AppKit redraws a window's views as it resizes, and the image must survive that. Every
+    /// window shares one decoded image.
+    pub(in crate::platform) fn the_background_image_survives_redraws_and_resizing(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|_| {
+            let mtm =
+                objc2::MainThreadMarker::new().expect("native test must run on the main thread");
+            let window = unsafe {
+                objc2_app_kit::NSWindow::initWithContentRect_styleMask_backing_defer(
+                    objc2_app_kit::NSWindow::alloc(mtm),
+                    NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(320.0, 180.0)),
+                    objc2_app_kit::NSWindowStyleMask::Borderless,
+                    objc2_app_kit::NSBackingStoreType::Buffered,
+                    false,
+                )
+            };
+            unsafe { window.setReleasedWhenClosed(false) };
+            let content_view = window.contentView().expect("a window has a content view");
+            let pixel: Arc<[u8]> = PIXEL.into();
+            apply_image(&content_view, Some(&pixel));
+            let image = identified_subview(&content_view, BACKGROUND_IMAGE_IDENTIFIER).unwrap();
+            let contents = |view: &NSView| unsafe {
+                let layer: Option<Retained<AnyObject>> = msg_send![view, layer];
+                let contents: Option<Retained<AnyObject>> = msg_send![&*layer.unwrap(), contents];
+                contents.map(|contents| Retained::as_ptr(&contents))
+            };
+            assert!(contents(&image).is_some());
+
+            // A second window presents the image the first one decoded.
+            let other = ContentView::new(NSSize::new(320.0, 180.0));
+            apply_image(&other.0, Some(&pixel));
+            let other_image = identified_subview(&other.0, BACKGROUND_IMAGE_IDENTIFIER).unwrap();
+            assert_eq!(contents(&other_image), contents(&image));
+
+            window.setContentSize(NSSize::new(640.0, 360.0));
+            image.setNeedsDisplay(true);
+            window.display();
+            assert_eq!(image.frame().size, NSSize::new(640.0, 360.0));
+            assert!(
+                contents(&image).is_some(),
+                "a redraw must not clear the image"
+            );
+            window.close();
         });
     }
 

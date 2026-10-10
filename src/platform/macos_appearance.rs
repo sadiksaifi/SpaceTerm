@@ -132,7 +132,11 @@ impl AppearancePlatform for MacosAppearancePlatform {
         super::macos_window_backdrop::apply(window, backdrop);
     }
 
-    fn apply_window_background_image(&self, window: &gpui::Window, image: Option<&[u8]>) {
+    fn apply_window_background_image(
+        &self,
+        window: &gpui::Window,
+        image: Option<&std::sync::Arc<[u8]>>,
+    ) {
         super::macos_window_backdrop::apply_background_image(window, image);
     }
 

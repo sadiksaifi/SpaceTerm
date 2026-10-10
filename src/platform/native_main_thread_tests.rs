@@ -62,6 +62,7 @@ pub(crate) fn run() {
     gpui_test!(
         macos_window_backdrop::tests::background_image_lies_beneath_a_material_that_blends_within_the_window
     );
+    gpui_test!(macos_window_backdrop::tests::the_background_image_survives_redraws_and_resizing);
     gpui_test!(
         macos_application_quit::tests::native_hook_cancels_policy_then_consumes_one_confirmation
     );
