@@ -904,3 +904,55 @@ mod macos_adapter_tests {
 #[cfg(all(test, target_os = "linux", feature = "native-tests"))]
 #[path = "../platform/linux_adapter_tests/fonts.rs"]
 mod linux_adapter_tests;
+
+/// Only a Workspace window presents the Background Image, and only while its window shows what
+/// lies behind it.
+#[gpui::test]
+fn only_a_workspace_window_presents_the_background_image_and_never_while_opaque(
+    cx: &mut TestAppContext,
+) {
+    use crate::background_image::testing::{PNG, store};
+
+    let (settings, platform) = start(cx);
+    platform.set_native_window_opacity_supported(true);
+    let store = Arc::new(store().0);
+    let id = store.install(PNG).unwrap();
+    let committed = settings.snapshot().committed;
+    let mut document = (*committed).clone();
+    document.appearance.window.background_image = Some(id);
+    settings
+        .update_committed(committed.revision, document)
+        .unwrap()
+        .run()
+        .unwrap();
+    cx.update(|cx| crate::ui::background_image_runtime::install(settings.clone(), store, cx));
+    cx.run_until_parked();
+    let test_window = cx.add_window(|_, _| gpui::EmptyView);
+    let mut workspace = WindowAppearanceOwner::workspace();
+    let mut settings_window = WindowAppearanceOwner::default();
+    let apply = |workspace: &mut WindowAppearanceOwner,
+                 settings_window: &mut WindowAppearanceOwner,
+                 cx: &mut TestAppContext| {
+        test_window
+            .update(cx, |_, window, cx| {
+                workspace.apply(window, cx);
+                settings_window.apply(window, cx);
+            })
+            .unwrap();
+    };
+
+    apply(&mut workspace, &mut settings_window, cx);
+    assert_eq!(
+        platform.background_images.borrow().as_slice(),
+        &[Some(PNG.to_vec())]
+    );
+
+    platform.set_native_window_opacity_supported(false);
+    cx.run_until_parked();
+    apply(&mut workspace, &mut settings_window, cx);
+    apply(&mut workspace, &mut settings_window, cx);
+    assert_eq!(
+        platform.background_images.borrow().as_slice(),
+        &[Some(PNG.to_vec()), None]
+    );
+}

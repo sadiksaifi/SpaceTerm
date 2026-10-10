@@ -304,6 +304,7 @@ fn compose(
             theme_registry: Some(Arc::new(super::https_transport::HttpsTransport::new())),
             remote_workspace,
             repository_status,
+            background_images: None,
         },
         services: None,
         window_movement: Rc::new(super::linux_window_drag::LinuxWindowMovementFactory),

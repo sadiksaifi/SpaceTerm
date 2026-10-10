@@ -64,6 +64,7 @@ fn reset_entries(cx: &gpui::App) -> Vec<MenuEntry<ResetTarget>> {
         MenuEntry::action("Appearance Mode", ResetTarget::AppearanceMode),
         MenuEntry::action("Opacity", ResetTarget::Opacity),
         MenuEntry::action("Blur", ResetTarget::Blur),
+        MenuEntry::action("Background Image", ResetTarget::BackgroundImage),
         MenuEntry::action(
             "Light Terminal Theme",
             ResetTarget::TerminalTheme(Appearance::Light),

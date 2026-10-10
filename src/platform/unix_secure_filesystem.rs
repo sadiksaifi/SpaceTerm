@@ -246,6 +246,25 @@ impl SecureFilesystem for UnixSecureFilesystem {
         directory.file.sync_all().map_err(classify)
     }
 
+    fn remove_private_file(
+        &self,
+        directory_handle: &SecureDirectory,
+        name: &OsStr,
+        expected_handle: &SecureEntryIdentity,
+    ) -> Result<(), SecureFilesystemError> {
+        let directory = directory(directory_handle)?;
+        let expected = *file_snapshot_identity(expected_handle)?;
+        let _transaction = lock_private_directory(&directory)?;
+        verify_directory_entry(&directory)?;
+        if file_version_at(&directory.file, name)?.is_none() {
+            return Err(SecureFilesystemError::Missing);
+        }
+        if !file_matches_snapshot_at(&directory.file, name, expected)? {
+            return Err(SecureFilesystemError::Conflict);
+        }
+        quarantine_and_remove_retained_file(&directory.file, name, expected.version.entry)
+    }
+
     fn prepare_private_file(
         &self,
         directory_handle: &SecureDirectory,
@@ -1491,6 +1510,54 @@ mod tests {
         assert_eq!(
             fs::metadata(&root).unwrap().permissions().mode() & 0o777,
             0o700
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn remove_private_file_removes_only_the_file_that_was_read() {
+        let root = test_root("remove");
+        let filesystem = UnixSecureFilesystem;
+        let directory = filesystem.ensure_private_directory(&root).unwrap();
+        let name = OsStr::new("image");
+        let write = |bytes: &[u8], nonce: u8| {
+            let prepared = filesystem
+                .prepare_private_file(&directory, name, bytes, [nonce; 16])
+                .unwrap();
+            let expected = filesystem
+                .read_private_file(&directory, name, 1024)
+                .unwrap()
+                .map(|snapshot| snapshot.identity);
+            filesystem
+                .commit_private_file(prepared, expected.as_ref())
+                .unwrap();
+        };
+        let read = || {
+            filesystem
+                .read_private_file(&directory, name, 1024)
+                .unwrap()
+                .unwrap()
+                .identity
+        };
+
+        write(b"first", 1);
+        let stale = read();
+        write(b"replacement", 2);
+        assert_eq!(
+            filesystem.remove_private_file(&directory, name, &stale),
+            Err(SecureFilesystemError::Conflict)
+        );
+        assert_eq!(fs::read(root.join("image")).unwrap(), b"replacement");
+
+        let current = read();
+        assert_eq!(
+            filesystem.remove_private_file(&directory, name, &current),
+            Ok(())
+        );
+        assert!(!root.join("image").exists());
+        assert_eq!(
+            filesystem.remove_private_file(&directory, name, &current),
+            Err(SecureFilesystemError::Missing)
         );
         let _ = fs::remove_dir_all(root);
     }

@@ -132,6 +132,14 @@ impl AppearancePlatform for MacosAppearancePlatform {
         super::macos_window_backdrop::apply(window, backdrop);
     }
 
+    fn apply_window_background_image(
+        &self,
+        window: &gpui::Window,
+        image: Option<&crate::background_image::LoadedBackgroundImage>,
+    ) {
+        super::macos_window_backdrop::apply_background_image(window, image);
+    }
+
     fn system_appearance(&self) -> Option<Appearance> {
         let defaults = NSUserDefaults::standardUserDefaults();
         let value = defaults.stringForKey(&NSString::from_str("AppleInterfaceStyle"));

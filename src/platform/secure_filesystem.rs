@@ -181,6 +181,15 @@ pub(crate) trait SecureFilesystem: Send + Sync {
         expected: &SecureEntryIdentity,
     ) -> Result<(), SecureFilesystemError>;
 
+    /// Removes only the expected private file. A file replaced or edited since `expected` was
+    /// read stays in place and the removal reports a conflict.
+    fn remove_private_file(
+        &self,
+        directory: &SecureDirectory,
+        name: &OsStr,
+        expected: &SecureEntryIdentity,
+    ) -> Result<(), SecureFilesystemError>;
+
     fn prepare_private_file(
         &self,
         directory: &SecureDirectory,

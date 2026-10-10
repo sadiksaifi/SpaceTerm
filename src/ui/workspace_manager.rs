@@ -297,7 +297,7 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut window_appearance = super::appearance_runtime::WindowAppearanceOwner::default();
+        let mut window_appearance = super::appearance_runtime::WindowAppearanceOwner::workspace();
         window_appearance.apply(window, cx);
         let mut window_traffic_lights =
             super::appearance_runtime::WindowTrafficLightOwner::workspace();
@@ -309,6 +309,11 @@ impl WorkspaceManager {
                 manager.window_traffic_lights.apply(window, cx);
                 cx.notify();
             },
+        )
+        .detach();
+        cx.observe_global_in::<super::background_image_runtime::BackgroundImageRuntime>(
+            window,
+            |manager, window, cx| manager.window_appearance.apply(window, cx),
         )
         .detach();
         let WorkspaceManagerAdapters {

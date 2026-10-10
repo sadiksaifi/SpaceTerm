@@ -1,4 +1,5 @@
-//! Reads one user-chosen file, a Zed theme or an exported Settings Document, with a byte bound.
+//! Reads one user-chosen file, a Zed theme, an exported Settings Document, or a Background Image,
+//! with a byte bound.
 //! Failures carry only a typed classification, never a path or native error text.
 
 use std::{fs::File, io::Read, path::Path};
@@ -32,27 +33,39 @@ pub(super) fn read_selected_document(
     path: &Path,
     opener: &dyn SelectedFileOpener,
 ) -> Result<Vec<u8>, ImportError> {
-    read_open_document(opener.open(path).map_err(|_| ImportError::Unreadable)?)
+    read_selected_file(path, opener, MAXIMUM_IMPORT_BYTES)
 }
 
-fn read_open_document(file: File) -> Result<Vec<u8>, ImportError> {
+/// Reads one chosen file of at most `limit` bytes, as [`read_selected_document`] does.
+pub(super) fn read_selected_file(
+    path: &Path,
+    opener: &dyn SelectedFileOpener,
+    limit: u64,
+) -> Result<Vec<u8>, ImportError> {
+    read_open_document(
+        opener.open(path).map_err(|_| ImportError::Unreadable)?,
+        limit,
+    )
+}
+
+fn read_open_document(file: File, limit: u64) -> Result<Vec<u8>, ImportError> {
     let metadata = file.metadata().map_err(|_| ImportError::Unreadable)?;
     if !metadata.is_file() {
         return Err(ImportError::Unreadable);
     }
-    if metadata.len() > MAXIMUM_IMPORT_BYTES {
+    if metadata.len() > limit {
         return Err(ImportError::TooLarge);
     }
-    read_bounded(file)
+    read_bounded(file, limit)
 }
 
-fn read_bounded(reader: impl Read) -> Result<Vec<u8>, ImportError> {
+fn read_bounded(reader: impl Read, limit: u64) -> Result<Vec<u8>, ImportError> {
     let mut bytes = Vec::new();
     reader
-        .take(MAXIMUM_IMPORT_BYTES + 1)
+        .take(limit + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| ImportError::Unreadable)?;
-    if bytes.len() as u64 > MAXIMUM_IMPORT_BYTES {
+    if bytes.len() as u64 > limit {
         return Err(ImportError::TooLarge);
     }
     Ok(bytes)
@@ -94,7 +107,10 @@ mod tests {
     fn a_document_at_the_bound_is_read() {
         let bytes = vec![b'x'; MAXIMUM_IMPORT_BYTES as usize];
 
-        assert_eq!(read_bounded(bytes.as_slice()), Ok(bytes));
+        assert_eq!(
+            read_bounded(bytes.as_slice(), MAXIMUM_IMPORT_BYTES),
+            Ok(bytes)
+        );
     }
 
     #[test]
@@ -111,7 +127,10 @@ mod tests {
         }
 
         let mut document = GrowingDocument(0);
-        assert_eq!(read_bounded(&mut document), Err(ImportError::TooLarge));
+        assert_eq!(
+            read_bounded(&mut document, MAXIMUM_IMPORT_BYTES),
+            Err(ImportError::TooLarge)
+        );
         assert_eq!(document.0, MAXIMUM_IMPORT_BYTES + 1);
     }
 
@@ -123,7 +142,10 @@ mod tests {
         std::fs::remove_file(&path).expect("remove fixture");
         std::fs::write(&path, b"replacement").expect("replacement fixture");
 
-        assert_eq!(read_open_document(file), Ok(b"original".to_vec()));
+        assert_eq!(
+            read_open_document(file, MAXIMUM_IMPORT_BYTES),
+            Ok(b"original".to_vec())
+        );
     }
 
     #[test]

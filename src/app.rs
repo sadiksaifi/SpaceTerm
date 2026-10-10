@@ -60,6 +60,15 @@ impl<A: SshProcessAdapter> StartupDependencies<A> {
             Arc::clone(&self.paths),
         ))
     }
+    pub(crate) fn background_image_store(
+        &self,
+        inspector: Arc<dyn crate::background_image::ImageInspector>,
+    ) -> Arc<crate::background_image::BackgroundImageStore> {
+        Arc::new(crate::background_image::BackgroundImageStore::new(
+            Arc::clone(&self.paths),
+            inspector,
+        ))
+    }
     /// The same file the settings storage reads and writes, as other programs open it.
     pub(crate) fn settings_file(
         &self,
@@ -790,6 +799,8 @@ pub(crate) struct ApplicationCapabilities {
     /// Runs git and the GitHub CLI for Repository Status.
     pub(crate) repository_status:
         Option<crate::ui::repository_status_store::RepositoryStatusAdapters>,
+    /// Keeps the Background Image copies where Workspace windows can present one.
+    pub(crate) background_images: Option<Arc<crate::background_image::BackgroundImageStore>>,
 }
 
 /// The startup-supplied file opener available to explicit local file selections.
@@ -1023,6 +1034,9 @@ pub(crate) fn initialize_application(
         if let Some(adapters) = &host.adapters.repository_status {
             crate::ui::repository_status_store::install(&settings, adapters.clone(), cx);
             crate::ui::worktree_store::install(&settings, adapters.clone(), cx);
+        }
+        if let Some(store) = &host.adapters.background_images {
+            crate::ui::background_image_runtime::install(settings.clone(), Arc::clone(store), cx);
         }
     }
     crate::ui::initialize_controls(cx).map_err(|_| RuntimeError::Initialization)?;
@@ -1302,6 +1316,7 @@ mod runtime_tests {
                 theme_registry: None,
                 remote_workspace: Arc::new(UnavailableRemote),
                 repository_status: None,
+                background_images: None,
             },
             services: Some(services),
             window_movement: movement,

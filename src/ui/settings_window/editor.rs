@@ -33,6 +33,9 @@ pub(super) struct SettingsEditor {
     in_flight: Option<ActiveCommit>,
     /// Retires a superseded scheduled write so a late completion cannot report stale status.
     generation: u64,
+    /// Advances when the draft's Background Image changes, or when a reset, reload, or recovery
+    /// replaces the draft, so a choice begun before it no longer applies.
+    background_image_changes: u64,
 }
 
 struct ActiveCommit {
@@ -67,7 +70,27 @@ impl SettingsEditor {
             pending: None,
             in_flight: None,
             generation: 0,
+            background_image_changes: 0,
         }
+    }
+
+    pub(super) fn background_image_changes(&self) -> u64 {
+        self.background_image_changes
+    }
+
+    /// Runs `change` on the draft, and records a Background Image change when the image differs
+    /// afterwards or when `replaces` says the draft was replaced as a whole.
+    fn tracking_background_image<R>(
+        &mut self,
+        replaces: bool,
+        change: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let before = self.document().appearance.window.background_image;
+        let result = change(self);
+        if replaces || self.document().appearance.window.background_image != before {
+            self.background_image_changes = self.background_image_changes.wrapping_add(1);
+        }
+        result
     }
 
     pub(super) fn document(&self) -> &SettingsDocument {
@@ -93,20 +116,20 @@ impl SettingsEditor {
         edit: impl FnOnce(&mut SettingsDocument),
         cx: &mut Context<SettingsWindow>,
     ) {
-        if self.draft.edit(edit) {
+        if self.tracking_background_image(false, |editor| editor.draft.edit(edit)) {
             self.schedule(cx);
         }
     }
 
     pub(super) fn reset(&mut self, target: ResetTarget, cx: &mut Context<SettingsWindow>) {
-        if self.draft.reset(target) {
+        if self.tracking_background_image(false, |editor| editor.draft.reset(target)) {
             self.schedule(cx);
         }
     }
 
     /// Restores every Setting, including the imported theme catalog, to its default.
     pub(super) fn reset_all(&mut self, cx: &mut Context<SettingsWindow>) {
-        if self.draft.reset_all() {
+        if self.tracking_background_image(true, |editor| editor.draft.reset_all()) {
             self.schedule(cx);
         }
     }
@@ -235,7 +258,7 @@ impl SettingsEditor {
 
     pub(super) fn reload(&mut self, cx: &mut Context<SettingsWindow>) {
         self.pending = None;
-        self.draft.reload();
+        self.tracking_background_image(true, |editor| editor.draft.reload());
         cx.notify();
     }
 
@@ -245,14 +268,14 @@ impl SettingsEditor {
         cx: &mut Context<SettingsWindow>,
     ) -> Result<(), RecoveryError> {
         self.pending = None;
-        let result = self.draft.recover_by_reset();
+        let result = self.tracking_background_image(true, |editor| editor.draft.recover_by_reset());
         cx.notify();
         result
     }
 
     pub(super) fn synchronize(&mut self) {
         if self.pending.is_none() && self.in_flight.is_none() {
-            self.draft.synchronize();
+            self.tracking_background_image(false, |editor| editor.draft.synchronize());
         }
     }
 

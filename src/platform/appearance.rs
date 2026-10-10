@@ -58,6 +58,18 @@ pub(crate) trait AppearancePlatform {
     fn accessibility_display_options(&self) -> AccessibilityDisplayOptions {
         AccessibilityDisplayOptions::default()
     }
+    /// Presents `image`, the loaded Background Image, behind one Window's content and beneath its
+    /// backdrop, or removes the image when `image` is `None`.
+    ///
+    /// The window owner calls this once per change. Only Workspace windows present an image, and
+    /// every one of them receives the same copy, so an Adapter may decode it once per id.
+    fn apply_window_background_image(
+        &self,
+        window: &gpui::Window,
+        image: Option<&crate::background_image::LoadedBackgroundImage>,
+    ) {
+        let _ = (window, image);
+    }
     /// Installs, replaces or removes the native backdrop behind one Window's content.
     ///
     /// The window owner calls this once per change to the requested backdrop, including the
@@ -83,6 +95,7 @@ pub(crate) mod testing {
         native_window_blur: Rc<Cell<Option<bool>>>,
         accessibility: Rc<Cell<AccessibilityDisplayOptions>>,
         pub(crate) backdrops: Rc<RefCell<Vec<WindowBackdrop>>>,
+        pub(crate) background_images: Rc<RefCell<Vec<Option<Vec<u8>>>>>,
         notifications: Rc<RefCell<Vec<async_channel::Sender<()>>>>,
         pub(crate) applied: Rc<RefCell<Vec<Appearance>>>,
     }
@@ -169,6 +182,15 @@ pub(crate) mod testing {
         }
         fn apply_window_backdrop(&self, _: &gpui::Window, backdrop: WindowBackdrop) {
             self.backdrops.borrow_mut().push(backdrop);
+        }
+        fn apply_window_background_image(
+            &self,
+            _: &gpui::Window,
+            image: Option<&crate::background_image::LoadedBackgroundImage>,
+        ) {
+            self.background_images
+                .borrow_mut()
+                .push(image.map(|image| image.bytes.to_vec()));
         }
         fn system_appearance(&self) -> Option<Appearance> {
             self.fact.get()

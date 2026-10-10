@@ -202,3 +202,25 @@ fn property_keys(value: &serde_json::Value) -> std::collections::BTreeSet<&str> 
         .map(String::as_str)
         .collect()
 }
+
+#[test]
+fn published_schema_and_parser_agree_on_the_background_image_digest() {
+    let validator = validator();
+    let mut settings = serde_json::to_value(super::SettingsDocument::default()).unwrap();
+    assert!(settings["appearance"]["window"]["background_image"].is_null());
+
+    settings["appearance"]["window"]["background_image"] = serde_json::json!("0f".repeat(32));
+    assert!(validator.is_valid(&settings));
+    let document = super::parse_settings(&serde_json::to_vec(&settings).unwrap()).unwrap();
+    assert!(document.appearance.window.background_image.is_some());
+
+    for invalid in [
+        "0F".repeat(32),
+        "0f".repeat(31),
+        String::from("/Users/me/photo.jpg"),
+    ] {
+        settings["appearance"]["window"]["background_image"] = serde_json::json!(invalid);
+        assert!(!validator.is_valid(&settings), "{invalid}");
+        assert!(super::parse_settings(&serde_json::to_vec(&settings).unwrap()).is_err());
+    }
+}

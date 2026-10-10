@@ -2,6 +2,7 @@
 //! It is application scoped so it stays reachable when no Workspace window exists.
 
 mod advanced;
+mod background_image;
 mod catalog;
 mod clipboard;
 mod editor;
@@ -266,6 +267,10 @@ pub(crate) struct SettingsWindow {
     /// it has no equivalent for; an unavailable feature keeps its rows to explain why.
     available_sections: Vec<SettingsSectionId>,
     omitted_rows: Vec<SettingsRowId>,
+    /// Counts Background Image choices, so only the latest one applies.
+    background_image_choices: u64,
+    /// Keeps the copy the draft names until the Settings name it too.
+    background_image_lease: Option<super::background_image_runtime::BackgroundImageLease>,
     permission_access: PermissionAccessRows,
     _permission_changes: Option<PermissionAccessChanges>,
     theme_gallery: ThemeGallery,
@@ -522,10 +527,13 @@ impl SettingsWindow {
                 section_feature(*section).is_none_or(|feature| presentation.has_feature(feature))
             })
             .collect();
+        // Only a desktop whose Workspace windows can present a Background Image keeps its copies.
+        let presents_background_image = super::background_image_runtime::store(cx).is_some();
         let omitted_rows = catalog::rows()
             .map(|row| row.id)
             .filter(|row| {
                 row_feature(*row).is_some_and(|feature| !presentation.has_feature(feature))
+                    || (*row == SettingsRowId::BackgroundImage && !presents_background_image)
             })
             .collect();
         Self {
@@ -545,6 +553,8 @@ impl SettingsWindow {
             window_movement,
             available_sections,
             omitted_rows,
+            background_image_choices: 0,
+            background_image_lease: None,
             microphone_access: MicrophoneAccessRow::new(permissions.microphone),
             permission_access: PermissionAccessRows::new(
                 permissions.system_permissions,
@@ -796,6 +806,7 @@ impl SettingsWindow {
 
 impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.hold_background_image(cx);
         let activity = super::appearance::window_activity(window);
         super::sidebar_window::render_scoped(activity, || self.render_chrome(window, cx))
     }
@@ -1162,6 +1173,7 @@ impl SettingsWindow {
             SettingsRowId::AppearanceMode => self.render_appearance_mode(cx),
             SettingsRowId::Opacity => self.render_opacity(appearance, cx),
             SettingsRowId::Blur => self.render_blur(cx),
+            SettingsRowId::BackgroundImage => self.render_background_image(cx),
             SettingsRowId::TerminalTheme => self.render_current_theme(appearance, window, cx),
             SettingsRowId::Density => self.render_density(cx),
             SettingsRowId::TerminalFontFamily => self.render_terminal_font(appearance, cx),
@@ -2086,6 +2098,18 @@ impl SettingsWindow {
                     },
                 )
             }
+            SettingsRowId::BackgroundImage => Some(
+                if super::appearance_runtime::current(cx)
+                    .chrome
+                    .composition
+                    .effective
+                    == crate::appearance::WindowBackgroundAppearance::Opaque
+                {
+                    "Shown behind terminal windows in place of the desktop. Decrease Opacity below 1 to see it."
+                } else {
+                    "Shown behind terminal windows in place of the desktop, with the same opacity and blur."
+                },
+            ),
             SettingsRowId::TerminalFontFamily => Some("Only monospaced families are listed."),
             SettingsRowId::AutomaticUpdateDownloads
             | SettingsRowId::UpdateCheckInterval
