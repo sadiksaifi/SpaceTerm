@@ -60,6 +60,13 @@ impl<A: SshProcessAdapter> StartupDependencies<A> {
             Arc::clone(&self.paths),
         ))
     }
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(
+            dead_code,
+            reason = "only macOS composition creates a background image store"
+        )
+    )]
     pub(crate) fn background_image_store(
         &self,
         inspector: Arc<dyn crate::background_image::ImageInspector>,
