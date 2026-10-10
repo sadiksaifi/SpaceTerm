@@ -4,6 +4,9 @@
 //! that digest, so choosing another image never rewrites a copy a retained document still names,
 //! and a copy whose bytes no longer match its name is never presented. Failures carry only a
 //! typed classification, never a path or native error text.
+//!
+//! The system inspects each image before it is copied, so a copy always opens and its decoded
+//! size stays bounded.
 
 #[cfg(test)]
 mod tests;
@@ -12,7 +15,7 @@ mod tests;
 pub(crate) mod testing {
     use std::sync::Arc;
 
-    use super::BackgroundImageStore;
+    use super::{BackgroundImageStore, ImageInspector};
     use crate::platform::app_directories::AppDirectoryEnvironment;
     use crate::platform::testing::RecordingFilesystem;
 
@@ -20,8 +23,23 @@ pub(crate) mod testing {
     pub(crate) const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR";
     pub(crate) const OTHER_PNG: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\x01";
 
-    /// A store over an in-memory private filesystem.
+    /// Reports every image at one fixed size, or that none opens.
+    pub(crate) struct FixedInspector(pub(crate) Option<(u64, u64)>);
+
+    impl ImageInspector for FixedInspector {
+        fn pixel_size(&self, _: &[u8]) -> Option<(u64, u64)> {
+            self.0
+        }
+    }
+
+    /// A store over an in-memory private filesystem whose images all open at one pixel.
     pub(crate) fn store() -> (BackgroundImageStore, Arc<RecordingFilesystem>) {
+        store_inspecting(Some((1, 1)))
+    }
+
+    pub(crate) fn store_inspecting(
+        size: Option<(u64, u64)>,
+    ) -> (BackgroundImageStore, Arc<RecordingFilesystem>) {
         let filesystem = Arc::new(RecordingFilesystem::default());
         let paths = crate::platform::testing::resolve_app_paths(
             &AppDirectoryEnvironment {
@@ -33,12 +51,16 @@ pub(crate) mod testing {
             filesystem.clone(),
         )
         .unwrap();
-        (BackgroundImageStore::new(Arc::new(paths)), filesystem)
+        (
+            BackgroundImageStore::new(Arc::new(paths), Arc::new(FixedInspector(size))),
+            filesystem,
+        )
     }
 }
 
 use std::ffi::OsString;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
@@ -49,6 +71,10 @@ use crate::platform::secure_filesystem::SecureFilesystemError;
 
 /// The largest image SpaceTerm copies or presents.
 pub(crate) const MAXIMUM_BYTES: usize = 32 * 1024 * 1024;
+
+/// The most pixels an image may decode to, which admits a 48-megapixel photo and bounds its
+/// decoded size near 256 MiB.
+pub(crate) const MAXIMUM_PIXELS: u64 = 64 * 1024 * 1024;
 
 const FILE_NAME_PREFIX: &str = "background-image-";
 const PREPARE_ATTEMPTS: usize = 8;
@@ -111,6 +137,8 @@ impl<'de> Deserialize<'de> for BackgroundImageId {
 pub(crate) enum BackgroundImageError {
     #[error("the image is larger than SpaceTerm presents")]
     TooLarge,
+    #[error("the image has more pixels than SpaceTerm presents")]
+    TooManyPixels,
     #[error("the file is not a PNG, JPEG, HEIC, or WebP image")]
     UnsupportedFormat,
     /// No copy with this digest remains, or its bytes no longer match it.
@@ -122,14 +150,46 @@ pub(crate) enum BackgroundImageError {
     Unavailable,
 }
 
+/// Opens an image the way the system will present it.
+pub(crate) trait ImageInspector: Send + Sync {
+    /// The width and height the image decodes to, or `None` when the system cannot open it.
+    fn pixel_size(&self, bytes: &[u8]) -> Option<(u64, u64)>;
+}
+
+/// A decision to discard one copy. It lapses when any image is copied after it was made, so a
+/// discard never removes a copy that was chosen again in the meantime.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Retirement {
+    id: BackgroundImageId,
+    installs: u64,
+}
+
 /// Copies, reads and discards Background Images in the application data directory.
 pub(crate) struct BackgroundImageStore {
     paths: Arc<AppPaths>,
+    inspector: Arc<dyn ImageInspector>,
+    /// Counts started copies, so a retirement can tell whether one began since.
+    installs: AtomicU64,
+    /// Orders copying against discarding.
+    changes: Mutex<()>,
 }
 
 impl BackgroundImageStore {
-    pub(crate) fn new(paths: Arc<AppPaths>) -> Self {
-        Self { paths }
+    pub(crate) fn new(paths: Arc<AppPaths>, inspector: Arc<dyn ImageInspector>) -> Self {
+        Self {
+            paths,
+            inspector,
+            installs: AtomicU64::new(0),
+            changes: Mutex::new(()),
+        }
+    }
+
+    /// Decides to discard the copy `id` names. Reading the counter never waits on a copy.
+    pub(crate) fn retire(&self, id: BackgroundImageId) -> Retirement {
+        Retirement {
+            id,
+            installs: self.installs.load(Ordering::SeqCst),
+        }
     }
 
     /// Retains a private copy of `bytes` and returns the digest naming it. Copying the same image
@@ -141,6 +201,19 @@ impl BackgroundImageStore {
         if !is_supported_format(bytes) {
             return Err(BackgroundImageError::UnsupportedFormat);
         }
+        let (width, height) = self
+            .inspector
+            .pixel_size(bytes)
+            .filter(|&(width, height)| width > 0 && height > 0)
+            .ok_or(BackgroundImageError::UnsupportedFormat)?;
+        if width.saturating_mul(height) > MAXIMUM_PIXELS {
+            return Err(BackgroundImageError::TooManyPixels);
+        }
+        let _changes = self
+            .changes
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        self.installs.fetch_add(1, Ordering::SeqCst);
         let id = BackgroundImageId::of(bytes);
         let directory = self
             .paths
@@ -196,8 +269,17 @@ impl BackgroundImageStore {
         Ok(snapshot.bytes.into())
     }
 
-    /// Removes the copy `id` names. A copy that is already gone counts as discarded.
-    pub(crate) fn discard(&self, id: BackgroundImageId) -> Result<(), BackgroundImageError> {
+    /// Removes the copy a retirement names, unless an image was copied since the retirement was
+    /// made. A copy that is already gone counts as discarded.
+    pub(crate) fn discard(&self, retirement: Retirement) -> Result<(), BackgroundImageError> {
+        let _changes = self
+            .changes
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if self.installs.load(Ordering::SeqCst) != retirement.installs {
+            return Ok(());
+        }
+        let id = retirement.id;
         let Some(directory) = self
             .paths
             .open_secure_root(AppDirectoryRoot::Data)

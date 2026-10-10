@@ -62,9 +62,11 @@ impl<A: SshProcessAdapter> StartupDependencies<A> {
     }
     pub(crate) fn background_image_store(
         &self,
+        inspector: Arc<dyn crate::background_image::ImageInspector>,
     ) -> Arc<crate::background_image::BackgroundImageStore> {
         Arc::new(crate::background_image::BackgroundImageStore::new(
             Arc::clone(&self.paths),
+            inspector,
         ))
     }
     /// The same file the settings storage reads and writes, as other programs open it.

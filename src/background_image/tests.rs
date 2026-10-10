@@ -1,4 +1,4 @@
-use super::testing::{OTHER_PNG, PNG, store};
+use super::testing::{OTHER_PNG, PNG, store, store_inspecting};
 use super::*;
 
 #[test]
@@ -60,10 +60,10 @@ fn a_discarded_copy_is_gone_and_discarding_it_again_succeeds() {
     let kept = store.install(OTHER_PNG).unwrap();
     let id = store.install(PNG).unwrap();
 
-    assert_eq!(store.discard(id), Ok(()));
+    assert_eq!(store.discard(store.retire(id)), Ok(()));
 
     assert_eq!(store.load(id), Err(BackgroundImageError::Missing));
-    assert_eq!(store.discard(id), Ok(()));
+    assert_eq!(store.discard(store.retire(id)), Ok(()));
     assert_eq!(&*store.load(kept).unwrap(), OTHER_PNG);
 }
 
@@ -73,7 +73,7 @@ fn nothing_is_read_before_an_image_was_ever_installed() {
     let id = BackgroundImageId::of(PNG);
 
     assert_eq!(store.load(id), Err(BackgroundImageError::Missing));
-    assert_eq!(store.discard(id), Ok(()));
+    assert_eq!(store.discard(store.retire(id)), Ok(()));
     assert!(filesystem.events.lock().unwrap().is_empty());
 }
 
@@ -94,4 +94,40 @@ fn the_digest_round_trips_as_lowercase_hexadecimal_only() {
     ] {
         assert!(serde_json::from_str::<BackgroundImageId>(&invalid).is_err());
     }
+}
+
+#[test]
+fn an_image_the_system_cannot_open_is_refused_without_a_copy() {
+    let (store, filesystem) = store_inspecting(None);
+
+    assert_eq!(
+        store.install(PNG),
+        Err(BackgroundImageError::UnsupportedFormat)
+    );
+    assert_eq!(filesystem.files.lock().unwrap().prepare_count, 0);
+}
+
+#[test]
+fn an_image_with_more_pixels_than_a_large_photo_is_refused() {
+    let (store, filesystem) = store_inspecting(Some((16_384, 16_384)));
+    assert_eq!(store.install(PNG), Err(BackgroundImageError::TooManyPixels));
+    assert_eq!(filesystem.files.lock().unwrap().prepare_count, 0);
+
+    let (store, _) = store_inspecting(Some((8_064, 6_048)));
+    assert!(store.install(PNG).is_ok());
+}
+
+/// Choosing an image again while its earlier copy waits to be discarded keeps the copy.
+#[test]
+fn a_copy_chosen_again_after_its_retirement_is_kept() {
+    let (store, _) = store();
+    let id = store.install(PNG).unwrap();
+    let retirement = store.retire(id);
+
+    assert_eq!(store.install(PNG), Ok(id));
+    assert_eq!(store.discard(retirement), Ok(()));
+    assert_eq!(&*store.load(id).unwrap(), PNG);
+
+    assert_eq!(store.discard(store.retire(id)), Ok(()));
+    assert_eq!(store.load(id), Err(BackgroundImageError::Missing));
 }

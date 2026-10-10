@@ -108,7 +108,8 @@ fn compose(
 ) -> Result<HostComposition, DesktopProfileError> {
     let settings_storage = startup.settings_storage();
     let settings_file = startup.settings_file();
-    let background_images = startup.background_image_store();
+    let background_images =
+        startup.background_image_store(Arc::new(super::macos_image_inspector::MacosImageInspector));
     let activity: Rc<dyn crate::platform::application_activity::ApplicationActivity> =
         Rc::new(crate::platform::macos_application::MacosApplicationActivity);
     let lifecycle = crate::ui::pane_lifecycle::PaneLifecycleDependencies {
