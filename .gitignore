@@ -43,3 +43,8 @@ __pycache__/
 
 # Editor temporary files
 *.swp
+
+# Release signing backups: track templates and encrypted files only.
+/secrets/release/*
+!/secrets/release/*.example
+!/secrets/release/*.vault
