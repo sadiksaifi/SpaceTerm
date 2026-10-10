@@ -18,6 +18,9 @@ const PIN_WIDTH: f32 = 16.0;
 const NAME_PIN_GAP: f32 = 4.0;
 /// How much smaller than a caption icon the pin draws, so it annotates the text it marks.
 const PIN_GLYPH_REDUCTION: f32 = 2.0;
+/// How far the pin sits below center. Its head spans the cap height, so a centered pin reads high
+/// beside lowercase text.
+const PIN_OPTICAL_OFFSET: f32 = 1.0;
 
 /// A row's first line. `pinned` marks a Workspace whose row leaves line 2 to its Worktrees.
 pub(super) fn title(
@@ -110,6 +113,8 @@ fn pin(id: u64, appearance: &ChromeAppearance) -> AnyElement {
     div()
         .w(appearance.spacing(PIN_WIDTH))
         .flex_shrink_0()
+        .relative()
+        .top(px(PIN_OPTICAL_OFFSET))
         .id(("workspace-row-pin", id))
         .debug_selector(move || format!("workspace-row-pin-{id}"))
         .text_color(gpui_color(appearance.colors.row_secondary))
