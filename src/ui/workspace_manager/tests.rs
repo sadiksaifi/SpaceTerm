@@ -7010,6 +7010,75 @@ fn workspace_pin_indicator_should_track_explicit_pin_state(cx: &mut TestAppConte
 }
 
 #[gpui::test]
+fn a_pinned_workspace_row_disclosing_worktrees_should_mark_the_pin_beside_its_name(
+    cx: &mut TestAppContext,
+) {
+    use crate::domain::RepositoryIdentity;
+    use crate::worktrees::WorktreeSnapshot;
+    use crate::worktrees::listing::{WorktreeHead, WorktreeRecord};
+
+    cx.update(|cx| {
+        crate::ui::worktree_store::testing::install(cx);
+    });
+    let base = temporary_directory("pinned-repository");
+    let main = base.join("main");
+    let linked = base.join("linked");
+    fs::create_dir_all(&main).unwrap();
+    fs::create_dir_all(&linked).unwrap();
+    let (manager, _records, cx) =
+        workspace_manager_with_directory_selection([Ok(Some(main.clone()))], cx);
+    choose_pin_directory(&manager, cx);
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    manager.update(cx, |manager, cx| {
+        manager
+            .workspaces
+            .rename_workspace(workspace_id, "chuchi".into())
+            .unwrap();
+        cx.notify();
+    });
+    let record = |root: &Path, branch: &str| WorktreeRecord {
+        root: root.to_path_buf(),
+        head: WorktreeHead::Branch(branch.into()),
+        locked: false,
+        missing: false,
+    };
+    let store =
+        cx.update(|_, cx| crate::ui::worktree_store::InstalledWorktrees::store(cx).unwrap());
+    store.update(cx, |store, cx| {
+        store.present(
+            &main,
+            Some(WorktreeSnapshot {
+                repository: RepositoryIdentity::new(main.clone()),
+                current: Some(0),
+                common_directory: main.join(".git"),
+                worktrees: vec![record(&main, "main"), record(&linked, "feature/login")],
+            }),
+            cx,
+        )
+    });
+    cx.run_until_parked();
+
+    let id = workspace_id.get();
+    let name = cx.debug_bounds(format!("workspace-row-name-{id}").leak());
+    let pin = cx.debug_bounds(format!("workspace-row-pin-{id}").leak());
+    let disclosure = cx.debug_bounds(format!("workspace-disclosure-{id}-expanded").leak());
+    let _ = fs::remove_dir_all(&base);
+    let (name, pin, disclosure) = (name.unwrap(), pin.unwrap(), disclosure.unwrap());
+    let text = cx.update(|window, cx| {
+        crate::ui::appearance::chrome(cx).typography.measure(
+            crate::ui::chrome_typography::TextRole::Navigation,
+            "chuchi",
+            window,
+        )
+    });
+    assert!(
+        pin.left() >= name.right() && pin.left() - name.left() <= text.ceil() + px(5.0),
+        "the pin follows the name, as it leads the directory of a row without Worktrees"
+    );
+    assert!(pin.right() < disclosure.left());
+}
+
+#[gpui::test]
 fn the_workspace_chip_should_appear_only_while_the_sidebar_is_hidden(cx: &mut TestAppContext) {
     let (manager, _, cx) = workspace_manager(cx);
 
