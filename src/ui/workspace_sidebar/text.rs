@@ -20,7 +20,7 @@ const NAME_PIN_GAP: f32 = 4.0;
 const PIN_GLYPH_REDUCTION: f32 = 2.0;
 /// How far the pin sits below center. Its head spans the cap height, so a centered pin reads high
 /// beside lowercase text.
-const PIN_OPTICAL_OFFSET: f32 = 1.0;
+const PIN_OPTICAL_OFFSET: f32 = 0.5;
 
 /// A row's first line. `pinned` marks a Workspace whose row leaves line 2 to its Worktrees.
 pub(super) fn title(
