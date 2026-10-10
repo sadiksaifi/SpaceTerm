@@ -297,6 +297,7 @@ class AccessibilityCommandInputTests(unittest.TestCase):
         specification = importlib.util.spec_from_file_location(
             "accessibility_smoke", ROOT / "mise-tasks/test/accessibility/linux.py"
         )
+        assert specification is not None and specification.loader is not None
         smoke = importlib.util.module_from_spec(specification)
         specification.loader.exec_module(smoke)
         self.smoke = smoke
