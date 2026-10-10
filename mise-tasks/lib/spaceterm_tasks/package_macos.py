@@ -15,7 +15,7 @@ import tempfile
 import tomllib
 from pathlib import Path
 
-from spaceterm_tasks import ROOT, TaskError, sparkle
+from spaceterm_tasks import ROOT, TaskError, macos_signing, sparkle
 from spaceterm_tasks.cargo import build_executable
 from spaceterm_tasks.macos_bundle import ICON_NAME, compile_icon, identity, identity_directory
 from spaceterm_tasks.packaging import (
@@ -46,6 +46,16 @@ def package(release_tag=None):
     require_apple_silicon()
     if release_tag:
         require_clean_checkout()
+        fingerprint = tomllib.loads(
+            (identity_directory("spaceterm") / "Packager.toml").read_text()
+        )["macos"]["signing-identity"]
+        with macos_signing.release_keychain(fingerprint, os.environ):
+            package_bundle(release_tag)
+    else:
+        package_bundle()
+
+
+def package_bundle(release_tag=None):
     name = selected_identity(release_tag)
     template = identity(name)
     version = release_version(release_tag) if release_tag else PREFLIGHT_VERSION
@@ -57,7 +67,9 @@ def package(release_tag=None):
         "tic could not compile the SpaceTerm terminfo entry",
     )
 
-    environment = packaged_environment(release_tag, removed=("SPACETERM_SPARKLE_DIR",))
+    environment = macos_signing.signing_environment(
+        packaged_environment(release_tag, removed=("SPACETERM_SPARKLE_DIR",))
+    )
     environment["MACOSX_DEPLOYMENT_TARGET"] = MINIMUM_MACOS
     config = tomllib.loads((identity_directory(name) / "Packager.toml").read_text())
     if release_tag:
@@ -192,7 +204,12 @@ def verify_bundle(app, name, release_tag, label):
     details = subprocess.run(
         ["codesign", "--display", "--verbose=4", str(app)], capture_output=True, text=True
     ).stderr
-    if "Signature=adhoc" not in details:
+    if release_tag:
+        config = tomllib.loads((identity_directory(name) / "Packager.toml").read_text())
+        macos_signing.verify_release_signature(
+            app, config["macos"]["signing-identity"], template["CFBundleIdentifier"], label
+        )
+    elif "Signature=adhoc" not in details:
         raise TaskError(f"{label} app is not ad hoc signed")
     entitlements = checked(
         ["codesign", "--display", "--entitlements", ":-", str(app)],

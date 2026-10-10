@@ -4,6 +4,7 @@
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -12,9 +13,16 @@ import unittest
 from pathlib import Path
 
 from spaceterm_tasks import ROOT
+from tests.macos_signing_fixture import certificate
 
 
 class PackageTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        temporary = tempfile.TemporaryDirectory(prefix="spaceterm-package-certificate-")
+        cls.addClassCleanup(temporary.cleanup)
+        cls.fingerprint, cls.credentials = certificate(Path(temporary.name))
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory(prefix="spaceterm-package-test-")
         self.addCleanup(self.directory.cleanup)
@@ -27,6 +35,14 @@ class PackageTests(unittest.TestCase):
                 ignore=shutil.ignore_patterns("__pycache__"),
             )
         shutil.copyfile(ROOT / "Cargo.toml", self.root / "Cargo.toml")
+        config = self.root / "packaging/macos/spaceterm/Packager.toml"
+        config.write_text(
+            re.sub(
+                r'signing-identity = ".*"',
+                f'signing-identity = "{self.fingerprint}"',
+                config.read_text(),
+            )
+        )
         # Release packaging requires a clean Git checkout.
         (self.root / ".gitignore").write_text("/target/\n/dist/\n__pycache__/\n")
         for arguments in (("init", "-q"), ("add", "-A"), ("commit", "-qm", "fixture")):
@@ -61,6 +77,10 @@ Path(os.environ["BUILD_RECORD"]).write_text(json.dumps({{
     "arguments": sys.argv[2:],
     "packaged": os.environ.get("SPACETERM_PACKAGED"),
     "release_tag": os.environ.get("SPACETERM_RELEASE_TAG"),
+    "private_inputs": [name for name in (
+        "MACOS_SIGNING_CERTIFICATE_P12", "MACOS_SIGNING_CERTIFICATE_PASSWORD",
+        "APPLE_CERTIFICATE", "APPLE_CERTIFICATE_PASSWORD", "UPDATE_SIGNING_KEY",
+    ) if name in os.environ],
 }}))
 print(json.dumps({{"reason": "compiler-artifact", "target": {{"name": "spaceterm"}},
                   "executable": os.environ["BUILD_EXECUTABLE"]}}))
@@ -70,6 +90,7 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
         self.record = Path(self.directory.name) / "build.json"
         self.env = {
             **os.environ,
+            **self.credentials,
             "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
             "PYTHONPATH": str(self.root / "mise-tasks/lib"),
             "BUILD_RECORD": str(self.record),
@@ -168,6 +189,26 @@ int main(int argc, char **argv) {{
         self.assertEqual(self.executable_uuid(bundled), self.executable_uuid(self.artifact))
         self.assertNotEqual(self.executable_uuid(bundled), self.executable_uuid(self.stale))
         self.assertEqual(json.loads(self.record.read_text())["release_tag"], "v0.0.1")
+        self.assertEqual(json.loads(self.record.read_text())["private_inputs"], [])
+        for value in self.credentials.values():
+            self.assertNotIn(value, result.stdout + result.stderr)
+        requirement = self.run_command(
+            "codesign", "--display", "--requirements", "-", str(bundled)
+        ).stdout
+        self.assertEqual(
+            requirement.strip(),
+            f'designated => identifier "io.github.sadiksaifi.spaceterm" and certificate leaf = H"{self.fingerprint.lower()}"',
+        )
+
+    def test_release_requires_signing_secrets_before_building(self):
+        self.compile_executable(self.artifact, "SpaceTerm")
+        self.env.pop("MACOS_SIGNING_CERTIFICATE_P12", None)
+        self.env.pop("MACOS_SIGNING_CERTIFICATE_PASSWORD", None)
+        result = self.package("v0.0.1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("release signing", result.stderr)
+        self.assertFalse(self.record.exists())
+        self.assertFalse((self.root / "dist/SpaceTerm.app").exists())
 
     def test_release_packaging_rejects_a_dirty_checkout_before_building(self):
         self.compile_executable(self.artifact, "SpaceTerm")
