@@ -310,16 +310,29 @@ class Input:
         else:
             self.key(0xFF08)
 
-    def command(self, command):
+    def command(self, command, *, wait_for_echo=False):
         if self.backend == "x11":
             run(["xdotool", "type", "--clearmodifiers", "--delay", "2", "--", command])
-            run(["xdotool", "key", "--clearmodifiers", "Return"])
         else:
             for char in command:
                 code = ord(char)
                 self.key(code if code < 256 else 0x01000000 | code)
                 self.probe.drain()
                 time.sleep(0.003)
+
+        def command_echoed():
+            self.probe.terminal.clear_cache()
+            text = self.probe.terminal.queryText()
+            caret = text.caretOffset
+            return caret >= len(command) and text.getText(caret - len(command), caret) == command
+
+        # Native key delivery precedes the paced Terminal text publication.
+        # Keep the command echo separate from its output insertion for Orca.
+        if wait_for_echo:
+            self.probe.wait(command_echoed, "shell_command_echo_missing")
+        if self.backend == "x11":
+            run(["xdotool", "key", "--clearmodifiers", "Return"])
+        else:
             self.key(0xFF0D)
 
     def screenshot(self, destination):
@@ -475,7 +488,7 @@ def validate_tree(probe, input_driver, output, fixture_speech, readiness):
     probe.begin("shell")
     # Encode the marker so echoed input cannot satisfy the output assertion.
     encoded = "".join(f"\\{ord(char):03o}" for char in MARKER + "\n")
-    input_driver.command("printf '" + encoded + "'")
+    input_driver.command("printf '" + encoded + "'", wait_for_echo=True)
     probe.wait(lambda: probe.contains(MARKER), "shell_fixture_output_missing")
     probe.wait(lambda: probe.insert_marker, "shell_text_event_missing")
     # Orca derives inserted output from the CURRENT caret line. Let it finish
@@ -2063,6 +2076,10 @@ def main():
         )
         scope = " (private bus/dconf isolation only)" if args.isolation_only else ""
         print(f"{backend}: {outcome}{scope}" + (f" ({failure})" if failure else ""))
+        if not report.get("passed"):
+            # These observers retain classifications, counts and timings only.
+            diagnostics = {key: report[key] for key in ("readiness", "orca") if key in report}
+            print(f"{backend}: diagnostics " + json.dumps(diagnostics, sort_keys=True))
     return int(status != 0)
 
 

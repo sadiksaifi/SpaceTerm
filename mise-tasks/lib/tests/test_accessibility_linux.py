@@ -292,6 +292,47 @@ class AccessibilityTerminalDiscoveryTests(unittest.TestCase):
         self.assertEqual(proof, dict.fromkeys(keys, True))
 
 
+class AccessibilityCommandInputTests(unittest.TestCase):
+    def setUp(self):
+        specification = importlib.util.spec_from_file_location(
+            "accessibility_smoke", ROOT / "mise-tasks/test/accessibility/linux.py"
+        )
+        smoke = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(smoke)
+        self.smoke = smoke
+
+    def test_return_waits_for_command_echo_in_the_terminal_text(self):
+        command = "printf '\\163'"
+        text = SimpleNamespace(caretOffset=2, getText=lambda start, end: "$ "[start:end])
+        terminal = SimpleNamespace(clear_cache=lambda: None, queryText=lambda: text)
+        waited = False
+
+        def wait(predicate, classification):
+            nonlocal waited
+            self.assertFalse(predicate())
+            document = "$ " + command
+            text.caretOffset = len(document)
+            text.getText = lambda start, end: document[start:end]
+            self.assertTrue(predicate())
+            waited = True
+
+        probe = SimpleNamespace(terminal=terminal, wait=wait)
+        input_driver = self.smoke.Input("x11", probe)
+
+        def send(arguments):
+            if arguments[-1] == "Return":
+                self.assertTrue(waited, "Return executed before the command echo was published")
+
+        with patch.object(self.smoke, "run", side_effect=send):
+            input_driver.command(command, wait_for_echo=True)
+
+    def test_inactive_performance_input_does_not_require_accessibility_publication(self):
+        input_driver = self.smoke.Input("x11", SimpleNamespace())
+        with patch.object(self.smoke, "run") as send:
+            input_driver.command("python3 workload.py")
+        self.assertEqual(send.call_args.args[0][-1], "Return")
+
+
 class Accessible(list):
     def __init__(self, role, name="", pid=None, children=()):
         super().__init__(children)
