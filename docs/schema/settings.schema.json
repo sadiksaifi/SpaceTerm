@@ -197,6 +197,19 @@
           "type": "boolean",
           "default": true
         },
+        "background_image": {
+          "description": "The SHA-256 digest of the Background Image copy SpaceTerm keeps, or null for none. Choose the image in Settings.",
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "density": {
           "enum": [
             "compact",

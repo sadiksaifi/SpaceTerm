@@ -171,6 +171,8 @@ fn reset_fixture() -> SettingsDocument {
     document.appearance.window.density = ChromeDensity::Comfortable;
     document.appearance.window.opacity = 0.2;
     document.appearance.window.blur = false;
+    document.appearance.window.background_image =
+        Some(serde_json::from_value(serde_json::json!("ab".repeat(32))).unwrap());
     document.appearance.terminal.themes.light = ThemeId::new("custom.reset-light").unwrap();
     document.appearance.terminal.typography.family = TerminalFontFamily::Named {
         family: String::from("Menlo"),
@@ -217,6 +219,9 @@ fn every_individual_preference_reset_changes_only_its_field() {
         }),
         (ResetTarget::Opacity, |value| value.window.opacity = 0.65),
         (ResetTarget::Blur, |value| value.window.blur = true),
+        (ResetTarget::BackgroundImage, |value| {
+            value.window.background_image = None
+        }),
         (ResetTarget::TerminalTheme(Appearance::Light), |value| {
             value.terminal.themes.light = AppearancePreferences::default().terminal.themes.light;
         }),
@@ -259,7 +264,7 @@ fn every_individual_preference_reset_changes_only_its_field() {
                 .bold_as_bright;
         }),
     ];
-    assert_eq!(cases.len(), 12);
+    assert_eq!(cases.len(), 13);
 
     for (target, expected_edit) in cases {
         let mut actual = reset_fixture();

@@ -158,6 +158,9 @@ pub(crate) struct WindowPreferences {
     pub(crate) density: ChromeDensity,
     pub(crate) opacity: f32,
     pub(crate) blur: bool,
+    /// The Background Image Workspace windows present behind their content.
+    #[serde(default)]
+    pub(crate) background_image: Option<crate::background_image::BackgroundImageId>,
 }
 
 impl Default for WindowPreferences {
@@ -166,6 +169,7 @@ impl Default for WindowPreferences {
             density: ChromeDensity::Compact,
             opacity: 0.65,
             blur: true,
+            background_image: None,
         }
     }
 }
@@ -200,6 +204,9 @@ impl AppearancePreferences {
             ResetTarget::AppearanceMode => self.mode = defaults.mode,
             ResetTarget::Opacity => self.window.opacity = defaults.window.opacity,
             ResetTarget::Blur => self.window.blur = defaults.window.blur,
+            ResetTarget::BackgroundImage => {
+                self.window.background_image = defaults.window.background_image
+            }
             ResetTarget::TerminalTheme(appearance) => {
                 *self.terminal.themes.get_mut(appearance) =
                     defaults.terminal.themes.get(appearance).clone();
@@ -257,6 +264,7 @@ pub(crate) enum ResetTarget {
     AppearanceMode,
     Opacity,
     Blur,
+    BackgroundImage,
     TerminalTheme(Appearance),
     TerminalFontFamily,
     TerminalBaseSize,
