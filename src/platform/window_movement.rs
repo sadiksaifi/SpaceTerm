@@ -25,6 +25,13 @@ pub(crate) enum OperatingSystemWindowDragError {
 pub(crate) enum WindowMoveStart {
     #[default]
     AwaitMovement,
+    #[cfg_attr(
+        all(not(target_os = "macos"), not(test)),
+        expect(
+            dead_code,
+            reason = "only macOS starts window moves during the mouse-down callback"
+        )
+    )]
     Started,
 }
 
