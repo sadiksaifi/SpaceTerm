@@ -4967,3 +4967,64 @@ fn a_choice_that_completes_after_a_reset_changes_nothing(cx: &mut TestAppContext
         None
     );
 }
+
+/// Reset All while the first choice is still copying an image keeps the Settings without one.
+#[gpui::test]
+fn a_first_choice_that_completes_after_reset_all_changes_nothing(cx: &mut TestAppContext) {
+    let (window, harness, store, cx) = open_settings_presenting_background_images(cx);
+    let id = store
+        .install(crate::background_image::testing::PNG)
+        .expect("the fixture image is kept");
+
+    let slow = window.update(cx, |settings, _| settings.begin_background_image_choice());
+    select_section(SettingsSectionId::Advanced, cx);
+    click("settings-reset-all", cx);
+    click("modal-action-settings-reset-all-confirm", cx);
+    cx.update(|native, cx| {
+        window.update(cx, |settings, cx| {
+            settings.finish_background_image(slow, Ok(id), native, cx);
+        });
+    });
+    settle(cx);
+
+    assert_eq!(
+        document_of(&window, cx).appearance.window.background_image,
+        None
+    );
+    assert_eq!(
+        harness
+            .storage
+            .document()
+            .and_then(|document| document.appearance.window.background_image),
+        None
+    );
+}
+
+/// The draft may name a chosen copy before the Settings do, so the window keeps it meanwhile.
+#[gpui::test]
+fn the_window_keeps_the_copy_its_draft_names(cx: &mut TestAppContext) {
+    let (window, _harness, store, cx) = open_settings_presenting_background_images(cx);
+    let id = store
+        .install(crate::background_image::testing::PNG)
+        .expect("the fixture image is kept");
+    cx.update(|native, cx| {
+        window.update(cx, |settings, cx| {
+            let choice = settings.begin_background_image_choice();
+            settings.finish_background_image(choice, Ok(id), native, cx);
+        });
+    });
+    assert_eq!(
+        window.read_with(cx, |settings, _| settings
+            .background_image_lease
+            .as_ref()
+            .map(|lease| lease.id())),
+        Some(id)
+    );
+
+    click("settings-row-background-image-reset", cx);
+    settle(cx);
+    assert!(
+        window.read_with(cx, |settings, _| settings.background_image_lease.is_none()),
+        "a draft that names no image keeps none"
+    );
+}

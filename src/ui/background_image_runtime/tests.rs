@@ -125,3 +125,69 @@ fn choosing_the_named_image_again_restores_a_missing_copy(cx: &mut TestAppContex
     cx.run_until_parked();
     assert_eq!(presented_bytes(cx).as_deref(), Some(PNG));
 }
+
+/// An editor's draft may name a copy before the Settings do, while another write finishes.
+#[gpui::test]
+fn a_lease_keeps_a_copy_the_settings_do_not_name(cx: &mut TestAppContext) {
+    let settings = Settings::load(Arc::new(MemoryStorage::default()));
+    let store = Arc::new(store().0);
+    let first = store.install(PNG).unwrap();
+    commit(&settings, Some(first));
+    cx.update(|cx| install(settings.clone(), Arc::clone(&store), cx));
+    cx.run_until_parked();
+
+    let drafted = store.install(OTHER_PNG).unwrap();
+    let lease = cx.update(|cx| lease(drafted, cx)).unwrap();
+    commit(&settings, None);
+    cx.run_until_parked();
+    assert_eq!(store.load(first), Err(BackgroundImageError::Missing));
+    assert!(store.load(drafted).is_ok(), "the lease keeps it");
+
+    drop(lease);
+    commit(&settings, Some(first));
+    cx.run_until_parked();
+    assert_eq!(
+        store.load(drafted),
+        Err(BackgroundImageError::Missing),
+        "the next change discards a copy nothing names any longer"
+    );
+}
+
+/// Naming a copy again, as an import or an edit to the settings file can, keeps it even while
+/// its discard is still waiting to run.
+#[gpui::test]
+fn a_copy_named_again_before_its_discard_runs_is_kept(cx: &mut TestAppContext) {
+    let settings = Settings::load(Arc::new(MemoryStorage::default()));
+    let store = Arc::new(store().0);
+    let id = store.install(PNG).unwrap();
+    commit(&settings, Some(id));
+    cx.update(|cx| install(settings.clone(), Arc::clone(&store), cx));
+    cx.run_until_parked();
+
+    commit(&settings, None);
+    cx.update(|cx| sync(false, cx));
+    commit(&settings, Some(id));
+    cx.update(|cx| sync(false, cx));
+    cx.run_until_parked();
+    assert!(store.load(id).is_ok());
+    assert_eq!(presented_bytes(cx).as_deref(), Some(PNG));
+}
+
+/// A discard that lapses because another image was copied meanwhile is decided again, so the copy
+/// nothing names is not left behind.
+#[gpui::test]
+fn a_lapsed_discard_is_tried_again(cx: &mut TestAppContext) {
+    let settings = Settings::load(Arc::new(MemoryStorage::default()));
+    let store = Arc::new(store().0);
+    let id = store.install(PNG).unwrap();
+    commit(&settings, Some(id));
+    cx.update(|cx| install(settings.clone(), Arc::clone(&store), cx));
+    cx.run_until_parked();
+
+    commit(&settings, None);
+    cx.update(|cx| sync(false, cx));
+    let other = store.install(OTHER_PNG).unwrap();
+    cx.run_until_parked();
+    assert_eq!(store.load(id), Err(BackgroundImageError::Missing));
+    assert!(store.load(other).is_ok(), "nothing owned this copy yet");
+}

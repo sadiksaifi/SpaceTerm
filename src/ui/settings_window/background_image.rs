@@ -44,12 +44,12 @@ impl ChooseError {
     }
 }
 
-/// One Choose in progress. It applies only while it is the latest choice and the Settings still
-/// name the image they named when it began, so a later Remove, reset, or choice wins.
+/// One Choose in progress. It applies only while it is the latest choice and nothing has changed
+/// the image or replaced the draft since it began, so a later reset, reload, or choice wins.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct BackgroundImageChoice {
     generation: u64,
-    before: Option<BackgroundImageId>,
+    changes: u64,
 }
 
 impl SettingsWindow {
@@ -57,7 +57,16 @@ impl SettingsWindow {
         self.background_image_choices = self.background_image_choices.wrapping_add(1);
         BackgroundImageChoice {
             generation: self.background_image_choices,
-            before: self.editor.document().appearance.window.background_image,
+            changes: self.editor.background_image_changes(),
+        }
+    }
+
+    /// Leases the copy the draft names, which may not have reached the Settings yet while another
+    /// write finishes, so the runtime keeps it.
+    pub(super) fn hold_background_image(&mut self, cx: &mut gpui::App) {
+        let id = self.editor.document().appearance.window.background_image;
+        if self.background_image_lease.as_ref().map(|lease| lease.id()) != id {
+            self.background_image_lease = id.and_then(|id| background_image_runtime::lease(id, cx));
         }
     }
 
@@ -129,15 +138,18 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) {
         if choice.generation != self.background_image_choices
-            || choice.before != self.editor.document().appearance.window.background_image
+            || choice.changes != self.editor.background_image_changes()
         {
             return;
         }
         match kept {
-            Ok(id) => self.edit(
-                move |draft| draft.appearance.window.background_image = Some(id),
-                cx,
-            ),
+            Ok(id) => {
+                self.edit(
+                    move |draft| draft.appearance.window.background_image = Some(id),
+                    cx,
+                );
+                self.hold_background_image(cx);
+            }
             Err(error) => present_failure(error, window, cx),
         }
     }

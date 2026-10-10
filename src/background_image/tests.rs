@@ -60,10 +60,10 @@ fn a_discarded_copy_is_gone_and_discarding_it_again_succeeds() {
     let kept = store.install(OTHER_PNG).unwrap();
     let id = store.install(PNG).unwrap();
 
-    assert_eq!(store.discard(store.retire(id)), Ok(()));
+    assert_eq!(store.discard(store.retire(id)), Ok(Discarded::Removed));
 
     assert_eq!(store.load(id), Err(BackgroundImageError::Missing));
-    assert_eq!(store.discard(store.retire(id)), Ok(()));
+    assert_eq!(store.discard(store.retire(id)), Ok(Discarded::Removed));
     assert_eq!(&*store.load(kept).unwrap(), OTHER_PNG);
 }
 
@@ -73,7 +73,7 @@ fn nothing_is_read_before_an_image_was_ever_installed() {
     let id = BackgroundImageId::of(PNG);
 
     assert_eq!(store.load(id), Err(BackgroundImageError::Missing));
-    assert_eq!(store.discard(store.retire(id)), Ok(()));
+    assert_eq!(store.discard(store.retire(id)), Ok(Discarded::Removed));
     assert!(filesystem.events.lock().unwrap().is_empty());
 }
 
@@ -125,9 +125,22 @@ fn a_copy_chosen_again_after_its_retirement_is_kept() {
     let retirement = store.retire(id);
 
     assert_eq!(store.install(PNG), Ok(id));
-    assert_eq!(store.discard(retirement), Ok(()));
+    assert_eq!(store.discard(retirement), Ok(Discarded::Lapsed));
     assert_eq!(&*store.load(id).unwrap(), PNG);
 
-    assert_eq!(store.discard(store.retire(id)), Ok(()));
+    assert_eq!(store.discard(store.retire(id)), Ok(Discarded::Removed));
     assert_eq!(store.load(id), Err(BackgroundImageError::Missing));
+}
+
+/// Settings that name a copy again, as an import or an edit to the settings file can, keep it.
+#[test]
+fn a_copy_named_again_after_its_retirement_is_kept() {
+    let (store, _) = store();
+    let id = store.install(PNG).unwrap();
+    let retirement = store.retire(id);
+
+    store.renew();
+
+    assert_eq!(store.discard(retirement), Ok(Discarded::Lapsed));
+    assert_eq!(&*store.load(id).unwrap(), PNG);
 }

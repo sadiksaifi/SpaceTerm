@@ -156,20 +156,43 @@ pub(crate) trait ImageInspector: Send + Sync {
     fn pixel_size(&self, bytes: &[u8]) -> Option<(u64, u64)>;
 }
 
-/// A decision to discard one copy. It lapses when any image is copied after it was made, so a
-/// discard never removes a copy that was chosen again in the meantime.
+/// A decision to discard one copy. It lapses when any image is copied or named again after it was
+/// made, so a discard never removes a copy that was chosen or named again in the meantime.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Retirement {
     id: BackgroundImageId,
-    installs: u64,
+    generation: u64,
+}
+
+impl Retirement {
+    pub(crate) fn id(self) -> BackgroundImageId {
+        self.id
+    }
+}
+
+/// What a discard did.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Discarded {
+    /// The copy is gone.
+    Removed,
+    /// An image was copied or named since the retirement, so the copy stays.
+    Lapsed,
+}
+
+/// The loaded bytes of one copy, shared by every window that presents it.
+#[derive(Clone)]
+pub(crate) struct LoadedBackgroundImage {
+    pub(crate) id: BackgroundImageId,
+    pub(crate) bytes: Arc<[u8]>,
 }
 
 /// Copies, reads and discards Background Images in the application data directory.
 pub(crate) struct BackgroundImageStore {
     paths: Arc<AppPaths>,
     inspector: Arc<dyn ImageInspector>,
-    /// Counts started copies, so a retirement can tell whether one began since.
-    installs: AtomicU64,
+    /// Advances whenever an image is copied or named again, so a retirement can tell whether that
+    /// happened since it was made.
+    generation: AtomicU64,
     /// Orders copying against discarding.
     changes: Mutex<()>,
 }
@@ -179,7 +202,7 @@ impl BackgroundImageStore {
         Self {
             paths,
             inspector,
-            installs: AtomicU64::new(0),
+            generation: AtomicU64::new(0),
             changes: Mutex::new(()),
         }
     }
@@ -188,8 +211,14 @@ impl BackgroundImageStore {
     pub(crate) fn retire(&self, id: BackgroundImageId) -> Retirement {
         Retirement {
             id,
-            installs: self.installs.load(Ordering::SeqCst),
+            generation: self.generation.load(Ordering::SeqCst),
         }
+    }
+
+    /// Records that a Settings Document names a copy again, which lapses every retirement made
+    /// before it.
+    pub(crate) fn renew(&self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
     }
 
     /// Retains a private copy of `bytes` and returns the digest naming it. Copying the same image
@@ -213,7 +242,7 @@ impl BackgroundImageStore {
             .changes
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        self.installs.fetch_add(1, Ordering::SeqCst);
+        self.generation.fetch_add(1, Ordering::SeqCst);
         let id = BackgroundImageId::of(bytes);
         let directory = self
             .paths
@@ -269,15 +298,18 @@ impl BackgroundImageStore {
         Ok(snapshot.bytes.into())
     }
 
-    /// Removes the copy a retirement names, unless an image was copied since the retirement was
-    /// made. A copy that is already gone counts as discarded.
-    pub(crate) fn discard(&self, retirement: Retirement) -> Result<(), BackgroundImageError> {
+    /// Removes the copy a retirement names, unless an image was copied or named again since the
+    /// retirement was made. A copy that is already gone counts as removed.
+    pub(crate) fn discard(
+        &self,
+        retirement: Retirement,
+    ) -> Result<Discarded, BackgroundImageError> {
         let _changes = self
             .changes
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        if self.installs.load(Ordering::SeqCst) != retirement.installs {
-            return Ok(());
+        if self.generation.load(Ordering::SeqCst) != retirement.generation {
+            return Ok(Discarded::Lapsed);
         }
         let id = retirement.id;
         let Some(directory) = self
@@ -285,7 +317,7 @@ impl BackgroundImageStore {
             .open_secure_root(AppDirectoryRoot::Data)
             .map_err(|_| BackgroundImageError::Unavailable)?
         else {
-            return Ok(());
+            return Ok(Discarded::Removed);
         };
         let filesystem = self.paths.filesystem();
         let name = id.file_name();
@@ -293,10 +325,10 @@ impl BackgroundImageStore {
             .read_private_file(&directory, &name, MAXIMUM_BYTES)
             .map_err(filesystem_error)?
         else {
-            return Ok(());
+            return Ok(Discarded::Removed);
         };
         match filesystem.remove_private_file(&directory, &name, &snapshot.identity) {
-            Ok(()) | Err(SecureFilesystemError::Missing) => Ok(()),
+            Ok(()) | Err(SecureFilesystemError::Missing) => Ok(Discarded::Removed),
             Err(error) => Err(filesystem_error(error)),
         }
     }

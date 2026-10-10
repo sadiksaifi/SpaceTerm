@@ -2,41 +2,51 @@
 //!
 //! The runtime loads the copy the previewed Settings name off the UI thread, so a Workspace
 //! window shows a changed image while the Settings Window is still saving it. It owns every copy
-//! a Settings Document has named or a choice has kept, and discards a copy once no retained or
-//! pending document names it. While a choice is still copying an image, nothing is discarded.
+//! a Settings Document, a lease, or a choice has named, and discards a copy once no retained or
+//! pending document and no lease names it. While a choice is still copying an image, nothing is
+//! discarded. A discard that lapsed or failed leaves the copy owned, to be tried again.
 
 #[cfg(test)]
 mod tests;
 
 use std::collections::HashSet;
+use std::rc::{Rc, Weak};
 use std::sync::Arc;
 
 use gpui::{App, AppContext as _, BorrowAppContext as _, Global, Task};
 
-use crate::background_image::{BackgroundImageId, BackgroundImageStore};
+use crate::background_image::{
+    BackgroundImageId, BackgroundImageStore, Discarded, LoadedBackgroundImage,
+};
 use crate::settings::Settings;
-
-/// The loaded Background Image a Workspace window presents.
-#[derive(Clone)]
-pub(crate) struct PresentedBackgroundImage {
-    pub(crate) id: BackgroundImageId,
-    pub(crate) bytes: Arc<[u8]>,
-}
 
 pub(crate) struct BackgroundImageRuntime {
     settings: Settings,
     store: Arc<BackgroundImageStore>,
     /// The copy the previewed Settings name, loaded or loading.
     requested: Option<BackgroundImageId>,
-    presented: Option<PresentedBackgroundImage>,
+    presented: Option<LoadedBackgroundImage>,
     /// The copies this runtime discards once nothing names them.
     owned: HashSet<BackgroundImageId>,
+    /// Copies named by documents that have not reached the Settings yet, such as an editor's
+    /// draft waiting for another write to finish.
+    leases: Vec<Weak<BackgroundImageId>>,
     /// Choices still copying an image, which may name a copy this runtime is about to discard.
     choosing: usize,
     load: Option<Task<()>>,
     _subscription: Task<()>,
 }
 impl Global for BackgroundImageRuntime {}
+
+/// Keeps one copy while it lives. Dropping it lets the next change discard the copy, unless
+/// something else names it.
+pub(crate) struct BackgroundImageLease(Rc<BackgroundImageId>);
+
+impl BackgroundImageLease {
+    pub(crate) fn id(&self) -> BackgroundImageId {
+        *self.0
+    }
+}
 
 pub(crate) fn install(settings: Settings, store: Arc<BackgroundImageStore>, cx: &mut App) {
     let changed = settings.subscribe();
@@ -52,6 +62,7 @@ pub(crate) fn install(settings: Settings, store: Arc<BackgroundImageStore>, cx: 
         requested: None,
         presented: None,
         owned: HashSet::new(),
+        leases: Vec::new(),
         choosing: 0,
         load: None,
         _subscription: subscription,
@@ -60,7 +71,7 @@ pub(crate) fn install(settings: Settings, store: Arc<BackgroundImageStore>, cx: 
 }
 
 /// The image Workspace windows present now.
-pub(crate) fn presented(cx: &App) -> Option<PresentedBackgroundImage> {
+pub(crate) fn presented(cx: &App) -> Option<LoadedBackgroundImage> {
     cx.try_global::<BackgroundImageRuntime>()
         .and_then(|runtime| runtime.presented.clone())
 }
@@ -69,6 +80,18 @@ pub(crate) fn presented(cx: &App) -> Option<PresentedBackgroundImage> {
 pub(crate) fn store(cx: &App) -> Option<Arc<BackgroundImageStore>> {
     cx.try_global::<BackgroundImageRuntime>()
         .map(|runtime| Arc::clone(&runtime.store))
+}
+
+/// Keeps the copy `id` names while the returned lease lives.
+pub(crate) fn lease(id: BackgroundImageId, cx: &mut App) -> Option<BackgroundImageLease> {
+    cx.try_global::<BackgroundImageRuntime>()?;
+    let lease = Rc::new(id);
+    let runtime = cx.global_mut::<BackgroundImageRuntime>();
+    runtime.leases.push(Rc::downgrade(&lease));
+    if runtime.owned.insert(id) {
+        runtime.store.renew();
+    }
+    Some(BackgroundImageLease(lease))
 }
 
 /// Holds every discard until [`end_choice`], because the image being copied may be one this
@@ -80,7 +103,7 @@ pub(crate) fn begin_choice(cx: &mut App) {
     }
 }
 
-/// Ends a choice. The runtime owns the copy it kept, and discards it unless the Settings name it.
+/// Ends a choice. The runtime owns the copy it kept, and discards it unless something names it.
 /// A copy that the Settings already named but that failed to load is loaded again.
 pub(crate) fn end_choice(kept: Option<BackgroundImageId>, cx: &mut App) {
     if cx.try_global::<BackgroundImageRuntime>().is_none() {
@@ -106,12 +129,24 @@ fn sync(reload: bool, cx: &mut App) {
         .appearance
         .window
         .background_image;
+    runtime.leases.retain(|lease| lease.strong_count() > 0);
     let named = runtime
         .settings
         .retainable_documents()
         .iter()
         .filter_map(|document| document.appearance.window.background_image)
+        .chain(
+            runtime
+                .leases
+                .iter()
+                .filter_map(|lease| lease.upgrade().map(|id| *id)),
+        )
         .collect::<HashSet<_>>();
+    // A copy named again, by an import or an edit to the settings file, lapses any discard of it
+    // that is still waiting to run.
+    if named.iter().any(|id| !runtime.owned.contains(id)) {
+        store.renew();
+    }
     runtime.owned.extend(&named);
     if runtime.choosing == 0 {
         let retired = runtime
@@ -123,10 +158,33 @@ fn sync(reload: bool, cx: &mut App) {
         runtime.owned.retain(|id| named.contains(id));
         if !retired.is_empty() {
             let store = Arc::clone(&store);
-            cx.background_spawn(async move {
+            let discarded = cx.background_spawn(async move {
+                let mut lapsed = Vec::new();
+                let mut failed = Vec::new();
                 for retirement in retired {
-                    let _ = store.discard(retirement);
+                    match store.discard(retirement) {
+                        Ok(Discarded::Removed) => {}
+                        Ok(Discarded::Lapsed) => lapsed.push(retirement.id()),
+                        Err(_) => failed.push(retirement.id()),
+                    }
                 }
+                (lapsed, failed)
+            });
+            // A lapsed discard is decided again at once against what is named now. A failed one
+            // waits for the next change, so a lasting failure cannot spin.
+            cx.spawn(async move |cx| {
+                let (lapsed, failed) = discarded.await;
+                if lapsed.is_empty() && failed.is_empty() {
+                    return;
+                }
+                cx.update(|cx| {
+                    let runtime = cx.global_mut::<BackgroundImageRuntime>();
+                    runtime.owned.extend(failed);
+                    if !lapsed.is_empty() {
+                        runtime.owned.extend(lapsed);
+                        sync(false, cx);
+                    }
+                });
             })
             .detach();
         }
@@ -151,9 +209,8 @@ fn sync(reload: bool, cx: &mut App) {
         cx.update(|cx| {
             cx.update_global::<BackgroundImageRuntime, _>(|runtime, _| {
                 if runtime.requested == Some(id) {
-                    runtime.presented = loaded
-                        .ok()
-                        .map(|bytes| PresentedBackgroundImage { id, bytes });
+                    runtime.presented =
+                        loaded.ok().map(|bytes| LoadedBackgroundImage { id, bytes });
                 }
             });
         });

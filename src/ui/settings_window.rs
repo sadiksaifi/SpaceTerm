@@ -269,6 +269,8 @@ pub(crate) struct SettingsWindow {
     omitted_rows: Vec<SettingsRowId>,
     /// Counts Background Image choices, so only the latest one applies.
     background_image_choices: u64,
+    /// Keeps the copy the draft names until the Settings name it too.
+    background_image_lease: Option<super::background_image_runtime::BackgroundImageLease>,
     permission_access: PermissionAccessRows,
     _permission_changes: Option<PermissionAccessChanges>,
     theme_gallery: ThemeGallery,
@@ -552,6 +554,7 @@ impl SettingsWindow {
             available_sections,
             omitted_rows,
             background_image_choices: 0,
+            background_image_lease: None,
             microphone_access: MicrophoneAccessRow::new(permissions.microphone),
             permission_access: PermissionAccessRows::new(
                 permissions.system_permissions,
@@ -803,6 +806,7 @@ impl SettingsWindow {
 
 impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.hold_background_image(cx);
         let activity = super::appearance::window_activity(window);
         super::sidebar_window::render_scoped(activity, || self.render_chrome(window, cx))
     }
