@@ -667,6 +667,16 @@ mod tests {
             Ok(())
         }
 
+        // Managed hosts never remove their file.
+        fn remove_private_file(
+            &self,
+            _: &SecureDirectory,
+            _: &OsStr,
+            _: &SecureEntryIdentity,
+        ) -> Result<(), SecureFilesystemError> {
+            Err(SecureFilesystemError::Unavailable)
+        }
+
         fn prepare_private_file(
             &self,
             directory: &SecureDirectory,

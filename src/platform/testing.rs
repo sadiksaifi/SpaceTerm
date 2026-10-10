@@ -181,6 +181,25 @@ impl SecureFilesystem for RecordingFilesystem {
         files.values.insert(path.join(to), source);
         Ok(())
     }
+    fn remove_private_file(
+        &self,
+        directory: &SecureDirectory,
+        name: &OsStr,
+        expected: &SecureEntryIdentity,
+    ) -> Result<(), SecureFilesystemError> {
+        let path = Self::path(directory)?.join(name);
+        let mut files = self.files.lock().unwrap();
+        let current = files
+            .values
+            .get(&path)
+            .map(|(_, identity)| SecureEntryIdentity::from_opaque(*identity))
+            .ok_or(SecureFilesystemError::Missing)?;
+        if &current != expected {
+            return Err(SecureFilesystemError::Conflict);
+        }
+        files.values.remove(&path);
+        Ok(())
+    }
     fn prepare_private_file(
         &self,
         directory: &SecureDirectory,
