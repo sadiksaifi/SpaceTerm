@@ -45,6 +45,7 @@ mod shortcut_recorder;
 mod text_area;
 mod text_editing;
 mod text_input;
+mod text_input_focus;
 mod text_measurement;
 pub use text_measurement::reserve_measured_width;
 mod toggle;
@@ -57,6 +58,8 @@ pub use window_controls::{
 };
 
 use gpui::App;
+
+pub use text_input_focus::TextInputFocus;
 
 pub use pointer_conventions::{PointerConventions, install_pointer_conventions};
 

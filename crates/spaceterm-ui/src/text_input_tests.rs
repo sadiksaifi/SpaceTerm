@@ -101,6 +101,73 @@ fn obscured_input<'a>(
 }
 
 #[gpui::test]
+fn native_text_ui_should_preserve_the_editing_owner(cx: &mut TestAppContext) {
+    let (input, cx) = input(cx, "name");
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let observed = events.clone();
+    cx.update(|window, cx| {
+        crate::TextInputFocus::set(Some(window.window_handle()), cx);
+        cx.subscribe(&input, move |_, event: &TextInputEvent, _| {
+            observed.borrow_mut().push(*event);
+        })
+        .detach();
+    });
+    cx.run_until_parked();
+    cx.deactivate_window();
+    cx.run_until_parked();
+
+    assert!(!events.borrow().contains(&TextInputEvent::FocusLost));
+    cx.simulate_input("🙂");
+    cx.run_until_parked();
+    assert_eq!(
+        input.read_with(cx, |input, _| input.value().to_owned()),
+        "name🙂"
+    );
+
+    cx.update(|_, cx| crate::TextInputFocus::set(None, cx));
+    cx.run_until_parked();
+    assert!(events.borrow().contains(&TextInputEvent::FocusLost));
+}
+
+#[gpui::test]
+fn native_text_ui_focus_transfer_should_blur_the_previous_editor_on_return(
+    cx: &mut TestAppContext,
+) {
+    let (input, other_focus, events, cx) = input_with_events(cx, "name", false);
+    cx.update(|window, cx| crate::TextInputFocus::set(Some(window.window_handle()), cx));
+    cx.deactivate_window();
+    cx.run_until_parked();
+    cx.update(|window, cx| other_focus.focus(window, cx));
+    cx.run_until_parked();
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+
+    assert!(!input.read_with(cx, |input, _| input.is_focused()));
+    assert_eq!(events.borrow().as_slice(), [TextInputEvent::FocusLost]);
+    assert!(cx.update(|window, _| other_focus.is_focused(window)));
+
+    cx.update(|window, cx| input.read(cx).focus_handle().focus(window, cx));
+    cx.run_until_parked();
+    assert_eq!(
+        events.borrow().as_slice(),
+        [TextInputEvent::FocusLost, TextInputEvent::FocusGained]
+    );
+}
+
+#[gpui::test]
+fn native_text_ui_owner_in_another_window_should_release_editing(cx: &mut TestAppContext) {
+    let (_, other_window) = input(cx, "other");
+    let other_handle = other_window.update(|window, _| window.window_handle());
+    let (input, _, events, cx) = input_with_events(cx, "name", false);
+    cx.update(|_, cx| crate::TextInputFocus::set(Some(other_handle), cx));
+    cx.deactivate_window();
+    cx.run_until_parked();
+
+    assert!(!input.read_with(cx, |input, _| input.is_focused()));
+    assert_eq!(events.borrow().as_slice(), [TextInputEvent::FocusLost]);
+}
+
+#[gpui::test]
 fn native_text_input_callbacks_keep_the_rendered_font_and_size(cx: &mut TestAppContext) {
     struct StyledInput(Entity<TextInput>, Pixels);
     impl Render for StyledInput {

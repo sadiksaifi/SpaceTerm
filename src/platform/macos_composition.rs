@@ -168,7 +168,7 @@ fn compose(
             application_menu: Rc::new(
                 super::macos_application_menu::MacosApplicationMenuAdapter::new(identity),
             ),
-            desktop_events: None,
+            desktop_events: Some(Rc::new(super::macos_text_input_focus::MacosTextInputFocus)),
             application_quit: Rc::new(
                 super::macos_application_quit::MacosApplicationQuitAdapter::new(),
             ),
