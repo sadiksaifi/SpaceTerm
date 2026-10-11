@@ -179,21 +179,6 @@ impl SelectionChip {
             .into_any_element()
     }
 
-    /// A recess in the chip's shape, filled with `fill` and shaded inward by `shadow`, in place of
-    /// the item's paint.
-    pub(crate) fn render_recess(
-        self,
-        selector: String,
-        fill: Color,
-        shadow: Vec<gpui::BoxShadow>,
-    ) -> AnyElement {
-        Self::body(self.shape)
-            .debug_selector(move || selector.clone())
-            .bg(gpui_color(fill))
-            .shadow(shadow)
-            .into_any_element()
-    }
-
     fn paint(self, selector: String, hover: f32) -> gpui::Div {
         let paint = self.paint;
         let fill = hovered_paint(paint.fill, paint.hover_fill.or(paint.fill), hover);

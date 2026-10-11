@@ -1895,8 +1895,8 @@ impl TabManager {
                 )
             });
         let element_name = if lifted { "tab-preview" } else { "tab-item" };
-        // The lifted copy shows its whole lift; a Tab in the bar slides aside, leaves a recess
-        // where a release would land it, and shows what remains of its lift as it settles.
+        // The lifted copy shows its whole lift. A Tab in the bar slides aside, leaves its hover
+        // chip where a release would land it, and shows what remains of its lift as it settles.
         let motion = if lifted {
             ItemMotion {
                 lift: 1.0,
@@ -1907,7 +1907,7 @@ impl TabManager {
         };
         let chip_selector = format!("{element_name}-{}-chip", tab_id.get());
         let chip = if motion.lifted {
-            drop_placeholder(chip, chip_selector, appearance)
+            drop_placeholder(presentation.tab_chip(false, appearance, cx), chip_selector)
         } else if motion.lift > 0.0 {
             chip.render_lifted(
                 chip_selector,
@@ -5954,7 +5954,7 @@ mod tests {
                 Some(second.origin),
                 Some(gpui::Bounds::new(third.origin + below, first.size)),
             ),
-            "a dragged Tab must leave its recess where it lands, open a gap there, and keep the \
+            "a dragged Tab must leave a placeholder where it lands, open a gap there, and keep the \
              press point of its lifted copy under the pointer"
         );
         assert_eq!(

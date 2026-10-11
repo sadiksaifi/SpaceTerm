@@ -509,25 +509,10 @@ pub(crate) fn lift_shadow(
     vec![layer(1.0, 10.0, 28.0), layer(0.7, 2.0, 6.0)]
 }
 
-/// The recessed chip that marks where a release would land a lifted item: the shadow color,
-/// filling the item's chip and darkening its top edge.
-pub(crate) fn drop_placeholder(
-    chip: SelectionChip,
-    selector: String,
-    appearance: &super::appearance::ChromeAppearance,
-) -> AnyElement {
-    let shadow = appearance.colors.shadow;
-    chip.render_recess(
-        selector,
-        shadow.multiply_opacity(96),
-        vec![BoxShadow {
-            inset: true,
-            color: gpui_color(shadow.multiply_opacity(204)).into(),
-            offset: point(px(0.0), px(1.0)),
-            blur_radius: px(4.0),
-            spread_radius: px(0.0),
-        }],
-    )
+/// The chip that marks where a release would land a lifted item: `chip` as it looks under the
+/// pointer, without the item's content.
+pub(crate) fn drop_placeholder(chip: SelectionChip, selector: String) -> AnyElement {
+    chip.render(selector, 1.0)
 }
 
 /// How opaque an item is that shows `lift` of its lift.

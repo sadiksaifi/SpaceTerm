@@ -874,9 +874,9 @@ impl WorkspaceSidebar {
                     .collect();
             let measure_sidebar = sidebar.clone();
             let motion = self.workspace_reorder.motion(workspace_id, cx);
-            // A lifted group leaves a recess in its row's chip shape where a release would land it.
+            // A lifted group leaves its row's hover chip where a release would land it.
             let placeholder = motion.lifted.then(|| {
-                let (chip, _) = row_paint(false, false, 0.0, appearance, cx);
+                let (chip, _) = row_paint(false, false, 1.0, appearance, cx);
                 div()
                     .absolute()
                     .top(motion.offset.y)
@@ -886,7 +886,6 @@ impl WorkspaceSidebar {
                     .child(drop_placeholder(
                         chip,
                         format!("workspace-placeholder-{}", workspace_id.get()),
-                        appearance,
                     ))
             });
             // The slot keeps the group's laid-out place, so a drag measures every group at rest
