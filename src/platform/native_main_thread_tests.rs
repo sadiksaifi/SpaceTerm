@@ -12,7 +12,6 @@ unsafe extern "C" {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SessionUnavailable {
     NoGraphicalSession,
-    NotOnConsole,
     ScreenLocked,
 }
 
@@ -21,9 +20,6 @@ impl SessionUnavailable {
         match self {
             Self::NoGraphicalSession => {
                 "this process has no graphical login session. Run them from a user logged in at the Mac."
-            }
-            Self::NotOnConsole => {
-                "this login session is not the active console session. Switch back to this user at the Mac."
             }
             Self::ScreenLocked => "the screen is locked. Unlock the Mac, then run them again.",
         }
@@ -46,31 +42,24 @@ fn session_unavailable() -> Option<SessionUnavailable> {
     let Some(session) = session else {
         return Some(SessionUnavailable::NoGraphicalSession);
     };
-    let flag = |key: &str| {
-        session
-            .objectForKey(&NSString::from_str(key))
-            .and_then(|value| value.downcast::<NSNumber>().ok())
-            .map(|value| value.boolValue())
-    };
-    if flag("kCGSSessionOnConsoleKey") != Some(true) {
-        return Some(SessionUnavailable::NotOnConsole);
-    }
-    // The key is present only while the screen is locked.
-    if flag("CGSSessionScreenIsLocked") == Some(true) {
-        return Some(SessionUnavailable::ScreenLocked);
-    }
-    None
+    // The key is present only while the screen is locked. A session switched away from the console
+    // keeps drawing, so console ownership alone does not decide whether a window can become key.
+    session
+        .objectForKey(&NSString::from_str("CGSSessionScreenIsLocked"))
+        .and_then(|value| value.downcast::<NSNumber>().ok())
+        .is_some_and(|locked| locked.boolValue())
+        .then_some(SessionUnavailable::ScreenLocked)
 }
 
 pub(crate) fn run() {
     use objc2::rc::autoreleasepool;
 
     assert!(objc2::MainThreadMarker::new().is_some());
-    // Some fixtures make a window key, which AppKit refuses outside an unlocked console session.
+    // Some fixtures make a window key, which AppKit refuses while the screen is locked.
     // Stop before any fixture runs so the failure names the session instead of a focus assertion.
     if let Some(reason) = session_unavailable() {
         eprintln!(
-            "native macOS tests need an unlocked console session: {}",
+            "native macOS tests need an unlocked graphical login session: {}",
             reason.explanation()
         );
         std::process::exit(1);
