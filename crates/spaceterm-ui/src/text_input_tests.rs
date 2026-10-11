@@ -101,6 +101,35 @@ fn obscured_input<'a>(
 }
 
 #[gpui::test]
+fn native_text_ui_should_preserve_the_editing_owner(cx: &mut TestAppContext) {
+    let (input, cx) = input(cx, "name");
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let observed = events.clone();
+    cx.update(|window, cx| {
+        crate::TextInputFocus::set(Some(window.window_handle()), cx);
+        cx.subscribe(&input, move |_, event: &TextInputEvent, _| {
+            observed.borrow_mut().push(*event);
+        })
+        .detach();
+    });
+    cx.run_until_parked();
+    cx.deactivate_window();
+    cx.run_until_parked();
+
+    assert!(!events.borrow().contains(&TextInputEvent::FocusLost));
+    cx.simulate_input("🙂");
+    cx.run_until_parked();
+    assert_eq!(
+        input.read_with(cx, |input, _| input.value().to_owned()),
+        "name🙂"
+    );
+
+    cx.update(|_, cx| crate::TextInputFocus::set(None, cx));
+    cx.run_until_parked();
+    assert!(events.borrow().contains(&TextInputEvent::FocusLost));
+}
+
+#[gpui::test]
 fn native_text_input_callbacks_keep_the_rendered_font_and_size(cx: &mut TestAppContext) {
     struct StyledInput(Entity<TextInput>, Pixels);
     impl Render for StyledInput {

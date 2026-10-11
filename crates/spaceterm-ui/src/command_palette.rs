@@ -1729,6 +1729,9 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
                 if palette.open
                     && palette.suspended_by_modal.is_none()
                     && !crate::menu::window_menu_is_open(window, cx)
+                    && !(!window.is_window_active()
+                        && crate::text_input_focus::retains_text_input(window, cx)
+                        && palette.focus_scope.contains_focused(window, cx))
                 {
                     // Unmounting removes the focus path before GPUI clears the responder. An
                     // unchanged responder belongs to the removed palette, not a new focus owner.
@@ -1771,38 +1774,10 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
                 }
             },
         );
-        cx.observe_window_activation(window, |palette, window, cx| {
-            if (palette.open || palette.pending_open.is_some())
-                && let Some(generation) = palette.suspended_by_modal
-                && window.is_window_active()
-                && !crate::modal::window_modal_is_open(window, cx)
-            {
-                if palette.resume_from_modal(generation, window, cx)
-                    && let Some(registration) = palette.coordinator_registration
-                {
-                    complete_window_command_palette_modal_resume(
-                        window.window_handle().window_id(),
-                        generation,
-                        registration,
-                        cx,
-                    );
-                }
-            } else if palette.open
-                && palette.suspended_by_modal.is_none()
-                && !window.is_window_active()
-            {
-                palette.close(CommandPaletteCloseReason::Deactivated, window, cx);
-            } else if !palette.open
-                && window.is_window_active()
-                && let Some(focus) = palette
-                    .restore_on_activation
-                    .take()
-                    .and_then(|focus| focus.upgrade())
-            {
-                focus.focus(window, cx);
-            }
-        })
-        .detach();
+        cx.observe_window_activation(window, Self::on_window_activation)
+            .detach();
+        cx.observe_global_in::<crate::TextInputFocus>(window, Self::on_window_activation)
+            .detach();
         let window_id = window.window_handle().window_id();
         cx.on_release(move |palette, cx| {
             if let Some(registration) = palette.coordinator_registration.take() {
@@ -1874,6 +1849,38 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         };
         palette.install_scroll_handler(cx);
         palette
+    }
+
+    fn on_window_activation(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) {
+        if (self.open || self.pending_open.is_some())
+            && let Some(generation) = self.suspended_by_modal
+            && window.is_window_active()
+            && !crate::modal::window_modal_is_open(window, cx)
+        {
+            if self.resume_from_modal(generation, window, cx)
+                && let Some(registration) = self.coordinator_registration
+            {
+                complete_window_command_palette_modal_resume(
+                    window.window_handle().window_id(),
+                    generation,
+                    registration,
+                    cx,
+                );
+            }
+        } else if self.open
+            && self.suspended_by_modal.is_none()
+            && !crate::text_input_focus::retains_text_input(window, cx)
+        {
+            self.close(CommandPaletteCloseReason::Deactivated, window, cx);
+        } else if !self.open
+            && window.is_window_active()
+            && let Some(focus) = self
+                .restore_on_activation
+                .take()
+                .and_then(|focus| focus.upgrade())
+        {
+            focus.focus(window, cx);
+        }
     }
 
     fn install_scroll_handler(&mut self, cx: &mut gpui::Context<Self>) {

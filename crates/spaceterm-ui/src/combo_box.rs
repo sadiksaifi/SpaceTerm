@@ -1630,25 +1630,10 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> ComboBoxState<I, C> {
                 });
             });
         });
-        cx.observe_window_activation(window, |state, window, cx| {
-            if state.open && !window.is_window_active() {
-                state.restore_on_activation = state
-                    .restore_focus
-                    .clone()
-                    .map(|focus| (focus, crate::modal::current_modal_parent(window, cx)));
-                state.close(ComboBoxCloseReason::Deactivated, false, Some(window), cx);
-            } else if !state.open
-                && window.is_window_active()
-                && let Some(focus) = state
-                    .restore_on_activation
-                    .take()
-                    .filter(|(_, parent)| *parent == crate::modal::current_modal_parent(window, cx))
-                    .and_then(|(focus, _)| focus.upgrade())
-            {
-                focus.focus(window, cx);
-            }
-        })
-        .detach();
+        cx.observe_window_activation(window, Self::on_window_activation)
+            .detach();
+        cx.observe_global_in::<crate::TextInputFocus>(window, Self::on_window_activation)
+            .detach();
         let window_id = window.window_handle().window_id();
         let release_window = window.window_handle();
         cx.on_release(move |state, cx| {
@@ -1711,6 +1696,25 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> ComboBoxState<I, C> {
             on_lifecycle: None,
             _input_subscription: input_subscription,
             _focus_subscription: focus_subscription,
+        }
+    }
+
+    fn on_window_activation(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) {
+        if self.open && !crate::text_input_focus::retains_text_input(window, cx) {
+            self.restore_on_activation = self
+                .restore_focus
+                .clone()
+                .map(|focus| (focus, crate::modal::current_modal_parent(window, cx)));
+            self.close(ComboBoxCloseReason::Deactivated, false, Some(window), cx);
+        } else if !self.open
+            && window.is_window_active()
+            && let Some(focus) = self
+                .restore_on_activation
+                .take()
+                .filter(|(_, parent)| *parent == crate::modal::current_modal_parent(window, cx))
+                .and_then(|(focus, _)| focus.upgrade())
+        {
+            focus.focus(window, cx);
         }
     }
 

@@ -284,6 +284,7 @@ impl TextArea {
             cx.on_focus(&focus_handle, window, Self::on_focus),
             cx.on_blur(&focus_handle, window, Self::on_blur),
             cx.observe_window_activation(window, Self::on_window_activation),
+            cx.observe_global_in::<crate::TextInputFocus>(window, Self::on_native_focus_change),
         ];
         let initial_value = Zeroizing::new(initial_value.into());
         let normalized = normalize_multiline(&initial_value);
@@ -475,13 +476,20 @@ impl TextArea {
     }
 
     fn on_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let already_focused = self.focused;
         self.focused = true;
         self.window_active = window.is_window_active();
-        cx.emit(TextAreaEvent::FocusGained);
+        if !already_focused {
+            cx.emit(TextAreaEvent::FocusGained);
+        }
         self.restart_caret(cx);
     }
-    fn on_blur(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.focused {
+    fn on_blur(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focused
+            || (!window.is_window_active()
+                && self.focus_handle.is_focused(window)
+                && crate::text_input_focus::retains_text_input(window, cx))
+        {
             return;
         }
         self.commit_composition();
@@ -492,6 +500,11 @@ impl TextArea {
         self.buffer.history.break_group();
         cx.emit(TextAreaEvent::FocusLost);
         cx.notify();
+    }
+    fn on_native_focus_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !crate::text_input_focus::retains_text_input(window, cx) {
+            self.on_blur(window, cx);
+        }
     }
     fn on_window_activation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.window_active = window.is_window_active();

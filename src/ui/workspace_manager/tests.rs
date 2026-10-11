@@ -10188,6 +10188,40 @@ fn hiding_sidebar_with_new_workspace_menu_open_should_restore_terminal_input(
 }
 
 #[gpui::test]
+fn native_text_ui_should_keep_workspace_rename_until_the_emoji_is_committed(
+    cx: &mut TestAppContext,
+) {
+    let (manager, _, cx) = workspace_manager(cx);
+    cx.update(|window, cx| {
+        window.activate_window();
+        spaceterm_ui::TextInputFocus::set(Some(window.window_handle()), cx);
+    });
+    cx.run_until_parked();
+    cx.simulate_keystrokes("cmd-shift-e shift-f10 down enter");
+    cx.run_until_parked();
+    assert!(manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).is_renaming()));
+
+    cx.deactivate_window();
+    cx.run_until_parked();
+    assert!(manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).is_renaming()));
+    cx.simulate_input("🙂");
+    cx.run_until_parked();
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager
+            .workspaces
+            .active_workspace()
+            .name()
+            .to_owned()),
+        "🙂"
+    );
+    assert!(!manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).is_renaming()));
+}
+
+#[gpui::test]
 fn sidebar_keyboard_rename_cancel_should_preserve_name_and_restore_sidebar_focus(
     cx: &mut TestAppContext,
 ) {

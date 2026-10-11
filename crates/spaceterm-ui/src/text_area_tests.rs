@@ -57,6 +57,31 @@ fn value(area: &Entity<TextArea>, cx: &mut VisualTestContext) -> String {
     cx.read(|cx| area.read(cx).value().to_owned())
 }
 
+#[gpui::test]
+fn native_text_ui_should_preserve_multiline_editing(cx: &mut TestAppContext) {
+    let (area, cx) = area(cx, "first\nsecond", |area| area);
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let observed = events.clone();
+    cx.update(|window, cx| {
+        crate::TextInputFocus::set(Some(window.window_handle()), cx);
+        cx.subscribe(&area, move |_, event: &TextAreaEvent, _| {
+            observed.borrow_mut().push(*event);
+        })
+        .detach();
+    });
+    cx.run_until_parked();
+    cx.deactivate_window();
+    cx.run_until_parked();
+    assert!(!events.borrow().contains(&TextAreaEvent::FocusLost));
+    cx.simulate_input("🙂");
+    cx.run_until_parked();
+    assert_eq!(value(&area, cx), "🙂first\nsecond");
+
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    assert!(!events.borrow().contains(&TextAreaEvent::FocusGained));
+}
+
 fn caret(area: &Entity<TextArea>, cx: &mut VisualTestContext) -> usize {
     cx.read(|cx| area.read(cx).buffer.selection.cursor())
 }
