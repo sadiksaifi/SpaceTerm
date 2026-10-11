@@ -3,10 +3,67 @@ use super::{
     macos_window_backdrop,
 };
 
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn CGSessionCopyCurrentDictionary() -> *mut std::ffi::c_void;
+}
+
+/// Why AppKit cannot make a window key in this process, which focus fixtures require.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SessionUnavailable {
+    NoGraphicalSession,
+    ScreenLocked,
+}
+
+impl SessionUnavailable {
+    const fn explanation(self) -> &'static str {
+        match self {
+            Self::NoGraphicalSession => {
+                "this process has no graphical login session. Run them from a user logged in at the Mac."
+            }
+            Self::ScreenLocked => "the screen is locked. Unlock the Mac, then run them again.",
+        }
+    }
+}
+
+fn session_unavailable() -> Option<SessionUnavailable> {
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::{NSDictionary, NSNumber, NSString};
+
+    // SAFETY: The call takes no arguments and returns a +1 CFDictionary, or null outside a
+    // graphical login session. CFDictionary is toll-free bridged to NSDictionary, so `Retained`
+    // takes that reference.
+    let session = unsafe {
+        Retained::from_raw(
+            CGSessionCopyCurrentDictionary().cast::<NSDictionary<NSString, AnyObject>>(),
+        )
+    };
+    let Some(session) = session else {
+        return Some(SessionUnavailable::NoGraphicalSession);
+    };
+    // The key is present only while the screen is locked. A session switched away from the console
+    // keeps drawing, so console ownership alone does not decide whether a window can become key.
+    session
+        .objectForKey(&NSString::from_str("CGSSessionScreenIsLocked"))
+        .and_then(|value| value.downcast::<NSNumber>().ok())
+        .is_some_and(|locked| locked.boolValue())
+        .then_some(SessionUnavailable::ScreenLocked)
+}
+
 pub(crate) fn run() {
     use objc2::rc::autoreleasepool;
 
     assert!(objc2::MainThreadMarker::new().is_some());
+    // Some fixtures make a window key, which AppKit refuses while the screen is locked.
+    // Stop before any fixture runs so the failure names the session instead of a focus assertion.
+    if let Some(reason) = session_unavailable() {
+        eprintln!(
+            "native macOS tests need an unlocked graphical login session: {}",
+            reason.explanation()
+        );
+        std::process::exit(1);
+    }
 
     fn run_gpui(name: &'static str, test: fn(&mut gpui::TestAppContext)) {
         let dispatcher = gpui::TestDispatcher::new(0);
