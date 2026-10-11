@@ -608,7 +608,16 @@ fn assert_deadline_ends_the_clean_filter(name: &str, body: &str) {
         .unwrap(),
     )
     .unwrap()
-    .replace("sleep 50 &", "sleep 1 &");
+    // Start the deadline once the clean filter blocks, so a slow git start cannot end the read
+    // before the filter runs. The wait is bounded so a filter that never starts fails the test.
+    .replace(
+        "sleep 50 &",
+        &format!(
+            "{{ waited=0; while [ ! -s '{}' ] && [ $waited -lt 150 ]; do sleep 0.1; \
+             waited=$((waited + 1)); done; sleep 1; }} &",
+            filter_process.display()
+        ),
+    );
 
     let elapsed = run_as_session_leader(&fixture, script.as_bytes());
 
