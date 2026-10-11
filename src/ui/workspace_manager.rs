@@ -66,6 +66,7 @@ use crate::platform::local_filesystem::{LocalFilesystemAuthority, LocalFilesyste
 use crate::platform::window_movement::{
     OperatingSystemWindowDragError, OperatingSystemWindowDragPlatform, WindowMoveStart,
 };
+use crate::settings::sidebar::SidebarState;
 use crate::ssh::live_connection::{ControlConnectionObserver, ControlConnectionTerminalState};
 use crate::ssh::process::TransientSshErrorOutput;
 use crate::terminal::metadata::RemoteTerminalMetadataContext;
@@ -294,9 +295,11 @@ impl WorkspaceManager {
         session_factory: Rc<dyn TerminalSessionFactory>,
         local_home_directory_path: PathBuf,
         adapters: WorkspaceManagerAdapters,
+        default_sidebar: SidebarState,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let sidebar_visible = default_sidebar.is_expanded();
         let mut window_appearance = super::appearance_runtime::WindowAppearanceOwner::workspace();
         window_appearance.apply(window, cx);
         let mut window_traffic_lights =
@@ -350,7 +353,7 @@ impl WorkspaceManager {
                     ),
                     TabManagerCreation {
                         workspace_id,
-                        sidebar_visible: true,
+                        sidebar_visible,
                         sidebar_width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
                         operating_system_window_drag_platform: Rc::clone(
                             &initial_window_drag_platform,
@@ -369,7 +372,7 @@ impl WorkspaceManager {
             manager.release_sidebar_worktrees(cx);
         })
         .detach();
-        let sidebar = cx.new(|cx| WorkspaceSidebar::new(window, cx));
+        let sidebar = cx.new(|cx| WorkspaceSidebar::new(sidebar_visible, window, cx));
         cx.subscribe_in(
             &sidebar,
             window,
@@ -2588,6 +2591,11 @@ impl WorkspaceManager {
 
     pub(crate) fn application_pane_facts(&self, cx: &App) -> Vec<ApplicationPaneFacts> {
         self.close_hierarchy(cx).application_pane_facts().collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn sidebar_visible(&self, cx: &App) -> bool {
+        self.sidebar.read(cx).layout().visible
     }
 
     pub(crate) const fn has_pending_close_confirmation(&self) -> bool {

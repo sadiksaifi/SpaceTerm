@@ -567,12 +567,17 @@ pub(crate) fn open(
     };
     let session_factory = Rc::clone(&host.session_factory);
     let home_directory = host.home_directory.clone();
+    let default_sidebar = cx
+        .try_global::<crate::ui::appearance_runtime::AppearanceRuntime>()
+        .map(|runtime| runtime.settings.snapshot().candidate.sidebar.default_state)
+        .unwrap_or_default();
     let result = cx.open_window(workspace_window_options(host, cx), |window, cx| {
         let workspace_manager = cx.new(|cx| {
             WorkspaceManager::new_with_adapters(
                 session_factory,
                 home_directory,
                 adapters,
+                default_sidebar,
                 window,
                 cx,
             )
@@ -1582,6 +1587,56 @@ mod runtime_tests {
         let cx = &mut gpui::VisualTestContext::from_window(reopened.into(), cx);
         cx.run_until_parked();
         assert!(!cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
+    }
+
+    #[gpui::test]
+    fn a_new_workspace_window_opens_its_sidebar_in_the_default_state(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut document = crate::settings::SettingsDocument::default();
+        document.sidebar.default_state = crate::settings::sidebar::SidebarState::Collapsed;
+        let host = host_with_storage(
+            crate::settings::storage::testing::MemoryStorage::with_document(&document),
+        );
+        let workspace = cx.update(|cx| start_application(cx, &host).unwrap());
+        cx.run_until_parked();
+        let sidebar_visible = |workspace: gpui::WindowHandle<WorkspaceManager>,
+                               cx: &mut gpui::TestAppContext| {
+            workspace
+                .read_with(cx, |manager, cx| manager.sidebar_visible(cx))
+                .unwrap()
+        };
+        assert!(!sidebar_visible(workspace, cx));
+        {
+            let cx = &mut gpui::VisualTestContext::from_window(workspace.into(), cx);
+            let root = cx.debug_bounds("workspace-manager").unwrap();
+            let content = cx.debug_bounds("tab-manager-content").unwrap();
+            assert_eq!(
+                content.origin.x, root.origin.x,
+                "the first Tab lays out without the collapsed sidebar"
+            );
+        }
+
+        cx.update(|cx| {
+            let settings = &cx
+                .global::<crate::ui::appearance_runtime::AppearanceRuntime>()
+                .settings;
+            let committed = settings.snapshot().committed;
+            let mut expanded = (*committed).clone();
+            expanded.sidebar.default_state = crate::settings::sidebar::SidebarState::Expanded;
+            settings
+                .update_committed(committed.revision, expanded)
+                .unwrap()
+                .run()
+                .unwrap();
+        });
+        let reopened = cx.update(|cx| open(cx, &host).unwrap());
+        cx.run_until_parked();
+        assert!(sidebar_visible(reopened, cx));
+        assert!(
+            !sidebar_visible(workspace, cx),
+            "an open window keeps its sidebar when the default changes"
+        );
     }
 
     #[gpui::test]
