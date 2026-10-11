@@ -427,7 +427,7 @@ impl Slide {
     }
 
     fn at(&self, now: Instant) -> Point<Pixels> {
-        let eased = ease_out(self.progress(now));
+        let eased = spring(self.progress(now));
         point(
             self.from.x + (self.to.x - self.from.x) * eased,
             self.from.y + (self.to.y - self.from.y) * eased,
@@ -447,6 +447,12 @@ impl Slide {
 /// Fast at the start and gentle at the end, as CSS `cubic-bezier(0.2, 0.8, 0.2, 1)`.
 fn ease_out(progress: f32) -> f32 {
     cubic_bezier((0.2, 0.8), (0.2, 1.0), progress)
+}
+
+/// Fast at the start, past the target, and back onto it, as CSS
+/// `cubic-bezier(0.34, 1.4, 0.64, 1)`.
+fn spring(progress: f32) -> f32 {
+    cubic_bezier((0.34, 1.4), (0.64, 1.0), progress)
 }
 
 /// The CSS timing function with control points `first` and `second`, at `progress`.
@@ -964,5 +970,14 @@ mod tests {
         assert_eq!((ease_out(0.0), ease_out(1.0)), (0.0, 1.0));
         assert!(ease_out(0.25) > 0.5, "the curve front-loads its motion");
         assert!(ease_out(0.5) < ease_out(0.75));
+    }
+
+    #[test]
+    fn spring_should_overshoot_its_target_and_land_exactly() {
+        assert_eq!((spring(0.0), spring(1.0)), (0.0, 1.0));
+        assert!(
+            (1..10).any(|tenth| spring(tenth as f32 / 10.0) > 1.0),
+            "the curve passes its target before it lands"
+        );
     }
 }
