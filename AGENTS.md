@@ -21,6 +21,7 @@ A native desktop terminal multiplexer for macOS and Linux, coming soon for Windo
 - Errors and Terminal Diagnostics carry typed classifications and bounded metadata only. They never carry terminal or clipboard contents, environment values, paths, credentials, or raw native errors.
 - SpaceTerm sends no automatic telemetry or crash reports.
 - Local file actions require explicit local authority. Remote values grant none.
+- Shipped releases are frozen. Before changing a retained format such as the Settings Document, confirm every shipped build reads the new form without data loss, or ship that handling in a release first.
 
 ## Work
 
