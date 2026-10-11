@@ -508,6 +508,10 @@ impl TextArea {
     }
     fn on_window_activation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.window_active = window.is_window_active();
+        // GPUI suppresses focus events while native UI holds the window's key status.
+        if self.window_active && self.focused && !self.focus_handle.is_focused(window) {
+            self.on_blur(window, cx);
+        }
         if !self.window_active {
             self.cancel_pointer_gesture();
         }

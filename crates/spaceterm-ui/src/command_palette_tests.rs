@@ -3967,6 +3967,30 @@ fn closing_a_modal_while_deactivated_should_resume_its_palette_after_reactivatio
 }
 
 #[gpui::test]
+fn native_text_ui_focus_transfer_should_close_the_palette_on_return(cx: &mut TestAppContext) {
+    let (root, palette, events, _, cx) = palette_window(cx);
+    open_palette(&root, &palette, cx);
+    events.borrow_mut().clear();
+    let other_focus = root.read_with(cx, |root, _| root.intruder_focus.clone());
+    cx.update(|window, cx| crate::TextInputFocus::set(Some(window.window_handle()), cx));
+    cx.deactivate_window();
+    cx.run_until_parked();
+    cx.update(|window, cx| other_focus.focus(window, cx));
+    cx.run_until_parked();
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+
+    assert!(!palette.read_with(cx, |palette, _| palette.is_open()));
+    assert!(cx.update(|window, _| other_focus.is_focused(window)));
+    assert_eq!(
+        events.borrow().as_slice(),
+        [CommandPaletteEvent::Lifecycle(
+            CommandPaletteLifecycleEvent::Closed(CommandPaletteCloseReason::FocusLost)
+        )]
+    );
+}
+
+#[gpui::test]
 fn native_text_ui_should_keep_the_palette_query_open(cx: &mut TestAppContext) {
     let (root, palette, _, _, cx) = palette_window(cx);
     open_palette(&root, &palette, cx);

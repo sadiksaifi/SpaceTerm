@@ -86,6 +86,52 @@ fn caret(area: &Entity<TextArea>, cx: &mut VisualTestContext) -> usize {
     cx.read(|cx| area.read(cx).buffer.selection.cursor())
 }
 
+#[gpui::test]
+fn native_text_ui_focus_transfer_should_blur_the_previous_area_on_return(cx: &mut TestAppContext) {
+    struct Root {
+        area: Entity<TextArea>,
+        other_focus: FocusHandle,
+    }
+    impl Render for Root {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .child(self.area.clone())
+                .child(div().track_focus(&self.other_focus).child("Other"))
+        }
+    }
+    install_theme(cx);
+    let (root, cx) = cx.add_window_view(|window, cx| Root {
+        area: cx.new(|cx| TextArea::new("test-area", "Test area", "first\nsecond", window, cx)),
+        other_focus: cx.focus_handle(),
+    });
+    let (area, other_focus) =
+        root.read_with(cx, |root, _| (root.area.clone(), root.other_focus.clone()));
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let observed = events.clone();
+    cx.update(|window, cx| {
+        window.activate_window();
+        area.read(cx).focus_handle().focus(window, cx);
+        cx.subscribe(&area, move |_, event: &TextAreaEvent, _| {
+            observed.borrow_mut().push(*event);
+        })
+        .detach();
+        crate::TextInputFocus::set(Some(window.window_handle()), cx);
+    });
+    cx.run_until_parked();
+    events.borrow_mut().clear();
+    cx.deactivate_window();
+    cx.run_until_parked();
+    cx.update(|window, cx| other_focus.focus(window, cx));
+    cx.run_until_parked();
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+
+    assert!(!area.read_with(cx, |area, _| area.is_focused()));
+    assert_eq!(events.borrow().as_slice(), [TextAreaEvent::FocusLost]);
+    assert!(cx.update(|window, _| other_focus.is_focused(window)));
+}
+
 fn place_caret(area: &Entity<TextArea>, line: usize, column: usize, cx: &mut VisualTestContext) {
     area.update(cx, |area, cx| {
         let range = area.lines[line - 1].clone();

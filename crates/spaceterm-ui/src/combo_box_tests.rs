@@ -2206,6 +2206,30 @@ fn native_text_ui_should_keep_the_combo_query_open(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn native_text_ui_focus_transfer_should_close_the_combo_on_return(cx: &mut TestAppContext) {
+    let (root, events, _, cx) = combo_box_window(cx, Some(1), items(), false);
+    open_by_pointer(cx);
+    events.borrow_mut().clear();
+    let other_focus = root.read_with(cx, |root, _| root.before_focus.clone());
+    cx.update(|window, cx| crate::TextInputFocus::set(Some(window.window_handle()), cx));
+    cx.deactivate_window();
+    cx.run_until_parked();
+    cx.update(|window, cx| other_focus.focus(window, cx));
+    cx.run_until_parked();
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+
+    assert!(!cx.update(|window, cx| crate::window_combo_box_is_open(window, cx)));
+    assert!(cx.update(|window, _| other_focus.is_focused(window)));
+    assert_eq!(
+        events.borrow().as_slice(),
+        [RecordedEvent::Lifecycle(ComboBoxLifecycleEvent::Closed(
+            ComboBoxCloseReason::FocusLost
+        ))]
+    );
+}
+
+#[gpui::test]
 fn deactivation_should_close_then_restore_the_predecessor_on_reactivation(cx: &mut TestAppContext) {
     let (root, events, _, cx) = combo_box_window(cx, Some(1), items(), false);
     let before_focus = root.read_with(cx, |root, _| root.before_focus.clone());

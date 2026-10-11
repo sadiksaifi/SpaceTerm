@@ -1706,6 +1706,12 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> ComboBoxState<I, C> {
                 .clone()
                 .map(|focus| (focus, crate::modal::current_modal_parent(window, cx)));
             self.close(ComboBoxCloseReason::Deactivated, false, Some(window), cx);
+        } else if self.open
+            && window.is_window_active()
+            && !self.popup_focus.contains_focused(window, cx)
+            && !crate::menu::window_menu_is_open(window, cx)
+        {
+            self.close(ComboBoxCloseReason::FocusLost, false, Some(window), cx);
         } else if !self.open
             && window.is_window_active()
             && let Some(focus) = self

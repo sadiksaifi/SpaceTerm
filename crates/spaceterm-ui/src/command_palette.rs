@@ -1872,6 +1872,13 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             && !crate::text_input_focus::retains_text_input(window, cx)
         {
             self.close(CommandPaletteCloseReason::Deactivated, window, cx);
+        } else if self.open
+            && self.suspended_by_modal.is_none()
+            && window.is_window_active()
+            && !self.focus_scope.contains_focused(window, cx)
+            && !crate::menu::window_menu_is_open(window, cx)
+        {
+            self.close(CommandPaletteCloseReason::FocusLost, window, cx);
         } else if !self.open
             && window.is_window_active()
             && let Some(focus) = self
