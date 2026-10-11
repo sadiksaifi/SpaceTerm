@@ -15,6 +15,7 @@ use gpui::{
 };
 
 use super::appearance::gpui_color;
+use super::selection_chip::SelectionChip;
 
 /// How long the other items take to slide aside as the landing slot moves.
 const SHIFT_DURATION: Duration = Duration::from_millis(200);
@@ -27,9 +28,10 @@ pub(crate) const LIFTED_OPACITY: f32 = 0.95;
 
 /// The drag state of one scrolling strip of items laid out along one axis.
 ///
-/// While an item is lifted, its own place stays empty, the other items slide aside to open a gap
-/// where a release would land it, and its lifted copy stays level with the strip. A release
-/// settles the item into the gap; a cancellation returns everything to rest.
+/// While an item is lifted, its lifted copy follows the pointer and the other items slide aside to
+/// open a gap where a release would land it. The item's empty place moves into that gap, and back
+/// to rest once the pointer leaves the strip. A release settles the item into its place; a
+/// cancellation returns everything to rest.
 pub(crate) struct ReorderableStrip<Id> {
     axis: Axis,
     lift: Option<Lift<Id>>,
@@ -167,8 +169,8 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
             return false;
         };
         let bounds = painted_item_bounds(items);
-        let free = pointer - lift.grab;
-        let held = ids
+        let origin = pointer - lift.grab;
+        let landing = ids
             .iter()
             .position(|candidate| *candidate == lift.id)
             .filter(|_| bounds.len() == ids.len())
@@ -178,12 +180,14 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
                     .dilate(px(TEAR_OFF_DISTANCE))
                     .contains(&pointer)
             })
-            .map(|current| hold(axis, &bounds, current, free));
-        let origin = held.map_or(free, |(origin, _)| origin);
-        let landing = held.map(|(_, position)| Landing {
-            position,
-            len: ids.len(),
-        });
+            .map(|current| Landing {
+                position: landing_position(
+                    &spans(axis, &bounds),
+                    current,
+                    f32::from(origin.along(axis)),
+                ),
+                len: ids.len(),
+            });
         let moved = lift.origin != Some(origin);
         lift.origin = Some(origin);
         let relanded = lift.landing != landing;
@@ -223,8 +227,8 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
         }
     }
 
-    /// Slides every item but the lifted one toward the place that opens the gap at the current
-    /// landing, or back to rest when there is none.
+    /// Slides every item toward the place that opens the gap at the current landing, or back to
+    /// rest when there is none. The lifted item's empty place moves into the gap.
     fn open_gap(&mut self, ids: &[Id], bounds: &[Bounds<Pixels>], cx: &App) {
         let Some(lift) = self.lift.as_ref() else {
             return;
@@ -241,10 +245,8 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
         let now = now(cx);
         let motion = super::appearance_runtime::control_motion(cx);
         for (id, shift) in ids.iter().zip(shifts) {
-            if *id != lifted {
-                let to = Point::default().apply_along(self.axis, |_| px(shift));
-                self.slide(*id, to, SHIFT_DURATION, now, motion);
-            }
+            let to = Point::default().apply_along(self.axis, |_| px(shift));
+            self.slide(*id, to, SHIFT_DURATION, now, motion);
         }
     }
 
@@ -282,7 +284,7 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
                 }
             }
             None => {
-                for id in ids.iter().filter(|id| **id != lift.id) {
+                for id in ids {
                     self.slide(*id, Point::default(), SETTLE_DURATION, now, motion);
                 }
             }
@@ -321,27 +323,8 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
     }
 }
 
-/// Where the lifted copy stands while the pointer is over the strip, and the position a release
-/// would land the item at `current` in. The copy stays level with the strip and within its items.
-fn hold(
-    axis: Axis,
-    bounds: &[Bounds<Pixels>],
-    current: usize,
-    free: Point<Pixels>,
-) -> (Point<Pixels>, usize) {
-    let spans = spans(axis, bounds);
-    let (rest_start, rest_end) = spans[current];
-    let first = spans[0].0;
-    let last = spans[spans.len() - 1].1;
-    let start =
-        f32::from(free.along(axis)).clamp(first, (last - (rest_end - rest_start)).max(first));
-    let origin = bounds[current].origin.apply_along(axis, |_| px(start));
-    (origin, landing_position(&spans, current, start))
-}
-
 /// The position a lifted item whose leading edge stands at `start` lands in: past every other
-/// item whose midpoint its center has passed. Reaching a midpoint passes the item, so a copy held
-/// at either end of a strip of equal items lands there.
+/// item whose midpoint its center has passed. Reaching a midpoint passes the item.
 fn landing_position(spans: &[(f32, f32)], dragged: usize, start: f32) -> usize {
     let (rest_start, rest_end) = spans[dragged];
     let center = start + (rest_end - rest_start) / 2.0;
@@ -356,7 +339,8 @@ fn landing_position(spans: &[(f32, f32)], dragged: usize, start: f32) -> usize {
 }
 
 /// How far each item moves along the strip to open a gap at `landing` for the item lifted from
-/// `dragged`. Each moved item takes the place its neighbor will leave.
+/// `dragged`. Each moved item takes the place its neighbor will leave, and the lifted item's empty
+/// place moves into the gap.
 fn gap_shifts(spans: &[(f32, f32)], dragged: usize, landing: usize) -> Vec<f32> {
     let toward_start = spans
         .get(dragged + 1)
@@ -366,7 +350,9 @@ fn gap_shifts(spans: &[(f32, f32)], dragged: usize, landing: usize) -> Vec<f32> 
         .map_or(0.0, |previous| spans[dragged].1 - spans[previous].1);
     (0..spans.len())
         .map(|index| {
-            if dragged < landing && index > dragged && index <= landing {
+            if index == dragged {
+                landed_start(spans, dragged, landing) - spans[dragged].0
+            } else if dragged < landing && index > dragged && index <= landing {
                 -toward_start
             } else if landing < dragged && index >= landing && index < dragged {
                 toward_end
@@ -460,6 +446,11 @@ impl Slide {
 
 /// Fast at the start and gentle at the end, as CSS `cubic-bezier(0.2, 0.8, 0.2, 1)`.
 fn ease_out(progress: f32) -> f32 {
+    cubic_bezier((0.2, 0.8), (0.2, 1.0), progress)
+}
+
+/// The CSS timing function with control points `first` and `second`, at `progress`.
+fn cubic_bezier(first: (f32, f32), second: (f32, f32), progress: f32) -> f32 {
     if progress <= 0.0 {
         return 0.0;
     }
@@ -473,7 +464,7 @@ fn ease_out(progress: f32) -> f32 {
     let (mut low, mut high) = (0.0_f32, 1.0_f32);
     let mut t = progress;
     for _ in 0..24 {
-        let x = bezier(t, 0.2, 0.2);
+        let x = bezier(t, first.0, second.0);
         if (x - progress).abs() < 1e-5 {
             break;
         }
@@ -484,7 +475,7 @@ fn ease_out(progress: f32) -> f32 {
         }
         t = (low + high) / 2.0;
     }
-    bezier(t, 0.8, 1.0)
+    bezier(t, first.1, second.1)
 }
 
 fn now(cx: &App) -> Instant {
@@ -510,6 +501,27 @@ pub(crate) fn lift_shadow(
         }
     };
     vec![layer(1.0, 10.0, 28.0), layer(0.7, 2.0, 6.0)]
+}
+
+/// The recessed chip that marks where a release would land a lifted item: the shadow color,
+/// filling the item's chip and darkening its top edge.
+pub(crate) fn drop_placeholder(
+    chip: SelectionChip,
+    selector: String,
+    appearance: &super::appearance::ChromeAppearance,
+) -> AnyElement {
+    let shadow = appearance.colors.shadow;
+    chip.render_recess(
+        selector,
+        shadow.multiply_opacity(96),
+        vec![BoxShadow {
+            inset: true,
+            color: gpui_color(shadow.multiply_opacity(204)).into(),
+            offset: point(px(0.0), px(1.0)),
+            blur_radius: px(4.0),
+            spread_radius: px(0.0),
+        }],
+    )
 }
 
 /// How opaque an item is that shows `lift` of its lift.
@@ -905,14 +917,18 @@ mod tests {
                 landing_position(&spans, 1, 300.0),
                 // A held at the leading end of the strip stays first.
                 landing_position(&spans, 0, 0.0),
+                // A copy carried past either end lands at that end.
+                landing_position(&spans, 1, -500.0),
+                landing_position(&spans, 1, 900.0),
             ],
-            [0, 1, 1, 2, 3, 0]
+            [0, 1, 1, 2, 3, 0, 0, 3]
         );
     }
 
     #[test]
     fn gap_shifts_should_move_each_passed_item_into_its_neighbors_place() {
-        // A narrow B sits between wider items, so each direction moves by B's own extent.
+        // A narrow B sits between wider items, so each direction moves by B's own extent, and B's
+        // empty place moves to where it would land.
         let spans = strip(&[100.0, 60.0, 100.0, 100.0]);
 
         assert_eq!(
@@ -922,8 +938,8 @@ mod tests {
                 gap_shifts(&spans, 1, 1),
             ],
             [
-                vec![0.0, 0.0, -60.0, -60.0],
-                vec![60.0, 0.0, 0.0, 0.0],
+                vec![0.0, 200.0, -60.0, -60.0],
+                vec![60.0, -100.0, 0.0, 0.0],
                 vec![0.0; 4],
             ]
         );
@@ -940,32 +956,6 @@ mod tests {
                 landed_start(&spans, 1, 1),
             ],
             [300.0, 0.0, 100.0]
-        );
-    }
-
-    #[test]
-    fn hold_should_keep_the_lifted_copy_level_with_the_strip_and_within_its_items() {
-        let bounds: Vec<_> = strip(&[100.0, 100.0, 100.0])
-            .into_iter()
-            .map(|(start, end)| {
-                Bounds::new(
-                    point(px(start), px(10.0)),
-                    gpui::size(px(end - start), px(30.0)),
-                )
-            })
-            .collect();
-
-        assert_eq!(
-            [
-                hold(Axis::Horizontal, &bounds, 0, point(px(120.0), px(40.0))),
-                hold(Axis::Horizontal, &bounds, 0, point(px(-80.0), px(0.0))),
-                hold(Axis::Horizontal, &bounds, 0, point(px(900.0), px(10.0))),
-            ],
-            [
-                (point(px(120.0), px(10.0)), 1),
-                (point(px(0.0), px(10.0)), 0),
-                (point(px(200.0), px(10.0)), 2),
-            ]
         );
     }
 
