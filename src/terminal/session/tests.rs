@@ -1425,19 +1425,20 @@ fn enabling_focus_reporting_emits_current_state_and_deduplicates_edges() {
     });
     assert_eq!(records.snapshot().written, b"\x1b[O\x1b[I");
 
+    // The status report reply proves the worker parsed the disable. A resize cannot, because the
+    // reader may hand the output to the worker after a later command.
     reader_steps
-        .send(ReaderStep::Bytes(b"\x1b[?1004l".to_vec()))
+        .send(ReaderStep::Bytes(b"\x1b[?1004l\x1b[5n".to_vec()))
         .unwrap();
-    session.resize(geometry(82, 24, 8.0, 20.0));
     records.wait_for("the focus-reporting disable barrier", |state| {
-        state.resizes.len() == 3
+        state.written == b"\x1b[O\x1b[I\x1b[0n"
     });
     session.focus(false);
-    session.resize(geometry(83, 24, 8.0, 20.0));
+    session.resize(geometry(82, 24, 8.0, 20.0));
     records.wait_for("the disabled focus edge barrier", |state| {
-        state.resizes.len() == 4
+        state.resizes.len() == 3
     });
-    assert_eq!(records.snapshot().written, b"\x1b[O\x1b[I");
+    assert_eq!(records.snapshot().written, b"\x1b[O\x1b[I\x1b[0n");
 
     session.shutdown();
 }
