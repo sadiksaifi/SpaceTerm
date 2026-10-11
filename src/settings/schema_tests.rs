@@ -116,6 +116,10 @@ fn published_schema_and_runtime_preferences_have_identical_fields() {
         property_keys(&schema["$defs"]["git"])
     );
     assert_eq!(
+        object_keys(&runtime["sidebar"]),
+        property_keys(&schema["$defs"]["sidebar"])
+    );
+    assert_eq!(
         object_keys(&runtime["updates"]),
         property_keys(&schema["$defs"]["updates"])
     );

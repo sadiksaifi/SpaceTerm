@@ -31,6 +31,7 @@ fn workspace_manager_with_directory_selection(
                 window_drag: Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
                 remote_workspace: test_remote_backend_factory(),
             },
+            SidebarState::Expanded,
             window,
             cx,
         )

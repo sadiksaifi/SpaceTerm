@@ -10,7 +10,7 @@ use crate::appearance::{
 };
 use crate::keybindings::KeybindingPreferences;
 
-const SETTINGS_SCHEMA_VERSION: u32 = 6;
+pub(super) const SETTINGS_SCHEMA_VERSION: u32 = 7;
 pub(super) const MAX_DOCUMENT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_DEPTH: usize = 32;
 
@@ -27,6 +27,8 @@ pub(crate) struct SettingsDocument {
     pub(crate) clipboard: crate::terminal::native_services::clipboard::ClipboardPreferences,
     #[serde(default)]
     pub(crate) git: super::git::GitPreferences,
+    #[serde(default)]
+    pub(crate) sidebar: super::sidebar::SidebarPreferences,
     pub(crate) appearance: AppearancePreferences,
     #[serde(default)]
     pub(crate) terminal_themes: Vec<TerminalTheme>,
@@ -41,6 +43,7 @@ impl Default for SettingsDocument {
             keybindings: Default::default(),
             clipboard: Default::default(),
             git: Default::default(),
+            sidebar: Default::default(),
             appearance: AppearancePreferences::default(),
             terminal_themes: Vec::new(),
         }
@@ -99,6 +102,7 @@ impl SettingsDocument {
         self.keybindings = defaults.keybindings;
         self.clipboard = defaults.clipboard;
         self.git = defaults.git;
+        self.sidebar = defaults.sidebar;
         self.terminal_themes = defaults.terminal_themes;
     }
 
@@ -110,6 +114,7 @@ impl SettingsDocument {
         self.keybindings = imported.keybindings;
         self.clipboard = imported.clipboard;
         self.git = imported.git;
+        self.sidebar = imported.sidebar;
         self.terminal_themes = imported.terminal_themes;
     }
 }
@@ -144,6 +149,7 @@ pub(crate) fn parse_settings(bytes: &[u8]) -> Result<SettingsDocument, SettingsD
         }
         Some(4) => migrate_v4_settings(&mut value)?,
         Some(5) => migrate_v5_settings(&mut value)?,
+        Some(6) => migrate_v6_settings(&mut value)?,
         Some(version) if version == u64::from(SETTINGS_SCHEMA_VERSION) => {}
         Some(_) => return Err(SettingsDocumentError::UnsupportedVersion),
         None => return Err(SettingsDocumentError::InvalidJson),
@@ -204,6 +210,21 @@ fn migrate_v5_settings(value: &mut serde_json::Value) -> Result<(), SettingsDocu
         .and_then(serde_json::Value::as_object)
         .is_some_and(|git| git.contains_key("worktree_path_template"))
     {
+        return Err(SettingsDocumentError::InvalidJson);
+    }
+    document.insert(
+        "schema_version".into(),
+        serde_json::json!(SETTINGS_SCHEMA_VERSION),
+    );
+    Ok(())
+}
+
+/// Version 7 adds the `sidebar` preferences, which a version 6 document takes at their defaults.
+fn migrate_v6_settings(value: &mut serde_json::Value) -> Result<(), SettingsDocumentError> {
+    let document = value
+        .as_object_mut()
+        .ok_or(SettingsDocumentError::InvalidJson)?;
+    if document.contains_key("sidebar") {
         return Err(SettingsDocumentError::InvalidJson);
     }
     document.insert(

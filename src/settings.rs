@@ -8,6 +8,7 @@ pub(crate) mod git;
 mod schema_tests;
 
 pub(crate) mod recovery;
+pub(crate) mod sidebar;
 pub(crate) mod storage;
 #[cfg(test)]
 mod storage_tests;
@@ -41,6 +42,8 @@ pub(crate) enum SettingsError {
     RevisionExhausted,
     #[error("settings are invalid")]
     Invalid,
+    #[error("settings come from a newer SpaceTerm")]
+    Unsupported,
     #[error(transparent)]
     Import(#[from] ImportError),
     #[error(transparent)]
@@ -55,9 +58,14 @@ impl SettingsError {
     }
 }
 
+/// A newer schema version is a valid document this build cannot read, so it is never malformed
+/// and Settings Recovery never replaces it.
 impl From<SettingsDocumentError> for SettingsError {
-    fn from(_: SettingsDocumentError) -> Self {
-        Self::Invalid
+    fn from(error: SettingsDocumentError) -> Self {
+        match error {
+            SettingsDocumentError::UnsupportedVersion => Self::Unsupported,
+            _ => Self::Invalid,
+        }
     }
 }
 

@@ -382,6 +382,9 @@ impl SaveStatus {
                 "Your settings file is too large to read"
             }
             Self::Unavailable(SettingsError::Invalid) => "Your settings could not be read",
+            Self::Unavailable(SettingsError::Unsupported) => {
+                "Your settings come from a newer SpaceTerm"
+            }
             Self::Unavailable(_) => "Your settings are unavailable",
         }
     }
@@ -402,6 +405,9 @@ impl SaveStatus {
             ),
             Self::Unavailable(SettingsError::Storage(StorageError::Conflict)) => Some(
                 "Reload to pick up the change. Editing is paused so SpaceTerm does not replace it.",
+            ),
+            Self::Unavailable(SettingsError::Unsupported) => Some(
+                "SpaceTerm is showing defaults and has changed nothing. Update SpaceTerm to use and edit these settings.",
             ),
             Self::Unavailable(_) => {
                 Some("Editing is paused until SpaceTerm can read and write your settings.")

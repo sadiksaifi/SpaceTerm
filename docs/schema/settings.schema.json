@@ -12,7 +12,7 @@
   ],
   "properties": {
     "schema_version": {
-      "const": 6
+      "const": 7
     },
     "revision": {
       "type": "integer",
@@ -39,6 +39,9 @@
     },
     "git": {
       "$ref": "#/$defs/git"
+    },
+    "sidebar": {
+      "$ref": "#/$defs/sidebar"
     }
   },
   "$defs": {
@@ -699,6 +702,19 @@
           "maxLength": 1024,
           "pattern": "^(~/|/)",
           "default": "~/.worktrees/{repository}/{branch}"
+        }
+      }
+    },
+    "sidebar": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "default_state": {
+          "enum": [
+            "expanded",
+            "collapsed"
+          ],
+          "default": "expanded"
         }
       }
     }

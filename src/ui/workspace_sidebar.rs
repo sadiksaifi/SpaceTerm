@@ -280,7 +280,7 @@ pub(super) struct WorkspaceSidebar {
 }
 
 impl WorkspaceSidebar {
-    pub(super) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(super) fn new(visible: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let scrollbar = cx.new(|_| {
             OverlayScrollbar::<f32>::new("workspace-scrollbar").accessibility_name("Workspace list")
         });
@@ -326,7 +326,7 @@ impl WorkspaceSidebar {
             rows: Vec::new(),
             remote_unavailable: None,
             layout: SidebarLayout {
-                visible: true,
+                visible,
                 width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
             },
             scroll_handle: ScrollHandle::new(),

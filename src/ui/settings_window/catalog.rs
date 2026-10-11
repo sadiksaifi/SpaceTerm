@@ -10,7 +10,7 @@ use crate::platform::permission_access::AccessibilityNaming;
 /// One named group of Settings presented as one navigation entry and one content region.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum SettingsSectionId {
-    /// How SpaceTerm's windows present themselves: density, opacity, and blur.
+    /// How SpaceTerm's windows present themselves: density, opacity, blur, and the sidebar.
     Interface,
     /// Terminal typography and text rendering.
     Font,
@@ -59,7 +59,7 @@ impl SettingsSectionId {
         desktop: &crate::desktop_profile::DesktopPresentation,
     ) -> &'static str {
         match self {
-            Self::Interface => "Density, opacity, and blur for SpaceTerm's windows.",
+            Self::Interface => "Density, opacity, blur, and the sidebar for SpaceTerm's windows.",
             Self::Font => "The typeface and text rendering in terminal panes.",
             Self::Themes => {
                 "Light, dark, or automatic appearance, and the colors terminal panes use in each. Themes published for Zed work too."
@@ -109,6 +109,8 @@ pub(super) enum SettingsRowId {
     /// The image Workspace windows present in place of the desktop.
     BackgroundImage,
     Density,
+    /// Whether a new window opens with the sidebar expanded or collapsed.
+    SidebarDefaultState,
     /// The Terminal Theme in use, or both slots under Auto.
     TerminalTheme,
     TerminalFontFamily,
@@ -181,7 +183,8 @@ impl SettingsRowId {
             Self::TerminalBoldAsBright => ResetTarget::TerminalBoldAsBright,
             // Update preferences live outside the appearance preferences, so their rows reset
             // through their own field instead of an appearance reset target.
-            Self::InstalledThemes
+            Self::SidebarDefaultState
+            | Self::InstalledThemes
             | Self::MicrophoneAccess
             | Self::ScreenRecordingAccess
             | Self::AccessibilityAccess
@@ -328,6 +331,24 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         label: "Background image",
         keywords: &["wallpaper", "picture", "photo", "backdrop"],
         selector: "settings-row-background-image",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::SidebarDefaultState,
+        section: SettingsSectionId::Interface,
+        group: "Sidebar",
+        label: "Default state",
+        keywords: &[
+            "sidebar",
+            "expanded",
+            "collapsed",
+            "hidden",
+            "shown",
+            "new window",
+            "launch",
+            "startup",
+            "workspaces",
+        ],
+        selector: "settings-row-sidebar-default-state",
     },
     SettingsRowDescriptor {
         id: SettingsRowId::TerminalFontFamily,
@@ -859,12 +880,13 @@ mod tests {
     }
 
     /// The complete preference row identity set, so the catalog cannot silently omit one.
-    const EVERY_PREFERENCE_ROW: [SettingsRowId; 32] = [
+    const EVERY_PREFERENCE_ROW: [SettingsRowId; 33] = [
         SettingsRowId::AppearanceMode,
         SettingsRowId::Opacity,
         SettingsRowId::Blur,
         SettingsRowId::BackgroundImage,
         SettingsRowId::Density,
+        SettingsRowId::SidebarDefaultState,
         SettingsRowId::TerminalTheme,
         SettingsRowId::TerminalFontFamily,
         SettingsRowId::TerminalBaseSize,
@@ -1173,7 +1195,8 @@ mod tests {
             // Update and shortcut rows reset their own field; their section tests cover that path.
             let resettable = !matches!(
                 row.id,
-                SettingsRowId::InstalledThemes
+                SettingsRowId::SidebarDefaultState
+                    | SettingsRowId::InstalledThemes
                     | SettingsRowId::MicrophoneAccess
                     | SettingsRowId::ScreenRecordingAccess
                     | SettingsRowId::AccessibilityAccess

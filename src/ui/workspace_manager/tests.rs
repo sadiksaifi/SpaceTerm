@@ -1117,6 +1117,7 @@ fn native_service_factory_reaches_initial_new_and_replacement_hierarchy(cx: &mut
                 native_services,
                 ..workspace_adapters(test_remote_backend_factory())
             },
+            SidebarState::Expanded,
             window,
             cx,
         )
@@ -1160,6 +1161,7 @@ fn accessibility_factory_reaches_initial_and_new_workspaces_tabs_and_split_panes
                 accessibility: factory.clone(),
                 ..workspace_adapters(test_remote_backend_factory())
             },
+            SidebarState::Expanded,
             window,
             cx,
         )
@@ -1223,6 +1225,7 @@ fn workspace_manager(
             session_factory,
             std::env::temp_dir(),
             workspace_adapters(test_remote_backend_factory()),
+            SidebarState::Expanded,
             window,
             cx,
         )
@@ -1271,6 +1274,7 @@ fn workspace_manager_with_application_actions(
             session_factory,
             std::env::temp_dir(),
             workspace_adapters(test_remote_backend_factory()),
+            SidebarState::Expanded,
             window,
             cx,
         )
@@ -1303,6 +1307,7 @@ fn workspace_manager_with_remote_backend(
             session_factory,
             std::env::temp_dir(),
             workspace_adapters(factory),
+            SidebarState::Expanded,
             window,
             cx,
         )
@@ -1416,6 +1421,7 @@ fn workspace_manager_with_operating_system_window_drag_platform(
                 window_drag: injected_platform,
                 ..workspace_adapters(test_remote_backend_factory())
             },
+            SidebarState::Expanded,
             window,
             cx,
         )
@@ -1452,6 +1458,7 @@ fn workspace_manager_with_directory_selection(
                 directory_selection,
                 ..workspace_adapters(test_remote_backend_factory())
             },
+            SidebarState::Expanded,
             window,
             cx,
         )
@@ -1628,6 +1635,7 @@ fn application_rtl_locale_installation_should_mirror_production_modal_footer(
             session_factory,
             std::env::temp_dir(),
             workspace_adapters(test_remote_backend_factory()),
+            SidebarState::Expanded,
             window,
             cx,
         )
@@ -1871,6 +1879,7 @@ fn simultaneous_modals_should_block_and_restore_terminal_input_focus_per_operati
             first_factory,
             PathBuf::from("/Users/first"),
             workspace_adapters(test_remote_backend_factory()),
+            SidebarState::Expanded,
             window,
             cx,
         )
@@ -1880,6 +1889,7 @@ fn simultaneous_modals_should_block_and_restore_terminal_input_focus_per_operati
             second_factory,
             PathBuf::from("/Users/second"),
             workspace_adapters(test_remote_backend_factory()),
+            SidebarState::Expanded,
             window,
             cx,
         )
@@ -2282,6 +2292,7 @@ fn top_combo_box_unavailable_remote_should_reject_acceptance_and_keep_terminal_i
             session_factory,
             std::env::temp_dir(),
             workspace_adapters(factory),
+            SidebarState::Expanded,
             window,
             cx,
         )
@@ -2583,6 +2594,7 @@ fn backend_construction_failure_should_disable_remote_instead_of_leaving_an_iner
             session_factory,
             std::env::temp_dir(),
             workspace_adapters(factory),
+            SidebarState::Expanded,
             window,
             cx,
         )
@@ -12194,6 +12206,7 @@ fn workspace_manager_with_terminal_nodes(
                 accessibility: Rc::new(AccessKitTerminalAccessibilityAdapterFactory),
                 ..workspace_adapters(test_remote_backend_factory())
             },
+            SidebarState::Expanded,
             window,
             cx,
         )
