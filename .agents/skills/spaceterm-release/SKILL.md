@@ -16,6 +16,6 @@ Allow at most eight release attempts per invocation, counting each release tag p
 5. Create a fix branch and PR. Fix the failure and validate through `mise run`. Obtain a fresh adversarial review using `$codex-subagent`. Address material findings, validate, and update the PR.
 6. After checks pass and findings are addressed, squash-merge and delete the PR's local/remote branch. Synchronize the release base branch; retry step 2.
 
-For Linux validation, use `ssh penguin` and `~/Projects/SpaceTerm`. For fork lookup on either host, follow `<repo-root>/AGENTS.md`.
+For Linux access and fork lookup, follow `<repo-root>/AGENTS.md`.
 
 Stop and report blockers requiring unavailable credentials, additional authority, or a product decision.
