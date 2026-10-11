@@ -39,6 +39,52 @@ _Avoid_: Window, Terminal Session
 
 **Window Controls**: The host's close, minimize, and maximize controls for an Operating-System Window.
 
+## Server architecture vocabulary
+
+These terms describe the server architecture being designed in [issue #162](https://github.com/sadiksaifi/SpaceTerm/issues/162).
+
+**SpaceTerm Server**: The application that owns its Workspaces and their Terminal Sessions independently of the applications presenting them.
+
+**SpaceTerm Client**: An application that presents and controls SpaceTerm Server state.
+
+**Workspace Window**: A desktop SpaceTerm Client's single main Operating-System Window presenting its Workspace Attachments.
+
+**Workspace Attachment**: A SpaceTerm Client's association with a server-owned Workspace for presentation.
+
+**Attach Workspace**: The action that creates a Workspace Attachment.
+
+**Detach Workspace**: The action that removes a Workspace Attachment.
+
+**Kill Workspace**: The action that removes a server-owned Workspace and its saved organization, ending all of its Terminal Sessions.
+
+**SpaceTerm Protocol**: The versioned, language-neutral exchange of server state, terminal presentation, and client operations between SpaceTerm Clients and SpaceTerm Servers.
+
+**SSH Bootstrap**: The use of an SSH Destination to detect, install, and start a SpaceTerm Server for a client connection.
+
+**Start Server**: The explicit action that starts a SpaceTerm Server.
+
+**Stop Server**: The explicit action that stops a SpaceTerm Server and ends its Terminal Sessions.
+
+**End All Sessions**: The action that ends every live Terminal Session on one SpaceTerm Server while retaining the running server and its Workspace organization.
+
+**Paired Device**: A client device whose identity a SpaceTerm Server has authorized for terminal access and server management.
+
+**Unpair Device**: The action that requests revocation of a Paired Device's access to one SpaceTerm Server and removes the initiating client's saved connection when it unpairs itself.
+
+**Unpair Pending**: An Unpair Device request whose server-side revocation is awaiting confirmation, independently of completed local connection removal.
+
+**Client Settings**: Preferences used by a SpaceTerm Client on its own device.
+
+**Server Settings**: Preferences owned by one SpaceTerm Server and shared by its authorized clients.
+
+**Client View State**: A SpaceTerm Client's presentation choices for server-owned work, including Tab display order, Pane Layouts and Split ratios, Active Workspace, Active Tab, Focused Pane, Zoomed Pane, Selection, Terminal Find, and scroll position.
+
+**Controlling Client**: The SpaceTerm Client with authority to supply terminal input and terminal dimensions to a Pane.
+
+**Take Over**: The action that replaces a Pane's Controlling Client.
+
+**Takeover Screen**: The Pane presentation shown to a SpaceTerm Client when another client is its Controlling Client.
+
 ## Settings
 
 **Settings**: Application-scoped preferences retained across launches.
