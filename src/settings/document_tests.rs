@@ -4,6 +4,7 @@ use crate::appearance::{
     ChromeDensity, Color, OptionalColorOverride, ResetTarget, ResolutionError, SystemAppearance,
     TerminalColorOverrides, TerminalColors, TerminalFontFamily, ThemeMetadata,
 };
+use crate::settings::sidebar::SidebarState;
 
 #[test]
 fn legacy_transparency_exports_as_opacity() {
@@ -20,7 +21,7 @@ fn legacy_transparency_exports_as_opacity() {
             .as_f64()
             .unwrap();
         assert_eq!(opacity, expected_opacity);
-        assert_eq!(exported["schema_version"], 6);
+        assert_eq!(exported["schema_version"], 7);
         assert!(
             exported["appearance"]["window"]
                 .get("transparency")
@@ -498,9 +499,9 @@ fn native_settings_are_canonical_strict_and_round_trip() {
     document.appearance.terminal.themes.light = ThemeId::builtin("builtin.spaceterm.light");
     let encoded = export_settings(&document).unwrap();
     let encoded_value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
-    assert_eq!(encoded_value["schema_version"], 6);
+    assert_eq!(encoded_value["schema_version"], 7);
     assert_eq!(parse_settings(encoded.as_bytes()).unwrap(), document);
-    let unsupported = encoded.replacen("\"schema_version\": 6", "\"schema_version\": 2", 1);
+    let unsupported = encoded.replacen("\"schema_version\": 7", "\"schema_version\": 2", 1);
     assert!(matches!(
         parse_settings(unsupported.as_bytes()),
         Err(SettingsDocumentError::UnsupportedVersion)
@@ -678,7 +679,7 @@ fn version_four_documents_migrate_with_default_git_settings() {
     assert!(document.git.show_repository_status && document.git.show_pull_requests);
     let exported: serde_json::Value =
         serde_json::from_str(&export_settings(&document).unwrap()).unwrap();
-    assert_eq!(exported["schema_version"], 6);
+    assert_eq!(exported["schema_version"], 7);
 }
 
 #[test]
@@ -704,7 +705,7 @@ fn version_five_documents_migrate_with_the_default_worktree_path_template() {
     );
     let exported: serde_json::Value =
         serde_json::from_str(&export_settings(&document).unwrap()).unwrap();
-    assert_eq!(exported["schema_version"], 6);
+    assert_eq!(exported["schema_version"], 7);
     assert!(matches!(
         parse_settings(&serde_json::to_vec(&early_template).unwrap()),
         Err(SettingsDocumentError::InvalidJson)
@@ -746,4 +747,60 @@ fn git_settings_reject_unknown_fields() {
         parse_settings(&serde_json::to_vec(&value).unwrap()),
         Err(SettingsDocumentError::InvalidJson)
     ));
+}
+
+#[test]
+fn version_six_documents_migrate_with_an_expanded_sidebar() {
+    let mut expected = reset_fixture();
+    expected.revision = 12;
+    expected.git.show_pull_requests = false;
+    let mut version_six = serde_json::to_value(&expected).unwrap();
+    version_six["schema_version"] = serde_json::json!(6);
+    version_six.as_object_mut().unwrap().remove("sidebar");
+    let mut early_sidebar = version_six.clone();
+    early_sidebar["sidebar"] = serde_json::json!({ "default_state": "collapsed" });
+
+    let document = parse_settings(&serde_json::to_vec(&version_six).unwrap()).unwrap();
+
+    assert_eq!(document, expected);
+    assert_eq!(document.sidebar.default_state, SidebarState::Expanded);
+    let exported: serde_json::Value =
+        serde_json::from_str(&export_settings(&document).unwrap()).unwrap();
+    assert_eq!(exported["schema_version"], 7);
+    assert_eq!(exported["sidebar"]["default_state"], "expanded");
+    assert!(matches!(
+        parse_settings(&serde_json::to_vec(&early_sidebar).unwrap()),
+        Err(SettingsDocumentError::InvalidJson)
+    ));
+}
+
+#[test]
+fn sidebar_settings_round_trip_import_and_reset() {
+    let mut document = SettingsDocument::default();
+    document.sidebar.default_state = SidebarState::Collapsed;
+    let exported = export_settings(&document).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&exported).unwrap();
+    assert_eq!(value["sidebar"]["default_state"], "collapsed");
+    let restored = parse_settings(exported.as_bytes()).unwrap();
+    assert_eq!(restored.sidebar, document.sidebar);
+    let mut imported = SettingsDocument::default();
+    imported.replace_settings(restored);
+    assert_eq!(imported.sidebar, document.sidebar);
+    imported.reset_all();
+    assert_eq!(imported.sidebar.default_state, SidebarState::Expanded);
+}
+
+#[test]
+fn sidebar_settings_reject_unknown_states_and_fields() {
+    let mut unknown_state = serde_json::to_value(SettingsDocument::default()).unwrap();
+    unknown_state["sidebar"]["default_state"] = serde_json::json!("hidden");
+    let mut unknown_field = serde_json::to_value(SettingsDocument::default()).unwrap();
+    unknown_field["sidebar"]["width"] = serde_json::json!(240);
+
+    for value in [unknown_state, unknown_field] {
+        assert!(matches!(
+            parse_settings(&serde_json::to_vec(&value).unwrap()),
+            Err(SettingsDocumentError::InvalidJson)
+        ));
+    }
 }

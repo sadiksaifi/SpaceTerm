@@ -8,6 +8,7 @@ pub(crate) mod git;
 mod schema_tests;
 
 pub(crate) mod recovery;
+pub(crate) mod sidebar;
 pub(crate) mod storage;
 #[cfg(test)]
 mod storage_tests;
