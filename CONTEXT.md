@@ -57,6 +57,8 @@ _Avoid_: Window, Terminal Session
 
 **Malformed Settings**: Retained data that cannot be read as a valid Settings Document. Storage failures are a distinct condition.
 
+**Unsupported Settings**: A retained Settings Document whose schema version is newer than this SpaceTerm reads. It is not Malformed Settings, so Settings Recovery never replaces it.
+
 **Settings Recovery**: Replacing Malformed Settings with defaults.
 
 ## Keybindings

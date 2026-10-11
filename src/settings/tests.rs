@@ -1028,6 +1028,30 @@ fn recovery_refuses_committing_and_storage_ready_settings() {
 }
 
 #[test]
+fn a_document_from_a_newer_spaceterm_is_unsupported_and_never_recovered() {
+    use super::recovery::RecoveryError;
+    let mut newer = serde_json::to_value(SettingsDocument::default()).unwrap();
+    newer["schema_version"] = serde_json::json!(u64::from(document::SETTINGS_SCHEMA_VERSION) + 1);
+    let bytes = serde_json::to_vec(&newer).unwrap();
+    let storage = Arc::new(MemoryStorage::default());
+    storage.0.lock().unwrap().snapshot = Some((bytes.clone(), 1));
+
+    let settings = Settings::load(storage.clone());
+
+    assert_eq!(settings.snapshot().status, Some(SettingsError::Unsupported));
+    assert!(!SettingsError::Unsupported.is_malformed());
+    assert_eq!(
+        settings.recover_by_reset(),
+        Err(RecoveryError::NotMalformed)
+    );
+    assert_eq!(settings.reload(), Err(SettingsError::Unsupported));
+    let state = storage.0.lock().unwrap();
+    assert_eq!(state.writes, 0);
+    assert!(state.backup.is_none());
+    assert_eq!(state.snapshot.as_ref().unwrap().0, bytes);
+}
+
+#[test]
 fn recovery_stops_on_quarantine_failure_without_writing_defaults() {
     use super::recovery::RecoveryError;
     let storage = Arc::new(MemoryStorage::default());

@@ -10,7 +10,7 @@ use crate::appearance::{
 };
 use crate::keybindings::KeybindingPreferences;
 
-const SETTINGS_SCHEMA_VERSION: u32 = 7;
+pub(super) const SETTINGS_SCHEMA_VERSION: u32 = 7;
 pub(super) const MAX_DOCUMENT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_DEPTH: usize = 32;
 

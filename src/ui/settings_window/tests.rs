@@ -675,6 +675,23 @@ fn unsafe_settings_do_not_offer_a_reset(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn settings_from_a_newer_spaceterm_pause_editing_without_a_reset(cx: &mut TestAppContext) {
+    let mut newer = serde_json::to_value(SettingsDocument::default()).unwrap();
+    let version = newer["schema_version"].as_u64().unwrap();
+    newer["schema_version"] = serde_json::json!(version + 1);
+    let storage = MemoryStorage::with_bytes(serde_json::to_vec(&newer).unwrap());
+    let (window, harness, cx) = open_settings_with(cx, storage);
+
+    assert_eq!(
+        status(&window, cx),
+        SaveStatus::Unavailable(crate::settings::SettingsError::Unsupported)
+    );
+    assert!(!window.read_with(cx, |window, _| window.editor.editable()));
+    assert!(cx.debug_bounds("settings-banner-reset-settings").is_none());
+    assert_eq!(harness.storage.writes(), 0);
+}
+
+#[gpui::test]
 fn a_document_published_without_identity_pauses_editing_until_reload(cx: &mut TestAppContext) {
     let (window, harness, cx) = open_settings(cx);
     harness.storage.drop_identity(true);

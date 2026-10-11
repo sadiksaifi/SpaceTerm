@@ -377,9 +377,9 @@ impl SettingsDraft {
 
     pub(super) fn report(&mut self, error: SettingsError) {
         self.status = match error {
-            SettingsError::Storage(StorageError::Conflict) | SettingsError::Invalid => {
-                SaveStatus::Unavailable(error)
-            }
+            SettingsError::Storage(StorageError::Conflict)
+            | SettingsError::Invalid
+            | SettingsError::Unsupported => SaveStatus::Unavailable(error),
             _ => SaveStatus::Failed(error),
         };
     }

@@ -1682,6 +1682,24 @@ mod runtime_tests {
     }
 
     #[gpui::test]
+    fn launch_does_not_offer_recovery_for_settings_from_a_newer_spaceterm(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut newer = serde_json::to_value(crate::settings::SettingsDocument::default()).unwrap();
+        let version = newer["schema_version"].as_u64().unwrap();
+        newer["schema_version"] = serde_json::json!(version + 1);
+        let storage = crate::settings::storage::testing::MemoryStorage::with_bytes(
+            serde_json::to_vec(&newer).unwrap(),
+        );
+        let host = host_with_storage(storage);
+        let workspace = cx.update(|cx| start_application(cx, &host).unwrap());
+        let cx = &mut gpui::VisualTestContext::from_window(workspace.into(), cx);
+        cx.run_until_parked();
+
+        assert!(!cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
+    }
+
+    #[gpui::test]
     fn launch_gate_prevents_workspace_creation_and_reopen_until_offline_fallback(
         cx: &mut gpui::TestAppContext,
     ) {
