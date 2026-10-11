@@ -11,6 +11,7 @@ mod import;
 mod keybindings;
 mod microphone;
 mod permission_access;
+mod sidebar;
 mod theme_gallery;
 mod theme_store;
 mod themes;
@@ -338,6 +339,7 @@ enum RowReset {
     Update,
     Clipboard,
     Git,
+    Sidebar,
     Shortcut(crate::keybindings::Command),
 }
 
@@ -730,6 +732,9 @@ impl SettingsWindow {
         if let Some(differs) = self.git_preference_differs(row) {
             return differs.then_some(RowReset::Git);
         }
+        if let Some(differs) = self.sidebar_preference_differs(row) {
+            return differs.then_some(RowReset::Sidebar);
+        }
         if matches!(row, SettingsRowId::Opacity | SettingsRowId::Blur)
             && !self.window_background(cx).adjustable()
         {
@@ -772,6 +777,7 @@ impl SettingsWindow {
                         RowReset::Update => settings.reset_update_preference(row, cx),
                         RowReset::Clipboard => settings.reset_clipboard_preference(row, cx),
                         RowReset::Git => settings.reset_git_preference(row, cx),
+                        RowReset::Sidebar => settings.reset_sidebar_preference(cx),
                         RowReset::Shortcut(command) => settings.reset_shortcut(command, cx),
                     });
                 },
@@ -1176,6 +1182,7 @@ impl SettingsWindow {
             SettingsRowId::BackgroundImage => self.render_background_image(cx),
             SettingsRowId::TerminalTheme => self.render_current_theme(appearance, window, cx),
             SettingsRowId::Density => self.render_density(cx),
+            SettingsRowId::SidebarDefaultState => self.render_sidebar_default_state(cx),
             SettingsRowId::TerminalFontFamily => self.render_terminal_font(appearance, cx),
             SettingsRowId::TerminalBaseSize => self.render_terminal_size(appearance, cx),
             SettingsRowId::TerminalLineHeight => self.render_line_height(appearance, cx),
@@ -2109,6 +2116,9 @@ impl SettingsWindow {
                 } else {
                     "Shown behind terminal windows in place of the desktop, with the same opacity and blur."
                 },
+            ),
+            SettingsRowId::SidebarDefaultState => Some(
+                "How the sidebar starts in each new window. Toggle Sidebar still shows or hides it.",
             ),
             SettingsRowId::TerminalFontFamily => Some("Only monospaced families are listed."),
             SettingsRowId::AutomaticUpdateDownloads

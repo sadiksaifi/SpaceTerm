@@ -9,6 +9,7 @@ use crate::platform::window_movement::{
     OperatingSystemWindowDragPlatform, RecordingOperatingSystemWindowDragPlatform,
 };
 use crate::settings::SettingsDocument;
+use crate::settings::sidebar::SidebarState;
 use crate::settings::storage::StorageError;
 use crate::theme_registry::ZedThemeRegistry;
 use crate::theme_registry::testing::{MemoryTransport, extension_archive};
@@ -2635,6 +2636,7 @@ fn rendered_control_selector(row: SettingsRowId) -> Option<String> {
             SettingsRowId::Blur => "settings-blur",
             SettingsRowId::BackgroundImage => "settings-background-image-choose",
             SettingsRowId::Density => "settings-density",
+            SettingsRowId::SidebarDefaultState => "settings-sidebar-default-state",
             SettingsRowId::TerminalTheme => "settings-current-theme",
             SettingsRowId::TerminalFontFamily => "settings-terminal-font-family",
             SettingsRowId::TerminalBaseSize => "settings-terminal-base-size",
@@ -4218,6 +4220,40 @@ fn git_tool_rows_follow_the_reported_tool_status(cx: &mut TestAppContext) {
         cx.debug_bounds("settings-github-cli-state-signed-out")
             .is_some()
     );
+}
+
+#[gpui::test]
+fn the_default_sidebar_state_saves_resets_and_remains_searchable(cx: &mut TestAppContext) {
+    let (window, harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::Interface, cx);
+    assert_eq!(
+        document_of(&window, cx).sidebar.default_state,
+        SidebarState::Expanded
+    );
+    assert!(
+        cx.debug_bounds("settings-row-sidebar-default-state-reset")
+            .is_none()
+    );
+    click("settings-sidebar-default-state-collapsed", cx);
+    settle(cx);
+    assert_eq!(
+        harness.storage.document().unwrap().sidebar.default_state,
+        SidebarState::Collapsed
+    );
+    click("settings-row-sidebar-default-state-reset", cx);
+    settle(cx);
+    assert_eq!(
+        harness.storage.document().unwrap().sidebar.default_state,
+        SidebarState::Expanded
+    );
+    for query in ["sidebar", "collapsed"] {
+        set_query(&window, query, cx);
+        assert!(
+            cx.debug_bounds("settings-row-sidebar-default-state")
+                .is_some(),
+            "{query}"
+        );
+    }
 }
 
 #[gpui::test]
