@@ -3,200 +3,528 @@
 //! strand it.
 
 use gpui::prelude::*;
+use std::collections::HashMap;
+use std::hash::Hash;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use gpui::{
-    Along as _, AnyElement, App, Axis, Bounds, Context, DispatchPhase, KeystrokeEvent, MouseButton,
-    MouseDownEvent, MouseUpEvent, Pixels, Point, ScrollHandle, Size, Subscription, Window,
-    WindowId, canvas, div, px,
+    Along as _, AnyElement, App, Axis, Bounds, BoxShadow, Context, DispatchPhase, KeystrokeEvent,
+    MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point, ScrollHandle, Size, Subscription,
+    Window, WindowId, canvas, div, point, px,
 };
 
 use super::appearance::gpui_color;
 
-/// The thickness of the accent line that marks where a dragged strip item would land.
-const INSERTION_MARKER_THICKNESS: f32 = 2.0;
+/// How long the other items take to slide aside as the landing slot moves.
+const SHIFT_DURATION: Duration = Duration::from_millis(200);
+/// How long a released item takes to settle into its slot, and the others to follow it.
+const SETTLE_DURATION: Duration = Duration::from_millis(260);
+/// How far past a strip the pointer may stray before the lifted item leaves it.
+pub(crate) const TEAR_OFF_DISTANCE: f32 = 48.0;
+/// How opaque a lifted item is, so the items it passes over show through a little.
+pub(crate) const LIFTED_OPACITY: f32 = 0.95;
 
-/// The drop state of one scrolling strip of items laid out along one axis.
+/// The drag state of one scrolling strip of items laid out along one axis.
+///
+/// While an item is lifted, its own place stays empty, the other items slide aside to open a gap
+/// where a release would land it, and its lifted copy stays level with the strip. A release
+/// settles the item into the gap; a cancellation returns everything to rest.
 pub(crate) struct ReorderableStrip<Id> {
     axis: Axis,
     lift: Option<Lift<Id>>,
+    /// Each item's displacement from its laid-out place, as it eases toward its target.
+    slides: HashMap<Id, Slide>,
+    /// The released item while it settles, which still shows its lift.
+    settling: Option<Id>,
 }
 
-/// The item a strip's drag carries, its session, and the slot a release would put it in.
+/// The item a strip's drag carries, its session, and where a release would land it.
 struct Lift<Id> {
     id: Id,
     session: DragSession,
-    insertion: Option<Insertion>,
+    /// Where the press held the item, from the item's origin.
+    grab: Point<Pixels>,
+    /// Where the lifted copy's origin stands in the window.
+    origin: Option<Point<Pixels>>,
+    landing: Option<Landing>,
 }
 
-/// A slot between the items of a strip that held `len` items, numbered from zero before the first
-/// item to `len` after the last.
+/// The position a released item would take among the `len` items of its strip.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct Insertion {
-    slot: usize,
+struct Landing {
+    position: usize,
     len: usize,
 }
 
-impl<Id: Copy + Eq> ReorderableStrip<Id> {
-    pub(crate) const fn new(axis: Axis) -> Self {
-        Self { axis, lift: None }
+/// How one strip item presents this frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct ItemMotion {
+    /// How far the item is drawn from its laid-out place.
+    pub(crate) offset: Point<Pixels>,
+    /// Whether the item is lifted, so its place stays empty.
+    pub(crate) lifted: bool,
+    /// How much of its lift a released item still shows, from 1 at release to 0 at rest.
+    pub(crate) lift: f32,
+}
+
+impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
+    pub(crate) fn new(axis: Axis) -> Self {
+        Self {
+            axis,
+            lift: None,
+            slides: HashMap::new(),
+            settling: None,
+        }
     }
 
-    /// Lifts the item `id`. It keeps its place until a release lands it elsewhere.
-    pub(crate) fn begin(&mut self, id: Id, session: DragSession) {
+    /// Lifts the item `id`, one of the strip's `ids` in presentation order. It keeps its place
+    /// until a release lands it elsewhere.
+    pub(crate) fn begin(
+        &mut self,
+        id: Id,
+        session: DragSession,
+        items: &ScrollHandle,
+        ids: &[Id],
+        window: &Window,
+        cx: &App,
+    ) {
+        self.slides.clear();
+        self.settling = None;
+        let rest = ids
+            .iter()
+            .position(|candidate| *candidate == id)
+            .and_then(|position| painted_item_bounds(items).get(position).copied());
+        let grab = rest.map_or_else(Point::default, |rest| grab_point(window, cx) - rest.origin);
         self.lift = Some(Lift {
             id,
             session,
-            insertion: None,
+            grab,
+            origin: None,
+            landing: None,
         });
     }
 
-    /// Ends a lift whose drag GPUI no longer carries. Call it on every render, so a drag released
-    /// while the strip was hidden leaves no marker behind.
-    pub(crate) fn end_released(&mut self, cx: &App) {
+    /// Prepares a frame. Ends a lift whose drag GPUI no longer carries, so a drag released while
+    /// the strip was hidden leaves nothing behind, and keeps frames coming while items slide.
+    /// Call it on every render.
+    pub(crate) fn refresh(&mut self, window: &mut Window, cx: &App) {
         if self
             .lift
             .as_ref()
             .is_some_and(|lift| !lift.session.is_active(cx))
         {
             self.lift = None;
+            self.slides.clear();
         }
-    }
-
-    pub(crate) fn cancel(&mut self) {
-        self.lift = None;
+        let now = now(cx);
+        self.slides
+            .retain(|_, slide| !slide.finished(now) || slide.to != Point::default());
+        if self
+            .settling
+            .is_some_and(|id| !self.slides.contains_key(&id))
+        {
+            self.settling = None;
+        }
+        if self.slides.values().any(|slide| !slide.finished(now)) {
+            window.request_animation_frame();
+        }
     }
 
     pub(crate) fn dragged(&self) -> Option<Id> {
         self.lift.as_ref().map(|lift| lift.id)
     }
 
-    /// The slot the insertion marker shows, numbered among the `len` items the strip presents.
-    pub(crate) fn insertion(&self, len: usize) -> Option<usize> {
-        self.lift
-            .as_ref()
-            .and_then(|lift| lift.insertion)
-            .filter(|insertion| insertion.len == len)
-            .map(|insertion| insertion.slot)
+    /// Where the lifted copy's origin stands in the window.
+    pub(crate) fn lifted_origin(&self) -> Option<Point<Pixels>> {
+        self.lift.as_ref().and_then(|lift| lift.origin)
     }
 
-    /// Follows the pointer with the slot a release would land the dragged item in. Returns whether
-    /// the slot changed.
+    /// How the item `id` presents this frame.
+    pub(crate) fn motion(&self, id: Id, cx: &App) -> ItemMotion {
+        let now = now(cx);
+        let slide = self.slides.get(&id);
+        ItemMotion {
+            offset: slide.map_or_else(Point::default, |slide| slide.at(now)),
+            lifted: self.dragged() == Some(id),
+            lift: slide
+                .filter(|_| self.settling == Some(id))
+                .map_or(0.0, |slide| 1.0 - ease_out(slide.progress(now))),
+        }
+    }
+
+    /// Follows the pointer with the lifted copy and the slot a release would land the item in.
+    /// Returns whether either changed.
     pub(crate) fn track(
         &mut self,
         items: &ScrollHandle,
-        current: usize,
-        len: usize,
+        ids: &[Id],
         pointer: Point<Pixels>,
+        cx: &App,
     ) -> bool {
         let axis = self.axis;
         let Some(lift) = self.lift.as_mut() else {
             return false;
         };
-        let insertion = strip_spans(items, axis, len, pointer)
-            .and_then(|spans| insertion_slot(&spans, current, f32::from(pointer.along(axis))))
-            .map(|slot| Insertion { slot, len });
-        let changed = lift.insertion != insertion;
-        lift.insertion = insertion;
-        changed
+        let bounds = painted_item_bounds(items);
+        let free = pointer - lift.grab;
+        let held = ids
+            .iter()
+            .position(|candidate| *candidate == lift.id)
+            .filter(|_| bounds.len() == ids.len())
+            .filter(|_| {
+                items
+                    .bounds()
+                    .dilate(px(TEAR_OFF_DISTANCE))
+                    .contains(&pointer)
+            })
+            .map(|current| hold(axis, &bounds, current, free));
+        let origin = held.map_or(free, |(origin, _)| origin);
+        let landing = held.map(|(_, position)| Landing {
+            position,
+            len: ids.len(),
+        });
+        let moved = lift.origin != Some(origin);
+        lift.origin = Some(origin);
+        let relanded = lift.landing != landing;
+        lift.landing = landing;
+        if relanded {
+            self.open_gap(ids, &bounds, cx);
+        }
+        moved || relanded
     }
 
-    /// Ends the drag on its release, returning the dragged item and its new position among the
-    /// `len` items when it lands somewhere new.
-    pub(crate) fn finish(&mut self, current: usize, len: usize, cx: &App) -> Option<(Id, usize)> {
+    /// Ends the drag on its release. Returns the dragged item and its new position among the
+    /// strip's `ids` when it lands somewhere new; the item then settles there.
+    pub(crate) fn finish(
+        &mut self,
+        items: &ScrollHandle,
+        ids: &[Id],
+        cx: &App,
+    ) -> Option<(Id, usize)> {
         let lift = self.lift.take()?;
         if !lift.session.is_active(cx) {
+            self.slides.clear();
             return None;
         }
-        let insertion = lift.insertion.filter(|insertion| insertion.len == len)?;
-        Some((lift.id, landing_position(insertion.slot, current)))
+        let landing = lift
+            .landing
+            .filter(|landing| landing.len == ids.len())
+            .map(|landing| landing.position);
+        self.settle(&lift, landing, items, ids, cx)
+            .map(|position| (lift.id, position))
     }
-}
 
-/// The start and end of every item along the strip, when the pointer lies within the strip and the
-/// container laid out `len` items.
-fn strip_spans(
-    items: &ScrollHandle,
-    axis: Axis,
-    len: usize,
-    pointer: Point<Pixels>,
-) -> Option<Vec<(f32, f32)>> {
-    if !items.bounds().contains(&pointer) {
-        return None;
+    /// Ends the drag without moving anything. The lifted item and the items it pushed aside
+    /// return to their places.
+    pub(crate) fn cancel(&mut self, items: &ScrollHandle, ids: &[Id], cx: &App) {
+        if let Some(lift) = self.lift.take() {
+            self.settle(&lift, None, items, ids, cx);
+        }
     }
-    let item_bounds = painted_item_bounds(items);
-    (item_bounds.len() == len).then(|| {
-        item_bounds
-            .iter()
-            .map(|bounds| {
-                let start = bounds.origin.along(axis);
-                (f32::from(start), f32::from(start + bounds.size.along(axis)))
+
+    /// Slides every item but the lifted one toward the place that opens the gap at the current
+    /// landing, or back to rest when there is none.
+    fn open_gap(&mut self, ids: &[Id], bounds: &[Bounds<Pixels>], cx: &App) {
+        let Some(lift) = self.lift.as_ref() else {
+            return;
+        };
+        let lifted = lift.id;
+        let shifts = lift
+            .landing
+            .zip(ids.iter().position(|candidate| *candidate == lifted))
+            .filter(|_| bounds.len() == ids.len())
+            .map(|(landing, current)| {
+                gap_shifts(&spans(self.axis, bounds), current, landing.position)
             })
-            .collect()
-    })
-}
-
-/// The slot a release at `pointer` lands the item at `dragged` in, or `None` when that slot is
-/// beside the item's own place.
-fn insertion_slot(spans: &[(f32, f32)], dragged: usize, pointer: f32) -> Option<usize> {
-    if dragged >= spans.len() {
-        return None;
+            .unwrap_or_else(|| vec![0.0; ids.len()]);
+        let now = now(cx);
+        let motion = super::appearance_runtime::control_motion(cx);
+        for (id, shift) in ids.iter().zip(shifts) {
+            if *id != lifted {
+                let to = Point::default().apply_along(self.axis, |_| px(shift));
+                self.slide(*id, to, SHIFT_DURATION, now, motion);
+            }
+        }
     }
-    let slot = spans
-        .iter()
-        .take_while(|(start, end)| pointer > (start + end) / 2.0)
-        .count();
-    (slot != dragged && slot != dragged + 1).then_some(slot)
+
+    /// Lands the lifted item at `landing`, or returns it to its place, from wherever its lifted
+    /// copy stands. Returns the landing when it is a new position.
+    fn settle(
+        &mut self,
+        lift: &Lift<Id>,
+        landing: Option<usize>,
+        items: &ScrollHandle,
+        ids: &[Id],
+        cx: &App,
+    ) -> Option<usize> {
+        let bounds = painted_item_bounds(items);
+        let Some(current) = ids
+            .iter()
+            .position(|candidate| *candidate == lift.id)
+            .filter(|_| bounds.len() == ids.len())
+        else {
+            self.slides.clear();
+            return None;
+        };
+        let landing = landing.filter(|position| *position != current);
+        let now = now(cx);
+        let motion = super::appearance_runtime::control_motion(cx);
+        let spans = spans(self.axis, &bounds);
+        match landing {
+            // Each item keeps easing toward the gap it was opening, now its laid-out place.
+            Some(position) => {
+                for (id, shift) in ids.iter().zip(gap_shifts(&spans, current, position)) {
+                    let shift = Point::default().apply_along(self.axis, |_| px(shift));
+                    if let Some(slide) = self.slides.get_mut(id) {
+                        *slide = slide.rebased(shift);
+                    }
+                }
+            }
+            None => {
+                for id in ids.iter().filter(|id| **id != lift.id) {
+                    self.slide(*id, Point::default(), SETTLE_DURATION, now, motion);
+                }
+            }
+        }
+        let start = landing.map_or(spans[current].0, |position| {
+            landed_start(&spans, current, position)
+        });
+        let place = bounds[current].origin.apply_along(self.axis, |_| px(start));
+        let from = lift
+            .origin
+            .map_or_else(Point::default, |origin| origin - place);
+        self.slides.insert(
+            lift.id,
+            Slide::new(from, Point::default(), SETTLE_DURATION, now, motion),
+        );
+        self.settling = Some(lift.id);
+        landing
+    }
+
+    /// Eases the item `id` from where it stands toward `to`, unless it is already headed there.
+    fn slide(
+        &mut self,
+        id: Id,
+        to: Point<Pixels>,
+        duration: Duration,
+        now: Instant,
+        motion: spaceterm_ui::ControlMotion,
+    ) {
+        let slide = self.slides.get(&id);
+        if slide.map_or(Point::default(), |slide| slide.to) == to {
+            return;
+        }
+        let from = slide.map_or_else(Point::default, |slide| slide.at(now));
+        self.slides
+            .insert(id, Slide::new(from, to, duration, now, motion));
+    }
 }
 
-fn landing_position(slot: usize, current: usize) -> usize {
-    if slot > current { slot - 1 } else { slot }
-}
-
-/// Which side of its item a strip's insertion marker sits on.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum MarkerSide {
-    Leading,
-    Trailing,
-}
-
-/// The accent line that marks the slot a dragged strip item would land in.
-pub(crate) fn insertion_marker(
+/// Where the lifted copy stands while the pointer is over the strip, and the position a release
+/// would land the item at `current` in. The copy stays level with the strip and within its items.
+fn hold(
     axis: Axis,
-    side: MarkerSide,
-    at_strip_end: bool,
-    inset: (Pixels, Pixels),
-    selector: String,
-    appearance: &super::appearance::ChromeAppearance,
-) -> AnyElement {
-    let thickness = px(INSERTION_MARKER_THICKNESS);
-    let offset = if at_strip_end {
-        px(0.0)
-    } else {
-        -thickness / 2.0
-    };
-    let marker = div()
-        .debug_selector(move || selector.clone())
-        .absolute()
-        .rounded_full()
-        .bg(gpui_color(appearance.colors.primary_background));
-    match (axis, side) {
-        (Axis::Horizontal, side) => {
-            let marker = marker.top(inset.0).bottom(inset.1).w(thickness);
-            match side {
-                MarkerSide::Leading => marker.left(offset),
-                MarkerSide::Trailing => marker.right(offset),
+    bounds: &[Bounds<Pixels>],
+    current: usize,
+    free: Point<Pixels>,
+) -> (Point<Pixels>, usize) {
+    let spans = spans(axis, bounds);
+    let (rest_start, rest_end) = spans[current];
+    let first = spans[0].0;
+    let last = spans[spans.len() - 1].1;
+    let start =
+        f32::from(free.along(axis)).clamp(first, (last - (rest_end - rest_start)).max(first));
+    let origin = bounds[current].origin.apply_along(axis, |_| px(start));
+    (origin, landing_position(&spans, current, start))
+}
+
+/// The position a lifted item whose leading edge stands at `start` lands in: past every other
+/// item whose midpoint its center has passed. Reaching a midpoint passes the item, so a copy held
+/// at either end of a strip of equal items lands there.
+fn landing_position(spans: &[(f32, f32)], dragged: usize, start: f32) -> usize {
+    let (rest_start, rest_end) = spans[dragged];
+    let center = start + (rest_end - rest_start) / 2.0;
+    spans
+        .iter()
+        .enumerate()
+        .filter(|(index, (start, end))| {
+            let midpoint = (start + end) / 2.0;
+            (*index < dragged && center > midpoint) || (*index > dragged && center >= midpoint)
+        })
+        .count()
+}
+
+/// How far each item moves along the strip to open a gap at `landing` for the item lifted from
+/// `dragged`. Each moved item takes the place its neighbor will leave.
+fn gap_shifts(spans: &[(f32, f32)], dragged: usize, landing: usize) -> Vec<f32> {
+    let toward_start = spans
+        .get(dragged + 1)
+        .map_or(0.0, |next| next.0 - spans[dragged].0);
+    let toward_end = dragged
+        .checked_sub(1)
+        .map_or(0.0, |previous| spans[dragged].1 - spans[previous].1);
+    (0..spans.len())
+        .map(|index| {
+            if dragged < landing && index > dragged && index <= landing {
+                -toward_start
+            } else if landing < dragged && index >= landing && index < dragged {
+                toward_end
+            } else {
+                0.0
             }
-        }
-        (Axis::Vertical, side) => {
-            let marker = marker.left(inset.0).right(inset.1).h(thickness);
-            match side {
-                MarkerSide::Leading => marker.top(offset),
-                MarkerSide::Trailing => marker.bottom(offset),
-            }
+        })
+        .collect()
+}
+
+/// Where the leading edge of the item lifted from `dragged` rests once it lands at `landing`.
+fn landed_start(spans: &[(f32, f32)], dragged: usize, landing: usize) -> f32 {
+    let (start, end) = spans[dragged];
+    match landing.cmp(&dragged) {
+        std::cmp::Ordering::Greater => spans[landing].1 - (end - start),
+        std::cmp::Ordering::Less => spans[landing].0,
+        std::cmp::Ordering::Equal => start,
+    }
+}
+
+/// The start and end of every item along the strip.
+fn spans(axis: Axis, bounds: &[Bounds<Pixels>]) -> Vec<(f32, f32)> {
+    bounds
+        .iter()
+        .map(|bounds| {
+            let start = bounds.origin.along(axis);
+            (f32::from(start), f32::from(start + bounds.size.along(axis)))
+        })
+        .collect()
+}
+
+/// One item's displacement easing from `from` to `to`.
+#[derive(Clone, Copy, Debug)]
+struct Slide {
+    from: Point<Pixels>,
+    to: Point<Pixels>,
+    since: Instant,
+    duration: Duration,
+}
+
+impl Slide {
+    /// A slide that starts at `now`, or lands at once when motion is reduced.
+    fn new(
+        from: Point<Pixels>,
+        to: Point<Pixels>,
+        duration: Duration,
+        now: Instant,
+        motion: spaceterm_ui::ControlMotion,
+    ) -> Self {
+        Self {
+            from,
+            to,
+            since: now,
+            duration: if motion == spaceterm_ui::ControlMotion::Reduced {
+                Duration::ZERO
+            } else {
+                duration
+            },
         }
     }
-    .into_any_element()
+
+    fn progress(&self, now: Instant) -> f32 {
+        if self.duration.is_zero() {
+            return 1.0;
+        }
+        (now.saturating_duration_since(self.since).as_secs_f32() / self.duration.as_secs_f32())
+            .min(1.0)
+    }
+
+    fn finished(&self, now: Instant) -> bool {
+        self.progress(now) >= 1.0
+    }
+
+    fn at(&self, now: Instant) -> Point<Pixels> {
+        let eased = ease_out(self.progress(now));
+        point(
+            self.from.x + (self.to.x - self.from.x) * eased,
+            self.from.y + (self.to.y - self.from.y) * eased,
+        )
+    }
+
+    /// The same slide, measured from a laid-out place that moved by `by`.
+    fn rebased(self, by: Point<Pixels>) -> Self {
+        Self {
+            from: self.from - by,
+            to: self.to - by,
+            ..self
+        }
+    }
+}
+
+/// Fast at the start and gentle at the end, as CSS `cubic-bezier(0.2, 0.8, 0.2, 1)`.
+fn ease_out(progress: f32) -> f32 {
+    if progress <= 0.0 {
+        return 0.0;
+    }
+    if progress >= 1.0 {
+        return 1.0;
+    }
+    let bezier = |t: f32, first: f32, second: f32| {
+        let rest = 1.0 - t;
+        3.0 * rest * rest * t * first + 3.0 * rest * t * t * second + t * t * t
+    };
+    let (mut low, mut high) = (0.0_f32, 1.0_f32);
+    let mut t = progress;
+    for _ in 0..24 {
+        let x = bezier(t, 0.2, 0.2);
+        if (x - progress).abs() < 1e-5 {
+            break;
+        }
+        if x < progress {
+            low = t;
+        } else {
+            high = t;
+        }
+        t = (low + high) / 2.0;
+    }
+    bezier(t, 0.8, 1.0)
+}
+
+fn now(cx: &App) -> Instant {
+    cx.background_executor().now()
+}
+
+/// The shadow under a lifted item's chip, `level` of the way from resting to lifted.
+pub(crate) fn lift_shadow(
+    appearance: &super::appearance::ChromeAppearance,
+    level: f32,
+) -> Vec<BoxShadow> {
+    if level <= 0.0 {
+        return Vec::new();
+    }
+    let layer = |share: f32, offset_y: f32, blur: f32| {
+        let opacity = (share * level.min(1.0) * 255.0).round() as u8;
+        BoxShadow {
+            inset: false,
+            color: gpui_color(appearance.colors.shadow.multiply_opacity(opacity)).into(),
+            offset: point(px(0.0), px(offset_y)),
+            blur_radius: px(blur),
+            spread_radius: px(0.0),
+        }
+    };
+    vec![layer(1.0, 10.0, 28.0), layer(0.7, 2.0, 6.0)]
+}
+
+/// How opaque an item is that shows `lift` of its lift.
+pub(crate) fn lifted_opacity(lift: f32) -> f32 {
+    1.0 - (1.0 - LIFTED_OPACITY) * lift.clamp(0.0, 1.0)
+}
+
+/// Finishes every strip slide in progress, since test windows have no frame loop.
+#[cfg(test)]
+pub(crate) fn finish_slides(cx: &mut gpui::VisualTestContext) {
+    cx.run_until_parked();
+    cx.executor()
+        .advance_clock(SHIFT_DURATION.max(SETTLE_DURATION));
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
 }
 
 pub(crate) fn painted_item_size(items: &ScrollHandle, position: usize) -> Option<Size<Pixels>> {
@@ -218,10 +546,21 @@ pub(crate) struct DragPreview {
     /// places the preview from that motion, so the face moves back by this much.
     lift: Point<Pixels>,
     face: Box<PreviewFace>,
+    placement: Option<Placement>,
 }
 
 /// Paints a dragged item's face for one frame.
 type PreviewFace = dyn Fn(&mut Window, &mut App) -> AnyElement;
+
+/// Where a preview's owner stands the face, instead of at the pointer.
+struct Placement {
+    /// Where GPUI places the preview from the pointer, as it reported when the drag started.
+    cursor_offset: Point<Pixels>,
+    origin: Box<PreviewOrigin>,
+}
+
+/// The face's origin in the window, while the owner places it.
+type PreviewOrigin = dyn Fn(&App) -> Option<Point<Pixels>>;
 
 impl DragPreview {
     /// A preview, for the drag GPUI is starting in `window`, that paints `face` at the pointer.
@@ -234,7 +573,23 @@ impl DragPreview {
         Self {
             lift: window.mouse_position() - grab_point(window, cx),
             face: Box::new(face),
+            placement: None,
         }
+    }
+
+    /// Stands the face at the origin `origin` reports, such as level with a strip, and at the
+    /// pointer while it reports none. `cursor_offset` is the offset GPUI passed to the drag's
+    /// constructor.
+    pub(crate) fn placed(
+        mut self,
+        cursor_offset: Point<Pixels>,
+        origin: impl Fn(&App) -> Option<Point<Pixels>> + 'static,
+    ) -> Self {
+        self.placement = Some(Placement {
+            cursor_offset,
+            origin: Box::new(origin),
+        });
+        self
     }
 
     /// A preview with nothing to paint, for a drag whose owner is gone.
@@ -242,6 +597,7 @@ impl DragPreview {
         Self {
             lift: Point::default(),
             face: Box::new(|_, _| div().into_any_element()),
+            placement: None,
         }
     }
 }
@@ -249,11 +605,19 @@ impl DragPreview {
 impl Render for DragPreview {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // GPUI lays the preview out as a root, which ignores its own offset, so the face moves.
+        let offset = self
+            .placement
+            .as_ref()
+            .and_then(|placement| {
+                let root = window.mouse_position() - placement.cursor_offset;
+                (placement.origin)(cx).map(|origin| origin - root)
+            })
+            .unwrap_or(self.lift);
         div().debug_selector(|| "drag-preview".to_owned()).child(
             div()
                 .relative()
-                .left(self.lift.x)
-                .top(self.lift.y)
+                .left(offset.x)
+                .top(offset.y)
                 .child((self.face)(window, cx)),
         )
     }
@@ -528,45 +892,87 @@ mod tests {
     }
 
     #[test]
-    fn insertion_slot_should_follow_each_item_whose_midpoint_the_pointer_passed() {
+    fn landing_position_should_follow_each_item_whose_midpoint_the_lifted_center_passed() {
         let spans = strip(&[100.0, 100.0, 100.0, 100.0]);
 
+        // B, lifted from A B C D, has its center 50 past its leading edge.
         assert_eq!(
             [
-                insertion_slot(&spans, 1, 40.0),
-                insertion_slot(&spans, 1, 251.0),
-                insertion_slot(&spans, 1, 399.0),
-                insertion_slot(&spans, 1, 520.0),
-                insertion_slot(&spans, 2, -40.0),
+                landing_position(&spans, 1, -10.0),
+                landing_position(&spans, 1, 40.0),
+                landing_position(&spans, 1, 160.0),
+                landing_position(&spans, 1, 201.0),
+                landing_position(&spans, 1, 300.0),
+                // A held at the leading end of the strip stays first.
+                landing_position(&spans, 0, 0.0),
             ],
-            [Some(0), Some(3), Some(4), Some(4), Some(0)]
+            [0, 1, 1, 2, 3, 0]
         );
     }
 
     #[test]
-    fn insertion_slot_should_show_nothing_beside_the_items_own_place() {
-        let spans = strip(&[100.0, 100.0, 100.0]);
+    fn gap_shifts_should_move_each_passed_item_into_its_neighbors_place() {
+        // A narrow B sits between wider items, so each direction moves by B's own extent.
+        let spans = strip(&[100.0, 60.0, 100.0, 100.0]);
 
         assert_eq!(
             [
-                insertion_slot(&spans, 1, 60.0),
-                insertion_slot(&spans, 1, 150.0),
-                insertion_slot(&spans, 1, 240.0),
+                gap_shifts(&spans, 1, 3),
+                gap_shifts(&spans, 1, 0),
+                gap_shifts(&spans, 1, 1),
             ],
-            [None, None, None]
+            [
+                vec![0.0, 0.0, -60.0, -60.0],
+                vec![60.0, 0.0, 0.0, 0.0],
+                vec![0.0; 4],
+            ]
         );
     }
 
     #[test]
-    fn landing_position_should_account_for_the_place_the_item_leaves() {
-        // B is lifted from A B C D.
+    fn landed_start_should_be_the_gap_the_shifted_items_leave() {
+        let spans = strip(&[100.0, 60.0, 100.0, 100.0]);
+
         assert_eq!(
             [
-                landing_position(0, 1),
-                landing_position(3, 1),
-                landing_position(4, 1),
+                landed_start(&spans, 1, 3),
+                landed_start(&spans, 1, 0),
+                landed_start(&spans, 1, 1),
             ],
-            [0, 2, 3]
+            [300.0, 0.0, 100.0]
         );
+    }
+
+    #[test]
+    fn hold_should_keep_the_lifted_copy_level_with_the_strip_and_within_its_items() {
+        let bounds: Vec<_> = strip(&[100.0, 100.0, 100.0])
+            .into_iter()
+            .map(|(start, end)| {
+                Bounds::new(
+                    point(px(start), px(10.0)),
+                    gpui::size(px(end - start), px(30.0)),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            [
+                hold(Axis::Horizontal, &bounds, 0, point(px(120.0), px(40.0))),
+                hold(Axis::Horizontal, &bounds, 0, point(px(-80.0), px(0.0))),
+                hold(Axis::Horizontal, &bounds, 0, point(px(900.0), px(10.0))),
+            ],
+            [
+                (point(px(120.0), px(10.0)), 1),
+                (point(px(0.0), px(10.0)), 0),
+                (point(px(200.0), px(10.0)), 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn ease_out_should_start_fast_and_land_exactly() {
+        assert_eq!((ease_out(0.0), ease_out(1.0)), (0.0, 1.0));
+        assert!(ease_out(0.25) > 0.5, "the curve front-loads its motion");
+        assert!(ease_out(0.5) < ease_out(0.75));
     }
 }

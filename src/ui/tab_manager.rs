@@ -13,8 +13,8 @@ use thiserror::Error;
 use super::chrome_icons::IconRole;
 use super::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use super::drag_and_drop::{
-    DragPreview, DragSession, MarkerSide, ReorderableStrip, drag_release_observer,
-    insertion_marker, painted_item_size,
+    DragPreview, DragSession, ItemMotion, ReorderableStrip, drag_release_observer, lift_shadow,
+    lifted_opacity, painted_item_size,
 };
 use super::selection_chip::{ChipPaint, ChipShape, SelectionChip};
 use super::terminal_focus::{TabFocusOwners, TerminalFocusBlocker, TerminalFocusCoordinator};
@@ -1046,6 +1046,7 @@ impl TabManager {
     fn begin_tab_drag(
         &mut self,
         tab_id: TabId,
+        cursor_offset: gpui::Point<Pixels>,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> DragPreview {
@@ -1054,13 +1055,25 @@ impl TabManager {
             .tab_position(tab_id)
             .and_then(|position| painted_item_size(&self.tab_bar_scroll_handle, position));
         let session = DragSession::begin(cx, |manager: &mut Self, _, cx| {
-            manager.tab_reorder.cancel();
+            let ids = manager.visible_tab_ids();
+            manager
+                .tab_reorder
+                .cancel(&manager.tab_bar_scroll_handle, &ids, cx);
             cx.notify();
         });
-        self.tab_reorder.begin(tab_id, session);
+        let ids = self.visible_tab_ids();
+        self.tab_reorder.begin(
+            tab_id,
+            session,
+            &self.tab_bar_scroll_handle,
+            &ids,
+            window,
+            cx,
+        );
         self.drag_tab_to(tab_id, window.mouse_position(), cx);
         cx.notify();
         let manager = cx.entity().downgrade();
+        let placement = manager.clone();
         DragPreview::new(window, cx, move |window, cx| {
             manager
                 .upgrade()
@@ -1071,21 +1084,22 @@ impl TabManager {
                 })
                 .unwrap_or_else(|| div().into_any_element())
         })
+        .placed(cursor_offset, move |cx| {
+            placement
+                .upgrade()
+                .and_then(|owner| owner.read(cx).tab_reorder.lifted_origin())
+        })
     }
 
     fn drag_tab_to(&mut self, tab_id: TabId, pointer: gpui::Point<Pixels>, cx: &mut Context<Self>) {
         if self.tab_reorder.dragged() != Some(tab_id) {
             return;
         }
-        let Some(current) = self.tab_position(tab_id) else {
-            return;
-        };
-        if self.tab_reorder.track(
-            &self.tab_bar_scroll_handle,
-            current,
-            self.visible_len(),
-            pointer,
-        ) {
+        let ids = self.visible_tab_ids();
+        if self
+            .tab_reorder
+            .track(&self.tab_bar_scroll_handle, &ids, pointer, cx)
+        {
             cx.notify();
         }
     }
@@ -1096,10 +1110,10 @@ impl TabManager {
             return;
         };
         self.drag_tab_to(tab_id, pointer, cx);
+        let ids = self.visible_tab_ids();
         let landing = self
-            .tab_position(tab_id)
-            .and_then(|current| self.tab_reorder.finish(current, self.visible_len(), cx));
-        self.tab_reorder.cancel();
+            .tab_reorder
+            .finish(&self.tab_bar_scroll_handle, &ids, cx);
         if let Some((tab_id, position)) = landing {
             self.move_tab(tab_id, position, cx);
         }
@@ -1145,6 +1159,10 @@ impl TabManager {
 
     fn visible_tabs(&self) -> impl Iterator<Item = (TabId, &Entity<TabView>)> {
         self.tabs.tabs_in(self.tabs.active_scope())
+    }
+
+    fn visible_tab_ids(&self) -> Vec<TabId> {
+        self.visible_tabs().map(|(tab_id, _)| tab_id).collect()
     }
 
     fn visible_len(&self) -> usize {
@@ -1877,6 +1895,26 @@ impl TabManager {
                 )
             });
         let element_name = if lifted { "tab-preview" } else { "tab-item" };
+        // The lifted copy shows its whole lift; a Tab in the bar slides aside, stays empty while
+        // lifted, and shows what remains of its lift as it settles.
+        let motion = if lifted {
+            ItemMotion {
+                lift: 1.0,
+                ..ItemMotion::default()
+            }
+        } else {
+            self.tab_reorder.motion(tab_id, cx)
+        };
+        let chip_selector = format!("{element_name}-{}-chip", tab_id.get());
+        let chip = if motion.lift > 0.0 {
+            chip.render_lifted(
+                chip_selector,
+                hover.max(motion.lift),
+                lift_shadow(appearance, motion.lift),
+            )
+        } else {
+            chip.render(chip_selector, hover)
+        };
         let close_control = if lifted {
             // The close control's glyph at rest, without a control that could take the pointer.
             div()
@@ -1938,6 +1976,13 @@ impl TabManager {
                 )
             })
             .relative()
+            .left(motion.offset.x)
+            .top(motion.offset.y)
+            .opacity(if motion.lifted {
+                0.0
+            } else {
+                lifted_opacity(motion.lift)
+            })
             .h_full()
             .flex_none()
             .w(appearance.spacing(TAB_ITEM_WIDTH))
@@ -1949,7 +1994,7 @@ impl TabManager {
             .items_center()
             .chrome_text(text_style)
             .text_color(gpui_color(foreground))
-            .child(chip.render(format!("{element_name}-{}-chip", tab_id.get()), hover))
+            .child(chip)
             .child(render_tab_identity(
                 tab_id,
                 identity,
@@ -1993,12 +2038,17 @@ impl TabManager {
                 });
                 cx.stop_propagation();
             })
-            .on_drag(DraggedTab { tab_id, owner }, move |_, _, window, cx| {
-                let preview = drag_manager
-                    .update(cx, |manager, cx| manager.begin_tab_drag(tab_id, window, cx))
-                    .unwrap_or_else(|_| DragPreview::empty());
-                cx.new(|_| preview)
-            })
+            .on_drag(
+                DraggedTab { tab_id, owner },
+                move |_, cursor_offset, window, cx| {
+                    let preview = drag_manager
+                        .update(cx, |manager, cx| {
+                            manager.begin_tab_drag(tab_id, cursor_offset, window, cx)
+                        })
+                        .unwrap_or_else(|_| DragPreview::empty());
+                    cx.new(|_| preview)
+                },
+            )
     }
 
     /// Each Tab's hover, in Tab bar order.
@@ -2061,8 +2111,6 @@ impl TabManager {
                 });
             });
         let last_index = self.visible_len() - 1;
-        let insertion = self.tab_reorder.insertion(self.visible_len());
-        let marker_inset = tab_chip_shape(appearance, cx).inset_y;
         let mut previous_inactive_tab = None;
         for (index, ((tab_id, view), (fade, hover))) in self.visible_tabs().zip(hovers).enumerate()
         {
@@ -2081,24 +2129,6 @@ impl TabManager {
                 .chain(trailing_boundary)
                 .map(|boundary| render_tab_separator(boundary, presentation, appearance));
             previous_inactive_tab = (!active).then_some(tab_id);
-            let markers = [
-                (index, MarkerSide::Leading, index == 0),
-                (index + 1, MarkerSide::Trailing, true),
-            ]
-            .into_iter()
-            .filter(|(slot, side, _)| {
-                insertion == Some(*slot) && (*side == MarkerSide::Leading || index == last_index)
-            })
-            .map(|(slot, side, at_strip_end)| {
-                insertion_marker(
-                    gpui::Axis::Horizontal,
-                    side,
-                    at_strip_end,
-                    (marker_inset, marker_inset),
-                    format!("tab-insertion-marker-{slot}"),
-                    appearance,
-                )
-            });
             let identity = view.read(cx).tab_identity();
             let tab_focus = view.read(cx).tab_focus().clone();
             let title = if identity.activity.is_empty() {
@@ -2136,7 +2166,6 @@ impl TabManager {
                     cx,
                 )
                 .children(separators)
-                .children(markers)
                 .child(fade.tracker());
             let open_manager = manager.clone();
             let lifecycle_manager = manager.clone();
@@ -2332,7 +2361,7 @@ impl TabManager {
 impl Render for TabManager {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         debug_assert!(self.tabs.len() > 0);
-        self.tab_reorder.end_released(cx);
+        self.tab_reorder.refresh(window, cx);
         #[cfg(test)]
         {
             self.rendered_window_active = window.is_window_active();
@@ -5828,6 +5857,8 @@ mod tests {
         assert!(active.right() <= strip.right());
     }
 
+    use crate::ui::drag_and_drop::{TEAR_OFF_DISTANCE, finish_slides};
+
     fn tab_order(manager: &Entity<TabManager>, cx: &mut VisualTestContext) -> Vec<u64> {
         manager.read_with(cx, |manager, _| {
             manager
@@ -5868,59 +5899,62 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_tab_released_beside_the_tab_bar_should_stay_in_place(cx: &mut TestAppContext) {
+    fn a_tab_released_beside_the_tab_bar_should_land_at_its_end(cx: &mut TestAppContext) {
         let (manager, _records, cx) = tab_manager(cx);
         click("create-tab-button", cx);
         click("create-tab-button", cx);
         let strip = cx.debug_bounds("tab-items").unwrap();
+        let first = cx.debug_bounds("tab-item-1-inactive").unwrap();
         let last = cx.debug_bounds("tab-item-3-active").unwrap();
-        // Level with the Tabs, but past the strip's leading end.
-        let beside = point(strip.left() - px(12.0), last.center().y);
+        // Level with the Tabs, a little past the strip's trailing end.
+        let beside = point(strip.right() + px(12.0), last.center().y);
 
         drag_tab(
-            last.center(),
-            &[last.center() - point(px(8.0), px(0.0)), beside],
+            first.center(),
+            &[first.center() + point(px(8.0), px(0.0)), beside],
             cx,
         );
-        let marked = [
-            "tab-insertion-marker-0",
-            "tab-insertion-marker-1",
-            "tab-insertion-marker-2",
-        ]
-        .into_iter()
-        .any(|marker| cx.debug_bounds(marker).is_some());
         cx.simulate_mouse_up(beside, MouseButton::Left, Modifiers::none());
         cx.run_until_parked();
 
-        assert_eq!((marked, tab_order(&manager, cx)), (false, vec![1, 2, 3]));
+        assert_eq!(tab_order(&manager, cx), vec![2, 3, 1]);
     }
 
     #[gpui::test]
-    fn dragging_a_tab_should_mark_its_slot_and_land_there_on_release(cx: &mut TestAppContext) {
+    fn dragging_a_tab_should_open_a_gap_and_settle_there_on_release(cx: &mut TestAppContext) {
         let (manager, _records, cx) = tab_manager(cx);
         click("create-tab-button", cx);
         click("create-tab-button", cx);
         let first = cx.debug_bounds("tab-item-1-inactive").unwrap();
+        let second = cx.debug_bounds("tab-item-2-inactive").unwrap();
         let third = cx.debug_bounds("tab-item-3-active").unwrap();
         let lift = first.center() + point(px(8.0), px(0.0));
-
-        let release = third.center() + point(px(4.0), px(0.0));
+        // Below the Tabs, so only the lifted copy's level shows the strip holding it.
+        let release = third.center() + point(px(4.0), px(10.0));
 
         drag_tab(first.center(), &[lift, release], cx);
+        finish_slides(cx);
         let during = (
             tab_order(&manager, cx),
             cx.debug_bounds("tab-item-1-inactive"),
-            cx.debug_bounds("tab-preview-1-inactive")
-                .map(|preview| preview.size),
-            cx.debug_bounds("tab-insertion-marker-3").is_some(),
+            cx.debug_bounds("tab-item-2-inactive").map(|tab| tab.origin),
+            cx.debug_bounds("tab-item-3-active").map(|tab| tab.origin),
+            cx.debug_bounds("tab-preview-1-inactive"),
         );
         cx.simulate_mouse_up(release, MouseButton::Left, Modifiers::none());
         cx.run_until_parked();
 
         assert_eq!(
             during,
-            (vec![1, 2, 3], Some(first), Some(first.size), true),
-            "a dragged Tab must keep its place, lift an exact copy, and mark where it lands"
+            (
+                vec![1, 2, 3],
+                Some(first),
+                Some(first.origin),
+                Some(second.origin),
+                Some(gpui::Bounds::new(third.origin, first.size)),
+            ),
+            "a dragged Tab must leave its place empty, open a gap where it lands, and hold its \
+             lifted copy level with the strip"
         );
         assert_eq!(
             (
@@ -5933,59 +5967,58 @@ mod tests {
             ),
             (vec![2, 3, 1], (TabId::new(3), None, None))
         );
-        cx.debug_bounds("tab-item-1-inactive")
-            .expect("the moved Tab must render in its new place");
         assert!(cx.debug_bounds("drag-preview").is_none());
-        assert!(cx.debug_bounds("tab-insertion-marker-3").is_none());
+        // The moved Tab starts where its copy was released and settles into its new place.
+        assert_eq!(
+            cx.debug_bounds("tab-item-1-inactive").map(|tab| tab.origin),
+            Some(third.origin)
+        );
+        finish_slides(cx);
+        assert_eq!(
+            [
+                "tab-item-2-inactive",
+                "tab-item-3-active",
+                "tab-item-1-inactive"
+            ]
+            .map(|selector| cx.debug_bounds(selector).map(|tab| tab.origin)),
+            [Some(first.origin), Some(second.origin), Some(third.origin)]
+        );
     }
 
     #[gpui::test]
-    fn the_tab_marker_should_follow_the_pointer_and_vanish_over_the_tabs_own_place(
-        cx: &mut TestAppContext,
-    ) {
+    fn the_gap_should_follow_the_lifted_tab_and_close_over_its_own_place(cx: &mut TestAppContext) {
         let (manager, _records, cx) = tab_manager(cx);
         click("create-tab-button", cx);
         click("create-tab-button", cx);
         let first = cx.debug_bounds("tab-item-1-inactive").unwrap();
         let second = cx.debug_bounds("tab-item-2-inactive").unwrap();
         let third = cx.debug_bounds("tab-item-3-active").unwrap();
-        let markers = |cx: &mut VisualTestContext| {
+        let shifts = |cx: &mut VisualTestContext| {
+            finish_slides(cx);
             [
-                "tab-insertion-marker-0",
-                "tab-insertion-marker-1",
-                "tab-insertion-marker-2",
-                "tab-insertion-marker-3",
+                ("tab-item-1-inactive", first),
+                ("tab-item-2-inactive", second),
             ]
-            .into_iter()
-            .enumerate()
-            .filter_map(|(slot, selector)| cx.debug_bounds(selector).map(|_| slot))
-            .collect::<Vec<_>>()
+            .map(|(selector, rest)| cx.debug_bounds(selector).unwrap().left() - rest.left())
+        };
+        let move_to = |position: gpui::Point<Pixels>, cx: &mut VisualTestContext| {
+            cx.simulate_mouse_move(position, Some(MouseButton::Left), Modifiers::none());
+            shifts(cx)
         };
 
         drag_tab(
             third.center(),
-            &[
-                third.center() - point(px(8.0), px(0.0)),
-                second.center() - point(px(4.0), px(0.0)),
-            ],
+            &[third.center() - point(px(8.0), px(0.0))],
             cx,
         );
-        let before_second = markers(cx);
-        let marker = cx.debug_bounds("tab-insertion-marker-1").unwrap();
-        cx.simulate_mouse_move(
-            first.center() - point(px(4.0), px(0.0)),
-            Some(MouseButton::Left),
-            Modifiers::none(),
-        );
-        cx.run_until_parked();
-        let before_first = markers(cx);
+        let before_second = move_to(second.center() - point(px(4.0), px(0.0)), cx);
+        let before_first = move_to(first.center() - point(px(4.0), px(0.0)), cx);
         let release = third.center() + point(px(4.0), px(0.0));
-        cx.simulate_mouse_move(release, Some(MouseButton::Left), Modifiers::none());
-        cx.run_until_parked();
-        let over_itself = markers(cx);
+        let over_itself = move_to(release, cx);
         cx.simulate_mouse_up(release, MouseButton::Left, Modifiers::none());
         cx.run_until_parked();
 
+        let width = third.size.width;
         assert_eq!(
             (
                 before_second,
@@ -5993,10 +6026,13 @@ mod tests {
                 over_itself,
                 tab_order(&manager, cx)
             ),
-            (vec![1], vec![0], vec![], vec![1, 2, 3])
+            (
+                [px(0.0), width],
+                [width, width],
+                [px(0.0), px(0.0)],
+                vec![1, 2, 3]
+            )
         );
-        // The marker stands on the edge the first and second Tabs share.
-        assert_eq!(marker.center().x, second.left());
     }
 
     #[gpui::test]
@@ -6005,23 +6041,31 @@ mod tests {
         click("create-tab-button", cx);
         click("create-tab-button", cx);
         let first = cx.debug_bounds("tab-item-1-inactive").unwrap();
+        let second = cx.debug_bounds("tab-item-2-inactive").unwrap();
         let third = cx.debug_bounds("tab-item-3-active").unwrap();
-        let below = point(third.center().x, third.bottom() + px(120.0));
+        let below = point(
+            third.center().x,
+            third.bottom() + px(TEAR_OFF_DISTANCE + 72.0),
+        );
 
         drag_tab(
             first.center(),
             &[third.center() + point(px(4.0), px(0.0)), below],
             cx,
         );
-        let marked = cx.debug_bounds("tab-insertion-marker-3").is_some();
+        finish_slides(cx);
+        let closed = cx.debug_bounds("tab-item-2-inactive").map(|tab| tab.origin);
         cx.simulate_mouse_up(below, MouseButton::Left, Modifiers::none());
         cx.run_until_parked();
 
-        assert_eq!((marked, tab_order(&manager, cx)), (false, vec![1, 2, 3]));
+        assert_eq!(
+            (closed, tab_order(&manager, cx)),
+            (Some(second.origin), vec![1, 2, 3])
+        );
     }
 
     #[gpui::test]
-    fn escape_should_cancel_a_tab_drag_without_moving_it(cx: &mut TestAppContext) {
+    fn escape_should_cancel_a_tab_drag_and_return_every_tab_to_its_place(cx: &mut TestAppContext) {
         let (manager, _records, cx) = tab_manager(cx);
         click("create-tab-button", cx);
         click("create-tab-button", cx);
@@ -6034,20 +6078,31 @@ mod tests {
             &[first.center() + point(px(8.0), px(0.0)), release],
             cx,
         );
-        let marked = cx.debug_bounds("tab-insertion-marker-3").is_some();
+        finish_slides(cx);
+        let opened = cx.debug_bounds("tab-item-3-active").unwrap().origin != third.origin;
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
         let cancelled = (
             manager.read_with(cx, |manager, _| manager.tab_reorder.dragged()),
             cx.debug_bounds("drag-preview").is_some(),
-            cx.debug_bounds("tab-insertion-marker-3").is_some(),
         );
         cx.simulate_mouse_up(release, MouseButton::Left, Modifiers::none());
-        cx.run_until_parked();
+        finish_slides(cx);
 
         assert_eq!(
-            (marked, cancelled, tab_order(&manager, cx)),
-            (true, (None, false, false), vec![1, 2, 3])
+            (
+                opened,
+                cancelled,
+                tab_order(&manager, cx),
+                ["tab-item-1-inactive", "tab-item-3-active"]
+                    .map(|selector| cx.debug_bounds(selector).map(|tab| tab.origin)),
+            ),
+            (
+                true,
+                (None, false),
+                vec![1, 2, 3],
+                [Some(first.origin), Some(third.origin)]
+            )
         );
     }
 

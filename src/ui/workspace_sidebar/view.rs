@@ -3,7 +3,9 @@ use crate::ui::appearance::gpui_color;
 use crate::ui::chrome_geometry::RadiusRole;
 use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
-use crate::ui::drag_and_drop::{MarkerSide, drag_release_observer, insertion_marker};
+use crate::ui::drag_and_drop::{
+    LIFTED_OPACITY, drag_release_observer, lift_shadow, lifted_opacity,
+};
 use crate::ui::selection_chip::{ChipPaint, ChipShape, SelectionChip};
 use gpui::accesskit;
 use spaceterm_ui::{ContextMenuTarget, HoverFade};
@@ -242,46 +244,6 @@ pub(super) enum RowRole {
 }
 
 impl WorkspaceSidebar {
-    /// The accent lines on a row that mark the slot a dragged row would land in.
-    fn row_insertion_markers(
-        &self,
-        workspace_id: WorkspaceId,
-        role: RowRole,
-        appearance: &crate::ui::appearance::ChromeAppearance,
-        cx: &App,
-    ) -> Vec<AnyElement> {
-        let len = self.rows.len();
-        let (Some(slot), Some(index), RowRole::InList) = (
-            self.workspace_reorder.insertion(len),
-            self.row_position(workspace_id),
-            role,
-        ) else {
-            return Vec::new();
-        };
-        let frame = crate::ui::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
-        let inset = (
-            frame.sidebar_chip_leading_inset(),
-            frame.sidebar_chip_trailing_inset(),
-        );
-        let side = if slot == index {
-            MarkerSide::Leading
-        } else if slot == len && index + 1 == len {
-            MarkerSide::Trailing
-        } else {
-            return Vec::new();
-        };
-        vec![insertion_marker(
-            gpui::Axis::Vertical,
-            side,
-            slot == 0 || slot == len,
-            inset,
-            format!("workspace-insertion-marker-{slot}"),
-            appearance,
-        )]
-    }
-}
-
-impl WorkspaceSidebar {
     /// One Workspace row, or the lifted copy that follows the pointer during a drag. The copy
     /// claims no pointer input because it lies over every drop target.
     #[expect(
@@ -472,7 +434,13 @@ impl WorkspaceSidebar {
         let (row_padding_leading, row_padding_trailing) = row_padding(appearance, cx);
         let drag_sidebar = sidebar.clone();
         let owner = sidebar.entity_id();
-        let markers = self.row_insertion_markers(workspace_id, role, appearance, cx);
+        // The lifted copy shows its whole lift; the row in the list shows what remains of its
+        // lift as it settles.
+        let lift = if lifted {
+            1.0
+        } else {
+            self.workspace_reorder.motion(workspace_id, cx).lift
+        };
         let element_name = if lifted {
             "workspace-row-preview"
         } else {
@@ -534,10 +502,15 @@ impl WorkspaceSidebar {
             .when_some(row_background, |row, background| {
                 row.bg(gpui_color(background))
             })
-            .child(chip.render(
-                format!("{element_name}-selection-{}", workspace_id.get()),
-                hover,
-            ))
+            .when(lifted, |row| row.opacity(LIFTED_OPACITY))
+            .child({
+                let selector = format!("{element_name}-selection-{}", workspace_id.get());
+                if lift > 0.0 {
+                    chip.render_lifted(selector, hover.max(lift), lift_shadow(appearance, lift))
+                } else {
+                    chip.render(selector, hover)
+                }
+            })
             .when(!lifted, |row| {
                 row.on_click(move |_, _, cx| {
                     let _ = click_sidebar.update(cx, |sidebar, cx| {
@@ -556,10 +529,15 @@ impl WorkspaceSidebar {
                         workspace_id,
                         owner,
                     },
-                    move |_, _, window, cx| {
+                    move |_, cursor_offset, window, cx| {
                         let preview = drag_sidebar
                             .update(cx, |sidebar, cx| {
-                                sidebar.begin_workspace_drag(workspace_id, window, cx)
+                                sidebar.begin_workspace_drag(
+                                    workspace_id,
+                                    cursor_offset,
+                                    window,
+                                    cx,
+                                )
                             })
                             .unwrap_or_else(|_| DragPreview::empty());
                         cx.new(|_| preview)
@@ -626,7 +604,6 @@ impl WorkspaceSidebar {
             )
             // Rows rest on the continuous base surface without separators. The hover and selection
             // chips alone give each Workspace its shape; collection focus never adds a row ring.
-            .children(markers)
             .when_some(tracker, |row, tracker| row.child(tracker.tracker()));
         if lifted {
             return row_content.into_any_element();
@@ -896,21 +873,33 @@ impl WorkspaceSidebar {
                     .chain(worktree_keys)
                     .collect();
             let measure_sidebar = sidebar.clone();
+            let motion = self.workspace_reorder.motion(workspace_id, cx);
+            // The slot keeps the group's laid-out place, so a drag measures every group at rest
+            // while the group itself slides.
             rows = rows.child(
-                div()
-                    .on_children_prepainted(move |bounds, _, cx| {
-                        let _ = measure_sidebar.update(cx, |sidebar, _| {
-                            sidebar.record_row_spans(workspace_id, &keys, &bounds);
-                        });
-                    })
-                    .id(("workspace-group", workspace_id.get()))
-                    .debug_selector(move || format!("workspace-group-{}", workspace_id.get()))
-                    .w_full()
-                    .flex_shrink_0()
-                    .flex()
-                    .flex_col()
-                    .child(parent)
-                    .children(children),
+                div().w_full().flex_shrink_0().child(
+                    div()
+                        .on_children_prepainted(move |bounds, _, cx| {
+                            let _ = measure_sidebar.update(cx, |sidebar, _| {
+                                sidebar.record_row_spans(workspace_id, &keys, &bounds);
+                            });
+                        })
+                        .id(("workspace-group", workspace_id.get()))
+                        .debug_selector(move || format!("workspace-group-{}", workspace_id.get()))
+                        .relative()
+                        .left(motion.offset.x)
+                        .top(motion.offset.y)
+                        .opacity(if motion.lifted {
+                            0.0
+                        } else {
+                            lifted_opacity(motion.lift)
+                        })
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .child(parent)
+                        .children(children),
+                ),
             );
         }
 

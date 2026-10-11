@@ -164,6 +164,22 @@ impl SelectionChip {
     /// The chip itself, painted under the item's own content. `hover` is how far the owning item
     /// has eased toward its hovered look.
     pub(crate) fn render(self, selector: String, hover: f32) -> AnyElement {
+        self.paint(selector, hover).into_any_element()
+    }
+
+    /// The chip of an item lifted off its surface, casting `shadow`.
+    pub(crate) fn render_lifted(
+        self,
+        selector: String,
+        hover: f32,
+        shadow: Vec<gpui::BoxShadow>,
+    ) -> AnyElement {
+        self.paint(selector, hover)
+            .shadow(shadow)
+            .into_any_element()
+    }
+
+    fn paint(self, selector: String, hover: f32) -> gpui::Div {
         let paint = self.paint;
         let fill = hovered_paint(paint.fill, paint.hover_fill.or(paint.fill), hover);
         // A rim describes the edge of a fill, and a transparent hover rim leaves the resting rim
@@ -182,7 +198,6 @@ impl SelectionChip {
                 };
                 chip.border(px(width)).border_color(gpui_color(edge))
             })
-            .into_any_element()
     }
 }
 

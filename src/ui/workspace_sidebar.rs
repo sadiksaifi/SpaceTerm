@@ -708,6 +708,7 @@ impl WorkspaceSidebar {
     fn begin_workspace_drag(
         &mut self,
         workspace_id: WorkspaceId,
+        cursor_offset: gpui::Point<Pixels>,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> DragPreview {
@@ -715,13 +716,19 @@ impl WorkspaceSidebar {
             .row_position(workspace_id)
             .and_then(|position| painted_item_size(&self.scroll_handle, position));
         let session = DragSession::begin(cx, |sidebar: &mut Self, _, cx| {
-            sidebar.workspace_reorder.cancel();
+            let ids = sidebar.row_ids();
+            sidebar
+                .workspace_reorder
+                .cancel(&sidebar.scroll_handle, &ids, cx);
             cx.notify();
         });
-        self.workspace_reorder.begin(workspace_id, session);
+        let ids = self.row_ids();
+        self.workspace_reorder
+            .begin(workspace_id, session, &self.scroll_handle, &ids, window, cx);
         self.drag_workspace_to(workspace_id, window.mouse_position(), cx);
         cx.notify();
         let sidebar = cx.entity().downgrade();
+        let placement = sidebar.clone();
         DragPreview::new(window, cx, move |window, cx| {
             sidebar
                 .upgrade()
@@ -735,6 +742,11 @@ impl WorkspaceSidebar {
                     )
                 })
                 .unwrap_or_else(|| div().into_any_element())
+        })
+        .placed(cursor_offset, move |cx| {
+            placement
+                .upgrade()
+                .and_then(|owner| owner.read(cx).workspace_reorder.lifted_origin())
         })
     }
 
@@ -782,12 +794,10 @@ impl WorkspaceSidebar {
         if self.workspace_reorder.dragged() != Some(workspace_id) {
             return;
         }
-        let Some(current) = self.row_position(workspace_id) else {
-            return;
-        };
+        let ids = self.row_ids();
         if self
             .workspace_reorder
-            .track(&self.scroll_handle, current, self.rows.len(), pointer)
+            .track(&self.scroll_handle, &ids, pointer, cx)
         {
             cx.notify();
         }
@@ -800,13 +810,14 @@ impl WorkspaceSidebar {
             return;
         };
         self.drag_workspace_to(workspace_id, pointer, cx);
-        let current = self.row_position(workspace_id);
-        let landing = current.and_then(|current| {
-            self.workspace_reorder
-                .finish(current, self.rows.len(), cx)
-                .map(|(workspace_id, position)| (workspace_id, current, position))
-        });
-        self.workspace_reorder.cancel();
+        let ids = self.row_ids();
+        let landing = self
+            .workspace_reorder
+            .finish(&self.scroll_handle, &ids, cx)
+            .and_then(|(workspace_id, position)| {
+                self.row_position(workspace_id)
+                    .map(|current| (workspace_id, current, position))
+            });
         if let Some((workspace_id, current, position)) = landing {
             self.move_row(workspace_id, current, position, cx);
         }
@@ -829,6 +840,10 @@ impl WorkspaceSidebar {
         cx.notify();
     }
 
+    fn row_ids(&self) -> Vec<WorkspaceId> {
+        self.rows.iter().map(|row| row.workspace_id).collect()
+    }
+
     fn row_position(&self, workspace_id: WorkspaceId) -> Option<usize> {
         self.rows
             .iter()
@@ -838,7 +853,7 @@ impl WorkspaceSidebar {
 
 impl Render for WorkspaceSidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.workspace_reorder.end_released(cx);
+        self.workspace_reorder.refresh(window, cx);
         self.sync_scrollbar(cx);
         let hovers = self.row_hovers(window, cx);
         self.render_body(hovers, cx.entity().downgrade(), window, cx)
