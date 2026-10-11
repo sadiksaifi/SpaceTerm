@@ -155,6 +155,19 @@ fn native_text_ui_focus_transfer_should_blur_the_previous_editor_on_return(
 }
 
 #[gpui::test]
+fn native_text_ui_owner_in_another_window_should_release_editing(cx: &mut TestAppContext) {
+    let (_, other_window) = input(cx, "other");
+    let other_handle = other_window.update(|window, _| window.window_handle());
+    let (input, _, events, cx) = input_with_events(cx, "name", false);
+    cx.update(|_, cx| crate::TextInputFocus::set(Some(other_handle), cx));
+    cx.deactivate_window();
+    cx.run_until_parked();
+
+    assert!(!input.read_with(cx, |input, _| input.is_focused()));
+    assert_eq!(events.borrow().as_slice(), [TextInputEvent::FocusLost]);
+}
+
+#[gpui::test]
 fn native_text_input_callbacks_keep_the_rendered_font_and_size(cx: &mut TestAppContext) {
     struct StyledInput(Entity<TextInput>, Pixels);
     impl Render for StyledInput {

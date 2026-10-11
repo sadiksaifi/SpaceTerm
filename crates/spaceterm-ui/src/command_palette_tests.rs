@@ -3991,8 +3991,28 @@ fn native_text_ui_focus_transfer_should_close_the_palette_on_return(cx: &mut Tes
 }
 
 #[gpui::test]
+fn native_text_ui_owner_in_another_window_should_close_the_palette(cx: &mut TestAppContext) {
+    let (_, _, _, _, other_window) = palette_window(cx);
+    let other_handle = other_window.update(|window, _| window.window_handle());
+    let (root, palette, events, _, cx) = palette_window(cx);
+    open_palette(&root, &palette, cx);
+    events.borrow_mut().clear();
+    cx.update(|_, cx| crate::TextInputFocus::set(Some(other_handle), cx));
+    cx.deactivate_window();
+    cx.run_until_parked();
+
+    assert!(!palette.read_with(cx, |palette, _| palette.is_open()));
+    assert_eq!(
+        events.borrow().as_slice(),
+        [CommandPaletteEvent::Lifecycle(
+            CommandPaletteLifecycleEvent::Closed(CommandPaletteCloseReason::Deactivated)
+        )]
+    );
+}
+
+#[gpui::test]
 fn native_text_ui_should_keep_the_palette_query_open(cx: &mut TestAppContext) {
-    let (root, palette, _, _, cx) = palette_window(cx);
+    let (root, palette, events, _, cx) = palette_window(cx);
     open_palette(&root, &palette, cx);
     cx.update(|window, cx| crate::TextInputFocus::set(Some(window.window_handle()), cx));
     cx.deactivate_window();
@@ -4005,9 +4025,16 @@ fn native_text_ui_should_keep_the_palette_query_open(cx: &mut TestAppContext) {
         "🙂"
     );
 
+    events.borrow_mut().clear();
     cx.update(|_, cx| crate::TextInputFocus::set(None, cx));
     cx.run_until_parked();
     assert!(!palette.read_with(cx, |palette, _| palette.is_open()));
+    assert_eq!(
+        events.borrow().as_slice(),
+        [CommandPaletteEvent::Lifecycle(
+            CommandPaletteLifecycleEvent::Closed(CommandPaletteCloseReason::Deactivated)
+        )]
+    );
 }
 
 #[gpui::test]

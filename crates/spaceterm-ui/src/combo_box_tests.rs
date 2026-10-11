@@ -2193,6 +2193,8 @@ fn native_text_ui_should_keep_the_combo_query_open(cx: &mut TestAppContext) {
     cx.simulate_input("ssh");
     cx.run_until_parked();
     assert!(events.borrow().is_empty());
+    assert!(cx.debug_bounds("combo-row-remote").is_some());
+    assert!(cx.debug_bounds("combo-row-local").is_none());
 
     cx.update(|_, cx| crate::TextInputFocus::set(None, cx));
     cx.run_until_parked();
@@ -2225,6 +2227,26 @@ fn native_text_ui_focus_transfer_should_close_the_combo_on_return(cx: &mut TestA
         events.borrow().as_slice(),
         [RecordedEvent::Lifecycle(ComboBoxLifecycleEvent::Closed(
             ComboBoxCloseReason::FocusLost
+        ))]
+    );
+}
+
+#[gpui::test]
+fn native_text_ui_owner_in_another_window_should_close_the_combo(cx: &mut TestAppContext) {
+    let (_, _, _, other_window) = combo_box_window(cx, Some(1), items(), false);
+    let other_handle = other_window.update(|window, _| window.window_handle());
+    let (_, events, _, cx) = combo_box_window(cx, Some(1), items(), false);
+    open_by_pointer(cx);
+    events.borrow_mut().clear();
+    cx.update(|_, cx| crate::TextInputFocus::set(Some(other_handle), cx));
+    cx.deactivate_window();
+    cx.run_until_parked();
+
+    assert!(!cx.update(|window, cx| crate::window_combo_box_is_open(window, cx)));
+    assert_eq!(
+        events.borrow().as_slice(),
+        [RecordedEvent::Lifecycle(ComboBoxLifecycleEvent::Closed(
+            ComboBoxCloseReason::Deactivated
         ))]
     );
 }

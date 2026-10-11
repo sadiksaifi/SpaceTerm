@@ -80,6 +80,14 @@ fn native_text_ui_should_preserve_multiline_editing(cx: &mut TestAppContext) {
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
     assert!(!events.borrow().contains(&TextAreaEvent::FocusGained));
+
+    events.borrow_mut().clear();
+    cx.deactivate_window();
+    cx.run_until_parked();
+    cx.update(|_, cx| crate::TextInputFocus::set(None, cx));
+    cx.run_until_parked();
+    assert!(!area.read_with(cx, |area, _| area.is_focused()));
+    assert_eq!(events.borrow().as_slice(), [TextAreaEvent::FocusLost]);
 }
 
 fn caret(area: &Entity<TextArea>, cx: &mut VisualTestContext) -> usize {
