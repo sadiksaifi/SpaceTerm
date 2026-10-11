@@ -2361,7 +2361,9 @@ impl TabManager {
 impl Render for TabManager {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         debug_assert!(self.tabs.len() > 0);
-        self.tab_reorder.refresh(window, cx);
+        let ids = self.visible_tab_ids();
+        self.tab_reorder
+            .refresh(&self.tab_bar_scroll_handle, &ids, window, cx);
         #[cfg(test)]
         {
             self.rendered_window_active = window.is_window_active();
@@ -6133,6 +6135,56 @@ mod tests {
         );
         cx.debug_bounds("tab-item-1-inactive")
             .expect("the released Tab must render in its new place");
+    }
+
+    #[gpui::test]
+    fn holding_a_tab_at_the_end_of_the_tab_bar_should_scroll_it_and_land_the_tab_last(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _records, cx) = tab_manager(cx);
+        for _ in 0..12 {
+            click("create-tab-button", cx);
+        }
+        manager.read_with(cx, |manager, _| {
+            manager
+                .tab_bar_scroll_handle
+                .set_offset(point(px(0.0), px(0.0)));
+        });
+        manager.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        let strip = cx.debug_bounds("tab-items").unwrap();
+        let first = cx.debug_bounds("tab-item-1-inactive").unwrap();
+        let held = point(strip.right() - px(4.0), first.center().y);
+        let scroll = |cx: &mut VisualTestContext| {
+            manager.read_with(cx, |manager, _| {
+                let handle = &manager.tab_bar_scroll_handle;
+                (handle.offset().x, -handle.max_offset().x)
+            })
+        };
+
+        drag_tab(
+            first.center(),
+            &[first.center() + point(px(8.0), px(0.0)), held],
+            cx,
+        );
+        // Held still, the strip keeps scrolling one frame after another until its end shows.
+        for _ in 0..240 {
+            let (offset, end) = scroll(cx);
+            if offset <= end {
+                break;
+            }
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(16));
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+            cx.run_until_parked();
+        }
+        let (offset, end) = scroll(cx);
+        cx.simulate_mouse_up(held, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(end < px(0.0), "twelve Tabs must overflow the Tab bar");
+        assert_eq!(offset, end, "the Tab bar must scroll to its end");
+        assert_eq!(tab_order(&manager, cx).last(), Some(&1));
     }
 
     #[gpui::test]

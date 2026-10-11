@@ -853,7 +853,9 @@ impl WorkspaceSidebar {
 
 impl Render for WorkspaceSidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.workspace_reorder.refresh(window, cx);
+        let ids = self.row_ids();
+        self.workspace_reorder
+            .refresh(&self.scroll_handle, &ids, window, cx);
         self.sync_scrollbar(cx);
         let hovers = self.row_hovers(window, cx);
         self.render_body(hovers, cx.entity().downgrade(), window, cx)

@@ -23,6 +23,12 @@ const SHIFT_DURATION: Duration = Duration::from_millis(200);
 const SETTLE_DURATION: Duration = Duration::from_millis(260);
 /// How far past a strip the pointer may stray before the lifted item leaves it.
 pub(crate) const TEAR_OFF_DISTANCE: f32 = 48.0;
+/// How deep into either end of a strip the pointer starts scrolling it.
+const AUTOSCROLL_EDGE: f32 = 40.0;
+/// How fast a strip scrolls, in points per second, with the pointer at or past its end.
+const AUTOSCROLL_SPEED: f32 = 720.0;
+/// The longest step one autoscroll frame takes, so a stalled frame does not jump the strip.
+const AUTOSCROLL_STEP: Duration = Duration::from_millis(50);
 /// How opaque a lifted item is, so the items it passes over show through a little.
 pub(crate) const LIFTED_OPACITY: f32 = 0.95;
 
@@ -49,6 +55,10 @@ struct Lift<Id> {
     grab: Point<Pixels>,
     /// Where the lifted copy's origin stands in the window.
     origin: Option<Point<Pixels>>,
+    /// Where the pointer last stood in the window.
+    pointer: Option<Point<Pixels>>,
+    /// When the strip last scrolled under the pointer, while the pointer stays near an end.
+    scrolled_at: Option<Instant>,
     landing: Option<Landing>,
 }
 
@@ -103,14 +113,23 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
             session,
             grab,
             origin: None,
+            pointer: None,
+            scrolled_at: None,
             landing: None,
         });
     }
 
-    /// Prepares a frame. Ends a lift whose drag GPUI no longer carries, so a drag released while
-    /// the strip was hidden leaves nothing behind, and keeps frames coming while items slide.
-    /// Call it on every render.
-    pub(crate) fn refresh(&mut self, window: &mut Window, cx: &App) {
+    /// Prepares a frame of the strip's `ids`, in presentation order. Ends a lift whose drag GPUI
+    /// no longer carries, so a drag released while the strip was hidden leaves nothing behind.
+    /// Scrolls the strip while the pointer holds near either end, and keeps frames coming while
+    /// it scrolls or items slide. Call it on every render.
+    pub(crate) fn refresh(
+        &mut self,
+        items: &ScrollHandle,
+        ids: &[Id],
+        window: &mut Window,
+        cx: &App,
+    ) {
         if self
             .lift
             .as_ref()
@@ -119,6 +138,7 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
             self.lift = None;
             self.slides.clear();
         }
+        self.autoscroll(items, ids, window, cx);
         let now = now(cx);
         self.slides
             .retain(|_, slide| !slide.finished(now) || slide.to != Point::default());
@@ -188,6 +208,7 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
                 ),
                 len: ids.len(),
             });
+        lift.pointer = Some(pointer);
         let moved = lift.origin != Some(origin);
         lift.origin = Some(origin);
         let relanded = lift.landing != landing;
@@ -196,6 +217,45 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
             self.open_gap(ids, &bounds, cx);
         }
         moved || relanded
+    }
+
+    /// Scrolls the strip toward the end the pointer holds near, faster the deeper it holds, and
+    /// follows the items that pass under the lifted copy.
+    fn autoscroll(&mut self, items: &ScrollHandle, ids: &[Id], window: &mut Window, cx: &App) {
+        let axis = self.axis;
+        let Some(lift) = self.lift.as_mut() else {
+            return;
+        };
+        let Some(pointer) = lift.pointer else {
+            return;
+        };
+        let viewport = items.bounds();
+        let velocity = if viewport.dilate(px(TEAR_OFF_DISTANCE)).contains(&pointer) {
+            let start = f32::from(viewport.origin.along(axis));
+            autoscroll_velocity(
+                (start, start + f32::from(viewport.size.along(axis))),
+                f32::from(pointer.along(axis)),
+            )
+        } else {
+            0.0
+        };
+        let offset = items.offset();
+        let current = f32::from(offset.along(axis));
+        let limit = -f32::from(items.max_offset().along(axis));
+        if !((velocity > 0.0 && current < 0.0) || (velocity < 0.0 && current > limit)) {
+            lift.scrolled_at = None;
+            return;
+        }
+        let now = now(cx);
+        let elapsed = lift
+            .scrolled_at
+            .map_or(Duration::ZERO, |at| now.saturating_duration_since(at))
+            .min(AUTOSCROLL_STEP);
+        lift.scrolled_at = Some(now);
+        let next = (current + velocity * elapsed.as_secs_f32()).clamp(limit, 0.0);
+        items.set_offset(offset.apply_along(axis, |_| px(next)));
+        window.request_animation_frame();
+        self.track(items, ids, pointer, cx);
     }
 
     /// Ends the drag on its release. Returns the dragged item and its new position among the
@@ -321,6 +381,19 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
         self.slides
             .insert(id, Slide::new(from, to, duration, now, motion));
     }
+}
+
+/// How fast a strip spanning `viewport` along its axis scrolls with the pointer at `pointer`, in
+/// points per second of scroll offset. Near the start the offset grows toward zero, showing
+/// earlier items; near the end it shrinks, showing later ones.
+fn autoscroll_velocity(viewport: (f32, f32), pointer: f32) -> f32 {
+    let (start, end) = viewport;
+    let edge = AUTOSCROLL_EDGE.min((end - start) / 2.0);
+    if edge <= 0.0 {
+        return 0.0;
+    }
+    let depth = |distance: f32| ((edge - distance) / edge).clamp(0.0, 1.0);
+    AUTOSCROLL_SPEED * (depth(pointer - start) - depth(end - pointer))
 }
 
 /// The position a lifted item whose leading edge stands at `start` lands in: past every other
@@ -947,6 +1020,30 @@ mod tests {
                 landed_start(&spans, 1, 1),
             ],
             [300.0, 0.0, 100.0]
+        );
+    }
+
+    #[test]
+    fn autoscroll_velocity_should_grow_toward_either_end_of_the_strip() {
+        let viewport = (100.0, 500.0);
+
+        assert_eq!(
+            [
+                autoscroll_velocity(viewport, 300.0),
+                autoscroll_velocity(viewport, 140.0),
+                autoscroll_velocity(viewport, 120.0),
+                autoscroll_velocity(viewport, 60.0),
+                autoscroll_velocity(viewport, 480.0),
+                autoscroll_velocity(viewport, 540.0),
+            ],
+            [
+                0.0,
+                0.0,
+                AUTOSCROLL_SPEED / 2.0,
+                AUTOSCROLL_SPEED,
+                -AUTOSCROLL_SPEED / 2.0,
+                -AUTOSCROLL_SPEED,
+            ]
         );
     }
 
