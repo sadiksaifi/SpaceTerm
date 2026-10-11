@@ -13,8 +13,8 @@ use thiserror::Error;
 use super::chrome_icons::IconRole;
 use super::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use super::drag_and_drop::{
-    DragPreview, DragSession, ItemMotion, ReorderableStrip, drag_release_observer,
-    drop_placeholder, lift_shadow, lifted_opacity, painted_item_size,
+    DragPreview, DragSession, ItemMotion, ReorderableStrip, drag_release_observer, lift_shadow,
+    painted_item_size,
 };
 use super::selection_chip::{ChipPaint, ChipShape, SelectionChip};
 use super::terminal_focus::{TabFocusOwners, TerminalFocusBlocker, TerminalFocusCoordinator};
@@ -1895,8 +1895,8 @@ impl TabManager {
                 )
             });
         let element_name = if lifted { "tab-preview" } else { "tab-item" };
-        // The lifted copy shows its whole lift. A Tab in the bar slides aside, leaves its hover
-        // chip where a release would land it, and shows what remains of its lift as it settles.
+        // The lifted copy shows its whole lift. A Tab in the bar slides aside, shows a faded face
+        // where a release would land it, and shows what remains of its lift as it settles.
         let motion = if lifted {
             ItemMotion {
                 lift: 1.0,
@@ -1906,9 +1906,7 @@ impl TabManager {
             self.tab_reorder.motion(tab_id, cx)
         };
         let chip_selector = format!("{element_name}-{}-chip", tab_id.get());
-        let chip = if motion.lifted {
-            drop_placeholder(presentation.tab_chip(false, appearance, cx), chip_selector)
-        } else if motion.lift > 0.0 {
+        let chip = if motion.lift > 0.0 {
             chip.render_lifted(
                 chip_selector,
                 hover.max(motion.lift),
@@ -1980,7 +1978,7 @@ impl TabManager {
             .relative()
             .left(motion.offset.x)
             .top(motion.offset.y)
-            .opacity(lifted_opacity(motion.lift))
+            .opacity(motion.opacity())
             .h_full()
             .flex_none()
             .w(appearance.spacing(TAB_ITEM_WIDTH))
@@ -1993,29 +1991,27 @@ impl TabManager {
             .chrome_text(text_style)
             .text_color(gpui_color(foreground))
             .child(chip)
-            .when(!motion.lifted, |face| {
-                face.child(render_tab_identity(
-                    tab_id,
-                    identity,
-                    status,
-                    status_host,
-                    close_clearance,
-                    appearance,
-                ))
-                .child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .bottom_0()
-                        .right(appearance.spacing(TAB_ITEM_RIGHT_PADDING))
-                        .flex()
-                        .items_center()
-                        // An inactive Tab shows its close control only under the pointer, where
-                        // its lifted copy always is.
-                        .when(!active, |button| button.opacity(hover))
-                        .child(close_control),
-                )
-            });
+            .child(render_tab_identity(
+                tab_id,
+                identity,
+                status,
+                status_host,
+                close_clearance,
+                appearance,
+            ))
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .right(appearance.spacing(TAB_ITEM_RIGHT_PADDING))
+                    .flex()
+                    .items_center()
+                    // An inactive Tab shows its close control only under the pointer, where its
+                    // lifted copy always is.
+                    .when(!active, |button| button.opacity(hover))
+                    .child(close_control),
+            );
         if lifted {
             return face;
         }
@@ -5956,7 +5952,7 @@ mod tests {
                 Some(second.origin),
                 Some(gpui::Bounds::new(third.origin + below, first.size)),
             ),
-            "a dragged Tab must leave a placeholder where it lands, open a gap there, and keep the \
+            "a dragged Tab must show its faded face where it lands, open a gap there, and keep the \
              press point of its lifted copy under the pointer"
         );
         assert_eq!(

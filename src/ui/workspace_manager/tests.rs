@@ -7875,8 +7875,6 @@ fn dragging_a_workspace_row_should_open_a_gap_and_settle_there_on_release(cx: &m
     let during = (
         workspace_order(&manager, cx),
         cx.debug_bounds("workspace-row-1-inactive"),
-        cx.debug_bounds("workspace-placeholder-1")
-            .is_some_and(|placeholder| landing.contains(&placeholder.center())),
         origin("workspace-row-3-active", cx),
         cx.debug_bounds("workspace-row-preview-1-inactive"),
     );
@@ -7889,11 +7887,10 @@ fn dragging_a_workspace_row_should_open_a_gap_and_settle_there_on_release(cx: &m
         (
             vec![1, 2, 3],
             Some(landing),
-            true,
             Some(second.origin),
             Some(gpui::Bounds::new(third.origin + beside, first.size)),
         ),
-        "a dragged row must leave a placeholder where it lands, open a gap there, and keep the press \
+        "a dragged row must show its faded face where it lands, open a gap there, and keep the press \
          point of its lifted copy under the pointer"
     );
     assert_eq!(
@@ -7904,7 +7901,6 @@ fn dragging_a_workspace_row_should_open_a_gap_and_settle_there_on_release(cx: &m
         (vec![2, 3, 1], WorkspaceId::new(3))
     );
     assert!(cx.debug_bounds("drag-preview").is_none());
-    assert!(cx.debug_bounds("workspace-placeholder-1").is_none());
     // The moved row starts where its copy was released and settles into its new place.
     assert_eq!(
         origin("workspace-row-1-inactive", cx),

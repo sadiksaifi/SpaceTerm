@@ -3,9 +3,7 @@ use crate::ui::appearance::gpui_color;
 use crate::ui::chrome_geometry::RadiusRole;
 use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
-use crate::ui::drag_and_drop::{
-    LIFTED_OPACITY, drag_release_observer, drop_placeholder, lift_shadow, lifted_opacity,
-};
+use crate::ui::drag_and_drop::{LIFTED_OPACITY, drag_release_observer, lift_shadow};
 use crate::ui::selection_chip::{ChipPaint, ChipShape, SelectionChip};
 use gpui::accesskit;
 use spaceterm_ui::{ContextMenuTarget, HoverFade};
@@ -874,53 +872,28 @@ impl WorkspaceSidebar {
                     .collect();
             let measure_sidebar = sidebar.clone();
             let motion = self.workspace_reorder.motion(workspace_id, cx);
-            // A lifted group leaves its row's hover chip where a release would land it.
-            let placeholder = motion.lifted.then(|| {
-                let (chip, _) = row_paint(false, false, 1.0, appearance, cx);
-                div()
-                    .absolute()
-                    .top(motion.offset.y)
-                    .bottom(-motion.offset.y)
-                    .left(motion.offset.x)
-                    .right(-motion.offset.x)
-                    .child(drop_placeholder(
-                        chip,
-                        format!("workspace-placeholder-{}", workspace_id.get()),
-                    ))
-            });
             // The slot keeps the group's laid-out place, so a drag measures every group at rest
             // while the group itself slides.
             rows = rows.child(
-                div()
-                    .relative()
-                    .w_full()
-                    .flex_shrink_0()
-                    .children(placeholder)
-                    .child(
-                        div()
-                            .on_children_prepainted(move |bounds, _, cx| {
-                                let _ = measure_sidebar.update(cx, |sidebar, _| {
-                                    sidebar.record_row_spans(workspace_id, &keys, &bounds);
-                                });
-                            })
-                            .id(("workspace-group", workspace_id.get()))
-                            .debug_selector(move || {
-                                format!("workspace-group-{}", workspace_id.get())
-                            })
-                            .relative()
-                            .left(motion.offset.x)
-                            .top(motion.offset.y)
-                            .opacity(if motion.lifted {
-                                0.0
-                            } else {
-                                lifted_opacity(motion.lift)
-                            })
-                            .w_full()
-                            .flex()
-                            .flex_col()
-                            .child(parent)
-                            .children(children),
-                    ),
+                div().w_full().flex_shrink_0().child(
+                    div()
+                        .on_children_prepainted(move |bounds, _, cx| {
+                            let _ = measure_sidebar.update(cx, |sidebar, _| {
+                                sidebar.record_row_spans(workspace_id, &keys, &bounds);
+                            });
+                        })
+                        .id(("workspace-group", workspace_id.get()))
+                        .debug_selector(move || format!("workspace-group-{}", workspace_id.get()))
+                        .relative()
+                        .left(motion.offset.x)
+                        .top(motion.offset.y)
+                        .opacity(motion.opacity())
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .child(parent)
+                        .children(children),
+                ),
             );
         }
 

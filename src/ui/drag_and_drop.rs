@@ -15,7 +15,6 @@ use gpui::{
 };
 
 use super::appearance::gpui_color;
-use super::selection_chip::SelectionChip;
 
 /// How long the other items take to slide aside as the landing slot moves.
 const SHIFT_DURATION: Duration = Duration::from_millis(200);
@@ -29,14 +28,17 @@ const AUTOSCROLL_EDGE: f32 = 40.0;
 const AUTOSCROLL_SPEED: f32 = 720.0;
 /// The longest step one autoscroll frame takes, so a stalled frame does not jump the strip.
 const AUTOSCROLL_STEP: Duration = Duration::from_millis(50);
+/// How opaque a lifted item's face is where a release would land it, so it reads as a preview
+/// of the drop rather than the item itself.
+const PLACEHOLDER_OPACITY: f32 = 0.4;
 /// How opaque a lifted item is, so the items it passes over show through a little.
 pub(crate) const LIFTED_OPACITY: f32 = 0.95;
 
 /// The drag state of one scrolling strip of items laid out along one axis.
 ///
 /// While an item is lifted, its lifted copy follows the pointer and the other items slide aside to
-/// open a gap where a release would land it. The item's empty place moves into that gap, and back
-/// to rest once the pointer leaves the strip. A release settles the item into its place; a
+/// open a gap where a release would land it. A faded face of the item moves into that gap, and
+/// back to the item's own place once the pointer leaves the strip. A release settles the item into its place; a
 /// cancellation returns everything to rest.
 pub(crate) struct ReorderableStrip<Id> {
     axis: Axis,
@@ -74,10 +76,22 @@ struct Landing {
 pub(crate) struct ItemMotion {
     /// How far the item is drawn from its laid-out place.
     pub(crate) offset: Point<Pixels>,
-    /// Whether the item is lifted, so its place stays empty.
+    /// Whether the item is lifted, so its face stays faded where a release would land it.
     pub(crate) lifted: bool,
     /// How much of its lift a released item still shows, from 1 at release to 0 at rest.
     pub(crate) lift: f32,
+}
+
+impl ItemMotion {
+    /// How opaque the item is: faded where a release would land it while lifted, and nearly
+    /// opaque while it settles.
+    pub(crate) fn opacity(self) -> f32 {
+        if self.lifted {
+            PLACEHOLDER_OPACITY
+        } else {
+            lifted_opacity(self.lift)
+        }
+    }
 }
 
 impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
@@ -582,14 +596,8 @@ pub(crate) fn lift_shadow(
     vec![layer(1.0, 10.0, 28.0), layer(0.7, 2.0, 6.0)]
 }
 
-/// The chip that marks where a release would land a lifted item: `chip` as it looks under the
-/// pointer, without the item's content.
-pub(crate) fn drop_placeholder(chip: SelectionChip, selector: String) -> AnyElement {
-    chip.render(selector, 1.0)
-}
-
 /// How opaque an item is that shows `lift` of its lift.
-pub(crate) fn lifted_opacity(lift: f32) -> f32 {
+fn lifted_opacity(lift: f32) -> f32 {
     1.0 - (1.0 - LIFTED_OPACITY) * lift.clamp(0.0, 1.0)
 }
 
