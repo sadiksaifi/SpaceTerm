@@ -1,0 +1,7 @@
+# Restore Panes in their last confirmed directory
+
+For [restored shell startup](0043-start-restored-shells-on-first-use.md), the SpaceTerm Server durably retains each Pane's last confirmed Current Directory on its own machine. A restored shell starts there, or in the Pane's retained Starting Directory when no later directory was confirmed. The server accepts directory information from the owning shell and revalidates filesystem authority before launch; reports from nested remote or container sessions cannot supply the restoration directory.
+
+This policy preserves the restored Pane's directory independently of Workspace pinning and the directory selection used when explicitly creating a new Pane. If the target directory is unavailable, the Pane presents "Directory unavailable" with Retry and Choose Directory. Retry revalidates the same target, and Choose Directory validates a replacement on the owning server and repairs that Pane without repinning the Workspace.
+
+Recovery preserves the Pane, Workspace identity, and Tab-to-Worktree membership. Git remains the authority for Worktree inventory under [ADR 0031](0031-retain-workspace-organization-across-server-restarts.md), and Worktree creation remains an explicit Git operation under [ADR 0019](0019-create-and-remove-worktrees-by-running-git.md).

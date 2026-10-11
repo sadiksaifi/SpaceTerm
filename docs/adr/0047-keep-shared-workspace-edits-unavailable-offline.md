@@ -1,0 +1,7 @@
+# Keep shared Workspace edits unavailable offline
+
+When a server is disconnected, the SpaceTerm Client keeps navigation through retained Workspace and Tab state, personal rearrangement under [ADR 0042](0042-keep-tab-order-and-pane-layouts-specific-to-each-client.md), and Client Settings available. New shared Workspace edits, including Tab and Pane creation, Workspace renaming, and Kill Workspace, remain unavailable until the server reconnects. The client does not queue new shared edits for later execution, and offline navigation cannot start a shell.
+
+Detach Workspace removes the local attachment and invalidates local control-resumption rights immediately, even while the server is unreachable. Server-side control release completes when the server becomes reachable and targets only the original control grants; it cannot release another client's takeover or a grant acquired later. Self-Unpair retains its immediate local removal and durable revocation workflow under [ADR 0038](0038-unpair-devices-without-blocking-local-connection-removal.md).
+
+An operation submitted before the interruption may already have committed. Reconnection resolves that operation's outcome using its original identity under [ADR 0037](0037-resolve-shared-mutations-at-the-server.md), so a lost acknowledgement does not become a false failure or a duplicate edit. Terminal presentation and input handling follow [ADR 0045](0045-freeze-terminal-screens-while-reconnecting.md).
