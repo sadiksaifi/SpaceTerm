@@ -19,6 +19,7 @@
 pub mod native_registration;
 pub mod protected_directory;
 pub mod root_protection;
+pub mod session_capabilities;
 pub mod startup;
 
 #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
