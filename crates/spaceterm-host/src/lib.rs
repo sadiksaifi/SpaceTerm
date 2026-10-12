@@ -26,6 +26,15 @@ pub mod storage;
 pub mod pty;
 pub mod shell_integration;
 pub mod shell_launch;
+pub mod transport;
+pub mod wss;
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod ipc;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod peer_credentials;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod ssh_tunnel;
 
 #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 mod test_support;
