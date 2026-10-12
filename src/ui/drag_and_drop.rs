@@ -51,6 +51,8 @@ pub(crate) struct ReorderableStrip<Id> {
     known: Option<Vec<Id>>,
     /// Each new item's natural size along the axis, once measured, as it grows into the strip.
     entering: HashMap<Id, (Ease, Option<Pixels>)>,
+    /// The items that finished growing at the last refresh, and take their full size this frame.
+    grown: Vec<Id>,
     /// The closing gap a removed item left before each item.
     leading_gaps: HashMap<Id, Gap>,
     /// The closing gap a removed last item left after the item that is now last.
@@ -151,8 +153,21 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
             settling: None,
             known: None,
             entering: HashMap::new(),
+            grown: Vec::new(),
             leading_gaps: HashMap::new(),
             trailing_gaps: HashMap::new(),
+        }
+    }
+
+    /// Keeps the new item `id`, one of the strip's `ids`, scrolled into view while it grows and
+    /// on the frame it reaches full size, so a strip that revealed it before it had a size still
+    /// shows it once it does.
+    pub(crate) fn reveal_while_entering(&self, id: Id, items: &ScrollHandle, ids: &[Id]) {
+        if !self.entering.contains_key(&id) && !self.grown.contains(&id) {
+            return;
+        }
+        if let Some(position) = ids.iter().position(|candidate| *candidate == id) {
+            items.scroll_to_item(position);
         }
     }
 
@@ -271,7 +286,15 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
         let now = now(cx);
         self.slides
             .retain(|_, slide| !slide.finished(now) || slide.to != Point::default());
-        self.entering.retain(|_, (ease, _)| !ease.finished(now));
+        self.grown.clear();
+        let grown = &mut self.grown;
+        self.entering.retain(|id, (ease, _)| {
+            let finished = ease.finished(now);
+            if finished {
+                grown.push(*id);
+            }
+            !finished
+        });
         self.leading_gaps.retain(|_, gap| !gap.ease.finished(now));
         self.trailing_gaps.retain(|_, gap| !gap.ease.finished(now));
         if !self.entering.is_empty()

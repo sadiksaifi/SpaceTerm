@@ -856,6 +856,13 @@ impl Render for WorkspaceSidebar {
         let ids = self.row_ids();
         self.workspace_reorder
             .refresh(&self.scroll_handle, &ids, window, cx);
+        if let Some(active) = self.rows.iter().find(|row| row.active) {
+            self.workspace_reorder.reveal_while_entering(
+                active.workspace_id,
+                &self.scroll_handle,
+                &ids,
+            );
+        }
         self.sync_scrollbar(cx);
         let hovers = self.row_hovers(window, cx);
         self.render_body(hovers, cx.entity().downgrade(), window, cx)

@@ -2407,6 +2407,11 @@ impl Render for TabManager {
         let ids = self.visible_tab_ids();
         self.tab_reorder
             .refresh(&self.tab_bar_scroll_handle, &ids, window, cx);
+        self.tab_reorder.reveal_while_entering(
+            self.tabs.active_tab_id(),
+            &self.tab_bar_scroll_handle,
+            &ids,
+        );
         #[cfg(test)]
         {
             self.rendered_window_active = window.is_window_active();
@@ -6104,6 +6109,25 @@ mod tests {
         assert!(
             before < growing && growing < before + width,
             "a new Tab must be part way in shortly after it opens, got {growing:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn a_new_tab_in_an_overflowing_bar_should_end_fully_in_view(cx: &mut TestAppContext) {
+        let (_manager, _records, cx) = tab_manager(cx);
+        for _ in 0..12 {
+            click("create-tab-button", cx);
+        }
+        cx.update(|_, cx| cx.set_global(AnimatePresence));
+
+        click("create-tab-button", cx);
+        finish_slides(cx);
+        let strip = cx.debug_bounds("tab-items").unwrap();
+        let created = cx.debug_bounds("tab-item-14-active").unwrap();
+
+        assert!(
+            strip.left() <= created.left() && created.right() <= strip.right(),
+            "a new active Tab must end inside the strip {strip:?}, got {created:?}"
         );
     }
 
