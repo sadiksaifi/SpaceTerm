@@ -5,25 +5,26 @@ use std::os::fd::{AsRawFd, FromRawFd};
 use super::{MAX_DRAIN_CALLS, MAX_EVENTS, MAX_HANDLES, WorkBudget};
 use crate::protected_directory::ProtectedDirectoryError;
 
-const NOTES: u32 = libc::NOTE_DELETE
-    | libc::NOTE_WRITE
-    | libc::NOTE_EXTEND
-    | libc::NOTE_ATTRIB
-    | libc::NOTE_LINK
-    | libc::NOTE_RENAME
-    | libc::NOTE_REVOKE;
+const DIRECTORY_NOTES: u32 =
+    libc::NOTE_DELETE | libc::NOTE_ATTRIB | libc::NOTE_RENAME | libc::NOTE_REVOKE;
+const FILE_NOTES: u32 = DIRECTORY_NOTES | libc::NOTE_WRITE | libc::NOTE_EXTEND | libc::NOTE_LINK;
 const BATCH_EVENTS: usize = 32;
+
+struct Watch {
+    descriptor: usize,
+    notes: u32,
+}
 
 pub(super) struct Observation {
     queue: File,
-    descriptors: Vec<usize>,
+    watches: Vec<Watch>,
     changed: bool,
 }
 
 impl Observation {
     pub(super) fn new(work: &mut WorkBudget) -> Result<Self, ProtectedDirectoryError> {
-        let mut descriptors = Vec::new();
-        descriptors
+        let mut watches = Vec::new();
+        watches
             .try_reserve_exact(MAX_HANDLES)
             .map_err(|_| ProtectedDirectoryError::Unavailable)?;
         let descriptor = work.call(|| {
@@ -49,7 +50,7 @@ impl Observation {
         })?;
         Ok(Self {
             queue,
-            descriptors,
+            watches,
             changed: false,
         })
     }
@@ -59,16 +60,23 @@ impl Observation {
         held: &File,
         work: &mut WorkBudget,
     ) -> Result<(), ProtectedDirectoryError> {
-        if self.descriptors.len() == MAX_HANDLES {
+        if self.watches.len() == MAX_HANDLES {
             return Err(ProtectedDirectoryError::Unavailable);
         }
         let ident =
             usize::try_from(held.as_raw_fd()).map_err(|_| ProtectedDirectoryError::Unavailable)?;
+        // Each retained child has its own rename/delete watch. A directory's
+        // write/link notes describe unrelated children, not its protection or binding.
+        let notes = if work.call(|| held.metadata())?.is_dir() {
+            DIRECTORY_NOTES
+        } else {
+            FILE_NOTES
+        };
         let change = libc::kevent {
             ident,
             filter: libc::EVFILT_VNODE,
             flags: libc::EV_ADD | libc::EV_ENABLE | libc::EV_CLEAR | libc::EV_RECEIPT,
-            fflags: NOTES,
+            fflags: notes,
             data: 0,
             udata: std::ptr::null_mut(),
         };
@@ -108,7 +116,10 @@ impl Observation {
         })?;
         // XNU binds EVFILT_VNODE to this descriptor's vnode. The outer guard
         // retains the duplicate until after queue teardown, without path reopening.
-        self.descriptors.push(ident);
+        self.watches.push(Watch {
+            descriptor: ident,
+            notes,
+        });
         Ok(())
     }
 
@@ -134,8 +145,12 @@ impl Observation {
                 let ident = event.ident;
                 let flags = event.flags;
                 let notes = event.fflags;
+                let watch = self
+                    .watches
+                    .iter()
+                    .find(|watch| watch.descriptor == ident)
+                    .ok_or(ProtectedDirectoryError::Unavailable)?;
                 if event.filter != libc::EVFILT_VNODE
-                    || !self.descriptors.contains(&ident)
                     || flags
                         & !(libc::EV_ADD
                             | libc::EV_ENABLE
@@ -145,7 +160,7 @@ impl Observation {
                             | libc::EV_ERROR)
                         != 0
                     || flags & libc::EV_ERROR != 0
-                    || notes & !NOTES != 0
+                    || notes & !watch.notes != 0
                     || (notes == 0 && flags & libc::EV_EOF == 0)
                     || event.data != 0
                     || !event.udata.is_null()
@@ -198,7 +213,7 @@ impl Observation {
             _ => return Ok(None),
         };
         events[0] = libc::kevent {
-            ident: self.descriptors[0],
+            ident: self.watches[0].descriptor,
             filter: if fault == Fault::MalformedRecord {
                 libc::EVFILT_READ
             } else {

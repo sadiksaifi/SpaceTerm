@@ -6,10 +6,14 @@ use std::fs::File;
 #[cfg(target_os = "macos")]
 use std::os::unix::fs::MetadataExt;
 
+#[cfg(target_os = "macos")]
+use crate::protected_directory::observation::Observation;
 use crate::protected_directory::{NativeDirectoryProtection, ProtectedDirectoryError};
 
 #[cfg(any(target_os = "macos", target_os = "linux", test))]
 mod admission;
+#[cfg(all(test, target_os = "macos"))]
+mod inspection_tests;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
@@ -80,20 +84,50 @@ impl NativeDirectoryProtection for NativeRootProtection {
 
 #[cfg(target_os = "macos")]
 fn verify_handle(file: &File) -> Result<(), ProtectedDirectoryError> {
-    let before = ProtectionVersion::of(file)?;
-    admission::require_root_mode(before.owner, before.mode)?;
-    let mount_before = macos::filesystem_version(file)?;
-    let inspection = mount_before
-        .require_proven_semantics()
-        .and_then(|()| macos::inspect_acl(file));
+    let inspection = ProtectionInspection::begin(file)?;
+    admission::require_root_mode(inspection.before.owner, inspection.before.mode)?;
+    let admission = inspection.inspect_acl();
     // Recheck even when ACL admission failed, so a changed inspection is not
     // mistaken for a stable protection snapshot.
-    let mount_after = macos::filesystem_version(file)?;
-    let after = ProtectionVersion::of(file)?;
-    if before != after || mount_before != mount_after {
-        return Err(ProtectedDirectoryError::Changed);
+    inspection.finish()?;
+    admission
+}
+
+#[cfg(target_os = "macos")]
+struct ProtectionInspection<'file> {
+    file: &'file File,
+    observation: Observation,
+    before: ProtectionVersion,
+    mount_before: macos::FilesystemVersion,
+}
+
+#[cfg(target_os = "macos")]
+impl<'file> ProtectionInspection<'file> {
+    fn begin(file: &'file File) -> Result<Self, ProtectedDirectoryError> {
+        let mut observation = Observation::begin()?;
+        observation.enroll(file)?;
+        Ok(Self {
+            file,
+            observation,
+            before: ProtectionVersion::of(file)?,
+            mount_before: macos::filesystem_version(file)?,
+        })
     }
-    inspection
+
+    fn inspect_acl(&self) -> Result<(), ProtectedDirectoryError> {
+        self.mount_before
+            .require_proven_semantics()
+            .and_then(|()| macos::inspect_acl(self.file))
+    }
+
+    fn finish(self) -> Result<(), ProtectedDirectoryError> {
+        let mount_after = macos::filesystem_version(self.file)?;
+        let after = ProtectionVersion::of(self.file)?;
+        if self.before != after || self.mount_before != mount_after {
+            return Err(ProtectedDirectoryError::Changed);
+        }
+        self.observation.finish()
+    }
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -107,8 +141,7 @@ struct ProtectionVersion {
     owner: u32,
     group: u32,
     mode: u32,
-    changed_seconds: i64,
-    changed_nanoseconds: i64,
+    changed_at: Option<(i64, i64)>,
 }
 
 #[cfg(target_os = "macos")]
@@ -121,8 +154,9 @@ impl ProtectionVersion {
             owner: metadata.uid(),
             group: metadata.gid(),
             mode: metadata.mode(),
-            changed_seconds: metadata.ctime(),
-            changed_nanoseconds: metadata.ctime_nsec(),
+            // Directory ctime also advances for unrelated children. The enrolled
+            // vnode detects covered attribute changes, including restored ACLs.
+            changed_at: (!metadata.is_dir()).then(|| (metadata.ctime(), metadata.ctime_nsec())),
         })
     }
 }

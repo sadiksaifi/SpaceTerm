@@ -25,7 +25,7 @@ const MAX_INTERRUPTS: usize = 16;
 const MAX_DRAIN_CALLS: usize = 64;
 const MAX_EVENTS: usize = 4096;
 
-pub(super) struct Observation {
+pub(crate) struct Observation {
     // Drop registrations before the descriptors they select.
     backend: platform::Observation,
     handles: Vec<File>,
@@ -33,7 +33,7 @@ pub(super) struct Observation {
 }
 
 impl Observation {
-    pub(super) fn begin() -> Result<Self, ProtectedDirectoryError> {
+    pub(crate) fn begin() -> Result<Self, ProtectedDirectoryError> {
         let mut work = WorkBudget::new();
         let mut handles = Vec::new();
         handles
@@ -47,7 +47,7 @@ impl Observation {
         })
     }
 
-    pub(super) fn enroll(&mut self, file: &File) -> Result<(), ProtectedDirectoryError> {
+    pub(crate) fn enroll(&mut self, file: &File) -> Result<(), ProtectedDirectoryError> {
         if self.handles.len() == MAX_HANDLES {
             return Err(ProtectedDirectoryError::Unavailable);
         }
@@ -68,7 +68,7 @@ impl Observation {
             .enroll(&self.handles[self.handles.len() - 1], &mut self.work)
     }
 
-    pub(super) fn finish(mut self) -> Result<(), ProtectedDirectoryError> {
+    pub(crate) fn finish(mut self) -> Result<(), ProtectedDirectoryError> {
         // No baseline or event state is reset between inspection rounds. A clean
         // drain is an observation only, not a barrier against concurrent writers.
         self.backend.finish(&mut self.work)

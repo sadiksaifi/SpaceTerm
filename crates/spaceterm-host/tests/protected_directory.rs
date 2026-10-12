@@ -9,7 +9,6 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard};
 
 use spaceterm_host::protected_directory::{
     NativeDirectoryProtection, ProtectedDirectoryError, RetainedProtectedDirectory,
@@ -17,9 +16,6 @@ use spaceterm_host::protected_directory::{
 
 const RECORD_NAME: &str = "registration";
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
-// Hold through cleanup so parallel fixtures do not change a shared temporary
-// ancestor's ctime during another fixture's protected inspection.
-static FIXTURE_LOCK: Mutex<()> = Mutex::new(());
 type EntryIdentity = (u64, u64);
 
 // Only these account-owned fixtures are inspected. This is not root or ACL evidence.
@@ -105,14 +101,10 @@ struct Fixture {
     ancestor: PathBuf,
     directory: PathBuf,
     protection: FixtureProtection,
-    _guard: MutexGuard<'static, ()>,
 }
 
 impl Fixture {
     fn new() -> Self {
-        let guard = FIXTURE_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // Native traversal must not normalize paths. Only fixture setup resolves the
         // OS temporary-directory alias, such as /var on macOS.
         let parent = fixture_io(std::env::temp_dir().canonicalize());
@@ -149,7 +141,6 @@ impl Fixture {
                 inspected_directories: RefCell::new(HashSet::new()),
                 inspected_files: Cell::new(0),
             },
-            _guard: guard,
         }
     }
 
@@ -228,6 +219,45 @@ fn unrelated_child_creation_between_successful_reads_does_not_invalidate_the_dir
         .read_regular_file(OsStr::new(RECORD_NAME), 14)
         .expect("unrelated child creation invalidated protected reading");
     assert_eq!(second.as_bytes(), b"bounded record");
+}
+
+#[test]
+fn unrelated_child_changes_during_either_file_inspection_remain_admissible() {
+    for trigger in [1, 2] {
+        let fixture = Fixture::new();
+        fixture.write_record(b"bounded record");
+        let protection = FileCheckProtection::new(&fixture.protection, trigger, |_| {
+            for parent in [&fixture.root, &fixture.ancestor, &fixture.directory] {
+                let sibling = parent.join("unrelated-directory");
+                fixture_io(DirBuilder::new().mode(0o700).create(&sibling));
+                let entry = parent.join("unrelated-file");
+                write_private_file(&entry, b"other");
+                fixture_io(fs::set_permissions(
+                    &entry,
+                    fs::Permissions::from_mode(0o644),
+                ));
+                let mut writer = fixture_io(OpenOptions::new().write(true).open(&entry));
+                fixture_io(writer.write_all(b"edited"));
+                let moved = parent.join("moved-unrelated-file");
+                fixture_io(fs::rename(&entry, &moved));
+                fixture_io(fs::remove_file(&moved));
+                fixture_io(fs::remove_dir(&sibling));
+            }
+            Ok(())
+        });
+        let directory = RetainedProtectedDirectory::open(&fixture.directory, &protection)
+            .expect("controlled protected directory opening failed");
+
+        let read = directory
+            .read_regular_file(OsStr::new(RECORD_NAME), 14)
+            .expect("unrelated child changes invalidated protected reading");
+
+        assert_eq!(read.as_bytes(), b"bounded record");
+        assert!(
+            protection.action.borrow().is_none(),
+            "the child changes did not run"
+        );
+    }
 }
 
 #[test]

@@ -21,7 +21,7 @@ use thiserror::Error;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod native;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-mod observation;
+pub(crate) mod observation;
 
 /// Content-free failures from protected directory operations.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
@@ -70,10 +70,10 @@ pub trait NativeDirectoryProtection {
 ///
 /// Each operation enrolls held handles in a private, bounded native observation
 /// before inspecting them. It compares sampled protection and links after callbacks,
-/// then rejects covered events or observation failures. Root and parent namespace
-/// events are not name-filtered, so unrelated during-operation changes may also reject.
-/// Changes between operations remain admissible when current protection and retained
-/// identities remain valid. Observation silence is not authentication or history proof.
+/// then rejects covered inode attribute, rename, deletion and file-write events or
+/// observation failures. Each retained child has its own observation. Unrelated child
+/// activity is admissible when current protection and retained identities remain valid.
+/// Observation silence is not authentication or history proof.
 ///
 /// Traversal admits at most 255 directory handles, including root, and reserves one
 /// observation for a read file. Linux descriptor binding assumes trusted host procfs
