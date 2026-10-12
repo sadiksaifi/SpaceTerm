@@ -1,6 +1,7 @@
 //! Owning-filesystem authority. Paths remain host values, never client-local capabilities.
 
 use super::browse::BrowseObservation;
+use super::validation::CreateTargetLease;
 use crate::git::filesystem::{
     DirectoryError, NativeWorktreeFilesystem, RetainedDirectory, WorktreeFilesystem,
 };
@@ -95,34 +96,74 @@ impl ServerDirectoryQueries for NativeDirectoryProvider {
         ancestor: &ServerDirectory,
         candidate: &ServerDirectory,
     ) -> Result<DirectoryContainment, DirectoryFailure> {
-        let ancestor = self.path(ancestor)?;
-        let candidate = self.path(candidate)?;
-        let observe = || {
-            let a = self.filesystem.validate_directory(&ancestor).ok()?;
-            let c = self.filesystem.validate_directory(&candidate).ok()?;
-            let physical_a = std::fs::canonicalize(a.path()).ok()?;
-            let physical_c = std::fs::canonicalize(c.path()).ok()?;
-            a.revalidate().ok()?;
-            c.revalidate().ok()?;
-            // Stat canonical spellings without opening extra unbudgeted identity handles.
-            use std::os::unix::fs::MetadataExt;
-            let identity = |path: &Path| std::fs::metadata(path).ok().map(|m| (m.dev(), m.ino()));
-            if identity(a.path()) != identity(&physical_a)
-                || identity(c.path()) != identity(&physical_c)
-            {
-                return None;
+        let candidate_path = self.path(candidate)?;
+        let observe = || match self.retain(ancestor) {
+            Ok(a) => {
+                let c = self.filesystem.validate_directory(&candidate_path).ok()?;
+                let physical_a = physical_path(&*a).ok()?;
+                let physical_c = physical_path(&*c).ok()?;
+                a.revalidate().ok()?;
+                c.revalidate().ok()?;
+                Some(classify_containment(&physical_a, &physical_c))
             }
-            a.revalidate().ok()?;
-            c.revalidate().ok()?;
-            Some(if physical_c.starts_with(&physical_a) {
-                DirectoryContainment::Inside
-            } else {
-                DirectoryContainment::Outside
-            })
+            Err(DirectoryFailure::Missing) => {
+                let a = self.retain_absent_removal_target(ancestor).ok()?;
+                self.absent_containment(&a, candidate).ok()
+            }
+            Err(_) => None,
         };
+        self.path(ancestor)?;
         Ok(observe().unwrap_or(DirectoryContainment::Unchecked))
     }
 }
+impl NativeDirectoryProvider {
+    fn absent_containment(
+        &self,
+        ancestor: &CreateTargetLease,
+        candidate: &ServerDirectory,
+    ) -> Result<DirectoryContainment, DirectoryFailure> {
+        let physical_a = ancestor.physical_path()?;
+        let (physical_c, absent, existing) = match self.retain(candidate) {
+            Ok(c) => (physical_path(&*c)?, None, Some(c)),
+            Err(DirectoryFailure::Missing) => {
+                let c = self.retain_absent_removal_target(candidate)?;
+                (c.physical_path()?, Some(c), None)
+            }
+            Err(error) => return Err(error),
+        };
+        ancestor.revalidate()?;
+        if let Some(c) = absent {
+            c.revalidate()?;
+        }
+        if let Some(c) = existing {
+            c.revalidate().map_err(classify)?;
+        }
+        Ok(classify_containment(&physical_a, &physical_c))
+    }
+}
+fn classify_containment(ancestor: &Path, candidate: &Path) -> DirectoryContainment {
+    if candidate.starts_with(ancestor) {
+        DirectoryContainment::Inside
+    } else {
+        DirectoryContainment::Outside
+    }
+}
+/// Check canonical spellings against retained identity without extra native leases.
+pub(crate) fn physical_path(
+    directory: &dyn RetainedDirectory,
+) -> Result<PathBuf, DirectoryFailure> {
+    use std::os::unix::fs::MetadataExt;
+    let path = std::fs::canonicalize(directory.path()).map_err(io_failure)?;
+    directory.revalidate().map_err(classify)?;
+    let selected = std::fs::metadata(directory.path()).map_err(io_failure)?;
+    let physical = std::fs::metadata(&path).map_err(io_failure)?;
+    if (selected.dev(), selected.ino()) != (physical.dev(), physical.ino()) {
+        return Err(DirectoryFailure::IdentityChanged);
+    }
+    directory.revalidate().map_err(classify)?;
+    Ok(path)
+}
+
 pub(crate) fn classify(error: DirectoryError) -> DirectoryFailure {
     match error {
         DirectoryError::Missing => DirectoryFailure::Missing,

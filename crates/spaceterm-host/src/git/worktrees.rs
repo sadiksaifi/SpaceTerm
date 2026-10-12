@@ -3,6 +3,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use thiserror::Error;
 
@@ -194,11 +195,13 @@ pub struct RemovalCheck {
 }
 
 /// Runs git for one machine's Worktrees. Blocking; callers use a dedicated thread.
+#[derive(Clone)]
 pub struct LocalWorktreeGit {
     runner: Arc<dyn RepositoryProgramRunner>,
     git: PathBuf,
     physical_home: PathBuf,
     git_version: ToolVersion,
+    read_deadline: Option<Instant>,
 }
 
 impl LocalWorktreeGit {
@@ -214,6 +217,15 @@ impl LocalWorktreeGit {
             git,
             physical_home,
             git_version,
+            read_deadline: None,
+        }
+    }
+
+    /// Bound a batch of validation reads. External writes never inherit this deadline.
+    pub fn with_read_deadline(&self, deadline: Instant) -> Self {
+        Self {
+            read_deadline: Some(deadline),
+            ..self.clone()
         }
     }
 
@@ -482,7 +494,7 @@ impl LocalWorktreeGit {
             arguments.push("--force");
         }
         arguments.extend(["--", path]);
-        match self.git(root, &arguments, &mut Vec::new(), cancellation) {
+        match self.write_git(root, &arguments, &mut Vec::new(), cancellation) {
             Ok(exit) if exit.success() => Ok(()),
             _ => Err(WorktreeRemoveError::Failed),
         }
@@ -512,7 +524,7 @@ impl LocalWorktreeGit {
     ) -> Result<(), WorktreeCreateError> {
         let mut arguments = vec!["worktree", "add"];
         arguments.extend_from_slice(options);
-        match self.git(root, &arguments, &mut Vec::new(), cancellation) {
+        match self.write_git(root, &arguments, &mut Vec::new(), cancellation) {
             Ok(exit) if exit.success() => Ok(()),
             _ => Err(WorktreeCreateError::Failed),
         }
@@ -631,13 +643,46 @@ impl LocalWorktreeGit {
         output: &mut Vec<u8>,
         cancellation: &CancellationToken,
     ) -> Result<ProgramExit, RepositoryReadError> {
+        self.run_with_deadline(
+            directory,
+            arguments,
+            output,
+            cancellation,
+            self.read_deadline,
+        )
+    }
+
+    fn write_git(
+        &self,
+        directory: &Path,
+        subcommand: &[&str],
+        output: &mut Vec<u8>,
+        cancellation: &CancellationToken,
+    ) -> Result<ProgramExit, RepositoryReadError> {
+        self.run_with_deadline(
+            directory,
+            git_arguments(directory, FsmonitorPolicy::Disabled, subcommand),
+            output,
+            cancellation,
+            None,
+        )
+    }
+
+    fn run_with_deadline(
+        &self,
+        directory: &Path,
+        arguments: Vec<OsString>,
+        output: &mut Vec<u8>,
+        cancellation: &CancellationToken,
+        deadline: Option<Instant>,
+    ) -> Result<ProgramExit, RepositoryReadError> {
         let request = ProgramRequest {
             executable: self.git.clone(),
             arguments,
             directory: directory.to_path_buf(),
             environment: git_environment(&self.git, &self.physical_home),
             stdout_limit: Some(OUTPUT_LIMIT),
-            deadline: None,
+            deadline,
             keep_process_group_on_exit: false,
         };
         self.runner

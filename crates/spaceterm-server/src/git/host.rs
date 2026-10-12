@@ -1,8 +1,11 @@
 //! Blocking native Git bridge. It reuses hardened host execution and the existing serializer.
+use super::authority::GitAuthoritySnapshot;
 use super::authority::{ConfirmedGitAction, ConfirmedGitPlan};
 use super::writes::DurableGitStartPermit;
 use spaceterm_core::operations::OperationBinding;
 use spaceterm_core::organization::{ServerDirectory, ServerSettingsRecord};
+use spaceterm_core::server_directories::ServerDirectoryQueries;
+use spaceterm_core::worktrees::queries::*;
 use spaceterm_core::worktrees::*;
 use spaceterm_host::git as native;
 use spaceterm_host::git::filesystem::NativeWorktreeFilesystem;
@@ -11,8 +14,9 @@ use spaceterm_host::git::server::{
 };
 use spaceterm_host::server_directories::native::NativeDirectoryProvider;
 use spaceterm_host::server_directories::validation::CreateTargetLease;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 pub use native::CancellationToken as GitReadCancellation;
@@ -32,7 +36,93 @@ pub trait GitHostAssessment: Send + Sync {
         cancellation: &GitReadCancellation,
     ) -> Result<Box<dyn PreparedServerGitWrite>, GitFailure>;
 }
+#[derive(Clone, Debug)]
+pub struct HostGitInventory {
+    /// The exact source Git discovered and its current entry, never containment inference.
+    pub source: ServerDirectory,
+    pub current: Option<usize>,
+    pub lease: Option<Arc<HostInventoryLease>>,
+    pub main_root: ServerDirectory,
+    pub common_directory: ServerDirectory,
+    pub repository: Option<spaceterm_core::identity::RepositoryId>,
+    pub records: Vec<HostGitWorktree>,
+}
+#[derive(Clone, Debug)]
+pub struct HostGitWorktree {
+    pub retained: Option<spaceterm_core::identity::WorktreeId>,
+    pub directory: ServerDirectory,
+    pub main: bool,
+    pub missing: bool,
+    pub bare: bool,
+    pub locked: bool,
+    pub branch: Option<spaceterm_core::organization::BranchName>,
+}
+#[derive(Clone, Debug)]
+pub struct HostGitSource {
+    pub common_directory: ServerDirectory,
+    pub worktree: ServerDirectory,
+}
+#[derive(Clone, Debug)]
+pub struct HostGitStatus {
+    pub inventory: Option<HostGitInventory>,
+    pub facts: queries::GitStatusFacts,
+}
+
 pub trait ServerGitHost: Send + Sync {
+    fn discover_source(
+        &self,
+        _directory: &ServerDirectory,
+        _basis: &GitAuthoritySnapshot,
+        _cancellation: &GitReadCancellation,
+    ) -> Result<Option<HostGitSource>, GitFailure> {
+        Err(GitFailure::Unchecked)
+    }
+    fn status(
+        &self,
+        _directory: &ServerDirectory,
+        _basis: &super::authority::GitAuthoritySnapshot,
+        _cancellation: &GitReadCancellation,
+    ) -> Result<HostGitStatus, GitFailure> {
+        Err(GitFailure::Unchecked)
+    }
+    fn inventory(
+        &self,
+        _directory: &ServerDirectory,
+        _basis: &super::authority::GitAuthoritySnapshot,
+        _cancellation: &GitReadCancellation,
+    ) -> Result<Option<HostGitInventory>, GitFailure> {
+        Err(GitFailure::Unchecked)
+    }
+    fn branches(
+        &self,
+        _repository: &RepositoryLocator,
+        _cancellation: &GitReadCancellation,
+    ) -> Result<Vec<queries::GitBranchRecord>, GitFailure> {
+        Err(GitFailure::Unchecked)
+    }
+    fn creation_assessment(
+        &self,
+        _draft: WorktreeCreateDraft,
+        _basis: &super::authority::GitAuthoritySnapshot,
+        _cancellation: &GitReadCancellation,
+    ) -> Result<(Arc<ConfirmedGitPlan>, Arc<dyn GitHostAssessment>), GitFailure> {
+        Err(GitFailure::Unchecked)
+    }
+    fn removal_assessment(
+        &self,
+        _worktree: spaceterm_core::identity::WorktreeId,
+        _basis: &super::authority::GitAuthoritySnapshot,
+        _cancellation: &GitReadCancellation,
+    ) -> Result<(Arc<ConfirmedGitPlan>, Arc<dyn GitHostAssessment>), GitFailure> {
+        Err(GitFailure::Unchecked)
+    }
+    fn containment(
+        &self,
+        _directory: &ServerDirectory,
+        _root: &ServerDirectory,
+    ) -> spaceterm_core::server_directories::DirectoryContainment {
+        spaceterm_core::server_directories::DirectoryContainment::Unchecked
+    }
     fn prepare_write(
         &self,
         request: HostGitWriteRequest,
@@ -62,11 +152,103 @@ pub struct HostRecoveryObservation {
     pub external: RetainedExternalResult,
 }
 
+type DirectoryIdentity = Arc<dyn native::filesystem::RetainedDirectory>;
+#[derive(Default)]
+struct InventoryIdentities {
+    entries: BTreeMap<Vec<u8>, InventoryIdentity>,
+}
+struct InventoryIdentity {
+    committed: Option<DirectoryIdentity>,
+    observed: Weak<dyn native::filesystem::RetainedDirectory>,
+}
+/// Native identity proof owned by one complete observation. Uncommitted leases
+/// disappear with the observation; only actor-committed records retain them.
+pub struct HostInventoryLease {
+    registry: Arc<Mutex<InventoryIdentities>>,
+    identities: Vec<(Vec<u8>, DirectoryIdentity)>,
+}
+impl std::fmt::Debug for HostInventoryLease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("HostInventoryLease(<redacted>)")
+    }
+}
+impl HostInventoryLease {
+    fn retain(
+        &mut self,
+        provider: &NativeDirectoryProvider,
+        directory: &ServerDirectory,
+        committed: bool,
+    ) -> Result<(), GitFailure> {
+        if self
+            .identities
+            .iter()
+            .any(|(key, _)| key == directory.bytes())
+        {
+            return Ok(());
+        }
+        let mut registry = self.registry.lock().map_err(|_| GitFailure::Unchecked)?;
+        registry
+            .entries
+            .retain(|_, entry| entry.committed.is_some() || entry.observed.strong_count() != 0);
+        let identity = match registry
+            .entries
+            .get(directory.bytes())
+            .and_then(|entry| entry.observed.upgrade())
+        {
+            Some(identity) => {
+                identity
+                    .revalidate()
+                    .map_err(|_| GitFailure::IdentityReplaced)?;
+                identity
+            }
+            None => {
+                // Keep native-handle headroom for confirmations and final write validation.
+                if registry.entries.len() >= 32 {
+                    return Err(GitFailure::Capacity);
+                }
+                provider.retain(directory).map_err(directory_failure)?
+            }
+        };
+        let entry = registry
+            .entries
+            .entry(directory.bytes().to_vec())
+            .or_insert_with(|| InventoryIdentity {
+                committed: None,
+                observed: Arc::downgrade(&identity),
+            });
+        if committed {
+            entry.committed = Some(identity.clone());
+        }
+        self.identities.push((directory.bytes().to_vec(), identity));
+        Ok(())
+    }
+    pub fn revalidate(&self) -> Result<(), GitFailure> {
+        for (_, identity) in &self.identities {
+            identity
+                .revalidate()
+                .map_err(|_| GitFailure::IdentityReplaced)?;
+        }
+        Ok(())
+    }
+    /// The actor retains these identities at its durable inventory commit, before publication.
+    /// This is idempotent so the service may also confirm a returned committed snapshot.
+    pub fn retain_committed(&self) -> Result<(), GitFailure> {
+        let mut registry = self.registry.lock().map_err(|_| GitFailure::Unchecked)?;
+        for (key, identity) in &self.identities {
+            if let Some(entry) = registry.entries.get_mut(key) {
+                entry.committed = Some(identity.clone());
+            }
+        }
+        Ok(())
+    }
+}
+
 pub struct NativeServerGitHost {
     coordinator: native::GitCoordinator,
     worktrees: Arc<native::LocalWorktreeGit>,
     directories: Arc<NativeDirectoryProvider>,
     head_reader: Arc<HeadReader>,
+    inventory_identities: Arc<Mutex<InventoryIdentities>>,
 }
 impl NativeServerGitHost {
     pub fn new(
@@ -98,7 +280,52 @@ impl NativeServerGitHost {
             worktrees,
             directories,
             head_reader: Arc::new(HeadReader { runner, git, home }),
+            inventory_identities: Arc::default(),
         }
+    }
+    fn checked_probe(
+        &self,
+        directory: &ServerDirectory,
+        cancellation: &GitReadCancellation,
+    ) -> Result<native::ProbeOutcome, GitFailure> {
+        let source = self
+            .directories
+            .retain(directory)
+            .map_err(directory_failure)?;
+        let probe = self
+            .coordinator
+            .probe(&path(directory)?, cancellation)
+            .map_err(read_failure)?;
+        source
+            .revalidate()
+            .map_err(|_| GitFailure::IdentityReplaced)?;
+        if matches!(probe, native::ProbeOutcome::NotRepository) {
+            // Empty discovery output also accompanies inaccessible or invalid Git metadata.
+            // Only a checked, available source with no enclosing Git marker is outside Git.
+            let selected = path(directory)?
+                .canonicalize()
+                .map_err(|_| GitFailure::InvalidDirectory)?;
+            for ancestor in selected.ancestors() {
+                match std::fs::symlink_metadata(ancestor.join(".git")) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    _ => return Err(GitFailure::Unchecked),
+                }
+            }
+            source
+                .revalidate()
+                .map_err(|_| GitFailure::IdentityReplaced)?;
+        }
+        Ok(probe)
+    }
+    fn inventory_lease(&self) -> HostInventoryLease {
+        HostInventoryLease {
+            registry: self.inventory_identities.clone(),
+            identities: Vec::new(),
+        }
+    }
+    fn retain_inventory_identity(&self, directory: &ServerDirectory) -> Result<(), GitFailure> {
+        self.inventory_lease()
+            .retain(&self.directories, directory, true)
     }
     /// Read Git's exact head and removal risks before the pure all-Workspace assessment.
     pub fn removal_facts(
@@ -121,7 +348,7 @@ impl NativeServerGitHost {
             .worktrees
             .iter()
             .enumerate()
-            .find(|(_, record)| record.root == location)
+            .find(|(_, record)| native::server::same_location(&record.root, &location))
             .ok_or(GitFailure::UnlistedWorktree)?;
         if target.main != (index == 0) || target.missing != record.missing {
             return Err(GitFailure::GitStateChanged);
@@ -207,6 +434,13 @@ impl NativeServerGitHost {
         plan: ConfirmedGitPlan,
         cancellation: &GitReadCancellation,
     ) -> Result<Arc<dyn GitHostAssessment>, GitFailure> {
+        self.assess_shared(Arc::new(plan), cancellation)
+    }
+    fn assess_shared(
+        &self,
+        plan: Arc<ConfirmedGitPlan>,
+        cancellation: &GitReadCancellation,
+    ) -> Result<Arc<dyn GitHostAssessment>, GitFailure> {
         plan.validate_scope()?;
         let roots = vec![
             self.directories
@@ -228,7 +462,17 @@ impl NativeServerGitHost {
             .find(|record| {
                 !record.missing && !matches!(record.head, native::listing::WorktreeHead::Bare)
             })
-            .ok_or(GitFailure::Unchecked)?;
+            // The existing hardened coordinator obtains authority from a live
+            // working tree. Do not invent bare-root authority for this assessment.
+            .ok_or_else(|| {
+                if inventory.worktrees.first().is_some_and(|record| {
+                    matches!(record.head, native::listing::WorktreeHead::Bare)
+                }) {
+                    GitFailure::BareRepositoryWithoutWorktree
+                } else {
+                    GitFailure::Unchecked
+                }
+            })?;
         let repository = self
             .coordinator
             .repository(&source.root, cancellation)
@@ -254,6 +498,15 @@ impl NativeServerGitHost {
             }
             ConfirmedGitAction::Remove(scope) => {
                 let location = path(&scope.facts().target.directory)?;
+                let absence = if scope.facts().target.missing {
+                    Some(Arc::new(
+                        self.directories
+                            .retain_absent_removal_target(&scope.facts().target.directory)
+                            .map_err(directory_failure)?,
+                    ))
+                } else {
+                    None
+                };
                 let expected = if scope.facts().target.missing {
                     let filesystem: Arc<dyn native::filesystem::WorktreeFilesystem> =
                         Arc::new(NativeWorktreeFilesystem);
@@ -286,6 +539,7 @@ impl NativeServerGitHost {
                     path: location,
                     force: scope.approval().force(),
                     expected,
+                    absence,
                 }
             }
         };
@@ -310,10 +564,11 @@ enum NativeAction {
         path: PathBuf,
         force: bool,
         expected: native::RemovalExpectation,
+        absence: Option<Arc<CreateTargetLease>>,
     },
 }
 struct NativeAssessment {
-    plan: ConfirmedGitPlan,
+    plan: Arc<ConfirmedGitPlan>,
     repository: native::GitRepository,
     action: NativeAction,
     coordinator: native::GitCoordinator,
@@ -344,6 +599,7 @@ impl GitHostAssessment for NativeAssessment {
                 path,
                 force,
                 expected,
+                absence,
             } => (
                 native::GitWrite::Remove {
                     path: path.clone(),
@@ -352,10 +608,10 @@ impl GitHostAssessment for NativeAssessment {
                 },
                 Arc::new(RemoveValidation {
                     plan: self.plan.clone(),
-                    coordinator: self.coordinator.clone(),
                     reader: Arc::clone(&self.reader),
                     worktrees: Arc::clone(&self.worktrees),
                     expected: expected.clone(),
+                    absence: absence.clone(),
                 }),
             ),
         };
@@ -394,12 +650,16 @@ struct RepositoryValidation {
     validation: Arc<dyn FinalWriteValidation>,
 }
 impl FinalWriteValidation for RepositoryValidation {
-    fn validate(&self) -> Result<(), GitFailure> {
+    fn validate(
+        &self,
+        cancellation: &GitReadCancellation,
+        deadline: Instant,
+    ) -> Result<(), GitFailure> {
         for root in &self.roots {
             root.revalidate()
                 .map_err(|_| GitFailure::IdentityReplaced)?;
         }
-        self.validation.validate()?;
+        self.validation.validate(cancellation, deadline)?;
         for root in &self.roots {
             root.revalidate()
                 .map_err(|_| GitFailure::IdentityReplaced)?;
@@ -409,52 +669,63 @@ impl FinalWriteValidation for RepositoryValidation {
 }
 struct CreateValidation(Arc<CreateTargetLease>);
 impl FinalWriteValidation for CreateValidation {
-    fn validate(&self) -> Result<(), GitFailure> {
+    fn validate(&self, _: &GitReadCancellation, _: Instant) -> Result<(), GitFailure> {
         self.0.revalidate().map_err(directory_failure)
     }
 }
 struct RemoveValidation {
-    plan: ConfirmedGitPlan,
-    coordinator: native::GitCoordinator,
+    plan: Arc<ConfirmedGitPlan>,
     reader: Arc<HeadReader>,
     worktrees: Arc<native::LocalWorktreeGit>,
     expected: native::RemovalExpectation,
+    absence: Option<Arc<CreateTargetLease>>,
 }
 impl FinalWriteValidation for RemoveValidation {
-    fn validate(&self) -> Result<(), GitFailure> {
+    fn validate(
+        &self,
+        cancellation: &GitReadCancellation,
+        deadline: Instant,
+    ) -> Result<(), GitFailure> {
         let ConfirmedGitAction::Remove(scope) = &self.plan.action else {
             return Err(GitFailure::InvalidResponse);
         };
-        let cancellation = GitReadCancellation::default();
+        if let Some(absence) = &self.absence {
+            absence.revalidate().map_err(directory_failure)?;
+        }
+        let worktrees = self.worktrees.with_read_deadline(deadline);
         let snapshot = native::server::server_inventory(
-            &self.worktrees,
+            &worktrees,
             &path(&self.plan.repository.parts().main_root)?,
-            &cancellation,
+            cancellation,
         )
         .map_err(read_failure)?;
         let location = path(&scope.facts().target.directory)?;
-        self.worktrees
-            .confirm_location(&location, &self.expected, &cancellation)
+        worktrees
+            .confirm_location(&location, &self.expected, cancellation)
             .map_err(remove_failure)?;
         let record = snapshot
             .worktrees
             .iter()
-            .find(|w| w.root == location)
+            .find(|w| native::server::same_location(&w.root, &location))
             .ok_or(GitFailure::UnlistedWorktree)?;
         if record.locked || record.missing != scope.facts().target.missing {
             return Err(GitFailure::GitStateChanged);
         }
         if !record.missing {
-            let check = self
-                .coordinator
-                .check_removal(&location, &cancellation)
+            let filesystem: Arc<dyn native::filesystem::WorktreeFilesystem> =
+                Arc::new(NativeWorktreeFilesystem);
+            let check = worktrees
+                .check_removal(&location, &filesystem, cancellation)
                 .map_err(remove_failure)?;
             if (check.changes && scope.approval().require_clean())
                 || (check.submodules && !scope.facts().submodules)
-                || self.reader.read(&location, &cancellation)? != scope.facts().head
+                || self.reader.read_before(&location, cancellation, deadline)? != scope.facts().head
             {
                 return Err(GitFailure::GitStateChanged);
             }
+        }
+        if let Some(absence) = &self.absence {
+            absence.revalidate().map_err(directory_failure)?;
         }
         Ok(())
     }
@@ -533,6 +804,399 @@ impl GitHostSettlement for NativeSettlement {
     }
 }
 impl ServerGitHost for NativeServerGitHost {
+    fn discover_source(
+        &self,
+        directory: &ServerDirectory,
+        basis: &GitAuthoritySnapshot,
+        cancellation: &GitReadCancellation,
+    ) -> Result<Option<HostGitSource>, GitFailure> {
+        let probe = self.checked_probe(directory, cancellation)?;
+        let repository = match probe {
+            native::ProbeOutcome::Repository(repository) => repository,
+            native::ProbeOutcome::NotRepository | native::ProbeOutcome::Hidden => return Ok(None),
+        };
+        let (native::RepositoryRoot::Local(root), native::RepositoryRoot::Local(common)) =
+            (&repository.root, &repository.common_directory)
+        else {
+            return Err(GitFailure::Unchecked);
+        };
+        let value = |path: &Path| {
+            ServerDirectory::new(
+                directory.server(),
+                path.as_os_str().as_encoded_bytes().to_vec(),
+            )
+            .map_err(|_| GitFailure::InvalidDirectory)
+        };
+        let common_directory = basis
+            .repositories
+            .iter()
+            .find(|locator| {
+                native::server::same_location(
+                    common,
+                    &path(&locator.parts().common_directory).unwrap_or_default(),
+                )
+            })
+            .map(|locator| locator.parts().common_directory.clone())
+            .map_or_else(|| value(common), Ok)?;
+        let worktree = basis
+            .organization
+            .state()
+            .worktrees
+            .iter()
+            .find(|record| {
+                native::server::same_location(root, &path(&record.directory).unwrap_or_default())
+            })
+            .map(|record| record.directory.clone())
+            .map_or_else(|| value(root), Ok)?;
+        Ok(Some(HostGitSource {
+            common_directory,
+            worktree,
+        }))
+    }
+    fn status(
+        &self,
+        directory: &ServerDirectory,
+        basis: &GitAuthoritySnapshot,
+        cancellation: &GitReadCancellation,
+    ) -> Result<HostGitStatus, GitFailure> {
+        let repository = match self.checked_probe(directory, cancellation)? {
+            native::ProbeOutcome::Repository(repository) => repository,
+            native::ProbeOutcome::NotRepository | native::ProbeOutcome::Hidden => {
+                return Ok(HostGitStatus {
+                    inventory: None,
+                    facts: empty_status(),
+                });
+            }
+        };
+        let native::RepositoryRoot::Local(root) = &repository.root else {
+            return Err(GitFailure::Unchecked);
+        };
+        let summary = self
+            .coordinator
+            .count(root, repository.config.fsmonitor, cancellation)
+            .map_err(read_failure)?;
+        let facts = native::server::status_facts(std::num::NonZeroU64::MIN, &repository, &summary)?;
+        let inventory = self.inventory(directory, basis, cancellation)?;
+        Ok(HostGitStatus { inventory, facts })
+    }
+    fn inventory(
+        &self,
+        directory: &ServerDirectory,
+        basis: &GitAuthoritySnapshot,
+        cancellation: &GitReadCancellation,
+    ) -> Result<Option<HostGitInventory>, GitFailure> {
+        let source = self
+            .directories
+            .retain(directory)
+            .map_err(directory_failure)?;
+        let selected = path(directory)?;
+        let snapshot = match self
+            .coordinator
+            .list(&selected, cancellation)
+            .map_err(read_failure)?
+        {
+            Some(snapshot) => snapshot,
+            None if basis.repositories.iter().any(|locator| {
+                native::server::same_location(
+                    &selected,
+                    &path(&locator.parts().main_root).unwrap_or_default(),
+                )
+            }) =>
+            {
+                self.coordinator
+                    .administrative_inventory(&selected, cancellation)
+                    .map_err(read_failure)?
+            }
+            None => match self.checked_probe(directory, cancellation)? {
+                native::ProbeOutcome::NotRepository | native::ProbeOutcome::Hidden => {
+                    return Ok(None);
+                }
+                _ => return Err(GitFailure::Unchecked),
+            },
+        };
+        source
+            .revalidate()
+            .map_err(|_| GitFailure::IdentityReplaced)?;
+        if snapshot.worktrees.len() > MAX_GIT_REPOSITORIES {
+            return Err(GitFailure::Capacity);
+        }
+        let value = |path: &Path| {
+            ServerDirectory::new(
+                directory.server(),
+                path.as_os_str().as_encoded_bytes().to_vec(),
+            )
+            .map_err(|_| GitFailure::InvalidDirectory)
+        };
+        let existing = basis.repositories.iter().find(|locator| {
+            native::server::same_location(
+                &snapshot.common_directory,
+                &path(&locator.parts().common_directory).unwrap_or_default(),
+            )
+        });
+        let (main_root, common_directory) = match existing {
+            Some(locator) => (
+                locator.parts().main_root.clone(),
+                locator.parts().common_directory.clone(),
+            ),
+            None => (
+                value(&snapshot.main_root)?,
+                value(&snapshot.common_directory)?,
+            ),
+        };
+        let mut lease = self.inventory_lease();
+        lease.retain(&self.directories, &main_root, existing.is_some())?;
+        lease.retain(&self.directories, &common_directory, existing.is_some())?;
+        let repository = existing.map(|r| r.scope().repository);
+        let mut records = Vec::with_capacity(snapshot.worktrees.len());
+        for (index, record) in snapshot.worktrees.iter().enumerate() {
+            if cancellation.is_cancelled() {
+                return Err(GitFailure::CancelledRead);
+            }
+            let retained = basis.organization.state().worktrees.iter().find(|old| {
+                Some(old.repository) == repository
+                    && native::server::same_location(
+                        &record.root,
+                        &path(&old.directory).unwrap_or_default(),
+                    )
+            });
+            if retained
+                .is_some_and(|old| old.main != (index == 0) || (old.missing && !record.missing))
+            {
+                return Err(GitFailure::IdentityReplaced);
+            }
+            let directory = retained
+                .map(|old| old.directory.clone())
+                .map_or_else(|| value(&record.root), Ok)?;
+            if !record.missing {
+                lease.retain(&self.directories, &directory, retained.is_some())?;
+            } else {
+                self.directories
+                    .retain_absent_removal_target(&directory)
+                    .map_err(directory_failure)?
+                    .revalidate()
+                    .map_err(directory_failure)?;
+            }
+            records.push(HostGitWorktree {
+                retained: retained.map(|w| w.id),
+                directory,
+                main: index == 0,
+                missing: record.missing,
+                bare: matches!(record.head, native::listing::WorktreeHead::Bare),
+                locked: record.locked,
+                branch: match &record.head {
+                    native::listing::WorktreeHead::Branch(name) => Some(branch_text(name)?),
+                    _ => None,
+                },
+            });
+        }
+        source
+            .revalidate()
+            .map_err(|_| GitFailure::IdentityReplaced)?;
+        Ok(Some(HostGitInventory {
+            source: directory.clone(),
+            current: snapshot.current,
+            lease: Some(Arc::new(lease)),
+            main_root,
+            common_directory,
+            repository,
+            records,
+        }))
+    }
+    fn branches(
+        &self,
+        repository: &RepositoryLocator,
+        cancellation: &GitReadCancellation,
+    ) -> Result<Vec<GitBranchRecord>, GitFailure> {
+        let root = path(&repository.parts().main_root)?;
+        self.retain_inventory_identity(&repository.parts().main_root)?;
+        self.retain_inventory_identity(&repository.parts().common_directory)?;
+        let branches = self
+            .coordinator
+            .branches(&root, cancellation)
+            .map_err(read_failure)?;
+        if branches.local.len() + branches.remote.len() > 16_384
+            || branches
+                .local
+                .iter()
+                .chain(&branches.remote)
+                .map(String::len)
+                .sum::<usize>()
+                > 1024 * 1024
+        {
+            return Err(GitFailure::Capacity);
+        }
+        let inventory = native::server::server_inventory(&self.worktrees, &root, cancellation)
+            .map_err(read_failure)?;
+        let checked_out = |name: &str| {
+            inventory.worktrees.iter().any(|w| matches!(&w.head, native::listing::WorktreeHead::Branch(branch) if branch == name))
+        };
+        branches
+            .local
+            .into_iter()
+            .map(|name| {
+                Ok(GitBranchRecord {
+                    checked_out: checked_out(&name),
+                    name: branch_text(&name)?,
+                    remote: false,
+                })
+            })
+            .chain(branches.remote.into_iter().map(|name| {
+                Ok(GitBranchRecord {
+                    checked_out: false,
+                    name: branch_text(&name)?,
+                    remote: true,
+                })
+            }))
+            .collect()
+    }
+    fn creation_assessment(
+        &self,
+        draft: WorktreeCreateDraft,
+        basis: &GitAuthoritySnapshot,
+        cancellation: &GitReadCancellation,
+    ) -> Result<(Arc<ConfirmedGitPlan>, Arc<dyn GitHostAssessment>), GitFailure> {
+        let repository = read_locator(basis, draft.parts().repository)?.clone();
+        let preview = self.preview_creation(
+            draft,
+            &repository,
+            &basis.organization.state().settings,
+            cancellation,
+        )?;
+        let target = match self
+            .directories
+            .retain_create_target(&preview.parts().directory)
+            .map_err(directory_failure)?
+            .class()
+        {
+            spaceterm_core::server_directories::DirectoryValidationClass::AbsentCreateTarget => {
+                CreationTargetObservation::Absent
+            }
+            _ => CreationTargetObservation::EmptyDirectory,
+        };
+        let mut plan = ConfirmedGitPlan {
+            repository,
+            action: ConfirmedGitAction::Create { preview, target },
+            assessment_digest: GitAssessmentDigest::from_bytes([1; 32]),
+        };
+        plan.assessment_digest = read_assessment_digest(&plan, basis.organization.epoch());
+        let plan = Arc::new(plan);
+        let native = self.assess_shared(Arc::clone(&plan), cancellation)?;
+        Ok((plan, native))
+    }
+    fn removal_assessment(
+        &self,
+        worktree: spaceterm_core::identity::WorktreeId,
+        basis: &GitAuthoritySnapshot,
+        cancellation: &GitReadCancellation,
+    ) -> Result<(Arc<ConfirmedGitPlan>, Arc<dyn GitHostAssessment>), GitFailure> {
+        use spaceterm_core::worktrees::assessment::*;
+        let target = basis
+            .organization
+            .state()
+            .worktrees
+            .iter()
+            .find(|w| w.id == worktree)
+            .ok_or(GitFailure::TargetGone)?;
+        let repository = read_locator(
+            basis,
+            spaceterm_core::operations::RepositoryScope {
+                server: worktree.server(),
+                repository: target.repository,
+            },
+        )?
+        .clone();
+        let facts = self.removal_facts(&repository, target, cancellation)?;
+        let inventory = self
+            .inventory(&repository.parts().main_root, basis, cancellation)?
+            .ok_or(GitFailure::UnlistedWorktree)?;
+        let pinned =
+            basis
+                .organization
+                .state()
+                .workspaces
+                .iter()
+                .filter_map(|workspace| {
+                    workspace.pinned_directory.value.as_ref().map(|directory| {
+                        PinDirectoryContainment {
+                            workspace: workspace.id,
+                            directory: directory.clone(),
+                            version: workspace.pinned_directory.version,
+                            containment: self.containment(directory, &target.directory),
+                        }
+                    })
+                })
+                .collect();
+        let panes = basis
+            .organization
+            .state()
+            .panes
+            .iter()
+            .map(|pane| {
+                let directory = basis
+                    .runtime
+                    .panes
+                    .iter()
+                    .find(|stamp| stamp.pane == pane.id)
+                    .and_then(|stamp| stamp.confirmed_directory.as_ref())
+                    .map_or_else(
+                        || pane.restoration_directory().clone(),
+                        |observation| observation.directory().clone(),
+                    );
+                PaneDirectoryContainment {
+                    pane: pane.id,
+                    containment: self.containment(&directory, &target.directory),
+                    directory,
+                }
+            })
+            .collect();
+        let fallbacks = inventory
+            .records
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .retained
+                    .and_then(|id| {
+                        basis
+                            .organization
+                            .state()
+                            .worktrees
+                            .iter()
+                            .find(|w| w.id == id)
+                    })
+                    .map(|record| FallbackWorktree {
+                        record: record.clone(),
+                        bare: entry.bare,
+                        available: !entry.missing
+                            && self.directories.retain(&entry.directory).is_ok(),
+                        containment: self.containment(&entry.directory, &target.directory),
+                    })
+            })
+            .collect();
+        let affected = AffectedWorktreeWork {
+            pinned,
+            panes,
+            fallbacks,
+        };
+        let scope = assess_removal(&basis.organization, &basis.runtime, &facts, &affected)?;
+        let mut plan = ConfirmedGitPlan {
+            repository,
+            action: ConfirmedGitAction::Remove(Box::new(scope)),
+            assessment_digest: GitAssessmentDigest::from_bytes([1; 32]),
+        };
+        plan.assessment_digest = read_assessment_digest(&plan, basis.organization.epoch());
+        let plan = Arc::new(plan);
+        let native = self.assess_shared(Arc::clone(&plan), cancellation)?;
+        Ok((plan, native))
+    }
+    fn containment(
+        &self,
+        directory: &ServerDirectory,
+        root: &ServerDirectory,
+    ) -> spaceterm_core::server_directories::DirectoryContainment {
+        self.directories
+            .containment(root, directory)
+            .unwrap_or(spaceterm_core::server_directories::DirectoryContainment::Unchecked)
+    }
     fn prepare_write(
         &self,
         request: HostGitWriteRequest,
@@ -594,6 +1258,11 @@ impl ServerGitHost for NativeServerGitHost {
     }
     fn shutdown(&self) -> Result<(), GitFailure> {
         self.coordinator.shutdown();
+        self.inventory_identities
+            .lock()
+            .map_err(|_| GitFailure::Unchecked)?
+            .entries
+            .clear();
         Ok(())
     }
 }
@@ -608,6 +1277,7 @@ impl HeadReader {
         directory: &Path,
         args: &[&str],
         cancellation: &GitReadCancellation,
+        deadline: Instant,
     ) -> Result<(native::ProgramExit, Vec<u8>), GitFailure> {
         let request = native::ProgramRequest {
             executable: self.git.clone(),
@@ -619,7 +1289,7 @@ impl HeadReader {
             directory: self.home.clone(),
             environment: native::local_read::git_environment(&self.git, &self.home),
             stdout_limit: Some(2048),
-            deadline: Some(Instant::now() + Duration::from_secs(30)),
+            deadline: Some(deadline),
             keep_process_group_on_exit: false,
         };
         let mut output = Vec::new();
@@ -641,10 +1311,23 @@ impl HeadReader {
         directory: &Path,
         cancellation: &GitReadCancellation,
     ) -> Result<Option<RetainedGitHead>, GitFailure> {
+        self.read_before(
+            directory,
+            cancellation,
+            Instant::now() + Duration::from_secs(30),
+        )
+    }
+    fn read_before(
+        &self,
+        directory: &Path,
+        cancellation: &GitReadCancellation,
+        deadline: Instant,
+    ) -> Result<Option<RetainedGitHead>, GitFailure> {
         let (symbolic, name) = self.run(
             directory,
             &["symbolic-ref", "--quiet", "HEAD"],
             cancellation,
+            deadline,
         )?;
         let branch = if symbolic.success() {
             let text = std::str::from_utf8(&name)
@@ -662,8 +1345,12 @@ impl HeadReader {
         } else {
             None
         };
-        let (exit, object) =
-            self.run(directory, &["rev-parse", "--verify", "HEAD"], cancellation)?;
+        let (exit, object) = self.run(
+            directory,
+            &["rev-parse", "--verify", "HEAD"],
+            cancellation,
+            deadline,
+        )?;
         if !exit.success() {
             return branch
                 .map(RetainedGitHead::Unborn)
@@ -847,4 +1534,108 @@ fn same_directory(left: &Path, right: &Path) -> bool {
         (Ok(left), Ok(right)) => left == right,
         _ => false,
     }
+}
+
+fn empty_status() -> GitStatusFacts {
+    GitStatusFacts {
+        revision: std::num::NonZeroU64::MIN,
+        branch: None,
+        changes: vec![],
+        dirty: false,
+        unchecked: false,
+        pull_request: None,
+        upstream: None,
+        operation: None,
+        counts: None,
+    }
+}
+fn branch_text(name: &str) -> Result<spaceterm_core::organization::BranchName, GitFailure> {
+    spaceterm_core::organization::BranchName::new(name.to_owned())
+        .map_err(|_| GitFailure::InvalidResponse)
+}
+fn read_locator(
+    basis: &GitAuthoritySnapshot,
+    scope: spaceterm_core::operations::RepositoryScope,
+) -> Result<&RepositoryLocator, GitFailure> {
+    basis
+        .repositories
+        .iter()
+        .find(|r| {
+            r.scope() == scope
+                && basis
+                    .organization
+                    .state()
+                    .repositories
+                    .iter()
+                    .any(|r| r.id == scope.repository)
+        })
+        .ok_or(GitFailure::TargetGone)
+}
+
+fn read_assessment_digest(
+    plan: &ConfirmedGitPlan,
+    epoch: spaceterm_core::authority::ServerEpoch,
+) -> GitAssessmentDigest {
+    use sha2::{Digest, Sha256};
+    fn text(hash: &mut Sha256, value: &[u8]) {
+        hash.update((value.len() as u64).to_le_bytes());
+        hash.update(value);
+    }
+    fn number(hash: &mut Sha256, value: u64) {
+        hash.update(value.to_le_bytes());
+    }
+    let mut hash = Sha256::new();
+    hash.update(b"spaceterm-git-read-assessment-v1\0");
+    hash.update(plan.repository.scope().server.bytes());
+    number(&mut hash, epoch.get());
+    number(&mut hash, plan.repository.scope().repository.local());
+    text(&mut hash, plan.repository.parts().main_root.bytes());
+    text(&mut hash, plan.repository.parts().common_directory.bytes());
+    match &plan.action {
+        ConfirmedGitAction::Create { preview, target } => {
+            number(&mut hash, 1);
+            text(&mut hash, preview.parts().directory.bytes());
+            number(
+                &mut hash,
+                preview.parts().template_version.map_or(0, |v| v.get()),
+            );
+            number(
+                &mut hash,
+                match target {
+                    CreationTargetObservation::Absent => 1,
+                    CreationTargetObservation::EmptyDirectory => 2,
+                },
+            );
+            match &preview.parts().draft.parts().branch {
+                WorktreeBranchChoice::New { name, base } => {
+                    number(&mut hash, 1);
+                    text(&mut hash, name.as_str().as_bytes());
+                    match base {
+                        BranchReference::Local(name) => {
+                            number(&mut hash, 1);
+                            text(&mut hash, name.as_str().as_bytes());
+                        }
+                        BranchReference::Remote(name) => {
+                            number(&mut hash, 2);
+                            text(&mut hash, name.as_str().as_bytes());
+                        }
+                    }
+                }
+                WorktreeBranchChoice::Existing { name } => {
+                    number(&mut hash, 2);
+                    text(&mut hash, name.as_str().as_bytes());
+                }
+                WorktreeBranchChoice::Remote { remote, name } => {
+                    number(&mut hash, 3);
+                    text(&mut hash, remote.as_str().as_bytes());
+                    text(&mut hash, name.as_str().as_bytes());
+                }
+            }
+        }
+        ConfirmedGitAction::Remove(scope) => {
+            number(&mut hash, 2);
+            hash.update(scope.assessment_digest().bytes());
+        }
+    }
+    GitAssessmentDigest::from_bytes(hash.finalize().into())
 }

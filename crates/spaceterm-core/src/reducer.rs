@@ -143,9 +143,21 @@ impl OrganizationReducer {
         inventory: &GitInventoryPatch,
         context: &ReductionContext,
     ) -> Result<PreparedReduction, ReducerFailure> {
+        self.prepare_git_inventory_reconciliation(inventory, &[], context)
+    }
+
+    /// Reconcile membership against entries whose identities this reducer allocates.
+    /// The inventory and membership changes share one candidate and publication revision.
+    pub fn prepare_git_inventory_reconciliation(
+        &self,
+        inventory: &GitInventoryPatch,
+        memberships: &[GitInventoryMembership],
+        context: &ReductionContext,
+    ) -> Result<PreparedReduction, ReducerFailure> {
         self.state.check_admission()?;
         self.state.check_principal(context)?;
-        let patch = match creation::plan_git_inventory(&self.state, inventory, context) {
+        let patch = match creation::plan_git_inventory(&self.state, inventory, memberships, context)
+        {
             Ok(patch) => patch,
             Err(ReducerFailure::QuotaExceeded) => {
                 ReductionPatch::rejected(&self.state, OperationFailure::Capacity)

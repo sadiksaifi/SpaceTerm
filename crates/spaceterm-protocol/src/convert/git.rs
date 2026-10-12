@@ -114,7 +114,7 @@ macro_rules! profile {
                 TimedOutRead => GitTimedOutRead, InvalidResponse => GitInvalidResponse, OutputTooLarge => GitOutputTooLarge,
                 WriteFailed => GitWriteFailed, ExternalStateUncertain => GitExternalStateUncertain, RecoveryNeedsReview => GitRecoveryNeedsReview,
                 StorageLocked => GitStorageLocked, StorageUnavailable => GitStorageUnavailable, UnsafeStorage => GitUnsafeStorage,
-                StorageFailure => GitStorageFailure, IndeterminateDurability => GitIndeterminateDurability
+                StorageFailure => GitStorageFailure, IndeterminateDurability => GitIndeterminateDurability, BareRepositoryWithoutWorktree => GitBareRepositoryWithoutWorktree
             );
             pub fn encode_scope(value: RepositoryScope) -> Result<wire::RepositoryScope, ProtocolError> {
                 value.validate().map_err(|_| ProtocolError::Malformed)?;
@@ -287,6 +287,82 @@ macro_rules! profile {
                 };
                 GitMutationOutcome::new(parts).map_err(failure)
             }
+            fn encode_removal(value: &GitRemovalSummary) -> wire::GitRemovalSummary {
+                wire::GitRemovalSummary {
+                    worktree: Some(entity(value.worktree.server(), value.worktree.local())),
+                    directory: Some(directories::encode_directory(&value.directory)),
+                    branch: value.branch.as_ref().map(encode_branch),
+                    risk: match value.risk {
+                        ApprovedRemoval::Clean => wire::GitRemovalRisk::Clean,
+                        ApprovedRemoval::DiscardChanges => wire::GitRemovalRisk::DiscardChanges,
+                        ApprovedRemoval::DeleteSubmoduleCheckouts => wire::GitRemovalRisk::DeleteSubmoduleCheckouts,
+                        ApprovedRemoval::DiscardChangesAndDeleteSubmoduleCheckouts => wire::GitRemovalRisk::DiscardChangesAndDeleteSubmoduleCheckouts,
+                        ApprovedRemoval::Missing => wire::GitRemovalRisk::Missing,
+                    } as i32,
+                }
+            }
+            fn decode_removal(value: &wire::GitRemovalSummary, expected: ServerId) -> Result<GitRemovalSummary, ProtocolError> {
+                Ok(GitRemovalSummary {
+                    worktree: WorktreeId::new(expected, decode_entity(value.worktree.as_ref(), expected)?).map_err(|_| ProtocolError::Malformed)?,
+                    directory: directories::decode_directory(value.directory.as_ref().ok_or(ProtocolError::Malformed)?, expected)?,
+                    branch: value.branch.as_ref().map(decode_branch_ref).transpose()?,
+                    risk: match wire::GitRemovalRisk::try_from(value.risk).map_err(|_| ProtocolError::Malformed)? {
+                        wire::GitRemovalRisk::Clean => ApprovedRemoval::Clean,
+                        wire::GitRemovalRisk::DiscardChanges => ApprovedRemoval::DiscardChanges,
+                        wire::GitRemovalRisk::DeleteSubmoduleCheckouts => ApprovedRemoval::DeleteSubmoduleCheckouts,
+                        wire::GitRemovalRisk::DiscardChangesAndDeleteSubmoduleCheckouts => ApprovedRemoval::DiscardChangesAndDeleteSubmoduleCheckouts,
+                        wire::GitRemovalRisk::Missing => ApprovedRemoval::Missing,
+                        _ => return Err(ProtocolError::Malformed),
+                    },
+                })
+            }
+            fn encode_pull_request(value: &GitPullRequestFacts) -> wire::GitPullRequestFacts {
+                wire::GitPullRequestFacts { host: value.host().to_owned(), owner: value.owner().to_owned(), repository: value.repository().to_owned(), head_branch: Some(encode_branch(value.head_branch())), head_owner: value.head_owner().map(str::to_owned) }
+            }
+            fn decode_pull_request(value: &wire::GitPullRequestFacts) -> Result<GitPullRequestFacts, ProtocolError> {
+                GitPullRequestFacts::new(value.host.clone(), value.owner.clone(), value.repository.clone(), decode_branch(value.head_branch.as_ref())?, value.head_owner.clone()).map_err(failure)
+            }
+            fn encode_upstream(value: &GitUpstream) -> wire::GitUpstream {
+                wire::GitUpstream { name: Some(encode_branch(&value.name)), divergence: value.divergence.map(|d| wire::GitDivergence { ahead: d.ahead, behind: d.behind }) }
+            }
+            fn decode_upstream(value: &wire::GitUpstream) -> Result<GitUpstream, ProtocolError> {
+                Ok(GitUpstream { name: decode_branch(value.name.as_ref())?, divergence: value.divergence.as_ref().map(|d| GitDivergence { ahead: d.ahead, behind: d.behind }) })
+            }
+            fn encode_operation(value: GitRepositoryOperation) -> wire::GitRepositoryOperation {
+                use wire::GitRepositoryOperationKind as K;
+                let (kind, step) = match value {
+                    GitRepositoryOperation::Rebasing { step } => (K::Rebasing, step),
+                    GitRepositoryOperation::Applying { step } => (K::Applying, step),
+                    GitRepositoryOperation::Merging => (K::Merging, None),
+                    GitRepositoryOperation::Reverting => (K::Reverting, None),
+                    GitRepositoryOperation::CherryPicking => (K::CherryPicking, None),
+                    GitRepositoryOperation::Bisecting => (K::Bisecting, None),
+                };
+                wire::GitRepositoryOperation { kind: kind as i32, step: step.map(|s| wire::GitOperationStep { current: s.current, total: s.total }) }
+            }
+            fn decode_operation(value: &wire::GitRepositoryOperation) -> Result<GitRepositoryOperation, ProtocolError> {
+                use wire::GitRepositoryOperationKind as K;
+                let kind = K::try_from(value.kind).map_err(|_| ProtocolError::Malformed)?;
+                let step = value.step.as_ref().map(|s| GitOperationStep { current: s.current, total: s.total });
+                if step.is_some() && !matches!(kind, K::Rebasing | K::Applying) { return Err(ProtocolError::Malformed); }
+                Ok(match kind {
+                    K::Rebasing => GitRepositoryOperation::Rebasing { step },
+                    K::Applying => GitRepositoryOperation::Applying { step },
+                    K::Merging => GitRepositoryOperation::Merging,
+                    K::Reverting => GitRepositoryOperation::Reverting,
+                    K::CherryPicking => GitRepositoryOperation::CherryPicking,
+                    K::Bisecting => GitRepositoryOperation::Bisecting,
+                    _ => return Err(ProtocolError::Malformed),
+                })
+            }
+            fn encode_counts(value: GitChangeCounts) -> wire::GitChangeCounts {
+                use wire::git_change_counts::Total as T;
+                wire::GitChangeCounts { total: Some(match value.total { GitChangeTotal::Exact(n) => T::Exact(n), GitChangeTotal::AtLeast(n) => T::AtLeast(n) }), staged: value.staged, modified: value.modified, deleted: value.deleted, renamed: value.renamed, conflicted: value.conflicted, untracked: value.untracked }
+            }
+            fn decode_counts(value: &wire::GitChangeCounts) -> Result<GitChangeCounts, ProtocolError> {
+                use wire::git_change_counts::Total as T;
+                Ok(GitChangeCounts { total: match value.total.ok_or(ProtocolError::Malformed)? { T::Exact(n) => GitChangeTotal::Exact(n), T::AtLeast(n) => GitChangeTotal::AtLeast(n) }, staged: value.staged, modified: value.modified, deleted: value.deleted, renamed: value.renamed, conflicted: value.conflicted, untracked: value.untracked })
+            }
             pub fn encode_response(value: &GitQueryResponse, expected: ServerId) -> Result<wire::GitQueryResult, ProtocolError> {
                 value.validate(expected).map_err(failure)?;
                 use wire::git_query_result::Result as R;
@@ -294,8 +370,8 @@ macro_rules! profile {
                     Err(f) => R::TypedFailure(encode_failure(*f)),
                     Ok(GitQueryResult::Inventory(p)) => R::Inventory(wire::GitInventoryPage { records: p.records.iter().map(|r| wire::GitInventoryRecord { worktree: Some(entity(r.worktree.server(), r.worktree.local())), directory: Some(directories::encode_directory(&r.directory)), main: r.main, missing: r.missing, listed: r.listed, version: r.version.get() }).collect(), next: p.next.as_ref().map(encode_cursor).transpose()?, version: p.version.get() }),
                     Ok(GitQueryResult::Branches(p)) => R::Branches(wire::GitBranchPage { records: p.records.iter().map(|r| wire::GitBranchRecord { name: Some(encode_branch(&r.name)), remote: r.remote, checked_out: r.checked_out }).collect(), next: p.next.as_ref().map(encode_cursor).transpose()? }),
-                    Ok(GitQueryResult::Status(s)) => R::Status(wire::GitStatusFacts { revision: s.revision.get(), branch: s.branch.as_ref().map(encode_branch), changes: s.changes.iter().map(|c| wire::GitChange { path: c.path().to_vec(), kind: c.kind }).collect(), dirty: s.dirty, unchecked: s.unchecked }),
-                    Ok(GitQueryResult::Assessment(p)) => R::Assessment(wire::GitAssessmentPage { token: Some(encode_token(&p.token)), tabs: p.tabs.iter().map(|t| wire::GitAffectedTab { workspace: Some(entity(t.workspace.server(), t.workspace.local())), tab: Some(entity(t.tab.server(), t.tab.local())), worktree: t.worktree.map(|w| entity(w.server(), w.local())), membership_version: t.membership_version.get() }).collect(), panes: p.panes.iter().map(|a| wire::GitAffectedPane { pane: Some(entity(a.pane.server(), a.pane.local())), tab: Some(entity(a.tab.server(), a.tab.local())), session_generation: a.session_generation.get(), control_generation: a.control_generation.get(), work_generation: a.work_generation.get(), starting: a.starting }).collect(), fallbacks: p.fallbacks.iter().map(|f| wire::GitFallback { workspace: Some(entity(f.workspace.server(), f.workspace.local())), worktree: f.worktree.map(|w| entity(w.server(), w.local())), directory: Some(directories::encode_directory(&f.directory)) }).collect(), next: p.next.as_ref().map(encode_cursor).transpose()?, requires_confirmation: p.requires_confirmation, creation_preview: p.creation_preview.as_ref().map(encode_preview).transpose()?.map(Box::new) }),
+                    Ok(GitQueryResult::Status(s)) => R::Status(wire::GitStatusFacts { revision: s.revision.get(), branch: s.branch.as_ref().map(encode_branch), changes: s.changes.iter().map(|c| wire::GitChange { path: c.path().to_vec(), kind: c.kind }).collect(), dirty: s.dirty, unchecked: s.unchecked, pull_request: s.pull_request.as_ref().map(encode_pull_request), upstream: s.upstream.as_ref().map(encode_upstream), operation: s.operation.map(encode_operation), counts: s.counts.map(encode_counts) }),
+                    Ok(GitQueryResult::Assessment(p)) => R::Assessment(wire::GitAssessmentPage { token: Some(encode_token(&p.token)), tabs: p.tabs.iter().map(|t| wire::GitAffectedTab { workspace: Some(entity(t.workspace.server(), t.workspace.local())), tab: Some(entity(t.tab.server(), t.tab.local())), worktree: t.worktree.map(|w| entity(w.server(), w.local())), membership_version: t.membership_version.get() }).collect(), panes: p.panes.iter().map(|a| wire::GitAffectedPane { pane: Some(entity(a.pane.server(), a.pane.local())), tab: Some(entity(a.tab.server(), a.tab.local())), session_generation: a.session_generation.get(), control_generation: a.control_generation.get(), work_generation: a.work_generation.get(), starting: a.starting }).collect(), fallbacks: p.fallbacks.iter().map(|f| wire::GitFallback { workspace: Some(entity(f.workspace.server(), f.workspace.local())), worktree: f.worktree.map(|w| entity(w.server(), w.local())), directory: Some(directories::encode_directory(&f.directory)) }).collect(), next: p.next.as_ref().map(encode_cursor).transpose()?, requires_confirmation: p.requires_confirmation, creation_preview: p.creation_preview.as_ref().map(encode_preview).transpose()?.map(Box::new), removal: p.removal.as_ref().map(encode_removal) }),
                 };
                 let response = wire::GitQueryResult { request: value.correlation.request.get(), request_generation: value.correlation.generation.get(), scope: value.scope.map(encode_scope).transpose()?, result: Some(result) };
                 bounded(&response, crate::limits::MAX_MANAGEMENT_BYTES)?;
@@ -317,11 +393,11 @@ macro_rules! profile {
                     }
                     R::Status(s) => {
                         if s.changes.len() > MAX_GIT_STATUS_CHANGES { return Err(ProtocolError::LimitExceeded); }
-                        Ok(GitQueryResult::Status(GitStatusFacts { revision: nonzero(s.revision)?, branch: s.branch.as_ref().map(decode_branch_ref).transpose()?, changes: s.changes.iter().map(|c| GitChange::new(c.path.clone(), c.kind).map_err(failure)).collect::<Result<_,ProtocolError>>()?, dirty: s.dirty, unchecked: s.unchecked }))
+                        Ok(GitQueryResult::Status(GitStatusFacts { revision: nonzero(s.revision)?, branch: s.branch.as_ref().map(decode_branch_ref).transpose()?, changes: s.changes.iter().map(|c| GitChange::new(c.path.clone(), c.kind).map_err(failure)).collect::<Result<_,ProtocolError>>()?, dirty: s.dirty, unchecked: s.unchecked, pull_request: s.pull_request.as_ref().map(decode_pull_request).transpose()?, upstream: s.upstream.as_ref().map(decode_upstream).transpose()?, operation: s.operation.as_ref().map(decode_operation).transpose()?, counts: s.counts.as_ref().map(decode_counts).transpose()? }))
                     }
                     R::Assessment(p) => {
                         page_count(p.tabs.len() + p.panes.len() + p.fallbacks.len())?;
-                        Ok(GitQueryResult::Assessment(Box::new(GitAssessmentPage { token: decode_token(p.token.as_ref().ok_or(ProtocolError::Malformed)?, expected)?, tabs: p.tabs.iter().map(|t| Ok(GitAffectedTab { workspace: WorkspaceId::new(expected, decode_entity(t.workspace.as_ref(), expected)?).map_err(|_| ProtocolError::Malformed)?, tab: TabId::new(expected, decode_entity(t.tab.as_ref(), expected)?).map_err(|_| ProtocolError::Malformed)?, worktree: t.worktree.as_ref().map(|e| WorktreeId::new(expected, decode_entity(Some(e), expected)?).map_err(|_| ProtocolError::Malformed)).transpose()?, membership_version: FieldVersion::new(t.membership_version) })).collect::<Result<_,ProtocolError>>()?, panes: p.panes.iter().map(|a| Ok(GitAffectedPane { pane: PaneId::new(expected, decode_entity(a.pane.as_ref(), expected)?).map_err(|_| ProtocolError::Malformed)?, tab: TabId::new(expected, decode_entity(a.tab.as_ref(), expected)?).map_err(|_| ProtocolError::Malformed)?, session_generation: SessionGeneration::new(a.session_generation), control_generation: ControlGeneration::new(a.control_generation), work_generation: CloseWorkGeneration::new(a.work_generation), starting: a.starting })).collect::<Result<_,ProtocolError>>()?, fallbacks: p.fallbacks.iter().map(|f| Ok(GitFallback { workspace: WorkspaceId::new(expected, decode_entity(f.workspace.as_ref(), expected)?).map_err(|_| ProtocolError::Malformed)?, worktree: f.worktree.as_ref().map(|e| WorktreeId::new(expected, decode_entity(Some(e), expected)?).map_err(|_| ProtocolError::Malformed)).transpose()?, directory: directories::decode_directory(f.directory.as_ref().ok_or(ProtocolError::Malformed)?, expected)? })).collect::<Result<_,ProtocolError>>()?, next: p.next.as_ref().map(|c| decode_cursor(c, expected)).transpose()?, requires_confirmation: p.requires_confirmation, creation_preview: p.creation_preview.as_ref().map(|p| decode_preview(p, expected)).transpose()? })))
+                        Ok(GitQueryResult::Assessment(Box::new(GitAssessmentPage { token: decode_token(p.token.as_ref().ok_or(ProtocolError::Malformed)?, expected)?, tabs: p.tabs.iter().map(|t| Ok(GitAffectedTab { workspace: WorkspaceId::new(expected, decode_entity(t.workspace.as_ref(), expected)?).map_err(|_| ProtocolError::Malformed)?, tab: TabId::new(expected, decode_entity(t.tab.as_ref(), expected)?).map_err(|_| ProtocolError::Malformed)?, worktree: t.worktree.as_ref().map(|e| WorktreeId::new(expected, decode_entity(Some(e), expected)?).map_err(|_| ProtocolError::Malformed)).transpose()?, membership_version: FieldVersion::new(t.membership_version) })).collect::<Result<_,ProtocolError>>()?, panes: p.panes.iter().map(|a| Ok(GitAffectedPane { pane: PaneId::new(expected, decode_entity(a.pane.as_ref(), expected)?).map_err(|_| ProtocolError::Malformed)?, tab: TabId::new(expected, decode_entity(a.tab.as_ref(), expected)?).map_err(|_| ProtocolError::Malformed)?, session_generation: SessionGeneration::new(a.session_generation), control_generation: ControlGeneration::new(a.control_generation), work_generation: CloseWorkGeneration::new(a.work_generation), starting: a.starting })).collect::<Result<_,ProtocolError>>()?, fallbacks: p.fallbacks.iter().map(|f| Ok(GitFallback { workspace: WorkspaceId::new(expected, decode_entity(f.workspace.as_ref(), expected)?).map_err(|_| ProtocolError::Malformed)?, worktree: f.worktree.as_ref().map(|e| WorktreeId::new(expected, decode_entity(Some(e), expected)?).map_err(|_| ProtocolError::Malformed)).transpose()?, directory: directories::decode_directory(f.directory.as_ref().ok_or(ProtocolError::Malformed)?, expected)? })).collect::<Result<_,ProtocolError>>()?, next: p.next.as_ref().map(|c| decode_cursor(c, expected)).transpose()?, requires_confirmation: p.requires_confirmation, creation_preview: p.creation_preview.as_ref().map(|p| decode_preview(p, expected)).transpose()?, removal: p.removal.as_ref().map(|r| decode_removal(r, expected)).transpose()? })))
                     }
                 };
                 let response = GitQueryResponse { correlation: GitCorrelation::new(value.request, value.request_generation).map_err(failure)?, scope: value.scope.as_ref().map(|s| decode_scope(s, expected)).transpose()?, result };

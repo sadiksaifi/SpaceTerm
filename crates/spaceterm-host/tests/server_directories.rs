@@ -156,3 +156,61 @@ fn home_is_owning_server_home_and_errors_are_content_free() {
     );
     assert!(!format!("{bad:?}").contains("private-path"));
 }
+
+#[test]
+fn absent_removal_target_checks_disjoint_directories_through_parent_aliases() {
+    let root = tempfile::tempdir().unwrap();
+    let parent = root.path().join("parent");
+    std::fs::create_dir(&parent).unwrap();
+    let alias = root.path().join("alias");
+    symlink(&parent, &alias).unwrap();
+    let outside = parent.join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    let target = alias.join("missing/target");
+    let provider = NativeDirectoryProvider::new(server(), root.path().to_path_buf()).unwrap();
+    assert_eq!(
+        provider.containment(&directory(&target), &directory(&outside)),
+        Ok(DirectoryContainment::Outside)
+    );
+    assert_eq!(
+        provider.containment(
+            &directory(&target),
+            &directory(&parent.join("missing/target/child"))
+        ),
+        Ok(DirectoryContainment::Inside)
+    );
+    std::fs::create_dir_all(&target).unwrap();
+    symlink(root.path().join("unavailable"), target.join("dangling")).unwrap();
+    assert_eq!(
+        provider.containment(&directory(&target.join("dangling")), &directory(&outside)),
+        Ok(DirectoryContainment::Unchecked)
+    );
+}
+
+#[test]
+fn absent_removal_lease_rejects_new_objects_and_replaced_physical_parent() {
+    let root = tempfile::tempdir().unwrap();
+    let parent = root.path().join("parent");
+    std::fs::create_dir(&parent).unwrap();
+    let alias = root.path().join("alias");
+    symlink(&parent, &alias).unwrap();
+    let provider = NativeDirectoryProvider::new(server(), root.path().to_path_buf()).unwrap();
+    for kind in 0..3 {
+        let target = alias.join(format!("target-{kind}"));
+        let lease = provider
+            .retain_absent_removal_target(&directory(&target))
+            .unwrap();
+        match kind {
+            0 => std::fs::create_dir(&target).unwrap(),
+            1 => std::fs::write(&target, b"replacement").unwrap(),
+            _ => symlink(root.path().join("gone"), &target).unwrap(),
+        }
+        assert_eq!(lease.revalidate(), Err(DirectoryFailure::IdentityChanged));
+    }
+    let lease = provider
+        .retain_absent_removal_target(&directory(&alias.join("missing")))
+        .unwrap();
+    std::fs::rename(&parent, root.path().join("old-parent")).unwrap();
+    std::fs::create_dir(&parent).unwrap();
+    assert_eq!(lease.revalidate(), Err(DirectoryFailure::IdentityChanged));
+}

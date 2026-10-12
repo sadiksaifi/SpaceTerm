@@ -1024,6 +1024,9 @@ fn every_typed_git_failure_survives_authenticated_query_responses() {
                 DomainFailure::IndeterminateDurability => {
                     $git::GitFailure::GitIndeterminateDurability
                 }
+                DomainFailure::BareRepositoryWithoutWorktree => {
+                    $git::GitFailure::GitBareRepositoryWithoutWorktree
+                }
             };
             let classes = [
                 DomainFailure::Unauthorized,
@@ -1063,6 +1066,7 @@ fn every_typed_git_failure_survives_authenticated_query_responses() {
                 DomainFailure::UnsafeStorage,
                 DomainFailure::StorageFailure,
                 DomainFailure::IndeterminateDurability,
+                DomainFailure::BareRepositoryWithoutWorktree,
             ];
             let (mut client, mut server) =
                 capable_connections(if stringify!($p) == "v1" { 1 } else { 2 });

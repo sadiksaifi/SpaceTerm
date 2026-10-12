@@ -4,6 +4,7 @@ use spaceterm_core::identity::*;
 use spaceterm_core::operations::*;
 use spaceterm_core::organization::*;
 use spaceterm_core::storage::*;
+use spaceterm_core::worktrees::queries::GitQueryResult;
 use spaceterm_core::worktrees::*;
 use spaceterm_server::contracts::ConnectionAccessSnapshot;
 use spaceterm_server::git::authority::*;
@@ -523,6 +524,49 @@ impl GitHostSettlement for Settlement {
         Ok(())
     }
 }
+// Native removal validation retains its immutable plan until settlement joins the worker.
+struct PlanAssessment {
+    host: Arc<Host>,
+    plan: Arc<ConfirmedGitPlan>,
+}
+struct PlanPrepared {
+    inner: Box<dyn PreparedServerGitWrite>,
+    plan: Arc<ConfirmedGitPlan>,
+}
+struct PlanSettlement {
+    inner: Box<dyn GitHostSettlement>,
+    _plan: Arc<ConfirmedGitPlan>,
+}
+impl GitHostAssessment for PlanAssessment {
+    fn prepare(
+        &self,
+        intent: &GitWriteIntent,
+        cancellation: &GitReadCancellation,
+    ) -> Result<Box<dyn PreparedServerGitWrite>, GitFailure> {
+        Ok(Box::new(PlanPrepared {
+            inner: Assessment(self.host.clone()).prepare(intent, cancellation)?,
+            plan: self.plan.clone(),
+        }))
+    }
+}
+impl PreparedServerGitWrite for PlanPrepared {
+    fn observation(&self) -> &HostWriteObservation {
+        self.inner.observation()
+    }
+    fn execute(self: Box<Self>, permit: DurableGitStartPermit) -> HostGitCompletion {
+        let mut completion = self.inner.execute(permit);
+        completion.settlement = Some(Box::new(PlanSettlement {
+            inner: completion.settlement.take().unwrap(),
+            _plan: self.plan,
+        }));
+        completion
+    }
+}
+impl GitHostSettlement for PlanSettlement {
+    fn finish(self: Box<Self>, recorded: bool) -> Result<(), GitFailure> {
+        self.inner.finish(recorded)
+    }
+}
 async fn fixture() -> (GitService, Arc<Actor>, Arc<Host>, GitCommand) {
     let actor = Arc::new(Actor::default());
     let host = Arc::new(Host::new(&actor));
@@ -719,6 +763,157 @@ async fn unavailable_final_storage_retains_completion_and_retries_only_persisten
             .unwrap(),
         GitSubmission::Retained(_)
     ));
+    assert_eq!(host.executions.load(Ordering::Acquire), 1);
+    service.shutdown().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn deferred_native_settlement_keeps_its_assessment_residency_until_joined() {
+    let actor = Arc::new(Actor::default());
+    let host = Arc::new(Host::new(&actor));
+    let service = GitService::new(
+        server(),
+        ServerEpoch::new(1),
+        host.clone(),
+        actor.clone(),
+        GitLimits::default(),
+    )
+    .unwrap();
+    service.recover(vec![]).await.unwrap();
+    let plan = Arc::new(removal_plan_with_additional_panes(119));
+    let proof = Arc::new(PlanAssessment {
+        host: host.clone(),
+        plan: plan.clone(),
+    });
+    let token = service
+        .cache_assessment(principal(), plan.as_ref().clone(), proof)
+        .await
+        .unwrap();
+    let GitQueryResult::Assessment(page) = service
+        .query(
+            principal(),
+            GitQuery::AssessmentPage {
+                assessment: token.clone(),
+                cursor: None,
+            },
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("assessment")
+    };
+    assert!(
+        page.next.is_none(),
+        "the submitted plan has no cached page retaining its reservation"
+    );
+    service
+        .cache_assessment(
+            principal(),
+            removal_plan_with_additional_panes(3550),
+            Arc::new(Assessment(host.clone())),
+        )
+        .await
+        .unwrap();
+    let full = service
+        .cache_assessment(
+            principal(),
+            plan.as_ref().clone(),
+            Arc::new(Assessment(host.clone())),
+        )
+        .await;
+    assert_eq!(full, Err(GitFailure::Capacity));
+    actor
+        .final_commits
+        .lock()
+        .unwrap()
+        .push_back(CommitDisposition::NotApplied(StoreFailure::Unavailable));
+    service
+        .submit(
+            principal(),
+            operation(1),
+            GitCommand::RemoveConfirmed { assessment: token },
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome(&service).await, Err(GitFailure::StorageUnavailable));
+    assert_eq!(
+        Arc::strong_count(&plan),
+        2,
+        "the deferred native worker still holds the plan"
+    );
+    assert_eq!(host.finishes.load(Ordering::Acquire), 0);
+    let after_deferral = service
+        .cache_assessment(
+            principal(),
+            plan.as_ref().clone(),
+            Arc::new(Assessment(host.clone())),
+        )
+        .await;
+    if after_deferral != Err(GitFailure::Capacity) {
+        assert_eq!(
+            service.shutdown().await,
+            Err(GitFailure::IndeterminateDurability)
+        );
+        assert_eq!(
+            after_deferral,
+            Err(GitFailure::Capacity),
+            "deferred native plans remain charged"
+        );
+    }
+    actor
+        .final_commits
+        .lock()
+        .unwrap()
+        .push_back(CommitDisposition::NotApplied(StoreFailure::Unavailable));
+    assert_eq!(
+        service.retry_settlements().await,
+        Err(GitFailure::StorageUnavailable)
+    );
+    let after_retry = service
+        .cache_assessment(
+            principal(),
+            plan.as_ref().clone(),
+            Arc::new(Assessment(host.clone())),
+        )
+        .await;
+    if after_retry != Err(GitFailure::Capacity) {
+        assert_eq!(
+            service.shutdown().await,
+            Err(GitFailure::IndeterminateDurability)
+        );
+        assert_eq!(
+            after_retry,
+            Err(GitFailure::Capacity),
+            "failed settlement retries keep the same reservation"
+        );
+    }
+    tokio::time::advance(Duration::from_secs(121)).await;
+    let candidate = removal_plan_with_additional_panes(3640);
+    let after_expiration = service
+        .cache_assessment(
+            principal(),
+            candidate.clone(),
+            Arc::new(Assessment(host.clone())),
+        )
+        .await;
+    if after_expiration != Err(GitFailure::Capacity) {
+        assert_eq!(
+            service.shutdown().await,
+            Err(GitFailure::IndeterminateDurability)
+        );
+        assert_eq!(
+            after_expiration,
+            Err(GitFailure::Capacity),
+            "cache expiration must not release an active native plan"
+        );
+    }
+    assert_eq!(service.retry_settlements().await.unwrap(), 1);
+    assert_eq!(Arc::strong_count(&plan), 1);
+    assert_eq!(host.finishes.load(Ordering::Acquire), 1);
+    service
+        .cache_assessment(principal(), candidate, Arc::new(Assessment(host.clone())))
+        .await
+        .unwrap();
     assert_eq!(host.executions.load(Ordering::Acquire), 1);
     service.shutdown().await.unwrap();
 }
@@ -996,6 +1191,9 @@ fn existing_and_remote_branch_operands_cannot_inject_options() {
 }
 
 fn removal_plan() -> ConfirmedGitPlan {
+    removal_plan_with_additional_panes(0)
+}
+fn removal_plan_with_additional_panes(additional: u64) -> ConfirmedGitPlan {
     use spaceterm_core::server_directories::DirectoryContainment;
     use spaceterm_core::worktrees::assessment::*;
     let workspace = WorkspaceId::new(server(), 1).unwrap();
@@ -1066,33 +1264,102 @@ fn removal_plan() -> ConfirmedGitPlan {
             directory: repository.parts().main_root.clone(),
         }],
         worktrees: vec![main.clone(), target.clone()],
-        retained: None,
+        retained: Some({
+            use spaceterm_core::organization_retained::*;
+            OrganizationRetainedFacts::new(OrganizationRetainedParts {
+                server: server(),
+                workspace_names: vec![WorkspaceNameBasis::new(
+                    workspace,
+                    NameText::new("work".into()).unwrap(),
+                    NameText::new("work".into()).unwrap(),
+                )],
+                creation_defaults: vec![TabCreationDefault::new(tab, vec![pane]).unwrap()],
+                pane_generations: vec![PaneGenerationHighWater::new(
+                    pane,
+                    generation,
+                    ControlGeneration::new(0),
+                )],
+                tab_membership_versions: vec![TabMembershipVersion::new(tab, FieldVersion::new(1))],
+                repository_inventory_versions: vec![RepositoryInventoryVersion::new(
+                    repository.scope().repository,
+                    FieldVersion::new(1),
+                )],
+                worktree_inventory: vec![
+                    WorktreeInventoryFacts::new(main.id, true, FieldVersion::new(1)),
+                    WorktreeInventoryFacts::new(target.id, true, FieldVersion::new(1)),
+                ],
+                remote_access: Versioned {
+                    value: spaceterm_core::remote_access::RemoteAccessPolicy::disabled(server()),
+                    version: FieldVersion::new(1),
+                },
+            })
+            .unwrap()
+        }),
     };
-    let snapshot = OrganizationSnapshot::new(
-        epoch,
-        state,
-        vec![PaneRuntimeRecord {
-            pane,
-            session_generation: generation,
-            phase: SessionPhase::Running { generation },
-            control_generation: ControlGeneration::new(0),
-            control: ControlRecord::Unclaimed,
-        }],
-    )
-    .unwrap();
+    let mut state = state;
+    let mut pane_runtime = vec![PaneRuntimeRecord {
+        pane,
+        session_generation: generation,
+        phase: SessionPhase::Running { generation },
+        control_generation: ControlGeneration::new(0),
+        control: ControlRecord::Unclaimed,
+    }];
+    if additional != 0 {
+        use spaceterm_core::organization_retained::*;
+        let mut retained = state.retained.take().unwrap().parts().clone();
+        let mut panes = vec![pane];
+        for index in 2..=additional + 1 {
+            let id = PaneId::new(server(), index).unwrap();
+            panes.push(id);
+            state.panes.push(PaneRecord {
+                id,
+                tab,
+                creation_ordinal: CreationOrdinal::new(index + 2),
+                creation: PaneCreation::SplitOf {
+                    source: pane,
+                    axis: SplitAxis::Horizontal,
+                    edge: SplitEdge::After,
+                },
+                starting_directory: directory(format!("/{}", "x".repeat(4090)).as_bytes()),
+                confirmed_restoration_directory: Versioned {
+                    value: None,
+                    version: FieldVersion::new(1),
+                },
+            });
+            retained.pane_generations.push(PaneGenerationHighWater::new(
+                id,
+                SessionGeneration::new(0),
+                ControlGeneration::new(0),
+            ));
+            pane_runtime.push(PaneRuntimeRecord {
+                pane: id,
+                session_generation: SessionGeneration::new(0),
+                phase: SessionPhase::NotStarted,
+                control_generation: ControlGeneration::new(0),
+                control: ControlRecord::Unclaimed,
+            });
+        }
+        retained.creation_defaults = vec![TabCreationDefault::new(tab, panes).unwrap()];
+        state.retained = Some(OrganizationRetainedFacts::new(retained).unwrap());
+    }
+    let snapshot = OrganizationSnapshot::new(epoch, state, pane_runtime).unwrap();
     let runtime = RuntimeWorkSet {
-        panes: vec![RuntimeWorkStamp {
-            pane,
-            session: Some(SessionKey {
-                epoch,
-                pane,
-                generation,
-            }),
-            context_generation: ContextGeneration::new(1),
-            work_generation: CloseWorkGeneration::new(1),
-            startup_reserved: false,
-            confirmed_directory: None,
-        }],
+        panes: snapshot
+            .runtime()
+            .iter()
+            .map(|record| RuntimeWorkStamp {
+                pane: record.pane,
+                session: (record.pane == pane).then_some(SessionKey {
+                    epoch,
+                    pane: record.pane,
+                    generation,
+                }),
+                context_generation: ContextGeneration::new(1),
+                work_generation: CloseWorkGeneration::new(1),
+                startup_reserved: false,
+                confirmed_directory: None,
+            })
+            .collect(),
     };
     let facts = WorktreeRemovalFacts {
         target: target.clone(),
@@ -1104,11 +1371,20 @@ fn removal_plan() -> ConfirmedGitPlan {
     };
     let affected = AffectedWorktreeWork {
         pinned: vec![],
-        panes: vec![PaneDirectoryContainment {
-            pane,
-            directory: target.directory,
-            containment: DirectoryContainment::Inside,
-        }],
+        panes: snapshot
+            .state()
+            .panes
+            .iter()
+            .map(|record| PaneDirectoryContainment {
+                pane: record.id,
+                directory: record.restoration_directory().clone(),
+                containment: if record.id == pane {
+                    DirectoryContainment::Inside
+                } else {
+                    DirectoryContainment::Outside
+                },
+            })
+            .collect(),
         fallbacks: vec![FallbackWorktree {
             record: main,
             bare: false,
@@ -1260,4 +1536,653 @@ async fn shutdown_cancels_not_started_queue_entries_but_drains_all_started_write
             ..
         }
     ));
+}
+
+#[test]
+fn bare_repository_without_live_linked_worktree_returns_explainable_refusal() {
+    use spaceterm_host::git::{RepositoryProgramRunner, UnixRepositoryProgramRunner, tools};
+    use spaceterm_host::server_directories::native::NativeDirectoryProvider;
+    use std::process::{Command as ProcessCommand, Stdio};
+    struct Directory(std::path::PathBuf);
+    impl Drop for Directory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let root = Directory(std::env::temp_dir().join(format!(
+        "spaceterm-native-bare-assessment-{}",
+        std::process::id()
+    )));
+    std::fs::create_dir(&root.0).unwrap();
+    let repository_path = root.0.join("bare.git");
+    std::fs::create_dir(&repository_path).unwrap();
+    assert!(
+        ProcessCommand::new("/usr/bin/git")
+            .args(["init", "--bare", "-b", "main"])
+            .current_dir(&repository_path)
+            .env_clear()
+            .env("HOME", &root.0)
+            .env("PATH", "/usr/bin:/bin")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    );
+    let provider = Arc::new(NativeDirectoryProvider::new(server(), root.0.clone()).unwrap());
+    let runner: Arc<dyn RepositoryProgramRunner> = Arc::new(UnixRepositoryProgramRunner::new());
+    let version = tools::parse_git_version(
+        &ProcessCommand::new("/usr/bin/git")
+            .arg("--version")
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    let host = NativeServerGitHost::new(
+        runner,
+        "/usr/bin/git".into(),
+        root.0.clone(),
+        version,
+        provider,
+    );
+    let mut plan = plan();
+    let directory = directory(repository_path.as_os_str().as_encoded_bytes());
+    plan.repository = RepositoryLocator::new(RepositoryLocatorParts {
+        scope: plan.repository.scope(),
+        main_root: directory.clone(),
+        common_directory: directory,
+    })
+    .unwrap();
+    assert!(matches!(
+        host.assess(plan, &GitReadCancellation::default()),
+        Err(GitFailure::BareRepositoryWithoutWorktree)
+    ));
+    assert!(!root.0.join("new").exists());
+    host.shutdown().unwrap();
+}
+
+struct NativeRemovalFixture {
+    root: std::path::PathBuf,
+    provider: Arc<spaceterm_host::server_directories::native::NativeDirectoryProvider>,
+    host: Arc<NativeServerGitHost>,
+    repository: RepositoryLocator,
+    snapshot: OrganizationSnapshot,
+}
+impl Drop for NativeRemovalFixture {
+    fn drop(&mut self) {
+        let _ = self.host.shutdown();
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+impl NativeRemovalFixture {
+    fn new(name: &str, runner: Arc<dyn spaceterm_host::git::RepositoryProgramRunner>) -> Self {
+        use spaceterm_core::organization_retained::*;
+        use spaceterm_host::git::tools;
+        use spaceterm_host::server_directories::native::NativeDirectoryProvider;
+        let root = std::env::temp_dir().join(format!("spaceterm-{name}-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let main_path = root.join("repository");
+        std::fs::create_dir(&main_path).unwrap();
+        run_git(&main_path, &["init", "-b", "main"]);
+        run_git(
+            &main_path,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "initial",
+            ],
+        );
+        run_git(
+            &main_path,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "topic",
+                root.join("linked").to_str().unwrap(),
+            ],
+        );
+        let provider = Arc::new(NativeDirectoryProvider::new(server(), root.clone()).unwrap());
+        let version = tools::parse_git_version(
+            &std::process::Command::new("/usr/bin/git")
+                .arg("--version")
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        let host = Arc::new(NativeServerGitHost::new(
+            runner,
+            "/usr/bin/git".into(),
+            root.clone(),
+            version,
+            Arc::clone(&provider),
+        ));
+        let repository = RepositoryLocator::new(RepositoryLocatorParts {
+            scope: plan().repository.scope(),
+            main_root: directory(main_path.as_os_str().as_encoded_bytes()),
+            common_directory: directory(main_path.join(".git").as_os_str().as_encoded_bytes()),
+        })
+        .unwrap();
+        let source = removal_plan();
+        let ConfirmedGitAction::Remove(scope) = source.action else {
+            unreachable!()
+        };
+        let tab = scope.retained().parts().tabs[0].clone();
+        let pane = scope.retained().parts().panes[0].hierarchy.pane;
+        let main = WorktreeRecord {
+            id: WorktreeId::new(server(), 1).unwrap(),
+            repository: repository.scope().repository,
+            directory: repository.parts().main_root.clone(),
+            main: true,
+            missing: false,
+        };
+        let target = WorktreeRecord {
+            id: WorktreeId::new(server(), 2).unwrap(),
+            directory: directory(root.join("linked").as_os_str().as_encoded_bytes()),
+            main: false,
+            ..main.clone()
+        };
+        let state = OrganizationState {
+            server: server(),
+            revision: OrganizationRevision::new(1),
+            settings: ServerSettingsRecord {
+                worktree_location: Versioned {
+                    value: WorktreeLocationTemplate::new(
+                        "~/.worktrees/{repository}/{branch}".into(),
+                    )
+                    .unwrap(),
+                    version: FieldVersion::new(1),
+                },
+            },
+            workspaces: vec![WorkspaceRecord {
+                id: tab.workspace,
+                root_tab: tab.id,
+                creation_ordinal: CreationOrdinal::new(1),
+                name: Versioned {
+                    value: WorkspaceName {
+                        mode: NameMode::Automatic,
+                        display: NameText::new("work".into()).unwrap(),
+                    },
+                    version: FieldVersion::new(1),
+                },
+                pinned_directory: Versioned {
+                    value: None,
+                    version: FieldVersion::new(1),
+                },
+            }],
+            tabs: vec![tab.clone()],
+            panes: vec![PaneRecord {
+                id: pane,
+                tab: tab.id,
+                creation: PaneCreation::Initial,
+                creation_ordinal: CreationOrdinal::new(3),
+                starting_directory: main.directory.clone(),
+                confirmed_restoration_directory: Versioned {
+                    value: None,
+                    version: FieldVersion::new(1),
+                },
+            }],
+            repositories: vec![RepositoryRecord {
+                id: main.repository,
+                directory: main.directory.clone(),
+            }],
+            worktrees: vec![main.clone(), target.clone()],
+            retained:
+                Some(
+                    OrganizationRetainedFacts::new(OrganizationRetainedParts {
+                        server: server(),
+                        workspace_names: vec![WorkspaceNameBasis::new(
+                            tab.workspace,
+                            NameText::new("work".into()).unwrap(),
+                            NameText::new("work".into()).unwrap(),
+                        )],
+                        creation_defaults: vec![
+                            TabCreationDefault::new(tab.id, vec![pane]).unwrap(),
+                        ],
+                        pane_generations: vec![PaneGenerationHighWater::new(
+                            pane,
+                            SessionGeneration::new(1),
+                            ControlGeneration::new(0),
+                        )],
+                        tab_membership_versions: vec![TabMembershipVersion::new(
+                            tab.id,
+                            FieldVersion::new(1),
+                        )],
+                        repository_inventory_versions: vec![RepositoryInventoryVersion::new(
+                            main.repository,
+                            FieldVersion::new(1),
+                        )],
+                        worktree_inventory: vec![
+                            WorktreeInventoryFacts::new(main.id, true, FieldVersion::new(1)),
+                            WorktreeInventoryFacts::new(target.id, true, FieldVersion::new(1)),
+                        ],
+                        remote_access: Versioned {
+                            value: spaceterm_core::remote_access::RemoteAccessPolicy::disabled(
+                                server(),
+                            ),
+                            version: FieldVersion::new(1),
+                        },
+                    })
+                    .unwrap(),
+                ),
+        };
+        let snapshot = OrganizationSnapshot::new(
+            ServerEpoch::new(1),
+            state,
+            vec![PaneRuntimeRecord {
+                pane,
+                session_generation: SessionGeneration::new(1),
+                phase: SessionPhase::Running {
+                    generation: SessionGeneration::new(1),
+                },
+                control_generation: ControlGeneration::new(0),
+                control: ControlRecord::Unclaimed,
+            }],
+        )
+        .unwrap();
+        Self {
+            root,
+            provider,
+            host,
+            repository,
+            snapshot,
+        }
+    }
+    fn plan(&self) -> Result<ConfirmedGitPlan, GitFailure> {
+        use spaceterm_core::server_directories::ServerDirectoryQueries;
+        use spaceterm_core::worktrees::assessment::*;
+        let facts = self.host.removal_facts(
+            &self.repository,
+            &self.snapshot.state().worktrees[1],
+            &GitReadCancellation::default(),
+        )?;
+        let runtime = RuntimeWorkSet {
+            panes: self
+                .snapshot
+                .runtime()
+                .iter()
+                .map(|r| RuntimeWorkStamp {
+                    pane: r.pane,
+                    session: Some(SessionKey {
+                        epoch: self.snapshot.epoch(),
+                        pane: r.pane,
+                        generation: r.session_generation,
+                    }),
+                    context_generation: ContextGeneration::new(1),
+                    work_generation: CloseWorkGeneration::new(1),
+                    startup_reserved: false,
+                    confirmed_directory: None,
+                })
+                .collect(),
+        };
+        let affected = AffectedWorktreeWork {
+            pinned: vec![],
+            panes: self
+                .snapshot
+                .state()
+                .panes
+                .iter()
+                .map(|p| PaneDirectoryContainment {
+                    pane: p.id,
+                    directory: p.restoration_directory().clone(),
+                    containment: self
+                        .provider
+                        .containment(&facts.target.directory, p.restoration_directory())
+                        .unwrap(),
+                })
+                .collect(),
+            fallbacks: vec![FallbackWorktree {
+                record: self.snapshot.state().worktrees[0].clone(),
+                bare: false,
+                available: true,
+                containment: self
+                    .provider
+                    .containment(
+                        &facts.target.directory,
+                        &self.snapshot.state().worktrees[0].directory,
+                    )
+                    .unwrap(),
+            }],
+        };
+        let scope = assess_removal(&self.snapshot, &runtime, &facts, &affected)?;
+        Ok(ConfirmedGitPlan {
+            repository: self.repository.clone(),
+            action: ConfirmedGitAction::Remove(Box::new(scope)),
+            assessment_digest: GitAssessmentDigest::from_bytes([11; 32]),
+        })
+    }
+}
+fn run_git(path: &std::path::Path, arguments: &[&str]) {
+    use std::process::{Command, Stdio};
+    assert!(
+        Command::new("/usr/bin/git")
+            .args(arguments)
+            .current_dir(path)
+            .env_clear()
+            .env("HOME", path)
+            .env("PATH", "/usr/bin:/bin")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+#[tokio::test]
+async fn shutdown_cancels_pipe_blocked_native_preparation_before_retirement_or_git_mutation() {
+    use spaceterm_host::git::*;
+    use std::io::Write;
+    struct BlockStatus {
+        enabled: AtomicBool,
+        root: Mutex<Option<std::path::PathBuf>>,
+        bounded: AtomicBool,
+        finished: AtomicBool,
+    }
+    impl RepositoryProgramRunner for BlockStatus {
+        fn run(
+            &self,
+            request: &ProgramRequest,
+            output: &mut dyn FnMut(&[u8]),
+            cancellation: &CancellationToken,
+        ) -> Result<ProgramExit, ProgramError> {
+            let runner = UnixRepositoryProgramRunner::new();
+            if self.enabled.load(Ordering::Acquire)
+                && request.arguments.iter().any(|a| a == "status")
+            {
+                self.bounded
+                    .store(request.deadline.is_some(), Ordering::Release);
+                let root = self.root.lock().unwrap().clone().unwrap();
+                // Run a real native process with a blocked pipe instead of a user's clean filter.
+                let blocked = ProgramRequest {
+                    executable: "/bin/sh".into(),
+                    arguments: vec![
+                        "-c".into(),
+                        "printf '%s' $$ > \"$1/pid\"; IFS= read -r line < \"$1/pipe\"".into(),
+                        "validation".into(),
+                        root.into_os_string(),
+                    ],
+                    directory: request.directory.clone(),
+                    environment: request.environment.clone(),
+                    stdout_limit: request.stdout_limit,
+                    deadline: request.deadline,
+                    keep_process_group_on_exit: false,
+                };
+                let result = runner.run(&blocked, output, cancellation);
+                self.finished.store(true, Ordering::Release);
+                result
+            } else {
+                runner.run(request, output, cancellation)
+            }
+        }
+    }
+    let runner = Arc::new(BlockStatus {
+        enabled: AtomicBool::new(false),
+        root: Mutex::new(None),
+        bounded: AtomicBool::new(false),
+        finished: AtomicBool::new(false),
+    });
+    let fixture = NativeRemovalFixture::new("cancel-native-validation", runner.clone());
+    let plan = fixture.plan().unwrap();
+    let native = fixture
+        .host
+        .assess(plan.clone(), &GitReadCancellation::default())
+        .unwrap();
+    assert!(
+        std::process::Command::new("/usr/bin/mkfifo")
+            .arg(fixture.root.join("pipe"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    let mut pipe = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(fixture.root.join("pipe"))
+        .unwrap();
+    *runner.root.lock().unwrap() = Some(fixture.root.clone());
+    let actor = Arc::new(Actor::default());
+    let service = GitService::new(
+        server(),
+        ServerEpoch::new(1),
+        fixture.host.clone(),
+        actor.clone(),
+        GitLimits::default(),
+    )
+    .unwrap();
+    service.recover(vec![]).await.unwrap();
+    let token = service
+        .cache_assessment(principal(), plan, native)
+        .await
+        .unwrap();
+    runner.enabled.store(true, Ordering::Release);
+    service
+        .submit(
+            principal(),
+            operation(1),
+            GitCommand::RemoveConfirmed { assessment: token },
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !fixture.root.join("pid").exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let shutting_down = service.clone();
+    let mut shutdown = tokio::spawn(async move { shutting_down.shutdown().await });
+    let result = tokio::time::timeout(Duration::from_secs(2), &mut shutdown).await;
+    let completed_without_release = result.is_ok();
+    if !completed_without_release {
+        runner.enabled.store(false, Ordering::Release);
+        pipe.write_all(b"release\n").unwrap();
+        shutdown.await.unwrap().unwrap();
+    } else {
+        result.unwrap().unwrap().unwrap();
+    }
+    assert!(
+        completed_without_release,
+        "shutdown waited for an unstarted native validation instead of cancelling it"
+    );
+    assert!(runner.bounded.load(Ordering::Acquire));
+    assert!(runner.finished.load(Ordering::Acquire));
+    let pid = std::fs::read_to_string(fixture.root.join("pid")).unwrap();
+    assert!(
+        !std::process::Command::new("/bin/kill")
+            .args(["-0", &pid])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert_eq!(
+        *actor.events.lock().unwrap(),
+        ["admission", "complete", "release"]
+    );
+    let outcomes = actor.outcomes.lock().unwrap();
+    let result = &outcomes.get(&operation(1)).unwrap().1;
+    assert!(matches!(
+        result.parts(),
+        GitMutationOutcomeParts::Failed {
+            failure: GitFailure::CancelledRead,
+            ended_sessions: 0,
+            ..
+        }
+    ));
+    assert!(fixture.root.join("linked/.git").is_file());
+    run_git(
+        &fixture.root.join("repository"),
+        &["show-ref", "--verify", "refs/heads/topic"],
+    );
+}
+
+#[tokio::test]
+async fn real_git_missing_worktree_with_unrelated_pane_directory_can_be_assessed_and_removed() {
+    use spaceterm_host::git::UnixRepositoryProgramRunner;
+    let mut fixture = NativeRemovalFixture::new(
+        "remove-missing",
+        Arc::new(UnixRepositoryProgramRunner::new()),
+    );
+    std::fs::remove_dir_all(fixture.root.join("linked")).unwrap();
+    let mut state = fixture.snapshot.state().clone();
+    state.worktrees[1].missing = true;
+    std::os::unix::fs::symlink(&fixture.root, fixture.root.join("parent-alias")).unwrap();
+    state.worktrees[1].directory = directory(
+        fixture
+            .root
+            .join("parent-alias/linked")
+            .as_os_str()
+            .as_encoded_bytes(),
+    );
+    fixture.snapshot = OrganizationSnapshot::new(
+        fixture.snapshot.epoch(),
+        state,
+        fixture.snapshot.runtime().to_vec(),
+    )
+    .unwrap();
+    let plan = fixture.plan().unwrap();
+    let ConfirmedGitAction::Remove(scope) = &plan.action else {
+        unreachable!()
+    };
+    assert_eq!(scope.approval(), ApprovedRemoval::Missing);
+    assert_eq!(scope.retained().parts().fallbacks.len(), 1);
+    let native = fixture
+        .host
+        .assess(plan.clone(), &GitReadCancellation::default())
+        .unwrap();
+    let actor = Arc::new(Actor::default());
+    let service = GitService::new(
+        server(),
+        fixture.snapshot.epoch(),
+        fixture.host.clone(),
+        actor.clone(),
+        GitLimits::default(),
+    )
+    .unwrap();
+    service.recover(vec![]).await.unwrap();
+    let token = service
+        .cache_assessment(principal(), plan, native)
+        .await
+        .unwrap();
+    service
+        .submit(
+            principal(),
+            operation(1),
+            GitCommand::RemoveConfirmed { assessment: token },
+        )
+        .await
+        .unwrap();
+    let result = outcome(&service).await.unwrap();
+    assert!(
+        matches!(
+            result.parts(),
+            GitMutationOutcomeParts::Removed {
+                closed_tabs: 1,
+                ended_sessions: 1,
+                ..
+            }
+        ),
+        "{result:?}"
+    );
+    assert!(
+        !fixture
+            .root
+            .join("repository/.git/worktrees/linked")
+            .exists()
+    );
+    run_git(
+        &fixture.root.join("repository"),
+        &["show-ref", "--verify", "refs/heads/topic"],
+    );
+    service.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn object_appearing_at_missing_worktree_refuses_preparation_before_session_retirement() {
+    use spaceterm_host::git::UnixRepositoryProgramRunner;
+    for kind in 0..3 {
+        let mut fixture = NativeRemovalFixture::new(
+            &format!("missing-replacement-{kind}"),
+            Arc::new(UnixRepositoryProgramRunner::new()),
+        );
+        let target = fixture.root.join("linked");
+        std::fs::remove_dir_all(&target).unwrap();
+        let mut state = fixture.snapshot.state().clone();
+        state.worktrees[1].missing = true;
+        fixture.snapshot = OrganizationSnapshot::new(
+            fixture.snapshot.epoch(),
+            state,
+            fixture.snapshot.runtime().to_vec(),
+        )
+        .unwrap();
+        let plan = fixture.plan().unwrap();
+        let native = fixture
+            .host
+            .assess(plan.clone(), &GitReadCancellation::default())
+            .unwrap();
+        let actor = Arc::new(Actor::default());
+        let service = GitService::new(
+            server(),
+            fixture.snapshot.epoch(),
+            fixture.host.clone(),
+            actor.clone(),
+            GitLimits::default(),
+        )
+        .unwrap();
+        service.recover(vec![]).await.unwrap();
+        let token = service
+            .cache_assessment(principal(), plan, native)
+            .await
+            .unwrap();
+        match kind {
+            0 => std::fs::create_dir(&target).unwrap(),
+            1 => std::fs::write(&target, b"replacement").unwrap(),
+            _ => std::os::unix::fs::symlink(fixture.root.join("gone"), &target).unwrap(),
+        }
+        service
+            .submit(
+                principal(),
+                operation(1),
+                GitCommand::RemoveConfirmed { assessment: token },
+            )
+            .await
+            .unwrap();
+        let result = outcome(&service).await.unwrap();
+        assert!(
+            matches!(
+                result.parts(),
+                GitMutationOutcomeParts::Failed {
+                    failure: GitFailure::IdentityReplaced,
+                    ended_sessions: 0,
+                    external: ExternalDisposition::NoEffectEstablished,
+                    ..
+                }
+            ),
+            "{result:?}"
+        );
+        assert_eq!(
+            *actor.events.lock().unwrap(),
+            ["admission", "complete", "release"]
+        );
+        assert!(std::fs::symlink_metadata(&target).is_ok());
+        assert!(
+            fixture
+                .root
+                .join("repository/.git/worktrees/linked")
+                .is_dir()
+        );
+        service.shutdown().await.unwrap();
+    }
 }

@@ -55,7 +55,7 @@ pub struct GitReadResult {
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GitSubscriptionEvent {
-    Status(GitReadResult),
+    Status(Box<GitReadResult>),
     /// Retain the previous successful facts. Never synthesize an empty inventory.
     LastKnown(GitFailure),
     ResyncRequired,
@@ -362,13 +362,18 @@ fn validate_read(
         {
             validate_token(&page.token, context, true)?
         }
-        (GitQuery::AssessRemove { .. }, GitQueryResult::Assessment(page))
-            if page.token.kind() == GitAssessmentKind::Remove =>
+        (GitQuery::AssessRemove { worktree }, GitQueryResult::Assessment(page))
+            if page.token.kind() == GitAssessmentKind::Remove
+                && page
+                    .removal
+                    .as_ref()
+                    .is_some_and(|summary| summary.worktree == *worktree) =>
         {
             validate_token(&page.token, context, true)?
         }
         (GitQuery::AssessmentPage { assessment, .. }, GitQueryResult::Assessment(page))
-            if assessment == &page.token =>
+            if assessment == &page.token
+                && (assessment.kind() != GitAssessmentKind::Remove || page.removal.is_some()) =>
         {
             validate_token(&page.token, context, true)?
         }

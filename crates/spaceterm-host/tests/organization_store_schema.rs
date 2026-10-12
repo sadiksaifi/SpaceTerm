@@ -960,6 +960,12 @@ fn git_scope_codec_preserves_exact_sessions_work_generations_and_fallbacks() {
             root_pane: pane,
             creation_ordinal: CreationOrdinal::new(1),
         }],
+        membership_versions: vec![
+            spaceterm_core::organization_retained::TabMembershipVersion::new(
+                tab,
+                FieldVersion::new(17),
+            ),
+        ],
         panes: vec![RetainedAffectedPane {
             hierarchy: spaceterm_core::operations::AssessedPane {
                 workspace,
@@ -988,6 +994,16 @@ fn git_scope_codec_preserves_exact_sessions_work_generations_and_fallbacks() {
     assert_eq!(
         codec::decode_git_removal_scope(&bytes, server()).unwrap(),
         value
+    );
+    assert_eq!(&bytes[4..6], &2u16.to_be_bytes());
+    let mut legacy_parts = value.parts().clone();
+    legacy_parts.membership_versions.clear();
+    let legacy = RetainedRemovalScope::new(legacy_parts).unwrap();
+    let legacy_bytes = codec::encode_git_removal_scope(&legacy).unwrap();
+    assert_eq!(&legacy_bytes[4..6], &1u16.to_be_bytes());
+    assert_eq!(
+        codec::decode_git_removal_scope(&legacy_bytes, server()).unwrap(),
+        legacy
     );
     let empty = RetainedRemovalScope::empty(server());
     assert_eq!(

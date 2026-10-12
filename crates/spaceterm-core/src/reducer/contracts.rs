@@ -326,6 +326,14 @@ pub struct GitOrganizationSettlement {
     pub creator_still_authorized: bool,
 }
 
+/// A destination is an index into the same validated inventory, not a guessed ID.
+#[derive(Clone, Copy, Debug)]
+pub struct GitInventoryMembership {
+    pub tab: TabId,
+    pub expected_version: FieldVersion,
+    pub destination: Option<usize>,
+}
+
 /// Owning-server inventory facts, not a Git write intent or execution permit.
 /// `None` requests a reducer-issued identity in the insertion transaction; supplied
 /// identities must already exist. Omitted Worktrees and their memberships survive.

@@ -658,6 +658,7 @@ fn variants(name: &str) -> Result<&'static [&'static str], CodecError> {
             "UnsafeStorage",
             "StorageFailure",
             "IndeterminateDurability",
+            "BareRepositoryWithoutWorktree",
         ],
         _ => return Err(CodecError),
     })

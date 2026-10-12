@@ -353,6 +353,7 @@ fn all_git_failure_numbers_have_one_exact_both_major_meaning() {
         GitFailure::UnsafeStorage,
         GitFailure::StorageFailure,
         GitFailure::IndeterminateDurability,
+        GitFailure::BareRepositoryWithoutWorktree,
     ];
     for (index, failure) in failures.into_iter().enumerate() {
         let number = index as i32 + 1;
@@ -361,7 +362,7 @@ fn all_git_failure_numbers_have_one_exact_both_major_meaning() {
         assert_eq!(git::v1::decode_failure(number), Ok(failure));
         assert_eq!(git::v2::decode_failure(number), Ok(failure));
     }
-    for number in [0, 38, -1] {
+    for number in [0, 39, -1] {
         assert_eq!(
             git::v1::decode_failure(number),
             Err(ProtocolError::Malformed)
@@ -481,6 +482,7 @@ fn creation_preview_and_removal_pages_preserve_optional_membership() {
             next: None,
             requires_confirmation: true,
             creation_preview: Some(preview),
+            removal: None,
         },
         GitAssessmentPage {
             token: token(GitAssessmentKind::Remove),
@@ -506,6 +508,7 @@ fn creation_preview_and_removal_pages_preserve_optional_membership() {
             next: None,
             requires_confirmation: true,
             creation_preview: None,
+            removal: None,
         },
     ];
     for page in pages {
@@ -636,6 +639,10 @@ fn remote_git_values_and_debug_exclude_paths_tokens_and_branch_text() {
             changes: vec![GitChange::new(b"sensitive-path".to_vec(), 1).unwrap()],
             dirty: true,
             unchecked: false,
+            pull_request: None,
+            upstream: None,
+            operation: None,
+            counts: None,
         })),
     };
     let debug = format!("{response:?} {:?}", token(GitAssessmentKind::Remove));
@@ -696,4 +703,290 @@ fn authenticated_directory_queries_are_bound_to_same_negotiated_principal() {
             response
         );
     }
+}
+
+fn authenticated_response_round_trip(major: u32, response: &GitQueryResponse) -> GitQueryResponse {
+    let (mut client, mut connection) = capable_connections(major);
+    let payload = git::encode_response(major, response, server()).unwrap();
+    let received = client
+        .decode(&connection.encode(&payload).unwrap())
+        .unwrap();
+    git::decode_response(&received, server()).unwrap()
+}
+
+#[test]
+fn removal_target_and_all_destructive_categories_round_trip_both_majors() {
+    for major in [1, 2] {
+        for risk in [
+            ApprovedRemoval::Clean,
+            ApprovedRemoval::DiscardChanges,
+            ApprovedRemoval::DeleteSubmoduleCheckouts,
+            ApprovedRemoval::DiscardChangesAndDeleteSubmoduleCheckouts,
+            ApprovedRemoval::Missing,
+        ] {
+            let response = GitQueryResponse {
+                correlation: correlation(),
+                scope: Some(scope()),
+                result: Ok(GitQueryResult::Assessment(Box::new(GitAssessmentPage {
+                    token: token(GitAssessmentKind::Remove),
+                    tabs: vec![],
+                    panes: vec![],
+                    fallbacks: vec![],
+                    next: None,
+                    requires_confirmation: true,
+                    creation_preview: None,
+                    removal: Some(GitRemovalSummary {
+                        worktree: WorktreeId::new(server(), 8).unwrap(),
+                        directory: ServerDirectory::new(
+                            server(),
+                            b"/owning/server/linked".to_vec(),
+                        )
+                        .unwrap(),
+                        branch: Some(BranchName::new("kept-branch".into()).unwrap()),
+                        risk,
+                    }),
+                }))),
+            };
+            assert_eq!(
+                authenticated_response_round_trip(major, &response),
+                response
+            );
+        }
+    }
+}
+
+#[test]
+fn status_preserves_pull_request_divergence_operation_and_full_counts_both_majors() {
+    for major in [1, 2] {
+        for total in [GitChangeTotal::Exact(2000), GitChangeTotal::AtLeast(2000)] {
+            for operation in [
+                GitRepositoryOperation::Rebasing {
+                    step: Some(GitOperationStep {
+                        current: 2,
+                        total: 7,
+                    }),
+                },
+                GitRepositoryOperation::Applying { step: None },
+                GitRepositoryOperation::Merging,
+                GitRepositoryOperation::Reverting,
+                GitRepositoryOperation::CherryPicking,
+                GitRepositoryOperation::Bisecting,
+            ] {
+                let response = GitQueryResponse {
+                    correlation: correlation(),
+                    scope: Some(scope()),
+                    result: Ok(GitQueryResult::Status(GitStatusFacts {
+                        revision: std::num::NonZeroU64::new(1).unwrap(),
+                        branch: Some(BranchName::new("local-topic".into()).unwrap()),
+                        changes: (0..20)
+                            .map(|i| GitChange::new(format!("file-{i}").into_bytes(), 1).unwrap())
+                            .collect(),
+                        dirty: true,
+                        unchecked: false,
+                        pull_request: Some(
+                            GitPullRequestFacts::new(
+                                "github.com".into(),
+                                "base-owner".into(),
+                                "app".into(),
+                                BranchName::new("pushed-topic".into()).unwrap(),
+                                Some("fork-owner".into()),
+                            )
+                            .unwrap(),
+                        ),
+                        upstream: Some(GitUpstream {
+                            name: BranchName::new("upstream/main".into()).unwrap(),
+                            divergence: Some(GitDivergence {
+                                ahead: 12,
+                                behind: 4,
+                            }),
+                        }),
+                        operation: Some(operation),
+                        counts: Some(GitChangeCounts {
+                            total,
+                            staged: 10,
+                            modified: 1500,
+                            deleted: 7,
+                            renamed: 5,
+                            conflicted: 3,
+                            untracked: 475,
+                        }),
+                    })),
+                };
+                assert_eq!(
+                    authenticated_response_round_trip(major, &response),
+                    response
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn status_extensions_reject_credentials_invalid_progress_and_inconsistent_counts() {
+    macro_rules! check {
+        ($p:ident) => {{
+            use spaceterm_protocol::wire::git::$p as w;
+            let response = |status| w::GitQueryResult {
+                request: 1,
+                request_generation: 2,
+                scope: Some(git::$p::encode_scope(scope()).unwrap()),
+                result: Some(w::git_query_result::Result::Status(status)),
+            };
+            let base = w::GitStatusFacts {
+                revision: 1,
+                branch: Some(w::BranchText {
+                    value: "topic".into(),
+                }),
+                ..Default::default()
+            };
+            for (host, owner, repository, head_owner) in [
+                ("credential@github.com", "owner", "repo", None),
+                ("GitHub.com", "owner", "repo", None),
+                ("github.com", "owner/path", "repo", None),
+                ("github.com", "owner", "repo?token=credential", None),
+                ("github.com", "owner", "repo", Some("token@owner")),
+            ] {
+                let status = w::GitStatusFacts {
+                    pull_request: Some(w::GitPullRequestFacts {
+                        host: host.into(),
+                        owner: owner.into(),
+                        repository: repository.into(),
+                        head_branch: Some(w::BranchText {
+                            value: "topic".into(),
+                        }),
+                        head_owner: head_owner.map(Into::into),
+                    }),
+                    ..base.clone()
+                };
+                assert_eq!(
+                    git::$p::decode_response(&response(status), server()),
+                    Err(ProtocolError::Malformed)
+                );
+            }
+            let status = w::GitStatusFacts {
+                pull_request: Some(w::GitPullRequestFacts {
+                    host: "github.com".into(),
+                    owner: "x".repeat(257),
+                    repository: "repo".into(),
+                    head_branch: Some(w::BranchText {
+                        value: "topic".into(),
+                    }),
+                    head_owner: None,
+                }),
+                ..base.clone()
+            };
+            assert_eq!(
+                git::$p::decode_response(&response(status), server()),
+                Err(ProtocolError::Malformed)
+            );
+            for (kind, current, total) in [
+                (w::GitRepositoryOperationKind::Rebasing, 0, 7),
+                (w::GitRepositoryOperationKind::Applying, 8, 7),
+                (w::GitRepositoryOperationKind::Merging, 2, 7),
+            ] {
+                let status = w::GitStatusFacts {
+                    operation: Some(w::GitRepositoryOperation {
+                        kind: kind as i32,
+                        step: Some(w::GitOperationStep { current, total }),
+                    }),
+                    ..base.clone()
+                };
+                assert_eq!(
+                    git::$p::decode_response(&response(status), server()),
+                    Err(ProtocolError::Malformed)
+                );
+            }
+            for counts in [
+                w::GitChangeCounts::default(),
+                w::GitChangeCounts {
+                    total: Some(w::git_change_counts::Total::Exact(0)),
+                    modified: 1,
+                    ..Default::default()
+                },
+            ] {
+                let status = w::GitStatusFacts {
+                    counts: Some(counts),
+                    ..base.clone()
+                };
+                assert_eq!(
+                    git::$p::decode_response(&response(status), server()),
+                    Err(ProtocolError::Malformed)
+                );
+            }
+            // Legacy facts still read, but absence must not imply an exact display-list count.
+            let decoded = git::$p::decode_response(&response(base), server()).unwrap();
+            let Ok(GitQueryResult::Status(status)) = decoded.result else {
+                panic!("expected status");
+            };
+            assert_eq!(status.counts, None);
+        }};
+    }
+    check!(v1);
+    check!(v2);
+}
+
+#[test]
+fn removal_summary_requires_its_remove_token_and_owning_server() {
+    macro_rules! check {
+        ($p:ident) => {{
+            use spaceterm_protocol::wire::git::$p as w;
+            let mut response = w::GitQueryResult {
+                request: 1,
+                request_generation: 2,
+                scope: Some(git::$p::encode_scope(scope()).unwrap()),
+                result: Some(w::git_query_result::Result::Assessment(
+                    w::GitAssessmentPage {
+                        token: Some(git::$p::encode_token(&token(GitAssessmentKind::Create))),
+                        requires_confirmation: true,
+                        removal: Some(w::GitRemovalSummary {
+                            worktree: Some(support::entity(8)),
+                            directory: Some(
+                                spaceterm_protocol::convert::directories::$p::encode_directory(
+                                    &ServerDirectory::new(server(), b"/linked".to_vec()).unwrap(),
+                                ),
+                            ),
+                            risk: w::GitRemovalRisk::DiscardChanges as i32,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                )),
+            };
+            assert_eq!(
+                git::$p::decode_response(&response, server()),
+                Err(ProtocolError::Malformed)
+            );
+            let Some(w::git_query_result::Result::Assessment(page)) = response.result.as_mut()
+            else {
+                unreachable!();
+            };
+            page.token = Some(git::$p::encode_token(&token(GitAssessmentKind::Remove)));
+            page.removal.as_mut().unwrap().risk = 0;
+            assert_eq!(
+                git::$p::decode_response(&response, server()),
+                Err(ProtocolError::Malformed)
+            );
+            let Some(w::git_query_result::Result::Assessment(page)) = response.result.as_mut()
+            else {
+                unreachable!();
+            };
+            page.removal.as_mut().unwrap().risk = w::GitRemovalRisk::Clean as i32;
+            page.removal
+                .as_mut()
+                .unwrap()
+                .worktree
+                .as_mut()
+                .unwrap()
+                .server
+                .as_mut()
+                .unwrap()
+                .value = vec![2; 16];
+            assert_eq!(
+                git::$p::decode_response(&response, server()),
+                Err(ProtocolError::Malformed)
+            );
+        }};
+    }
+    check!(v1);
+    check!(v2);
 }

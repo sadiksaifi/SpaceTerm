@@ -8,10 +8,10 @@ use spaceterm_host::git::*;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 struct Valid;
 impl FinalWriteValidation for Valid {
-    fn validate(&self) -> Result<(), GitFailure> {
+    fn validate(&self, _: &CancellationToken, _: Instant) -> Result<(), GitFailure> {
         Ok(())
     }
 }
@@ -171,7 +171,7 @@ fn replaced_common_directory_invalidates_prepared_write() {
 fn failed_final_validation_runs_no_git_write() {
     struct Refuse(std::sync::atomic::AtomicUsize);
     impl FinalWriteValidation for Refuse {
-        fn validate(&self) -> Result<(), GitFailure> {
+        fn validate(&self, _: &CancellationToken, _: Instant) -> Result<(), GitFailure> {
             if self.0.fetch_add(1, std::sync::atomic::Ordering::AcqRel) == 0 {
                 Ok(())
             } else {
@@ -196,5 +196,117 @@ fn failed_final_validation_runs_no_git_write() {
         Err(GitFailure::GitStateChanged)
     ));
     assert!(!root.path().join("one").exists());
+    coordinator.shutdown();
+}
+
+#[test]
+fn status_mapping_keeps_exact_and_lower_bound_counts_beyond_display_limit() {
+    use spaceterm_core::worktrees::queries::*;
+    let repository = ProbedRepository {
+        root: RepositoryRoot::Local("/repo".into()),
+        git_directory: RepositoryRoot::Local("/repo/.git".into()),
+        common_directory: RepositoryRoot::Local("/repo/.git".into()),
+        head: RepositoryHead::Branch("topic".into()),
+        commit: None,
+        upstream: None,
+        operation: Some(RepositoryOperation::Rebasing {
+            step: Some(OperationStep {
+                current: 2,
+                total: 7,
+            }),
+        }),
+        config: RepositoryConfig::default(),
+    };
+    for total in [ChangeTotal::Exact(2000), ChangeTotal::AtLeast(2000)] {
+        let summary = PorcelainSummary {
+            headers: StatusHeaders {
+                branch: Some("topic".into()),
+                upstream: Some("origin/main".into()),
+                divergence: Some(Divergence {
+                    ahead: 12,
+                    behind: 4,
+                }),
+                ..Default::default()
+            },
+            changes: ChangeSummary {
+                total,
+                modified: 2000,
+                entries: (0..20)
+                    .map(|i| ChangeEntry {
+                        kind: ChangeKind::Modified,
+                        path: format!("file-{i}").into(),
+                    })
+                    .collect(),
+                ..Default::default()
+            },
+        };
+        let mapped = spaceterm_host::git::server::status_facts(
+            std::num::NonZeroU64::new(1).unwrap(),
+            &repository,
+            &summary,
+        )
+        .unwrap();
+        assert_eq!(mapped.changes.len(), 20);
+        assert_eq!(
+            mapped.counts.unwrap().total,
+            match total {
+                ChangeTotal::Exact(n) => GitChangeTotal::Exact(n),
+                ChangeTotal::AtLeast(n) => GitChangeTotal::AtLeast(n),
+            }
+        );
+        assert_eq!(mapped.counts.unwrap().modified, 2000);
+        assert_eq!(
+            mapped.upstream.unwrap().divergence,
+            Some(GitDivergence {
+                ahead: 12,
+                behind: 4
+            })
+        );
+        assert_eq!(
+            mapped.operation,
+            Some(GitRepositoryOperation::Rebasing {
+                step: Some(GitOperationStep {
+                    current: 2,
+                    total: 7
+                })
+            })
+        );
+    }
+}
+
+#[test]
+fn started_write_validation_does_not_observe_preparation_cancellation() {
+    struct RequireActive;
+    impl FinalWriteValidation for RequireActive {
+        fn validate(
+            &self,
+            cancellation: &CancellationToken,
+            deadline: Instant,
+        ) -> Result<(), GitFailure> {
+            assert!(deadline > Instant::now());
+            if cancellation.is_cancelled() {
+                Err(GitFailure::CancelledRead)
+            } else {
+                Ok(())
+            }
+        }
+    }
+    let (root, coordinator) = fixture();
+    let cancellation = CancellationToken::default();
+    let repository = coordinator.repository(root.path(), &cancellation).unwrap();
+    let (_, prepared) = coordinator
+        .prepare_server_write(
+            &repository,
+            create(root.path(), "started"),
+            binding(1),
+            &cancellation,
+            Arc::new(RequireActive),
+        )
+        .unwrap();
+    cancellation.cancel();
+    let executed = prepared.execute(binding(1)).unwrap();
+    assert_eq!(executed.outcome(), GitWriteOutcome::Created);
+    executed.finish(Ok(())).unwrap();
+    assert!(root.path().join("started/.git").is_file());
     coordinator.shutdown();
 }

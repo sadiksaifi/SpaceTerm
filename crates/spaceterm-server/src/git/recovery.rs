@@ -72,7 +72,7 @@ impl GitService {
                 external: observation.external,
                 recovery: Some(observation.observation),
             };
-            match self.settle(reservation, completion, None).await {
+            match self.settle(reservation, completion, None, None).await {
                 Ok(_) => reconciled += 1,
                 Err(error) => {
                     failure = Some(error);

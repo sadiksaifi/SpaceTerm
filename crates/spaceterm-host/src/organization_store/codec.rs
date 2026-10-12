@@ -24,7 +24,7 @@ use spaceterm_core::organization::{
     BoundedText, BranchName, FailureClass, MAX_DIRECTORY_BYTES, MAX_NAME_BYTES, PaneCreation,
     RetirementReason, ServerDirectory, SplitAxis, SplitEdge, TabRecord,
 };
-use spaceterm_core::organization_retained::TabCreationDefault;
+use spaceterm_core::organization_retained::{TabCreationDefault, TabMembershipVersion};
 use spaceterm_core::pairing::{
     ClientRecord, EnrollmentIssuer, PairingClientStreams, PairingClientStreamsParts, PairingKeys,
     PairingKeysParts,
@@ -270,12 +270,19 @@ pub fn encode_record(
     kind: RecordKind,
     encode: impl FnOnce(&mut Writer) -> Result<(), CodecFailure>,
 ) -> Result<Vec<u8>, CodecFailure> {
+    encode_versioned_record(kind, VERSION, encode)
+}
+fn encode_versioned_record(
+    kind: RecordKind,
+    version: u16,
+    encode: impl FnOnce(&mut Writer) -> Result<(), CodecFailure>,
+) -> Result<Vec<u8>, CodecFailure> {
     let mut writer = Writer {
         bytes: Vec::new(),
         maximum: kind.maximum_payload() + HEADER_BYTES,
     };
     writer.fixed(MAGIC)?;
-    writer.fixed(&VERSION.to_be_bytes())?;
+    writer.fixed(&version.to_be_bytes())?;
     writer.fixed(&(kind as u16).to_be_bytes())?;
     writer.fixed(&[0; 4])?;
     encode(&mut writer)?;
@@ -292,6 +299,14 @@ pub fn decode_record<T>(
     bytes: &[u8],
     decode: impl FnOnce(&mut Reader<'_>) -> Result<T, CodecFailure>,
 ) -> Result<T, CodecFailure> {
+    decode_versioned_record(kind, bytes, VERSION, decode)
+}
+fn decode_versioned_record<T>(
+    kind: RecordKind,
+    bytes: &[u8],
+    version: u16,
+    decode: impl FnOnce(&mut Reader<'_>) -> Result<T, CodecFailure>,
+) -> Result<T, CodecFailure> {
     if bytes.len() > kind.maximum_payload() + HEADER_BYTES {
         return Err(CodecFailure::ResourceLimit);
     }
@@ -299,7 +314,7 @@ pub fn decode_record<T>(
     if header.fixed(4)? != MAGIC {
         return Err(CodecFailure::InvalidEncoding);
     }
-    if header.fixed(2)? != VERSION.to_be_bytes() {
+    if header.fixed(2)? != version.to_be_bytes() {
         return Err(CodecFailure::UnsupportedVersion);
     }
     if header.fixed(2)? != (kind as u16).to_be_bytes() {
@@ -1040,11 +1055,25 @@ fn read_tab(reader: &mut Reader<'_>, server: ServerId) -> Result<TabRecord, Code
 /// Encodes exact all-Workspace removal scope, without attachments or native proofs.
 pub fn encode_git_removal_scope(value: &RetainedRemovalScope) -> Result<Vec<u8>, CodecFailure> {
     let value = value.parts();
-    encode_record(RecordKind::GitRemovalScope, |writer| {
+    // Only this unshipped record advances. V1 scopes remain readable for recovery;
+    // absence of membership versions is never interpreted as an initial generation.
+    let version = if value.membership_versions.is_empty() {
+        1
+    } else {
+        2
+    };
+    encode_versioned_record(RecordKind::GitRemovalScope, version, |writer| {
         writer.fixed(&value.server.bytes())?;
         writer.count(value.tabs.len(), MAX_GIT_TABS)?;
         for tab in &value.tabs {
             write_tab(writer, tab)?;
+        }
+        if version == 2 {
+            writer.count(value.membership_versions.len(), MAX_GIT_TABS)?;
+            for stamp in &value.membership_versions {
+                writer.u64(stamp.id().local())?;
+                writer.u64(stamp.version().get())?;
+            }
         }
         writer.count(value.panes.len(), MAX_GIT_PANES)?;
         for pane in &value.panes {
@@ -1081,9 +1110,29 @@ pub fn decode_git_removal_scope(
     bytes: &[u8],
     expected: ServerId,
 ) -> Result<RetainedRemovalScope, CodecFailure> {
-    decode_record(RecordKind::GitRemovalScope, bytes, |reader| {
+    let version = u16::from_be_bytes(array(
+        bytes.get(4..6).ok_or(CodecFailure::InvalidEncoding)?,
+    )?);
+    if !matches!(version, 1 | 2) {
+        return Err(CodecFailure::UnsupportedVersion);
+    }
+    decode_versioned_record(RecordKind::GitRemovalScope, bytes, version, |reader| {
         let server = server(reader, expected)?;
         let tabs = vector(reader, MAX_GIT_TABS, 33, |reader| read_tab(reader, server))?;
+        let membership_versions = if version == 2 {
+            let stamps = vector(reader, MAX_GIT_TABS, 16, |reader| {
+                Ok(TabMembershipVersion::new(
+                    local(reader, server)?,
+                    FieldVersion::new(reader.u64()?),
+                ))
+            })?;
+            if stamps.len() != tabs.len() {
+                return Err(CodecFailure::InvalidEncoding);
+            }
+            stamps
+        } else {
+            Vec::new()
+        };
         let panes = vector(reader, MAX_GIT_PANES, 58, |reader| {
             let hierarchy = AssessedPane {
                 workspace: local(reader, server)?,
@@ -1116,6 +1165,7 @@ pub fn decode_git_removal_scope(
         RetainedRemovalScope::new(RetainedRemovalScopeParts {
             server,
             tabs,
+            membership_versions,
             panes,
             fallbacks,
         })
@@ -1133,7 +1183,7 @@ tags!(failure_tag, read_failure, FailureClass, { 0 => LaunchUnavailable, 1 => Ru
 tags!(retirement_reason_tag, read_retirement_reason, RetirementReason, { 0 => OrdinaryExit, 1 => EndAllSessions, 2 => Stop, 3 => RuntimeFailure, 4 => ConfirmedClose, 5 => KillWorkspace, 6 => WorktreeRemoval, 7 => ServerUpdate, 8 => ServerRecovery });
 tags!(external_tag, read_external, ExternalDisposition, { 0 => NoEffectEstablished, 1 => DesiredStateObserved, 2 => PartialOrAmbiguous, 3 => Unavailable });
 tags!(git_failure_tag, read_git_failure, GitFailure, {
-    0 => Unauthorized, 1 => WrongServer, 2 => TargetGone, 3 => Offline, 4 => Busy, 5 => Capacity, 6 => ExpiredAssessment, 7 => StaleAssessment, 8 => MainWorktree, 9 => LockedWorktree, 10 => UnlistedWorktree, 11 => HoldsPinnedDirectory, 12 => NoFallback, 13 => InvalidBranch, 14 => InvalidTemplate, 15 => InvalidDirectory, 16 => OccupiedTarget, 17 => BranchExists, 18 => BranchMissing, 19 => BranchCheckedOut, 20 => IdentityReplaced, 21 => GitStateChanged, 22 => Unchecked, 23 => ToolMissing, 24 => ToolTooOld, 25 => CancelledRead, 26 => TimedOutRead, 27 => InvalidResponse, 28 => OutputTooLarge, 29 => WriteFailed, 30 => ExternalStateUncertain, 31 => RecoveryNeedsReview, 32 => StorageLocked, 33 => StorageUnavailable, 34 => UnsafeStorage, 35 => StorageFailure, 36 => IndeterminateDurability
+    0 => Unauthorized, 1 => WrongServer, 2 => TargetGone, 3 => Offline, 4 => Busy, 5 => Capacity, 6 => ExpiredAssessment, 7 => StaleAssessment, 8 => MainWorktree, 9 => LockedWorktree, 10 => UnlistedWorktree, 11 => HoldsPinnedDirectory, 12 => NoFallback, 13 => InvalidBranch, 14 => InvalidTemplate, 15 => InvalidDirectory, 16 => OccupiedTarget, 17 => BranchExists, 18 => BranchMissing, 19 => BranchCheckedOut, 20 => IdentityReplaced, 21 => GitStateChanged, 22 => Unchecked, 23 => ToolMissing, 24 => ToolTooOld, 25 => CancelledRead, 26 => TimedOutRead, 27 => InvalidResponse, 28 => OutputTooLarge, 29 => WriteFailed, 30 => ExternalStateUncertain, 31 => RecoveryNeedsReview, 32 => StorageLocked, 33 => StorageUnavailable, 34 => UnsafeStorage, 35 => StorageFailure, 36 => IndeterminateDurability, 37 => BareRepositoryWithoutWorktree
 });
 
 /// Encodes classified external observations without turning them into success.

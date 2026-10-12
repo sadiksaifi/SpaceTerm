@@ -8,7 +8,11 @@ use std::time::{Duration, Instant};
 /// Native checks run inside the repository lane immediately before allowing Git to write.
 pub trait FinalWriteValidation: Send + Sync + 'static {
     /// Check retained destination identity and the originally approved deletion categories.
-    fn validate(&self) -> Result<(), GitFailure>;
+    fn validate(
+        &self,
+        cancellation: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<(), GitFailure>;
 }
 /// Prepared native write holding the existing coordinator's physical repository lane.
 pub struct PreparedRepositoryWrite {
@@ -94,6 +98,8 @@ impl Drop for ExecutedRepositoryWrite {
 }
 struct Handshake {
     binding: OperationBinding,
+    cancellation: CancellationToken,
+    deadline: Instant,
     prepared: mpsc::Sender<PendingWriteIntent>,
     start: Mutex<mpsc::Receiver<OperationBinding>>,
     completed: mpsc::Sender<GitWriteOutcome>,
@@ -103,7 +109,15 @@ struct Handshake {
 }
 impl WriteIntentHook for Handshake {
     fn record(&self, intent: &PendingWriteIntent) -> Result<(), IntentError> {
-        if let Err(failure) = self.validation.validate() {
+        let validation = self.validation.validate(&self.cancellation, self.deadline);
+        let validation = if self.cancellation.is_cancelled() {
+            Err(GitFailure::CancelledRead)
+        } else if Instant::now() >= self.deadline {
+            Err(GitFailure::TimedOutRead)
+        } else {
+            validation
+        };
+        if let Err(failure) = validation {
             *self.failure.lock().map_err(|_| IntentError)? = Some(failure);
             return Err(IntentError);
         }
@@ -120,7 +134,10 @@ impl WriteIntentHook for Handshake {
             return Err(IntentError);
         }
         // No shutdown/client cancellation is observed here. A durable Started intent must settle.
-        if let Err(failure) = self.validation.validate() {
+        if let Err(failure) = self.validation.validate(
+            &CancellationToken::default(),
+            Instant::now() + Duration::from_secs(30),
+        ) {
             *self.failure.lock().map_err(|_| IntentError)? = Some(failure);
             return Err(IntentError);
         }
@@ -147,6 +164,8 @@ impl GitCoordinator {
         validation: Arc<dyn FinalWriteValidation>,
     ) -> Result<(PendingWriteIntent, PreparedRepositoryWrite), GitFailure> {
         let cancellation = CancellationToken::linked(cancellation, &CancellationToken::default());
+        let began = Instant::now();
+        let deadline = began + Duration::from_secs(30);
         let (prepared, observation) = mpsc::channel();
         let (start, decision) = mpsc::channel();
         let (completed, completion) = mpsc::channel();
@@ -154,6 +173,8 @@ impl GitCoordinator {
         let failure = Arc::new(Mutex::new(None));
         let hook = Arc::new(Handshake {
             binding,
+            cancellation: cancellation.clone(),
+            deadline,
             prepared,
             start: Mutex::new(decision),
             completed,
@@ -164,7 +185,6 @@ impl GitCoordinator {
         let ticket = self
             .write(repository, write, &cancellation, hook)
             .map_err(write_failure)?;
-        let began = Instant::now();
         let intent = loop {
             match observation.recv_timeout(Duration::from_millis(20)) {
                 Ok(intent) => break intent,
@@ -228,4 +248,225 @@ pub fn server_inventory(
         return Err(RepositoryReadError::OutputTooLarge);
     }
     Ok(inventory)
+}
+
+/// Normalize only the facts needed by client-local GitHub CLI lookup. Selection
+/// follows the existing desktop remote and plain-push policy; no tool runs here.
+pub fn pull_request_facts(
+    config: &RepositoryConfig,
+    head: &RepositoryHead,
+) -> Option<spaceterm_core::worktrees::queries::GitPullRequestFacts> {
+    use spaceterm_core::organization::BranchName;
+    use spaceterm_core::worktrees::queries::GitPullRequestFacts;
+    let RepositoryHead::Branch(branch) = head else {
+        return None;
+    };
+    let remote = |name: &str| {
+        config
+            .remotes
+            .iter()
+            .find(|(remote, _)| &**remote == name)
+            .map(|(_, url)| &**url)
+    };
+    let base = if remote("upstream").is_some() {
+        "upstream"
+    } else {
+        config.branch_remote.as_deref().unwrap_or("origin")
+    };
+    let (host, owner, repository) = remote_repository(remote(base)?)?;
+    let host = normalized_host(host);
+    let head_branch = match config.branch_merge.as_deref() {
+        Some(merge) if config.push_to_upstream && !merge.is_empty() => {
+            merge.strip_prefix("refs/heads/").unwrap_or(merge)
+        }
+        _ => branch,
+    };
+    let head_owner = config
+        .branch_push_remote
+        .as_deref()
+        .or(config.push_default.as_deref())
+        .or(config.branch_remote.as_deref())
+        .and_then(remote)
+        .and_then(remote_repository)
+        .and_then(|(host, owner, repository)| {
+            // Validate the selected push remote too. An invalid remote does not
+            // silently fall through to another remote or disclose its URL.
+            GitPullRequestFacts::new(
+                normalized_host(host),
+                owner.to_owned(),
+                repository.to_owned(),
+                BranchName::new(head_branch.to_owned()).ok()?,
+                None,
+            )
+            .ok()
+        })
+        .map(|facts| facts.owner().to_owned());
+    GitPullRequestFacts::new(
+        host,
+        owner.to_owned(),
+        repository.to_owned(),
+        BranchName::new(head_branch.to_owned()).ok()?,
+        head_owner,
+    )
+    .ok()
+}
+fn normalized_host(host: &str) -> String {
+    let host = host.to_ascii_lowercase();
+    if host == "ssh.github.com" {
+        "github.com".into()
+    } else {
+        host
+    }
+}
+fn remote_repository(url: &str) -> Option<(&str, &str, &str)> {
+    if url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return None;
+    }
+    let (host, path) = match url.split_once("://") {
+        Some((scheme, rest)) => {
+            if !["https", "http", "ssh", "git"]
+                .iter()
+                .any(|s| scheme.eq_ignore_ascii_case(s))
+            {
+                return None;
+            }
+            let (authority, path) = rest.split_once('/')?;
+            let authority = without_userinfo(authority)?;
+            let host = match authority.split_once(':') {
+                Some((host, port))
+                    if !port.is_empty()
+                        && port.len() <= 5
+                        && port.bytes().all(|b| b.is_ascii_digit()) =>
+                {
+                    host
+                }
+                Some(_) => return None,
+                None => authority,
+            };
+            (host, path)
+        }
+        None => {
+            if url.contains("::") {
+                return None;
+            }
+            let (authority, path) = url.split_once(':')?;
+            if authority.contains('/') {
+                return None;
+            }
+            (
+                without_userinfo(authority)?,
+                path.strip_prefix('/').unwrap_or(path),
+            )
+        }
+    };
+    let path = path.trim_end_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let (owner, repository) = path.split_once('/')?;
+    Some((host, owner, repository))
+}
+fn without_userinfo(authority: &str) -> Option<&str> {
+    match authority.rsplit_once('@') {
+        Some((user, host)) if !user.is_empty() => Some(host),
+        Some(_) => None,
+        None => Some(authority),
+    }
+}
+
+/// Convert hardened native observations without collapsing full aggregate counts
+/// to the first 20 display entries. A branch race requires another observation.
+pub fn status_facts(
+    revision: std::num::NonZeroU64,
+    repository: &ProbedRepository,
+    summary: &PorcelainSummary,
+) -> Result<spaceterm_core::worktrees::queries::GitStatusFacts, GitFailure> {
+    use spaceterm_core::organization::BranchName;
+    use spaceterm_core::worktrees::queries::*;
+    let branch = match &repository.head {
+        RepositoryHead::Branch(branch) | RepositoryHead::Unborn(branch) => Some(branch.as_ref()),
+        RepositoryHead::Detached(_) => None,
+    };
+    if branch != summary.headers.branch.as_deref() {
+        return Err(GitFailure::GitStateChanged);
+    }
+    if summary.changes.entries.len() > MAX_GIT_STATUS_CHANGES {
+        return Err(GitFailure::Capacity);
+    }
+    let count = &summary.changes;
+    let counts = GitChangeCounts {
+        total: match count.total {
+            ChangeTotal::Exact(n) => GitChangeTotal::Exact(n),
+            ChangeTotal::AtLeast(n) => GitChangeTotal::AtLeast(n),
+        },
+        staged: count.staged,
+        modified: count.modified,
+        deleted: count.deleted,
+        renamed: count.renamed,
+        conflicted: count.conflicted,
+        untracked: count.untracked,
+    };
+    let step = |step: OperationStep| GitOperationStep {
+        current: step.current,
+        total: step.total,
+    };
+    let facts = GitStatusFacts {
+        revision,
+        branch: branch
+            .map(|b| BranchName::new(b.to_owned()).map_err(|_| GitFailure::InvalidResponse))
+            .transpose()?,
+        changes: count
+            .entries
+            .iter()
+            .map(|e| {
+                GitChange::new(
+                    e.path.as_bytes().to_vec(),
+                    match e.kind {
+                        ChangeKind::Staged => 1,
+                        ChangeKind::Modified => 2,
+                        ChangeKind::Deleted => 3,
+                        ChangeKind::Renamed => 4,
+                        ChangeKind::Conflicted => 5,
+                        ChangeKind::Untracked => 6,
+                    },
+                )
+            })
+            .collect::<Result<_, _>>()?,
+        dirty: counts.total.value() > 0,
+        unchecked: false,
+        pull_request: pull_request_facts(&repository.config, &repository.head),
+        upstream: summary
+            .headers
+            .upstream
+            .as_ref()
+            .map(|name| {
+                Ok(GitUpstream {
+                    name: BranchName::new(name.to_string())
+                        .map_err(|_| GitFailure::InvalidResponse)?,
+                    divergence: summary.headers.divergence.map(|d| GitDivergence {
+                        ahead: d.ahead,
+                        behind: d.behind,
+                    }),
+                })
+            })
+            .transpose()?,
+        operation: repository.operation.map(|operation| match operation {
+            RepositoryOperation::Rebasing { step: s } => {
+                GitRepositoryOperation::Rebasing { step: s.map(step) }
+            }
+            RepositoryOperation::Applying { step: s } => {
+                GitRepositoryOperation::Applying { step: s.map(step) }
+            }
+            RepositoryOperation::Merging => GitRepositoryOperation::Merging,
+            RepositoryOperation::Reverting => GitRepositoryOperation::Reverting,
+            RepositoryOperation::CherryPicking => GitRepositoryOperation::CherryPicking,
+            RepositoryOperation::Bisecting => GitRepositoryOperation::Bisecting,
+        }),
+        counts: Some(counts),
+    };
+    Ok(facts)
+}
+
+/// Compare Git-listed locations through physical parents, including checked absence.
+/// This is comparison data only; writes still require retained native identity leases.
+pub fn same_location(left: &std::path::Path, right: &std::path::Path) -> bool {
+    super::coordinator::same_location(left, right)
 }

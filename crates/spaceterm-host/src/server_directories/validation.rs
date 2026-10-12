@@ -1,5 +1,5 @@
 //! Fresh native directory and create-target validation. Query results are only observations.
-use super::native::{NativeDirectoryProvider, classify, io_failure};
+use super::native::{NativeDirectoryProvider, classify, io_failure, physical_path};
 use crate::git::filesystem::RetainedDirectory;
 use spaceterm_core::organization::ServerDirectory;
 use spaceterm_core::server_directories::*;
@@ -21,6 +21,16 @@ impl CreateTargetLease {
         } else {
             DirectoryValidationClass::AbsentCreateTarget
         }
+    }
+    pub(crate) fn physical_path(&self) -> Result<PathBuf, DirectoryFailure> {
+        self.revalidate()?;
+        let parent = physical_path(&*self.parent)?;
+        let suffix = self
+            .path
+            .strip_prefix(self.parent.path())
+            .map_err(|_| DirectoryFailure::Unchecked)?;
+        self.revalidate()?;
+        Ok(parent.join(suffix))
     }
     /// Reject replacement, newly occupied destinations and changed ancestors.
     pub fn revalidate(&self) -> Result<(), DirectoryFailure> {
@@ -54,6 +64,18 @@ impl CreateTargetLease {
     }
 }
 impl NativeDirectoryProvider {
+    /// Retain an absent removal destination and its nearest existing physical parent.
+    /// The lease rejects every new object and parent replacement before effects.
+    pub fn retain_absent_removal_target(
+        &self,
+        directory: &ServerDirectory,
+    ) -> Result<CreateTargetLease, DirectoryFailure> {
+        let lease = self.retain_create_target(directory)?;
+        if lease.class() != DirectoryValidationClass::AbsentCreateTarget {
+            return Err(DirectoryFailure::IdentityChanged);
+        }
+        Ok(lease)
+    }
     /// Retain exact empty-target identity or the nearest existing parent of an absent target.
     pub fn retain_create_target(
         &self,
@@ -84,7 +106,7 @@ impl NativeDirectoryProvider {
             .to_path_buf();
         let lease = loop {
             match std::fs::symlink_metadata(&parent) {
-                Ok(metadata) if metadata.is_dir() => {
+                Ok(metadata) if metadata.is_dir() || metadata.file_type().is_symlink() => {
                     break self
                         .filesystem
                         .validate_directory(&parent)

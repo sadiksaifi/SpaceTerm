@@ -3,6 +3,7 @@ mod support;
 use spaceterm_core::authority::*;
 use spaceterm_core::identity::*;
 use spaceterm_core::organization::*;
+use spaceterm_core::organization_retained::*;
 use spaceterm_core::server_directories::DirectoryContainment;
 use spaceterm_core::worktrees::assessment::*;
 use spaceterm_core::worktrees::*;
@@ -61,7 +62,7 @@ fn snapshot(workspaces: u64) -> OrganizationSnapshot {
             control: ControlRecord::Unclaimed,
         })
         .collect();
-    OrganizationSnapshot::new(ServerEpoch::new(1), state, runtime).unwrap()
+    versioned_snapshot(ServerEpoch::new(1), state, runtime)
 }
 fn directory(bytes: &[u8]) -> ServerDirectory {
     ServerDirectory::new(support::server(), bytes.to_vec()).unwrap()
@@ -187,12 +188,35 @@ fn unrelated_tab_order_does_not_change_scope_or_roots() {
 
 #[test]
 fn session_replacement_and_work_generation_invalidate_confirmation() {
-    let snapshot = snapshot(1);
+    let original = snapshot(1);
+    let mut records = original.runtime().to_vec();
+    records[0].session_generation = SessionGeneration::new(1);
+    records[0].phase = SessionPhase::Running {
+        generation: SessionGeneration::new(1),
+    };
+    let snapshot = versioned_snapshot(original.epoch(), original.state().clone(), records);
     let (mut runtime, target, affected) = inputs(&snapshot);
+    runtime.panes[0].session = Some(SessionKey {
+        epoch: snapshot.epoch(),
+        pane: snapshot.state().panes[0].id,
+        generation: SessionGeneration::new(1),
+    });
     let scope = assess_removal(&snapshot, &runtime, &target, &affected).unwrap();
     runtime.panes[0].work_generation = CloseWorkGeneration::new(2);
     assert_eq!(
         revalidate_removal(&scope, &snapshot, &runtime, &affected),
+        Err(GitFailure::StaleAssessment)
+    );
+    runtime.panes[0].work_generation = CloseWorkGeneration::new(1);
+    let mut records = snapshot.runtime().to_vec();
+    records[0].session_generation = SessionGeneration::new(2);
+    records[0].phase = SessionPhase::Running {
+        generation: SessionGeneration::new(2),
+    };
+    let replacement = versioned_snapshot(snapshot.epoch(), snapshot.state().clone(), records);
+    runtime.panes[0].session.as_mut().unwrap().generation = SessionGeneration::new(2);
+    assert_eq!(
+        revalidate_removal(&scope, &replacement, &runtime, &affected),
         Err(GitFailure::StaleAssessment)
     );
 }
@@ -401,4 +425,389 @@ fn intent_recovery_rejects_phase_disagreement_and_completed_identity() {
     assert_eq!(validate(&ledger), Ok(()));
     ledger.completed = true;
     assert_eq!(validate(&ledger), Err(StoreFailure::InvalidDurableState));
+}
+
+#[test]
+fn durable_removal_intent_preserves_directory_contained_tabs_and_generations() {
+    use spaceterm_core::operations::*;
+    let original = snapshot(2);
+    let mut state = original.state().clone();
+    state.tabs[1].worktree = Some(state.worktrees[0].id);
+    let snapshot =
+        OrganizationSnapshot::new(original.epoch(), state, original.runtime().to_vec()).unwrap();
+    let (runtime, target, mut affected) = inputs(&snapshot);
+    affected.panes[1].containment = DirectoryContainment::Inside;
+    let scope = assess_removal(&snapshot, &runtime, &target, &affected).unwrap();
+    let binding = OperationBinding {
+        id: support::operation(1),
+        digest: RequestDigest::for_command(&support::create_command()).unwrap(),
+    };
+    let intent = GitWriteIntent::new(GitWriteIntentParts {
+        binding,
+        repository: RepositoryLocator::new(RepositoryLocatorParts {
+            scope: RepositoryScope {
+                server: support::server(),
+                repository: target.target.repository,
+            },
+            main_root: directory(b"/repo"),
+            common_directory: directory(b"/repo/.git"),
+        })
+        .unwrap(),
+        action: RetainedGitAction::Remove {
+            worktree: target.target.id,
+            directory: target.target.directory,
+            head: target.head,
+            approval: scope.approval(),
+        },
+        phase: GitIntentPhase::Prepared,
+        assessment_digest: GitAssessmentDigest::from_bytes([2; 32]),
+        affected: scope.retained().clone(),
+        allocation: binding,
+        external_result: None,
+    })
+    .unwrap();
+    let recovered: GitWriteIntent =
+        serde_json::from_slice(&serde_json::to_vec(&intent).unwrap()).unwrap();
+    assert_eq!(recovered.parts().affected, *scope.retained());
+    assert_eq!(
+        recovered.parts().affected.parts().tabs[1].worktree,
+        Some(snapshot.state().worktrees[0].id)
+    );
+    let mut changed = runtime.clone();
+    changed.panes[1].context_generation = ContextGeneration::new(2);
+    assert_eq!(
+        revalidate_removal(&scope, &snapshot, &changed, &affected),
+        Err(GitFailure::StaleAssessment)
+    );
+    let mut changed = snapshot.state().clone();
+    changed.tabs[1].worktree = None;
+    let changed =
+        OrganizationSnapshot::new(snapshot.epoch(), changed, snapshot.runtime().to_vec()).unwrap();
+    assert_eq!(
+        revalidate_removal(&scope, &changed, &runtime, &affected),
+        Err(GitFailure::StaleAssessment)
+    );
+}
+
+#[test]
+fn retained_removal_scope_rejects_invalid_or_mixed_session_incarnations() {
+    let snapshot = snapshot(2);
+    let (runtime, target, affected) = inputs(&snapshot);
+    let scope = assess_removal(&snapshot, &runtime, &target, &affected).unwrap();
+    for epochs in [[0, 1], [1, 2]] {
+        let mut parts = scope.retained().parts().clone();
+        for (pane, epoch) in parts.panes.iter_mut().zip(epochs) {
+            pane.hierarchy.session_generation = SessionGeneration::new(1);
+            pane.session = Some(SessionKey {
+                epoch: ServerEpoch::new(epoch),
+                pane: pane.hierarchy.pane,
+                generation: SessionGeneration::new(1),
+            });
+        }
+        assert_eq!(
+            RetainedRemovalScope::new(parts),
+            Err(GitFailure::InvalidResponse)
+        );
+    }
+    let mut parts = scope.retained().parts().clone();
+    parts.panes[0].session = Some(SessionKey {
+        epoch: snapshot.epoch(),
+        pane: parts.panes[0].hierarchy.pane,
+        generation: SessionGeneration::new(0),
+    });
+    assert_eq!(
+        RetainedRemovalScope::new(parts),
+        Err(GitFailure::InvalidResponse)
+    );
+}
+
+fn versioned_snapshot(
+    epoch: ServerEpoch,
+    mut state: OrganizationState,
+    runtime: Vec<PaneRuntimeRecord>,
+) -> OrganizationSnapshot {
+    use spaceterm_core::remote_access::RemoteAccessPolicy;
+    let mut facts = state
+        .retained
+        .as_ref()
+        .map(|v| v.parts().clone())
+        .unwrap_or_else(|| OrganizationRetainedParts {
+            server: state.server,
+            workspace_names: state
+                .workspaces
+                .iter()
+                .map(|w| {
+                    WorkspaceNameBasis::new(
+                        w.id,
+                        w.name.value.display.clone(),
+                        w.name.value.display.clone(),
+                    )
+                })
+                .collect(),
+            creation_defaults: state
+                .tabs
+                .iter()
+                .map(|t| TabCreationDefault::new(t.id, vec![t.root_pane]).unwrap())
+                .collect(),
+            pane_generations: vec![],
+            tab_membership_versions: state
+                .tabs
+                .iter()
+                .map(|t| TabMembershipVersion::new(t.id, FieldVersion::new(1)))
+                .collect(),
+            repository_inventory_versions: state
+                .repositories
+                .iter()
+                .map(|r| RepositoryInventoryVersion::new(r.id, FieldVersion::new(1)))
+                .collect(),
+            worktree_inventory: state
+                .worktrees
+                .iter()
+                .map(|w| WorktreeInventoryFacts::new(w.id, true, FieldVersion::new(1)))
+                .collect(),
+            remote_access: Versioned {
+                value: RemoteAccessPolicy::disabled(state.server),
+                version: FieldVersion::new(1),
+            },
+        });
+    facts.pane_generations = runtime
+        .iter()
+        .map(|r| PaneGenerationHighWater::new(r.pane, r.session_generation, r.control_generation))
+        .collect();
+    state.retained = Some(OrganizationRetainedFacts::new(facts).unwrap());
+    OrganizationSnapshot::new(epoch, state, runtime).unwrap()
+}
+
+#[test]
+fn removal_rejects_affected_membership_aba_but_allows_unrelated_membership_edits() {
+    use spaceterm_core::operations::*;
+    use spaceterm_core::reducer::*;
+    let initial = snapshot(3);
+    let mut state = initial.state().clone();
+    state.settings.worktree_location.value =
+        WorktreeLocationTemplate::new("~/.worktrees/{repository}/{branch}".into()).unwrap();
+    for workspace in &mut state.workspaces {
+        workspace.name.value.display =
+            NameText::new(format!("work-{}", workspace.id.local())).unwrap();
+    }
+    state.retained = None;
+    // Tab 2 is affected through containment, not its saved Worktree tag. Tab 3 is unrelated.
+    state.tabs[1].worktree = Some(state.worktrees[0].id);
+    state.tabs[2].worktree = None;
+    let initial = versioned_snapshot(initial.epoch(), state, initial.runtime().to_vec());
+    let marks = IdentityHighWater {
+        workspace: 3,
+        tab: 3,
+        pane: 3,
+        creation_ordinal: 9,
+        repository: 1,
+        worktree: 2,
+        pairing: 1,
+        client: 1,
+        operation_stream: 1,
+    };
+    let mut reducer = OrganizationReducer::from_recovered(
+        RetainedOrganization::new(initial.state().clone(), marks, directory(b"/home")),
+        StoreRevision::new(0),
+        initial.epoch(),
+        OrganizationLimits::default(),
+    )
+    .unwrap();
+    let original = reducer.snapshot();
+    let (runtime, facts, mut affected) = inputs(&original);
+    affected.panes[1].containment = DirectoryContainment::Inside;
+    let scope = assess_removal(&original, &runtime, &facts, &affected).unwrap();
+    let edits = [
+        (
+            original.state().tabs[2].id,
+            Some(original.state().worktrees[0].id),
+        ),
+        (
+            original.state().tabs[1].id,
+            Some(original.state().worktrees[1].id),
+        ),
+        (
+            original.state().tabs[1].id,
+            Some(original.state().worktrees[0].id),
+        ),
+    ];
+    for (index, (tab, worktree)) in edits.into_iter().enumerate() {
+        let current = reducer.snapshot();
+        let retained = current.state().retained.as_ref().unwrap();
+        let version = retained
+            .tab_membership_versions()
+            .iter()
+            .find(|v| v.id() == tab)
+            .unwrap()
+            .version();
+        let patch = WorktreeOrganizationPatch {
+            binding: OperationBinding {
+                id: support::operation(index as u64 + 1),
+                digest: RequestDigest::from_bytes([9; 32]),
+            },
+            scope: RepositoryScope {
+                server: support::server(),
+                repository: facts.target.repository,
+            },
+            expected_inventory_version: Some(retained.repository_inventory_versions()[0].version()),
+            repositories: vec![],
+            worktrees: vec![],
+            memberships: vec![WorktreeMembershipEdit {
+                tab,
+                expected_version: version,
+                worktree,
+            }],
+            settlement: None,
+        };
+        let prepared = reducer
+            .prepare_event(&OrganizationEvent::WorktreeOrganizationChanged(Box::new(
+                patch,
+            )))
+            .unwrap();
+        let receipt = spaceterm_core::storage::CommitReceipt {
+            store_revision: prepared
+                .expected_store_revision()
+                .checked_successor()
+                .unwrap(),
+            organization_revision: prepared.resulting_organization_revision(),
+        };
+        reducer.apply_committed(prepared, &receipt).unwrap();
+        if index == 0 {
+            assert_eq!(
+                revalidate_removal(&scope, &reducer.snapshot(), &runtime, &affected),
+                Ok(())
+            );
+        }
+    }
+    let changed = reducer.snapshot();
+    assert_eq!(changed.state().tabs[1], original.state().tabs[1]);
+    assert_eq!(changed.runtime(), original.runtime());
+    assert_eq!(
+        revalidate_removal(&scope, &changed, &runtime, &affected),
+        Err(GitFailure::StaleAssessment)
+    );
+}
+
+#[test]
+fn legacy_removal_scope_reads_without_inventing_membership_generations() {
+    let original = snapshot(1);
+    let (runtime, facts, affected) = inputs(&original);
+    let scope = assess_removal(&original, &runtime, &facts, &affected).unwrap();
+    let mut legacy = serde_json::to_value(scope.retained()).unwrap();
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("membership_versions");
+    let retained: RetainedRemovalScope = serde_json::from_value(legacy).unwrap();
+    assert!(retained.parts().membership_versions.is_empty());
+    let mut state = original.state().clone();
+    state.retained = None;
+    let unversioned =
+        OrganizationSnapshot::new(original.epoch(), state, original.runtime().to_vec()).unwrap();
+    assert_eq!(
+        assess_removal(&unversioned, &runtime, &facts, &affected),
+        Err(GitFailure::Unchecked)
+    );
+}
+
+#[test]
+fn removal_digest_includes_authoritative_directory_facts_without_changing_hierarchy() {
+    let original = snapshot(1);
+    let (runtime, facts, affected) = inputs(&original);
+    let first = assess_removal(&original, &runtime, &facts, &affected).unwrap();
+    let mut state = original.state().clone();
+    state.panes[0].confirmed_restoration_directory = Versioned {
+        value: Some(directory(b"/different")),
+        version: FieldVersion::new(2),
+    };
+    let changed =
+        OrganizationSnapshot::new(original.epoch(), state, original.runtime().to_vec()).unwrap();
+    let (runtime, facts, affected) = inputs(&changed);
+    let second = assess_removal(&changed, &runtime, &facts, &affected).unwrap();
+    assert_eq!(first.retained(), second.retained());
+    assert_ne!(first.assessment_digest(), second.assessment_digest());
+}
+
+#[test]
+fn inventory_membership_rejection_does_not_publish_or_advance_allocation_marks() {
+    use spaceterm_core::{operations::*, reducer::*};
+    let initial = snapshot(1);
+    let mut state = initial.state().clone();
+    state.settings.worktree_location.value =
+        WorktreeLocationTemplate::new("~/Worktrees/{repository}/{branch}".into()).unwrap();
+    let marks = IdentityHighWater {
+        workspace: 1,
+        tab: 1,
+        pane: 1,
+        creation_ordinal: 3,
+        repository: 1,
+        worktree: 2,
+        pairing: 1,
+        client: 1,
+        operation_stream: 1,
+    };
+    let mut reducer = OrganizationReducer::from_recovered(
+        RetainedOrganization::new(state, marks, directory(b"/home")),
+        StoreRevision::new(0),
+        initial.epoch(),
+        OrganizationLimits::default(),
+    )
+    .unwrap();
+    let before = reducer.snapshot();
+    let inventory = GitInventoryPatch {
+        repository: Some(before.state().repositories[0].id),
+        directory: before.state().repositories[0].directory.clone(),
+        expected_inventory_version: Some(FieldVersion::new(1)),
+        worktrees: vec![GitInventoryWorktree {
+            id: None,
+            directory: directory(b"/fresh"),
+            main: false,
+            missing: false,
+            listed: true,
+        }],
+    };
+    let context = ReductionContext {
+        principal: MutationPrincipal {
+            pairing: PairingId::new(support::server(), 1).unwrap(),
+            client: ClientId::new(support::server(), 1).unwrap(),
+        },
+        operation: support::operation(1),
+        request_digest: RequestDigest::from_bytes([2; 32]),
+        now: ReducerTick::new(1),
+        facts: ReductionFacts::default(),
+    };
+    let stale = [GitInventoryMembership {
+        tab: before.state().tabs[0].id,
+        expected_version: FieldVersion::new(99),
+        destination: Some(0),
+    }];
+    let prepared = reducer
+        .prepare_git_inventory_reconciliation(&inventory, &stale, &context)
+        .unwrap();
+    assert_eq!(
+        prepared.resolution(),
+        &Resolution::Completed(Outcome::Failed(OperationFailure::StaleValidation))
+    );
+    assert_eq!(prepared.writes().resulting_high_water(), marks);
+    let receipt = spaceterm_core::storage::CommitReceipt {
+        store_revision: StoreRevision::new(1),
+        organization_revision: prepared.resulting_organization_revision(),
+    };
+    assert!(
+        reducer
+            .apply_committed(prepared, &receipt)
+            .unwrap()
+            .publication
+            .is_none()
+    );
+    assert_eq!(reducer.snapshot(), before);
+    let invalid = [GitInventoryMembership {
+        destination: Some(1),
+        expected_version: FieldVersion::new(1),
+        ..stale[0]
+    }];
+    assert!(matches!(
+        reducer.prepare_git_inventory_reconciliation(&inventory, &invalid, &context),
+        Err(ReducerFailure::InvalidFacts)
+    ));
 }
