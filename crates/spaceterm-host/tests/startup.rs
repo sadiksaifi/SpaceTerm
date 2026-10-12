@@ -307,3 +307,120 @@ fn an_unavailable_approved_installation_does_not_fall_back_to_the_staged_install
         &[(key, generation, record.approved_installation)]
     );
 }
+
+mod native_composition {
+    use spaceterm_host::{
+        boot_credentials::*,
+        native_deployment::{contracts::NativeFailure, profile::BootCredentialBinding},
+        startup::*,
+    };
+    use std::{
+        num::NonZeroU64,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+    struct Authority(AtomicUsize);
+    impl NativeStartupAuthority for Authority {
+        fn admit(
+            &self,
+            _: AccountBuildKey,
+            _: NonZeroU64,
+        ) -> Result<NativeStartupAdmission, NativeFailure> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(NativeStartupAdmission::Stopped)
+        }
+        fn authorize_release(
+            &self,
+            _: &PendingStartup,
+            _: &PostExecProof,
+        ) -> Result<CredentialReleasePermit, NativeFailure> {
+            panic!("Stopped must not authorize credential release")
+        }
+        fn recheck_release(&self, _: &CredentialReleasePermit) -> Result<(), NativeFailure> {
+            panic!("Stopped must not recheck credential release")
+        }
+    }
+    struct Credentials;
+    impl BootCredentialAdapter for Credentials {
+        fn inspect_policy(
+            &self,
+            _: &BootCredentialBinding,
+        ) -> Result<CredentialPolicyFacts, NativeFailure> {
+            panic!("Stopped must not inspect credentials")
+        }
+        fn retrieve_for_startup(
+            &self,
+            _: &CredentialReleasePermit,
+            _: &mut LockedSecret32,
+        ) -> Result<(), NativeFailure> {
+            panic!("Stopped must not retrieve credentials")
+        }
+    }
+    struct Launcher;
+    impl OneShotLauncher for Launcher {
+        fn launch(
+            &mut self,
+            _: PendingStartup,
+            _: &dyn NativeStartupAuthority,
+            _: &dyn BootCredentialAdapter,
+        ) -> Result<std::convert::Infallible, NativeFailure> {
+            panic!("Stopped must not create pipes, fork, or retain an installation")
+        }
+    }
+    #[test]
+    fn stopped_precedes_credential_policy_and_installation_retention() {
+        let key = AccountBuildKey {
+            account_uid: 501,
+            build_identity: BuildIdentity::Development,
+        };
+        let authority = Authority(AtomicUsize::new(0));
+        assert_eq!(
+            launch_once(
+                key,
+                NonZeroU64::new(7).unwrap(),
+                &authority,
+                &Credentials,
+                &mut Launcher
+            ),
+            Ok(())
+        );
+        assert_eq!(authority.0.load(Ordering::SeqCst), 1);
+    }
+    #[test]
+    fn root_and_uid_sentinel_reject_before_native_authority_composition() {
+        let authority = Authority(AtomicUsize::new(0));
+        for account_uid in [0, u32::MAX] {
+            let key = AccountBuildKey {
+                account_uid,
+                build_identity: BuildIdentity::Development,
+            };
+            assert_eq!(
+                launch_once(
+                    key,
+                    NonZeroU64::new(7).unwrap(),
+                    &authority,
+                    &Credentials,
+                    &mut Launcher
+                ),
+                Err(NativeFailure::InvalidRecord)
+            );
+        }
+        assert_eq!(authority.0.load(Ordering::SeqCst), 0);
+    }
+    #[test]
+    fn production_launcher_fails_before_credentials_without_native_publication_authority() {
+        let key = AccountBuildKey {
+            account_uid: 501,
+            build_identity: BuildIdentity::Development,
+        };
+        assert_eq!(
+            launch_once(
+                key,
+                NonZeroU64::new(7).unwrap(),
+                &SystemNativeStartupAuthority,
+                &Credentials,
+                &mut Launcher
+            ),
+            Err(NativeFailure::CustodyUnavailable)
+        );
+    }
+}

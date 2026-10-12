@@ -258,7 +258,7 @@ enum Phase {
     #[default]
     Idle,
     Checking,
-    Available(ReleaseFeed),
+    Available(Box<ReleaseFeed>),
     Downloading,
     Ready,
     /// The installation was replaced. Only relaunch remains.
@@ -341,7 +341,7 @@ impl Shared {
         match result {
             Ok(feed) if feed.supersedes(self.current_version) => {
                 let (version, published_at) = (feed.version.clone(), feed.published_at);
-                cycle.phase = Phase::Available(feed);
+                cycle.phase = Phase::Available(Box::new(feed));
                 drop(cycle);
                 self.send(UpdateEvent::ReleaseMetadata {
                     published_at,
@@ -1189,7 +1189,7 @@ mod tests {
         updates.start(events).unwrap();
         let shared = updates.shared().unwrap();
         // A test build has no stable version, so make the signed release available directly.
-        shared.lock().phase = Phase::Available(shared.fetch_feed().unwrap());
+        shared.lock().phase = Phase::Available(Box::new(shared.fetch_feed().unwrap()));
         let parent = fixture.installation.root.parent().unwrap().to_path_buf();
         assert!(fixture.installation.writable());
         fs::set_permissions(&parent, fs::Permissions::from_mode(0o555)).unwrap();
@@ -1270,7 +1270,7 @@ mod tests {
         let (events, receiver) = async_channel::unbounded();
         updates.start(events).unwrap();
         let shared = updates.shared().unwrap();
-        shared.lock().phase = Phase::Available(shared.fetch_feed().unwrap());
+        shared.lock().phase = Phase::Available(Box::new(shared.fetch_feed().unwrap()));
         updates.download().unwrap();
         // The worker reports the download, then blocks on the archive body.
         assert!(matches!(

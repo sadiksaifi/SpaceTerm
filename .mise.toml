@@ -269,6 +269,18 @@ run = "python -I mise-tasks/server/native/macos/acl_tests.py"
 description = "Check native credential policy memory safety and allocation failures"
 run = "python -I mise-tasks/server/native/macos/acl_tests.py --sanitizers"
 
+[tasks."test:server:native:companion:macos"]
+description = "Test the temporary GUI evidence companion's model, interactions, and app build"
+run = "python -I mise-tasks/server/native/macos/companion_tests.py"
+
+[tasks."test:server:native:companion:asan:macos"]
+description = "Check the GUI evidence companion's model and interactions with ASan and UBSan"
+run = "python -I mise-tasks/server/native/macos/companion_tests.py --sanitizers"
+
+[tasks."test:server:native:companion:tools"]
+description = "Test GUI evidence companion source policy and bundle metadata on any platform"
+run = "python -I mise-tasks/server/native/macos/companion_tests.py --portable"
+
 [tasks."test:server:native:handoff:tools"]
 description = "Test startup-pipe tooling; native fault cases require the explicit macOS fault task"
 run = "python -m unittest tests.test_server_handoff"
@@ -518,3 +530,23 @@ run = "cargo test --package spaceterm-protocol --locked"
 [tasks."protocol:check-schema"]
 description = "Generate and check both protocol profiles with pinned Rust schema compilers"
 run = "cargo check --package spaceterm-protocol --locked"
+
+[tasks."test:server:native:installation"]
+description = "Test bounded native registration, installation and journal policy without privilege"
+run = "python -I mise-tasks/server/native/installation_tests.py"
+
+[tasks."test:server:native:linux-credentials"]
+description = "Test bounded Linux credential output without credential-tool execution"
+run = "python -I mise-tasks/server/native/installation_tests.py --linux-credentials"
+
+[tasks."check:server:distribution"]
+description = "Check headless release metadata and archive authentication"
+run = "cargo check -p spaceterm-distribution --all-targets --locked"
+
+[tasks."test:server:distribution"]
+description = "Test frozen client feeds and separate server artifacts"
+run = "cargo test -p spaceterm-distribution --all-targets --locked"
+
+[tasks."lint:server:distribution"]
+description = "Lint headless artifact verification"
+run = "cargo clippy -p spaceterm-distribution --all-targets --locked --no-deps -- -D warnings"

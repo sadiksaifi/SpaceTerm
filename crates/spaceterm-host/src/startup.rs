@@ -3,10 +3,12 @@
 use std::fmt;
 use std::num::NonZeroU64;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Isolated SpaceTerm application identity, independent of installation or runtime version.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum BuildIdentity {
     /// The shipped application identity.
     Release,
@@ -17,7 +19,8 @@ pub enum BuildIdentity {
 }
 
 /// Exact native registration lookup key. UID zero and u32::MAX are rejected during admission.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AccountBuildKey {
     /// The owning operating-system account's UID, not the launcher's effective UID.
     pub account_uid: u32,
@@ -26,7 +29,8 @@ pub struct AccountBuildKey {
 }
 
 /// A protected installation's logical identity, not an executable path or startup authority.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct InstallationId(
     /// The native installation identifier within its account/build registration.
     pub NonZeroU64,
@@ -50,7 +54,8 @@ pub struct ProtectedRegistration {
 }
 
 /// Durable native supervision intent, distinct from whether a process is currently alive.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum DesiredServerState {
     /// Startup may proceed after exact registration validation.
     Running,
@@ -200,4 +205,313 @@ pub fn admit_startup<Native: NativeStartupRegistration + ?Sized>(
         _generation: generation,
         _installation: installation,
     }))
+}
+
+use crate::{
+    approved_installation::RetainedApprovedInstallation,
+    boot_credentials::CredentialReleasePermit,
+    installation::RetainedRegistration,
+    native_deployment::{
+        account::AccountBinding,
+        contracts::{DataGenerationId, NativeFailure, NativeRequestId},
+        profile::RegistrationProfile,
+    },
+    native_registration::{RegistrationHeadV2, StartupBarrier, validate_registration_head},
+};
+
+/// Exact native process incarnation, not a PID-name match.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProcessIdentity {
+    /// Positive native process identifier bounded to i32::MAX.
+    pub pid: u32,
+    /// Native process start seconds.
+    pub start_seconds: u64,
+    /// Native process start microseconds, below one million.
+    pub start_microseconds: u32,
+}
+
+/// Comparison-only startup context; a populated value is not pending or release authority.
+#[derive(Clone, Eq, PartialEq)]
+pub struct PendingStartupContext {
+    /// Exact registered account/build key.
+    pub key: AccountBuildKey,
+    /// Registered primary GID.
+    pub primary_gid: u32,
+    /// Exact registration generation.
+    pub registration_generation: NonZeroU64,
+    /// Exact lifecycle intent generation.
+    pub lifecycle_generation: NonZeroU64,
+    /// Committed data generation.
+    pub data_generation: DataGenerationId,
+    /// Committed installation ID.
+    pub installation: InstallationId,
+    /// Canonical core ServerId bytes.
+    pub server_id: [u8; 16],
+    /// Native incarnation binding.
+    pub account_binding_sha256: [u8; 32],
+    /// Full approved installation binding.
+    pub installation_binding: [u8; 32],
+    /// Exact admitted main server file digest.
+    pub server_artifact_sha256: [u8; 32],
+    /// Exact installation manifest digest.
+    pub manifest_sha256: [u8; 32],
+    /// Fixed native credential binding digest.
+    pub credential_binding_sha256: [u8; 32],
+    /// Fresh native cryptographic startup nonce.
+    pub startup_nonce: [u8; 32],
+    /// Original service-tracked launcher, preserved across exec.
+    pub original_process: ProcessIdentity,
+    /// Exact short-lived privileged retriever child.
+    pub retriever_process: ProcessIdentity,
+    /// Validated native journal request when admission is restricted.
+    pub journal_request: Option<NativeRequestId>,
+}
+impl fmt::Debug for PendingStartupContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("PendingStartupContext(..)")
+    }
+}
+
+/// Noncloneable pending native authority. Facts cannot construct it.
+pub struct PendingStartup {
+    context: Box<PendingStartupContext>,
+    _registration: Box<RetainedRegistration>,
+    _installation: Box<RetainedApprovedInstallation>,
+}
+impl PendingStartup {
+    /// Returns the exact bounded exchange comparison context.
+    pub fn context(&self) -> &PendingStartupContext {
+        &self.context
+    }
+}
+
+/// Native post-exec observation authority, not receiver declarations or wire matches.
+pub struct PostExecProof {
+    _authority: crate::native_deployment::contracts::NativeAuthorization,
+}
+
+/// Unprivileged storage waiting facts. They contain no path or replacement identity.
+pub struct UnprivilegedWaitPlan {
+    key: AccountBuildKey,
+    generation: NonZeroU64,
+    failure: NativeFailure,
+}
+impl UnprivilegedWaitPlan {
+    /// Returns the exact existing registration key.
+    pub fn key(&self) -> AccountBuildKey {
+        self.key
+    }
+    /// Returns the generation to revalidate after native storage unlock.
+    pub fn generation(&self) -> NonZeroU64 {
+        self.generation
+    }
+    /// Distinguishes locked storage from unavailable or unmounted storage.
+    pub fn failure(&self) -> NativeFailure {
+        self.failure
+    }
+}
+
+/// Native admission with an explicit unprivileged waiting route.
+pub enum NativeStartupAdmission {
+    /// Deliberate Stopped, before retention, credentials, pipes or fork.
+    Stopped,
+    /// Existing registered storage is unavailable; do not recreate identity or data.
+    WaitingStorage(UnprivilegedWaitPlan),
+    /// Exact native authority owned by the one-shot launcher.
+    Ready(PendingStartup),
+}
+
+/// Privileged startup authority chosen by trusted composition, without caller executable inputs.
+pub trait NativeStartupAuthority: Send + Sync {
+    /// Validates fixed registration and native custody before startup.
+    fn admit(
+        &self,
+        key: AccountBuildKey,
+        generation: NonZeroU64,
+    ) -> Result<NativeStartupAdmission, NativeFailure>;
+    /// Acquires live release authority only after independent native post-exec proof.
+    fn authorize_release(
+        &self,
+        pending: &PendingStartup,
+        proof: &PostExecProof,
+    ) -> Result<CredentialReleasePermit, NativeFailure>;
+    /// Rechecks current Running intent, generations, journal and exact process under release fence.
+    fn recheck_release(&self, permit: &CredentialReleasePermit) -> Result<(), NativeFailure>;
+}
+
+/// Fixed production startup authority. Unavailable native providers never become synthetic authority.
+#[derive(Default)]
+pub struct SystemNativeStartupAuthority;
+impl NativeStartupAuthority for SystemNativeStartupAuthority {
+    fn admit(
+        &self,
+        key: AccountBuildKey,
+        _generation: NonZeroU64,
+    ) -> Result<NativeStartupAdmission, NativeFailure> {
+        crate::native_deployment::contracts::validate_key(key)?;
+        if !cfg!(any(target_os = "macos", target_os = "linux")) {
+            return Err(NativeFailure::UnsupportedHost);
+        }
+        // Retained sampling in the base does not establish immutable authenticated
+        // publication or account incarnation. Do not inspect credentials to paper over it.
+        Err(NativeFailure::CustodyUnavailable)
+    }
+    fn authorize_release(
+        &self,
+        _pending: &PendingStartup,
+        _proof: &PostExecProof,
+    ) -> Result<CredentialReleasePermit, NativeFailure> {
+        Err(NativeFailure::NativeUnavailable)
+    }
+    fn recheck_release(&self, _permit: &CredentialReleasePermit) -> Result<(), NativeFailure> {
+        Err(NativeFailure::NativeUnavailable)
+    }
+}
+
+/// Decoded registration/profile comparison facts from a trusted native inspection edge.
+/// This is not RetainedRegistration or launch authority.
+pub struct StartupSnapshot {
+    /// Exact head facts.
+    pub head: RegistrationHeadV2,
+    /// Protected profile facts selected by the head.
+    pub profile: RegistrationProfile,
+    /// Matching bounded journal, if present.
+    pub journal: Option<crate::activation_journal::ActivationJournalRecord>,
+}
+
+/// Read-only preflight inputs. Implementations belong to trusted native composition.
+pub trait StartupInspection: Send + Sync {
+    /// Reads fixed bounded comparison facts without retaining code or inspecting credentials.
+    fn read_snapshot(&self, key: AccountBuildKey) -> Result<StartupSnapshot, NativeFailure>;
+    /// Revalidates native account incarnation and primary GID.
+    fn observe_account(&self, key: AccountBuildKey) -> Result<AccountBinding, NativeFailure>;
+    /// Distinguishes registered storage identity, locked storage, and an unmounted underlay.
+    fn check_storage(&self, snapshot: &StartupSnapshot) -> Result<(), NativeFailure>;
+}
+
+/// Comparison-only next step. It cannot start a process or release a credential.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StartupPreflight {
+    /// Stopped guard passed before installation or credential work.
+    Stopped,
+    /// Existing identity waits unprivileged without creating underlay data.
+    WaitingStorage(NativeFailure),
+    /// Only this exact approved installation may be retained next.
+    RetainApproved(InstallationId),
+}
+
+/// Checks startup facts in frozen order. Stopped precedes storage, code retention and credentials.
+pub fn inspect_startup(
+    key: AccountBuildKey,
+    generation: NonZeroU64,
+    native: &dyn StartupInspection,
+) -> Result<StartupPreflight, NativeFailure> {
+    use sha2::{Digest, Sha256};
+    crate::native_deployment::contracts::validate_key(key)?;
+    let snapshot = native.read_snapshot(key)?;
+    validate_registration_head(&snapshot.head)?;
+    let head = &snapshot.head;
+    if head.key != key
+        || snapshot.profile.account().key() != key
+        || snapshot.profile.server_id_bytes() != &head.server_id
+    {
+        return Err(NativeFailure::IdentityMismatch);
+    }
+    if head.generation != generation {
+        return Err(NativeFailure::GenerationMismatch);
+    }
+    let digest: [u8; 32] = Sha256::digest(snapshot.profile.encode()?).into();
+    if digest != head.profile_sha256 {
+        return Err(NativeFailure::InvalidRecord);
+    }
+    snapshot
+        .profile
+        .account()
+        .compare(&native.observe_account(key)?)?;
+    if head.desired_state == DesiredServerState::Stopped {
+        return Ok(StartupPreflight::Stopped);
+    }
+    let journal_selection = snapshot
+        .journal
+        .as_ref()
+        .map(|journal| journal.recovery_selection(head, &snapshot.profile.account().sha256()))
+        .transpose()?;
+    match head.startup_barrier {
+        StartupBarrier::Open => {
+            if journal_selection.is_some_and(|s| {
+                !matches!(
+                    s,
+                    crate::activation_journal::RecoverySelection::Original { .. }
+                        | crate::activation_journal::RecoverySelection::Committed { .. }
+                )
+            }) {
+                return Err(NativeFailure::UnsafeNativeState);
+            }
+        }
+        StartupBarrier::ApprovedStartOnly => {
+            if !matches!(
+                journal_selection,
+                Some(crate::activation_journal::RecoverySelection::Committed { .. })
+            ) {
+                return Err(NativeFailure::UnsafeNativeState);
+            }
+        }
+        StartupBarrier::Inhibited => return Err(NativeFailure::OutcomePending),
+        StartupBarrier::RecoveryRequired => return Err(NativeFailure::UnsafeNativeState),
+    }
+    match native.check_storage(&snapshot) {
+        Ok(()) => Ok(StartupPreflight::RetainApproved(head.approved_installation)),
+        Err(failure @ (NativeFailure::StorageLocked | NativeFailure::StorageUnavailable)) => {
+            Ok(StartupPreflight::WaitingStorage(failure))
+        }
+        Err(failure) => Err(failure),
+    }
+}
+
+/// Owned one-shot execution edge. Successful same-PID exec cannot return.
+pub trait OneShotLauncher {
+    /// Consumes pending ownership on every path and preserves cleanup uncertainty.
+    fn launch(
+        &mut self,
+        pending: PendingStartup,
+        authority: &dyn NativeStartupAuthority,
+        credentials: &dyn crate::boot_credentials::BootCredentialAdapter,
+    ) -> Result<std::convert::Infallible, NativeFailure>;
+}
+
+/// Fixed fail-closed execution edge until the native exchange owner supplies its implementation.
+#[derive(Default)]
+pub struct UnavailableOneShotLauncher;
+impl OneShotLauncher for UnavailableOneShotLauncher {
+    fn launch(
+        &mut self,
+        _pending: PendingStartup,
+        _authority: &dyn NativeStartupAuthority,
+        _credentials: &dyn crate::boot_credentials::BootCredentialAdapter,
+    ) -> Result<std::convert::Infallible, NativeFailure> {
+        Err(NativeFailure::NativeUnavailable)
+    }
+}
+
+/// Frozen single-threaded launcher composition. Stopped cannot reach the execution adapter.
+pub fn launch_once(
+    key: AccountBuildKey,
+    generation: NonZeroU64,
+    authority: &dyn NativeStartupAuthority,
+    credentials: &dyn crate::boot_credentials::BootCredentialAdapter,
+    launcher: &mut dyn OneShotLauncher,
+) -> Result<(), NativeFailure> {
+    crate::native_deployment::contracts::validate_key(key)?;
+    match authority.admit(key, generation)? {
+        NativeStartupAdmission::Stopped => Ok(()),
+        // No production unlock wait route has been supplied. Report the classified storage
+        // condition, never recreate identity or fork a replacement privileged waiter.
+        NativeStartupAdmission::WaitingStorage(plan) => Err(plan.failure()),
+        NativeStartupAdmission::Ready(pending) => {
+            match launcher.launch(pending, authority, credentials) {
+                Ok(never) => match never {},
+                Err(failure) => Err(failure),
+            }
+        }
+    }
 }

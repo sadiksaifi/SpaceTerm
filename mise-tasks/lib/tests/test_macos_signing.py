@@ -148,3 +148,64 @@ class ReleaseSigningTests(unittest.TestCase):
         for path in imported.decode().splitlines():
             if "spaceterm-release-signing-" in path:
                 self.assertFalse(Path(path.strip().strip('"')).exists())
+
+
+class SigningSerializationTests(unittest.TestCase):
+    def test_parallel_signing_import_windows_are_serialized(self):
+        import threading
+
+        from spaceterm_tasks.macos_signing import signing_search_list_lock
+
+        entered = threading.Event()
+        release = threading.Event()
+        second_entered = threading.Event()
+        failures = []
+
+        def first():
+            try:
+                with signing_search_list_lock():
+                    entered.set()
+                    release.wait(5)
+            except Exception as error:
+                failures.append(type(error))
+
+        def second():
+            try:
+                with signing_search_list_lock():
+                    second_entered.set()
+            except Exception as error:
+                failures.append(type(error))
+
+        a = threading.Thread(target=first)
+        b = threading.Thread(target=second)
+        a.start()
+        self.assertTrue(entered.wait(5))
+        b.start()
+        try:
+            self.assertFalse(second_entered.wait(0.1))
+        finally:
+            release.set()
+            a.join(5)
+            b.join(5)
+        self.assertTrue(second_entered.is_set())
+        self.assertFalse(failures)
+
+    def test_desktop_designated_requirement_is_unchanged(self):
+        from unittest.mock import patch
+
+        from spaceterm_tasks.macos_signing import verify_release_signature
+
+        fingerprint = "9E07CD5C15C5C862A21B93EA55D4303BC19B7366"
+        identifier = "io.github.sadiksaifi.spaceterm"
+        designated = f'designated => identifier "{identifier}" and certificate leaf = H"{fingerprint.lower()}"'
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch(
+                "spaceterm_tasks.macos_signing.checked", side_effect=[b"", designated]
+            ) as checked,
+        ):
+            verify_release_signature(Path(temporary), fingerprint, identifier, "desktop")
+            self.assertEqual(
+                checked.call_args_list[0].args[0][-2:],
+                [f'=certificate leaf = H"{fingerprint.lower()}"', temporary],
+            )

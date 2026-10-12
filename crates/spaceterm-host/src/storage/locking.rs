@@ -177,6 +177,6 @@ impl Entry {
         if unsafe { libc::fcntl(self.fd(), libc::F_GETLK, &mut lock) } != 0 {
             return Err(ffi::SQLITE_IOERR_CHECKRESERVEDLOCK);
         }
-        Ok(lock.l_type != libc::F_UNLCK as _)
+        Ok(lock.l_type != libc::F_UNLCK as libc::c_short)
     }
 }
