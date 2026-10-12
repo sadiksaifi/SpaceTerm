@@ -269,6 +269,18 @@ run = "python -I mise-tasks/server/native/macos/acl_tests.py"
 description = "Check native credential policy memory safety and allocation failures"
 run = "python -I mise-tasks/server/native/macos/acl_tests.py --sanitizers"
 
+[tasks."test:server:native:companion:macos"]
+description = "Test the temporary GUI evidence companion's model, interactions, and app build"
+run = "python -I mise-tasks/server/native/macos/companion_tests.py"
+
+[tasks."test:server:native:companion:asan:macos"]
+description = "Check the GUI evidence companion's model and interactions with ASan and UBSan"
+run = "python -I mise-tasks/server/native/macos/companion_tests.py --sanitizers"
+
+[tasks."test:server:native:companion:tools"]
+description = "Test GUI evidence companion source policy and bundle metadata on any platform"
+run = "python -I mise-tasks/server/native/macos/companion_tests.py --portable"
+
 [tasks."test:server:native:handoff:tools"]
 description = "Test startup-pipe tooling; native fault cases require the explicit macOS fault task"
 run = "python -m unittest tests.test_server_handoff"
