@@ -5721,6 +5721,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "spaceterm-client"
+version = "0.0.0"
+dependencies = [
+ "spaceterm-core",
+]
+
+[[package]]
+name = "spaceterm-core"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.19",
+ "unicode-segmentation",
+]
+
+[[package]]
 name = "spaceterm-directories"
 version = "0.0.0"
 dependencies = [
@@ -5734,6 +5752,13 @@ version = "0.0.0"
 dependencies = [
  "libc",
  "thiserror 2.0.19",
+]
+
+[[package]]
+name = "spaceterm-server"
+version = "0.0.0"
+dependencies = [
+ "spaceterm-core",
 ]
 
 [[package]]

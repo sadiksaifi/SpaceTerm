@@ -5,6 +5,9 @@ edition = "2024"
 
 [workspace]
 members = [
+    "crates/spaceterm-core",
+    "crates/spaceterm-client",
+    "crates/spaceterm-server",
     "crates/spaceterm-directories",
     "crates/spaceterm-host",
     "crates/spaceterm-ui",
