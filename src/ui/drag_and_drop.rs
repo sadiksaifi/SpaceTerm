@@ -632,7 +632,7 @@ fn presence_motion(cx: &App) -> spaceterm_ui::ControlMotion {
     super::appearance_runtime::control_motion(cx)
 }
 
-/// A springy progress from 0 to 1 that starts at `since`.
+/// A progress from 0 to 1 that starts at `since` and eases out, without overshoot.
 #[derive(Clone, Copy, Debug)]
 struct Ease {
     since: Instant,
@@ -665,7 +665,7 @@ impl Ease {
     }
 
     fn at(&self, now: Instant) -> f32 {
-        spring(self.progress(now))
+        ease_out(self.progress(now))
     }
 }
 
