@@ -48,6 +48,8 @@ def entry() -> int:
         environment["CARGO_BUILD_JOBS"] = "3"
     observers = run_suite(["--lib", "--", "observer_tests"], environment, 1)
     print(f"{observers} account observer regressions passed; no custody evidence credit")
+    witnesses = run_suite(["--lib", "--", "linux_custody::mount_probe"], environment, 1)
+    print(f"{witnesses} mount witness regressions passed; no privileged evidence credit")
     authority = run_suite(
         [
             "--test",

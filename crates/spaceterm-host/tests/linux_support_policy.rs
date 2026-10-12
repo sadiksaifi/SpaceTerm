@@ -3,8 +3,12 @@ use spaceterm_host::{
     native_deployment::contracts::NativeFailure,
 };
 
-const AUTHENTICATED: &str = "Matching Defaults entries for account on host:\n    env_reset, authenticate\n\nUser account may run the following commands on host:\n\nSudoers entry:\n    RunAsUsers: ALL\n    RunAsGroups: ALL\n    Options: authenticate\n    Commands:\n        ALL\n";
-const NOPASSWD: &str = "Matching Defaults entries for account on host:\n    env_reset\n\nUser account may run the following commands on host:\n\nSudoers entry:\n    RunAsUsers: root\n    Options: !authenticate\n    Commands:\n        /usr/bin/systemctl restart nginx\n";
+const AUTHENTICATED: &str = include_str!(
+    "../../../tests/server_native/linux/policy_fixtures/sudo-1.9.9-ubuntu-22.04-password.listing"
+);
+const NOPASSWD: &str = include_str!(
+    "../../../tests/server_native/linux/policy_fixtures/sudo-1.9.9-ubuntu-22.04-nopasswd.listing"
+);
 fn admitted() -> PolicySnapshot<'static> {
     PolicySnapshot {
         sudo_listing: AUTHENTICATED,
@@ -30,13 +34,16 @@ fn admitted() -> PolicySnapshot<'static> {
 }
 #[test]
 fn support_policy_refuses_nopasswd_but_allows_password_gated_sudo_membership() {
-    assert_eq!(evaluate(&admitted()), Ok(()));
-    let mut snapshot = admitted();
-    snapshot.sudo_listing = NOPASSWD;
-    assert_eq!(
-        evaluate(&snapshot),
-        Err(NativeFailure::LinuxPasswordlessSudo)
-    );
+    for dialect in [SudoDialect::V1_9, SudoDialect::V1_9Recent] {
+        let mut snapshot = admitted();
+        snapshot.sudo_dialect = dialect;
+        assert_eq!(evaluate(&snapshot), Ok(()));
+        snapshot.sudo_listing = NOPASSWD;
+        assert_eq!(
+            evaluate(&snapshot),
+            Err(NativeFailure::LinuxPasswordlessSudo)
+        );
+    }
 }
 #[test]
 fn password_authenticated_transient_caches_are_positive_controls() {
@@ -101,6 +108,26 @@ fn truncated_failed_and_unsupported_sudo_listings_are_unavailable() {
         );
     }
 }
+#[test]
+fn sudo_command_tabs_do_not_bypass_record_validation() {
+    for listing in [
+        AUTHENTICATED.replace("    RunAsUsers: ALL", "\tRunAsUsers: ALL"),
+        AUTHENTICATED.replace("\tALL", "\t\tALL"),
+        AUTHENTICATED.replace("\tALL", "\t"),
+        AUTHENTICATED.replace("\tALL", "        ALL"),
+        AUTHENTICATED.replace("    Commands:\n", ""),
+        AUTHENTICATED.replace("    RunAsUsers: ALL\n", ""),
+        format!("{NOPASSWD}\nSudoers entry:\n    Commands:\n\tALL\n"),
+    ] {
+        let mut snapshot = admitted();
+        snapshot.sudo_listing = &listing;
+        assert_eq!(
+            evaluate(&snapshot),
+            Err(NativeFailure::LinuxPolicyCheckUnavailable)
+        );
+    }
+}
+
 #[test]
 fn rights_removal_requires_reboot_only_for_an_actual_unproven_transition() {
     let mut snapshot = admitted();

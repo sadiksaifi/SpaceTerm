@@ -283,6 +283,9 @@ impl PendingStartup {
     pub fn context(&self) -> &PendingStartupContext {
         &self.context
     }
+    pub(crate) fn retained_installation(&self) -> &RetainedApprovedInstallation {
+        &self._installation
+    }
 }
 
 /// Native post-exec observation authority, not receiver declarations or wire matches.
@@ -292,22 +295,42 @@ pub struct PostExecProof {
 
 /// Unprivileged storage waiting facts. They contain no path or replacement identity.
 pub struct UnprivilegedWaitPlan {
-    key: AccountBuildKey,
-    generation: NonZeroU64,
-    failure: NativeFailure,
+    retry: Box<RegisteredStorageRetry>,
 }
 impl UnprivilegedWaitPlan {
-    /// Returns the exact existing registration key.
-    pub fn key(&self) -> AccountBuildKey {
-        self.key
+    /// Retains the original classified wait without credentials, code-retention authority or new roots.
+    pub fn begin(
+        key: AccountBuildKey,
+        generation: NonZeroU64,
+        native: &dyn StartupInspection,
+    ) -> Result<Self, NativeFailure> {
+        Ok(Self {
+            retry: Box::new(RegisteredStorageRetry::begin(key, generation, native)?),
+        })
     }
-    /// Returns the generation to revalidate after native storage unlock.
+    /// Returns the exact original registration key.
+    pub fn key(&self) -> AccountBuildKey {
+        self.retry.head.key
+    }
+    /// Returns the generation retained before dropping privileges to wait.
     pub fn generation(&self) -> NonZeroU64 {
-        self.generation
+        self.retry.head.generation
     }
     /// Distinguishes locked storage from unavailable or unmounted storage.
     pub fn failure(&self) -> NativeFailure {
-        self.failure
+        self.retry.failure
+    }
+    /// Returns original account, roots and storage comparison bindings. This is not launch authority.
+    pub fn profile(&self) -> &RegistrationProfile {
+        &self.retry.profile
+    }
+    /// Returns the original approved installation/data and generations, never a replacement selection.
+    pub fn head(&self) -> &RegistrationHeadV2 {
+        &self.retry.head
+    }
+    /// Rechecks the same registration. A newer Stop cancels before application storage inspection.
+    pub fn retry(&self, native: &dyn StartupInspection) -> Result<StartupPreflight, NativeFailure> {
+        self.retry.retry(native)
     }
 }
 
@@ -406,9 +429,18 @@ pub fn inspect_startup(
     generation: NonZeroU64,
     native: &dyn StartupInspection,
 ) -> Result<StartupPreflight, NativeFailure> {
-    use sha2::{Digest, Sha256};
     crate::native_deployment::contracts::validate_key(key)?;
     let snapshot = native.read_snapshot(key)?;
+    inspect_startup_snapshot(key, generation, &snapshot, native)
+}
+
+pub(crate) fn inspect_startup_snapshot(
+    key: AccountBuildKey,
+    generation: NonZeroU64,
+    snapshot: &StartupSnapshot,
+    native: &dyn StartupInspection,
+) -> Result<StartupPreflight, NativeFailure> {
+    use sha2::{Digest, Sha256};
     validate_registration_head(&snapshot.head)?;
     let head = &snapshot.head;
     if head.key != key
@@ -459,7 +491,7 @@ pub fn inspect_startup(
         StartupBarrier::Inhibited => return Err(NativeFailure::OutcomePending),
         StartupBarrier::RecoveryRequired => return Err(NativeFailure::UnsafeNativeState),
     }
-    match native.check_storage(&snapshot) {
+    match native.check_storage(snapshot) {
         Ok(()) => Ok(StartupPreflight::RetainApproved(head.approved_installation)),
         Err(failure @ (NativeFailure::StorageLocked | NativeFailure::StorageUnavailable)) => {
             Ok(StartupPreflight::WaitingStorage(failure))
@@ -468,8 +500,78 @@ pub fn inspect_startup(
     }
 }
 
+/// Unprivileged retry of one existing registration's storage. This holds comparison facts only,
+/// never credentials or launch authority. The native storage peer must check the registered volume
+/// before touching application directories, so locked/unmounted storage cannot expose an underlay.
+pub struct RegisteredStorageRetry {
+    head: RegistrationHeadV2,
+    profile: RegistrationProfile,
+    failure: NativeFailure,
+}
+impl fmt::Debug for RegisteredStorageRetry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RegisteredStorageRetry(..)")
+    }
+}
+impl RegisteredStorageRetry {
+    /// Retains original identity, roots and approved data only after a classified storage wait.
+    pub fn begin(
+        key: AccountBuildKey,
+        generation: NonZeroU64,
+        native: &dyn StartupInspection,
+    ) -> Result<Self, NativeFailure> {
+        crate::native_deployment::contracts::validate_key(key)?;
+        let snapshot = native.read_snapshot(key)?;
+        let failure = match inspect_startup_snapshot(key, generation, &snapshot, native)? {
+            StartupPreflight::WaitingStorage(failure) => failure,
+            _ => return Err(NativeFailure::UnsafeNativeState),
+        };
+        Ok(Self {
+            head: snapshot.head,
+            profile: snapshot.profile,
+            failure,
+        })
+    }
+
+    /// Rechecks native account and storage without rediscovery, replacement identity or XDG resolution.
+    /// A newer Stop cancels the wait before storage inspection. A changed approval requires new admission.
+    pub fn retry(&self, native: &dyn StartupInspection) -> Result<StartupPreflight, NativeFailure> {
+        let snapshot = native.read_snapshot(self.head.key)?;
+        if snapshot.head.key != self.head.key
+            || snapshot.head.server_id != self.head.server_id
+            || snapshot.head.profile_sha256 != self.head.profile_sha256
+            || snapshot.profile.encode()? != self.profile.encode()?
+        {
+            return Err(NativeFailure::IdentityMismatch);
+        }
+        if snapshot.head.generation < self.head.generation
+            || snapshot.head.lifecycle_generation < self.head.lifecycle_generation
+            || snapshot.head.approved_installation != self.head.approved_installation
+            || snapshot.head.approved_data_generation != self.head.approved_data_generation
+            || snapshot.head.approved_descriptor_sha256 != self.head.approved_descriptor_sha256
+            || snapshot.head.approved_manifest_sha256 != self.head.approved_manifest_sha256
+            || snapshot.head.installation_high_water < self.head.installation_high_water
+            || snapshot.head.data_high_water < self.head.data_high_water
+        {
+            return Err(NativeFailure::GenerationMismatch);
+        }
+        inspect_startup_snapshot(self.head.key, snapshot.head.generation, &snapshot, native)
+    }
+}
+
 /// Owned one-shot execution edge. Successful same-PID exec cannot return.
 pub trait OneShotLauncher {
+    /// Consumes the original wait plan in the native unprivileged driver. The driver must
+    /// drop privileges before waiting and reenter the fixed protected startup route on unlock.
+    /// Default refusal preserves fail-closed composition when that driver is absent.
+    fn wait_for_storage(
+        &mut self,
+        plan: UnprivilegedWaitPlan,
+        _authority: &dyn NativeStartupAuthority,
+        _credentials: &dyn crate::boot_credentials::BootCredentialAdapter,
+    ) -> Result<(), NativeFailure> {
+        Err(plan.failure())
+    }
     /// Consumes pending ownership on every path and preserves cleanup uncertainty.
     fn launch(
         &mut self,
@@ -504,9 +606,9 @@ pub fn launch_once(
     crate::native_deployment::contracts::validate_key(key)?;
     match authority.admit(key, generation)? {
         NativeStartupAdmission::Stopped => Ok(()),
-        // No production unlock wait route has been supplied. Report the classified storage
-        // condition, never recreate identity or fork a replacement privileged waiter.
-        NativeStartupAdmission::WaitingStorage(plan) => Err(plan.failure()),
+        NativeStartupAdmission::WaitingStorage(plan) => {
+            launcher.wait_for_storage(plan, authority, credentials)
+        }
         NativeStartupAdmission::Ready(pending) => {
             match launcher.launch(pending, authority, credentials) {
                 Ok(never) => match never {},

@@ -500,13 +500,19 @@ impl ActivationJournalRecord {
                 return Err(NativeFailure::UnsafeNativeState);
             }
             // A crash after atomic approval but before journal advance still follows the head.
-            if !matches!(
-                self.state,
-                ActivationJournalState::MigrationReady
-                    | ActivationJournalState::ApprovalCommitted
-                    | ActivationJournalState::Starting
-                    | ActivationJournalState::Completed
-            ) {
+            let commit_predecessor = match self.operation {
+                NativeOperationKind::Install => ActivationJournalState::Staged,
+                NativeOperationKind::Activate => ActivationJournalState::MigrationReady,
+                _ => return Err(NativeFailure::UnsafeNativeState),
+            };
+            if self.state != commit_predecessor
+                && !matches!(
+                    self.state,
+                    ActivationJournalState::ApprovalCommitted
+                        | ActivationJournalState::Starting
+                        | ActivationJournalState::Completed
+                )
+            {
                 return Err(NativeFailure::UnsafeNativeState);
             }
             return Ok(RecoverySelection::Committed {
@@ -549,9 +555,7 @@ impl ActivationJournalRecord {
                 | ActivationJournalState::Staged
                 | ActivationJournalState::Completed
                 | ActivationJournalState::Aborted
-        ) || self.advances_lifecycle()
-            && !lifecycle_committed
-            && self.state == ActivationJournalState::ActivationPrepared)
+        ) || !lifecycle_committed && self.state == ActivationJournalState::ActivationPrepared)
             && head.startup_barrier == StartupBarrier::Open
         {
             return Ok(RecoverySelection::Original {

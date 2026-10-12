@@ -246,3 +246,7 @@ fn lifecycle_generation_cannot_skip_a_native_intent() {
     );
     assert_eq!(storage.calls.load(Ordering::SeqCst), 0);
 }
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[path = "native_authority/publication.rs"]
+mod fresh_publication;

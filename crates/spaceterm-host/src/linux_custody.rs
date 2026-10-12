@@ -2,6 +2,14 @@
 
 use std::convert::Infallible;
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the native custody issuer must consume this witness; production admission remains closed"
+    )
+)]
+mod mount_probe;
 pub mod support_policy;
 
 /// Retained native custody. Only A's private OS-anchored composition may issue it.

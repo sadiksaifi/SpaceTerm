@@ -133,6 +133,60 @@ fn journal_crash_before_and_after_every_commit_boundary() {
 }
 
 #[test]
+fn install_recovers_running_and_stopped_head_commits_before_journal_advance() {
+    for desired in [DesiredServerState::Running, DesiredServerState::Stopped] {
+        let initial = head(desired);
+        let mut admitted = journal(desired);
+        admitted.operation = NativeOperationKind::Install;
+        admitted.candidate_input = Some(VerifiedCandidateId::new([4; 16]).unwrap());
+        admitted.assessment_digest = None;
+        admitted.state = S::Staged;
+        let published = committed(initial.clone(), &admitted);
+        for phase in [S::Staged, S::ApprovalCommitted] {
+            admitted.state = phase;
+            let restored = ActivationJournalRecord::decode(&admitted.encode().unwrap()).unwrap();
+            assert_eq!(
+                restored.recovery_selection(&published, &[6; 32]),
+                Ok(RecoverySelection::Committed {
+                    installation: published.approved_installation,
+                    data: published.approved_data_generation,
+                    desired_state: desired,
+                }),
+                "{desired:?} at {phase:?}"
+            );
+            let mut unrelated = published.clone();
+            unrelated.active_request = Some(NativeRequestId::new([9; 16]).unwrap());
+            assert_eq!(
+                restored.recovery_selection(&unrelated, &[6; 32]),
+                Err(NativeFailure::IdentityMismatch)
+            );
+            let mut wrong_data = published.clone();
+            wrong_data.approved_data_generation = initial.approved_data_generation;
+            assert_eq!(
+                restored.recovery_selection(&wrong_data, &[6; 32]),
+                Err(NativeFailure::UnsafeNativeState)
+            );
+        }
+        admitted.state = S::Staged;
+        assert!(matches!(
+            admitted.recovery_selection(&initial, &[6; 32]),
+            Ok(RecoverySelection::Original { .. })
+        ));
+        admitted.state = S::Staging;
+        assert_eq!(
+            admitted.recovery_selection(&published, &[6; 32]),
+            Err(NativeFailure::UnsafeNativeState)
+        );
+        admitted.state = S::ApprovalCommitted;
+        assert_eq!(
+            admitted.recovery_selection(&initial, &[6; 32]),
+            Err(NativeFailure::UnsafeNativeState)
+        );
+        assert!(admitted.transition(S::Aborted).is_err());
+    }
+}
+
+#[test]
 fn precommit_failure_preserves_old_selection() {
     let initial = head(DesiredServerState::Running);
     let j = journal(DesiredServerState::Running)

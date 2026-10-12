@@ -11,9 +11,36 @@ use crate::{
 pub struct RetainedRegistration {
     head: RegistrationHeadV2,
     profile: RegistrationProfile,
-    _custody: crate::approved_installation::InstallationCustody,
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    custody: crate::native_deployment::authority::RegistrationCustody,
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    _unavailable: crate::native_deployment::contracts::NativeAuthorization,
 }
 impl RetainedRegistration {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    pub(crate) fn from_native(
+        head: RegistrationHeadV2,
+        profile: RegistrationProfile,
+        custody: crate::native_deployment::authority::RegistrationCustody,
+    ) -> Result<Self, NativeFailure> {
+        custody.revalidate(head.key)?;
+        Ok(Self {
+            head,
+            profile,
+            custody,
+        })
+    }
+    /// Revalidates retained head/profile/journal descriptors and native custody before use.
+    pub fn revalidate(&self) -> Result<(), NativeFailure> {
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            self.custody.revalidate(self.head.key)
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            Err(NativeFailure::UnsupportedHost)
+        }
+    }
     /// Returns the head authenticated through retained native custody.
     pub fn head(&self) -> &RegistrationHeadV2 {
         &self.head
@@ -175,7 +202,12 @@ pub fn propose_staging(
     if head.startup_barrier != StartupBarrier::Open {
         return Err(NativeFailure::OutcomePending);
     }
-    if installation.0.get() <= head.installation_high_water {
+    // The native allocator has already burned the current high-water ID. This helper
+    // produces facts only; the native writer must bind that reservation to its journal.
+    if installation.0.get() < head.installation_high_water
+        || installation == head.approved_installation
+        || Some(installation) == head.staged_installation
+    {
         return Err(NativeFailure::UnsafeNativeState);
     }
     let mut next = head.clone();

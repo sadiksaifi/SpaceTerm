@@ -2,6 +2,8 @@
 
 use crate::native_deployment::contracts::NativeFailure;
 
+pub mod native;
+
 /// Verbose sudo listing dialects covered by the supported distribution baseline.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SudoDialect {
@@ -191,6 +193,19 @@ fn check_sudo(text: &str, dialect: SudoDialect) -> Result<(), NativeFailure> {
                 return Err(NativeFailure::LimitExceeded);
             }
             entry = Some(SudoEntry::default());
+        } else if let Some(command) = line.strip_prefix('\t') {
+            // display_priv_long emits one literal tab. The native collector must
+            // use a pipe (no terminal-width wrapping) and LC_ALL=C. A command is
+            // valid only after the complete entry header, never as a field.
+            let current = entry.as_mut().ok_or(unavailable)?;
+            if !current.commands
+                || !current.run_as
+                || command.is_empty()
+                || command.starts_with(char::is_whitespace)
+            {
+                return Err(unavailable);
+            }
+            current.grants |= !command.starts_with('!');
         } else if line.starts_with("    ") {
             let value = line.trim();
             if let Some(entry) = &mut entry {
@@ -221,8 +236,6 @@ fn check_sudo(text: &str, dialect: SudoDialect) -> Result<(), NativeFailure> {
                     entry.options = Some(required);
                 } else if value == "Commands:" && !entry.commands {
                     entry.commands = true;
-                } else if entry.commands && line.starts_with("        ") && !value.is_empty() {
-                    entry.grants |= !value.starts_with('!');
                 } else {
                     return Err(unavailable);
                 }
