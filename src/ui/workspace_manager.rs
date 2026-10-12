@@ -1018,6 +1018,7 @@ impl WorkspaceManager {
         self.synchronize_tab_manager_layout(workspace_id, window, cx);
         previous_manager.update(cx, |manager, cx| manager.deactivate(cx));
         next_manager.update(cx, |manager, cx| manager.activate(window, cx));
+        Self::hand_over_tab_strip(&previous_manager, &next_manager, cx);
         self.sidebar.update(cx, |sidebar, cx| {
             sidebar.cancel_rename(cx);
         });
@@ -1717,6 +1718,17 @@ impl WorkspaceManager {
             manager.set_parent_focus_blocker(blocker, cx);
             manager.activate(window, cx);
         });
+        Self::hand_over_tab_strip(&previous_manager, &next_manager, cx);
+    }
+
+    /// Starts `next`'s Tab strip from the shape of `previous`'s, whose place it takes.
+    fn hand_over_tab_strip(previous: &Entity<TabManager>, next: &Entity<TabManager>, cx: &mut App) {
+        if previous == next {
+            return;
+        }
+        if let Some(shape) = previous.read(cx).tab_strip_shape(cx) {
+            next.update(cx, |manager, cx| manager.arrive_from(shape, cx));
+        }
     }
 
     fn debug_assert_remote_runtime_invariants(&self) {
@@ -2379,6 +2391,7 @@ impl WorkspaceManager {
         } else {
             next_manager.update(cx, |manager, cx| manager.activate(window, cx));
         }
+        Self::hand_over_tab_strip(&previous_manager, &next_manager, cx);
         self.sync_terminal_focus_blocker(window, cx);
         self.scroll_active_workspace_into_view(cx);
 
@@ -2686,7 +2699,10 @@ impl WorkspaceManager {
             sidebar.cancel_rename_for(workspace_id, cx)
         });
         self.sync_terminal_focus_blocker(window, cx);
-        self.scroll_active_workspace_into_view(cx);
+        // Closing another Workspace leaves the sidebar where it was scrolled.
+        if was_active {
+            self.scroll_active_workspace_into_view(cx);
+        }
 
         cx.notify();
     }
@@ -2740,7 +2756,9 @@ impl WorkspaceManager {
                     sidebar.cancel_rename_for(workspace_id, cx)
                 });
                 self.sync_terminal_focus_blocker(window, cx);
-                self.scroll_active_workspace_into_view(cx);
+                if was_active {
+                    self.scroll_active_workspace_into_view(cx);
+                }
 
                 cx.notify();
             }

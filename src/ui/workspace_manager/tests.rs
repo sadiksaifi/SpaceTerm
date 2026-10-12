@@ -2,6 +2,7 @@ use crate::directory_selection::GpuiDirectorySelection;
 use crate::domain::RemoteConnectionPhase;
 use crate::ssh::remote_account::RemoteWorkspaceAccount;
 use crate::terminal::GpuiTerminalKeyInputAdapterFactory;
+use crate::ui::drag_and_drop::finish_slides;
 use crate::ui::workspace_frame::WorkspaceFrame;
 use crate::ui::workspace_sidebar::SIDEBAR_ROW_SELECTION_INSET_Y;
 use crate::ui::{TOP_CHROME_HEIGHT, WORKSPACE_SIDEBAR_MINIMUM_WIDTH};
@@ -7809,7 +7810,7 @@ fn a_workspace_row_drag_released_on_its_first_move_should_land(cx: &mut TestAppC
 }
 
 #[gpui::test]
-fn a_workspace_row_released_below_the_list_should_stay_in_place(cx: &mut TestAppContext) {
+fn a_workspace_row_released_just_below_the_list_should_land_at_its_end(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
     cx.simulate_keystrokes("cmd-n");
     cx.simulate_keystrokes("cmd-n");
@@ -7831,20 +7832,14 @@ fn a_workspace_row_released_below_the_list_should_stay_in_place(cx: &mut TestApp
     cx.run_until_parked();
     cx.simulate_mouse_move(below, MouseButton::Left, Modifiers::none());
     cx.run_until_parked();
-    let marked = cx.debug_bounds("workspace-insertion-marker-3").is_some();
     cx.simulate_mouse_up(below, MouseButton::Left, Modifiers::none());
     cx.run_until_parked();
 
-    assert_eq!(
-        (marked, workspace_order(&manager, cx)),
-        (false, vec![1, 2, 3])
-    );
+    assert_eq!(workspace_order(&manager, cx), vec![2, 3, 1]);
 }
 
 #[gpui::test]
-fn dragging_a_workspace_row_should_mark_its_slot_and_land_there_on_release(
-    cx: &mut TestAppContext,
-) {
+fn dragging_a_workspace_row_should_open_a_gap_and_settle_there_on_release(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
     cx.simulate_keystrokes("cmd-n");
     cx.simulate_keystrokes("cmd-n");
@@ -7852,6 +7847,9 @@ fn dragging_a_workspace_row_should_mark_its_slot_and_land_there_on_release(
     let first = cx.debug_bounds("workspace-row-1-inactive").unwrap();
     let second = cx.debug_bounds("workspace-row-2-inactive").unwrap();
     let third = cx.debug_bounds("workspace-row-3-active").unwrap();
+    let origin = |selector: &'static str, cx: &mut VisualTestContext| {
+        cx.debug_bounds(selector).map(|row| row.origin)
+    };
 
     cx.simulate_mouse_move(first.center(), None, Modifiers::none());
     cx.simulate_mouse_down(first.center(), MouseButton::Left, Modifiers::none());
@@ -7866,28 +7864,42 @@ fn dragging_a_workspace_row_should_mark_its_slot_and_land_there_on_release(
         MouseButton::Left,
         Modifiers::none(),
     );
-    cx.run_until_parked();
-    let between = cx.debug_bounds("workspace-insertion-marker-2");
-    let release = third.center() + point(px(0.0), px(4.0));
+    finish_slides(cx);
+    let between = origin("workspace-row-2-inactive", cx);
+    // Beside the rows, where the lifted copy stays in line with them.
+    let beside = point(px(0.0), px(4.0));
+    let release = third.center() + point(px(30.0), px(4.0));
     cx.simulate_mouse_move(release, MouseButton::Left, Modifiers::none());
-    cx.run_until_parked();
+    finish_slides(cx);
+    let landing = gpui::Bounds::new(third.origin, first.size);
+    let dashed = cx
+        .debug_bounds("workspace-row-selection-1-landing")
+        .is_some();
     let during = (
         workspace_order(&manager, cx),
         cx.debug_bounds("workspace-row-1-inactive"),
-        cx.debug_bounds("workspace-row-preview-1-inactive")
-            .map(|preview| preview.size),
-        cx.debug_bounds("workspace-insertion-marker-3").is_some(),
+        origin("workspace-row-3-active", cx),
+        cx.debug_bounds("workspace-row-preview-1-inactive"),
     );
     cx.simulate_mouse_up(release, MouseButton::Left, Modifiers::none());
     cx.run_until_parked();
 
+    assert_eq!(between, Some(first.origin));
     assert_eq!(
         during,
-        (vec![1, 2, 3], Some(first), Some(first.size), true),
-        "a dragged row must keep its place, lift an exact copy, and mark where it lands"
+        (
+            vec![1, 2, 3],
+            Some(landing),
+            Some(second.origin),
+            Some(gpui::Bounds::new(third.origin + beside, first.size)),
+        ),
+        "a dragged row must show its faded face where it lands, open a gap there, and hold its \
+         lifted copy in line with the rows"
     );
-    // The marker between two rows stands on the edge they share.
-    assert_eq!(between.map(|marker| marker.center().y), Some(third.top()));
+    assert!(
+        dashed,
+        "a dragged row's faded face must edge its chip with a dashed line"
+    );
     assert_eq!(
         (
             workspace_order(&manager, cx),
@@ -7896,11 +7908,20 @@ fn dragging_a_workspace_row_should_mark_its_slot_and_land_there_on_release(
         (vec![2, 3, 1], WorkspaceId::new(3))
     );
     assert!(cx.debug_bounds("drag-preview").is_none());
-    assert!(cx.debug_bounds("workspace-insertion-marker-3").is_none());
-    let moved = cx
-        .debug_bounds("workspace-row-1-inactive")
-        .expect("the moved Workspace must render in its new place");
-    assert_eq!(moved.origin, third.origin);
+    // The moved row starts where its copy was released and settles into its new place.
+    assert_eq!(
+        origin("workspace-row-1-inactive", cx),
+        Some(third.origin + beside)
+    );
+    finish_slides(cx);
+    assert_eq!(
+        [
+            origin("workspace-row-2-inactive", cx),
+            origin("workspace-row-3-active", cx),
+            origin("workspace-row-1-inactive", cx),
+        ],
+        [Some(first.origin), Some(second.origin), Some(third.origin)]
+    );
 
     // Position shortcuts follow the presented order.
     cx.simulate_keystrokes("ctrl-1");
@@ -7912,7 +7933,265 @@ fn dragging_a_workspace_row_should_mark_its_slot_and_land_there_on_release(
 }
 
 #[gpui::test]
-fn escape_should_cancel_a_workspace_row_drag_without_moving_it(cx: &mut TestAppContext) {
+fn a_closed_workspace_row_should_leave_a_gap_that_closes(cx: &mut TestAppContext) {
+    let (_manager, _records, cx) = workspace_manager(cx);
+    cx.simulate_keystrokes("cmd-n");
+    cx.run_until_parked();
+    cx.update(|_, cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
+    let first = cx.debug_bounds("workspace-row-1-inactive").unwrap();
+    let second = cx.debug_bounds("workspace-row-2-active").unwrap();
+
+    right_click("workspace-row-1-inactive", cx);
+    click("workspace-menu-row-close", cx);
+    click("modal-action-close-confirmation-confirm", cx);
+    let closing = cx
+        .debug_bounds("workspace-row-2-active")
+        .map(|row| row.origin);
+    crate::ui::drag_and_drop::finish_slides(cx);
+    let closed = cx
+        .debug_bounds("workspace-row-2-active")
+        .map(|row| row.origin);
+
+    assert_eq!(
+        (closing, closed),
+        (Some(second.origin), Some(first.origin)),
+        "the row after a closed one must start in its own place and close the gap"
+    );
+}
+
+#[gpui::test]
+fn selecting_another_workspace_should_move_the_selection_from_the_old_row(cx: &mut TestAppContext) {
+    let (_manager, _records, cx) = workspace_manager(cx);
+    cx.simulate_keystrokes("cmd-n");
+    finish_slides(cx);
+    cx.update(|_, cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
+    let first = cx.debug_bounds("workspace-row-1-inactive").unwrap();
+    let second = cx.debug_bounds("workspace-row-2-active").unwrap();
+    let selection = cx.debug_bounds("workspace-row-selection-2").unwrap().origin;
+    let chip = |cx: &mut VisualTestContext| {
+        cx.debug_bounds("workspace-row-selection-1")
+            .expect("the selected row's chip was not rendered")
+            .origin
+    };
+
+    click("workspace-row-1-inactive", cx);
+    let leaving = chip(cx);
+    finish_slides(cx);
+    let landed = chip(cx);
+
+    assert_eq!(
+        (leaving, landed),
+        (selection, selection + (first.origin - second.origin)),
+        "the selection must leave from the old row and land on the new one"
+    );
+}
+
+#[gpui::test]
+fn switching_to_a_workspace_with_fewer_tabs_should_start_its_tab_strip_from_the_old_one(
+    cx: &mut TestAppContext,
+) {
+    let (_manager, _records, cx) = workspace_manager(cx);
+    cx.simulate_keystrokes("cmd-t cmd-t cmd-n");
+    finish_slides(cx);
+    click("workspace-row-1-inactive", cx);
+    finish_slides(cx);
+    cx.update(|_, cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
+    let first = cx.debug_bounds("tab-item-1-inactive").unwrap().origin;
+    let third = cx.debug_bounds("tab-item-3-active").unwrap().origin;
+    let selection = cx.debug_bounds("tab-item-3-chip").unwrap().origin;
+    let create = cx.debug_bounds("create-tab-button").unwrap().origin;
+    let strip = |cx: &mut VisualTestContext| {
+        (
+            cx.debug_bounds("tab-item-1-chip")
+                .expect("the arriving Tab's chip was not rendered")
+                .origin,
+            cx.debug_bounds("create-tab-button").unwrap().origin,
+        )
+    };
+
+    click("workspace-row-2-inactive", cx);
+    let (leaving, closing) = strip(cx);
+    finish_slides(cx);
+    let (landed, closed) = strip(cx);
+
+    assert_eq!(
+        (leaving, closing, landed),
+        (selection, create, selection + (first - third)),
+        "the selection must leave from the old active Tab, and the strip's end from the old end"
+    );
+    assert!(
+        closed.x < create.x,
+        "the strip must close the place of the Tabs it lacks, got {closed:?} from {create:?}"
+    );
+}
+
+#[gpui::test]
+fn switching_to_a_workspace_with_an_overflowing_tab_strip_should_keep_its_tabs_in_place(
+    cx: &mut TestAppContext,
+) {
+    let (_manager, _records, cx) = workspace_manager(cx);
+    for _ in 0..13 {
+        cx.simulate_keystrokes("cmd-t");
+    }
+    cx.simulate_keystrokes("cmd-n");
+    finish_slides(cx);
+    click("workspace-row-1-inactive", cx);
+    finish_slides(cx);
+    let strip = cx.debug_bounds("tab-items").unwrap();
+    let rest = ["tab-item-13-inactive", "tab-item-14-active"]
+        .map(|selector| cx.debug_bounds(selector).map(|tab| tab.origin));
+    click("workspace-row-2-inactive", cx);
+    finish_slides(cx);
+    cx.update(|_, cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
+    let selection = cx.debug_bounds("tab-item-1-chip").unwrap().origin;
+    let tabs = |cx: &mut VisualTestContext| {
+        ["tab-item-13-inactive", "tab-item-14-active"]
+            .map(|selector| cx.debug_bounds(selector).map(|tab| tab.origin))
+    };
+
+    click("workspace-row-1-inactive", cx);
+    let arriving = tabs(cx);
+    let leaving = cx.debug_bounds("tab-item-14-chip").unwrap().origin;
+    finish_slides(cx);
+
+    assert!(
+        rest[1].is_some_and(|last| strip.right() < last.x + strip.size.width),
+        "the strip must overflow for this test, got {rest:?} in {strip:?}"
+    );
+    assert_eq!(
+        (arriving, leaving, tabs(cx)),
+        (rest, selection, rest),
+        "an overflowing strip's Tabs must keep their places while the selection leaves from the \
+         old one"
+    );
+}
+
+#[gpui::test]
+fn a_new_workspace_should_start_its_tab_strip_from_a_scrolled_old_one(cx: &mut TestAppContext) {
+    let (_manager, _records, cx) = workspace_manager(cx);
+    for _ in 0..13 {
+        cx.simulate_keystrokes("cmd-t");
+    }
+    finish_slides(cx);
+    cx.update(|_, cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
+    let selection = cx.debug_bounds("tab-item-14-chip").unwrap().origin;
+    let create = cx.debug_bounds("create-tab-button").unwrap().origin;
+
+    cx.simulate_keystrokes("cmd-n");
+    cx.run_until_parked();
+    let leaving = (
+        cx.debug_bounds("tab-item-1-chip")
+            .expect("the new Workspace's Tab chip was not rendered")
+            .origin,
+        cx.debug_bounds("create-tab-button").unwrap().origin,
+    );
+
+    assert_eq!(
+        leaving,
+        (selection, create),
+        "the selection and the strip's end must leave from where a scrolled strip drew them"
+    );
+}
+
+#[gpui::test]
+fn switching_workspaces_while_a_dropped_tab_settles_should_move_the_selection_from_where_it_is_drawn(
+    cx: &mut TestAppContext,
+) {
+    let (_manager, _records, cx) = workspace_manager(cx);
+    cx.simulate_keystrokes("cmd-t cmd-t");
+    finish_slides(cx);
+    cx.update(|_, cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
+    let first = cx.debug_bounds("tab-item-1-inactive").unwrap();
+    let third = cx.debug_bounds("tab-item-3-active").unwrap();
+    cx.simulate_mouse_move(third.center(), None, Modifiers::none());
+    cx.simulate_mouse_down(third.center(), MouseButton::Left, Modifiers::none());
+    for position in [
+        third.center() - point(px(8.0), px(0.0)),
+        first.center() + point(px(30.0), px(0.0)),
+    ] {
+        cx.simulate_mouse_move(position, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+    }
+    finish_slides(cx);
+    let release = first.center() + point(px(30.0), px(0.0));
+    cx.simulate_mouse_up(release, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    let drawn = cx.debug_bounds("tab-item-3-chip").unwrap().origin;
+
+    cx.simulate_keystrokes("cmd-n");
+    cx.run_until_parked();
+    let leaving = cx
+        .debug_bounds("tab-item-1-chip")
+        .expect("the new Workspace's Tab chip was not rendered")
+        .origin;
+
+    assert_eq!(
+        leaving, drawn,
+        "the selection must leave from where the settling Tab drew it"
+    );
+}
+
+#[gpui::test]
+fn a_new_workspace_should_start_its_tab_strip_from_the_old_one(cx: &mut TestAppContext) {
+    let (_manager, _records, cx) = workspace_manager(cx);
+    cx.simulate_keystrokes("cmd-t cmd-t");
+    finish_slides(cx);
+    cx.update(|_, cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
+    let first = cx.debug_bounds("tab-item-1-inactive").unwrap().origin;
+    let third = cx.debug_bounds("tab-item-3-active").unwrap().origin;
+    let selection = cx.debug_bounds("tab-item-3-chip").unwrap().origin;
+    let chip = |cx: &mut VisualTestContext| {
+        cx.debug_bounds("tab-item-1-chip")
+            .expect("the new Workspace's Tab chip was not rendered")
+            .origin
+    };
+
+    cx.simulate_keystrokes("cmd-n");
+    cx.run_until_parked();
+    let leaving = chip(cx);
+    finish_slides(cx);
+    let landed = chip(cx);
+
+    assert_eq!(
+        (leaving, landed),
+        (selection, selection + (first - third)),
+        "the selection must leave from the old Workspace's active Tab"
+    );
+}
+
+#[gpui::test]
+fn switching_to_a_workspace_with_more_tabs_should_grow_the_tabs_the_old_strip_lacked(
+    cx: &mut TestAppContext,
+) {
+    let (_manager, _records, cx) = workspace_manager(cx);
+    cx.simulate_keystrokes("cmd-t cmd-t cmd-n");
+    finish_slides(cx);
+    cx.update(|_, cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
+    let selection = cx.debug_bounds("tab-item-1-chip").unwrap().origin;
+    let create = cx.debug_bounds("create-tab-button").unwrap().origin;
+    let end = |cx: &mut VisualTestContext| cx.debug_bounds("create-tab-button").unwrap().origin;
+
+    click("workspace-row-1-inactive", cx);
+    let leaving = cx.debug_bounds("tab-item-3-chip").unwrap().origin;
+    let growing = end(cx);
+    finish_slides(cx);
+    let grown = end(cx);
+
+    assert_eq!(
+        (leaving, growing),
+        (selection, create),
+        "the selection must leave from the old active Tab, and the strip's end from the old end"
+    );
+    assert!(
+        create.x < grown.x,
+        "the Tabs the old strip lacked must grow in, got {grown:?} from {create:?}"
+    );
+}
+
+#[gpui::test]
+fn escape_should_cancel_a_workspace_row_drag_and_return_every_row_to_its_place(
+    cx: &mut TestAppContext,
+) {
     let (manager, _records, cx) = workspace_manager(cx);
     cx.simulate_keystrokes("cmd-n");
     cx.simulate_keystrokes("cmd-n");
@@ -7927,24 +8206,29 @@ fn escape_should_cancel_a_workspace_row_drag_without_moving_it(cx: &mut TestAppC
         cx.simulate_mouse_move(position, MouseButton::Left, Modifiers::none());
         cx.run_until_parked();
     }
-    let marked = cx.debug_bounds("workspace-insertion-marker-3").is_some();
+    finish_slides(cx);
+    let opened = cx.debug_bounds("workspace-row-3-active").unwrap().origin != third.origin;
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
-    let cancelled = (
-        cx.debug_bounds("drag-preview").is_some(),
-        cx.debug_bounds("workspace-insertion-marker-3").is_some(),
-    );
+    let cancelled = cx.debug_bounds("drag-preview").is_some();
     cx.simulate_mouse_up(release, MouseButton::Left, Modifiers::none());
-    cx.run_until_parked();
+    finish_slides(cx);
 
     assert_eq!(
-        (marked, cancelled, workspace_order(&manager, cx)),
-        (true, (false, false), vec![1, 2, 3])
+        (
+            opened,
+            cancelled,
+            workspace_order(&manager, cx),
+            ["workspace-row-1-inactive", "workspace-row-3-active"]
+                .map(|selector| cx.debug_bounds(selector).map(|row| row.origin)),
+        ),
+        (
+            true,
+            false,
+            vec![1, 2, 3],
+            [Some(first.origin), Some(third.origin)]
+        )
     );
-    let unmoved = cx
-        .debug_bounds("workspace-row-1-inactive")
-        .expect("the cancelled Workspace must render in its original place");
-    assert_eq!(unmoved.origin, first.origin);
 }
 
 #[gpui::test]
@@ -7994,13 +8278,13 @@ fn escape_should_cancel_only_the_drag_in_progress(cx: &mut TestAppContext) {
     cx.simulate_mouse_move(first.center(), None, Modifiers::none());
     cx.simulate_mouse_down(first.center(), MouseButton::Left, Modifiers::none());
     cx.simulate_mouse_move(past_second, MouseButton::Left, Modifiers::none());
-    cx.run_until_parked();
-    let marked = cx.debug_bounds("tab-insertion-marker-2").is_some();
+    finish_slides(cx);
+    let opened = cx.debug_bounds("tab-item-2-active").unwrap().origin != second.origin;
     cx.simulate_keystrokes("escape");
-    cx.run_until_parked();
+    finish_slides(cx);
     let cancelled = (
         visible_tabs.read_with(cx, |tabs, _| tabs.dragged_tab()),
-        cx.debug_bounds("tab-insertion-marker-2").is_some(),
+        cx.debug_bounds("tab-item-2-active").unwrap().origin != second.origin,
     );
     cx.simulate_mouse_up(past_second, MouseButton::Left, Modifiers::none());
     cx.run_until_parked();
@@ -8008,7 +8292,7 @@ fn escape_should_cancel_only_the_drag_in_progress(cx: &mut TestAppContext) {
     // The hidden Tab bar never saw its release, so its drag landed nowhere.
     assert_eq!(
         (
-            marked,
+            opened,
             cancelled,
             visible_tabs.read_with(cx, |tabs, _| tabs.tab_ids()),
             hidden_tabs.read_with(cx, |tabs, _| tabs.tab_ids()),
@@ -8068,6 +8352,48 @@ fn workspace_scrollbar_thumb_should_drag_the_list(cx: &mut TestAppContext) {
     assert!(
         state < before,
         "the Workspace list did not finish a scrollbar drag: {state:?}"
+    );
+}
+
+#[gpui::test]
+fn closing_an_inactive_workspace_should_keep_the_sidebar_where_it_was_scrolled(
+    cx: &mut TestAppContext,
+) {
+    let (manager, _records, cx) = workspace_manager(cx);
+    for _ in 0..24 {
+        cx.simulate_keystrokes("cmd-n");
+    }
+    finish_slides(cx);
+    manager.update(cx, |manager, cx| {
+        manager
+            .sidebar
+            .read(cx)
+            .scroll_handle()
+            .set_offset(point(px(0.0), px(0.0)));
+    });
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+
+    right_click("workspace-row-2-inactive", cx);
+    click("workspace-menu-row-close", cx);
+    if cx
+        .debug_bounds("modal-action-close-confirmation-confirm")
+        .is_some()
+    {
+        click("modal-action-close-confirmation-confirm", cx);
+    }
+    finish_slides(cx);
+
+    let state = manager.read_with(cx, |manager, cx| {
+        (
+            manager.workspaces.len(),
+            manager.sidebar.read(cx).scroll_handle().offset().y,
+        )
+    });
+    assert_eq!(
+        state,
+        (24, px(0.0)),
+        "closing an inactive Workspace must not scroll the sidebar back to the active one"
     );
 }
 
@@ -13278,4 +13604,56 @@ fn a_menu_should_keep_the_keyboards_row_in_a_focused_sidebar(cx: &mut TestAppCon
         "Shift-F10 opens the selected row's menu"
     );
     assert_eq!(after_keyboard_menu, landed);
+}
+
+#[gpui::test]
+fn an_expanded_workspace_group_released_below_the_list_should_land_at_its_end(
+    cx: &mut TestAppContext,
+) {
+    cx.update(|cx| {
+        crate::ui::worktree_store::testing::install(cx);
+    });
+    let (manager, _records, cx) = workspace_manager(cx);
+    let roots: Vec<PathBuf> = (0..5)
+        .map(|index| std::env::temp_dir().join(format!("spaceterm-dragged-group-{index}")))
+        .collect();
+    let linked: Vec<&Path> = roots.iter().map(PathBuf::as_path).collect();
+    present_worktrees(cx, &linked);
+    cx.simulate_keystrokes("cmd-n");
+    cx.simulate_keystrokes("cmd-n");
+    redraw(cx);
+    click("workspace-disclosure-2-expanded", cx);
+    click("workspace-disclosure-3-expanded", cx);
+    cx.simulate_resize(gpui::size(px(1000.0), px(600.0)));
+    redraw(cx);
+    let first = cx.debug_bounds("workspace-row-1-inactive").unwrap();
+    let group = cx.debug_bounds("workspace-group-1").unwrap();
+    let last = cx.debug_bounds("workspace-row-3-active").unwrap();
+    let list = cx.debug_bounds("workspace-list").unwrap();
+    let footer = cx.debug_bounds("workspace-sidebar-footer").unwrap();
+    assert!(
+        group.size.height > list.size.height / 2.0 && last.bottom() <= list.bottom(),
+        "the expanded group fills more than half of the list {list:?}, which shows every row"
+    );
+    let below = point(first.center().x, footer.center().y);
+
+    cx.simulate_mouse_move(first.center(), None, Modifiers::none());
+    cx.simulate_mouse_down(first.center(), MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(
+        first.center() + point(px(0.0), px(8.0)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    cx.run_until_parked();
+    cx.simulate_mouse_move(below, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    let copy = cx.debug_bounds("drag-preview");
+    cx.simulate_mouse_up(below, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+
+    assert_eq!(
+        workspace_order(&manager, cx),
+        vec![2, 3, 1],
+        "the lifted Workspace row, held at the list's end at {copy:?}, must land there"
+    );
 }
