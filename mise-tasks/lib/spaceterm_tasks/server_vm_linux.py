@@ -183,12 +183,12 @@ class _SignalAction(ctypes.Structure):
 
 
 class _AcquisitionSignals:
-    """Defer Python handlers until the new child has an owned group lease.
+    """Defer Python handlers across child acquisition or the final group signal.
 
     No signal mask changes during spawning, so the child inherits the caller's
     original mask. Only handler restoration briefly blocks these signals, after
-    acquisition (or a failed spawn). Restore handlers and the exact prior mask
-    before dispatching bounded pending callbacks with their actual signal frames.
+    the guarded operation. Restore handlers and the exact prior mask before
+    dispatching bounded pending callbacks with their actual signal frames.
     A custom handler cannot replace our guard or unwind the acquisition window.
     """
 
@@ -201,6 +201,11 @@ class _AcquisitionSignals:
         self.pending: list[tuple[int, FrameType | None]] = []
         self.handler = self._record
         self.failure: BaseException | None = None
+        # Restoration can unwind before its retry body or while recording an
+        # interruption. Keep progress across the caller's restoration retries.
+        self.original_mask: set[int] | None = None
+        self.restored: set[int] = set()
+        self.dispatched = 0
 
     def _record(self, signum: int, frame: FrameType | None) -> None:
         if len(self.pending) < _MAX_ACQUISITION_SIGNALS:
@@ -213,36 +218,72 @@ class _AcquisitionSignals:
             handler = signal.getsignal(signum)
             if callable(handler):
                 # Record before installation, including an interrupted install.
-                self.handlers[signum] = (handler, self.native.snapshot(signum))
+                # A retirement retry must not snapshot our guard as the caller.
+                if signum not in self.handlers:
+                    self.handlers[signum] = (handler, self.native.snapshot(signum))
                 signal.signal(signum, self.handler)
 
     def restore(self) -> None:
         if not self.handlers:
             return
-        # A restored handler may raise. Block only during restoration, never
-        # across Popen, and finish all handlers before unmasking pending signals.
-        original_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set(self.handlers))
-        try:
-            for signum, (handler, action) in self.handlers.items():
-                if signal.getsignal(signum) is self.handler:
-                    self.cleanup.attempt(lambda: signal.signal(signum, handler))
-                if signal.getsignal(signum) is handler:
-                    # signal.signal resets siginterrupt/SA_RESTART and other
-                    # kernel action state. Restore that state, not just the
-                    # Python callable; do not overwrite an intentional new handler.
-                    self.cleanup.attempt(lambda: self.native.restore(signum, action))
-        finally:
-            self.cleanup.attempt(lambda: signal.pthread_sigmask(signal.SIG_SETMASK, original_mask))
-        for signum, frame in self.pending:
+        # Blocking affects only this thread. An unmasked worker can still cause
+        # an already restored caller handler to raise on the main Python thread.
+        # Resume unfinished handlers, native actions, mask restoration and callback
+        # dispatch after those interruptions, including at loop back edges.
+        while True:
             try:
-                self.handlers[signum][0](signum, frame)
+                try:
+                    if self.original_mask is None:
+                        # Snapshot without changing the mask. If delivery interrupts
+                        # the following block, a retry must not adopt our blocked mask.
+                        self.original_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+                    signal.pthread_sigmask(signal.SIG_BLOCK, set(self.handlers))
+                except Exception:
+                    self.cleanup.complete = False
+                if self.cleanup.interruption is not None:
+                    # Bookkeeping is itself interruptible by restored handlers.
+                    # Record the first exception before entering this retry body.
+                    self.cleanup.interrupted(self.cleanup.interruption)
+                for signum, (handler, action) in self.handlers.items():
+                    if signum in self.restored:
+                        continue
+                    try:
+                        if signal.getsignal(signum) is self.handler:
+                            signal.signal(signum, handler)
+                        if signal.getsignal(signum) is handler:
+                            # Retrying this native action is idempotent. Python's
+                            # signal.signal resets SA_RESTART and other state;
+                            # do not overwrite an intentional new caller handler.
+                            self.native.restore(signum, action)
+                    except Exception:
+                        self.cleanup.complete = False
+                    self.restored.add(signum)
+                try:
+                    if self.original_mask is not None:
+                        signal.pthread_sigmask(signal.SIG_SETMASK, self.original_mask)
+                except Exception:
+                    self.cleanup.complete = False
+                while self.dispatched < len(self.pending):
+                    try:
+                        # Advance before calling arbitrary caller code, which can
+                        # perform effects before raising. Never replay a callback
+                        # or free queue capacity beyond the operation-wide cap.
+                        signum, frame = self.pending[self.dispatched]
+                        self.dispatched += 1
+                        self.handlers[signum][0](signum, frame)
+                    except (KeyboardInterrupt, SystemExit):
+                        raise
+                    except BaseException as error:
+                        if self.failure is None:
+                            self.failure = error
+                self.pending.clear()
+                self.handlers.clear()
+                return
             except (KeyboardInterrupt, SystemExit) as error:
-                self.cleanup.interrupted(error)
-            except BaseException as error:
-                if self.failure is None:
-                    self.failure = error
-        self.pending.clear()
-        self.handlers.clear()
+                # Preserve the first exception before an interruptible recorder
+                # can unwind. The next iteration resumes its bookkeeping too.
+                if self.cleanup.interruption is None:
+                    self.cleanup.interruption = error
 
     def check(self) -> None:
         if self.cleanup.interruption is not None:
@@ -406,8 +447,8 @@ def _read_bytes(fd: int, size: int) -> bytes:
 
 
 class _StatFS(ctypes.Structure):
-    # Native Linux glibc statfs on the supported 64-bit hosts. Reject another
-    # native word size before passing this storage to libc.
+    # Linux glibc statfs on x86_64 and little-endian aarch64 only. A 64-bit
+    # word size alone does not validate another architecture's structure ABI.
     _fields_ = [
         ("kind", ctypes.c_long),
         ("block_size", ctypes.c_long),
@@ -425,13 +466,25 @@ class _StatFS(ctypes.Structure):
 
 
 class _LinuxNative:
-    """Four fixed libc calls; no native executable or syscall-number injection."""
+    """Fixed glibc calls on validated ABIs; no executable or syscall injection."""
 
     def __init__(self):
-        if ctypes.sizeof(ctypes.c_long) != 8 or ctypes.sizeof(ctypes.c_void_p) != 8:
+        if (
+            os.uname().machine not in {"x86_64", "aarch64"}
+            or sys.byteorder != "little"
+            or ctypes.sizeof(ctypes.c_long) != 8
+            or ctypes.sizeof(ctypes.c_void_p) != 8
+            or ctypes.sizeof(_StatFS) != 120
+            or ctypes.alignment(_StatFS) != 8
+            or ctypes.sizeof(_SignalAction) != 256
+            or ctypes.alignment(_SignalAction) != 8
+        ):
             raise _Denied(NativeClassification.UNAVAILABLE)
         try:
             library = ctypes.CDLL(None, use_errno=True)
+            # Other libcs can export these calls with different structure ABIs.
+            # Require glibc before even snapshotting a native signal action.
+            _ = library.gnu_get_libc_version
             self.statfs = library.fstatfs
             self.statfs.argtypes = (ctypes.c_int, ctypes.POINTER(_StatFS))
             self.statfs.restype = ctypes.c_int
@@ -925,6 +978,34 @@ def _signal_owned(child: _ChildLease, signum: int) -> None:
     os.killpg(child.pid, signum)
 
 
+def _kill_owned(child: _ChildLease, cleanup: _Cleanup) -> None:
+    # Masking the main thread cannot prevent worker-delivered Python handlers
+    # from unwinding the last group signal. Defer them until SIGKILL finishes,
+    # before any consuming reap releases the lease. No retry renews this budget.
+    if child.reap_deadline is None:
+        child.reap_deadline = time.monotonic() + _POST_KILL_WAIT_SECONDS
+    acquisition = None
+    try:
+        while True:
+            try:
+                if acquisition is None:
+                    acquisition = _AcquisitionSignals(cleanup)
+                acquisition.install()
+                _signal_owned(child, signal.SIGKILL)
+                return
+            except (KeyboardInterrupt, SystemExit) as error:
+                cleanup.interrupted(error)
+            # An interrupted installation or syscall can be retried only while
+            # the original unreaped lease and post-kill deadline still permit it.
+            if not child.signals_open or time.monotonic() >= child.reap_deadline:
+                raise _Denied(NativeClassification.CLEANUP_INCOMPLETE)
+    finally:
+        if acquisition is not None:
+            while acquisition.handlers:
+                cleanup.attempt(acquisition.restore)
+            cleanup.attempt(acquisition.check)
+
+
 def _reap_child(child: _ChildLease, cleanup: _Cleanup) -> int | None:
     # Close the lease before any consuming wait, even if wait is interrupted
     # after kernel consumption but before Popen publishes its returncode.
@@ -968,15 +1049,22 @@ def _retire_child(child: _ChildLease, *, exited: bool, cleanup: _Cleanup) -> int
         # One post-kill phase budget, shared by pipe closure, consuming waits and
         # every outer fallback. An interruption cannot restart it.
         child.reap_deadline = time.monotonic() + _POST_KILL_WAIT_SECONDS
-    if authority and group_present:
+    while authority and group_present:
         try:
-            _signal_owned(child, signal.SIGKILL)
+            if not child.signals_open or time.monotonic() >= child.reap_deadline:
+                cleanup.complete = False
+                break
+            _kill_owned(child, cleanup)
+            break
         except ProcessLookupError:
-            pass
+            break
         except (KeyboardInterrupt, SystemExit) as error:
+            # A handler can unwind the helper at entry, before its guard exists.
+            # Resume this phase under the same deadline before consuming reaping.
             cleanup.interrupted(error)
         except Exception:
             cleanup.complete = False
+            break
     # Escaped/inherited writers have no authority to extend pipe closure or reap.
     child.close_pipes(cleanup)
     return _reap_child(child, cleanup)
@@ -1107,7 +1195,8 @@ def _new_verification_operation() -> _VerificationOperation:
     except (OSError, ValueError):
         unavailable = True
     finally:
-        cleanup.attempt(acquisition.restore)
+        while acquisition.handlers:
+            cleanup.attempt(acquisition.restore)
     acquisition.check()
     if unavailable:
         raise _Denied(NativeClassification.UNAVAILABLE)
@@ -1183,7 +1272,8 @@ def _verify_native(files: _VerificationFiles) -> _OperationResult:
             cleanup.interrupted(error)
             raise
         finally:
-            acquisition.restore()
+            while acquisition.handlers:
+                cleanup.attempt(acquisition.restore)
         acquisition.check()
         output = _read_output(process, deadline)
         exited = _await_exit(process, deadline)
@@ -1197,19 +1287,38 @@ def _verify_native(files: _VerificationFiles) -> _OperationResult:
         if process is not None:
             if child is None:
                 child = files.child = _ChildLease(process, process.pid)
+            retirement_finished = False
             try:
                 returncode = _retire_child(child, exited=exited, cleanup=cleanup)
+                retirement_finished = True
             except (KeyboardInterrupt, SystemExit) as error:
                 cleanup.interrupted(error)
-                if child.signals_open:
-                    cleanup.attempt(lambda: _signal_owned(child, signal.SIGKILL))
-                cleanup.attempt(lambda: _reap_child(child, cleanup))
             except Exception:
                 cleanup.complete = False
-                if child.signals_open:
-                    cleanup.attempt(lambda: _signal_owned(child, signal.SIGKILL))
-                cleanup.attempt(lambda: _reap_child(child, cleanup))
             finally:
+                if child.signals_open:
+                    # The outer fallback has the same helper-entry cancellation
+                    # window. Retain its original deadline and unreaped lease.
+                    while child.signals_open:
+                        try:
+                            if child.reap_deadline is None:
+                                child.reap_deadline = time.monotonic() + _POST_KILL_WAIT_SECONDS
+                            if time.monotonic() >= child.reap_deadline:
+                                cleanup.complete = False
+                                break
+                            _kill_owned(child, cleanup)
+                            break
+                        except ProcessLookupError:
+                            break
+                        except (KeyboardInterrupt, SystemExit) as error:
+                            cleanup.interrupted(error)
+                        except Exception:
+                            cleanup.complete = False
+                            break
+                if not retirement_finished:
+                    # Closing signaling authority does not prove any wait ran.
+                    # Resume an aborted retirement under its original deadline.
+                    cleanup.attempt(lambda: _reap_child(child, cleanup))
                 cleanup.attempt(lambda: child.close_pipes(cleanup))
     if cleanup.interruption is not None:
         raise cleanup.interruption
@@ -1451,8 +1560,9 @@ class NativeSignatureVerifier:
     a signing subkey whose binding the maintained native verifier validated.
     last_classification contains no native output, paths or exception messages.
     An unconfigured adapter remains unavailable and has no filesystem effects.
-    The production operation is Linux-only VM tooling on the main Python thread.
-    Unsupported hosts and worker threads return UNAVAILABLE before native effects.
+    The production operation is main-thread Linux VM tooling, restricted to
+    little-endian x86_64/aarch64 glibc ABIs. Unsupported hosts and worker threads
+    return UNAVAILABLE before native effects.
     Handler-capability probes precede filesystem effects; portable policy stays here.
     """
 
