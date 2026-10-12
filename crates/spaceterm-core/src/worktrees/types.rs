@@ -56,6 +56,7 @@ pub enum GitFailure {
     UnsafeStorage,
     StorageFailure,
     IndeterminateDurability,
+    BareRepositoryWithoutWorktree,
 }
 impl fmt::Display for GitFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

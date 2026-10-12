@@ -5,6 +5,7 @@ use crate::authority::{CloseWorkGeneration, CreationOrdinal, FieldVersion, Sessi
 use crate::identity::*;
 use crate::operations::{AssessedPane, OperationBinding, OperationId, RepositoryScope};
 use crate::organization::{BranchName, ServerDirectory, TabRecord};
+use crate::organization_retained::TabMembershipVersion;
 use crate::storage::StoreFailure;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -210,6 +211,10 @@ pub struct WorkspaceFallbackPlan {
 pub struct RetainedRemovalScopeParts {
     pub server: ServerId,
     pub tabs: Vec<TabRecord>,
+    /// Empty only for legacy records without comparison stamps. Recovery may read
+    /// them, but a fresh assessment must obtain every affected Tab's version.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub membership_versions: Vec<TabMembershipVersion>,
     pub panes: Vec<RetainedAffectedPane>,
     pub fallbacks: Vec<WorkspaceFallbackPlan>,
 }
@@ -223,6 +228,7 @@ pub struct RetainedRemovalScope(RetainedRemovalScopeParts);
 impl RetainedRemovalScope {
     pub fn new(parts: RetainedRemovalScopeParts) -> Result<Self, GitFailure> {
         if parts.tabs.len() > MAX_GIT_TABS
+            || parts.membership_versions.len() > MAX_GIT_TABS
             || parts.panes.len() > MAX_GIT_PANES
             || parts.fallbacks.len() > parts.tabs.len()
         {
@@ -244,6 +250,19 @@ impl RetainedRemovalScope {
             }
             workspaces.insert(tab.workspace);
         }
+        let mut memberships = BTreeSet::new();
+        for version in &parts.membership_versions {
+            if version.id().server() != parts.server {
+                return Err(GitFailure::WrongServer);
+            }
+            if !tabs.contains(&version.id()) || !memberships.insert(version.id()) {
+                return Err(GitFailure::InvalidResponse);
+            }
+        }
+        if !memberships.is_empty() && memberships != tabs {
+            return Err(GitFailure::InvalidResponse);
+        }
+        let mut session_epoch = None;
         for pane in &parts.panes {
             let h = pane.hierarchy;
             if h.pane.server() != parts.server
@@ -260,12 +279,17 @@ impl RetainedRemovalScope {
             {
                 return Err(GitFailure::InvalidResponse);
             }
-            if let Some(session) = pane.session
-                && (session.pane != h.pane
+            if let Some(session) = pane.session {
+                if session.pane != h.pane
+                    || session.epoch.get() == 0
+                    || session.generation.get() == 0
                     || session.generation != h.session_generation
-                    || pane.startup_reserved)
-            {
-                return Err(GitFailure::InvalidResponse);
+                    || pane.startup_reserved
+                    || session_epoch.is_some_and(|epoch| epoch != session.epoch)
+                {
+                    return Err(GitFailure::InvalidResponse);
+                }
+                session_epoch = Some(session.epoch);
             }
         }
         if parts.tabs.iter().any(|t| {
@@ -281,6 +305,7 @@ impl RetainedRemovalScope {
             .tabs
             .len()
             .checked_mul(128)
+            .and_then(|n| n.checked_add(parts.membership_versions.len().checked_mul(32)?))
             .and_then(|n| n.checked_add(parts.panes.len().checked_mul(256)?))
             .ok_or(GitFailure::Capacity)?;
         for fallback in &parts.fallbacks {
@@ -311,6 +336,7 @@ impl RetainedRemovalScope {
         Self(RetainedRemovalScopeParts {
             server,
             tabs: Vec::new(),
+            membership_versions: Vec::new(),
             panes: Vec::new(),
             fallbacks: Vec::new(),
         })
@@ -504,18 +530,9 @@ impl GitWriteIntent {
             return Err(GitFailure::WrongServer);
         }
         parts.action.validate_scope(server)?;
-        if let RetainedGitAction::Remove { worktree, .. } = &parts.action
-            && parts
-                .affected
-                .parts()
-                .tabs
-                .iter()
-                .any(|tab| tab.worktree != Some(*worktree))
-        {
-            return Err(GitFailure::InvalidResponse);
-        }
-        // RetainedRemovalScope checks every Pane's exact Tab/Workspace link.
-        // Requiring those Tabs' target membership also binds the Pane scope.
+        // Directory-contained work can belong to Tabs tagged with another Worktree.
+        // Retain their original membership and exact Pane generations. The actor
+        // revalidates this complete assessed scope before retirement, not just target tags.
         if (parts.phase == GitIntentPhase::ExternalFinished) != parts.external_result.is_some()
             || parts
                 .external_result

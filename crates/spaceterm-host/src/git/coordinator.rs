@@ -361,6 +361,18 @@ impl GitCoordinator {
         })
     }
 
+    /// Inspect a retained administrative root, including a bare Main repository.
+    /// Keep the same cancellation and shutdown ownership as presentation discovery.
+    pub fn administrative_inventory(
+        &self,
+        root: &Path,
+        cancellation: &CancellationToken,
+    ) -> Result<WorktreeSnapshot, RepositoryReadError> {
+        self.read(cancellation, |cancellation| {
+            super::server::server_inventory(&self.0.worktrees, root, cancellation)
+        })
+    }
+
     /// Read branches without taking a write lane.
     pub fn branches(
         &self,
@@ -711,7 +723,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 // Missing Worktrees still need parent-alias normalization (for example /var on macOS).
 // Do not equate failed observations or follow a dangling final link.
-fn same_location(left: &Path, right: &Path) -> bool {
+pub(super) fn same_location(left: &Path, right: &Path) -> bool {
     match (physical_location(left), physical_location(right)) {
         (Some(left), Some(right)) => left == right,
         _ => false,

@@ -207,3 +207,148 @@ async fn both_major_completed_retry_reaches_service_without_second_write_or_new_
     assert_eq!(actor.unexpected_effects.load(Ordering::SeqCst), 0);
     assert_eq!(host.writes.load(Ordering::SeqCst), 0);
 }
+
+#[test]
+fn pull_request_remote_precedence_push_branch_and_fork_owner_survive_both_majors() {
+    use spaceterm_core::{organization::BranchName, worktrees::queries::*};
+    use spaceterm_host::git::{RepositoryConfig, RepositoryHead};
+    let remotes = [
+        ("origin", "git@github.com:origin-owner/app.git"),
+        (
+            "work",
+            "https://account:credential@acme.ghe.com/team/app.git",
+        ),
+        (
+            "upstream",
+            "ssh://git@ssh.github.com:443/base-owner/app.git",
+        ),
+        ("default", "git@github.com:default-owner/app.git"),
+        ("push", "git@github.com:push-owner/app.git"),
+    ];
+    for (
+        base_remote,
+        push_remote,
+        push_default,
+        push_to_upstream,
+        expected_host,
+        expected_owner,
+        expected_head_owner,
+    ) in [
+        (None, None, None, false, "github.com", "base-owner", None),
+        (
+            Some("work"),
+            Some("push"),
+            Some("default"),
+            true,
+            "github.com",
+            "base-owner",
+            Some("push-owner"),
+        ),
+        (
+            Some("work"),
+            None,
+            Some("default"),
+            false,
+            "github.com",
+            "base-owner",
+            Some("default-owner"),
+        ),
+        (
+            Some("origin"),
+            None,
+            None,
+            true,
+            "github.com",
+            "base-owner",
+            Some("origin-owner"),
+        ),
+    ] {
+        let config = RepositoryConfig {
+            remotes: remotes
+                .iter()
+                .map(|(name, url)| ((*name).into(), (*url).into()))
+                .collect(),
+            branch_remote: base_remote.map(Into::into),
+            branch_push_remote: push_remote.map(Into::into),
+            push_default: push_default.map(Into::into),
+            push_to_upstream,
+            branch_merge: Some("refs/heads/pushed-topic".into()),
+            ..Default::default()
+        };
+        let facts = spaceterm_host::git::server::pull_request_facts(
+            &config,
+            &RepositoryHead::Branch("local-topic".into()),
+        )
+        .unwrap();
+        assert_eq!(facts.host(), expected_host);
+        assert_eq!(facts.owner(), expected_owner);
+        assert_eq!(facts.head_owner(), expected_head_owner);
+        assert_eq!(
+            facts.head_branch().as_str(),
+            if push_to_upstream {
+                "pushed-topic"
+            } else {
+                "local-topic"
+            }
+        );
+        for major in [1, 2] {
+            let response = GitQueryResponse {
+                correlation: GitCorrelation::new(1, 1).unwrap(),
+                scope: Some(RepositoryScope {
+                    server: server(),
+                    repository: RepositoryId::new(server(), 1).unwrap(),
+                }),
+                result: Ok(GitQueryResult::Status(GitStatusFacts {
+                    revision: std::num::NonZeroU64::new(1).unwrap(),
+                    branch: Some(BranchName::new("local-topic".into()).unwrap()),
+                    changes: vec![],
+                    dirty: false,
+                    unchecked: false,
+                    pull_request: Some(facts.clone()),
+                    upstream: None,
+                    operation: None,
+                    counts: None,
+                })),
+            };
+            let payload = git::encode_response(major, &response, server()).unwrap();
+            let bytes = payload.encode().unwrap();
+            assert!(
+                !bytes
+                    .windows(b"credential".len())
+                    .any(|w| w == b"credential")
+            );
+            assert_eq!(
+                git::decode_response(
+                    &spaceterm_protocol::codec::Payload::decode(major, &bytes).unwrap(),
+                    server()
+                )
+                .unwrap(),
+                response
+            );
+        }
+    }
+    // With no upstream remote, the branch remote wins over origin. Userinfo is stripped.
+    for (branch_remote, expected_host, expected_owner) in [
+        (Some("work"), "acme.ghe.com", "team"),
+        (None, "github.com", "origin-owner"),
+    ] {
+        let config = RepositoryConfig {
+            remotes: remotes
+                .iter()
+                .filter(|(name, _)| *name != "upstream")
+                .map(|(name, url)| ((*name).into(), (*url).into()))
+                .collect(),
+            branch_remote: branch_remote.map(Into::into),
+            ..Default::default()
+        };
+        let facts = spaceterm_host::git::server::pull_request_facts(
+            &config,
+            &RepositoryHead::Branch("local-topic".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            (facts.host(), facts.owner()),
+            (expected_host, expected_owner)
+        );
+    }
+}

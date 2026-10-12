@@ -454,6 +454,10 @@ fn status_failure_keeps_last_successful_facts_and_stale_revision_cannot_replace_
             changes: vec![],
             dirty: false,
             unchecked: false,
+            pull_request: None,
+            upstream: None,
+            operation: None,
+            counts: None,
         }),
     };
     replica.accept(result.clone()).unwrap();
@@ -643,7 +647,7 @@ impl GitConnectionPort for Subscriber {
     ) -> Result<Box<dyn GitSubscriptionPort>, ClientGitFailure> {
         Ok(Box::new(Subscription {
             events: std::collections::VecDeque::from([
-                GitSubscriptionEvent::Status(GitReadResult {
+                GitSubscriptionEvent::Status(Box::new(GitReadResult {
                     epoch: ServerEpoch::new(7),
                     scope: None,
                     result: GitQueryResult::Status(GitStatusFacts {
@@ -652,8 +656,12 @@ impl GitConnectionPort for Subscriber {
                         changes: vec![],
                         dirty: false,
                         unchecked: false,
+                        pull_request: None,
+                        upstream: None,
+                        operation: None,
+                        counts: None,
                     }),
-                }),
+                })),
                 GitSubscriptionEvent::LastKnown(GitFailure::ToolMissing),
                 GitSubscriptionEvent::ResyncRequired,
             ]),
@@ -744,4 +752,55 @@ fn inventory_scope_count_plus_one_rejects_entire_refresh() {
     }
     assert!(replica.records().is_empty());
     assert!(replica.needs_resync());
+}
+
+#[tokio::test]
+async fn removal_read_requires_summary_for_the_requested_target() {
+    let requested = WorktreeId::new(server(), 8).unwrap();
+    for (target, expected) in [
+        (None, Err(ClientGitFailure::InvalidResponse)),
+        (
+            Some(WorktreeId::new(server(), 9).unwrap()),
+            Err(ClientGitFailure::InvalidResponse),
+        ),
+        (Some(requested), Ok(())),
+    ] {
+        let result = GitReadResult {
+            epoch: ServerEpoch::new(7),
+            scope: read(1, None, 1).scope,
+            result: GitQueryResult::Assessment(Box::new(GitAssessmentPage {
+                token: command().assessment().clone(),
+                tabs: vec![],
+                panes: vec![],
+                fallbacks: vec![],
+                next: None,
+                requires_confirmation: true,
+                creation_preview: None,
+                removal: target.map(|worktree| GitRemovalSummary {
+                    worktree,
+                    directory: ServerDirectory::new(server(), b"/linked".to_vec()).unwrap(),
+                    branch: None,
+                    risk: ApprovedRemoval::DiscardChanges,
+                }),
+            })),
+        };
+        let client = GitClient::new(
+            server(),
+            Arc::new(Reader {
+                state: std::sync::Mutex::new(binding()),
+                result,
+                reconnect: false,
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            client
+                .query(GitQuery::AssessRemove {
+                    worktree: requested
+                })
+                .await
+                .map(|_| ()),
+            expected
+        );
+    }
 }

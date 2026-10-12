@@ -1,7 +1,7 @@
 //! Service-owned durable writes. No connection or waiter owns a Started operation's lifetime.
 use super::authority::*;
 use super::host::*;
-use super::reads::CachedAssessment;
+use super::reads::{CachedAssessment, ReadReservation};
 use spaceterm_core::authority::ServerEpoch;
 use spaceterm_core::identity::{ClientId, ServerId};
 use spaceterm_core::operations::{OperationBinding, OperationId};
@@ -63,6 +63,9 @@ pub(crate) struct Inner {
     pub limits: GitLimits,
     pub cancellation: GitReadCancellation,
     pub state: Mutex<State>,
+    pub reads: Mutex<super::reads::ReadState>,
+    pub read_slots: Arc<Semaphore>,
+    pub read_wake: tokio::sync::Notify,
     writes: Arc<Semaphore>,
     pub(crate) shutdown: tokio::sync::Mutex<()>,
 }
@@ -85,6 +88,7 @@ pub(crate) struct PendingSettlement {
     pub reservation: GitReservation,
     pub completion: GitCompletionPlan,
     pub native: Option<Box<dyn GitHostSettlement>>,
+    pub residency: Option<Arc<ReadReservation>>,
 }
 impl GitService {
     /// Admission remains closed until `recover` successfully resolves retained intents.
@@ -126,6 +130,9 @@ impl GitService {
                     jobs: BTreeMap::new(),
                     deferred: Vec::new(),
                 }),
+                reads: Mutex::new(super::reads::ReadState::default()),
+                read_slots: Arc::new(Semaphore::new(8)),
+                read_wake: tokio::sync::Notify::new(),
                 writes: Arc::new(Semaphore::new(limits.active_writes)),
                 shutdown: tokio::sync::Mutex::new(()),
             }),
@@ -251,11 +258,16 @@ impl GitService {
                     principal,
                     binding,
                     command,
-                    plan: assessment.plan,
+                    plan: assessment.plan.as_ref().clone(),
                 };
                 let handle = tokio::spawn(async move {
                     let result = service
-                        .run(request, assessment.native, admission_sender)
+                        .run(
+                            request,
+                            assessment.native,
+                            assessment.residency,
+                            admission_sender,
+                        )
                         .await;
                     let _ = result_sender.send(Some(result));
                 });
@@ -307,6 +319,7 @@ impl GitService {
         &self,
         request: ConfirmedGitAdmission,
         native: Arc<dyn GitHostAssessment>,
+        residency: Arc<ReadReservation>,
         admitted: watch::Sender<Option<Result<GitSubmission, GitFailure>>>,
     ) -> Result<GitMutationOutcome, GitFailure> {
         let plan = request.plan.clone();
@@ -427,6 +440,7 @@ impl GitService {
                                     recovery: None,
                                 },
                                 None,
+                                None,
                             )
                             .await;
                     }
@@ -451,6 +465,7 @@ impl GitService {
                                 external,
                                 recovery: None,
                             },
+                            None,
                             None,
                         )
                         .await;
@@ -483,6 +498,7 @@ impl GitService {
                     recovery: None,
                 },
                 completion.settlement,
+                Some(residency),
             )
             .await;
         drop(permit);
@@ -502,13 +518,14 @@ impl GitService {
             external: failure_result(failure),
             recovery: None,
         };
-        self.settle(reservation, completion, None).await
+        self.settle(reservation, completion, None, None).await
     }
     pub(crate) async fn settle(
         &self,
         reservation: GitReservation,
         completion: GitCompletionPlan,
         native: Option<Box<dyn GitHostSettlement>>,
+        residency: Option<Arc<ReadReservation>>,
     ) -> Result<GitMutationOutcome, GitFailure> {
         for _ in 0..3 {
             let result = self
@@ -529,6 +546,7 @@ impl GitService {
                             reservation,
                             completion,
                             native,
+                            residency,
                         })
                         .await;
                         return Err(GitFailure::IndeterminateDurability);
@@ -545,6 +563,7 @@ impl GitService {
                         reservation,
                         completion,
                         native,
+                        residency,
                     })?;
                     return Err(failure);
                 }
@@ -553,6 +572,7 @@ impl GitService {
                         reservation,
                         completion,
                         native,
+                        residency,
                     })
                     .await;
                     return Err(GitFailure::IndeterminateDurability);
@@ -563,6 +583,7 @@ impl GitService {
             reservation,
             completion,
             native,
+            residency,
         })?;
         Err(GitFailure::StorageFailure)
     }
@@ -576,6 +597,7 @@ impl GitService {
             reservation,
             completion,
             native: None,
+            residency: None,
         })
         .await;
     }
@@ -618,7 +640,12 @@ impl GitService {
                 let (sender, receiver) = watch::channel(None);
                 let handle = tokio::spawn(async move {
                     let result = service
-                        .settle(pending.reservation, pending.completion, pending.native)
+                        .settle(
+                            pending.reservation,
+                            pending.completion,
+                            pending.native,
+                            pending.residency,
+                        )
                         .await;
                     let _ = sender.send(Some(result));
                 });
@@ -689,11 +716,14 @@ impl GitService {
         state.closing = true;
         state.assessments.clear();
         self.inner.cancellation.cancel();
+        self.inner.read_wake.notify_waiters();
         Ok(())
     }
     pub async fn shutdown(&self) -> Result<GitShutdownReport, GitFailure> {
         self.quiesce()?;
         let _shutdown = self.inner.shutdown.lock().await;
+        // All native reads retain service-owned join handles, including dropped callers.
+        let read_failure = self.shutdown_reads().await.is_err();
         let jobs = {
             let mut state = self
                 .inner
@@ -706,7 +736,7 @@ impl GitService {
             std::mem::take(&mut state.jobs)
         };
         let joined_writes = jobs.len();
-        let mut worker_failure = false;
+        let mut worker_failure = read_failure;
         for (_, job) in jobs {
             for handle in job.handles {
                 if handle.await.is_err() {
@@ -728,12 +758,13 @@ impl GitService {
             let native = state
                 .deferred
                 .iter_mut()
-                .filter_map(|p| p.native.take())
+                .filter_map(|p| p.native.take().map(|native| (native, p.residency.take())))
                 .collect::<Vec<_>>();
             (unresolved, native)
         };
-        for native in native {
+        for (native, residency) in native {
             finish_native(Some(native), false).await?;
+            drop(residency);
         }
         let host = Arc::clone(&self.inner.host);
         tokio::task::spawn_blocking(move || host.shutdown())

@@ -428,6 +428,7 @@ fn select_directory(
 pub(crate) fn plan_git_inventory(
     state: &ReducerState,
     inventory: &GitInventoryPatch,
+    memberships: &[GitInventoryMembership],
     context: &ReductionContext,
 ) -> Result<ReductionPatch, ReducerFailure> {
     let old = state.organization();
@@ -447,7 +448,7 @@ pub(crate) fn plan_git_inventory(
             OperationFailure::BusyRetiring,
         ));
     }
-    if inventory.worktrees.len() > state.limits.worktrees {
+    if inventory.worktrees.len() > state.limits.worktrees || memberships.len() > state.limits.tabs {
         return Ok(ReductionPatch::rejected(state, OperationFailure::Capacity));
     }
     if inventory
@@ -508,6 +509,25 @@ pub(crate) fn plan_git_inventory(
             entry.listed,
         ));
     }
+    let memberships = memberships
+        .iter()
+        .map(|edit| {
+            let worktree = edit
+                .destination
+                .map(|index| {
+                    worktrees
+                        .get(index)
+                        .map(|(worktree, _)| worktree.id)
+                        .ok_or(ReducerFailure::InvalidFacts)
+                })
+                .transpose()?;
+            Ok(WorktreeMembershipEdit {
+                tab: edit.tab,
+                expected_version: edit.expected_version,
+                worktree,
+            })
+        })
+        .collect::<Result<Vec<_>, ReducerFailure>>()?;
     let patch = WorktreeOrganizationPatch {
         binding: context.binding(),
         scope: RepositoryScope { server, repository },
@@ -517,7 +537,7 @@ pub(crate) fn plan_git_inventory(
             directory: inventory.directory.clone(),
         }],
         worktrees,
-        memberships: Vec::new(),
+        memberships,
         settlement: None,
     };
     plan_worktree_patch_with_allocation(state, &patch, Some(marks))

@@ -525,6 +525,7 @@ fn removal_intent_parts(target: WorktreeId, tab_worktree: WorktreeId) -> GitWrit
         affected: RetainedRemovalScope::new(RetainedRemovalScopeParts {
             server: server(),
             tabs,
+            membership_versions: vec![],
             panes,
             fallbacks: vec![],
         })
@@ -534,20 +535,20 @@ fn removal_intent_parts(target: WorktreeId, tab_worktree: WorktreeId) -> GitWrit
     }
 }
 #[test]
-fn checked_removal_intent_rejects_another_worktrees_tabs() {
+fn checked_removal_intent_rejects_another_servers_target() {
     let parts = removal_intent_parts(
-        WorktreeId::new(server(), 1).unwrap(),
+        WorktreeId::new(ServerId::new([8; 16]), 1).unwrap(),
         WorktreeId::new(server(), 2).unwrap(),
     );
-    assert_eq!(GitWriteIntent::new(parts), Err(GitFailure::InvalidResponse));
+    assert_eq!(GitWriteIntent::new(parts), Err(GitFailure::WrongServer));
 }
 #[test]
-fn removal_intent_deserialization_rechecks_the_exact_worktree() {
+fn removal_intent_deserialization_rechecks_the_targets_server() {
     let target = WorktreeId::new(server(), 1).unwrap();
     let value = GitWriteIntent::new(removal_intent_parts(target, target)).unwrap();
     let mut json = serde_json::to_value(value).unwrap();
     json["action"]["Remove"]["worktree"] =
-        serde_json::to_value(WorktreeId::new(server(), 2).unwrap()).unwrap();
+        serde_json::to_value(WorktreeId::new(ServerId::new([8; 16]), 2).unwrap()).unwrap();
     assert!(serde_json::from_value::<GitWriteIntent>(json).is_err());
 }
 #[test]

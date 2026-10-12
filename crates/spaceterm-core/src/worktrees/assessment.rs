@@ -74,6 +74,149 @@ impl WorktreeRemovalScope {
     pub fn facts(&self) -> &WorktreeRemovalFacts {
         &self.facts
     }
+    /// Target and destructive categories for every page of this token-bound confirmation.
+    pub fn summary(&self) -> queries::GitRemovalSummary {
+        queries::GitRemovalSummary {
+            worktree: self.facts.target.id,
+            directory: self.facts.target.directory.clone(),
+            branch: match &self.facts.head {
+                Some(RetainedGitHead::Branch { name, .. } | RetainedGitHead::Unborn(name)) => {
+                    Some(name.clone())
+                }
+                _ => None,
+            },
+            risk: self.approval(),
+        }
+    }
+    /// Hash the complete comparison scope, including authoritative directory facts.
+    /// Native handles remain outside this portable digest.
+    pub fn assessment_digest(&self) -> GitAssessmentDigest {
+        use sha2::{Digest, Sha256};
+        fn number(hash: &mut Sha256, value: u64) {
+            hash.update(value.to_le_bytes());
+        }
+        fn bytes(hash: &mut Sha256, value: &[u8]) {
+            number(hash, value.len() as u64);
+            hash.update(value);
+        }
+        fn object(hash: &mut Sha256, object: &GitObjectId) {
+            match object {
+                GitObjectId::Sha1(value) => bytes(hash, value),
+                GitObjectId::Sha256(value) => bytes(hash, value),
+            }
+        }
+        let mut hash = Sha256::new();
+        hash.update(b"spaceterm-worktree-removal-scope-v1\0");
+        hash.update(self.retained.parts().server.bytes());
+        number(&mut hash, self.epoch.get());
+        let facts = &self.facts;
+        number(&mut hash, facts.target.id.local());
+        number(&mut hash, facts.target.repository.local());
+        bytes(&mut hash, facts.target.directory.bytes());
+        hash.update([
+            facts.target.main as u8,
+            facts.target.missing as u8,
+            facts.listed as u8,
+            facts.locked as u8,
+            facts.changes as u8,
+            facts.submodules as u8,
+        ]);
+        match &facts.head {
+            None => number(&mut hash, 0),
+            Some(RetainedGitHead::Unborn(name)) => {
+                number(&mut hash, 1);
+                bytes(&mut hash, name.as_str().as_bytes());
+            }
+            Some(RetainedGitHead::Detached(commit)) => {
+                number(&mut hash, 2);
+                object(&mut hash, commit);
+            }
+            Some(RetainedGitHead::Branch { name, commit }) => {
+                number(&mut hash, 3);
+                bytes(&mut hash, name.as_str().as_bytes());
+                object(&mut hash, commit);
+            }
+        }
+        let parts = self.retained.parts();
+        number(&mut hash, parts.tabs.len() as u64);
+        for tab in &parts.tabs {
+            for value in [
+                tab.workspace.local(),
+                tab.id.local(),
+                tab.root_pane.local(),
+                tab.creation_ordinal.get(),
+                tab.worktree.map_or(0, |id| id.local()),
+            ] {
+                number(&mut hash, value);
+            }
+        }
+        number(&mut hash, parts.membership_versions.len() as u64);
+        for version in &parts.membership_versions {
+            number(&mut hash, version.id().local());
+            number(&mut hash, version.version().get());
+        }
+        number(&mut hash, parts.panes.len() as u64);
+        for pane in &parts.panes {
+            let p = pane.hierarchy;
+            for value in [
+                p.workspace.local(),
+                p.tab.local(),
+                p.pane.local(),
+                p.session_generation.get(),
+                p.control_generation.get(),
+                p.context_generation.get(),
+                pane.work_generation.get(),
+                pane.session.map_or(0, |s| s.epoch.get()),
+                pane.startup_reserved as u64,
+            ] {
+                number(&mut hash, value);
+            }
+        }
+        number(&mut hash, parts.fallbacks.len() as u64);
+        for fallback in &parts.fallbacks {
+            number(&mut hash, fallback.workspace.local());
+            number(&mut hash, fallback.worktree.local());
+            bytes(&mut hash, fallback.directory.bytes());
+        }
+        number(&mut hash, self.directories.len() as u64);
+        for observation in &self.directories {
+            number(&mut hash, observation.pane.local());
+            bytes(&mut hash, observation.directory.bytes());
+            number(
+                &mut hash,
+                match observation.containment {
+                    DirectoryContainment::Inside => 1,
+                    DirectoryContainment::Outside => 2,
+                    DirectoryContainment::Unchecked => 3,
+                },
+            );
+        }
+        GitAssessmentDigest::from_bytes(hash.finalize().into())
+    }
+    /// Conservative cache residency using actual directory lengths, not the
+    /// maximum directory bound multiplied by every affected Pane.
+    pub fn value_bytes(&self) -> usize {
+        let parts = self.retained.parts();
+        2048 + self.facts.target.directory.bytes().len()
+            + match &self.facts.head {
+                Some(RetainedGitHead::Branch { name, .. } | RetainedGitHead::Unborn(name)) => {
+                    name.as_str().len()
+                }
+                _ => 0,
+            }
+            + parts.tabs.len() * 192
+            + parts.panes.len() * 256
+            + self
+                .directories
+                .iter()
+                .map(|p| 128 + p.directory.bytes().len())
+                .sum::<usize>()
+            + parts
+                .fallbacks
+                .iter()
+                .map(|f| 128 + f.directory.bytes().len())
+                .sum::<usize>()
+    }
     pub fn approval(&self) -> ApprovedRemoval {
         match (
             self.facts.target.missing,
@@ -200,6 +343,23 @@ pub fn assess_removal(
         .collect();
     tabs.sort_by_key(|t| t.id);
     let tab_map: BTreeMap<_, _> = tabs.iter().map(|t| (t.id, t)).collect();
+    let membership_versions = if tabs.is_empty() {
+        Vec::new()
+    } else {
+        let versions = state
+            .retained
+            .as_ref()
+            .ok_or(GitFailure::Unchecked)?
+            .tab_membership_versions();
+        tabs.iter()
+            .map(|tab| {
+                versions
+                    .binary_search_by_key(&tab.id, |v| v.id())
+                    .map(|index| versions[index])
+                    .map_err(|_| GitFailure::Unchecked)
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
     let mut panes = Vec::new();
     let mut retained_directories = Vec::new();
     for pane in &state.panes {
@@ -263,6 +423,7 @@ pub fn assess_removal(
     let retained = RetainedRemovalScope::new(RetainedRemovalScopeParts {
         server: state.server,
         tabs,
+        membership_versions,
         panes,
         fallbacks,
     })?;

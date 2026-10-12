@@ -214,8 +214,64 @@ impl GitCompletionCommit {
     }
 }
 
+/// A single committed actor observation. Display reports remain presentation-only;
+/// only the reducer's committed restoration field may supply removal authority.
+#[derive(Clone, Debug)]
+pub struct GitAuthoritySnapshot {
+    pub organization: spaceterm_core::organization::OrganizationSnapshot,
+    pub repositories: Vec<RepositoryLocator>,
+    pub home: spaceterm_core::organization::ServerDirectory,
+    pub display_directories: Vec<spaceterm_core::observations::DisplayDirectoryObservation>,
+    pub runtime: spaceterm_core::worktrees::assessment::RuntimeWorkSet,
+}
+
+/// Inventory entries carry optional retained identities, never freshly allocated IDs.
+/// Membership destinations are indices into the same complete observation.
+#[derive(Clone, Debug)]
+pub struct GitInventoryReconciliation {
+    pub basis: GitAuthoritySnapshot,
+    pub inventory: super::host::HostGitInventory,
+    pub memberships: Vec<GitInventoryMembership>,
+}
+#[derive(Clone, Debug)]
+pub struct GitOutsideSourceReconciliation {
+    pub basis: GitAuthoritySnapshot,
+    pub directory: spaceterm_core::organization::ServerDirectory,
+    pub memberships: Vec<WorktreeMembershipEdit>,
+}
+pub use spaceterm_core::reducer::{GitInventoryMembership, WorktreeMembershipEdit};
+
 /// All methods serialize through the actor; none holds an organization lock while awaiting IO.
 pub trait GitOrganizationPort: Send + Sync {
+    /// The frozen read bridge. Write-only compositions fail closed until supplied.
+    fn snapshot(&self) -> GitFuture<'_, Result<GitAuthoritySnapshot, GitFailure>> {
+        Box::pin(async { Err(GitFailure::StorageUnavailable) })
+    }
+    /// Revalidate the observation basis, ask the reducer to allocate any new IDs,
+    /// and commit locator, inventory, memberships, Roots and revision together.
+    /// Retain the inventory's native lease at the durable commit, even if the read waiter
+    /// has gone away. Publish through the actor's organization hub to every authorized connection,
+    /// not merely the querying principal or attached/active Workspaces. Reject
+    /// conflicting Git/destructive reservations; a Started write's uncommitted
+    /// external state cannot register as a different new Worktree.
+    fn reconcile_inventory(
+        &self,
+        _principal: AuthenticatedGitPrincipal,
+        _request: GitInventoryReconciliation,
+    ) -> GitFuture<'_, Result<GitAuthoritySnapshot, GitFailure>> {
+        Box::pin(async { Err(GitFailure::StorageUnavailable) })
+    }
+    /// A checked source with no visible working tree may clear unpinned Root membership only.
+    /// Compare source/Session and canonical membership versions against the basis, reject
+    /// conflicting reservations, and publish the committed change to every authorized client.
+    /// Keep all retained repository and Worktree records. Failed probes never call this port.
+    fn reconcile_outside_source(
+        &self,
+        _principal: AuthenticatedGitPrincipal,
+        _request: GitOutsideSourceReconciliation,
+    ) -> GitFuture<'_, Result<GitAuthoritySnapshot, GitFailure>> {
+        Box::pin(async { Err(GitFailure::StorageUnavailable) })
+    }
     fn authorize(
         &self,
         principal: AuthenticatedGitPrincipal,
