@@ -467,7 +467,10 @@ pub(crate) struct TabView {
     tab: Tab<Entity<TerminalPane>>,
     session_factory: WorkspaceTerminalSessionFactory,
     pane_construction: PaneConstruction,
+    /// Each Pane's laid-out place.
     pane_bounds: BTreeMap<PaneId, Bounds<Pixels>>,
+    /// Where each Pane's surface was drawn, which differs from its place while Panes move.
+    pane_surfaces: BTreeMap<PaneId, Bounds<Pixels>>,
     pane_layout_size: Option<PaneSize>,
     /// A Split that waits for the next Pane measurement, because the retained bounds are stale.
     pending_split: Option<(PaneId, SplitAxis)>,
@@ -558,6 +561,7 @@ impl TabView {
             session_factory,
             pane_construction,
             pane_bounds: BTreeMap::new(),
+            pane_surfaces: BTreeMap::new(),
             pane_layout_size: None,
             pending_split: None,
             split_bounds: BTreeMap::new(),
@@ -1281,7 +1285,7 @@ impl TabView {
         let pointer = window.mouse_position();
         self.drag_pane_to(pane_id, pointer, cx);
         cx.notify();
-        let Some(pane) = self.pane_bounds.get(&pane_id).copied() else {
+        let Some(pane) = self.pane_surfaces.get(&pane_id).copied() else {
             return DragPreview::empty();
         };
         let caption = Bounds::new(
@@ -1455,7 +1459,7 @@ impl TabView {
         collect_pane_order(self.tab.root(), &mut panes);
         let (target_pane_id, bounds) = panes
             .into_iter()
-            .filter_map(|candidate| Some((candidate, *self.pane_bounds.get(&candidate)?)))
+            .filter_map(|candidate| Some((candidate, *self.pane_surfaces.get(&candidate)?)))
             .find(|(_, bounds)| bounds.contains(&pointer))?;
         if target_pane_id == pane_id {
             return None;
@@ -1562,6 +1566,7 @@ impl TabView {
                     terminal.close();
                 });
                 self.pane_bounds.remove(&pane_id);
+                self.pane_surfaces.remove(&pane_id);
                 self.split_bounds.clear();
                 self.pane_titles.remove(&pane_id);
                 self.pane_captions.remove(&pane_id);
@@ -2041,11 +2046,12 @@ impl TabView {
 
         div()
             .on_children_prepainted(move |children, _, cx| {
-                let Some(place) = children.first() else {
+                let [place, surface] = children.as_slice() else {
                     return;
                 };
                 let _ = measure_view.update(cx, |view, _| {
                     view.pane_bounds.insert(pane_id, *place);
+                    view.pane_surfaces.insert(pane_id, *surface);
                 });
             })
             .relative()
@@ -2247,7 +2253,7 @@ impl Render for TabView {
                 places
             })
             .unwrap_or_default();
-        self.pane_frames = self.pane_motion.present(&places, cx);
+        self.pane_frames = self.pane_motion.present(&places, window.scale_factor(), cx);
         if self.pane_frames.moving {
             window.request_animation_frame();
         }
@@ -2278,16 +2284,17 @@ impl Render for TabView {
                     let Some(bounds) = children.first() else {
                         return;
                     };
-                    let (first_measurement, pending_split) = view
+                    let (resized, pending_split) = view
                         .update(cx, |view, _| {
                             let measured = pane_size(*bounds).ok();
-                            let first = view.pane_layout_size.is_none() && measured.is_some();
+                            let resized = view.pane_layout_size != measured && measured.is_some();
                             view.pane_layout_size = measured;
-                            (first, view.pending_split.take())
+                            (resized, view.pending_split.take())
                         })
                         .unwrap_or_default();
-                    // The first measured layout gives Pane motion a place to start from.
-                    if first_measurement {
+                    // This frame laid out its Panes for the previous size. Pane motion starts from
+                    // where the next frame draws them at the measured size.
+                    if resized {
                         let view = view.clone();
                         window.defer(cx, move |_, cx| {
                             let _ = view.update(cx, |_, cx| cx.notify());
@@ -4088,6 +4095,126 @@ mod tests {
                 cx.debug_bounds("closing-pane")
             ),
             (Some(whole), None)
+        );
+    }
+
+    #[gpui::test]
+    fn a_zoom_at_a_fractional_size_should_resize_the_terminal_once_as_its_pane_grows(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::ui::drag_and_drop::AnimatePresence;
+
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
+        let records = TestTerminalSessionRecords::default();
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            Rc::new(
+                TestTerminalSessionFactory::new(records.clone())
+                    .with_selection_copy_response(Ok(None)),
+            ),
+            crate::terminal::testing::test_local_directory(test_home_directory()),
+        );
+        let (view, cx) = cx
+            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
+        cx.simulate_resize(gpui::size(px(1001.0), px(701.0)));
+        cx.run_until_parked();
+        split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
+        split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
+        let resizes = || {
+            records
+                .commands()
+                .iter()
+                .filter(|call| matches!(call.command, RecordedCommand::Resize(_)))
+                .count()
+        };
+        let before = resizes();
+
+        cx.update(|_, cx| cx.set_global(AnimatePresence));
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.focus_pane(PaneId::new(3), cx);
+                view.toggle_zoom(window, cx);
+            });
+        });
+        cx.run_until_parked();
+        let mut counts = vec![resizes() - before];
+        for _ in 0..30 {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(16));
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+            cx.run_until_parked();
+            counts.push(resizes() - before);
+        }
+
+        assert_eq!(
+            counts,
+            vec![1; 31],
+            "the zoomed Terminal must resize once, when the zoom starts"
+        );
+    }
+
+    #[gpui::test]
+    fn a_split_after_a_window_resize_should_start_from_where_the_pane_is_drawn(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::ui::drag_and_drop::AnimatePresence;
+
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
+        let session_factory = test_session_factory();
+        let (view, cx) = cx
+            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
+        cx.run_until_parked();
+        cx.simulate_resize(gpui::size(px(1001.0), px(701.0)));
+        cx.run_until_parked();
+        let whole = cx.debug_bounds("pane-surface-1").unwrap();
+
+        cx.update(|_, cx| cx.set_global(AnimatePresence));
+        split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(60));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        let moving = cx.debug_bounds("pane-surface-1").unwrap();
+
+        assert!(
+            moving.right() < whole.right() && moving.size.height == whole.size.height,
+            "the split Pane must make room from its resized place: {moving:?} in {whole:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn a_pane_dropped_while_panes_move_should_land_on_the_pane_drawn_under_the_pointer(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::ui::drag_and_drop::AnimatePresence;
+
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
+        let session_factory = test_session_factory();
+        let (view, cx) = cx
+            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
+        cx.run_until_parked();
+
+        cx.update(|_, cx| cx.set_global(AnimatePresence));
+        split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(60));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        let drawn = cx.debug_bounds("pane-surface-1").unwrap();
+        let place = view.read_with(cx, |view, _| view.pane_bounds[&PaneId::new(2)]);
+        let pointer = point((place.left() + drawn.right()) / 2.0, drawn.center().y);
+        assert!(drawn.contains(&pointer) && place.contains(&pointer));
+
+        let target = view.read_with(cx, |view, cx| {
+            view.drop_target(PaneId::new(2), pointer, pane_gap(cx))
+        });
+
+        assert_eq!(
+            target.map(|(pane_id, _)| pane_id),
+            Some(PaneId::new(1)),
+            "the pointer is over the drawn Pane 1, inside the place Pane 2 opens toward"
         );
     }
 

@@ -15,11 +15,13 @@ const EDGE_TOLERANCE: f32 = 0.5;
 /// zoom, or split reset lays them out.
 ///
 /// Only a change announced by [`PaneMotion::expect_change`] moves Panes, so a window resize or a
-/// split resize drag lays them out at once. A Pane that stays eases from where it was drawn. A new
+/// split resize drag lays them out at once and stops any motion under way. A Pane that stays eases from where it was drawn. A new
 /// Pane opens from its far edge as the Pane beside it makes room, and a removed Pane's place
 /// closes toward its far edge as the Pane beside it takes the space.
 #[derive(Default)]
 pub(crate) struct PaneMotion {
+    /// Where each Pane was laid out in the last frame, in Pane Layout coordinates.
+    targets: BTreeMap<PaneId, Bounds<Pixels>>,
     /// Where each Pane was drawn in the last frame, in Pane Layout coordinates.
     drawn: BTreeMap<PaneId, Bounds<Pixels>>,
     /// Each moving Pane's bounds when its motion started.
@@ -38,33 +40,50 @@ struct Move {
 
 #[derive(Clone, Copy, Debug)]
 struct Closing {
+    pane_id: PaneId,
     from: Bounds<Pixels>,
     to: Bounds<Pixels>,
     ease: Ease,
 }
 
 /// Where one frame draws each Pane, and the places of removed Panes still closing.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct PaneFrames {
     frames: BTreeMap<PaneId, (Bounds<Pixels>, Bounds<Pixels>)>,
+    /// Device pixels per Pane Layout pixel.
+    scale_factor: f32,
     /// The closing places of removed Panes, in Pane Layout coordinates.
     pub(crate) closing: Vec<Bounds<Pixels>>,
     /// Whether any Pane or closing place is still moving.
     pub(crate) moving: bool,
 }
 
+impl Default for PaneFrames {
+    fn default() -> Self {
+        Self {
+            frames: BTreeMap::new(),
+            scale_factor: 1.0,
+            closing: Vec::new(),
+            moving: false,
+        }
+    }
+}
+
 impl PaneFrames {
-    /// How far the Pane `pane_id` is drawn inside each edge of its laid-out place. Outward
-    /// distances are negative.
+    /// How far the Pane `pane_id` is drawn inside each edge of its laid-out place, in whole device
+    /// pixels so that offsetting by one edge and back again by the sum of two keeps a size exact.
+    /// Outward distances are negative.
     pub(crate) fn inset(&self, pane_id: PaneId) -> Edges<Pixels> {
         let Some((target, frame)) = self.frames.get(&pane_id) else {
             return Edges::default();
         };
+        let device_pixels =
+            |distance: Pixels| (distance * self.scale_factor).round() / self.scale_factor;
         Edges {
-            top: frame.top() - target.top(),
-            right: target.right() - frame.right(),
-            bottom: target.bottom() - frame.bottom(),
-            left: frame.left() - target.left(),
+            top: device_pixels(frame.top() - target.top()),
+            right: device_pixels(target.right() - frame.right()),
+            bottom: device_pixels(target.bottom() - frame.bottom()),
+            left: device_pixels(frame.left() - target.left()),
         }
     }
 }
@@ -76,13 +95,18 @@ impl PaneMotion {
         self.expected = true;
     }
 
-    /// Where this frame draws each Pane laid out at `targets`, in Pane Layout coordinates.
+    /// Where this frame draws each Pane laid out at `targets`, in Pane Layout coordinates, at
+    /// `scale_factor` device pixels per Pane Layout pixel.
     pub(crate) fn present(
         &mut self,
         targets: &BTreeMap<PaneId, Bounds<Pixels>>,
+        scale_factor: f32,
         cx: &App,
     ) -> PaneFrames {
-        self.present_at(targets, now(cx), presence_motion(cx))
+        PaneFrames {
+            scale_factor,
+            ..self.present_at(targets, now(cx), presence_motion(cx))
+        }
     }
 
     fn present_at(
@@ -97,7 +121,11 @@ impl PaneMotion {
         }
         if std::mem::take(&mut self.expected) && !self.drawn.is_empty() {
             self.follow_change(targets, now, motion);
+        } else if *targets != self.targets {
+            self.moves.clear();
+            self.closing.clear();
         }
+        self.targets.clone_from(targets);
         self.moves
             .retain(|pane_id, motion| targets.contains_key(pane_id) && !motion.ease.finished(now));
         self.closing.retain(|closing| !closing.ease.finished(now));
@@ -123,6 +151,7 @@ impl PaneMotion {
                 .map(|closing| between(closing.from, closing.to, closing.ease.at(now)))
                 .collect(),
             moving: !self.moves.is_empty() || !self.closing.is_empty(),
+            ..PaneFrames::default()
         }
     }
 
@@ -134,10 +163,20 @@ impl PaneMotion {
         motion: spaceterm_ui::ControlMotion,
     ) {
         let ease = Ease::new(PRESENCE_DURATION, now, motion);
+        // A removed Pane that returns before its place closes opens from that place.
+        let closing = std::mem::take(&mut self.closing);
+        let (returning, closing): (Vec<_>, Vec<_>) = closing
+            .into_iter()
+            .partition(|closing| targets.contains_key(&closing.pane_id));
+        self.closing = closing;
         for (pane_id, target) in targets {
             let from = match self.drawn.get(pane_id) {
                 Some(drawn) => Some(*drawn),
-                None => self.opening(*target, targets),
+                None => returning
+                    .iter()
+                    .find(|closing| closing.pane_id == *pane_id)
+                    .map(|closing| between(closing.from, closing.to, closing.ease.at(now)))
+                    .or_else(|| self.opening(*target, targets)),
             };
             match from.filter(|from| from != target) {
                 Some(from) => {
@@ -152,9 +191,10 @@ impl PaneMotion {
             .drawn
             .iter()
             .filter(|(pane_id, _)| !targets.contains_key(pane_id))
-            .filter_map(|(_, from)| {
+            .filter_map(|(pane_id, from)| {
                 let to = self.closed(*from, targets)?;
                 Some(Closing {
+                    pane_id: *pane_id,
                     from: *from,
                     to,
                     ease,
@@ -376,6 +416,51 @@ mod tests {
         let frames = motion.present_at(&moved, start + HALFWAY, ControlMotion::Standard);
 
         assert_eq!(frame(&frames, 1), drawn);
+    }
+
+    #[test]
+    fn a_layout_change_nobody_announced_should_stop_the_motion_and_draw_every_pane_at_rest() {
+        let start = Instant::now();
+        let mut motion = PaneMotion::default();
+        motion.present_at(
+            &layout(&[(1, rect(0., 0., 210., 50.))]),
+            start,
+            ControlMotion::Standard,
+        );
+        motion.expect_change();
+        let split = layout(&[(1, rect(0., 0., 100., 50.)), (2, rect(110., 0., 210., 50.))]);
+        motion.present_at(&split, start, ControlMotion::Standard);
+
+        let resized = layout(&[(1, rect(0., 0., 150., 50.)), (2, rect(160., 0., 310., 50.))]);
+        let frames = motion.present_at(&resized, start + HALFWAY, ControlMotion::Standard);
+
+        assert_eq!(
+            (frame(&frames, 1), frame(&frames, 2), frames.moving),
+            (resized[&PaneId::new(1)], resized[&PaneId::new(2)], false)
+        );
+    }
+
+    #[test]
+    fn a_pane_that_returns_while_its_place_closes_should_open_from_that_place() {
+        let start = Instant::now();
+        let mut motion = PaneMotion::default();
+        let split = layout(&[(1, rect(0., 0., 100., 50.)), (2, rect(110., 0., 210., 50.))]);
+        motion.present_at(&split, start, ControlMotion::Standard);
+        motion.expect_change();
+        let zoomed = layout(&[(1, rect(0., 0., 210., 50.))]);
+        motion.present_at(&zoomed, start, ControlMotion::Standard);
+        let closing = motion
+            .present_at(&zoomed, start + HALFWAY, ControlMotion::Standard)
+            .closing;
+        motion.expect_change();
+
+        let frames = motion.present_at(&split, start + HALFWAY, ControlMotion::Standard);
+
+        assert_eq!(
+            (vec![frame(&frames, 2)], frames.closing),
+            (closing, Vec::new()),
+            "the returning Pane must replace its closing place"
+        );
     }
 
     #[test]
