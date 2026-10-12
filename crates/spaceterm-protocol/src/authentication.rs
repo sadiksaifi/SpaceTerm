@@ -535,8 +535,15 @@ pub(crate) fn decode_signed(bytes: &[u8], maximum: usize) -> Result<common::Sign
 
 // Every component, including the domain label, has an explicit length. The
 // transcript is unambiguous even when protobuf admits alternate field order.
-fn signing_bytes(domain: &[u8], parts: &[&[u8]]) -> Vec<u8> {
-    let mut result = Vec::new();
+fn signing_bytes(domain: &[u8], parts: &[&[u8]]) -> zeroize::Zeroizing<Vec<u8>> {
+    // Callers bound every component before reaching this helper. Allocate once so
+    // growth cannot leave a bearer-containing previous allocation behind.
+    let capacity = [b"SpaceTerm Protocol Ed25519 v1".as_slice(), domain]
+        .into_iter()
+        .chain(parts.iter().copied())
+        .map(|part| 8 + part.len())
+        .sum();
+    let mut result = zeroize::Zeroizing::new(Vec::with_capacity(capacity));
     for part in [b"SpaceTerm Protocol Ed25519 v1".as_slice(), domain]
         .into_iter()
         .chain(parts.iter().copied())
@@ -571,4 +578,75 @@ fn transcript_binding(hello: &[u8], reply: &[u8]) -> [u8; 32] {
     let mut result = [0; 32];
     result.copy_from_slice(value.as_ref());
     result
+}
+
+#[cfg(test)]
+mod signing_tests {
+    use super::*;
+    use ring::signature::KeyPair;
+
+    #[test]
+    fn enrollment_bearer_transcript_has_scoped_cleanup_and_preserves_encoding() {
+        fn requires_scoped_cleanup<T: zeroize::ZeroizeOnDrop>(_: &T) {}
+        let bearer = [0xa5; 32];
+        let transcript = signing_bytes(b"authenticated-envelope", &[&bearer]);
+        requires_scoped_cleanup(&transcript);
+        let mut expected = Vec::new();
+        for part in [
+            b"SpaceTerm Protocol Ed25519 v1".as_slice(),
+            b"authenticated-envelope".as_slice(),
+            bearer.as_slice(),
+        ] {
+            expected.extend_from_slice(&(part.len() as u64).to_be_bytes());
+            expected.extend_from_slice(part);
+        }
+        assert_eq!(transcript.as_slice(), expected);
+    }
+
+    #[test]
+    fn bearer_transcript_signing_and_verification_preserve_success_and_failure() {
+        struct Key(signature::Ed25519KeyPair);
+        impl SigningKey for Key {
+            fn public_key(&self) -> [u8; 32] {
+                self.0.public_key().as_ref().try_into().unwrap()
+            }
+            fn sign(&self, bytes: &[u8]) -> Result<[u8; 64], ProtocolError> {
+                Ok(self.0.sign(bytes).as_ref().try_into().unwrap())
+            }
+        }
+        struct Unavailable;
+        impl SigningKey for Unavailable {
+            fn public_key(&self) -> [u8; 32] {
+                [0; 32]
+            }
+            fn sign(&self, _: &[u8]) -> Result<[u8; 64], ProtocolError> {
+                Err(ProtocolError::Authentication)
+            }
+        }
+        let key = Key(signature::Ed25519KeyPair::from_seed_unchecked(&[1; 32]).unwrap());
+        let bearer = [0xa5; 32];
+        let proof = sign(&key, b"authenticated-envelope", &[&bearer]).unwrap();
+        assert_eq!(
+            verify(
+                key.public_key(),
+                b"authenticated-envelope",
+                &[&bearer],
+                &proof
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            verify(
+                key.public_key(),
+                b"authenticated-envelope",
+                &[&[0xa6; 32]],
+                &proof
+            ),
+            Err(ProtocolError::Authentication)
+        );
+        assert_eq!(
+            sign(&Unavailable, b"authenticated-envelope", &[&bearer]),
+            Err(ProtocolError::Authentication)
+        );
+    }
 }

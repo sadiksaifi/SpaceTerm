@@ -33,3 +33,8 @@ tokio = { version = "=1.53.1", default-features = false, features = ["macros", "
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = { version = "=5.19.0", default-features = false, features = ["async-io"] }
+aes = { version = "=0.8.4", features = ["zeroize"] }
+cbc = { version = "=0.1.2", features = ["zeroize"] }
+hkdf = "=0.12.4"
+num-bigint-dig = { version = "=0.9.1", features = ["zeroize"] }
+sha2 = "=0.10.9"
