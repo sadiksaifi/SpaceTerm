@@ -1626,9 +1626,19 @@ async fn started_git_retirement_remains_pending_and_shares_cleanup_with_stop() {
         head: None,
         approval: ApprovedRemoval::Clean,
     };
+    let tabs = handle.snapshot().state().tabs.clone();
     parts.affected = RetainedRemovalScope::new(RetainedRemovalScopeParts {
         server: support::server(),
-        tabs: handle.snapshot().state().tabs.clone(),
+        membership_versions: tabs
+            .iter()
+            .map(|tab| {
+                spaceterm_core::organization_retained::TabMembershipVersion::new(
+                    tab.id,
+                    FieldVersion::new(1),
+                )
+            })
+            .collect(),
+        tabs,
         panes: vec![RetainedAffectedPane {
             hierarchy: AssessedPane {
                 workspace: workspace(),
