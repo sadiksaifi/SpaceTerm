@@ -16,6 +16,7 @@
 
 #![deny(missing_docs)]
 
+pub mod git;
 pub mod native_registration;
 pub mod protected_directory;
 pub mod root_protection;

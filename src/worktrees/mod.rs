@@ -1,10 +1,9 @@
 //! Worktrees: the git worktrees of the repository a Workspace reads, and the git commands that
 //! list, create, and remove them.
 //!
-//! This module is portable product policy. Programs run only through the Repository Status
-//! [`RepositoryProgramRunner`](crate::repository_status::RepositoryProgramRunner) adapter with the
-//! same hardening its reads use. Values can carry paths and branch names for presentation; errors
-//! never do.
+//! Git policy and parsers belong to `spaceterm_host::git`. This desktop facade keeps its catalog,
+//! Workspace-scoped repository identities, and Local Filesystem Authority. Values can carry paths
+//! and branch names for presentation; errors never do.
 
 pub(crate) mod catalog;
 pub(crate) mod git;
