@@ -26,7 +26,10 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, fields, is_dataclass, replace
 from enum import StrEnum
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:
+    from spaceterm_tasks.server_vm_executor import ExecutionReceipt, VmExecutor
 
 from spaceterm_tasks import ROOT
 
@@ -1027,9 +1030,19 @@ def _start_command(vm: PreparedVm, runner: RunnerIdentity) -> tuple[str, ...]:
         "--device",
         "/dev/kvm:/dev/kvm:rw",
         "--mount",
-        f"type=bind,src={request.directory},dst=/vm",
+        f"type=bind,src={request.directory},dst=/vm,bind-nonrecursive",
         "--network",
         "bridge",
+        "--ipc",
+        "private",
+        "--cgroupns",
+        "private",
+        "--workdir",
+        "/vm",
+        "--runtime",
+        "runc",
+        "--stop-timeout",
+        "30",
         "--publish",
         f"127.0.0.1:{request.ssh.port}:2222/tcp",
         "--label",
@@ -1330,7 +1343,7 @@ class VmPlanner:
                 )
             )
             or type(owner.credential_files) is not tuple
-            or len(owner.credential_files) != 2
+            or len(owner.credential_files) not in (2, 4)
             or not all(_valid_owned_path(item) for item in owner.credential_files)
         ):
             raise _Denied(failure)
@@ -1352,6 +1365,14 @@ class VmPlanner:
             != (
                 owner.credential_directory.path / "id_ed25519",
                 owner.credential_directory.path / "id_ed25519.pub",
+                *(
+                    (
+                        owner.credential_directory.path / "host_ed25519",
+                        owner.credential_directory.path / "host_ed25519.pub",
+                    )
+                    if len(owner.credential_files) == 4
+                    else ()
+                ),
             )
         ):
             raise _Denied(failure)
@@ -1597,13 +1618,39 @@ def run_task(
     phase: Phase,
     *,
     request: PrepareRequest | None = None,
-    receipt: Path | None = None,
+    receipt: "Path | ExecutionReceipt | None" = None,
+    executor: "VmExecutor | None" = None,
+    state_directory: OwnedPath | None = None,
 ) -> int:
-    """Execution remains unavailable, without reading inputs or claiming evidence.
+    """Execute only with independently composed native peers and held ownership.
 
-    Planning is callable separately with independent pins and native read-only
-    adapters. CLI execution needs a distinct authorization and revalidation
-    contract. A receipt path or Docker availability does not supply that contract.
+    A decoded receipt path never grants execution. The one-shot Linux entry keeps
+    original receipts in memory across provisioning, transport and teardown.
+    Legacy path-only invocations remain closed rather than adopting disk records.
     """
-    print(f"phase={phase.value} classification={Classification.GATE_NOT_READY.value}")
-    return 2
+    from spaceterm_tasks.server_vm_executor import ExecutionReceipt
+
+    result = None
+    if executor is not None:
+        if phase == Phase.PREPARE and request is not None and state_directory is not None:
+            result = executor.prepare(request, state_directory=state_directory)
+        elif isinstance(receipt, ExecutionReceipt):
+            if phase == Phase.START:
+                result = executor.start(receipt)
+            elif phase == Phase.STOP:
+                result = executor.stop(receipt)
+            elif phase == Phase.REMOVE:
+                result = executor.remove(receipt)
+    classification = result.classification if result is not None else Classification.GATE_NOT_READY
+    print(f"phase={phase.value} classification={classification.value}")
+    return (
+        0
+        if classification
+        in (
+            Classification.PREPARED,
+            Classification.STARTED,
+            Classification.STOPPED,
+            Classification.REMOVED,
+        )
+        else 2
+    )

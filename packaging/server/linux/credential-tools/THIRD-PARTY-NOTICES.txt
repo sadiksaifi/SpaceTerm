@@ -11,5 +11,7 @@ of LGPL libraries. Native credential delivery to modified code still requires an
 explicit authenticated installation. It does not grant automatic approval to a
 modified library or remove the local-use rights of the license.
 
-This source pin has no completed credential-tool build or Jammy runtime receipt.
-No licensed binary closure is shipped by this configuration yet.
+The downstream credential-policy patch is by the SpaceTerm contributors and is
+licensed under LGPL-2.1-or-later. Its exact source and recipe digest accompany the
+upstream source under share/sources/build-material. Build completion and license
+permissions do not establish native runtime approval.

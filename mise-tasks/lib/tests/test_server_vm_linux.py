@@ -44,7 +44,7 @@ from types import FrameType
 from typing import TYPE_CHECKING, TypedDict, Unpack, cast
 from unittest.mock import patch
 
-from spaceterm_tasks import ROOT
+from spaceterm_tasks import ROOT, TaskError
 from spaceterm_tasks import server_vm_linux as native
 from spaceterm_tasks.server_vm_linux import (
     ApprovedKeyring,
@@ -3089,6 +3089,572 @@ class BoundedNativeProcessTests(NativeFixture):
             self.assertTrue(pipe.closed)
         self.assertEqual((output.getvalue(), error.getvalue()), ("", ""))
         self.assert_scratch_clean()
+
+
+class VmProvisioningTests(unittest.TestCase):
+    def test_stock_seed_binds_original_guest_and_separate_accounts(self):
+        from spaceterm_tasks import server_vm_linux as native
+
+        token = "6" * 64
+        # Public comparison data only. Private key generation is a native boundary.
+        public = (
+            b"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZm\n"
+        )
+        seed = native.jammy_seed(token, public, public, b"synthetic noncredential key data")
+        document = native.read_jammy_seed(seed)
+        config = json.loads(document["user-data"].removeprefix(b"#cloud-config\n"))
+        self.assertEqual(config["users"][0]["name"], "stvm-admin")
+        self.assertEqual(config["users"][0]["uid"], 20000)
+        self.assertEqual(config["users"][1]["name"], "stvm-server")
+        self.assertEqual(config["users"][1]["uid"], 20001)
+        self.assertEqual(config["users"][1]["sudo"], False)
+        self.assertEqual(config["users"][1]["groups"], [])
+        owner = json.loads(config["write_files"][0]["content"])
+        self.assertEqual(owner["token"], token)
+        self.assertEqual(owner["server_uid"], 20001)
+        self.assertEqual(config["write_files"][0]["permissions"], "0600")
+        self.assertFalse(config["ssh_pwauth"])
+        self.assertEqual(config["ssh_keys"]["ed25519_public"], public.decode().strip())
+        for word in ("apport", "apparmor", "suid_dumpable", "sysctl", "apt", "package"):
+            self.assertNotIn(word, document["user-data"].decode())
+        with self.assertRaises(native._Denied):
+            native.read_jammy_seed(seed[:-1])
+
+    def test_explicit_task_composition_dispatches_owned_receipts_not_paths(self):
+        from spaceterm_tasks import server_vm as vm
+
+        from tests.test_server_vm_executor import VmExecutorTests
+
+        fixture = VmExecutorTests()
+        fixture.new_fixture()
+        self.addCleanup(fixture.doCleanups)
+        output = io.StringIO()
+        with redirect_stdout(output):
+            result = vm.run_task(
+                vm.Phase.PREPARE,
+                executor=fixture.executor,
+                state_directory=fixture.state_identity,
+                request=fixture.request,
+            )
+        self.assertEqual(result, 0)
+        self.assertTrue(fixture.native.calls)
+        self.assertEqual(output.getvalue(), "phase=prepare classification=prepared\n")
+        fixture.native.calls.clear()
+        with redirect_stdout(io.StringIO()):
+            result = vm.run_task(
+                vm.Phase.START, executor=fixture.executor, receipt=Path("/not-authority")
+            )
+        self.assertEqual(result, 2)
+        self.assertEqual(fixture.native.calls, [])
+
+
+class OwnedJammyTransportTests(unittest.TestCase):
+    def fixture(self):
+        from spaceterm_tasks import server_vm as vm_module
+
+        from tests import test_server_vm_executor as fixtures
+        from tests.test_server_vm import bounded_configuration, bounded_policy
+
+        fixture = fixtures.VmExecutorTests()
+        fixture.new_fixture()
+        self.addCleanup(fixture.doCleanups)
+
+        class Native(fixtures.ControlledVmNative):
+            def create_credentials(self, directory_fd):
+                super().create_credentials(directory_fd)
+                credentials = os.open(
+                    "credentials", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC, dir_fd=directory_fd
+                )
+                try:
+                    fixtures.write_private(
+                        credentials, "host_ed25519", b"noncredential fixture object"
+                    )
+                    fixtures.write_private(
+                        credentials,
+                        "host_ed25519.pub",
+                        b"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZm\n",
+                    )
+                finally:
+                    os.close(credentials)
+
+            def create_container(self, vm, runner):
+                prepared = vm
+                identifier = super().create_container(prepared, runner)
+                assert identifier is not None
+                self.observation = vm_module.ContainerObservation(
+                    identifier,
+                    prepared.ownership.token,
+                    prepared.request.directory,
+                    False,
+                    bounded_configuration(
+                        prepared.request.directory, runner, prepared.request.runner_image
+                    ),
+                    bounded_policy(),
+                )
+                return identifier
+
+            def start_container(self, container_id):
+                super().start_container(container_id)
+                assert self.observation is not None
+                self.observation = replace(self.observation, running=True)
+
+            def stop_container(self, container_id, timeout_seconds):
+                super().stop_container(container_id, timeout_seconds)
+                assert self.observation is not None
+                self.observation = replace(self.observation, running=False)
+
+            def remove_container(self, container_id):
+                super().remove_container(container_id)
+                self.observation = None
+
+        fixture.native = Native()
+        fixture.executor._native = fixture.executor._planner._containers = fixture.native
+        return fixture
+
+    def test_owned_sequence_checks_transport_and_retires_original_guest_on_interruption(self):
+        from spaceterm_tasks import server_vm_linux as native
+        from spaceterm_tasks.linux_custody_evidence import GuestObservation
+
+        for failure in (
+            None,
+            KeyboardInterrupt(),
+            SystemExit(143),
+            TaskError("ownership-mismatch"),
+        ):
+            with self.subTest(failure=type(failure)):
+                fixture = self.fixture()
+                seen = []
+
+                class Peer:
+                    def __init__(self, receipt):
+                        self.receipt = receipt
+                        seen.append(receipt)
+
+                    def observe(self):
+                        if failure is not None:
+                            raise failure
+                        return GuestObservation(
+                            self.receipt.container_id,
+                            self.receipt.token,
+                            1000,
+                            1001,
+                            (22, 4, 0),
+                            (5, 15, 0),
+                            (2, 35, 0),
+                            249,
+                            True,
+                            True,
+                            2,
+                        )
+
+                if failure is not None:
+                    with self.assertRaises(type(failure)):
+                        native.run_owned_jammy_transport(
+                            fixture.executor, fixture.request, fixture.state_identity, Peer
+                        )
+                else:
+                    native.run_owned_jammy_transport(
+                        fixture.executor, fixture.request, fixture.state_identity, Peer
+                    )
+                self.assertEqual(len(seen), 1)
+                self.assertIsNone(fixture.native.observation)
+                self.assertEqual(
+                    [name for name, _ in fixture.native.calls].count("create-container"), 1
+                )
+                self.assertEqual(fixture.journal()["stage"], "removed")
+                self.assertFalse(fixture.directory.exists())
+
+    def test_late_guest_observation_cannot_pass_the_original_boot_deadline(self):
+        from spaceterm_tasks import server_vm_linux as native
+        from spaceterm_tasks.linux_custody_evidence import GuestObservation
+
+        fixture = self.fixture()
+
+        class Peer:
+            def __init__(self, receipt):
+                self.receipt = receipt
+
+            def observe(self):
+                return GuestObservation(
+                    self.receipt.container_id,
+                    self.receipt.token,
+                    1000,
+                    1001,
+                    (22, 4, 0),
+                    (5, 15, 0),
+                    (2, 35, 0),
+                    249,
+                    True,
+                    True,
+                    2,
+                )
+
+        with (
+            patch.object(native.time, "monotonic", side_effect=(0, 180)),
+            self.assertRaisesRegex(TaskError, "^timed-out$"),
+        ):
+            native.run_owned_jammy_transport(
+                fixture.executor, fixture.request, fixture.state_identity, Peer
+            )
+        self.assertIsNone(fixture.native.observation)
+        self.assertEqual(fixture.journal()["stage"], "removed")
+
+    def test_cleanup_refusal_preserves_original_receipt_and_never_removes_running_guest(self):
+        from spaceterm_tasks import server_vm_linux as native
+
+        fixture = self.fixture()
+        fixture.native.errors["stop-container"] = OSError("private native detail")
+
+        class Peer:
+            def __init__(self, _receipt):
+                pass
+
+            def observe(self):
+                raise KeyboardInterrupt()
+
+        with self.assertRaisesRegex(TaskError, "^cleanup-unresolved$"):
+            native.run_owned_jammy_transport(
+                fixture.executor, fixture.request, fixture.state_identity, Peer
+            )
+        self.assertNotIn("remove-container", [name for name, _ in fixture.native.calls])
+        self.assertTrue(fixture.directory.exists())
+        self.assertEqual(fixture.journal()["stage"], "stop-pending")
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux sealed SSH descriptor contract")
+    def test_actual_owned_jammy_transport_binds_guest_and_accounts(self):
+        from spaceterm_tasks import server_vm_linux as native
+
+        fixture = self.fixture()
+        prepared = fixture.executor.prepare(fixture.request, state_directory=fixture.state_identity)
+        assert prepared.receipt is not None
+        started = fixture.executor.start(prepared.receipt)
+        receipt = started.receipt
+        assert receipt is not None
+        peer = native.LinuxGuestTransport(receipt, fixture.native)
+        calls = []
+        observation = dict(
+            token=receipt.token,
+            administrator_uid=20000,
+            server_uid=20001,
+            os_version=[22, 4, 0],
+            kernel_version=[5, 15, 0],
+            libc_version=[2, 35, 0],
+            systemd_version=249,
+            apparmor_enabled=True,
+            apport_enabled=True,
+            suid_dumpable=2,
+        )
+
+        def ssh(program, arguments, *, inherited, **_kwargs):
+            self.assertEqual(program, "ssh")
+            self.assertIn("StrictHostKeyChecking=yes", arguments)
+            self.assertIn("IdentityAgent=none", arguments)
+            self.assertIn("ForwardAgent=no", arguments)
+            self.assertIn("ControlPath=none", arguments)
+            self.assertIn("stvm-admin@127.0.0.1", arguments)
+            self.assertIn("HostKeyAlias=stvm-" + receipt.token, arguments)
+            self.assertEqual(len(inherited), 2)
+            for descriptor in inherited:
+                self.assertEqual(
+                    fcntl.fcntl(descriptor, native._F_GET_SEALS) & native._REQUIRED_SEALS,
+                    native._REQUIRED_SEALS,
+                )
+            known = os.pread(inherited[1], 8192, 0)
+            self.assertTrue(known.startswith(("stvm-" + receipt.token + " ssh-ed25519 ").encode()))
+            calls.append(arguments)
+            return native._OperationResult(json.dumps(observation).encode(), 0)
+
+        with patch.object(native, "_run_vm_tool", side_effect=ssh):
+            value = peer.observe()
+            self.assertEqual(value.container_id, receipt.container_id)
+            self.assertEqual((value.administrator_uid, value.server_uid), (20000, 20001))
+            observation["token"] = "0" * 64
+            with self.assertRaisesRegex(TaskError, "^ownership-mismatch$"):
+                peer.observe()
+            assert fixture.native.observation is not None
+            fixture.native.observation = replace(fixture.native.observation, owner_token="0" * 64)
+            with self.assertRaisesRegex(TaskError, "^ownership-mismatch$"):
+                peer.observe()
+            self.assertEqual(len(calls), 2)
+
+
+class RunnerObservationTests(unittest.TestCase):
+    def raw_observation(self, request, runner):
+        from tests.test_server_vm import (
+            CONTAINER_ID,
+            LOCAL_RUNNER_IMAGE,
+            TOKEN,
+            bounded_configuration,
+        )
+
+        config = {
+            "Image": request.runner_image,
+            "User": f"{runner.uid}:{runner.gid}",
+            "Env": None,
+            "WorkingDir": "/vm",
+            "Entrypoint": ["/usr/bin/qemu-system-x86_64"],
+            "Cmd": list(bounded_configuration(request.directory, runner).arguments),
+            "Volumes": None,
+            "ExposedPorts": {"2222/tcp": {}},
+            "Tty": False,
+            "OpenStdin": False,
+            "StopTimeout": 30,
+            "Labels": {"io.github.sadiksaifi.spaceterm.issue520.vm-owner": TOKEN},
+        }
+        host = dict(
+            NanoCpus=2000000000,
+            Memory=6144 * 1024**2,
+            MemorySwap=6144 * 1024**2,
+            PidsLimit=256,
+            ReadonlyRootfs=True,
+            Privileged=False,
+            CapDrop=["ALL"],
+            CapAdd=None,
+            SecurityOpt=["no-new-privileges:true"],
+            GroupAdd=[str(runner.kvm_gid)],
+            Tmpfs={"/tmp": "rw,noexec,nosuid,size=64m"},
+            Devices=[
+                dict(PathOnHost="/dev/kvm", PathInContainer="/dev/kvm", CgroupPermissions="rw")
+            ],
+            NetworkMode="bridge",
+            PidMode="",
+            IpcMode="private",
+            UTSMode="",
+            UsernsMode="",
+            CgroupnsMode="private",
+            PublishAllPorts=False,
+            PortBindings={"2222/tcp": [dict(HostIp="127.0.0.1", HostPort="25022")]},
+            LogConfig=dict(Type="local", Config={"max-size": "10m", "max-file": "2"}),
+            RestartPolicy=dict(Name="no", MaximumRetryCount=0),
+            AutoRemove=False,
+            Runtime="runc",
+            OomKillDisable=False,
+            OomScoreAdj=0,
+            CgroupParent="",
+            Binds=None,
+            VolumesFrom=None,
+            DeviceRequests=None,
+            DeviceCgroupRules=None,
+            Sysctls=None,
+            StorageOpt=None,
+            Ulimits=None,
+            CpusetCpus="",
+            CpusetMems="",
+            BlkioWeightDevice=None,
+            BlkioDeviceReadBps=None,
+            BlkioDeviceWriteBps=None,
+            BlkioDeviceReadIOps=None,
+            BlkioDeviceWriteIOps=None,
+            Mounts=[
+                dict(
+                    Type="bind",
+                    Source=str(request.directory),
+                    Target="/vm",
+                    BindOptions=dict(NonRecursive=True),
+                )
+            ],
+        )
+        return [
+            dict(
+                Id=CONTAINER_ID,
+                Image=LOCAL_RUNNER_IMAGE,
+                Config=config,
+                HostConfig=host,
+                State=dict(Running=False),
+                Mounts=[
+                    dict(
+                        Type="bind",
+                        Source=str(request.directory),
+                        Destination="/vm",
+                        RW=True,
+                        Propagation="rprivate",
+                    )
+                ],
+                AppArmorProfile="docker-default",
+            )
+        ]
+
+    def test_effective_runner_policy_rejects_extra_rights_and_inherited_configuration(self):
+        import copy
+
+        from spaceterm_tasks import server_vm_linux as native
+
+        from tests.test_server_vm import (
+            CONTAINER_ID,
+            LOCAL_RUNNER_IMAGE,
+            bounded_configuration,
+            bounded_policy,
+        )
+        from tests.test_server_vm_executor import VmExecutorTests
+
+        fixture = VmExecutorTests()
+        fixture.new_fixture()
+        self.addCleanup(fixture.doCleanups)
+        original = self.raw_observation(fixture.request, fixture.runner)
+        value = native._container_observation(
+            original, fixture.request, fixture.runner, LOCAL_RUNNER_IMAGE, CONTAINER_ID
+        )
+        self.assertEqual(
+            value.configuration,
+            bounded_configuration(fixture.directory, fixture.runner, fixture.request.runner_image),
+        )
+        self.assertEqual(value.policy, bounded_policy())
+        for section, field, altered in (
+            ("HostConfig", "Privileged", True),
+            ("HostConfig", "CapAdd", ["SYS_ADMIN"]),
+            ("HostConfig", "DeviceRequests", [dict(Count=-1)]),
+            ("HostConfig", "PidMode", "host"),
+            ("HostConfig", "Memory", 0),
+            ("HostConfig", "NanoCpus", 0),
+            ("HostConfig", "Ulimits", []),
+            (
+                "HostConfig",
+                "PortBindings",
+                {"2222/tcp": [dict(HostIp="0.0.0.0", HostPort="25022")]},
+            ),
+            ("Config", "Env", ["LD_PRELOAD=untrusted"]),
+            ("Config", "Healthcheck", dict(Test=["CMD", "untrusted"])),
+            ("Config", "Volumes", {"/host": {}}),
+        ):
+            with self.subTest(section=section, field=field):
+                raw = copy.deepcopy(original)
+                raw[0][section][field] = altered
+                with self.assertRaises(native._Denied):
+                    native._container_observation(
+                        raw, fixture.request, fixture.runner, LOCAL_RUNNER_IMAGE, CONTAINER_ID
+                    )
+        raw = copy.deepcopy(original)
+        del raw[0]["HostConfig"]["SecurityOpt"]
+        with self.assertRaises(native._Denied):
+            native._container_observation(
+                raw, fixture.request, fixture.runner, LOCAL_RUNNER_IMAGE, CONTAINER_ID
+            )
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux protected utility descriptor contract")
+    def test_protected_tool_uses_original_executable_descriptor_and_bounded_process(self):
+        from spaceterm_tasks import server_vm_linux as native
+
+        real = subprocess.Popen
+        calls = []
+
+        def spawn(arguments, **kwargs):
+            descriptor = int(arguments[0].rsplit("/", 1)[1])
+            self.assertEqual(os.fstat(descriptor).st_uid, 0)
+            self.assertIn(descriptor, kwargs["pass_fds"])
+            self.assertNotIn("SSH_AUTH_SOCK", kwargs["env"])
+            self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
+            calls.append(arguments)
+            return real((sys.executable, "-I", "-c", "print('bounded-control')"), **kwargs)
+
+        with patch.object(native, "_popen", side_effect=spawn):
+            result = native._run_vm_tool("ssh", ("-V",))
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.status, b"bounded-control\n")
+        self.assertEqual(len(calls), 1)
+        with (
+            patch.object(native, "_popen", side_effect=spawn),
+            self.assertRaises(native._Denied) as error,
+        ):
+            native._run_vm_tool("ssh", ("-V",), maximum=2)
+        self.assertEqual(error.exception.classification, native.NativeClassification.OUTPUT_LIMIT)
+
+
+class NativeVmArtifactTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "linux", "Linux provisioning tool contract")
+    def test_concrete_native_adapter_produces_bounded_disks_keys_and_stock_seed(self):
+        from spaceterm_tasks import server_vm as vm
+        from spaceterm_tasks import server_vm_linux as native
+
+        from tests.test_server_vm import LOCAL_RUNNER_IMAGE
+        from tests.test_server_vm_executor import VmExecutorTests, write_private
+
+        fixture = VmExecutorTests()
+        fixture.new_fixture()
+        self.addCleanup(fixture.doCleanups)
+        adapter = native.NativeVm(fixture.request, LOCAL_RUNNER_IMAGE)
+        public = (
+            b"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZm\n"
+        )
+        calls = []
+        capacities = {}
+
+        def tool(program, arguments, *, inherited, **_kwargs):
+            calls.append((program, arguments))
+            if program == "ssh-keygen":
+                leaf = arguments[-1].rsplit("/", 1)[1]
+                write_private(inherited[0], leaf, b"noncredential test object")
+                write_private(inherited[0], leaf + ".pub", public)
+            elif program == "qemu-img":
+                operation = arguments[0]
+                if operation == "convert":
+                    self.assertEqual(os.pread(inherited[0], 8192, 0), fixture.image_bytes)
+                    os.write(inherited[1], b"controlled unprivileged image output")
+                elif operation == "resize":
+                    capacities[os.fstat(inherited[0]).st_ino] = int(arguments[-1])
+                elif operation == "create":
+                    os.write(inherited[0], b"controlled unprivileged data output")
+                    capacities[os.fstat(inherited[0]).st_ino] = int(arguments[-1])
+                elif operation == "info":
+                    current = os.fstat(inherited[0])
+                    data = {
+                        "format": "qcow2",
+                        "virtual-size": capacities[current.st_ino],
+                        "actual-size": current.st_blocks * 512,
+                    }
+                    return native._OperationResult(json.dumps(data).encode(), 0)
+            else:
+                self.fail("unexpected utility")
+            return native._OperationResult(b"", 0)
+
+        directory = os.open(fixture.directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        image = os.open(fixture.request.image.path, os.O_RDONLY | os.O_CLOEXEC)
+        try:
+            with patch.object(native, "_run_vm_tool", side_effect=tool):
+                adapter.create_credentials(directory)
+                unavailable = os.statvfs_result((4096, 4096, 0, 0, 0, 1, 1, 1, 0, 255))
+                with (
+                    patch.object(os, "fstatvfs", return_value=unavailable),
+                    self.assertRaises(native._Denied),
+                ):
+                    adapter.create_os_disk(directory, image, 24 * 1024**3)
+                self.assertFalse((fixture.directory / "os.qcow2").exists())
+                available = os.statvfs_result(
+                    (4096, 4096, 10000000, 10000000, 10000000, 1, 1, 1, 0, 255)
+                )
+                with patch.object(os, "fstatvfs", return_value=available):
+                    adapter.create_os_disk(directory, image, 24 * 1024**3)
+                adapter.create_encrypted_disk(directory, 8 * 1024**3)
+                adapter.create_seed(directory, "6" * 64)
+                for name, size in (("os.qcow2", 24 * 1024**3), ("encrypted.qcow2", 8 * 1024**3)):
+                    descriptor = os.open(name, os.O_RDONLY | os.O_CLOEXEC, dir_fd=directory)
+                    try:
+                        evidence = adapter.inspect_disk(
+                            descriptor, vm.OwnedPath.capture(fixture.directory / name)
+                        )
+                        self.assertEqual(evidence.virtual_size_bytes, size)
+                        self.assertFalse(evidence.has_backing_file)
+                        self.assertFalse(evidence.has_external_data_file)
+                    finally:
+                        os.close(descriptor)
+                descriptor = os.open("seed.iso", os.O_RDONLY | os.O_CLOEXEC, dir_fd=directory)
+                try:
+                    evidence = adapter.inspect_seed(
+                        descriptor, vm.OwnedPath.capture(fixture.directory / "seed.iso")
+                    )
+                    self.assertEqual(evidence.label, "CIDATA")
+                    self.assertLess(evidence.size_bytes, 4 * 1024**2)
+                finally:
+                    os.close(descriptor)
+        finally:
+            os.close(image)
+            os.close(directory)
+        self.assertEqual(
+            set(path.name for path in fixture.directory.iterdir()),
+            {"credentials", "os.qcow2", "encrypted.qcow2", "seed.iso"},
+        )
+        self.assertEqual([name for name, _ in calls].count("ssh-keygen"), 2)
+        for path in (fixture.directory / "credentials").iterdir():
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
 
 
 if __name__ == "__main__":

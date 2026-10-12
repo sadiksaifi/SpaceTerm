@@ -26,8 +26,18 @@ debian/rules and build dependencies describe Ubuntu's library build. Rebuild a
 modified library for x86_64 glibc 2.35 or earlier and retain its SONAME and ABI.
 The shipped binaries were obtained from Ubuntu's signed Jammy archive, then
 copied as regular files and transformed with patchelf --set-rpath '$ORIGIN'.
-The tool's RUNPATH is '$ORIGIN/../../lib/credential-tools'. No source patches
-were applied to systemd. The build receipt hashes the transformed binaries.
+The tool's RUNPATH is '$ORIGIN/../../lib/credential-tools'. The recorded
+0001-spaceterm-private-credential-policy.patch is applied before compilation.
+It is shipped under share/sources/build-material with its exact recipe digest.
+The patch restricts the CLI to anonymous-stream Host/HostAndTpm2 enrollment and
+startup decrypt, verifies dumpable zero, requires mlockall for secret-bearing
+execution, disables plaintext stdio buffering, and preserves upstream wiping.
+Startup decrypt opens existing host-key storage without provisioning or repair.
+It rejects unsupported ciphertext recipes before accessing native keys.
+The build receipt hashes the patched and transformed binaries. Every build
+gets a new build identity and resets all native runtime evidence to unrun.
+That identity is recorded in authenticated build-info.json and the sibling
+JSON receipt. Packaging binds both to the exact evidence recorded in the pin.
 
 A modified LGPL library may replace its matching private shared library in a
 local test copy. No application relinking objects are needed for this dynamic

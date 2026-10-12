@@ -205,6 +205,7 @@ def validate_headless_name(name):
     parts = PurePosixPath(name).parts
     if any(
         part.lower() in ("fonts", "icons", "sparkle.framework", "spaceterm.app")
+        or part.lower().startswith("spaceterm-native-evidence-")
         or part.lower().endswith((".desktop", ".icns", ".ttf", ".otf", ".dmg"))
         for part in parts
     ):

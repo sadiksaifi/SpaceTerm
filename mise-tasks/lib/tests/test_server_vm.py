@@ -526,7 +526,9 @@ class VmPlanningTests(unittest.TestCase):
         self.assertIn("no-new-privileges:true", values("--security-opt"))
         self.assertEqual(values("--tmpfs"), ["/tmp:rw,noexec,nosuid,size=64m"])
         self.assertEqual(values("--device"), ["/dev/kvm:/dev/kvm:rw"])
-        self.assertEqual(values("--mount"), [f"type=bind,src={self.directory},dst=/vm"])
+        self.assertEqual(
+            values("--mount"), [f"type=bind,src={self.directory},dst=/vm,bind-nonrecursive"]
+        )
         self.assertEqual(values("--publish"), ["127.0.0.1:25022:2222/tcp"])
         self.assertIn(f"{OWNER_LABEL}={TOKEN}", values("--label"))
         self.assertEqual(values("--log-driver"), ["local"])
@@ -541,7 +543,6 @@ class VmPlanningTests(unittest.TestCase):
         for forbidden in (
             "--privileged",
             "--pid",
-            "--ipc",
             "--uts",
             "--userns",
             "--volumes-from",
@@ -551,6 +552,8 @@ class VmPlanningTests(unittest.TestCase):
             "-P",
         ):
             self.assertNotIn(forbidden, command)
+        self.assertEqual(values("--ipc"), ["private"])
+        self.assertEqual(values("--cgroupns"), ["private"])
         self.assertNotIn("host", values("--network"))
         for argument in command:
             self.assertFalse(argument.startswith(("--network=host", "--pid=host", "--ipc=host")))

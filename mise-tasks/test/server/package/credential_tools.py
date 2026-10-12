@@ -7,12 +7,12 @@ import os
 import re
 import sys
 
-from spaceterm_tasks import TaskError, main
+from spaceterm_tasks import ROOT, TaskError, main
 from spaceterm_tasks.macos_signing import signing_environment
 from spaceterm_tasks.package_server_linux import (
     CLOSURE,
     credential_tool_pin,
-    verify_credential_files,
+    verify_credential_build,
     verify_elf_closure,
 )
 from spaceterm_tasks.packaging import checked
@@ -35,7 +35,7 @@ def test():
     pin = credential_tool_pin()
     if pin["build"]["complete"] is not True:
         raise TaskError("credential-tool compiler-container checks require a completed build")
-    verify_credential_files(CLOSURE, pin["build"]["files"])
+    verify_credential_build(CLOSURE, pin["build"])
     verify_elf_closure(CLOSURE)
     command = [
         "docker",
@@ -107,6 +107,31 @@ def test():
     print(
         f"Executed {checks} loader/version checks with zero failures. Source and LGPL receipts verified."
     )
+    observations = checked(
+        [
+            *command[:-1],
+            "--tmpfs",
+            "/tmp:rw,exec,nosuid,nodev,size=64m",
+            "--mount",
+            f"type=bind,src={ROOT / 'tests/server_native/linux/custody'},dst=/fixtures,readonly",
+            pin["build"]["build_image"],
+            "python3",
+            "-I",
+            "/fixtures/credential_tool_tests.py",
+            "--root",
+            "/candidate",
+            "--peer-source",
+            "/fixtures/credential_tool_peers.c",
+        ],
+        "credential-tool injected native-peer checks failed",
+        env=clean,
+        timeout=120,
+    )
+    if not re.fullmatch(
+        rb"native-peer-cases=[1-9][0-9]{0,2}; privileged-evidence=unrun\n", observations
+    ):
+        raise TaskError("credential-tool native-peer observation is incomplete")
+    print(observations.decode().strip())
     print("No native Jammy-kernel, systemd 249, Host-key, TPM, or custody case ran.")
 
 
