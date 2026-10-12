@@ -8189,6 +8189,36 @@ fn switching_to_a_workspace_with_more_tabs_should_grow_the_tabs_the_old_strip_la
 }
 
 #[gpui::test]
+fn switching_back_and_forth_quickly_should_start_each_tab_strip_from_the_old_end(
+    cx: &mut TestAppContext,
+) {
+    let (_manager, _records, cx) = workspace_manager(cx);
+    cx.simulate_keystrokes("cmd-t cmd-t cmd-n");
+    finish_slides(cx);
+    cx.update(|_, cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
+    let end = |cx: &mut VisualTestContext| cx.debug_bounds("create-tab-button").unwrap().origin.x;
+    let later = |cx: &mut VisualTestContext| {
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(60));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+    };
+
+    click("workspace-row-1-inactive", cx);
+    later(cx);
+    click("workspace-row-2-inactive", cx);
+    later(cx);
+    let left = end(cx);
+    click("workspace-row-1-inactive", cx);
+    let arrived = end(cx);
+
+    assert!(
+        (arrived - left).abs() <= px(1.0),
+        "the Tab strip must start from the old strip's end at {left:?}, got {arrived:?}"
+    );
+}
+
+#[gpui::test]
 fn escape_should_cancel_a_workspace_row_drag_and_return_every_row_to_its_place(
     cx: &mut TestAppContext,
 ) {

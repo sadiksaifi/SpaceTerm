@@ -117,6 +117,9 @@ struct Flight<Id> {
     /// Where the selection started along the strip, from where the item settles.
     from: Pixels,
     ease: Ease,
+    /// How far the strip was scrolled when the selection left, until the next layout shows
+    /// whether revealing the selected item scrolled it.
+    left_scrolled: Option<Pixels>,
 }
 
 /// The item a strip's drag carries, its session, and where a release would land it.
@@ -357,11 +360,39 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
         }
         let motion = presence_motion(cx);
         let reshape = !self.overflowing;
-        for id in ids.iter().skip(from.slots.len()).filter(|_| reshape) {
-            let natural = self.laid_out.get(id).map(|(_, size)| *size);
-            self.entering
-                .entry(*id)
-                .or_insert_with(|| (Ease::new(PRESENCE_DURATION, now, motion), natural));
+        // The items the other strip lacked grow in from where its end stood, which a gap still
+        // closing in it can hold past its last item. Growth left over from an earlier arrival
+        // starts again from there.
+        let lacked = ids
+            .iter()
+            .skip(from.slots.len())
+            .filter(|_| reshape)
+            .map(|id| {
+                let natural = match self.entering.get(id) {
+                    Some((_, natural)) => *natural,
+                    None => self.laid_out.get(id).map(|(_, size)| *size),
+                };
+                (*id, natural)
+            })
+            .collect::<Vec<_>>();
+        let past_last = from.slots.last().map_or(px(0.0), |(start, size)| {
+            (from.end - *start - *size).max(px(0.0))
+        });
+        let natural = lacked
+            .iter()
+            .map(|(_, natural)| *natural)
+            .sum::<Option<Pixels>>();
+        let grown = natural
+            .filter(|natural| *natural > px(0.0))
+            .map_or(0.0, |natural| (past_last / natural).min(1.0));
+        for (id, natural) in lacked {
+            self.entering.insert(
+                id,
+                (
+                    Ease::reached(grown, PRESENCE_DURATION, now, motion),
+                    natural,
+                ),
+            );
         }
         let carrier = ids
             .last()
@@ -383,6 +414,8 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
                 id,
                 from: px(0.0),
                 ease: Ease::new(SELECTION_DURATION, now, motion),
+                // The arrival aims the selection from the strip's latest scroll on every frame.
+                left_scrolled: None,
             });
         self.arrival = Some(Arrival {
             from,
@@ -500,6 +533,9 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
                     id,
                     from: from - to,
                     ease: Ease::new(duration, now, motion),
+                    // A strip whose items grow in scrolls along with their growth, which the
+                    // selection follows.
+                    left_scrolled: self.entering.is_empty().then_some(self.scrolled),
                 });
         }
         self.begin_arrival(now, cx);
@@ -630,6 +666,14 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
             return;
         };
         self.scrolled = items.offset().along(axis);
+        // A strip that scrolls to reveal the newly selected item does so on the frame the
+        // selection leaves, so the selection leaves from where it was drawn before that scroll.
+        // Later scrolling carries the selection along.
+        if let Some(flight) = self.flight.as_mut()
+            && let Some(left_scrolled) = flight.left_scrolled.take()
+        {
+            flight.from += left_scrolled - self.scrolled;
+        }
         self.laid_out_at = self.refreshed_at;
         let viewport = items.bounds();
         let visible_end = viewport.origin.along(axis) + viewport.size.along(axis);
@@ -763,15 +807,24 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
         window: &Window,
         cx: &App,
     ) {
+        // An item grabbed while it still settles is drawn short of its place, so the press holds
+        // it from where it is drawn.
+        let drawn = ids
+            .iter()
+            .position(|candidate| *candidate == id)
+            .and_then(|position| self.item_bounds(items, ids).get(position).copied())
+            .map(|face| {
+                face.origin
+                    + self
+                        .slides
+                        .get(&id)
+                        .map_or_else(Point::default, |slide| slide.at(now(cx)))
+            });
         self.slides.clear();
         self.settling = None;
         self.arriving = None;
         self.arrival = None;
-        let rest = ids
-            .iter()
-            .position(|candidate| *candidate == id)
-            .and_then(|position| self.item_bounds(items, ids).get(position).copied());
-        let grab = rest.map_or_else(Point::default, |rest| grab_point(window, cx) - rest.origin);
+        let grab = drawn.map_or_else(Point::default, |drawn| grab_point(window, cx) - drawn);
         self.lift = Some(Lift {
             id,
             session,
@@ -1236,6 +1289,21 @@ struct Ease {
 }
 
 impl Ease {
+    /// An ease that stands `eased` of the way along at `now`.
+    fn reached(
+        eased: f32,
+        duration: Duration,
+        now: Instant,
+        motion: spaceterm_ui::ControlMotion,
+    ) -> Self {
+        let ease = Self::new(duration, now, motion);
+        let elapsed = ease.duration.mul_f32(undecay(eased));
+        Self {
+            since: now.checked_sub(elapsed).unwrap_or(now),
+            ..ease
+        }
+    }
+
     /// An ease that starts at `now`, or ends at once when motion is reduced.
     fn new(duration: Duration, now: Instant, motion: spaceterm_ui::ControlMotion) -> Self {
         Self {
@@ -1340,10 +1408,17 @@ impl Slide {
 
 /// Closes the same share of the remaining distance in each moment, so it starts at full speed
 /// and slows toward the end, without overshoot.
+/// How many time constants the motion runs, by when less than 1% of the distance remains.
+const TIME_CONSTANTS: f32 = 6.2;
+
 fn decay(progress: f32) -> f32 {
-    /// How many time constants the motion runs, by when less than 1% of the distance remains.
-    const TIME_CONSTANTS: f32 = 6.2;
     (1.0 - (-TIME_CONSTANTS * progress).exp()) / (1.0 - (-TIME_CONSTANTS).exp())
+}
+
+/// The progress at which [`decay`] reaches `eased`, from 0 to 1.
+fn undecay(eased: f32) -> f32 {
+    let eased = eased.clamp(0.0, 1.0);
+    (-(1.0 - eased * (1.0 - (-TIME_CONSTANTS).exp())).ln() / TIME_CONSTANTS).clamp(0.0, 1.0)
 }
 
 fn now(cx: &App) -> Instant {
@@ -1829,6 +1904,14 @@ mod tests {
                 -AUTOSCROLL_SPEED,
             ]
         );
+    }
+
+    #[test]
+    fn undecay_should_find_the_progress_that_decay_reaches() {
+        assert_eq!((undecay(0.0), undecay(1.0)), (0.0, 1.0));
+        for progress in [0.1, 0.25, 0.5, 0.9] {
+            assert!((undecay(decay(progress)) - progress).abs() < 1e-4);
+        }
     }
 
     #[test]
