@@ -6542,6 +6542,42 @@ mod tests {
     }
 
     #[gpui::test]
+    fn new_tabs_opened_in_quick_succession_should_keep_the_selection_at_the_bar_end(
+        cx: &mut TestAppContext,
+    ) {
+        let (_manager, _records, cx) = tab_manager(cx);
+        for _ in 0..12 {
+            click("create-tab-button", cx);
+        }
+        finish_slides(cx);
+        cx.update(|_, cx| cx.set_global(AnimatePresence));
+        let selection = cx.debug_bounds("tab-item-13-chip").unwrap().origin;
+        let next_frame = |cx: &mut VisualTestContext| {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(30));
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+            cx.run_until_parked();
+        };
+
+        click("create-tab-button", cx);
+        for _ in 0..4 {
+            next_frame(cx);
+        }
+        click("create-tab-button", cx);
+        let mut frames = vec![cx.debug_bounds("tab-item-15-chip").unwrap().origin];
+        for _ in 0..4 {
+            next_frame(cx);
+            frames.push(cx.debug_bounds("tab-item-15-chip").unwrap().origin);
+        }
+
+        assert_eq!(
+            frames,
+            vec![selection; 5],
+            "a Tab opened while the one before it still grows must hold the selection still"
+        );
+    }
+
+    #[gpui::test]
     fn a_new_tab_in_an_overflowing_bar_should_end_fully_in_view(cx: &mut TestAppContext) {
         let (_manager, _records, cx) = tab_manager(cx);
         for _ in 0..12 {

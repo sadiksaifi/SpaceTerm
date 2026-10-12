@@ -520,8 +520,8 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
     }
 
     /// Where the item `id` starts along the strip once every item has grown in and every gap has
-    /// closed. A new item settles where the item after it, or the end of the item before it,
-    /// stood in the last frame.
+    /// closed. A new item starts where the item after it, or the end of the item before it, stood
+    /// in the last frame, and settles as far beyond as the items before it still grow.
     fn settled_start(&self, id: Id, now: Instant) -> Option<Pixels> {
         if let Some((start, _)) = self.laid_out.get(&id) {
             return Some(*start - self.displacement(id, now));
@@ -538,6 +538,7 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
             .find_map(|previous| self.laid_out.get(previous))
             .map(|(start, size)| *start + *size);
         next.or(previous)
+            .map(|start| start - self.displacement(id, now))
     }
 
     /// How far the item `id` starts along the strip from where it settles, while items before it
@@ -632,7 +633,20 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
         let start = next
             .map(|(start, _)| start)
             .or(previous.map(|(start, size)| start + size));
-        let size = previous.or(next).map(|(_, size)| size);
+        // A neighbor that is still growing in has its full size ahead of it.
+        let size = |candidate: &Id| {
+            let (_, size) = self.laid_out.get(candidate)?;
+            let natural = self
+                .entering
+                .get(candidate)
+                .and_then(|(_, natural)| *natural);
+            Some(natural.unwrap_or(*size))
+        };
+        let size = ids[..position]
+            .iter()
+            .rev()
+            .chain(&ids[position + 1..])
+            .find_map(size);
         start
             .zip(size)
             .filter(|(start, size)| *start + *size > self.visible_end + px(0.5))
