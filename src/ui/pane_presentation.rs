@@ -227,15 +227,15 @@ impl PanePresentation {
             .unwrap_or_default()
     }
 
-    /// The actions plain Tab and Shift-Tab visit from the Pane. A Takeover Screen has none, so Tab
-    /// completion followed by Return or Space, typed for the shell, cannot take control from the
-    /// other device.
+    /// The actions plain Tab and Shift-Tab visit from the Pane. A Takeover Screen never offers Take
+    /// Over to them, so Tab completion followed by Return or Space, typed for the shell, cannot take
+    /// control from the other device. An interrupted Takeover Screen still offers Retry.
     fn keyboard_actions(&self) -> Vec<PanePresentationAction> {
+        let mut actions = self.operable_actions(true);
         if self.guards_take_over() {
-            Vec::new()
-        } else {
-            self.operable_actions(true)
+            actions.retain(|action| *action != PanePresentationAction::TakeOver);
         }
+        actions
     }
 
     /// Moves keyboard focus on plain Tab and Shift-Tab, which a live Terminal would send to its

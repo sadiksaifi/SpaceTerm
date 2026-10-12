@@ -640,24 +640,31 @@ fn takeover_screen_is_content_free_and_never_takes_over_from_terminal_typing(
 }
 
 #[gpui::test]
-fn an_interrupted_takeover_screen_keeps_tab_and_return_from_its_actions(cx: &mut TestAppContext) {
+fn an_interrupted_takeover_screen_keeps_tab_and_return_from_take_over(cx: &mut TestAppContext) {
     let device = DisplayName::reported("Studio Mac");
     let mut pane = pane(PanePresentation::Live, cx);
-    for presentation in [
-        PanePresentation::Offline {
-            prior: OfflinePrior::Takeover(device.clone()),
-        },
-        PanePresentation::Reconciling {
-            prior: OfflinePrior::Takeover(device.clone()),
-        },
-    ] {
-        pane.present(presentation.clone());
-        pane.advance(TAKEOVER_ARMING_DELAY);
-        for keys in ["tab enter", "tab space", "shift-tab enter"] {
-            pane.press(keys);
-            assert!(pane.take_actions().is_empty(), "{presentation:?} {keys}");
-            assert!(pane.pane_focused(), "{presentation:?} {keys}");
-        }
+    pane.present(PanePresentation::Reconciling {
+        prior: OfflinePrior::Takeover(device.clone()),
+    });
+    pane.advance(TAKEOVER_ARMING_DELAY);
+    for keys in ["tab enter", "tab space", "shift-tab enter"] {
+        pane.press(keys);
+        assert!(pane.take_actions().is_empty(), "{keys}");
+        assert!(pane.pane_focused(), "{keys}");
+    }
+
+    pane.present(PanePresentation::Offline {
+        prior: OfflinePrior::Takeover(device),
+    });
+    pane.advance(TAKEOVER_ARMING_DELAY);
+    for keys in ["tab enter", "tab space", "shift-tab enter"] {
+        pane.press(keys);
+        assert_eq!(
+            pane.take_actions(),
+            [PanePresentationAction::Retry],
+            "{keys}"
+        );
+        assert!(pane.pane_focused(), "{keys}");
     }
     assert!(pane.record().terminal_input.borrow().is_empty());
 }
