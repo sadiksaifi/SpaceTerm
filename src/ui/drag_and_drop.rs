@@ -3,7 +3,7 @@
 //! strand it.
 
 use gpui::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -55,6 +55,9 @@ pub(crate) struct ReorderableStrip<Id> {
     entering: HashMap<Id, (Ease, Option<Pixels>)>,
     /// The items that finished growing at the last refresh, and take their full size this frame.
     grown: Vec<Id>,
+    /// The new items that reach past the strip's visible end, where the strip holds them while
+    /// they grow, so their faces grow from that end.
+    growing_from_end: HashSet<Id>,
     /// The closing gap a removed item left before each item, inside that item's slot.
     leading_gaps: HashMap<Id, Gap>,
     /// The closing gap a removed last item left after the item that is now last, inside that
@@ -73,6 +76,8 @@ pub(crate) struct ReorderableStrip<Id> {
     scrolled: Pixels,
     /// Whether the items of the last frame ran past the strip's visible end.
     overflowing: bool,
+    /// Where the strip's visible part ended in the last frame, in layout coordinates.
+    visible_end: Pixels,
     /// The shape of the strip this one takes the place of, until the next frame starts from it.
     arriving: Option<StripShape>,
     /// This strip moving from the shape of the strip it took the place of.
@@ -149,6 +154,8 @@ pub(crate) struct ItemMotion {
     pub(crate) selection_offset: Point<Pixels>,
     /// The item's slot size along the strip while it grows in, or `None` at its natural size.
     pub(crate) extent: Option<Pixels>,
+    /// Whether the item grows from its slot's far end, where the strip holds it in view.
+    pub(crate) grows_from_end: bool,
     /// The closing gap before the item's slot, along the strip.
     pub(crate) leading_gap: Pixels,
     /// The closing gap after the item's slot, along the strip.
@@ -189,6 +196,13 @@ impl ItemMotion {
             Axis::Horizontal => slot.w(extent + gaps),
             Axis::Vertical => slot.h(extent + gaps),
         };
+        // An item the strip holds at its visible end shows whole by reaching back over the items
+        // making room for it, instead of past that end.
+        let slot = match (self.grows_from_end, axis) {
+            (false, _) => slot,
+            (true, Axis::Horizontal) => slot.flex().flex_row().justify_end(),
+            (true, Axis::Vertical) => slot.flex().flex_col().justify_end(),
+        };
         slot.on_children_prepainted(move |bounds, _, cx| {
             if let Some(item) = bounds.first() {
                 measure(item.size, cx);
@@ -207,6 +221,7 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
             known: None,
             entering: HashMap::new(),
             grown: Vec::new(),
+            growing_from_end: HashSet::new(),
             leading_gaps: HashMap::new(),
             trailing_gaps: HashMap::new(),
             refreshed_at: None,
@@ -215,6 +230,7 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
             flight: None,
             scrolled: px(0.0),
             overflowing: false,
+            visible_end: px(0.0),
             arriving: None,
             arrival: None,
         }
@@ -587,6 +603,26 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
             .laid_out
             .values()
             .any(|(start, size)| *start + *size > visible_end + px(0.5));
+        self.visible_end = visible_end - self.scrolled;
+    }
+
+    /// Whether the new item at `position` among the strip's `ids` reaches past the visible end of
+    /// an overflowing strip once grown, judged from the last frame's layout and the size of a
+    /// neighbor. A strip that fits its items ends at its last item, and grows with a new one.
+    fn reaches_past_visible_end(&self, ids: &[Id], position: usize) -> bool {
+        if !self.overflowing {
+            return false;
+        }
+        let laid_out = |candidate: &Id| self.laid_out.get(candidate).copied();
+        let next = ids[position + 1..].iter().find_map(laid_out);
+        let previous = ids[..position].iter().rev().find_map(laid_out);
+        let start = next
+            .map(|(start, _)| start)
+            .or(previous.map(|(start, size)| start + size));
+        let size = previous.or(next).map(|(_, size)| size);
+        start
+            .zip(size)
+            .is_some_and(|(start, size)| start + size > self.visible_end + px(0.5))
     }
 
     /// Starts new items growing into the strip and closes the gaps removed items leave, when the
@@ -601,9 +637,15 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
         self.arrival = None;
         let now = now(cx);
         let motion = presence_motion(cx);
-        for id in ids.iter().filter(|id| !known.contains(id)) {
+        for (position, id) in ids.iter().enumerate() {
+            if known.contains(id) {
+                continue;
+            }
             self.entering
                 .insert(*id, (Ease::new(PRESENCE_DURATION, now, motion), None));
+            if self.reaches_past_visible_end(ids, position) {
+                self.growing_from_end.insert(*id);
+            }
         }
         let bounds = (0..known.len())
             .map(|position| items.bounds_for_item(position))
@@ -705,6 +747,8 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
             }
             !finished
         });
+        let entering = &self.entering;
+        self.growing_from_end.retain(|id| entering.contains_key(id));
         self.leading_gaps.retain(|_, gap| !gap.ease.finished(now));
         self.trailing_gaps.retain(|_, gap| !gap.ease.finished(now));
         self.refreshed_at = Some(now);
@@ -762,6 +806,7 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
                 }),
             extent: entering
                 .map(|(ease, natural)| natural.map_or(px(0.0), |natural| natural * ease.at(now))),
+            grows_from_end: entering.is_some() && self.growing_from_end.contains(&id),
             leading_gap: self
                 .leading_gaps
                 .get(&id)

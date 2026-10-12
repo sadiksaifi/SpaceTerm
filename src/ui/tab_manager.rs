@@ -6485,6 +6485,34 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_new_tab_in_an_overflowing_bar_should_show_whole_while_it_grows(cx: &mut TestAppContext) {
+        let (_manager, _records, cx) = tab_manager(cx);
+        for _ in 0..12 {
+            click("create-tab-button", cx);
+        }
+        finish_slides(cx);
+        cx.update(|_, cx| cx.set_global(AnimatePresence));
+
+        click("create-tab-button", cx);
+        let mut frames = Vec::new();
+        for _ in 0..4 {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(30));
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+            cx.run_until_parked();
+            frames.push(cx.debug_bounds("tab-item-14-active").unwrap());
+        }
+        let strip = cx.debug_bounds("tab-items").unwrap();
+
+        for created in frames {
+            assert!(
+                strip.left() <= created.left() && created.right() <= strip.right(),
+                "a growing Tab must show whole inside the strip {strip:?}, got {created:?}"
+            );
+        }
+    }
+
+    #[gpui::test]
     fn a_new_tab_in_an_overflowing_bar_should_end_fully_in_view(cx: &mut TestAppContext) {
         let (_manager, _records, cx) = tab_manager(cx);
         for _ in 0..12 {
