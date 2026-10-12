@@ -1918,6 +1918,11 @@ impl TabManager {
             TabItemRole::Departing => ItemMotion::default(),
         };
         let chip_selector = format!("{element_name}-{}-chip", tab_id.get());
+        let chip = if motion.lifted {
+            chip.landing(foreground)
+        } else {
+            chip
+        };
         let chip = if motion.lift > 0.0 {
             chip.render_lifted(
                 chip_selector,
@@ -6201,6 +6206,7 @@ mod tests {
 
         drag_tab(first.center(), &[lift, release], cx);
         finish_slides(cx);
+        let landing = cx.debug_bounds("tab-item-1-chip-landing").is_some();
         let during = (
             tab_order(&manager, cx),
             cx.debug_bounds("tab-item-1-inactive"),
@@ -6222,6 +6228,10 @@ mod tests {
             ),
             "a dragged Tab must show its faded face where it lands, open a gap there, and hold its \
              lifted copy inside the strip"
+        );
+        assert!(
+            landing,
+            "a dragged Tab's faded face must edge its chip with a dashed line"
         );
         assert_eq!(
             (

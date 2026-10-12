@@ -7872,6 +7872,9 @@ fn dragging_a_workspace_row_should_open_a_gap_and_settle_there_on_release(cx: &m
     cx.simulate_mouse_move(release, MouseButton::Left, Modifiers::none());
     finish_slides(cx);
     let landing = gpui::Bounds::new(third.origin, first.size);
+    let dashed = cx
+        .debug_bounds("workspace-row-selection-1-landing")
+        .is_some();
     let during = (
         workspace_order(&manager, cx),
         cx.debug_bounds("workspace-row-1-inactive"),
@@ -7892,6 +7895,10 @@ fn dragging_a_workspace_row_should_open_a_gap_and_settle_there_on_release(cx: &m
         ),
         "a dragged row must show its faded face where it lands, open a gap there, and hold its \
          lifted copy in line with the rows"
+    );
+    assert!(
+        dashed,
+        "a dragged row's faded face must edge its chip with a dashed line"
     );
     assert_eq!(
         (

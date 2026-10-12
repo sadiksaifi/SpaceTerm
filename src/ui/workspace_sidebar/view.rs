@@ -294,6 +294,8 @@ impl WorkspaceSidebar {
         let (chip, row_colors) = row_paint(selected, emphasized, hover, appearance, cx);
         let chip = if paint_only {
             chip
+        } else if self.workspace_reorder.motion(workspace_id, cx).lifted {
+            chip.landing(row_colors.row_foreground)
         } else {
             self.outline_menu_target(chip, SidebarRowKey::Workspace(workspace_id), appearance)
         };

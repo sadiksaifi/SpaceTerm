@@ -130,6 +130,7 @@ pub(crate) struct SelectionChip {
     shape: ChipShape,
     paint: ChipPaint,
     outline: Option<Color>,
+    landing: Option<Color>,
 }
 
 /// The width of the outline that marks the item a context menu acts on.
@@ -141,7 +142,14 @@ impl SelectionChip {
             shape,
             paint,
             outline: None,
+            landing: None,
         }
+    }
+
+    /// Edges the chip with a dashed line in `color`, marking the place a dragged item would land.
+    pub(crate) const fn landing(mut self, color: Color) -> Self {
+        self.landing = Some(color);
+        self
     }
 
     /// Outlines the chip in `color`, as a source list marks the item its context menu acts on
@@ -187,8 +195,15 @@ impl SelectionChip {
         let rest_rim = paint.fill.and(paint.rim).filter(|rim| rim.a != 0);
         let hover_rim = paint.hover_rim.filter(|rim| rim.a != 0).or(rest_rim);
         let rim = hovered_paint(rest_rim, hover_rim, hover);
+        let landing = self.landing.is_some();
         Self::body(self.shape)
-            .debug_selector(move || selector.clone())
+            .debug_selector(move || {
+                if landing {
+                    format!("{selector}-landing")
+                } else {
+                    selector.clone()
+                }
+            })
             .when_some(fill, |chip, fill| chip.bg(gpui_color(fill)))
             .when_some(self.outline.or(rim), |chip, edge| {
                 let width = if self.outline.is_some() {
@@ -197,6 +212,11 @@ impl SelectionChip {
                     HAIRLINE
                 };
                 chip.border(px(width)).border_color(gpui_color(edge))
+            })
+            .when_some(self.landing, |chip, edge| {
+                chip.border(px(HAIRLINE))
+                    .border_dashed()
+                    .border_color(gpui_color(edge))
             })
     }
 }
