@@ -125,6 +125,9 @@ struct Lift<Id> {
     session: DragSession,
     /// Where the press held the item, from the item's origin.
     grab: Point<Pixels>,
+    /// How long the lifted copy is along the strip when it shows only the start of the item's
+    /// face, as a Workspace row lifted from its group does.
+    length: Option<Pixels>,
     /// Where the lifted copy's origin stands in the window.
     origin: Option<Point<Pixels>>,
     /// Where the pointer last stood in the window.
@@ -747,10 +750,13 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
     }
 
     /// Lifts the item `id`, one of the strip's `ids` in presentation order. It keeps its place
-    /// until a release lands it elsewhere.
+    /// until a release lands it elsewhere. A lifted copy that shows only the start of the item's
+    /// face is `length` long along the strip; otherwise it shows the whole face.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn begin(
         &mut self,
         id: Id,
+        length: Option<Pixels>,
         session: DragSession,
         items: &ScrollHandle,
         ids: &[Id],
@@ -770,6 +776,7 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
             id,
             session,
             grab,
+            length,
             origin: None,
             pointer: None,
             scrolled_at: None,
@@ -906,14 +913,20 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
             .iter()
             .position(|candidate| *candidate == lift.id)
             .filter(|_| faces.len() == ids.len() && slots.len() == ids.len());
-        let origin = current.map_or(pointer - lift.grab, |current| {
-            confine(axis, items.bounds(), faces[current], pointer - lift.grab)
+        let copy = current.map(|current| {
+            let face = faces[current];
+            lift.length.map_or(face, |length| {
+                Bounds::new(face.origin, face.size.apply_along(axis, |_| length))
+            })
         });
-        let landing = current.map(|current| Landing {
+        let origin = copy.map_or(pointer - lift.grab, |copy| {
+            confine(axis, items.bounds(), copy, pointer - lift.grab)
+        });
+        let landing = current.zip(copy).map(|(current, copy)| Landing {
             position: landing_position(
                 &spans(axis, &slots),
                 current,
-                f32::from(origin.along(axis)),
+                f32::from(origin.along(axis) + copy.size.along(axis) / 2.0),
             ),
             len: ids.len(),
         });
@@ -1140,11 +1153,9 @@ fn autoscroll_velocity(viewport: (f32, f32), pointer: f32) -> f32 {
     AUTOSCROLL_SPEED * (depth(pointer - start) - depth(end - pointer))
 }
 
-/// The position a lifted item whose leading edge stands at `start` lands in: past every other
-/// item whose midpoint its center has passed. Reaching a midpoint passes the item.
-fn landing_position(spans: &[(f32, f32)], dragged: usize, start: f32) -> usize {
-    let (rest_start, rest_end) = spans[dragged];
-    let center = start + (rest_end - rest_start) / 2.0;
+/// The position a lifted item whose lifted copy has its center at `center` lands in: past every
+/// other item whose midpoint the center has passed. Reaching a midpoint passes the item.
+fn landing_position(spans: &[(f32, f32)], dragged: usize, center: f32) -> usize {
     spans
         .iter()
         .enumerate()
@@ -1744,19 +1755,19 @@ mod tests {
     fn landing_position_should_follow_each_item_whose_midpoint_the_lifted_center_passed() {
         let spans = strip(&[100.0, 100.0, 100.0, 100.0]);
 
-        // B, lifted from A B C D, has its center 50 past its leading edge.
+        // B is lifted from A B C D.
         assert_eq!(
             [
-                landing_position(&spans, 1, -10.0),
                 landing_position(&spans, 1, 40.0),
-                landing_position(&spans, 1, 160.0),
-                landing_position(&spans, 1, 201.0),
-                landing_position(&spans, 1, 300.0),
+                landing_position(&spans, 1, 90.0),
+                landing_position(&spans, 1, 210.0),
+                landing_position(&spans, 1, 251.0),
+                landing_position(&spans, 1, 350.0),
                 // A held at the leading end of the strip stays first.
-                landing_position(&spans, 0, 0.0),
+                landing_position(&spans, 0, 50.0),
                 // A copy carried past either end lands at that end.
-                landing_position(&spans, 1, -500.0),
-                landing_position(&spans, 1, 900.0),
+                landing_position(&spans, 1, -450.0),
+                landing_position(&spans, 1, 950.0),
             ],
             [0, 1, 1, 2, 3, 0, 0, 3]
         );

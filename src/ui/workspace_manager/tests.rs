@@ -13605,3 +13605,55 @@ fn a_menu_should_keep_the_keyboards_row_in_a_focused_sidebar(cx: &mut TestAppCon
     );
     assert_eq!(after_keyboard_menu, landed);
 }
+
+#[gpui::test]
+fn an_expanded_workspace_group_released_below_the_list_should_land_at_its_end(
+    cx: &mut TestAppContext,
+) {
+    cx.update(|cx| {
+        crate::ui::worktree_store::testing::install(cx);
+    });
+    let (manager, _records, cx) = workspace_manager(cx);
+    let roots: Vec<PathBuf> = (0..5)
+        .map(|index| std::env::temp_dir().join(format!("spaceterm-dragged-group-{index}")))
+        .collect();
+    let linked: Vec<&Path> = roots.iter().map(PathBuf::as_path).collect();
+    present_worktrees(cx, &linked);
+    cx.simulate_keystrokes("cmd-n");
+    cx.simulate_keystrokes("cmd-n");
+    redraw(cx);
+    click("workspace-disclosure-2-expanded", cx);
+    click("workspace-disclosure-3-expanded", cx);
+    cx.simulate_resize(gpui::size(px(1000.0), px(600.0)));
+    redraw(cx);
+    let first = cx.debug_bounds("workspace-row-1-inactive").unwrap();
+    let group = cx.debug_bounds("workspace-group-1").unwrap();
+    let last = cx.debug_bounds("workspace-row-3-active").unwrap();
+    let list = cx.debug_bounds("workspace-list").unwrap();
+    let footer = cx.debug_bounds("workspace-sidebar-footer").unwrap();
+    assert!(
+        group.size.height > list.size.height / 2.0 && last.bottom() <= list.bottom(),
+        "the expanded group fills more than half of the list {list:?}, which shows every row"
+    );
+    let below = point(first.center().x, footer.center().y);
+
+    cx.simulate_mouse_move(first.center(), None, Modifiers::none());
+    cx.simulate_mouse_down(first.center(), MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(
+        first.center() + point(px(0.0), px(8.0)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    cx.run_until_parked();
+    cx.simulate_mouse_move(below, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    let copy = cx.debug_bounds("drag-preview");
+    cx.simulate_mouse_up(below, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+
+    assert_eq!(
+        workspace_order(&manager, cx),
+        vec![2, 3, 1],
+        "the lifted Workspace row, held at the list's end at {copy:?}, must land there"
+    );
+}

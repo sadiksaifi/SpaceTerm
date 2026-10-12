@@ -1078,6 +1078,7 @@ impl TabManager {
         let ids = self.visible_tab_ids();
         self.tab_reorder.begin(
             tab_id,
+            None,
             session,
             &self.tab_bar_scroll_handle,
             &ids,

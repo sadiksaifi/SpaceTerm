@@ -724,8 +724,20 @@ impl WorkspaceSidebar {
             cx.notify();
         });
         let ids = self.row_ids();
-        self.workspace_reorder
-            .begin(workspace_id, session, &self.scroll_handle, &ids, window, cx);
+        // The lifted copy shows the Workspace row alone, without its group's Worktree rows.
+        let length = self
+            .row_spans
+            .get(&SidebarRowKey::Workspace(workspace_id))
+            .map(|(top, bottom)| *bottom - *top);
+        self.workspace_reorder.begin(
+            workspace_id,
+            length,
+            session,
+            &self.scroll_handle,
+            &ids,
+            window,
+            cx,
+        );
         self.drag_workspace_to(workspace_id, window.mouse_position(), cx);
         cx.notify();
         let sidebar = cx.entity().downgrade();
