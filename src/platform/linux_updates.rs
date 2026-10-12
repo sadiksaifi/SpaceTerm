@@ -887,8 +887,19 @@ mod tests {
         let destination = directory.path().join("tree");
         unpack(&release(b"new"), ROOT, &destination).unwrap();
         use std::os::unix::fs::PermissionsExt as _;
-        let executable = fs::metadata(destination.join("bin/spaceterm")).unwrap();
-        assert_eq!(executable.permissions().mode() & 0o777, 0o755);
+        // Unpacking honors the process umask. The owner's bits and the absence of group and other
+        // write hold under every ordinary umask.
+        let executable = fs::metadata(destination.join("bin/spaceterm"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(executable & 0o700, 0o700);
+        assert_eq!(executable & 0o022, 0);
+        let notes = fs::metadata(destination.join("share/spaceterm/notes.txt"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(notes & 0o711, 0o600);
         assert_eq!(
             fs::read(destination.join("share/spaceterm/notes.txt")).unwrap(),
             b"notes"

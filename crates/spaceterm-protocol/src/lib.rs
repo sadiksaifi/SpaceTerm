@@ -12,6 +12,25 @@ mod semantics;
 /// Generated wire DTOs. Receive untrusted bytes through the bounded connection codec,
 /// not directly through `prost::Message::decode`.
 pub mod wire {
+    pub mod pairing {
+        include!(concat!(env!("OUT_DIR"), "/spaceterm.pairing.rs"));
+    }
+    pub mod git {
+        pub mod v1 {
+            include!(concat!(env!("OUT_DIR"), "/spaceterm.git.v1.rs"));
+        }
+        pub mod v2 {
+            include!(concat!(env!("OUT_DIR"), "/spaceterm.git.v2.rs"));
+        }
+    }
+    pub mod directories {
+        pub mod v1 {
+            include!(concat!(env!("OUT_DIR"), "/spaceterm.directories.v1.rs"));
+        }
+        pub mod v2 {
+            include!(concat!(env!("OUT_DIR"), "/spaceterm.directories.v2.rs"));
+        }
+    }
     pub mod common {
         include!(concat!(env!("OUT_DIR"), "/spaceterm.common.rs"));
     }
@@ -49,3 +68,6 @@ pub enum ProtocolError {
     #[error("secure random source unavailable")]
     RandomUnavailable,
 }
+
+pub mod convert;
+pub mod pairing_adapter;

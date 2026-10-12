@@ -350,3 +350,13 @@ mod linux_ssh_executable;
 
 #[cfg(target_os = "linux")]
 mod linux_updates;
+
+pub(crate) mod client_journal;
+
+pub(crate) mod server_client_route;
+
+pub(crate) mod client_view_store;
+
+pub(crate) mod client_credentials;
+
+pub(crate) mod client_pairing_store;

@@ -1,0 +1,199 @@
+syntax = "proto3";
+package spaceterm.pairing;
+import "common.proto";
+
+// New qualified DTOs use Entity for server-issued nonzero local identities.
+// Existing ordinary Principal handles use the shared conversion adapter, not
+// reinterpretation of a PairingId/ClientId as a global UUID.
+message Target {
+  spaceterm.common.Identity server = 1;
+  spaceterm.common.Identity device = 2;
+  spaceterm.common.Entity pairing = 3;
+}
+message Keys {
+  bytes device_identity_public_key = 1;
+  bytes pairing_authentication_public_key = 2;
+}
+message Binding {
+  spaceterm.common.Entity client = 1;
+  spaceterm.common.Entity pairing = 2;
+  spaceterm.common.OperationStream ordinary_stream = 3;
+  spaceterm.common.OperationStream self_revocation_stream = 4;
+}
+// Stream descriptors contain no sequence and do not assert durable admission.
+message Ticket { spaceterm.common.Identity server = 1; bytes ticket_nonce = 2; }
+message Proposal {
+  spaceterm.common.Identity server = 1;
+  spaceterm.common.Identity device = 2;
+  Keys keys = 3;
+  bytes claim_nonce = 4;
+}
+message Reservation {
+  Ticket ticket = 1;
+  Target target = 2;
+  Keys keys = 3;
+  spaceterm.common.Entity initial_client = 4;
+  spaceterm.common.OperationId enrollment_operation = 5;
+  bytes claim_digest = 6;
+  bytes enrollment_request_digest = 7;
+}
+message IssueAuthorization { Proposal proposal = 1; }
+message BindAdditionalClient {
+  Target target = 1;
+  uint64 expected_authorization_version = 2;
+  bytes claim_digest = 3;
+  bytes device_identity_proof = 4;
+  bytes pairing_authentication_proof = 5;
+}
+message AssessUnpair { Target target = 1; }
+message UnpairAssessment {
+  spaceterm.common.OperationId assessment_operation = 1;
+  bytes assessment_digest = 2;
+  Target target = 3;
+  uint64 authorization_version = 4;
+  repeated spaceterm.common.Entity clients = 5;
+}
+message UnpairConfirmed { UnpairAssessment assessment = 1; }
+
+// This transient delivery is never part of the retained compact Outcome.
+// Lost plaintext authorization requires new explicit issuance, not secret replay.
+message AuthorizationDelivery {
+  Reservation reservation = 1;
+  bytes single_use_authorization = 2;
+}
+
+// Signature domain is "pairing-receipt-v1", using authentication.rs's existing
+// length-delimited "SpaceTerm Protocol Ed25519 v1" signing machinery.
+// Verify the exact canonical_body bytes before decoding/reencoding any claims.
+message SignedReceipt { bytes canonical_body = 1; bytes signature = 2; }
+message EnrollmentReceiptBody {
+  Target target = 1;
+  Keys keys = 2;
+  Binding client = 3;
+  spaceterm.common.OperationId enrollment_operation = 4;
+  bytes request_digest = 5;
+  uint64 store_revision = 6;
+}
+message ClientBindingReceiptBody {
+  Target target = 1;
+  Keys keys = 2;
+  Binding client = 3;
+  spaceterm.common.OperationId operation = 4;
+  bytes request_digest = 5;
+  uint64 store_revision = 6;
+}
+message RevocationReceiptBody {
+  Target target = 1;
+  bytes authentication_key_digest = 2;
+  bytes revocation_event = 3;
+  spaceterm.common.OperationId causing_operation = 4;
+  uint64 store_revision = 5;
+}
+message ReceiptBody {
+  uint32 schema = 1;
+  oneof kind {
+    EnrollmentReceiptBody enrollment = 2;
+    ClientBindingReceiptBody client_binding = 3;
+    RevocationReceiptBody revocation = 4;
+  }
+}
+
+// Restricted request correlation is distinct from the receipt's causing operation.
+// Another device's revocation can return its original receipt without fabricating
+// execution of this pending self-revocation operation.
+message SelfRevocation {
+  spaceterm.common.OperationId operation = 1;
+  bytes request_digest = 2;
+  Target target = 3;
+}
+message ReceiptStatus {
+  spaceterm.common.OperationId operation = 1;
+  bytes request_digest = 2;
+  Target target = 3;
+}
+message RestrictedAcknowledgement {
+  spaceterm.common.OperationId operation = 1;
+  bytes request_digest = 2;
+  Target target = 3;
+  uint64 acknowledged_through = 4;
+}
+enum RestrictedResultKind {
+  RESTRICTED_RESULT_UNSPECIFIED = 0;
+  EXECUTED = 1;
+  ALREADY_REVOKED = 2;
+  PENDING = 3;
+}
+message RestrictedResult {
+  spaceterm.common.OperationId request_operation = 1;
+  bytes request_digest = 2;
+  Target target = 3;
+  RestrictedResultKind disposition = 4;
+  SignedReceipt receipt = 5;
+}
+
+// Enrollment is a separate type state. It authenticates the reserved prospective
+// identities and exact claim, never an ordinary paired-device connection.
+message EnrollmentHello {
+  Reservation reservation = 1;
+  bytes nonce = 2;
+  repeated uint32 majors = 3;
+}
+message EnrollmentServerHello {
+  spaceterm.common.Identity server = 1;
+  bytes public_key = 2;
+  bytes nonce = 3;
+  repeated uint32 majors = 4;
+  uint32 selected_major = 5;
+  Reservation reservation = 6;
+  spaceterm.common.Purpose purpose = 7;
+}
+message EnrollmentProof {
+  Reservation reservation = 1;
+  bytes transcript = 2;
+  bytes device_identity_proof = 3;
+  bytes pairing_authentication_proof = 4;
+}
+message EnrollmentReady {
+  Reservation reservation = 1;
+  bytes transcript = 2;
+  spaceterm.common.Purpose purpose = 3;
+}
+message EnrollmentSubmission {
+  Reservation reservation = 1;
+  bytes single_use_authorization = 2;
+  bytes device_identity_proof = 3;
+  bytes pairing_authentication_proof = 4;
+}
+message EnrollmentLookup { Reservation reservation = 1; }
+message EnrollmentAcknowledgement {
+  spaceterm.common.OperationId operation = 1;
+  bytes request_digest = 2;
+  uint64 acknowledged_through = 3;
+}
+message EnrollmentResult {
+  spaceterm.common.OperationId operation = 1;
+  bytes request_digest = 2;
+  SignedReceipt receipt = 3;
+  spaceterm.common.Failure failure = 4;
+}
+message EnrollmentMessage {
+  oneof kind {
+    EnrollmentSubmission submit = 1;
+    EnrollmentLookup lookup = 2;
+    EnrollmentAcknowledgement acknowledgement = 3;
+    EnrollmentResult result = 4;
+  }
+}
+// Signed server hello/ready and authenticated enrollment envelopes reuse common
+// Signed / AuthenticatedEnvelope. This bounded outer exchange is never Payload.
+message EnrollmentExchange {
+  oneof kind {
+    EnrollmentHello hello = 1;
+    spaceterm.common.Signed server_hello = 2;
+    EnrollmentProof proof = 3;
+    spaceterm.common.Signed ready = 4;
+    spaceterm.common.Signed envelope = 5;
+  }
+}
+
+enum PairingFailure { PAIRING_FAILURE_UNSPECIFIED = 0; PAIRING_INVALID_REQUEST = 1; PAIRING_LIMIT_EXCEEDED = 2; PAIRING_IDENTITY_MISMATCH = 3; PAIRING_FINGERPRINT_MISMATCH = 4; PAIRING_AUTHORIZATION_REQUIRED = 5; PAIRING_AUTHORIZATION_DENIED = 6; PAIRING_AUTHORIZATION_UNAVAILABLE = 7; PAIRING_PAIRING_REVOKED = 8; PAIRING_CLIENT_NOT_BOUND = 9; PAIRING_STALE_ASSESSMENT = 10; PAIRING_AUTHORIZATION_EXPIRED = 11; PAIRING_AUTHORIZATION_CONSUMED = 12; PAIRING_REQUEST_IDENTITY_REUSED = 13; PAIRING_OFFLINE = 14; PAIRING_ROUTE_CHANGED = 15; PAIRING_TIMED_OUT = 16; PAIRING_CANCELLED = 17; PAIRING_INCOMPATIBLE = 18; PAIRING_UNSUPPORTED_TARGET = 19; PAIRING_SERVICE_MANAGER_UNAVAILABLE = 20; PAIRING_EXPLICIT_START_REQUIRED = 21; PAIRING_CREDENTIAL_UNAVAILABLE = 22; PAIRING_CREDENTIAL_INTEGRITY = 23; PAIRING_STORAGE_UNAVAILABLE = 24; PAIRING_UNSAFE_STORAGE = 25; PAIRING_UNKNOWN_SCHEMA = 26; PAIRING_INVALID_DURABLE_STATE = 27; PAIRING_RECOVERY_REQUIRED = 28; PAIRING_RECEIPT_INVALID = 29; PAIRING_REVOCATION_UNCONFIRMED = 30; }

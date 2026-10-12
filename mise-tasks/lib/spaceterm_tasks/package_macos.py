@@ -33,6 +33,11 @@ from spaceterm_tasks.packaging import (
     verify_resources,
 )
 
+# Finalization runs inside the existing signing scope only after its provider
+# can re-sign the final outer bundle and regenerate the DMG atomically.
+COMPANION_EXTENSION_MODULE = "spaceterm_tasks.status_companion_packaging"
+COMPANION_HOOK_DECLARATIONS = ("finalize_macos_package", "verify_companion")
+
 STAGE = ROOT / "target" / "package-macos"
 MINIMUM_MACOS = "26.0"
 
