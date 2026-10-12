@@ -14,6 +14,7 @@ from pathlib import Path
 
 from spaceterm_tasks import ROOT, TaskError, package_linux, sparkle
 from spaceterm_tasks.macos_bundle import identity
+from spaceterm_tasks.macos_signing import signing_environment
 from spaceterm_tasks.packaging import DIST, STABLE_TAG, release_version
 
 SPARKLE_NS = "http://www.andymatuschak.org/xml-namespaces/sparkle"
@@ -48,6 +49,7 @@ def public_key():
 
 
 def checked(arguments, **kwargs):
+    kwargs.setdefault("env", signing_environment(os.environ))
     result = subprocess.run(arguments, capture_output=True, check=False, **kwargs)
     if result.returncode:
         raise TaskError("release signing or verification failed")
@@ -324,6 +326,9 @@ def publish(tag):
             (linux_archive_name(version), linux_feed_name(), f"{linux_feed_name()}.sig"),
         ),
     ]
+    from spaceterm_tasks import release_server
+
+    platforms.extend(release_server.platform_assets(version))
     assets = [directory / name for directory, names in platforms for name in names]
     if not all(path.is_file() for path in assets):
         raise TaskError("prepare the complete release assets before publishing")
@@ -331,6 +336,10 @@ def publish(tag):
     for directory, names in platforms:
         if published_checksums(directory) != checksums(directory / name for name in names):
             raise TaskError("the release assets differ from their checksums")
+    for platform in ("darwin-arm64", "linux-x86_64"):
+        release_server.verify_assets(
+            release_server.asset_directory(platform), platform, version, public_key()
+        )
     with tempfile.TemporaryDirectory() as temporary:
         combined = Path(temporary) / "SHA256SUMS"
         combined.write_text(checksums(assets))

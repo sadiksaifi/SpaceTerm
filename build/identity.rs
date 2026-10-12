@@ -92,3 +92,79 @@ pub fn watched_paths(root: &Path) -> Result<Vec<PathBuf>, &'static str> {
     );
     Ok(paths)
 }
+
+/// Server code signing identity. It never claims desktop activation names.
+#[allow(dead_code, reason = "also included by the desktop build script")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ServerBuild {
+    Release,
+    Preflight,
+    Development,
+}
+
+#[allow(dead_code, reason = "also included by the desktop build script")]
+impl ServerBuild {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Release => "release",
+            Self::Preflight => "preflight",
+            Self::Development => "development",
+        }
+    }
+    pub const fn identifier(self) -> &'static str {
+        match self {
+            Self::Release => "io.github.sadiksaifi.spaceterm.server",
+            Self::Preflight => "io.github.sadiksaifi.spaceterm-preflight.server",
+            Self::Development => "io.github.sadiksaifi.spaceterm-development.server",
+        }
+    }
+    pub const fn bundle_name(self) -> &'static str {
+        match self {
+            Self::Release => "SpaceTerm Server",
+            Self::Preflight => "SpaceTerm Preflight Server",
+            Self::Development => "SpaceTerm Development Server",
+        }
+    }
+    pub fn launcher_identifier(self) -> String {
+        format!("{}.launcher", self.identifier())
+    }
+    pub fn manager_identifier(self) -> String {
+        format!("{}.manager", self.identifier())
+    }
+}
+
+#[allow(dead_code, reason = "also included by the desktop build script")]
+#[derive(Debug, Eq, PartialEq)]
+pub struct ServerIdentity {
+    pub build: ServerBuild,
+    pub version: Identity,
+    pub commit: String,
+}
+
+/// Reuses the exact desktop clean/annotated-tag rule without changing desktop selection.
+#[allow(dead_code, reason = "also included by the desktop build script")]
+pub fn resolve_server(
+    root: &Path,
+    packaged: bool,
+    release_tag: Option<&str>,
+) -> Result<ServerIdentity, &'static str> {
+    if release_tag.is_some() && !packaged {
+        return Err("only a packaged server may carry a release tag");
+    }
+    let version = resolve(root, release_tag)?;
+    let commit = git(root, &["rev-parse", "HEAD"])?;
+    if commit.len() != 40 || !commit.bytes().all(|b| matches!(b,b'0'..=b'9'|b'a'..=b'f')) {
+        return Err("the server build commit is unavailable");
+    }
+    let build = match (packaged, release_tag.is_some()) {
+        (true, true) => ServerBuild::Release,
+        (true, false) => ServerBuild::Preflight,
+        (false, false) => ServerBuild::Development,
+        (false, true) => return Err("only a packaged server may carry a release tag"),
+    };
+    Ok(ServerIdentity {
+        build,
+        version,
+        commit,
+    })
+}

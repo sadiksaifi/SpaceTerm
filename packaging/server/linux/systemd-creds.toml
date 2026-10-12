@@ -1,0 +1,281 @@
+schema_version = 1
+
+[source]
+repository = "https://github.com/systemd/systemd"
+tag = "v260.5"
+annotated_tag = "cc38479b7ff6e20ab265dda8f01f85e1e83f0058"
+commit = "84ff4f0dff41c26472cd48c4c4955c2d77f5ac08"
+tagger_date = "2026-09-10T23:22:27Z"
+archive_url = "https://codeload.github.com/systemd/systemd/tar.gz/84ff4f0dff41c26472cd48c4c4955c2d77f5ac08"
+archive_sha256 = "9c6f6666e48f4c4f230bbb08bfa293f323d28a568f798fafba0eeca1a5936f9b"
+authentication = "github-verified-exact-annotated-tag"
+authentication_result = "valid"
+signer_policy = "Accept only the frozen annotated tag object and commit, with GitHub reporting its signature valid. No other signer, tag, or revision is selected."
+license = "LGPL-2.1-or-later"
+patches = []
+
+[build]
+# Recorded compiler-container construction. Native credential and baseline evidence remain unrun.
+build_image = "sha256:81147dcdbe67748eced8011c2f93e1b57e7a0579c6c5bdfe6758b1da9cae3ea1"
+build_image_sha256 = "81147dcdbe67748eced8011c2f93e1b57e7a0579c6c5bdfe6758b1da9cae3ea1"
+compiler = "gcc"
+compiler_version = "11.4.0"
+complete = true
+meson_version = "1.3.2"
+ninja_version = "1.10.1"
+options = ["--prefix=/usr","--libdir=lib","--buildtype=release","-Dmode=release","-Dtranslations=false","-Dauto_features=disabled","-Ddefault_library=shared","-Dopenssl=enabled","-Dtpm2=enabled","-Dlibmount=enabled","-Dman=disabled","-Dhtml=disabled","-Dtests=false","-Dinstall-tests=false","-Dstandalone-binaries=false","-Dvcs-tag=false","-Dshared-lib-tag=spaceterm-260.5"]
+targets = ["systemd-creds"]
+
+[[build.dependencies]]
+build_options = ["--prefix=/usr","--libdir=lib","--buildtype=release","-Dmode=release","-Dtranslations=false","-Dauto_features=disabled","-Ddefault_library=shared","-Dopenssl=enabled","-Dtpm2=enabled","-Dlibmount=enabled","-Dman=disabled","-Dhtml=disabled","-Dtests=false","-Dinstall-tests=false","-Dstandalone-binaries=false","-Dvcs-tag=false","-Dshared-lib-tag=spaceterm-260.5"]
+corresponding_source = "share/sources/systemd.tar.gz"
+license = "LGPL-2.1-or-later"
+name = "systemd"
+notice_file = "share/licenses/systemd.txt"
+source_identity = "84ff4f0dff41c26472cd48c4c4955c2d77f5ac08"
+source_sha256 = "9c6f6666e48f4c4f230bbb08bfa293f323d28a568f798fafba0eeca1a5936f9b"
+version = "260.5"
+
+[[build.dependencies]]
+build_options = ["Ubuntu signed archive binary; exact source package and debian/rules included","patchelf --set-rpath $ORIGIN"]
+corresponding_source = "share/sources/libcap2.tar"
+license = "BSD-3-Clause OR GPL-2.0-only"
+name = "libcap2"
+notice_file = "share/licenses/libcap2.txt"
+source_identity = "ubuntu-jammy:libcap2=1:2.44-1ubuntu0.22.04.3"
+source_sha256 = "2966c99c14eafb59650ab523705b000cc2fec81cf9ef6551024e3380eba4161d"
+version = "1:2.44-1ubuntu0.22.04.3"
+
+[[build.dependencies]]
+build_options = ["Ubuntu signed archive binary; exact source package and debian/rules included","patchelf --set-rpath $ORIGIN"]
+corresponding_source = "share/sources/libselinux.tar"
+license = "public-domain"
+name = "libselinux"
+notice_file = "share/licenses/libselinux.txt"
+source_identity = "ubuntu-jammy:libselinux=3.3-1build2"
+source_sha256 = "96ee3875f1279dd95d62e2378847f2994b96249928b13d629bb8e1560f114f3c"
+version = "3.3-1build2"
+
+[[build.dependencies]]
+build_options = ["Ubuntu signed archive binary; exact source package and debian/rules included","patchelf --set-rpath $ORIGIN"]
+corresponding_source = "share/sources/openssl.tar"
+license = "Apache-2.0"
+name = "openssl"
+notice_file = "share/licenses/openssl.txt"
+source_identity = "ubuntu-jammy:openssl=3.0.2-0ubuntu1.30"
+source_sha256 = "1b0a54e58431e7347a89d8dc334836de6b976216fc6c5a3e75fad29da78487a1"
+version = "3.0.2-0ubuntu1.30"
+
+[[build.dependencies]]
+build_options = ["Ubuntu signed archive binary; exact source package and debian/rules included","patchelf --set-rpath $ORIGIN"]
+corresponding_source = "share/sources/pcre2.tar"
+license = "BSD-3-Clause"
+name = "pcre2"
+notice_file = "share/licenses/pcre2.txt"
+source_identity = "ubuntu-jammy:pcre2=10.39-3ubuntu0.1"
+source_sha256 = "0f66fdd148baca77df0067ba6417f71d3a85c330fc35e542c2b68274bdd9eb43"
+version = "10.39-3ubuntu0.1"
+
+[[build.dependencies]]
+build_options = ["Ubuntu signed archive binary; exact source package and debian/rules included","patchelf --set-rpath $ORIGIN"]
+corresponding_source = "share/sources/tpm2-tss.tar"
+license = "BSD-2-Clause"
+name = "tpm2-tss"
+notice_file = "share/licenses/tpm2-tss.txt"
+source_identity = "ubuntu-jammy:tpm2-tss=3.2.0-1ubuntu1.1"
+source_sha256 = "1f3e2da6b7a4071b13236fbc02a9066a68edede4518b1bc5510f794b41fb0d26"
+version = "3.2.0-1ubuntu1.1"
+
+[[build.dependencies]]
+build_options = ["Ubuntu signed archive binary; exact source package and debian/rules included","patchelf --set-rpath $ORIGIN"]
+corresponding_source = "share/sources/util-linux.tar"
+license = "LGPL-2.1-or-later"
+name = "util-linux"
+notice_file = "share/licenses/util-linux.txt"
+source_identity = "ubuntu-jammy:util-linux=2.37.2-4ubuntu3.6"
+source_sha256 = "bbfeb0fe03720d3adfda532067ae32ffa9b39d885212829cfb7147683b173e1e"
+version = "2.37.2-4ubuntu3.6"
+
+[[build.files]]
+name = "lib/credential-tools/libblkid.so.1"
+sha256 = "495f7fda724b04654980e83397401b7b41c30783b18b0573cd75f29f3c7dabfb"
+
+[[build.files]]
+name = "lib/credential-tools/libcap.so.2"
+sha256 = "507b03ad6351343928e8b46ba0a29835f5d2862b5d9161fa15620e5e0403d137"
+
+[[build.files]]
+name = "lib/credential-tools/libcrypto.so.3"
+sha256 = "58a084c1a810ae96c8c3b3546b787a3d83be355da454e87f47f6ce978546fa39"
+
+[[build.files]]
+name = "lib/credential-tools/libmount.so.1"
+sha256 = "41741527ec600ca2d24cb3ba2813a5e95e508d74090cb14431549a1c732ec764"
+
+[[build.files]]
+name = "lib/credential-tools/libpcre2-8.so.0"
+sha256 = "ae221d7cbbd01bc6841ff391dc89c41278d45859a1a51f76632baf5c06a8415b"
+
+[[build.files]]
+name = "lib/credential-tools/libselinux.so.1"
+sha256 = "e0a27099dfa75ecfda7fdb4f30aa771be544df4ac49bd035442528f48b179434"
+
+[[build.files]]
+name = "lib/credential-tools/libsystemd-shared-spaceterm-260.5.so"
+sha256 = "38cde9503f34625261a4f15af1a7fbae6c97f876c974991a106e71fcb9492783"
+
+[[build.files]]
+name = "lib/credential-tools/libtss2-esys.so.0"
+sha256 = "c12349874cce73b2a2f01feb9478c8b97e5464123ed270601d825bcb385c347d"
+
+[[build.files]]
+name = "lib/credential-tools/libtss2-mu.so.0"
+sha256 = "85e1bee2748a3f0a2f597f141d7f7bb39c751c29528b54621848f6405b1a822f"
+
+[[build.files]]
+name = "lib/credential-tools/libtss2-rc.so.0"
+sha256 = "b0c34dc6fdde25e9b7adfb5707c7f98924f9782f68174d413a148144ae724ce2"
+
+[[build.files]]
+name = "lib/credential-tools/libtss2-sys.so.1"
+sha256 = "ca1906c52839df53454fc1bd7f0bd38a30c14fcf979f4ff6fab3b6db69960ce0"
+
+[[build.files]]
+name = "lib/credential-tools/libtss2-tcti-device.so.0"
+sha256 = "d4c7c19c9152a85725aae83e7bfb2bda7b2cd4ceef478097241b6e7a523282e0"
+
+[[build.files]]
+name = "libexec/credential-tools/systemd-creds"
+sha256 = "9014de8b89e676714a8d7ee6cd09706e351feb1b0c72793068950dc3c2923d19"
+
+[[build.files]]
+name = "share/licenses/LGPL-2.0-or-later.txt"
+sha256 = "c7e6735d511987e7ed4c4a08b335d578335088e06225955ec8944973dbc0640c"
+
+[[build.files]]
+name = "share/licenses/UPSTREAM-LICENSE-NOTES.txt"
+sha256 = "769cad6e4cf7548fe86ccd11f16a922aaacaeaaf885af15d13bf0d6946f58cf9"
+
+[[build.files]]
+name = "share/licenses/libcap2.txt"
+sha256 = "a906104348c333a96d63c3573e6eb9c2cc3b410d045f3ad512dcafa4b3e4cff3"
+
+[[build.files]]
+name = "share/licenses/libselinux.txt"
+sha256 = "641806738b0c6a3d03168c2649e6b94205198bb66cd557e6bae3a20b71c9bb0b"
+
+[[build.files]]
+name = "share/licenses/openssl.txt"
+sha256 = "6a7da622fe0637a334d2a8fc470852d2ffb77d9a2b2f930f854e32a41ad6ef35"
+
+[[build.files]]
+name = "share/licenses/pcre2.txt"
+sha256 = "f65dae37239e4d61a1bdeaf2ded76b8569d012a054aa042233b78615e7a83210"
+
+[[build.files]]
+name = "share/licenses/systemd.txt"
+sha256 = "20e50fe7aae3e56378ebf0417d9de904f55a0e61e4df315333e632a4d3555d95"
+
+[[build.files]]
+name = "share/licenses/tpm2-tss.txt"
+sha256 = "fa02bf80160d58f149d73d3804f53eed15a1f95798d12aafc5c4176c418fcfd9"
+
+[[build.files]]
+name = "share/licenses/util-linux.txt"
+sha256 = "ad8aaaa7adbab70cfc6d813d1b16351ec6b9136670c893b193df9c22f1e4fd69"
+
+[[build.files]]
+name = "share/sources/build-material/Jammy.Dockerfile"
+sha256 = "50648ec92191d80bc32d8d98db81496004b940fedd0be2dc24d3801177f507e3"
+
+[[build.files]]
+name = "share/sources/build-material/RELINKING.txt"
+sha256 = "b0f746a783d80e45f7800993bd7289d411e07bab1b6297765d56ebca66d6e3d7"
+
+[[build.files]]
+name = "share/sources/build-material/build-info.json"
+sha256 = "66d82300791e6cc20b9ead4ea7105c89b59654214293f8d19e31e1358cfde842"
+
+[[build.files]]
+name = "share/sources/build-material/build.py"
+sha256 = "4b82c8f53a5e32901677c71ac4cd781b902e1e25d9e731422a6683bc4025726d"
+
+[[build.files]]
+name = "share/sources/build-material/meson-options.json"
+sha256 = "6a22a4f7cbb0d875d1bd99ff13d7d6b25b3f61a49942783c3c21a6601f9edd61"
+
+[[build.files]]
+name = "share/sources/build-material/packages.tsv"
+sha256 = "35e3a0f58fb51fb9c4ad058889834b2faebc347f99db32fccae68158bf9f3ef5"
+
+[[build.files]]
+name = "share/sources/build-material/recipe.json"
+sha256 = "0bcbed49761f4f5fb475499f065bf944ac389e3e63a72471240708a2114c603f"
+
+[[build.files]]
+name = "share/sources/build-material/source-components.json"
+sha256 = "3faa67fb6064b6acecc0bb83963e4e707d25d6ddc22957ded62703cf6a437be9"
+
+[[build.files]]
+name = "share/sources/libcap2.tar"
+sha256 = "2966c99c14eafb59650ab523705b000cc2fec81cf9ef6551024e3380eba4161d"
+
+[[build.files]]
+name = "share/sources/libselinux.tar"
+sha256 = "96ee3875f1279dd95d62e2378847f2994b96249928b13d629bb8e1560f114f3c"
+
+[[build.files]]
+name = "share/sources/openssl.tar"
+sha256 = "1b0a54e58431e7347a89d8dc334836de6b976216fc6c5a3e75fad29da78487a1"
+
+[[build.files]]
+name = "share/sources/pcre2.tar"
+sha256 = "0f66fdd148baca77df0067ba6417f71d3a85c330fc35e542c2b68274bdd9eb43"
+
+[[build.files]]
+name = "share/sources/systemd.tar.gz"
+sha256 = "9c6f6666e48f4c4f230bbb08bfa293f323d28a568f798fafba0eeca1a5936f9b"
+
+[[build.files]]
+name = "share/sources/tpm2-tss.tar"
+sha256 = "1f3e2da6b7a4071b13236fbc02a9066a68edede4518b1bc5510f794b41fb0d26"
+
+[[build.files]]
+name = "share/sources/util-linux.tar"
+sha256 = "bbfeb0fe03720d3adfda532067ae32ffa9b39d885212829cfb7147683b173e1e"
+
+[[build.files]]
+name = "share/spaceterm-server/THIRD-PARTY-NOTICES.txt"
+sha256 = "4f7ff5f96ea3274ed90f511a419aa1e794d771ca77da03d267f32a4e0fb8c150"
+
+[[build.files]]
+name = "share/spaceterm-server/credential-tools/openssl.cnf"
+sha256 = "bea2d71d87f565057518d374c9f1059d04bdb760fe62e78521e5e24517b4525e"
+
+[runtime]
+elf_interpreter = "/lib64/ld-linux-x86-64.so.2"
+credential_tool_runpath = "$ORIGIN/../../lib/credential-tools"
+library_runpath = "$ORIGIN"
+openssl_providers = "private-authenticated-closure"
+openssl_configuration = "private-authenticated-configuration"
+minimum_glibc = [2, 35]
+minimum_kernel = [5, 15]
+minimum_supervisor = [249]
+jammy_result = "unrun"
+host_key_result = "unrun"
+tpm_result = "unrun"
+
+[licensing]
+linking = "private-shared-libraries"
+corresponding_source = "exact-source-archives-and-all-patches"
+relinking = "build-recipes-compiler-options-and-replacement-library-instructions"
+notice_file = "share/spaceterm-server/THIRD-PARTY-NOTICES.txt"
+source_root = "share/sources"
+license_root = "share/licenses"
+obligations = [
+    "Ship the exact corresponding systemd source archive and applied patches.",
+    "Ship the exact source and licenses of every bundled dependency separately.",
+    "Ship complete Meson options, compiler and build-image identities, and build material.",
+    "Permit replacing and rebuilding the LGPL private shared libraries for modified local use.",
+    "Native production approval of modified code remains an explicit authenticated installation operation.",
+]

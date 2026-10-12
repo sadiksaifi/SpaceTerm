@@ -160,3 +160,109 @@ class CaskUpdateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CompletePublicationTests(unittest.TestCase):
+    def test_publication_requires_all_client_and_server_assets(self):
+        from unittest.mock import Mock
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            client_mac = root / "mac"
+            client_linux = root / "linux"
+            for directory, names in (
+                (client_mac, (release.archive_name("1.2.3"), "appcast.xml", "install.sh")),
+                (
+                    client_linux,
+                    (
+                        release.linux_archive_name("1.2.3"),
+                        release.linux_feed_name(),
+                        release.linux_feed_name() + ".sig",
+                    ),
+                ),
+            ):
+                directory.mkdir()
+                for name in names:
+                    (directory / name).write_bytes(b"client asset")
+                (directory / "SHA256SUMS").write_text(
+                    release.checksums(directory / name for name in names)
+                )
+            with (
+                patch.object(release, "RELEASE_ASSETS", client_mac),
+                patch.object(release, "LINUX_RELEASE_ASSETS", client_linux),
+                patch.object(release, "checked", return_value=b"abc"),
+                patch.object(release, "notes", return_value="notes"),
+                patch.object(
+                    release.subprocess, "run", return_value=Mock(returncode=0, stdout=b"abc")
+                ) as run,
+            ):
+                with self.assertRaises(TaskError):
+                    release.publish("v1.2.3")
+                self.assertFalse(
+                    any(call.args[0][:2] == ["gh", "release"] for call in run.call_args_list)
+                )
+
+    def test_server_checksum_entries_do_not_change_frozen_desktop_installer_selection(self):
+        import re
+
+        from spaceterm_tasks.server_artifacts import archive_name
+
+        entries = [
+            release.archive_name("1.2.3"),
+            release.linux_archive_name("1.2.3"),
+            archive_name("1.2.3", "darwin-arm64"),
+            archive_name("1.2.3", "linux-x86_64"),
+        ]
+        listing = "".join(f"{'a' * 64}  {name}\n" for name in entries)
+        self.assertEqual(release.archive_digest("1.2.3", listing), "a" * 64)
+        # This is the retained packaging/install.sh selector, not the current feed reader.
+        for suffix in ("darwin-arm64.dmg", "linux-x86_64.tar.gz"):
+            pattern = rf"^[0-9a-f]{{64}}  SpaceTerm-[0-9]+\.[0-9]+\.[0-9]+-{re.escape(suffix)}$"
+            matches = re.findall(pattern, listing, re.MULTILINE)
+            self.assertEqual(len(matches), 1)
+            self.assertNotIn("SpaceTerm-Server", matches[0])
+
+    def test_frozen_shipped_installer_executes_its_unchanged_checksum_selector(self):
+        from spaceterm_tasks.server_artifacts import archive_name
+
+        frozen = (
+            ROOT
+            / "crates/spaceterm-distribution/tests/fixtures/shipped-v0.5.0-through-v0.6.7/packaging/install.sh"
+        )
+        source = frozen.read_text()
+        selector = source[
+            source.index("latest_release() {") : source.index("\ndownload_release() {")
+        ]
+        listing = "".join(
+            f"{'a' * 64}  {name}\n"
+            for name in (
+                release.archive_name("1.2.3"),
+                release.linux_archive_name("1.2.3"),
+                archive_name("1.2.3", "darwin-arm64"),
+                archive_name("1.2.3", "linux-x86_64"),
+            )
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            checksums = Path(temporary) / "listing"
+            checksums.write_text(listing)
+            for suffix in ("darwin-arm64.dmg", "linux-x86_64.tar.gz"):
+                script = (
+                    'set -eu\nRELEASES="unused"\nstep() { :; }\ndie() { exit 2; }\ndownload() { cp "$LISTING" "$work/SHA256SUMS"; }\n'
+                    + selector
+                    + '\nlatest_release "$SUFFIX" fixture\nprintf "%s\\n%s\\n" "$archive" "$version"\n'
+                )
+                result = subprocess.run(
+                    ["/bin/sh"],
+                    input=script.encode(),
+                    capture_output=True,
+                    cwd=ROOT,
+                    env={
+                        "PATH": "/usr/bin:/bin",
+                        "TMPDIR": temporary,
+                        "LISTING": str(checksums),
+                        "SUFFIX": suffix,
+                    },
+                    timeout=5,
+                )
+                self.assertEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, f"SpaceTerm-1.2.3-{suffix}\n1.2.3\n".encode())

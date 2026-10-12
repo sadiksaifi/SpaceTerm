@@ -6,6 +6,7 @@ edition = "2024"
 [workspace]
 members = [
     "crates/spaceterm-directories",
+    "crates/spaceterm-distribution",
     "crates/spaceterm-host",
     "crates/spaceterm-ui",
     "third_party/libghostty-vt",
@@ -40,6 +41,7 @@ harness = false
 required-features = ["native-tests"]
 
 [dependencies]
+spaceterm-distribution = { path = "crates/spaceterm-distribution" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"

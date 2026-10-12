@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>SpaceTerm</string>
+	<key>CFBundleExecutable</key>
+	<string>SpaceTerm</string>
+	<key>CFBundleIconFile</key>
+	<string>SpaceTerm</string>
+	<key>CFBundleIconName</key>
+	<string>SpaceTerm</string>
+	<key>CFBundleIdentifier</key>
+	<string>io.github.sadiksaifi.spaceterm</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>SpaceTerm</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.developer-tools</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>26.0</string>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>SpaceTerm reads the branch and changes of the Git repository a terminal pane is in on your Desktop.</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>SpaceTerm reads the branch and changes of the Git repository a terminal pane is in in Documents.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>SpaceTerm reads the branch and changes of the Git repository a terminal pane is in in Downloads.</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright © 2026 Sadik Saifi</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>SpaceTerm lets terminal applications you run use your microphone for voice input.</string>
+	<key>NSNetworkVolumesUsageDescription</key>
+	<string>SpaceTerm reads the branch and changes of the Git repository a terminal pane is in on a network volume.</string>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>SpaceTerm reads the branch and changes of the Git repository a terminal pane is in on a removable volume.</string>
+	<key>SUAutomaticallyUpdate</key>
+	<false/>
+	<key>SUEnableAutomaticChecks</key>
+	<false/>
+	<key>SUEnableSystemProfiling</key>
+	<false/>
+	<key>SUFeedURL</key>
+	<string>https://github.com/sadiksaifi/SpaceTerm/releases/latest/download/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>n5rQEtlPsivSl/mVVtDn2vKqbjeV+kSTExbA38FyafI=</string>
+	<key>SURequireSignedFeed</key>
+	<true/>
+	<key>SUSignedFeedFailureExpirationInterval</key>
+	<integer>0</integer>
+	<key>SUVerifyUpdateBeforeExtraction</key>
+	<true/>
+</dict>
+</plist>

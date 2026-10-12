@@ -1,116 +1,32 @@
-//! The signed feed and archive that self-installed releases update from.
-//!
-//! A release publishes one feed per platform, signed with the same Ed25519 key that signs the
-//! archive it names. Neither the feed nor the archive grants authority until both signatures
-//! verify against the key the running build carries.
+//! Desktop-compatible facade over the portable signed release reader.
 #![cfg_attr(
     not(target_os = "linux"),
-    allow(
-        dead_code,
-        reason = "only the Linux updater installs release archives itself"
-    )
+    allow(dead_code, reason = "only Linux installs client archives")
 )]
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD;
-use serde::Deserialize;
-use sha2::{Digest as _, Sha256};
+use super::UpdateError;
+pub(crate) use client_feed::ReleasePlatform;
+#[cfg(target_os = "linux")]
+pub(crate) use client_feed::{MAX_ARCHIVE_BYTES, MAX_FEED_BYTES, MAX_FEED_SIGNATURE_BYTES};
+pub(crate) use spaceterm_distribution::UpdateKey;
+use spaceterm_distribution::client_feed;
 
-use super::{UpdateError, stable_version};
-
-const RELEASES: &str = "https://github.com/sadiksaifi/SpaceTerm/releases";
-pub(crate) const MAX_FEED_BYTES: usize = 4096;
-pub(crate) const MAX_FEED_SIGNATURE_BYTES: usize = 256;
-pub(crate) const MAX_ARCHIVE_BYTES: u64 = 512 * 1024 * 1024;
-/// Publication clocks may run slightly ahead of the installed host.
-const CLOCK_SKEW: u64 = 300;
-
-/// The release asset names of one platform, for example `linux-x86_64`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ReleasePlatform(&'static str);
-
-impl ReleasePlatform {
-    pub(crate) const fn new(name: &'static str) -> Self {
-        Self(name)
-    }
-
-    /// The feed of the latest release, which always names that release's own archive.
-    pub(crate) fn feed_url(self) -> String {
-        format!("{RELEASES}/latest/download/latest-{}.json", self.0)
-    }
-
-    pub(crate) fn feed_signature_url(self) -> String {
-        format!("{}.sig", self.feed_url())
-    }
-
-    fn archive_name(self, version: &str) -> String {
-        format!("SpaceTerm-{version}-{}.tar.gz", self.0)
-    }
-}
-
-/// The Ed25519 public key installed releases trust.
-#[derive(Clone)]
-pub(crate) struct UpdateKey([u8; 32]);
-
-impl UpdateKey {
-    /// The release identity's bundle template is the one source of the update trust root.
-    pub(crate) fn release() -> Option<Self> {
-        Self::from_property_list(include_str!("../../packaging/macos/spaceterm/Info.plist"))
-    }
-
-    fn from_property_list(plist: &str) -> Option<Self> {
-        let (_, after) = plist.split_once("<key>SUPublicEDKey</key>")?;
-        let value = after.trim_start().strip_prefix("<string>")?;
-        let (value, _) = value.split_once("</string>")?;
-        Self::from_base64(value.trim())
-    }
-
-    pub(crate) fn from_base64(value: &str) -> Option<Self> {
-        STANDARD.decode(value).ok()?.try_into().ok().map(Self)
-    }
-
-    fn verifies(&self, message: &[u8], signature: &[u8; 64]) -> bool {
-        ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, &self.0)
-            .verify(message, signature)
-            .is_ok()
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct FeedDocument {
-    version: String,
-    published_at: u64,
-    archive: ArchiveDocument,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ArchiveDocument {
-    name: String,
-    size: u64,
-    sha256: String,
-    signature: String,
-}
-
-/// A verified feed: the newest release and the archive that installs it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ReleaseFeed {
     pub(crate) version: String,
     pub(crate) published_at: u64,
     pub(crate) archive: ReleaseArchive,
+    verified: client_feed::ReleaseFeed,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ReleaseArchive {
     pub(crate) url: String,
     pub(crate) size: u64,
-    sha256: [u8; 32],
-    signature: [u8; 64],
+    verified: client_feed::ReleaseArchive,
 }
 
 impl ReleaseFeed {
-    /// Verifies the detached feed signature before reading any field the feed claims.
     pub(crate) fn verify(
         key: &UpdateKey,
         platform: ReleasePlatform,
@@ -118,83 +34,37 @@ impl ReleaseFeed {
         signature: &[u8],
         now: u64,
     ) -> Result<Self, UpdateError> {
-        if feed.len() > MAX_FEED_BYTES || signature.len() > MAX_FEED_SIGNATURE_BYTES {
-            return Err(UpdateError::Verification);
-        }
-        let signature = std::str::from_utf8(signature)
-            .ok()
-            .and_then(|value| decode_signature(value.trim_ascii()))
-            .ok_or(UpdateError::Verification)?;
-        if !key.verifies(feed, &signature) {
-            return Err(UpdateError::Verification);
-        }
-        let document: FeedDocument =
-            serde_json::from_slice(feed).map_err(|_| UpdateError::Verification)?;
-        let archive = document.archive;
-        let valid = stable_version(&document.version).is_some()
-            && document.published_at > 0
-            && document.published_at <= now.saturating_add(CLOCK_SKEW)
-            && archive.name == platform.archive_name(&document.version)
-            && (1..=MAX_ARCHIVE_BYTES).contains(&archive.size);
-        let sha256 = decode_sha256(&archive.sha256);
-        let archive_signature = decode_signature(&archive.signature);
-        let (true, Some(sha256), Some(signature)) = (valid, sha256, archive_signature) else {
-            return Err(UpdateError::Verification);
-        };
+        let verified = client_feed::ReleaseFeed::verify(key, platform, feed, signature, now)
+            .map_err(|_| UpdateError::Verification)?;
         Ok(Self {
+            version: verified.version.clone(),
+            published_at: verified.published_at,
             archive: ReleaseArchive {
-                url: format!("{RELEASES}/download/v{}/{}", document.version, archive.name),
-                size: archive.size,
-                sha256,
-                signature,
+                url: verified.archive.url.clone(),
+                size: verified.archive.size,
+                verified: verified.archive.clone(),
             },
-            version: document.version,
-            published_at: document.published_at,
+            verified,
         })
     }
 
-    /// Whether this release is newer than `current`. A build without a stable version, such as
-    /// one built from an untagged commit, never treats a release as newer.
     pub(crate) fn supersedes(&self, current: &str) -> bool {
-        match (stable_version(&self.version), stable_version(current)) {
-            (Some(release), Some(current)) => release > current,
-            _ => false,
-        }
+        self.verified.supersedes(current)
     }
 }
 
 impl ReleaseArchive {
     pub(crate) fn verify(&self, key: &UpdateKey, bytes: &[u8]) -> Result<(), UpdateError> {
-        let digest: [u8; 32] = Sha256::digest(bytes).into();
-        if bytes.len() as u64 == self.size
-            && digest == self.sha256
-            && key.verifies(bytes, &self.signature)
-        {
-            Ok(())
-        } else {
-            Err(UpdateError::Verification)
-        }
+        self.verified
+            .verify(key, bytes)
+            .map_err(|_| UpdateError::Verification)
     }
 }
 
-fn decode_signature(value: &str) -> Option<[u8; 64]> {
-    STANDARD.decode(value).ok()?.try_into().ok()
-}
-
-fn decode_sha256(value: &str) -> Option<[u8; 32]> {
-    if value.len() != 64
-        || !value
-            .bytes()
-            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-    {
-        return None;
-    }
-    let mut digest = [0; 32];
-    for (index, byte) in digest.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16).ok()?;
-    }
-    Some(digest)
-}
+#[cfg(test)]
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+#[cfg(test)]
+use sha2::{Digest as _, Sha256};
 
 #[cfg(test)]
 pub(crate) mod testing {
@@ -210,7 +80,7 @@ pub(crate) mod testing {
         }
 
         pub(crate) fn key(&self) -> UpdateKey {
-            UpdateKey(self.0.public_key().as_ref().try_into().unwrap())
+            UpdateKey::from_base64(&STANDARD.encode(self.0.public_key().as_ref())).unwrap()
         }
 
         pub(crate) fn sign(&self, message: &[u8]) -> String {
@@ -260,7 +130,16 @@ mod tests {
     fn release_key_should_come_from_the_release_bundle_template() {
         let plist = include_str!("../../packaging/macos/spaceterm/Info.plist");
         let key = UpdateKey::release().expect("the release template carries an update key");
-        assert!(plist.contains(&STANDARD.encode(key.0)));
+        let (_, value) = plist.split_once("<key>SUPublicEDKey</key>").unwrap();
+        let value = value
+            .trim_start()
+            .strip_prefix("<string>")
+            .unwrap()
+            .split_once("</string>")
+            .unwrap()
+            .0;
+        assert!(UpdateKey::from_base64(value).is_some());
+        let _ = key;
     }
 
     #[test]

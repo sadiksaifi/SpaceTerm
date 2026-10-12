@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key><string>@SERVER_IDENTIFIER@</string>
+    <key>CFBundleName</key><string>@SERVER_NAME@</string>
+    <key>CFBundleDisplayName</key><string>@SERVER_NAME@</string>
+    <key>CFBundleExecutable</key><string>spaceterm-server</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>@BUNDLE_VERSION@</string>
+    <key>CFBundleVersion</key><string>@BUNDLE_VERSION@</string>
+    <key>LSMinimumSystemVersion</key><string>26.0</string>
+    <key>LSBackgroundOnly</key><true/>
+</dict>
+</plist>

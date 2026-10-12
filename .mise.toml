@@ -437,3 +437,15 @@ run = "tagsmith validate --tag {{usage.tag | quote}} --github-output"
 [tasks."release:notes:preview"]
 description = "Preview release notes for changes since the last release"
 run = "git-cliff --config cliff.toml --unreleased --offline --strip all"
+
+[tasks."check:server:distribution"]
+description = "Check headless release metadata and archive authentication"
+run = "cargo check -p spaceterm-distribution --all-targets --locked"
+
+[tasks."test:server:distribution"]
+description = "Test frozen client feeds and separate server artifacts"
+run = "cargo test -p spaceterm-distribution --all-targets --locked"
+
+[tasks."lint:server:distribution"]
+description = "Lint headless artifact verification"
+run = "cargo clippy -p spaceterm-distribution --all-targets --locked -- -D warnings"

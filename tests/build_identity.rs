@@ -158,3 +158,57 @@ fn watched_paths_exist_in_a_linked_worktree() {
         ])
     );
 }
+
+#[test]
+fn server_identifiers_are_stable_and_distinct_for_all_builds() {
+    use identity::ServerBuild;
+    for (build, desktop) in [
+        (ServerBuild::Release, "io.github.sadiksaifi.spaceterm"),
+        (
+            ServerBuild::Preflight,
+            "io.github.sadiksaifi.spaceterm-preflight",
+        ),
+        (
+            ServerBuild::Development,
+            "io.github.sadiksaifi.spaceterm-development",
+        ),
+    ] {
+        assert_eq!(build.identifier(), format!("{desktop}.server"));
+        assert_eq!(
+            build.launcher_identifier(),
+            format!("{desktop}.server.launcher")
+        );
+        assert_eq!(
+            build.manager_identifier(),
+            format!("{desktop}.server.manager")
+        );
+        assert!(!build.bundle_name().is_empty());
+        assert!(!build.name().is_empty());
+    }
+}
+
+#[test]
+fn release_identity_still_requires_clean_annotated_tag() {
+    use identity::{ServerBuild, resolve_server};
+    let repository = Repository::new();
+    repository.annotated_tag("v1.2.3");
+    assert_eq!(
+        resolve_server(repository.path(), true, Some("v1.2.3"))
+            .unwrap()
+            .build,
+        ServerBuild::Release
+    );
+    assert!(resolve_server(repository.path(), false, Some("v1.2.3")).is_err());
+    assert_eq!(
+        resolve_server(repository.path(), true, None).unwrap().build,
+        ServerBuild::Preflight
+    );
+    assert_eq!(
+        resolve_server(repository.path(), false, None)
+            .unwrap()
+            .build,
+        ServerBuild::Development
+    );
+    fs::write(repository.path().join("dirty"), b"change").unwrap();
+    assert!(resolve_server(repository.path(), true, Some("v1.2.3")).is_err());
+}

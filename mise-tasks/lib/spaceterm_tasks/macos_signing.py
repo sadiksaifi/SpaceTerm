@@ -2,11 +2,16 @@
 
 import base64
 import binascii
+import fcntl
+import os
 import re
 import secrets
 import shlex
+import stat
 import subprocess
+import sys
 import tempfile
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -75,7 +80,7 @@ def signing_credentials(fingerprint, environment):
 
 
 @contextmanager
-def release_keychain(fingerprint, environment):
+def _isolated_release_keychain(fingerprint, environment):
     """Require the pinned private identity; restore the search list and delete all imports."""
     certificate, password = signing_credentials(fingerprint, environment)
     clean = signing_environment(environment)
@@ -147,13 +152,16 @@ def release_keychain(fingerprint, environment):
 def verify_release_signature(app, fingerprint, identifier, label):
     """Require the pinned signer throughout the bundle and an invariant app requirement."""
     requirement = certificate_requirement(fingerprint)
+    clean = signing_environment(os.environ)
     checked(
         ["codesign", "--verify", "--strict", "--deep", "-R", f"={requirement}", str(app)],
         f"{label} release signature does not match the pinned certificate",
+        env=clean,
     )
     designated = checked(
         ["codesign", "--display", "--requirements", "-", str(app)],
         f"{label} release designated requirement could not be read",
+        env=clean,
         text=True,
     ).strip()
     if designated != f'designated => identifier "{identifier}" and {requirement}':
@@ -167,4 +175,60 @@ def verify_release_signature(app, fingerprint, identifier, label):
             checked(
                 ["codesign", "--verify", "--strict", "-R", f"={requirement}", str(path)],
                 f"{label} bundled executable does not match the pinned certificate",
+                env=clean,
             )
+
+
+@contextmanager
+def signing_search_list_lock():
+    """Serialize the entire user search-list snapshot/mutation/restore window."""
+    root = (
+        Path("/private/tmp" if sys.platform == "darwin" else "/tmp")
+        / f"spaceterm-signing-{os.getuid()}"
+    )
+    try:
+        root.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    descriptor = None
+    try:
+        info = os.fstat(directory)
+        if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+            raise TaskError("signing serialization storage is unsafe")
+        descriptor = os.open(
+            "search-list.lock",
+            os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC,
+            0o600,
+            dir_fd=directory,
+        )
+        info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or info.st_nlink != 1
+            or stat.S_IMODE(info.st_mode) != 0o600
+        ):
+            raise TaskError("signing serialization file is unsafe")
+        deadline = time.monotonic() + 30
+        while True:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TaskError("signing serialization timed out") from None
+                time.sleep(0.02)
+        yield
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        os.close(directory)
+
+
+@contextmanager
+def release_keychain(fingerprint, environment):
+    """Import only within the per-account, per-host serialized search-list window."""
+    signing_credentials(fingerprint, environment)
+    with signing_search_list_lock(), _isolated_release_keychain(fingerprint, environment):
+        yield
