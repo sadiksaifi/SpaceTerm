@@ -1825,7 +1825,9 @@ mod linux_session {
 
     const SESSION_PATH: &str = "/org/freedesktop/login1/session/_32";
 
-    struct LoginManager;
+    struct LoginManager {
+        session_path: &'static str,
+    }
     #[zbus::interface(name = "org.freedesktop.login1.Manager")]
     impl LoginManager {
         /// logind resolves "auto" to the caller's session, or to its user's display session
@@ -1834,7 +1836,7 @@ mod linux_session {
             if session_id != "auto" {
                 return Err(zbus::fdo::Error::InvalidArgs("unknown session".to_owned()));
             }
-            Ok(OwnedObjectPath::try_from(SESSION_PATH).unwrap())
+            Ok(OwnedObjectPath::try_from(self.session_path).unwrap())
         }
     }
 
@@ -1872,17 +1874,22 @@ mod linux_session {
     struct Login {
         connection: zbus::Connection,
         session: LoginSession,
+        session_path: &'static str,
     }
     impl Login {
         async fn start(bus: &PrivateBus) -> Self {
+            Self::start_at(bus, SESSION_PATH).await
+        }
+
+        async fn start_at(bus: &PrivateBus, session_path: &'static str) -> Self {
             let session = LoginSession::default();
             let connection = zbus::connection::Builder::address(bus.address.as_str())
                 .unwrap()
                 .name("org.freedesktop.login1")
                 .unwrap()
-                .serve_at("/org/freedesktop/login1", LoginManager)
+                .serve_at("/org/freedesktop/login1", LoginManager { session_path })
                 .unwrap()
-                .serve_at(SESSION_PATH, session.clone())
+                .serve_at(session_path, session.clone())
                 .unwrap()
                 .build()
                 .await
@@ -1890,6 +1897,7 @@ mod linux_session {
             Self {
                 connection,
                 session,
+                session_path,
             }
         }
 
@@ -1904,7 +1912,8 @@ mod linux_session {
             panic!("the companion did not read the login session");
         }
 
-        /// Changes the session as logind does, then waits until the companion read it again.
+        /// Changes the hints and emits logind's property signals. Generating those signals
+        /// also reads the hints, so this does not prove the companion observed them.
         async fn set(&self, locked: bool, idle: bool) {
             let before = self.session.reads.load(Ordering::Acquire);
             self.session.locked.store(locked, Ordering::Release);
@@ -1912,7 +1921,7 @@ mod linux_session {
             let interface = self
                 .connection
                 .object_server()
-                .interface::<_, LoginSession>(SESSION_PATH)
+                .interface::<_, LoginSession>(self.session_path)
                 .await
                 .unwrap();
             let emitter = interface.signal_emitter();
@@ -1975,6 +1984,9 @@ mod linux_session {
         login.read(2).await;
         login.set(true, false).await;
         original.close().await.unwrap();
+        // Surviving without a watcher proves the companion observed the away hint.
+        tokio::time::sleep(HOST_GRACE * 3).await;
+        assert_eq!(area.next_action(), Ok(None));
 
         let (replacement, items, _) = watcher_with_rejection(&bus, true, true).await;
         let interface = replacement
@@ -1995,9 +2007,9 @@ mod linux_session {
             .unwrap();
         tokio::time::sleep(HOST_GRACE * 3).await;
         assert_eq!(area.next_action(), Ok(None));
+        registered(&items).await;
 
         login.set(false, false).await;
-        registered(&items).await;
         tokio::time::sleep(HOST_GRACE * 3).await;
         assert_eq!(area.next_action(), Ok(None));
     }
@@ -2047,6 +2059,42 @@ mod linux_session {
             tokio::time::timeout(Duration::from_secs(3), lost(&mut area, &ingress))
                 .await
                 .expect("logind disappearing promptly resumes the host grace");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_restarted_logind_tracks_away_hints_and_keeps_the_status_area() {
+        for (locked, idle) in [(true, false), (false, true)] {
+            let bus = PrivateBus::start();
+            let login = Login::start(&bus).await;
+            let (original, _) = watcher(&bus, true).await;
+            let (mut area, ingress) = connect(&bus).await.unwrap();
+            login.read(2).await;
+
+            assert!(
+                login
+                    .connection
+                    .release_name("org.freedesktop.login1")
+                    .await
+                    .unwrap()
+            );
+            // The old owner stays connected, but the new owner resolves another session.
+            let replacement = Login::start_at(&bus, "/org/freedesktop/login1/session/_33").await;
+            replacement.read(2).await;
+            replacement.set(locked, idle).await;
+            original.close().await.unwrap();
+            tokio::time::sleep(HOST_GRACE * 3).await;
+            assert_eq!(area.next_action(), Ok(None), "locked {locked}, idle {idle}");
+            area.present(&CompanionModel::connecting()).unwrap();
+
+            replacement.set(false, false).await;
+            let (_watcher, items) = watcher(&bus, true).await;
+            registered(&items).await;
+            tokio::time::sleep(HOST_GRACE * 3).await;
+            assert_eq!(area.next_action(), Ok(None));
+            area.present(&CompanionModel::from_status(&running(1, "1.2.3")))
+                .unwrap();
+            assert_eq!(ingress.pop(), None);
         }
     }
 
