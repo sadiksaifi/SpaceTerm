@@ -33,6 +33,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -1704,6 +1705,36 @@ class UnsupportedNativePlatformTests(PortableFixture):
                 ):
                     self.assert_unsupported_before_effects(self.verifier())
 
+    def test_unvalidated_structure_abis_are_unavailable_before_native_effects(self):
+        for machine in ("mips64", "ppc64le", "riscv64", "aarch64_be", "unknown"):
+            with (
+                self.subTest(machine=machine),
+                patch.object(sys, "platform", "linux"),
+                patch.object(
+                    native.os,
+                    "uname",
+                    return_value=os.uname_result(("Linux", "fixture", "", "", machine)),
+                ),
+            ):
+                self.assert_unsupported_before_effects(self.verifier())
+        real_sizeof = native.ctypes.sizeof
+        for structure in (native._StatFS, native._SignalAction):
+            with (
+                self.subTest(structure=structure.__name__),
+                patch.object(sys, "platform", "linux"),
+                patch.object(
+                    native.os,
+                    "uname",
+                    return_value=os.uname_result(("Linux", "fixture", "", "", "x86_64")),
+                ),
+                patch.object(
+                    native.ctypes,
+                    "sizeof",
+                    side_effect=lambda value: real_sizeof(value) + (value is structure) * 8,
+                ),
+            ):
+                self.assert_unsupported_before_effects(self.verifier())
+
     def test_unsupported_selection_clears_a_previous_verified_result(self):
         verifier = self.verifier()
         self.assertEqual(self.invoke(verifier), CHECKSUM_KEY)
@@ -1731,6 +1762,31 @@ class LinuxSignatureAuthenticationTests(NativeFixture):
     test_unexpected_scratch_entries_do_not_grant_recursive_cleanup_authority = _SignatureAuthenticationScenarios.test_unexpected_scratch_entries_do_not_grant_recursive_cleanup_authority
     test_native_ordinary_exceptions_are_typed_content_free_and_cleanup_owned_scratch = _SignatureAuthenticationScenarios.test_native_ordinary_exceptions_are_typed_content_free_and_cleanup_owned_scratch
     test_keyboard_interrupt_and_system_exit_survive_owned_cleanup = _SignatureAuthenticationScenarios.test_keyboard_interrupt_and_system_exit_survive_owned_cleanup
+
+    def test_non_glibc_is_unavailable_before_opening_authority_or_allocating_resources(self):
+        library = native.ctypes.CDLL(None, use_errno=True)
+
+        class WithoutGlibcMarker:
+            def __getattr__(self, name):
+                if name == "gnu_get_libc_version":
+                    raise AttributeError(name)
+                return getattr(library, name)
+
+        verifier = self.verifier()
+        with (
+            patch.object(native.ctypes, "CDLL", return_value=WithoutGlibcMarker()),
+            patch.object(native.os, "open", side_effect=OSError(errno.EIO, LEAK)) as opened,
+            patch.object(native.os, "mkdir", side_effect=OSError(errno.EIO, LEAK)) as made,
+            patch.object(native.os, "memfd_create", side_effect=OSError(errno.EIO, LEAK)) as sealed,
+            patch.object(native, "_popen", side_effect=OSError(errno.EIO, LEAK)) as spawned,
+        ):
+            self.assertIsNone(verifier.verify(DOCUMENT, SIGNATURE))
+        opened.assert_not_called()
+        made.assert_not_called()
+        sealed.assert_not_called()
+        spawned.assert_not_called()
+        self.assertEqual(verifier.last_classification, NativeClassification.UNAVAILABLE)
+        self.assert_scratch_clean()
 
     def test_approved_keyring_real_bytes_match_the_independent_digest_and_size(self):
         for approved in (
@@ -2136,6 +2192,152 @@ class LinuxObservationTests(NativeFixture):
 
 @unittest.skipUnless(sys.platform == "linux", "Linux owned process groups")
 class BoundedNativeProcessTests(NativeFixture):
+    def assert_worker_interrupt_during_restoration(self, phase, first, later=None):
+        delivered = []
+        ready = threading.Event()
+        send = [threading.Event() for _ in range(2 if later is not None else 1)]
+        sent = [threading.Event() for _ in send]
+        triggered = []
+        recording = []
+        record_interruption = native._Cleanup.interrupted
+        worker_masks = []
+        original_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGUSR2})
+        expected_mask = original_mask | {signal.SIGUSR2}
+
+        def interrupted(signum, _frame):
+            delivered.append(signum)
+            raise first if delivered.count(signal.SIGINT) == 1 or later is None else later
+
+        def interrupted_recording(cleanup, error):
+            if later is not None and error is first and not recording:
+                # Deliver again before the first exception reaches its recorder.
+                # The first exception and restoration progress must survive this
+                # second unwind, not just interruptions in the restoration loop.
+                recording.append(error)
+                send[1].set()
+                self.assertTrue(sent[1].wait(3), "worker did not receive the second SIGINT")
+            record_interruption(cleanup, error)
+
+        def terminated(signum, _frame):
+            delivered.append(signum)
+            raise SystemExit(143)
+
+        def received(signum, _frame):
+            delivered.append(signum)
+
+        handlers = {
+            signal.SIGINT: interrupted,
+            signal.SIGTERM: terminated,
+            signal.SIGUSR1: received,
+        }
+        previous = {
+            signum: (signal.getsignal(signum), self.signal_flags(signum)) for signum in handlers
+        }
+        for signum, handler in handlers.items():
+            signal.signal(signum, handler)
+            signal.siginterrupt(signum, False)
+        expected_flags = {signum: self.signal_flags(signum) for signum in handlers}
+
+        def receive_on_worker():
+            # pthread_sigmask in restore() cannot block this thread's delivery.
+            signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT})
+            worker_masks.append(signal.pthread_sigmask(signal.SIG_BLOCK, set()))
+            ready.set()
+            for requested, delivered_signal in zip(send, sent, strict=True):
+                if requested.wait(3):
+                    signal.pthread_kill(threading.get_ident(), signal.SIGINT)
+                    delivered_signal.set()
+
+        worker = threading.Thread(target=receive_on_worker)
+        original_trace = sys.gettrace()
+
+        def trace_restoration(frame, event, _argument):
+            if frame.f_code is not native._AcquisitionSignals.restore.__code__:
+                return trace_restoration
+            if event == "call" and not triggered:
+                # Queue callbacks before restoration. An asynchronous caller
+                # interrupt must not strand them, even when one callback raises.
+                signal.pthread_kill(threading.get_ident(), signal.SIGTERM)
+                signal.pthread_kill(threading.get_ident(), signal.SIGUSR1)
+            if (
+                event == "line"
+                and not triggered
+                and signal.getsignal(signal.SIGINT) is interrupted
+                and signal.getsignal(signal.SIGUSR1) is not received
+            ):
+                flags_restored = self.signal_flags(signal.SIGINT) == expected_flags[signal.SIGINT]
+                if flags_restored == (phase != "native-action"):
+                    triggered.append(phase)
+                    send[0].set()
+                    self.assertTrue(sent[0].wait(3), "worker did not receive the targeted SIGINT")
+            return trace_restoration
+
+        verifier = self.verifier()
+        try:
+            worker.start()
+            self.assertTrue(ready.wait(3), "unmasked worker did not become ready")
+            sys.settrace(trace_restoration)
+            with (
+                patch.object(native.os, "open", side_effect=OSError(errno.EIO, LEAK)) as opened,
+                patch.object(native.os, "mkdir", side_effect=OSError(errno.EIO, LEAK)) as made,
+                patch.object(
+                    native.os, "memfd_create", side_effect=OSError(errno.EIO, LEAK)
+                ) as sealed,
+                patch.object(native, "_popen", side_effect=OSError(errno.EIO, LEAK)) as spawned,
+                patch.object(native._Cleanup, "interrupted", interrupted_recording),
+                self.assertRaises((KeyboardInterrupt, SystemExit)) as raised,
+            ):
+                verifier.verify(DOCUMENT, SIGNATURE)
+            sys.settrace(original_trace)
+            self.assertIs(raised.exception, first)
+            self.assertEqual(triggered, [phase])
+            self.assertEqual(len(worker_masks), 1)
+            self.assertNotIn(signal.SIGINT, worker_masks[0])
+            for signum, handler in handlers.items():
+                self.assertIs(signal.getsignal(signum), handler)
+                self.assertEqual(self.signal_flags(signum), expected_flags[signum])
+            self.assertEqual(signal.pthread_sigmask(signal.SIG_BLOCK, set()), expected_mask)
+            self.assertEqual(
+                delivered, [signal.SIGINT] * len(send) + [signal.SIGTERM, signal.SIGUSR1]
+            )
+            self.assertEqual(recording, [first] if later is not None else [])
+            opened.assert_not_called()
+            made.assert_not_called()
+            sealed.assert_not_called()
+            spawned.assert_not_called()
+            self.assert_scratch_clean()
+        finally:
+            sys.settrace(original_trace)
+            worker.join(timeout=4)
+            # Rescue the caller's process state after a failing regression. No
+            # fixture signal or abandoned guard may leak into the next test.
+            signal.pthread_sigmask(signal.SIG_BLOCK, set(handlers))
+            for signum, (handler, flags) in previous.items():
+                if signum in signal.sigpending():
+                    signal.sigwait({signum})
+                signal.signal(signum, handler)
+                signal.siginterrupt(signum, not bool(flags & 0x10000000))
+            signal.pthread_sigmask(signal.SIG_SETMASK, original_mask)
+            self.assertFalse(worker.is_alive(), "fixture signal worker did not finish")
+
+    def test_worker_interrupt_between_python_and_native_handler_restoration_finishes_cleanup(self):
+        for first in (KeyboardInterrupt(), SystemExit(73)):
+            with self.subTest(interrupt_type=type(first)):
+                self.assert_worker_interrupt_during_restoration("native-action", first)
+
+    def test_worker_interrupt_between_handlers_restores_pending_callbacks_and_original_mask(self):
+        for first in (KeyboardInterrupt(), SystemExit(73)):
+            with self.subTest(interrupt_type=type(first)):
+                self.assert_worker_interrupt_during_restoration("next-handler", first)
+
+    def test_second_worker_interrupt_during_interruption_recording_finishes_restoration(self):
+        for first, later in (
+            (KeyboardInterrupt(), SystemExit(74)),
+            (SystemExit(73), KeyboardInterrupt()),
+        ):
+            with self.subTest(first_type=type(first)):
+                self.assert_worker_interrupt_during_restoration("bookkeeping", first, later)
+
     def test_constructor_interrupt_retires_the_real_child_before_releasing_resources(self):
         for first, phase in (
             (KeyboardInterrupt(), "constructor"),
@@ -2400,6 +2602,146 @@ class BoundedNativeProcessTests(NativeFixture):
                 finally:
                     signal.signal(signal.SIGINT, previous)
 
+    def test_second_interrupt_before_final_group_signal_cannot_abandon_owned_child(self):
+        for first, later, delivery in (
+            (KeyboardInterrupt(), SystemExit(74), "main"),
+            (SystemExit(73), KeyboardInterrupt(), "worker"),
+            (KeyboardInterrupt(), SystemExit(74), "guard-setup"),
+            (KeyboardInterrupt(), SystemExit(74), "guard-entry"),
+            (SystemExit(73), KeyboardInterrupt(), "guard-entry"),
+        ):
+            with self.subTest(first_type=type(first), delivery=delivery):
+                verifier = self.verifier()
+                delivered = []
+                second = []
+                killed = []
+                cleanup_state = []
+                resources = []
+                ready = threading.Event()
+                send = threading.Event()
+                sent = threading.Event()
+                real_killpg = os.killpg
+                real_rmdir = os.rmdir
+                real_library = native.ctypes.CDLL
+                original_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+                original_trace = sys.gettrace()
+
+                def trace_kill_entry(frame, event, _argument):
+                    if (
+                        frame.f_code is native._kill_owned.__code__
+                        and event == "call"
+                        and not second
+                    ):
+                        # CPython can dispatch before the helper executes any
+                        # bookkeeping or enters its own protected retry region.
+                        second.append(self.children[-1][0].pid)
+                        os.kill(os.getpid(), signal.SIGINT)
+                    return trace_kill_entry
+
+                def receive_on_worker():
+                    signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT})
+                    ready.set()
+                    if send.wait(3):
+                        signal.pthread_kill(threading.get_ident(), signal.SIGINT)
+                        sent.set()
+
+                worker = threading.Thread(target=receive_on_worker)
+
+                def interrupted(signum, _frame):
+                    delivered.append(signum)
+                    raise first if len(delivered) == 1 else later
+
+                def inspect_resources(argv, options):
+                    resources.extend(self.resource_fds(argv, options))
+
+                def load_library(*args, **options):
+                    if delivery == "guard-setup" and len(delivered) == 1 and not second:
+                        # Deferral setup itself must not open another cancellation
+                        # gap before the final group signal has been protected.
+                        second.append(self.children[-1][0].pid)
+                        os.kill(os.getpid(), signal.SIGINT)
+                    return real_library(*args, **options)
+
+                def signal_group(pgid, signum):
+                    if signum == signal.SIGKILL and not second:
+                        second.append(pgid)
+                        # Real delivery at the last pre-killpg boundary, not an
+                        # injected exception or a consuming-reap interruption.
+                        if delivery == "main":
+                            os.kill(os.getpid(), signal.SIGINT)
+                        else:
+                            send.set()
+                            self.assertTrue(sent.wait(3), "worker did not send the second SIGINT")
+                    for fd in resources:
+                        os.fstat(fd)
+                    result = real_killpg(pgid, signum)
+                    if signum == signal.SIGKILL:
+                        killed.append(pgid)
+                    return result
+
+                def remove_scratch(name, *, dir_fd=None):
+                    controlled, record = self.children[-1]
+                    descendant = json.loads(record.read_bytes())["descendant"]
+                    cleanup_state.append(
+                        (
+                            controlled.process.returncode,
+                            controlled.group_kill_sent,
+                            self.wait_for_retirement(descendant),
+                            controlled.retire.exists(),
+                        )
+                    )
+                    for fd in resources:
+                        os.fstat(fd)
+                    return real_rmdir(name, dir_fd=dir_fd)
+
+                previous_flags = self.signal_flags(signal.SIGINT)
+                previous = signal.signal(signal.SIGINT, interrupted)
+                signal.siginterrupt(signal.SIGINT, False)
+                expected_flags = self.signal_flags(signal.SIGINT)
+                started = time.monotonic()
+                try:
+                    if delivery == "worker":
+                        worker.start()
+                        self.assertTrue(ready.wait(3), "unmasked worker did not become ready")
+                    if delivery == "guard-entry":
+                        sys.settrace(trace_kill_entry)
+                    with (
+                        patch.object(native.os, "killpg", side_effect=signal_group),
+                        patch.object(native.os, "rmdir", side_effect=remove_scratch),
+                        patch.object(native.ctypes, "CDLL", side_effect=load_library),
+                        self.assertRaises(type(first)) as raised,
+                    ):
+                        self.invoke(
+                            verifier,
+                            mode="interrupt-owner",
+                            descendant=True,
+                            before_spawn=inspect_resources,
+                        )
+                    self.assertIs(raised.exception, first)
+                    controlled = self.children[-1][0]
+                    self.assertEqual(second, [controlled.pid])
+                    self.assertEqual(killed, [controlled.pid], "the final group signal must finish")
+                    self.assertEqual(cleanup_state, [(-signal.SIGKILL, True, True, False)])
+                    self.assertEqual(delivered, [signal.SIGINT, signal.SIGINT])
+                    self.assertIs(signal.getsignal(signal.SIGINT), interrupted)
+                    self.assertEqual(self.signal_flags(signal.SIGINT), expected_flags)
+                    self.assertEqual(signal.pthread_sigmask(signal.SIG_BLOCK, set()), original_mask)
+                    self.assertLess(time.monotonic() - started, 3)
+                    self.assert_group_retired()
+                    self.assert_descriptors_closed(resources)
+                    self.assert_scratch_clean()
+                finally:
+                    sys.settrace(original_trace)
+                    if delivery == "worker":
+                        worker.join(timeout=4)
+                        self.assertFalse(worker.is_alive(), "fixture signal worker did not finish")
+                    signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
+                    if signal.SIGINT in signal.sigpending():
+                        signal.sigwait({signal.SIGINT})
+                    signal.signal(signal.SIGINT, previous)
+                    signal.siginterrupt(signal.SIGINT, not bool(previous_flags & 0x10000000))
+                    signal.pthread_sigmask(signal.SIG_SETMASK, original_mask)
+
     def test_timeout_uses_a_monotonic_deadline_and_retires_the_owned_group(self):
         verifier = self.verifier()
         started = time.monotonic()
@@ -2547,6 +2889,124 @@ class BoundedNativeProcessTests(NativeFixture):
         os.kill(escaped, 0)  # Native cleanup may signal only its owned process group.
         self.assertEqual(controlled.communications, 0)
         self.assert_scratch_clean()
+
+    def test_second_interrupt_after_signal_lease_closes_finishes_reaping_before_cleanup(self):
+        for first, later in (
+            (KeyboardInterrupt(), SystemExit(74)),
+            (SystemExit(73), KeyboardInterrupt()),
+        ):
+            with self.subTest(first_type=type(first)):
+                verifier = self.verifier()
+                delivered = []
+                interrupted_reap = []
+                signals = []
+                reaps = []
+                cleanup_state = []
+                resources = []
+                real_monotonic = time.monotonic
+                real_wait = ControlledChild.wait
+                real_killpg = os.killpg
+                real_rmdir = os.rmdir
+
+                def interrupted(signum, _frame):
+                    delivered.append(signum)
+                    raise first if len(delivered) == 1 else later
+
+                def interrupt_before_wait():
+                    frame = sys._getframe(1)
+                    if frame.f_code is native._reap_child.__code__ and not interrupted_reap:
+                        child = frame.f_locals["child"]
+                        # Send a real second SIGINT after signaling authority closes,
+                        # before the protected wait region or any consuming reap.
+                        interrupted_reap.append(
+                            (
+                                child,
+                                child.reap_deadline,
+                                child.signals_open,
+                                tuple(child.process.waits),
+                            )
+                        )
+                        os.kill(os.getpid(), signal.SIGINT)
+                    return real_monotonic()
+
+                def inspect_resources(argv, options):
+                    resources.extend(self.resource_fds(argv, options))
+
+                def signal_group(pgid, signum):
+                    lease_open = not interrupted_reap or interrupted_reap[0][0].signals_open
+                    signals.append((pgid, signum, lease_open))
+                    return real_killpg(pgid, signum)
+
+                def observe_wait(controlled, timeout=None):
+                    child = interrupted_reap[0][0]
+                    reaps.append((child.reap_deadline, child.signals_open, timeout))
+                    return real_wait(controlled, timeout=timeout)
+
+                def remove_scratch(name, *, dir_fd=None):
+                    controlled = self.children[-1][0]
+                    cleanup_state.append(
+                        (
+                            controlled.process.returncode,
+                            bool(controlled.waits),
+                            controlled.retire.exists(),
+                        )
+                    )
+                    for fd in resources:
+                        os.fstat(fd)
+                    return real_rmdir(name, dir_fd=dir_fd)
+
+                previous_flags = self.signal_flags(signal.SIGINT)
+                previous = signal.signal(signal.SIGINT, interrupted)
+                signal.siginterrupt(signal.SIGINT, False)
+                expected_flags = self.signal_flags(signal.SIGINT)
+                original_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+                started = real_monotonic()
+                try:
+                    with (
+                        patch.object(native.time, "monotonic", interrupt_before_wait),
+                        patch.object(native.os, "killpg", side_effect=signal_group),
+                        patch.object(native.os, "rmdir", side_effect=remove_scratch),
+                        patch.object(ControlledChild, "wait", observe_wait),
+                        self.assertRaises(type(first)) as raised,
+                    ):
+                        self.invoke(
+                            verifier,
+                            mode="interrupt-owner",
+                            descendant=True,
+                            before_spawn=inspect_resources,
+                        )
+                    self.assertIs(raised.exception, first)
+                    self.assertEqual(delivered, [signal.SIGINT, signal.SIGINT])
+                    self.assertEqual(len(interrupted_reap), 1)
+                    child, deadline, lease_open, waits = interrupted_reap[0]
+                    self.assertFalse(lease_open)
+                    self.assertEqual(waits, ())
+                    self.assertIsNotNone(deadline)
+                    self.assertEqual(child.reap_deadline, deadline)
+                    self.assertEqual(cleanup_state, [(-signal.SIGKILL, True, False)])
+                    self.assertTrue(reaps, "closed signaling authority must not skip reaping")
+                    for reap_deadline, signals_open, timeout in reaps:
+                        self.assertEqual(reap_deadline, deadline)
+                        self.assertFalse(signals_open)
+                        self.assertIsNotNone(timeout)
+                        self.assertTrue(math.isfinite(timeout))
+                        self.assertGreater(timeout, 0)
+                        self.assertLessEqual(timeout, 0.2)
+                    self.assertIn(signal.SIGKILL, [entry[1] for entry in signals])
+                    for pgid, _signum, signals_open in signals:
+                        self.assertEqual(pgid, child.pid)
+                        self.assertTrue(signals_open, "no group signal may follow lease closure")
+                    self.assertIs(signal.getsignal(signal.SIGINT), interrupted)
+                    self.assertEqual(self.signal_flags(signal.SIGINT), expected_flags)
+                    self.assertEqual(signal.pthread_sigmask(signal.SIG_BLOCK, set()), original_mask)
+                    self.assertLess(real_monotonic() - started, 3)
+                    self.assert_group_retired()
+                    self.assert_descriptors_closed(resources)
+                    self.assert_scratch_clean()
+                finally:
+                    signal.signal(signal.SIGINT, previous)
+                    signal.siginterrupt(signal.SIGINT, not bool(previous_flags & 0x10000000))
+                    signal.pthread_sigmask(signal.SIG_SETMASK, original_mask)
 
     def test_first_execution_interrupt_survives_a_later_consuming_reap_interrupt(self):
         for first, later in (
