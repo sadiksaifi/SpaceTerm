@@ -945,8 +945,8 @@ impl Button {
     }
 
     /// Tracks keyboard focus with `focus_handle`, which the button's owner retains across frames,
-    /// instead of a handle the button creates.
-    pub(crate) fn focus_handle(mut self, focus_handle: FocusHandle) -> Self {
+    /// instead of a handle the button creates. The button adopts the handle when it first renders.
+    pub fn focus_handle(mut self, focus_handle: FocusHandle) -> Self {
         self.core.injected_focus_handle = Some(focus_handle);
         self
     }

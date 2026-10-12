@@ -218,6 +218,11 @@ fn sections_present_their_own_fixtures(cx: &mut TestAppContext) {
             "workbench-terminal-caption",
         ),
         (
+            WorkbenchSection::ServerSurfaces,
+            "workbench-navigation-workbench-section-server-surfaces",
+            "workbench-server-pane-0",
+        ),
+        (
             WorkbenchSection::Document,
             "workbench-navigation-workbench-section-document",
             "workbench-document-apply",
