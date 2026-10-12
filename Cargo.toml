@@ -29,7 +29,10 @@ accesskit_unix = { git = "https://github.com/sadiksaifi/accesskit", tag = "space
 [features]
 # Every build outside the packaging script is SpaceTerm Development and carries its developer tools.
 default = ["developer-tools"]
-native-tests = ["spaceterm-terminal/native-tests"]
+native-tests = [
+    "spaceterm-host/native-tests",
+    "spaceterm-terminal/native-tests",
+]
 developer-tools = ["spaceterm-ui/control-preview"]
 
 [[test]]
@@ -98,6 +101,7 @@ spaceterm-terminal = { path = "crates/spaceterm-terminal", features = ["test-sup
 accesskit_consumer = "=0.38.0"
 gpui = { git = "https://github.com/sadiksaifi/zed", tag = "spaceterm-2026-10-10.1", features = ["test-support"] }
 jsonschema = { version = "=0.56.0", default-features = false }
+spaceterm-host = { path = "crates/spaceterm-host", features = ["test-support"] }
 spaceterm-ui = { path = "crates/spaceterm-ui", features = ["test-support"] }
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]

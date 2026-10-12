@@ -5913,7 +5913,9 @@ dependencies = [
 name = "spaceterm-host"
 version = "0.0.0"
 dependencies = [
+ "anyhow",
  "libc",
+ "portable-pty",
  "same-file",
  "thiserror 2.0.19",
 ]
