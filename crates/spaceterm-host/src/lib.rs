@@ -21,6 +21,7 @@ pub mod native_registration;
 pub mod protected_directory;
 pub mod root_protection;
 pub mod startup;
+pub mod storage;
 
 pub mod pty;
 pub mod shell_integration;
