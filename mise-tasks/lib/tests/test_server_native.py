@@ -437,5 +437,69 @@ class NativeFeasibilityTests(unittest.TestCase):
                     )
 
 
+class ReadOnlyMacOSInspectorTests(unittest.TestCase):
+    def test_default_inspection_never_installs_unlocks_or_prompts(self):
+        from spaceterm_tasks.server_native import MacOSReadOnlyInspector
+
+        class RegistrationReader:
+            def read(self, namespace, uid):
+                return None
+
+        with (
+            patch("subprocess.Popen", side_effect=AssertionError("native command")),
+            patch("subprocess.run", side_effect=AssertionError("native command")),
+        ):
+            inspector = MacOSReadOnlyInspector(
+                RegistrationReader(),
+                HostFacts(
+                    platform=HostPlatform.MACOS,
+                    os_version=Version(26),
+                    supervisor=Supervisor.LAUNCHD,
+                ),
+                501,
+            )
+            evidence = NativeFeasibility(inspector).run()
+        self.assertEqual(evidence.classification, Classification.MISSING_INSTALLATION)
+        assert evidence.observation is not None
+        self.assertEqual(evidence.observation.host.credential_storage, Storage.UNCHECKED)
+
+    def test_read_only_inspector_preserves_stopped_without_storage_probe(self):
+        from spaceterm_tasks.server_native import MacOSReadOnlyInspector
+
+        class RegistrationReader:
+            def read(self, namespace, uid):
+                return (
+                    b"STRGREC\0"
+                    + bytes((1, 0, 3, 2))
+                    + (501).to_bytes(4, "little")
+                    + (1).to_bytes(8, "little") * 2
+                    + bytes(16)
+                )
+
+        evidence = NativeFeasibility(
+            MacOSReadOnlyInspector(RegistrationReader(), HostFacts(), 501)
+        ).run()
+        self.assertEqual(evidence.classification, Classification.STOPPED)
+        assert evidence.observation is not None
+        self.assertEqual(evidence.observation.application_storage, Storage.UNCHECKED)
+
+    def test_read_only_inspector_does_not_admit_malformed_or_new_records(self):
+        from spaceterm_tasks.server_native import MacOSReadOnlyInspector
+
+        class RegistrationReader:
+            def __init__(self, data):
+                self.data = data
+
+            def read(self, namespace, uid):
+                return self.data
+
+        for data in (bytes(48), b"STRGREC\0" + bytes((2, 0)) + bytes(246), b"raw sensitive error"):
+            with self.subTest(size=len(data)):
+                evidence = NativeFeasibility(
+                    MacOSReadOnlyInspector(RegistrationReader(data), HostFacts(), 501)
+                ).run()
+                self.assertEqual(evidence.classification, Classification.INSPECTION_UNAVAILABLE)
+
+
 if __name__ == "__main__":
     unittest.main()

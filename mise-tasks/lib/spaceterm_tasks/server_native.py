@@ -5,6 +5,9 @@ supervisor prerequisites. It does not verify boot, logout, credential access,
 account isolation, or privacy grants. Inspection never prepares or changes host integration.
 """
 
+import os
+import platform
+import stat
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol
@@ -261,8 +264,152 @@ class NativeFeasibility:
         return Classification.READY
 
 
+class RegistrationStatusReader(Protocol):
+    def read(self, namespace: Namespace, uid: int) -> bytes | None: ...
+
+
+class FixedMacOSRegistrationReader:
+    """Read bounded candidates at the fixed root without creating missing storage.
+
+    Directory-relative opening rejects links and obvious account-write exposure.
+    These observations are not a custody lease or startup admission. The native
+    authority remains the only owner of schema-2 profile and storage validation.
+    """
+
+    def read(self, namespace: Namespace, uid: int) -> bytes | None:
+        descriptors = []
+        try:
+            descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            descriptors.append(descriptor)
+            for name in ("Library", "Application Support", "SpaceTerm", "ServerRegistrations"):
+                info = os.fstat(descriptor)
+                if info.st_uid != 0 or info.st_mode & 0o022:
+                    raise PermissionError()
+                try:
+                    descriptor = os.open(
+                        name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor
+                    )
+                except FileNotFoundError:
+                    return None
+                descriptors.append(descriptor)
+            build = {
+                Namespace.DEVELOPMENT: "development",
+                Namespace.PREFLIGHT: "preflight",
+                Namespace.RELEASE: "release",
+            }[namespace]
+            info = os.fstat(descriptor)
+            if info.st_uid != 0 or info.st_mode & 0o022:
+                raise PermissionError()
+            try:
+                descriptor = os.open(
+                    f"{build}-{uid}.registration",
+                    os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                    dir_fd=descriptor,
+                )
+            except FileNotFoundError:
+                return None
+            descriptors.append(descriptor)
+            info = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != 0
+                or info.st_mode & 0o022
+                or info.st_nlink != 1
+            ):
+                raise PermissionError()
+            data = bytearray()
+            while len(data) <= 256:
+                chunk = os.read(descriptor, 257 - len(data))
+                if not chunk:
+                    break
+                data.extend(chunk)
+            current = os.fstat(descriptor)
+            fields = (
+                "st_dev",
+                "st_ino",
+                "st_mode",
+                "st_uid",
+                "st_gid",
+                "st_nlink",
+                "st_size",
+                "st_mtime_ns",
+                "st_ctime_ns",
+            )
+            if any(getattr(current, field) != getattr(info, field) for field in fields):
+                raise OSError()
+            return bytes(data)
+        finally:
+            for descriptor in reversed(descriptors):
+                os.close(descriptor)
+
+
+class MacOSReadOnlyInspector:
+    """Observe registration and host facts. Never open any credential facility.
+
+    Running leaves storage unchecked. Schema-2 interpretation requires the native
+    authority's read-only status binding and is unavailable until it is integrated.
+    No Python pathname check substitutes for that authority.
+    """
+
+    def __init__(
+        self,
+        reader: RegistrationStatusReader | None = None,
+        host: HostFacts | None = None,
+        uid: int | None = None,
+    ):
+        self._reader = reader if reader is not None else FixedMacOSRegistrationReader()
+        self._host = host
+        self._uid = os.getuid() if uid is None else uid
+
+    def observe(self, namespace: Namespace) -> NativeObservation:
+        if type(self._uid) is not int or not 0 < self._uid < 2**32 - 1:
+            raise TaskError("identity-mismatch")
+        host = self._host
+        if host is None:
+            host = HostFacts(platform=HostPlatform.UNSUPPORTED)
+            if platform.system() == "Darwin" and platform.machine() == "arm64":
+                # platform.mac_ver reads the system version plist, not a Keychain.
+                parts = platform.mac_ver()[0].split(".")
+                if not 1 <= len(parts) <= 3 or any(not part.isdecimal() for part in parts):
+                    raise TaskError("native-unavailable")
+                values = [int(part) for part in parts] + [0] * (3 - len(parts))
+                host = HostFacts(
+                    platform=HostPlatform.MACOS,
+                    os_version=Version(*values),
+                    supervisor=Supervisor.LAUNCHD,
+                )
+            else:
+                return NativeObservation(
+                    Registration.UNAVAILABLE, DesiredState.UNKNOWN, Storage.UNCHECKED, host
+                )
+        data = self._reader.read(namespace, self._uid)
+        if data is None:
+            return NativeObservation(
+                Registration.MISSING, DesiredState.UNKNOWN, Storage.UNCHECKED, host
+            )
+        build = {Namespace.DEVELOPMENT: 3, Namespace.PREFLIGHT: 2, Namespace.RELEASE: 1}[namespace]
+        if (
+            type(data) is not bytes
+            or len(data) != 48
+            or data[:10] != b"STRGREC\0\x01\x00"
+            or data[10] != build
+            or data[11] not in (1, 2)
+            or int.from_bytes(data[12:16], "little") != self._uid
+            or not int.from_bytes(data[16:24], "little")
+            or not int.from_bytes(data[24:32], "little")
+            or any(data[40:48])
+        ):
+            raise TaskError("native-unavailable")
+        state = DesiredState.STOPPED if data[11] == 2 else DesiredState.RUNNING
+        return NativeObservation(Registration.PRESENT, state, Storage.UNCHECKED, host)
+
+
 def run_task(phase: Phase = Phase.INSPECT) -> int:
-    """The command has no native inspector and cannot claim host evidence."""
-    evidence = NativeFeasibility().run(phase)
+    """Default inspection reads candidates only and never claims startup evidence."""
+    evidence = NativeFeasibility(MacOSReadOnlyInspector()).run(phase)
     print(f"phase={evidence.phase.value} classification={evidence.classification.value}")
-    return 2
+    return (
+        0
+        if evidence.classification in (Classification.MISSING_INSTALLATION, Classification.STOPPED)
+        else 2
+    )
