@@ -3,5 +3,11 @@ name = "spaceterm-server"
 publish = false
 edition = "2024"
 
+[features]
+native-tests = ["spaceterm-host/native-tests"]
+test-support = ["spaceterm-host/test-support"]
+
 [dependencies]
+spaceterm-host = { path = "../spaceterm-host" }
+spaceterm-distribution = { path = "../spaceterm-distribution" }
 spaceterm-core = { path = "../spaceterm-core" }

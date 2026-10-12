@@ -19,3 +19,6 @@ pub enum StartupFailure {
 pub fn production_startup() -> Result<(), StartupFailure> {
     Err(StartupFailure::NativeCredentialDeliveryUnavailable)
 }
+
+/// Safe native receiver adapter supplied by native-handoff B2.
+pub mod native_startup;

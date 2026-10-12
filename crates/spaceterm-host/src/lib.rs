@@ -16,6 +16,9 @@
 
 #![deny(missing_docs)]
 
+// Legacy source-included tests must use the real host contracts for additive ports.
+extern crate self as spaceterm_host;
+
 pub mod git;
 pub mod native_registration;
 pub mod protected_directory;
@@ -42,3 +45,15 @@ pub mod approved_installation;
 pub mod boot_credentials;
 pub mod installation;
 pub mod native_deployment;
+
+// Native phase 2 producers compile against the same headless host surface.
+pub mod linux_custody;
+pub mod linux_launcher;
+pub mod native_evidence;
+pub mod native_management;
+pub mod native_receipts;
+pub mod native_receiver;
+pub mod native_refusals;
+pub mod native_spawn;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod startup_exchange;

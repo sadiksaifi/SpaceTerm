@@ -6080,11 +6080,13 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "futures-util",
+ "getrandom 0.4.3",
  "hkdf",
  "hmac",
  "libc",
  "portable-pty",
  "rcgen",
+ "ring",
  "rusqlite",
  "rustls",
  "same-file",
@@ -6092,7 +6094,10 @@ dependencies = [
  "serde_json",
  "sha2",
  "socket2",
+ "spaceterm-core",
  "spaceterm-directories",
+ "spaceterm-distribution",
+ "spaceterm-protocol",
  "subtle",
  "tempfile",
  "thiserror 2.0.19",
@@ -6121,6 +6126,8 @@ name = "spaceterm-server"
 version = "0.0.0"
 dependencies = [
  "spaceterm-core",
+ "spaceterm-distribution",
+ "spaceterm-host",
 ]
 
 [[package]]

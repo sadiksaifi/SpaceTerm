@@ -32,3 +32,16 @@ pub mod cli_sudo;
 pub mod linux;
 #[path = "macos_management/mod.rs"]
 pub mod macos;
+
+/// Fixed client-facing management ports supplied by native-management C1.
+#[allow(
+    dead_code,
+    reason = "legacy source-included tests do not consume the additive facade"
+)]
+#[path = "native_management/facade.rs"]
+pub mod facade;
+#[allow(
+    unused_imports,
+    reason = "public facade reexports also compile in legacy source-included tests"
+)]
+pub use facade::{GuiNativeManagement, NativeAction, NativeManagement};

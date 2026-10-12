@@ -8,6 +8,11 @@ native-tests = []
 test-support = []
 
 [dependencies]
+spaceterm-core = { path = "../spaceterm-core" }
+spaceterm-protocol = { path = "../spaceterm-protocol" }
+spaceterm-distribution = { path = "../spaceterm-distribution" }
+getrandom = "=0.4.3"
+ring = "=0.17.14"
 same-file = "=1.0.6"
 thiserror = "=2.0.19"
 rusqlite = { version = "=0.37.0", features = ["bundled", "hooks"] }
@@ -37,3 +42,25 @@ rcgen = { version = "=0.14.5", default-features = false, features = ["ring"] }
 libc = "=0.2.189"
 anyhow = "1.0.100"
 portable-pty = "=0.9.0"
+
+[[bin]]
+name = "spaceterm-server-launcher"
+path = "src/bin/spaceterm-server-launcher.rs"
+
+[[bin]]
+name = "spaceterm-server-manager"
+path = "src/bin/spaceterm-server-manager.rs"
+
+[[bin]]
+name = "spaceterm-server-spawner"
+path = "src/bin/spaceterm-server-spawner.rs"
+
+[[bin]]
+name = "spaceterm-native-evidence-admin"
+path = "src/bin/spaceterm-native-evidence-admin.rs"
+required-features = ["native-tests"]
+
+[[bin]]
+name = "spaceterm-native-evidence-client"
+path = "src/bin/spaceterm-native-evidence-client.rs"
+required-features = ["native-tests"]
