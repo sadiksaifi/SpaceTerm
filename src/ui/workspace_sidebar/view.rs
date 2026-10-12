@@ -507,8 +507,12 @@ impl WorkspaceSidebar {
                 let selector = format!("{element_name}-selection-{}", workspace_id.get());
                 if lift > 0.0 {
                     chip.render_lifted(selector, hover.max(lift), lift_shadow(appearance, lift))
-                } else {
+                } else if lifted {
                     chip.render(selector, hover)
+                } else {
+                    let motion = self.workspace_reorder.motion(workspace_id, cx);
+                    chip.displaced(motion.selection_offset)
+                        .render(selector, hover)
                 }
             })
             .when(!lifted, |row| {

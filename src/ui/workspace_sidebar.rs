@@ -863,6 +863,12 @@ impl Render for WorkspaceSidebar {
                 &ids,
             );
         }
+        let selected = match self.selected_key() {
+            Some(SidebarRowKey::Workspace(workspace_id)) => Some(workspace_id),
+            _ => None,
+        };
+        self.workspace_reorder
+            .follow_selection(selected, window, cx);
         self.sync_scrollbar(cx);
         let hovers = self.row_hovers(window, cx);
         self.render_body(hovers, cx.entity().downgrade(), window, cx)

@@ -21,7 +21,9 @@ const SHIFT_DURATION: Duration = Duration::from_millis(200);
 /// How long a released item takes to settle into its slot, and the others to follow it.
 const SETTLE_DURATION: Duration = Duration::from_millis(260);
 /// How long a new item takes to grow into the strip, and the gap a removed item leaves to close.
-const PRESENCE_DURATION: Duration = Duration::from_millis(300);
+const PRESENCE_DURATION: Duration = Duration::from_millis(440);
+/// How long the selection takes to move from one item to another.
+const SELECTION_DURATION: Duration = Duration::from_millis(310);
 /// How deep into either end of a strip the pointer starts scrolling it.
 const AUTOSCROLL_EDGE: f32 = 40.0;
 /// How fast a strip scrolls, in points per second, with the pointer at or past its end.
@@ -57,6 +59,21 @@ pub(crate) struct ReorderableStrip<Id> {
     leading_gaps: HashMap<Id, Gap>,
     /// The closing gap a removed last item left after the item that is now last.
     trailing_gaps: HashMap<Id, Gap>,
+    /// Where each item of the last frame started along the strip, and its size, in layout
+    /// coordinates.
+    laid_out: HashMap<Id, (Pixels, Pixels)>,
+    /// The selected item at the last refresh.
+    selected: Option<Id>,
+    /// The selection moving to the selected item.
+    flight: Option<Flight<Id>>,
+}
+
+/// The selection moving from where it was drawn to the item `id`.
+struct Flight<Id> {
+    id: Id,
+    /// Where the selection started along the strip, from where the item settles.
+    from: Pixels,
+    ease: Ease,
 }
 
 /// The item a strip's drag carries, its session, and where a release would land it.
@@ -90,8 +107,8 @@ pub(crate) struct ItemMotion {
     pub(crate) lifted: bool,
     /// How much of its lift a released item still shows, from 1 at release to 0 at rest.
     pub(crate) lift: f32,
-    /// How far a new item has grown into the strip, from 0 toward 1, or `None` once it is in.
-    pub(crate) presence: Option<f32>,
+    /// How far the item's selection is drawn from the item while it moves there.
+    pub(crate) selection_offset: Point<Pixels>,
     /// The item's slot size along the strip while it grows in, or `None` at its natural size.
     pub(crate) extent: Option<Pixels>,
     /// The closing gap before the item's slot, along the strip.
@@ -104,20 +121,17 @@ impl ItemMotion {
     /// How opaque the item is: faded where a release would land it while lifted, and nearly
     /// opaque while it settles.
     pub(crate) fn opacity(self) -> f32 {
-        let presence = self
-            .presence
-            .map_or(1.0, |presence| presence.clamp(0.0, 1.0));
-        presence
-            * if self.lifted {
-                PLACEHOLDER_OPACITY
-            } else {
-                lifted_opacity(self.lift)
-            }
+        if self.lifted {
+            PLACEHOLDER_OPACITY
+        } else {
+            lifted_opacity(self.lift)
+        }
     }
 
     /// Sizes `slot`, the element that holds the item's place in a strip along `axis`, while the
-    /// item grows in, and opens the closing gaps beside it. `measure` receives the item's natural
-    /// size while it grows, which needs `slot`'s only child to be the item.
+    /// item grows in, and opens the closing gaps beside it. The item shows whole from the start
+    /// and overlaps the items making room for it. `measure` receives the item's natural size
+    /// while it grows, which needs `slot`'s only child to be the item.
     pub(crate) fn frame_slot(
         self,
         axis: Axis,
@@ -135,12 +149,11 @@ impl ItemMotion {
             Axis::Horizontal => slot.w(extent),
             Axis::Vertical => slot.h(extent),
         };
-        slot.overflow_hidden()
-            .on_children_prepainted(move |bounds, _, cx| {
-                if let Some(item) = bounds.first() {
-                    measure(item.size, cx);
-                }
-            })
+        slot.on_children_prepainted(move |bounds, _, cx| {
+            if let Some(item) = bounds.first() {
+                measure(item.size, cx);
+            }
+        })
     }
 }
 
@@ -156,7 +169,100 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
             grown: Vec::new(),
             leading_gaps: HashMap::new(),
             trailing_gaps: HashMap::new(),
+            laid_out: HashMap::new(),
+            selected: None,
+            flight: None,
         }
+    }
+
+    /// Moves the selection to the item `selected` from wherever it was drawn, when it differs
+    /// from the last refresh. Call it on every render, after [`Self::refresh`].
+    pub(crate) fn follow_selection(&mut self, selected: Option<Id>, window: &mut Window, cx: &App) {
+        let now = now(cx);
+        if self.lift.is_some() {
+            self.flight = None;
+        }
+        if selected != self.selected {
+            let previous = std::mem::replace(&mut self.selected, selected);
+            let motion = presence_motion(cx);
+            let from = previous.and_then(|previous| self.selection_start(previous, now));
+            let to = selected.and_then(|selected| self.settled_start(selected, now));
+            self.flight = from
+                .zip(to)
+                .zip(selected)
+                .filter(|_| self.lift.is_none() && motion != spaceterm_ui::ControlMotion::Reduced)
+                .map(|((from, to), id)| Flight {
+                    id,
+                    from: from - to,
+                    ease: Ease::new(SELECTION_DURATION, now, motion),
+                });
+        }
+        if self.flight.as_ref().is_some_and(|flight| {
+            flight.ease.finished(now) && self.displacement(flight.id, now) == px(0.0)
+        }) {
+            self.flight = None;
+        }
+        if self.flight.is_some() {
+            window.request_animation_frame();
+        }
+    }
+
+    /// Where the selection drawn at the item `id` started along the strip in the last frame.
+    fn selection_start(&self, id: Id, now: Instant) -> Option<Pixels> {
+        let (start, _) = *self.laid_out.get(&id)?;
+        let flying = self
+            .flight
+            .as_ref()
+            .filter(|flight| flight.id == id)
+            .map_or(px(0.0), |flight| flight.from * (1.0 - flight.ease.at(now)));
+        Some(start + flying)
+    }
+
+    /// Where the item `id` starts along the strip once every item has grown in and every gap has
+    /// closed. A new item settles where the item after it, or the end of the item before it,
+    /// stood in the last frame.
+    fn settled_start(&self, id: Id, now: Instant) -> Option<Pixels> {
+        if let Some((start, _)) = self.laid_out.get(&id) {
+            return Some(*start - self.displacement(id, now));
+        }
+        let ids = self.known.as_ref()?;
+        let position = ids.iter().position(|candidate| *candidate == id)?;
+        let next = ids[position + 1..]
+            .iter()
+            .find_map(|next| self.laid_out.get(next))
+            .map(|(start, _)| *start);
+        let previous = ids[..position]
+            .iter()
+            .rev()
+            .find_map(|previous| self.laid_out.get(previous))
+            .map(|(start, size)| *start + *size);
+        next.or(previous)
+    }
+
+    /// How far the item `id` starts along the strip from where it settles, while items before it
+    /// grow in and gaps before it close.
+    fn displacement(&self, id: Id, now: Instant) -> Pixels {
+        let Some(ids) = self.known.as_ref() else {
+            return px(0.0);
+        };
+        let Some(position) = ids.iter().position(|candidate| *candidate == id) else {
+            return px(0.0);
+        };
+        let gap =
+            |gaps: &HashMap<Id, Gap>, id: &Id| gaps.get(id).map_or(px(0.0), |gap| gap.at(now));
+        ids[..position]
+            .iter()
+            .fold(gap(&self.leading_gaps, &id), |shift, before| {
+                let growing = self
+                    .entering
+                    .get(before)
+                    .filter(|(ease, _)| !ease.finished(now))
+                    .and_then(|(ease, natural)| {
+                        natural.map(|natural| natural * (ease.at(now) - 1.0))
+                    })
+                    .unwrap_or(px(0.0));
+                shift + gap(&self.leading_gaps, before) + gap(&self.trailing_gaps, before) + growing
+            })
     }
 
     /// Keeps the new item `id`, one of the strip's `ids`, scrolled into view while it grows and
@@ -177,6 +283,27 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
         if let Some((_, natural)) = self.entering.get_mut(&id) {
             *natural = Some(size.along(axis));
         }
+    }
+
+    /// Records where each item of the last frame was laid out, when the strip's children match it.
+    fn record_layout(&mut self, items: &ScrollHandle) {
+        let axis = self.axis;
+        let Some(known) = self.known.as_ref() else {
+            return;
+        };
+        let bounds = (0..known.len())
+            .map(|position| items.bounds_for_item(position))
+            .collect::<Option<Vec<_>>>()
+            .filter(|bounds| bounds.len() == known.len() && items.children_count() == known.len());
+        self.laid_out = bounds
+            .map(|bounds| {
+                known
+                    .iter()
+                    .zip(bounds)
+                    .map(|(id, bounds)| (*id, (bounds.origin.along(axis), bounds.size.along(axis))))
+                    .collect()
+            })
+            .unwrap_or_default();
     }
 
     /// Starts new items growing into the strip and closes the gaps removed items leave, when the
@@ -281,6 +408,7 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
             self.lift = None;
             self.slides.clear();
         }
+        self.record_layout(items);
         self.follow_changes(items, ids, cx);
         self.autoscroll(items, ids, window, cx);
         let now = now(cx);
@@ -337,7 +465,18 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
             lift: slide
                 .filter(|_| self.settling == Some(id))
                 .map_or(0.0, |slide| 1.0 - ease_out(slide.progress(now))),
-            presence: entering.map(|(ease, _)| ease.at(now)),
+            selection_offset: self
+                .flight
+                .as_ref()
+                .filter(|flight| flight.id == id && self.lift.is_none())
+                .map_or_else(Point::default, |flight| {
+                    let offset =
+                        flight.from * (1.0 - flight.ease.at(now)) - self.displacement(id, now);
+                    match self.axis {
+                        Axis::Horizontal => point(offset, px(0.0)),
+                        Axis::Vertical => point(px(0.0), offset),
+                    }
+                }),
             extent: entering
                 .map(|(ease, natural)| natural.map_or(px(0.0), |natural| natural * ease.at(now))),
             leading_gap: self
@@ -655,7 +794,7 @@ fn presence_motion(cx: &App) -> spaceterm_ui::ControlMotion {
     super::appearance_runtime::control_motion(cx)
 }
 
-/// A progress from 0 to 1 that starts at `since` and eases out, without overshoot.
+/// A progress from 0 to 1 that starts at `since`, fast at first and slowing to a stop.
 #[derive(Clone, Copy, Debug)]
 struct Ease {
     since: Instant,
@@ -688,7 +827,7 @@ impl Ease {
     }
 
     fn at(&self, now: Instant) -> f32 {
-        ease_out(self.progress(now))
+        decay(self.progress(now))
     }
 }
 
@@ -763,6 +902,14 @@ impl Slide {
             ..self
         }
     }
+}
+
+/// Closes the same share of the remaining distance in each moment, so it starts at full speed
+/// and slows toward the end, without overshoot.
+fn decay(progress: f32) -> f32 {
+    /// How many time constants the motion runs, by when less than 1% of the distance remains.
+    const TIME_CONSTANTS: f32 = 6.2;
+    (1.0 - (-TIME_CONSTANTS * progress).exp()) / (1.0 - (-TIME_CONSTANTS).exp())
 }
 
 /// Fast at the start and gentle at the end, as CSS `cubic-bezier(0.2, 0.8, 0.2, 1)`.
@@ -840,8 +987,12 @@ fn lifted_opacity(lift: f32) -> f32 {
 #[cfg(test)]
 pub(crate) fn finish_slides(cx: &mut gpui::VisualTestContext) {
     cx.run_until_parked();
-    cx.executor()
-        .advance_clock(SHIFT_DURATION.max(SETTLE_DURATION).max(PRESENCE_DURATION));
+    cx.executor().advance_clock(
+        SHIFT_DURATION
+            .max(SETTLE_DURATION)
+            .max(PRESENCE_DURATION)
+            .max(SELECTION_DURATION),
+    );
     cx.update(|window, cx| window.simulate_next_frame(cx));
     cx.run_until_parked();
 }
@@ -1288,6 +1439,13 @@ mod tests {
                 -AUTOSCROLL_SPEED,
             ]
         );
+    }
+
+    #[test]
+    fn decay_should_start_at_full_speed_and_land_exactly() {
+        assert_eq!((decay(0.0), decay(1.0)), (0.0, 1.0));
+        assert!(decay(0.1) > 0.4, "the curve moves fastest at the start");
+        assert!(decay(0.5) < decay(0.75) && decay(0.75) < 1.0);
     }
 
     #[test]

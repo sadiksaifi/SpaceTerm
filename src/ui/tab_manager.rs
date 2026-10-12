@@ -1910,7 +1910,7 @@ impl TabManager {
         let chip = if motion.lifted {
             chip.landing(foreground)
         } else {
-            chip
+            chip.displaced(motion.selection_offset)
         };
         let chip = if motion.lift > 0.0 {
             chip.render_lifted(
@@ -2417,6 +2417,8 @@ impl Render for TabManager {
             &self.tab_bar_scroll_handle,
             &ids,
         );
+        self.tab_reorder
+            .follow_selection(Some(self.tabs.active_tab_id()), window, cx);
         #[cfg(test)]
         {
             self.rendered_window_active = window.is_window_active();
@@ -6090,9 +6092,11 @@ mod tests {
         };
         let width = cx.debug_bounds("tab-item-1-active").unwrap().size.width;
         let before = create(cx);
+        let selection = cx.debug_bounds("tab-item-1-chip").unwrap().origin;
 
         click("create-tab-button", cx);
         let entering = create(cx);
+        let leaving = cx.debug_bounds("tab-item-2-chip").map(|chip| chip.origin);
         cx.executor()
             .advance_clock(std::time::Duration::from_millis(30));
         cx.update(|window, cx| window.simulate_next_frame(cx));
@@ -6100,6 +6104,7 @@ mod tests {
         let growing = create(cx);
         finish_slides(cx);
         let entered = create(cx);
+        let landed = cx.debug_bounds("tab-item-2-chip").map(|chip| chip.origin);
         click("tab-close-button-2", cx);
         let closing = create(cx);
         finish_slides(cx);
@@ -6114,6 +6119,81 @@ mod tests {
         assert!(
             before < growing && growing < before + width,
             "a new Tab must be part way in shortly after it opens, got {growing:?}"
+        );
+        assert_eq!(
+            (leaving, landed),
+            (Some(selection), Some(selection + point(width, px(0.0)))),
+            "the selection must move from the old Tab to the new one"
+        );
+    }
+
+    #[gpui::test]
+    fn switching_tabs_should_move_the_selection_from_the_old_tab(cx: &mut TestAppContext) {
+        let (_manager, _records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
+        finish_slides(cx);
+        cx.update(|_, cx| cx.set_global(AnimatePresence));
+        let first = cx.debug_bounds("tab-item-1-inactive").unwrap();
+        let second = cx.debug_bounds("tab-item-2-active").unwrap();
+        let selection = cx.debug_bounds("tab-item-2-chip").unwrap();
+        let chip = |cx: &mut VisualTestContext| {
+            cx.debug_bounds("tab-item-1-chip")
+                .expect("the selected Tab's chip was not rendered")
+                .origin
+        };
+
+        click("tab-item-1-inactive", cx);
+        let leaving = chip(cx);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(30));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        let moving = chip(cx);
+        finish_slides(cx);
+        let landed = chip(cx);
+
+        let home = selection.origin + (first.origin - second.origin);
+        assert_eq!(
+            (leaving, landed),
+            (selection.origin, home),
+            "the selection must leave from the old Tab and land on the new one"
+        );
+        assert!(
+            home.x < moving.x && moving.x < selection.origin.x,
+            "the selection must be on its way shortly after the switch, got {moving:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn closing_the_active_tab_should_hold_the_selection_where_the_next_tab_slides_in(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
+        click("create-tab-button", cx);
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| manager.activate_tab_at(1, window, cx));
+        });
+        finish_slides(cx);
+        cx.update(|_, cx| cx.set_global(AnimatePresence));
+        let selection = cx.debug_bounds("tab-item-2-chip").unwrap();
+        let third = cx.debug_bounds("tab-item-3-inactive").unwrap();
+
+        click("tab-close-button-2", cx);
+        let closing = (
+            cx.debug_bounds("tab-item-3-active").map(|tab| tab.origin),
+            cx.debug_bounds("tab-item-3-chip").map(|chip| chip.origin),
+        );
+        finish_slides(cx);
+        let closed = cx.debug_bounds("tab-item-3-chip").map(|chip| chip.origin);
+
+        assert_eq!(
+            (closing, closed),
+            (
+                (Some(third.origin), Some(selection.origin)),
+                Some(selection.origin)
+            ),
+            "the next Tab must slide in under the selection, which stays where it was"
         );
     }
 

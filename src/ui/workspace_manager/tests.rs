@@ -7960,6 +7960,33 @@ fn a_closed_workspace_row_should_leave_a_gap_that_closes(cx: &mut TestAppContext
 }
 
 #[gpui::test]
+fn selecting_another_workspace_should_move_the_selection_from_the_old_row(cx: &mut TestAppContext) {
+    let (_manager, _records, cx) = workspace_manager(cx);
+    cx.simulate_keystrokes("cmd-n");
+    finish_slides(cx);
+    cx.update(|_, cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
+    let first = cx.debug_bounds("workspace-row-1-inactive").unwrap();
+    let second = cx.debug_bounds("workspace-row-2-active").unwrap();
+    let selection = cx.debug_bounds("workspace-row-selection-2").unwrap().origin;
+    let chip = |cx: &mut VisualTestContext| {
+        cx.debug_bounds("workspace-row-selection-1")
+            .expect("the selected row's chip was not rendered")
+            .origin
+    };
+
+    click("workspace-row-1-inactive", cx);
+    let leaving = chip(cx);
+    finish_slides(cx);
+    let landed = chip(cx);
+
+    assert_eq!(
+        (leaving, landed),
+        (selection, selection + (first.origin - second.origin)),
+        "the selection must leave from the old row and land on the new one"
+    );
+}
+
+#[gpui::test]
 fn escape_should_cancel_a_workspace_row_drag_and_return_every_row_to_its_place(
     cx: &mut TestAppContext,
 ) {

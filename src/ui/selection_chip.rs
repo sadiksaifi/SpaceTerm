@@ -131,6 +131,7 @@ pub(crate) struct SelectionChip {
     paint: ChipPaint,
     outline: Option<Color>,
     landing: Option<Color>,
+    offset: gpui::Point<Pixels>,
 }
 
 /// The width of the outline that marks the item a context menu acts on.
@@ -143,7 +144,14 @@ impl SelectionChip {
             paint,
             outline: None,
             landing: None,
+            offset: gpui::Point::default(),
         }
+    }
+
+    /// Draws the chip `offset` from its place in the item, as a selection moving to the item.
+    pub(crate) const fn displaced(mut self, offset: gpui::Point<Pixels>) -> Self {
+        self.offset = offset;
+        self
     }
 
     /// Edges the chip with a dashed line in `color`, marking the place a dragged item would land.
@@ -159,13 +167,13 @@ impl SelectionChip {
         self
     }
 
-    fn body(shape: ChipShape) -> gpui::Div {
+    fn body(shape: ChipShape, offset: gpui::Point<Pixels>) -> gpui::Div {
         div()
             .absolute()
-            .top(shape.inset_y)
-            .bottom(shape.inset_y)
-            .left(shape.inset_leading)
-            .right(shape.inset_trailing)
+            .top(shape.inset_y + offset.y)
+            .bottom(shape.inset_y - offset.y)
+            .left(shape.inset_leading + offset.x)
+            .right(shape.inset_trailing - offset.x)
             .rounded(shape.radius)
     }
 
@@ -196,7 +204,7 @@ impl SelectionChip {
         let hover_rim = paint.hover_rim.filter(|rim| rim.a != 0).or(rest_rim);
         let rim = hovered_paint(rest_rim, hover_rim, hover);
         let landing = self.landing.is_some();
-        Self::body(self.shape)
+        Self::body(self.shape, self.offset)
             .debug_selector(move || {
                 if landing {
                     format!("{selector}-landing")
