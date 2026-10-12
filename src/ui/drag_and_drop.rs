@@ -936,7 +936,7 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
     }
 
     /// Scrolls the strip toward the end the pointer holds near, faster the deeper it holds, and
-    /// follows the items that pass under the lifted copy.
+    /// follows the items that pass under the lifted copy or grow beside it while it holds still.
     fn autoscroll(&mut self, items: &ScrollHandle, ids: &[Id], window: &mut Window, cx: &App) {
         let axis = self.axis;
         let Some(lift) = self.lift.as_mut() else {
@@ -956,6 +956,7 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
         let limit = -f32::from(items.max_offset().along(axis));
         if !((velocity > 0.0 && current < 0.0) || (velocity < 0.0 && current > limit)) {
             lift.scrolled_at = None;
+            self.track(items, ids, pointer, cx);
             return;
         }
         let now = now(cx);

@@ -6060,6 +6060,54 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_tab_held_still_while_it_grows_should_open_a_gap_as_wide_as_it_grows(
+        cx: &mut TestAppContext,
+    ) {
+        let (_manager, _records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
+        click("create-tab-button", cx);
+        click("create-tab-button", cx);
+        finish_slides(cx);
+        let first = cx.debug_bounds("tab-item-1-inactive").unwrap().origin;
+        let rest = [
+            "tab-item-2-inactive",
+            "tab-item-3-inactive",
+            "tab-item-4-active",
+        ]
+        .map(|selector| cx.debug_bounds(selector).unwrap().origin);
+        click("tab-close-button-4", cx);
+        finish_slides(cx);
+        cx.update(|_, cx| cx.set_global(AnimatePresence));
+        click("create-tab-button", cx);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(60));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        let grabbed = cx.debug_bounds("tab-item-5-active").unwrap().center();
+        let held = first + point(px(4.0), px(10.0));
+
+        drag_tab(grabbed, &[grabbed - point(px(8.0), px(0.0)), held], cx);
+        for _ in 0..60 {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(16));
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+            cx.run_until_parked();
+        }
+
+        assert_eq!(
+            [
+                "tab-item-1-inactive",
+                "tab-item-2-inactive",
+                "tab-item-3-inactive",
+            ]
+            .map(|selector| cx.debug_bounds(selector).map(|tab| tab.origin)),
+            rest.map(Some),
+            "Tabs must make room for the whole lifted Tab once it has grown, while the pointer \
+             holds still"
+        );
+    }
+
+    #[gpui::test]
     fn a_tab_dragged_while_it_grows_should_leave_every_tab_at_rest(cx: &mut TestAppContext) {
         let (manager, _records, cx) = tab_manager(cx);
         click("create-tab-button", cx);
