@@ -22,7 +22,7 @@ message Limits {
   uint32 paste_bytes = 7;
   uint32 clipboard_bytes = 8;
 }
-enum Purpose { PURPOSE_UNSPECIFIED = 0; ORDINARY = 1; REVOCATION_STATUS = 2; }
+enum Purpose { PURPOSE_UNSPECIFIED = 0; ORDINARY = 1; REVOCATION_STATUS = 2; ENROLLMENT = 3; }
 enum Direction { DIRECTION_UNSPECIFIED = 0; CLIENT_TO_SERVER = 1; SERVER_TO_CLIENT = 2; }
 message ClientHello {
   Identity expected_server = 1;
@@ -291,3 +291,19 @@ message RestrictedMessage {
     Failure failure = 4;
   }
 }
+
+// Extensions are not advertised until producer/converter validation exists.
+enum Capability {
+  CAPABILITY_UNSPECIFIED = 0;
+  NORMALIZED_CREATION_TOPOLOGY = 1;
+  SERVER_GIT = 520001;
+  SERVER_DIRECTORIES = 520002;
+  CANONICAL_DOMAIN = 520003;
+}
+// This descriptor does not imply admission. Sequence belongs to OperationId.
+message OperationStream {
+  Entity key = 1;
+  Entity pairing = 2;
+  Entity client = 3;
+}
+message QualifiedOperationId { OperationStream stream = 1; uint64 sequence = 2; }

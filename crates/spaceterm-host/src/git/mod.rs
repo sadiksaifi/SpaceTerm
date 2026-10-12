@@ -61,3 +61,7 @@ impl fmt::Debug for WorktreeSnapshot {
             .finish_non_exhaustive()
     }
 }
+
+/// Server-domain bridge over the existing Git coordinator.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod server;

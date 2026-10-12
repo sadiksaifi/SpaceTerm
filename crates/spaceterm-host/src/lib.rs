@@ -42,3 +42,8 @@ pub mod approved_installation;
 pub mod boot_credentials;
 pub mod installation;
 pub mod native_deployment;
+pub mod organization_store;
+
+pub mod server_directories;
+
+pub mod bootstrap;

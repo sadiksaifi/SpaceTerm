@@ -41,3 +41,12 @@ pub use find::{FindDirection, FindHighlightSpan, FindQueryGeneration, TerminalFi
 pub use hyperlink::HyperlinkTarget;
 pub use key::{InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, PhysicalKey};
 pub use snapshot::*;
+
+#[cfg(feature = "engine")]
+pub mod content;
+#[path = "content/contracts.rs"]
+pub mod content_contracts;
+#[cfg(feature = "runtime")]
+pub mod runtime;
+#[path = "runtime/contracts.rs"]
+pub mod runtime_contracts;

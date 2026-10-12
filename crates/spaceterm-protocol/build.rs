@@ -13,14 +13,59 @@ use prost_types::{
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let files = ["proto/common.proto", "proto/v1.proto", "proto/v2.proto"];
+    let files = [
+        "proto/common.proto",
+        "proto/v1.proto",
+        "proto/v2.proto",
+        "proto/pairing.proto",
+        "proto/pairing_restricted.proto",
+        "proto/git_v1.proto",
+        "proto/git_v2.proto",
+        "proto/directories_v1.proto",
+        "proto/directories_v2.proto",
+    ];
     for file in files {
         println!("cargo:rerun-if-changed={file}");
     }
     // Both parsing and Rust generation are pinned Rust dependencies. No protoc,
     // network access, or host compiler installation participates in generation.
     let descriptors = protox::compile(files, ["proto"])?;
-    prost_build::Config::new().compile_fds(descriptors.clone())?;
+    let mut config = prost_build::Config::new();
+    // Box only additive payload fields. This changes Rust storage, not protobuf
+    // tags or retained legacy profile meaning.
+    for major in [1, 2] {
+        for field in [
+            "Outcome.result.pairing_result",
+            "OperationLookupResult.disposition.completed",
+            "FindEvent.item.chunk",
+            "Message.kind.canonical_semantic_page",
+            "Message.kind.content_read_response",
+            "ContentReadResponse.result.page",
+            "PairingOutcome.operation",
+            "PairingOutcome.reservation",
+            "PairingOutcome.enrollment_receipt",
+            "PairingOutcome.client_binding_receipt",
+            "PairingOutcome.unpair_assessment",
+            "PairingOutcome.authorization_delivery",
+            "PairingOutcome.revocation_proof",
+            "SemanticPage.stamp",
+            "SemanticPage.page_continuation",
+            "ContentQuery.stamp",
+            "ContentQuery.page_continuation",
+            "ContentQuery.find_continuation",
+            "ResourceRequest.stamp",
+            "ResourceChunk.stamp",
+        ] {
+            config.boxed(format!(".spaceterm.v{major}.{field}"));
+        }
+        config.boxed(format!(
+            ".spaceterm.directories.v{major}.DirectoryQueryResult.result.page"
+        ));
+        config.boxed(format!(
+            ".spaceterm.git.v{major}.GitAssessmentPage.creation_preview"
+        ));
+    }
+    config.compile_fds(descriptors.clone())?;
 
     let mut messages = BTreeMap::new();
     let mut enums = BTreeMap::new();
@@ -53,7 +98,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "preflight stack counter capacity"
         );
         let semantic = match message.name() {
-            "SemanticRow" => "Row",
+            "SemanticRow" | "CanonicalSemanticRow" => "Row",
             "StyledCell" | "Grapheme" => "Cell",
             _ => "Other",
         };
@@ -79,7 +124,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ),
                 Type::Bytes => {
                     let exact = match field.name() {
-                        "signature" | "device_proof" => 64,
+                        "signature"
+                        | "device_proof"
+                        | "device_identity_proof"
+                        | "pairing_authentication_proof" => 64,
+                        "device_identity_public_key"
+                        | "pairing_authentication_public_key"
+                        | "claim_nonce"
+                        | "claim_digest"
+                        | "request_digest"
+                        | "enrollment_request_digest"
+                        | "assessment_digest"
+                        | "authentication_key_digest"
+                        | "single_use_authorization"
+                        | "plain_digest"
+                        | "html_digest"
+                        | "query_fingerprint"
+                        | "random" => 32,
+                        "ticket_nonce" | "revocation_event" | "native_request" => 16,
                         "nonce"
                         | "connection_nonce"
                         | "binding"
@@ -106,9 +168,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "default_foreground" | "default_background" | "cursor_color",
                         ) => 0x00ff_ffff,
                         ("Color", "palette_index") | ("ColorOverride", "slot") => 255,
-                        ("Geometry", _) => u16::MAX as u32,
+                        ("Geometry" | "MeasuredGrid" | "CellPixelMetrics", _) => u16::MAX as u32,
+                        ("GraphicsResourceReference", "rgba_bytes") => {
+                            hard::MAX_GRAPHICS_TRANSMISSION_BYTES as u32
+                        }
                         ("Key" | "Pointer", "modifiers" | "consumed_modifiers") => 1023,
                         ("Key", "unshifted_codepoint") => 0x10_ffff,
+                        ("PhysicalRowId", "page_row")
+                        | ("PageContinuation", "columns" | "next_column")
+                        | (
+                            "SemanticRow" | "CanonicalSemanticRow",
+                            "start_column" | "end_column" | "columns",
+                        ) => u16::MAX as u32,
+                        ("PhysicalRowId" | "QueryStamp" | "ContentBase", "screen") => 2,
+                        ("RemoteEndpoint", "port") => u16::MAX as u32,
+                        ("CapabilityStatus", "availability") | ("ListenerStatus", "state") => 4,
+                        ("ManagementProgress", "state") => 6,
                         _ => u32::MAX,
                     };
                     format!("Kind::Varint({maximum})")
@@ -124,7 +199,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ("ClipboardRequest", "text") | ("NativeCompletion", "clipboard_text") => {
                     "Clipboard"
                 }
-                ("ResourceChunk", "data") => "Resource",
+                ("ResourceChunk" | "CopyChunk", "data") => "Resource",
                 _ => "Other",
             };
             output.push_str(&format!("Field {{ number: {}, kind: {kind}, repeated: {repeated}, oneof: {oneof}, max_count: {max_count}, required: {required}, content_limit: ContentLimit::{content_limit} }},\n", field.number()));
@@ -173,15 +248,36 @@ fn repeated_limit(message: &str, field: &str) -> usize {
     match (message, field) {
         (_, "majors" | "capabilities") => 16,
         (_, "palette" | "color_overrides") => hard::MAX_PALETTE_COLORS,
-        ("SemanticPage", "rows") => hard::MAX_SEMANTIC_ROWS,
-        ("SemanticRow", "cells" | "runs") | ("StyledRun", "graphemes") => hard::MAX_SEMANTIC_CELLS,
-        ("SemanticPage", "graphics" | "hyperlinks" | "matches") => hard::MAX_SEMANTIC_REFERENCES,
+        ("SemanticPage" | "CanonicalSemanticPage", "rows") => hard::MAX_SEMANTIC_ROWS,
+        ("SemanticRow" | "CanonicalSemanticRow", "cells" | "runs") | ("StyledRun", "graphemes") => {
+            hard::MAX_SEMANTIC_CELLS
+        }
+        ("SemanticPage" | "CanonicalSemanticPage", "graphics" | "hyperlinks" | "matches") => {
+            hard::MAX_SEMANTIC_REFERENCES
+        }
+        ("CanonicalSemanticPage", "resources") => 128,
+        ("OrganizationDelta" | "OrganizationSnapshot", "repositories" | "deleted_repositories") => {
+            4096
+        }
+        ("Tab", "creation_replay_order") => usize::from(u16::MAX),
+        ("UnpairAssessment", "clients") => 16,
+        ("RemoteAccessPolicy", "endpoints") | ("ManagementStatus", "listeners" | "progress") => 8,
+        ("GitInventoryPage" | "GitBranchPage", "records")
+        | ("GitAssessmentPage", "tabs" | "panes" | "fallbacks")
+        | ("DirectoryPage", "entries") => 128,
+        ("GitStatusFacts", "changes") => 20,
+        ("FindChunk", "matches") | ("TopologyPage", "rows") => 256,
         _ => 4096,
     }
 }
 
 fn bytes_limit(message: &str, field: &str) -> usize {
     match (message, field) {
+        ("SignedReceipt", "canonical_body") => 1984,
+        ("RemoteEndpoint", "address") => 16,
+        ("DirectoryEntryName", "value") => 255,
+        ("BranchText", "value") => 1024,
+        ("CopyChunk", "data") => hard::MAX_RESOURCE_CHUNK_BYTES,
         ("Signed", "body") | ("AuthenticatedEnvelope", "payload") => hard::MAX_FRAME_BYTES,
         ("Paste" | "UnsafePasteRequest", "text") => hard::MAX_PASTE_BYTES,
         ("ClipboardRequest", "text") | ("NativeCompletion", "clipboard_text") => {
@@ -222,6 +318,8 @@ fn required(message: &str, field: &FieldDescriptorProto) -> bool {
         "Outcome" => field.name() == "operation",
         "RevocationRequest" | "RevocationStatus" | "RevocationReceipt" => true,
         "SemanticRow" => matches!(field.name(), "id" | "revision"),
+        "CanonicalSemanticRow" => matches!(field.name(), "id" | "columns"),
+        "CanonicalSemanticPage" => matches!(field.name(), "stamp" | "geometry"),
         "SemanticPage" => matches!(
             field.name(),
             "fence"
@@ -243,19 +341,84 @@ fn required(message: &str, field: &FieldDescriptorProto) -> bool {
         "Style" => matches!(field.name(), "foreground" | "background"),
         "StyledCell" => field.name() == "style",
         "StyledRun" => matches!(field.name(), "style" | "graphemes"),
-        "ResourceId" => true,
+        "ResourceId" => matches!(field.name(), "session" | "local_id"),
         "ResourceChunk" => matches!(
             field.name(),
             "fence" | "resource" | "transfer" | "total_bytes" | "format"
         ),
-        "Geometry" => true,
+        "Geometry"
+        | "MeasuredGrid"
+        | "HeldControl"
+        | "StartupAwaitingMeasurementResult"
+        | "GraphicsResourceReference"
+        | "ContentFailure"
+        | "ContentResyncRequired"
+        | "CellPixelMetrics"
+        | "NewBranchChoice"
+        | "RemoteBranchChoice"
+        | "WorktreeCreateDraft" => true,
+        "LegacyCreatedWorkspaceResult" | "LegacyCreatedTabResult" => true,
+        "LegacyControlAcquiredResult" => field.name() != "generation",
+        "LegacyAssessedResult" => field.name() == "assessment",
+        "OperationFailureResult" => field.name() == "kind",
+        "WorktreeCreationPreview" => matches!(field.name(), "draft" | "directory"),
         "Failure" => field.name() == "classification",
+        "ContentBase" => matches!(field.name(), "session" | "screen"),
+        "TopologyPage" => field.name() == "stamp",
+        "GitInventoryRequest" => field.name() == "workspace",
         "TerminalMetadata" => field.name() == "version",
         "Key" => field.name() == "action",
         "ControlRequest" => matches!(field.name(), "pane" | "action" | "request"),
         "Scope" => field.name() == "kind",
         "ManagementRequest" => matches!(field.name(), "request" | "action"),
         "ManagementStatus" => field.name() == "state",
+        "Target"
+        | "Keys"
+        | "Binding"
+        | "Ticket"
+        | "Proposal"
+        | "Reservation"
+        | "IssueAuthorization"
+        | "BindAdditionalClient"
+        | "AssessUnpair"
+        | "UnpairAssessment"
+        | "UnpairConfirmed"
+        | "AuthorizationDelivery"
+        | "SignedReceipt"
+        | "EnrollmentReceiptBody"
+        | "ClientBindingReceiptBody"
+        | "RevocationReceiptBody"
+        | "SelfRevocation"
+        | "ReceiptStatus"
+        | "RestrictedAcknowledgement"
+        | "EnrollmentHello"
+        | "EnrollmentServerHello"
+        | "EnrollmentProof"
+        | "EnrollmentReady"
+        | "EnrollmentSubmission"
+        | "EnrollmentLookup"
+        | "EnrollmentAcknowledgement" => true,
+        "ReceiptBody" => field.name() == "schema",
+        "RestrictedResult" => field.name() != "receipt",
+        "EnrollmentResult" => matches!(field.name(), "operation" | "request_digest"),
+        "GitAssessmentToken" => true,
+        "DirectoryContext"
+        | "ServerDirectory"
+        | "ServerDirectoryValue"
+        | "DirectoryEntryName"
+        | "BranchText" => true,
+        "DirectoryCursor" => true,
+        "OperationStream" | "QualifiedOperationId" | "GrantedControl" | "PageLimits" => true,
+        "QueryStamp" => matches!(field.name(), "fence" | "request" | "screen"),
+        "AcceptedPaneCreation" => matches!(field.name(), "tab" | "pane" | "source" | "edge"),
+        "PhysicalRowId" => field.name() == "screen",
+        "OperationLookupRequest" | "OperationLookupResult" => {
+            matches!(field.name(), "operation" | "request_digest")
+        }
+        "PublicationPart" => matches!(
+            field.name(),
+            "request" | "transfer" | "total" | "epoch" | "revision"
+        ),
         _ => false,
     }
 }

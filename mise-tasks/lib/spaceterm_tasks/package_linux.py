@@ -34,6 +34,11 @@ from spaceterm_tasks.packaging import (
     verify_resources,
 )
 
+# The companion owner supplies these functions before the coordinator activates
+# the build/stage/verification calls. Existing desktop packaging stays unchanged.
+COMPANION_EXTENSION_MODULE = "spaceterm_tasks.status_companion_packaging"
+COMPANION_HOOK_DECLARATIONS = ("stage_linux", "verify_companion")
+
 STAGE = ROOT / "target" / "package-linux"
 PLATFORM = "linux-x86_64"
 # Ubuntu 22.04. The release builds there, and every symbol the executable needs must exist there.

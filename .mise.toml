@@ -434,6 +434,10 @@ run = [
   { task = "lint:diff" },
   { task = "check:portable" },
   { task = "test:portable" },
+  { task = "check:headless" },
+  { task = "check:server:client" },
+  { task = "lint:server:client" },
+  { task = "test:server:client" },
 ]
 
 [tasks."engine:build"]
@@ -550,3 +554,321 @@ run = "cargo test -p spaceterm-distribution --all-targets --locked"
 [tasks."lint:server:distribution"]
 description = "Lint headless artifact verification"
 run = "cargo clippy -p spaceterm-distribution --all-targets --locked --no-deps -- -D warnings"
+[tasks."test:server:organization"]
+description = "Test the portable organization reducer"
+usage = 'arg "[filter]" help="Run only organization reducer tests whose names contain this text"'
+run = "cargo test --package spaceterm-core --test organization_reducer --locked --no-fail-fast {{usage.filter | quote}}"
+
+[tasks."check:server:organization"]
+description = "Check portable organization contracts and reducer without default features"
+run = "cargo check --package spaceterm-core --all-targets --no-default-features --locked"
+
+[tasks."lint:server:organization"]
+description = "Lint portable organization contracts and reducer"
+run = "cargo clippy --package spaceterm-core --all-targets --all-features --locked --no-deps -- -D warnings"
+
+[tasks."test:server:op-ledger"]
+description = "Test durable operation identity, retention, transactions, and recovery"
+run = "cargo test --package spaceterm-core --locked --test operation_ledger_identity --test operation_ledger_retention --test operation_ledger_transactions --test operation_ledger_recovery"
+
+[tasks."test:server:core"]
+description = "Test every portable server core target"
+run = "cargo test --package spaceterm-core --all-targets --locked"
+
+[tasks."test:server:core:rustdoc"]
+description = "Test portable server core documentation examples"
+run = "cargo test --package spaceterm-core --doc --locked"
+
+[tasks."lint:server:core"]
+description = "Lint every portable server core target and feature"
+run = "cargo clippy --package spaceterm-core --all-targets --all-features --locked --no-deps -- -D warnings"
+
+[tasks."fmt:server:core:check"]
+description = "Check portable server core Rust formatting"
+run = "cargo fmt --package spaceterm-core -- --check"
+
+[tasks."test:terminal:contracts"]
+description = "Test engine-free terminal request and observation contracts"
+run = "cargo test --package spaceterm-terminal --no-default-features --test engine_free_contracts --locked"
+
+[tasks."test:terminal:runtime"]
+description = "Test terminal runtime ownership and content with all features"
+run = "cargo test --package spaceterm-terminal --all-targets --all-features --locked"
+
+[tasks."test:terminal:runtime:no-graphics"]
+description = "Test terminal runtime with graphics disabled"
+run = "cargo test --package spaceterm-terminal --all-targets --no-default-features --features runtime --locked"
+
+[tasks."check:terminal:contracts"]
+description = "Check terminal contracts without linking the VT engine"
+run = "cargo check --package spaceterm-terminal --all-targets --no-default-features --locked"
+
+[tasks."lint:terminal:runtime"]
+description = "Lint terminal runtime with all features"
+run = "cargo clippy --package spaceterm-terminal --all-targets --all-features --locked --no-deps -- -D warnings"
+
+[tasks."lint:terminal:runtime:no-graphics"]
+description = "Lint terminal runtime with graphics disabled"
+run = "cargo clippy --package spaceterm-terminal --all-targets --no-default-features --features runtime --locked --no-deps -- -D warnings"
+
+[tasks."test:terminal:legacy"]
+description = "Test desktop session and native-service compatibility"
+run = [
+  "cargo test --package spaceterm --bin spaceterm --locked terminal::session",
+  "cargo test --package spaceterm --bin spaceterm --locked terminal::native_services",
+]
+
+[tasks."lint:terminal:legacy"]
+description = "Lint desktop terminal compatibility integration"
+run = "cargo clippy --package spaceterm --all-targets --all-features --locked --no-deps -- -D warnings"
+
+[tasks."fmt:check:client"]
+description = "Check portable client Rust formatting"
+run = "cargo fmt --package spaceterm-client -- --check"
+
+[tasks."test:client"]
+description = "Test every portable client target"
+env = { CARGO_BUILD_JOBS = "3" }
+run = "cargo test --package spaceterm-client --all-targets --locked"
+
+[tasks."test:client:portable"]
+description = "Test portable client targets without default features"
+env = { CARGO_BUILD_JOBS = "3" }
+run = "cargo test --package spaceterm-client --all-targets --no-default-features --locked"
+
+[tasks."test:client:view"]
+description = "Test client-owned arrangements, attachments, startup and presentation policy"
+env = { CARGO_BUILD_JOBS = "3" }
+run = "cargo test --package spaceterm-client --all-targets --locked view::"
+
+[tasks."lint:client"]
+description = "Lint every portable client target and feature"
+env = { CARGO_BUILD_JOBS = "3" }
+run = "cargo clippy --package spaceterm-client --all-targets --all-features --locked -- -D warnings"
+
+[tasks."test:client:rustdoc"]
+description = "Test portable client documentation examples"
+env = { CARGO_BUILD_JOBS = "3" }
+run = "cargo test --package spaceterm-client --doc --locked"
+
+[tasks."test:server:client"]
+description = "Test portable server clients and durable operation recovery"
+run = [
+  "cargo test --package spaceterm-client --all-targets --features test-support --locked",
+  "cargo test --package spaceterm-client --all-targets --no-default-features --locked",
+  "cargo test --package spaceterm-client --doc --features test-support --locked",
+]
+
+[tasks."check:server:client"]
+description = "Check portable server client targets and formatting"
+run = [
+  "cargo fmt --package spaceterm-client -- --check",
+  "cargo check --package spaceterm-client --all-targets --all-features --locked",
+  "cargo check --package spaceterm-client --all-targets --no-default-features --locked",
+]
+
+[tasks."lint:server:client"]
+description = "Lint portable server client targets and features"
+run = "cargo clippy --package spaceterm-client --all-targets --all-features --locked --no-deps -- -D warnings"
+
+[tasks."test:server:client:native"]
+description = "Test the native client journal and authenticated route adapters"
+run = [
+  "cargo test --package spaceterm --bin spaceterm --features native-tests --locked platform::client_journal",
+  "cargo test --package spaceterm --bin spaceterm --features native-tests --locked platform::server_client_route",
+]
+
+[tasks."check:server:org-store"]
+description = "Check the SQLite organization adapter and its test targets"
+run = "cargo check -p spaceterm-host --all-targets --features test-support --locked"
+
+[tasks."test:server:org-store"]
+description = "Test organization storage, recovery and authority fault boundaries"
+run = "cargo test -p spaceterm-host --all-targets --features test-support --locked --no-fail-fast"
+
+[tasks."lint:server:org-store"]
+description = "Lint the SQLite organization adapter and its test targets"
+run = "cargo clippy -p spaceterm-host --all-targets --features test-support --locked --no-deps -- -D warnings"
+
+[tasks."test:server:org-store:contracts"]
+description = "Test portable organization and durability contracts"
+run = "cargo test -p spaceterm-core --all-targets --locked"
+
+[tasks."test:server:org-store:settings-schema"]
+description = "Test that the published Settings schema remains unchanged"
+run = "cargo test -p spaceterm --bin spaceterm --no-default-features --locked settings::schema_tests"
+
+[tasks."test:server:org-store:settings-document"]
+description = "Test retained Settings document compatibility"
+run = "cargo test -p spaceterm --bin spaceterm --no-default-features --locked settings::document_tests"
+
+[tasks."test:server:pairing"]
+description = "Test portable pairing, both protocol majors and server/host integration"
+env = { CARGO_BUILD_JOBS = "3" }
+run = "cargo test --locked -p spaceterm-core -p spaceterm-protocol -p spaceterm-client -p spaceterm-server -p spaceterm-host --all-targets --no-fail-fast"
+
+[tasks."lint:server:pairing"]
+description = "Lint pairing producer and consumer packages"
+env = { CARGO_BUILD_JOBS = "3" }
+run = "cargo clippy --locked -p spaceterm-core -p spaceterm-protocol -p spaceterm-client -p spaceterm-server -p spaceterm-host --all-targets --no-deps -- -D warnings"
+
+[tasks."test:server:pairing:types"]
+description = "Test pairing capability and purpose compile-fail contracts"
+env = { CARGO_BUILD_JOBS = "3" }
+run = "cargo test --locked -p spaceterm-core -p spaceterm-protocol -p spaceterm-client --doc"
+
+[tasks."test:client:pairing:desktop"]
+description = "Test desktop pairing adapters and retained-format regressions"
+env = { CARGO_BUILD_JOBS = "3" }
+run = [
+  "cargo test --locked -p spaceterm --bin spaceterm --no-default-features pairing",
+  "cargo test --locked -p spaceterm --bin spaceterm --no-default-features platform::client_credentials::tests",
+  "cargo test --locked -p spaceterm --bin spaceterm --no-default-features ssh::",
+  "cargo test --locked -p spaceterm --bin spaceterm --no-default-features ui::askpass_dialog::",
+  "cargo test --locked -p spaceterm --bin spaceterm --no-default-features settings::schema_tests",
+  "cargo test --locked -p spaceterm --bin spaceterm --no-default-features application_identity",
+  "cargo test --locked -p spaceterm --bin spaceterm --no-default-features keybindings",
+]
+
+[tasks."lint:client:pairing:desktop"]
+description = "Lint desktop pairing and SSH integration"
+env = { CARGO_BUILD_JOBS = "3" }
+run = "cargo clippy --locked -p spaceterm --all-targets --no-deps -- -D warnings"
+
+[tasks."check:client:pairing:desktop"]
+description = "Compile desktop pairing native adapters without invoking them"
+env = { CARGO_BUILD_JOBS = "3" }
+run = "cargo check --locked -p spaceterm --features native-tests"
+
+[tasks."test:client:pairing:native"]
+description = "Run explicitly selected disposable native client credential tests"
+confirm = "Create and delete uniquely named disposable native client credential items?"
+env = { CARGO_BUILD_JOBS = "3", SPACETERM_NATIVE_CLIENT_CREDENTIAL_TESTS = "1" }
+run = [
+  "cargo test --locked -p spaceterm-client-native --features native-tests --test client_credentials_native -- --ignored --test-threads=1",
+  "cargo test --locked -p spaceterm --bin spaceterm --no-default-features --features native-tests platform::client_credentials::native_tests -- --ignored --test-threads=1",
+]
+
+[tasks."test:server:git"]
+description = "Test server-owned Git policy, directories, durability and both protocol profiles"
+run = [
+  "cargo test --package spaceterm-core --test worktrees --test server_directories --locked",
+  "cargo test --package spaceterm-host --test git_operations --test git_server_identity --test server_directories --features native-tests --locked",
+  "cargo test --package spaceterm-protocol --test git_conformance --test directory_conformance --locked",
+  "cargo test --package spaceterm-client --test git --test directories --locked",
+  "cargo test --package spaceterm-server --test git_assessments --test git_durability --test git_shutdown --test git_protocol --test server_directories --locked",
+]
+
+[tasks."fmt:cli-companion:check"]
+description = "Check formatting for the CLI and status companion packages"
+env = { CARGO_BUILD_JOBS = "3" }
+run = "cargo fmt -p spaceterm-host -p spaceterm-client -p spaceterm-server -p spaceterm -- --check"
+
+[tasks."test:server:cli"]
+description = "Test CLI parsing, management and both protocol majors"
+env = { CARGO_BUILD_JOBS = "3" }
+run = "cargo test --locked -p spaceterm-client-native --test cli_arguments --test cli_management --test cli_protocol"
+
+[tasks."test:client:management"]
+description = "Test the portable client management facade"
+env = { CARGO_BUILD_JOBS = "3" }
+run = "cargo test --locked -p spaceterm-client --test management_cli"
+
+[tasks."check:server:cli"]
+description = "Check the CLI and portable management facade"
+env = { CARGO_BUILD_JOBS = "3" }
+run = "cargo check --locked -p spaceterm-client -p spaceterm-client-native --all-targets"
+
+[tasks."lint:server:cli"]
+description = "Lint the CLI and portable management facade"
+env = { CARGO_BUILD_JOBS = "3" }
+run = "cargo clippy --locked -p spaceterm-client -p spaceterm-client-native --all-targets -- -D warnings"
+
+[tasks."test:status-companion"]
+description = "Test the feature-gated status companion binary"
+env = { CARGO_BUILD_JOBS = "3" }
+run = "cargo test --locked -p spaceterm --bin spaceterm-status --features status-companion"
+
+[tasks."test:status-companion:linux"]
+description = "Test the status companion with a controlled Linux session bus"
+env = { CARGO_BUILD_JOBS = "3" }
+run = "dbus-run-session -- cargo test --locked -p spaceterm --bin spaceterm-status --features status-companion status_companion::tests"
+
+[tasks."check:status-companion"]
+description = "Check the companion and preserve the desktop binary build"
+env = { CARGO_BUILD_JOBS = "3" }
+run = [
+    "cargo check --locked -p spaceterm --bin spaceterm-status --features status-companion",
+    "cargo check --locked -p spaceterm --bin spaceterm",
+]
+
+[tasks."lint:status-companion"]
+description = "Lint the feature-gated status companion binary"
+env = { CARGO_BUILD_JOBS = "3" }
+run = "cargo clippy --locked -p spaceterm --bin spaceterm-status --features status-companion -- -D warnings"
+
+[tasks."test:cli-companion:tools"]
+description = "Test companion packaging and CLI check tooling"
+run = "python -m unittest tests.test_status_companion_packaging tests.test_cli_companion_checks"
+
+[tasks."test:server:cli:no-display"]
+description = "Check the headless CLI without graphical-session variables or native mutation"
+env = { CARGO_BUILD_JOBS = "3" }
+usage = 'flag "--executable <path>" help="Check a separately packaged headless executable instead of building the development binary"'
+run = "python -m spaceterm_tasks.cli_companion_checks no-display{% if usage.executable %} --executable {{usage.executable | quote}}{% endif %}"
+
+[tasks."test:desktop"]
+description = "Run desktop application tests"
+usage = 'arg "[filter]" help="Run only desktop tests whose names contain this text"'
+env = { CARGO_BUILD_JOBS = "3" }
+run = "cargo test --package spaceterm --bin spaceterm --locked {{usage.filter | quote}}"
+
+[tasks."test:desktop:servers"]
+description = "Test server-backed desktop interactions"
+env = { CARGO_BUILD_JOBS = "3" }
+run = "cargo test --package spaceterm --bin spaceterm --locked desktop_server_"
+
+[tasks."test:desktop:client-view-store"]
+description = "Test native personal-view publication and recovery"
+env = { CARGO_BUILD_JOBS = "3" }
+run = "cargo test --package spaceterm --bin spaceterm --features native-tests --locked desktop_server_view_store_"
+
+[tasks."check:desktop"]
+description = "Check every desktop target and feature"
+env = { CARGO_BUILD_JOBS = "3" }
+run = "cargo check --package spaceterm --all-targets --all-features --locked"
+
+[tasks."check:desktop:portable"]
+description = "Check desktop targets without default features"
+env = { CARGO_BUILD_JOBS = "3" }
+run = "cargo check --package spaceterm --all-targets --no-default-features --locked"
+
+[tasks."lint:desktop"]
+description = "Lint every desktop target and feature"
+env = { CARGO_BUILD_JOBS = "3" }
+run = "cargo clippy --package spaceterm --all-targets --all-features --locked --no-deps -- -D warnings"
+
+[tasks."lint:desktop:portable"]
+description = "Lint desktop targets without default features"
+env = { CARGO_BUILD_JOBS = "3" }
+run = "cargo clippy --package spaceterm --all-targets --no-default-features --locked --no-deps -- -D warnings"
+
+[tasks."fmt:desktop:check"]
+description = "Check desktop Rust formatting"
+run = "cargo fmt --package spaceterm -- --check"
+
+[tasks."test:server:composition"]
+description = "Test headless server composition"
+run = "cargo test --package spaceterm-server --all-targets --locked"
+
+[tasks."check:server:composition"]
+description = "Check headless server composition"
+run = "cargo check --package spaceterm-server --all-targets --locked"
+
+[tasks."lint:server:composition"]
+description = "Lint headless server composition"
+run = "cargo clippy --package spaceterm-server --all-targets --locked --no-deps -- -D warnings"
+
+[tasks."test:server:vertical"]
+description = "Test both-major authenticated server verticals"
+run = "cargo test --package spaceterm-server --test authenticated_local_vertical --test two_client_control --test terminal_resources_wss --locked"
