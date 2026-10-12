@@ -118,7 +118,14 @@ fn removal_should_refuse_a_worktree_recreated_at_the_confirmed_location() {
     fs::write(location.join("notes"), b"unsaved\n").unwrap();
 
     assert_eq!(
-        git.is_worktree(&location, &confirmed.identity, &cancellation),
+        git.confirm_location(
+            &location,
+            &RemovalExpectation::Worktree {
+                identity: confirmed.identity.clone(),
+                require_clean: false,
+            },
+            &cancellation,
+        ),
         Err(WorktreeRemoveError::Replaced)
     );
     assert_eq!(
