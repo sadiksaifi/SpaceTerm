@@ -10,6 +10,7 @@ mod controls;
 mod document;
 mod modals;
 mod preview;
+mod server_surfaces;
 mod surfaces;
 mod terminal;
 
@@ -82,16 +83,18 @@ pub(crate) enum WorkbenchSection {
     FloatingSurfaces,
     Modals,
     Terminal,
+    ServerSurfaces,
     Document,
 }
 
 impl WorkbenchSection {
-    pub(crate) const ALL: [Self; 6] = [
+    pub(crate) const ALL: [Self; 7] = [
         Self::Appearance,
         Self::Controls,
         Self::FloatingSurfaces,
         Self::Modals,
         Self::Terminal,
+        Self::ServerSurfaces,
         Self::Document,
     ];
 
@@ -103,6 +106,7 @@ impl WorkbenchSection {
             Self::FloatingSurfaces => "floating-surfaces",
             Self::Modals => "modals",
             Self::Terminal => "terminal",
+            Self::ServerSurfaces => "server-surfaces",
             Self::Document => "document",
         }
     }
@@ -120,6 +124,7 @@ impl WorkbenchSection {
             Self::FloatingSurfaces => "Floating Surfaces",
             Self::Modals => "Modals",
             Self::Terminal => "Terminal",
+            Self::ServerSurfaces => "Server Surfaces",
             Self::Document => "Settings Document",
         }
     }
@@ -133,6 +138,9 @@ impl WorkbenchSection {
             }
             Self::Modals => "Each modal family over controls it must obscure.",
             Self::Terminal => "Display fixtures for Workspace windows.",
+            Self::ServerSurfaces => {
+                "Pane presentations, server sections, and the empty Workspace Window in each state."
+            }
             Self::Document => "The whole Settings Document as JSON, previewed on request.",
         }
     }
@@ -144,6 +152,7 @@ impl WorkbenchSection {
             Self::FloatingSurfaces => "workbench-section-floating-surfaces",
             Self::Modals => "workbench-section-modals",
             Self::Terminal => "workbench-section-terminal",
+            Self::ServerSurfaces => "workbench-section-server-surfaces",
             Self::Document => "workbench-section-document",
         }
     }
@@ -155,6 +164,7 @@ impl WorkbenchSection {
             Self::FloatingSurfaces => IconName::Layers,
             Self::Modals => IconName::AppWindow,
             Self::Terminal => IconName::Terminal,
+            Self::ServerSurfaces => IconName::Server,
             Self::Document => IconName::FileCode,
         }
     }
@@ -863,6 +873,7 @@ impl DeveloperWorkbench {
             }
             WorkbenchSection::Modals => self.modals.render(surface, window, cx),
             WorkbenchSection::Terminal => terminal::render(surface, window, cx),
+            WorkbenchSection::ServerSurfaces => server_surfaces::render(surface, window, cx),
             WorkbenchSection::Document => self.document.render(surface, window, cx),
         };
         let scrolled = self.scroll.max_offset().y > px(0.0) && self.scroll.offset().y < px(-0.5);

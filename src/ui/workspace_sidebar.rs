@@ -1,5 +1,6 @@
 //! Workspace sidebar presentation and transient interaction lifecycle.
 //! Workspace policy stays with the application; the sidebar emits typed requests.
+pub(in crate::ui) mod server_group;
 mod text;
 mod view;
 

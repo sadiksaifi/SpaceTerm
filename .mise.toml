@@ -154,7 +154,7 @@ run = [{ task = "development:{{ os() }}" }]
 description = "Open the Developer Workbench in SpaceTerm Development"
 usage = '''
 arg "[section]" help="Workbench section" default="appearance" {
-  choices "appearance" "controls" "floating-surfaces" "modals" "terminal" "document"
+  choices "appearance" "controls" "floating-surfaces" "modals" "terminal" "server-surfaces" "document"
 }
 '''
 run = [{ task = "development:{{ os() }}", env = { SPACETERM_DEVELOPER_WORKBENCH = "{{usage.section}}" } }]
