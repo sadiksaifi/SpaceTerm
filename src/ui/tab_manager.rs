@@ -6822,8 +6822,14 @@ mod tests {
 
         let moved = point(px(8.0), px(0.0));
         drag_tab(settling.center(), &[settling.center() + moved], cx);
-        let copy = cx.debug_bounds("tab-preview-1-inactive").map(|tab| tab.origin);
-        cx.simulate_mouse_up(settling.center() + moved, MouseButton::Left, Modifiers::none());
+        let copy = cx
+            .debug_bounds("tab-preview-1-inactive")
+            .map(|tab| tab.origin);
+        cx.simulate_mouse_up(
+            settling.center() + moved,
+            MouseButton::Left,
+            Modifiers::none(),
+        );
         cx.run_until_parked();
 
         assert_eq!(

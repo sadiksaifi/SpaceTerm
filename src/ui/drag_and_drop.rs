@@ -507,7 +507,7 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
                     ease: Ease::new(duration, now, motion),
                     // A strip whose items grow in scrolls along with their growth, which the
                     // selection follows.
-                    left_scrolled: Some(self.scrolled).filter(|_| self.entering.is_empty()),
+                    left_scrolled: self.entering.is_empty().then_some(self.scrolled),
                 });
         }
         self.begin_arrival(now, cx);
