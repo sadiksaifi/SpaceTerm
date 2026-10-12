@@ -3,7 +3,7 @@
 
 use crate::ui::appearance::gpui_color;
 use gpui::prelude::*;
-use gpui::{AnyElement, Pixels, div, px};
+use gpui::{AnyElement, Bounds, PathBuilder, Pixels, canvas, div, point, px, size};
 
 use crate::appearance::{Appearance, Color};
 use crate::ui::chrome_geometry::HAIRLINE;
@@ -139,6 +139,10 @@ const MENU_TARGET_OUTLINE: f32 = 2.0;
 /// How much of its color's opacity the dashed edge of a landing place keeps, so it marks the
 /// place without competing with the item's faded face.
 const LANDING_EDGE_OPACITY: u8 = 77;
+/// The length of each dash in the edge of a landing place.
+const LANDING_DASH: f32 = 2.0;
+/// The space between the dashes in the edge of a landing place.
+const LANDING_GAP: f32 = 3.0;
 
 impl SelectionChip {
     pub(crate) fn new(shape: ChipShape, paint: ChipPaint) -> Self {
@@ -225,11 +229,51 @@ impl SelectionChip {
                 chip.border(px(width)).border_color(gpui_color(edge))
             })
             .when_some(self.landing, |chip, edge| {
-                chip.border(px(HAIRLINE))
-                    .border_dashed()
-                    .border_color(gpui_color(edge.multiply_opacity(LANDING_EDGE_OPACITY)))
+                chip.child(dashed_edge(
+                    edge.multiply_opacity(LANDING_EDGE_OPACITY),
+                    self.shape.radius,
+                ))
             })
     }
+}
+
+/// A hairline of dashes in `color` around the rounded rectangle that fills its parent, with
+/// corners of `radius`. GPUI's dashed border fixes its gaps at half a dash, so the edge strokes its
+/// own path.
+fn dashed_edge(color: Color, radius: Pixels) -> impl IntoElement {
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            // The stroke centers on the path, so the path runs half a hairline inside the bounds.
+            let inset = px(HAIRLINE / 2.0);
+            let edge = Bounds::new(
+                bounds.origin + point(inset, inset),
+                bounds.size - size(inset * 2.0, inset * 2.0),
+            );
+            let radius = (radius - inset)
+                .max(px(0.0))
+                .min(edge.size.width / 2.0)
+                .min(edge.size.height / 2.0);
+            let corner = point(radius, radius);
+            let (left, top, right, bottom) = (edge.left(), edge.top(), edge.right(), edge.bottom());
+            let mut path =
+                PathBuilder::stroke(px(HAIRLINE)).dash_array(&[px(LANDING_DASH), px(LANDING_GAP)]);
+            path.move_to(point(left + radius, top));
+            path.line_to(point(right - radius, top));
+            path.arc_to(corner, px(0.0), false, true, point(right, top + radius));
+            path.line_to(point(right, bottom - radius));
+            path.arc_to(corner, px(0.0), false, true, point(right - radius, bottom));
+            path.line_to(point(left + radius, bottom));
+            path.arc_to(corner, px(0.0), false, true, point(left, bottom - radius));
+            path.line_to(point(left, top + radius));
+            path.arc_to(corner, px(0.0), false, true, point(left + radius, top));
+            path.close();
+            if let Ok(path) = path.build() {
+                window.paint_path(path, gpui_color(color));
+            }
+        },
+    )
+    .size_full()
 }
 
 /// A paint `hover` of the way from its resting to its hovered color.
