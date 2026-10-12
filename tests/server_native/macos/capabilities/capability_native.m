@@ -1,5 +1,10 @@
 #include "capability_internal.h"
 #include "capability_environment.h"
+#include "capability_process.h"
+#include "capability_agents.h"
+#import <OpenDirectory/OpenDirectory.h>
+#include <SystemConfiguration/SystemConfiguration.h>
+#include <CommonCrypto/CommonDigest.h>
 #import <AppKit/AppKit.h>
 #import <AVFoundation/AVFoundation.h>
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
@@ -8,12 +13,14 @@
 #include <Carbon/Carbon.h>
 #include <bsm/libbsm.h>
 #include <errno.h>
+#include <dlfcn.h>
 #include <fcntl.h>
 #include <libproc.h>
 #include <poll.h>
 #include <pwd.h>
 #include <spawn.h>
 #include <signal.h>
+#include <pthread.h>
 #include <sys/time.h>
 #include <sys/sysctl.h>
 #include <sys/resource.h>
@@ -31,13 +38,15 @@ static int targets_bound;
 static int owned_tty = -1;
 static pid_t foreground_child = -1;
 static pid_t previous_foreground = -1;
+static pid_t tree_child = -1;
+static uint64_t tree_root;
 
 static int foreground(int tty, pid_t group) {
     sigset_t blocked, original;
     sigemptyset(&blocked); sigaddset(&blocked, SIGTTOU);
-    if (sigprocmask(SIG_BLOCK, &blocked, &original) != 0) return 0;
+    if (pthread_sigmask(SIG_BLOCK, &blocked, &original) != 0) return 0;
     int result = tcsetpgrp(tty, group) == 0;
-    if (sigprocmask(SIG_SETMASK, &original, NULL) != 0) return 0;
+    if (pthread_sigmask(SIG_SETMASK, &original, NULL) != 0) return 0;
     return result;
 }
 int st_capability_begin_foreground(pid_t child) {
@@ -47,14 +56,20 @@ int st_capability_begin_foreground(pid_t child) {
     previous_foreground = owned_tty >= 0 ? tcgetpgrp(owned_tty) : -1;
     return previous_foreground == getpgrp() && foreground(owned_tty, child);
 }
-st_native_result st_capability_finish_spawn(pid_t child, int retired) {
+st_native_result st_capability_finish_spawn(pid_t child, int retired, int root_reaped) {
     (void)retired;
-    if (owned_tty < 0) return ST_PROBE_OK;
+    int tree_retired = 1;
+    if (tree_child > 0) {
+        tree_retired = child == tree_child && root_reaped && tree_root &&
+            st_capability_tree_retire_native(tree_root) == ST_PROBE_OK;
+        tree_child = -1; tree_root = 0;
+    }
+    if (owned_tty < 0) return tree_retired ? ST_PROBE_OK : ST_PROBE_CLEANUP_UNRESOLVED;
     int okay = child == foreground_child && tcgetpgrp(owned_tty) == child &&
         foreground(owned_tty, previous_foreground);
     /* Never replace a newer foreground-group change. */
     close(owned_tty); owned_tty = -1; foreground_child = -1; previous_foreground = -1;
-    return okay ? ST_PROBE_OK : ST_PROBE_CLEANUP_UNRESOLVED;
+    return okay && tree_retired ? ST_PROBE_OK : ST_PROBE_CLEANUP_UNRESOLVED;
 }
 
 static int expired(uint64_t deadline) { return st_capability_monotonic_ns() >= deadline; }
@@ -178,6 +193,50 @@ static int admitted_worker(void) {
     CFRelease(required);
     return status == errSecSuccess;
 }
+typedef struct {
+    st_capability_process_identity effect, actor;
+    uint32_t session, account;
+} responsible_binding;
+static uint32_t observe_responsible(responsible_binding *binding) {
+    /* libSystem's responsibility observer is evidence-only, not ancestry and
+     * not a TCC grant. Older systems without this fixed OS symbol stay Unknown. */
+    typedef pid_t (*responsible_fn)(pid_t);
+    responsible_fn responsible = (responsible_fn)dlsym(RTLD_DEFAULT,
+        "responsibility_get_pid_responsible_for_pid");
+    st_capability_process_identity effect_before, effect_after, actor_before, actor_after;
+    auditinfo_addr_t session_before, session_after;
+    if (!responsible || !st_capability_process_observe(getpid(), &effect_before) ||
+        getaudit_addr(&session_before, sizeof(session_before)) != 0) return ST_RESPONSIBLE_UNKNOWN;
+    pid_t actor = responsible(getpid());
+    if (actor <= 0 || !st_capability_process_observe(actor, &actor_before)) return ST_RESPONSIBLE_UNKNOWN;
+    uint32_t classification = ST_RESPONSIBLE_OTHER;
+    if (signed_process(actor, @ST_CAPABILITY_IDENTIFIER)) classification = ST_RESPONSIBLE_PROBE;
+    else if (signed_process(actor, @ST_CAPABILITY_COMPANION_IDENTIFIER)) classification = ST_RESPONSIBLE_COMPANION;
+    else if (signed_process(actor, @"io.github.sadiksaifi.spaceterm") ||
+        signed_process(actor, @"io.github.sadiksaifi.spaceterm-preflight") ||
+        signed_process(actor, @"io.github.sadiksaifi.spaceterm-development")) classification = ST_RESPONSIBLE_DESKTOP;
+    else if (signed_process(actor, @"io.github.sadiksaifi.spaceterm.server") ||
+        signed_process(actor, @"io.github.sadiksaifi.spaceterm-preflight.server") ||
+        signed_process(actor, @"io.github.sadiksaifi.spaceterm-development.server") ||
+        signed_process(actor, @"io.github.sadiksaifi.spaceterm-development.server.native-evidence.server")) classification = ST_RESPONSIBLE_SERVER;
+    if (responsible(getpid()) != actor ||
+        !st_capability_process_observe(actor, &actor_after) ||
+        !st_capability_process_observe(getpid(), &effect_after) ||
+        getaudit_addr(&session_after, sizeof(session_after)) != 0 ||
+        effect_before.uniqueid != effect_after.uniqueid || effect_before.pidversion != effect_after.pidversion ||
+        actor_before.uniqueid != actor_after.uniqueid || actor_before.pidversion != actor_after.pidversion ||
+        session_before.ai_asid != session_after.ai_asid || session_before.ai_auid != session_after.ai_auid)
+        return ST_RESPONSIBLE_UNKNOWN;
+    if (binding) *binding = (responsible_binding){effect_after, actor_after,
+        session_after.ai_asid, session_after.ai_auid};
+    return classification;
+}
+uint32_t st_capability_responsible_process(void) { return observe_responsible(NULL); }
+static int same_responsible(const responsible_binding *a, const responsible_binding *b) {
+    return a->effect.uniqueid == b->effect.uniqueid && a->effect.pidversion == b->effect.pidversion &&
+        a->actor.uniqueid == b->actor.uniqueid && a->actor.pidversion == b->actor.pidversion &&
+        a->session == b->session && a->account == b->account;
+}
 static int observed_context(uint32_t requested) {
     if (!isatty(STDIN_FILENO) && !isatty(STDERR_FILENO)) {
         int tty = open("/dev/tty", O_RDONLY | O_CLOEXEC | O_NOCTTY);
@@ -206,17 +265,15 @@ static char **worker_environment(st_capability_case capability) {
     /* Import only the probed PATH/locale or agent binding, never the complete
      * GUI environment. A bound violation fails instead of dropping a value and
      * turning different actual shell environments into equal observations. */
-    const char *names[ST_CAPABILITY_LOCALE_COUNT + 3] = {"PATH"};
+    const char *names[ST_CAPABILITY_LOCALE_COUNT + 2] = {"PATH"};
     for (size_t i = 0; i < ST_CAPABILITY_LOCALE_COUNT; ++i) names[i + 1] = st_capability_locale_names[i];
     names[ST_CAPABILITY_LOCALE_COUNT + 1] = "SSH_AUTH_SOCK";
-    names[ST_CAPABILITY_LOCALE_COUNT + 2] = "GPG_AGENT_INFO";
     char **result = calloc(ST_CAPABILITY_LOCALE_COUNT + 5, sizeof(char *));
     if (!result) return NULL;
     size_t used = 0;
-    for (size_t i = 0; i < ST_CAPABILITY_LOCALE_COUNT + 3; ++i) {
+    for (size_t i = 0; i < ST_CAPABILITY_LOCALE_COUNT + 2; ++i) {
         if ((i <= ST_CAPABILITY_LOCALE_COUNT && capability != ST_CAP_LOGIN_SHELL) ||
-            (i == ST_CAPABILITY_LOCALE_COUNT + 1 && capability != ST_CAP_SSH_AGENT) ||
-            (i == ST_CAPABILITY_LOCALE_COUNT + 2 && capability != ST_CAP_GPG_AGENT)) continue;
+            (i == ST_CAPABILITY_LOCALE_COUNT + 1 && capability != ST_CAP_SSH_AGENT)) continue;
         const char *value = getenv(names[i]);
         if (!value) continue;
         if (strlen(value) > 4096 || asprintf(&result[used], "%s=%s", names[i], value) < 0) {
@@ -279,7 +336,13 @@ st_native_result st_capability_spawn(st_capability_case capability, st_probe_con
         if (error) { close(output[0]); close(input[1]); return ST_PROBE_IO_UNAVAILABLE; }
         int ready = 1;
         if (capability == ST_CAP_TOUCH_ID_SUDO) {
-            ready = st_capability_begin_foreground(child);
+            /* The worker is blocked on its configuration pipe. Retain its
+             * uniqueid before either fixed sudo command may fork. This outer
+             * scope survives worker timeout or cancellation during inner cleanup. */
+            st_capability_process_identity identity;
+            tree_child = child;
+            tree_root = st_capability_process_observe(child, &identity) ? identity.uniqueid : 0;
+            ready = tree_root && st_capability_begin_foreground(child);
         }
         /* Config is one fixed bounded, nonsecret record. Never put paths in argv. */
         int written = ready && st_capability_transfer(input[1], &bound_targets, sizeof(bound_targets), 1, deadline);
@@ -642,39 +705,84 @@ static void ssh_agent(st_capability_observation *out, uint64_t deadline) {
     st_capability_discard_owned(response, sizeof(response)); close(fd);
     if (success) verified(out); else out->outcome = expired(deadline) ? ST_OUTCOME_TIMED_OUT : ST_OUTCOME_FAILED;
 }
-static int assuan_line(int fd, uint64_t deadline, int *okay) {
-    char line[1025] = {0}; size_t used = 0;
-    while (used < sizeof(line) - 1 && st_capability_transfer(fd, line + used, 1, 0, deadline)) {
-        if (line[used++] == '\n') {
-            *okay = used >= 3 && memcmp(line, "OK", 2) == 0 && (line[2] == '\n' || line[2] == ' ' || line[2] == '\r');
-            int error = used >= 4 && memcmp(line, "ERR ", 4) == 0;
-            st_capability_discard_owned(line, sizeof(line));
-            return error ? -1 : 1;
+static int native_agent_session(void *unused, st_capability_agent_session *out) {
+    (void)unused;
+    memset(out, 0, sizeof(*out));
+    uid_t uid = getuid();
+    if (!uid || geteuid() != uid) return 0;
+    ODNode *node = [ODNode nodeWithSession:[ODSession defaultSession] type:kODNodeTypeAuthentication error:NULL];
+    if (!node) return 0;
+    NSArray *attributes = @[kODAttributeTypeGUID, kODAttributeTypeNFSHomeDirectory];
+    NSString *number = [NSString stringWithFormat:@"%u", uid];
+    ODQuery *query = [ODQuery queryWithNode:node forRecordTypes:kODRecordTypeUsers
+        attribute:kODAttributeTypeUniqueID matchType:kODMatchEqualTo queryValues:number
+        returnAttributes:attributes maximumResults:2 error:NULL];
+    NSArray *records = [query resultsAllowingPartial:NO error:NULL];
+    if (records.count != 1) return 0;
+    ODRecord *record = records[0];
+    NSArray *generated = [record valuesForAttribute:kODAttributeTypeGUID error:NULL];
+    NSArray *homes = [record valuesForAttribute:kODAttributeTypeNFSHomeDirectory error:NULL];
+    if (generated.count != 1 || homes.count != 1 || ![generated[0] isKindOfClass:[NSString class]] ||
+        ![homes[0] isKindOfClass:[NSString class]]) return 0;
+    NSUUID *uuid = [[NSUUID alloc] initWithUUIDString:generated[0]];
+    if (!uuid || ![homes[0] getCString:out->home maxLength:sizeof(out->home) encoding:NSUTF8StringEncoding] ||
+        out->home[0] != '/') return 0;
+    [uuid getUUIDBytes:out->account];
+    ODQuery *unique = [ODQuery queryWithNode:node forRecordTypes:kODRecordTypeUsers
+        attribute:kODAttributeTypeGUID matchType:kODMatchEqualTo queryValues:generated[0]
+        returnAttributes:@[kODAttributeTypeGUID] maximumResults:2 error:NULL];
+    if ([unique resultsAllowingPartial:NO error:NULL].count != 1) return 0;
+    int okay = 1;
+    SCDynamicStoreRef store = SCDynamicStoreCreate(NULL, CFSTR("SpaceTerm narrow agent observation"), NULL, NULL);
+    CFDictionaryRef console = store ? SCDynamicStoreCopyValue(store, CFSTR("State:/Users/ConsoleUser")) : NULL;
+    CFArrayRef sessions = console ? CFDictionaryGetValue(console, CFSTR("SessionInfo")) : NULL;
+    uint32_t asid = 0;
+    if (sessions && CFGetTypeID(sessions) == CFArrayGetTypeID() && CFArrayGetCount(sessions) <= 64) {
+        for (CFIndex i = 0; i < CFArrayGetCount(sessions); ++i) {
+            CFDictionaryRef entry = CFArrayGetValueAtIndex(sessions, i);
+            if (CFGetTypeID(entry) != CFDictionaryGetTypeID()) continue;
+            CFNumberRef user = CFDictionaryGetValue(entry, CFSTR("kCGSSessionUserIDKey"));
+            CFNumberRef audit = CFDictionaryGetValue(entry, CFSTR("kCGSSessionAuditIDKey"));
+            CFBooleanRef active = CFDictionaryGetValue(entry, CFSTR("kCGSSessionOnConsoleKey"));
+            uint32_t observed_uid = UINT32_MAX, observed_asid = 0;
+            if (user && audit && active && CFGetTypeID(user) == CFNumberGetTypeID() &&
+                CFGetTypeID(audit) == CFNumberGetTypeID() && CFGetTypeID(active) == CFBooleanGetTypeID() &&
+                CFNumberGetValue(user, kCFNumberSInt32Type, &observed_uid) && observed_uid == uid &&
+                CFBooleanGetValue(active) && CFNumberGetValue(audit, kCFNumberSInt32Type, &observed_asid)) {
+                if (asid) { okay = 0; break; } asid = observed_asid;
+            }
         }
     }
-    st_capability_discard_owned(line, sizeof(line)); return 0;
+    if (console) CFRelease(console); if (store) CFRelease(store);
+    uint32_t actual = 0, attributes_bits = 0;
+    if (!okay || !asid || SessionGetInfo(asid, &actual, &attributes_bits) != 0 || actual != asid ||
+        !(attributes_bits & sessionHasGraphicAccess) || (attributes_bits & sessionIsRoot)) return 0;
+    uint64_t window = 0; pid_t pids[8193];
+    int count = proc_listallpids(pids, sizeof(pids));
+    if (count <= 0 || count >= 8193) return 0;
+    for (int i = 0; i < count; ++i) {
+        struct proc_bsdshortinfo info; char path[4096]; st_capability_process_identity identity;
+        if (pids[i] <= 0 || proc_pidinfo(pids[i], PROC_PIDT_SHORTBSDINFO, 0, &info, sizeof(info)) != sizeof(info) ||
+            info.pbsi_uid != uid || proc_pidpath(pids[i], path, sizeof(path)) <= 0 ||
+            strcmp(path, "/System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow")) continue;
+        if (window || !st_capability_process_observe(pids[i], &identity)) return 0;
+        window = identity.uniqueid;
+    }
+    char boot[64] = {0}; size_t length = sizeof(boot);
+    if (!window || sysctlbyname("kern.bootsessionuuid", boot, &length, NULL, 0) != 0 || length > sizeof(boot) || length < 2) return 0;
+    uint8_t input[sizeof(boot) + sizeof(asid) + sizeof(window)], digest[CC_SHA256_DIGEST_LENGTH];
+    memcpy(input, boot, sizeof(boot)); memcpy(input + sizeof(boot), &asid, sizeof(asid));
+    memcpy(input + sizeof(boot) + sizeof(asid), &window, sizeof(window));
+    CC_SHA256(input, sizeof(input), digest); memcpy(out->session, digest, 16); out->uid = uid;
+    st_capability_discard_owned(input, sizeof(input)); st_capability_discard_owned(digest, sizeof(digest));
+    return 1;
+}
+int st_capability_native_agent_session(st_capability_agent_session *out) {
+    return out && native_agent_session(NULL, out);
 }
 static void gpg_agent(st_capability_observation *out, uint64_t deadline) {
-    /* Baseline uses only a supplied narrow legacy socket binding. Modern agent
-     * discovery belongs to the session adapter, not an uncontrolled gpgconf. */
-    const char *binding = getenv("GPG_AGENT_INFO");
-    if (!binding || strlen(binding) >= 4096) { unavailable(out, 1); return; }
-    char path[4096]; strcpy(path, binding);
-    char *separator = strchr(path, ':'); if (separator) *separator = 0;
-    int fd = agent_socket(path, deadline);
-    st_capability_discard_owned(path, sizeof(path));
-    if (fd < 0) { unavailable(out, 1); return; }
-    out->preflight_class = ST_PREFLIGHT_ALLOWED;
-    int okay = 0, success = 0;
-    for (unsigned i = 0; i < 4 && !okay; ++i) if (assuan_line(fd, deadline, &okay) <= 0) break;
-    char query[] = "GETINFO version\n";
-    if (okay && st_capability_transfer(fd, query, sizeof(query) - 1, 1, deadline)) {
-        okay = 0;
-        for (unsigned i = 0; i < 8 && !okay; ++i) if (assuan_line(fd, deadline, &okay) <= 0) break;
-        success = okay;
-    }
-    close(fd);
-    if (success) verified(out); else out->outcome = expired(deadline) ? ST_OUTCOME_TIMED_OUT : ST_OUTCOME_FAILED;
+    st_capability_agent_peer peer = {NULL, native_agent_session};
+    (void)st_capability_gpg_agent(&peer, deadline, out);
 }
 
 static int owned_wait(pid_t child, uint64_t deadline, int *status) {
@@ -695,29 +803,59 @@ static int owned_wait(pid_t child, uint64_t deadline, int *status) {
     }
     return 0;
 }
+/* Both commands are prepared before fork. The child performs only async-signal-
+ * safe operations before exec and cannot run until its uniqueid is retained.
+ * Each sudo root gets its own session/group. The outer worker scope additionally
+ * catches interruption before the inner scope's sentinel or final scan. */
+static int fixed_sudo(int tty, int invalidate, uint64_t deadline, int *status, int *clean) {
+    int gate[2];
+    if (pipe(gate) != 0) return 0;
+    fcntl(gate[0], F_SETFD, FD_CLOEXEC); fcntl(gate[1], F_SETFD, FD_CLOEXEC);
+    char *reset[] = {"/usr/bin/sudo", "-k", NULL};
+    char *environment[] = {"PATH=/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL=C", NULL};
+    char *const *arguments = invalidate ? reset : (char *const *)st_capability_sudo_argv();
+    pid_t child = fork();
+    if (!child) {
+        close(gate[1]);
+        char byte = 0; ssize_t received;
+        do { received = read(gate[0], &byte, 1); } while (received < 0 && errno == EINTR);
+        close(gate[0]);
+        if (received != 1 || byte != 'g' || setsid() < 0 ||
+            dup2(tty, STDIN_FILENO) < 0 || dup2(tty, STDOUT_FILENO) < 0 || dup2(tty, STDERR_FILENO) < 0) _exit(125);
+        execve("/usr/bin/sudo", arguments, environment); _exit(126);
+    }
+    close(gate[0]);
+    if (child < 0) { close(gate[1]); return 0; }
+    st_capability_process_identity root;
+    int observed = st_capability_process_observe(child, &root);
+    char byte = 'g';
+    int started = observed && st_capability_transfer(gate[1], &byte, 1, 1, deadline);
+    close(gate[1]);
+    int completed = owned_wait(child, deadline, status);
+    *clean = completed && observed && st_capability_tree_retire_native(root.uniqueid) == ST_PROBE_OK;
+    return started && completed;
+}
 static void touch_id(st_capability_observation *out, uint64_t deadline) {
     int tty = open("/dev/tty", O_RDWR | O_CLOEXEC | O_NOCTTY);
     if (tty < 0) { unavailable(out, 1); return; }
     out->preflight_class = ST_PREFLIGHT_ALLOWED;
-    posix_spawn_file_actions_t actions; posix_spawnattr_t attributes;
-    if (posix_spawn_file_actions_init(&actions) || posix_spawnattr_init(&attributes)) { close(tty); unavailable(out, 0); return; }
-    int error = posix_spawn_file_actions_adddup2(&actions, tty, STDIN_FILENO);
-    if (!error) error = posix_spawn_file_actions_adddup2(&actions, tty, STDOUT_FILENO);
-    if (!error) error = posix_spawn_file_actions_adddup2(&actions, tty, STDERR_FILENO);
-    if (!error) error = posix_spawnattr_setflags(&attributes, POSIX_SPAWN_CLOEXEC_DEFAULT);
-    char *environment[] = {"PATH=/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL=C", NULL};
-    pid_t child = -1;
-    if (!error) error = posix_spawn(&child, "/usr/bin/sudo", &actions, &attributes, (char *const *)st_capability_sudo_argv(), environment);
-    posix_spawn_file_actions_destroy(&actions); posix_spawnattr_destroy(&attributes); close(tty);
-    if (error) { unavailable(out, 0); return; }
-    int status = 0;
-    if (!owned_wait(child, deadline, &status)) { out->outcome = ST_OUTCOME_TIMED_OUT; return; }
-    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+    int status = 0, clean = 0;
+    int completed = fixed_sudo(tty, 1, deadline, &status, &clean);
+    if (completed && clean && WIFEXITED(status) && WEXITSTATUS(status) == 0)
+        completed = fixed_sudo(tty, 0, deadline, &status, &clean);
+    close(tty);
+    if (!clean) {
+        out->cleanup_class = ST_CLEANUP_UNRESOLVED;
+        out->outcome = ST_OUTCOME_CLEANUP_UNRESOLVED; return;
+    }
+    out->cleanup_class = ST_CLEANUP_VERIFIED;
+    if (!completed) out->outcome = ST_OUTCOME_TIMED_OUT;
+    else if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
         out->effect_class = ST_EFFECT_COMPLETED_UNATTRIBUTED;
-        out->outcome = ST_OUTCOME_UNAVAILABLE; /* No public proof of Touch ID vs password/cache. */
+        out->outcome = ST_OUTCOME_UNAVAILABLE; /* Completion alone cannot prove Touch ID rather than password. */
     } else if (WIFSIGNALED(status) && (WTERMSIG(status) == SIGINT || WTERMSIG(status) == SIGTERM))
         out->outcome = ST_OUTCOME_CANCELLED;
-    else out->outcome = ST_OUTCOME_UNAVAILABLE; /* A nonzero sudo exit is not a native denial classification. */
+    else out->outcome = ST_OUTCOME_UNAVAILABLE;
 }
 void st_capability_controlled_shell_order(st_capability_observation *out, uint64_t deadline) {
     struct passwd *account = getpwuid(getuid());
@@ -823,53 +961,6 @@ st_native_result st_capability_observe_environment(st_probe_context context,
     return st_capability_environment_retain(context, getenv("PATH"), locales, out);
 }
 
-static int environment_peer(int fd) {
-    uid_t uid; gid_t gid; pid_t pid = -1; socklen_t size = sizeof(pid);
-    return getuid() != 0 && geteuid() == getuid() && getpeereid(fd, &uid, &gid) == 0 && uid == getuid() &&
-        getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &pid, &size) == 0 && size == sizeof(pid) &&
-        pid > 0 && signed_process(pid, @ST_CAPABILITY_IDENTIFIER);
-}
-st_native_result st_capability_environment_send_current(int channel, st_probe_context context,
-    uint64_t deadline) {
-    uint64_t now = st_capability_monotonic_ns();
-    if (!now || deadline <= now) return ST_PROBE_TIMED_OUT;
-    if (deadline - now > UINT64_C(5000000000)) return ST_PROBE_LIMIT;
-    if (!environment_peer(channel)) return ST_PROBE_UNAVAILABLE;
-    st_capability_retained_environment *value = NULL;
-    st_native_result result = st_capability_observe_environment(context, &value);
-    if (result == ST_PROBE_OK) result = st_capability_environment_send_private(channel, value, deadline);
-    /* Keep the authenticated peer process alive until the collector recognizes
-     * both actual contexts. EOF on the snapshot half does not retire the owner. */
-    uint8_t acknowledgement = 0, extra;
-    if (result == ST_PROBE_OK && (!st_capability_transfer(channel, &acknowledgement, 1, 0, deadline) ||
-        acknowledgement != 1 || !st_capability_wait_fd(channel, POLLIN, deadline) || read(channel, &extra, 1) != 0))
-        result = ST_PROBE_IO_UNAVAILABLE;
-    st_capability_environment_release(&value);
-    return result;
-}
-st_native_result st_capability_environment_compare_channels(int gui_channel, int daemon_channel,
-    uint64_t deadline, st_capability_environment_difference *out) {
-    uint64_t now = st_capability_monotonic_ns();
-    if (!now || deadline <= now) return ST_PROBE_TIMED_OUT;
-    if (deadline - now > UINT64_C(5000000000)) return ST_PROBE_LIMIT;
-    if (!out || gui_channel == daemon_channel || !signed_process(getpid(), @ST_CAPABILITY_IDENTIFIER) ||
-        !environment_peer(gui_channel) || !environment_peer(daemon_channel) || expired(deadline))
-        return ST_PROBE_UNAVAILABLE;
-    st_capability_retained_environment *gui = NULL, *daemon = NULL;
-    st_native_result result = st_capability_environment_receive_private(gui_channel, ST_CONTEXT_GUI, deadline, &gui);
-    if (result == ST_PROBE_OK) result = st_capability_environment_receive_private(daemon_channel, ST_CONTEXT_DAEMON, deadline, &daemon);
-    if (result == ST_PROBE_OK && !expired(deadline)) result = st_capability_environment_compare(gui, daemon, out);
-    else if (expired(deadline)) result = ST_PROBE_TIMED_OUT;
-    if (result == ST_PROBE_OK) {
-        uint8_t acknowledgement = 1;
-        if (!st_capability_transfer(gui_channel, &acknowledgement, 1, 1, deadline) || shutdown(gui_channel, SHUT_WR) ||
-            !st_capability_transfer(daemon_channel, &acknowledgement, 1, 1, deadline) || shutdown(daemon_channel, SHUT_WR))
-            result = ST_PROBE_IO_UNAVAILABLE;
-    }
-    st_capability_environment_release(&gui); st_capability_environment_release(&daemon);
-    return result;
-}
-
 st_native_result st_capability_native_worker(st_capability_case capability, st_probe_context context,
     uint64_t deadline, st_capability_observation *out) {
     @autoreleasepool {
@@ -879,6 +970,8 @@ st_native_result st_capability_native_worker(st_capability_case capability, st_p
         /* Context ancestry does not establish TCC responsible-application identity. */
         if (getuid() == 0 || geteuid() != getuid() || !signed_process(getpid(), @ST_CAPABILITY_IDENTIFIER) ||
             !observed_context(context)) return ST_PROBE_UNAVAILABLE;
+        responsible_binding before = {0}, after = {0};
+        out->responsible_process = observe_responsible(&before);
         switch (capability) {
             case ST_CAP_PROTECTED_FOLDERS: folders(out); break;
             case ST_CAP_SELECTED_VOLUME: volume(out); break;
@@ -904,6 +997,8 @@ st_native_result st_capability_native_worker(st_capability_case capability, st_p
                 break;
             }
         }
+        if (observe_responsible(&after) == ST_RESPONSIBLE_UNKNOWN || !same_responsible(&before, &after))
+            out->responsible_process = ST_RESPONSIBLE_UNKNOWN;
         return ST_PROBE_OK;
     }
 }

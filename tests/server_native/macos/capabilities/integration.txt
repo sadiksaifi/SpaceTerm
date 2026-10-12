@@ -133,8 +133,8 @@ Touch ID sudo runs only /usr/bin/sudo -- /usr/bin/true, on the controlling PTY,
 with fixed environment. It never reads/captures authentication input, edits PAM,
 or uses AskPass, -S, -E, or an application password cache. The worker owns the
 foreground PTY for this explicit case and restores it only if the foreground
-process group has not changed. Pipe/socket writes consume only their newly generated
-SIGPIPE and preserve the owner's disposition and mask, so a rejected configuration
+process group has not changed. Darwin pipe/socket writes use descriptor-local SIGPIPE suppression and preserve
+every thread's disposition, mask and pending signals, so a rejected configuration
 still reaches reaping and PTY restoration. Zero sudo exit cannot prove Touch ID
 rather than password or cached authorization. Its effect is CompletedUnattributed,
 and unresolved descendant retirement overrides its outcome with CleanupUnresolved.
@@ -153,28 +153,33 @@ actual account shell with -l -i, without -c or controlled startup replacements.
 The worker carries only inherited PATH and the fixed fourteen-variable locale
 allowlist, and rejects oversize values instead of silently dropping them.
 
-To compare both actual environments, arrange two connected Unix stream channels
-whose native peers are the same pinned probe executable in the intended account.
-Only those channel descriptors may cross the corresponding exec. The evidence
-controller owns channel creation, run binding, descriptor closure, and process
-receipts; no stdout, temporary file, environment dump, or value hash is a channel.
-Launch the same signed probe from each actual PTY login shell with
---environment-channel <context-code> <absolute-monotonic-ns> <channel-fd>.
-Launch its collector with --environment-pair <absolute-monotonic-ns> <gui-fd>
-<daemon-fd>. These are evidence-only commands, not a production session adapter.
-The collector and both sources independently authenticate the same-account pinned
-probe peer through native UID/PID/code observations. Each source also verifies its
-actual shell and requested ancestry. The source stays alive for the collector's
-bounded acknowledgement. Both records require the declared different contexts,
-exact bounded lengths, no embedded NUL or trailing bytes, and EOF. All transfers
-share one absolute deadline of at most five seconds. Native synchronous preflight
-still requires the controller's outer lifetime bound.
+Actual environment comparison is blocked pending a reviewed frame-bound native
+sender mechanism. The evidence-only --environment-channel <context-code>
+<absolute-monotonic-ns> <channel-fd> <run-id-hex> and --environment-pair
+<absolute-monotonic-ns> <gui-fd> <daemon-fd> <run-id-hex> entries now return
+Unavailable for valid inputs, before handshake, grant, or private acquisition.
+They emit no environment or difference record. The run ID remains a nonzero
+sixteen-byte binding encoded as exactly 32 lowercase hex characters. Argument
+validation and the five-second absolute deadline bound remain enforced.
 
-Private SCE1 snapshots contain only PATH and the fixed locale allowlist in owned
-memory and authenticated IPC. They are not evidence records and must never be
-logged, persisted, or forwarded to a terminal. The comparator retains no public
+The retained-holder regression disproved the prior SCA2 guarantee. An unapproved
+process inherited an approved holder's endpoint, supplied SCE1, and shut down
+writing. The approved holder kept its descriptor and process identity, attempted
+a write that failed with EPIPE, and restored Darwin LOCAL_PEERPID to its own PID.
+A barrier delayed the second frame until that restoration. The old collector
+accepted the injected snapshot and emitted equality. Every fixture retired before
+the assertion. PID/start/code rechecks, a nonsecret challenge, and EOF cannot bind
+that frame to its sender. The independent native socket control still exercises
+this boundary while the public adapter refuses. Do not revive SCA2 or treat the
+last socket I/O owner as sender evidence. The replacement needs an explicit
+architecture decision; this refusal is containment, not a completed mechanism.
+
+The private SCE1 codec remains available only to injected transport tests. No
+current native stream adapter authenticates its frames or may transfer actual
+PATH/locale values. SCE1 is not an evidence record and must never be logged,
+persisted, or forwarded to a terminal. The memory comparator retains no public
 value accessor, wipes allocations on every exit, and compares exact values
-internally. Its public output is exactly twenty big-endian bytes: schema 1,
+internally. Its closed output format is exactly twenty big-endian bytes: schema 1,
 GUI context 1, daemon context 2, PATH difference, locale difference. PATH codes
 are 1 Equal, 2 PresenceChanged, 3 ComponentsChanged, 4 OrderChanged. ComponentsChanged
 includes multiplicity changes; OrderChanged requires the same component multiset.
@@ -207,8 +212,13 @@ prove a GUI-session incarnation. Real macOS session-incarnation observation and
 the Linux D-Bus/session counterpart remain unavailable and require their
 own native/logout evidence. No production success-shaped test adapter is wired.
 
-Register task-registration.toml additively in the coordinator-owned .mise.toml.
-The supplied worktree lacks the ND520/1 seed, core/server/client crates, common
-NativeFailure module, and check:headless task. Only the necessary additive host
-module declaration was made. Reconcile the evidence result alias with the common
-header during integration; do not weaken an unavailable native provider.
+The native phase 2 seed registers the capability tasks. No shared declaration or
+production-admission change is part of E1. The complete 13-case executable builds,
+but its missing mechanisms are not owner-run evidence deferrals. In addition to
+frame-bound environment transfer, E1 still needs native session/logout observation,
+responsible-process attribution, safe general clipboard behavior, modern GPG-agent
+discovery, identity-bound sudo/PAM descendant retirement, and Linux D-Bus/graphical
+adapters. The pre-fork Darwin NOTE_TRACK experiment rejected registration; its
+control observed direct-child exit but no bound escaped-descendant identity. That
+result requires an architecture decision and does not prove every native mechanism
+unavailable. Preserve CleanupUnresolved until the selected mechanism is proved.

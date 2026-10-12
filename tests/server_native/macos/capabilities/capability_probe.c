@@ -84,7 +84,8 @@ static int remaining_ms(uint64_t deadline) {
  * Signal only the retained worker group. Reaping and group absence prove no
  * more than direct-worker retirement; descendants can escape with setsid().
  * Nested sudo scopes therefore remain CleanupUnresolved below. */
-static int retire(pid_t child, int already_reaped) {
+static int retire(pid_t child, int *reaped) {
+    int already_reaped = *reaped;
     int status;
     pid_t waited = 0;
     if (already_reaped && kill(-child, 0) != 0 && errno == ESRCH) return 1;
@@ -96,7 +97,7 @@ static int retire(pid_t child, int already_reaped) {
     do {
         if (!already_reaped) {
             waited = waitpid(child, &status, WNOHANG);
-            if (waited == child) already_reaped = 1;
+            if (waited == child) *reaped = already_reaped = 1;
             else if (waited < 0 && errno != EINTR) return 0;
         }
         if (already_reaped && kill(-child, 0) != 0 && errno == ESRCH) return 1;
@@ -179,13 +180,14 @@ st_native_result st_capability_run(st_capability_case capability, st_probe_conte
         if (capability == ST_CAP_LOGIN_KEYCHAIN || capability == ST_CAP_CLIPBOARD)
             observation.cleanup_class = ST_CLEANUP_UNRESOLVED;
     }
-    int retired = retire(child, reaped);
-    st_native_result finished = st_capability_finish_spawn(child, retired);
-    if (!retired || finished != ST_PROBE_OK || capability == ST_CAP_TOUCH_ID_SUDO) observation.cleanup_class = ST_CLEANUP_UNRESOLVED;
-    /* Sudo may fork, daemonize, or change process groups.
-     * Neither their exit status nor the worker's group absence proves every
-     * descendant retired. No identity-bound native descendant observer exists
-     * yet. Preserve this uncertainty even when a worker emits Passed. */
+    int retired = retire(child, &reaped);
+    st_native_result finished = st_capability_finish_spawn(child, retired, reaped);
+    if ((!retired && capability != ST_CAP_TOUCH_ID_SUDO) || finished != ST_PROBE_OK) observation.cleanup_class = ST_CLEANUP_UNRESOLVED;
+    else if (capability == ST_CAP_TOUCH_ID_SUDO && observation.cleanup_class != ST_CLEANUP_UNRESOLVED)
+        observation.cleanup_class = ST_CLEANUP_VERIFIED;
+    /* The native finish port proves the fixed sudo tree with uniqueid ancestry,
+     * a reaped sentinel and identity-checked rescans. Group emptiness alone does
+     * not authorize that port's success. */
     if (observation.cleanup_class == ST_CLEANUP_UNRESOLVED) {
         observation.outcome = ST_OUTCOME_CLEANUP_UNRESOLVED;
         result = ST_PROBE_CLEANUP_UNRESOLVED;

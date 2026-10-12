@@ -16,6 +16,21 @@ static int decimal(const char *text, uint64_t *out) {
     }
     *out = value; return 1;
 }
+static int run_identity(const char *text, uint8_t out[16]) {
+    if (!text || strlen(text) != 32) return 0;
+    unsigned nonzero = 0;
+    for (size_t i = 0; i < 16; ++i) {
+        unsigned value = 0;
+        for (size_t j = 0; j < 2; ++j) {
+            char c = text[i * 2 + j];
+            if (c >= '0' && c <= '9') value = value * 16 + (unsigned)(c - '0');
+            else if (c >= 'a' && c <= 'f') value = value * 16 + (unsigned)(c - 'a' + 10);
+            else return 0;
+        }
+        out[i] = (uint8_t)value; nonzero |= value;
+    }
+    return nonzero != 0;
+}
 static void emit(void *context, const st_capability_observation *observation) {
     int *failed = context;
     uint8_t bytes[32];
@@ -49,20 +64,20 @@ int main(int argc, char **argv) {
             st_capability_environment_encode(&observation, bytes)) return 1;
         return fwrite(bytes, 1, sizeof(bytes), stdout) == sizeof(bytes) && fflush(stdout) == 0 ? 0 : 1;
     }
-    if (argc == 5 && strcmp(argv[1], "--environment-channel") == 0) {
-        uint64_t context, deadline, fd;
-        if (!decimal(argv[2], &context) || context < 1 || context > 2 || !decimal(argv[3], &deadline) ||
+    if (argc == 6 && strcmp(argv[1], "--environment-channel") == 0) {
+        uint64_t context, deadline, fd; uint8_t run[16];
+        if (!run_identity(argv[5], run) || !decimal(argv[2], &context) || context < 1 || context > 2 || !decimal(argv[3], &deadline) ||
             !decimal(argv[4], &fd) || fd < 3 || fd > INT32_MAX) return 1;
-        st_native_result result = st_capability_environment_send_current((int)fd, (uint32_t)context, deadline);
+        st_native_result result = st_capability_environment_send_current((int)fd, (uint32_t)context, deadline, run);
         close((int)fd);
         return result == ST_PROBE_OK ? 0 : 1;
     }
-    if (argc == 5 && strcmp(argv[1], "--environment-pair") == 0) {
-        uint64_t deadline, gui, daemon;
-        if (!decimal(argv[2], &deadline) || !decimal(argv[3], &gui) || !decimal(argv[4], &daemon) ||
+    if (argc == 6 && strcmp(argv[1], "--environment-pair") == 0) {
+        uint64_t deadline, gui, daemon; uint8_t run[16];
+        if (!run_identity(argv[5], run) || !decimal(argv[2], &deadline) || !decimal(argv[3], &gui) || !decimal(argv[4], &daemon) ||
             gui < 3 || daemon < 3 || gui > INT32_MAX || daemon > INT32_MAX || gui == daemon) return 1;
         st_capability_environment_difference difference;
-        st_native_result result = st_capability_environment_compare_channels((int)gui, (int)daemon, deadline, &difference);
+        st_native_result result = st_capability_environment_compare_channels((int)gui, (int)daemon, deadline, run, &difference);
         close((int)gui); close((int)daemon);
         uint8_t bytes[20];
         if (result != ST_PROBE_OK || st_capability_environment_difference_encode(&difference, bytes)) return 1;

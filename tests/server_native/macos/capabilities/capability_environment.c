@@ -160,9 +160,9 @@ int st_capability_shell_invocation(const char *const argv[], size_t count, int h
     return login && interactive;
 }
 
-/* SCE1 is PRIVATE owned IPC, not an evidence record. The native boundary must
- * authenticate both peers before calling these routines. No path or locale
- * byte leaves this allocation except through that connected channel. */
+/* SCE1 is a private codec, not sender evidence. Actual values require native
+ * frame-bound sender evidence, not endpoint last-owner PID/code checks. No current
+ * native adapter supplies it; only injected transport tests use these routines. */
 static void put_u32(uint8_t *bytes, uint32_t value) {
     bytes[0] = (uint8_t)(value >> 24); bytes[1] = (uint8_t)(value >> 16);
     bytes[2] = (uint8_t)(value >> 8); bytes[3] = (uint8_t)value;

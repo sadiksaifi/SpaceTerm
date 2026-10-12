@@ -10,13 +10,16 @@ st_native_result st_capability_spawn(st_capability_case, st_probe_context,
     uint64_t deadline_ns, pid_t *owned_child, int *owned_output);
 /* Transfer only the current owning PTY to an already retained worker. */
 int st_capability_begin_foreground(pid_t owned_child);
-st_native_result st_capability_finish_spawn(pid_t owned_child, int retired);
+st_native_result st_capability_finish_spawn(pid_t owned_child, int group_absent, int root_reaped);
 st_native_result st_capability_native_worker(st_capability_case, st_probe_context,
     uint64_t deadline_ns, st_capability_observation *);
 int st_capability_worker_entry(int argc, char **argv);
+/* Read-only OS responsibility observation for this exact effect process. */
+uint32_t st_capability_responsible_process(void);
 
-/* Private snapshot transport, never used until the native adapter authenticates
- * the connected same-account signed probe peer. No general environment import. */
+/* Private snapshot codec for injected transport tests. Actual values require
+ * native sender evidence bound to the entire frame. Endpoint last-owner PID/code
+ * checks cannot supply it. No current native adapter may call this codec. */
 struct st_capability_retained_environment;
 st_native_result st_capability_environment_send_private(int fd,
     const struct st_capability_retained_environment *, uint64_t deadline_ns);

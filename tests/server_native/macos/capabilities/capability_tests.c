@@ -4,6 +4,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <signal.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -113,10 +114,10 @@ st_native_result st_capability_spawn(st_capability_case capability, st_probe_con
     return ST_PROBE_OK;
 }
 
-st_native_result st_capability_finish_spawn(pid_t child, int retired) {
-    assert(child == last_child && retired);
+st_native_result st_capability_finish_spawn(pid_t child, int retired, int root_reaped) {
+    assert(child == last_child && retired && root_reaped);
     ++finish_count;
-    return ST_PROBE_OK;
+    return mode == 10 ? ST_PROBE_CLEANUP_UNRESOLVED : ST_PROBE_OK;
 }
 
 static st_native_result run(unsigned selected_mode, uint32_t capability, uint32_t context, uint64_t budget) {
@@ -186,6 +187,10 @@ TEST(touch_id_case_executes_only_usr_bin_true) {
     assert(strcmp(arguments[1], "--") == 0);
     assert(strcmp(arguments[2], "/usr/bin/true") == 0);
     assert(arguments[3] == NULL);
+}
+TEST(completed_fixed_tree_is_not_unconditionally_cleanup_unresolved) {
+    assert(run(0, ST_CAP_TOUCH_ID_SUDO, ST_CONTEXT_GUI, UINT64_C(1000000000)) == ST_PROBE_OK);
+    assert(emitted.outcome == ST_OUTCOME_PASSED);
 }
 TEST(short_and_extra_output_reject_before_success) {
     assert(run(3, ST_CAP_MICROPHONE, ST_CONTEXT_GUI, UINT64_C(1000000000)) == ST_PROBE_INVALID);
@@ -358,7 +363,61 @@ TEST(private_environment_transport_rejects_oversize_nul_trailing_and_timeout) {
     }
 }
 
+
+#ifdef __APPLE__
+static pthread_mutex_t mask_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t mask_condition = PTHREAD_COND_INITIALIZER;
+static int mask_phase;
+static void *distinct_mask(void *unused) {
+    (void)unused;
+    sigset_t blocked, pending;
+    sigemptyset(&blocked); sigaddset(&blocked, SIGUSR1);
+    assert(pthread_sigmask(SIG_BLOCK, &blocked, NULL) == 0);
+    assert(pthread_kill(pthread_self(), SIGUSR1) == 0);
+    assert(pthread_mutex_lock(&mask_mutex) == 0);
+    mask_phase = 1; assert(pthread_cond_signal(&mask_condition) == 0);
+    while (mask_phase != 2) assert(pthread_cond_wait(&mask_condition, &mask_mutex) == 0);
+    assert(pthread_mutex_unlock(&mask_mutex) == 0);
+    assert(pthread_sigmask(SIG_SETMASK, NULL, &blocked) == 0);
+    assert(sigismember(&blocked, SIGUSR1));
+    assert(sigpending(&pending) == 0 && sigismember(&pending, SIGUSR1));
+    int signal_number; assert(sigwait(&blocked, &signal_number) == 0 && signal_number == SIGUSR1);
+    return NULL;
+}
+TEST(descriptor_sigpipe_preserves_other_thread_mask_and_pending_signal) {
+    pid_t owner = fork(); assert(owner >= 0);
+    if (!owner) {
+        assert(signal(SIGPIPE, SIG_DFL) != SIG_ERR);
+        assert(signal(SIGUSR1, SIG_DFL) != SIG_ERR);
+        sigset_t empty; sigemptyset(&empty); assert(pthread_sigmask(SIG_SETMASK, &empty, NULL) == 0);
+        pthread_t worker; assert(pthread_create(&worker, NULL, distinct_mask, NULL) == 0);
+        assert(pthread_mutex_lock(&mask_mutex) == 0);
+        while (mask_phase != 1) assert(pthread_cond_wait(&mask_condition, &mask_mutex) == 0);
+        assert(pthread_mutex_unlock(&mask_mutex) == 0);
+        for (int socket = 0; socket < 2; ++socket) {
+            int fds[2]; assert((socket ? socketpair(AF_UNIX, SOCK_STREAM, 0, fds) : pipe(fds)) == 0);
+            int writing = socket ? fds[0] : fds[1], reading = socket ? fds[1] : fds[0];
+            close(reading); char byte = 0;
+            assert(!st_capability_transfer(writing, &byte, 1, 1,
+                st_capability_monotonic_ns() + UINT64_C(1000000000)));
+            close(writing);
+        }
+        assert(pthread_mutex_lock(&mask_mutex) == 0);
+        mask_phase = 2; assert(pthread_cond_signal(&mask_condition) == 0);
+        assert(pthread_mutex_unlock(&mask_mutex) == 0);
+        assert(pthread_join(worker, NULL) == 0);
+        assert(pthread_sigmask(SIG_SETMASK, NULL, &empty) == 0 && !sigismember(&empty, SIGUSR1));
+        _exit(0);
+    }
+    int status; assert(waitpid(owner, &status, 0) == owner);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+}
+#endif
+
 int main(void) {
+#ifdef __APPLE__
+    RUN(descriptor_sigpipe_preserves_other_thread_mask_and_pending_signal);
+#endif
     RUN(probe_timeout_does_not_reset_after_partial_output);
     RUN(probe_output_rejects_paths_environment_values_and_native_errors);
     RUN(preflight_success_without_effect_is_not_passed);
@@ -367,6 +426,7 @@ int main(void) {
     RUN(clipboard_restore_does_not_overwrite_newer_user_change);
     RUN(capture_pixels_and_microphone_samples_are_discarded);
     RUN(touch_id_case_executes_only_usr_bin_true);
+    RUN(completed_fixed_tree_is_not_unconditionally_cleanup_unresolved);
     RUN(short_and_extra_output_reject_before_success);
     RUN(cleanup_uncertainty_overrides_effect_success);
     RUN(resource_worker_timeout_does_not_claim_cleanup);
@@ -381,5 +441,9 @@ int main(void) {
     RUN(sigpipe_suppression_handles_sockets_and_preserves_existing_pending_signal);
     RUN(private_environment_transport_rejects_oversize_nul_trailing_and_timeout);
     printf("executed=%u proof=synthetic native-effects=0\n", test_count);
-    return test_count == 21 ? 0 : 1;
+    #ifdef __APPLE__
+    return test_count == 23 ? 0 : 1;
+#else
+    return test_count == 22 ? 0 : 1;
+#endif
 }

@@ -6,6 +6,9 @@
 
 use std::{fmt, time::Duration};
 
+pub mod native;
+pub use native::{NativeGuiSessionPeer, SystemGuiSessionObserver, SystemNativeGuiSessionPeer};
+
 /// Content-free failures at the capability boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum CapabilityFailure {
@@ -344,6 +347,10 @@ pub enum SessionPurpose {
     Clipboard,
     /// Open the fixed synthetic companion URL.
     CompanionUrl,
+    /// Reach the current graphical session's account-scoped user D-Bus.
+    UserBus,
+    /// Reach graphical-session tools through the account's desktop portal bus.
+    GraphicalPortal,
 }
 
 /// Native session comparison facts. Constructing facts creates no adapter lease.

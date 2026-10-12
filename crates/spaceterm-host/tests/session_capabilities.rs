@@ -184,6 +184,38 @@ fn session_lease_rejects_other_broker_purpose_and_expiry() {
     );
 }
 
+#[cfg(all(target_os = "macos", feature = "native-tests"))]
+#[test]
+fn native_unprivileged_session_observation_can_issue_an_expiring_lease() {
+    use spaceterm_host::session_capabilities::{NativeGuiSessionPeer, SystemNativeGuiSessionPeer};
+    // This Mac gate observes the existing GUI session without logout, TCC or
+    // account mutation. A no-GUI host cannot credit this issuance regression.
+    let uid = unsafe { libc::getuid() };
+    let native = SystemNativeGuiSessionPeer::default();
+    let observed = native.observe(uid).unwrap();
+    assert!(observed.is_some());
+    assert_eq!(native.observe(uid).unwrap(), observed);
+    assert_eq!(native.observe(u32::MAX).unwrap(), None);
+    let account = fixture_account(uid);
+    let key = account.key();
+    let broker = SessionAdapterBroker::new(
+        spaceterm_host::session_capabilities::SystemGuiSessionObserver::new(
+            AccountPeer(account),
+            key,
+        ),
+    );
+    let lease = broker
+        .bind(SessionPurpose::GpgAgent, 100, Duration::from_millis(1))
+        .unwrap();
+    broker
+        .revalidate(&lease, SessionPurpose::GpgAgent, 101)
+        .unwrap();
+    assert_eq!(
+        broker.revalidate(&lease, SessionPurpose::GpgAgent, 1_000_100),
+        Err(CapabilityFailure::StaleAssessment)
+    );
+}
+
 #[test]
 fn production_session_observer_remains_unavailable() {
     let broker = SessionAdapterBroker::new(UnavailableGuiSessionObserver);
@@ -253,4 +285,213 @@ fn exact_environment_difference_is_separate_from_counts_and_rejects_coalesced_co
     }
     assert!(NormalizedEnvironmentDifference::decode(b"PATH=/synthetic/bin").is_err());
     assert!(NormalizedEnvironmentDifference::decode(&record([1, 1, 2, 1, 1, 0, 0, 0])).is_err());
+}
+
+use spaceterm_host::{
+    native_deployment::account::{AccountBinding, NativeAccountId, NativeAccountProvider},
+    native_deployment::contracts::NativeFailure,
+    startup::{AccountBuildKey, BuildIdentity},
+};
+struct AccountPeer(AccountBinding);
+impl NativeAccountProvider for AccountPeer {
+    fn observe(&self, key: AccountBuildKey) -> Result<AccountBinding, NativeFailure> {
+        if key == self.0.key() {
+            Ok(self.0.clone())
+        } else {
+            Err(NativeFailure::IdentityMismatch)
+        }
+    }
+}
+fn fixture_account(uid: u32) -> AccountBinding {
+    AccountBinding::new(
+        AccountBuildKey {
+            account_uid: uid,
+            build_identity: BuildIdentity::Development,
+        },
+        20,
+        NativeAccountId::macos([1; 16]).unwrap(),
+    )
+    .unwrap()
+}
+#[derive(Clone)]
+struct NativeSessionPeer(Arc<Mutex<Option<[u8; 16]>>>);
+impl spaceterm_host::session_capabilities::NativeGuiSessionPeer for NativeSessionPeer {
+    fn observe(&self, _: u32) -> Result<Option<[u8; 16]>, CapabilityFailure> {
+        Ok(*self.0.lock().unwrap())
+    }
+}
+#[test]
+fn native_observation_boundary_rechecks_account_session_and_logout() {
+    use spaceterm_host::session_capabilities::SystemGuiSessionObserver;
+    let current = Arc::new(Mutex::new(Some([1; 16])));
+    let account = fixture_account(501);
+    let key = account.key();
+    let broker = SessionAdapterBroker::new(SystemGuiSessionObserver::with_native_peer(
+        AccountPeer(account),
+        key,
+        NativeSessionPeer(current.clone()),
+    ));
+    let lease = broker
+        .bind(SessionPurpose::UserBus, 100, Duration::from_secs(1))
+        .unwrap();
+    broker
+        .revalidate(&lease, SessionPurpose::UserBus, 101)
+        .unwrap();
+    *current.lock().unwrap() = Some([2; 16]);
+    assert_eq!(
+        broker.revalidate(&lease, SessionPurpose::UserBus, 102),
+        Err(CapabilityFailure::StaleAssessment)
+    );
+    *current.lock().unwrap() = None;
+    assert_eq!(
+        broker.revalidate(&lease, SessionPurpose::UserBus, 103),
+        Err(CapabilityFailure::StaleAssessment)
+    );
+}
+
+#[cfg(unix)]
+struct Locations(std::path::PathBuf);
+#[cfg(unix)]
+impl spaceterm_host::session_capabilities::native::NativeSessionLocations for Locations {
+    fn home(&self, _: u32) -> Result<std::path::PathBuf, CapabilityFailure> {
+        Ok(self.0.clone())
+    }
+    fn runtime(&self, _: u32) -> Result<Option<std::path::PathBuf>, CapabilityFailure> {
+        Ok(Some(self.0.clone()))
+    }
+}
+#[cfg(unix)]
+#[test]
+fn modern_agent_discovery_does_not_need_legacy_environment_and_rechecks_completion() {
+    use spaceterm_host::session_capabilities::{
+        SystemGuiSessionObserver, native::SystemSessionConnector,
+    };
+    use std::{
+        io::{Read, Write},
+        os::unix::{fs::PermissionsExt, net::UnixListener},
+    };
+    let temporary = tempfile::tempdir().unwrap();
+    let home = temporary.path();
+    std::fs::create_dir(home.join(".gnupg")).unwrap();
+    std::fs::set_permissions(home.join(".gnupg"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let listener = UnixListener::bind(home.join(".gnupg/S.gpg-agent")).unwrap();
+    let agent = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.write_all(b"OK fixture\n").unwrap();
+        let mut query = [0; 16];
+        stream.read_exact(&mut query).unwrap();
+        assert_eq!(&query, b"GETINFO version\n");
+        stream.write_all(b"D synthetic\nOK\n").unwrap();
+    });
+    let uid = unsafe { libc::getuid() };
+    let account = fixture_account(uid);
+    let key = account.key();
+    let current = Arc::new(Mutex::new(Some([1; 16])));
+    let broker = SessionAdapterBroker::new(SystemGuiSessionObserver::with_native_peer(
+        AccountPeer(account.clone()),
+        key,
+        NativeSessionPeer(current.clone()),
+    ));
+    let lease = broker
+        .bind(SessionPurpose::GpgAgent, 100, Duration::from_secs(1))
+        .unwrap();
+    let connector = SystemSessionConnector::with_locations(&account, Locations(home.into()));
+    let result = connector.with_connection(
+        &broker,
+        &lease,
+        SessionPurpose::GpgAgent,
+        || 101,
+        |stream| {
+            let mut greeting = [0; 11];
+            stream.read_exact(&mut greeting).unwrap();
+            assert_eq!(&greeting, b"OK fixture\n");
+            stream.write_all(b"GETINFO version\n").unwrap();
+            let mut reply = [0; 15];
+            stream.read_exact(&mut reply).unwrap();
+            assert_eq!(&reply, b"D synthetic\nOK\n");
+            *current.lock().unwrap() = None;
+            Ok(())
+        },
+    );
+    agent.join().unwrap();
+    assert_eq!(result, Err(CapabilityFailure::StaleAssessment));
+    assert_eq!(
+        connector.with_connection(&broker, &lease, SessionPurpose::UserBus, || 101, |_| Ok(())),
+        Err(CapabilityFailure::StaleAssessment)
+    );
+}
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_user_bus_and_graphical_portal_are_distinct_session_purposes() {
+    use spaceterm_host::session_capabilities::{
+        SystemGuiSessionObserver, native::SystemSessionConnector,
+    };
+    use std::os::unix::{fs::PermissionsExt, net::UnixListener};
+    let temporary = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let listener = UnixListener::bind(temporary.path().join("bus")).unwrap();
+    let uid = unsafe { libc::getuid() };
+    let account = fixture_account(uid);
+    let key = account.key();
+    let broker = SessionAdapterBroker::new(SystemGuiSessionObserver::with_native_peer(
+        AccountPeer(account.clone()),
+        key,
+        NativeSessionPeer(Arc::new(Mutex::new(Some([1; 16])))),
+    ));
+    let bus = broker
+        .bind(SessionPurpose::UserBus, 100, Duration::from_secs(1))
+        .unwrap();
+    let portal = broker
+        .bind(SessionPurpose::GraphicalPortal, 100, Duration::from_secs(1))
+        .unwrap();
+    let connector =
+        SystemSessionConnector::with_locations(&account, Locations(temporary.path().into()));
+    assert_eq!(
+        connector.with_connection(
+            &broker,
+            &bus,
+            SessionPurpose::GraphicalPortal,
+            || 101,
+            |_| Ok(())
+        ),
+        Err(CapabilityFailure::StaleAssessment)
+    );
+    for (lease, purpose) in [
+        (&bus, SessionPurpose::UserBus),
+        (&portal, SessionPurpose::GraphicalPortal),
+    ] {
+        connector
+            .with_connection(&broker, lease, purpose, || 101, |_| Ok(()))
+            .unwrap();
+        listener.accept().unwrap();
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "native-tests"))]
+#[test]
+fn native_linux_session_observation_can_issue_an_expiring_lease() {
+    use spaceterm_host::session_capabilities::{
+        NativeGuiSessionPeer, SystemGuiSessionObserver, SystemNativeGuiSessionPeer,
+    };
+    let uid = unsafe { libc::getuid() };
+    let native = SystemNativeGuiSessionPeer::default();
+    assert!(native.observe(uid).unwrap().is_some());
+    let account = fixture_account(uid);
+    let key = account.key();
+    let broker =
+        SessionAdapterBroker::new(SystemGuiSessionObserver::new(AccountPeer(account), key));
+    let lease = broker
+        .bind(
+            SessionPurpose::GraphicalPortal,
+            100,
+            Duration::from_millis(1),
+        )
+        .unwrap();
+    broker
+        .revalidate(&lease, SessionPurpose::GraphicalPortal, 101)
+        .unwrap();
+    assert_eq!(
+        broker.revalidate(&lease, SessionPurpose::GraphicalPortal, 1_000_100),
+        Err(CapabilityFailure::StaleAssessment)
+    );
 }

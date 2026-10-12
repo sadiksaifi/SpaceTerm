@@ -1,4 +1,5 @@
 #include "capability_internal.h"
+#include "capability_agents.h"
 #import <Foundation/Foundation.h>
 #include <assert.h>
 #include <stdio.h>
@@ -74,7 +75,7 @@ static void closed_configuration_pipe_restores_actual_foreground_pty(void) {
             st_capability_monotonic_ns() + UINT64_C(1000000000)));
         close(config[1]);
         int status; assert(waitpid(worker, &status, 0) == worker);
-        assert(st_capability_finish_spawn(worker, 1) == ST_PROBE_OK);
+        assert(st_capability_finish_spawn(worker, 1, 1) == ST_PROBE_OK);
         assert(tcgetpgrp(slave) == getpgrp());
         close(slave); _exit(0);
     }
@@ -82,6 +83,18 @@ static void closed_configuration_pipe_restores_actual_foreground_pty(void) {
     int status; assert(waitpid(owner, &status, 0) == owner);
     close(master);
     assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+}
+static void native_responsible_process_observation_is_not_ancestry_assumption(void) {
+    uint32_t observed = st_capability_responsible_process();
+    assert(observed >= ST_RESPONSIBLE_DESKTOP && observed < ST_RESPONSIBLE_UNKNOWN);
+}
+static void native_agent_account_and_session_observation_is_stable(void) {
+    st_capability_agent_session before = {0}, after = {0};
+    assert(st_capability_native_agent_session(&before));
+    assert(st_capability_native_agent_session(&after));
+    assert(before.uid == getuid() && memcmp(&before, &after, sizeof(before)) == 0);
+    st_capability_discard_owned(&before, sizeof(before));
+    st_capability_discard_owned(&after, sizeof(after));
 }
 int main(void) {
     @autoreleasepool {
@@ -93,7 +106,11 @@ int main(void) {
         puts("passed targets_reject_unknown_schema_reserved_and_traversal");
         closed_configuration_pipe_restores_actual_foreground_pty();
         puts("passed closed_configuration_pipe_restores_actual_foreground_pty");
-        puts("executed=4 proof=synthetic native-effects=0");
+        native_responsible_process_observation_is_not_ancestry_assumption();
+        puts("passed native_responsible_process_observation_is_not_ancestry_assumption");
+        native_agent_account_and_session_observation_is_stable();
+        puts("passed native_agent_account_and_session_observation_is_stable");
+        puts("executed=6 proof=synthetic native-effects=0");
         return 0;
     }
 }

@@ -43,12 +43,13 @@ st_native_result st_capability_environment_difference_encode(
  * files. Unavailable if actual login/interactive/PTY context cannot be proved. */
 st_native_result st_capability_observe_environment(st_probe_context context,
     st_capability_retained_environment **out);
-/* Native authenticated peer channels carry private snapshots. The standalone
- * pair command emits only st_capability_environment_difference's fixed record. */
+/* Evidence-only stream entries remain unavailable without frame-bound native
+ * sender evidence. They grant no private transfer and leave output unchanged.
+ * LOCAL_PEERPID and a nonsecret handshake cannot supply that binding. */
 st_native_result st_capability_environment_send_current(int owned_channel, st_probe_context,
-    uint64_t deadline_ns);
+    uint64_t deadline_ns, const uint8_t run_id[16]);
 st_native_result st_capability_environment_compare_channels(int gui_channel, int daemon_channel,
-    uint64_t deadline_ns, st_capability_environment_difference *out);
+    uint64_t deadline_ns, const uint8_t run_id[16], st_capability_environment_difference *out);
 
 /* Recognize an explicit interactive login shell on a PTY, never a -c command
  * or script pretending to be an observed account shell. */

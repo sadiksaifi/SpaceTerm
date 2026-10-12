@@ -22,6 +22,7 @@ from spaceterm_tasks.macos_signing import signing_environment  # noqa: E402
 
 SOURCES = ROOT / "tests" / "server_native" / "macos" / "capabilities"
 REQUIRED_CASES = (
+    "descriptor_sigpipe_preserves_other_thread_mask_and_pending_signal",
     "probe_timeout_does_not_reset_after_partial_output",
     "probe_output_rejects_paths_environment_values_and_native_errors",
     "preflight_success_without_effect_is_not_passed",
@@ -30,6 +31,7 @@ REQUIRED_CASES = (
     "clipboard_restore_does_not_overwrite_newer_user_change",
     "capture_pixels_and_microphone_samples_are_discarded",
     "touch_id_case_executes_only_usr_bin_true",
+    "completed_fixed_tree_is_not_unconditionally_cleanup_unresolved",
     "short_and_extra_output_reject_before_success",
     "cleanup_uncertainty_overrides_effect_success",
     "resource_worker_timeout_does_not_claim_cleanup",
@@ -44,12 +46,38 @@ REQUIRED_CASES = (
     "sigpipe_suppression_handles_sockets_and_preserves_existing_pending_signal",
     "private_environment_transport_rejects_oversize_nul_trailing_and_timeout",
 )
+CHANNEL_CASES = (
+    "private_frame_cannot_borrow_restored_approved_holder_identity",
+    "socket_last_owner_can_restore_after_unapproved_frame",
+    "environment_channels_without_sender_binding_never_grant_or_observe_private_values",
+)
+TREE_CASES = (
+    "retained_fork_parent_identity_finds_reparented_member",
+    "triple_fork_unknown_window_parent_remains_unresolved",
+    "pid_reuse_never_signals_the_replacement",
+    "unrelated_window_activity_is_not_a_member",
+    "exec_shadow_bit_does_not_break_ancestry",
+    "denied_retirement_never_becomes_complete_cleanup",
+    "retirement_has_one_absolute_deadline",
+    "post_sentinel_unknown_ancestry_is_not_inferred_foreign",
+)
+TREE_NATIVE_CASES = (
+    "native_reparented_member_is_identity_retired",
+    "native_triple_fork_uncertainty_is_preserved",
+)
+AGENT_CASES = (
+    "modern_gpg_agent_is_queried_without_legacy_environment",
+    "replacement_session_refuses_modern_agent_completion",
+    "expired_agent_lease_performs_no_discovery_or_query",
+)
 EVENT_CASES = ("url_receipt_is_independent_of_automation_denial",)
 TARGET_CASES = (
     "targets_reject_unbound_companion_window",
     "targets_reject_hidden_bytes_after_volume_terminator",
     "targets_reject_unknown_schema_reserved_and_traversal",
     "closed_configuration_pipe_restores_actual_foreground_pty",
+    "native_responsible_process_observation_is_not_ancestry_assumption",
+    "native_agent_account_and_session_observation_is_stable",
 )
 NATIVE_FRAMEWORKS = (
     "AppKit",
@@ -60,6 +88,8 @@ NATIVE_FRAMEWORKS = (
     "ApplicationServices",
     "Carbon",
     "CoreMedia",
+    "OpenDirectory",
+    "SystemConfiguration",
 )
 
 
@@ -134,6 +164,10 @@ def build_fixture(destination, *, sanitizers=False, environment=None):
             str(SOURCES / "capability_io.c"),
             str(SOURCES / "capability_environment.c"),
             str(SOURCES / "capability_native.m"),
+            str(SOURCES / "capability_tree.c"),
+            str(SOURCES / "capability_process.c"),
+            str(SOURCES / "capability_agents.c"),
+            str(SOURCES / "capability_channel.c"),
             str(SOURCES / "capability_events.c"),
             str(SOURCES / "probe_main.c"),
             *(argument for name in NATIVE_FRAMEWORKS for argument in ("-framework", name)),
@@ -181,6 +215,67 @@ def run_task(*, sanitizers=False):
         )
         checked(arguments, clean)
         count = verify_test_output(checked([str(binary)], clean, timeout=10))
+        channels = Path(temporary) / "channel-tests"
+        arguments = compiler_arguments(sanitizers=sanitizers)
+        arguments.extend(
+            [
+                str(SOURCES / "capability_probe.c"),
+                str(SOURCES / "capability_io.c"),
+                str(SOURCES / "capability_environment.c"),
+                str(SOURCES / "capability_channel.c"),
+                str(SOURCES / "channel_tests.c"),
+                "-Wl,-dead_strip",
+                "-o",
+                str(channels),
+            ]
+        )
+        checked(arguments, clean)
+        count += verify_test_output(checked([str(channels)], clean, timeout=10), CHANNEL_CASES)
+        for name, sources, cases in (
+            ("tree-tests", ("capability_tree.c", "tree_tests.c"), TREE_CASES),
+            (
+                "tree-native-tests",
+                (
+                    "capability_tree.c",
+                    "capability_process.c",
+                    "capability_probe.c",
+                    "tree_native_tests.c",
+                ),
+                TREE_NATIVE_CASES,
+            ),
+        ):
+            tree = Path(temporary) / name
+            checked(
+                [
+                    *compiler_arguments(sanitizers=sanitizers),
+                    *(str(SOURCES / source) for source in sources),
+                    "-Wl,-dead_strip",
+                    "-o",
+                    str(tree),
+                ],
+                clean,
+            )
+            count += verify_test_output(checked([str(tree)], clean, timeout=10), cases)
+        agents = Path(temporary) / "agent-tests"
+        checked(
+            [
+                *compiler_arguments(sanitizers=sanitizers),
+                *(
+                    str(SOURCES / source)
+                    for source in (
+                        "capability_agents.c",
+                        "capability_probe.c",
+                        "capability_io.c",
+                        "agent_tests.c",
+                    )
+                ),
+                "-Wl,-dead_strip",
+                "-o",
+                str(agents),
+            ],
+            clean,
+        )
+        count += verify_test_output(checked([str(agents)], clean, timeout=10), AGENT_CASES)
         events = Path(temporary) / "event-tests"
         arguments = compiler_arguments(sanitizers=sanitizers)
         arguments.extend(
@@ -204,6 +299,9 @@ def run_task(*, sanitizers=False):
                 str(SOURCES / "capability_probe.c"),
                 str(SOURCES / "capability_io.c"),
                 str(SOURCES / "capability_native.m"),
+                str(SOURCES / "capability_tree.c"),
+                str(SOURCES / "capability_process.c"),
+                str(SOURCES / "capability_agents.c"),
                 str(SOURCES / "capability_environment.c"),
                 str(SOURCES / "capability_events.c"),
                 str(SOURCES / "target_tests.m"),
