@@ -239,9 +239,12 @@ fn stopped_still_revalidates_native_account_and_registration_generation() {
     assert_eq!(native.storage_calls.load(Ordering::SeqCst), 0);
 }
 #[test]
-fn missing_native_account_incarnation_is_unavailable_not_passwd_identity() {
+fn missing_native_account_is_unavailable_not_passwd_identity() {
     assert_eq!(
-        SystemAccountProvider.observe(key()),
+        SystemAccountProvider.observe(AccountBuildKey {
+            account_uid: u32::MAX - 1,
+            ..key()
+        }),
         Err(NativeFailure::AccountIdentityUnavailable)
     );
 }

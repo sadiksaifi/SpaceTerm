@@ -2,6 +2,8 @@
 
 use std::convert::Infallible;
 
+pub mod support_policy;
+
 /// Retained native custody. Only A's private OS-anchored composition may issue it.
 #[expect(
     dead_code,
