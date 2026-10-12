@@ -697,7 +697,7 @@ impl SessionPresence {
         }
     }
 
-    /// The next change of whether the session is away. Pending forever once logind is gone.
+    /// The next change of whether the session is away. Pending forever if tracking ends.
     async fn changed(&mut self) -> bool {
         if self.open && self.away.changed().await.is_ok() {
             return *self.away.borrow_and_update();
@@ -735,6 +735,27 @@ async fn follow_session(
     .await
     .map_err(unavailable)?
     .map_err(unavailable)?;
+    let mut resolve = true;
+    loop {
+        let change = tokio::select! {
+            _ = follow_session_owner(&connection, away), if resolve => None,
+            change = std::future::poll_fn(|context| Pin::new(&mut owners).poll_next(context)) => {
+                Some(change.ok_or(CompanionFailure::StatusAreaUnavailable)?)
+            }
+        };
+        // A departed or replaced owner no longer owns the resolved session. Keep watching
+        // for its successor after either an ownership change or a failed session query.
+        away.send_if_modified(|away| std::mem::replace(away, false));
+        resolve = change.is_some_and(
+            |change| matches!(change.args(), Ok(arguments) if arguments.new_owner().is_some()),
+        );
+    }
+}
+
+async fn follow_session_owner(
+    connection: &zbus::Connection,
+    away: &watch::Sender<bool>,
+) -> Result<(), CompanionFailure> {
     let reply = tokio::time::timeout(
         BUS_DEADLINE,
         connection.call_method(
@@ -760,14 +781,14 @@ async fn follow_session(
         .build();
     let mut changes = tokio::time::timeout(
         BUS_DEADLINE,
-        MessageStream::for_match_rule(changes, &connection, Some(WATCHER_SIGNAL_QUEUE)),
+        MessageStream::for_match_rule(changes, connection, Some(WATCHER_SIGNAL_QUEUE)),
     )
     .await
     .map_err(unavailable)?
     .map_err(unavailable)?;
     loop {
-        let locked = session_hint(&connection, &session, "LockedHint").await?;
-        let idle = session_hint(&connection, &session, "IdleHint").await?;
+        let locked = session_hint(connection, &session, "LockedHint").await?;
+        let idle = session_hint(connection, &session, "IdleHint").await?;
         let now_away = locked || idle;
         away.send_if_modified(|away| std::mem::replace(away, now_away) != now_away);
         tokio::select! {
@@ -775,10 +796,6 @@ async fn follow_session(
                 if change.is_none() {
                     return Err(CompanionFailure::StatusAreaUnavailable);
                 }
-            }
-            // A departed or replaced logind no longer owns the resolved session.
-            _ = std::future::poll_fn(|context| Pin::new(&mut owners).poll_next(context)) => {
-                return Err(CompanionFailure::StatusAreaUnavailable);
             }
             // Signals may stop without the name leaving. Recheck only while the grace is paused.
             () = tokio::time::sleep(BUS_DEADLINE), if now_away => {}
