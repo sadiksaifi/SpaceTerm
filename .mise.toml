@@ -490,3 +490,23 @@ run = "tagsmith validate --tag {{usage.tag | quote}} --github-output"
 [tasks."release:notes:preview"]
 description = "Preview release notes for changes since the last release"
 run = "git-cliff --config cliff.toml --unreleased --offline --strip all"
+
+[tasks."check:headless"]
+description = "Reject graphical dependencies in headless server and client crates"
+run = "python -m spaceterm_tasks.headless"
+
+[tasks."test:headless:tools"]
+description = "Test the headless dependency classifier"
+run = "python -m unittest tests.test_headless"
+
+[tasks."test:server:contracts"]
+description = "Test portable domain contracts and headless composition skeletons"
+run = "cargo test --package spaceterm-core --package spaceterm-client --package spaceterm-server --all-targets --locked"
+
+[tasks."check:server:contracts"]
+description = "Check portable domain contracts and headless composition skeletons"
+run = "cargo check --package spaceterm-core --package spaceterm-client --package spaceterm-server --all-targets --locked"
+
+[tasks."lint:server:contracts"]
+description = "Lint portable domain contracts and headless composition skeletons"
+run = "cargo clippy --package spaceterm-core --package spaceterm-client --package spaceterm-server --all-targets --locked --no-deps -- -D warnings"

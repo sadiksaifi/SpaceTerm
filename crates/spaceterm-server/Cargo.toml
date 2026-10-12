@@ -1,0 +1,7 @@
+[package]
+name = "spaceterm-server"
+publish = false
+edition = "2024"
+
+[dependencies]
+spaceterm-core = { path = "../spaceterm-core" }
