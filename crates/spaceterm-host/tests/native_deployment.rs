@@ -1,0 +1,284 @@
+use base64::{Engine, engine::general_purpose::STANDARD};
+use sha2::{Digest, Sha256};
+use spaceterm_directories::AppDirectoryEnvironment;
+use spaceterm_host::{
+    native_deployment::{
+        account::{AccountBinding, NativeAccountId, NativeAccountProvider, SystemAccountProvider},
+        contracts::{DataGenerationId, NativeFailure},
+        profile::{BootCredentialBinding, RegisteredRoots, RegistrationProfile, StorageBinding},
+    },
+    native_registration::{RegistrationHeadV2, StartupBarrier},
+    startup::{
+        AccountBuildKey, BuildIdentity, DesiredServerState, InstallationId, StartupInspection,
+        StartupPreflight, StartupSnapshot, inspect_startup,
+    },
+};
+use std::{
+    num::NonZeroU64,
+    path::PathBuf,
+    sync::atomic::{AtomicUsize, Ordering},
+};
+
+fn key() -> AccountBuildKey {
+    AccountBuildKey {
+        account_uid: 501,
+        build_identity: BuildIdentity::Development,
+    }
+}
+fn account() -> AccountBinding {
+    AccountBinding::new(key(), 20, NativeAccountId::macos([1; 16]).unwrap()).unwrap()
+}
+fn profile() -> RegistrationProfile {
+    let roots = RegisteredRoots::new(
+        "/first/config".into(),
+        "/first/data".into(),
+        "/first/state".into(),
+        "/first/cache".into(),
+    )
+    .unwrap();
+    let boot = BootCredentialBinding::macos([2; 32], [3; 32], account().sha256(), [4; 16]).unwrap();
+    RegistrationProfile::new(
+        key(),
+        20,
+        [1; 16],
+        [4; 16],
+        roots,
+        boot,
+        StorageBinding::new(vec![5; 16]).unwrap(),
+    )
+    .unwrap()
+}
+fn head(profile: &RegistrationProfile, desired_state: DesiredServerState) -> RegistrationHeadV2 {
+    RegistrationHeadV2 {
+        key: key(),
+        generation: NonZeroU64::new(7).unwrap(),
+        desired_state,
+        approved_installation: InstallationId(NonZeroU64::new(11).unwrap()),
+        staged_installation: Some(InstallationId(NonZeroU64::new(12).unwrap())),
+        approved_data_generation: DataGenerationId::new(1).unwrap(),
+        active_request: None,
+        startup_barrier: StartupBarrier::Open,
+        profile_sha256: Sha256::digest(profile.encode().unwrap()).into(),
+        approved_manifest_sha256: [6; 32],
+        approved_descriptor_sha256: [7; 32],
+        staged_descriptor_sha256: Some([8; 32]),
+        installation_high_water: 12,
+        data_high_water: 1,
+        server_id: [4; 16],
+        lifecycle_generation: NonZeroU64::new(2).unwrap(),
+    }
+}
+
+#[test]
+fn uid_reuse_cannot_inherit_native_account_binding() {
+    let old = account();
+    let recreated =
+        AccountBinding::new(key(), 20, NativeAccountId::macos([9; 16]).unwrap()).unwrap();
+    assert_eq!(
+        old.compare(&recreated),
+        Err(NativeFailure::IdentityMismatch)
+    );
+    assert_ne!(old.sha256(), recreated.sha256());
+    let regrouped =
+        AccountBinding::new(key(), 21, NativeAccountId::macos([1; 16]).unwrap()).unwrap();
+    assert_eq!(
+        old.compare(&regrouped),
+        Err(NativeFailure::IdentityMismatch)
+    );
+    let mut canonical = b"SpaceTerm native account binding v1\0".to_vec();
+    canonical.extend([1, 3]);
+    canonical.extend(501u32.to_le_bytes());
+    canonical.extend(20u32.to_le_bytes());
+    canonical.extend(16u16.to_le_bytes());
+    canonical.extend([1; 16]);
+    let expected: [u8; 32] = Sha256::digest(canonical).into();
+    assert_eq!(old.sha256(), expected);
+}
+
+#[test]
+fn discovery_reuses_first_approved_xdg_roots() {
+    let p = profile();
+    let later = AppDirectoryEnvironment {
+        home: Some("/other/home".into()),
+        xdg_config_home: Some("/other/config".into()),
+        ..Default::default()
+    };
+    let proposal = RegisteredRoots::resolve_initial(BuildIdentity::Development, &later).unwrap();
+    assert_ne!(proposal.config(), p.roots().config());
+    let retained = RegistrationProfile::decode(&p.encode().unwrap(), key()).unwrap();
+    assert_eq!(
+        retained.roots().config(),
+        std::path::Path::new("/first/config")
+    );
+    assert_eq!(retained.roots(), p.roots());
+}
+
+#[test]
+fn profile_rejects_unknown_duplicate_tags_and_unsafe_pathnames() {
+    let bytes = profile().encode().unwrap();
+    let text = String::from_utf8(bytes.clone()).unwrap();
+    for bad in [
+        text.replacen('{', "{\"schema_version\":1,", 1),
+        text.replacen('{', "{\"unknown\":1,", 1),
+        text.replace("\"native-volume\"", "\"exists\""),
+        text.replace("\"macos\"", "\"unknown\""),
+        text.replace("\"roots\":{", "\"roots\":{\"unknown\":1,"),
+        text.replace("\"schema_version\":1", "\"schema_version\":2"),
+    ] {
+        assert!(RegistrationProfile::decode(bad.as_bytes(), key()).is_err());
+    }
+    for path in [
+        b"relative".as_slice(),
+        b"/root/../other",
+        b"/root/./data",
+        b"/root/\0data",
+        b"/root//data",
+    ] {
+        let mut object: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        object["roots"]["data"] = STANDARD.encode(path).into();
+        assert!(RegistrationProfile::decode(&serde_json::to_vec(&object).unwrap(), key()).is_err());
+    }
+    assert!(
+        RegisteredRoots::new(
+            PathBuf::from("/valid"),
+            PathBuf::from("../invalid"),
+            PathBuf::from("/valid"),
+            PathBuf::from("/valid")
+        )
+        .is_err()
+    );
+    assert!(!format!("{:?}", profile()).contains("first"));
+}
+
+struct Inspection {
+    profile: RegistrationProfile,
+    head: RegistrationHeadV2,
+    storage_calls: AtomicUsize,
+    account: AccountBinding,
+    storage_failure: Option<NativeFailure>,
+}
+impl Inspection {
+    fn new(state: DesiredServerState) -> Self {
+        let profile = profile();
+        Self {
+            head: head(&profile, state),
+            profile,
+            storage_calls: AtomicUsize::new(0),
+            account: account(),
+            storage_failure: None,
+        }
+    }
+}
+impl StartupInspection for Inspection {
+    fn read_snapshot(&self, _: AccountBuildKey) -> Result<StartupSnapshot, NativeFailure> {
+        Ok(StartupSnapshot {
+            head: self.head.clone(),
+            profile: self.profile.clone(),
+            journal: None,
+        })
+    }
+    fn observe_account(&self, _: AccountBuildKey) -> Result<AccountBinding, NativeFailure> {
+        Ok(self.account.clone())
+    }
+    fn check_storage(&self, _: &StartupSnapshot) -> Result<(), NativeFailure> {
+        self.storage_calls.fetch_add(1, Ordering::SeqCst);
+        self.storage_failure.map_or(Ok(()), Err)
+    }
+}
+#[test]
+fn stopped_preflight_does_not_inspect_storage_or_select_installation() {
+    let native = Inspection::new(DesiredServerState::Stopped);
+    assert_eq!(
+        inspect_startup(key(), native.head.generation, &native),
+        Ok(StartupPreflight::Stopped)
+    );
+    assert_eq!(native.storage_calls.load(Ordering::SeqCst), 0);
+}
+#[test]
+fn startup_never_selects_staged_installation() {
+    let native = Inspection::new(DesiredServerState::Running);
+    assert_eq!(
+        inspect_startup(key(), native.head.generation, &native),
+        Ok(StartupPreflight::RetainApproved(
+            native.head.approved_installation
+        ))
+    );
+    assert_ne!(
+        native.head.staged_installation,
+        Some(native.head.approved_installation)
+    );
+}
+#[test]
+fn locked_or_unmounted_storage_waits_without_replacement_identity() {
+    for failure in [
+        NativeFailure::StorageLocked,
+        NativeFailure::StorageUnavailable,
+    ] {
+        let mut native = Inspection::new(DesiredServerState::Running);
+        native.storage_failure = Some(failure);
+        assert_eq!(
+            inspect_startup(key(), native.head.generation, &native),
+            Ok(StartupPreflight::WaitingStorage(failure))
+        );
+        assert_eq!(native.storage_calls.load(Ordering::SeqCst), 1);
+    }
+}
+#[test]
+fn stopped_still_revalidates_native_account_and_registration_generation() {
+    let mut native = Inspection::new(DesiredServerState::Stopped);
+    native.account =
+        AccountBinding::new(key(), 20, NativeAccountId::macos([9; 16]).unwrap()).unwrap();
+    assert_eq!(
+        inspect_startup(key(), native.head.generation, &native),
+        Err(NativeFailure::IdentityMismatch)
+    );
+    assert_eq!(
+        inspect_startup(key(), NonZeroU64::new(8).unwrap(), &native),
+        Err(NativeFailure::GenerationMismatch)
+    );
+    assert_eq!(native.storage_calls.load(Ordering::SeqCst), 0);
+}
+#[test]
+fn missing_native_account_incarnation_is_unavailable_not_passwd_identity() {
+    assert_eq!(
+        SystemAccountProvider.observe(key()),
+        Err(NativeFailure::AccountIdentityUnavailable)
+    );
+}
+
+#[test]
+fn immutable_profile_preserves_exact_strict_json_bytes_for_head_authentication() {
+    let p = profile();
+    let text = String::from_utf8(p.encode().unwrap()).unwrap();
+    let noncanonical = format!(" {text}\n");
+    let retained = RegistrationProfile::decode(noncanonical.as_bytes(), key()).unwrap();
+    assert_eq!(retained.encode().unwrap(), noncanonical.as_bytes());
+    assert_eq!(retained.roots(), p.roots());
+}
+
+#[test]
+fn roots_round_trip_non_utf8_unix_pathnames_without_debug_contents() {
+    use std::os::unix::ffi::OsStrExt;
+    let non_utf8 = PathBuf::from(std::ffi::OsStr::from_bytes(b"/first/\xff"));
+    let roots = RegisteredRoots::new(
+        non_utf8.clone(),
+        "/first/data".into(),
+        "/first/state".into(),
+        "/first/cache".into(),
+    )
+    .unwrap();
+    let boot = BootCredentialBinding::macos([2; 32], [3; 32], account().sha256(), [4; 16]).unwrap();
+    let p = RegistrationProfile::new(
+        key(),
+        20,
+        [1; 16],
+        [4; 16],
+        roots,
+        boot,
+        StorageBinding::new(vec![5; 16]).unwrap(),
+    )
+    .unwrap();
+    let retained = RegistrationProfile::decode(&p.encode().unwrap(), key()).unwrap();
+    assert_eq!(retained.roots().config(), non_utf8);
+    assert_eq!(format!("{:?}", retained.roots()), "RegisteredRoots(..)");
+}

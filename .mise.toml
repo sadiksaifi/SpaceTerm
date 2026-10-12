@@ -518,3 +518,10 @@ run = "cargo test --package spaceterm-protocol --locked"
 [tasks."protocol:check-schema"]
 description = "Generate and check both protocol profiles with pinned Rust schema compilers"
 run = "cargo check --package spaceterm-protocol --locked"
+[tasks."test:server:native:installation"]
+description = "Test bounded native registration, installation and journal policy without privilege"
+run = "python -I mise-tasks/server/native/installation_tests.py"
+
+[tasks."test:server:native:linux-credentials"]
+description = "Test bounded Linux credential output without credential-tool execution"
+run = "python -I mise-tasks/server/native/installation_tests.py --linux-credentials"

@@ -35,3 +35,9 @@ pub mod ipc;
 pub mod peer_credentials;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod ssh_tunnel;
+
+pub mod activation_journal;
+pub mod approved_installation;
+pub mod boot_credentials;
+pub mod installation;
+pub mod native_deployment;

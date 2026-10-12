@@ -6064,6 +6064,7 @@ name = "spaceterm-host"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "futures-util",
  "libc",
  "portable-pty",
@@ -6071,7 +6072,11 @@ dependencies = [
  "rusqlite",
  "rustls",
  "same-file",
+ "serde",
+ "serde_json",
+ "sha2",
  "socket2",
+ "spaceterm-directories",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
