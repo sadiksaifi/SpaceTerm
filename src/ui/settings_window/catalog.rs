@@ -747,7 +747,7 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
     SettingsRowDescriptor {
         id: SettingsRowId::ServerStatus,
         section: SettingsSectionId::Servers,
-        group: "Status",
+        group: "Server",
         label: "Status",
         keywords: &[
             "running",
@@ -764,7 +764,7 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
     SettingsRowDescriptor {
         id: SettingsRowId::ServerVersion,
         section: SettingsSectionId::Servers,
-        group: "Status",
+        group: "Server",
         label: "Version",
         keywords: &[
             "restart",
@@ -778,7 +778,7 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
     SettingsRowDescriptor {
         id: SettingsRowId::ServerConnection,
         section: SettingsSectionId::Servers,
-        group: "Status",
+        group: "Server",
         label: "Connection",
         keywords: &["route", "ssh", "wss", "websocket", "ipc"],
         selector: "settings-row-server-connection",
@@ -786,7 +786,7 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
     SettingsRowDescriptor {
         id: SettingsRowId::ServerEndAllSessions,
         section: SettingsSectionId::Servers,
-        group: "Status",
+        group: "Server",
         label: "End all sessions",
         keywords: &["kill", "terminate", "terminal sessions", "scrollback"],
         selector: "settings-row-server-end-all-sessions",

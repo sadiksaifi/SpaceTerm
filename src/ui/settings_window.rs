@@ -2079,10 +2079,11 @@ fn row_layout(row: SettingsRowId) -> FormRowLayout {
         SettingsRowId::TerminalTheme
         | SettingsRowId::InstalledThemes
         | SettingsRowId::SettingsFile
-        | SettingsRowId::ServerList => FormRowLayout::Full,
-        SettingsRowId::WorktreeLocation
-        | SettingsRowId::ServerWorktreeLocation
-        | SettingsRowId::ServerPermissions => FormRowLayout::Above,
+        | SettingsRowId::ServerList
+        | SettingsRowId::ServerPermissions => FormRowLayout::Full,
+        SettingsRowId::WorktreeLocation | SettingsRowId::ServerWorktreeLocation => {
+            FormRowLayout::Above
+        }
         _ => FormRowLayout::Beside,
     }
 }

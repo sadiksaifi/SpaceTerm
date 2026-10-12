@@ -971,6 +971,28 @@ fn a_disconnected_server_shows_its_location_without_offering_edits(cx: &mut Test
     assert_eq!(field["aria"]["read_only"], true);
 }
 
+#[gpui::test]
+fn a_location_no_connection_has_read_reads_as_unknown_instead_of_an_empty_field(
+    cx: &mut TestAppContext,
+) {
+    let mut fixture = open(Appearance::Dark, snapshot(vec![ssh()]), cx);
+    assert!(fixture.rendered("settings-server-worktree-location-frame"));
+    assert!(!fixture.rendered("settings-server-worktree-location"));
+    let tree = A11yTree::read(fixture.cx);
+    assert!(tree.find_text("Unknown").is_some());
+    assert!(
+        tree.with_role("TextInput")
+            .into_iter()
+            .all(|node| node["aria"]["label"] != "New Worktree Location")
+    );
+    assert_eq!(
+        fixture
+            .caption(SettingsRowId::ServerWorktreeLocation)
+            .as_deref(),
+        Some("Connect to Build Box to change its settings.")
+    );
+}
+
 // Permissions --------------------------------------------------------------------------------
 
 #[gpui::test]

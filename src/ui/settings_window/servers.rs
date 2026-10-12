@@ -1139,8 +1139,17 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         self.synchronize_server_worktree_location(server, cx);
+        // Until a live connection reads the setting there is no value to show or edit, and an
+        // empty field would read as an empty location.
+        if server.worktree_location.is_none() {
+            return text_value(
+                "settings-server-worktree-location-frame",
+                SharedString::new_static("Unknown"),
+                appearance,
+            );
+        }
         let input = self.servers.worktree.input.clone();
-        let editable = server.connected() && server.worktree_location.is_some();
+        let editable = server.connected();
         input.update(cx, |input, cx| input.set_editable(editable, cx));
         let edit = server
             .worktree_location
