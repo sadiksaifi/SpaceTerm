@@ -1,1 +1,222 @@
-//! Owned by server-core Job A. Implements this module after the H0 declaration freeze.
+//! Validation and old-instance reconciliation finish before any listener opens.
+
+use crate::{
+    adapters::{core::CommitCursor, store::StoreWorker},
+    api::ServerConfig,
+    contracts::*,
+    failure::{failure, ledger_failure, store_failure},
+};
+use spaceterm_core::{authority::*, operation_ledger_contracts::*, retirement::*, storage::*};
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+pub(crate) struct RecoveryResult {
+    pub store: StoreWorker,
+    pub cursor: CommitCursor,
+    pub recovered: RecoveredState,
+}
+
+pub(crate) async fn recover(
+    config: &mut ServerConfig,
+    credentials: &dyn ServerCredentialPort,
+    external_work: &dyn ExternalWorkPort,
+    host_management: &dyn HostManagementPort,
+    store: StoreWorker,
+) -> Result<RecoveryResult, ServerFailure> {
+    config.limits.validate()?;
+    let expected_server = config.host.authority.validate_startup()?;
+    config
+        .host
+        .authority
+        .validate_credentials(credentials, expected_server)?;
+    let mut recovered = store.recover().await?;
+    recovered
+        .validate_with(config.core.validator.as_ref())
+        .map_err(store_failure)?;
+    if expected_server != recovered.organization.server {
+        return Err(failure(ServerFailureClass::ScopeMismatch));
+    }
+    let next_epoch = recovered
+        .last_epoch
+        .checked_successor()
+        .ok_or_else(|| failure(ServerFailureClass::Exhausted))?;
+    // The provider verifies all previous-instance ownership even with an empty
+    // expected list. A new registry's emptiness is never process-cleanup evidence.
+    let expected = expected_cleanup(&recovered)?;
+    let sessions: Vec<_> = expected.keys().copied().collect();
+    let cleanup = host_management
+        .previous_instance_cleanup(expected_server, recovered.last_epoch, &sessions)
+        .await?;
+    validate_cleanup(&expected, &cleanup)?;
+
+    let edits = external_work.reconcile(&recovered).await?;
+    if edits.transactions.len() > 64 {
+        return Err(failure(ServerFailureClass::Capacity));
+    }
+    for parts in edits.transactions {
+        let cursor = CommitCursor::from_recovered(&recovered);
+        if parts.server != cursor.server
+            || parts.expected_store_revision != cursor.store
+            || parts.expected_organization_revision != cursor.organization
+            || parts.expected_epoch != cursor.epoch
+            || parts.resulting_epoch != cursor.epoch
+            || parts.expected_high_water != cursor.high_water
+        {
+            return Err(failure(ServerFailureClass::RecoveryRequired));
+        }
+        let transaction = Arc::new(
+            DurableTransaction::new_with_validation(parts, config.core.validator.as_ref())
+                .map_err(store_failure)?,
+        );
+        let receipt = checked_commit(&store, transaction.clone()).await?;
+        // Reopen only through the store authority, not filesystem paths or a
+        // second auxiliary truth. Revalidate the complete new recovered bundle.
+        recovered = store.recover().await?;
+        recovered
+            .validate_with(config.core.validator.as_ref())
+            .map_err(store_failure)?;
+        let resulting = transaction.parts();
+        if recovered.organization.server != expected_server
+            || recovered.store_revision != receipt.store_revision
+            || recovered.organization.revision != receipt.organization_revision
+            || recovered.last_epoch != resulting.resulting_epoch
+            || recovered.high_water != resulting.resulting_high_water
+        {
+            return Err(failure(ServerFailureClass::RecoveryRequired));
+        }
+    }
+    config.core.ledger.recover(&recovered)?;
+    let reduction = config
+        .core
+        .reducer
+        .recover(&recovered, next_epoch, &cleanup)?;
+    let mut cursor = CommitCursor::from_recovered(&recovered);
+    let mut parts = cursor.parts().map_err(store_failure)?;
+    parts.resulting_epoch = next_epoch;
+    reduction.append_to(&mut parts)?;
+    let context = TransactionContext::new(
+        cursor.store,
+        cursor.organization,
+        parts.resulting_organization_revision,
+        None,
+    )
+    .map_err(ledger_failure)?;
+    if let Some(projection) = config
+        .core
+        .ledger
+        .prepare_recovery(&recovered, &cleanup, context)?
+    {
+        projection.append_to(&mut parts).map_err(ledger_failure)?;
+    }
+    for descriptor in &recovered.native_retirements {
+        if !parts.operation_writes.iter().any(|write| {
+            matches!(write, OperationWrite::NativeRetirement(NativeRetirementMutation::Complete { request, batch })
+                if *request == descriptor.request() && *batch == descriptor.batch())
+        }) {
+            return Err(failure(ServerFailureClass::RecoveryRequired));
+        }
+    }
+    if let Some(ledger) = &recovered.ledger {
+        for operation in ledger.operations() {
+            if let RecoveredOperationRecord::Pending(record) = operation
+                && let Some(progress) = &record.external_progress
+                && let ExternalProgressState::AcceptedRetirement(descriptor) = progress.state()
+                && !parts.operation_writes.iter().any(|write| {
+                    matches!(write, OperationWrite::Ledger(write)
+                        if matches!(write.as_ref(), LedgerWrite::CompleteOperation { record: completed, .. }
+                            if completed.binding == record.binding
+                                && completed.outcome_revision == descriptor.acceptance_revision()))
+                })
+            {
+                return Err(failure(ServerFailureClass::RecoveryRequired));
+            }
+        }
+    }
+    let transaction = Arc::new(
+        DurableTransaction::new_with_validation(parts, config.core.validator.as_ref())
+            .map_err(store_failure)?,
+    );
+    let receipt = checked_commit(&store, transaction.clone()).await?;
+    cursor.install(transaction.parts(), receipt)?;
+    config.core.reducer.committed(receipt)?;
+    config.core.ledger.committed(receipt)?;
+    if config.core.reducer.snapshot().epoch() != next_epoch {
+        return Err(failure(ServerFailureClass::RecoveryRequired));
+    }
+    Ok(RecoveryResult {
+        store,
+        cursor,
+        recovered,
+    })
+}
+
+async fn checked_commit(
+    store: &StoreWorker,
+    transaction: Arc<DurableTransaction>,
+) -> Result<CommitReceipt, ServerFailure> {
+    match store
+        .commit(transaction.clone())?
+        .await
+        .map_err(|_| failure(ServerFailureClass::RecoveryRequired))?
+    {
+        CommitDisposition::Durable(receipt) if transaction.accepts_receipt(receipt) => Ok(receipt),
+        CommitDisposition::NotApplied(value) => Err(store_failure(value)),
+        _ => Err(failure(ServerFailureClass::RecoveryRequired)),
+    }
+}
+fn expected_cleanup(
+    recovered: &RecoveredState,
+) -> Result<BTreeMap<SessionKey, spaceterm_core::organization::RetirementReason>, ServerFailure> {
+    let mut expected = BTreeMap::new();
+    let mut insert = |sessions: &[RetiredSession]| -> Result<(), ServerFailure> {
+        for session in sessions {
+            if let Some(previous) = expected.insert(session.session(), session.first_reason())
+                && previous != session.first_reason()
+            {
+                return Err(failure(ServerFailureClass::RecoveryRequired));
+            }
+        }
+        Ok(())
+    };
+    if let Some(ledger) = &recovered.ledger {
+        for operation in ledger.operations() {
+            if let RecoveredOperationRecord::Pending(record) = operation
+                && let Some(progress) = &record.external_progress
+            {
+                match progress.state() {
+                    ExternalProgressState::AcceptedRetirement(v) => insert(v.sessions())?,
+                    ExternalProgressState::RecordedIntent {
+                        retirement: Some(v),
+                        ..
+                    } => insert(v.sessions())?,
+                    _ => {}
+                }
+            }
+        }
+    }
+    for native in &recovered.native_retirements {
+        insert(native.sessions())?;
+    }
+    if expected.len() > 64 {
+        return Err(failure(ServerFailureClass::RecoveryRequired));
+    }
+    Ok(expected)
+}
+fn validate_cleanup(
+    expected: &BTreeMap<SessionKey, spaceterm_core::organization::RetirementReason>,
+    cleanup: &[SessionCleanupObservation],
+) -> Result<(), ServerFailure> {
+    if cleanup.len() != expected.len() {
+        return Err(failure(ServerFailureClass::CleanupIncomplete));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for value in cleanup {
+        if !seen.insert(value.session())
+            || expected.get(&value.session()) != Some(&value.first_reason())
+            || !matches!(value.result(), CleanupResult::Confirmed(_))
+        {
+            return Err(failure(ServerFailureClass::CleanupIncomplete));
+        }
+    }
+    Ok(())
+}

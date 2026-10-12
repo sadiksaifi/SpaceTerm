@@ -6168,7 +6168,9 @@ name = "spaceterm-server"
 version = "0.0.0"
 dependencies = [
  "getrandom 0.4.3",
+ "rcgen",
  "ring",
+ "rustls",
  "serde",
  "sha2",
  "spaceterm-client",
