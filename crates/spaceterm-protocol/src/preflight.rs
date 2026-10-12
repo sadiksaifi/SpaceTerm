@@ -253,3 +253,136 @@ pub(crate) fn payload_tag(mut bytes: &[u8]) -> Result<u32, ProtocolError> {
     }
     u32::try_from(tag >> 3).map_err(|_| ProtocolError::Malformed)
 }
+
+// Named roots reserved for pairing's owned receive codecs. The declarations
+// remain separate from the legacy restricted four-arm profile.
+#[expect(
+    unused_imports,
+    reason = "pairing-owned codecs consume these frozen schema roots after H0"
+)]
+pub(crate) use generated::{
+    SPACETERM_PAIRING_ENROLLMENTEXCHANGE, SPACETERM_PAIRING_ENROLLMENTHELLO,
+    SPACETERM_PAIRING_ENROLLMENTMESSAGE, SPACETERM_PAIRING_ENROLLMENTPROOF,
+    SPACETERM_PAIRING_ENROLLMENTREADY, SPACETERM_PAIRING_ENROLLMENTSERVERHELLO,
+    SPACETERM_PAIRING_RECEIPTBODY, SPACETERM_PAIRING_RESTRICTEDEXTENSION,
+};
+
+#[cfg(test)]
+mod receipt_admission_tests {
+    use super::*;
+    use crate::wire::{common, pairing};
+    use prost::Message;
+
+    fn identity() -> common::Identity {
+        common::Identity { value: vec![7; 16] }
+    }
+    fn entity(local_id: u64) -> common::Entity {
+        common::Entity {
+            server: Some(identity()),
+            local_id,
+        }
+    }
+    fn operation() -> common::OperationId {
+        common::OperationId {
+            server: Some(identity()),
+            pairing: Some(identity()),
+            client: Some(identity()),
+            stream: Some(identity()),
+            sequence: 1,
+        }
+    }
+    fn variants() -> Vec<pairing::receipt_body::Kind> {
+        let target = pairing::Target {
+            server: Some(identity()),
+            device: Some(identity()),
+            pairing: Some(entity(1)),
+        };
+        let keys = pairing::Keys {
+            device_identity_public_key: vec![1; 32],
+            pairing_authentication_public_key: vec![2; 32],
+        };
+        let stream = common::OperationStream {
+            key: Some(entity(1)),
+            pairing: Some(entity(1)),
+            client: Some(entity(1)),
+        };
+        let binding = pairing::Binding {
+            client: Some(entity(1)),
+            pairing: Some(entity(1)),
+            ordinary_stream: Some(stream.clone()),
+            self_revocation_stream: Some(stream),
+        };
+        vec![
+            pairing::receipt_body::Kind::Enrollment(pairing::EnrollmentReceiptBody {
+                target: Some(target.clone()),
+                keys: Some(keys.clone()),
+                client: Some(binding.clone()),
+                enrollment_operation: Some(operation()),
+                request_digest: vec![3; 32],
+                store_revision: 1,
+            }),
+            pairing::receipt_body::Kind::ClientBinding(pairing::ClientBindingReceiptBody {
+                target: Some(target.clone()),
+                keys: Some(keys),
+                client: Some(binding),
+                operation: Some(operation()),
+                request_digest: vec![3; 32],
+                store_revision: 1,
+            }),
+            pairing::receipt_body::Kind::Revocation(pairing::RevocationReceiptBody {
+                target: Some(target),
+                authentication_key_digest: vec![4; 32],
+                revocation_event: vec![5; 16],
+                causing_operation: Some(operation()),
+                store_revision: 1,
+            }),
+        ]
+    }
+    fn admit(bytes: &[u8]) -> Result<(), ProtocolError> {
+        check(
+            generated::SPACETERM_PAIRING_RECEIPTBODY,
+            bytes,
+            NegotiatedLimits::default(),
+        )
+    }
+    #[test]
+    fn each_receipt_variant_passes_its_exact_byte_root() {
+        for kind in variants() {
+            let bytes = pairing::ReceiptBody {
+                schema: 1,
+                kind: Some(kind),
+            }
+            .encode_to_vec();
+            assert_eq!(admit(&bytes), Ok(()));
+        }
+    }
+    #[test]
+    fn receipt_root_rejects_missing_schema_or_variant() {
+        assert_eq!(admit(&[8, 1]), Err(ProtocolError::Malformed));
+        let bytes = pairing::ReceiptBody {
+            schema: 0,
+            kind: Some(variants().remove(0)),
+        }
+        .encode_to_vec();
+        assert_eq!(admit(&bytes), Err(ProtocolError::Malformed));
+    }
+    #[test]
+    fn receipt_root_rejects_duplicate_and_competing_variants() {
+        let variants = variants();
+        for second in [&variants[0], &variants[1], &variants[2]] {
+            let mut bytes = pairing::ReceiptBody {
+                schema: 1,
+                kind: Some(variants[0].clone()),
+            }
+            .encode_to_vec();
+            bytes.extend(
+                pairing::ReceiptBody {
+                    schema: 0,
+                    kind: Some(second.clone()),
+                }
+                .encode_to_vec(),
+            );
+            assert_eq!(admit(&bytes), Err(ProtocolError::Malformed));
+        }
+    }
+}

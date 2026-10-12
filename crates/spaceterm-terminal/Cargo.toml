@@ -9,10 +9,14 @@ default = ["engine", "kitty-graphics", "png"]
 engine = ["dep:libghostty-vt"]
 kitty-graphics = ["libghostty-vt?/kitty-graphics"]
 png = ["kitty-graphics", "libghostty-vt?/png"]
+runtime = ["engine", "dep:async-channel"]
 test-support = []
 native-tests = []
 
 [dependencies]
+spaceterm-core = { path = "../spaceterm-core" }
+async-channel = { version = "=2.5.0", optional = true }
+sha2 = "=0.10.9"
 getrandom = "=0.4.3"
 int-enum = "1.2.0"
 libghostty-vt = { path = "../../third_party/libghostty-vt", default-features = false, optional = true }

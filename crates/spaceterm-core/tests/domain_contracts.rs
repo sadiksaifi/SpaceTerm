@@ -351,6 +351,12 @@ fn durable_transaction_rejects_counter_wrap_regression_and_unpublished_writes() 
 
 fn recovered() -> RecoveredState {
     RecoveredState {
+        ledger: None,
+        pairing: None,
+        git_repositories: vec![],
+        git_intents: vec![],
+        git_allocations: vec![],
+        native_retirements: vec![],
         organization: organization(),
         store_revision: StoreRevision::new(1),
         last_epoch: ServerEpoch::new(1),

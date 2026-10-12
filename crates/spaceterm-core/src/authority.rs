@@ -261,3 +261,60 @@ impl From<EffectFence> for FenceParts {
         }
     }
 }
+
+stamp!(
+    CloseWorkGeneration,
+    "Content-free work comparison generation within an exact Session. Zero is initial Unknown."
+);
+
+/// The exact epoch and grant returned by a creation, acquisition, or takeover.
+/// This is historical comparison data, not current control authority. A client
+/// must retain this epoch when it records a deferred exact-generation release.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(try_from = "GrantedControlParts", into = "GrantedControlParts")]
+pub struct GrantedControl {
+    epoch: ServerEpoch,
+    grant: ControlGrant,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+struct GrantedControlParts {
+    epoch: ServerEpoch,
+    grant: ControlGrant,
+}
+
+impl GrantedControl {
+    /// Actual grants require an established epoch and a nonzero grant generation.
+    /// The existing ControlGrant constructor continues to permit comparison zero.
+    pub fn new(epoch: ServerEpoch, grant: ControlGrant) -> Result<Self, FenceError> {
+        if epoch.get() == 0 || grant.generation().get() == 0 {
+            return Err(FenceError::WrongBinding);
+        }
+        Ok(Self { epoch, grant })
+    }
+
+    pub const fn epoch(self) -> ServerEpoch {
+        self.epoch
+    }
+
+    pub const fn grant(self) -> ControlGrant {
+        self.grant
+    }
+}
+
+impl TryFrom<GrantedControlParts> for GrantedControl {
+    type Error = FenceError;
+
+    fn try_from(parts: GrantedControlParts) -> Result<Self, Self::Error> {
+        Self::new(parts.epoch, parts.grant)
+    }
+}
+
+impl From<GrantedControl> for GrantedControlParts {
+    fn from(value: GrantedControl) -> Self {
+        Self {
+            epoch: value.epoch,
+            grant: value.grant,
+        }
+    }
+}

@@ -219,3 +219,96 @@ impl From<GridSize> for GridParts {
         }
     }
 }
+
+/// Server measurement preserving valid cell dimensions even when a multiplied
+/// PTY pixel extent cannot fit u16. Each unrepresentable extent becomes zero.
+/// Legacy GridSize retains its original overflow rejection and serialized form.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(try_from = "GridParts", into = "GridParts")]
+pub struct MeasuredGrid {
+    rows: u16,
+    columns: u16,
+    cell_pixels: CellPixels,
+}
+impl MeasuredGrid {
+    pub fn new(
+        rows: u32,
+        columns: u32,
+        cell_pixels: CellPixels,
+        limits: GridLimits,
+    ) -> Result<Self, GridError> {
+        if rows == 0 || columns == 0 {
+            return Err(GridError::ZeroDimension);
+        }
+        if rows > limits.max_rows || columns > limits.max_columns {
+            return Err(GridError::TooLarge);
+        }
+        if rows.checked_mul(columns).ok_or(GridError::Overflow)? > limits.max_cells {
+            return Err(GridError::TooManyCells);
+        }
+        Ok(Self {
+            rows: u16::try_from(rows).map_err(|_| GridError::Overflow)?,
+            columns: u16::try_from(columns).map_err(|_| GridError::Overflow)?,
+            cell_pixels,
+        })
+    }
+    pub const fn rows(self) -> u16 {
+        self.rows
+    }
+    pub const fn columns(self) -> u16 {
+        self.columns
+    }
+    pub const fn cell_pixels(self) -> CellPixels {
+        self.cell_pixels
+    }
+    pub fn cells(self) -> u32 {
+        u32::from(self.rows) * u32::from(self.columns)
+    }
+    /// Width and height are independent: an overflowing width does not discard
+    /// the representable height or the engine's actual cell metrics.
+    pub fn pty_pixels(self) -> (u16, u16) {
+        (
+            self.columns
+                .checked_mul(self.cell_pixels.width)
+                .unwrap_or(0),
+            self.rows.checked_mul(self.cell_pixels.height).unwrap_or(0),
+        )
+    }
+    pub fn validate(self, limits: GridLimits) -> Result<Self, GridError> {
+        Self::new(
+            u32::from(self.rows),
+            u32::from(self.columns),
+            self.cell_pixels,
+            limits,
+        )
+    }
+}
+impl From<GridSize> for MeasuredGrid {
+    fn from(value: GridSize) -> Self {
+        Self {
+            rows: value.rows,
+            columns: value.columns,
+            cell_pixels: value.cell_pixels,
+        }
+    }
+}
+impl TryFrom<GridParts> for MeasuredGrid {
+    type Error = GridError;
+    fn try_from(value: GridParts) -> Result<Self, Self::Error> {
+        Self::new(
+            u32::from(value.rows),
+            u32::from(value.columns),
+            value.cell_pixels,
+            SUPPORTED_GRID_LIMITS,
+        )
+    }
+}
+impl From<MeasuredGrid> for GridParts {
+    fn from(value: MeasuredGrid) -> Self {
+        Self {
+            rows: value.rows,
+            columns: value.columns,
+            cell_pixels: value.cell_pixels,
+        }
+    }
+}

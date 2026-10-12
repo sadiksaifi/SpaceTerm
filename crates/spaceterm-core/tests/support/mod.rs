@@ -74,5 +74,6 @@ pub fn organization() -> OrganizationState {
         }],
         worktrees: vec![],
         repositories: vec![],
+        retained: None,
     }
 }

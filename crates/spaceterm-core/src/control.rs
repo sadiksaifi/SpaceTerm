@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::authority::{ControlGeneration, ControlGrant, EffectFence, ServerEpoch};
-use crate::geometry::GridSize;
+use crate::geometry::{GridSize, MeasuredGrid};
 use crate::identity::{ClientId, PaneId, TabId};
 use crate::operations::OperationId;
 
@@ -42,6 +42,8 @@ pub enum StartupSource {
 pub enum StartupError {
     #[error("startup intent belongs to another Client or server")]
     WrongBinding,
+    #[error("startup reservation does not bind its measured explicit intent")]
+    InvalidReservation,
 }
 
 /// Cancellable explicit intent retained until measured dimensions arrive.
@@ -114,4 +116,73 @@ pub struct StartupMeasurement {
     pub intent: OperationId,
     pub fence: EffectFence,
     pub grid: GridSize,
+}
+
+/// Additive measured completion. Existing StartupMeasurement and its retained
+/// Command representation remain unchanged.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MeasuredStartupMeasurement {
+    pub intent: OperationId,
+    pub fence: EffectFence,
+    pub grid: MeasuredGrid,
+}
+impl From<StartupMeasurement> for MeasuredStartupMeasurement {
+    fn from(value: StartupMeasurement) -> Self {
+        Self {
+            intent: value.intent,
+            fence: value.fence,
+            grid: value.grid.into(),
+        }
+    }
+}
+
+/// Comparison facts for measured explicit startup after the actor has committed
+/// StartupReserved. This record is not authorization and must be accepted only
+/// from the serialized startup registry with its current admitted reservation.
+/// The intent/measurement fence names the old generation; session names the new
+/// published Starting generation. No client may manufacture a reserved launch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MeasuredStartupReservation {
+    intent: StartupIntent,
+    measurement: MeasuredStartupMeasurement,
+    session: crate::authority::SessionKey,
+}
+impl MeasuredStartupReservation {
+    pub fn new(
+        intent: StartupIntent,
+        measurement: impl Into<MeasuredStartupMeasurement>,
+        session: crate::authority::SessionKey,
+    ) -> Result<Self, StartupError> {
+        let measurement = measurement.into();
+        let expected = intent.fence().session();
+        if intent.id() != measurement.intent
+            || !intent.fence().matches(&measurement.fence)
+            || session.epoch.get() == 0
+            || session.pane != expected.pane
+            || session.epoch != expected.epoch
+            || expected.generation.checked_successor() != Some(session.generation)
+        {
+            return Err(StartupError::InvalidReservation);
+        }
+        Ok(Self {
+            intent,
+            measurement,
+            session,
+        })
+    }
+    pub const fn intent(self) -> StartupIntent {
+        self.intent
+    }
+    pub const fn measurement(self) -> MeasuredStartupMeasurement {
+        self.measurement
+    }
+    pub const fn expected_session(self) -> crate::authority::SessionKey {
+        self.intent.fence().session()
+    }
+    pub const fn session(self) -> crate::authority::SessionKey {
+        self.session
+    }
+    pub const fn grid(self) -> MeasuredGrid {
+        self.measurement.grid
+    }
 }
