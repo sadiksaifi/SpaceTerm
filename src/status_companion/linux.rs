@@ -653,9 +653,7 @@ async fn follow_bus(mut bus: Bus) {
             BusEvent::WatcherLeft => false,
             BusEvent::WatcherReturned => registered_and_hosted(&bus).await,
             // A watcher that could not take the item earlier gets it once its host appears.
-            BusEvent::WatcherSignaled if unhosted_until.is_some() => {
-                registered_and_hosted(&bus).await
-            }
+            BusEvent::WatcherSignaled if unhosted => registered_and_hosted(&bus).await,
             BusEvent::WatcherSignaled => matches!(hosted(&bus.connection).await, Ok(true)),
         };
         unhosted = !shown;
@@ -721,8 +719,18 @@ async fn follow_session(
             Some(address) => zbus::connection::Builder::address(address.as_str()),
             None => zbus::connection::Builder::system(),
         }?
+        .method_timeout(BUS_DEADLINE)
         .build()
         .await
+    })
+    .await
+    .map_err(unavailable)?
+    .map_err(unavailable)?;
+    let mut owners = tokio::time::timeout(BUS_DEADLINE, async {
+        DBusProxy::new(&connection)
+            .await?
+            .receive_name_owner_changed_with_args(&[(0, LOGIN)])
+            .await
     })
     .await
     .map_err(unavailable)?
@@ -750,19 +758,30 @@ async fn follow_session(
         .and_then(|rule| rule.path(session.clone()))
         .map_err(unavailable)?
         .build();
-    let mut changes =
-        MessageStream::for_match_rule(changes, &connection, Some(WATCHER_SIGNAL_QUEUE))
-            .await
-            .map_err(unavailable)?;
+    let mut changes = tokio::time::timeout(
+        BUS_DEADLINE,
+        MessageStream::for_match_rule(changes, &connection, Some(WATCHER_SIGNAL_QUEUE)),
+    )
+    .await
+    .map_err(unavailable)?
+    .map_err(unavailable)?;
     loop {
         let locked = session_hint(&connection, &session, "LockedHint").await?;
         let idle = session_hint(&connection, &session, "IdleHint").await?;
         let now_away = locked || idle;
         away.send_if_modified(|away| std::mem::replace(away, now_away) != now_away);
-        let change =
-            std::future::poll_fn(|context| Pin::new(&mut changes).poll_next(context)).await;
-        if change.is_none() {
-            return Err(CompanionFailure::StatusAreaUnavailable);
+        tokio::select! {
+            change = std::future::poll_fn(|context| Pin::new(&mut changes).poll_next(context)) => {
+                if change.is_none() {
+                    return Err(CompanionFailure::StatusAreaUnavailable);
+                }
+            }
+            // A departed or replaced logind no longer owns the resolved session.
+            _ = std::future::poll_fn(|context| Pin::new(&mut owners).poll_next(context)) => {
+                return Err(CompanionFailure::StatusAreaUnavailable);
+            }
+            // Signals may stop without the name leaving. Recheck only while the grace is paused.
+            () = tokio::time::sleep(BUS_DEADLINE), if now_away => {}
         }
     }
 }

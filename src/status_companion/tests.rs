@@ -1481,12 +1481,19 @@ mod linux_session {
     struct Watcher {
         items: Arc<Mutex<Vec<String>>>,
         host: Arc<AtomicBool>,
+        reject_once: AtomicBool,
     }
     #[zbus::interface(name = "org.kde.StatusNotifierWatcher")]
     impl Watcher {
-        fn register_status_notifier_item(&self, service: String) {
+        fn register_status_notifier_item(&self, service: String) -> zbus::fdo::Result<()> {
+            if self.reject_once.swap(false, Ordering::AcqRel) {
+                return Err(zbus::fdo::Error::Failed("registration rejected".to_owned()));
+            }
             self.items.lock().unwrap().push(service);
+            Ok(())
         }
+        #[zbus(signal)]
+        async fn status_notifier_host_registered(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
         #[zbus(signal)]
         async fn status_notifier_host_unregistered(emitter: &SignalEmitter<'_>)
         -> zbus::Result<()>;
@@ -1514,6 +1521,14 @@ mod linux_session {
         bus: &PrivateBus,
         host: bool,
     ) -> (zbus::Connection, Arc<Mutex<Vec<String>>>, Arc<AtomicBool>) {
+        watcher_with_rejection(bus, host, false).await
+    }
+
+    async fn watcher_with_rejection(
+        bus: &PrivateBus,
+        host: bool,
+        reject_once: bool,
+    ) -> (zbus::Connection, Arc<Mutex<Vec<String>>>, Arc<AtomicBool>) {
         let items = Arc::new(Mutex::new(Vec::new()));
         let host = Arc::new(AtomicBool::new(host));
         let connection = zbus::connection::Builder::address(bus.address.as_str())
@@ -1525,6 +1540,7 @@ mod linux_session {
                 Watcher {
                     items: items.clone(),
                     host: host.clone(),
+                    reject_once: AtomicBool::new(reject_once),
                 },
             )
             .unwrap()
@@ -1725,7 +1741,8 @@ mod linux_session {
 
     /// Waits until the area reports itself lost, as the controller would observe it.
     async fn lost(area: &mut LinuxStatusArea, ingress: &ActionIngress) {
-        tokio::time::timeout(Duration::from_secs(5), async {
+        // A stalled logind needs a recheck interval and a bus deadline before the grace.
+        tokio::time::timeout(Duration::from_secs(15), async {
             loop {
                 ingress.wait().await;
                 match area.next_action() {
@@ -1826,18 +1843,27 @@ mod linux_session {
         locked: Arc<AtomicBool>,
         idle: Arc<AtomicBool>,
         reads: Arc<AtomicUsize>,
+        stalled: Arc<AtomicBool>,
     }
     #[zbus::interface(name = "org.freedesktop.login1.Session")]
     impl LoginSession {
         #[zbus(property)]
-        fn locked_hint(&self) -> bool {
+        async fn locked_hint(&self) -> bool {
             self.reads.fetch_add(1, Ordering::AcqRel);
-            self.locked.load(Ordering::Acquire)
+            if self.stalled.load(Ordering::Acquire) {
+                std::future::pending().await
+            } else {
+                self.locked.load(Ordering::Acquire)
+            }
         }
         #[zbus(property)]
-        fn idle_hint(&self) -> bool {
+        async fn idle_hint(&self) -> bool {
             self.reads.fetch_add(1, Ordering::AcqRel);
-            self.idle.load(Ordering::Acquire)
+            if self.stalled.load(Ordering::Acquire) {
+                std::future::pending().await
+            } else {
+                self.idle.load(Ordering::Acquire)
+            }
         }
     }
 
@@ -1940,6 +1966,42 @@ mod linux_session {
         }
     }
 
+    #[tokio::test]
+    async fn a_replacement_watcher_retries_rejected_registration_while_the_session_is_away() {
+        let bus = PrivateBus::start();
+        let login = Login::start(&bus).await;
+        let (original, _) = watcher(&bus, true).await;
+        let (mut area, _) = connect(&bus).await.unwrap();
+        login.read(2).await;
+        login.set(true, false).await;
+        original.close().await.unwrap();
+
+        let (replacement, items, _) = watcher_with_rejection(&bus, true, true).await;
+        let interface = replacement
+            .object_server()
+            .interface::<_, Watcher>("/StatusNotifierWatcher")
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while interface.get().await.reject_once.load(Ordering::Acquire) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the replacement rejects the first registration");
+        assert!(items.lock().unwrap().is_empty());
+        Watcher::status_notifier_host_registered(interface.signal_emitter())
+            .await
+            .unwrap();
+        tokio::time::sleep(HOST_GRACE * 3).await;
+        assert_eq!(area.next_action(), Ok(None));
+
+        login.set(false, false).await;
+        registered(&items).await;
+        tokio::time::sleep(HOST_GRACE * 3).await;
+        assert_eq!(area.next_action(), Ok(None));
+    }
+
     /// Returning to the session starts a fresh grace period, so a watcher that never comes
     /// back still loses the status area.
     #[tokio::test]
@@ -1955,6 +2017,53 @@ mod linux_session {
         assert_eq!(area.next_action(), Ok(None));
 
         login.set(false, false).await;
+        lost(&mut area, &ingress).await;
+    }
+
+    #[tokio::test]
+    async fn a_logind_that_leaves_while_the_session_is_away_resumes_the_host_grace() {
+        for close in [false, true] {
+            let bus = PrivateBus::start();
+            let login = Login::start(&bus).await;
+            let (original, _) = watcher(&bus, true).await;
+            let (mut area, ingress) = connect(&bus).await.unwrap();
+            login.read(2).await;
+            login.set(true, false).await;
+            original.close().await.unwrap();
+            tokio::time::sleep(HOST_GRACE * 3).await;
+            assert_eq!(area.next_action(), Ok(None));
+
+            if close {
+                login.connection.close().await.unwrap();
+            } else {
+                assert!(
+                    login
+                        .connection
+                        .release_name("org.freedesktop.login1")
+                        .await
+                        .unwrap()
+                );
+            }
+            tokio::time::timeout(Duration::from_secs(3), lost(&mut area, &ingress))
+                .await
+                .expect("logind disappearing promptly resumes the host grace");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_logind_that_stops_answering_while_the_session_is_away_resumes_the_host_grace() {
+        let bus = PrivateBus::start();
+        let login = Login::start(&bus).await;
+        let (original, _) = watcher(&bus, true).await;
+        let (mut area, ingress) = connect(&bus).await.unwrap();
+        login.read(2).await;
+        login.set(false, true).await;
+        original.close().await.unwrap();
+        tokio::time::sleep(HOST_GRACE * 3).await;
+        assert_eq!(area.next_action(), Ok(None));
+
+        // Keep the name and connection alive, but never answer another hint read or signal.
+        login.session.stalled.store(true, Ordering::Release);
         lost(&mut area, &ingress).await;
     }
 
