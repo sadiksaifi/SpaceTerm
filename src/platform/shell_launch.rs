@@ -1,61 +1,23 @@
-//! Complete, platform-neutral process launch policy before Native PTY construction.
+//! Desktop identity and SSH conversion for the headless shell launch planner.
 
-use std::ffi::{OsStr, OsString};
-use std::fmt;
 use std::path::{Path, PathBuf};
 
-use thiserror::Error;
-
-use super::shell_integration::{
-    ShellEnvironment, ShellIntegrationMode, ShellIntegrationPolicy, ShellIntegrationStatus,
-    plan_shell_integration,
-};
+use super::shell_integration::{ShellEnvironment, ShellIntegrationMode, ShellIntegrationPolicy};
 use crate::ssh::command::SshCommandSpec;
 use crate::terminal::identity;
+use spaceterm_host::shell_launch::{
+    PreparedRemoteShellCommand, RemoteShellLaunchParts, ShellEnvironmentDenylist,
+    ShellTerminalIdentity, ShellTerminfoIdentity,
+};
+pub(crate) use spaceterm_host::shell_launch::{PreparedShellLaunch, ShellLaunchFailure};
 
-const FOREIGN_RUNTIME_ENVIRONMENT: &[&str] = &[
-    "GHOSTTY_BIN_DIR",
-    "GHOSTTY_RESOURCES_DIR",
-    "GHOSTTY_SHELL_FEATURES",
-    "ITERM_SESSION_ID",
-    "KITTY_LISTEN_ON",
-    "KITTY_PID",
-    "KITTY_PUBLIC_KEY",
-    "KITTY_WINDOW_ID",
-    "LC_TERMINAL",
-    "LC_TERMINAL_VERSION",
-    "STY",
-    "TERM_SESSION_ID",
-    "TERMINAL_EMULATOR",
-    "TMUX",
-    "TMUX_PANE",
-    "WARP_SESSION_ID",
-    "WARP_TERMINAL_SESSION_UUID",
-    "WEZTERM_CONFIG_FILE",
-    "WEZTERM_EXECUTABLE",
-    "WEZTERM_EXECUTABLE_DIR",
-    "WEZTERM_PANE",
-    "WEZTERM_UNIX_SOCKET",
-    "WT_PROFILE_ID",
-    "WT_SESSION",
-    "ZELLIJ",
-    "ZELLIJ_PANE_ID",
-    "ZELLIJ_SESSION_NAME",
-];
-
-/// Composition supplies the selected shell, resources, captured environment, and policy facts.
 #[derive(Clone)]
 pub(crate) struct ShellLaunchPlanner {
-    shell: PathBuf,
+    planner: spaceterm_host::shell_launch::ShellLaunchPlanner,
     resources: PathBuf,
-    environment: (ShellIntegrationMode, ShellEnvironment),
-    policy: ShellIntegrationPolicy,
-    host_runtime_environment: &'static [&'static str],
 }
 
 impl ShellLaunchPlanner {
-    /// `host_runtime_environment` names launch and terminal variables that only the host
-    /// desktop exports, removed in addition to the shared foreign terminal variables.
     pub(crate) fn new(
         shell: PathBuf,
         resources: PathBuf,
@@ -64,12 +26,32 @@ impl ShellLaunchPlanner {
         policy: ShellIntegrationPolicy,
         host_runtime_environment: &'static [&'static str],
     ) -> Self {
+        let terminal_identity = ShellTerminalIdentity {
+            fallback_term: identity::TERM_FALLBACK,
+            colorterm: identity::COLORTERM,
+            program_name: identity::COMPATIBILITY_PROGRAM_NAME,
+            program_version: identity::PROGRAM_VERSION,
+            terminfo: Some(ShellTerminfoIdentity {
+                directory: resources.join("terminfo"),
+                terminal_name: identity::TERM_NAME,
+            }),
+        };
+        let denylist = host_runtime_environment
+            .iter()
+            .fold(ShellEnvironmentDenylist::default(), |denylist, name| {
+                denylist.with_name(*name)
+            });
         Self {
-            shell,
+            planner: spaceterm_host::shell_launch::ShellLaunchPlanner::new(
+                shell,
+                resources.clone(),
+                mode,
+                inherited,
+                policy,
+                terminal_identity,
+            )
+            .with_environment_denylist(denylist),
             resources,
-            environment: (mode, inherited),
-            policy,
-            host_runtime_environment,
         }
     }
 
@@ -91,179 +73,50 @@ impl ShellLaunchPlanner {
         mode: ShellIntegrationMode,
         inherited: ShellEnvironment,
     ) -> Self {
-        self.environment = (mode, inherited);
+        self.planner = self.planner.with_environment(mode, inherited);
         self
     }
 
     pub(crate) fn fallback_title(&self) -> String {
-        self.shell
-            .file_name()
-            .unwrap_or(self.shell.as_os_str())
-            .to_string_lossy()
-            .into_owned()
+        self.planner.fallback_title()
     }
 
     pub(crate) fn local(
         &self,
-        working_directory: &Path,
+        directory: &Path,
     ) -> Result<PreparedShellLaunch, ShellLaunchFailure> {
-        self.local_with_environment(working_directory, self.environment.0, &self.environment.1)
-    }
-
-    fn local_with_environment(
-        &self,
-        working_directory: &Path,
-        mode: ShellIntegrationMode,
-        inherited: &ShellEnvironment,
-    ) -> Result<PreparedShellLaunch, ShellLaunchFailure> {
-        validate_working_directory(working_directory)?;
-        let integration =
-            plan_shell_integration(&self.shell, &self.resources, mode, inherited, &self.policy);
-        let terminal_identity = identity::launch_identity(&self.resources);
-        let mut arguments = integration.arguments;
-        arguments.push(OsString::from("-l"));
-        let mut environment = integration.environment;
-        environment.extend([
-            ("TERM".into(), terminal_identity.term.into()),
-            ("COLORTERM".into(), identity::COLORTERM.into()),
-            (
-                "TERM_PROGRAM".into(),
-                identity::COMPATIBILITY_PROGRAM_NAME.into(),
-            ),
-            (
-                "TERM_PROGRAM_VERSION".into(),
-                identity::PROGRAM_VERSION.into(),
-            ),
-            ("SPACETERM".into(), "1".into()),
-        ]);
-        if let Some(terminfo) = &terminal_identity.terminfo {
-            environment.push(("TERMINFO".into(), terminfo.as_os_str().to_owned()));
-        }
-        Ok(PreparedShellLaunch {
-            executable: self.shell.clone(),
-            arguments,
-            working_directory: working_directory.to_owned(),
-            inherit_environment: true,
-            environment_removals: FOREIGN_RUNTIME_ENVIRONMENT
-                .iter()
-                .chain(self.host_runtime_environment)
-                .copied()
-                // A Prompt Owner inherited from another session would let that session's shell
-                // speak for this one; the session sets its own.
-                .chain(["TERMINFO", "SPACETERM_PROMPT_OWNER"])
-                .map(OsString::from)
-                .collect(),
-            environment,
-            integration: Some(integration.status),
-            terminal_name: terminal_identity.term,
-        })
+        let launch_identity = identity::launch_identity(&self.resources);
+        self.planner
+            .clone()
+            .with_terminal_identity(ShellTerminalIdentity {
+                fallback_term: launch_identity.term,
+                colorterm: identity::COLORTERM,
+                program_name: identity::COMPATIBILITY_PROGRAM_NAME,
+                program_version: identity::PROGRAM_VERSION,
+                terminfo: launch_identity
+                    .terminfo
+                    .map(|directory| ShellTerminfoIdentity {
+                        directory,
+                        terminal_name: identity::TERM_NAME,
+                    }),
+            })
+            .local(directory)
     }
 }
 
-/// An owned, non-cloneable launch. Debug never exposes command, path, or environment values.
-pub(crate) struct PreparedShellLaunch {
-    executable: PathBuf,
-    arguments: Vec<OsString>,
-    working_directory: PathBuf,
-    inherit_environment: bool,
-    environment_removals: Vec<OsString>,
-    environment: Vec<(OsString, OsString)>,
-    integration: Option<ShellIntegrationStatus>,
-    terminal_name: &'static str,
-}
-
-impl PreparedShellLaunch {
-    pub(crate) fn remote(
-        local_home: &Path,
-        command: SshCommandSpec,
-    ) -> Result<Self, ShellLaunchFailure> {
-        validate_working_directory(local_home)?;
-        let (executable, arguments, prepared_environment) = command
+impl PreparedRemoteShellCommand for SshCommandSpec {
+    fn into_remote_shell_parts(self) -> Result<RemoteShellLaunchParts, ShellLaunchFailure> {
+        let (executable, arguments, environment) = self
             .into_pane_launch_parts()
             .map_err(|_| ShellLaunchFailure::TerminalSessionChannelUnavailable)?;
-        let (working_directory, mut environment) =
-            prepared_environment.into_pane_launch_environment();
-        environment.push(("TERM".into(), identity::TERM_FALLBACK.into()));
-        Ok(Self {
+        let (working_directory, environment) = environment.into_pane_launch_environment();
+        Ok(RemoteShellLaunchParts {
             executable,
             arguments,
             working_directory,
-            inherit_environment: false,
-            environment_removals: Vec::new(),
             environment,
-            integration: None,
             terminal_name: identity::TERM_FALLBACK,
         })
-    }
-
-    /// Sets one more variable for the shell, replacing any inherited value.
-    pub(crate) fn with_environment_value(mut self, name: &str, value: &str) -> Self {
-        self.environment.push((name.into(), value.into()));
-        self
-    }
-
-    pub(crate) fn terminal_name(&self) -> &'static str {
-        self.terminal_name
-    }
-
-    pub(crate) fn executable(&self) -> &OsStr {
-        self.executable.as_os_str()
-    }
-    pub(crate) fn arguments(&self) -> &[OsString] {
-        &self.arguments
-    }
-    pub(crate) fn working_directory(&self) -> &Path {
-        &self.working_directory
-    }
-    pub(crate) fn inherit_environment(&self) -> bool {
-        self.inherit_environment
-    }
-    pub(crate) fn environment_removals(&self) -> &[OsString] {
-        &self.environment_removals
-    }
-    pub(crate) fn environment(&self) -> &[(OsString, OsString)] {
-        &self.environment
-    }
-
-    #[cfg(test)]
-    pub(crate) fn for_test(working_directory: PathBuf) -> Self {
-        let mut launch = ShellLaunchPlanner::for_test(
-            "/fixture/zsh".into(),
-            "/fixture/missing-resources".into(),
-        )
-        .local_with_environment(
-            &std::env::temp_dir(),
-            ShellIntegrationMode::Disabled,
-            &ShellEnvironment::default(),
-        )
-        .unwrap();
-        launch.working_directory = working_directory;
-        launch
-    }
-}
-
-impl fmt::Debug for PreparedShellLaunch {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("PreparedShellLaunch")
-            .field("integration", &self.integration)
-            .finish_non_exhaustive()
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-pub(crate) enum ShellLaunchFailure {
-    #[error("Shell launch directory is unavailable; select an existing directory and retry")]
-    DirectoryUnavailable,
-    #[error("Remote Terminal Session Channel is unavailable; reconnect and retry")]
-    TerminalSessionChannelUnavailable,
-}
-
-fn validate_working_directory(directory: &Path) -> Result<(), ShellLaunchFailure> {
-    if directory.metadata().is_ok_and(|metadata| metadata.is_dir()) {
-        Ok(())
-    } else {
-        Err(ShellLaunchFailure::DirectoryUnavailable)
     }
 }
 
@@ -271,222 +124,33 @@ fn validate_working_directory(directory: &Path) -> Result<(), ShellLaunchFailure
 mod tests {
     use super::*;
     use crate::domain::{RemoteDirectory, SshDestination};
-    use crate::platform::shell_integration::ShellKind;
     use crate::ssh::command::{
         PreparedSshTerminalSessionChannelError, RemotePaneShellCommandBuilder,
         ValidatedRemoteLoginShell,
     };
 
-    fn env_value<'a>(launch: &'a PreparedShellLaunch, key: &str) -> Option<&'a OsStr> {
-        launch
-            .environment()
-            .iter()
-            .find(|(name, _)| name == key)
-            .map(|(_, value)| value.as_os_str())
-    }
-
     #[test]
-    fn local_launch_prepares_every_supported_shell_and_preserves_login_order() {
+    fn desktop_launch_rechecks_packaged_identity_and_exports_the_engine_version() {
         let resources = crate::terminal::testing::ShellResourcesFixture::new();
-        let inherited = ShellEnvironment {
-            xdg_data_dirs: Some("/custom/share".into()),
-            zdotdir: Some("/private/zsh config".into()),
-            env: Some("/private/bash env".into()),
-        };
-        for (shell, kind, arguments) in [
-            ("/opt/bin/bash", ShellKind::Bash, vec!["--posix", "-l"]),
-            ("/opt/bin/elvish", ShellKind::Elvish, vec!["-l"]),
-            ("/opt/bin/fish", ShellKind::Fish, vec!["-l"]),
-            (
-                "/opt/bin/nu",
-                ShellKind::Nushell,
-                vec!["--execute", "use spaceterm *; install", "-l"],
-            ),
-            ("/bin/zsh", ShellKind::Zsh, vec!["-l"]),
-        ] {
-            let directory = std::env::temp_dir();
-            let launch = ShellLaunchPlanner::new(
-                shell.into(),
-                resources.path().to_path_buf(),
-                ShellIntegrationMode::Automatic,
-                inherited.clone(),
-                ShellIntegrationPolicy::fixture(),
-                &[],
-            )
-            .local(&directory)
-            .unwrap();
-            assert_eq!(launch.executable(), OsStr::new(shell));
-            assert_eq!(launch.arguments(), arguments);
-            assert_eq!(launch.working_directory(), directory);
-            assert_eq!(
-                launch.integration,
-                Some(ShellIntegrationStatus::Applied(kind))
-            );
-            assert!(launch.inherit_environment());
-            assert_eq!(
-                env_value(&launch, "SPACETERM_SHELL_INTEGRATION_VERSION"),
-                Some(OsStr::new("1"))
-            );
-            match kind {
-                ShellKind::Bash => assert_eq!(
-                    env_value(&launch, "SPACETERM_BASH_ENV"),
-                    inherited.env.as_deref()
-                ),
-                ShellKind::Zsh => assert_eq!(
-                    env_value(&launch, "SPACETERM_ZSH_ZDOTDIR"),
-                    inherited.zdotdir.as_deref()
-                ),
-                _ => {
-                    let mut expected = resources
-                        .path()
-                        .to_path_buf()
-                        .join("shell-integration")
-                        .into_os_string();
-                    expected.push(":/custom/share");
-                    assert_eq!(
-                        env_value(&launch, "XDG_DATA_DIRS"),
-                        Some(expected.as_os_str())
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn local_fallbacks_keep_login_arguments_and_terminal_identity() {
-        let resources = crate::terminal::testing::ShellResourcesFixture::new();
-        for (shell, mode, root, status) in [
-            (
-                "/bin/zsh",
-                ShellIntegrationMode::Disabled,
-                resources.path().to_path_buf(),
-                ShellIntegrationStatus::Disabled,
-            ),
-            (
-                "/fixture/unsupported",
-                ShellIntegrationMode::Automatic,
-                resources.path().to_path_buf(),
-                ShellIntegrationStatus::Unsupported,
-            ),
-            (
-                "/bin/unknown",
-                ShellIntegrationMode::Automatic,
-                resources.path().to_path_buf(),
-                ShellIntegrationStatus::Unsupported,
-            ),
-            (
-                "/bin/zsh",
-                ShellIntegrationMode::Automatic,
-                resources.path().to_path_buf().join("missing"),
-                ShellIntegrationStatus::MissingResources,
-            ),
-        ] {
-            let launch = ShellLaunchPlanner::new(
-                shell.into(),
-                root,
-                mode,
-                ShellEnvironment::default(),
-                ShellIntegrationPolicy::fixture(),
-                &["HOST_LAUNCH_MARKER"],
-            )
-            .local(&std::env::temp_dir())
-            .unwrap();
-            assert_eq!(launch.arguments(), ["-l"]);
-            assert_eq!(launch.integration, Some(status));
-            assert_eq!(
-                env_value(&launch, "SPACETERM_SHELL_INTEGRATION_VERSION"),
-                None
-            );
-            assert_eq!(
-                env_value(&launch, "TERM"),
-                Some(OsStr::new("xterm-256color"))
-            );
-            assert_eq!(
-                env_value(&launch, "COLORTERM"),
-                Some(OsStr::new("truecolor"))
-            );
-            assert_eq!(
-                env_value(&launch, "TERM_PROGRAM"),
-                Some(OsStr::new("ghostty"))
-            );
-            assert_eq!(
-                env_value(&launch, "TERM_PROGRAM_VERSION"),
-                Some(OsStr::new(identity::PROGRAM_VERSION))
-            );
-            assert_eq!(env_value(&launch, "SPACETERM"), Some(OsStr::new("1")));
-            assert!(FOREIGN_RUNTIME_ENVIRONMENT.iter().all(|name| {
-                launch
-                    .environment_removals()
-                    .contains(&OsString::from(name))
-            }));
-            assert!(
-                launch
-                    .environment_removals()
-                    .contains(&OsString::from("TERMINFO"))
-            );
-            assert!(
-                launch
-                    .environment_removals()
-                    .contains(&OsString::from("HOST_LAUNCH_MARKER"))
-            );
-        }
-    }
-
-    #[test]
-    fn packaged_identity_requires_a_discoverable_entry_at_the_injected_location() {
-        let root =
-            std::env::temp_dir().join(format!("spaceterm-launch-resources-{}", std::process::id()));
-        let entry = root.join("terminfo/78/xterm-spaceterm");
+        let planner =
+            ShellLaunchPlanner::for_test("/fixture/zsh".into(), resources.path().to_owned());
+        let directory = std::env::temp_dir();
+        let fallback = planner.local(&directory).unwrap();
+        assert_eq!(fallback.terminal_name(), identity::TERM_FALLBACK);
+        let entry = resources.path().join("terminfo/x/xterm-spaceterm");
         std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
         std::fs::write(&entry, b"compiled fixture").unwrap();
-        let planner = ShellLaunchPlanner::for_test("/fixture/zsh".into(), root.clone())
-            .with_environment(ShellIntegrationMode::Automatic, ShellEnvironment::default());
-        let launch = planner.local(&std::env::temp_dir()).unwrap();
+        let packaged = planner.local(&directory).unwrap();
+        assert_eq!(packaged.terminal_name(), identity::TERM_NAME);
+        assert!(packaged.environment().contains(&(
+            "TERM_PROGRAM_VERSION".into(),
+            identity::PROGRAM_VERSION.into(),
+        )));
+        std::fs::remove_file(entry).unwrap();
         assert_eq!(
-            env_value(&launch, "TERM"),
-            Some(OsStr::new("xterm-spaceterm"))
+            planner.local(&directory).unwrap().terminal_name(),
+            identity::TERM_FALLBACK
         );
-        assert_eq!(
-            env_value(&launch, "TERMINFO"),
-            Some(root.join("terminfo").as_os_str())
-        );
-        std::fs::remove_dir_all(&root).unwrap();
-        let launch = planner.local(&std::env::temp_dir()).unwrap();
-        assert_eq!(
-            env_value(&launch, "TERM"),
-            Some(OsStr::new("xterm-256color"))
-        );
-        assert_eq!(env_value(&launch, "TERMINFO"), None);
-    }
-
-    #[test]
-    fn launch_validation_preserves_spelling_and_redacts_missing_and_file_paths() {
-        let resources = crate::terminal::testing::ShellResourcesFixture::new();
-        let planner = ShellLaunchPlanner::for_test(
-            "/sensitive/shell/zsh".into(),
-            resources.path().to_path_buf(),
-        )
-        .with_environment(ShellIntegrationMode::Automatic, ShellEnvironment::default());
-        let directory = std::env::temp_dir().join(".");
-        assert_eq!(
-            planner.local(&directory).unwrap().working_directory(),
-            directory
-        );
-        for directory in [
-            resources
-                .path()
-                .to_path_buf()
-                .join("missing-private-project"),
-            resources
-                .path()
-                .to_path_buf()
-                .join("shell-integration/zsh/.zshenv"),
-        ] {
-            let error = planner.local(&directory).unwrap_err();
-            assert_eq!(error, ShellLaunchFailure::DirectoryUnavailable);
-            assert!(!format!("{error:?} {error}").contains("private-project"));
-            assert!(std::error::Error::source(&error).is_none());
-        }
     }
 
     #[test]
@@ -511,7 +175,7 @@ mod tests {
         assert_eq!(launch.arguments(), expected_arguments);
         assert_eq!(launch.working_directory(), std::env::temp_dir());
         assert!(!launch.inherit_environment());
-        assert_eq!(launch.integration, None);
+        assert_eq!(launch.integration_status(), None);
         assert_eq!(
             launch.environment(),
             [
@@ -520,10 +184,7 @@ mod tests {
                 ("TERM".into(), "xterm-256color".into())
             ]
         );
-        let mut launch = launch;
-        launch
-            .environment
-            .push(("SSH_ASKPASS_TOKEN".into(), "sensitive-secret-value".into()));
+        let launch = launch.with_environment_value("SSH_ASKPASS_TOKEN", "sensitive-secret-value");
         assert_eq!(
             format!("{launch:?}"),
             "PreparedShellLaunch { integration: None, .. }"

@@ -21,5 +21,9 @@ pub mod protected_directory;
 pub mod root_protection;
 pub mod startup;
 
+pub mod pty;
+pub mod shell_integration;
+pub mod shell_launch;
+
 #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 mod test_support;
