@@ -437,3 +437,13 @@ run = "tagsmith validate --tag {{usage.tag | quote}} --github-output"
 [tasks."release:notes:preview"]
 description = "Preview release notes for changes since the last release"
 run = "git-cliff --config cliff.toml --unreleased --offline --strip all"
+
+[tasks."test:protocol"]
+description = "Run both SpaceTerm Protocol major profiles and authentication conformance"
+env.CARGO_BUILD_JOBS = "3"
+run = "cargo test --package spaceterm-protocol --locked"
+
+[tasks."protocol:check-schema"]
+description = "Generate and check both protocol profiles with pinned Rust schema compilers"
+env.CARGO_BUILD_JOBS = "3"
+run = "cargo check --package spaceterm-protocol --locked"

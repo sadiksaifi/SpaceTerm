@@ -1,0 +1,15 @@
+[package]
+name = "spaceterm-protocol"
+publish = false
+edition = "2024"
+
+[dependencies]
+prost = "=0.14.4"
+ring = "=0.17.14"
+thiserror = "=2.0.19"
+unicode-segmentation = "=1.13.3"
+
+[build-dependencies]
+prost-build = "=0.14.4"
+prost-types = "=0.14.4"
+protox = "=0.10.0"

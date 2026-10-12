@@ -1,0 +1,317 @@
+//! Authenticated, sequenced envelopes shared by IPC and WSS.
+
+use crate::{
+    ProtocolError,
+    authentication::{Principal, Purpose, SigningKey, decode_signed, get_identity, sign, verify},
+    codec::Payload,
+    limits::NegotiatedLimits,
+    preflight,
+    wire::common,
+};
+use prost::Message;
+use std::sync::Arc;
+
+pub(crate) struct ConnectionParameters {
+    pub principal: Principal,
+    pub purpose: Purpose,
+    pub major: u32,
+    pub limits: NegotiatedLimits,
+    pub capabilities: Vec<u32>,
+    pub epoch: u64,
+    pub binding: [u8; 32],
+    pub direction: common::Direction,
+    pub signer: Arc<dyn SigningKey>,
+    pub peer_key: [u8; 32],
+}
+
+pub(crate) struct ConnectionCodec {
+    parameters: ConnectionParameters,
+    send_sequence: u64,
+    receive_sequence: u64,
+    failed: bool,
+}
+impl ConnectionCodec {
+    pub(crate) fn new(parameters: ConnectionParameters) -> Self {
+        Self {
+            parameters,
+            send_sequence: 1,
+            receive_sequence: 1,
+            failed: false,
+        }
+    }
+    fn encode(&mut self, payload: Vec<u8>) -> Result<Vec<u8>, ProtocolError> {
+        if self.failed {
+            return Err(ProtocolError::Authentication);
+        }
+        let next = self
+            .send_sequence
+            .checked_add(1)
+            .ok_or(ProtocolError::Exhausted)?;
+        let body = common::AuthenticatedEnvelope {
+            direction: self.parameters.direction as i32,
+            major: self.parameters.major,
+            binding: self.parameters.binding.to_vec(),
+            sequence: self.send_sequence,
+            payload,
+            purpose: self.parameters.purpose.wire(),
+        };
+        // Include the signature, both nested byte lengths and all envelope metadata
+        // in frame admission before either serialized envelope allocation.
+        let body_len = body.encoded_len();
+        let overhead = 1 + varint_len(body_len) + body_len + 1 + 1 + 64;
+        if overhead > self.parameters.limits.frame_bytes {
+            return Err(ProtocolError::LimitExceeded);
+        }
+        let bytes = body.encode_to_vec();
+        let signature = sign(
+            self.parameters.signer.as_ref(),
+            b"authenticated-envelope",
+            &[&bytes],
+        )?;
+        let encoded = common::Signed {
+            body: bytes,
+            signature: signature.to_vec(),
+        }
+        .encode_to_vec();
+        self.send_sequence = next;
+        Ok(encoded)
+    }
+
+    fn decode(&mut self, bytes: &[u8]) -> Result<Vec<u8>, ProtocolError> {
+        if self.failed {
+            return Err(ProtocolError::Authentication);
+        }
+        let result = self.decode_inner(bytes);
+        if result.is_err() {
+            self.failed = true;
+        }
+        result
+    }
+    fn decode_inner(&mut self, bytes: &[u8]) -> Result<Vec<u8>, ProtocolError> {
+        let signed = decode_signed(bytes, self.parameters.limits.frame_bytes)?;
+        verify(
+            self.parameters.peer_key,
+            b"authenticated-envelope",
+            &[&signed.body],
+            &signed.signature,
+        )?;
+        preflight::check(
+            preflight::SPACETERM_COMMON_AUTHENTICATEDENVELOPE,
+            &signed.body,
+            self.parameters.limits,
+        )?;
+        let envelope = common::AuthenticatedEnvelope::decode(signed.body.as_slice())
+            .map_err(|_| ProtocolError::Malformed)?;
+        if envelope.major != self.parameters.major
+            || envelope.binding != self.parameters.binding
+            || envelope.direction != opposite(self.parameters.direction) as i32
+            || envelope.purpose != self.parameters.purpose.wire()
+        {
+            return Err(ProtocolError::Authentication);
+        }
+        if envelope.sequence != self.receive_sequence {
+            return Err(ProtocolError::Sequence);
+        }
+        self.receive_sequence = self
+            .receive_sequence
+            .checked_add(1)
+            .ok_or(ProtocolError::Exhausted)?;
+        Ok(envelope.payload)
+    }
+}
+
+/// An ordinary connection can only be obtained from active-pairing readiness.
+///
+/// It cannot be constructed from identities, decoded DTOs, or a restricted retry.
+///
+/// ```compile_fail
+/// use spaceterm_protocol::connection::AuthenticatedConnection;
+/// let connection = AuthenticatedConnection::new();
+/// ```
+pub struct AuthenticatedConnection {
+    codec: ConnectionCodec,
+}
+impl AuthenticatedConnection {
+    pub(crate) fn new(codec: ConnectionCodec) -> Self {
+        Self { codec }
+    }
+    pub fn principal(&self) -> Principal {
+        self.codec.parameters.principal
+    }
+    pub fn major(&self) -> u32 {
+        self.codec.parameters.major
+    }
+    pub fn limits(&self) -> NegotiatedLimits {
+        self.codec.parameters.limits
+    }
+    pub fn capabilities(&self) -> &[u32] {
+        &self.codec.parameters.capabilities
+    }
+    pub fn epoch(&self) -> u64 {
+        self.codec.parameters.epoch
+    }
+    /// Identifies this exact handshake, including its independently fresh server nonce.
+    pub fn binding(&self) -> [u8; 32] {
+        self.codec.parameters.binding
+    }
+
+    /// Returns one WSS binary message. IPC adds the framing module's length prefix.
+    pub fn encode(&mut self, payload: &Payload) -> Result<Vec<u8>, ProtocolError> {
+        if payload.major() != self.major() {
+            return Err(ProtocolError::Negotiation);
+        }
+        let bytes = payload.encode_with_limits(self.limits())?;
+        ordinary_direction(
+            preflight::payload_tag(&bytes)?,
+            self.codec.parameters.direction,
+        )?;
+        self.codec.encode(bytes)
+    }
+
+    /// Verifies exact signed bytes, binding, direction, major and strict next sequence
+    /// before admitting and decoding the major-specific payload. Failure is terminal.
+    pub fn decode(&mut self, bytes: &[u8]) -> Result<Payload, ProtocolError> {
+        let result = (|| {
+            let payload = self.codec.decode(bytes)?;
+            ordinary_direction(
+                preflight::payload_tag(&payload)?,
+                opposite(self.codec.parameters.direction),
+            )?;
+            Payload::decode_with_limits(self.major(), &payload, self.limits())
+        })();
+        if result.is_err() {
+            self.codec.failed = true;
+        }
+        result
+    }
+}
+
+/// Self-revocation/status only. There is deliberately no upgrade or ordinary codec.
+/// Retaining this capability cannot recreate terminal access after local removal.
+///
+/// ```compile_fail
+/// use spaceterm_protocol::connection::{AuthenticatedConnection, RestrictedConnection};
+/// fn upgrade(connection: RestrictedConnection) -> AuthenticatedConnection {
+///     connection.into_ordinary()
+/// }
+/// ```
+pub struct RestrictedConnection {
+    codec: ConnectionCodec,
+}
+impl RestrictedConnection {
+    pub(crate) fn new(codec: ConnectionCodec) -> Self {
+        Self { codec }
+    }
+    pub fn principal(&self) -> Principal {
+        self.codec.parameters.principal
+    }
+    pub fn major(&self) -> u32 {
+        self.codec.parameters.major
+    }
+
+    pub fn limits(&self) -> NegotiatedLimits {
+        self.codec.parameters.limits
+    }
+
+    pub fn encode(
+        &mut self,
+        payload: &common::RestrictedMessage,
+    ) -> Result<Vec<u8>, ProtocolError> {
+        if payload.encoded_len() > self.codec.parameters.limits.management_bytes {
+            return Err(ProtocolError::LimitExceeded);
+        }
+        let bytes = payload.encode_to_vec();
+        preflight::check(
+            preflight::SPACETERM_COMMON_RESTRICTEDMESSAGE,
+            &bytes,
+            self.codec.parameters.limits,
+        )?;
+        self.validate(payload, self.codec.parameters.direction)?;
+        self.codec.encode(bytes)
+    }
+
+    pub fn decode(&mut self, bytes: &[u8]) -> Result<common::RestrictedMessage, ProtocolError> {
+        let result = (|| {
+            let payload = self.codec.decode(bytes)?;
+            if payload.len() > self.codec.parameters.limits.management_bytes {
+                return Err(ProtocolError::LimitExceeded);
+            }
+            preflight::check(
+                preflight::SPACETERM_COMMON_RESTRICTEDMESSAGE,
+                &payload,
+                self.codec.parameters.limits,
+            )?;
+            let message = common::RestrictedMessage::decode(payload.as_slice())
+                .map_err(|_| ProtocolError::Malformed)?;
+            self.validate(&message, opposite(self.codec.parameters.direction))?;
+            Ok(message)
+        })();
+        if result.is_err() {
+            self.codec.failed = true;
+        }
+        result
+    }
+
+    fn validate(
+        &self,
+        value: &common::RestrictedMessage,
+        direction: common::Direction,
+    ) -> Result<(), ProtocolError> {
+        use common::restricted_message::Kind;
+        let (operation, target) = match (&value.kind, direction) {
+            (Some(Kind::Revoke(request)), common::Direction::ClientToServer) => {
+                (&request.operation, &request.target_pairing)
+            }
+            (Some(Kind::Status(request)), common::Direction::ClientToServer) => {
+                (&request.operation, &request.target_pairing)
+            }
+            (Some(Kind::Receipt(receipt)), common::Direction::ServerToClient) => {
+                (&receipt.operation, &receipt.target_pairing)
+            }
+            (Some(Kind::Failure(_)), common::Direction::ServerToClient) => return Ok(()),
+            _ => return Err(ProtocolError::UnexpectedMessage),
+        };
+        let principal = self.principal();
+        let operation = operation.as_ref().ok_or(ProtocolError::Malformed)?;
+        if get_identity(target.as_ref())? != principal.pairing
+            || get_identity(operation.server.as_ref())? != principal.server
+            || get_identity(operation.pairing.as_ref())? != principal.pairing
+            || get_identity(operation.client.as_ref())? != principal.client
+        {
+            return Err(ProtocolError::PairingDenied);
+        }
+        Ok(())
+    }
+}
+
+fn ordinary_direction(tag: u32, direction: common::Direction) -> Result<(), ProtocolError> {
+    let client_request = matches!(
+        tag,
+        1 | 4 | 6 | 7 | 9 | 11 | 13 | 15 | 17 | 19 | 20 | 22 | 24 | 28 | 30
+    );
+    let server_response = matches!(
+        tag,
+        2 | 3 | 5 | 8 | 10 | 12 | 14 | 16 | 17 | 18 | 21 | 23 | 25 | 26 | 27 | 29 | 31
+    );
+    if (direction == common::Direction::ClientToServer && client_request)
+        || (direction == common::Direction::ServerToClient && server_response)
+    {
+        Ok(())
+    } else {
+        Err(ProtocolError::UnexpectedMessage)
+    }
+}
+fn opposite(direction: common::Direction) -> common::Direction {
+    match direction {
+        common::Direction::ClientToServer => common::Direction::ServerToClient,
+        _ => common::Direction::ClientToServer,
+    }
+}
+fn varint_len(mut value: usize) -> usize {
+    let mut length = 1;
+    while value >= 128 {
+        value >>= 7;
+        length += 1;
+    }
+    length
+}

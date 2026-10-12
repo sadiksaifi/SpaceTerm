@@ -1,0 +1,225 @@
+syntax = "proto3";
+package spaceterm.v1;
+import "common.proto";
+
+// Major 1 is the previous, complete profile. Semantic rows carry one StyledCell
+// per grid cell, including wide-cell spacers. Major 2 instead groups graphemes
+// into StyledRuns. Consumers must implement both layouts, not alias these types.
+message Message {
+  oneof kind {
+    OrganizationQuery organization_query = 1;
+    OrganizationSnapshot organization_snapshot = 2;
+    OrganizationDelta organization_delta = 3;
+    Operation operation = 4;
+    Outcome outcome = 5;
+    Acknowledgement acknowledgement = 6;
+    ControlRequest control_request = 7;
+    ControlOutcome control_outcome = 8;
+    StartupIntent startup_intent = 9;
+    StartupOutcome startup_outcome = 10;
+    RuntimeCommand runtime_command = 11;
+    RuntimeOutcome runtime_outcome = 12;
+    ContentQuery content_query = 13;
+    SemanticPage semantic_page = 14;
+    ResourceRequest resource_request = 15;
+    ResourceChunk resource_chunk = 16;
+    ResourceCancel resource_cancel = 17;
+    NativeRequest native_request = 18;
+    NativeCompletion native_completion = 19;
+    PairingRequest pairing_request = 20;
+    PairingOutcome pairing_outcome = 21;
+    spaceterm.common.RevocationRequest revocation_request = 22;
+    spaceterm.common.RevocationReceipt revocation_receipt = 23;
+    ManagementRequest management_request = 24;
+    ManagementStatus management_status = 25;
+    spaceterm.common.Failure failure = 26;
+    ContentInvalidation content_invalidation = 27;
+    RepositoryQuery repository_query = 28;
+    RepositoryPage repository_page = 29;
+    DirectoryQuery directory_query = 30;
+    DirectoryPage directory_page = 31;
+  }
+}
+message OrganizationQuery { uint64 known_revision = 1; bytes continuation = 2; }
+message OrganizationSnapshot {
+  spaceterm.common.Identity server = 1; uint64 epoch = 2; uint64 revision = 3;
+  repeated Workspace workspaces = 4; repeated Tab tabs = 5; repeated Pane panes = 6;
+  repeated Worktree worktrees = 7; ServerSettings settings = 8;
+  bytes continuation = 9; bool complete = 10;
+}
+message OrganizationDelta {
+  spaceterm.common.Identity server = 1; uint64 epoch = 2;
+  uint64 base_revision = 3; uint64 revision = 4;
+  repeated Workspace workspaces = 5; repeated Tab tabs = 6; repeated Pane panes = 7;
+  repeated Worktree worktrees = 8; repeated spaceterm.common.Entity deleted_workspaces = 9;
+  repeated spaceterm.common.Entity deleted_tabs = 10; repeated spaceterm.common.Entity deleted_panes = 11;
+  repeated spaceterm.common.Entity deleted_worktrees = 12; ServerSettings settings = 13;
+  bytes continuation = 14; bool complete = 15;
+}
+enum NameMode { NAME_UNSPECIFIED = 0; AUTOMATIC = 1; CUSTOM = 2; }
+message Directory { string display_path = 1; uint64 version = 2; bool available = 3; }
+message Workspace {
+  spaceterm.common.Entity id = 1; uint64 creation_ordinal = 2;
+  string name = 3; NameMode name_mode = 4; uint64 name_version = 5;
+  Directory pin = 6; uint64 pin_version = 7; spaceterm.common.Entity root_tab = 8;
+  string assigned_automatic_name = 9;
+}
+message Tab {
+  spaceterm.common.Entity id = 1; spaceterm.common.Entity workspace = 2;
+  spaceterm.common.Entity root_pane = 3; spaceterm.common.Entity worktree = 4;
+  uint64 creation_ordinal = 5;
+}
+enum Edge { EDGE_UNSPECIFIED = 0; LEFT = 1; RIGHT = 2; TOP = 3; BOTTOM = 4; }
+message Creation { spaceterm.common.Entity split_source = 1; Edge edge = 2; }
+enum SessionPhase { PHASE_UNSPECIFIED = 0; NOT_STARTED = 1; RUNNING = 2; ENDED = 3; FAILED = 4; DIRECTORY_UNAVAILABLE = 5; }
+enum EndReason { END_UNSPECIFIED = 0; RESTORED = 1; END_ALL_SESSIONS = 2; SERVER_STOP = 3; }
+message Control { spaceterm.common.Identity client = 1; uint64 generation = 2; }
+message Pane {
+  spaceterm.common.Entity id = 1; spaceterm.common.Entity tab = 2; uint64 creation_ordinal = 3;
+  Creation creation = 4; Directory starting_directory = 5; Directory restoration_directory = 6;
+  uint64 directory_version = 7; Control control = 8;
+  SessionPhase phase = 9; uint64 session_generation = 10; EndReason end_reason = 11;
+  spaceterm.common.Failure failure = 12;
+}
+message Worktree { spaceterm.common.Entity id = 1; spaceterm.common.Entity repository = 2; string display_name = 3; Directory directory = 4; bool listed = 5; uint64 version = 6; }
+message ServerSettings { uint64 version = 1; Directory worktree_location = 2; bool remote_access_enabled = 3; string bind_scope = 4; uint32 scrollback_rows = 5; }
+message CreateWorkspace { string name = 1; Directory pin = 2; }
+message CreateTab { spaceterm.common.Entity workspace = 1; spaceterm.common.Entity worktree = 2; spaceterm.common.Entity source_pane = 3; }
+message CreatePane { spaceterm.common.Entity tab = 1; spaceterm.common.Entity source = 2; Edge edge = 3; }
+message RenameWorkspace { spaceterm.common.Entity workspace = 1; uint64 expected_name_version = 2; NameMode mode = 3; string name = 4; }
+message PinWorkspace { spaceterm.common.Entity workspace = 1; uint64 expected_pin_version = 2; Directory pin = 3; }
+message RepairDirectory { spaceterm.common.Entity pane = 1; uint64 expected_directory_version = 2; Directory directory = 3; bool retry_same = 4; }
+message ChangeSettings { uint64 expected_version = 1; ServerSettings settings = 2; }
+enum ScopeKind { SCOPE_UNSPECIFIED = 0; PANE = 1; TAB = 2; WORKSPACE = 3; SERVER = 4; WORKTREE = 5; }
+message Scope { ScopeKind kind = 1; spaceterm.common.Entity entity = 2; }
+message AssessClose { Scope scope = 1; }
+message ConfirmClose { bytes assessment = 1; }
+message EndAllSessions { bytes assessment = 1; }
+message WorktreeWrite { spaceterm.common.Entity repository = 1; string branch = 2; Directory directory = 3; spaceterm.common.Entity remove = 4; bytes assessment = 5; bool force = 6; }
+message Operation {
+  spaceterm.common.OperationId id = 1;
+  oneof action {
+    CreateWorkspace create_workspace = 2; CreateTab create_tab = 3; CreatePane create_pane = 4;
+    RenameWorkspace rename_workspace = 5; PinWorkspace pin_workspace = 6; RepairDirectory repair_directory = 7;
+    ChangeSettings change_settings = 8; AssessClose assess_close = 9; ConfirmClose confirm_close = 10;
+    EndAllSessions end_all_sessions = 11; WorktreeWrite worktree_write = 12;
+  }
+}
+enum ConflictField { CONFLICT_UNSPECIFIED = 0; NAME = 1; PIN = 2; DIRECTORY = 3; SETTINGS = 4; MEMBERSHIP = 5; }
+message NameValue { NameMode mode = 1; string name = 2; }
+message FieldConflict {
+  ConflictField field = 1; spaceterm.common.Entity target = 2; uint64 current_version = 3;
+  oneof current_value { NameValue name = 4; Directory directory = 5; ServerSettings settings = 6; bool absent = 7; }
+}
+message AssessmentMember { spaceterm.common.Entity pane = 1; uint64 session_generation = 2; uint64 control_generation = 3; bool running = 4; }
+message Assessment { bytes token = 1; Scope scope = 2; uint64 organization_revision = 3; repeated AssessmentMember members = 4; uint32 running_sessions = 5; }
+message Outcome {
+  spaceterm.common.OperationId operation = 1; uint64 publication_revision = 2;
+  oneof result {
+    spaceterm.common.Entity created = 3; bool committed = 4; FieldConflict conflict = 5;
+    spaceterm.common.Failure rejected = 6; Assessment assessment = 7;
+  }
+}
+message Acknowledgement { spaceterm.common.Identity pairing = 1; spaceterm.common.Identity client = 2; spaceterm.common.Identity stream = 3; uint64 contiguous_sequence = 4; }
+enum ControlAction { CONTROL_UNSPECIFIED = 0; COMPARE_ACQUIRE = 1; TAKE_OVER = 2; RELEASE_EXACT = 3; }
+message ControlRequest { spaceterm.common.Entity pane = 1; ControlAction action = 2; uint64 expected_generation = 3; uint64 request = 4; }
+message ControlOutcome { spaceterm.common.Entity pane = 1; uint64 request = 2; Control control = 3; spaceterm.common.Failure failure = 4; }
+enum StartupSource { STARTUP_UNSPECIFIED = 0; EXPLICIT_SELECTION = 1; TAB_OPEN = 2; START_SESSION = 3; }
+message Geometry { uint32 rows = 1; uint32 columns = 2; uint32 cell_width_px = 3; uint32 cell_height_px = 4; }
+message StartupIntent { spaceterm.common.EffectFence fence = 1; uint64 intent = 2; StartupSource source = 3; Geometry measured = 4; bool cancel = 5; }
+message StartupOutcome { spaceterm.common.Entity pane = 1; uint64 intent = 2; uint64 session_generation = 3; spaceterm.common.Failure failure = 4; }
+// Modifier bits 0..9 are shift, alt, control, platform, caps lock, num lock,
+// right shift, right alt, right control, right platform. Native scan codes stay local.
+message Key {
+  spaceterm.common.PhysicalKey code = 1; uint32 modifiers = 2; optional string text = 3;
+  spaceterm.common.KeyAction action = 4; string logical_key = 5;
+  uint32 consumed_modifiers = 6; uint32 unshifted_codepoint = 7; bool option_as_alt = 8;
+}
+message Pointer { uint32 column = 1; uint32 row = 2; uint32 button = 3; uint32 modifiers = 4; sint32 wheel_x = 5; sint32 wheel_y = 6; bool release = 7; bool motion = 8; }
+message Paste { bytes text = 1; bytes approval = 2; }
+message Appearance { uint64 generation = 1; uint32 foreground = 2; uint32 background = 3; repeated uint32 palette = 4; bool bold_as_bright = 5; bool dark = 6; }
+message RuntimeCommand {
+  spaceterm.common.EffectFence fence = 1; uint64 request = 2;
+  oneof action { Key key = 3; string input_method_text = 4; Paste paste = 5; Pointer pointer = 6; Geometry resize = 7; Appearance appearance = 8; bool focus_report = 9; }
+}
+message RuntimeOutcome { uint64 request = 1; spaceterm.common.EffectFence fence = 2; spaceterm.common.Failure failure = 3; }
+message CellRef { spaceterm.common.Session session = 1; uint64 screen_generation = 2; uint64 row_id = 3; uint64 row_revision = 4; uint32 column = 5; }
+enum ContentQueryKind { CONTENT_UNSPECIFIED = 0; ACTIVE_GRID = 1; HISTORY = 2; TOPOLOGY = 3; FIND = 4; COPY = 5; }
+message ContentQuery {
+  spaceterm.common.EffectFence fence = 1; uint64 request_generation = 2; uint64 expected_revision = 3;
+  ContentQueryKind kind = 4; bytes continuation = 5; CellRef start = 6; CellRef end = 7;
+  string query = 8; bool case_sensitive = 9; bool regex = 10;
+}
+message Color { oneof value { uint32 rgb = 1; uint32 palette_index = 2; bool default_color = 3; } }
+message Style { Color foreground = 1; Color background = 2; Color underline_color = 3; uint32 flags = 4; uint32 underline_style = 5; }
+message Hyperlink { uint64 id = 1; string uri = 2; }
+// A glyph has width 1 or 2. A spacer has width 0 and empty text. wrap_head
+// identifies the blank at a soft-wrapped row end, distinct from a wide-cell tail.
+message StyledCell { string grapheme = 1; uint32 width = 2; bool spacer = 3; Style style = 4; uint64 hyperlink_id = 5; bool wrap_head = 6; }
+message SemanticRow { uint64 id = 1; uint64 revision = 2; bool soft_wrap = 3; repeated StyledCell cells = 4; }
+message Cursor { uint64 row_id = 1; uint32 column = 2; uint32 shape = 3; bool visible = 4; bool blinking = 5; }
+message Modes { bool alternate_screen = 1; bool bracketed_paste = 2; bool focus_events = 3; uint32 mouse_protocol = 4; uint32 keyboard_protocol = 5; bool synchronized_output = 6; }
+// Palette overrides only (OSC 4/104); default and cursor overrides are separate.
+message ColorOverride { uint32 slot = 1; uint32 rgb = 2; }
+// Program state, not resolved client theme colors. RGB values are 24-bit 0xRRGGBB;
+// present zero is black. An absent override uses the client's current theme color,
+// including after an OSC 110/111/112 reset. reverse_colors is DEC private mode 5.
+message ColorState {
+  optional uint32 default_foreground = 1; optional uint32 default_background = 2;
+  optional uint32 cursor_color = 3; bool reverse_colors = 4;
+}
+message ResourceId { spaceterm.common.Session session = 1; uint64 local_id = 2; }
+message GraphicPlacement { ResourceId resource = 1; uint64 row_id = 2; uint32 column = 3; uint32 columns = 4; uint32 rows = 5; sint32 z_index = 6; uint32 source_x = 7; uint32 source_y = 8; uint32 source_width = 9; uint32 source_height = 10; }
+message FindMatch { CellRef start = 1; CellRef end = 2; }
+// Sanitized display facts. current_directory is neither restoration authority nor
+// client-local filesystem authority. Prompt Owner values and native proofs stay off wire.
+message TerminalMetadata {
+  string title = 1; Directory current_directory = 2; string user = 3;
+  string hostname = 4; bool hidden_input = 5; uint64 version = 6; bool at_prompt = 7;
+}
+message SemanticPage {
+  spaceterm.common.EffectFence fence = 1; uint64 request_generation = 2; uint64 content_revision = 3;
+  uint64 screen_generation = 4; uint64 topology_revision = 5;
+  repeated SemanticRow rows = 6; Cursor cursor = 7; Modes modes = 8;
+  repeated ColorOverride color_overrides = 9; repeated Hyperlink hyperlinks = 10;
+  repeated GraphicPlacement graphics = 11; bytes continuation = 12; bool complete = 13;
+  repeated FindMatch matches = 14; bytes copy_text = 15;
+  TerminalMetadata metadata = 16; Geometry geometry = 17;
+  // If present, replaces program color state and all palette overrides at this
+  // revision. Missing palette slots revert to the current client theme. If absent,
+  // this page carries no color-state update (for example, a history or Find page).
+  ColorState color_state = 18;
+}
+message ContentInvalidation { spaceterm.common.EffectFence fence = 1; uint64 content_revision = 2; uint64 screen_generation = 3; }
+message ResourceRequest { spaceterm.common.EffectFence fence = 1; ResourceId resource = 2; uint64 transfer = 3; uint64 offset = 4; }
+enum ResourceFormat { RESOURCE_UNSPECIFIED = 0; RGBA8 = 1; PNG = 2; COPY_UTF8 = 3; COPY_HTML = 4; }
+message ResourceChunk {
+  spaceterm.common.EffectFence fence = 1; ResourceId resource = 2; uint64 transfer = 3;
+  uint64 offset = 4; uint64 total_bytes = 5; bytes data = 6; bytes digest = 7;
+  bool complete = 8; ResourceFormat format = 9; uint32 width = 10; uint32 height = 11;
+}
+message ResourceCancel { uint64 transfer = 1; spaceterm.common.EffectFence fence = 2; }
+message ClipboardRequest { bool read = 1; bytes text = 2; uint32 deadline_ms = 3; }
+message UnsafePasteRequest { bytes text = 1; uint32 expires_after_ms = 2; }
+enum PermissionKind { PERMISSION_UNSPECIFIED = 0; MICROPHONE = 1; SCREEN_RECORDING = 2; ACCESSIBILITY = 3; PROTECTED_DIRECTORY = 4; }
+message PermissionRequest { PermissionKind kind = 1; }
+message NativeRequest {
+  spaceterm.common.EffectFence fence = 1; uint64 request = 2;
+  oneof action { ClipboardRequest clipboard = 3; UnsafePasteRequest unsafe_paste = 4; PermissionRequest permission = 5; }
+}
+message NativeCompletion { spaceterm.common.EffectFence fence = 1; uint64 request = 2; bool allowed = 3; bytes clipboard_text = 4; spaceterm.common.Failure failure = 5; }
+message PairedDevice { spaceterm.common.Identity device = 1; spaceterm.common.Identity pairing = 2; string name = 3; bytes public_key = 4; repeated spaceterm.common.Identity clients = 5; }
+message Enrollment { bytes single_use_authorization = 1; bytes verified_fingerprint = 2; PairedDevice device = 3; }
+message PairingRequest { uint64 request = 1; oneof action { bool list = 2; Enrollment enroll = 3; spaceterm.common.Identity revoke = 4; } }
+message PairingOutcome { uint64 request = 1; repeated PairedDevice devices = 2; spaceterm.common.RevocationReceipt receipt = 3; spaceterm.common.Failure failure = 4; }
+enum ManagementAction { MANAGEMENT_UNSPECIFIED = 0; STATUS = 1; START = 2; STOP = 3; REPAIR = 4; STAGE_UPDATE = 5; ACTIVATE_UPDATE = 6; ASSESS_END_ALL = 7; }
+// Authorization and assessment are opaque references to host/server-owned decisions,
+// never passwords, executable paths, native proofs, or arbitrary commands.
+message ManagementRequest { uint64 request = 1; ManagementAction action = 2; bytes authorization = 3; bytes assessment = 4; string version = 5; }
+enum ServerState { STATE_UNSPECIFIED = 0; ONLINE = 1; STOPPED = 2; STORAGE_LOCKED = 3; STORAGE_UNAVAILABLE = 4; RECOVERING = 5; }
+message ManagementStatus { uint64 request = 1; ServerState state = 2; uint64 epoch = 3; string runtime_version = 4; string approved_version = 5; bool remote_access_enabled = 6; repeated uint32 majors = 7; spaceterm.common.Failure failure = 8; }
+message RepositoryQuery { spaceterm.common.Entity repository = 1; uint64 expected_revision = 2; bytes continuation = 3; }
+message RepositoryPage { spaceterm.common.Entity repository = 1; uint64 revision = 2; string branch = 3; uint32 added = 4; uint32 modified = 5; uint32 deleted = 6; repeated Worktree worktrees = 7; bytes continuation = 8; bool complete = 9; spaceterm.common.Failure failure = 10; }
+message DirectoryQuery { uint64 request = 1; Directory directory = 2; bytes continuation = 3; }
+message DirectoryEntry { string name = 1; bool directory = 2; bool selectable = 3; }
+message DirectoryPage { uint64 request = 1; Directory directory = 2; repeated DirectoryEntry entries = 3; bytes continuation = 4; bool complete = 5; spaceterm.common.Failure failure = 6; }
