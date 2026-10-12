@@ -15,6 +15,8 @@ typedef uint32_t st_management_result;
 #define ST_MANAGEMENT_SUPERVISOR_UNAVAILABLE UINT32_C(24)
 #define ST_MANAGEMENT_BACKGROUND_SUPPRESSED UINT32_C(25)
 #define ST_MANAGEMENT_STALE_ASSESSMENT UINT32_C(14)
+#define ST_MANAGEMENT_IDENTITY_MISMATCH UINT32_C(12)
+#define ST_MANAGEMENT_TIMED_OUT UINT32_C(29)
 /* AuthorizationPriv.h defines this SPI as bit 5. The public macOS SDK omits
  * its name. Native acceptance is a required evidence gate, not assumed here. */
 #define ST_MANAGEMENT_LEAST_PRIVILEGED_FLAG UINT32_C(32)
@@ -41,10 +43,8 @@ st_management_result st_management_gui_right_export(
 st_management_result st_management_gui_right_release(
     st_management_gui_authorization **owned_authorization);
 
-/* A granted right is only an observation, not caller/account/native authority.
- * The helper reconstructs its right without interaction or extension and
- * destroys the verified token rights before reporting success. The common native
- * caller/account adapter must independently bind the peer before any effect. */
+/* A raw external form has no request or original expiry binding. This legacy
+ * observation entry refuses authority even when authd still holds the right. */
 typedef struct {
     uint32_t schema;
     uint32_t right_granted;
@@ -56,13 +56,45 @@ st_management_result st_management_verify_gui_right(
     const uint8_t external_form[ST_MANAGEMENT_EXTERNAL_BYTES],
     st_management_right_observation *out_observation);
 
-/* No caller fabrication API. Until native binding is integrated this always
- * returns unavailable, even if a separate right observation was successful. */
+/* The root Rust issuer owns this live scope. It is never serialized, decoded,
+ * created from a request, or supplied by the GUI. Its protected original
+ * assessment binds the actual caller, account incarnation, exact 160-byte
+ * request, enrolled external form, and original boot-bound deadline. */
+typedef struct st_management_admission st_management_admission;
+st_management_result st_management_admission_recheck(
+    const st_management_admission *scope, const uint8_t request[160],
+    const uint8_t external[ST_MANAGEMENT_EXTERNAL_BYTES]);
+st_management_result st_management_admission_consume(
+    const st_management_admission *scope, const uint8_t request[160],
+    const uint8_t external[ST_MANAGEMENT_EXTERNAL_BYTES]);
+st_management_result st_management_verify_gui_right_bound(
+    const st_management_admission *scope, uint32_t build, uint32_t operation,
+    const uint8_t request[160], const uint8_t external[ST_MANAGEMENT_EXTERNAL_BYTES],
+    st_management_right_observation *out_observation);
+
+/* A one-request launchd endpoint receives a simple fixed Mach message plus the
+ * kernel audit trailer. The opaque object retains the exact dynamic SecCode
+ * guest and audit-token principal. No request UID or client bytes construct it. */
+typedef struct st_management_demand_message st_management_demand_message;
+st_management_result st_management_receive_gui_demand(uint32_t build,
+    uint32_t remaining_ms, st_management_demand_message **out_message);
+st_management_result st_management_demand_request(const st_management_demand_message *message,
+    uint8_t out_request[160]);
+st_management_result st_management_demand_external(const st_management_demand_message *message,
+    uint8_t out_external[32]);
+st_management_result st_management_demand_caller_uid(const st_management_demand_message *message,
+    uint32_t *out_uid);
+st_management_result st_management_demand_recheck(const st_management_demand_message *message);
+void st_management_demand_release(st_management_demand_message **owned_message);
+
+/* Unbound legacy entry has no native caller scope and cannot authorize effects. */
 st_management_result st_management_authorize_request(void);
 
 #if defined(ST_MANAGEMENT_TESTING) && defined(__APPLE__)
 #include <Security/Authorization.h>
 #include <CoreFoundation/CoreFoundation.h>
+#include <Security/SecCode.h>
+#include <mach/mach.h>
 /* Compiled only into ordinary tests. These callbacks never enter production. */
 typedef struct {
     OSStatus (*create)(const AuthorizationRights *, const AuthorizationEnvironment *,
@@ -77,5 +109,16 @@ typedef struct {
     uint64_t (*monotonic_ns)(void);
 } st_management_test_calls;
 void st_management_test_set_calls(const st_management_test_calls *calls);
+typedef struct {
+    uint32_t (*real_uid)(void);
+    uint32_t (*effective_uid)(void);
+    kern_return_t (*check_in)(mach_port_t, const char *, mach_port_t *);
+    mach_msg_return_t (*receive)(mach_msg_header_t *, mach_msg_option_t,
+        mach_msg_size_t, mach_msg_size_t, mach_port_name_t, mach_msg_timeout_t, mach_port_name_t);
+    OSStatus (*guest)(SecCodeRef, CFDictionaryRef, SecCSFlags, SecCodeRef *);
+    OSStatus (*validate)(SecCodeRef, SecCSFlags, SecRequirementRef);
+    kern_return_t (*deallocate)(ipc_space_t, mach_port_name_t);
+} st_management_demand_test_calls;
+void st_management_demand_test_set_calls(const st_management_demand_test_calls *calls);
 #endif
 #endif

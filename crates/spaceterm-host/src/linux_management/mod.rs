@@ -35,8 +35,20 @@ impl PkexecInvocation {
 /// Process exit alone cannot distinguish no agent, denial, exec failure, and
 /// cancelled policy requests. Read the native polkit outcome through its bound
 /// subject/provider. Neither PKEXEC_UID nor a process exit creates caller proof.
-pub fn authorize_native_request(
-    _request: &ManagementRequest,
-) -> Result<std::convert::Infallible, NativeFailure> {
-    Err(NativeFailure::AuthorizationUnavailable)
+pub fn authorize_native_request<
+    P: crate::native_management::facade::authorization::NativeAuthorizationBoundary,
+>(
+    issuer: &crate::native_management::facade::authorization::NativeAuthorizationIssuer<P>,
+    request: &ManagementRequest,
+    deadline: crate::native_management::helper_lifetime::HelperDeadline,
+) -> Result<crate::native_management::facade::authorization::NativeAuthorizationLease, NativeFailure>
+{
+    issuer.authorize(
+        request,
+        crate::native_management::controller::AuthorizationRoute::Gui,
+        deadline,
+    )
 }
+
+#[path = "polkit.rs"]
+pub mod polkit;

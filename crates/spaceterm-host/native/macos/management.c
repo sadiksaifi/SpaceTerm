@@ -4,11 +4,17 @@
 #include <stdlib.h>
 #include <time.h>
 #include <string.h>
+#include <unistd.h>
 
 #if defined(__APPLE__)
 #include <Security/Authorization.h>
 #include <Security/AuthorizationDB.h>
 #include <CoreFoundation/CoreFoundation.h>
+#include <Security/SecCode.h>
+#include <Security/SecBase.h>
+#include <Security/SecStaticCode.h>
+#include <mach/mach.h>
+#include <servers/bootstrap.h>
 #endif
 
 static void wipe(void *memory, size_t length) {
@@ -72,6 +78,166 @@ void st_management_test_set_calls(const st_management_test_calls *calls) { test_
 #else
 #define NATIVE_CALL(name, fallback) fallback
 #endif
+
+#if defined(ST_MANAGEMENT_TESTING)
+static const st_management_demand_test_calls *demand_calls;
+void st_management_demand_test_set_calls(const st_management_demand_test_calls *calls) {
+    demand_calls = calls;
+}
+#define DEMAND_CALL(name, fallback) (demand_calls != NULL ? demand_calls->name : fallback)
+#else
+#define DEMAND_CALL(name, fallback) fallback
+#endif
+
+struct st_management_demand_message {
+    uint8_t request[160];
+    uint8_t external[32];
+    audit_token_t audit;
+    SecCodeRef code;
+    mach_port_t receiver;
+    mach_port_t reply;
+};
+typedef struct {
+    mach_msg_header_t header;
+    uint8_t request[160];
+    uint8_t external[32];
+} st_management_demand_wire;
+
+static st_management_result demand_guest(const audit_token_t *audit, SecCodeRef *out_code) {
+    *out_code = NULL;
+    CFDataRef token = CFDataCreate(NULL, (const UInt8 *)audit, sizeof(*audit));
+    if (token == NULL) return ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
+    const void *keys[] = { kSecGuestAttributeAudit };
+    const void *values[] = { token };
+    CFDictionaryRef attributes = CFDictionaryCreate(NULL, keys, values, 1,
+        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFRelease(token);
+    if (attributes == NULL) return ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
+    OSStatus status = DEMAND_CALL(guest, SecCodeCopyGuestWithAttributes)(NULL, attributes,
+        kSecCSDefaultFlags, out_code);
+    CFRelease(attributes);
+    if (status != errSecSuccess || *out_code == NULL) {
+        if (*out_code != NULL) CFRelease(*out_code);
+        *out_code = NULL;
+        return ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
+    }
+    status = DEMAND_CALL(validate, SecCodeCheckValidity)(*out_code, kSecCSStrictValidate, NULL);
+    if (status != errSecSuccess) {
+        CFRelease(*out_code); *out_code = NULL;
+        return ST_MANAGEMENT_AUTHORIZATION_DENIED;
+    }
+    return ST_MANAGEMENT_OK;
+}
+
+void st_management_demand_release(st_management_demand_message **owned) {
+    if (owned == NULL || *owned == NULL) return;
+    st_management_demand_message *message = *owned;
+    *owned = NULL;
+    if (message->code != NULL) CFRelease(message->code);
+    if (message->reply != MACH_PORT_NULL)
+        (void)DEMAND_CALL(deallocate, mach_port_deallocate)(mach_task_self(), message->reply);
+    if (message->receiver != MACH_PORT_NULL)
+        (void)DEMAND_CALL(deallocate, mach_port_deallocate)(mach_task_self(), message->receiver);
+    wipe(message, sizeof(*message)); free(message);
+}
+
+st_management_result st_management_receive_gui_demand(uint32_t build,
+    uint32_t remaining_ms, st_management_demand_message **out) {
+    if (out == NULL) return ST_MANAGEMENT_INVALID_RECORD;
+    *out = NULL;
+    if (build < 1 || build > 3 || remaining_ms == 0 || remaining_ms > 2000)
+        return ST_MANAGEMENT_INVALID_RECORD;
+    if (DEMAND_CALL(real_uid, getuid)() != 0 || DEMAND_CALL(effective_uid, geteuid)() != 0)
+        return ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
+    char endpoint[ST_MANAGEMENT_RIGHT_BYTES];
+    st_management_result result = st_management_format_right(build, 4, endpoint, sizeof(endpoint));
+    if (result != 0) return result;
+    char *suffix = strstr(endpoint, ".manage.start");
+    if (suffix == NULL) return ST_MANAGEMENT_INVALID_RECORD;
+    memcpy(suffix, ".manager.demand", sizeof(".manager.demand"));
+    st_management_demand_message *message = calloc(1, sizeof(*message));
+    if (message == NULL) return ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
+    if (DEMAND_CALL(check_in, bootstrap_check_in)(bootstrap_port, endpoint, &message->receiver) != KERN_SUCCESS
+        || message->receiver == MACH_PORT_NULL) {
+        st_management_demand_release(&message); return ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
+    }
+    struct { st_management_demand_wire wire; mach_msg_max_trailer_t trailer; } incoming;
+    memset(&incoming, 0, sizeof(incoming));
+    mach_msg_option_t options = MACH_RCV_MSG | MACH_RCV_TIMEOUT
+        | MACH_RCV_TRAILER_TYPE(MACH_MSG_TRAILER_FORMAT_0)
+        | MACH_RCV_TRAILER_ELEMENTS(MACH_RCV_TRAILER_AUDIT);
+    mach_msg_return_t received = DEMAND_CALL(receive, mach_msg)(&incoming.wire.header, options, 0,
+        sizeof(incoming), message->receiver, remaining_ms, MACH_PORT_NULL);
+    if (received != MACH_MSG_SUCCESS) {
+        st_management_demand_release(&message);
+        return received == MACH_RCV_TIMED_OUT ? ST_MANAGEMENT_TIMED_OUT : ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
+    }
+    mach_msg_header_t *header = &incoming.wire.header;
+    if (header->msgh_size != sizeof(st_management_demand_wire)
+        || header->msgh_id != 0x53544d47
+        || (header->msgh_bits & MACH_MSGH_BITS_COMPLEX) != 0
+        || header->msgh_local_port != message->receiver
+        || MACH_MSGH_BITS_REMOTE(header->msgh_bits) != MACH_MSG_TYPE_PORT_SEND_ONCE
+        || header->msgh_remote_port == MACH_PORT_NULL) {
+        /* Preserve our receive right while destroying any transferred message resources. */
+        header->msgh_local_port = MACH_PORT_NULL;
+        mach_msg_destroy(header);
+        wipe(&incoming, sizeof(incoming));
+        st_management_demand_release(&message); return ST_MANAGEMENT_INVALID_RECORD;
+    }
+    message->reply = header->msgh_remote_port;
+    const mach_msg_audit_trailer_t *trailer = (const mach_msg_audit_trailer_t *)&incoming.trailer;
+    if (trailer->msgh_trailer_type != MACH_MSG_TRAILER_FORMAT_0
+        || trailer->msgh_trailer_size < sizeof(*trailer)
+        || trailer->msgh_trailer_size > sizeof(incoming.trailer)) {
+        wipe(&incoming, sizeof(incoming));
+        st_management_demand_release(&message); return ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
+    }
+    message->audit = trailer->msgh_audit;
+    /* Darwin's kernel audit ABI: effective UID at word 1, PID at 5, PID version at 7. */
+    uint32_t uid = message->audit.val[1];
+    uint32_t request_uid = ((uint32_t)incoming.wire.request[12] << 24)
+        | ((uint32_t)incoming.wire.request[13] << 16)
+        | ((uint32_t)incoming.wire.request[14] << 8) | incoming.wire.request[15];
+    if (uid == 0 || uid == UINT32_MAX || message->audit.val[5] == 0 || message->audit.val[7] == 0
+        || uid != request_uid || incoming.wire.request[6] != build) {
+        wipe(&incoming, sizeof(incoming));
+        st_management_demand_release(&message); return ST_MANAGEMENT_IDENTITY_MISMATCH;
+    }
+    memcpy(message->request, incoming.wire.request, sizeof(message->request));
+    memcpy(message->external, incoming.wire.external, sizeof(message->external));
+    wipe(&incoming, sizeof(incoming));
+    result = demand_guest(&message->audit, &message->code);
+    if (result != 0) { st_management_demand_release(&message); return result; }
+    *out = message; return ST_MANAGEMENT_OK;
+}
+st_management_result st_management_demand_request(const st_management_demand_message *message,
+    uint8_t out[160]) {
+    if (out == NULL) return ST_MANAGEMENT_INVALID_RECORD;
+    memset(out, 0, 160);
+    if (message == NULL || message->code == NULL) return ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
+    memcpy(out, message->request, 160); return ST_MANAGEMENT_OK;
+}
+st_management_result st_management_demand_external(const st_management_demand_message *message, uint8_t out[32]) {
+    if (out == NULL) return ST_MANAGEMENT_INVALID_RECORD;
+    wipe(out, 32);
+    if (message == NULL || message->code == NULL) return ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
+    memcpy(out, message->external, 32); return ST_MANAGEMENT_OK;
+}
+st_management_result st_management_demand_caller_uid(const st_management_demand_message *message,
+    uint32_t *out_uid) {
+    if (out_uid == NULL) return ST_MANAGEMENT_INVALID_RECORD;
+    *out_uid = 0;
+    if (message == NULL || message->code == NULL) return ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
+    *out_uid = message->audit.val[1]; return ST_MANAGEMENT_OK;
+}
+st_management_result st_management_demand_recheck(const st_management_demand_message *message) {
+    if (message == NULL || message->code == NULL) return ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
+    SecCodeRef current = NULL;
+    st_management_result result = demand_guest(&message->audit, &current);
+    if (current != NULL) CFRelease(current);
+    return result;
+}
 
 static int boolean_value(CFDictionaryRef dictionary, CFStringRef key, int expected) {
     CFTypeRef value = CFDictionaryGetValue(dictionary, key);
@@ -252,11 +418,17 @@ st_management_result st_management_gui_right_export(
     return ST_MANAGEMENT_OK;
 }
 
-st_management_result st_management_verify_gui_right(uint32_t build, uint32_t operation,
-    const uint8_t external[ST_MANAGEMENT_EXTERNAL_BYTES], st_management_right_observation *out) {
+st_management_result st_management_verify_gui_right_bound(
+    const st_management_admission *scope, uint32_t build, uint32_t operation,
+    const uint8_t request[160], const uint8_t external[ST_MANAGEMENT_EXTERNAL_BYTES],
+    st_management_right_observation *out) {
     if (out == NULL) return ST_MANAGEMENT_INVALID_RECORD;
     memset(out, 0, sizeof(*out));
-    if (external == NULL) return ST_MANAGEMENT_INVALID_RECORD;
+    if (external == NULL || request == NULL || scope == NULL) return ST_MANAGEMENT_INVALID_RECORD;
+    st_management_result scoped = st_management_admission_recheck(scope, request, external);
+    if (scoped != ST_MANAGEMENT_OK) return scoped;
+    /* Wire tags must agree even after the trusted scope has been checked. */
+    if (request[5] != operation || request[6] != build) return ST_MANAGEMENT_INVALID_RECORD;
     char right[ST_MANAGEMENT_RIGHT_BYTES];
     st_management_result result = st_management_format_right(build, operation, right, sizeof(right));
     if (result != ST_MANAGEMENT_OK) return result;
@@ -271,8 +443,10 @@ st_management_result st_management_verify_gui_right(uint32_t build, uint32_t ope
     if (result == ST_MANAGEMENT_OK && authorization == NULL)
         result = ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
     if (result == ST_MANAGEMENT_OK) result = copy_exact_right(authorization, right, 0);
-    /* A verified exact right is consumed, not cached for another request. The
-     * GUI owner still releases its own reference on admission or cancellation. */
+    if (result == ST_MANAGEMENT_OK)
+        result = st_management_admission_consume(scope, request, external);
+    /* Consumption is atomic in the original protected scope. The copied authd
+     * reference is destroyed; a saved form cannot establish another scope. */
     AuthorizationFlags release_flags = result == ST_MANAGEMENT_OK
         ? kAuthorizationFlagDestroyRights : kAuthorizationFlagDefaults;
     if (authorization != NULL && NATIVE_CALL(free_authorization, AuthorizationFree)(
@@ -285,6 +459,28 @@ st_management_result st_management_verify_gui_right(uint32_t build, uint32_t ope
     return result;
 }
 #else
+st_management_result st_management_receive_gui_demand(uint32_t build, uint32_t remaining,
+    st_management_demand_message **out) {
+    (void)build; (void)remaining;
+    if (out == NULL) return ST_MANAGEMENT_INVALID_RECORD;
+    *out = NULL; return ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
+}
+st_management_result st_management_demand_request(const st_management_demand_message *message, uint8_t out[160]) {
+    (void)message; if (out == NULL) return ST_MANAGEMENT_INVALID_RECORD;
+    memset(out, 0, 160); return ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
+}
+st_management_result st_management_demand_external(const st_management_demand_message *message, uint8_t out[32]) {
+    (void)message; if (out == NULL) return ST_MANAGEMENT_INVALID_RECORD;
+    wipe(out, 32); return ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
+}
+st_management_result st_management_demand_caller_uid(const st_management_demand_message *message, uint32_t *out) {
+    (void)message; if (out == NULL) return ST_MANAGEMENT_INVALID_RECORD;
+    *out = 0; return ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
+}
+st_management_result st_management_demand_recheck(const st_management_demand_message *message) {
+    (void)message; return ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
+}
+void st_management_demand_release(st_management_demand_message **owned) { if (owned != NULL) *owned = NULL; }
 st_management_result st_management_request_gui_right(uint32_t build, uint32_t operation,
     const uint8_t request_id[16], st_management_gui_authorization **out) {
     (void)build; (void)operation; (void)request_id;
@@ -305,9 +501,11 @@ st_management_result st_management_gui_right_release(st_management_gui_authoriza
     if (*owned != NULL) return ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
     return ST_MANAGEMENT_OK;
 }
-st_management_result st_management_verify_gui_right(uint32_t build, uint32_t operation,
-    const uint8_t external[ST_MANAGEMENT_EXTERNAL_BYTES], st_management_right_observation *out) {
-    (void)build; (void)operation;
+st_management_result st_management_verify_gui_right_bound(
+    const st_management_admission *scope, uint32_t build, uint32_t operation,
+    const uint8_t request[160], const uint8_t external[ST_MANAGEMENT_EXTERNAL_BYTES],
+    st_management_right_observation *out) {
+    (void)scope; (void)request; (void)build; (void)operation;
     if (out == NULL || external == NULL) return ST_MANAGEMENT_INVALID_RECORD;
     memset(out, 0, sizeof(*out));
     return ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
@@ -315,5 +513,13 @@ st_management_result st_management_verify_gui_right(uint32_t build, uint32_t ope
 #endif
 
 st_management_result st_management_authorize_request(void) {
+    return ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
+}
+
+st_management_result st_management_verify_gui_right(uint32_t build, uint32_t operation,
+    const uint8_t external[ST_MANAGEMENT_EXTERNAL_BYTES], st_management_right_observation *out) {
+    (void)build; (void)operation;
+    if (out == NULL || external == NULL) return ST_MANAGEMENT_INVALID_RECORD;
+    memset(out, 0, sizeof(*out));
     return ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
 }

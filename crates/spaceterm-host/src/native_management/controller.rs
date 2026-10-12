@@ -101,6 +101,18 @@ pub trait ManagementBackend: Send + Sync {
     type Authorization;
     /// Retained authority from the shared native installation journal.
     type Transaction;
+    /// Authenticates a resolving caller without issuing or reusing a mutation grant.
+    /// Only an exact durably admitted request may be returned. The default has no
+    /// retained lookup route and proceeds to fresh authorization, never to effects.
+    fn lookup_retained(
+        &self,
+        _request: &ManagementRequest,
+        _route: AuthorizationRoute,
+        deadline: HelperDeadline,
+    ) -> Result<Option<JournalAdmission<Self::Transaction>>, NativeFailure> {
+        deadline.check()?;
+        Ok(None)
+    }
     /// Independently bind actual OS caller, account incarnation, build, and right.
     fn authorize(
         &self,
@@ -237,6 +249,10 @@ impl<B: ManagementBackend> ManagementController<B> {
         route: AuthorizationRoute,
     ) -> Result<ManagementProgress, NativeFailure> {
         let deadline = self.lifetime.deadline();
+        if let Some(existing) = self.backend.lookup_retained(request, route, deadline)? {
+            let _serial = self.serial.try_lock().map_err(lock_failure)?;
+            return self.advance(existing, *request.request_bytes(), deadline);
+        }
         // Interactive OS authentication happens in unprivileged orchestration.
         // This port verifies already-obtained authority without prompting as root.
         let authority = self.backend.authorize(request, route, deadline)?;

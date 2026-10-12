@@ -20,8 +20,8 @@ impl SudoInvocation {
     /// Fixed flags before the boundary's admitted manager. No -S, -E, or AskPass.
     pub fn prefix(self) -> &'static [&'static str] {
         match self.mode {
-            SudoMode::Interactive => &["--"],
-            SudoMode::NonInteractive => &["-n", "--"],
+            SudoMode::Interactive => &["-k", "--"],
+            SudoMode::NonInteractive => &["-k", "-n", "--"],
         }
     }
     /// Manager request transport. No credentials are passed in arguments.
@@ -88,10 +88,10 @@ impl<B: SudoBoundary> SudoAdapter<B> {
 }
 
 /// Unavailable until authenticated OS caller and retained exec providers are wired.
-pub struct NativeSudoBoundary;
+pub struct UnavailableSudoBoundary;
 /// No success-shaped retained helper exists in unavailable production composition.
 pub enum UnavailableHelper {}
-impl SudoBoundary for NativeSudoBoundary {
+impl SudoBoundary for UnavailableSudoBoundary {
     type RetainedHelper = UnavailableHelper;
     fn retain_fixed_helper(
         &self,
@@ -114,3 +114,9 @@ impl SudoBoundary for NativeSudoBoundary {
         match helper {}
     }
 }
+
+#[path = "execution.rs"]
+mod execution;
+pub use execution::{NativeSudoBoundary, RetainedSudoExecution};
+#[path = "reply.rs"]
+pub mod reply;
