@@ -1,0 +1,39 @@
+# Native evidence packages
+
+This package lets an operator inspect signed test fixtures before installing them. Preparation does not sign code, import certificates, open a Keychain, authorize an operation, or change host integration. With no fixture input, it reports `native-unavailable` and creates nothing.
+
+The coordinator registers the tasks in `task-entries.toml`. The preparation entry point accepts `--fixtures` with a new directory containing pre-signed fixtures and `fixture-manifest.json`. Run the repository entry point with `python -I`. Do not run an interpreter from the fixture directory.
+
+## Fixture input
+
+`validate_manifest` and `CODE_IDENTIFIERS` in `mise-tasks/lib/spaceterm_tasks/server_native_macos.py` define the input format and exact identifiers. The manifest is canonical schema-1 JSON. It binds the run ID, source revision, dirty state, every file's size, mode and SHA-256, and the complete set of native entry points. It contains no credential or account environment.
+
+The directory must contain exactly the listed regular files and the manifest. Preparation rejects links, duplicate entries, unexpected files or directories, traversal, and unlisted executable code. It copies bytes into a new candidate directory and verifies the destination. It does not bless an existing account-owned inode as a privileged installation.
+
+The native verifier requires the pinned certificate, each exact identifier, hardened runtime, an empty entitlement set, arm64 code, and system-only dependencies without loader-environment or rpath commands. Preparation retains the files and directory edges across the policy calls and checks their kernel change stamps and exact bytes. Replacing and restoring a file or ancestor invalidates preflight. These unprivileged handles do not supply custody. A signature or policy failure leaves only a nonrunnable preflight. Preparation never overwrites a candidate.
+
+## Operator sequence
+
+A signed candidate contains `preflight.json`, the fixtures, and two generated shell sequences. The local sequence is intended for an existing GUI-parented shell. The disposable sequence accepts one OpenSSH destination, creates new remote staging storage, transfers the package without agent forwarding, and uses `sudo -n`. It preserves `SSH_AUTH_SOCK` only for local OpenSSH authentication. Agent, X11, and configured port forwarding and local commands are disabled. Remote commands and privileged tools still run with a closed environment.
+
+Neither sequence is consent to mutate a host. Independent review must cover the exact signed preflight, the embedded manifest digest, the complete fixtures, and the native admin before execution. The sequence contains digest literals rather than executing a staging script as root.
+
+Bootstrap reads admin bytes as the account and writes them through a trusted OS tool into fresh root-owned storage. Before executing the protected admin as root, it verifies that copy's signature, digest, hardened runtime, empty entitlements, arm64 architecture, and system-only dependency and loader policy. It repeats those checks before each privileged fixture invocation. Trusted OS tools and fixtures receive a closed environment. The protected root is never recursively removed by the shell.
+
+The admin must implement the frozen `install --account-uid ... --candidate ...` and `uninstall` operations. It must verify the protected bootstrap receipt against the fixed candidate, refuse every native-resource collision before installation effects, bind the actual native account, publish a durable full receipt, authenticate every protected destination copy, and prove exact process retirement before cleanup. Preparation cannot establish these native guarantees.
+
+The signed client must implement `live-session --output ...` and `automated --output ...`. It must create the output exclusively, observe its real process context, emit the shared schema, and observe receipt-bound cleanup. It must not infer an effect from a utility exit. The disposable case plan records interactive cases as `unrun`; it does not supply privacy grants, GUI attribution, or physical hardware.
+
+## Receipts and output
+
+`new_receipt`, `validate_receipt`, `ReceiptStore`, and `FixtureNativeOperations` define the portable recovery contract. Schema-2 receipts bind the account incarnation, UID/GID, build, ServerId, credential slot and binding, registration name and digest, service label, artifact hashes, and each effect's native identities. Files bind volume, device, inode, generation, birth time, type, relative name, and content digest. Credential items bind the fixed System Keychain and native persistent reference. Services bind their native instance; processes bind boot, PID, start time, role, and executable digest. A generated marker is not a native instance identity. These fields are protected recovery facts, not authorization or JSONL evidence. Schema-1 state-only receipts cannot authorize automatic removal.
+
+The native admin must supply protected storage, historical write exclusion, authenticated process identities, exact credential-item identity, and native serialization. The Python store is not a privileged storage adapter. Its filesystem tests run only in temporary unprivileged directories.
+
+Publication records intent before each effect. The native installer reports each created identity through a durable callback before exposing it or making another effect. Identities are Pending until installation completes. A crash before identity publication leaves cleanup unresolved; the collector cannot recover authority from a name or matching digest. Failed synchronization latches `indeterminate`; another synchronization cannot clear it. Cleanup drains and verifies the recorded previous process scope, retains exact object bindings, and compares them with the receipt before removal. The native remover must recheck those bindings through deletion. Recreated files or items and recycled process identities remain untouched. An uncertain scope preserves the receipt and fixtures. A first termination signal unwinds into cleanup. Subsequent signals do not replace it. Cleanup uncertainty takes precedence over cancellation and output failure.
+
+The JSONL schema and case allowlists live in `mise-tasks/lib/spaceterm_tasks/native_evidence_schema.py`. Native emitters must use those closed variants and identifiers. Each required case has a specific observation contract. Successful retrieval requires observed retrieval, accepted noninteractive policy, release revalidation, wiping, and retriever retirement. Credential denial requires an observed rejected attempt without secret release. Privilege proof requires saved IDs, cleared groups, authenticated execution, descriptor closure, and root retirement. Startup, update, drain, authorization, and bootstrap cases have separate effect observations. The current privilege variant covers macOS only; it cannot credit Linux capability or nondumpability proof. Cases without an observation contract can report Unrun or preflight, not native Passed or Denied. The collector rejects gaps, duplicate observations, substituted run identity, invalid records and incomplete required cases. It never fills a missing case with a synthetic result.
+
+The collection entry point accepts `--input` and `--profile local|disposable`. A valid file is not deployment approval. It reports native Passed, Unrun and unresolved counts separately. Unrun or unresolved evidence returns a nonpassing status. Keep partial output and unresolved protected receipts for recovery.
+
+The read-only inspector recognizes retained schema-1 registration candidates. Schema-2 status remains unavailable until the native authority's read-only status binding is integrated. Python pathname checks never supply custody, storage-unlock, credential-release, or startup authority.

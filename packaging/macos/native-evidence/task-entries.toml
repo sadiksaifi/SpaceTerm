@@ -1,0 +1,17 @@
+# Add these entries to .mise.toml during coordinator integration.
+# Register the frozen interface names; preparation defaults to read-only.
+[tasks."server:native:macos:prepare-evidence"]
+description = "Assemble existing signed fixtures without importing signing material or changing host integration"
+run = "python -I mise-tasks/server/native/macos/prepare_evidence.py"
+
+[tasks."server:native:macos:collect-evidence"]
+description = "Validate bounded native evidence without inventing missing observations"
+run = "python -I mise-tasks/server/native/macos/collect_evidence.py"
+
+[tasks."test:server:native:evidence:tools"]
+description = "Test native evidence assembly and receipt recovery without host mutation"
+run = "python -m unittest tests.test_server_native_macos"
+
+[tasks."test:server:native:evidence:schema"]
+description = "Test strict bounded native evidence records and collection"
+run = "python -m unittest tests.test_native_evidence_schema"
