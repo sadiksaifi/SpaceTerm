@@ -11,3 +11,14 @@ test-support = ["spaceterm-host/test-support"]
 spaceterm-host = { path = "../spaceterm-host" }
 spaceterm-distribution = { path = "../spaceterm-distribution" }
 spaceterm-core = { path = "../spaceterm-core" }
+spaceterm-protocol = { path = "../spaceterm-protocol" }
+spaceterm-terminal = { path = "../spaceterm-terminal", default-features = false, features = ["runtime", "kitty-graphics", "png"] }
+tokio = { version = "=1.53.1", default-features = false, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+getrandom = "=0.4.3"
+sha2 = "=0.10.9"
+serde = { version = "=1.0.229", features = ["derive"] }
+thiserror = "=2.0.19"
+
+[dev-dependencies]
+spaceterm-client = { path = "../spaceterm-client", default-features = false, features = ["test-support"] }
+spaceterm-host = { path = "../spaceterm-host", features = ["test-support", "native-tests"] }

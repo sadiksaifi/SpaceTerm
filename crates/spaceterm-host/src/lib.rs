@@ -45,6 +45,11 @@ pub mod approved_installation;
 pub mod boot_credentials;
 pub mod installation;
 pub mod native_deployment;
+pub mod organization_store;
+
+pub mod server_directories;
+
+pub mod bootstrap;
 
 // Native phase 2 producers compile against the same headless host surface.
 pub mod linux_custody;

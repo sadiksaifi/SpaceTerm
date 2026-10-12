@@ -1,0 +1,16 @@
+syntax = "proto3";
+package spaceterm.directories.v1;
+import "common.proto";
+message ServerDirectory { spaceterm.common.Identity server = 1; bytes value = 2; }
+message DirectoryContext { spaceterm.common.Identity server = 1; uint64 epoch = 2; spaceterm.common.Entity pairing = 3; spaceterm.common.Entity client = 4; }
+message DirectoryCursor { DirectoryContext context = 1; ServerDirectory scope = 2; uint64 observation = 3; bytes random = 4; }
+message DirectoryEntryName { bytes value = 1; }
+message DirectoryEntry { DirectoryEntryName name = 1; ServerDirectory directory = 2; bool selectable = 3; }
+message DirectoryPage { DirectoryContext context = 1; ServerDirectory directory = 2; uint64 observation = 3; repeated DirectoryEntry entries = 4; DirectoryCursor next = 5; }
+enum DirectoryPurpose { DIRECTORY_PURPOSE_UNSPECIFIED = 0; WORKSPACE_PIN = 1; SESSION_LAUNCH = 2; PANE_REPAIR = 3; WORKTREE_CREATE_TARGET = 4; WORKTREE_FALLBACK = 5; }
+enum DirectoryValidationClass { DIRECTORY_VALIDATION_UNSPECIFIED = 0; AVAILABLE_DIRECTORY = 1; ABSENT_CREATE_TARGET = 2; EMPTY_CREATE_TARGET = 3; MISSING = 4; NOT_DIRECTORY = 5; UNAVAILABLE = 6; IDENTITY_CHANGED = 7; UNCHECKED = 8; }
+message BrowseDirectory { ServerDirectory directory = 1; DirectoryCursor cursor = 2; }
+message ValidateDirectory { ServerDirectory directory = 1; DirectoryPurpose purpose = 2; }
+message DirectoryQuery { uint64 request = 1; uint64 request_generation = 2; DirectoryContext context = 3; oneof action { bool home = 4; BrowseDirectory browse = 5; ValidateDirectory validate = 6; } }
+message DirectoryValidation { ServerDirectory directory = 1; DirectoryPurpose purpose = 2; DirectoryValidationClass classification = 3; }
+message DirectoryQueryResult { uint64 request = 1; uint64 request_generation = 2; oneof result { ServerDirectory home = 3; DirectoryPage page = 4; DirectoryValidation validation = 5; spaceterm.common.Failure failure = 6; } }

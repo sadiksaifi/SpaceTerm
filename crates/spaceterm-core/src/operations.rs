@@ -163,6 +163,10 @@ pub enum CloseTarget {
     Pane(PaneId),
     Tab(TabId),
     Workspace(WorkspaceId),
+    WorktreeTabs {
+        workspace: WorkspaceId,
+        worktree: WorktreeId,
+    },
 }
 impl CloseTarget {
     pub const fn server(self) -> ServerId {
@@ -170,6 +174,7 @@ impl CloseTarget {
             Self::Pane(v) => v.server(),
             Self::Tab(v) => v.server(),
             Self::Workspace(v) => v.server(),
+            Self::WorktreeTabs { workspace, .. } => workspace.server(),
         }
     }
 }
@@ -189,6 +194,7 @@ pub enum AssessmentTarget {
         scope: RepositoryScope,
         worktree: WorktreeId,
     },
+    KillWorkspace(WorkspaceId),
 }
 /// Server-internal comparison facts. Native proofs are retained by the host, not here.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -275,6 +281,7 @@ pub enum Command {
     ReleaseControl(ReleaseControlRequest),
     BeginStartup(StartupIntent),
     CompleteStartup(StartupMeasurement),
+    CompleteMeasuredStartup(MeasuredStartupMeasurement),
     CancelStartup {
         intent: OperationId,
     },
@@ -298,10 +305,24 @@ pub enum Command {
         assessment: AssessmentRef,
         force: bool,
     },
+    AssessKillWorkspace {
+        workspace: WorkspaceId,
+    },
+    SetRemoteAccess {
+        server: ServerId,
+        expected_version: FieldVersion,
+        value: crate::remote_access::RemoteAccessPolicy,
+    },
+    Pairing(crate::pairing::PairingCommand),
+    Worktree(crate::worktrees::types::GitCommand),
 }
 impl Command {
     pub fn server(&self) -> ServerId {
         match self {
+            Self::AssessKillWorkspace { workspace } => workspace.server(),
+            Self::SetRemoteAccess { server, .. } => *server,
+            Self::Pairing(value) => value.server(),
+            Self::Worktree(value) => value.server(),
             Self::CreateWorkspace { server, .. }
             | Self::SetWorktreeLocation { server, .. }
             | Self::AssessEndAllSessions { server }
@@ -320,6 +341,7 @@ impl Command {
             Self::ReleaseControl(v) => v.grant.pane().server(),
             Self::BeginStartup(v) => v.fence().session().pane.server(),
             Self::CompleteStartup(v) => v.fence.session().pane.server(),
+            Self::CompleteMeasuredStartup(v) => v.fence.session().pane.server(),
             Self::CancelStartup { intent } => intent.stream().server(),
             Self::RevokePairing { pairing } => pairing.server(),
             Self::RefreshWorktrees { scope }
@@ -344,14 +366,23 @@ impl Command {
                 value.as_ref().is_none_or(|value| value.server() == server)
             }
             Self::RepairPaneDirectory { value, .. } => value.server() == server,
-            Self::CloseConfirmed { assessment, .. }
-            | Self::KillWorkspaceConfirmed { assessment, .. }
+            Self::AssessClose { target } => target.validate_scope(server).is_ok(),
+            Self::CloseConfirmed { target, assessment } => {
+                target.validate_scope(server).is_ok() && assessment.operation.stream() == stream
+            }
+            Self::SetRemoteAccess { value, .. } => value.server() == server,
+            Self::Pairing(value) => value.validate_scope(stream).is_ok(),
+            Self::Worktree(value) => value.validate_stream(stream).is_ok(),
+            Self::KillWorkspaceConfirmed { assessment, .. }
             | Self::EndAllSessions { assessment, .. } => assessment.operation.stream() == stream,
             Self::CompareAcquire(v) => v.client == stream.client(),
             Self::TakeOver(v) => v.client == stream.client(),
             Self::ReleaseControl(v) => v.grant.client() == stream.client(),
             Self::BeginStartup(v) => v.id().stream() == stream,
             Self::CompleteStartup(v) => {
+                v.intent.stream() == stream && v.fence.grant().client() == stream.client()
+            }
+            Self::CompleteMeasuredStartup(v) => {
                 v.intent.stream() == stream && v.fence.grant().client() == stream.client()
             }
             Self::CancelStartup { intent } => intent.stream() == stream,
@@ -442,6 +473,11 @@ pub enum FieldConflict {
         current_value: WorktreeLocationTemplate,
         current_version: FieldVersion,
     },
+    RemoteAccess {
+        server: ServerId,
+        current_value: crate::remote_access::RemoteAccessPolicy,
+        current_version: FieldVersion,
+    },
 }
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum OperationFailure {
@@ -455,6 +491,11 @@ pub enum OperationFailure {
     StorageUnavailable,
     Unsupported,
     Runtime(FailureClass),
+    InvalidValue,
+    WrongMembership,
+    StaleValidation,
+    AssessmentExpired,
+    BusyRetiring,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum Outcome {
@@ -487,6 +528,11 @@ pub enum Outcome {
     },
     Conflict(FieldConflict),
     Failed(OperationFailure),
+    CreatedWithControl(CreatedOrganization),
+    ControlGranted(GrantedControl),
+    Assessment(Box<CloseAssessment>),
+    Pairing(Box<crate::pairing::PairingOutcome>),
+    Git(crate::worktrees::types::GitMutationOutcome),
 }
 
 /// Only NeverAdmitted permits fresh admission. Pending and completed retry their
@@ -512,6 +558,16 @@ impl Outcome {
     pub fn validate_scope(&self, stream: OperationStreamId) -> Result<(), RequestError> {
         let server = stream.server();
         let valid = match self {
+            Self::CreatedWithControl(value) => value.validate_scope(stream).is_ok(),
+            Self::ControlGranted(value) => {
+                value.grant().pane().server() == server && value.grant().client() == stream.client()
+            }
+            Self::Assessment(value) => {
+                value.reference().operation.stream() == stream
+                    && value.summary().target().validate_scope(server).is_ok()
+            }
+            Self::Pairing(value) => value.validate_scope(stream).is_ok(),
+            Self::Git(value) => value.validate_scope(server).is_ok(),
             Self::Applied | Self::Failed(_) => true,
             Self::CreatedWorkspace {
                 workspace,
@@ -553,12 +609,367 @@ impl Outcome {
                     ..
                 } => pane.server() == server && current_value.server() == server,
                 FieldConflict::WorktreeLocation { server: owner, .. } => *owner == server,
+                FieldConflict::RemoteAccess {
+                    server: owner,
+                    current_value,
+                    ..
+                } => *owner == server && current_value.server() == server,
             },
         };
         if valid {
             Ok(())
         } else {
             Err(RequestError::WrongScope)
+        }
+    }
+}
+
+impl CloseTarget {
+    /// Structural scope only; reducer assessment checks current membership.
+    pub fn validate_scope(self, server: ServerId) -> Result<(), RequestError> {
+        if self.server() != server
+            || matches!(self, Self::WorktreeTabs { worktree, .. } if worktree.server() != server)
+        {
+            return Err(RequestError::WrongScope);
+        }
+        Ok(())
+    }
+
+    pub fn fits_high_water(self, marks: IdentityHighWater) -> bool {
+        match self {
+            Self::Pane(id) => id.local() <= marks.pane,
+            Self::Tab(id) => id.local() <= marks.tab,
+            Self::Workspace(id) => id.local() <= marks.workspace,
+            Self::WorktreeTabs {
+                workspace,
+                worktree,
+            } => workspace.local() <= marks.workspace && worktree.local() <= marks.worktree,
+        }
+    }
+}
+
+impl AssessmentTarget {
+    pub const fn server(self) -> ServerId {
+        match self {
+            Self::Close(target) => target.server(),
+            Self::EndAllSessions(server) => server,
+            Self::RemoveWorktree { scope, .. } => scope.server,
+            Self::KillWorkspace(workspace) => workspace.server(),
+        }
+    }
+
+    pub fn validate_scope(self, server: ServerId) -> Result<(), RequestError> {
+        if self.server() != server {
+            return Err(RequestError::WrongScope);
+        }
+        match self {
+            Self::Close(target) => target.validate_scope(server),
+            Self::RemoveWorktree { scope, worktree } => {
+                scope.validate()?;
+                if worktree.server() != server {
+                    return Err(RequestError::WrongScope);
+                }
+                Ok(())
+            }
+            Self::EndAllSessions(_) | Self::KillWorkspace(_) => Ok(()),
+        }
+    }
+
+    pub fn fits_high_water(self, marks: IdentityHighWater) -> bool {
+        match self {
+            Self::Close(target) => target.fits_high_water(marks),
+            Self::EndAllSessions(_) => true,
+            Self::KillWorkspace(id) => id.local() <= marks.workspace,
+            Self::RemoveWorktree { scope, worktree } => {
+                scope.repository.local() <= marks.repository && worktree.local() <= marks.worktree
+            }
+        }
+    }
+}
+
+/// Identities created by one ordinary organization operation. No live existence
+/// check applies when this record is replayed after later deletion.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum CreatedEntities {
+    Workspace {
+        workspace: WorkspaceId,
+        tab: TabId,
+        pane: PaneId,
+    },
+    Tab {
+        tab: TabId,
+        pane: PaneId,
+    },
+    Pane(PaneId),
+}
+
+impl CreatedEntities {
+    pub const fn pane(self) -> PaneId {
+        match self {
+            Self::Workspace { pane, .. } | Self::Tab { pane, .. } | Self::Pane(pane) => pane,
+        }
+    }
+
+    pub fn validate_scope(self, server: ServerId) -> Result<(), RequestError> {
+        let valid = match self {
+            Self::Workspace {
+                workspace,
+                tab,
+                pane,
+            } => workspace.server() == server && tab.server() == server && pane.server() == server,
+            Self::Tab { tab, pane } => tab.server() == server && pane.server() == server,
+            Self::Pane(pane) => pane.server() == server,
+        };
+        if !valid {
+            return Err(RequestError::WrongScope);
+        }
+        Ok(())
+    }
+
+    pub fn fits_high_water(self, marks: IdentityHighWater) -> bool {
+        match self {
+            Self::Workspace {
+                workspace,
+                tab,
+                pane,
+            } => {
+                workspace.local() <= marks.workspace
+                    && tab.local() <= marks.tab
+                    && pane.local() <= marks.pane
+            }
+            Self::Tab { tab, pane } => tab.local() <= marks.tab && pane.local() <= marks.pane,
+            Self::Pane(pane) => pane.local() <= marks.pane,
+        }
+    }
+}
+
+/// A bounded creation result with exact original control provenance.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(
+    try_from = "CreatedOrganizationParts",
+    into = "CreatedOrganizationParts"
+)]
+pub struct CreatedOrganization {
+    entities: CreatedEntities,
+    control: GrantedControl,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+struct CreatedOrganizationParts {
+    entities: CreatedEntities,
+    control: GrantedControl,
+}
+
+impl CreatedOrganization {
+    pub fn new(entities: CreatedEntities, control: GrantedControl) -> Result<Self, RequestError> {
+        entities.validate_scope(control.grant().pane().server())?;
+        if entities.pane() != control.grant().pane() {
+            return Err(RequestError::WrongScope);
+        }
+        Ok(Self { entities, control })
+    }
+
+    pub const fn entities(self) -> CreatedEntities {
+        self.entities
+    }
+    pub const fn control(self) -> GrantedControl {
+        self.control
+    }
+
+    pub fn validate_scope(self, stream: OperationStreamId) -> Result<(), RequestError> {
+        self.entities.validate_scope(stream.server())?;
+        if self.control.grant().client() != stream.client() {
+            return Err(RequestError::WrongScope);
+        }
+        Ok(())
+    }
+
+    pub fn fits_high_water(self, marks: IdentityHighWater) -> bool {
+        self.entities.fits_high_water(marks)
+            && self.control.grant().client().local() <= marks.client
+    }
+}
+
+impl TryFrom<CreatedOrganizationParts> for CreatedOrganization {
+    type Error = RequestError;
+    fn try_from(parts: CreatedOrganizationParts) -> Result<Self, Self::Error> {
+        Self::new(parts.entities, parts.control)
+    }
+}
+impl From<CreatedOrganization> for CreatedOrganizationParts {
+    fn from(value: CreatedOrganization) -> Self {
+        Self {
+            entities: value.entities,
+            control: value.control,
+        }
+    }
+}
+
+/// Bounded client-visible counts. Exact hierarchy, runtime facts, principal,
+/// deadline, and consumption remain in the reducer's assessment registry.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(try_from = "AssessmentSummaryParts", into = "AssessmentSummaryParts")]
+pub struct AssessmentSummary {
+    target: AssessmentTarget,
+    workspace_count: u32,
+    tab_count: u32,
+    pane_count: u32,
+    live_session_count: u32,
+    requires_confirmation: bool,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+struct AssessmentSummaryParts {
+    target: AssessmentTarget,
+    workspace_count: u32,
+    tab_count: u32,
+    pane_count: u32,
+    live_session_count: u32,
+    requires_confirmation: bool,
+}
+
+impl AssessmentSummary {
+    pub fn new(
+        target: AssessmentTarget,
+        workspace_count: u32,
+        tab_count: u32,
+        pane_count: u32,
+        live_session_count: u32,
+        requires_confirmation: bool,
+    ) -> Result<Self, RequestError> {
+        target.validate_scope(target.server())?;
+        if workspace_count > tab_count
+            || tab_count > pane_count
+            || live_session_count > pane_count
+            || matches!(
+                target,
+                AssessmentTarget::KillWorkspace(_) | AssessmentTarget::EndAllSessions(_)
+            ) && !requires_confirmation
+        {
+            return Err(RequestError::WrongScope);
+        }
+        Ok(Self {
+            target,
+            workspace_count,
+            tab_count,
+            pane_count,
+            live_session_count,
+            requires_confirmation,
+        })
+    }
+
+    pub const fn target(self) -> AssessmentTarget {
+        self.target
+    }
+    pub const fn workspace_count(self) -> u32 {
+        self.workspace_count
+    }
+    pub const fn tab_count(self) -> u32 {
+        self.tab_count
+    }
+    pub const fn pane_count(self) -> u32 {
+        self.pane_count
+    }
+    pub const fn live_session_count(self) -> u32 {
+        self.live_session_count
+    }
+    pub const fn requires_confirmation(self) -> bool {
+        self.requires_confirmation
+    }
+}
+
+impl TryFrom<AssessmentSummaryParts> for AssessmentSummary {
+    type Error = RequestError;
+    fn try_from(parts: AssessmentSummaryParts) -> Result<Self, Self::Error> {
+        Self::new(
+            parts.target,
+            parts.workspace_count,
+            parts.tab_count,
+            parts.pane_count,
+            parts.live_session_count,
+            parts.requires_confirmation,
+        )
+    }
+}
+impl From<AssessmentSummary> for AssessmentSummaryParts {
+    fn from(value: AssessmentSummary) -> Self {
+        Self {
+            target: value.target,
+            workspace_count: value.workspace_count,
+            tab_count: value.tab_count,
+            pane_count: value.pane_count,
+            live_session_count: value.live_session_count,
+            requires_confirmation: value.requires_confirmation,
+        }
+    }
+}
+
+/// Historical assessment handle plus bounded summary. AssessmentRef is the
+/// original assessment operation/digest, not authentication or native authority.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(try_from = "CloseAssessmentParts", into = "CloseAssessmentParts")]
+pub struct CloseAssessment {
+    reference: AssessmentRef,
+    epoch: ServerEpoch,
+    summary: AssessmentSummary,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+struct CloseAssessmentParts {
+    reference: AssessmentRef,
+    epoch: ServerEpoch,
+    summary: AssessmentSummary,
+}
+
+impl CloseAssessment {
+    pub fn new(
+        reference: AssessmentRef,
+        epoch: ServerEpoch,
+        summary: AssessmentSummary,
+    ) -> Result<Self, RequestError> {
+        if epoch.get() == 0 || reference.operation.stream().server() != summary.target().server() {
+            return Err(RequestError::WrongScope);
+        }
+        Ok(Self {
+            reference,
+            epoch,
+            summary,
+        })
+    }
+    pub const fn reference(self) -> AssessmentRef {
+        self.reference
+    }
+    pub const fn epoch(self) -> ServerEpoch {
+        self.epoch
+    }
+    pub const fn summary(self) -> AssessmentSummary {
+        self.summary
+    }
+}
+
+impl TryFrom<CloseAssessmentParts> for CloseAssessment {
+    type Error = RequestError;
+    fn try_from(parts: CloseAssessmentParts) -> Result<Self, Self::Error> {
+        Self::new(parts.reference, parts.epoch, parts.summary)
+    }
+}
+impl From<CloseAssessment> for CloseAssessmentParts {
+    fn from(value: CloseAssessment) -> Self {
+        Self {
+            reference: value.reference,
+            epoch: value.epoch,
+            summary: value.summary,
+        }
+    }
+}
+
+impl Outcome {
+    /// Original epoch and grant only. Legacy results do not acquire guessed provenance.
+    pub fn grant_provenance(&self) -> Option<GrantedControl> {
+        match self {
+            Self::CreatedWithControl(value) => Some(value.control()),
+            Self::ControlGranted(value) => Some(*value),
+            _ => None,
         }
     }
 }

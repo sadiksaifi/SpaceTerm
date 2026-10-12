@@ -12,6 +12,31 @@ struct SpaceTermPatch {
     compiled_source: &'static [u8],
 }
 
+// The content owner supplies the patch and matching generated ABI before this
+// declaration joins the active patch/export checks. H0 must not require exports
+// absent from the pinned Wave 1 engine or install an empty replacement patch.
+#[expect(
+    dead_code,
+    reason = "terminal-runtime Job B activates this frozen ABI registration with its real patch"
+)]
+const SEMANTIC_CONTENT_PATCH_DECLARATION: (&str, &str, &[&str]) = (
+    "patches/spaceterm-semantic-content.patch",
+    "content.h",
+    &[
+        "ghostty_content_state_new",
+        "ghostty_content_state_free",
+        "ghostty_content_state_capture",
+        "ghostty_content_read_page",
+        "ghostty_content_read_topology",
+        "ghostty_content_copy_begin",
+        "ghostty_content_copy_step",
+        "ghostty_content_copy_free",
+        "ghostty_content_find_begin",
+        "ghostty_content_find_step",
+        "ghostty_content_find_free",
+    ],
+);
+
 const SPACETERM_PATCHES: &[SpaceTermPatch] = &[
     SpaceTermPatch {
         relative_path: "patches/spaceterm-kitty-graphics.patch",

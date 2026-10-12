@@ -366,3 +366,11 @@ mod tests {
         assert_eq!(actual.as_slice(), expected);
     }
 }
+
+pub(crate) mod server_client_runtime;
+
+pub(crate) mod server_desktop_contracts;
+
+pub(crate) mod server_pane_session;
+
+pub(crate) mod server_git;

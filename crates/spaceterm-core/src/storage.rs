@@ -8,8 +8,14 @@ use thiserror::Error;
 
 use crate::authority::*;
 use crate::identity::*;
+use crate::operation_ledger_contracts::{LedgerRecovery, LedgerWrite, OperationReductionBasis};
 use crate::operations::*;
 use crate::organization::*;
+use crate::pairing::{PairingRecovery, PairingWrite};
+use crate::worktrees::intent::{
+    GitAllocationMutation, GitAllocationReservation, GitIntentMutation, GitRepositoryMutation,
+    GitWriteIntent, RepositoryLocator,
+};
 
 /// Typed, content-free storage classifications. Locked or unavailable storage is
 /// never treated as missing organization or permission to replace an identity.
@@ -31,6 +37,12 @@ pub enum StoreFailure {
     RevisionConflict,
     #[error("durable counters are exhausted")]
     Exhausted,
+    #[error("proposed storage transaction is invalid")]
+    InvalidTransaction,
+    #[error("storage identity comparison failed")]
+    IdentityMismatch,
+    #[error("storage recovery is required")]
+    RecoveryRequired,
 }
 
 /// A host may implement this through synchronous SQLite on a blocking worker.
@@ -92,6 +104,14 @@ pub enum OperationWrite {
         stream: OperationStreamId,
         through: OperationSequence,
     },
+    Ledger(Box<LedgerWrite>),
+    Pairing(Box<PairingWrite>),
+    GitRepository(GitRepositoryMutation),
+    GitIntent(GitIntentMutation),
+    GitAllocation(GitAllocationMutation),
+    /// Same-operation reducer projection, including a no-change conflict.
+    ReductionBasis(OperationReductionBasis),
+    NativeRetirement(crate::retirement::NativeRetirementMutation),
 }
 
 /// A transaction proposal, not a commit receipt. Expected values must be compared
@@ -114,6 +134,34 @@ pub struct TransactionParts {
 pub struct DurableTransaction(TransactionParts);
 impl DurableTransaction {
     pub fn new(parts: TransactionParts) -> Result<Self, StoreFailure> {
+        let value = Self::check_shape(parts)?;
+        if value.requires_domain_validation() {
+            return Err(StoreFailure::RecoveryRequired);
+        }
+        Ok(value)
+    }
+    /// Constructs a Wave 2 proposal only after complete borrowed validation.
+    /// The physical store still compares the proposal against committed state.
+    pub fn new_with_validation(
+        parts: TransactionParts,
+        validator: &dyn DurabilityValidator,
+    ) -> Result<Self, StoreFailure> {
+        let value = Self::check_shape(parts)?;
+        validator.validate_transaction_projection(value.parts())?;
+        Ok(value)
+    }
+    fn requires_domain_validation(&self) -> bool {
+        self.0.operation_writes.iter().any(|write| match write {
+            OperationWrite::Put(record) => legacy_record_requires_domain_validation(record),
+            OperationWrite::SetStream(_) | OperationWrite::RetireAcknowledgedPrefix { .. } => false,
+            _ => true,
+        }) || self
+            .0
+            .organization_writes
+            .iter()
+            .any(|write| matches!(write, OrganizationWrite::Retained(_)))
+    }
+    fn check_shape(parts: TransactionParts) -> Result<Self, StoreFailure> {
         let next_store = parts
             .expected_store_revision
             .checked_successor()
@@ -132,6 +180,21 @@ impl DurableTransaction {
                 .dominates(parts.expected_high_water)
             || (parts.resulting_epoch != parts.expected_epoch
                 && parts.expected_epoch.checked_successor() != Some(parts.resulting_epoch))
+        {
+            return Err(StoreFailure::InvalidDurableState);
+        }
+        if parts
+            .operation_writes
+            .iter()
+            .any(|write| matches!(write, OperationWrite::Ledger(_)))
+            && parts.operation_writes.iter().any(|write| {
+                matches!(
+                    write,
+                    OperationWrite::Put(_)
+                        | OperationWrite::SetStream(_)
+                        | OperationWrite::RetireAcknowledgedPrefix { .. }
+                )
+            })
         {
             return Err(StoreFailure::InvalidDurableState);
         }
@@ -164,6 +227,18 @@ impl DurableTransaction {
                     return Err(StoreFailure::InvalidDurableState);
                 }
                 OperationWrite::RetireAcknowledgedPrefix { .. } => {}
+                // Owner validators check these complete typed projections.
+                OperationWrite::Ledger(_)
+                | OperationWrite::Pairing(_)
+                | OperationWrite::GitRepository(_)
+                | OperationWrite::GitIntent(_)
+                | OperationWrite::GitAllocation(_)
+                | OperationWrite::ReductionBasis(_) => {}
+                OperationWrite::NativeRetirement(write) => {
+                    if write.request().server() != parts.server || write.validate().is_err() {
+                        return Err(StoreFailure::InvalidDurableState);
+                    }
+                }
             }
         }
         Ok(Self(parts))
@@ -188,14 +263,88 @@ pub struct RecoveredState {
     pub high_water: IdentityHighWater,
     pub streams: Vec<DurableStreamState>,
     pub operations: Vec<DurableOperationRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ledger: Option<LedgerRecovery>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pairing: Option<PairingRecovery>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub git_repositories: Vec<RepositoryLocator>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub git_intents: Vec<GitWriteIntent>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub git_allocations: Vec<GitAllocationReservation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub native_retirements: Vec<crate::retirement::NativeRetirementDescriptor>,
 }
 impl RecoveredState {
+    /// Legacy validation never silently accepts a new-format durable bundle.
     pub fn validate(&self) -> Result<(), StoreFailure> {
+        self.validate_shape()?;
+        if self.requires_domain_validation() {
+            return Err(StoreFailure::RecoveryRequired);
+        }
+        Ok(())
+    }
+    /// Org-store calls this boundary before exposing new-format recovery.
+    pub fn validate_with(&self, validator: &dyn DurabilityValidator) -> Result<(), StoreFailure> {
+        self.validate_shape()?;
+        validator.validate_recovery(self)
+    }
+    pub fn ledger_recovery(&self) -> Option<&LedgerRecovery> {
+        self.ledger.as_ref()
+    }
+    pub fn pairing_recovery(&self) -> Option<&PairingRecovery> {
+        self.pairing.as_ref()
+    }
+    pub fn git_repositories(&self) -> &[RepositoryLocator] {
+        &self.git_repositories
+    }
+    pub fn git_intents(&self) -> &[GitWriteIntent] {
+        &self.git_intents
+    }
+    pub fn git_allocations(&self) -> &[GitAllocationReservation] {
+        &self.git_allocations
+    }
+    fn requires_domain_validation(&self) -> bool {
+        self.operations
+            .iter()
+            .any(legacy_record_requires_domain_validation)
+            || self.ledger.is_some()
+            || self.pairing.is_some()
+            || self.organization.retained.is_some()
+            || !self.git_repositories.is_empty()
+            || !self.git_intents.is_empty()
+            || !self.git_allocations.is_empty()
+            || !self.native_retirements.is_empty()
+    }
+    fn validate_shape(&self) -> Result<(), StoreFailure> {
         self.organization
             .validate()
             .map_err(|_| StoreFailure::InvalidDurableState)?;
         let server = self.organization.server;
         let marks = self.high_water;
+        let mut native_requests = std::collections::BTreeSet::new();
+        let mut native_batches = std::collections::BTreeSet::new();
+        if self.native_retirements.len() > crate::retirement::MAX_NATIVE_RETIREMENTS
+            || self.native_retirements.iter().any(|value| {
+                value.request().server() != server
+                    || value.batch().epoch() > self.last_epoch
+                    || value.acceptance_revision() > self.organization.revision
+                    || !native_requests.insert(value.request().id_bytes())
+                    || !native_batches.insert(value.batch())
+                    || value.panes().iter().any(|pane| {
+                        pane.pane().local() > marks.pane
+                            || pane.tab().local() > marks.tab
+                            || pane.workspace().local() > marks.workspace
+                            || pane
+                                .worktree()
+                                .is_some_and(|worktree| worktree.local() > marks.worktree)
+                    })
+            })
+        {
+            return Err(StoreFailure::InvalidDurableState);
+        }
+
         let too_high =
             self.organization.workspaces.iter().any(|v| {
                 v.id.local() > marks.workspace || v.creation_ordinal.get() > marks.creation_ordinal
@@ -213,8 +362,22 @@ impl RecoveredState {
                     .repositories
                     .iter()
                     .any(|v| v.id.local() > marks.repository);
-        if too_high {
+        if too_high
+            || self
+                .organization
+                .retained
+                .as_ref()
+                .is_some_and(|v| !v.fits_high_water(marks))
+        {
             return Err(StoreFailure::InvalidDurableState);
+        }
+        if self.ledger.is_some() && (!self.streams.is_empty() || !self.operations.is_empty()) {
+            return Err(StoreFailure::InvalidDurableState);
+        }
+        if let Some(pairing) = &self.pairing {
+            pairing
+                .validate_for(server, self.store_revision, marks)
+                .map_err(|_| StoreFailure::InvalidDurableState)?;
         }
         let mut streams = BTreeMap::new();
         let mut stream_keys = BTreeSet::new();
@@ -287,7 +450,10 @@ fn validate_operation(
             result,
             publication_revision,
         } => {
-            if *publication_revision > revision || !outcome_fits_marks(result, marks) {
+            if matches!(result, Outcome::Git(value) if value.revision().is_some_and(|owned| owned != *publication_revision))
+                || *publication_revision > revision
+                || !outcome_fits_marks(result, marks)
+            {
                 return Err(StoreFailure::InvalidDurableState);
             }
             result
@@ -333,11 +499,26 @@ fn write_fits_marks(write: &OrganizationWrite, marks: IdentityHighWater) -> bool
         }
         OrganizationWrite::DeleteWorktree(v) => v.local() <= marks.worktree,
         OrganizationWrite::SetServerSettings(_) => true,
+        OrganizationWrite::Retained(value) => value.fits_high_water(marks),
     }
 }
 
 fn outcome_fits_marks(outcome: &Outcome, marks: IdentityHighWater) -> bool {
     match outcome {
+        Outcome::CreatedWithControl(value) => value.fits_high_water(marks),
+        Outcome::ControlGranted(value) => {
+            value.grant().pane().local() <= marks.pane
+                && value.grant().client().local() <= marks.client
+        }
+        Outcome::Assessment(value) => {
+            stream_fits_marks(value.reference().operation.stream(), marks)
+                && value.summary().target().fits_high_water(marks)
+        }
+        Outcome::Pairing(value) => value.fits_marks(marks),
+        Outcome::Git(value) => value
+            .worktree()
+            .is_none_or(|id| id.local() <= marks.worktree),
+        Outcome::Conflict(FieldConflict::RemoteAccess { .. }) => true,
         Outcome::CreatedWorkspace {
             workspace,
             tab,
@@ -370,5 +551,54 @@ fn outcome_fits_marks(outcome: &Outcome, marks: IdentityHighWater) -> bool {
         | Outcome::Failed(_)
         | Outcome::ControlUnavailable(ControlRecord::Unclaimed)
         | Outcome::Conflict(FieldConflict::WorktreeLocation { .. }) => true,
+    }
+}
+
+/// Complete pure validation supplied by the domain owners. It borrows the one
+/// transaction/recovery bundle, decodes compact outcomes with the ledger codec,
+/// verifies exact signed receipt bytes, and checks cross-projection agreement.
+/// No default implementation can authorize Wave 2 durable state.
+pub trait DurabilityValidator: Send + Sync {
+    fn validate_transaction_projection(&self, parts: &TransactionParts)
+    -> Result<(), StoreFailure>;
+    fn validate_recovery(&self, recovered: &RecoveredState) -> Result<(), StoreFailure>;
+}
+
+// Legacy retained variants keep their old validation. New domain payloads cannot
+// acquire a default-validation bypass by entering the old operation slot.
+fn legacy_record_requires_domain_validation(record: &DurableOperationRecord) -> bool {
+    match &record.state {
+        DurableOperationState::Pending { command } => matches!(
+            command,
+            Command::CompleteMeasuredStartup(_)
+                | Command::AssessKillWorkspace { .. }
+                | Command::SetRemoteAccess { .. }
+                | Command::Pairing(_)
+                | Command::Worktree(_)
+                | Command::AssessClose {
+                    target: CloseTarget::WorktreeTabs { .. }
+                }
+                | Command::CloseConfirmed {
+                    target: CloseTarget::WorktreeTabs { .. },
+                    ..
+                }
+                | Command::CreateWorkspace {
+                    name: NameDraft::Blank,
+                    ..
+                }
+                | Command::RenameWorkspace {
+                    draft: NameDraft::Blank,
+                    ..
+                }
+        ),
+        DurableOperationState::Completed { result, .. } => matches!(
+            result,
+            Outcome::CreatedWithControl(_)
+                | Outcome::ControlGranted(_)
+                | Outcome::Assessment(_)
+                | Outcome::Pairing(_)
+                | Outcome::Git(_)
+                | Outcome::Conflict(FieldConflict::RemoteAccess { .. })
+        ),
     }
 }
