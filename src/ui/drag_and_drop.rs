@@ -256,13 +256,12 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
                 (item.origin.along(axis), item.size.along(axis))
             })
             .collect::<Vec<_>>();
-        // The selection draws inside its item, which a drop may still be settling.
+        // The selection draws inside its item's face, which a drop may still be settling.
         let selection = self.selected.and_then(|id| {
             let position = ids.iter().position(|candidate| *candidate == id)?;
             let motion = self.motion(id, cx);
-            Some(
-                slots[position].0 + motion.offset.along(axis) + motion.selection_offset.along(axis),
-            )
+            let face = self.face(id, painted[position]).origin.along(axis);
+            Some(face + motion.offset.along(axis) + motion.selection_offset.along(axis))
         });
         let last = painted.last()?;
         let viewport = items.bounds();
@@ -298,12 +297,21 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
     }
 
     /// The bounds of the item `id`'s face in `slot`, its slot in the last frame. A new item's face
-    /// shows whole while its slot grows.
+    /// shows whole while its slot grows, from the slot's far end when it grows from there.
     fn face(&self, id: Id, slot: Bounds<Pixels>) -> Bounds<Pixels> {
         let item = self.trim(id, slot);
+        let axis = self.axis;
         match self.entering.get(&id).and_then(|(_, natural)| *natural) {
             Some(natural) => {
-                Bounds::new(item.origin, item.size.apply_along(self.axis, |_| natural))
+                let lag = if self.growing_from_end.contains(&id) {
+                    item.size.along(axis) - natural
+                } else {
+                    px(0.0)
+                };
+                Bounds::new(
+                    item.origin.apply_along(axis, |start| start + lag),
+                    item.size.apply_along(axis, |_| natural),
+                )
             }
             None => item,
         }
@@ -465,7 +473,11 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
                     .as_ref()
                     .is_some_and(|ids| !ids.contains(&previous))
             });
-            let duration = if removed {
+            // A selection that reaches an item growing from the strip's end moves with its growth,
+            // which the strip scrolls along, so it holds still at that end.
+            let growing_from_end =
+                selected.is_some_and(|selected| self.growing_from_end.contains(&selected));
+            let duration = if removed || growing_from_end {
                 PRESENCE_DURATION
             } else {
                 SELECTION_DURATION
@@ -606,12 +618,13 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
         self.visible_end = visible_end - self.scrolled;
     }
 
-    /// Whether the new item at `position` among the strip's `ids` reaches past the visible end of
-    /// an overflowing strip once grown, judged from the last frame's layout and the size of a
-    /// neighbor. A strip that fits its items ends at its last item, and grows with a new one.
-    fn reaches_past_visible_end(&self, ids: &[Id], position: usize) -> bool {
+    /// The size of the new item at `position` among the strip's `ids`, estimated from a neighbor,
+    /// when it reaches past the visible end of an overflowing strip once grown, judged from the
+    /// last frame's layout. A strip that fits its items ends at its last item, and grows with a
+    /// new one.
+    fn reaches_past_visible_end(&self, ids: &[Id], position: usize) -> Option<Pixels> {
         if !self.overflowing {
-            return false;
+            return None;
         }
         let laid_out = |candidate: &Id| self.laid_out.get(candidate).copied();
         let next = ids[position + 1..].iter().find_map(laid_out);
@@ -622,7 +635,8 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
         let size = previous.or(next).map(|(_, size)| size);
         start
             .zip(size)
-            .is_some_and(|(start, size)| start + size > self.visible_end + px(0.5))
+            .filter(|(start, size)| *start + *size > self.visible_end + px(0.5))
+            .map(|(_, size)| size)
     }
 
     /// Starts new items growing into the strip and closes the gaps removed items leave, when the
@@ -641,11 +655,14 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
             if known.contains(id) {
                 continue;
             }
-            self.entering
-                .insert(*id, (Ease::new(PRESENCE_DURATION, now, motion), None));
-            if self.reaches_past_visible_end(ids, position) {
+            // An item that grows from the strip's end starts its face at the estimated size, so
+            // the selection inside it lines up before it is measured.
+            let estimate = self.reaches_past_visible_end(ids, position);
+            if estimate.is_some() {
                 self.growing_from_end.insert(*id);
             }
+            self.entering
+                .insert(*id, (Ease::new(PRESENCE_DURATION, now, motion), estimate));
         }
         let bounds = (0..known.len())
             .map(|position| items.bounds_for_item(position))
@@ -786,6 +803,13 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
             .entering
             .get(&id)
             .filter(|(ease, _)| !ease.finished(now));
+        let grows_from_end = entering.is_some() && self.growing_from_end.contains(&id);
+        // A face that grows from its slot's far end starts short of the slot's start by the part
+        // of it the slot still holds back.
+        let lag = entering
+            .filter(|_| grows_from_end)
+            .and_then(|(ease, natural)| natural.map(|natural| natural * (ease.at(now) - 1.0)))
+            .unwrap_or(px(0.0));
         ItemMotion {
             offset: slide.map_or_else(Point::default, |slide| slide.at(now)),
             lifted: self.dragged() == Some(id),
@@ -797,8 +821,9 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
                 .as_ref()
                 .filter(|flight| flight.id == id && self.lift.is_none())
                 .map_or_else(Point::default, |flight| {
-                    let offset =
-                        flight.from * (1.0 - flight.ease.at(now)) - self.displacement(id, now);
+                    let offset = flight.from * (1.0 - flight.ease.at(now))
+                        - self.displacement(id, now)
+                        - lag;
                     match self.axis {
                         Axis::Horizontal => point(offset, px(0.0)),
                         Axis::Vertical => point(px(0.0), offset),
@@ -806,7 +831,7 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
                 }),
             extent: entering
                 .map(|(ease, natural)| natural.map_or(px(0.0), |natural| natural * ease.at(now))),
-            grows_from_end: entering.is_some() && self.growing_from_end.contains(&id),
+            grows_from_end,
             leading_gap: self
                 .leading_gaps
                 .get(&id)
