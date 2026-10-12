@@ -13,8 +13,14 @@ from collections import deque
 from spaceterm_tasks import ROOT, TaskError, main
 
 # Extend this list when another portable composition crate becomes mandatory.
-REQUIRED_CRATES = ("spaceterm-core", "spaceterm-client", "spaceterm-server", "spaceterm-host")
-OPTIONAL_CRATES = ("spaceterm-protocol", "spaceterm-terminal")
+REQUIRED_CRATES = (
+    "spaceterm-core",
+    "spaceterm-client",
+    "spaceterm-server",
+    "spaceterm-host",
+    "spaceterm-protocol",
+    "spaceterm-terminal",
+)
 
 # Normalize underscores so package spelling and Cargo aliases cannot hide a family.
 FORBIDDEN_FAMILIES = (
@@ -138,7 +144,7 @@ def check_metadata(metadata):
         roots = {}
         for member in members:
             name = names[member]
-            if name in REQUIRED_CRATES + OPTIONAL_CRATES:
+            if name in REQUIRED_CRATES:
                 if name in roots:
                     raise ValueError
                 roots[name] = member
@@ -161,7 +167,7 @@ def check_metadata(metadata):
     except (KeyError, TypeError, ValueError, AttributeError):
         raise TaskError("Cargo returned an incomplete dependency graph") from None
 
-    checked = [name for name in REQUIRED_CRATES + OPTIONAL_CRATES if name in roots]
+    checked = list(REQUIRED_CRATES)
     for name in checked:
         root = roots[name]
         parents = {root: None}

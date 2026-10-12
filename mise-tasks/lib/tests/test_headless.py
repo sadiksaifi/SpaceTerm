@@ -7,7 +7,14 @@ from unittest.mock import patch
 from spaceterm_tasks import TaskError
 from spaceterm_tasks.headless import check_metadata, check_workspace, forbidden_package
 
-MANDATORY = ("spaceterm-core", "spaceterm-client", "spaceterm-server", "spaceterm-host")
+MANDATORY = (
+    "spaceterm-core",
+    "spaceterm-client",
+    "spaceterm-server",
+    "spaceterm-host",
+    "spaceterm-protocol",
+    "spaceterm-terminal",
+)
 
 
 def metadata(edges=None, *, roots=MANDATORY):
@@ -53,14 +60,14 @@ class HeadlessTests(unittest.TestCase):
         self.assertEqual(check_metadata(graph), MANDATORY)
 
     def test_missing_required_root_fails_closed(self):
-        with self.assertRaisesRegex(TaskError, "crates missing: spaceterm-host"):
+        with self.assertRaisesRegex(TaskError, "crates missing: spaceterm-terminal"):
             check_metadata(metadata(roots=MANDATORY[:-1]))
 
-    def test_optional_crates_are_checked_when_present(self):
-        roots = (*MANDATORY, "spaceterm-protocol", "spaceterm-terminal")
-        self.assertEqual(check_metadata(metadata(roots=roots)), roots)
+    def test_protocol_and_terminal_roots_are_checked(self):
         with self.assertRaisesRegex(TaskError, "spaceterm-terminal -> font-kit"):
-            check_metadata(metadata({"spaceterm-terminal": ("font-kit",)}, roots=roots))
+            check_metadata(metadata({"spaceterm-terminal": ("font-kit",)}))
+        with self.assertRaisesRegex(TaskError, "spaceterm-protocol -> gpui"):
+            check_metadata(metadata({"spaceterm-protocol": ("gpui",)}))
 
     def test_cycle_in_a_portable_graph_terminates(self):
         graph = metadata({"spaceterm-core": ("portable",), "portable": ("spaceterm-core",)})
