@@ -1,7 +1,9 @@
 #![cfg(any(target_os = "macos", target_os = "linux"))]
 
+use std::ffi::OsString;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::path::Path;
 use std::time::Duration;
 
 use spaceterm_host::ipc::{IpcListener, IpcTransport, PrivateIpcDirectory};
@@ -26,6 +28,58 @@ fn directory() -> (tempfile::TempDir, PrivateIpcDirectory) {
 
 fn admission() -> AdmissionLimits {
     AdmissionLimits::new(2, Duration::from_secs(1)).unwrap()
+}
+
+fn directory_entries(path: &Path) -> Vec<(OsString, u64, u64, u32)> {
+    let mut entries = fs::read_dir(path)
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            let metadata = fs::symlink_metadata(entry.path()).unwrap();
+            (
+                entry.file_name(),
+                metadata.dev(),
+                metadata.ino(),
+                metadata.mode(),
+            )
+        })
+        .collect::<Vec<_>>();
+    entries.sort();
+    entries
+}
+
+#[tokio::test]
+async fn ipc_connect_reports_a_missing_endpoint_as_unavailable_without_mutating_entries() {
+    let (temporary, directory) = directory();
+    let endpoint = directory.endpoint("s").unwrap();
+    fs::write(temporary.path().join("retained"), b"untouched").unwrap();
+    let before = directory_entries(temporary.path());
+
+    let error = IpcTransport::connect(&endpoint, MessageLimit::envelope())
+        .await
+        .err();
+
+    assert_eq!(directory_entries(temporary.path()), before);
+    assert_eq!(error, Some(TransportError::Unavailable));
+}
+
+#[tokio::test]
+async fn ipc_connect_reports_a_refused_endpoint_as_unavailable_without_mutating_entries() {
+    let (temporary, directory) = directory();
+    let endpoint = directory.endpoint("s").unwrap();
+    fs::write(temporary.path().join("retained"), b"untouched").unwrap();
+    let socket = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None).unwrap();
+    socket
+        .bind(&socket2::SockAddr::unix(endpoint.path()).unwrap())
+        .unwrap();
+    let before = directory_entries(temporary.path());
+
+    let error = IpcTransport::connect(&endpoint, MessageLimit::envelope())
+        .await
+        .err();
+
+    assert_eq!(directory_entries(temporary.path()), before);
+    assert_eq!(error, Some(TransportError::Unavailable));
 }
 
 #[path = "support/cleanup_race.rs"]
@@ -247,6 +301,56 @@ async fn dropping_an_unauthenticated_ipc_connection_disconnects_it_and_releases_
         .await
         .unwrap()
         .unwrap();
+}
+
+#[test]
+fn dropping_pending_ipc_holds_admission_until_the_cancelled_timer_is_polled() {
+    use futures_util::FutureExt;
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (_temporary, directory) = directory();
+    let endpoint = directory.endpoint("s").unwrap();
+    let limit = MessageLimit::new(16).unwrap();
+    let listener = runtime.block_on(async {
+        IpcListener::bind(
+            endpoint.clone(),
+            limit,
+            AdmissionLimits::new(1, Duration::from_secs(1)).unwrap(),
+        )
+        .unwrap()
+    });
+    let client = runtime
+        .block_on(IpcTransport::connect(&endpoint, limit))
+        .unwrap();
+    let pending = runtime.block_on(listener.accept()).unwrap();
+    let _other_client = std::os::unix::net::UnixStream::connect(endpoint.path()).unwrap();
+    drop(pending);
+
+    // This root future returns without letting the runtime poll the cancelled timer.
+    assert!(
+        runtime
+            .block_on(async { listener.accept().now_or_never() })
+            .is_none(),
+        "admission must wait for the abandoned transport to be destroyed"
+    );
+    runtime.block_on(async {
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), client.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            None
+        );
+        tokio::time::timeout(Duration::from_secs(1), listener.accept())
+            .await
+            .unwrap()
+            .unwrap()
+            .finish_authentication()
+            .unwrap();
+    });
 }
 
 #[tokio::test]

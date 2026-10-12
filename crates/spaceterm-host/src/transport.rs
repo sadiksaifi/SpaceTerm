@@ -272,47 +272,53 @@ impl AdmissionLease {
     }
 }
 
+struct PendingConnectionState<T> {
+    // Field order destroys an abandoned transport before returning its admission slot.
+    transport: Arc<T>,
+    lease: AdmissionLease,
+}
+
 /// An eligible, not yet application-authenticated connection with a live admission deadline.
 ///
 /// The timer closes idle connections and releases their admission slot even if no caller
-/// polls them. Dropping a pending connection also releases its slot and cancels its timer.
+/// polls them. Drop cancels the timer and holds admission until the transport is destroyed.
 pub struct PendingConnection<T: MessageTransport + 'static> {
-    transport: Arc<T>,
-    lease: Arc<AdmissionLease>,
+    state: Arc<PendingConnectionState<T>>,
     deadline: Instant,
     timer: tokio::task::JoinHandle<()>,
 }
 
 impl<T: MessageTransport + 'static> PendingConnection<T> {
     pub(crate) fn new(transport: T, permit: OwnedSemaphorePermit, deadline: Instant) -> Self {
-        let transport = Arc::new(transport);
-        let lease = Arc::new(AdmissionLease {
-            status: AtomicU8::new(0),
-            permit: Mutex::new(Some(permit)),
+        let state = Arc::new(PendingConnectionState {
+            transport: Arc::new(transport),
+            lease: AdmissionLease {
+                status: AtomicU8::new(0),
+                permit: Mutex::new(Some(permit)),
+            },
         });
-        let timer_transport = Arc::clone(&transport);
-        let timer_lease = Arc::clone(&lease);
+        let timer_state = Arc::clone(&state);
         let timer = tokio::spawn(async move {
             tokio::time::sleep_until(deadline).await;
-            if timer_lease
+            if timer_state
+                .lease
                 .status
                 .compare_exchange(0, 2, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
-                let _ = timer_transport.close().await;
-                timer_lease.release();
+                let _ = timer_state.transport.close().await;
+                timer_state.lease.release();
             }
         });
         Self {
-            transport,
-            lease,
+            state,
             deadline,
             timer,
         }
     }
 
     fn check_deadline(&self) -> Result<(), TransportError> {
-        if Instant::now() >= self.deadline || self.lease.status.load(Ordering::Acquire) == 2 {
+        if Instant::now() >= self.deadline || self.state.lease.status.load(Ordering::Acquire) == 2 {
             Err(TransportError::HandshakeExpired)
         } else {
             Ok(())
@@ -325,31 +331,31 @@ impl<T: MessageTransport + 'static> PendingConnection<T> {
     /// authentication is a composition error; local account eligibility alone is insufficient.
     pub fn finish_authentication(self) -> Result<Arc<T>, TransportError> {
         self.check_deadline()?;
-        self.lease
+        self.state
+            .lease
             .status
             .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| TransportError::HandshakeExpired)?;
-        self.lease.release();
-        Ok(Arc::clone(&self.transport))
+        self.state.lease.release();
+        Ok(Arc::clone(&self.state.transport))
     }
 }
 
 impl<T: MessageTransport + 'static> Drop for PendingConnection<T> {
     fn drop(&mut self) {
         self.timer.abort();
-        self.lease.release();
     }
 }
 
 impl<T: MessageTransport + 'static> MessageTransport for PendingConnection<T> {
     fn peer_facts(&self) -> PeerFacts {
-        self.transport.peer_facts()
+        self.state.transport.peer_facts()
     }
 
     fn send<'a>(&'a self, message: &'a [u8]) -> TransportFuture<'a, ()> {
         Box::pin(async move {
             self.check_deadline()?;
-            tokio::time::timeout_at(self.deadline, self.transport.send(message))
+            tokio::time::timeout_at(self.deadline, self.state.transport.send(message))
                 .await
                 .map_err(|_| TransportError::HandshakeExpired)?
         })
@@ -358,7 +364,7 @@ impl<T: MessageTransport + 'static> MessageTransport for PendingConnection<T> {
     fn recv(&self) -> TransportFuture<'_, Option<Vec<u8>>> {
         Box::pin(async move {
             self.check_deadline()?;
-            tokio::time::timeout_at(self.deadline, self.transport.recv())
+            tokio::time::timeout_at(self.deadline, self.state.transport.recv())
                 .await
                 .map_err(|_| TransportError::HandshakeExpired)?
         })
@@ -366,9 +372,9 @@ impl<T: MessageTransport + 'static> MessageTransport for PendingConnection<T> {
 
     fn close(&self) -> TransportFuture<'_, ()> {
         Box::pin(async move {
-            self.lease.status.store(2, Ordering::Release);
-            let result = self.transport.close().await;
-            self.lease.release();
+            self.state.lease.status.store(2, Ordering::Release);
+            let result = self.state.transport.close().await;
+            self.state.lease.release();
             result
         })
     }

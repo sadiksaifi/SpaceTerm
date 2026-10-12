@@ -10,7 +10,9 @@ use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::FileTypeExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex as NativeMutex, OnceLock};
 
@@ -610,12 +612,9 @@ impl IpcTransport {
         endpoint: &IpcEndpoint,
         limit: MessageLimit,
     ) -> Result<Self, TransportError> {
-        endpoint.verify()?;
-        let metadata =
-            fs::symlink_metadata(endpoint.path()).map_err(|_| TransportError::UnsafeEndpoint)?;
-        if !metadata.file_type().is_socket() {
-            return Err(TransportError::UnsafeEndpoint);
-        }
+        endpoint
+            .socket_identity()?
+            .ok_or(TransportError::Unavailable)?;
         let stream = UnixStream::connect(endpoint.path())
             .await
             .map_err(|_| TransportError::Unavailable)?;
