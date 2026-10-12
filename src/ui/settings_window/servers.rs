@@ -11,12 +11,14 @@ pub(crate) mod model;
 #[path = "servers_tests.rs"]
 mod tests;
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, Entity, FocusHandle, KeyDownEvent, SharedString, Subscription,
-    Window, accesskit, div, px,
+    AnyElement, App, Bounds, Context, Entity, FocusHandle, KeyDownEvent, Pixels, SharedString,
+    Subscription, Window, accesskit, div, px,
 };
 use spaceterm_ui::{
     Alert, AlertIntent, Button, ButtonSize, ButtonVariant, ComboBoxItem, FieldState, Icon,
@@ -31,12 +33,18 @@ use crate::ui::appearance::{ChromeAppearance, gpui_color};
 use crate::ui::chrome_geometry::{HAIRLINE, RadiusRole};
 use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
-use crate::ui::sidebar_window::form::{CaptionTone, action_button, row_horizontal_inset};
+use crate::ui::sidebar_window::form::{CaptionTone, action_button, badge, row_horizontal_inset};
+use crate::worktrees::path_template::validate;
 use copy::{Confirmation, StatusTone};
 use model::{
-    BindScope, IncompatibleSide, InstalledServers, PendingUnpair, ServerKey, ServerRequest,
-    ServerStatus, ServerSummary, Servers, ServersSnapshot, SettingEditState,
+    BindScope, IncompatibleSide, InstalledServers, PendingUnpair, RemoteAccess, ServerKey,
+    ServerPermissionKind, ServerRequest, ServerStatus, ServerSummary, ServerTextSetting, Servers,
+    ServersSnapshot, SettingEditState,
 };
+
+/// The outline level of the selected server's name. The groups that present it sit one level
+/// below.
+pub(super) const SELECTED_SERVER_HEADING_LEVEL: usize = 2;
 
 /// The rows that present the selected server. With no server to select they have nothing to say,
 /// so Settings omits them.
@@ -55,6 +63,18 @@ fn presents_selected_server(row: SettingsRowId) -> bool {
     )
 }
 
+/// The server rows whose controls take keyboard focus. Each one is a focus scope, so focus that
+/// the keyboard moves into it scrolls the row into view.
+const FOCUSABLE_ROWS: [SettingsRowId; 7] = [
+    SettingsRowId::ServerStatus,
+    SettingsRowId::ServerVersion,
+    SettingsRowId::ServerEndAllSessions,
+    SettingsRowId::ServerWorktreeLocation,
+    SettingsRowId::ServerRemoteAccess,
+    SettingsRowId::ServerRemoteAccessScope,
+    SettingsRowId::ServerUnpair,
+];
+
 /// The Servers section's own state: the latest published servers and the person's choices.
 pub(super) struct ServersSection {
     snapshot: ServersSnapshot,
@@ -69,6 +89,12 @@ pub(super) struct ServersSection {
     proposed_scopes: HashMap<ServerKey, SharedString>,
     /// Notices dismissed here that the next snapshot has not dropped yet.
     dismissed: HashSet<SharedString>,
+    /// The focus scope around each row in [`FOCUSABLE_ROWS`].
+    row_focus: HashMap<SettingsRowId, FocusHandle>,
+    /// The focus scope around the pending-unpair notices, and where they were last laid out.
+    notices_focus: FocusHandle,
+    notices_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    _focus_scopes: Vec<Subscription>,
 }
 
 /// The selected server's New Worktree Location field. It sends a change on Return or when focus
@@ -78,7 +104,60 @@ struct WorktreeField {
     /// The text the field last took from the published setting, and the revision the person edits
     /// from. Text that differs from it while the field has focus is the person's typing.
     synced: Option<SyncedText>,
+    /// The request sent to each server that no published snapshot has answered yet. The field
+    /// shows what it sent until the answer arrives, so a draft never reverts in the meantime.
+    sent: HashMap<ServerKey, SentLocation>,
     _events: Subscription,
+}
+
+/// A New Worktree Location request that no published snapshot has answered yet.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SentLocation {
+    /// A change to `text`, made from the server's `base_revision`.
+    Change {
+        text: SharedString,
+        base_revision: u64,
+        /// The setting as published when the change went out.
+        seen: ServerTextSetting,
+    },
+    /// Dropping this device's unapplied change.
+    Discard,
+}
+
+impl SentLocation {
+    fn request(&self, server: &ServerKey) -> ServerRequest {
+        match self {
+            Self::Change {
+                text,
+                base_revision,
+                ..
+            } => ServerRequest::SetWorktreeLocation {
+                server: server.clone(),
+                template: text.clone(),
+                base_revision: *base_revision,
+            },
+            Self::Discard => ServerRequest::DiscardWorktreeLocationEdit(server.clone()),
+        }
+    }
+
+    /// The text the field shows while the request is on its way.
+    fn shown(&self, setting: &ServerTextSetting) -> SharedString {
+        match self {
+            Self::Change { text, .. } => text.clone(),
+            Self::Discard => setting.value.clone(),
+        }
+    }
+
+    /// Whether `setting` carries the request's outcome. The receiver publishes a change as an
+    /// edit before anything else, so a change is answered once the setting differs from the one it
+    /// went out against. A resent draft can match the edit already published, so the draft alone
+    /// cannot tell. A discard is answered once no edit is left.
+    fn answered(&self, setting: &ServerTextSetting) -> bool {
+        match self {
+            Self::Change { seen, .. } => setting != seen,
+            Self::Discard => setting.edit.is_none(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -91,10 +170,38 @@ struct SyncedText {
 impl ServersSection {
     pub(super) fn new(window: &mut Window, cx: &mut Context<SettingsWindow>) -> Self {
         let list_focus = cx.focus_handle().tab_stop(true);
-        cx.on_focus(&list_focus, window, |_, _, cx| cx.notify())
-            .detach();
+        cx.on_focus(&list_focus, window, |settings, window, cx| {
+            settings.reveal_server_row(SettingsRowId::ServerList, window, cx);
+            cx.notify();
+        })
+        .detach();
         cx.on_blur(&list_focus, window, |_, _, cx| cx.notify())
             .detach();
+        // The section is taller than the window, so Tab can reach a control scrolled out of
+        // sight. Each scope is a container, never a tab stop of its own.
+        let mut focus_scopes = Vec::new();
+        let row_focus = FOCUSABLE_ROWS
+            .into_iter()
+            .map(|row| {
+                let focus = cx.focus_handle();
+                focus_scopes.push(cx.on_focus_in(&focus, window, move |settings, window, cx| {
+                    settings.reveal_server_row(row, window, cx);
+                }));
+                (row, focus)
+            })
+            .collect();
+        let notices_focus = cx.focus_handle();
+        let notices_bounds = Rc::new(Cell::new(None));
+        focus_scopes.push(cx.on_focus_in(&notices_focus, window, {
+            let bounds = Rc::clone(&notices_bounds);
+            move |settings, window, cx| {
+                if let Some(bounds) = bounds.get()
+                    && window.last_input_was_keyboard()
+                {
+                    settings.scroll_bounds_into_view(bounds, cx);
+                }
+            }
+        }));
         let input = cx.new(|cx| {
             TextInput::new(
                 "settings-server-worktree-location",
@@ -131,10 +238,15 @@ impl ServersSection {
             worktree: WorktreeField {
                 input,
                 synced: None,
+                sent: HashMap::new(),
                 _events: events,
             },
             proposed_scopes: HashMap::new(),
             dismissed: HashSet::new(),
+            row_focus,
+            notices_focus,
+            notices_bounds,
+            _focus_scopes: focus_scopes,
         };
         section.follow(cx);
         section
@@ -175,6 +287,14 @@ impl ServersSection {
         });
         self.proposed_scopes
             .retain(|key, _| snapshot.servers.iter().any(|server| server.key == *key));
+        self.worktree.sent.retain(|key, sent| {
+            snapshot
+                .servers
+                .iter()
+                .find(|server| server.key == *key)
+                .and_then(|server| server.worktree_location.as_ref())
+                .is_some_and(|setting| !sent.answered(setting))
+        });
         self.snapshot = snapshot;
     }
 
@@ -207,12 +327,11 @@ impl ServersSection {
         presents_selected_server(row) && self.selected_server().is_none()
     }
 
-    /// The server rows answer for the server the list selects, so the list stays above any of
-    /// them a search finds.
+    /// The server rows answer for the server the list selects, so the list leads whenever a search
+    /// finds any of them, including one the search ranks above the list.
     pub(super) fn complete(&self, rows: &mut Vec<SettingsRowId>) {
-        if rows.iter().copied().any(presents_selected_server)
-            && !rows.contains(&SettingsRowId::ServerList)
-        {
+        if rows.iter().copied().any(presents_selected_server) {
+            rows.retain(|row| *row != SettingsRowId::ServerList);
             rows.insert(0, SettingsRowId::ServerList);
         }
     }
@@ -226,19 +345,47 @@ impl ServersSection {
             .collect()
     }
 
-    /// The scope a change to remote connections uses: the server's while they are on, otherwise
-    /// the one the person chose, the one the server used last, or the first it offers.
-    fn chosen_scope(&self, server: &ServerSummary) -> Option<BindScope> {
+    /// The scope Listen on shows. While remote connections are on, it is the one the server listens
+    /// on, or none when the server no longer offers that one. While they are off, it is the one
+    /// turning them on would use: the one the person chose, the one the server used last, or the
+    /// first it offers.
+    fn shown_scope(&self, server: &ServerSummary) -> Option<BindScope> {
         let remote = server.remote_access.as_ref()?;
-        let proposed = (!remote.enabled)
-            .then(|| self.proposed_scopes.get(&server.key))
-            .flatten();
-        proposed
-            .or(remote.scope.as_ref())
-            .and_then(|id| remote.scopes.iter().find(|scope| scope.id == *id))
+        let offered = |id: &SharedString| remote.scopes.iter().find(|scope| scope.id == *id);
+        if remote.enabled {
+            return remote.scope.as_ref().and_then(offered).cloned();
+        }
+        self.proposed_scopes
+            .get(&server.key)
+            .and_then(offered)
+            .or_else(|| remote.scope.as_ref().and_then(offered))
             .or_else(|| remote.scopes.first())
             .cloned()
     }
+
+    /// Where this device's change to the server's New Worktree Location stands, counting a request
+    /// no snapshot has answered yet.
+    fn location_edit_state(&self, server: &ServerSummary) -> Option<SettingEditState> {
+        match self.worktree.sent.get(&server.key) {
+            Some(SentLocation::Change { .. }) => Some(SettingEditState::Saving),
+            Some(SentLocation::Discard) => None,
+            None => server
+                .worktree_location
+                .as_ref()?
+                .edit
+                .as_ref()
+                .map(|edit| edit.state.clone()),
+        }
+    }
+}
+
+/// The server's remote connections when this device can change them: it holds a live connection
+/// and has no change of its own waiting for the server.
+fn adjustable_remote_access(server: &ServerSummary) -> Option<&RemoteAccess> {
+    server
+        .remote_access
+        .as_ref()
+        .filter(|remote| server.connected() && !remote.pending)
 }
 
 /// Where one option sits in the server list, and whether the list holds keyboard focus.
@@ -246,10 +393,17 @@ impl ServersSection {
 struct OptionPlacement {
     selected: bool,
     list_focused: bool,
+    /// Whether the selection shows the accent fill, which only keyboard focus earns.
+    emphasized: bool,
     /// The option's 1-based position among every listed server.
     position: usize,
     total: usize,
 }
+
+/// Names the Status row's badge and the text it publishes.
+const STATUS_BADGE: &str = "settings-server-status-text";
+/// Names the Version row's badge and the text it publishes.
+const VERSION_BADGE: &str = "settings-server-version-text";
 
 /// What the Status row offers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -258,14 +412,14 @@ enum StatusAction {
     Stop { enabled: bool },
 }
 
-/// Start needs host access through the service manager or SSH. Stop needs either a live
-/// connection or host access.
+/// Start and Stop both need host access through the service manager or SSH: Start launches the
+/// service, and Stop suspends its automatic startup with the host's authorization. A WSS
+/// connection offers neither, so this device could not undo a Stop it sent.
 fn status_action(server: &ServerSummary) -> Option<StatusAction> {
     let host = server.route.manages_host();
     match server.status {
         ServerStatus::Stopped => Some(StatusAction::Start { enabled: host }),
-        ServerStatus::Running => Some(StatusAction::Stop { enabled: true }),
-        ServerStatus::Starting | ServerStatus::Incompatible(_) => {
+        ServerStatus::Running | ServerStatus::Starting | ServerStatus::Incompatible(_) => {
             Some(StatusAction::Stop { enabled: host })
         }
         ServerStatus::Stopping => Some(StatusAction::Stop { enabled: false }),
@@ -285,30 +439,24 @@ enum VersionAction {
     },
 }
 
+/// Restart asks the running server to restart its own version under its service manager, which
+/// any live connection can ask. Installing a staged version replaces the server's approved
+/// installation, which needs the host's authorization, as Start and Stop do.
 fn version_action(server: &ServerSummary) -> VersionAction {
-    let host = server.route.manages_host();
     match &server.staged_version {
         Some(version) => VersionAction::Update {
             version: version.clone(),
-            enabled: match server.status {
-                ServerStatus::Running => true,
-                ServerStatus::Stopped | ServerStatus::Incompatible(IncompatibleSide::Server) => {
-                    host
-                }
-                _ => false,
-            },
+            enabled: server.route.manages_host()
+                && matches!(
+                    server.status,
+                    ServerStatus::Running
+                        | ServerStatus::Stopped
+                        | ServerStatus::Incompatible(IncompatibleSide::Server)
+                ),
         },
         None => VersionAction::Restart {
             enabled: server.connected(),
         },
-    }
-}
-
-fn update_label(server: &ServerSummary) -> &'static str {
-    if server.status == ServerStatus::Stopped {
-        "Install Update…"
-    } else {
-        "Update and Restart…"
     }
 }
 
@@ -317,6 +465,20 @@ fn tone_color(tone: StatusTone, colors: &ChromeColors) -> crate::appearance::Col
         StatusTone::Positive => colors.success,
         StatusTone::Neutral => colors.icon_muted,
         StatusTone::Attention => colors.warning,
+    }
+}
+
+/// The selection colors one server list option paints.
+fn option_selection(emphasized: bool, appearance: &ChromeAppearance) -> ChromeColors {
+    let card = appearance.host_colors(spaceterm_ui::ControlHost::Card);
+    if emphasized && appearance.active {
+        crate::ui::selection_chip::emphasized_selection_colors(card)
+    } else if appearance.active {
+        appearance
+            .unfocused_selection_colors(spaceterm_ui::ControlHost::Card)
+            .clone()
+    } else {
+        card.clone()
     }
 }
 
@@ -336,6 +498,14 @@ fn server_button(
 }
 
 impl SettingsWindow {
+    /// Scrolls a server row into view when the keyboard moved focus into it. Pointer focus leaves
+    /// the scroll position alone, so a press never moves its target out from under the pointer.
+    fn reveal_server_row(&mut self, row: SettingsRowId, window: &Window, cx: &mut Context<Self>) {
+        if window.last_input_was_keyboard() {
+            self.scroll_row_into_view(row, cx);
+        }
+    }
+
     /// Follows a server source installed after this window opened.
     fn follow_servers(&mut self, cx: &mut Context<Self>) {
         if self.servers.follow(cx) {
@@ -393,6 +563,9 @@ impl SettingsWindow {
         window.prevent_default();
         cx.stop_propagation();
         self.select_server(keys[next].clone(), cx);
+        // A key press after a pointer press turns the accent selection on even where the
+        // selection stays put.
+        cx.notify();
     }
 
     pub(super) fn render_server_row(
@@ -408,9 +581,34 @@ impl SettingsWindow {
         let Some(server) = self.servers.selected_server().cloned() else {
             return div().into_any_element();
         };
+        let control = self.render_selected_server_row(row, &server, appearance, cx);
+        match self.servers.row_focus.get(&row) {
+            // The scope wraps the control without a box of its own, so the row keeps its layout.
+            Some(focus) => div()
+                .track_focus(focus)
+                .min_w_0()
+                .flex()
+                .flex_row()
+                .items_center()
+                .when(row == SettingsRowId::ServerWorktreeLocation, |scope| {
+                    scope.w_full()
+                })
+                .child(control)
+                .into_any_element(),
+            None => control,
+        }
+    }
+
+    fn render_selected_server_row(
+        &mut self,
+        row: SettingsRowId,
+        server: &ServerSummary,
+        appearance: &ChromeAppearance,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         match row {
-            SettingsRowId::ServerStatus => self.render_server_status(&server, appearance, cx),
-            SettingsRowId::ServerVersion => self.render_server_version(&server, appearance, cx),
+            SettingsRowId::ServerStatus => self.render_server_status(server, appearance, cx),
+            SettingsRowId::ServerVersion => self.render_server_version(server, appearance, cx),
             SettingsRowId::ServerConnection => text_value(
                 "settings-row-server-connection-control",
                 copy::route_description(&server.route),
@@ -427,6 +625,7 @@ impl SettingsWindow {
                             &key,
                             copy::end_all_sessions_confirmation,
                             ServerRequest::EndAllSessions(key.clone()),
+                            ServerSummary::connected,
                             window,
                             cx,
                         );
@@ -435,12 +634,12 @@ impl SettingsWindow {
                 )
             }
             SettingsRowId::ServerWorktreeLocation => {
-                self.render_server_worktree_location(&server, appearance, cx)
+                self.render_server_worktree_location(server, appearance, cx)
             }
-            SettingsRowId::ServerPermissions => render_server_permissions(&server, appearance),
-            SettingsRowId::ServerRemoteAccess => self.render_remote_access(&server, cx),
+            SettingsRowId::ServerPermissions => render_server_permissions(server, appearance),
+            SettingsRowId::ServerRemoteAccess => self.render_remote_access(server, cx),
             SettingsRowId::ServerRemoteAccessScope => {
-                self.render_remote_access_scope(&server, appearance, cx)
+                self.render_remote_access_scope(server, appearance, cx)
             }
             SettingsRowId::ServerUnpair => {
                 let key = server.key.clone();
@@ -449,10 +648,13 @@ impl SettingsWindow {
                     "Unpair…",
                     true,
                     move |settings, window, cx| {
+                        // Unpairing works without a connection: the revocation retries until the
+                        // server confirms it.
                         settings.confirm_server_request(
                             &key,
                             copy::unpair_confirmation,
                             ServerRequest::UnpairThisDevice(key.clone()),
+                            |_| true,
                             window,
                             cx,
                         );
@@ -482,16 +684,19 @@ impl SettingsWindow {
                 };
                 Some((copy::status_explanation(server), tone))
             }
-            SettingsRowId::ServerVersion => match (&server.staged_version, &server.status) {
-                (Some(version), ServerStatus::Stopped) => guidance(
+            SettingsRowId::ServerVersion => {
+                let version = server.staged_version.as_ref()?;
+                let text = if !server.route.manages_host() {
+                    format!(
+                        "Version {version} is ready. To install it, connect to {name} over SSH or use its machine."
+                    )
+                } else if server.status == ServerStatus::Stopped {
                     format!("Version {version} is ready. {name} stays stopped after it installs.")
-                        .into(),
-                ),
-                (Some(version), _) => guidance(
-                    format!("Version {version} is ready. Installing it restarts {name}.").into(),
-                ),
-                (None, _) => None,
-            },
+                } else {
+                    format!("Version {version} is ready. Installing it restarts {name}.")
+                };
+                guidance(text.into())
+            }
             SettingsRowId::ServerEndAllSessions if server.connected() => guidance(
                 format!("Ends every Terminal Session on {name} for every client. {name} keeps running.")
                     .into(),
@@ -530,14 +735,24 @@ impl SettingsWindow {
             }
             SettingsRowId::ServerRemoteAccessScope => {
                 let remote = server.remote_access.as_ref()?;
-                let scope = self.servers.chosen_scope(server)?;
-                if remote.enabled {
-                    guidance(scope.addresses)
-                } else {
-                    guidance(
+                let warning = |text: String| Some((text.into(), CaptionTone::Warning));
+                match (remote.enabled, self.servers.shown_scope(server)) {
+                    (true, Some(scope)) => guidance(scope.addresses),
+                    (false, Some(scope)) => guidance(
                         format!("{}. Used when remote connections are on.", scope.addresses)
                             .into(),
-                    )
+                    ),
+                    // The server listens on addresses it no longer offers, so none of the offered
+                    // ones may stand in for them.
+                    (true, None) if remote.scopes.is_empty() => warning(format!(
+                        "{name} no longer offers the addresses remote connections use. Turn remote connections off, or wait for {name} to offer them again."
+                    )),
+                    (true, None) => warning(format!(
+                        "{name} no longer offers the addresses remote connections use. Choose other addresses, or turn remote connections off."
+                    )),
+                    (false, None) => guidance(
+                        format!("{name} offers no addresses for remote connections.").into(),
+                    ),
                 }
             }
             SettingsRowId::ServerUnpair => guidance(
@@ -590,17 +805,11 @@ impl SettingsWindow {
         }
         let focus = self.servers.list_focus.clone();
         let focused = focus.is_focused(window);
-        // A list with keyboard focus shows its selection in the accent color, as a native table
-        // does. Without focus it shows the resting selection colors.
-        let selection = if focused && appearance.active {
-            crate::ui::selection_chip::emphasized_selection_colors(card)
-        } else if appearance.active {
-            appearance
-                .unfocused_selection_colors(spaceterm_ui::ControlHost::Card)
-                .clone()
-        } else {
-            card.clone()
-        };
+        // A list the keyboard is driving shows its selection in the accent color, as a native
+        // table does. A pointer press focuses the list too, but leaves the resting selection
+        // colors, as the sidebar and the theme slots do.
+        let emphasized = focused && window.last_input_was_keyboard();
+        let selection = option_selection(emphasized, appearance);
         let selected = self
             .servers
             .selected_server()
@@ -618,6 +827,7 @@ impl SettingsWindow {
                     let placement = OptionPlacement {
                         selected: selected.as_ref() == Some(&server.key),
                         list_focused: focused,
+                        emphasized,
                         position,
                         total,
                     };
@@ -674,6 +884,7 @@ impl SettingsWindow {
         let OptionPlacement {
             selected,
             list_focused: focused,
+            emphasized,
             position,
             total,
         } = placement;
@@ -688,7 +899,7 @@ impl SettingsWindow {
             (card.text, card.text_muted, card.icon_muted)
         };
         // The accent fill carries the selection's own foreground, so status tints yield to it.
-        let status_color = if selected && focused && appearance.active {
+        let status_color = if selected && emphasized && appearance.active {
             selection.row_selected_icon
         } else {
             tone_color(copy::status_tone(&server.status), card)
@@ -784,29 +995,40 @@ impl SettingsWindow {
             .into_any_element()
     }
 
-    /// The selected server's name above the rows that present it.
+    /// The selected server's name above the rows that present it. It is the parent of their group
+    /// headings, one level below the section's title and in the group headings' text style.
     pub(super) fn render_selected_server_heading(
         &self,
         appearance: &ChromeAppearance,
     ) -> Option<AnyElement> {
         let server = self.servers.selected_server()?;
+        let glyph = appearance.icons.metrics(IconRole::Row).glyph_size;
         Some(
             div()
                 .id("settings-server-heading")
                 .role(accesskit::Role::Heading)
-                .aria_level(2)
+                .aria_level(SELECTED_SERVER_HEADING_LEVEL)
                 .aria_label(server.name.clone())
                 .debug_selector(|| "settings-server-heading".to_owned())
                 .px(row_horizontal_inset(appearance))
                 .flex()
                 .flex_row()
-                .items_baseline()
-                .gap(appearance.spacing(8.0))
+                .items_center()
+                .gap(appearance.spacing(6.0))
+                .child(div().flex_none().child(Icon::new(
+                    if server.route.is_local() {
+                        IconName::Laptop
+                    } else {
+                        IconName::Server
+                    },
+                    glyph,
+                    gpui_color(appearance.colors.icon_muted),
+                )))
                 .child(
                     div()
                         .min_w_0()
                         .truncate()
-                        .chrome_text(appearance.typography.style(TextRole::Title))
+                        .chrome_text(appearance.typography.style(TextRole::Section))
                         .text_color(gpui_color(appearance.colors.text))
                         .child(server.name.clone()),
                 )
@@ -821,8 +1043,39 @@ impl SettingsWindow {
         )
     }
 
-    /// One dismissible notice per pending unpair, above the list.
+    /// One dismissible notice per pending unpair, stacked above the list in one focus scope.
     pub(super) fn render_unpair_notices(
+        &self,
+        settings: &SettingsAppearance,
+        spacing: Pixels,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let notices = self.render_unpair_notice_cards(settings, cx);
+        if notices.is_empty() {
+            self.servers.notices_bounds.set(None);
+            return None;
+        }
+        let bounds = Rc::clone(&self.servers.notices_bounds);
+        Some(
+            div()
+                .track_focus(&self.servers.notices_focus)
+                .flex()
+                .flex_col()
+                .w_full()
+                .gap(spacing)
+                .on_children_prepainted(move |children: Vec<Bounds<Pixels>>, _, _| {
+                    bounds.set(
+                        children
+                            .into_iter()
+                            .reduce(|all, notice| all.union(&notice)),
+                    );
+                })
+                .children(notices)
+                .into_any_element(),
+        )
+    }
+
+    fn render_unpair_notice_cards(
         &self,
         settings: &SettingsAppearance,
         cx: &mut Context<Self>,
@@ -929,7 +1182,6 @@ impl SettingsWindow {
         appearance: &ChromeAppearance,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let card = appearance.host_colors(spaceterm_ui::ControlHost::Card);
         let key = server.key.clone();
         let action = status_action(server).map(|action| match action {
             StatusAction::Start { enabled } => server_button(
@@ -950,6 +1202,9 @@ impl SettingsWindow {
                         &key,
                         copy::stop_confirmation,
                         ServerRequest::Stop(key.clone()),
+                        |server| {
+                            status_action(server) == Some(StatusAction::Stop { enabled: true })
+                        },
                         window,
                         cx,
                     );
@@ -957,32 +1212,21 @@ impl SettingsWindow {
                 cx,
             ),
         });
+        // The state reads as a badge beside its action, as every state row in Settings does.
         div()
             .debug_selector(|| "settings-row-server-status-control".to_owned())
             .flex()
             .flex_row()
             .items_center()
-            .gap(appearance.spacing(10.0))
+            .gap(appearance.spacing(8.0))
             .child(
                 div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(appearance.spacing(4.0))
-                    .child(Icon::new(
-                        copy::status_icon(&server.status),
-                        appearance.icons.metrics(IconRole::Status).glyph_size,
-                        gpui_color(tone_color(copy::status_tone(&server.status), card)),
-                    ))
-                    .child(
-                        div()
-                            .chrome_text(appearance.typography.style(TextRole::Body))
-                            .text_color(gpui_color(card.text))
-                            .child(gpui::Text::new(
-                                SharedString::from("settings-server-status-text").into(),
-                                copy::status_label(&server.status),
-                            )),
-                    ),
+                    .debug_selector(|| STATUS_BADGE.to_owned())
+                    .child(badge(
+                        STATUS_BADGE,
+                        copy::status_label(&server.status),
+                        appearance,
+                    )),
             )
             .children(action)
             .into_any_element()
@@ -994,18 +1238,18 @@ impl SettingsWindow {
         appearance: &ChromeAppearance,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let card = appearance.host_colors(spaceterm_ui::ControlHost::Card);
         let key = server.key.clone();
         let action = match version_action(server) {
             VersionAction::Restart { enabled } => server_button(
                 "settings-server-restart",
-                "Restart…",
+                "Restart Server…",
                 enabled,
                 move |settings, window, cx| {
                     settings.confirm_server_request(
                         &key,
                         copy::restart_confirmation,
                         ServerRequest::Restart(key.clone()),
+                        |server| version_action(server) == VersionAction::Restart { enabled: true },
                         window,
                         cx,
                     );
@@ -1014,18 +1258,31 @@ impl SettingsWindow {
             ),
             VersionAction::Update { version, enabled } => server_button(
                 "settings-server-update",
-                update_label(server),
+                "Update Server…",
                 enabled,
                 move |settings, window, cx| {
-                    let version = version.clone();
+                    let Some(server) = settings.servers.find(&key) else {
+                        return;
+                    };
+                    // Updating a stopped server leaves it stopped, and its confirmation says so.
+                    // The update goes out only while that still holds.
+                    let confirmation = copy::update_confirmation(server, &version);
+                    let stopped = server.status == ServerStatus::Stopped;
+                    let offered = VersionAction::Update {
+                        version: version.clone(),
+                        enabled: true,
+                    };
                     let request = ServerRequest::InstallUpdate {
                         server: key.clone(),
                         version: version.clone(),
                     };
-                    settings.confirm_server_request(
-                        &key,
-                        move |server| copy::update_confirmation(server, &version),
+                    settings.present_confirmation(
+                        confirmation,
                         request,
+                        move |server| {
+                            version_action(server) == offered
+                                && (server.status == ServerStatus::Stopped) == stopped
+                        },
                         window,
                         cx,
                     );
@@ -1038,42 +1295,47 @@ impl SettingsWindow {
             .flex()
             .flex_row()
             .items_center()
-            .gap(appearance.spacing(10.0))
+            .gap(appearance.spacing(8.0))
             .child(
                 div()
-                    .chrome_text(appearance.typography.style(TextRole::Body))
-                    .text_color(gpui_color(card.text))
-                    .child(gpui::Text::new(
-                        SharedString::from("settings-server-version-text").into(),
+                    .debug_selector(|| VERSION_BADGE.to_owned())
+                    .child(badge(
+                        VERSION_BADGE,
                         server
                             .version
                             .clone()
                             .unwrap_or_else(|| SharedString::new_static("Unknown")),
+                        appearance,
                     )),
             )
             .child(action)
             .into_any_element()
     }
 
-    /// Asks before a request that ends work, then sends it if the server is still listed.
+    /// Asks before a request that ends work, in the words `confirmation` gives for the server.
     fn confirm_server_request(
         &mut self,
         key: &ServerKey,
         confirmation: impl FnOnce(&ServerSummary) -> Confirmation,
         request: ServerRequest,
+        allowed: impl Fn(&ServerSummary) -> bool + 'static,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(server) = self.servers.find(key) else {
             return;
         };
-        self.present_confirmation(confirmation(server), request, window, cx);
+        self.present_confirmation(confirmation(server), request, allowed, window, cx);
     }
 
+    /// Presents `confirmation` and sends `request` when the person confirms. The server can change
+    /// while the confirmation is open, so the request goes out only if its server is still listed
+    /// and `allowed` still holds for it then. A refused request is never kept for later.
     fn present_confirmation(
         &mut self,
         confirmation: Confirmation,
         request: ServerRequest,
+        allowed: impl Fn(&ServerSummary) -> bool + 'static,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1123,6 +1385,15 @@ impl SettingsWindow {
                 return;
             }
             let _ = owner.update(cx, |settings, cx| {
+                // Another window may have unpaired the server, or its connection or state may have
+                // changed, since the person was asked.
+                let still_allowed = request
+                    .server()
+                    .and_then(|server| settings.servers.find(server))
+                    .is_some_and(&allowed);
+                if !still_allowed {
+                    return;
+                }
                 settings.send_server_request(request, cx);
                 cx.notify();
             });
@@ -1151,14 +1422,8 @@ impl SettingsWindow {
         let input = self.servers.worktree.input.clone();
         let editable = server.connected();
         input.update(cx, |input, cx| input.set_editable(editable, cx));
-        let edit = server
-            .worktree_location
-            .as_ref()
-            .and_then(|setting| setting.edit.as_ref());
-        let invalid = matches!(
-            edit.map(|edit| &edit.state),
-            Some(SettingEditState::Rejected(_))
-        );
+        let edit_state = self.servers.location_edit_state(server);
+        let invalid = matches!(edit_state, Some(SettingEditState::Rejected(_)));
         let focus = input.read(cx).focus_handle();
         let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
         let field = spaceterm_ui::field_frame(
@@ -1182,12 +1447,10 @@ impl SettingsWindow {
             cx.stop_propagation();
         })
         .child(input);
-        let conflict = server.worktree_location.as_ref().filter(|setting| {
-            setting
-                .edit
-                .as_ref()
-                .is_some_and(|edit| edit.state == SettingEditState::Conflict)
-        });
+        let conflict = server
+            .worktree_location
+            .as_ref()
+            .filter(|_| edit_state == Some(SettingEditState::Conflict));
         let resolution = conflict.map(|setting| {
             let key = server.key.clone();
             let discard_key = key.clone();
@@ -1196,7 +1459,7 @@ impl SettingsWindow {
                 .as_ref()
                 .map(|edit| edit.draft.clone())
                 .unwrap_or_default();
-            let revision = setting.revision;
+            let seen = setting.clone();
             div()
                 .flex()
                 .flex_col()
@@ -1222,11 +1485,12 @@ impl SettingsWindow {
                             "Save My Change",
                             true,
                             move |settings, _, cx| {
-                                settings.send_server_request(
-                                    ServerRequest::SetWorktreeLocation {
-                                        server: key.clone(),
-                                        template: draft.clone(),
-                                        base_revision: revision,
+                                settings.send_server_worktree_location(
+                                    &key,
+                                    SentLocation::Change {
+                                        text: draft.clone(),
+                                        base_revision: seen.revision,
+                                        seen: seen.clone(),
                                     },
                                     cx,
                                 );
@@ -1238,8 +1502,9 @@ impl SettingsWindow {
                             "Discard My Change",
                             true,
                             move |settings, _, cx| {
-                                settings.send_server_request(
-                                    ServerRequest::DiscardWorktreeLocationEdit(discard_key.clone()),
+                                settings.send_server_worktree_location(
+                                    &discard_key,
+                                    SentLocation::Discard,
                                     cx,
                                 );
                             },
@@ -1258,7 +1523,8 @@ impl SettingsWindow {
             .into_any_element()
     }
 
-    /// Shows the server's value, or this device's unapplied change, unless the person is typing.
+    /// Shows the server's value, or this device's unapplied change, unless the person is typing. A
+    /// request the server hasn't answered shows what it sent.
     fn synchronize_server_worktree_location(
         &mut self,
         server: &ServerSummary,
@@ -1274,10 +1540,13 @@ impl SettingsWindow {
             }
             return;
         };
-        let desired = setting
-            .edit
-            .as_ref()
-            .map_or_else(|| setting.value.clone(), |edit| edit.draft.clone());
+        let desired = match field.sent.get(&server.key) {
+            Some(sent) => sent.shown(setting),
+            None => setting
+                .edit
+                .as_ref()
+                .map_or_else(|| setting.value.clone(), |edit| edit.draft.clone()),
+        };
         let current = SharedString::from(field.input.read(cx).value().to_owned());
         let resting = match &field.synced {
             Some(synced) if synced.server == server.key => {
@@ -1324,20 +1593,32 @@ impl SettingsWindow {
             text: text.clone(),
             ..synced.clone()
         });
-        let request = if text == setting.value {
+        let sent = if text == setting.value {
             // Typing the server's value back is the same as dropping the change.
-            if setting.edit.is_none() {
+            if self.servers.location_edit_state(&server).is_none() {
                 cx.notify();
                 return;
             }
-            ServerRequest::DiscardWorktreeLocationEdit(server.key.clone())
+            SentLocation::Discard
         } else {
-            ServerRequest::SetWorktreeLocation {
-                server: server.key.clone(),
-                template: text,
+            SentLocation::Change {
+                text,
                 base_revision: synced.revision,
+                seen: setting.clone(),
             }
         };
+        self.send_server_worktree_location(&server.key, sent, cx);
+    }
+
+    /// Sends a New Worktree Location request, and shows what it sent until the server answers.
+    fn send_server_worktree_location(
+        &mut self,
+        server: &ServerKey,
+        sent: SentLocation,
+        cx: &mut Context<Self>,
+    ) {
+        let request = sent.request(server);
+        self.servers.worktree.sent.insert(server.clone(), sent);
         self.send_server_request(request, cx);
         cx.notify();
     }
@@ -1361,11 +1642,8 @@ impl SettingsWindow {
             text: value,
             revision: setting.revision,
         });
-        if setting.edit.is_some() {
-            self.send_server_request(
-                ServerRequest::DiscardWorktreeLocationEdit(server.key.clone()),
-                cx,
-            );
+        if self.servers.location_edit_state(&server).is_some() {
+            self.send_server_worktree_location(&server.key, SentLocation::Discard, cx);
         }
         cx.notify();
     }
@@ -1382,26 +1660,33 @@ impl SettingsWindow {
                 CaptionTone::Guidance,
             ));
         }
-        let Some(setting) = &server.worktree_location else {
+        if server.worktree_location.is_none() {
             return Some((
                 format!("Waiting for {name}'s settings…").into(),
                 CaptionTone::Guidance,
             ));
-        };
-        match setting.edit.as_ref().map(|edit| &edit.state) {
+        }
+        match self.servers.location_edit_state(server) {
             Some(SettingEditState::Saving) => {
                 Some((format!("Saving to {name}…").into(), CaptionTone::Guidance))
             }
-            Some(SettingEditState::Rejected(rejection)) => {
-                Some((copy::rejection_caption(name, rejection), CaptionTone::Error))
-            }
+            Some(SettingEditState::Rejected(rejection)) => Some((
+                copy::rejection_caption(name, &rejection),
+                CaptionTone::Error,
+            )),
             // The conflict explains itself beside its two choices.
             Some(SettingEditState::Conflict) => None,
             None => {
                 let text = self.servers.worktree.input.read(cx).value();
-                let (example, _) = super::git::worktree_location_caption(text, None);
+                // The server validates the template. A template this device can't expand still
+                // gets guidance, without an example it can't show.
+                let guidance = if validate(text).is_ok() {
+                    super::git::worktree_location_caption(text, None).0
+                } else {
+                    SharedString::new_static("Use {repository} and {branch}.")
+                };
                 Some((
-                    format!("Shared by every device paired with {name}. {example}").into(),
+                    format!("Shared by every device paired with {name}. {guidance}").into(),
                     CaptionTone::Guidance,
                 ))
             }
@@ -1413,10 +1698,14 @@ impl SettingsWindow {
         server: &ServerSummary,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let remote = server.remote_access.as_ref();
-        let enabled = remote.is_some_and(|remote| remote.enabled);
-        let available = server.connected()
-            && remote.is_some_and(|remote| !remote.pending && !remote.scopes.is_empty());
+        let enabled = server
+            .remote_access
+            .as_ref()
+            .is_some_and(|remote| remote.enabled);
+        // Turning remote connections off needs no addresses, so it stays possible after the
+        // server stops offering the ones they use.
+        let available = adjustable_remote_access(server)
+            .is_some_and(|remote| remote.enabled || !remote.scopes.is_empty());
         let owner = cx.weak_entity();
         let key = server.key.clone();
         Switch::new(
@@ -1438,8 +1727,8 @@ impl SettingsWindow {
         .into_any_element()
     }
 
-    /// Turning remote connections on always asks, naming the server and the scope. Turning them
-    /// off asks only when this device would lose its own connection.
+    /// Turning remote connections on asks, naming the server and the scope. Turning them off asks
+    /// too, because every device connected over the network disconnects, possibly this one.
     fn request_remote_access(
         &mut self,
         key: &ServerKey,
@@ -1450,24 +1739,36 @@ impl SettingsWindow {
         let Some(server) = self.servers.find(key).cloned() else {
             return;
         };
-        let Some(scope) = self.servers.chosen_scope(&server) else {
+        if !enabled {
+            self.present_confirmation(
+                copy::disable_remote_access_confirmation(&server),
+                ServerRequest::DisableRemoteAccess(key.clone()),
+                |server| adjustable_remote_access(server).is_some_and(|remote| remote.enabled),
+                window,
+                cx,
+            );
+            return;
+        }
+        let Some(scope) = self.servers.shown_scope(&server) else {
             return;
         };
-        let request = ServerRequest::SetRemoteAccess {
+        let request = ServerRequest::EnableRemoteAccess {
             server: key.clone(),
-            enabled,
             scope: scope.id.clone(),
         };
-        if enabled {
-            let confirmation = copy::enable_remote_access_confirmation(&server, &scope);
-            self.present_confirmation(confirmation, request, window, cx);
-        } else if matches!(server.route, model::ServerRoute::Wss { .. }) {
-            let confirmation = copy::disable_remote_access_confirmation(&server);
-            self.present_confirmation(confirmation, request, window, cx);
-        } else {
-            self.send_server_request(request, cx);
-            cx.notify();
-        }
+        let confirmation = copy::enable_remote_access_confirmation(&server, &scope);
+        // The confirmation names the scope's addresses, so it holds only while the server still
+        // offers them unchanged and nobody has turned remote connections on meanwhile.
+        self.present_confirmation(
+            confirmation,
+            request,
+            move |server| {
+                adjustable_remote_access(server)
+                    .is_some_and(|remote| !remote.enabled && remote.scopes.contains(&scope))
+            },
+            window,
+            cx,
+        );
     }
 
     fn render_remote_access_scope(
@@ -1481,13 +1782,28 @@ impl SettingsWindow {
             .as_ref()
             .filter(|remote| !remote.scopes.is_empty())
         else {
+            let listening = server
+                .remote_access
+                .as_ref()
+                .is_some_and(|remote| remote.enabled);
             return text_value(
                 "settings-server-remote-access-scope",
-                SharedString::new_static("None offered"),
+                SharedString::new_static(if listening {
+                    "Unavailable"
+                } else {
+                    "None offered"
+                }),
                 appearance,
             );
         };
-        let chosen = self.servers.chosen_scope(server).map(|scope| scope.id);
+        // While remote connections are on, addresses the server no longer offers read as
+        // unavailable rather than as one of the offered scopes.
+        let shown = self.servers.shown_scope(server).map(|scope| scope.id);
+        let prompt = if remote.enabled {
+            "Unavailable"
+        } else {
+            "Choose addresses"
+        };
         let items = remote
             .scopes
             .iter()
@@ -1502,12 +1818,12 @@ impl SettingsWindow {
         settings_selector(
             "settings-server-remote-access-scope".to_owned(),
             "Listen on",
-            chosen,
-            "Choose addresses",
+            shown,
+            prompt,
             items,
             appearance,
         )
-        .disabled(!server.connected() || remote.pending)
+        .disabled(adjustable_remote_access(server).is_none())
         .on_accept(move |acceptance, window, cx| {
             let scope = acceptance.item_id().clone();
             let key = key.clone();
@@ -1519,7 +1835,7 @@ impl SettingsWindow {
     }
 
     /// While remote connections are off the choice waits for them to be turned on. While they are
-    /// on, moving them asks first.
+    /// on, moving them disconnects devices on the other addresses, so it asks first.
     fn choose_remote_access_scope(
         &mut self,
         key: &ServerKey,
@@ -1530,7 +1846,7 @@ impl SettingsWindow {
         let Some(server) = self.servers.find(key).cloned() else {
             return;
         };
-        let Some(remote) = server.remote_access.as_ref() else {
+        let Some(remote) = adjustable_remote_access(&server) else {
             return;
         };
         if !remote.enabled {
@@ -1541,16 +1857,27 @@ impl SettingsWindow {
         if remote.scope.as_ref() == Some(&scope) {
             return;
         }
-        let Some(choice) = remote.scopes.iter().find(|candidate| candidate.id == scope) else {
+        let Some(choice) = remote
+            .scopes
+            .iter()
+            .find(|candidate| candidate.id == scope)
+            .cloned()
+        else {
             return;
         };
-        let confirmation = copy::change_scope_confirmation(&server, choice);
+        let confirmation = copy::change_scope_confirmation(&server, &choice);
         self.present_confirmation(
             confirmation,
-            ServerRequest::SetRemoteAccess {
+            ServerRequest::EnableRemoteAccess {
                 server: key.clone(),
-                enabled: true,
                 scope,
+            },
+            move |server| {
+                adjustable_remote_access(server).is_some_and(|remote| {
+                    remote.enabled
+                        && remote.scope.as_ref() != Some(&choice.id)
+                        && remote.scopes.contains(&choice)
+                })
             },
             window,
             cx,
@@ -1579,7 +1906,7 @@ fn text_value(
 }
 
 /// Each permission the server reports, named as the server's system names it, with its state in
-/// words.
+/// a badge as the Privacy section shows this device's own.
 fn render_server_permissions(server: &ServerSummary, appearance: &ChromeAppearance) -> AnyElement {
     let card = appearance.host_colors(spaceterm_ui::ControlHost::Card);
     let Some(permissions) = &server.permissions else {
@@ -1597,16 +1924,16 @@ fn render_server_permissions(server: &ServerSummary, appearance: &ChromeAppearan
         .w_full()
         .flex()
         .flex_col()
-        .gap(appearance.spacing(4.0))
+        .gap(appearance.spacing(6.0))
         .children(permissions.entries.iter().map(|entry| {
             let name = copy::permission_name(entry.kind, permissions.naming);
             let state = copy::permission_state(entry.state);
+            let (item, state_badge) = permission_selectors(entry.kind);
             div()
-                .id(SharedString::from(format!(
-                    "settings-server-permission-{name}"
-                )))
+                .id(item)
                 .role(accesskit::Role::ListItem)
                 .aria_label(SharedString::from(format!("{name}: {state}")))
+                .debug_selector(move || item.to_owned())
                 .flex()
                 .flex_row()
                 .items_center()
@@ -1620,10 +1947,27 @@ fn render_server_permissions(server: &ServerSummary, appearance: &ChromeAppearan
                 )
                 .child(
                     div()
-                        .chrome_text(appearance.typography.style(TextRole::Body))
-                        .text_color(gpui_color(card.text_muted))
-                        .child(state),
+                        .debug_selector(move || state_badge.to_owned())
+                        .child(badge(state_badge, state, appearance)),
                 )
         }))
         .into_any_element()
+}
+
+/// The selectors of one permission's list item and of its state badge.
+fn permission_selectors(kind: ServerPermissionKind) -> (&'static str, &'static str) {
+    match kind {
+        ServerPermissionKind::Microphone => (
+            "settings-server-permission-microphone",
+            "settings-server-permission-microphone-state",
+        ),
+        ServerPermissionKind::ScreenRecording => (
+            "settings-server-permission-screen-recording",
+            "settings-server-permission-screen-recording-state",
+        ),
+        ServerPermissionKind::Accessibility => (
+            "settings-server-permission-accessibility",
+            "settings-server-permission-accessibility-state",
+        ),
+    }
 }

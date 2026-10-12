@@ -62,8 +62,12 @@ pub(super) fn status_explanation(server: &ServerSummary) -> SharedString {
         ServerStatus::Running if server.route.is_local() => {
             "Its Terminal Sessions keep running when SpaceTerm quits.".into()
         }
-        ServerStatus::Running => {
+        ServerStatus::Running if server.route.manages_host() => {
             "Its Terminal Sessions keep running when this device disconnects.".into()
+        }
+        // Stopping needs the host's authorization, which a WSS connection cannot obtain.
+        ServerStatus::Running => {
+            "Its Terminal Sessions keep running when this device disconnects. To stop it, connect over SSH or use its machine.".into()
         }
         ServerStatus::Starting => format!("{name} is starting.").into(),
         ServerStatus::Stopping => {
@@ -146,9 +150,9 @@ pub(super) fn permission_name(
 pub(super) fn permission_state(state: ServerPermissionState) -> &'static str {
     match state {
         ServerPermissionState::Allowed => "Allowed",
-        ServerPermissionState::NotAllowed => "Not allowed",
-        ServerPermissionState::NotSetUp => "Not set up",
-        ServerPermissionState::NotNeeded => "Not needed",
+        ServerPermissionState::NotAllowed => "Not Allowed",
+        ServerPermissionState::NotSetUp => "Not Set Up",
+        ServerPermissionState::NotNeeded => "Not Needed",
     }
 }
 
@@ -182,8 +186,8 @@ pub(super) fn rejection_caption(name: &str, rejection: &SettingRejection) -> Sha
             "{name} can't create folders there. Choose a location its account can write to."
         )
         .into(),
-        SettingRejection::Other(reason) => {
-            format!("{name} didn't accept this location. {reason}").into()
+        SettingRejection::NotSaved => {
+            format!("{name} couldn't save this location. Try again.").into()
         }
     }
 }
@@ -221,6 +225,8 @@ fn restart_detail(name: &str) -> SharedString {
     .into()
 }
 
+/// Only a route that manages the host offers Stop, so this device can always start the server
+/// again.
 pub(super) fn stop_confirmation(server: &ServerSummary) -> Confirmation {
     let name = &server.name;
     Confirmation {
@@ -243,7 +249,7 @@ pub(super) fn restart_confirmation(server: &ServerSummary) -> Confirmation {
         title: format!("Restart {name}?").into(),
         message: format!("Every Terminal Session on {name} ends for every client.").into(),
         detail: Some(restart_detail(name)),
-        confirm: "Restart",
+        confirm: "Restart Server",
         destructive: true,
     }
 }
@@ -282,7 +288,7 @@ pub(super) fn end_all_sessions_confirmation(server: &ServerSummary) -> Confirmat
     let name = &server.name;
     Confirmation {
         id: "settings-server-end-all-sessions",
-        title: format!("End all sessions on {name}?").into(),
+        title: format!("End All Sessions on {name}?").into(),
         message: format!(
             "Every live Terminal Session on {name} ends for every client, and its terminal output and scrollback are cleared."
         )
@@ -342,8 +348,18 @@ pub(super) fn enable_remote_access_confirmation(
     }
 }
 
+/// Moving remote connections disconnects every device on the addresses left behind, which can
+/// include this device when it connects over WSS.
 pub(super) fn change_scope_confirmation(server: &ServerSummary, scope: &BindScope) -> Confirmation {
     let name = &server.name;
+    let detail = if server.route.manages_host() {
+        format!("Terminal Sessions on {name} keep running.")
+    } else {
+        format!(
+            "This device connects to {name} over the network. If its address isn't in {}, it disconnects too. Terminal Sessions on {name} keep running.",
+            scope.label
+        )
+    };
     Confirmation {
         id: "settings-server-remote-access-scope",
         title: format!("Listen on {}?", scope.label).into(),
@@ -352,26 +368,38 @@ pub(super) fn change_scope_confirmation(server: &ServerSummary, scope: &BindScop
             scope.addresses
         )
         .into(),
-        detail: None,
+        detail: Some(detail.into()),
         confirm: "Change",
-        destructive: false,
+        destructive: true,
     }
 }
 
-/// Turning remote connections off needs confirmation only when this device would lose its own
-/// connection.
+/// Turning remote connections off disconnects every device connected over the network, including
+/// this device when it connects over WSS.
 pub(super) fn disable_remote_access_confirmation(server: &ServerSummary) -> Confirmation {
     let name = &server.name;
+    let (message, detail) = if server.route.manages_host() {
+        (
+            format!(
+                "{name} stops accepting network connections. Devices connected to {name} over the network disconnect."
+            ),
+            format!("Terminal Sessions on {name} keep running."),
+        )
+    } else {
+        (
+            format!(
+                "{name} stops accepting network connections. Devices connected to {name} over the network disconnect, including this one."
+            ),
+            format!(
+                "Terminal Sessions on {name} keep running. To turn remote connections on again, connect to {name} over SSH or on its machine."
+            ),
+        )
+    };
     Confirmation {
         id: "settings-server-remote-access-disable",
         title: format!("Turn off remote connections to {name}?").into(),
-        message: format!(
-            "{name} stops accepting network connections. This device connects to {name} over the network, so it disconnects too."
-        )
-        .into(),
-        detail: Some(
-            format!("To turn them on again, connect to {name} over SSH or on its machine.").into(),
-        ),
+        message: message.into(),
+        detail: Some(detail.into()),
         confirm: "Turn Off",
         destructive: true,
     }

@@ -46,7 +46,8 @@ impl ServerRoute {
     }
 
     /// Whether this device can manage the server's service: through the local service manager or
-    /// over SSH. A WSS connection reaches only the running server.
+    /// over SSH. A WSS connection reaches only the running server, so it can neither start the
+    /// service nor obtain the host authorization a durable stop needs.
     pub(crate) fn manages_host(&self) -> bool {
         !matches!(self, Self::Wss { .. })
     }
@@ -62,6 +63,10 @@ pub(crate) enum IncompatibleSide {
 }
 
 /// What this device knows about a server's process and its connection to it.
+///
+/// No status means "unpair pending". Unpairing removes the server from this device at once, so it
+/// leaves the list, and ADR 0038 forbids an obsolete connection staying in the saved-server list.
+/// A [`PendingUnpair`] notice above the list reports the revocation still being retried.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ServerStatus {
     /// This device is connecting or reconnecting.
@@ -89,8 +94,9 @@ pub(crate) enum SettingRejection {
     InvalidTemplate(WorktreePathTemplateError),
     /// The server cannot create directories there.
     Unwritable,
-    /// Another reason, in the server's words.
-    Other(SharedString),
+    /// The server could not save the setting for a reason it does not classify. The section shows
+    /// fixed text and never the server's own message, which may carry paths or native errors.
+    NotSaved,
 }
 
 /// Where a change this device sent to a server setting stands.
@@ -235,6 +241,8 @@ pub(crate) enum ServerRequest {
     EndAllSessions(ServerKey),
     /// Removes this device's pairing now and revokes it at the server in the background.
     UnpairThisDevice(ServerKey),
+    /// Changes the server's New Worktree Location. The receiver publishes the change as the
+    /// setting's [`SettingEdit`] with `template` as its draft, from Saving to its outcome.
     SetWorktreeLocation {
         server: ServerKey,
         template: SharedString,
@@ -243,16 +251,41 @@ pub(crate) enum ServerRequest {
     },
     /// Drops this device's unapplied change and shows the server's value again.
     DiscardWorktreeLocationEdit(ServerKey),
-    SetRemoteAccess {
+    /// Turns remote connections on, or moves them, to the bind scope `scope`.
+    EnableRemoteAccess {
         server: ServerKey,
-        enabled: bool,
         scope: SharedString,
     },
+    /// Turns remote connections off, whatever scope they use.
+    DisableRemoteAccess(ServerKey),
     /// Hides one pending-unpair notice. Revocation keeps retrying.
     DismissUnpairNotice(SharedString),
 }
 
+impl ServerRequest {
+    /// The server the request acts on. A notice dismissal acts on no listed server.
+    pub(crate) fn server(&self) -> Option<&ServerKey> {
+        match self {
+            Self::Start(server)
+            | Self::Stop(server)
+            | Self::Restart(server)
+            | Self::EndAllSessions(server)
+            | Self::UnpairThisDevice(server)
+            | Self::DiscardWorktreeLocationEdit(server)
+            | Self::DisableRemoteAccess(server)
+            | Self::InstallUpdate { server, .. }
+            | Self::SetWorktreeLocation { server, .. }
+            | Self::EnableRemoteAccess { server, .. } => Some(server),
+            Self::DismissUnpairNotice(_) => None,
+        }
+    }
+}
+
 /// Where the Servers section's requests go.
+///
+/// The receiver answers through the next [`ServersSnapshot`] it publishes, not through `send`.
+/// Until a snapshot carries a New Worktree Location setting that differs from the one a change
+/// went out against, the section keeps showing the sent text as being saved.
 pub(crate) trait ServerRequests {
     fn send(&self, request: ServerRequest, cx: &mut App);
 }

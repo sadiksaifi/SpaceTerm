@@ -3,7 +3,9 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use gpui::{App, Entity, Modifiers, TestAppContext, VisualTestContext};
+use gpui::{
+    App, Entity, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, TestAppContext, VisualTestContext,
+};
 use serde_json::Value;
 use spaceterm_ui::a11y_testing::{A11yTree, perform};
 
@@ -100,9 +102,55 @@ impl Fixture<'_> {
         })
     }
 
+    /// Presses and releases Return. A focused button activates on release, so a key-down alone
+    /// would leave a focused modal action untouched.
+    fn press_return(&mut self) {
+        let keystroke = Keystroke::parse("enter").unwrap_or_default();
+        self.cx.simulate_event(KeyDownEvent {
+            keystroke: keystroke.clone(),
+            prefer_character_input: false,
+            is_held: false,
+        });
+        self.cx.simulate_event(KeyUpEvent { keystroke });
+        self.cx.run_until_parked();
+    }
+
     fn modal_open(&mut self) -> bool {
         self.cx
             .update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx))
+    }
+
+    /// Types `query` into Settings Search.
+    fn search(&mut self, query: &str) {
+        let window = self.window.clone();
+        let query = query.to_owned();
+        self.cx.update(|_, cx| {
+            window.update(cx, |window, cx| {
+                let search = window.search.clone();
+                search.update(cx, |search, cx| search.set_value(query, cx));
+            });
+        });
+        self.cx.run_until_parked();
+    }
+
+    fn rows(&mut self) -> Vec<SettingsRowId> {
+        self.window.read_with(self.cx, |window, _| {
+            window.rows_for(SettingsSectionId::Servers)
+        })
+    }
+
+    /// Replaces the New Worktree Location field's text and presses Return, as typing does.
+    fn enter_location(&mut self, text: &str) {
+        self.click("settings-server-worktree-location");
+        let input = self
+            .window
+            .read_with(self.cx, |window, _| window.servers.worktree.input.clone());
+        let text = text.to_owned();
+        self.cx.update(|_, cx| {
+            input.update(cx, |input, cx| input.set_value(text, cx));
+        });
+        self.cx.simulate_keystrokes("enter");
+        self.cx.run_until_parked();
     }
 
     fn document(&mut self) -> SettingsDocument {
@@ -315,9 +363,23 @@ fn the_list_groups_local_servers_before_remote_ones_and_states_each_status_in_wo
     );
     assert_eq!(lab["aria"]["position_in_set"], 2);
 
-    // The selected server's rows sit under its name.
+    // The selected server's rows sit under its name, which sits under the page's title.
+    assert_eq!(named(&tree, "Heading", "Servers")["aria"]["level"], 1);
     let heading = named(&tree, "Heading", "Studio");
     assert_eq!(heading["aria"]["level"], 2);
+    for group in [
+        "Server",
+        "Server Settings",
+        "Permissions",
+        "Remote Access",
+        "Pairing",
+    ] {
+        assert_eq!(
+            named(&tree, "Heading", group)["aria"]["level"],
+            3,
+            "{group}"
+        );
+    }
     assert!(tree.find_text("Running").is_some());
     assert!(tree.find_text("Private local connection").is_some());
     assert!(tree.find_text("1.4.0").is_some());
@@ -576,8 +638,17 @@ fn status_actions_follow_what_the_route_and_state_allow() {
         status_action(&ServerSummary { status, ..server })
     };
     assert_eq!(
-        with(ServerStatus::Running, wss()),
+        with(ServerStatus::Running, local()),
         Some(StatusAction::Stop { enabled: true })
+    );
+    assert_eq!(
+        with(ServerStatus::Running, ssh()),
+        Some(StatusAction::Stop { enabled: true })
+    );
+    // A WSS connection can't start the server again, so it can't stop it either.
+    assert_eq!(
+        with(ServerStatus::Running, wss()),
+        Some(StatusAction::Stop { enabled: false })
     );
     assert_eq!(
         with(ServerStatus::Stopping, local()),
@@ -611,6 +682,7 @@ fn restart_confirms_that_every_client_loses_its_sessions(cx: &mut TestAppContext
     );
 
     let confirmation = copy::restart_confirmation(&local());
+    assert_eq!(confirmation.confirm, "Restart Server");
     assert_eq!(
         confirmation.message,
         "Every Terminal Session on Studio ends for every client."
@@ -668,6 +740,110 @@ fn a_staged_version_offers_an_update_that_names_its_effect(cx: &mut TestAppConte
     );
 }
 
+#[test]
+fn installing_an_update_needs_host_access_as_start_and_stop_do() {
+    use super::{VersionAction, version_action};
+    let staged = |server: ServerSummary| ServerSummary {
+        status: ServerStatus::Running,
+        staged_version: Some("1.5.0".into()),
+        ..server
+    };
+    let update = |enabled| VersionAction::Update {
+        version: "1.5.0".into(),
+        enabled,
+    };
+    assert_eq!(version_action(&staged(local())), update(true));
+    assert_eq!(version_action(&staged(ssh())), update(true));
+    // Activating a release replaces the server's approved installation, which only the host's
+    // authorization allows, and a WSS connection can't obtain it.
+    assert_eq!(version_action(&staged(wss())), update(false));
+    // The server restarts its own running version under its service manager, so any live
+    // connection can ask for that.
+    assert_eq!(
+        version_action(&ServerSummary {
+            status: ServerStatus::Running,
+            ..wss()
+        }),
+        VersionAction::Restart { enabled: true }
+    );
+}
+
+#[gpui::test]
+fn over_wss_an_update_explains_where_it_can_be_installed(cx: &mut TestAppContext) {
+    let staged = ServerSummary {
+        status: ServerStatus::Running,
+        staged_version: Some("1.5.0".into()),
+        ..wss()
+    };
+    let mut fixture = open(Appearance::Dark, snapshot(vec![staged]), cx);
+
+    fixture.click("settings-server-update");
+    assert!(!fixture.modal_open());
+    assert!(fixture.requests.take().is_empty());
+    assert_eq!(
+        fixture.caption(SettingsRowId::ServerVersion).as_deref(),
+        Some("Version 1.5.0 is ready. To install it, connect to Lab over SSH or use its machine.")
+    );
+}
+
+#[gpui::test]
+fn a_confirmation_accepted_after_its_server_changed_sends_nothing(cx: &mut TestAppContext) {
+    let stopped_with_update = ServerSummary {
+        status: ServerStatus::Stopped,
+        staged_version: Some("1.5.0".into()),
+        ..ssh()
+    };
+    let mut fixture = open(
+        Appearance::Dark,
+        snapshot(vec![local(), stopped_with_update.clone()]),
+        cx,
+    );
+
+    // The connection drops while End All Sessions waits for an answer.
+    fixture.click("settings-server-end-all-sessions");
+    assert!(fixture.modal_open());
+    let offline = ServerSummary {
+        status: ServerStatus::Offline,
+        ..local()
+    };
+    fixture.publish(snapshot(vec![offline, stopped_with_update.clone()]));
+    fixture.click("modal-action-settings-server-end-all-sessions-confirm");
+    assert!(!fixture.modal_open());
+    assert!(fixture.requests.take().is_empty());
+
+    // The update was confirmed for a stopped server, which it would leave stopped. A server that
+    // started meanwhile would restart instead, which nobody confirmed.
+    fixture.click("settings-server-option-build");
+    fixture.click("settings-server-update");
+    assert!(fixture.modal_open());
+    fixture.publish(snapshot(vec![
+        local(),
+        ServerSummary {
+            status: ServerStatus::Running,
+            ..stopped_with_update.clone()
+        },
+    ]));
+    fixture.click("modal-action-settings-server-update-confirm");
+    assert!(fixture.requests.take().is_empty());
+
+    // Another device turned remote connections on, on other addresses, before this one confirmed.
+    fixture.publish(snapshot(vec![local(), stopped_with_update]));
+    fixture.click("settings-server-option-local");
+    fixture.click("settings-server-remote-access");
+    assert!(fixture.modal_open());
+    fixture.publish(snapshot(vec![ServerSummary {
+        remote_access: Some(RemoteAccess {
+            enabled: true,
+            scope: Some("tailnet".into()),
+            scopes: scopes(),
+            pending: false,
+        }),
+        ..local()
+    }]));
+    fixture.click("modal-action-settings-server-remote-access-enable-confirm");
+    assert!(fixture.requests.take().is_empty());
+}
+
 #[gpui::test]
 fn end_all_sessions_needs_a_live_connection_and_confirms(cx: &mut TestAppContext) {
     let mut fixture = open(Appearance::Dark, snapshot(vec![local(), ssh()]), cx);
@@ -691,7 +867,7 @@ fn end_all_sessions_needs_a_live_connection_and_confirms(cx: &mut TestAppContext
     );
 
     let confirmation = copy::end_all_sessions_confirmation(&local());
-    assert_eq!(confirmation.title, "End all sessions on Studio?");
+    assert_eq!(confirmation.title, "End All Sessions on Studio?");
     assert_eq!(confirmation.confirm, "End All Sessions");
     assert_eq!(
         confirmation.detail.as_deref(),
@@ -815,6 +991,72 @@ fn a_location_change_is_sent_with_the_revision_it_was_made_from(cx: &mut TestApp
 }
 
 #[gpui::test]
+fn a_sent_location_stays_in_the_field_until_the_server_answers(cx: &mut TestAppContext) {
+    let mut fixture = open(Appearance::Dark, snapshot(vec![local()]), cx);
+
+    fixture.enter_location("~/wt/{branch}");
+    assert_eq!(fixture.requests.take().len(), 1);
+    // No answer has been published yet. The field keeps what the person sent.
+    assert_eq!(fixture.field(), "~/wt/{branch}");
+    assert_eq!(
+        fixture
+            .caption(SettingsRowId::ServerWorktreeLocation)
+            .as_deref(),
+        Some("Saving to Studio…")
+    );
+    // A snapshot that still carries the old value and no answer doesn't take the draft away.
+    fixture.publish(snapshot(vec![ServerSummary {
+        name: "Studio Mac".into(),
+        ..local()
+    }]));
+    assert_eq!(fixture.field(), "~/wt/{branch}");
+
+    // A refusal keeps the draft through the snapshot's own copy of it.
+    fixture.publish(snapshot(vec![ServerSummary {
+        worktree_location: Some(location(
+            3,
+            Some(SettingEdit {
+                draft: "~/wt/{branch}".into(),
+                state: SettingEditState::Rejected(SettingRejection::Unwritable),
+            }),
+        )),
+        ..local()
+    }]));
+    assert_eq!(fixture.field(), "~/wt/{branch}");
+
+    // Typing the server's value back drops the change, and the field keeps that value while the
+    // server's answer is on its way.
+    fixture.enter_location(LOCATION);
+    assert_eq!(
+        fixture.requests.take(),
+        vec![ServerRequest::DiscardWorktreeLocationEdit(ServerKey::new(
+            "local"
+        ))]
+    );
+    assert_eq!(fixture.field(), LOCATION);
+
+    // Once the server applies a change, the field follows the server again.
+    fixture.enter_location("~/next/{branch}");
+    fixture.publish(snapshot(vec![ServerSummary {
+        worktree_location: Some(ServerTextSetting {
+            value: "~/next/{branch}".into(),
+            revision: 4,
+            edit: None,
+        }),
+        ..local()
+    }]));
+    fixture.publish(snapshot(vec![ServerSummary {
+        worktree_location: Some(ServerTextSetting {
+            value: "~/later/{branch}".into(),
+            revision: 5,
+            edit: None,
+        }),
+        ..local()
+    }]));
+    assert_eq!(fixture.field(), "~/later/{branch}");
+}
+
+#[gpui::test]
 fn escape_returns_the_location_to_the_servers_value(cx: &mut TestAppContext) {
     let mut fixture = open(Appearance::Dark, snapshot(vec![local()]), cx);
     fixture.click("settings-server-worktree-location");
@@ -895,14 +1137,13 @@ fn a_location_being_saved_shows_the_draft_and_says_so(cx: &mut TestAppContext) {
     );
 }
 
+/// A rejection the server does not classify reads as fixed text, so a server's own message, which
+/// may carry a path or a native error, never reaches the window.
 #[test]
-fn a_rejection_in_the_servers_words_is_quoted_after_its_name() {
+fn an_unclassified_rejection_reads_as_fixed_text() {
     assert_eq!(
-        copy::rejection_caption(
-            "Studio",
-            &SettingRejection::Other("The disk is full.".into())
-        ),
-        "Studio didn't accept this location. The disk is full."
+        copy::rejection_caption("Studio", &SettingRejection::NotSaved),
+        "Studio couldn't save this location. Try again."
     );
 }
 
@@ -921,7 +1162,7 @@ fn a_conflict_keeps_the_draft_shows_the_current_value_and_resolves_either_way(
         }),
         ..local()
     };
-    let mut fixture = open(Appearance::Dark, snapshot(vec![conflicted]), cx);
+    let mut fixture = open(Appearance::Dark, snapshot(vec![conflicted.clone()]), cx);
     assert_eq!(fixture.field(), "~/mine/{branch}");
     let tree = A11yTree::read(fixture.cx);
     assert!(
@@ -932,18 +1173,54 @@ fn a_conflict_keeps_the_draft_shows_the_current_value_and_resolves_either_way(
     );
 
     fixture.click("settings-server-worktree-location-save-mine");
+    assert_eq!(
+        fixture.requests.take(),
+        vec![ServerRequest::SetWorktreeLocation {
+            server: ServerKey::new("local"),
+            template: "~/mine/{branch}".into(),
+            base_revision: 9,
+        }]
+    );
+    // The resent change is on its way, so the choices give way to its progress.
+    assert!(!fixture.rendered("settings-server-worktree-location-save-mine"));
+    assert_eq!(
+        fixture
+            .caption(SettingsRowId::ServerWorktreeLocation)
+            .as_deref(),
+        Some("Saving to Studio…")
+    );
+    // A snapshot that still carries the conflict it answered has not answered the resent change.
+    fixture.publish(snapshot(vec![ServerSummary {
+        staged_version: Some("1.5.0".into()),
+        ..conflicted.clone()
+    }]));
+    assert_eq!(fixture.field(), "~/mine/{branch}");
+    assert!(!fixture.rendered("settings-server-worktree-location-save-mine"));
+    assert_eq!(
+        fixture
+            .caption(SettingsRowId::ServerWorktreeLocation)
+            .as_deref(),
+        Some("Saving to Studio…")
+    );
+
+    // Another conflict brings the choices back. Discarding shows the server's value at once.
+    fixture.publish(snapshot(vec![ServerSummary {
+        worktree_location: Some(ServerTextSetting {
+            value: "~/third/{branch}".into(),
+            revision: 10,
+            ..conflicted.worktree_location.clone().unwrap()
+        }),
+        ..conflicted
+    }]));
     fixture.click("settings-server-worktree-location-discard-mine");
     assert_eq!(
         fixture.requests.take(),
-        vec![
-            ServerRequest::SetWorktreeLocation {
-                server: ServerKey::new("local"),
-                template: "~/mine/{branch}".into(),
-                base_revision: 9,
-            },
-            ServerRequest::DiscardWorktreeLocationEdit(ServerKey::new("local")),
-        ]
+        vec![ServerRequest::DiscardWorktreeLocationEdit(ServerKey::new(
+            "local"
+        ))]
     );
+    assert_eq!(fixture.field(), "~/third/{branch}");
+    assert!(!fixture.rendered("settings-server-worktree-location-conflict"));
 
     // Once the server drops the change, the field shows its value.
     fixture.publish(snapshot(vec![ServerSummary {
@@ -1001,11 +1278,20 @@ fn permissions_name_the_servers_own_grants_in_words(cx: &mut TestAppContext) {
     let tree = A11yTree::read(fixture.cx);
     named(&tree, "List", "System permissions");
     named(&tree, "ListItem", "Microphone: Allowed");
-    named(&tree, "ListItem", "Screen recording: Not set up");
-    named(&tree, "ListItem", "Device control: Not allowed");
+    named(&tree, "ListItem", "Screen recording: Not Set Up");
+    named(&tree, "ListItem", "Device control: Not Allowed");
+    // Each state reads as a badge, as this device's own permissions do in Privacy.
+    for state in [
+        "settings-server-permission-microphone-state",
+        "settings-server-permission-screen-recording-state",
+        "settings-server-permission-accessibility-state",
+    ] {
+        assert!(fixture.rendered(state), "{state}");
+    }
+    assert!(tree.find_text("Not Allowed").is_some());
     assert_eq!(
         copy::permission_state(ServerPermissionState::NotNeeded),
-        "Not needed"
+        "Not Needed"
     );
     assert_eq!(
         fixture.caption(SettingsRowId::ServerPermissions).as_deref(),
@@ -1031,6 +1317,10 @@ fn remote_access_is_off_by_default_and_turning_it_on_names_the_server_and_scope(
     let tree = A11yTree::read(fixture.cx);
     let switch = named(&tree, "Switch", "Allow remote connections");
     assert_eq!(switch["aria"]["toggled"], "False");
+    assert_eq!(
+        named(&tree, "ComboBox", "Listen on")["aria"]["value"],
+        "Local network"
+    );
 
     fixture.click("settings-server-remote-access");
     assert!(fixture.modal_open());
@@ -1063,9 +1353,8 @@ fn remote_access_is_off_by_default_and_turning_it_on_names_the_server_and_scope(
     fixture.click("modal-action-settings-server-remote-access-enable-confirm");
     assert_eq!(
         fixture.requests.take(),
-        vec![ServerRequest::SetRemoteAccess {
+        vec![ServerRequest::EnableRemoteAccess {
             server: ServerKey::new("local"),
-            enabled: true,
             scope: "tailnet".into(),
         }]
     );
@@ -1078,35 +1367,51 @@ fn remote_access_is_off_by_default_and_turning_it_on_names_the_server_and_scope(
     );
 }
 
-#[gpui::test]
-fn turning_remote_access_off_asks_only_when_this_device_would_disconnect(cx: &mut TestAppContext) {
-    let enabled = Some(RemoteAccess {
+fn remote_access_on() -> Option<RemoteAccess> {
+    Some(RemoteAccess {
         enabled: true,
         scope: Some("lan".into()),
         scopes: scopes(),
         pending: false,
-    });
+    })
+}
+
+/// A Running WSS server with remote connections on, which this device reaches over them.
+fn wss_with_remote_access() -> ServerSummary {
+    ServerSummary {
+        status: ServerStatus::Running,
+        remote_access: remote_access_on(),
+        ..wss()
+    }
+}
+
+#[gpui::test]
+fn turning_remote_access_off_asks_because_network_devices_disconnect(cx: &mut TestAppContext) {
     let over_ssh = ServerSummary {
         status: ServerStatus::Running,
-        remote_access: enabled.clone(),
+        remote_access: remote_access_on(),
         ..ssh()
     };
-    let over_wss = ServerSummary {
-        status: ServerStatus::Running,
-        remote_access: enabled,
-        ..wss()
-    };
-    let mut fixture = open(Appearance::Dark, snapshot(vec![over_ssh, over_wss]), cx);
+    let mut fixture = open(
+        Appearance::Dark,
+        snapshot(vec![over_ssh.clone(), wss_with_remote_access()]),
+        cx,
+    );
+
+    // Other devices may be connected over the network, so even an SSH route asks first.
+    fixture.click("settings-server-remote-access");
+    assert!(fixture.modal_open());
+    // The confirmation is destructive, so Return doesn't turn remote connections off.
+    fixture.press_return();
+    assert!(fixture.requests.take().is_empty());
+    // Focus enters on Cancel, which Return activates.
+    assert!(!fixture.modal_open());
 
     fixture.click("settings-server-remote-access");
-    assert!(!fixture.modal_open());
+    fixture.click("modal-action-settings-server-remote-access-disable-confirm");
     assert_eq!(
         fixture.requests.take(),
-        vec![ServerRequest::SetRemoteAccess {
-            server: ServerKey::new("build"),
-            enabled: false,
-            scope: "lan".into(),
-        }]
+        vec![ServerRequest::DisableRemoteAccess(ServerKey::new("build"))]
     );
 
     fixture.click("settings-server-option-lab");
@@ -1115,11 +1420,93 @@ fn turning_remote_access_off_asks_only_when_this_device_would_disconnect(cx: &mu
     fixture.click("modal-action-settings-server-remote-access-disable-confirm");
     assert_eq!(
         fixture.requests.take(),
-        vec![ServerRequest::SetRemoteAccess {
+        vec![ServerRequest::DisableRemoteAccess(ServerKey::new("lab"))]
+    );
+
+    let over_ssh = copy::disable_remote_access_confirmation(&over_ssh);
+    assert!(over_ssh.destructive);
+    assert_eq!(
+        over_ssh.message,
+        "Build Box stops accepting network connections. Devices connected to Build Box over the network disconnect."
+    );
+    assert_eq!(
+        over_ssh.detail.as_deref(),
+        Some("Terminal Sessions on Build Box keep running.")
+    );
+    let over_wss = copy::disable_remote_access_confirmation(&wss_with_remote_access());
+    assert!(over_wss.destructive);
+    assert_eq!(
+        over_wss.message,
+        "Lab stops accepting network connections. Devices connected to Lab over the network disconnect, including this one."
+    );
+    assert_eq!(
+        over_wss.detail.as_deref(),
+        Some(
+            "Terminal Sessions on Lab keep running. To turn remote connections on again, connect to Lab over SSH or on its machine."
+        )
+    );
+}
+
+#[gpui::test]
+fn moving_remote_access_asks_and_warns_a_wss_device_that_it_may_disconnect(
+    cx: &mut TestAppContext,
+) {
+    let mut fixture = open(
+        Appearance::Dark,
+        snapshot(vec![wss_with_remote_access()]),
+        cx,
+    );
+    let choose = |fixture: &mut Fixture<'_>| {
+        let window = fixture.window.clone();
+        fixture.cx.update(|gpui_window, cx| {
+            window.update(cx, |settings, cx| {
+                settings.choose_remote_access_scope(
+                    &ServerKey::new("lab"),
+                    "tailnet".into(),
+                    gpui_window,
+                    cx,
+                );
+            });
+        });
+        fixture.cx.run_until_parked();
+    };
+
+    choose(&mut fixture);
+    assert!(fixture.modal_open());
+    // The confirmation is destructive, so Return doesn't move remote connections.
+    fixture.press_return();
+    assert!(fixture.requests.take().is_empty());
+    // Focus enters on Cancel, which Return activates.
+    assert!(!fixture.modal_open());
+
+    choose(&mut fixture);
+    fixture.click("modal-action-settings-server-remote-access-scope-confirm");
+    assert_eq!(
+        fixture.requests.take(),
+        vec![ServerRequest::EnableRemoteAccess {
             server: ServerKey::new("lab"),
-            enabled: false,
-            scope: "lan".into(),
+            scope: "tailnet".into(),
         }]
+    );
+
+    let over_wss = copy::change_scope_confirmation(&wss_with_remote_access(), &scopes()[1]);
+    assert!(over_wss.destructive);
+    assert_eq!(over_wss.title, "Listen on Tailnet?");
+    assert_eq!(
+        over_wss.message,
+        "Lab accepts SpaceTerm connections over the network on 100.64.0.20 instead. Devices connected on other addresses disconnect."
+    );
+    assert_eq!(
+        over_wss.detail.as_deref(),
+        Some(
+            "This device connects to Lab over the network. If its address isn't in Tailnet, it disconnects too. Terminal Sessions on Lab keep running."
+        )
+    );
+    let local_scope = copy::change_scope_confirmation(&local(), &scopes()[1]);
+    assert!(local_scope.destructive);
+    assert_eq!(
+        local_scope.detail.as_deref(),
+        Some("Terminal Sessions on Studio keep running.")
     );
 }
 
@@ -1143,6 +1530,107 @@ fn a_pending_remote_access_change_waits_for_the_server(cx: &mut TestAppContext) 
             .caption(SettingsRowId::ServerRemoteAccess)
             .as_deref(),
         Some("Waiting for Studio to confirm…")
+    );
+}
+
+#[gpui::test]
+fn remote_access_turns_off_after_the_server_stops_offering_its_addresses(cx: &mut TestAppContext) {
+    let stranded = ServerSummary {
+        remote_access: Some(RemoteAccess {
+            enabled: true,
+            scope: Some("lan".into()),
+            scopes: Vec::new(),
+            pending: false,
+        }),
+        ..local()
+    };
+    let mut fixture = open(Appearance::Dark, snapshot(vec![stranded]), cx);
+    assert_eq!(
+        fixture
+            .caption(SettingsRowId::ServerRemoteAccessScope)
+            .as_deref(),
+        Some(
+            "Studio no longer offers the addresses remote connections use. Turn remote connections off, or wait for Studio to offer them again."
+        )
+    );
+
+    // Turning remote connections off needs no addresses.
+    fixture.click("settings-server-remote-access");
+    assert!(fixture.modal_open());
+    fixture.click("modal-action-settings-server-remote-access-disable-confirm");
+    assert_eq!(
+        fixture.requests.take(),
+        vec![ServerRequest::DisableRemoteAccess(ServerKey::new("local"))]
+    );
+}
+
+#[gpui::test]
+fn listen_on_never_presents_other_addresses_as_the_ones_in_use(cx: &mut TestAppContext) {
+    let moved = ServerSummary {
+        remote_access: Some(RemoteAccess {
+            enabled: true,
+            scope: Some("wifi".into()),
+            scopes: scopes(),
+            pending: false,
+        }),
+        ..local()
+    };
+    let mut fixture = open(Appearance::Dark, snapshot(vec![moved]), cx);
+    assert_eq!(
+        fixture
+            .caption(SettingsRowId::ServerRemoteAccessScope)
+            .as_deref(),
+        Some(
+            "Studio no longer offers the addresses remote connections use. Choose other addresses, or turn remote connections off."
+        )
+    );
+    // The picker selects none of the offered scopes and shows its "Unavailable" prompt.
+    let tree = A11yTree::read(fixture.cx);
+    assert!(named(&tree, "ComboBox", "Listen on")["aria"]["value"].is_null());
+
+    // Choosing offered addresses moves remote connections there, and asks first.
+    let window = fixture.window.clone();
+    fixture.cx.update(|gpui_window, cx| {
+        window.update(cx, |settings, cx| {
+            settings.choose_remote_access_scope(
+                &ServerKey::new("local"),
+                "lan".into(),
+                gpui_window,
+                cx,
+            );
+        });
+    });
+    fixture.cx.run_until_parked();
+    fixture.click("modal-action-settings-server-remote-access-scope-confirm");
+    assert_eq!(
+        fixture.requests.take(),
+        vec![ServerRequest::EnableRemoteAccess {
+            server: ServerKey::new("local"),
+            scope: "lan".into(),
+        }]
+    );
+}
+
+#[gpui::test]
+fn a_server_without_addresses_says_why_remote_access_cannot_turn_on(cx: &mut TestAppContext) {
+    let unoffered = ServerSummary {
+        remote_access: Some(RemoteAccess {
+            enabled: false,
+            scope: None,
+            scopes: Vec::new(),
+            pending: false,
+        }),
+        ..local()
+    };
+    let mut fixture = open(Appearance::Dark, snapshot(vec![unoffered]), cx);
+    fixture.click("settings-server-remote-access");
+    assert!(!fixture.modal_open());
+    assert!(fixture.requests.take().is_empty());
+    assert_eq!(
+        fixture
+            .caption(SettingsRowId::ServerRemoteAccessScope)
+            .as_deref(),
+        Some("Studio offers no addresses for remote connections.")
     );
 }
 
@@ -1179,6 +1667,35 @@ fn a_server_search_opens_the_section_with_the_list_above_the_rows_it_found(
         .debug_bounds("settings-row-server-end-all-sessions")
         .unwrap();
     assert!(list.bottom() <= row.top());
+}
+
+#[gpui::test]
+fn the_list_leads_even_when_the_search_ranks_a_server_row_above_it(cx: &mut TestAppContext) {
+    let mut fixture = open(Appearance::Dark, snapshot(vec![local()]), cx);
+    // "ver" starts the word Version but sits inside the word server, so Version ranks higher.
+    fixture.search("ver");
+    let ranked = fixture
+        .window
+        .read_with(fixture.cx, |window, _| window.matching_rows());
+    let position = |row| ranked.iter().position(|ranked| *ranked == row);
+    assert!(position(SettingsRowId::ServerVersion) < position(SettingsRowId::ServerList));
+
+    let rows = fixture.rows();
+    assert_eq!(rows.first(), Some(&SettingsRowId::ServerList));
+    assert_eq!(
+        rows.iter()
+            .filter(|row| **row == SettingsRowId::ServerList)
+            .count(),
+        1
+    );
+    let list = fixture.cx.debug_bounds("settings-server-list").unwrap();
+    let heading = fixture.cx.debug_bounds("settings-server-heading").unwrap();
+    let version = fixture
+        .cx
+        .debug_bounds("settings-row-server-version")
+        .unwrap();
+    assert!(list.bottom() <= heading.top());
+    assert!(heading.bottom() <= version.top());
 }
 
 #[gpui::test]

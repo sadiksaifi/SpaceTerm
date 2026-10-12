@@ -656,6 +656,12 @@ impl SettingsWindow {
         let Some(bounds) = self.row_bounds.borrow().get(&row).copied() else {
             return;
         };
+        self.scroll_bounds_into_view(bounds, cx);
+    }
+
+    /// Scrolls the detail pane the least distance that shows `bounds`, which are window
+    /// coordinates from the latest frame. Bounds taller than the viewport show their top.
+    fn scroll_bounds_into_view(&mut self, bounds: Bounds<Pixels>, cx: &mut Context<Self>) {
         let viewport = self.scroll.bounds();
         let shift = if bounds.top() < viewport.top() || bounds.size.height > viewport.size.height {
             viewport.top() - bounds.top()
@@ -1063,6 +1069,15 @@ impl SettingsWindow {
             }
         }
         let has_lead_group = groups.first().is_some_and(|(title, _, _)| title.is_empty());
+        // The selected server's name heads the groups that present it, so they sit a level below.
+        let server_heading = (section == SettingsSectionId::Servers)
+            .then(|| self.render_selected_server_heading(appearance))
+            .flatten();
+        let group_heading_level = if server_heading.is_some() {
+            servers::SELECTED_SERVER_HEADING_LEVEL + 1
+        } else {
+            FormGroup::DEFAULT_HEADING_LEVEL
+        };
         self.row_bounds.borrow_mut().clear();
         let rendered = groups
             .into_iter()
@@ -1076,6 +1091,7 @@ impl SettingsWindow {
                 };
                 let row_bounds = Rc::clone(&self.row_bounds);
                 FormGroup::new(group_selector(section, title), heading, members)
+                    .heading_level(group_heading_level)
                     .on_rows_prepainted(move |bounds, _, _| {
                         row_bounds
                             .borrow_mut()
@@ -1090,14 +1106,13 @@ impl SettingsWindow {
             .flatten();
         // The selected server's rows sit under its name, below the list that selects it.
         let mut rendered = rendered;
-        let mut unpair_notices = Vec::new();
-        if section == SettingsSectionId::Servers {
-            unpair_notices = self.render_unpair_notices(settings, cx);
-            if let Some(heading) = self.render_selected_server_heading(appearance) {
-                let position = usize::from(has_lead_group);
-                rendered.insert(position.min(rendered.len()), heading);
-            }
+        if let Some(heading) = server_heading {
+            let position = usize::from(has_lead_group);
+            rendered.insert(position.min(rendered.len()), heading);
         }
+        let unpair_notices = (section == SettingsSectionId::Servers)
+            .then(|| self.render_unpair_notices(settings, group_spacing(appearance), cx))
+            .flatten();
         div()
             .debug_selector(move || section.selector().to_owned())
             .flex()

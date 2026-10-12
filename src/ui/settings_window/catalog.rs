@@ -787,7 +787,8 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         id: SettingsRowId::ServerEndAllSessions,
         section: SettingsSectionId::Servers,
         group: "Server",
-        label: "End all sessions",
+        // The action's own name, as the domain glossary capitalizes it.
+        label: "End All Sessions",
         keywords: &["kill", "terminate", "terminal sessions", "scrollback"],
         selector: "settings-row-server-end-all-sessions",
     },
@@ -798,6 +799,7 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         label: "New Worktree Location",
         keywords: &[
             "worktree",
+            "server worktree",
             "path",
             "folder",
             "directory",
@@ -811,7 +813,16 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         section: SettingsSectionId::Servers,
         group: "Permissions",
         label: "System permissions",
-        keywords: &["server permissions", "authorization"],
+        // The permissions the server reports, so a search for one reaches the server's grant as
+        // well as this device's in Privacy.
+        keywords: &[
+            "server permissions",
+            "authorization",
+            "microphone",
+            "screen recording",
+            "accessibility",
+            "device control",
+        ],
         selector: "settings-row-server-permissions",
     },
     SettingsRowDescriptor {
@@ -1447,6 +1458,7 @@ mod tests {
             ("update server", SettingsRowId::ServerVersion),
             ("end all sessions", SettingsRowId::ServerEndAllSessions),
             ("server settings", SettingsRowId::ServerWorktreeLocation),
+            ("server worktree", SettingsRowId::ServerWorktreeLocation),
             ("server permissions", SettingsRowId::ServerPermissions),
             ("remote access", SettingsRowId::ServerRemoteAccess),
             ("bind", SettingsRowId::ServerRemoteAccessScope),
@@ -1472,6 +1484,27 @@ mod tests {
             (
                 "restart",
                 [SettingsRowId::UpdateStatus, SettingsRowId::ServerVersion],
+            ),
+            (
+                "microphone",
+                [
+                    SettingsRowId::MicrophoneAccess,
+                    SettingsRowId::ServerPermissions,
+                ],
+            ),
+            (
+                "screen recording",
+                [
+                    SettingsRowId::ScreenRecordingAccess,
+                    SettingsRowId::ServerPermissions,
+                ],
+            ),
+            (
+                "accessibility",
+                [
+                    SettingsRowId::AccessibilityAccess,
+                    SettingsRowId::ServerPermissions,
+                ],
             ),
         ] {
             let matched = matching_rows(query);
