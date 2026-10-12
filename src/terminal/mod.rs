@@ -17,7 +17,6 @@ pub(crate) use native_services::hyperlink;
 pub(crate) mod identity;
 pub(crate) mod key;
 pub(crate) mod key_input;
-mod keyboard_protocol;
 pub(crate) mod metadata;
 pub(crate) mod native_services;
 pub(crate) mod title;
@@ -56,9 +55,9 @@ pub(crate) use failure::{
     DiagnosticBundle, DiagnosticKeyEventKind, PaneTerminalState, TerminalFailure,
     UnhandledKeyDiagnostic,
 };
-pub(crate) use find::{
-    FindDirection, FindHighlightSpan, FindQueryGeneration, TerminalFindSnapshot,
-};
+#[cfg(test)]
+pub(crate) use find::TerminalFindSnapshot;
+pub(crate) use find::{FindDirection, FindHighlightSpan, FindQueryGeneration};
 pub(crate) use graphics::{GraphicsSnapshot, ImageKey, ImagePlacementSnapshot, ImageSnapshot};
 pub(crate) use hyperlink::HyperlinkTarget;
 pub(crate) use key::{InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, PhysicalKey};

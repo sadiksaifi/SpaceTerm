@@ -33,7 +33,7 @@ fn directory_identity_preserves_selected_spelling_and_equivalent_paths() {
     symlink(&target, &selected).unwrap();
     let authority = LocalFilesystemAuthority::new(
         crate::local_path::LocalPathSemantics::Posix,
-        Arc::new(crate::platform::unix_local_identity::UnixLocalIdentity),
+        Arc::new(crate::native_test_adapters::identity()),
     );
     let directory = authority.validate_directory(&selected).unwrap();
     let equivalent = authority.validate_directory(&target).unwrap();
@@ -56,7 +56,7 @@ fn directory_revalidation_rejects_retarget_replacement_removal_and_file() {
     symlink(&target, &selected).unwrap();
     let authority = LocalFilesystemAuthority::new(
         crate::local_path::LocalPathSemantics::Posix,
-        Arc::new(crate::platform::unix_local_identity::UnixLocalIdentity),
+        Arc::new(crate::native_test_adapters::identity()),
     );
     let directory = authority.validate_directory(&selected).unwrap();
     fs::remove_file(&selected).unwrap();
@@ -91,7 +91,7 @@ fn directory_validation_rejects_relative_malformed_and_unreadable_paths() {
     let root = Fixture::new();
     let authority = LocalFilesystemAuthority::new(
         crate::local_path::LocalPathSemantics::Posix,
-        Arc::new(crate::platform::unix_local_identity::UnixLocalIdentity),
+        Arc::new(crate::native_test_adapters::identity()),
     );
     assert_eq!(
         authority.validate_directory(Path::new("relative")),
@@ -114,7 +114,7 @@ fn errors_and_retained_identities_do_not_disclose_content() {
     let root = Fixture::new();
     let authority = LocalFilesystemAuthority::new(
         crate::local_path::LocalPathSemantics::Posix,
-        Arc::new(crate::platform::unix_local_identity::UnixLocalIdentity),
+        Arc::new(crate::native_test_adapters::identity()),
     );
     let directory = authority.validate_directory(&root.0).unwrap();
     assert_eq!(
@@ -151,7 +151,7 @@ fn local_file_authority_rejects_symlink_retargeting_and_successor_objects() {
     symlink(&target, &selected).unwrap();
     let authority = LocalFilesystemAuthority::new(
         crate::local_path::LocalPathSemantics::Posix,
-        Arc::new(crate::platform::unix_local_identity::UnixLocalIdentity),
+        Arc::new(crate::native_test_adapters::identity()),
     );
     let file = authority.local_file("selected", &root.0).unwrap();
     assert_eq!(
@@ -176,7 +176,7 @@ fn file_identity_fails_closed_when_host_refuses_retention() {
     fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
     let authority = LocalFilesystemAuthority::new(
         crate::local_path::LocalPathSemantics::Posix,
-        Arc::new(crate::platform::unix_local_identity::UnixLocalIdentity),
+        Arc::new(crate::native_test_adapters::identity()),
     );
     assert!(authority.local_file("file", &root.0).is_none());
 }
@@ -186,7 +186,7 @@ fn file_validation_rejects_missing_non_file_malformed_and_oversized_targets() {
     let root = Fixture::new();
     let authority = LocalFilesystemAuthority::new(
         crate::local_path::LocalPathSemantics::Posix,
-        Arc::new(crate::platform::unix_local_identity::UnixLocalIdentity),
+        Arc::new(crate::native_test_adapters::identity()),
     );
     for value in ["missing", ".", "bad\0", "bad\n", ""] {
         assert!(authority.local_file(value, &root.0).is_none());
@@ -210,7 +210,7 @@ fn emission_metadata_is_content_private_scoped_versioned_and_bounded() {
     fs::write(&path, b"contents").unwrap();
     let file = LocalFilesystemAuthority::new(
         crate::local_path::LocalPathSemantics::Posix,
-        Arc::new(crate::platform::unix_local_identity::UnixLocalIdentity),
+        Arc::new(crate::native_test_adapters::identity()),
     )
     .local_file("private-name", &root.0)
     .unwrap();
@@ -258,7 +258,7 @@ fn local_file_leases_preserve_descriptor_headroom_across_emulators_and_snapshots
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "platform::local_filesystem::unix_adapter_tests::local_file_leases_preserve_descriptor_headroom_across_emulators_and_snapshots",
+                "local_filesystem::unix_adapter_tests::local_file_leases_preserve_descriptor_headroom_across_emulators_and_snapshots",
                 "--nocapture",
             ])
             .env(CHILD, "1")
@@ -287,7 +287,7 @@ fn local_file_leases_preserve_descriptor_headroom_across_emulators_and_snapshots
     let root = Fixture::new();
     let authority = LocalFilesystemAuthority::new(
         crate::local_path::LocalPathSemantics::Posix,
-        Arc::new(crate::platform::unix_local_identity::UnixLocalIdentity),
+        Arc::new(crate::native_test_adapters::identity()),
     );
     let mut registries: Vec<_> = (0..4)
         .map(|_| LocalFileEmissionRegistry::default())
@@ -325,7 +325,7 @@ fn registry_eviction_releases_real_handles_before_resolving_more_output() {
     let root = Fixture::new();
     let authority = LocalFilesystemAuthority::new(
         crate::local_path::LocalPathSemantics::Posix,
-        Arc::new(crate::platform::unix_local_identity::UnixLocalIdentity),
+        Arc::new(crate::native_test_adapters::identity()),
     );
     let mut registry = LocalFileEmissionRegistry::default();
     let mut first = None;
@@ -374,7 +374,7 @@ fn physical_containment_follows_symbolic_links_on_either_side() {
     symlink(&elsewhere, &escape).unwrap();
     let authority = LocalFilesystemAuthority::new(
         crate::local_path::LocalPathSemantics::Posix,
-        Arc::new(crate::platform::unix_local_identity::UnixLocalIdentity),
+        Arc::new(crate::native_test_adapters::identity()),
     );
 
     assert_eq!(

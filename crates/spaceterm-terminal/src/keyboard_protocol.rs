@@ -4,22 +4,22 @@ use libghostty_vt::key::{
     Action as GhosttyKeyAction, Encoder as KeyEncoder, Event as KeyEvent, Mods, OptionAsAlt,
 };
 
-use crate::terminal::key::{InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy};
+use crate::key::{InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy};
 
-pub(crate) struct KeyboardProtocolEncoder {
+pub struct KeyboardProtocolEncoder {
     encoder: KeyEncoder<'static>,
     event: KeyEvent<'static>,
 }
 
 impl KeyboardProtocolEncoder {
-    pub(crate) fn new() -> Result<Self, libghostty_vt::Error> {
+    pub fn new() -> Result<Self, libghostty_vt::Error> {
         Ok(Self {
             encoder: KeyEncoder::new()?,
             event: KeyEvent::new()?,
         })
     }
 
-    pub(crate) fn encode(
+    pub fn encode(
         &mut self,
         terminal: &Terminal<'_, '_>,
         input: &KeyInput,
@@ -57,7 +57,7 @@ impl KeyboardProtocolEncoder {
                 KeyAction::Repeat => GhosttyKeyAction::Repeat,
                 KeyAction::Release => GhosttyKeyAction::Release,
             })
-            .set_key(input.physical_key)
+            .set_key(input.physical_key.into())
             .set_mods(key_modifiers(input.modifiers))
             .set_consumed_mods(key_modifiers(input.consumed_modifiers))
             .set_composing(false)

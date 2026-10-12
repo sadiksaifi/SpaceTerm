@@ -52,12 +52,6 @@ impl Default for ChromeColors {
     }
 }
 
-impl Default for TerminalColors {
-    fn default() -> Self {
-        spaceterm_dark_terminal()
-    }
-}
-
 fn spaceterm_dark_chrome() -> ChromeColors {
     super::compiler::compile_builtin_chrome(Appearance::Dark)
 }
@@ -510,34 +504,7 @@ impl ChromePalette {
 
 /// The authored SpaceTerm Terminal palettes, paired with the Chrome ladder of the same appearance.
 fn spaceterm_dark_terminal() -> TerminalColors {
-    TerminalColors {
-        foreground: Color::rgb(0xd8d8d8),
-        background: Color::rgb(0x191919),
-        normal: [
-            0x2e2e2e, 0xe5696b, 0x83c07e, 0xe6b85c, 0x5fa3f0, 0xc387d9, 0x5fc0c8, 0xc8c8c8,
-        ]
-        .map(Color::rgb),
-        bright: [
-            0x6e6e6e, 0xf28a8b, 0x9fd39a, 0xf0cb80, 0x84b9f6, 0xd5a4e6, 0x82d3d9, 0xf0f0f0,
-        ]
-        .map(Color::rgb),
-        dim: [
-            0x1f1f1f, 0xa24c4e, 0x5e895a, 0xa38443, 0x4a78ae, 0x8c64a0, 0x468a90, 0x8a8a8a,
-        ]
-        .map(Color::rgb),
-        bright_foreground: Color::rgb(0xf0f0f0),
-        dim_foreground: Color::rgb(0x8a8a8a),
-        cursor: Color::rgb(0xd8d8d8),
-        cursor_text: None,
-        selection_background: Color::rgba(0x34485eaa),
-        selection_foreground: None,
-        find_match_background: Color::rgba(0xe6b85c4d),
-        find_match_foreground: None,
-        find_active_match_background: Color::rgba(0xf0913a80),
-        find_active_match_foreground: None,
-        hyperlink: Color::rgb(0x5ea8ff),
-        visual_bell: Color::rgba(0xe6b85c80),
-    }
+    TerminalColors::default()
 }
 
 fn spaceterm_light_terminal() -> TerminalColors {

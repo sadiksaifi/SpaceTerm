@@ -5,25 +5,7 @@ use super::{
     TerminalFontFamily, ThemeCatalog, ThemeId, builtin, preferences::PreferenceError,
 };
 
-#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
-pub(crate) struct AppearanceGeneration(u64);
-
-impl AppearanceGeneration {
-    pub(crate) const INITIAL: Self = Self(0);
-    #[allow(
-        dead_code,
-        reason = "terminal update boundaries construct externally assigned generations"
-    )]
-    pub(crate) const fn new(value: u64) -> Self {
-        Self(value)
-    }
-    pub(crate) const fn get(self) -> u64 {
-        self.0
-    }
-    pub(crate) fn next(self) -> Option<Self> {
-        self.0.checked_add(1).map(Self)
-    }
-}
+pub(crate) use spaceterm_terminal::appearance::AppearanceGeneration;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct SystemAppearance {

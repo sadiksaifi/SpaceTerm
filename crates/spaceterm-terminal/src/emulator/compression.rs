@@ -4,11 +4,11 @@ use libghostty_vt::terminal::{CompressionActivity, CompressionMode, CompressionR
 use super::TerminalEmulator;
 
 impl TerminalEmulator {
-    pub(crate) fn compression_activity(&self) -> Result<CompressionActivity, Error> {
+    pub fn compression_activity(&self) -> Result<CompressionActivity, Error> {
         self.terminal.compression_activity()
     }
 
-    pub(crate) fn compress_scrollback(&mut self) -> Result<CompressionResult, Error> {
+    pub fn compress_scrollback(&mut self) -> Result<CompressionResult, Error> {
         // Compression can discard dirty row headers even when a pane is hidden.
         self.capture_accessibility_if_needed()?;
         self.terminal.compress(CompressionMode::Incremental)
@@ -19,10 +19,8 @@ impl TerminalEmulator {
 mod tests {
     use std::fmt::Write as _;
 
-    use crate::terminal::FindQueryGeneration;
-    use crate::terminal::geometry::{
-        BackingScale, CellGridSize, LogicalCellSize, TerminalGeometry,
-    };
+    use crate::FindQueryGeneration;
+    use crate::geometry::{BackingScale, CellGridSize, LogicalCellSize, TerminalGeometry};
 
     use super::*;
 

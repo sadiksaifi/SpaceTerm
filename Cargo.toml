@@ -11,11 +11,12 @@ members = [
     "crates/spaceterm-directories",
     "crates/spaceterm-host",
     "crates/spaceterm-protocol",
+    "crates/spaceterm-terminal",
     "crates/spaceterm-ui",
     "third_party/libghostty-vt",
     "third_party/libghostty-vt-sys",
 ]
-default-members = [".", "crates/spaceterm-directories", "crates/spaceterm-ui"]
+default-members = [".", "crates/spaceterm-directories", "crates/spaceterm-terminal", "crates/spaceterm-ui"]
 resolver = "2"
 
 [patch.crates-io]
@@ -28,7 +29,7 @@ accesskit_unix = { git = "https://github.com/sadiksaifi/accesskit", tag = "space
 [features]
 # Every build outside the packaging script is SpaceTerm Development and carries its developer tools.
 default = ["developer-tools"]
-native-tests = []
+native-tests = ["spaceterm-terminal/native-tests"]
 developer-tools = ["spaceterm-ui/control-preview"]
 
 [[test]]
@@ -63,6 +64,7 @@ rustc-hash = "=2.1.3"
 spaceterm-directories = { path = "crates/spaceterm-directories" }
 spaceterm-host = { path = "crates/spaceterm-host" }
 spaceterm-ui = { path = "crates/spaceterm-ui" }
+spaceterm-terminal = { path = "crates/spaceterm-terminal" }
 thiserror = "2.0.17"
 unicode-bidi = "=0.3.18"
 unicode-segmentation = "=1.13.3"
@@ -92,6 +94,7 @@ objc2-user-notifications = { version = "=0.3.2", default-features = false, featu
 raw-window-handle = "=0.6.2"
 
 [dev-dependencies]
+spaceterm-terminal = { path = "crates/spaceterm-terminal", features = ["test-support"] }
 accesskit_consumer = "=0.38.0"
 gpui = { git = "https://github.com/sadiksaifi/zed", tag = "spaceterm-2026-10-10.1", features = ["test-support"] }
 jsonschema = { version = "=0.56.0", default-features = false }

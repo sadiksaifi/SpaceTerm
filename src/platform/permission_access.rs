@@ -4,16 +4,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// One permission that programs in a Terminal Session inherit from SpaceTerm and that only System
-/// Settings grants.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) enum SystemPermission {
-    /// Capturing the screen, which a program needs to take screenshots.
-    ScreenRecording,
-    /// Controlling other applications, which a program needs to click and type. System Settings names
-    /// it as [`AccessibilityNaming`] describes.
-    Accessibility,
-}
+pub(crate) use spaceterm_terminal::permission_request::SystemPermission;
 
 /// What System Settings calls the Accessibility permission on the running system.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

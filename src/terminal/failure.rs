@@ -1,5 +1,4 @@
 use std::collections::VecDeque;
-use std::fmt;
 use std::path::Path;
 use std::time::Instant;
 
@@ -7,166 +6,9 @@ use super::emulator::PresentationGeneration;
 use super::key::KeyAction;
 use super::session::{TerminalSessionExit, TerminalSessionFailure, TerminalSessionStartupStage};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum FailureClass {
-    Pty,
-    Emulator,
-    Presentation,
-    Platform,
-    Resource,
-}
-
-impl fmt::Display for FailureClass {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Pty => "PTY",
-            Self::Emulator => "Terminal Emulator",
-            Self::Presentation => "presentation",
-            Self::Platform => "desktop integration",
-            Self::Resource => "renderer resource",
-        })
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Recoverability {
-    Recoverable,
-    Fatal,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum FailureReason {
-    Io(std::io::ErrorKind),
-    OutOfMemory,
-    InvalidValue,
-    OutOfSpace,
-    InvalidInput,
-    InvalidUtf8,
-    CapacityExceeded,
-    ChannelClosed,
-}
-
-impl From<libghostty_vt::Error> for FailureReason {
-    fn from(error: libghostty_vt::Error) -> Self {
-        match error {
-            libghostty_vt::Error::OutOfMemory => Self::OutOfMemory,
-            libghostty_vt::Error::InvalidValue => Self::InvalidValue,
-            libghostty_vt::Error::OutOfSpace { .. } => Self::OutOfSpace,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct TerminalFailure {
-    class: FailureClass,
-    recoverability: Recoverability,
-    operation: &'static str,
-    reason: Option<FailureReason>,
-}
-
-impl TerminalFailure {
-    pub(crate) const fn pty(operation: &'static str) -> Self {
-        Self::new(FailureClass::Pty, Recoverability::Fatal, operation)
-    }
-
-    pub(crate) const fn emulator(operation: &'static str) -> Self {
-        Self::new(FailureClass::Emulator, Recoverability::Fatal, operation)
-    }
-
-    pub(crate) fn emulator_error(operation: &'static str, error: libghostty_vt::Error) -> Self {
-        Self::emulator(operation).with_reason(error.into())
-    }
-
-    pub(crate) const fn with_reason(mut self, reason: FailureReason) -> Self {
-        self.reason = Some(reason);
-        self
-    }
-
-    pub(crate) const fn presentation(operation: &'static str) -> Self {
-        Self::new(
-            FailureClass::Presentation,
-            Recoverability::Recoverable,
-            operation,
-        )
-    }
-
-    pub(crate) const fn platform(operation: &'static str) -> Self {
-        Self::new(
-            FailureClass::Platform,
-            Recoverability::Recoverable,
-            operation,
-        )
-    }
-
-    pub(crate) const fn resource(operation: &'static str) -> Self {
-        Self::new(
-            FailureClass::Resource,
-            Recoverability::Recoverable,
-            operation,
-        )
-    }
-
-    const fn new(
-        class: FailureClass,
-        recoverability: Recoverability,
-        operation: &'static str,
-    ) -> Self {
-        Self {
-            class,
-            recoverability,
-            operation,
-            reason: None,
-        }
-    }
-
-    pub(crate) fn from_session(failure: &TerminalSessionFailure) -> Self {
-        match failure {
-            TerminalSessionFailure::Startup { stage, .. } => match stage {
-                TerminalSessionStartupStage::Pty
-                | TerminalSessionStartupStage::Reader
-                | TerminalSessionStartupStage::ReaderThread => Self::pty("session-startup"),
-                TerminalSessionStartupStage::Emulator => Self::emulator("session-startup"),
-            },
-            TerminalSessionFailure::Runtime(failure) => failure.clone(),
-            TerminalSessionFailure::PtyRead { .. } => Self::pty("read-shell-output"),
-            TerminalSessionFailure::ShellWait { .. } => Self::pty("reap-shell-process"),
-        }
-    }
-
-    pub(crate) const fn class(&self) -> FailureClass {
-        self.class
-    }
-
-    pub(crate) const fn recoverability(&self) -> Recoverability {
-        self.recoverability
-    }
-
-    pub(crate) const fn operation(&self) -> &'static str {
-        self.operation
-    }
-
-    pub(crate) const fn reason(&self) -> Option<FailureReason> {
-        self.reason
-    }
-
-    pub(crate) const fn is_fatal(&self) -> bool {
-        matches!(self.recoverability, Recoverability::Fatal)
-    }
-}
-
-impl fmt::Display for TerminalFailure {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let action = match self.recoverability {
-            Recoverability::Recoverable => "The last valid frame is preserved; retry the action.",
-            Recoverability::Fatal => "Close this Pane and restart the terminal command.",
-        };
-        write!(
-            formatter,
-            "{} failed during {}. {action}",
-            self.class, self.operation
-        )
-    }
-}
+pub(crate) use spaceterm_terminal::failure::{
+    FailureClass, FailureReason, Recoverability, TerminalFailure,
+};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) enum PaneTerminalState {
@@ -392,6 +234,26 @@ impl DiagnosticBundle {
 
     pub(crate) fn export(&self, path: &Path) -> std::io::Result<()> {
         std::fs::write(path, self.encode_from(0))
+    }
+}
+
+impl spaceterm_terminal::failure::SessionFailureFacts for TerminalSessionFailure {
+    fn terminal_failure(&self) -> TerminalFailure {
+        match self {
+            TerminalSessionFailure::Startup { stage, .. } => match stage {
+                TerminalSessionStartupStage::Pty
+                | TerminalSessionStartupStage::Reader
+                | TerminalSessionStartupStage::ReaderThread => {
+                    TerminalFailure::pty("session-startup")
+                }
+                TerminalSessionStartupStage::Emulator => {
+                    TerminalFailure::emulator("session-startup")
+                }
+            },
+            TerminalSessionFailure::Runtime(failure) => failure.clone(),
+            TerminalSessionFailure::PtyRead { .. } => TerminalFailure::pty("read-shell-output"),
+            TerminalSessionFailure::ShellWait { .. } => TerminalFailure::pty("reap-shell-process"),
+        }
     }
 }
 

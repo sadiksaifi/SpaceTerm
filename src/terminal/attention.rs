@@ -3,14 +3,7 @@ use std::time::{Duration, Instant};
 const BELL_RATE_LIMIT: Duration = Duration::from_millis(100);
 const DOCK_RATE_LIMIT: Duration = Duration::from_secs(1);
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum AttentionEvent {
-    Bell,
-    CommandFinished {
-        exit_status: Option<i32>,
-        duration: Duration,
-    },
-}
+pub(crate) use spaceterm_terminal::attention::AttentionEvent;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct AttentionFacts {
