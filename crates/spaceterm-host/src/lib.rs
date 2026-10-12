@@ -23,3 +23,9 @@ pub mod startup;
 
 #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 mod test_support;
+
+pub mod activation_journal;
+pub mod approved_installation;
+pub mod boot_credentials;
+pub mod installation;
+pub mod native_deployment;

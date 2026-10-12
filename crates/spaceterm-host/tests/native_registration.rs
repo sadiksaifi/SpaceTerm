@@ -389,3 +389,116 @@ mod startup_composition {
         assert_eq!(reader.read_fixed_registration(key()), Ok(expected));
     }
 }
+
+fn schema_two_bytes() -> [u8; 256] {
+    let mut b = [0; 256];
+    b[..8].copy_from_slice(b"STRGREC\0");
+    b[8..10].copy_from_slice(&2u16.to_le_bytes());
+    b[10] = 3;
+    b[11] = 2;
+    b[12..16].copy_from_slice(&501u32.to_le_bytes());
+    b[16..24].copy_from_slice(&7u64.to_le_bytes());
+    b[24..32].copy_from_slice(&11u64.to_le_bytes());
+    b[40..48].copy_from_slice(&1u64.to_le_bytes());
+    b[72..168].fill(4);
+    b[200..208].copy_from_slice(&11u64.to_le_bytes());
+    b[208..216].copy_from_slice(&1u64.to_le_bytes());
+    b[216..232].fill(5);
+    b[232..240].copy_from_slice(&2u64.to_le_bytes());
+    b
+}
+
+#[test]
+fn schema_two_decodes_exact_head_without_extending_schema_one() {
+    let key = AccountBuildKey {
+        account_uid: 501,
+        build_identity: BuildIdentity::Development,
+    };
+    let head =
+        spaceterm_host::native_registration::decode_registration_head(&schema_two_bytes(), key)
+            .unwrap();
+    assert_eq!(head.approved_installation.0.get(), 11);
+    assert_eq!(head.desired_state, DesiredServerState::Stopped);
+}
+
+#[test]
+fn schema_one_rejects_schema_two_and_trailing_bytes() {
+    let key = AccountBuildKey {
+        account_uid: 501,
+        build_identity: BuildIdentity::Development,
+    };
+    assert_eq!(
+        decode_registration_record(&schema_two_bytes(), key),
+        Err(StartupError::UnsafeRegistration)
+    );
+    let mut bytes = schema_two_bytes()[..48].to_vec();
+    bytes[8] = 1;
+    bytes[40..48].fill(0);
+    assert!(decode_registration_record(&bytes, key).is_ok());
+    bytes.push(0);
+    assert_eq!(
+        decode_registration_record(&bytes, key),
+        Err(StartupError::UnsafeRegistration)
+    );
+}
+
+#[test]
+fn schema_two_rejects_truncation_reserved_and_inconsistent_optionals() {
+    use spaceterm_host::native_registration::{decode_registration_head, encode_registration_head};
+    let key = AccountBuildKey {
+        account_uid: 501,
+        build_identity: BuildIdentity::Development,
+    };
+    let original = schema_two_bytes();
+    let head = decode_registration_head(&original, key).unwrap();
+    assert_eq!(encode_registration_head(&head).unwrap(), original);
+    for length in 0..256 {
+        assert!(decode_registration_head(&original[..length], key).is_err());
+    }
+    let mut extra = original.to_vec();
+    extra.push(0);
+    assert!(decode_registration_head(&extra, key).is_err());
+    for offset in (65..72).chain(240..256) {
+        let mut b = original;
+        b[offset] = 1;
+        assert!(decode_registration_head(&b, key).is_err());
+    }
+    for (offset, value) in [
+        (32, 12u64),
+        (168, 1),
+        (48, 1),
+        (200, 10),
+        (208, 0),
+        (232, 0),
+    ] {
+        let mut b = original;
+        b[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+        assert!(decode_registration_head(&b, key).is_err());
+    }
+    let mut b = original;
+    b[64] = 1;
+    assert!(decode_registration_head(&b, key).is_err());
+    b[48] = 1;
+    assert!(decode_registration_head(&b, key).is_ok()); // Journal validation is not byte decoding.
+}
+
+#[test]
+fn schema_two_identity_mismatch_requires_a_well_formed_record() {
+    use spaceterm_host::native_deployment::contracts::NativeFailure;
+    use spaceterm_host::native_registration::decode_registration_head;
+    let key = AccountBuildKey {
+        account_uid: 501,
+        build_identity: BuildIdentity::Development,
+    };
+    let mut b = schema_two_bytes();
+    b[12..16].copy_from_slice(&502u32.to_le_bytes());
+    assert_eq!(
+        decode_registration_head(&b, key),
+        Err(NativeFailure::IdentityMismatch)
+    );
+    b[250] = 1;
+    assert_eq!(
+        decode_registration_head(&b, key),
+        Err(NativeFailure::InvalidRecord)
+    );
+}

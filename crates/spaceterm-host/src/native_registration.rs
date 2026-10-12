@@ -798,3 +798,235 @@ mod tests {
         );
     }
 }
+
+/// A schema-2 startup barrier. The head remains the only approved selection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum StartupBarrier {
+    /// No active native transaction.
+    Open = 0,
+    /// An admitted transaction inhibits startup.
+    Inhibited = 1,
+    /// Validated repair is required before startup.
+    RecoveryRequired = 2,
+    /// Only the journal's committed approved selection may start.
+    ApprovedStartOnly = 3,
+}
+
+/// Comparison facts decoded from the exact 256-byte schema-2 head.
+///
+/// `server_id` holds canonical core identity bytes, not a second identity type.
+/// Neither construction nor decoding grants publication or credential authority.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RegistrationHeadV2 {
+    /// Exact account/build key.
+    pub key: AccountBuildKey,
+    /// Incremented at every head publication.
+    pub generation: NonZeroU64,
+    /// Durable lifecycle intent.
+    pub desired_state: DesiredServerState,
+    /// The sole runtime selected for startup.
+    pub approved_installation: InstallationId,
+    /// An authenticated candidate, never selected implicitly.
+    pub staged_installation: Option<InstallationId>,
+    /// Data generation selected atomically with the approved installation.
+    pub approved_data_generation: crate::native_deployment::contracts::DataGenerationId,
+    /// Active transaction identifier, if startup is restricted.
+    pub active_request: Option<crate::native_deployment::contracts::NativeRequestId>,
+    /// Startup restriction associated with a validated journal.
+    pub startup_barrier: StartupBarrier,
+    /// Digest of the immutable protected profile.
+    pub profile_sha256: [u8; 32],
+    /// Digest of the approved installation manifest.
+    pub approved_manifest_sha256: [u8; 32],
+    /// Digest of the exact approved descriptor bytes.
+    pub approved_descriptor_sha256: [u8; 32],
+    /// Digest of staged descriptor, present exactly when its ID is present.
+    pub staged_descriptor_sha256: Option<[u8; 32]>,
+    /// Protected installation allocation high-water mark.
+    pub installation_high_water: u64,
+    /// Protected data allocation high-water mark.
+    pub data_high_water: u64,
+    /// Canonical 16-byte core ServerId representation.
+    pub server_id: [u8; 16],
+    /// Advanced by explicit lifecycle requests.
+    pub lifecycle_generation: NonZeroU64,
+}
+
+/// Decodes schema 2 separately from the retained exact schema-1 reader.
+/// Identity mismatch is reported only after every structural invariant is checked.
+pub fn decode_registration_head(
+    bytes: &[u8],
+    key: AccountBuildKey,
+) -> Result<RegistrationHeadV2, crate::native_deployment::contracts::NativeFailure> {
+    use crate::native_deployment::contracts::{
+        DataGenerationId, NativeFailure, NativeRequestId, validate_key,
+    };
+    validate_key(key)?;
+    if bytes.len() == 48 && bytes.get(..10) == Some(b"STRGREC\0\x01\x00") {
+        return match decode_registration_record(bytes, key) {
+            Ok(_) => Err(NativeFailure::LegacyRegistrationRequiresMigration),
+            Err(StartupError::IdentityMismatch) => Err(NativeFailure::IdentityMismatch),
+            Err(_) => Err(NativeFailure::InvalidRecord),
+        };
+    }
+    let b: &[u8; 256] = bytes.try_into().map_err(|_| NativeFailure::InvalidRecord)?;
+    if &b[..8] != b"STRGREC\0" {
+        return Err(NativeFailure::InvalidRecord);
+    }
+    if u16::from_le_bytes([b[8], b[9]]) != 2 {
+        return Err(NativeFailure::UnsupportedSchema);
+    }
+    if b[65..72].iter().chain(b[240..].iter()).any(|v| *v != 0) {
+        return Err(NativeFailure::InvalidRecord);
+    }
+    let build_identity = match b[10] {
+        1 => BuildIdentity::Release,
+        2 => BuildIdentity::Preflight,
+        3 => BuildIdentity::Development,
+        _ => return Err(NativeFailure::InvalidRecord),
+    };
+    let desired_state = match b[11] {
+        1 => DesiredServerState::Running,
+        2 => DesiredServerState::Stopped,
+        _ => return Err(NativeFailure::InvalidRecord),
+    };
+    let stored_key = AccountBuildKey {
+        account_uid: u32::from_le_bytes(
+            b[12..16]
+                .try_into()
+                .map_err(|_| NativeFailure::InvalidRecord)?,
+        ),
+        build_identity,
+    };
+    let number = |start: usize| -> Result<u64, NativeFailure> {
+        Ok(u64::from_le_bytes(
+            b[start..start + 8]
+                .try_into()
+                .map_err(|_| NativeFailure::InvalidRecord)?,
+        ))
+    };
+    let nz = |start| NonZeroU64::new(number(start)?).ok_or(NativeFailure::InvalidRecord);
+    let request: [u8; 16] = b[48..64]
+        .try_into()
+        .map_err(|_| NativeFailure::InvalidRecord)?;
+    let digest = |start: usize| {
+        b[start..start + 32]
+            .try_into()
+            .map_err(|_| NativeFailure::InvalidRecord)
+    };
+    let staged_installation = NonZeroU64::new(number(32)?).map(InstallationId);
+    let staged_digest = digest(168)?;
+    let head = RegistrationHeadV2 {
+        key: stored_key,
+        generation: nz(16)?,
+        desired_state,
+        approved_installation: InstallationId(nz(24)?),
+        staged_installation,
+        approved_data_generation: DataGenerationId::new(number(40)?)?,
+        active_request: if request == [0; 16] {
+            None
+        } else {
+            Some(NativeRequestId::new(request)?)
+        },
+        startup_barrier: match b[64] {
+            0 => StartupBarrier::Open,
+            1 => StartupBarrier::Inhibited,
+            2 => StartupBarrier::RecoveryRequired,
+            3 => StartupBarrier::ApprovedStartOnly,
+            _ => return Err(NativeFailure::InvalidRecord),
+        },
+        profile_sha256: digest(72)?,
+        approved_manifest_sha256: digest(104)?,
+        approved_descriptor_sha256: digest(136)?,
+        staged_descriptor_sha256: if staged_digest == [0; 32] {
+            None
+        } else {
+            Some(staged_digest)
+        },
+        installation_high_water: number(200)?,
+        data_high_water: number(208)?,
+        server_id: b[216..232]
+            .try_into()
+            .map_err(|_| NativeFailure::InvalidRecord)?,
+        lifecycle_generation: nz(232)?,
+    };
+    validate_registration_head(&head)?;
+    if head.key != key {
+        return Err(NativeFailure::IdentityMismatch);
+    }
+    Ok(head)
+}
+
+/// Checks local head invariants. Matching journal and historical marks require retained authority.
+pub fn validate_registration_head(
+    head: &RegistrationHeadV2,
+) -> Result<(), crate::native_deployment::contracts::NativeFailure> {
+    use crate::native_deployment::contracts::{NativeFailure, nonzero, validate_key};
+    validate_key(head.key)?;
+    nonzero(&head.server_id)?;
+    for digest in [
+        &head.profile_sha256,
+        &head.approved_manifest_sha256,
+        &head.approved_descriptor_sha256,
+    ] {
+        nonzero(digest)?;
+    }
+    if head.staged_installation.is_some() != head.staged_descriptor_sha256.is_some()
+        || head.staged_installation == Some(head.approved_installation)
+        || (head.startup_barrier == StartupBarrier::Open) != head.active_request.is_none()
+        || head.installation_high_water < head.approved_installation.0.get()
+        || head
+            .staged_installation
+            .is_some_and(|id| id.0.get() > head.installation_high_water)
+        || head.data_high_water < head.approved_data_generation.get()
+    {
+        return Err(NativeFailure::InvalidRecord);
+    }
+    if let Some(digest) = head.staged_descriptor_sha256 {
+        nonzero(&digest)?;
+    }
+    Ok(())
+}
+
+/// Encodes exactly 256 bytes, without reinterpreting the legacy record's reserved fields.
+pub fn encode_registration_head(
+    head: &RegistrationHeadV2,
+) -> Result<[u8; 256], crate::native_deployment::contracts::NativeFailure> {
+    use crate::native_deployment::contracts::build_code;
+    validate_registration_head(head)?;
+    let mut b = [0; 256];
+    b[..8].copy_from_slice(b"STRGREC\0");
+    b[8..10].copy_from_slice(&2u16.to_le_bytes());
+    b[10] = build_code(head.key.build_identity);
+    b[11] = match head.desired_state {
+        DesiredServerState::Running => 1,
+        DesiredServerState::Stopped => 2,
+    };
+    b[12..16].copy_from_slice(&head.key.account_uid.to_le_bytes());
+    for (start, value) in [
+        (16, head.generation.get()),
+        (24, head.approved_installation.0.get()),
+        (32, head.staged_installation.map_or(0, |id| id.0.get())),
+        (40, head.approved_data_generation.get()),
+        (200, head.installation_high_water),
+        (208, head.data_high_water),
+        (232, head.lifecycle_generation.get()),
+    ] {
+        b[start..start + 8].copy_from_slice(&value.to_le_bytes());
+    }
+    if let Some(request) = head.active_request {
+        b[48..64].copy_from_slice(request.as_bytes());
+    }
+    b[64] = head.startup_barrier as u8;
+    b[72..104].copy_from_slice(&head.profile_sha256);
+    b[104..136].copy_from_slice(&head.approved_manifest_sha256);
+    b[136..168].copy_from_slice(&head.approved_descriptor_sha256);
+    if let Some(digest) = head.staged_descriptor_sha256 {
+        b[168..200].copy_from_slice(&digest);
+    }
+    b[216..232].copy_from_slice(&head.server_id);
+    Ok(b)
+}
+
+pub mod writer;
