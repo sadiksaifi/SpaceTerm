@@ -16,7 +16,9 @@ use zeroize::Zeroize;
 use super::unix::LockedMemory;
 use super::{ACK_INFO, CONFIRM_INFO, ConfirmationMacs, KEY_INFO, NativeFailure, PREFIX_BYTES};
 
-const STACK_BYTES: usize = 131_072;
+// The linked headless server has 256 KiB of static TLS. glibc reserves TLS
+// inside a caller-supplied pthread stack, in addition to the crypto frames.
+const STACK_BYTES: usize = 524_288;
 const REQUEST_BYTES: usize = 512;
 
 #[repr(C)]
@@ -90,7 +92,7 @@ fn calculate_using(
         return Err(NativeFailure::NativeUnavailable);
     }
     // Caller-provided stacks do not get an implicit guard allocation. The bounded
-    // fixed-size computation uses this entire supplied, locked 128 KiB mapping.
+    // fixed-size computation uses this entire supplied, locked 512 KiB mapping.
     let configured = unsafe {
         pthread_attr_setguardsize(&mut attributes, 0) == 0
             && pthread_attr_setstack(&mut attributes, stack_start as *mut _, STACK_BYTES) == 0

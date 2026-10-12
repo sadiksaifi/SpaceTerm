@@ -29,7 +29,7 @@ ROOT = Path(__file__).resolve().parents[4]
 CASES = (
     "drop-groups-gid-uid-in-order",
     "darwin-primary-group-only-passes",
-    "darwin-additional-group-rejects",
+    "darwin-ordinary-groups-pass",
     "darwin-wrong-primary-group-rejects",
     "privilege-drop-stops-at-first-failure",
     "missing-native-saved-id-proof-is-unavailable-not-success",
@@ -223,7 +223,7 @@ def run_task(
         remote_code, remote_data = driver.bounded_process(
             [str(binary), "--remote-credentials"], environment, timeout=5.0, native=True
         )
-        driver.CASES = ("remote-group-proof-stays-unavailable",)
+        driver.CASES = ("remote-kernel-privilege-observation",)
         try:
             remote_records = driver.validate_records(remote_data, remote_code)
         finally:

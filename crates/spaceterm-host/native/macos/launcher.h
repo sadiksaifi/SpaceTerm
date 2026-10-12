@@ -18,7 +18,7 @@ void st_native_post_exec_proof_release(st_native_post_exec_proof **owned_proof);
  * pending ownership even on failure. No test implementation ships in the host. */
 void st_native_pending_release(st_native_pending **owned_pending);
 
-/* Drops groups and all three UID/GID identities using the retained pending
+/* Sets ordinary account groups and drops all three UID/GID identities using the retained pending
  * account, then independently checks native saved IDs. Does not execute code or
  * authorize release. Production composition may call it only after retaining
  * the authenticated execution binding and before same-PID exec. */

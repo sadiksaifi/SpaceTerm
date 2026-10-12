@@ -12,7 +12,82 @@ pub mod linux;
 
 /// Noncloneable credential-release authority. Facts and wire recognition cannot construct it.
 pub struct CredentialReleasePermit {
-    _authority: crate::native_deployment::contracts::NativeAuthorization,
+    lease: Box<dyn RetainedCredentialRelease>,
+}
+
+/// Issued only by native-authority's retained serialized release fence. The
+/// lease must keep genuine authenticated publication and credential custody
+/// live, not reconstruct authority from the context or credential digest.
+pub(crate) trait RetainedCredentialRelease: Send + Sync {
+    fn context(&self) -> &crate::startup::PendingStartupContext;
+    fn credential_binding(&self) -> &BootCredentialBinding;
+    fn recheck(&self) -> Result<(), NativeFailure>;
+    #[cfg(target_os = "linux")]
+    fn linux_execution(&self) -> Result<linux::RetainedCredentialExecution<'_>, NativeFailure>;
+}
+
+impl CredentialReleasePermit {
+    #[cfg_attr(
+        not(all(target_os = "linux", feature = "test-support")),
+        expect(
+            dead_code,
+            reason = "native-authority A3 supplies the retained fence issuer"
+        )
+    )]
+    pub(crate) fn retain(lease: impl RetainedCredentialRelease + 'static) -> Self {
+        Self {
+            lease: Box::new(lease),
+        }
+    }
+
+    /// Exact context retained under the permit's serialized native release fence.
+    pub fn context(&self) -> &crate::startup::PendingStartupContext {
+        self.lease.context()
+    }
+
+    /// Fixed native credential binding retained by the issuer, not a caller selector.
+    pub fn credential_binding(&self) -> &BootCredentialBinding {
+        self.lease.credential_binding()
+    }
+
+    /// Revalidates current authority while the original retained fence remains held.
+    pub fn recheck(&self) -> Result<(), NativeFailure> {
+        if self.credential_binding().sha256()? != self.context().credential_binding_sha256 {
+            return Err(NativeFailure::CredentialPolicyRejected);
+        }
+        self.lease.recheck()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn linux_execution(
+        &self,
+    ) -> Result<linux::RetainedCredentialExecution<'_>, NativeFailure> {
+        self.recheck()?;
+        self.lease.linux_execution()
+    }
+}
+
+/// Native binding lookup over the permit's owned retained release lease. The
+/// coordinator selects this adapter only with the genuine native fence issuer.
+pub struct RetainedCredentialReleaseBindings;
+impl crate::native_deployment::ports::CredentialReleaseBindings
+    for RetainedCredentialReleaseBindings
+{
+    fn context<'a>(
+        &self,
+        permit: &'a CredentialReleasePermit,
+    ) -> Result<&'a crate::startup::PendingStartupContext, NativeFailure> {
+        permit.recheck()?;
+        Ok(permit.context())
+    }
+
+    fn credential_binding<'a>(
+        &self,
+        permit: &'a CredentialReleasePermit,
+    ) -> Result<&'a BootCredentialBinding, NativeFailure> {
+        permit.recheck()?;
+        Ok(permit.credential_binding())
+    }
 }
 
 /// Bounded native policy observation. It contains no credential selector or secret.
@@ -78,7 +153,9 @@ impl LockedSecret32 {
             }
             #[cfg(target_os = "linux")]
             // SAFETY: the mapping is page aligned; Linux accepts a rounded region length.
-            if unsafe { libc::madvise(ptr, 32, libc::MADV_DONTDUMP) } != 0 {
+            if unsafe { libc::madvise(ptr, 32, libc::MADV_DONTDUMP) } != 0
+                || unsafe { libc::madvise(ptr, 32, libc::MADV_WIPEONFORK) } != 0
+            {
                 return Err(NativeFailure::CredentialUnavailable);
             }
             Ok(secret)
@@ -88,6 +165,23 @@ impl LockedSecret32 {
             Err(NativeFailure::UnsupportedHost)
         }
     }
+    /// Writes exactly one credential into the already locked mapping. This is
+    /// memory ownership only; it never grants credential-release authority.
+    pub fn write(&mut self, bytes: &[u8]) -> Result<(), NativeFailure> {
+        if bytes.len() != 32 {
+            self.wipe();
+            return Err(NativeFailure::CredentialPolicyRejected);
+        }
+        // SAFETY: the owned mapping has exactly 32 writable secret bytes.
+        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.allocation.as_ptr(), 32) };
+        Ok(())
+    }
+
+    pub(crate) fn bytes(&self) -> &[u8; 32] {
+        // SAFETY: the live mapping is initialized and contains exactly 32 bytes.
+        unsafe { &*self.allocation.as_ptr().cast::<[u8; 32]>() }
+    }
+
     /// Wipes the exact secret region without releasing its ownership.
     pub fn wipe(&mut self) {
         // SAFETY: allocation is owned, mapped and writable for its full lifetime.

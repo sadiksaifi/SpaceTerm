@@ -665,3 +665,36 @@ fn successful_reaping_permanently_invalidates_exact_child() {
     );
     drop(child);
 }
+
+#[test]
+fn receiver_rejects_a_transcript_for_another_startup_before_readiness() {
+    let mut owned = Some(helper_child("0.03"));
+    let retriever = process_identity(owned.as_ref().unwrap().id()).unwrap();
+    let exact = ExactChild::take(&mut owned, retriever).unwrap();
+    let original = process_identity(std::process::id()).unwrap();
+    let mut ready = literal_ready();
+    for (offset, process) in [(272, original), (296, retriever)] {
+        ready[offset..offset + 8].copy_from_slice(&u64::from(process.pid).to_be_bytes());
+        ready[offset + 8..offset + 16].copy_from_slice(&process.start_seconds.to_be_bytes());
+        ready[offset + 16..offset + 20].copy_from_slice(&process.start_microseconds.to_be_bytes());
+    }
+    ready[280..288].copy_from_slice(&(original.start_seconds + 1).to_be_bytes());
+    let transcript = StartupTranscript::recognize_ready(&ready).unwrap();
+    let (rr, rw) = anonymous_pipe().unwrap();
+    let (dr, dw) = anonymous_pipe().unwrap();
+    let (cr, cw) = anonymous_pipe().unwrap();
+    let (ar, aw) = anonymous_pipe().unwrap();
+    drop((dw, aw));
+    let result = receive(
+        &transcript,
+        ReceiverPipes::take(rw, dr, cw, ar).unwrap(),
+        exact,
+        ExchangeDeadline::start(Duration::from_millis(300)).unwrap(),
+    )
+    .map(|_| ());
+    drop((rr, cr));
+    assert_eq!(result, Err(NativeFailure::ProcessIdentityMismatch));
+}
+
+#[path = "native_handoff/cleanup_exit.rs"]
+mod cleanup_exit;

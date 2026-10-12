@@ -11,6 +11,7 @@ sys.dont_write_bytecode = True
 
 import importlib.util
 import io
+import json
 import os
 import re
 import tempfile
@@ -50,15 +51,26 @@ def run(driver):
     }
     environment["CARGO_BUILD_JOBS"] = "3" if sys.platform == "darwin" else "4"
     environment["LC_ALL"] = "C"
-    for name, selection, minimum in (
-        ("native-crypto-and-reaping", ["--lib", "startup_exchange::"], 4),
-        ("exported-host-exchange", ["--test", "startup_exchange"], 22),
-    ):
+    suites = [
+        ("native-crypto-and-reaping", "spaceterm-host", ["--lib", "startup_exchange::"], 4),
+        ("exported-host-exchange", "spaceterm-host", ["--test", "startup_exchange"], 22),
+        ("native-startup-peers", "spaceterm-server", ["--test", "native_startup"], 5),
+    ]
+    if sys.platform == "linux":
+        suites.append(
+            (
+                "credential-recipe",
+                "spaceterm-host",
+                ["--lib", "linux_launcher::credential_tool::tests::"],
+                3,
+            )
+        )
+    for name, package, selection, minimum in suites:
         command = [
             "cargo",
             "test",
             "--package",
-            "spaceterm-host",
+            package,
             "--features",
             "native-tests",
             "--locked",
@@ -87,8 +99,210 @@ def run(driver):
             driver.emit(name, "red")
             return 1
         driver.emit(name, "pass")
+    if not guard_fixture(driver, environment) or not receiver_entry_fixture(driver, environment):
+        return 1
     driver.emit("driver", "exchange-green-native-authority-gated")
     return 0
+
+
+def guard_fixture(driver, environment):
+    """Build a standalone peer so native fork starts from a single thread."""
+    with tempfile.TemporaryDirectory(prefix="retriever-guard-") as directory:
+        build = Path(directory)
+        artifacts = build / "artifacts"
+        command = [
+            "/bin/sh",
+            "-c",
+            'umask 077; output=$1; shift; exec "$@" > "$output"',
+            "guard-library",
+            str(artifacts),
+            "cargo",
+            "build",
+            "--package",
+            "spaceterm-host",
+            "--features",
+            "native-tests,test-support" if sys.platform == "linux" else "native-tests",
+            "--locked",
+            "--lib",
+            "--message-format=json",
+        ]
+        code, _ = driver.bounded_process(command, environment, timeout=120.0)
+        if code != 0:
+            driver.emit("guard-build", "red")
+            return False
+        with artifacts.open("rb") as stream:
+            data = stream.read(2_097_153)
+        if len(data) > 2_097_152:
+            raise driver.TaskFailure("driver-invalid-output")
+        libraries = []
+        for line in data.splitlines():
+            try:
+                record = json.loads(line)
+            except (ValueError, UnicodeError):
+                raise driver.TaskFailure("driver-invalid-output") from None
+            if (
+                record.get("reason") == "compiler-artifact"
+                and record.get("target", {}).get("name") == "spaceterm_host"
+            ):
+                libraries.extend(
+                    Path(name) for name in record.get("filenames", []) if name.endswith(".rlib")
+                )
+        if len(libraries) != 1:
+            raise driver.TaskFailure("driver-invalid-output")
+        library = libraries[0]
+        binary = build / "guard-peer"
+        command = [
+            "rustc",
+            "--edition=2024",
+            "-Dwarnings",
+            str(ROOT / "crates/spaceterm-host/tests/native_handoff/guard_fixture.rs"),
+            "--extern",
+            f"spaceterm_host={library}",
+            "-L",
+            f"dependency={library.parent / 'deps'}",
+            "-o",
+            str(binary),
+        ]
+        code, _ = driver.bounded_process(command, environment, timeout=60.0)
+        if code != 0:
+            driver.emit("guard-build", "red")
+            return False
+        code, data = driver.bounded_process([str(binary)], environment, timeout=10.0, native=True)
+        original = driver.CASES
+        driver.CASES = (
+            "retriever-guard-exact-retirement",
+            "retriever-timeout-retires-fixed-worker",
+        )
+        try:
+            records = driver.validate_records(data, code)
+        finally:
+            driver.CASES = original
+        for record in records:
+            driver.emit(record["case"], record["result"])
+        if code != 0:
+            return False
+        return sys.platform != "linux" or credential_executor_fixture(
+            driver, environment, library, build
+        )
+
+
+def credential_executor_fixture(driver, environment, library, build):
+    """Use an explicitly injected release lease, not a second output recognizer."""
+    fixture = ROOT / "crates/spaceterm-host/tests/native_handoff"
+    tool, replacement = build / "synthetic-tool", build / "replacement-tool"
+    for binary, defines in ((tool, []), (replacement, ["-DFIXTURE_REPLACEMENT"])):
+        command = [
+            "cc",
+            "-std=c11",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-Wpedantic",
+            *defines,
+            str(fixture / "credential_tool.c"),
+            "-o",
+            str(binary),
+        ]
+        code, _ = driver.bounded_process(command, environment, timeout=60.0)
+        if code != 0:
+            driver.emit("credential-executor-build", "red")
+            return False
+    binary = build / "credential-executor-peer"
+    command = [
+        "rustc",
+        "--edition=2024",
+        "-Dwarnings",
+        str(fixture / "credential_executor_fixture.rs"),
+        "--extern",
+        f"spaceterm_host={library}",
+        "-L",
+        f"dependency={library.parent / 'deps'}",
+        "-o",
+        str(binary),
+    ]
+    code, _ = driver.bounded_process(command, environment, timeout=60.0)
+    if code != 0:
+        driver.emit("credential-executor-build", "red")
+        return False
+    scratch = build / "credential-cases"
+    scratch.mkdir(mode=0o700)
+    code, data = driver.bounded_process(
+        [str(binary), str(tool), str(replacement), str(scratch)],
+        environment,
+        timeout=15.0,
+        native=True,
+    )
+    original = driver.CASES
+    driver.CASES = (
+        "retained-tool-descriptor-exec",
+        "retained-tool-short-output",
+        "retained-tool-oversize-output",
+        "retained-tool-requires-eof",
+        "retained-tool-requires-zero-exit",
+        "retained-tool-timeout-reaped-and-wiped",
+        "retained-tool-empty-output",
+        "wrong-recipe-zero-tool-spawns",
+        "retired-generation-zero-tool-spawns",
+        "retired-generation-zero-delivery",
+    )
+    try:
+        records = driver.validate_records(data, code)
+    finally:
+        driver.CASES = original
+    for record in records:
+        driver.emit(record["case"], record["result"])
+    return code == 0
+
+
+def receiver_entry_fixture(driver, environment):
+    """Execute the actual native entry object without any privileged startup."""
+    with tempfile.TemporaryDirectory(prefix="receiver-entry-") as directory:
+        binary = Path(directory) / "entry-peer"
+        native = ROOT / "crates/spaceterm-host/native"
+        source = native / (
+            "macos/receiver_entry.c" if sys.platform == "darwin" else "linux/receiver/entry.c"
+        )
+        command = [
+            "cc",
+            "-std=c11",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-Wpedantic",
+            "-I",
+            str(native / "include"),
+        ]
+        if sys.platform == "darwin":
+            command.extend(["-arch", "arm64", "-mmacosx-version-min=26.0"])
+        command.extend(
+            [
+                str(source),
+                str(ROOT / "crates/spaceterm-host/tests/native_handoff/receiver_entry.c"),
+                "-o",
+                str(binary),
+            ]
+        )
+        code, _ = driver.bounded_process(command, environment, timeout=60.0)
+        if code != 0:
+            driver.emit("receiver-entry-build", "red")
+            return False
+        code, data = driver.bounded_process([str(binary)], environment, timeout=10.0, native=True)
+        cases = (
+            "entry-protects-all-descriptors",
+            "entry-wrong-direction-closes-all",
+            "entry-missing-descriptor-closes-all",
+        )
+        if sys.platform == "linux":
+            cases += ("entry-dumpable-one-rejects",)
+        original = driver.CASES
+        driver.CASES = cases
+        try:
+            records = driver.validate_records(data, code)
+        finally:
+            driver.CASES = original
+        for record in records:
+            driver.emit(record["case"], record["result"])
+        return code == 0
 
 
 def entry():

@@ -20,6 +20,57 @@ struct st_native_pending { st_native_pending_facts facts; };
 static st_native_pending pending;
 static unsigned release_calls, steps, failed_step;
 static bool release_unresolved, missing_saved, missing_groups, wrong_saved, wrong_start;
+struct st_native_execution_binding { st_native_pending_facts facts; };
+static bool execution_available;
+static bool execution_replaced;
+static unsigned execution_releases;
+static unsigned report_fault;
+
+st_native_result st_native_pending_copy_account_groups(
+    const st_native_pending *p, uint32_t *groups, uint32_t capacity, uint32_t *count) {
+    if (p != &pending || groups == NULL || count == NULL) return 9;
+    gid_t native[256];
+    int length = getgroups(256, native);
+    if (length < 1 || (uint32_t)length > capacity) return 30;
+    for (int i = 0; i < length; ++i) groups[i] = native[i];
+    *count = (uint32_t)length;
+    return 0;
+}
+st_native_result st_native_pending_retain_execution(
+    const st_native_pending *p, st_native_execution_binding **out) {
+    if (!execution_available) return 28;
+    if (p != &pending || out == NULL || *out != NULL) return 9;
+    *out = calloc(1, sizeof(**out));
+    if (*out == NULL) return 2;
+    (*out)->facts = p->facts;
+    return 0;
+}
+st_native_result st_native_execution_binding_recheck(
+    const st_native_execution_binding *binding, const st_native_pending_facts *facts) {
+    if (binding == NULL || facts == NULL) return 9;
+    return execution_replaced || memcmp(&binding->facts, facts, sizeof(*facts)) != 0 ? 28 : 0;
+}
+st_native_result st_native_execution_binding_copy_receiver_groups(
+    const st_native_execution_binding *binding, const st_native_pending_facts *facts,
+    uint32_t *groups, uint32_t capacity, uint32_t *count) {
+    st_native_result result = st_native_execution_binding_recheck(binding, facts);
+    if (result != 0) return result;
+    gid_t native[256];
+    int length = getgroups(256, native);
+    if (length < 1 || (uint32_t)length > capacity) return 30;
+    for (int i = 0; i < length; ++i) groups[i] = native[i];
+    *count = (uint32_t)length;
+    if (report_fault == 1) groups[0] = 0;
+    if (report_fault == 2) { groups[0] = facts->gid + 1; *count = 1; }
+    if (report_fault == 3) *count = 257;
+    return 0;
+}
+void st_native_execution_binding_release(st_native_execution_binding **owned) {
+    if (owned == NULL || *owned == NULL) return;
+    ++execution_releases;
+    free(*owned);
+    *owned = NULL;
+}
 static bool cleanup_unresolved;
 static bool forced_cleanup_uncertainty;
 static volatile sig_atomic_t cancellation_probe;
@@ -72,6 +123,7 @@ static st_native_result fake_observe(uint32_t pid, st_native_privilege_observati
     (void)pid;
     memset(out, 0, sizeof(*out));
     out->process = pending.facts.original_process;
+    out->kernel_process = pending.facts.original_process;
     out->real_uid = out->effective_uid = out->saved_uid = pending.facts.uid;
     out->real_gid = out->effective_gid = out->saved_gid = pending.facts.gid;
     out->saved_ids_observed = missing_saved ? 0 : 1;
@@ -83,7 +135,9 @@ static st_native_result fake_observe(uint32_t pid, st_native_privilege_observati
     return 0;
 }
 static int fake_groups(int count, const gid_t *groups) {
-    if (count != 0 || groups != NULL) return -1;
+    gid_t native[256];
+    int length = getgroups(256, native);
+    if (count != length || groups == NULL || memcmp(groups, native, (size_t)count * sizeof(gid_t)) != 0) return -1;
     return ++steps == failed_step ? -1 : 0;
 }
 static int fake_gid(gid_t gid) {
@@ -114,6 +168,8 @@ static bool reset(void) {
     f->retriever_process = (st_native_process_identity){ (uint32_t)getpid() + 1, 1, 1 };
     release_calls = steps = failed_step = 0;
     release_unresolved = missing_saved = missing_groups = wrong_saved = wrong_start = false;
+    execution_available = execution_replaced = false;
+    execution_releases = report_fault = 0;
     st_launcher_test_calls calls = {fake_groups, fake_gid, fake_uid, fake_observe};
     st_launcher_test_inject(&calls);
     return true;
@@ -127,10 +183,17 @@ static bool primary_group_only(void) {
     if (fake_observe(pending.facts.original_process.pid, &observed) != 0) return false;
     return st_native_validate_privileges(&pending.facts, &observed) == 0;
 }
-static bool unexpected_group(void) {
+static bool ordinary_groups(void) {
     st_native_privilege_observation observed;
     if (fake_observe(pending.facts.original_process.pid, &observed) != 0) return false;
     observed.groups[1] = pending.facts.gid + 1;
+    observed.group_count = 2;
+    return st_native_validate_privileges(&pending.facts, &observed) == 0;
+}
+static bool root_group(void) {
+    st_native_privilege_observation observed;
+    if (fake_observe(pending.facts.original_process.pid, &observed) != 0) return false;
+    observed.groups[1] = 0;
     observed.group_count = 2;
     return st_native_validate_privileges(&pending.facts, &observed) == 27;
 }
@@ -183,6 +246,71 @@ static bool no_wire_proof(void) {
     st_native_result result = st_native_observe_post_exec(&pending, &proof);
     st_native_post_exec_proof_release(&proof);
     return result != 0 && proof == NULL;
+}
+static bool retained_post_exec(void) {
+    execution_available = true;
+    st_native_post_exec_proof *proof = NULL;
+    st_native_result result = st_native_observe_post_exec(&pending, &proof);
+    bool issued = result == 0 && proof != NULL;
+    st_native_post_exec_proof_release(&proof);
+    return issued && proof == NULL && execution_releases == 1;
+}
+static bool privilege_snapshot_refusals(void) {
+    st_native_privilege_observation observed;
+    if (fake_observe(pending.facts.original_process.pid, &observed) != 0) return false;
+    ++observed.kernel_process.start_seconds;
+    if (st_native_validate_privileges(&pending.facts, &observed) != 26) return false;
+    observed.kernel_process = observed.process;
+    uint32_t *ids[] = {&observed.real_uid, &observed.effective_uid, &observed.saved_uid,
+        &observed.real_gid, &observed.effective_gid, &observed.saved_gid};
+    for (size_t i = 0; i < sizeof(ids) / sizeof(ids[0]); ++i) {
+        uint32_t original = *ids[i];
+        *ids[i] = 0;
+        st_native_result result = st_native_validate_privileges(&pending.facts, &observed);
+        *ids[i] = original;
+        if (result != 27) return false;
+    }
+    observed.group_count = 0;
+    return st_native_validate_privileges(&pending.facts, &observed) == 27;
+}
+static bool retained_proof_rechecks(void) {
+    execution_available = true;
+    st_native_post_exec_proof *proof = NULL;
+    if (st_native_observe_post_exec(&pending, &proof) != 0) return false;
+    bool valid = st_native_post_exec_proof_recheck(proof, &pending) == 0;
+    uint32_t report[256], count = 0;
+    gid_t groups[256];
+    int length = getgroups(256, groups);
+    valid = valid && length > 0 &&
+        st_native_post_exec_proof_copy_groups(proof, report, 256, &count) == 0 &&
+        count == (uint32_t)length;
+    for (uint32_t i = 0; valid && i < count; ++i) valid = report[i] == (uint32_t)groups[i];
+    ++pending.facts.lifecycle_generation;
+    valid = valid && st_native_post_exec_proof_recheck(proof, &pending) == 26;
+    --pending.facts.lifecycle_generation;
+    execution_replaced = true;
+    valid = valid && st_native_post_exec_proof_recheck(proof, &pending) == 28;
+    st_native_post_exec_proof_release(&proof);
+    return valid && proof == NULL && execution_releases == 1;
+}
+static bool inconsistent_receiver_report(void) {
+    execution_available = true;
+    for (report_fault = 1; report_fault <= 3; ++report_fault) {
+        st_native_post_exec_proof *proof = NULL;
+        st_native_result result = st_native_observe_post_exec(&pending, &proof);
+        bool valid = result == 27 && proof == NULL && execution_releases == report_fault;
+        st_native_post_exec_proof_release(&proof);
+        if (!valid) return false;
+    }
+    return true;
+}
+static bool native_post_exec_authority(void) {
+    return reset() && no_wire_proof() &&
+        reset() && retained_post_exec() &&
+        reset() && privilege_snapshot_refusals() &&
+        reset() && root_group() &&
+        reset() && retained_proof_rechecks() &&
+        reset() && inconsistent_receiver_report();
 }
 static bool invalid_abi(void) {
     pending.facts.abi_version = 1;
@@ -285,8 +413,11 @@ static bool remote_credentials(void) {
     int count = getgroups(256, groups);
     bool valid = pid > 0 && count > 0 &&
         st_native_observe_process((uint32_t)pid, &observed) == 0 &&
-        observed.groups_observed == 0 && observed.saved_ids_observed == 1 &&
-        observed.group_count == 0 && observed.real_uid == getuid() &&
+        observed.groups_observed == 1 && observed.saved_ids_observed == 1 &&
+        observed.group_count >= 1 && observed.group_count <= (uint32_t)count &&
+        observed.groups[0] == getgid() &&
+        memcmp(&observed.process, &observed.kernel_process, sizeof(observed.process)) == 0 &&
+        observed.real_uid == getuid() &&
         observed.effective_uid == geteuid() && observed.saved_uid == geteuid() &&
         observed.real_gid == getgid() && observed.effective_gid == getegid() &&
         observed.saved_gid == getegid();
@@ -299,7 +430,7 @@ typedef struct { const char *name; bool (*run)(void); } test_case;
 static const test_case cases[] = {
     {"drop-groups-gid-uid-in-order", drop_order},
     {"darwin-primary-group-only-passes", primary_group_only},
-    {"darwin-additional-group-rejects", unexpected_group},
+    {"darwin-ordinary-groups-pass", ordinary_groups},
     {"darwin-wrong-primary-group-rejects", wrong_primary_group},
     {"privilege-drop-stops-at-first-failure", drop_failure},
     {"missing-native-saved-id-proof-is-unavailable-not-success", saved_missing},
@@ -309,7 +440,7 @@ static const test_case cases[] = {
     {"stale-original-process-rejects-before-drop", stale_before_drop},
     {"pending-consumed-before-unavailable-launch", consumed_pending},
     {"unresolved-release-overrides-launch-failure", unresolved_pending},
-    {"native-proof-not-readiness-bits-authorizes-release", no_wire_proof},
+    {"native-proof-not-readiness-bits-authorizes-release", native_post_exec_authority},
     {"unknown-abi-rejects-before-effects", invalid_abi},
     {"tracked-launcher-exec-preserves-original-pid-identity", exec_identity},
     {"terminal-child-inherits-no-exchange-descriptor", descriptor_exec},
@@ -366,7 +497,7 @@ int main(int argc, char **argv) {
     if (argc == 2 && strcmp(argv[1], "--remote-credentials") == 0) {
         if (!install_cancellation()) return 2;
         bool valid = remote_credentials();
-        printf("{\"schema\":1,\"scope\":\"launcher-native-mechanics\",\"case\":\"remote-group-proof-stays-unavailable\",\"result\":\"%s\"}\n", valid ? "pass" : "red");
+        printf("{\"schema\":1,\"scope\":\"launcher-native-mechanics\",\"case\":\"remote-kernel-privilege-observation\",\"result\":\"%s\"}\n", valid ? "pass" : "red");
         return cleanup_unresolved ? 125 : valid ? 0 : 1;
     }
     if (argc != 1 || !install_cancellation()) return 2;
