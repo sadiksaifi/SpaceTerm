@@ -871,11 +871,22 @@ impl WorkspaceSidebar {
                     .chain(worktree_keys)
                     .collect();
             let measure_sidebar = sidebar.clone();
+            let grow_sidebar = sidebar.clone();
             let motion = self.workspace_reorder.motion(workspace_id, cx);
             // The slot keeps the group's laid-out place, so a drag measures every group at rest
-            // while the group itself slides.
+            // while the group itself slides. It also grows a new group in and closes the gap a
+            // removed one leaves.
+            let slot = motion.frame_slot(
+                gpui::Axis::Vertical,
+                div().w_full().flex_shrink_0(),
+                move |size, cx| {
+                    let _ = grow_sidebar.update(cx, |sidebar, _| {
+                        sidebar.workspace_reorder.measure(workspace_id, size);
+                    });
+                },
+            );
             rows = rows.child(
-                div().w_full().flex_shrink_0().child(
+                slot.child(
                     div()
                         .on_children_prepainted(move |bounds, _, cx| {
                             let _ = measure_sidebar.update(cx, |sidebar, _| {

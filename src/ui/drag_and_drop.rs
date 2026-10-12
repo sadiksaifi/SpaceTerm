@@ -9,9 +9,9 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    Along as _, AnyElement, App, Axis, Bounds, BoxShadow, Context, DispatchPhase, KeystrokeEvent,
-    MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point, ScrollHandle, Size, Subscription,
-    Window, WindowId, canvas, div, point, px,
+    Along as _, AnyElement, App, Axis, Bounds, BoxShadow, Context, DispatchPhase, Div,
+    KeystrokeEvent, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point, ScrollHandle, Size,
+    Subscription, Window, WindowId, canvas, div, point, px,
 };
 
 use super::appearance::gpui_color;
@@ -20,6 +20,8 @@ use super::appearance::gpui_color;
 const SHIFT_DURATION: Duration = Duration::from_millis(200);
 /// How long a released item takes to settle into its slot, and the others to follow it.
 const SETTLE_DURATION: Duration = Duration::from_millis(260);
+/// How long a new item takes to grow into the strip, and the gap a removed item leaves to close.
+const PRESENCE_DURATION: Duration = Duration::from_millis(300);
 /// How deep into either end of a strip the pointer starts scrolling it.
 const AUTOSCROLL_EDGE: f32 = 40.0;
 /// How fast a strip scrolls, in points per second, with the pointer at or past its end.
@@ -45,6 +47,14 @@ pub(crate) struct ReorderableStrip<Id> {
     slides: HashMap<Id, Slide>,
     /// The released item while it settles, which still shows its lift.
     settling: Option<Id>,
+    /// The strip's items at the last refresh, in presentation order, or `None` before the first.
+    known: Option<Vec<Id>>,
+    /// Each new item's natural size along the axis, once measured, as it grows into the strip.
+    entering: HashMap<Id, (Ease, Option<Pixels>)>,
+    /// The closing gap a removed item left before each item.
+    leading_gaps: HashMap<Id, Gap>,
+    /// The closing gap a removed last item left after the item that is now last.
+    trailing_gaps: HashMap<Id, Gap>,
 }
 
 /// The item a strip's drag carries, its session, and where a release would land it.
@@ -78,17 +88,57 @@ pub(crate) struct ItemMotion {
     pub(crate) lifted: bool,
     /// How much of its lift a released item still shows, from 1 at release to 0 at rest.
     pub(crate) lift: f32,
+    /// How far a new item has grown into the strip, from 0 toward 1, or `None` once it is in.
+    pub(crate) presence: Option<f32>,
+    /// The item's slot size along the strip while it grows in, or `None` at its natural size.
+    pub(crate) extent: Option<Pixels>,
+    /// The closing gap before the item's slot, along the strip.
+    pub(crate) leading_gap: Pixels,
+    /// The closing gap after the item's slot, along the strip.
+    pub(crate) trailing_gap: Pixels,
 }
 
 impl ItemMotion {
     /// How opaque the item is: faded where a release would land it while lifted, and nearly
     /// opaque while it settles.
     pub(crate) fn opacity(self) -> f32 {
-        if self.lifted {
-            PLACEHOLDER_OPACITY
-        } else {
-            lifted_opacity(self.lift)
-        }
+        let presence = self
+            .presence
+            .map_or(1.0, |presence| presence.clamp(0.0, 1.0));
+        presence
+            * if self.lifted {
+                PLACEHOLDER_OPACITY
+            } else {
+                lifted_opacity(self.lift)
+            }
+    }
+
+    /// Sizes `slot`, the element that holds the item's place in a strip along `axis`, while the
+    /// item grows in, and opens the closing gaps beside it. `measure` receives the item's natural
+    /// size while it grows, which needs `slot`'s only child to be the item.
+    pub(crate) fn frame_slot(
+        self,
+        axis: Axis,
+        slot: Div,
+        measure: impl Fn(Size<Pixels>, &mut App) + 'static,
+    ) -> Div {
+        let slot = match axis {
+            Axis::Horizontal => slot.ml(self.leading_gap).mr(self.trailing_gap),
+            Axis::Vertical => slot.mt(self.leading_gap).mb(self.trailing_gap),
+        };
+        let Some(extent) = self.extent else {
+            return slot;
+        };
+        let slot = match axis {
+            Axis::Horizontal => slot.w(extent),
+            Axis::Vertical => slot.h(extent),
+        };
+        slot.overflow_hidden()
+            .on_children_prepainted(move |bounds, _, cx| {
+                if let Some(item) = bounds.first() {
+                    measure(item.size, cx);
+                }
+            })
     }
 }
 
@@ -99,6 +149,72 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
             lift: None,
             slides: HashMap::new(),
             settling: None,
+            known: None,
+            entering: HashMap::new(),
+            leading_gaps: HashMap::new(),
+            trailing_gaps: HashMap::new(),
+        }
+    }
+
+    /// Records the natural size of the new item `id`, which its slot holds back while it grows.
+    pub(crate) fn measure(&mut self, id: Id, size: Size<Pixels>) {
+        let axis = self.axis;
+        if let Some((_, natural)) = self.entering.get_mut(&id) {
+            *natural = Some(size.along(axis));
+        }
+    }
+
+    /// Starts new items growing into the strip and closes the gaps removed items leave, when the
+    /// strip's `ids` differ from the last refresh. The first refresh only records them.
+    fn follow_changes(&mut self, items: &ScrollHandle, ids: &[Id], cx: &App) {
+        let Some(known) = self.known.replace(ids.to_vec()) else {
+            return;
+        };
+        if known == ids {
+            return;
+        }
+        let now = now(cx);
+        let motion = presence_motion(cx);
+        for id in ids.iter().filter(|id| !known.contains(id)) {
+            self.entering
+                .insert(*id, (Ease::new(PRESENCE_DURATION, now, motion), None));
+        }
+        let bounds = (0..known.len())
+            .map(|position| items.bounds_for_item(position))
+            .collect::<Option<Vec<_>>>()
+            .filter(|bounds| bounds.len() == known.len());
+        for (position, id) in known.iter().enumerate() {
+            if ids.contains(id) {
+                continue;
+            }
+            self.entering.remove(id);
+            let lead = self
+                .leading_gaps
+                .remove(id)
+                .map_or(px(0.0), |gap| gap.at(now));
+            let trail = self
+                .trailing_gaps
+                .remove(id)
+                .map_or(px(0.0), |gap| gap.at(now));
+            let Some(bounds) = bounds.as_ref() else {
+                continue;
+            };
+            let extent = bounds[position].size.along(self.axis) + lead + trail;
+            let next = known[position + 1..].iter().find(|id| ids.contains(id));
+            let previous = known[..position].iter().rev().find(|id| ids.contains(id));
+            let (gaps, carrier) = match (next, previous) {
+                (Some(next), _) => (&mut self.leading_gaps, *next),
+                (None, Some(previous)) => (&mut self.trailing_gaps, *previous),
+                (None, None) => continue,
+            };
+            let open = gaps.get(&carrier).map_or(px(0.0), |gap| gap.at(now));
+            gaps.insert(
+                carrier,
+                Gap {
+                    extent: open + extent,
+                    ease: Ease::new(PRESENCE_DURATION, now, motion),
+                },
+            );
         }
     }
 
@@ -150,10 +266,20 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
             self.lift = None;
             self.slides.clear();
         }
+        self.follow_changes(items, ids, cx);
         self.autoscroll(items, ids, window, cx);
         let now = now(cx);
         self.slides
             .retain(|_, slide| !slide.finished(now) || slide.to != Point::default());
+        self.entering.retain(|_, (ease, _)| !ease.finished(now));
+        self.leading_gaps.retain(|_, gap| !gap.ease.finished(now));
+        self.trailing_gaps.retain(|_, gap| !gap.ease.finished(now));
+        if !self.entering.is_empty()
+            || !self.leading_gaps.is_empty()
+            || !self.trailing_gaps.is_empty()
+        {
+            window.request_animation_frame();
+        }
         if self
             .settling
             .is_some_and(|id| !self.slides.contains_key(&id))
@@ -178,12 +304,27 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
     pub(crate) fn motion(&self, id: Id, cx: &App) -> ItemMotion {
         let now = now(cx);
         let slide = self.slides.get(&id);
+        let entering = self
+            .entering
+            .get(&id)
+            .filter(|(ease, _)| !ease.finished(now));
         ItemMotion {
             offset: slide.map_or_else(Point::default, |slide| slide.at(now)),
             lifted: self.dragged() == Some(id),
             lift: slide
                 .filter(|_| self.settling == Some(id))
                 .map_or(0.0, |slide| 1.0 - ease_out(slide.progress(now))),
+            presence: entering.map(|(ease, _)| ease.at(now)),
+            extent: entering
+                .map(|(ease, natural)| natural.map_or(px(0.0), |natural| natural * ease.at(now))),
+            leading_gap: self
+                .leading_gaps
+                .get(&id)
+                .map_or(px(0.0), |gap| gap.at(now)),
+            trailing_gap: self
+                .trailing_gaps
+                .get(&id)
+                .map_or(px(0.0), |gap| gap.at(now)),
         }
     }
 
@@ -475,6 +616,72 @@ fn spans(axis: Axis, bounds: &[Bounds<Pixels>]) -> Vec<(f32, f32)> {
         .collect()
 }
 
+/// Opts a test into the motion of items entering and leaving a strip. Other tests see every item
+/// at rest as soon as it is added or removed.
+#[cfg(test)]
+pub(crate) struct AnimatePresence;
+
+#[cfg(test)]
+impl gpui::Global for AnimatePresence {}
+
+fn presence_motion(cx: &App) -> spaceterm_ui::ControlMotion {
+    #[cfg(test)]
+    if !cx.has_global::<AnimatePresence>() {
+        return spaceterm_ui::ControlMotion::Reduced;
+    }
+    super::appearance_runtime::control_motion(cx)
+}
+
+/// A springy progress from 0 to 1 that starts at `since`.
+#[derive(Clone, Copy, Debug)]
+struct Ease {
+    since: Instant,
+    duration: Duration,
+}
+
+impl Ease {
+    /// An ease that starts at `now`, or ends at once when motion is reduced.
+    fn new(duration: Duration, now: Instant, motion: spaceterm_ui::ControlMotion) -> Self {
+        Self {
+            since: now,
+            duration: if motion == spaceterm_ui::ControlMotion::Reduced {
+                Duration::ZERO
+            } else {
+                duration
+            },
+        }
+    }
+
+    fn progress(&self, now: Instant) -> f32 {
+        if self.duration.is_zero() {
+            return 1.0;
+        }
+        (now.saturating_duration_since(self.since).as_secs_f32() / self.duration.as_secs_f32())
+            .min(1.0)
+    }
+
+    fn finished(&self, now: Instant) -> bool {
+        self.progress(now) >= 1.0
+    }
+
+    fn at(&self, now: Instant) -> f32 {
+        spring(self.progress(now))
+    }
+}
+
+/// The space a removed item left in the strip, closing from `extent` to nothing.
+#[derive(Clone, Copy, Debug)]
+struct Gap {
+    extent: Pixels,
+    ease: Ease,
+}
+
+impl Gap {
+    fn at(&self, now: Instant) -> Pixels {
+        self.extent * (1.0 - self.ease.at(now))
+    }
+}
+
 /// One item's displacement easing from `from` to `to`.
 #[derive(Clone, Copy, Debug)]
 struct Slide {
@@ -605,12 +812,13 @@ fn lifted_opacity(lift: f32) -> f32 {
     1.0 - (1.0 - LIFTED_OPACITY) * lift.clamp(0.0, 1.0)
 }
 
-/// Finishes every strip slide in progress, since test windows have no frame loop.
+/// Finishes every strip slide, growth, and closing gap in progress, since test windows have no
+/// frame loop.
 #[cfg(test)]
 pub(crate) fn finish_slides(cx: &mut gpui::VisualTestContext) {
     cx.run_until_parked();
     cx.executor()
-        .advance_clock(SHIFT_DURATION.max(SETTLE_DURATION));
+        .advance_clock(SHIFT_DURATION.max(SETTLE_DURATION).max(PRESENCE_DURATION));
     cx.update(|window, cx| window.simulate_next_frame(cx));
     cx.run_until_parked();
 }

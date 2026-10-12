@@ -7926,6 +7926,33 @@ fn dragging_a_workspace_row_should_open_a_gap_and_settle_there_on_release(cx: &m
 }
 
 #[gpui::test]
+fn a_closed_workspace_row_should_leave_a_gap_that_closes(cx: &mut TestAppContext) {
+    let (_manager, _records, cx) = workspace_manager(cx);
+    cx.simulate_keystrokes("cmd-n");
+    cx.run_until_parked();
+    cx.update(|_, cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
+    let first = cx.debug_bounds("workspace-row-1-inactive").unwrap();
+    let second = cx.debug_bounds("workspace-row-2-active").unwrap();
+
+    right_click("workspace-row-1-inactive", cx);
+    click("workspace-menu-row-close", cx);
+    click("modal-action-close-confirmation-confirm", cx);
+    let closing = cx
+        .debug_bounds("workspace-row-2-active")
+        .map(|row| row.origin);
+    crate::ui::drag_and_drop::finish_slides(cx);
+    let closed = cx
+        .debug_bounds("workspace-row-2-active")
+        .map(|row| row.origin);
+
+    assert_eq!(
+        (closing, closed),
+        (Some(second.origin), Some(first.origin)),
+        "the row after a closed one must start in its own place and close the gap"
+    );
+}
+
+#[gpui::test]
 fn escape_should_cancel_a_workspace_row_drag_and_return_every_row_to_its_place(
     cx: &mut TestAppContext,
 ) {

@@ -2189,46 +2189,60 @@ impl TabManager {
             let open_manager = manager.clone();
             let lifecycle_manager = manager.clone();
             let activate_manager = manager.clone();
+            let grow_manager = manager.clone();
+            // The slot grows a new Tab in and closes the gap a closed one leaves. As a flex row, it
+            // leaves the Tab its own width while it is narrower.
+            let slot = self.tab_reorder.motion(tab_id, cx).frame_slot(
+                gpui::Axis::Horizontal,
+                div().flex().flex_none().h_full(),
+                move |size, cx| {
+                    let _ = grow_manager.update(cx, |manager, _| {
+                        manager.tab_reorder.measure(tab_id, size);
+                    });
+                },
+            );
             items = items.child(
-                ContextMenu::new(
-                    ("tab-context-menu", tab_id.get()),
-                    accessibility_name,
-                    face,
-                    tab_menu_entries(
-                        active,
-                        index == 0,
-                        index == last_index,
-                        child_launch_available,
-                        desktop_presentation,
-                    ),
-                )
-                .size(MenuSize::Wide)
-                .fill_parent_height()
-                .preserve_trigger_cursor()
-                .keyboard_trigger(&tab_focus)
-                .target(target)
-                .debug_selector(format!("tab-context-menu-{}", tab_id.get()))
-                .on_open_request(move |_, _, cx| {
-                    open_manager
-                        .update(cx, |manager, cx| manager.request_tab_menu(tab_id, cx))
-                        .unwrap_or(false)
-                })
-                .on_lifecycle(move |event, cx| {
-                    let manager = lifecycle_manager.clone();
-                    let event = *event;
-                    // Menu lifecycle delivery can occur while its Window is borrowed.
-                    cx.defer(move |cx| {
-                        let _ = manager.update(cx, |manager, cx| {
-                            manager.handle_tab_menu_lifecycle(tab_id, event, cx);
+                slot.child(
+                    ContextMenu::new(
+                        ("tab-context-menu", tab_id.get()),
+                        accessibility_name,
+                        face,
+                        tab_menu_entries(
+                            active,
+                            index == 0,
+                            index == last_index,
+                            child_launch_available,
+                            desktop_presentation,
+                        ),
+                    )
+                    .size(MenuSize::Wide)
+                    .fill_parent_height()
+                    .preserve_trigger_cursor()
+                    .keyboard_trigger(&tab_focus)
+                    .target(target)
+                    .debug_selector(format!("tab-context-menu-{}", tab_id.get()))
+                    .on_open_request(move |_, _, cx| {
+                        open_manager
+                            .update(cx, |manager, cx| manager.request_tab_menu(tab_id, cx))
+                            .unwrap_or(false)
+                    })
+                    .on_lifecycle(move |event, cx| {
+                        let manager = lifecycle_manager.clone();
+                        let event = *event;
+                        // Menu lifecycle delivery can occur while its Window is borrowed.
+                        cx.defer(move |cx| {
+                            let _ = manager.update(cx, |manager, cx| {
+                                manager.handle_tab_menu_lifecycle(tab_id, event, cx);
+                            });
                         });
-                    });
-                })
-                .on_activate(move |activation, window, cx| {
-                    let command = *activation.action();
-                    let _ = activate_manager.update(cx, |manager, cx| {
-                        manager.perform_tab_menu_command(tab_id, command, window, cx);
-                    });
-                }),
+                    })
+                    .on_activate(move |activation, window, cx| {
+                        let command = *activation.action();
+                        let _ = activate_manager.update(cx, |manager, cx| {
+                            manager.perform_tab_menu_command(tab_id, command, window, cx);
+                        });
+                    }),
+                ),
             );
         }
         let release_manager = manager.clone();
@@ -5992,7 +6006,7 @@ mod tests {
         assert!(active.right() <= strip.right());
     }
 
-    use crate::ui::drag_and_drop::finish_slides;
+    use crate::ui::drag_and_drop::{AnimatePresence, finish_slides};
 
     fn tab_order(manager: &Entity<TabManager>, cx: &mut VisualTestContext) -> Vec<u64> {
         manager.read_with(cx, |manager, _| {
@@ -6053,6 +6067,44 @@ mod tests {
         cx.run_until_parked();
 
         assert_eq!(tab_order(&manager, cx), vec![2, 3, 1]);
+    }
+
+    #[gpui::test]
+    fn a_new_tab_should_grow_in_and_a_closed_one_should_close_its_gap(cx: &mut TestAppContext) {
+        let (_manager, _records, cx) = tab_manager(cx);
+        cx.update(|_, cx| cx.set_global(AnimatePresence));
+        let create = |cx: &mut VisualTestContext| {
+            cx.debug_bounds("create-tab-area")
+                .expect("the Create Tab control was not rendered")
+                .left()
+        };
+        let width = cx.debug_bounds("tab-item-1-active").unwrap().size.width;
+        let before = create(cx);
+
+        click("create-tab-button", cx);
+        let entering = create(cx);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(30));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        let growing = create(cx);
+        finish_slides(cx);
+        let entered = create(cx);
+        click("tab-close-button-2", cx);
+        let closing = create(cx);
+        finish_slides(cx);
+        let closed = create(cx);
+
+        assert_eq!(
+            (entering, entered, closing, closed),
+            (before, before + width, before + width, before),
+            "a new Tab must grow from nothing, and a closed Tab's place must close from its full \
+             width"
+        );
+        assert!(
+            before < growing && growing < before + width,
+            "a new Tab must be part way in shortly after it opens, got {growing:?}"
+        );
     }
 
     #[gpui::test]
