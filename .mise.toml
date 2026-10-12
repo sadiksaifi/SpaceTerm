@@ -510,3 +510,11 @@ run = "cargo check --package spaceterm-core --package spaceterm-client --package
 [tasks."lint:server:contracts"]
 description = "Lint portable domain contracts and headless composition skeletons"
 run = "cargo clippy --package spaceterm-core --package spaceterm-client --package spaceterm-server --all-targets --locked --no-deps -- -D warnings"
+
+[tasks."test:protocol"]
+description = "Run both SpaceTerm Protocol major profiles and authentication conformance"
+run = "cargo test --package spaceterm-protocol --locked"
+
+[tasks."protocol:check-schema"]
+description = "Generate and check both protocol profiles with pinned Rust schema compilers"
+run = "cargo check --package spaceterm-protocol --locked"

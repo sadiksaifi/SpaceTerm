@@ -1,0 +1,293 @@
+syntax = "proto3";
+package spaceterm.common;
+
+// UUID-shaped opaque handles, never native authority. All identities are 16 bytes.
+message Identity { bytes value = 1; }
+message Entity { Identity server = 1; uint64 local_id = 2; }
+message Session { Entity pane = 1; uint64 server_epoch = 2; uint64 generation = 3; }
+message EffectFence {
+  Session session = 1;
+  Identity client = 2;
+  uint64 control_generation = 3;
+  uint64 connection_generation = 4;
+  uint64 context_generation = 5;
+}
+message Limits {
+  uint32 frame_bytes = 1;
+  uint32 management_bytes = 2;
+  uint32 semantic_rows = 3;
+  uint32 semantic_cells = 4;
+  uint32 resource_chunk_bytes = 5;
+  uint32 concurrent_transfers = 6;
+  uint32 paste_bytes = 7;
+  uint32 clipboard_bytes = 8;
+}
+enum Purpose { PURPOSE_UNSPECIFIED = 0; ORDINARY = 1; REVOCATION_STATUS = 2; }
+enum Direction { DIRECTION_UNSPECIFIED = 0; CLIENT_TO_SERVER = 1; SERVER_TO_CLIENT = 2; }
+message ClientHello {
+  Identity expected_server = 1;
+  Identity device = 2;
+  Identity pairing = 3;
+  Identity client = 4;
+  bytes nonce = 5;
+  repeated uint32 majors = 6;
+  repeated uint32 capabilities = 7;
+  Limits limits = 8;
+  Purpose purpose = 9;
+}
+message ServerHello {
+  Identity server = 1;
+  bytes nonce = 2;
+  uint64 epoch = 3;
+  bytes connection_nonce = 4;
+  repeated uint32 majors = 5;
+  uint32 selected_major = 6;
+  repeated uint32 capabilities = 7;
+  Limits accepted_limits = 8;
+  Purpose purpose = 9;
+}
+// All proofs use Ed25519. The signed input concatenates a u64 big-endian byte
+// length and the exact bytes for each component, in this order:
+//   "SpaceTerm Protocol Ed25519 v1", domain label, domain-specific parts.
+// Domains and parts:
+//   "server-hello": received ClientHello bytes, ServerHello body bytes;
+//   "device-proof": original ClientHello bytes, received ServerHello body bytes;
+//   "ready": ClientHello bytes, ServerHello body bytes, Ready body bytes;
+//   "authenticated-envelope": AuthenticatedEnvelope body bytes.
+// The device proof is sent as 64 raw signature bytes. Other proofs use Signed.
+// The connection binding is SHA-256 of the same length-delimited encoding with
+// domain "connection-binding" and parts ClientHello bytes, ServerHello body bytes.
+// Majors, capabilities, accepted limits, purpose, epoch and both fresh nonces are
+// therefore bound without decoding and reencoding any received transcript bytes.
+message Signed { bytes body = 1; bytes signature = 2; }
+message Ready {
+  bytes transcript = 1;
+  bytes device_proof = 2;
+  Identity pairing = 3;
+  Identity client = 4;
+  Purpose purpose = 5;
+}
+message AuthenticatedEnvelope {
+  Direction direction = 1;
+  uint32 major = 2;
+  bytes binding = 3;
+  uint64 sequence = 4;
+  bytes payload = 5;
+  Purpose purpose = 6;
+}
+// Frozen physical key codes, independent of native scan codes and future VT enum additions.
+enum PhysicalKey {
+  KEY_UNIDENTIFIED = 0;
+  KEY_BACKQUOTE = 1;
+  KEY_BACKSLASH = 2;
+  KEY_BRACKET_LEFT = 3;
+  KEY_BRACKET_RIGHT = 4;
+  KEY_COMMA = 5;
+  KEY_DIGIT0 = 6;
+  KEY_DIGIT1 = 7;
+  KEY_DIGIT2 = 8;
+  KEY_DIGIT3 = 9;
+  KEY_DIGIT4 = 10;
+  KEY_DIGIT5 = 11;
+  KEY_DIGIT6 = 12;
+  KEY_DIGIT7 = 13;
+  KEY_DIGIT8 = 14;
+  KEY_DIGIT9 = 15;
+  KEY_EQUAL = 16;
+  KEY_INTL_BACKSLASH = 17;
+  KEY_INTL_RO = 18;
+  KEY_INTL_YEN = 19;
+  KEY_A = 20;
+  KEY_B = 21;
+  KEY_C = 22;
+  KEY_D = 23;
+  KEY_E = 24;
+  KEY_F = 25;
+  KEY_G = 26;
+  KEY_H = 27;
+  KEY_I = 28;
+  KEY_J = 29;
+  KEY_K = 30;
+  KEY_L = 31;
+  KEY_M = 32;
+  KEY_N = 33;
+  KEY_O = 34;
+  KEY_P = 35;
+  KEY_Q = 36;
+  KEY_R = 37;
+  KEY_S = 38;
+  KEY_T = 39;
+  KEY_U = 40;
+  KEY_V = 41;
+  KEY_W = 42;
+  KEY_X = 43;
+  KEY_Y = 44;
+  KEY_Z = 45;
+  KEY_MINUS = 46;
+  KEY_PERIOD = 47;
+  KEY_QUOTE = 48;
+  KEY_SEMICOLON = 49;
+  KEY_SLASH = 50;
+  KEY_ALT_LEFT = 51;
+  KEY_ALT_RIGHT = 52;
+  KEY_BACKSPACE = 53;
+  KEY_CAPS_LOCK = 54;
+  KEY_CONTEXT_MENU = 55;
+  KEY_CONTROL_LEFT = 56;
+  KEY_CONTROL_RIGHT = 57;
+  KEY_ENTER = 58;
+  KEY_META_LEFT = 59;
+  KEY_META_RIGHT = 60;
+  KEY_SHIFT_LEFT = 61;
+  KEY_SHIFT_RIGHT = 62;
+  KEY_SPACE = 63;
+  KEY_TAB = 64;
+  KEY_CONVERT = 65;
+  KEY_KANA_MODE = 66;
+  KEY_NON_CONVERT = 67;
+  KEY_DELETE = 68;
+  KEY_END = 69;
+  KEY_HELP = 70;
+  KEY_HOME = 71;
+  KEY_INSERT = 72;
+  KEY_PAGE_DOWN = 73;
+  KEY_PAGE_UP = 74;
+  KEY_ARROW_DOWN = 75;
+  KEY_ARROW_LEFT = 76;
+  KEY_ARROW_RIGHT = 77;
+  KEY_ARROW_UP = 78;
+  KEY_NUM_LOCK = 79;
+  KEY_NUMPAD0 = 80;
+  KEY_NUMPAD1 = 81;
+  KEY_NUMPAD2 = 82;
+  KEY_NUMPAD3 = 83;
+  KEY_NUMPAD4 = 84;
+  KEY_NUMPAD5 = 85;
+  KEY_NUMPAD6 = 86;
+  KEY_NUMPAD7 = 87;
+  KEY_NUMPAD8 = 88;
+  KEY_NUMPAD9 = 89;
+  KEY_NUMPAD_ADD = 90;
+  KEY_NUMPAD_BACKSPACE = 91;
+  KEY_NUMPAD_CLEAR = 92;
+  KEY_NUMPAD_CLEAR_ENTRY = 93;
+  KEY_NUMPAD_COMMA = 94;
+  KEY_NUMPAD_DECIMAL = 95;
+  KEY_NUMPAD_DIVIDE = 96;
+  KEY_NUMPAD_ENTER = 97;
+  KEY_NUMPAD_EQUAL = 98;
+  KEY_NUMPAD_MEMORY_ADD = 99;
+  KEY_NUMPAD_MEMORY_CLEAR = 100;
+  KEY_NUMPAD_MEMORY_RECALL = 101;
+  KEY_NUMPAD_MEMORY_STORE = 102;
+  KEY_NUMPAD_MEMORY_SUBTRACT = 103;
+  KEY_NUMPAD_MULTIPLY = 104;
+  KEY_NUMPAD_PAREN_LEFT = 105;
+  KEY_NUMPAD_PAREN_RIGHT = 106;
+  KEY_NUMPAD_SUBTRACT = 107;
+  KEY_NUMPAD_SEPARATOR = 108;
+  KEY_NUMPAD_UP = 109;
+  KEY_NUMPAD_DOWN = 110;
+  KEY_NUMPAD_RIGHT = 111;
+  KEY_NUMPAD_LEFT = 112;
+  KEY_NUMPAD_BEGIN = 113;
+  KEY_NUMPAD_HOME = 114;
+  KEY_NUMPAD_END = 115;
+  KEY_NUMPAD_INSERT = 116;
+  KEY_NUMPAD_DELETE = 117;
+  KEY_NUMPAD_PAGE_UP = 118;
+  KEY_NUMPAD_PAGE_DOWN = 119;
+  KEY_ESCAPE = 120;
+  KEY_F1 = 121;
+  KEY_F2 = 122;
+  KEY_F3 = 123;
+  KEY_F4 = 124;
+  KEY_F5 = 125;
+  KEY_F6 = 126;
+  KEY_F7 = 127;
+  KEY_F8 = 128;
+  KEY_F9 = 129;
+  KEY_F10 = 130;
+  KEY_F11 = 131;
+  KEY_F12 = 132;
+  KEY_F13 = 133;
+  KEY_F14 = 134;
+  KEY_F15 = 135;
+  KEY_F16 = 136;
+  KEY_F17 = 137;
+  KEY_F18 = 138;
+  KEY_F19 = 139;
+  KEY_F20 = 140;
+  KEY_F21 = 141;
+  KEY_F22 = 142;
+  KEY_F23 = 143;
+  KEY_F24 = 144;
+  KEY_F25 = 145;
+  KEY_FN = 146;
+  KEY_FN_LOCK = 147;
+  KEY_PRINT_SCREEN = 148;
+  KEY_SCROLL_LOCK = 149;
+  KEY_PAUSE = 150;
+  KEY_BROWSER_BACK = 151;
+  KEY_BROWSER_FAVORITES = 152;
+  KEY_BROWSER_FORWARD = 153;
+  KEY_BROWSER_HOME = 154;
+  KEY_BROWSER_REFRESH = 155;
+  KEY_BROWSER_SEARCH = 156;
+  KEY_BROWSER_STOP = 157;
+  KEY_EJECT = 158;
+  KEY_LAUNCH_APP1 = 159;
+  KEY_LAUNCH_APP2 = 160;
+  KEY_LAUNCH_MAIL = 161;
+  KEY_MEDIA_PLAY_PAUSE = 162;
+  KEY_MEDIA_SELECT = 163;
+  KEY_MEDIA_STOP = 164;
+  KEY_MEDIA_TRACK_NEXT = 165;
+  KEY_MEDIA_TRACK_PREVIOUS = 166;
+  KEY_POWER = 167;
+  KEY_SLEEP = 168;
+  KEY_AUDIO_VOLUME_DOWN = 169;
+  KEY_AUDIO_VOLUME_MUTE = 170;
+  KEY_AUDIO_VOLUME_UP = 171;
+  KEY_WAKE_UP = 172;
+  KEY_COPY = 173;
+  KEY_CUT = 174;
+  KEY_PASTE = 175;
+}
+enum KeyAction { KEY_ACTION_UNSPECIFIED = 0; KEY_PRESS = 1; KEY_REPEAT = 2; KEY_RELEASE = 3; }
+
+message OperationId {
+  Identity server = 1;
+  Identity pairing = 2;
+  Identity client = 3;
+  Identity stream = 4;
+  uint64 sequence = 5;
+}
+enum FailureClass {
+  FAILURE_UNSPECIFIED = 0;
+  INVALID = 1; STALE = 2; DENIED = 3; NOT_FOUND = 4; BUSY = 5;
+  LIMIT = 6; UNAVAILABLE = 7; CONFLICT = 8; UNCERTAIN_DURABILITY = 9;
+  RETIRED = 10; RESYNC_REQUIRED = 11;
+}
+// Error metadata is enum/counter data only. No native error or peer-provided text.
+message Failure { FailureClass classification = 1; uint32 retry_after_ms = 2; }
+message RevocationRequest { OperationId operation = 1; Identity target_pairing = 2; }
+message RevocationStatus { OperationId operation = 1; Identity target_pairing = 2; }
+enum RevocationState { REVOCATION_UNSPECIFIED = 0; PENDING = 1; REVOKED = 2; }
+// The envelope signature is the receipt's signature. Its exact signed bytes may be retained.
+message RevocationReceipt {
+  OperationId operation = 1;
+  Identity target_pairing = 2;
+  RevocationState state = 3;
+  uint64 store_revision = 4;
+}
+// This profile is usable with retained revoked-device verification material.
+// It has no terminal, management, enrollment, startup, or ordinary status operation.
+message RestrictedMessage {
+  oneof kind {
+    RevocationRequest revoke = 1;
+    RevocationStatus status = 2;
+    RevocationReceipt receipt = 3;
+    Failure failure = 4;
+  }
+}
