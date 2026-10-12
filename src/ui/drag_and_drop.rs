@@ -360,11 +360,39 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
         }
         let motion = presence_motion(cx);
         let reshape = !self.overflowing;
-        for id in ids.iter().skip(from.slots.len()).filter(|_| reshape) {
-            let natural = self.laid_out.get(id).map(|(_, size)| *size);
-            self.entering
-                .entry(*id)
-                .or_insert_with(|| (Ease::new(PRESENCE_DURATION, now, motion), natural));
+        // The items the other strip lacked grow in from where its end stood, which a gap still
+        // closing in it can hold past its last item. Growth left over from an earlier arrival
+        // starts again from there.
+        let lacked = ids
+            .iter()
+            .skip(from.slots.len())
+            .filter(|_| reshape)
+            .map(|id| {
+                let natural = match self.entering.get(id) {
+                    Some((_, natural)) => *natural,
+                    None => self.laid_out.get(id).map(|(_, size)| *size),
+                };
+                (*id, natural)
+            })
+            .collect::<Vec<_>>();
+        let past_last = from.slots.last().map_or(px(0.0), |(start, size)| {
+            (from.end - *start - *size).max(px(0.0))
+        });
+        let natural = lacked
+            .iter()
+            .map(|(_, natural)| *natural)
+            .sum::<Option<Pixels>>();
+        let grown = natural
+            .filter(|natural| *natural > px(0.0))
+            .map_or(0.0, |natural| (past_last / natural).min(1.0));
+        for (id, natural) in lacked {
+            self.entering.insert(
+                id,
+                (
+                    Ease::reached(grown, PRESENCE_DURATION, now, motion),
+                    natural,
+                ),
+            );
         }
         let carrier = ids
             .last()
@@ -1261,6 +1289,21 @@ struct Ease {
 }
 
 impl Ease {
+    /// An ease that stands `eased` of the way along at `now`.
+    fn reached(
+        eased: f32,
+        duration: Duration,
+        now: Instant,
+        motion: spaceterm_ui::ControlMotion,
+    ) -> Self {
+        let ease = Self::new(duration, now, motion);
+        let elapsed = ease.duration.mul_f32(undecay(eased));
+        Self {
+            since: now.checked_sub(elapsed).unwrap_or(now),
+            ..ease
+        }
+    }
+
     /// An ease that starts at `now`, or ends at once when motion is reduced.
     fn new(duration: Duration, now: Instant, motion: spaceterm_ui::ControlMotion) -> Self {
         Self {
@@ -1365,10 +1408,17 @@ impl Slide {
 
 /// Closes the same share of the remaining distance in each moment, so it starts at full speed
 /// and slows toward the end, without overshoot.
+/// How many time constants the motion runs, by when less than 1% of the distance remains.
+const TIME_CONSTANTS: f32 = 6.2;
+
 fn decay(progress: f32) -> f32 {
-    /// How many time constants the motion runs, by when less than 1% of the distance remains.
-    const TIME_CONSTANTS: f32 = 6.2;
     (1.0 - (-TIME_CONSTANTS * progress).exp()) / (1.0 - (-TIME_CONSTANTS).exp())
+}
+
+/// The progress at which [`decay`] reaches `eased`, from 0 to 1.
+fn undecay(eased: f32) -> f32 {
+    let eased = eased.clamp(0.0, 1.0);
+    (-(1.0 - eased * (1.0 - (-TIME_CONSTANTS).exp())).ln() / TIME_CONSTANTS).clamp(0.0, 1.0)
 }
 
 fn now(cx: &App) -> Instant {
@@ -1854,6 +1904,14 @@ mod tests {
                 -AUTOSCROLL_SPEED,
             ]
         );
+    }
+
+    #[test]
+    fn undecay_should_find_the_progress_that_decay_reaches() {
+        assert_eq!((undecay(0.0), undecay(1.0)), (0.0, 1.0));
+        for progress in [0.1, 0.25, 0.5, 0.9] {
+            assert!((undecay(decay(progress)) - progress).abs() < 1e-4);
+        }
     }
 
     #[test]
