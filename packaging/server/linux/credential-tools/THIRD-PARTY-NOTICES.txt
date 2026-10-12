@@ -1,0 +1,15 @@
+The server credential tool uses systemd v260.5.
+Copyright the systemd authors. See the corresponding source for individual notices.
+Most systemd code is licensed under LGPL-2.1-or-later.
+Individual source files identify exceptions. UPSTREAM-LICENSE-NOTES.txt describes them.
+
+Every released package must include the exact systemd source archive, all patches,
+complete build options, compiler and build-image identities, and build material.
+Each bundled dependency must include its own exact source archive and license.
+The private shared-library arrangement must permit local replacement and rebuilding
+of LGPL libraries. Native credential delivery to modified code still requires an
+explicit authenticated installation. It does not grant automatic approval to a
+modified library or remove the local-use rights of the license.
+
+This source pin has no completed credential-tool build or Jammy runtime receipt.
+No licensed binary closure is shipped by this configuration yet.

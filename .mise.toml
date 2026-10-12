@@ -530,6 +530,7 @@ run = "cargo test --package spaceterm-protocol --locked"
 [tasks."protocol:check-schema"]
 description = "Generate and check both protocol profiles with pinned Rust schema compilers"
 run = "cargo check --package spaceterm-protocol --locked"
+
 [tasks."test:server:native:installation"]
 description = "Test bounded native registration, installation and journal policy without privilege"
 run = "python -I mise-tasks/server/native/installation_tests.py"
@@ -537,3 +538,15 @@ run = "python -I mise-tasks/server/native/installation_tests.py"
 [tasks."test:server:native:linux-credentials"]
 description = "Test bounded Linux credential output without credential-tool execution"
 run = "python -I mise-tasks/server/native/installation_tests.py --linux-credentials"
+
+[tasks."check:server:distribution"]
+description = "Check headless release metadata and archive authentication"
+run = "cargo check -p spaceterm-distribution --all-targets --locked"
+
+[tasks."test:server:distribution"]
+description = "Test frozen client feeds and separate server artifacts"
+run = "cargo test -p spaceterm-distribution --all-targets --locked"
+
+[tasks."lint:server:distribution"]
+description = "Lint headless artifact verification"
+run = "cargo clippy -p spaceterm-distribution --all-targets --locked --no-deps -- -D warnings"
