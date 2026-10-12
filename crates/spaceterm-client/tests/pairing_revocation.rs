@@ -1,7 +1,7 @@
 use ring::signature::{Ed25519KeyPair, KeyPair};
 use sha2::{Digest, Sha256};
 use spaceterm_client::{
-    journal::{ClientJournal, JournalCommitDisposition, JournalReceipt},
+    journal::{PairingClientJournal, PairingCommitDisposition, PairingJournalReceipt},
     pairing::{credentials::*, enrollment::*, journal::*, revocation::*},
 };
 use spaceterm_core::{
@@ -246,7 +246,7 @@ struct Journal {
     fence: PairingAuthorityFence,
     state: Mutex<PairingJournalSnapshot>,
     changes: Mutex<Vec<PairingJournalChange>>,
-    fail: Mutex<Option<JournalCommitDisposition>>,
+    fail: Mutex<Option<PairingCommitDisposition>>,
 }
 impl Journal {
     fn new(saved: Vec<SavedPairing>) -> Arc<Self> {
@@ -273,7 +273,7 @@ impl Journal {
         value
     }
 }
-impl ClientJournal for Journal {
+impl PairingClientJournal for Journal {
     fn pairing_authority_fence(&self) -> &PairingAuthorityFence {
         &self.fence
     }
@@ -293,7 +293,7 @@ impl ClientJournal for Journal {
     fn commit_pairing<'a>(
         &'a self,
         tx: &'a PairingJournalTransaction,
-    ) -> PairingFuture<'a, JournalCommitDisposition> {
+    ) -> PairingFuture<'a, PairingCommitDisposition> {
         Box::pin(async move {
             if let Some(failure) = self.fail.lock().unwrap().take() {
                 return failure;
@@ -394,7 +394,7 @@ impl ClientJournal for Journal {
             }
             self.changes.lock().unwrap().push(tx.change.clone());
             state.revision += 1;
-            JournalCommitDisposition::Durable(JournalReceipt {
+            PairingCommitDisposition::Durable(PairingJournalReceipt {
                 revision: state.revision,
             })
         })
@@ -750,8 +750,8 @@ async fn offline_self_unpair_removes_ordinary_access_after_durable_recording() {
 #[tokio::test]
 async fn local_indeterminate_removal_is_not_reported_as_durable_success() {
     for failure in [
-        JournalCommitDisposition::Indeterminate,
-        JournalCommitDisposition::NotApplied(PairingFailure::StorageUnavailable),
+        PairingCommitDisposition::Indeterminate,
+        PairingCommitDisposition::NotApplied(PairingFailure::StorageUnavailable),
     ] {
         let f = Fixture::new(1, 1);
         let journal = Journal::new(vec![f.saved.clone()]);
@@ -817,7 +817,7 @@ async fn receipt_recording_failure_never_deletes_credential() {
     let f = Fixture::new(1, 1);
     let journal = Journal::pending(f.pending());
     let (driver, deleted) = driver(&f, journal.clone(), 2, 1, None, false);
-    *journal.fail.lock().unwrap() = Some(JournalCommitDisposition::Indeterminate);
+    *journal.fail.lock().unwrap() = Some(PairingCommitDisposition::Indeterminate);
     assert_eq!(
         driver
             .run_once(
@@ -1566,7 +1566,7 @@ impl LocalPairingStore for BlockingStore {
     fn commit<'a>(
         &'a self,
         _: &'a PairingJournalTransaction,
-    ) -> PairingFuture<'a, JournalCommitDisposition> {
+    ) -> PairingFuture<'a, PairingCommitDisposition> {
         panic!("capacity test must not commit")
     }
 }
@@ -1803,8 +1803,8 @@ async fn self_unpair_fences_independently_issued_authorities_and_stale_snapshots
 #[tokio::test]
 async fn failed_self_unpair_cannot_reissue_ordinary_authority_from_unchanged_recovery() {
     for failure in [
-        JournalCommitDisposition::Indeterminate,
-        JournalCommitDisposition::NotApplied(PairingFailure::StorageUnavailable),
+        PairingCommitDisposition::Indeterminate,
+        PairingCommitDisposition::NotApplied(PairingFailure::StorageUnavailable),
     ] {
         let f = Fixture::new(1, 1);
         let journal = Journal::new(vec![f.saved.clone()]);

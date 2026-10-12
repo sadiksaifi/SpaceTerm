@@ -71,7 +71,7 @@ struct EvidenceJournal {
     state: std::sync::Mutex<spaceterm_client::pairing::journal::PairingJournalSnapshot>,
     fence: spaceterm_client::pairing::credentials::PairingAuthorityFence,
 }
-impl spaceterm_client::journal::ClientJournal for EvidenceJournal {
+impl spaceterm_client::journal::PairingClientJournal for EvidenceJournal {
     fn pairing_authority_fence(
         &self,
     ) -> &spaceterm_client::pairing::credentials::PairingAuthorityFence {
@@ -93,7 +93,7 @@ impl spaceterm_client::journal::ClientJournal for EvidenceJournal {
         tx: &'a spaceterm_client::pairing::journal::PairingJournalTransaction,
     ) -> spaceterm_client::pairing::credentials::PairingFuture<
         'a,
-        spaceterm_client::journal::JournalCommitDisposition,
+        spaceterm_client::journal::PairingCommitDisposition,
     > {
         Box::pin(async move {
             use spaceterm_client::{journal::*, pairing::journal::PairingJournalChange};
@@ -118,7 +118,7 @@ impl spaceterm_client::journal::ClientJournal for EvidenceJournal {
                 _ => panic!("credential evidence cannot enroll"),
             }
             state.revision += 1;
-            JournalCommitDisposition::Durable(JournalReceipt {
+            PairingCommitDisposition::Durable(PairingJournalReceipt {
                 revision: state.revision,
             })
         })

@@ -1,5 +1,7 @@
 use super::adapter::{DeviceCredentials, NativeKeyStore};
-use spaceterm_client::journal::{ClientJournal, JournalCommitDisposition, JournalReceipt};
+use spaceterm_client::journal::{
+    PairingClientJournal, PairingCommitDisposition, PairingJournalReceipt,
+};
 use spaceterm_client::pairing::{
     credentials::{
         CredentialNamespace, CredentialPurpose, CredentialScope, NativeDeviceCredentials,
@@ -429,7 +431,7 @@ struct RecoveredJournal {
     state: spaceterm_client::pairing::journal::PairingJournalSnapshot,
     fence: spaceterm_client::pairing::credentials::PairingAuthorityFence,
 }
-impl spaceterm_client::journal::ClientJournal for RecoveredJournal {
+impl spaceterm_client::journal::PairingClientJournal for RecoveredJournal {
     fn pairing_authority_fence(
         &self,
     ) -> &spaceterm_client::pairing::credentials::PairingAuthorityFence {
@@ -448,18 +450,18 @@ impl spaceterm_client::journal::ClientJournal for RecoveredJournal {
         _: &'a spaceterm_client::pairing::journal::PairingJournalTransaction,
     ) -> spaceterm_client::pairing::credentials::PairingFuture<
         'a,
-        spaceterm_client::journal::JournalCommitDisposition,
+        spaceterm_client::journal::PairingCommitDisposition,
     > {
         panic!("signing test cannot commit")
     }
 }
 
 struct PreparationJournal {
-    fail: Mutex<Option<JournalCommitDisposition>>,
+    fail: Mutex<Option<PairingCommitDisposition>>,
     state: Mutex<PairingJournalSnapshot>,
     fence: PairingAuthorityFence,
 }
-impl ClientJournal for PreparationJournal {
+impl PairingClientJournal for PreparationJournal {
     fn pairing_authority_fence(&self) -> &PairingAuthorityFence {
         &self.fence
     }
@@ -471,7 +473,7 @@ impl ClientJournal for PreparationJournal {
     fn commit_pairing<'a>(
         &'a self,
         tx: &'a PairingJournalTransaction,
-    ) -> PairingFuture<'a, JournalCommitDisposition> {
+    ) -> PairingFuture<'a, PairingCommitDisposition> {
         Box::pin(async move {
             if let Some(failure) = self.fail.lock().unwrap().take() {
                 return failure;
@@ -497,7 +499,7 @@ impl ClientJournal for PreparationJournal {
                 _ => panic!("native preparation test cannot activate bindings"),
             }
             state.revision += 1;
-            JournalCommitDisposition::Durable(JournalReceipt {
+            PairingCommitDisposition::Durable(PairingJournalReceipt {
                 revision: state.revision,
             })
         })
@@ -716,8 +718,8 @@ async fn cancelled_creation_recovers_the_original_slot_after_native_insertion_fi
 #[tokio::test]
 async fn failed_or_indeterminate_preparation_admission_creates_no_native_item() {
     for failure in [
-        JournalCommitDisposition::NotApplied(PairingFailure::StorageUnavailable),
-        JournalCommitDisposition::Indeterminate,
+        PairingCommitDisposition::NotApplied(PairingFailure::StorageUnavailable),
+        PairingCommitDisposition::Indeterminate,
     ] {
         let journal = Arc::new(PreparationJournal {
             fail: Mutex::new(Some(failure)),

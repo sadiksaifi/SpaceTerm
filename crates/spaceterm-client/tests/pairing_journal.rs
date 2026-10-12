@@ -1,5 +1,5 @@
 use spaceterm_client::{
-    journal::{ClientJournal, JournalCommitDisposition, JournalReceipt},
+    journal::{PairingClientJournal, PairingCommitDisposition, PairingJournalReceipt},
     pairing::{
         credentials::{PairingAuthorityFence, PairingFuture},
         journal::{
@@ -15,7 +15,7 @@ struct Journal {
     fence: PairingAuthorityFence,
     calls: Mutex<Vec<PairingJournalTransaction>>,
 }
-impl ClientJournal for Journal {
+impl PairingClientJournal for Journal {
     fn pairing_authority_fence(&self) -> &PairingAuthorityFence {
         &self.fence
     }
@@ -27,10 +27,10 @@ impl ClientJournal for Journal {
     fn commit_pairing<'a>(
         &'a self,
         tx: &'a PairingJournalTransaction,
-    ) -> PairingFuture<'a, JournalCommitDisposition> {
+    ) -> PairingFuture<'a, PairingCommitDisposition> {
         Box::pin(async move {
             self.calls.lock().unwrap().push(tx.clone());
-            JournalCommitDisposition::Durable(JournalReceipt {
+            PairingCommitDisposition::Durable(PairingJournalReceipt {
                 revision: tx.expected_revision + 1,
             })
         })
@@ -66,7 +66,7 @@ async fn pairing_store_delegates_notice_to_the_one_client_journal() {
     );
     assert!(matches!(
         store.dismiss_notice(0, operation).await,
-        JournalCommitDisposition::Durable(_)
+        PairingCommitDisposition::Durable(_)
     ));
     assert!(
         matches!(&journal.calls.lock().unwrap()[0].change, PairingJournalChange::DismissNotice { operation: found } if *found == operation)

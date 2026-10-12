@@ -7,7 +7,7 @@ use super::{
     },
     revocation::VerifiedRevocationReceipt,
 };
-use crate::journal::{ClientJournal, JournalCommitDisposition};
+use crate::journal::{PairingClientJournal, PairingCommitDisposition};
 use spaceterm_core::{
     identity::DeviceId,
     operations::{OperationBinding, OperationId},
@@ -482,12 +482,12 @@ pub trait LocalPairingStore: Send + Sync {
     fn commit<'a>(
         &'a self,
         transaction: &'a PairingJournalTransaction,
-    ) -> PairingFuture<'a, JournalCommitDisposition>;
+    ) -> PairingFuture<'a, PairingCommitDisposition>;
     fn dismiss_notice(
         &self,
         expected_revision: u64,
         operation: OperationId,
-    ) -> PairingFuture<'_, JournalCommitDisposition> {
+    ) -> PairingFuture<'_, PairingCommitDisposition> {
         Box::pin(async move {
             self.commit(&PairingJournalTransaction {
                 expected_revision,
@@ -501,12 +501,12 @@ pub trait LocalPairingStore: Send + Sync {
 pub struct JournalPairingStore<J: ?Sized> {
     journal: Arc<J>,
 }
-impl<J: ClientJournal + ?Sized> JournalPairingStore<J> {
+impl<J: PairingClientJournal + ?Sized> JournalPairingStore<J> {
     pub fn new(journal: Arc<J>) -> Self {
         Self { journal }
     }
 }
-impl<J: ClientJournal + ?Sized> LocalPairingStore for JournalPairingStore<J> {
+impl<J: PairingClientJournal + ?Sized> LocalPairingStore for JournalPairingStore<J> {
     fn ordinary_authority<'a>(
         &'a self,
         key: &'a LocalPairingKey,
@@ -542,14 +542,14 @@ impl<J: ClientJournal + ?Sized> LocalPairingStore for JournalPairingStore<J> {
     fn commit<'a>(
         &'a self,
         transaction: &'a PairingJournalTransaction,
-    ) -> PairingFuture<'a, JournalCommitDisposition> {
+    ) -> PairingFuture<'a, PairingCommitDisposition> {
         Box::pin(async move {
             if let PairingJournalChange::SelfUnpair(pending) = &transaction.change {
                 self.seal_ordinary(&pending.task.parts().local_pairing);
             }
             let recovered = match self.recover().await {
                 Ok(recovered) => recovered,
-                Err(failure) => return JournalCommitDisposition::NotApplied(failure),
+                Err(failure) => return PairingCommitDisposition::NotApplied(failure),
             };
             let validation = match &transaction.change {
                 PairingJournalChange::ReserveCredential(preparation) => recovered
@@ -622,7 +622,7 @@ impl<J: ClientJournal + ?Sized> LocalPairingStore for JournalPairingStore<J> {
                 _ => Ok(()),
             };
             if let Err(failure) = validation {
-                return JournalCommitDisposition::NotApplied(failure);
+                return PairingCommitDisposition::NotApplied(failure);
             }
             self.journal.commit_pairing(transaction).await
         })
@@ -630,16 +630,16 @@ impl<J: ClientJournal + ?Sized> LocalPairingStore for JournalPairingStore<J> {
 }
 
 pub fn require_durable(
-    disposition: JournalCommitDisposition,
+    disposition: PairingCommitDisposition,
     expected_revision: u64,
 ) -> Result<(), PairingFailure> {
     match disposition {
-        JournalCommitDisposition::Durable(receipt)
+        PairingCommitDisposition::Durable(receipt)
             if expected_revision.checked_add(1) == Some(receipt.revision) =>
         {
             Ok(())
         }
-        JournalCommitDisposition::NotApplied(failure) => Err(failure),
+        PairingCommitDisposition::NotApplied(failure) => Err(failure),
         _ => Err(PairingFailure::RecoveryRequired),
     }
 }

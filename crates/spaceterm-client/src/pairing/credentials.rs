@@ -273,7 +273,7 @@ impl PairingAuthorityState {
     }
 }
 
-/// Owned once by ClientJournal. Issuance, recovered membership and local removal
+/// Owned once by PairingClientJournal. Issuance, recovered membership and local removal
 /// share one lock. The latest validated revision cannot be replaced by a stale
 /// read, so retired gates can be reclaimed without granting stale snapshots.
 /// Failed local removals stay latched until durable suppression is observed.
