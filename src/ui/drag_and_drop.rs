@@ -20,8 +20,6 @@ use super::appearance::gpui_color;
 const SHIFT_DURATION: Duration = Duration::from_millis(200);
 /// How long a released item takes to settle into its slot, and the others to follow it.
 const SETTLE_DURATION: Duration = Duration::from_millis(260);
-/// How far past a strip the pointer may stray before the lifted item leaves it.
-pub(crate) const TEAR_OFF_DISTANCE: f32 = 48.0;
 /// How deep into either end of a strip the pointer starts scrolling it.
 const AUTOSCROLL_EDGE: f32 = 40.0;
 /// How fast a strip scrolls, in points per second, with the pointer at or past its end.
@@ -36,10 +34,10 @@ pub(crate) const LIFTED_OPACITY: f32 = 0.95;
 
 /// The drag state of one scrolling strip of items laid out along one axis.
 ///
-/// While an item is lifted, its lifted copy follows the pointer and the other items slide aside to
-/// open a gap where a release would land it. A faded face of the item moves into that gap, and
-/// back to the item's own place once the pointer leaves the strip. A release settles the item into its place; a
-/// cancellation returns everything to rest.
+/// While an item is lifted, its lifted copy follows the pointer inside the strip and the other items
+/// slide aside to open a gap where a release would land it. A faded face of the item moves into
+/// that gap. A release anywhere settles the item into that place; a cancellation returns everything
+/// to rest.
 pub(crate) struct ReorderableStrip<Id> {
     axis: Axis,
     lift: Option<Lift<Id>>,
@@ -189,8 +187,8 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
         }
     }
 
-    /// Follows the pointer with the lifted copy and the slot a release would land the item in.
-    /// Returns whether either changed.
+    /// Follows the pointer with the lifted copy, held inside the strip, and the slot a release would
+    /// land the item in. Returns whether either changed.
     pub(crate) fn track(
         &mut self,
         items: &ScrollHandle,
@@ -203,25 +201,21 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
             return false;
         };
         let bounds = painted_item_bounds(items);
-        let origin = pointer - lift.grab;
-        let landing = ids
+        let current = ids
             .iter()
             .position(|candidate| *candidate == lift.id)
-            .filter(|_| bounds.len() == ids.len())
-            .filter(|_| {
-                items
-                    .bounds()
-                    .dilate(px(TEAR_OFF_DISTANCE))
-                    .contains(&pointer)
-            })
-            .map(|current| Landing {
-                position: landing_position(
-                    &spans(axis, &bounds),
-                    current,
-                    f32::from(origin.along(axis)),
-                ),
-                len: ids.len(),
-            });
+            .filter(|_| bounds.len() == ids.len());
+        let origin = current.map_or(pointer - lift.grab, |current| {
+            confine(axis, items.bounds(), bounds[current], pointer - lift.grab)
+        });
+        let landing = current.map(|current| Landing {
+            position: landing_position(
+                &spans(axis, &bounds),
+                current,
+                f32::from(origin.along(axis)),
+            ),
+            len: ids.len(),
+        });
         lift.pointer = Some(pointer);
         let moved = lift.origin != Some(origin);
         lift.origin = Some(origin);
@@ -244,15 +238,11 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
             return;
         };
         let viewport = items.bounds();
-        let velocity = if viewport.dilate(px(TEAR_OFF_DISTANCE)).contains(&pointer) {
-            let start = f32::from(viewport.origin.along(axis));
-            autoscroll_velocity(
-                (start, start + f32::from(viewport.size.along(axis))),
-                f32::from(pointer.along(axis)),
-            )
-        } else {
-            0.0
-        };
+        let start = f32::from(viewport.origin.along(axis));
+        let velocity = autoscroll_velocity(
+            (start, start + f32::from(viewport.size.along(axis))),
+            f32::from(pointer.along(axis)),
+        );
         let offset = items.offset();
         let current = f32::from(offset.along(axis));
         let limit = -f32::from(items.max_offset().along(axis));
@@ -395,6 +385,20 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
         self.slides
             .insert(id, Slide::new(from, to, duration, now, motion));
     }
+}
+
+/// Where a lifted copy whose item rests at `rest` stands when its origin follows the pointer to
+/// `origin`: level with the items across the strip, and between the ends of its `viewport` along it.
+fn confine(
+    axis: Axis,
+    viewport: Bounds<Pixels>,
+    rest: Bounds<Pixels>,
+    origin: Point<Pixels>,
+) -> Point<Pixels> {
+    let start = viewport.origin.along(axis);
+    let end = (start + viewport.size.along(axis) - rest.size.along(axis)).max(start);
+    let along = origin.along(axis).max(start).min(end);
+    rest.origin.apply_along(axis, |_| along)
 }
 
 /// How fast a strip spanning `viewport` along its axis scrolls with the pointer at `pointer`, in

@@ -7866,9 +7866,9 @@ fn dragging_a_workspace_row_should_open_a_gap_and_settle_there_on_release(cx: &m
     );
     finish_slides(cx);
     let between = origin("workspace-row-2-inactive", cx);
-    // Beside the rows, where the lifted copy follows the pointer.
-    let beside = point(px(30.0), px(4.0));
-    let release = third.center() + beside;
+    // Beside the rows, where the lifted copy stays in line with them.
+    let beside = point(px(0.0), px(4.0));
+    let release = third.center() + point(px(30.0), px(4.0));
     cx.simulate_mouse_move(release, MouseButton::Left, Modifiers::none());
     finish_slides(cx);
     let landing = gpui::Bounds::new(third.origin, first.size);
@@ -7890,8 +7890,8 @@ fn dragging_a_workspace_row_should_open_a_gap_and_settle_there_on_release(cx: &m
             Some(second.origin),
             Some(gpui::Bounds::new(third.origin + beside, first.size)),
         ),
-        "a dragged row must show its faded face where it lands, open a gap there, and keep the press \
-         point of its lifted copy under the pointer"
+        "a dragged row must show its faded face where it lands, open a gap there, and hold its \
+         lifted copy in line with the rows"
     );
     assert_eq!(
         (

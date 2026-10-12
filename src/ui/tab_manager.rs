@@ -5992,7 +5992,7 @@ mod tests {
         assert!(active.right() <= strip.right());
     }
 
-    use crate::ui::drag_and_drop::{TEAR_OFF_DISTANCE, finish_slides};
+    use crate::ui::drag_and_drop::finish_slides;
 
     fn tab_order(manager: &Entity<TabManager>, cx: &mut VisualTestContext) -> Vec<u64> {
         manager.read_with(cx, |manager, _| {
@@ -6064,9 +6064,9 @@ mod tests {
         let second = cx.debug_bounds("tab-item-2-inactive").unwrap();
         let third = cx.debug_bounds("tab-item-3-active").unwrap();
         let lift = first.center() + point(px(8.0), px(0.0));
-        // Below the Tabs, where the lifted copy follows the pointer off the strip.
-        let below = point(px(4.0), px(10.0));
-        let release = third.center() + below;
+        // Past the last Tab and below the strip, where the lifted copy stays held at the strip's
+        // end, level with the Tabs.
+        let release = third.center() + point(px(4.0), px(10.0));
 
         drag_tab(first.center(), &[lift, release], cx);
         finish_slides(cx);
@@ -6087,10 +6087,10 @@ mod tests {
                 Some(gpui::Bounds::new(third.origin, first.size)),
                 Some(first.origin),
                 Some(second.origin),
-                Some(gpui::Bounds::new(third.origin + below, first.size)),
+                Some(gpui::Bounds::new(third.origin, first.size)),
             ),
-            "a dragged Tab must show its faded face where it lands, open a gap there, and keep the \
-             press point of its lifted copy under the pointer"
+            "a dragged Tab must show its faded face where it lands, open a gap there, and hold its \
+             lifted copy inside the strip"
         );
         assert_eq!(
             (
@@ -6104,10 +6104,10 @@ mod tests {
             (vec![2, 3, 1], (TabId::new(3), None, None))
         );
         assert!(cx.debug_bounds("drag-preview").is_none());
-        // The moved Tab starts where its copy was released and settles into its new place.
+        // The moved Tab starts where its copy was released, already its new place.
         assert_eq!(
             cx.debug_bounds("tab-item-1-inactive").map(|tab| tab.origin),
-            Some(third.origin + below)
+            Some(third.origin)
         );
         finish_slides(cx);
         assert_eq!(
@@ -6172,31 +6172,35 @@ mod tests {
     }
 
     #[gpui::test]
-    fn releasing_a_tab_outside_the_tab_bar_should_move_nothing(cx: &mut TestAppContext) {
+    fn a_tab_dragged_far_below_the_tab_bar_should_stay_in_the_strip_and_land_there(
+        cx: &mut TestAppContext,
+    ) {
         let (manager, _records, cx) = tab_manager(cx);
         click("create-tab-button", cx);
         click("create-tab-button", cx);
         let first = cx.debug_bounds("tab-item-1-inactive").unwrap();
         let second = cx.debug_bounds("tab-item-2-inactive").unwrap();
         let third = cx.debug_bounds("tab-item-3-active").unwrap();
-        let below = point(
-            third.center().x,
-            third.bottom() + px(TEAR_OFF_DISTANCE + 72.0),
-        );
+        let below = point(second.center().x, third.bottom() + px(240.0));
 
         drag_tab(
             first.center(),
-            &[third.center() + point(px(4.0), px(0.0)), below],
+            &[first.center() + point(px(8.0), px(0.0)), below],
             cx,
         );
         finish_slides(cx);
-        let closed = cx.debug_bounds("tab-item-2-inactive").map(|tab| tab.origin);
+        let preview = cx.debug_bounds("tab-preview-1-inactive");
         cx.simulate_mouse_up(below, MouseButton::Left, Modifiers::none());
         cx.run_until_parked();
 
         assert_eq!(
-            (closed, tab_order(&manager, cx)),
-            (Some(second.origin), vec![1, 2, 3])
+            (
+                preview.map(|preview| preview.top()),
+                tab_order(&manager, cx)
+            ),
+            (Some(second.top()), vec![2, 1, 3]),
+            "the lifted copy must stay level with the Tabs, and a release must land the Tab where \
+             its copy shows"
         );
     }
 
