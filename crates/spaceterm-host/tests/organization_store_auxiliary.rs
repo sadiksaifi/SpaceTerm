@@ -1649,9 +1649,20 @@ fn fallback_fixture(directory: &std::path::Path) -> FallbackFixture {
         common_directory: inventory.directory,
     })
     .unwrap();
+    let membership_versions = state
+        .organization
+        .retained
+        .as_ref()
+        .expect("the store retains Tab membership versions")
+        .tab_membership_versions()
+        .iter()
+        .filter(|version| version.id() == removed_tab.id)
+        .cloned()
+        .collect();
     let affected = RetainedRemovalScope::new(RetainedRemovalScopeParts {
         server: server(),
         tabs: vec![removed_tab.clone()],
+        membership_versions,
         panes: vec![RetainedAffectedPane {
             hierarchy: AssessedPane {
                 workspace,
