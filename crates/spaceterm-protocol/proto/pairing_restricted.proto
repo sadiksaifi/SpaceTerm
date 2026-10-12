@@ -1,0 +1,17 @@
+syntax = "proto3";
+package spaceterm.pairing;
+import "common.proto";
+import "pairing.proto";
+
+// A replacement restricted extension root, not a replacement ordinary handshake.
+// Keep common.RestrictedMessage unchanged to avoid an import cycle and retain its
+// Wave 1 four-arm codec. pairing_adapter owns this new bounded restricted codec.
+message RestrictedExtension {
+  oneof kind {
+    SelfRevocation revoke = 1;
+    ReceiptStatus status = 2;
+    RestrictedAcknowledgement acknowledgement = 3;
+    RestrictedResult result = 4;
+    spaceterm.common.Failure failure = 5;
+  }
+}

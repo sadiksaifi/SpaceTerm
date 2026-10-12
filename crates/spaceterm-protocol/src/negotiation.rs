@@ -40,3 +40,32 @@ pub(crate) fn validate_advertisement(majors: &[u32]) -> Result<(), ProtocolError
     }
     Ok(())
 }
+
+/// Authenticated normalized creation-default replay extension.
+pub const CAPABILITY_NORMALIZED_CREATION_TOPOLOGY: u32 = 1;
+/// Server-owned Git extension. Not advertised until the converter is installed.
+pub const CAPABILITY_SERVER_GIT: u32 = 520_001;
+/// Owning-server directory extension. Not advertised by the declaration freeze.
+pub const CAPABILITY_SERVER_DIRECTORIES: u32 = 520_002;
+/// Complete canonical-domain conversion and revision-exact resource contract.
+pub const CAPABILITY_CANONICAL_DOMAIN: u32 = 520_003;
+
+/// Additive envelope registration: tag, authenticated capability, permitted directions.
+pub const EXTENSION_ENVELOPES: &[(u32, u32, bool, bool)] = &[
+    (32, CAPABILITY_SERVER_GIT, true, false),
+    (33, CAPABILITY_SERVER_GIT, false, true),
+    (34, CAPABILITY_SERVER_DIRECTORIES, true, false),
+    (35, CAPABILITY_SERVER_DIRECTORIES, false, true),
+    (36, CAPABILITY_CANONICAL_DOMAIN, true, false),
+    (37, CAPABILITY_CANONICAL_DOMAIN, false, true),
+    (38, CAPABILITY_CANONICAL_DOMAIN, false, true),
+    (39, CAPABILITY_CANONICAL_DOMAIN, true, true),
+    (40, CAPABILITY_CANONICAL_DOMAIN, false, true),
+    (41, CAPABILITY_CANONICAL_DOMAIN, true, false),
+    (42, CAPABILITY_CANONICAL_DOMAIN, false, true),
+    (43, CAPABILITY_CANONICAL_DOMAIN, false, true),
+    (44, CAPABILITY_CANONICAL_DOMAIN, false, true),
+    (45, CAPABILITY_CANONICAL_DOMAIN, false, true),
+    (46, CAPABILITY_CANONICAL_DOMAIN, false, true),
+    (47, CAPABILITY_CANONICAL_DOMAIN, false, true),
+];

@@ -60,6 +60,10 @@ fn page1(rows: usize, cells: usize) -> v1::Message {
                         };
                         cells
                     ],
+                    physical_row: None,
+                    start_column: 0,
+                    end_column: 0,
+                    columns: 0,
                 })
                 .collect(),
             complete: true,
@@ -93,6 +97,10 @@ fn page2(rows: usize, cells: usize) -> v2::Message {
                             cells
                         ],
                     }],
+                    physical_row: None,
+                    start_column: 0,
+                    end_column: 0,
+                    columns: 0,
                 })
                 .collect(),
             complete: true,
@@ -150,6 +158,7 @@ fn alternating_style_page2(rows: usize, cells: usize) -> v2::Message {
             resource: Some(v2::ResourceId {
                 session: fence().session,
                 local_id,
+                generation: 0,
             }),
             row_id: 1,
             columns: 1,
@@ -163,6 +172,7 @@ fn alternating_style_page2(rows: usize, cells: usize) -> v2::Message {
         row_id: 1,
         row_revision: 1,
         column: 0,
+        physical_row: None,
     };
     page.matches = vec![
         v2::FindMatch {
@@ -514,6 +524,7 @@ fn paste_clipboard_and_resource_chunks_have_data_boundaries_in_both_majors() {
                                 allowed: true,
                                 clipboard_text: vec![b'x'; length],
                                 failure: None,
+                                ..Default::default()
                             },
                         )),
                     })
@@ -526,6 +537,7 @@ fn paste_clipboard_and_resource_chunks_have_data_boundaries_in_both_majors() {
                                 resource: Some($profile::ResourceId {
                                     session: fence().session,
                                     local_id: 1,
+                                    generation: 0,
                                 }),
                                 transfer: 1,
                                 total_bytes: length as u64,
@@ -733,4 +745,186 @@ fn a_long_complete_grapheme_is_preserved_within_the_semantic_frame_budget() {
     content.rows[0].runs[0].graphemes[0].text = format!("a{}", "\u{301}".repeat(512));
     let expected = Payload::Major2(page.clone());
     assert_eq!(Payload::decode(2, &page.encode_to_vec()), Ok(expected));
+}
+
+#[test]
+fn new_status_envelopes_require_authenticated_capability_in_both_majors() {
+    let fixture = Fixture::new();
+    for major in [1, 2] {
+        let (mut client, _) = fixture.connect(&[major]);
+        let payload = match major {
+            1 => Payload::Major1(v1::Message {
+                kind: Some(v1::message::Kind::StatusQuery(v1::StatusQuery {
+                    request: 1,
+                    ..Default::default()
+                })),
+            }),
+            2 => Payload::Major2(v2::Message {
+                kind: Some(v2::message::Kind::StatusQuery(v2::StatusQuery {
+                    request: 1,
+                    ..Default::default()
+                })),
+            }),
+            _ => unreachable!(),
+        };
+        assert_eq!(client.encode(&payload), Err(ProtocolError::Negotiation));
+    }
+}
+
+#[test]
+fn remote_policy_ninth_endpoint_is_rejected_by_both_descriptor_profiles() {
+    macro_rules! check {
+        ($profile:ident, $major:ident) => {{
+            let payload = Payload::$major($profile::Message {
+                kind: Some($profile::message::Kind::Operation($profile::Operation {
+                    id: Some(operation_id()),
+                    action: Some($profile::operation::Action::SetRemoteAccess(
+                        $profile::SetRemoteAccess {
+                            server: Some(support::id(1)),
+                            expected_version: 1,
+                            value: Some($profile::RemoteAccessPolicy {
+                                server: Some(support::id(1)),
+                                version: 2,
+                                endpoints: (1..=9)
+                                    .map(|port| $profile::RemoteEndpoint {
+                                        address: vec![127, 0, 0, 1],
+                                        port,
+                                        ..Default::default()
+                                    })
+                                    .collect(),
+                            }),
+                        },
+                    )),
+                })),
+            });
+            assert_eq!(payload.encode(), Err(ProtocolError::LimitExceeded));
+        }};
+    }
+    check!(v1, Major1);
+    check!(v2, Major2);
+}
+
+#[test]
+fn standalone_pairing_receipt_body_cannot_exceed_its_reserved_signature_headroom() {
+    for major in [1, 2] {
+        let proof = spaceterm_protocol::wire::pairing::SignedReceipt {
+            canonical_body: vec![1; 1985],
+            signature: vec![1; 64],
+        };
+        let payload = match major {
+            1 => Payload::Major1(v1::Message {
+                kind: Some(v1::message::Kind::PairingOutcome(v1::PairingOutcome {
+                    request: 1,
+                    enrollment_receipt: Some(Box::new(proof)),
+                    ..Default::default()
+                })),
+            }),
+            2 => Payload::Major2(v2::Message {
+                kind: Some(v2::message::Kind::PairingOutcome(v2::PairingOutcome {
+                    request: 1,
+                    enrollment_receipt: Some(Box::new(proof)),
+                    ..Default::default()
+                })),
+            }),
+            _ => unreachable!(),
+        };
+        assert_eq!(payload.encode(), Err(ProtocolError::LimitExceeded));
+    }
+}
+
+fn canonical_physical_page(major: u32, count: usize) -> Payload {
+    macro_rules! make {
+        ($profile:ident, $variant:ident, $content:expr) => {{
+            let page = $profile::CanonicalSemanticPage {
+                stamp: Some($profile::QueryStamp {
+                    fence: Some(fence()),
+                    content_revision: 1,
+                    screen: 1,
+                    request: 1,
+                    request_generation: 0,
+                    ..Default::default()
+                }),
+                geometry: Some($profile::Geometry {
+                    rows: 2,
+                    columns: 1,
+                    cell_width_px: 8,
+                    cell_height_px: 16,
+                }),
+                rows: (0..count)
+                    .map(|index| {
+                        let mut row = $content;
+                        row.id = Some($profile::PhysicalRowId {
+                            screen_generation: 0,
+                            screen: 1,
+                            node_serial: u64::MAX,
+                            page_row: index as u32,
+                        });
+                        row
+                    })
+                    .collect(),
+                complete: true,
+                ..Default::default()
+            };
+            Payload::$variant($profile::Message {
+                kind: Some($profile::message::Kind::CanonicalSemanticPage(Box::new(
+                    page,
+                ))),
+            })
+        }};
+    }
+    match major {
+        1 => make!(
+            v1,
+            Major1,
+            v1::CanonicalSemanticRow {
+                columns: 1,
+                end_column: 1,
+                cells: vec![v1::StyledCell {
+                    grapheme: "x".into(),
+                    width: 1,
+                    style: Some(style1()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }
+        ),
+        2 => make!(
+            v2,
+            Major2,
+            v2::CanonicalSemanticRow {
+                columns: 1,
+                end_column: 1,
+                runs: vec![v2::StyledRun {
+                    style: Some(style2()),
+                    graphemes: vec![v2::Grapheme {
+                        text: "x".into(),
+                        width: 1,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }
+        ),
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn canonical_physical_rows_preserve_shared_node_serial_distinct_page_rows_and_zero_comparisons() {
+    for major in [1, 2] {
+        let payload = canonical_physical_page(major, 2);
+        let bytes = payload.encode().unwrap();
+        assert_eq!(Payload::decode(major, &bytes).unwrap(), payload);
+    }
+}
+
+#[test]
+fn canonical_physical_page_row_budget_rejects_limit_plus_one_in_both_majors() {
+    for major in [1, 2] {
+        assert_eq!(
+            canonical_physical_page(major, 257).encode(),
+            Err(ProtocolError::LimitExceeded)
+        );
+    }
 }

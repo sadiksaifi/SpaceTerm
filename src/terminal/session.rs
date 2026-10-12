@@ -2405,3 +2405,5 @@ pub(super) mod tests;
 ))]
 #[path = "../platform/unix_adapter_tests/session.rs"]
 mod unix_adapter_tests;
+
+mod runtime_bridge;

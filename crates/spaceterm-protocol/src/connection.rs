@@ -161,9 +161,11 @@ impl AuthenticatedConnection {
             return Err(ProtocolError::Negotiation);
         }
         let bytes = payload.encode_with_limits(self.limits())?;
+        ordinary_field_capabilities(payload, self.capabilities())?;
         ordinary_direction(
             preflight::payload_tag(&bytes)?,
             self.codec.parameters.direction,
+            self.capabilities(),
         )?;
         self.codec.encode(bytes)
     }
@@ -176,8 +178,11 @@ impl AuthenticatedConnection {
             ordinary_direction(
                 preflight::payload_tag(&payload)?,
                 opposite(self.codec.parameters.direction),
+                self.capabilities(),
             )?;
-            Payload::decode_with_limits(self.major(), &payload, self.limits())
+            let payload = Payload::decode_with_limits(self.major(), &payload, self.limits())?;
+            ordinary_field_capabilities(&payload, self.capabilities())?;
+            Ok(payload)
         })();
         if result.is_err() {
             self.codec.failed = true;
@@ -252,6 +257,41 @@ impl RestrictedConnection {
         result
     }
 
+    /// Pairing extension uses the same established principal and sequence.
+    pub fn encode_pairing_extension(
+        &mut self,
+        payload: &crate::wire::pairing::RestrictedExtension,
+        codec: &dyn crate::pairing_adapter::RestrictedExtensionCodec,
+    ) -> Result<Vec<u8>, ProtocolError> {
+        let bytes = codec.encode_restricted_extension(
+            payload,
+            self.principal(),
+            self.codec.parameters.direction,
+            self.limits(),
+        )?;
+        self.codec.encode(bytes)
+    }
+    /// Invalid extension reception fails the established restricted connection.
+    pub fn decode_pairing_extension(
+        &mut self,
+        bytes: &[u8],
+        codec: &dyn crate::pairing_adapter::RestrictedExtensionCodec,
+    ) -> Result<crate::wire::pairing::RestrictedExtension, ProtocolError> {
+        let result = (|| {
+            let payload = self.codec.decode(bytes)?;
+            codec.decode_restricted_extension(
+                &payload,
+                self.principal(),
+                opposite(self.codec.parameters.direction),
+                self.limits(),
+            )
+        })();
+        if result.is_err() {
+            self.codec.failed = true;
+        }
+        result
+    }
+
     fn validate(
         &self,
         value: &common::RestrictedMessage,
@@ -284,7 +324,26 @@ impl RestrictedConnection {
     }
 }
 
-fn ordinary_direction(tag: u32, direction: common::Direction) -> Result<(), ProtocolError> {
+fn ordinary_direction(
+    tag: u32,
+    direction: common::Direction,
+    capabilities: &[u32],
+) -> Result<(), ProtocolError> {
+    if let Some((_, capability, client, server)) = crate::negotiation::EXTENSION_ENVELOPES
+        .iter()
+        .find(|entry| entry.0 == tag)
+    {
+        if !capabilities.contains(capability) {
+            return Err(ProtocolError::Negotiation);
+        }
+        return if (direction == common::Direction::ClientToServer && *client)
+            || (direction == common::Direction::ServerToClient && *server)
+        {
+            Ok(())
+        } else {
+            Err(ProtocolError::UnexpectedMessage)
+        };
+    }
     let client_request = matches!(
         tag,
         1 | 4 | 6 | 7 | 9 | 11 | 13 | 15 | 17 | 19 | 20 | 22 | 24 | 28 | 30
@@ -314,4 +373,46 @@ fn varint_len(mut value: usize) -> usize {
         length += 1;
     }
     length
+}
+
+/// Additive fields nested in legacy envelopes require the same authenticated
+/// capability as canonical envelope roots. Structural admission runs first.
+fn ordinary_field_capabilities(
+    payload: &Payload,
+    capabilities: &[u32],
+) -> Result<(), ProtocolError> {
+    macro_rules! canonical {
+        ($message:expr, $p:ident) => {{
+            use crate::wire::$p;
+            match &$message.kind {
+                Some($p::message::Kind::Outcome(outcome)) => matches!(outcome.result,
+                    Some($p::outcome::Result::ControlUnavailable(_)
+                    | $p::outcome::Result::StartupAwaitingMeasurement(_)
+                    | $p::outcome::Result::SessionStarted(_)
+                    | $p::outcome::Result::LegacyCreatedWorkspace(_)
+                    | $p::outcome::Result::LegacyCreatedTab(_)
+                    | $p::outcome::Result::LegacyCreatedPane(_)
+                    | $p::outcome::Result::LegacyCreatedWorktree(_)
+                    | $p::outcome::Result::LegacyControlAcquired(_)
+                    | $p::outcome::Result::LegacyAssessed(_)
+                    | $p::outcome::Result::OperationFailure(_))),
+                Some($p::message::Kind::OrganizationDelta(delta)) => !delta.repositories.is_empty() || !delta.deleted_repositories.is_empty(),
+                Some($p::message::Kind::StartupIntent(intent)) => intent.measured_grid.is_some(),
+                Some($p::message::Kind::RuntimeCommand(command)) => matches!(command.action, Some($p::runtime_command::Action::MeasuredResize(_)
+                    | $p::runtime_command::Action::ClearScreenAndScrollback(_)
+                    | $p::runtime_command::Action::CellPixelMetrics(_))),
+                Some($p::message::Kind::Operation(operation)) => matches!(&operation.action, Some($p::operation::Action::IdentifiedStartup(intent)) if intent.measured_grid.is_some()),
+                _ => false,
+            }
+        }};
+    }
+    let required = match payload {
+        Payload::Major1(message) => canonical!(message, v1),
+        Payload::Major2(message) => canonical!(message, v2),
+    };
+    if required && !capabilities.contains(&crate::negotiation::CAPABILITY_CANONICAL_DOMAIN) {
+        Err(ProtocolError::Negotiation)
+    } else {
+        Ok(())
+    }
 }
