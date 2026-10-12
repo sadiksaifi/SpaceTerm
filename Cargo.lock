@@ -5732,8 +5732,13 @@ dependencies = [
 name = "spaceterm-host"
 version = "0.0.0"
 dependencies = [
+ "hkdf",
+ "hmac",
  "libc",
+ "sha2",
+ "subtle",
  "thiserror 2.0.19",
+ "zeroize",
 ]
 
 [[package]]
