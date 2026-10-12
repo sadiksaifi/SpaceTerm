@@ -79,6 +79,41 @@ pub enum NativeFailure {
     CleanupUnresolved = 33,
     /// Io Unavailable.
     IoUnavailable = 34,
+    /// Ask an administrator to require authentication for this account's sudo commands.
+    LinuxPasswordlessSudo = 35,
+    /// Use an account outside the docker group, or use rootless containers.
+    LinuxDockerMembership = 36,
+    /// Use an account outside the lxd group.
+    LinuxLxdMembership = 37,
+    /// Remove this account's access to the rootful container service.
+    LinuxContainerBrokerAccess = 38,
+    /// Remove this account's raw-device permissions or use another account.
+    LinuxRawDiskAccess = 39,
+    /// Remove the delegated file or administrator bypass authority.
+    LinuxDelegatedDacAuthority = 40,
+    /// Remove delegated tracing access for this account.
+    LinuxDelegatedTracing = 41,
+    /// Remove delegated profiling access for this account.
+    LinuxDelegatedProfiling = 42,
+    /// Ask an administrator to restrict system-wide profiling.
+    LinuxSystemWideProfiling = 43,
+    /// Use a supported sudo and polkit policy.
+    LinuxUnsupportedAuthorizationPolicy = 44,
+    /// Ask an administrator to configure the supported broker profile.
+    LinuxUnsupportedPrivilegedBroker = 45,
+    /// Restore the required native policy checks, then retry.
+    LinuxPolicyCheckUnavailable = 46,
+    // 47 is reserved and unused. Password-authenticated transient caches are not refusals.
+    /// Reboot after removing the bypass rights, then retry.
+    LinuxPriorBypassHistoryUnproven = 48,
+    /// Repair the protected server installation through native management.
+    LinuxPublicationUnavailable = 49,
+    /// Move the protected installation to supported host storage.
+    LinuxMountWitnessUnavailable = 50,
+    /// Restore a supported dumpability configuration and unreadable server executable.
+    LinuxUnsafeDumpableTransition = 51,
+    /// Ask an administrator to install the authenticated native publisher.
+    BootstrapTrustUnavailable = 52,
 }
 
 impl fmt::Display for NativeFailure {
@@ -224,4 +259,12 @@ pub use crate::boot_credentials::{
 pub use crate::startup::{
     NativeStartupAdmission, NativeStartupAuthority, OneShotLauncher, PendingStartup,
     PendingStartupContext, PostExecProof, ProcessIdentity, UnprivilegedWaitPlan,
+};
+
+pub use crate::installation::RetainedRegistration;
+pub use crate::native_deployment::publication::{InstallationPublisher, StagedInstallation};
+pub use crate::native_management::facade::{
+    ActivationAssessment, CollectionAssessment, ConfirmedNativeAction, InitialRootApproval,
+    NativeAction, NativeAssessment, NativeOperation, NativeProgress, NativeStatus,
+    OwnerEnrollmentClaim, RemoteAccessAssessment, RepairAssessment, RuntimeAssessment,
 };

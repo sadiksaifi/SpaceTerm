@@ -3,9 +3,14 @@ name = "spaceterm-server"
 publish = false
 edition = "2024"
 
+[features]
+native-tests = ["spaceterm-host/native-tests"]
+test-support = ["spaceterm-host/test-support"]
+
 [dependencies]
-spaceterm-core = { path = "../spaceterm-core" }
 spaceterm-host = { path = "../spaceterm-host" }
+spaceterm-distribution = { path = "../spaceterm-distribution" }
+spaceterm-core = { path = "../spaceterm-core" }
 spaceterm-protocol = { path = "../spaceterm-protocol" }
 spaceterm-terminal = { path = "../spaceterm-terminal", default-features = false, features = ["runtime", "kitty-graphics", "png"] }
 tokio = { version = "=1.53.1", default-features = false, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }

@@ -55,3 +55,6 @@ pub mod git;
 pub mod adapters;
 
 pub mod contracts;
+
+/// Safe native receiver adapter supplied by native-handoff B2.
+pub mod native_startup;
