@@ -73,8 +73,9 @@ use crate::terminal::{
 };
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, Edges, Entity, EventEmitter, MouseButton, Pixels, Render,
-    ScrollHandle, Task, Window, accesskit, div, px, relative,
+    AnyElement, App, Bounds, Context, Edges, Element, ElementId, Entity, EventEmitter,
+    GlobalElementId, InspectorElementId, LayoutId, MouseButton, Pixels, Render, ScrollHandle, Task,
+    Window, accesskit, div, px, relative,
 };
 use spaceterm_ui::{
     Alert, AlertIntent, ButtonSize, ButtonTheme, ButtonVariant, ContextMenu, ContextMenuTarget,
@@ -2107,19 +2108,31 @@ impl TabManager {
             });
         let last_index = self.visible_len() - 1;
         // The strip's own ends carry the outer marks, so they stay put while Tabs slide or scroll.
+        // Each hides only while the active Tab covers its end of the visible strip.
+        let tab_count = self.visible_len();
+        let active_position = self.tab_position(active_tab_id);
         let strip_marks = self
             .visible_tabs()
             .next()
-            .filter(|&(tab_id, _)| self.sidebar_visible && tab_id != active_tab_id)
-            .map(|(tab_id, _)| TabBoundary::StripStart(tab_id))
+            .filter(|_| self.sidebar_visible)
+            .map(|(tab_id, _)| (TabBoundary::StripStart(tab_id), StripEdge::Start))
             .into_iter()
             .chain(
                 self.visible_tabs()
                     .last()
-                    .filter(|&(tab_id, _)| tab_id != active_tab_id)
-                    .map(|(tab_id, _)| TabBoundary::StripEnd(tab_id)),
+                    .map(|(tab_id, _)| (TabBoundary::StripEnd(tab_id), StripEdge::End)),
             )
-            .map(|boundary| render_tab_separator(boundary, presentation, appearance))
+            .map(|(boundary, edge)| {
+                let items = self.tab_bar_scroll_handle.clone();
+                PaintWhen {
+                    visible: Box::new(move || {
+                        !active_position.is_some_and(|active| {
+                            active_tab_covers(edge, &items, active, tab_count)
+                        })
+                    }),
+                    child: render_tab_separator(boundary, presentation, appearance),
+                }
+            })
             .collect::<Vec<_>>();
         let mut previous_inactive_tab = None;
         for (index, ((tab_id, view), (fade, hover))) in self.visible_tabs().zip(hovers).enumerate()
@@ -2503,6 +2516,101 @@ impl TabBoundary {
                 format!("tab-separator-{}-{}", leading.get(), trailing.get())
             }
             Self::StripEnd(tab_id) => format!("tab-separator-{}-end", tab_id.get()),
+        }
+    }
+}
+
+/// One end of the visible Tab strip.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StripEdge {
+    Start,
+    End,
+}
+
+/// Whether the active Tab, as scrolled this frame, covers one end of the visible Tab strip. Before
+/// the strip is laid out, the first Tab covers its start and the last Tab its end.
+fn active_tab_covers(edge: StripEdge, items: &ScrollHandle, active: usize, len: usize) -> bool {
+    let Some(span) = items.bounds_for_item(active) else {
+        return match edge {
+            StripEdge::Start => active == 0,
+            StripEdge::End => active + 1 == len,
+        };
+    };
+    let offset = items.offset().x;
+    let viewport = items.bounds();
+    let edge = match edge {
+        StripEdge::Start => viewport.left() + px(0.5),
+        StripEdge::End => viewport.right() - px(0.5),
+    };
+    span.left() + offset < edge && edge < span.right() + offset
+}
+
+/// Paints its child only when `visible` holds at prepaint, after the elements before it have
+/// prepainted. A scroll container settles its offset there, so the decision sees this frame's
+/// scroll rather than the one render saw.
+struct PaintWhen {
+    visible: Box<dyn Fn() -> bool>,
+    child: AnyElement,
+}
+
+impl IntoElement for PaintWhen {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for PaintWhen {
+    type RequestLayoutState = ();
+    type PrepaintState = bool;
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        (self.child.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) -> bool {
+        let visible = (self.visible)();
+        if visible {
+            self.child.prepaint(window, cx);
+        }
+        visible
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        visible: &mut bool,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        if *visible {
+            self.child.paint(window, cx);
         }
     }
 }
@@ -6241,6 +6349,67 @@ mod tests {
             strip.right(),
             "the mark should rest at the strip end while the last Tab is scrolled out of view"
         );
+    }
+
+    #[gpui::test]
+    fn the_strip_end_marks_should_show_once_the_active_tab_scrolls_out_past_them(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _records, cx) = tab_manager(cx);
+        for _ in 0..12 {
+            click("create-tab-button", cx);
+        }
+        let activate = |position: usize, cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                manager.update(cx, |manager, cx| {
+                    manager.set_sidebar_layout(
+                        true,
+                        px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
+                        px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
+                        cx,
+                    );
+                    manager.activate_tab_at(position, window, cx);
+                });
+            });
+            cx.run_until_parked();
+        };
+        let wheel = |delta: f32, cx: &mut VisualTestContext| {
+            let strip = cx.debug_bounds("tab-items").unwrap();
+            cx.simulate_event(ScrollWheelEvent {
+                position: strip.center(),
+                delta: ScrollDelta::Pixels(point(px(0.0), px(delta))),
+                modifiers: Modifiers::none(),
+                touch_phase: TouchPhase::Moved,
+            });
+            cx.run_until_parked();
+        };
+        let order = tab_order(&manager, cx);
+        let start = leaked_selector(format!("tab-separator-start-{}", order[0]));
+        let end = leaked_selector(format!("tab-separator-{}-end", order[order.len() - 1]));
+
+        activate(0, cx);
+        assert!(
+            cx.debug_bounds(start).is_none(),
+            "the active first Tab at the strip start hides the start mark"
+        );
+        wheel(-10_000.0, cx);
+        let strip = cx.debug_bounds("tab-items").unwrap();
+        let mark = cx
+            .debug_bounds(start)
+            .expect("the active first Tab scrolled out past the start should show the start mark");
+        assert_eq!(mark.left(), strip.left());
+
+        activate(order.len() - 1, cx);
+        assert!(
+            cx.debug_bounds(end).is_none(),
+            "the active last Tab scrolled into view at the strip end hides the end mark"
+        );
+        wheel(10_000.0, cx);
+        let strip = cx.debug_bounds("tab-items").unwrap();
+        let mark = cx
+            .debug_bounds(end)
+            .expect("the active last Tab scrolled out past the end should show the end mark");
+        assert_eq!(mark.right(), strip.right());
     }
 
     #[gpui::test]
