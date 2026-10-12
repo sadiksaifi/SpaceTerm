@@ -939,7 +939,7 @@ mod tests {
                 }),
                 environment:
                     super::super::process::SshProcessEnvironment::new_without_authentication(
-                        PathBuf::from("/private/tmp"),
+                        PathBuf::from("/tmp"),
                         None,
                     )
                     .unwrap(),
@@ -1491,12 +1491,12 @@ mod tests {
         let launch =
             PreparedShellLaunch::remote(Path::new("/tmp"), channel.take().unwrap()).unwrap();
         assert!(!launch.inherit_environment());
-        assert_eq!(launch.working_directory(), Path::new("/private/tmp"));
+        assert_eq!(launch.working_directory(), Path::new("/tmp"));
         assert!(launch.environment_removals().is_empty());
         assert_eq!(
             launch.environment(),
             &[
-                (OsString::from("HOME"), OsString::from("/private/tmp")),
+                (OsString::from("HOME"), OsString::from("/tmp")),
                 (OsString::from("PATH"), OsString::from("/fixture/bin")),
                 (OsString::from("TERM"), OsString::from("xterm-256color")),
             ]
@@ -1510,7 +1510,7 @@ mod tests {
             .transition(LiveConnectionState::ShuttingDown);
         let error = PreparedShellLaunch::remote(Path::new("/tmp"), command).unwrap_err();
         assert_eq!(error, ShellLaunchFailure::TerminalSessionChannelUnavailable);
-        assert!(!format!("{launch:?} {error:?} {error}").contains("/private/tmp"));
+        assert!(!format!("{launch:?} {error:?} {error}").contains("/tmp"));
     }
 
     #[gpui::test]
