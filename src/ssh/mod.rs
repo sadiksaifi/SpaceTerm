@@ -18,3 +18,5 @@ pub(crate) mod startup_environment;
 
 #[cfg(test)]
 pub(crate) mod testing;
+
+pub(crate) mod bootstrap_authentication;

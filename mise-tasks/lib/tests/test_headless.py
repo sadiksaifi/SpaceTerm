@@ -10,6 +10,7 @@ from spaceterm_tasks.headless import check_metadata, check_workspace, forbidden_
 MANDATORY = (
     "spaceterm-core",
     "spaceterm-client",
+    "spaceterm-client-native",
     "spaceterm-server",
     "spaceterm-host",
     "spaceterm-protocol",
@@ -68,6 +69,10 @@ class HeadlessTests(unittest.TestCase):
             check_metadata(metadata({"spaceterm-terminal": ("font-kit",)}))
         with self.assertRaisesRegex(TaskError, "spaceterm-protocol -> gpui"):
             check_metadata(metadata({"spaceterm-protocol": ("gpui",)}))
+
+    def test_native_client_composition_cannot_reach_a_desktop_dependency(self):
+        with self.assertRaisesRegex(TaskError, "spaceterm-client-native -> gpui"):
+            check_metadata(metadata({"spaceterm-client-native": ("gpui",)}))
 
     def test_cycle_in_a_portable_graph_terminates(self):
         graph = metadata({"spaceterm-core": ("portable",), "portable": ("spaceterm-core",)})

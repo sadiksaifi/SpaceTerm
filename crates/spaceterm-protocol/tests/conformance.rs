@@ -116,6 +116,10 @@ fn styled_page(major: u32) -> Payload {
                                 ..Default::default()
                             },
                         ],
+                        physical_row: None,
+                        start_column: 0,
+                        end_column: 0,
+                        columns: 0,
                     }],
                     color_state: Some(v1::ColorState {
                         default_foreground: Some(0x01_0203),
@@ -137,6 +141,7 @@ fn styled_page(major: u32) -> Payload {
                         shape: 1,
                         visible: true,
                         blinking: false,
+                        physical_row: None,
                     }),
                     modes: Some(v1::Modes {
                         bracketed_paste: true,
@@ -203,6 +208,10 @@ fn styled_page(major: u32) -> Payload {
                                 },
                             ],
                         }],
+                        physical_row: None,
+                        start_column: 0,
+                        end_column: 0,
+                        columns: 0,
                     }],
                     color_state: Some(v2::ColorState {
                         default_foreground: Some(0x01_0203),
@@ -224,6 +233,7 @@ fn styled_page(major: u32) -> Payload {
                         shape: 1,
                         visible: true,
                         blinking: false,
+                        physical_row: None,
                     }),
                     modes: Some(v2::Modes {
                         bracketed_paste: true,

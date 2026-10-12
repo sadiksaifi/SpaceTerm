@@ -124,3 +124,5 @@ pub(crate) fn sys_set<T>(opt: ffi::SysOption::Type, val: *const T) -> error::Res
     let result = unsafe { ffi::ghostty_sys_set(opt, val.cast()) };
     error::from_result(result)
 }
+
+pub mod content;

@@ -6007,6 +6007,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "objc2-quick-look-ui",
  "objc2-user-notifications",
+ "oo7",
  "pollster 0.4.0",
  "portable-pty",
  "raw-window-handle",
@@ -6019,13 +6020,18 @@ dependencies = [
  "serde_json_lenient",
  "sha2",
  "smallvec",
+ "spaceterm-client",
+ "spaceterm-client-native",
+ "spaceterm-core",
  "spaceterm-directories",
  "spaceterm-distribution",
  "spaceterm-host",
+ "spaceterm-protocol",
  "spaceterm-terminal",
  "spaceterm-ui",
  "tar",
  "thiserror 2.0.19",
+ "tokio",
  "unicode-bidi",
  "unicode-segmentation",
  "ureq",
@@ -6038,7 +6044,34 @@ dependencies = [
 name = "spaceterm-client"
 version = "0.0.0"
 dependencies = [
+ "prost",
+ "ring",
+ "serde",
+ "sha2",
  "spaceterm-core",
+ "spaceterm-protocol",
+ "spaceterm-terminal",
+ "thiserror 2.0.19",
+ "tokio",
+ "zeroize",
+]
+
+[[package]]
+name = "spaceterm-client-native"
+version = "0.0.0"
+dependencies = [
+ "base64 0.22.1",
+ "ring",
+ "serde",
+ "serde_json",
+ "spaceterm-client",
+ "spaceterm-core",
+ "spaceterm-host",
+ "spaceterm-protocol",
+ "thiserror 2.0.19",
+ "tokio",
+ "zbus",
+ "zeroize",
 ]
 
 [[package]]
@@ -6112,28 +6145,41 @@ dependencies = [
 name = "spaceterm-protocol"
 version = "0.0.0"
 dependencies = [
+ "base64 0.22.1",
  "prost",
  "prost-build",
  "prost-types",
  "protox",
  "ring",
+ "spaceterm-core",
+ "spaceterm-terminal",
  "thiserror 2.0.19",
  "unicode-segmentation",
+ "zeroize",
 ]
 
 [[package]]
 name = "spaceterm-server"
 version = "0.0.0"
 dependencies = [
+ "getrandom 0.4.3",
+ "serde",
+ "sha2",
+ "spaceterm-client",
  "spaceterm-core",
  "spaceterm-distribution",
  "spaceterm-host",
+ "spaceterm-protocol",
+ "spaceterm-terminal",
+ "thiserror 2.0.19",
+ "tokio",
 ]
 
 [[package]]
 name = "spaceterm-terminal"
 version = "0.1.0"
 dependencies = [
+ "async-channel",
  "getrandom 0.4.3",
  "int-enum",
  "libc",
@@ -6141,6 +6187,8 @@ dependencies = [
  "same-file",
  "serde",
  "serde_json",
+ "sha2",
+ "spaceterm-core",
  "thiserror 2.0.19",
 ]
 
@@ -6638,6 +6686,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",

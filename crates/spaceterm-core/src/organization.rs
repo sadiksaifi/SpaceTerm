@@ -15,6 +15,7 @@ use crate::identity::*;
 pub const MAX_NAME_BYTES: usize = 1024;
 pub const MAX_DIRECTORY_BYTES: usize = 4096;
 pub const MAX_TEMPLATE_BYTES: usize = 4096;
+pub const MAX_ACCEPTED_PANE_CREATIONS: usize = 8192;
 
 /// Bounded text. Debug output intentionally excludes its contents.
 #[derive(Clone, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -121,6 +122,7 @@ pub struct WorkspaceName {
 pub enum NameDraft {
     Automatic,
     Custom(NameText),
+    Blank,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -221,6 +223,8 @@ pub enum EndReason {
     Stop,
     RuntimeFailure,
     ServerRestart,
+    WorktreeRemoval,
+    ServerUpdate,
 }
 /// Worker retirement events must retain this reason. Only ordinary exit reduces
 /// hierarchy. Explicit closure removes membership through its durable mutation.
@@ -232,6 +236,9 @@ pub enum RetirementReason {
     RuntimeFailure,
     ConfirmedClose,
     KillWorkspace,
+    WorktreeRemoval,
+    ServerUpdate,
+    ServerRecovery,
 }
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum SessionPhase {
@@ -240,6 +247,7 @@ pub enum SessionPhase {
     Ended { reason: EndReason },
     Failed { class: FailureClass },
     DirectoryUnavailable,
+    Starting { generation: SessionGeneration },
 }
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum ControlRecord {
@@ -278,6 +286,12 @@ pub enum OrganizationError {
     InvalidRuntime,
     #[error("publication revision does not advance")]
     InvalidRevision,
+    #[error("retained organization facts are inconsistent")]
+    InvalidRetention,
+    #[error("retained organization exceeds its value bound")]
+    QuotaExceeded,
+    #[error("organization comparison counter is exhausted")]
+    CounterExhausted,
 }
 
 /// Durable read model. Collection order is not client order. Runtime grants and
@@ -292,6 +306,9 @@ pub struct OrganizationState {
     pub panes: Vec<PaneRecord>,
     pub repositories: Vec<RepositoryRecord>,
     pub worktrees: Vec<WorktreeRecord>,
+    /// None preserves legacy Wave 1 serialization. Wave 2 readiness requires Some.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained: Option<crate::organization_retained::OrganizationRetainedFacts>,
 }
 
 impl OrganizationState {
@@ -407,6 +424,9 @@ impl OrganizationState {
         if initial_tabs.len() != tabs.len() {
             return Err(OrganizationError::InvalidTopology);
         }
+        if let Some(retained) = &self.retained {
+            retained.validate_against(self)?;
+        }
         Ok(())
     }
 
@@ -443,6 +463,20 @@ impl OrganizationSnapshot {
         if seen != pane_ids {
             return Err(OrganizationError::InvalidRuntime);
         }
+        if let Some(retained) = &state.retained {
+            for record in &runtime {
+                let index = retained
+                    .pane_generations()
+                    .binary_search_by_key(&record.pane, |v| v.pane())
+                    .map_err(|_| OrganizationError::InvalidRetention)?;
+                let marks = retained.pane_generations()[index];
+                if marks.session() != record.session_generation
+                    || marks.control() != record.control_generation
+                {
+                    return Err(OrganizationError::InvalidRuntime);
+                }
+            }
+        }
         Ok(Self {
             epoch,
             state,
@@ -469,6 +503,11 @@ fn validate_runtime(record: &PaneRuntimeRecord, server: ServerId) -> Result<(), 
     {
         return Err(OrganizationError::InvalidRuntime);
     }
+    if let SessionPhase::Starting { generation } = record.phase
+        && (generation.get() == 0 || generation != record.session_generation)
+    {
+        return Err(OrganizationError::InvalidRuntime);
+    }
     if let ControlRecord::Held { client, generation } = record.control
         && (client.server() != server || generation != record.control_generation)
     {
@@ -491,6 +530,7 @@ pub enum OrganizationWrite {
     PutWorktree(WorktreeRecord),
     DeleteWorktree(WorktreeId),
     SetServerSettings(ServerSettingsRecord),
+    Retained(crate::organization_retained::RetainedOrganizationWrite),
 }
 impl OrganizationWrite {
     pub fn server(&self) -> Option<ServerId> {
@@ -506,6 +546,7 @@ impl OrganizationWrite {
             Self::PutWorktree(v) => v.id.server(),
             Self::DeleteWorktree(v) => v.server(),
             Self::SetServerSettings(_) => return None,
+            Self::Retained(value) => value.server(),
         })
     }
 }
@@ -517,6 +558,7 @@ pub struct OrganizationDelta {
     revision: OrganizationRevision,
     writes: Vec<OrganizationWrite>,
     runtime: Vec<PaneRuntimeRecord>,
+    accepted_creations: Vec<AcceptedPaneCreation>,
 }
 impl OrganizationDelta {
     /// May batch contiguous publications. A missing base requires a new snapshot,
@@ -549,7 +591,47 @@ impl OrganizationDelta {
             revision,
             writes,
             runtime,
+            accepted_creations: Vec::new(),
         })
+    }
+    /// Attach original split placements to this exact immutable publication.
+    /// This checks comparison facts only; the reducer establishes admission.
+    pub fn with_accepted_creations(
+        mut self,
+        values: Vec<AcceptedPaneCreation>,
+    ) -> Result<Self, OrganizationError> {
+        if values.len() > MAX_ACCEPTED_PANE_CREATIONS {
+            return Err(OrganizationError::QuotaExceeded);
+        }
+        let mut panes = BTreeSet::new();
+        for value in &values {
+            if value.server() != self.server
+                || value.epoch() != self.epoch
+                || value.base() != self.base
+                || value.revision() != self.revision
+            {
+                return Err(OrganizationError::InvalidRevision);
+            }
+            if !panes.insert(value.pane()) {
+                return Err(OrganizationError::Duplicate);
+            }
+            AcceptedPaneCreation::new(
+                &self,
+                value.tab(),
+                value.pane(),
+                value.ordinal(),
+                PaneCreation::SplitOf {
+                    source: value.source(),
+                    axis: value.axis(),
+                    edge: value.edge(),
+                },
+            )?;
+        }
+        self.accepted_creations = values;
+        Ok(self)
+    }
+    pub fn accepted_creations(&self) -> &[AcceptedPaneCreation] {
+        &self.accepted_creations
     }
     pub const fn server(&self) -> ServerId {
         self.server
@@ -600,6 +682,7 @@ impl OrganizationWrite {
                         .is_none_or(|directory| directory.server() == server)
                     && !matches!(v.creation, PaneCreation::SplitOf { source, .. } if source.server() != server)
             }
+            Self::Retained(value) => return value.validate_scope(server),
             Self::PutRepository(v) => v.directory.server() == server,
             Self::PutWorktree(v) => {
                 v.repository.server() == server && v.directory.server() == server
@@ -611,5 +694,181 @@ impl OrganizationWrite {
         } else {
             Err(OrganizationError::WrongServer)
         }
+    }
+}
+
+/// Original split-placement metadata from one accepted organization publication.
+///
+/// The reducer supplies this only for accepted CreatePane transitions, not for
+/// rebasing an existing Pane's creation link. Structural validation is comparison
+/// data, not proof of admission. The client verifies new membership against its
+/// retained base and uses this metadata only with the matching publication.
+/// A source deleted later in that publication may be absent from its final
+/// snapshot; the normalized topology supplies the resynchronization fallback.
+/// This transient record is not a retained deleted-ancestor history.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AcceptedPaneCreation {
+    epoch: ServerEpoch,
+    base: OrganizationRevision,
+    revision: OrganizationRevision,
+    tab: TabId,
+    pane: PaneId,
+    source: PaneId,
+    axis: SplitAxis,
+    edge: SplitEdge,
+    ordinal: CreationOrdinal,
+}
+
+impl AcceptedPaneCreation {
+    /// Bind an original split to its validated publication and written Pane.
+    /// Original placement may differ from the final normalized PaneCreation link.
+    pub fn new(
+        publication: &OrganizationDelta,
+        tab: TabId,
+        pane: PaneId,
+        ordinal: CreationOrdinal,
+        original_creation: PaneCreation,
+    ) -> Result<Self, OrganizationError> {
+        let PaneCreation::SplitOf { source, axis, edge } = original_creation else {
+            return Err(OrganizationError::InvalidTopology);
+        };
+        let server = publication.server();
+        if tab.server() != server || pane.server() != server || source.server() != server {
+            return Err(OrganizationError::WrongServer);
+        }
+        if source == pane {
+            return Err(OrganizationError::InvalidTopology);
+        }
+        if !publication.writes().iter().any(|write| {
+            matches!(write, OrganizationWrite::PutPane(record)
+                if record.id == pane && record.tab == tab && record.creation_ordinal == ordinal)
+        }) {
+            return Err(OrganizationError::InvalidMembership);
+        }
+        Ok(Self {
+            epoch: publication.epoch(),
+            base: publication.base(),
+            revision: publication.revision(),
+            tab,
+            pane,
+            source,
+            axis,
+            edge,
+            ordinal,
+        })
+    }
+
+    /// The owning Server.
+    pub const fn server(self) -> ServerId {
+        self.pane.server()
+    }
+    /// The publication's runtime incarnation.
+    pub const fn epoch(self) -> ServerEpoch {
+        self.epoch
+    }
+    /// The publication's required base.
+    pub const fn base(self) -> OrganizationRevision {
+        self.base
+    }
+    /// The publication whose resulting snapshot may consume this placement.
+    pub const fn revision(self) -> OrganizationRevision {
+        self.revision
+    }
+    /// The owning Tab.
+    pub const fn tab(self) -> TabId {
+        self.tab
+    }
+    /// The newly created Pane.
+    pub const fn pane(self) -> PaneId {
+        self.pane
+    }
+    /// The original split source, not a rebased default anchor.
+    pub const fn source(self) -> PaneId {
+        self.source
+    }
+    /// The original split axis.
+    pub const fn axis(self) -> SplitAxis {
+        self.axis
+    }
+    /// The new Pane's side along that axis.
+    pub const fn edge(self) -> SplitEdge {
+        self.edge
+    }
+    /// The new Pane's retained creation ordinal.
+    pub const fn ordinal(self) -> CreationOrdinal {
+        self.ordinal
+    }
+}
+
+/// Revision-bound defaults, not a personal layout or a second durable tree.
+/// Every current Tab has one normalized replay order; snapshots expose no
+/// accepted-creations metadata. Delta adapters retain original split placement.
+pub trait CreationTopologyReadModel {
+    fn server(&self) -> ServerId;
+    fn epoch(&self) -> ServerEpoch;
+    fn revision(&self) -> OrganizationRevision;
+    fn creation_default(
+        &self,
+        tab: TabId,
+    ) -> Option<&crate::organization_retained::TabCreationDefault>;
+    fn accepted_creations(&self) -> &[AcceptedPaneCreation];
+}
+
+/// Expected shared state and the exact generation reserved before launch.
+/// Construction supplies no explicit-use authority. Server startup policy admits
+/// that authority; the reducer records this reservation in a durable transition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StartupReservation {
+    pane: PaneId,
+    expected_session_generation: SessionGeneration,
+    expected_control_generation: ControlGeneration,
+    expected_control: ControlRecord,
+    session: SessionKey,
+}
+
+impl StartupReservation {
+    pub fn new(
+        pane: PaneId,
+        expected_session_generation: SessionGeneration,
+        expected_control_generation: ControlGeneration,
+        expected_control: ControlRecord,
+        session: SessionKey,
+    ) -> Result<Self, OrganizationError> {
+        let next = expected_session_generation
+            .checked_successor()
+            .ok_or(OrganizationError::CounterExhausted)?;
+        if session.pane != pane || session.epoch.get() == 0 || session.generation != next {
+            return Err(OrganizationError::InvalidRuntime);
+        }
+        match expected_control {
+            ControlRecord::Held { client, generation }
+                if client.server() == pane.server()
+                    && generation.get() != 0
+                    && generation == expected_control_generation => {}
+            _ => return Err(OrganizationError::InvalidRuntime),
+        }
+        Ok(Self {
+            pane,
+            expected_session_generation,
+            expected_control_generation,
+            expected_control,
+            session,
+        })
+    }
+
+    pub const fn pane(self) -> PaneId {
+        self.pane
+    }
+    pub const fn expected_session_generation(self) -> SessionGeneration {
+        self.expected_session_generation
+    }
+    pub const fn expected_control_generation(self) -> ControlGeneration {
+        self.expected_control_generation
+    }
+    pub const fn expected_control(self) -> ControlRecord {
+        self.expected_control
+    }
+    pub const fn session(self) -> SessionKey {
+        self.session
     }
 }
