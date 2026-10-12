@@ -7,6 +7,7 @@ No host key, TPM, native registration, or service-manager operation runs here.
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -16,6 +17,12 @@ from pathlib import Path
 
 SOURCE_SHA256 = "9c6f6666e48f4c4f230bbb08bfa293f323d28a568f798fafba0eeca1a5936f9b"
 SOURCE_COMMIT = "84ff4f0dff41c26472cd48c4c4955c2d77f5ac08"
+PATCHES = [
+    {
+        "name": "0001-spaceterm-private-credential-policy.patch",
+        "sha256": "ea0f2897290b784a85dbadf53789bd17e5272704a71bb3b3b7aa13fcffd3af10",
+    }
+]
 SYSTEM_LIBRARIES = {
     "libc.so.6",
     "libm.so.6",
@@ -112,6 +119,35 @@ def elf_dependencies(path, environment):
     return re.findall(r"\(NEEDED\).*\[(.*?)\]", data)
 
 
+def build_receipt(recipe, build_info, files):
+    """A new construction never inherits observations of an earlier construction."""
+    runtime = {
+        key: value
+        for key, value in recipe["runtime"].items()
+        if key
+        not in {"jammy_result", "host_key_result", "tpm_result", "closure_sha256", "evidence"}
+    }
+    receipt = {
+        "schema_version": 1,
+        "source": recipe["source"],
+        "build": {**build_info, "files": files},
+        "runtime": runtime,
+        "licensing": recipe["licensing"],
+    }
+    binding = hashlib.sha256(
+        json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    receipt["runtime"] = {
+        **runtime,
+        "closure_sha256": binding,
+        "jammy_result": "unrun",
+        "host_key_result": "unrun",
+        "tpm_result": "unrun",
+        "evidence": {},
+    }
+    return receipt
+
+
 def build(arguments):
     global PHASE
     scratch = Path(arguments.scratch)
@@ -145,6 +181,28 @@ def build(arguments):
 
         downloaded.extractall(source, filter=source_filter)
     source = source / f"systemd-{SOURCE_COMMIT}"
+    PHASE = "patch-authentication"
+    if recipe["source"]["patches"] != PATCHES:
+        raise BuildFailure("credential-tool-patch-rejected")
+    for patch in PATCHES:
+        path = Path("/driver") / patch["name"]
+        if path.is_symlink() or digest(path) != patch["sha256"]:
+            raise BuildFailure("credential-tool-patch-rejected")
+        run(
+            [
+                "patch",
+                "--batch",
+                "--fuzz=0",
+                "--reject-file=-",
+                "--directory",
+                source,
+                "-p1",
+                "--input",
+                path,
+            ],
+            environment,
+            failure="credential-tool-patch-rejected",
+        )
     build_root = scratch / "build"
     PHASE = "meson-setup"
     run(
@@ -295,7 +353,12 @@ def build(arguments):
     materials = root / "share/sources/build-material"
     for name in ("LGPL-2.0-or-later.txt", "UPSTREAM-LICENSE-NOTES.txt"):
         copy(Path("/driver") / name, root / "share/licenses" / name)
-    for name in ("build.py", "Jammy.Dockerfile", "RELINKING.txt"):
+    for name in (
+        "build.py",
+        "Jammy.Dockerfile",
+        "RELINKING.txt",
+        *(patch["name"] for patch in PATCHES),
+    ):
         copy(Path("/driver") / name, materials / name)
     copy(Path(arguments.recipe), materials / "recipe.json")
     copy(Path("/opt/credential-sources/packages.tsv"), materials / "packages.tsv")
@@ -320,6 +383,9 @@ def build(arguments):
         raise BuildFailure("credential-tool-version-rejected")
     build_info = {
         **recipe["build"],
+        # Bind each construction to a shipped metadata file before hashing the
+        # closure. Byte-identical executables cannot inherit prior evidence.
+        "build_id": os.urandom(32).hex(),
         "complete": True,
         "compiler": "gcc",
         "compiler_version": run(["gcc", "-dumpfullversion"], environment),
@@ -341,14 +407,7 @@ def build(arguments):
         for path in sorted(root.rglob("*"))
         if path.is_file()
     ]
-    receipt = {
-        "schema_version": 1,
-        "source": recipe["source"],
-        "build": {**build_info, "files": files},
-        # Containers do not establish the kernel/supervisor, Host key, or TPM gates.
-        "runtime": recipe["runtime"],
-        "licensing": recipe["licensing"],
-    }
+    receipt = build_receipt(recipe, build_info, files)
     Path(arguments.receipt).write_text(json.dumps(receipt, sort_keys=True, separators=(",", ":")))
     print("credential-tool-built; native-baseline-and-credential-evidence-unrun")
 

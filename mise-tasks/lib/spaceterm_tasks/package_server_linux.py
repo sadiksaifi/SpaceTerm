@@ -1,5 +1,6 @@
 """Linux server packaging. An unbuilt or unproved credential closure blocks releases."""
 
+import hashlib
 import json
 import os
 import re
@@ -19,6 +20,90 @@ CLOSURE = DIST / "server-credential-tools-x86_64"
 SOURCE_COMMIT = "84ff4f0dff41c26472cd48c4c4955c2d77f5ac08"
 SOURCE_TAG = "cc38479b7ff6e20ab265dda8f01f85e1e83f0058"
 SOURCE_SHA256 = "9c6f6666e48f4c4f230bbb08bfa293f323d28a568f798fafba0eeca1a5936f9b"
+PATCHES = [
+    {
+        "name": "0001-spaceterm-private-credential-policy.patch",
+        "sha256": "ea0f2897290b784a85dbadf53789bd17e5272704a71bb3b3b7aa13fcffd3af10",
+    }
+]
+
+
+RUNTIME_RESULTS = ("jammy_result", "host_key_result", "tpm_result")
+RUNTIME_POLICY = {
+    "elf_interpreter": "/lib64/ld-linux-x86-64.so.2",
+    "credential_tool_runpath": "$ORIGIN/../../lib/credential-tools",
+    "library_runpath": "$ORIGIN",
+    "openssl_providers": "private-authenticated-closure",
+    "openssl_configuration": "private-authenticated-configuration",
+    "minimum_glibc": [2, 35],
+    "minimum_kernel": [5, 15],
+    "minimum_supervisor": [249],
+}
+
+
+def credential_closure_binding(receipt):
+    document = {**receipt, "runtime": RUNTIME_POLICY}
+    return hashlib.sha256(
+        json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def validate_runtime(receipt, *, fresh=False):
+    runtime = receipt["runtime"]
+    if (
+        not isinstance(runtime, dict)
+        or set(runtime)
+        != set(RUNTIME_POLICY) | set(RUNTIME_RESULTS) | {"closure_sha256", "evidence"}
+        or any(runtime[key] != value for key, value in RUNTIME_POLICY.items())
+        or runtime["closure_sha256"] != credential_closure_binding(receipt)
+        or not isinstance(runtime["evidence"], dict)
+        or not set(runtime["evidence"]) <= {"jammy", "host-key", "tpm"}
+    ):
+        raise TaskError("credential-tool runtime evidence differs from its exact closure")
+    for field, gate in zip(RUNTIME_RESULTS, ("jammy", "host-key", "tpm"), strict=True):
+        result = runtime[field]
+        record = runtime["evidence"].get(gate)
+        if result == "unrun" and record is None:
+            continue
+        if (
+            fresh
+            or result != "passed"
+            or not isinstance(record, dict)
+            or set(record) != {"closure_sha256", "tests_run", "tests_passed", "tests_skipped"}
+            or record["closure_sha256"] != runtime["closure_sha256"]
+            or any(
+                type(record[key]) is not int
+                for key in ("tests_run", "tests_passed", "tests_skipped")
+            )
+            or not 0 < record["tests_run"] <= 4096
+            or record["tests_passed"] != record["tests_run"]
+            or record["tests_skipped"] != 0
+        ):
+            raise TaskError("credential-tool runtime evidence differs from its exact closure")
+
+
+def validate_build_receipt(receipt, pin, image):
+    try:
+        if (
+            not isinstance(receipt, dict)
+            or set(receipt) != set(pin)
+            or any(
+                receipt[field] != pin[field] for field in ("source", "licensing", "schema_version")
+            )
+            or not isinstance(receipt["build"], dict)
+            or receipt["build"].get("complete") is not True
+            or receipt["build"].get("options") != pin["build"]["options"]
+            or receipt["build"].get("targets") != ["systemd-creds"]
+            or receipt["build"].get("build_image") != image
+            or receipt["build"].get("build_image_sha256") != image.removeprefix("sha256:")
+            or not artifacts.valid_sha256(receipt["build"].get("build_id"))
+            or receipt["build"].get("build_id") == pin["build"].get("build_id")
+            or not receipt["build"].get("dependencies")
+        ):
+            raise TaskError("credential-tool build receipt differs from its frozen recipe")
+        validate_runtime(receipt, fresh=True)
+    except (KeyError, TypeError, ValueError):
+        raise TaskError("credential-tool build receipt differs from its frozen recipe") from None
 
 
 def credential_tool_pin():
@@ -45,7 +130,7 @@ def _credential_tool_pin():
         or source["archive_url"]
         != f"https://codeload.github.com/systemd/systemd/tar.gz/{SOURCE_COMMIT}"
         or source["license"] != "LGPL-2.1-or-later"
-        or source["patches"] != []
+        or source["patches"] != PATCHES
     ):
         raise TaskError("credential tool requires the exact authenticated upstream source pin")
     options = pin["build"]["options"]
@@ -84,10 +169,54 @@ def verify_credential_files(root, pinned_files):
         path = root / file["name"]
         if path.is_symlink() or not path.is_file() or artifacts.digest(path) != file["sha256"]:
             raise TaskError("credential-tool closure differs from its binary pin")
+    hashes = {file["name"]: file["sha256"] for file in pinned_files}
+    if any(
+        hashes.get("share/sources/build-material/" + patch["name"]) != patch["sha256"]
+        for patch in PATCHES
+    ):
+        raise TaskError("credential-tool corresponding hardening patch is missing or unrecorded")
     actual = {p.relative_to(root).as_posix() for p in root.rglob("*") if not p.is_dir()}
     if actual != files or "libexec/credential-tools/systemd-creds" not in files:
         raise TaskError("credential-tool closure is missing or has unexpected files")
     return files
+
+
+def verify_credential_build(root, build):
+    files = verify_credential_files(root, build["files"])
+    metadata_name = "share/sources/build-material/build-info.json"
+    if metadata_name not in files or not artifacts.valid_sha256(build.get("build_id")):
+        raise TaskError("credential-tool authenticated build identity is unavailable")
+    try:
+        with (root / metadata_name).open("rb") as stream:
+            metadata = artifacts.strict_json(
+                stream.read(artifacts.MAX_MANIFEST_BYTES + 1), artifacts.MAX_MANIFEST_BYTES
+            )
+    except OSError:
+        raise TaskError("credential-tool authenticated build identity is unavailable") from None
+    if not isinstance(metadata, dict) or metadata.get("build_id") != build["build_id"]:
+        raise TaskError("credential-tool build identity differs from its authenticated metadata")
+    return files
+
+
+def verify_selected_credential_receipt(root, pin):
+    try:
+        with root.with_name(root.name + ".json").open("rb") as stream:
+            receipt = artifacts.strict_json(
+                stream.read(artifacts.MAX_MANIFEST_BYTES + 1), artifacts.MAX_MANIFEST_BYTES
+            )
+        if not isinstance(receipt, dict) or set(receipt) != set(pin):
+            raise TaskError("selected credential-tool build receipt is invalid")
+        validate_runtime(receipt)
+        # Evidence is recorded in the pin after native execution. The original
+        # build receipt may remain unrun, but it must select that same closure.
+        if receipt["runtime"]["closure_sha256"] != pin["runtime"]["closure_sha256"]:
+            raise TaskError(
+                "selected credential-tool build differs from its authenticated evidence"
+            )
+    except (OSError, KeyError, TypeError, ValueError):
+        raise TaskError(
+            "selected credential-tool build receipt is unavailable or invalid"
+        ) from None
 
 
 def verify_copied_credential_files(root, pinned_files, notices_sha256):
@@ -108,6 +237,7 @@ def validate_credential_closure(root=None):
     pin = credential_tool_pin()
     build = pin["build"]
     runtime = pin["runtime"]
+    validate_runtime(pin)
     if (
         not build["complete"]
         or any(
@@ -123,6 +253,7 @@ def validate_credential_closure(root=None):
         )
         or runtime["jammy_result"] != "passed"
         or runtime["host_key_result"] != "passed"
+        or runtime["tpm_result"] != "passed"
     ):
         raise TaskError("pinned credential-tool closure and Jammy evidence are unavailable")
     if (
@@ -131,7 +262,8 @@ def validate_credential_closure(root=None):
         or not build["files"]
     ):
         raise TaskError("credential-tool dependency and source material are incomplete")
-    files = verify_credential_files(root, build["files"])
+    verify_selected_credential_receipt(root, pin)
+    files = verify_credential_build(root, build)
     dependencies = []
     for dependency in build["dependencies"]:
         required = {
@@ -390,23 +522,8 @@ def build_credential_tool():
         )
         data = (stage / "receipt.json").read_bytes()
         receipt = artifacts.strict_json(data, artifacts.MAX_MANIFEST_BYTES)
-        if (
-            not isinstance(receipt, dict)
-            or set(receipt) != set(pin)
-            or any(
-                receipt[field] != pin[field]
-                for field in ("source", "runtime", "licensing", "schema_version")
-            )
-            or not isinstance(receipt["build"], dict)
-            or receipt["build"].get("complete") is not True
-            or receipt["build"].get("options") != pin["build"]["options"]
-            or receipt["build"].get("targets") != ["systemd-creds"]
-            or receipt["build"].get("build_image") != image
-            or receipt["build"].get("build_image_sha256") != image.removeprefix("sha256:")
-            or not receipt["build"].get("dependencies")
-        ):
-            raise TaskError("credential-tool build receipt differs from its frozen recipe")
-        verify_credential_files(stage / "closure", receipt["build"]["files"])
+        validate_build_receipt(receipt, pin, image)
+        verify_credential_build(stage / "closure", receipt["build"])
         verify_elf_closure(stage / "closure")
         shutil.move(stage / "closure", destination)
         receipt_path.write_bytes(data)
