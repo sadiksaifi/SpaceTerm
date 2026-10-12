@@ -11,6 +11,7 @@ mod import;
 mod keybindings;
 mod microphone;
 mod permission_access;
+mod servers;
 mod sidebar;
 mod theme_gallery;
 mod theme_store;
@@ -283,6 +284,8 @@ pub(crate) struct SettingsWindow {
     settings_file: advanced::SettingsFileView,
     /// The Worktree Path Template field, kept so an edit survives re-rendering.
     worktree_location: git::WorktreeLocationField,
+    /// The servers this device is paired with, and the person's choices among them.
+    servers: servers::ServersSection,
 }
 
 impl SidebarOwner for SettingsWindow {
@@ -510,6 +513,7 @@ impl SettingsWindow {
             window,
             cx,
         );
+        let servers = servers::ServersSection::new(window, cx);
         let permission_changes =
             PermissionAccessChanges::observe(permissions.system_permissions.as_ref(), cx);
         // A Permission Setup reports its progress and the grant it finds while this window waits
@@ -570,6 +574,7 @@ impl SettingsWindow {
             shortcuts,
             settings_file,
             worktree_location,
+            servers,
         }
     }
 
@@ -674,15 +679,21 @@ impl SettingsWindow {
             .filter(|row| {
                 self.available_sections.contains(&row.descriptor().section)
                     && !self.omitted_rows.contains(row)
+                    && !self.servers.omits(*row)
             })
             .collect()
     }
 
     fn rows_for(&self, section: SettingsSectionId) -> Vec<SettingsRowId> {
-        self.matching_rows()
+        let mut rows = self
+            .matching_rows()
             .into_iter()
             .filter(|row| row.descriptor().section == section)
-            .collect()
+            .collect();
+        if section == SettingsSectionId::Servers {
+            self.servers.complete(&mut rows);
+        }
+        rows
     }
 
     fn synchronize_search_results(&mut self) {
@@ -911,6 +922,7 @@ impl SettingsWindow {
                     SettingsSectionId::Privacy => IconName::Shield,
                     SettingsSectionId::Git => IconName::GitBranch,
                     SettingsSectionId::Updates => IconName::Download,
+                    SettingsSectionId::Servers => IconName::Server,
                     SettingsSectionId::Advanced => IconName::Cog,
                 },
                 available: available.contains(&section),
@@ -1050,6 +1062,7 @@ impl SettingsWindow {
                 None => groups.push((title, vec![row], vec![rendered])),
             }
         }
+        let has_lead_group = groups.first().is_some_and(|(title, _, _)| title.is_empty());
         self.row_bounds.borrow_mut().clear();
         let rendered = groups
             .into_iter()
@@ -1075,6 +1088,16 @@ impl SettingsWindow {
         let notice = (section == SettingsSectionId::Themes)
             .then(|| self.render_diagnostics_notice(appearance, cx))
             .flatten();
+        // The selected server's rows sit under its name, below the list that selects it.
+        let mut rendered = rendered;
+        let mut unpair_notices = Vec::new();
+        if section == SettingsSectionId::Servers {
+            unpair_notices = self.render_unpair_notices(settings, cx);
+            if let Some(heading) = self.render_selected_server_heading(appearance) {
+                let position = usize::from(has_lead_group);
+                rendered.insert(position.min(rendered.len()), heading);
+            }
+        }
         div()
             .debug_selector(move || section.selector().to_owned())
             .flex()
@@ -1082,6 +1105,7 @@ impl SettingsWindow {
             .w_full()
             .gap(group_spacing(appearance))
             .children(notice)
+            .children(unpair_notices)
             .children(shortcut_search)
             .children(no_shortcuts)
             .children(rendered)
@@ -1162,6 +1186,10 @@ impl SettingsWindow {
             if let Some(description) = self.shortcut_description(command, cx) {
                 rendered = rendered.caption(description.text, description.tone);
             }
+        } else if row.descriptor().section == SettingsSectionId::Servers {
+            if let Some((caption, tone)) = self.server_row_caption(row, cx) {
+                rendered = rendered.caption(caption, tone);
+            }
         } else if let Some(description) = self.row_description(row, cx) {
             rendered = rendered.description(description);
         }
@@ -1213,6 +1241,16 @@ impl SettingsWindow {
             SettingsRowId::AutomaticUpdateDownloads => self.render_automatic_update_downloads(cx),
             SettingsRowId::UpdateCheckInterval => self.render_update_check_interval(cx),
             SettingsRowId::UpdateReminderInterval => self.render_update_reminder_interval(cx),
+            SettingsRowId::ServerList
+            | SettingsRowId::ServerStatus
+            | SettingsRowId::ServerVersion
+            | SettingsRowId::ServerConnection
+            | SettingsRowId::ServerEndAllSessions
+            | SettingsRowId::ServerWorktreeLocation
+            | SettingsRowId::ServerPermissions
+            | SettingsRowId::ServerRemoteAccess
+            | SettingsRowId::ServerRemoteAccessScope
+            | SettingsRowId::ServerUnpair => self.render_server_row(row, appearance, window, cx),
             SettingsRowId::Shortcut(command) => self.render_shortcut(command, cx),
             SettingsRowId::SettingsFile => self.render_settings_file(appearance, cx),
             SettingsRowId::ExportSettings => {
@@ -2040,8 +2078,11 @@ fn row_layout(row: SettingsRowId) -> FormRowLayout {
     match row {
         SettingsRowId::TerminalTheme
         | SettingsRowId::InstalledThemes
-        | SettingsRowId::SettingsFile => FormRowLayout::Full,
-        SettingsRowId::WorktreeLocation => FormRowLayout::Above,
+        | SettingsRowId::SettingsFile
+        | SettingsRowId::ServerList => FormRowLayout::Full,
+        SettingsRowId::WorktreeLocation
+        | SettingsRowId::ServerWorktreeLocation
+        | SettingsRowId::ServerPermissions => FormRowLayout::Above,
         _ => FormRowLayout::Beside,
     }
 }
