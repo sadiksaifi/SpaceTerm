@@ -763,15 +763,24 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
         window: &Window,
         cx: &App,
     ) {
+        // An item grabbed while it still settles is drawn short of its place, so the press holds
+        // it from where it is drawn.
+        let drawn = ids
+            .iter()
+            .position(|candidate| *candidate == id)
+            .and_then(|position| self.item_bounds(items, ids).get(position).copied())
+            .map(|face| {
+                face.origin
+                    + self
+                        .slides
+                        .get(&id)
+                        .map_or_else(Point::default, |slide| slide.at(now(cx)))
+            });
         self.slides.clear();
         self.settling = None;
         self.arriving = None;
         self.arrival = None;
-        let rest = ids
-            .iter()
-            .position(|candidate| *candidate == id)
-            .and_then(|position| self.item_bounds(items, ids).get(position).copied());
-        let grab = rest.map_or_else(Point::default, |rest| grab_point(window, cx) - rest.origin);
+        let grab = drawn.map_or_else(Point::default, |drawn| grab_point(window, cx) - drawn);
         self.lift = Some(Lift {
             id,
             session,

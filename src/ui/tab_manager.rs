@@ -6752,6 +6752,45 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_tab_grabbed_again_while_it_settles_should_lift_from_where_it_is_drawn(
+        cx: &mut TestAppContext,
+    ) {
+        let (_manager, _records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
+        click("create-tab-button", cx);
+        let first = cx.debug_bounds("tab-item-1-inactive").unwrap();
+        let second = cx.debug_bounds("tab-item-2-inactive").unwrap();
+        // Past the second Tab's midpoint, short of the third's, so the Tab lands second and
+        // settles 80pt back.
+        let release = second.center() + point(px(80.0), px(0.0));
+        drag_tab(
+            first.center(),
+            &[first.center() + point(px(8.0), px(0.0)), release],
+            cx,
+        );
+        cx.simulate_mouse_up(release, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(60));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        let settling = cx.debug_bounds("tab-item-1-inactive").unwrap();
+        assert_ne!(settling.origin, second.origin, "the Tab is still settling");
+
+        let moved = point(px(8.0), px(0.0));
+        drag_tab(settling.center(), &[settling.center() + moved], cx);
+        let copy = cx.debug_bounds("tab-preview-1-inactive").map(|tab| tab.origin);
+        cx.simulate_mouse_up(settling.center() + moved, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            copy,
+            Some(settling.origin + moved),
+            "a Tab grabbed while it settles must lift from where it is drawn"
+        );
+    }
+
+    #[gpui::test]
     fn the_gap_should_follow_the_lifted_tab_and_close_over_its_own_place(cx: &mut TestAppContext) {
         let (manager, _records, cx) = tab_manager(cx);
         click("create-tab-button", cx);
