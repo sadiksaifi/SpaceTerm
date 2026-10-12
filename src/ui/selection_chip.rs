@@ -138,7 +138,7 @@ pub(crate) struct SelectionChip {
 const MENU_TARGET_OUTLINE: f32 = 2.0;
 /// How much of its color's opacity the dashed edge of a landing place keeps, so it marks the
 /// place without competing with the item's faded face.
-const LANDING_EDGE_OPACITY: u8 = 115;
+const LANDING_EDGE_OPACITY: u8 = 77;
 
 impl SelectionChip {
     pub(crate) fn new(shape: ChipShape, paint: ChipPaint) -> Self {
