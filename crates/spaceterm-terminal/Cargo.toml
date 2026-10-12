@@ -1,0 +1,25 @@
+[package]
+name = "spaceterm-terminal"
+version = "0.1.0"
+publish = false
+edition = "2024"
+
+[features]
+default = ["engine", "kitty-graphics", "png"]
+engine = ["dep:libghostty-vt"]
+kitty-graphics = ["libghostty-vt?/kitty-graphics"]
+png = ["kitty-graphics", "libghostty-vt?/png"]
+test-support = []
+native-tests = []
+
+[dependencies]
+getrandom = "=0.4.3"
+int-enum = "1.2.0"
+libghostty-vt = { path = "../../third_party/libghostty-vt", default-features = false, optional = true }
+serde = { version = "1.0", features = ["derive"] }
+same-file = "=1.0.6"
+thiserror = "2.0.17"
+
+[dev-dependencies]
+libc = "=0.2.189"
+serde_json = "1.0"

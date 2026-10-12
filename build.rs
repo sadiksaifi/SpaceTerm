@@ -14,6 +14,7 @@ fn main() {
         PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("Cargo supplies the manifest"));
     // Watch source changes as well as refs so development identity cannot retain a release label.
     println!("cargo:rerun-if-changed=src");
+    println!("cargo:rerun-if-changed=crates");
     println!("cargo:rerun-if-changed=build/identity.rs");
     for path in identity::watched_paths(&root).unwrap_or_else(|error| panic!("{error}")) {
         println!("cargo:rerun-if-changed={}", path.display());

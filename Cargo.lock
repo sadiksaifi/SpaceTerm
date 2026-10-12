@@ -5709,6 +5709,7 @@ dependencies = [
  "sha2",
  "smallvec",
  "spaceterm-directories",
+ "spaceterm-terminal",
  "spaceterm-ui",
  "tar",
  "thiserror 2.0.19",
@@ -5733,6 +5734,20 @@ name = "spaceterm-host"
 version = "0.0.0"
 dependencies = [
  "libc",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "spaceterm-terminal"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.4.3",
+ "int-enum",
+ "libc",
+ "libghostty-vt",
+ "same-file",
+ "serde",
+ "serde_json",
  "thiserror 2.0.19",
 ]
 
