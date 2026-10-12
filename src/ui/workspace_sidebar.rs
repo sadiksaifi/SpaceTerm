@@ -254,6 +254,9 @@ struct DraggedWorkspace {
 /// Owns sidebar layout, scrolling, menus, inline rename, reordering, and focus transitions.
 pub(super) struct WorkspaceSidebar {
     rows: Vec<WorkspaceRowViewModel>,
+    /// Each Workspace's row as last rendered, kept for a closed Workspace while its row shrinks
+    /// out of the list.
+    departed_rows: std::collections::HashMap<WorkspaceId, WorkspaceRowViewModel>,
     remote_unavailable: Option<String>,
     layout: SidebarLayout,
     scroll_handle: ScrollHandle,
@@ -324,6 +327,7 @@ impl WorkspaceSidebar {
         .detach();
         Self {
             rows: Vec::new(),
+            departed_rows: std::collections::HashMap::new(),
             remote_unavailable: None,
             layout: SidebarLayout {
                 visible,
@@ -863,6 +867,17 @@ impl Render for WorkspaceSidebar {
                 &ids,
             );
         }
+        let mut rows = self
+            .rows
+            .iter()
+            .map(|row| (row.workspace_id, row.clone()))
+            .collect::<std::collections::HashMap<_, _>>();
+        for departed in self.workspace_reorder.departing() {
+            if let Some(row) = self.departed_rows.remove(&departed) {
+                rows.entry(departed).or_insert(row);
+            }
+        }
+        self.departed_rows = rows;
         self.sync_scrollbar(cx);
         let hovers = self.row_hovers(window, cx);
         self.render_body(hovers, cx.entity().downgrade(), window, cx)

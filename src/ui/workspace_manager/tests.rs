@@ -7940,15 +7940,23 @@ fn a_closed_workspace_row_should_leave_a_gap_that_closes(cx: &mut TestAppContext
     let closing = cx
         .debug_bounds("workspace-row-2-active")
         .map(|row| row.origin);
+    let departing = cx.debug_bounds("workspace-row-departing-1-inactive");
     crate::ui::drag_and_drop::finish_slides(cx);
     let closed = cx
         .debug_bounds("workspace-row-2-active")
         .map(|row| row.origin);
+    let departed = cx.debug_bounds("workspace-row-departing-1-inactive");
 
     assert_eq!(
         (closing, closed),
         (Some(second.origin), Some(first.origin)),
         "the row after a closed one must start in its own place and close the gap"
+    );
+    assert_eq!(
+        (departing.map(|row| row.origin), departed),
+        (Some(first.origin), None),
+        "a closed row must show its face in its old place while the gap closes, and leave once \
+         it has"
     );
 }
 

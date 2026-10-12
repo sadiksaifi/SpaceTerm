@@ -369,6 +369,8 @@ impl std::fmt::Debug for TabManagerEvent {
 enum TabItemRole {
     InBar,
     Lifted,
+    /// A closed Tab shrinking out of the bar.
+    Departing,
 }
 
 /// Where the pointer stands over one Tab.
@@ -413,6 +415,9 @@ pub(crate) struct TabManager {
     tab_selector_pressed: Option<TabId>,
     tab_menu: Option<TabId>,
     tab_reorder: ReorderableStrip<TabId>,
+    /// Each Tab's identity and selection as last rendered, kept for a closed Tab while it shrinks
+    /// out of the bar.
+    tab_faces: std::collections::HashMap<TabId, (TabIdentity, bool)>,
     operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
     window_drag_status: WindowDragRegionStatus,
     tab_bar_scroll_handle: ScrollHandle,
@@ -501,6 +506,7 @@ impl TabManager {
             tab_selector_pressed: None,
             tab_menu: None,
             tab_reorder: ReorderableStrip::new(gpui::Axis::Horizontal),
+            tab_faces: std::collections::HashMap::new(),
             operating_system_window_drag_platform,
             window_drag_status: WindowDragRegionStatus::new(),
             tab_bar_scroll_handle: ScrollHandle::new(),
@@ -1848,7 +1854,8 @@ impl TabManager {
         window: &Window,
         cx: &App,
     ) -> gpui::Stateful<gpui::Div> {
-        let lifted = role == TabItemRole::Lifted;
+        // A lifted or departing face only paints, and claims no pointer input.
+        let paint_only = role != TabItemRole::InBar;
         let press_manager = manager.clone();
         let release_manager = manager.clone();
         let click_manager = manager.clone();
@@ -1895,16 +1902,20 @@ impl TabManager {
                     window,
                 )
             });
-        let element_name = if lifted { "tab-preview" } else { "tab-item" };
+        let element_name = match role {
+            TabItemRole::InBar => "tab-item",
+            TabItemRole::Lifted => "tab-preview",
+            TabItemRole::Departing => "tab-departing",
+        };
         // The lifted copy shows its whole lift. A Tab in the bar slides aside, shows a faded face
         // where a release would land it, and shows what remains of its lift as it settles.
-        let motion = if lifted {
-            ItemMotion {
+        let motion = match role {
+            TabItemRole::InBar => self.tab_reorder.motion(tab_id, cx),
+            TabItemRole::Lifted => ItemMotion {
                 lift: 1.0,
                 ..ItemMotion::default()
-            }
-        } else {
-            self.tab_reorder.motion(tab_id, cx)
+            },
+            TabItemRole::Departing => ItemMotion::default(),
         };
         let chip_selector = format!("{element_name}-{}-chip", tab_id.get());
         let chip = if motion.lift > 0.0 {
@@ -1916,7 +1927,7 @@ impl TabManager {
         } else {
             chip.render(chip_selector, hover)
         };
-        let close_control = if lifted {
+        let close_control = if paint_only {
             // The close control's glyph at rest, without a control that could take the pointer.
             div()
                 .size(close_button_size)
@@ -2013,7 +2024,7 @@ impl TabManager {
                     .when(!active, |button| button.opacity(hover))
                     .child(close_control),
             );
-        if lifted {
+        if paint_only {
             return face;
         }
         face.cursor_pointer()
@@ -2201,8 +2212,32 @@ impl TabManager {
                     });
                 },
             );
+            let departures = self
+                .tab_reorder
+                .departures(tab_id, cx)
+                .into_iter()
+                .filter_map(|departure| {
+                    let (identity, active) = self.tab_faces.get(&departure.id)?.clone();
+                    let face = self.render_tab_item(
+                        departure.id,
+                        identity,
+                        active,
+                        TabItemRole::Departing,
+                        TabHover {
+                            level: 0.0,
+                            under_pointer: false,
+                        },
+                        presentation,
+                        manager.clone(),
+                        appearance,
+                        window,
+                        cx,
+                    );
+                    Some(departure.render(gpui::Axis::Horizontal, face.into_any_element()))
+                })
+                .collect::<Vec<_>>();
             items = items.child(
-                slot.child(
+                slot.children(departures).child(
                     ContextMenu::new(
                         ("tab-context-menu", tab_id.get()),
                         accessibility_name,
@@ -2407,11 +2442,24 @@ impl Render for TabManager {
         let ids = self.visible_tab_ids();
         self.tab_reorder
             .refresh(&self.tab_bar_scroll_handle, &ids, window, cx);
-        self.tab_reorder.reveal_while_entering(
-            self.tabs.active_tab_id(),
-            &self.tab_bar_scroll_handle,
-            &ids,
-        );
+        let active_tab_id = self.tabs.active_tab_id();
+        self.tab_reorder
+            .reveal_while_entering(active_tab_id, &self.tab_bar_scroll_handle, &ids);
+        let mut faces = self
+            .visible_tabs()
+            .map(|(tab_id, view)| {
+                (
+                    tab_id,
+                    (view.read(cx).tab_identity(), tab_id == active_tab_id),
+                )
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        for departed in self.tab_reorder.departing() {
+            if let Some(face) = self.tab_faces.remove(&departed) {
+                faces.entry(departed).or_insert(face);
+            }
+        }
+        self.tab_faces = faces;
         #[cfg(test)]
         {
             self.rendered_window_active = window.is_window_active();
@@ -6097,14 +6145,21 @@ mod tests {
         let entered = create(cx);
         click("tab-close-button-2", cx);
         let closing = create(cx);
+        let departing = cx.debug_bounds("tab-departing-2-active").is_some();
         finish_slides(cx);
         let closed = create(cx);
+        let departed = cx.debug_bounds("tab-departing-2-active").is_some();
 
         assert_eq!(
             (entering, entered, closing, closed),
             (before, before + width, before + width, before),
             "a new Tab must grow from nothing, and a closed Tab's place must close from its full \
              width"
+        );
+        assert_eq!(
+            (departing, departed),
+            (true, false),
+            "a closed Tab must show its face while its place closes, and leave once it has"
         );
         assert!(
             before < growing && growing < before + width,
