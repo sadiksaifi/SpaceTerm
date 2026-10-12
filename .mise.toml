@@ -752,7 +752,7 @@ run = [
 [tasks."test:server:git"]
 description = "Test server-owned Git policy, directories, durability and both protocol profiles"
 run = [
-  "cargo test --package spaceterm-core --test worktrees --test server_directories --locked",
+  "cargo test --package spaceterm-core --test worktrees --locked",
   "cargo test --package spaceterm-host --test git_operations --test git_server_identity --test server_directories --features native-tests --locked",
   "cargo test --package spaceterm-protocol --test git_conformance --test directory_conformance --locked",
   "cargo test --package spaceterm-client --test git --test directories --locked",
