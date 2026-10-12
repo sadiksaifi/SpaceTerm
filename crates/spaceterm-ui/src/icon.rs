@@ -174,7 +174,12 @@ lucide_sources! {
     ChevronRight => "chevron-right",
     ChevronUp => "chevron-up",
     CircleAlert => "circle-alert",
+    CircleCheck => "circle-check",
+    CircleDashed => "circle-dashed",
     CircleDot => "circle-dot",
+    CircleFadingArrowUp => "circle-fading-arrow-up",
+    CircleStop => "circle-stop",
+    CloudOff => "cloud-off",
     Cog => "cog",
     Columns2 => "columns-2",
     Copy => "copy",
@@ -191,6 +196,7 @@ lucide_sources! {
     ImageOff => "image-off",
     Info => "info",
     Keyboard => "keyboard",
+    Laptop => "laptop",
     Lock => "lock",
     Maximize2 => "maximize-2",
     Minimize2 => "minimize-2",
@@ -205,6 +211,7 @@ lucide_sources! {
     RotateCw => "rotate-cw",
     Rows2 => "rows-2",
     Search => "search",
+    Server => "server",
     Shield => "shield",
     Square => "square",
     SquareCheckBig => "square-check-big",
@@ -837,6 +844,26 @@ mod tests {
             .expect("the 7-point clear glyph has a prepared asset");
         assert_eq!(path, format!("{LUCIDE_ASSET_PREFIX}x/7/1.svg"));
         assert!(EmbeddedAssets.load(&path).expect("asset lookup").is_some());
+    }
+
+    #[test]
+    fn server_glyphs_resolve_prepared_vector_assets() {
+        // Settings names each server's kind and status with these glyphs beside text and the
+        // section icons. The font fallback would set them off-center and at another stroke.
+        for (name, slug) in [
+            (IconName::Server, "server"),
+            (IconName::Laptop, "laptop"),
+            (IconName::CircleCheck, "circle-check"),
+            (IconName::CircleDashed, "circle-dashed"),
+            (IconName::CircleStop, "circle-stop"),
+            (IconName::CloudOff, "cloud-off"),
+            (IconName::CircleFadingArrowUp, "circle-fading-arrow-up"),
+        ] {
+            let path = lucide_asset_path(name, gpui::px(16.0), gpui::px(16.0))
+                .unwrap_or_else(|| panic!("{slug} has a prepared asset"));
+            assert_eq!(path, format!("{LUCIDE_ASSET_PREFIX}{slug}/16/1.svg"));
+            assert!(EmbeddedAssets.load(&path).expect("asset lookup").is_some());
+        }
     }
 
     #[test]

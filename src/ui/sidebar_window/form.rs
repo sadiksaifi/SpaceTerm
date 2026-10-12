@@ -110,6 +110,7 @@ pub(crate) enum FormRowLayout {
 pub(crate) struct FormGroup {
     selector: String,
     title: &'static str,
+    heading_level: usize,
     rows: Vec<AnyElement>,
     on_rows_prepainted: Option<RowsPrepainted>,
 }
@@ -117,13 +118,24 @@ pub(crate) struct FormGroup {
 type RowsPrepainted = Box<dyn Fn(Vec<Bounds<Pixels>>, &mut Window, &mut App)>;
 
 impl FormGroup {
+    /// The outline level of a group's title directly under the page's own title.
+    pub(crate) const DEFAULT_HEADING_LEVEL: usize = 2;
+
     pub(crate) fn new(selector: String, title: &'static str, rows: Vec<AnyElement>) -> Self {
         Self {
             selector,
             title,
+            heading_level: Self::DEFAULT_HEADING_LEVEL,
             rows,
             on_rows_prepainted: None,
         }
+    }
+
+    /// Publishes the title at `level` for groups nested under another heading on the page. The
+    /// title keeps its text style.
+    pub(crate) fn heading_level(mut self, level: usize) -> Self {
+        self.heading_level = level;
+        self
     }
 
     /// Reports where each row was laid out on every frame, in row order and window coordinates.
@@ -180,7 +192,7 @@ impl FormGroup {
                         div()
                             .id(SharedString::from(title_selector.clone()))
                             .role(accesskit::Role::Heading)
-                            .aria_level(2)
+                            .aria_level(self.heading_level)
                             .aria_label(self.title)
                             .debug_selector(move || title_selector.clone())
                             .chrome_text(appearance.typography.style(TextRole::Section))

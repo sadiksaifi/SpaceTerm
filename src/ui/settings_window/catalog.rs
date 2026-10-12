@@ -24,13 +24,16 @@ pub(crate) enum SettingsSectionId {
     Git,
     /// The installed version, the latest check, and how SpaceTerm keeps itself current.
     Updates,
+    /// The servers this device is paired with: their status, the settings each one owns, and
+    /// managing them. Server state lives with each server, never in the Settings Document.
+    Servers,
     /// Settings as a whole: the settings file, export and import, and Reset All.
     Advanced,
 }
 
 impl SettingsSectionId {
     /// Every section in presentation order.
-    pub(super) const ALL: [Self; 8] = [
+    pub(super) const ALL: [Self; 9] = [
         Self::Interface,
         Self::Font,
         Self::Themes,
@@ -38,6 +41,7 @@ impl SettingsSectionId {
         Self::Privacy,
         Self::Git,
         Self::Updates,
+        Self::Servers,
         Self::Advanced,
     ];
 
@@ -50,6 +54,7 @@ impl SettingsSectionId {
             Self::Privacy => "Privacy",
             Self::Git => "Git",
             Self::Updates => "Updates",
+            Self::Servers => "Servers",
             Self::Advanced => "Advanced",
         }
     }
@@ -79,6 +84,9 @@ impl SettingsSectionId {
             Self::Updates => {
                 "SpaceTerm keeps itself current in the background and asks before it restarts."
             }
+            Self::Servers => {
+                "Servers run your Terminal Sessions and keep them running when SpaceTerm quits. Each server's settings are shared by every device paired with it."
+            }
             Self::Advanced => {
                 "Every setting at once: edit them as JSON, export or import them, or start over."
             }
@@ -94,6 +102,7 @@ impl SettingsSectionId {
             Self::Privacy => "settings-section-privacy",
             Self::Git => "settings-section-git",
             Self::Updates => "settings-section-updates",
+            Self::Servers => "settings-section-servers",
             Self::Advanced => "settings-section-advanced",
         }
     }
@@ -146,6 +155,26 @@ pub(super) enum SettingsRowId {
     UpdateCheckInterval,
     /// How often an overdue update is brought back after it was dismissed.
     UpdateReminderInterval,
+    /// The paired servers, local first, and which one the rows below it present.
+    ServerList,
+    /// The selected server's status, and Start or Stop.
+    ServerStatus,
+    /// The version the selected server runs, and Restart or Update.
+    ServerVersion,
+    /// How this device reaches the selected server.
+    ServerConnection,
+    /// Ends every Terminal Session on the selected server while it keeps running.
+    ServerEndAllSessions,
+    /// The selected server's New Worktree Location, which every paired device shares.
+    ServerWorktreeLocation,
+    /// The system permissions the selected server reports for its Terminal Sessions.
+    ServerPermissions,
+    /// Whether the selected server accepts SpaceTerm connections over the network.
+    ServerRemoteAccess,
+    /// The addresses the selected server accepts network connections on.
+    ServerRemoteAccessScope,
+    /// Removes this device's pairing with the selected server.
+    ServerUnpair,
     /// The Keybinding of one Command.
     Shortcut(Command),
     /// The settings file, shown read-only and edited in the person's own editor.
@@ -199,6 +228,17 @@ impl SettingsRowId {
             | Self::AutomaticUpdateDownloads
             | Self::UpdateCheckInterval
             | Self::UpdateReminderInterval
+            // Server rows present state each server owns, which no Settings reset changes.
+            | Self::ServerList
+            | Self::ServerStatus
+            | Self::ServerVersion
+            | Self::ServerConnection
+            | Self::ServerEndAllSessions
+            | Self::ServerWorktreeLocation
+            | Self::ServerPermissions
+            | Self::ServerRemoteAccess
+            | Self::ServerRemoteAccessScope
+            | Self::ServerUnpair
             // Keybindings live outside the appearance preferences and reset through the keymap
             // profile, which returns a displaced default to its Command.
             | Self::Shortcut(_)
@@ -686,6 +726,130 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         selector: "settings-row-update-reminder-interval",
     },
     SettingsRowDescriptor {
+        id: SettingsRowId::ServerList,
+        section: SettingsSectionId::Servers,
+        // The list leads the page and needs no title: the page is about the server it selects.
+        group: "",
+        label: "Servers",
+        keywords: &[
+            "server",
+            "spaceterm server",
+            "paired",
+            "local",
+            "remote",
+            "ssh",
+            "wss",
+            "machine",
+            "host",
+        ],
+        selector: "settings-row-server-list",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::ServerStatus,
+        section: SettingsSectionId::Servers,
+        group: "Server",
+        label: "Status",
+        keywords: &[
+            "running",
+            "stopped",
+            "offline",
+            "incompatible",
+            "connecting",
+            "start server",
+            "stop server",
+            "boot",
+        ],
+        selector: "settings-row-server-status",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::ServerVersion,
+        section: SettingsSectionId::Servers,
+        group: "Server",
+        label: "Version",
+        keywords: &[
+            "restart",
+            "restart server",
+            "update server",
+            "upgrade",
+            "install",
+        ],
+        selector: "settings-row-server-version",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::ServerConnection,
+        section: SettingsSectionId::Servers,
+        group: "Server",
+        label: "Connection",
+        keywords: &["route", "ssh", "wss", "websocket", "ipc"],
+        selector: "settings-row-server-connection",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::ServerEndAllSessions,
+        section: SettingsSectionId::Servers,
+        group: "Server",
+        // The action's own name, as the domain glossary capitalizes it.
+        label: "End All Sessions",
+        keywords: &["kill", "terminate", "terminal sessions", "scrollback"],
+        selector: "settings-row-server-end-all-sessions",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::ServerWorktreeLocation,
+        section: SettingsSectionId::Servers,
+        group: "Server Settings",
+        label: "New Worktree Location",
+        keywords: &[
+            "worktree",
+            "server worktree",
+            "path",
+            "folder",
+            "directory",
+            "template",
+            "server settings",
+        ],
+        selector: "settings-row-server-worktree-location",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::ServerPermissions,
+        section: SettingsSectionId::Servers,
+        group: "Permissions",
+        label: "System permissions",
+        // The permissions the server reports, so a search for one reaches the server's grant as
+        // well as this device's in Privacy.
+        keywords: &[
+            "server permissions",
+            "authorization",
+            "microphone",
+            "screen recording",
+            "accessibility",
+            "device control",
+        ],
+        selector: "settings-row-server-permissions",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::ServerRemoteAccess,
+        section: SettingsSectionId::Servers,
+        group: "Remote Access",
+        label: "Allow remote connections",
+        keywords: &["remote access", "network", "listen", "wss", "websocket"],
+        selector: "settings-row-server-remote-access",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::ServerRemoteAccessScope,
+        section: SettingsSectionId::Servers,
+        group: "Remote Access",
+        label: "Listen on",
+        keywords: &["bind", "address", "scope", "network", "port"],
+        selector: "settings-row-server-remote-access-scope",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::ServerUnpair,
+        section: SettingsSectionId::Servers,
+        group: "Pairing",
+        label: "Unpair this device",
+        keywords: &["unpair", "forget", "revoke", "remove server", "disconnect"],
+        selector: "settings-row-server-unpair",
+    },
+    SettingsRowDescriptor {
         id: SettingsRowId::SettingsFile,
         section: SettingsSectionId::Advanced,
         group: "Settings File",
@@ -880,7 +1044,7 @@ mod tests {
     }
 
     /// The complete preference row identity set, so the catalog cannot silently omit one.
-    const EVERY_PREFERENCE_ROW: [SettingsRowId; 33] = [
+    const EVERY_PREFERENCE_ROW: [SettingsRowId; 43] = [
         SettingsRowId::AppearanceMode,
         SettingsRowId::Opacity,
         SettingsRowId::Blur,
@@ -910,6 +1074,16 @@ mod tests {
         SettingsRowId::AutomaticUpdateDownloads,
         SettingsRowId::UpdateCheckInterval,
         SettingsRowId::UpdateReminderInterval,
+        SettingsRowId::ServerList,
+        SettingsRowId::ServerStatus,
+        SettingsRowId::ServerVersion,
+        SettingsRowId::ServerConnection,
+        SettingsRowId::ServerEndAllSessions,
+        SettingsRowId::ServerWorktreeLocation,
+        SettingsRowId::ServerPermissions,
+        SettingsRowId::ServerRemoteAccess,
+        SettingsRowId::ServerRemoteAccessScope,
+        SettingsRowId::ServerUnpair,
         SettingsRowId::SettingsFile,
         SettingsRowId::ExportSettings,
         SettingsRowId::ImportSettings,
@@ -1211,6 +1385,16 @@ mod tests {
                     | SettingsRowId::AutomaticUpdateDownloads
                     | SettingsRowId::UpdateCheckInterval
                     | SettingsRowId::UpdateReminderInterval
+                    | SettingsRowId::ServerList
+                    | SettingsRowId::ServerStatus
+                    | SettingsRowId::ServerVersion
+                    | SettingsRowId::ServerConnection
+                    | SettingsRowId::ServerEndAllSessions
+                    | SettingsRowId::ServerWorktreeLocation
+                    | SettingsRowId::ServerPermissions
+                    | SettingsRowId::ServerRemoteAccess
+                    | SettingsRowId::ServerRemoteAccessScope
+                    | SettingsRowId::ServerUnpair
                     | SettingsRowId::Shortcut(_)
                     | SettingsRowId::SettingsFile
                     | SettingsRowId::ExportSettings
@@ -1259,6 +1443,106 @@ mod tests {
                 "{query:?} should reach {row:?}"
             );
         }
+    }
+
+    /// A person managing a server searches for what they want done to it, so each action and
+    /// setting is reachable from its own words.
+    #[test]
+    fn a_server_query_reaches_its_row() {
+        for (query, row) in [
+            ("servers", SettingsRowId::ServerList),
+            ("stop server", SettingsRowId::ServerStatus),
+            ("start server", SettingsRowId::ServerStatus),
+            ("offline", SettingsRowId::ServerStatus),
+            ("restart server", SettingsRowId::ServerVersion),
+            ("update server", SettingsRowId::ServerVersion),
+            ("end all sessions", SettingsRowId::ServerEndAllSessions),
+            ("server settings", SettingsRowId::ServerWorktreeLocation),
+            ("server worktree", SettingsRowId::ServerWorktreeLocation),
+            ("server permissions", SettingsRowId::ServerPermissions),
+            ("remote access", SettingsRowId::ServerRemoteAccess),
+            ("bind", SettingsRowId::ServerRemoteAccessScope),
+            ("unpair", SettingsRowId::ServerUnpair),
+        ] {
+            let first = matching_rows(query).first().copied();
+            assert_eq!(first, Some(row), "{query:?} should rank {row:?} first");
+        }
+        // Git, clipboard access over SSH, and app updates share these words, so they reach the
+        // server rows without ranking them first.
+        for (query, rows) in [
+            (
+                "worktree",
+                [
+                    SettingsRowId::WorktreeLocation,
+                    SettingsRowId::ServerWorktreeLocation,
+                ],
+            ),
+            (
+                "ssh",
+                [SettingsRowId::ServerList, SettingsRowId::ServerConnection],
+            ),
+            (
+                "restart",
+                [SettingsRowId::UpdateStatus, SettingsRowId::ServerVersion],
+            ),
+            (
+                "microphone",
+                [
+                    SettingsRowId::MicrophoneAccess,
+                    SettingsRowId::ServerPermissions,
+                ],
+            ),
+            (
+                "screen recording",
+                [
+                    SettingsRowId::ScreenRecordingAccess,
+                    SettingsRowId::ServerPermissions,
+                ],
+            ),
+            (
+                "accessibility",
+                [
+                    SettingsRowId::AccessibilityAccess,
+                    SettingsRowId::ServerPermissions,
+                ],
+            ),
+        ] {
+            let matched = matching_rows(query);
+            for row in rows {
+                assert!(matched.contains(&row), "{query:?} should reach {row:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn every_server_row_belongs_to_the_servers_section() {
+        for row in rows() {
+            let server_row = matches!(
+                row.id,
+                SettingsRowId::ServerList
+                    | SettingsRowId::ServerStatus
+                    | SettingsRowId::ServerVersion
+                    | SettingsRowId::ServerConnection
+                    | SettingsRowId::ServerEndAllSessions
+                    | SettingsRowId::ServerWorktreeLocation
+                    | SettingsRowId::ServerPermissions
+                    | SettingsRowId::ServerRemoteAccess
+                    | SettingsRowId::ServerRemoteAccessScope
+                    | SettingsRowId::ServerUnpair
+            );
+            assert_eq!(
+                row.section == SettingsSectionId::Servers,
+                server_row,
+                "{:?} is in {:?}",
+                row.id,
+                row.section
+            );
+        }
+        assert_eq!(
+            SettingsSectionId::ALL.last(),
+            Some(&SettingsSectionId::Advanced),
+            "Advanced stays last"
+        );
     }
 
     #[test]
