@@ -805,7 +805,7 @@ run = [
 [tasks."lint:status-companion"]
 description = "Lint the feature-gated status companion binary"
 env = { CARGO_BUILD_JOBS = "3" }
-run = "cargo clippy --locked -p spaceterm --bin spaceterm-status --features status-companion -- -D warnings"
+run = "cargo clippy --locked -p spaceterm --bin spaceterm-status --features status-companion --all-targets --no-deps -- -D warnings"
 
 [tasks."test:cli-companion:tools"]
 description = "Test companion packaging and CLI check tooling"
