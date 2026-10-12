@@ -17,9 +17,9 @@ use gpui::{
 use super::appearance::gpui_color;
 
 /// How long the other items take to slide aside as the landing slot moves.
-const SHIFT_DURATION: Duration = Duration::from_millis(200);
+const SHIFT_DURATION: Duration = Duration::from_millis(310);
 /// How long a released item takes to settle into its slot, and the others to follow it.
-const SETTLE_DURATION: Duration = Duration::from_millis(260);
+const SETTLE_DURATION: Duration = Duration::from_millis(440);
 /// How long a new item takes to grow into the strip, and the gap a removed item leaves to close.
 const PRESENCE_DURATION: Duration = Duration::from_millis(440);
 /// How long the selection takes to move from one item to another.
@@ -464,7 +464,7 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
             lifted: self.dragged() == Some(id),
             lift: slide
                 .filter(|_| self.settling == Some(id))
-                .map_or(0.0, |slide| 1.0 - ease_out(slide.progress(now))),
+                .map_or(0.0, |slide| 1.0 - decay(slide.progress(now))),
             selection_offset: self
                 .flight
                 .as_ref()
@@ -887,7 +887,7 @@ impl Slide {
     }
 
     fn at(&self, now: Instant) -> Point<Pixels> {
-        let eased = spring(self.progress(now));
+        let eased = decay(self.progress(now));
         point(
             self.from.x + (self.to.x - self.from.x) * eased,
             self.from.y + (self.to.y - self.from.y) * eased,
@@ -910,46 +910,6 @@ fn decay(progress: f32) -> f32 {
     /// How many time constants the motion runs, by when less than 1% of the distance remains.
     const TIME_CONSTANTS: f32 = 6.2;
     (1.0 - (-TIME_CONSTANTS * progress).exp()) / (1.0 - (-TIME_CONSTANTS).exp())
-}
-
-/// Fast at the start and gentle at the end, as CSS `cubic-bezier(0.2, 0.8, 0.2, 1)`.
-fn ease_out(progress: f32) -> f32 {
-    cubic_bezier((0.2, 0.8), (0.2, 1.0), progress)
-}
-
-/// Fast at the start, past the target, and back onto it, as CSS
-/// `cubic-bezier(0.34, 1.4, 0.64, 1)`.
-fn spring(progress: f32) -> f32 {
-    cubic_bezier((0.34, 1.4), (0.64, 1.0), progress)
-}
-
-/// The CSS timing function with control points `first` and `second`, at `progress`.
-fn cubic_bezier(first: (f32, f32), second: (f32, f32), progress: f32) -> f32 {
-    if progress <= 0.0 {
-        return 0.0;
-    }
-    if progress >= 1.0 {
-        return 1.0;
-    }
-    let bezier = |t: f32, first: f32, second: f32| {
-        let rest = 1.0 - t;
-        3.0 * rest * rest * t * first + 3.0 * rest * t * t * second + t * t * t
-    };
-    let (mut low, mut high) = (0.0_f32, 1.0_f32);
-    let mut t = progress;
-    for _ in 0..24 {
-        let x = bezier(t, first.0, second.0);
-        if (x - progress).abs() < 1e-5 {
-            break;
-        }
-        if x < progress {
-            low = t;
-        } else {
-            high = t;
-        }
-        t = (low + high) / 2.0;
-    }
-    bezier(t, first.1, second.1)
 }
 
 fn now(cx: &App) -> Instant {
@@ -1446,21 +1406,5 @@ mod tests {
         assert_eq!((decay(0.0), decay(1.0)), (0.0, 1.0));
         assert!(decay(0.1) > 0.4, "the curve moves fastest at the start");
         assert!(decay(0.5) < decay(0.75) && decay(0.75) < 1.0);
-    }
-
-    #[test]
-    fn ease_out_should_start_fast_and_land_exactly() {
-        assert_eq!((ease_out(0.0), ease_out(1.0)), (0.0, 1.0));
-        assert!(ease_out(0.25) > 0.5, "the curve front-loads its motion");
-        assert!(ease_out(0.5) < ease_out(0.75));
-    }
-
-    #[test]
-    fn spring_should_overshoot_its_target_and_land_exactly() {
-        assert_eq!((spring(0.0), spring(1.0)), (0.0, 1.0));
-        assert!(
-            (1..10).any(|tenth| spring(tenth as f32 / 10.0) > 1.0),
-            "the curve passes its target before it lands"
-        );
     }
 }
