@@ -3,7 +3,7 @@
 mod text;
 mod view;
 
-use super::drag_and_drop::{DragPreview, DragSession, ReorderableStrip, painted_item_size};
+use super::drag_and_drop::{DragPreview, DragSession, ReorderableStrip};
 use super::workspace_chrome::{
     WorkspaceChromeIdentity, WorkspaceChromeLayout, WorkspaceChromeStatus,
 };
@@ -712,9 +712,10 @@ impl WorkspaceSidebar {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> DragPreview {
-        let size = self
-            .row_position(workspace_id)
-            .and_then(|position| painted_item_size(&self.scroll_handle, position));
+        let size = self.row_position(workspace_id).and_then(|position| {
+            self.workspace_reorder
+                .item_size(&self.scroll_handle, workspace_id, position)
+        });
         let session = DragSession::begin(cx, |sidebar: &mut Self, _, cx| {
             let ids = sidebar.row_ids();
             sidebar

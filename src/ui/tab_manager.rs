@@ -14,7 +14,7 @@ use super::chrome_icons::IconRole;
 use super::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use super::drag_and_drop::{
     DragPreview, DragSession, ItemMotion, ReorderableStrip, StripShape, drag_release_observer,
-    lift_shadow, painted_item_size,
+    lift_shadow,
 };
 use super::selection_chip::{ChipPaint, ChipShape, SelectionChip};
 use super::terminal_focus::{TabFocusOwners, TerminalFocusBlocker, TerminalFocusCoordinator};
@@ -1064,9 +1064,10 @@ impl TabManager {
         cx: &mut Context<Self>,
     ) -> DragPreview {
         self.cancel_tab_selector(tab_id, cx);
-        let size = self
-            .tab_position(tab_id)
-            .and_then(|position| painted_item_size(&self.tab_bar_scroll_handle, position));
+        let size = self.tab_position(tab_id).and_then(|position| {
+            self.tab_reorder
+                .item_size(&self.tab_bar_scroll_handle, tab_id, position)
+        });
         let session = DragSession::begin(cx, |manager: &mut Self, _, cx| {
             let ids = manager.visible_tab_ids();
             manager
@@ -6056,6 +6057,87 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_tab_dragged_while_it_grows_should_leave_every_tab_at_rest(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
+        click("create-tab-button", cx);
+        click("create-tab-button", cx);
+        finish_slides(cx);
+        let rest = [1, 2, 3, 4].map(|tab| {
+            cx.debug_bounds(if tab == 4 {
+                "tab-item-4-active"
+            } else {
+                [
+                    "",
+                    "tab-item-1-inactive",
+                    "tab-item-2-inactive",
+                    "tab-item-3-inactive",
+                ][tab]
+            })
+            .unwrap()
+            .origin
+        });
+        click("tab-close-button-4", cx);
+        finish_slides(cx);
+        cx.update(|_, cx| cx.set_global(AnimatePresence));
+        click("create-tab-button", cx);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(60));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        let grabbed = cx.debug_bounds("tab-item-5-active").unwrap().center();
+        let release = rest[0] + point(px(4.0), px(10.0));
+
+        drag_tab(grabbed, &[grabbed - point(px(8.0), px(0.0)), release], cx);
+        finish_slides(cx);
+        cx.simulate_mouse_up(release, MouseButton::Left, Modifiers::none());
+        finish_slides(cx);
+
+        assert_eq!(
+            (
+                tab_order(&manager, cx),
+                [
+                    "tab-item-5-active",
+                    "tab-item-1-inactive",
+                    "tab-item-2-inactive",
+                    "tab-item-3-inactive",
+                ]
+                .map(|selector| cx.debug_bounds(selector).map(|tab| tab.origin)),
+            ),
+            (vec![5, 1, 2, 3], rest.map(Some)),
+            "a Tab dropped after it finished growing must leave every Tab in its own place"
+        );
+    }
+
+    #[gpui::test]
+    fn switching_tabs_while_a_gap_closes_should_move_the_selection_from_where_it_was_drawn(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
+        click("create-tab-button", cx);
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| manager.activate_tab_at(1, window, cx));
+        });
+        finish_slides(cx);
+        cx.update(|_, cx| cx.set_global(AnimatePresence));
+        click("tab-close-button-2", cx);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(60));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        let drawn = cx.debug_bounds("tab-item-3-chip").unwrap().origin;
+
+        click("tab-item-1-inactive", cx);
+        let leaving = cx.debug_bounds("tab-item-1-chip").unwrap().origin;
+
+        assert_eq!(
+            leaving, drawn,
+            "the selection must leave from where it was drawn while the closed Tab's gap closes"
+        );
+    }
+
+    #[gpui::test]
     fn a_tab_drag_released_on_its_first_move_should_land(cx: &mut TestAppContext) {
         let (manager, _records, cx) = tab_manager(cx);
         click("create-tab-button", cx);
@@ -6206,6 +6288,54 @@ mod tests {
                 Some(selection.origin)
             ),
             "the next Tab must slide in under the selection, which stays where it was"
+        );
+    }
+
+    #[gpui::test]
+    fn closing_the_first_tab_of_a_bar_scrolled_to_its_end_should_slide_the_others_smoothly(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _records, cx) = tab_manager(cx);
+        for _ in 0..13 {
+            click("create-tab-button", cx);
+        }
+        finish_slides(cx);
+        cx.update(|_, cx| cx.set_global(AnimatePresence));
+        let last = cx.debug_bounds("tab-item-14-active").unwrap().origin;
+        let tab = |cx: &mut VisualTestContext| {
+            cx.debug_bounds("tab-item-14-active")
+                .expect("the active Tab was not rendered")
+                .origin
+        };
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                let first = manager
+                    .tabs
+                    .iter()
+                    .next()
+                    .map(|(tab_id, _)| tab_id)
+                    .unwrap();
+                manager.close_tab(first, window, cx);
+            })
+        });
+        cx.run_until_parked();
+        let closing = tab(cx);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(60));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        let moving = tab(cx);
+        finish_slides(cx);
+        let closed = tab(cx);
+
+        assert_eq!(
+            (closing, closed),
+            (last, last),
+            "the active Tab at the end must hold its place while the first Tab's gap closes"
+        );
+        assert_eq!(
+            moving, last,
+            "the active Tab must not move while the gap closes"
         );
     }
 

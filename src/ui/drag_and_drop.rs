@@ -55,7 +55,7 @@ pub(crate) struct ReorderableStrip<Id> {
     entering: HashMap<Id, (Ease, Option<Pixels>)>,
     /// The items that finished growing at the last refresh, and take their full size this frame.
     grown: Vec<Id>,
-    /// The closing gap a removed item left before each item.
+    /// The closing gap a removed item left before each item, inside that item's slot.
     leading_gaps: HashMap<Id, Gap>,
     /// The closing gap a removed last item left after the item that is now last, inside that
     /// item's slot.
@@ -123,6 +123,8 @@ struct Lift<Id> {
     /// When the strip last scrolled under the pointer, while the pointer stays near an end.
     scrolled_at: Option<Instant>,
     landing: Option<Landing>,
+    /// Each item's size along the strip when the gap last opened.
+    extents: Vec<Pixels>,
 }
 
 /// The position a released item would take among the `len` items of its strip.
@@ -165,8 +167,8 @@ impl ItemMotion {
     /// Sizes `slot`, the element that holds the item's place in a strip along `axis`, while the
     /// item grows in, and opens the closing gaps beside it. The item shows whole from the start
     /// and overlaps the items making room for it. `measure` receives the item's natural size
-    /// while it grows, which needs `slot`'s only child to be the item. The trailing gap stays
-    /// inside the slot, so a scrolling strip counts it and closes it without jumping.
+    /// while it grows, which needs `slot`'s only child to be the item. Both gaps stay inside the
+    /// slot, so a scrolling strip counts them and closes them without jumping.
     pub(crate) fn frame_slot(
         self,
         axis: Axis,
@@ -174,15 +176,16 @@ impl ItemMotion {
         measure: impl Fn(Size<Pixels>, &mut App) + 'static,
     ) -> Div {
         let slot = match axis {
-            Axis::Horizontal => slot.ml(self.leading_gap).pr(self.trailing_gap),
-            Axis::Vertical => slot.mt(self.leading_gap).pb(self.trailing_gap),
+            Axis::Horizontal => slot.pl(self.leading_gap).pr(self.trailing_gap),
+            Axis::Vertical => slot.pt(self.leading_gap).pb(self.trailing_gap),
         };
         let Some(extent) = self.extent else {
             return slot;
         };
+        let gaps = self.leading_gap + self.trailing_gap;
         let slot = match axis {
-            Axis::Horizontal => slot.w(extent + self.trailing_gap),
-            Axis::Vertical => slot.h(extent + self.trailing_gap),
+            Axis::Horizontal => slot.w(extent + gaps),
+            Axis::Vertical => slot.h(extent + gaps),
         };
         slot.on_children_prepainted(move |bounds, _, cx| {
             if let Some(item) = bounds.first() {
@@ -227,13 +230,10 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
         if painted.len() != ids.len() {
             return None;
         }
-        let slots = ids
-            .iter()
-            .zip(&painted)
-            .map(|(id, bounds)| {
-                let size = bounds.size.along(axis) - self.painted_trailing_gap(*id);
-                (bounds.origin.along(axis), size)
-            })
+        let slots = self
+            .item_bounds(items, ids)
+            .into_iter()
+            .map(|bounds| (bounds.origin.along(axis), bounds.size.along(axis)))
             .collect::<Vec<_>>();
         let selection = self.selected.and_then(|id| {
             let position = ids.iter().position(|candidate| *candidate == id)?;
@@ -250,11 +250,41 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
         })
     }
 
-    /// The trailing gap inside the slot of the item `id` in the last frame.
-    fn painted_trailing_gap(&self, id: Id) -> Pixels {
-        self.refreshed_at
-            .zip(self.trailing_gaps.get(&id))
-            .map_or(px(0.0), |(at, gap)| gap.at(at))
+    /// The bounds the strip's `items` painted each of its `ids` at in the window, without the
+    /// closing gaps inside their slots.
+    pub(crate) fn item_bounds(&self, items: &ScrollHandle, ids: &[Id]) -> Vec<Bounds<Pixels>> {
+        ids.iter()
+            .zip(painted_item_bounds(items))
+            .map(|(id, slot)| self.trim(*id, slot))
+            .collect()
+    }
+
+    /// The size the strip's `items` painted the item `id` at, the one at `position` among them,
+    /// without the closing gaps inside its slot.
+    pub(crate) fn item_size(
+        &self,
+        items: &ScrollHandle,
+        id: Id,
+        position: usize,
+    ) -> Option<Size<Pixels>> {
+        items
+            .bounds_for_item(position)
+            .map(|slot| self.trim(id, slot).size)
+    }
+
+    /// Trims `slot`, the bounds of the item `id`'s slot in the last frame, to the item itself.
+    fn trim(&self, id: Id, slot: Bounds<Pixels>) -> Bounds<Pixels> {
+        let painted = |gaps: &HashMap<Id, Gap>| {
+            self.refreshed_at
+                .zip(gaps.get(&id))
+                .map_or(px(0.0), |(at, gap)| gap.at(at))
+        };
+        let (lead, trail) = (painted(&self.leading_gaps), painted(&self.trailing_gaps));
+        let axis = self.axis;
+        Bounds::new(
+            slot.origin.apply_along(axis, |start| start + lead),
+            slot.size.apply_along(axis, |size| size - lead - trail),
+        )
     }
 
     /// Starts this strip from `from`, the shape of the strip it takes the place of, on its next
@@ -433,7 +463,9 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
             .flight
             .as_ref()
             .filter(|flight| flight.id == id)
-            .map_or(px(0.0), |flight| flight.from * (1.0 - flight.ease.at(now)));
+            .map_or(px(0.0), |flight| {
+                flight.from * (1.0 - flight.ease.at(now)) - self.displacement(id, now)
+            });
         Some(start + flying)
     }
 
@@ -522,9 +554,9 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
                 known
                     .iter()
                     .zip(bounds)
-                    .map(|(id, bounds)| {
-                        let size = bounds.size.along(axis) - self.painted_trailing_gap(*id);
-                        (*id, (bounds.origin.along(axis), size))
+                    .map(|(id, slot)| {
+                        let item = self.trim(*id, slot);
+                        (*id, (item.origin.along(axis), item.size.along(axis)))
                     })
                     .collect()
             })
@@ -560,16 +592,13 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
                 continue;
             }
             self.entering.remove(id);
-            let lead = self
-                .leading_gaps
-                .remove(id)
-                .map_or(px(0.0), |gap| gap.at(now));
-            // The slot's bounds hold its own trailing gap.
+            // The slot's bounds hold its own closing gaps.
+            self.leading_gaps.remove(id);
             self.trailing_gaps.remove(id);
             let Some(bounds) = bounds.as_ref() else {
                 continue;
             };
-            let extent = bounds[position].size.along(self.axis) + lead;
+            let extent = bounds[position].size.along(self.axis);
             let next = known[position + 1..].iter().find(|id| ids.contains(id));
             let previous = known[..position].iter().rev().find(|id| ids.contains(id));
             let (gaps, carrier) = match (next, previous) {
@@ -606,7 +635,7 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
         let rest = ids
             .iter()
             .position(|candidate| *candidate == id)
-            .and_then(|position| painted_item_bounds(items).get(position).copied());
+            .and_then(|position| self.item_bounds(items, ids).get(position).copied());
         let grab = rest.map_or_else(Point::default, |rest| grab_point(window, cx) - rest.origin);
         self.lift = Some(Lift {
             id,
@@ -616,6 +645,7 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
             pointer: None,
             scrolled_at: None,
             landing: None,
+            extents: Vec::new(),
         });
     }
 
@@ -731,10 +761,10 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
         cx: &App,
     ) -> bool {
         let axis = self.axis;
+        let bounds = self.item_bounds(items, ids);
         let Some(lift) = self.lift.as_mut() else {
             return false;
         };
-        let bounds = painted_item_bounds(items);
         let current = ids
             .iter()
             .position(|candidate| *candidate == lift.id)
@@ -755,7 +785,14 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
         lift.origin = Some(origin);
         let relanded = lift.landing != landing;
         lift.landing = landing;
-        if relanded {
+        // Items that grow or close their gaps mid-drag change how far the others shift.
+        let extents = bounds
+            .iter()
+            .map(|bounds| bounds.size.along(axis))
+            .collect::<Vec<_>>();
+        let resized = lift.extents != extents;
+        lift.extents = extents;
+        if relanded || resized {
             self.open_gap(ids, &bounds, cx);
         }
         moved || relanded
@@ -858,7 +895,7 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
         ids: &[Id],
         cx: &App,
     ) -> Option<usize> {
-        let bounds = painted_item_bounds(items);
+        let bounds = self.item_bounds(items, ids);
         let Some(current) = ids
             .iter()
             .position(|candidate| *candidate == lift.id)
@@ -872,12 +909,24 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
         let motion = super::appearance_runtime::control_motion(cx);
         let spans = spans(self.axis, &bounds);
         match landing {
-            // Each item keeps easing toward the gap it was opening, now its laid-out place.
+            // Each item keeps easing toward the gap it was opening, now its laid-out place. One
+            // whose gap no longer matches the layout eases from where it stands to its place.
             Some(position) => {
                 for (id, shift) in ids.iter().zip(gap_shifts(&spans, current, position)) {
                     let shift = Point::default().apply_along(self.axis, |_| px(shift));
                     if let Some(slide) = self.slides.get_mut(id) {
-                        *slide = slide.rebased(shift);
+                        let rebased = slide.rebased(shift);
+                        *slide = if rebased.to == Point::default() {
+                            rebased
+                        } else {
+                            Slide::new(
+                                rebased.at(now),
+                                Point::default(),
+                                SETTLE_DURATION,
+                                now,
+                                motion,
+                            )
+                        };
                     }
                 }
             }
@@ -1186,10 +1235,6 @@ pub(crate) fn finish_slides(cx: &mut gpui::VisualTestContext) {
     );
     cx.update(|window, cx| window.simulate_next_frame(cx));
     cx.run_until_parked();
-}
-
-pub(crate) fn painted_item_size(items: &ScrollHandle, position: usize) -> Option<Size<Pixels>> {
-    items.bounds_for_item(position).map(|bounds| bounds.size)
 }
 
 /// The bounds a scroll container painted its items at, in presentation order.
