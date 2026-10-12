@@ -136,6 +136,9 @@ pub(crate) struct SelectionChip {
 
 /// The width of the outline that marks the item a context menu acts on.
 const MENU_TARGET_OUTLINE: f32 = 2.0;
+/// How much of its color's opacity the dashed edge of a landing place keeps, so it marks the
+/// place without competing with the item's faded face.
+const LANDING_EDGE_OPACITY: u8 = 115;
 
 impl SelectionChip {
     pub(crate) fn new(shape: ChipShape, paint: ChipPaint) -> Self {
@@ -224,7 +227,7 @@ impl SelectionChip {
             .when_some(self.landing, |chip, edge| {
                 chip.border(px(HAIRLINE))
                     .border_dashed()
-                    .border_color(gpui_color(edge))
+                    .border_color(gpui_color(edge.multiply_opacity(LANDING_EDGE_OPACITY)))
             })
     }
 }
