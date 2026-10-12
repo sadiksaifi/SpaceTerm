@@ -20,6 +20,7 @@ pub mod git;
 pub mod native_registration;
 pub mod protected_directory;
 pub mod root_protection;
+pub mod session_capabilities;
 pub mod startup;
 pub mod storage;
 

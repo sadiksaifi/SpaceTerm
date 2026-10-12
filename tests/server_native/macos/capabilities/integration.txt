@@ -1,0 +1,214 @@
+Capability fixture integration contract
+
+This directory contains evidence-only code. No fixture is a native startup,
+credential-release, installation, or GUI-session authority. Production GUI-session
+observation in spaceterm-host remains unavailable. No native evidence has been
+collected by the ordinary test task.
+
+Build and assembly
+
+Import build_fixture(destination, environment=...) from capability_tests.py to
+build the probe. It compiles, embeds ProbeInfo.plist in __TEXT,__info_plist, and
+never signs or executes the native binary. Use a new staging destination. Signing
+and protected installation belong to the evidence assembler and its authenticated
+publisher. Never execute a staging executable with sudo.
+
+Install the exact authenticated executable at the path in capability_internal.h.
+The probe requires the pinned certificate, its exact identifier, hardened runtime,
+and empty entitlements. Copy shell-fixture's four dotfiles into capability-shell
+beside the executable and include each in the authenticated manifest and cleanup
+receipt. The worker rejects writable modes, symlinks, and every ACL entry on its
+code/resource ancestry. This check is a necessary preflight, not historical write
+exclusion or publication authority. The publisher must supply those guarantees.
+
+The same executable handles both PTY contexts. It requires a controlling terminal
+and independently finds the nearest signed desktop/companion or server ancestor.
+An asserted context cannot override the nearer ancestor. All three existing build
+identities are recognized with the unchanged pinned certificate. TCC attribution
+is not inferred from ancestry: responsible_process remains Unknown until actual
+responsible-application observation is supplied.
+
+Inputs and output
+
+The evidence controller launches the fixed signed probe. A directly linked caller
+with another code identifier cannot serve as its worker parent and is rejected;
+do not reinterpret that failure as a capability denial. Inside the signed probe,
+bind st_capability_targets and call st_capability_run. The standalone entry is --run <case-code> <context-code> <absolute-monotonic-ns>
+<targets-fd>. The descriptor carries exactly one native st_capability_targets
+record followed by EOF. It contains a nonzero run ID, optional authenticated
+companion PID/window facts, and an explicitly selected volume directory, never a
+credential. Paths are not command arguments or output. The private input struct
+is not the production native exchange ABI. Use the C header in the controller.
+
+The parent re-execs only the fixed protected executable, closes unrelated FDs,
+strips every environment variable except the small baseline allowlist, suppresses
+raw worker stderr, and accepts exactly one 32-byte big-endian observation followed
+by EOF. capability_probe.h declares every code and field. The shared schema owner
+must translate this record into its closed capability facts and add actual run,
+sequence, host, revision, artifact, and proof metadata. Never relabel ordinary
+synthetic test stdout as Native Passed. A worker exit or preflight alone is not a
+successful effect. Missing, short, oversized, contradictory, or wrong-context
+records fail. A failed output channel is not completion.
+
+The effect deadline is absolute: five seconds normally, sixty seconds only for an
+explicit user-mediated sudo case. Partial output and EINTR do not reset it. A
+separate 250 ms retirement guard checks exact direct-child reaping and group
+absence. These checks do not prove escaped-descendant absence. The only default
+case that executes nested programs, sudo, always preserves CleanupUnresolved
+until an identity-bound native descendant observer exists. A worker's successful
+exit cannot clear that uncertainty. The separate controlled shell-order helper
+also preserves it. No forced-kill fallback exists. Resource-worker death or
+unresolved retirement overrides effect success. The worker also has an independent lifetime
+guard around native effects. The outer evidence controller must bound the whole
+probe process, including synchronous signed-code/session preflight, and retain
+its cleanup receipt if cancellation loses an observation or child retirement.
+No signal handler or framework result can substitute for native cleanup evidence.
+
+Companion target contract
+
+Use the companion identifier declared in capability_internal.h. Its synthetic
+window title is "SpaceTerm Native Evidence 520 <run-id-hex>". Supply that window's
+actual WindowServer ID and process PID. Screen capture accepts only that PID,
+window ID, and title. It reads image dimensions but copies/retains no pixels.
+The synthetic Accessibility control identifier is
+"spaceterm-native-520-control-<run-id-hex>" and its value is
+"SpaceTerm520 <run-id-hex>". No other application receives an AX operation.
+
+The URL scheme is spaceterm-native-520 and the URL is
+spaceterm-native-520://probe/<run-id-hex>. The URL case authenticates the handler
+application and explicitly opens the URL with that protected application. It
+requires delivery to the supplied companion PID, then queries the receipt through
+an independent authenticated Unix stream. No Apple Event or Automation preflight
+runs in the URL case. The companion owns the run-bound socket
+/private/tmp/spaceterm-native-520-<run-id-hex>.url.sock. It refuses collisions,
+authenticates the connecting same-account probe's pinned identifier/certificate,
+and accepts exactly the sixteen run-ID bytes followed by EOF. It returns those
+same sixteen bytes followed by EOF only after observing the exact matching URL.
+A request alone cannot synthesize a receipt. The probe checks native peer UID,
+peer PID, pinned code, and unchanged companion start time. The companion's cleanup
+receipt owns the socket. Missing targets or receipts remain Unavailable, not
+Automation Denied. The ordinary tests inject successful URL delivery/receipt and
+denied Automation and verify independent outcomes.
+
+Apple Event class is 'ST52'. Event 'ping' echoes the 32-byte lowercase run ID from
+keyDirectObject/typeUTF8Text. This is the independent Automation case. Permission
+preflight uses no prompt;
+AESendMessage disallows interaction. Unsupported targets remain Unavailable.
+These targets must be integrated by the companion owner, not assumed to exist.
+
+Synthetic inputs and cleanup
+
+Before explicitly requested folder tests, the controller creates only the three
+receipt-bound files spaceterm-native-520-<run-id-hex>.marker in the account's
+native Desktop, Documents, and Downloads directories. Each contains exactly the
+16 run-ID bytes and belongs to the account. The worker itself opens each file,
+so no pre-opened descriptor bypasses the probed folder access. The controller
+creates the same marker only on an explicitly selected removable/network volume.
+It records and removes only those markers. Missing inputs remain Unrun.
+
+Microphone effects require existing authorization and a device. No requestAccess
+call exists. The sample callback retains no sample buffer and reads no audio data.
+Screen and Accessibility probes use preflight only and never request a grant.
+Physical-device, ScreenCaptureKit, and responsible-application behavior still
+require the later user-directed matrix against this exact signed fixture.
+
+The login-Keychain case uses only the account's fixed login.keychain-db, disables
+interaction, refuses a synthetic item collision, and never opens System Keychain.
+The service is "SpaceTerm Native Evidence 520 capability <run-id-hex>" and the
+account is <run-id-hex>. The worker creates a random synthetic 32-byte value,
+checks its exact round trip, wipes returned data, deletes the exact new item,
+and checks absence. Record this deterministic binding before launch. Worker
+loss after enrollment is CleanupUnresolved; receipt-bound cleanup must inspect
+and remove only this synthetic item. No real account credential is selected.
+
+SSH tests send only an unsupported synthetic extension and accept its protocol
+failure response as reachability. They never enumerate, add, remove, or sign with
+keys. GPG tests read only an Assuan greeting and GETINFO version, discard every
+response line, and emit no keys/fingerprints/version strings. Baseline discovery
+uses SSH_AUTH_SOCK and legacy GPG_AGENT_INFO, with socket ownership and native
+peer-UID checks. Modern GPG-agent discovery needs the narrow session adapter and
+must not silently invoke an arbitrary gpgconf or import the whole GUI environment.
+
+Touch ID sudo runs only /usr/bin/sudo -- /usr/bin/true, on the controlling PTY,
+with fixed environment. It never reads/captures authentication input, edits PAM,
+or uses AskPass, -S, -E, or an application password cache. The worker owns the
+foreground PTY for this explicit case and restores it only if the foreground
+process group has not changed. Pipe/socket writes consume only their newly generated
+SIGPIPE and preserve the owner's disposition and mask, so a rejected configuration
+still reaches reaping and PTY restoration. Zero sudo exit cannot prove Touch ID
+rather than password or cached authorization. Its effect is CompletedUnattributed,
+and unresolved descendant retirement overrides its outcome with CleanupUnresolved.
+The user/OS attribution and native scope-retirement evidence are still required.
+
+Environment comparison
+
+Counts and actual values are separate observations. --environment retains the old
+sixteen-byte counts/presence record. It cannot establish equality. Rust names this
+comparison compare_counts. Case 13 no longer launches a shell with fixed PATH,
+locale, ZDOTDIR, or /dev/null. It inspects the account's actual parent /bin/zsh or
+/bin/bash process, native start time, same controlling PTY, and explicit login and
+interactive flags. Commands (-c), script operands, unsupported flags/shells, or
+missing native observations remain Unrun. The evidence PTY owner must launch the
+actual account shell with -l -i, without -c or controlled startup replacements.
+The worker carries only inherited PATH and the fixed fourteen-variable locale
+allowlist, and rejects oversize values instead of silently dropping them.
+
+To compare both actual environments, arrange two connected Unix stream channels
+whose native peers are the same pinned probe executable in the intended account.
+Only those channel descriptors may cross the corresponding exec. The evidence
+controller owns channel creation, run binding, descriptor closure, and process
+receipts; no stdout, temporary file, environment dump, or value hash is a channel.
+Launch the same signed probe from each actual PTY login shell with
+--environment-channel <context-code> <absolute-monotonic-ns> <channel-fd>.
+Launch its collector with --environment-pair <absolute-monotonic-ns> <gui-fd>
+<daemon-fd>. These are evidence-only commands, not a production session adapter.
+The collector and both sources independently authenticate the same-account pinned
+probe peer through native UID/PID/code observations. Each source also verifies its
+actual shell and requested ancestry. The source stays alive for the collector's
+bounded acknowledgement. Both records require the declared different contexts,
+exact bounded lengths, no embedded NUL or trailing bytes, and EOF. All transfers
+share one absolute deadline of at most five seconds. Native synchronous preflight
+still requires the controller's outer lifetime bound.
+
+Private SCE1 snapshots contain only PATH and the fixed locale allowlist in owned
+memory and authenticated IPC. They are not evidence records and must never be
+logged, persisted, or forwarded to a terminal. The comparator retains no public
+value accessor, wipes allocations on every exit, and compares exact values
+internally. Its public output is exactly twenty big-endian bytes: schema 1,
+GUI context 1, daemon context 2, PATH difference, locale difference. PATH codes
+are 1 Equal, 2 PresenceChanged, 3 ComponentsChanged, 4 OrderChanged. ComponentsChanged
+includes multiplicity changes; OrderChanged requires the same component multiset.
+Locale codes are 1 Equal, 2 PresenceChanged, 3 ValuesChanged, over LANG and the
+thirteen LC_* names in capability_environment.c. PresenceChanged takes precedence
+if another variable also changes value. No values, account names, paths, or hashes
+enter the output. spaceterm-host recognizes this closed record through
+NormalizedEnvironmentDifference. Shared JSONL schema translation belongs to the
+evidence owner. Missing records cannot become equal or Passed comparisons.
+
+The protected shell-fixture still tests controlled startup order separately:
+environment, login profile, interactive rc, login completion (1234). The explicit
+st_capability_controlled_shell_order helper cannot establish actual environment
+equality or complete descendant cleanup. It reports CleanupUnresolved after
+executing its controlled shell. It is never the default case-13 effect.
+
+Known blockers
+
+The general clipboard case remains Unavailable and never writes the pasteboard.
+NSPasteboard's changeCount check followed by clearContents is not an atomic
+compare-and-restore. The eligibility helper deliberately is not used as such a
+primitive. This prevents overwriting a newer user change, but does not deliver
+pbcopy/pbpaste evidence. A reviewed native exclusion/restore design is required.
+
+The Rust broker binds a noncloneable lease to account-binding digest, observed
+GUI-session incarnation, purpose, issuer, and expiry. Its tests reject logout,
+replacement account/session, wrong broker/purpose, and expiry. A populated facts
+record alone does not construct a lease. Actual environment comparison does not
+prove a GUI-session incarnation. Real macOS session-incarnation observation and
+the Linux D-Bus/session counterpart remain unavailable and require their
+own native/logout evidence. No production success-shaped test adapter is wired.
+
+Register task-registration.toml additively in the coordinator-owned .mise.toml.
+The supplied worktree lacks the ND520/1 seed, core/server/client crates, common
+NativeFailure module, and check:headless task. Only the necessary additive host
+module declaration was made. Reconcile the evidence result alias with the common
+header during integration; do not weaken an unavailable native provider.
