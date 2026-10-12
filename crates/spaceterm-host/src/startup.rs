@@ -288,7 +288,11 @@ impl PendingStartup {
     }
 }
 
-/// Native post-exec observation authority, not receiver declarations or wire matches.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub use crate::startup_exchange::PostExecProof;
+
+/// Native post-exec authority is unavailable on unsupported hosts.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub struct PostExecProof {
     _authority: crate::native_deployment::contracts::NativeAuthorization,
 }

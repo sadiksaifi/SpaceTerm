@@ -1,61 +1,27 @@
-//! One reusable credential-free spawner per server start, owned by native-handoff B3.
+//! Account programs are created by one pre-secret, exec-separated process.
+//!
+//! The launcher must start the protected spawner before retrieving credentials, drop it to the
+//! account with its ordinary groups, and pass one anonymous channel to the server. Connecting
+//! that channel does not spawn a process or grant native startup authority. Server composition
+//! must share this connection between the PTY factory and repository runner. Desktop composition
+//! keeps its ordinary adapters.
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-mod boundary {
-    use std::{convert::Infallible, os::fd::OwnedFd};
-
-    use crate::{native_deployment::contracts::NativeFailure, shell_launch::PreparedShellLaunch};
-
-    /// Ordinary account tool arguments, environment, directory authority, and intended streams.
-    /// The implementation must bound the payload to 256 KiB and exclude custody handles.
-    #[expect(dead_code, reason = "native-handoff B3 replaces the unavailable seed")]
-    pub(crate) struct BoundedToolSpawn {
-        _unavailable: Infallible,
-    }
-
-    /// Child ownership and bounded status/signal/reaping through the reusable spawner.
-    #[expect(dead_code, reason = "native-handoff B3 replaces the unavailable seed")]
-    pub(crate) struct OwnedToolProcess {
-        _unavailable: Infallible,
-    }
-
-    /// The only process-creation route available to a secret-bearing server.
-    #[expect(dead_code, reason = "native-handoff B3 replaces the unavailable seed")]
-    pub(crate) trait CredentialFreeSpawn: Send + Sync {
-        fn spawn_pty(
-            &self,
-            launch: PreparedShellLaunch,
-            slave: OwnedFd,
-        ) -> Result<Box<dyn portable_pty::Child + Send + Sync>, NativeFailure>;
-
-        fn spawn_tool(&self, request: BoundedToolSpawn) -> Result<OwnedToolProcess, NativeFailure>;
-    }
-
-    /// Fail-closed route until B3 supplies the anonymous channel and native child ownership.
-    #[expect(dead_code, reason = "native-handoff B3 replaces the unavailable seed")]
-    pub(crate) struct UnavailableCredentialFreeSpawn;
-
-    impl CredentialFreeSpawn for UnavailableCredentialFreeSpawn {
-        fn spawn_pty(
-            &self,
-            _launch: PreparedShellLaunch,
-            _slave: OwnedFd,
-        ) -> Result<Box<dyn portable_pty::Child + Send + Sync>, NativeFailure> {
-            Err(NativeFailure::NativeUnavailable)
-        }
-
-        fn spawn_tool(
-            &self,
-            _request: BoundedToolSpawn,
-        ) -> Result<OwnedToolProcess, NativeFailure> {
-            Err(NativeFailure::NativeUnavailable)
-        }
-    }
-}
+mod client;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod protocol;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod pty;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod repository;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod service;
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-#[expect(
-    unused_imports,
-    reason = "native-handoff B3 consumes these private cross-track ports"
-)]
-pub(crate) use boundary::{BoundedToolSpawn, CredentialFreeSpawn, OwnedToolProcess};
+pub use client::CredentialFreeSpawner;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub use pty::CredentialFreePtyAdapterFactory;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub use repository::CredentialFreeRepositoryProgramRunner;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub use service::run_inherited;

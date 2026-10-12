@@ -8,6 +8,7 @@
 use std::fmt;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::process::ExitStatusExt;
 use std::ptr::NonNull;
 use std::time::Duration;
 
@@ -142,6 +143,11 @@ impl PipeEndpoint {
         result
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn descriptor(&self) -> Result<&OwnedFd, NativeFailure> {
+        self.0.as_ref().ok_or(NativeFailure::UnsafeNativeState)
+    }
+
     fn raw(&self) -> Result<RawFd, NativeFailure> {
         self.0
             .as_ref()
@@ -187,7 +193,7 @@ impl<const N: usize> fmt::Debug for LockedMemory<N> {
 impl<const N: usize> LockedMemory<N> {
     /// Allocates, excludes from core dumps where available and locks one bounded mapping.
     pub fn allocate() -> Result<Self, NativeFailure> {
-        if N == 0 || N > 131_072 {
+        if N == 0 || N > 524_288 {
             return Err(NativeFailure::LimitExceeded);
         }
         let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
@@ -210,7 +216,9 @@ impl<const N: usize> LockedMemory<N> {
             return Err(NativeFailure::IoUnavailable);
         }
         #[cfg(target_os = "linux")]
-        if unsafe { libc::madvise(raw, length, libc::MADV_DONTDUMP) } != 0 {
+        if unsafe { libc::madvise(raw, length, libc::MADV_DONTDUMP) } != 0
+            || unsafe { libc::madvise(raw, length, libc::MADV_WIPEONFORK) } != 0
+        {
             unsafe { libc::munmap(raw, length) };
             return Err(NativeFailure::NativeUnavailable);
         }
@@ -300,14 +308,38 @@ impl ReceiverReceipt {
 /// initialization, listeners or Terminal Sessions. Native composition must still
 /// revalidate startup authority after return. Failures close pipes and wipe all
 /// mappings before bounded cleanup; unresolved cleanup overrides any other result.
+/// Successful retirement and receipt issuance share the original exchange deadline.
+/// A separate 250 ms failure-cleanup allowance cannot produce a receipt.
 pub fn receive(
+    transcript: &StartupTranscript,
+    pipes: ReceiverPipes,
+    child: ExactChild,
+    deadline: ExchangeDeadline,
+) -> Result<ReceiverReceipt, NativeFailure> {
+    receive_using(
+        transcript,
+        pipes,
+        child,
+        deadline,
+        StartupTranscript::confirmation_macs,
+    )
+}
+
+fn receive_using(
     transcript: &StartupTranscript,
     mut pipes: ReceiverPipes,
     mut child: ExactChild,
     deadline: ExchangeDeadline,
+    calculate: impl FnOnce(
+        &StartupTranscript,
+        &[u8; 32],
+        &[u8; 32],
+    ) -> Result<super::ConfirmationMacs, NativeFailure>,
 ) -> Result<ReceiverReceipt, NativeFailure> {
     let result = (|| {
-        if child.identity != transcript.retriever_identity() {
+        if child.identity != transcript.retriever_identity()
+            || process_identity(std::process::id())? != transcript.original_identity()
+        {
             return Err(NativeFailure::ProcessIdentityMismatch);
         }
         disable_core_dumps()?;
@@ -325,7 +357,7 @@ pub fn receive(
         challenge
             .bytes_mut()
             .copy_from_slice(&frame.bytes()[352..384]);
-        let macs = transcript.confirmation_macs(secret.bytes(), challenge.bytes())?;
+        let macs = calculate(transcript, secret.bytes(), challenge.bytes())?;
         frame.wipe();
         frame.bytes_mut()[..352].copy_from_slice(&transcript.prefix(FrameKind::Confirmation));
         frame.bytes_mut()[352..384].copy_from_slice(challenge.bytes());
@@ -346,12 +378,32 @@ pub fn receive(
         Ok(ReceiverReceipt { secret })
     })();
     drop(pipes);
-    // Secret-bearing failed closures have already dropped their locked mappings.
-    let cleanup = child.reap(ExchangeDeadline::start(Duration::from_millis(250))?);
-    match cleanup {
+    // Success requires retirement within the original exchange deadline.
+    // Failed exchanges have already wiped their mappings before cleanup.
+    let cleanup_deadline = if result.is_ok() {
+        deadline
+    } else {
+        ExchangeDeadline::start(Duration::from_millis(250))?
+    };
+    match child.reap_retriever(cleanup_deadline) {
+        Err(_) if result.is_ok() && child.has_wait_reservation() => {
+            // Only timeout retains exact wait ownership. Wipe the receipt before
+            // a separate failure-cleanup allowance, which can never admit startup.
+            drop(result);
+            match child.reap_retriever(ExchangeDeadline::start(Duration::from_millis(250))?) {
+                Ok(_) => Err(NativeFailure::TimedOut),
+                Err(_) => Err(NativeFailure::CleanupUnresolved),
+            }
+        }
         Err(_) => Err(NativeFailure::CleanupUnresolved),
+        Ok(_) if matches!(result, Err(NativeFailure::CleanupUnresolved)) => result,
         Ok(false) => Err(NativeFailure::CredentialUnavailable),
-        Ok(true) => result,
+        Ok(true) => {
+            if result.is_ok() {
+                deadline.remaining()?;
+            }
+            result
+        }
     }
 }
 
@@ -361,8 +413,15 @@ pub fn receive(
 pub struct ExactChild {
     identity: ProcessIdentity,
     child: Option<std::process::Child>,
+    inherited: Option<ProcessIdentity>,
 }
 impl ExactChild {
+    /// Native identity retained by this exclusive child owner. Comparison facts alone cannot
+    /// recreate the owner or its wait reservation.
+    pub fn identity(&self) -> ProcessIdentity {
+        self.identity
+    }
+
     /// Transfers exclusive ownership on success. Failures leave the caller's
     /// child intact for cleanup; the same child cannot produce a second token.
     pub fn take(
@@ -391,20 +450,104 @@ impl ExactChild {
         Ok(Self {
             identity,
             child: owned.take(),
+            inherited: None,
         })
     }
+    /// Claims the direct retriever child that survived the service-tracked exec.
+    ///
+    /// # Safety
+    /// The caller must own this child's sole wait reservation from fork, must
+    /// not have another waiter or an autoreaping SIGCHLD policy, and must never
+    /// claim it again. Decoded PID facts alone do not satisfy this contract.
+    pub unsafe fn inherit(identity: ProcessIdentity) -> Result<Self, NativeFailure> {
+        let (actual, parent) = observe_process(identity.pid)?;
+        if actual != identity || parent != unsafe { libc::getpid() } as u32 {
+            return Err(NativeFailure::ProcessIdentityMismatch);
+        }
+        let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+        if unsafe { libc::sigaction(libc::SIGCHLD, std::ptr::null(), &mut action) } != 0
+            || action.sa_sigaction != libc::SIG_DFL
+            || action.sa_flags & libc::SA_NOCLDWAIT != 0
+        {
+            return Err(NativeFailure::CleanupUnresolved);
+        }
+        Ok(Self {
+            identity,
+            child: None,
+            inherited: Some(identity),
+        })
+    }
+
+    pub(crate) fn has_wait_reservation(&self) -> bool {
+        self.child.is_some() || self.inherited.is_some()
+    }
+
     /// Waits without signaling a privileged child. A completed wait or lost
     /// reservation permanently invalidates ownership. ECHILD is unresolved,
     /// never retirement. The native retriever must own a lifetime guard.
     pub fn reap(&mut self, deadline: ExchangeDeadline) -> Result<bool, NativeFailure> {
-        self.reap_with(deadline, std::process::Child::try_wait)
+        self.reap_status(deadline).map(|status| status.success())
     }
 
+    pub(crate) fn reap_retriever(
+        &mut self,
+        deadline: ExchangeDeadline,
+    ) -> Result<bool, NativeFailure> {
+        let status = self.reap_status(deadline)?;
+        // Only a normal retriever exit can attest its guard's retirement. Exit
+        // 33 explicitly preserves unresolved tool/guard cleanup across exec;
+        // signal death supplies no guarded-scope retirement receipt either.
+        match status.code() {
+            Some(code) if code == NativeFailure::CleanupUnresolved as i32 => {
+                Err(NativeFailure::CleanupUnresolved)
+            }
+            None => Err(NativeFailure::CleanupUnresolved),
+            Some(code) => Ok(code == 0),
+        }
+    }
+
+    fn reap_status(
+        &mut self,
+        deadline: ExchangeDeadline,
+    ) -> Result<std::process::ExitStatus, NativeFailure> {
+        if self.inherited.is_none() {
+            return self.reap_status_with(deadline, std::process::Child::try_wait);
+        }
+        loop {
+            let identity = self.inherited.ok_or(NativeFailure::UnsafeNativeState)?;
+            let mut status = 0;
+            // SAFETY: inherit transferred this exact child's exclusive wait reservation.
+            let waited = unsafe { libc::waitpid(identity.pid as i32, &mut status, libc::WNOHANG) };
+            if waited == identity.pid as i32 {
+                self.inherited.take();
+                return Ok(std::process::ExitStatus::from_raw(status));
+            }
+            if waited < 0 && io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+                self.inherited.take();
+                return Err(NativeFailure::CleanupUnresolved);
+            }
+            let remaining = deadline
+                .remaining()
+                .map_err(|_| NativeFailure::CleanupUnresolved)?;
+            std::thread::sleep(remaining.min(Duration::from_millis(2)));
+        }
+    }
+
+    #[cfg(test)]
     fn reap_with(
         &mut self,
         deadline: ExchangeDeadline,
-        mut wait: impl FnMut(&mut std::process::Child) -> io::Result<Option<std::process::ExitStatus>>,
+        wait: impl FnMut(&mut std::process::Child) -> io::Result<Option<std::process::ExitStatus>>,
     ) -> Result<bool, NativeFailure> {
+        self.reap_status_with(deadline, wait)
+            .map(|status| status.success())
+    }
+
+    fn reap_status_with(
+        &mut self,
+        deadline: ExchangeDeadline,
+        mut wait: impl FnMut(&mut std::process::Child) -> io::Result<Option<std::process::ExitStatus>>,
+    ) -> Result<std::process::ExitStatus, NativeFailure> {
         loop {
             let child = self
                 .child
@@ -413,7 +556,7 @@ impl ExactChild {
             match wait(child) {
                 Ok(Some(status)) => {
                     self.child.take();
-                    return Ok(status.success());
+                    return Ok(status);
                 }
                 Err(error) if error.raw_os_error() == Some(libc::EINTR) => {}
                 Err(_) => {
@@ -704,6 +847,86 @@ pub(crate) fn native_memory_is_locked(bytes: &[u8]) -> bool {
 #[cfg(test)]
 mod child_tests {
     use super::*;
+
+    #[test]
+    fn cryptographic_join_failure_survives_unsuccessful_exact_retriever_exit() {
+        use super::super::{FrameKind, PREFIX_BYTES};
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut owned = Some(
+            std::process::Command::new("/bin/sh")
+                .args(["-c", "read line; exit 7"])
+                .env_clear()
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let mut exit = owned.as_mut().unwrap().stdin.take().unwrap();
+        let retriever = process_identity(owned.as_ref().unwrap().id()).unwrap();
+        let exact = ExactChild::take(&mut owned, retriever).unwrap();
+        let original = process_identity(std::process::id()).unwrap();
+        let mut ready = [0; PREFIX_BYTES];
+        ready[..4].copy_from_slice(b"STN2");
+        ready[4] = 2;
+        ready[5] = 1;
+        ready[8..12].copy_from_slice(&352u32.to_be_bytes());
+        for (offset, value) in [(16, 501u32), (20, 20), (24, 3), (28, 63)] {
+            ready[offset..offset + 4].copy_from_slice(&value.to_be_bytes());
+        }
+        for offset in [32, 40, 48, 56] {
+            ready[offset..offset + 8].copy_from_slice(&1u64.to_be_bytes());
+        }
+        ready[64..272].fill(1);
+        for (offset, process) in [(272, original), (296, retriever)] {
+            ready[offset..offset + 8].copy_from_slice(&u64::from(process.pid).to_be_bytes());
+            ready[offset + 8..offset + 16].copy_from_slice(&process.start_seconds.to_be_bytes());
+            ready[offset + 16..offset + 20]
+                .copy_from_slice(&process.start_microseconds.to_be_bytes());
+        }
+        let transcript = StartupTranscript::recognize_ready(&ready).unwrap();
+        let (rr, rw) = anonymous_pipe().unwrap();
+        let (dr, dw) = anonymous_pipe().unwrap();
+        let (cr, cw) = anonymous_pipe().unwrap();
+        let (ar, aw) = anonymous_pipe().unwrap();
+        let deadline = ExchangeDeadline::start(Duration::from_millis(500)).unwrap();
+        let peer = std::thread::spawn(move || {
+            let expected = StartupTranscript::recognize_ready(&ready).unwrap();
+            let mut input = PipeEndpoint::take(rr, false).unwrap();
+            let mut output = PipeEndpoint::take(dw, true).unwrap();
+            let mut confirmation = PipeEndpoint::take(cr, false).unwrap();
+            let mut frame = LockedMemory::<417>::allocate().unwrap();
+            input.read_frame(&mut frame, 352, deadline).unwrap();
+            frame.wipe();
+            frame.bytes_mut()[..352].copy_from_slice(&expected.prefix(FrameKind::Delivery));
+            getrandom::fill(&mut frame.bytes_mut()[352..416]).unwrap();
+            output.write_frame(&frame.bytes()[..416], deadline).unwrap();
+            assert_eq!(
+                confirmation.read_frame(&mut frame, 416, deadline),
+                Err(NativeFailure::CredentialUnavailable)
+            );
+            // Nonzero retirement follows the failed calculation's pipe closure,
+            // not a scheduler-dependent delay before exact-child ownership.
+            exit.write_all(b"exit\n").unwrap();
+            drop(aw);
+        });
+        let outcome = receive_using(
+            &transcript,
+            ReceiverPipes::take(rw, dr, cw, ar).unwrap(),
+            exact,
+            deadline,
+            |transcript, secret, challenge| {
+                super::super::crypto::failed_join(
+                    &transcript.prefix(FrameKind::Ready),
+                    secret,
+                    challenge,
+                )
+            },
+        );
+        peer.join().unwrap();
+        assert!(matches!(outcome, Err(NativeFailure::CleanupUnresolved)));
+    }
 
     #[test]
     fn external_wait_consumption_cannot_reap_a_reused_direct_child_pid() {

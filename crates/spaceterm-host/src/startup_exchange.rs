@@ -20,6 +20,10 @@ pub mod unix;
 #[path = "startup_exchange/crypto.rs"]
 mod crypto;
 
+#[path = "startup_exchange/post_exec.rs"]
+pub(crate) mod post_exec;
+pub use post_exec::PostExecProof;
+
 /// Exact ABI-2 prefix length.
 pub const PREFIX_BYTES: usize = 352;
 /// Exact ABI-2 delivery, confirmation and acknowledgement length.
@@ -60,6 +64,66 @@ impl Drop for StartupTranscript {
 }
 
 impl StartupTranscript {
+    /// Encodes comparison facts using the existing STN2 grammar. This operation
+    /// cannot construct pending, execution or credential-release authority.
+    pub fn from_context(
+        context: &crate::startup::PendingStartupContext,
+    ) -> Result<Self, NativeFailure> {
+        use crate::startup::BuildIdentity;
+        let mut bytes = [0; PREFIX_BYTES];
+        bytes[..4].copy_from_slice(b"STN2");
+        bytes[4] = 2;
+        bytes[5] = FrameKind::Ready as u8;
+        bytes[8..12].copy_from_slice(&(PREFIX_BYTES as u32).to_be_bytes());
+        for (offset, value) in [
+            (16, context.key.account_uid),
+            (20, context.primary_gid),
+            (
+                24,
+                match context.key.build_identity {
+                    BuildIdentity::Release => 1,
+                    BuildIdentity::Preflight => 2,
+                    BuildIdentity::Development => 3,
+                },
+            ),
+            (28, 0x3f),
+        ] {
+            bytes[offset..offset + 4].copy_from_slice(&value.to_be_bytes());
+        }
+        for (offset, value) in [
+            (32, context.registration_generation.get()),
+            (40, context.lifecycle_generation.get()),
+            (48, context.data_generation.get()),
+            (56, context.installation.0.get()),
+        ] {
+            bytes[offset..offset + 8].copy_from_slice(&value.to_be_bytes());
+        }
+        bytes[64..80].copy_from_slice(&context.server_id);
+        for (offset, digest) in [
+            (80, &context.account_binding_sha256),
+            (112, &context.installation_binding),
+            (144, &context.server_artifact_sha256),
+            (176, &context.manifest_sha256),
+            (208, &context.credential_binding_sha256),
+            (240, &context.startup_nonce),
+        ] {
+            bytes[offset..offset + 32].copy_from_slice(digest);
+        }
+        for (offset, process) in [
+            (272, context.original_process),
+            (296, context.retriever_process),
+        ] {
+            bytes[offset..offset + 8].copy_from_slice(&u64::from(process.pid).to_be_bytes());
+            bytes[offset + 8..offset + 16].copy_from_slice(&process.start_seconds.to_be_bytes());
+            bytes[offset + 16..offset + 20]
+                .copy_from_slice(&process.start_microseconds.to_be_bytes());
+        }
+        if let Some(request) = context.journal_request {
+            bytes[320..336].copy_from_slice(request.as_bytes());
+        }
+        Self::recognize_ready(&bytes)
+    }
+
     /// Recognizes the complete ABI-2 readiness grammar with no trailing bytes.
     pub fn recognize_ready(bytes: &[u8]) -> Result<Self, NativeFailure> {
         if bytes.len() != PREFIX_BYTES {
@@ -125,6 +189,15 @@ impl StartupTranscript {
         }
     }
 
+    /// The service-tracked process identity, preserved by the launcher exec.
+    pub fn original_identity(&self) -> ProcessIdentity {
+        ProcessIdentity {
+            pid: u64_at(&self.0, 272) as u32,
+            start_seconds: u64_at(&self.0, 280),
+            start_microseconds: u32_at(&self.0, 288),
+        }
+    }
+
     /// The retriever's process comparison identity. A PID alone supplies no authority.
     pub fn retriever_identity(&self) -> ProcessIdentity {
         ProcessIdentity {
@@ -147,16 +220,8 @@ impl StartupTranscript {
     }
 }
 
-/// Process comparison facts. They do not authorize signals or credential release.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ProcessIdentity {
-    /// Nonzero native PID bounded by i32::MAX.
-    pub pid: u32,
-    /// Native process start time seconds.
-    pub start_seconds: u64,
-    /// Native process start time fraction, below one million.
-    pub start_microseconds: u32,
-}
+/// The shared native process comparison identity. No comparison grants authority.
+pub use crate::startup::ProcessIdentity;
 
 /// Owned locked MAC bytes, wiped before unlock, with redacted diagnostics.
 pub struct ConfirmationMacs {
@@ -203,6 +268,19 @@ impl ExchangeDeadline {
                 .ok_or(NativeFailure::LimitExceeded)?,
         ))
     }
+    /// Keeps tool failure cleanup inside the independently enforced lifetime.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn reserve(self, cleanup: Duration) -> Result<Self, NativeFailure> {
+        let deadline = Self(self.0.checked_sub(cleanup).ok_or(NativeFailure::TimedOut)?);
+        deadline.remaining()?;
+        Ok(deadline)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn instant(self) -> Instant {
+        self.0
+    }
+
     /// Remaining budget, or a typed timeout, including at exact expiry.
     pub fn remaining(&self) -> Result<Duration, NativeFailure> {
         let value = self.0.saturating_duration_since(Instant::now());

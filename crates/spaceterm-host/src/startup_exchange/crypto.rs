@@ -16,7 +16,9 @@ use zeroize::Zeroize;
 use super::unix::LockedMemory;
 use super::{ACK_INFO, CONFIRM_INFO, ConfirmationMacs, KEY_INFO, NativeFailure, PREFIX_BYTES};
 
-const STACK_BYTES: usize = 131_072;
+// The linked headless server has 256 KiB of static TLS. glibc reserves TLS
+// inside a caller-supplied pthread stack, in addition to the crypto frames.
+const STACK_BYTES: usize = 524_288;
 const REQUEST_BYTES: usize = 512;
 
 #[repr(C)]
@@ -45,7 +47,19 @@ pub(super) fn calculate(
     secret: &[u8; 32],
     challenge: &[u8; 32],
 ) -> Result<ConfirmationMacs, NativeFailure> {
-    calculate_using(ready, secret, challenge, worker, |_, _, _| {})
+    calculate_using(
+        ready,
+        secret,
+        challenge,
+        worker,
+        |thread| unsafe { libc::pthread_join(thread, ptr::null_mut()) },
+        |stack, request, output| {
+            mem::forget(stack);
+            mem::forget(request);
+            mem::forget(output);
+        },
+        |_, _, _| {},
+    )
 }
 
 fn calculate_using(
@@ -53,6 +67,8 @@ fn calculate_using(
     secret: &[u8; 32],
     challenge: &[u8; 32],
     callback: extern "C" fn(*mut libc::c_void) -> *mut libc::c_void,
+    join: impl FnOnce(libc::pthread_t) -> i32,
+    unresolved: impl FnOnce(LockedMemory<STACK_BYTES>, LockedMemory<REQUEST_BYTES>, LockedMemory<64>),
     retired: impl FnOnce(&LockedMemory<STACK_BYTES>, &LockedMemory<REQUEST_BYTES>, &LockedMemory<64>),
 ) -> Result<ConfirmationMacs, NativeFailure> {
     let mut stack = LockedMemory::<STACK_BYTES>::allocate()?;
@@ -76,7 +92,7 @@ fn calculate_using(
         return Err(NativeFailure::NativeUnavailable);
     }
     // Caller-provided stacks do not get an implicit guard allocation. The bounded
-    // fixed-size computation uses this entire supplied, locked 128 KiB mapping.
+    // fixed-size computation uses this entire supplied, locked 512 KiB mapping.
     let configured = unsafe {
         pthread_attr_setguardsize(&mut attributes, 0) == 0
             && pthread_attr_setstack(&mut attributes, stack_start as *mut _, STACK_BYTES) == 0
@@ -92,12 +108,10 @@ fn calculate_using(
     }
     // SAFETY: this is the sole waiter for the successfully created joinable worker.
     // No secret input remains borrowed from the caller by the worker.
-    if unsafe { libc::pthread_join(thread, ptr::null_mut()) } != 0 {
+    if join(thread) != 0 {
         // An unresolved worker may still use these mappings. Never unmap its
         // stack or inputs; retain locked resources and refuse exchange completion.
-        mem::forget(stack);
-        mem::forget(request);
-        mem::forget(output);
+        unresolved(stack, request, output);
         return Err(NativeFailure::CleanupUnresolved);
     }
     let result = unsafe { (*request_pointer).result };
@@ -112,6 +126,39 @@ fn calculate_using(
     } else {
         Err(NativeFailure::UnsafeNativeState)
     }
+}
+
+#[cfg(test)]
+pub(super) fn failed_join(
+    ready: &[u8; PREFIX_BYTES],
+    secret: &[u8; 32],
+    challenge: &[u8; 32],
+) -> Result<ConfirmationMacs, NativeFailure> {
+    calculate_using(
+        ready,
+        secret,
+        challenge,
+        worker,
+        |thread| {
+            // Retire the real worker before injecting the boundary's failure so
+            // the test can safely reclaim mappings that production must retain.
+            assert_eq!(unsafe { libc::pthread_join(thread, ptr::null_mut()) }, 0);
+            libc::EINVAL
+        },
+        |mut stack, mut request, mut output| {
+            for bytes in [
+                stack.bytes().as_slice(),
+                request.bytes().as_slice(),
+                output.bytes().as_slice(),
+            ] {
+                assert!(super::unix::native_memory_is_locked(bytes));
+            }
+            stack.wipe();
+            request.wipe();
+            output.wipe();
+        },
+        |_, _, _| panic!("failed join cannot publish MACs"),
+    )
 }
 
 extern "C" fn worker(pointer: *mut libc::c_void) -> *mut libc::c_void {
@@ -188,6 +235,8 @@ mod tests {
             &[7; 32],
             &[11; 32],
             failed_worker,
+            |thread| unsafe { libc::pthread_join(thread, ptr::null_mut()) },
+            |_, _, _| panic!("unexpected join failure"),
             |stack, request, output| {
                 for bytes in [
                     stack.bytes().as_slice(),
@@ -209,6 +258,8 @@ mod tests {
             &[7; 32],
             &[11; 32],
             worker,
+            |thread| unsafe { libc::pthread_join(thread, ptr::null_mut()) },
+            |_, _, _| panic!("unexpected join failure"),
             |stack, request, output| {
                 assert!(stack.bytes().iter().all(|byte| *byte == 0));
                 assert!(request.bytes().iter().all(|byte| *byte == 0));

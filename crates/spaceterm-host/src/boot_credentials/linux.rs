@@ -5,9 +5,24 @@ use super::{
 };
 use crate::native_deployment::{contracts::NativeFailure, profile::BootCredentialBinding};
 use std::{
+    fs::File,
     os::fd::{AsRawFd, OwnedFd},
     time::Instant,
 };
+
+/// Borrowed from a genuine native release lease. Its issuer must retain the
+/// authenticated downstream-patched tool and complete protected closure, the
+/// immutable fixed ciphertext, and admitted host-key/TPM storage. Protection
+/// must exclude account writes and replacement races throughout descriptor-exec.
+pub(crate) struct RetainedCredentialExecution<'a> {
+    pub(crate) tool: &'a File,
+    pub(crate) ciphertext: &'a File,
+}
+
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+#[path = "../../tests/native_handoff/credential_release_peer.rs"]
+pub mod test_support;
 
 /// Fixed packaged systemd-creds adapter. No tool, ciphertext, environment or account selector input.
 #[derive(Default)]
@@ -24,11 +39,16 @@ impl BootCredentialAdapter for SystemdBootCredentials {
     }
     fn retrieve_for_startup(
         &self,
-        _permit: &CredentialReleasePermit,
+        permit: &CredentialReleasePermit,
         destination: &mut LockedSecret32,
     ) -> Result<(), NativeFailure> {
         destination.wipe();
-        Err(NativeFailure::CustodyUnavailable)
+        crate::linux_launcher::inspect_linux_credential_policy_bound(permit)?;
+        crate::linux_launcher::credential_tool::retrieve(
+            permit,
+            permit.linux_execution()?,
+            destination,
+        )
     }
 }
 
