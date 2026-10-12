@@ -1269,14 +1269,16 @@ fn retirement_progress_codec_round_trips_and_rejects_corrupt_envelopes() {
     assert!(codec::decode_external_progress(&tag, server()).is_err());
 }
 
-// The two real owners disagree for an effect-free confirmed close. The store
-// cannot invent an accepted retirement to make Applied admissible. Assert the
-// fail-closed boundary until issue #520's owning producer supplies that progress.
 #[test]
-fn effect_free_confirmed_close_is_rejected_before_metadata_deletion() {
+fn confirmed_close_without_live_sessions_real_ledger_completion() {
     let directory = private_directory();
     let mut fixture = ReducedFixture::new(directory.path());
-    let (_, _, pane) = fixture.create();
+    let (workspace, tab, pane) = fixture.create();
+    let created = fixture.fixture.store.recover().unwrap();
+    let original_creation = match &created.ledger.as_ref().unwrap().operations[0] {
+        RecoveredOperationRecord::Completed(record) => record.clone(),
+        _ => panic!("creation must be completed"),
+    };
     let assessed = fixture.execute(
         Command::AssessClose {
             target: CloseTarget::Pane(pane),
@@ -1300,73 +1302,245 @@ fn effect_free_confirmed_close_is_rejected_before_metadata_deletion() {
     context.facts.retirement_outcome =
         Some(AppliedRetirementOutcome::new(&CanonicalCodec).unwrap());
     let reduction = fixture.reducer.prepare_command(&command, &context).unwrap();
-    assert!(matches!(
-        reduction.resolution(),
-        Resolution::Completed(Outcome::Applied)
-    ));
-    let before = fixture.fixture.store.recover().unwrap();
-    let basis = reduction
-        .writes()
-        .operation_writes()
-        .iter()
-        .find_map(|v| match v {
-            OperationWrite::ReductionBasis(v) => Some(*v),
-            _ => None,
-        })
+    let revision = reduction.resulting_organization_revision();
+    let accepted = fixture.commit_reduction(reduction, Some(context.binding()));
+    assert!(accepted.publication.is_some());
+    assert!(
+        !accepted
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, OrganizationEffect::RetireSession { .. }))
+    );
+    let deleted = fixture.fixture.store.recover().unwrap();
+    assert!(deleted.organization.workspaces.is_empty());
+    assert!(deleted.organization.tabs.is_empty());
+    assert!(deleted.organization.panes.is_empty());
+    let Resolution::AwaitingRetirement(plan) = accepted.resolution else {
+        panic!("accepted retirement required");
+    };
+    assert!(plan.descriptor.sessions().is_empty());
+    assert!(plan.descriptor.cleanup_confirmed());
+    assert_eq!(plan.descriptor.binding(), context.binding());
+    assert_eq!(plan.descriptor.acceptance_revision(), revision);
+    let completion = fixture
+        .reducer
+        .prepare_retirement_completion(plan.descriptor.batch())
         .unwrap();
+    assert_eq!(completion.resulting_organization_revision(), revision);
+    let completed = fixture.commit_reduction(completion, None);
+    assert!(completed.publication.is_none() && completed.effects.is_empty());
+    assert!(matches!(
+        completed.resolution,
+        Resolution::RetirementCompleted(value) if value.descriptor == plan.descriptor
+    ));
+    let (surviving_workspace, _, _) = fixture.create();
+    let before_reopen = fixture.fixture.store.recover().unwrap();
+    assert!(before_reopen.organization.revision > revision);
+    drop(fixture);
+    let mut store = reopen(directory.path());
+    let recovered = store.recover().unwrap();
+    assert_eq!(recovered, before_reopen);
+    let mut ledger = OperationLedger::recover(server(), recovered.ledger.clone().unwrap()).unwrap();
+    let binding = StreamBinding::from_stream(context.operation.stream());
+    let expected = OperationLookup::Completed {
+        result: Outcome::Applied,
+        publication_revision: revision,
+    };
+    assert_eq!(
+        ledger
+            .lookup(&binding, context.operation, Some(context.request_digest))
+            .unwrap(),
+        expected
+    );
     let transaction_context = TransactionContext::new(
-        before.store_revision,
-        before.organization.revision,
-        reduction.resulting_organization_revision(),
-        Some(basis),
+        recovered.store_revision,
+        recovered.organization.revision,
+        recovered.organization.revision,
+        None,
     )
     .unwrap();
-    let failure = fixture
-        .fixture
-        .ledger
-        .prepare_completion(
-            &fixture.fixture.binding,
-            context.operation,
-            context.request_digest,
-            CompactOutcome::new(&Outcome::Applied, &CanonicalCodec).unwrap(),
-            reduction.resulting_organization_revision(),
-            transaction_context,
-        )
-        .unwrap_err();
-    assert_eq!(failure.class, LedgerFailureClass::InvalidExternalProgress);
-    assert_eq!(fixture.fixture.store.recover().unwrap(), before);
-    assert_eq!(before.organization.panes[0].id, pane);
-    let retry_context = fixture.fixture.context();
     assert!(matches!(
-        fixture
-            .fixture
-            .ledger
-            .prepare_admission(
-                &fixture.fixture.binding,
-                context.operation,
-                &command,
-                PendingKind::External {
-                    effect: ExternalEffectKind::SessionLifecycle
-                },
-                retry_context,
-            )
-            .unwrap(),
-        AdmissionPreparation::Existing(OperationLookup::Pending)
+        ledger.prepare_admission(
+            &binding,
+            context.operation,
+            &command,
+            PendingKind::External { effect: ExternalEffectKind::SessionLifecycle },
+            transaction_context,
+        ).unwrap(),
+        AdmissionPreparation::Existing(result) if result == expected
     ));
-    drop(fixture);
-    let recovered = reopen(directory.path()).recover().unwrap();
-    assert_eq!(recovered, before);
-    let ledger = OperationLedger::recover(server(), recovered.ledger.unwrap()).unwrap();
     assert_eq!(
         ledger
             .lookup(
-                &StreamBinding::from_stream(context.operation.stream()),
-                context.operation,
-                Some(context.request_digest)
+                &binding,
+                original_creation.binding.id,
+                Some(original_creation.binding.digest)
             )
             .unwrap(),
-        OperationLookup::Pending
+        OperationLookup::Completed {
+            result: original_creation.outcome.outcome(&CanonicalCodec).unwrap(),
+            publication_revision: original_creation.outcome_revision,
+        }
     );
+    assert_eq!(store.recover().unwrap(), recovered);
+    assert!(
+        recovered
+            .organization
+            .workspaces
+            .iter()
+            .all(|record| record.id != workspace)
+    );
+    assert!(
+        recovered
+            .organization
+            .tabs
+            .iter()
+            .all(|record| record.id != tab)
+    );
+    assert!(
+        recovered
+            .organization
+            .panes
+            .iter()
+            .all(|record| record.id != pane)
+    );
+    assert_eq!(recovered.organization.workspaces[0].id, surviving_workspace);
+}
+
+#[test]
+fn confirmed_kill_workspace_without_live_sessions_real_ledger_completion() {
+    let directory = private_directory();
+    let mut fixture = ReducedFixture::new(directory.path());
+    let (workspace, tab, pane) = fixture.create();
+    let created = fixture.fixture.store.recover().unwrap();
+    let original_creation = match &created.ledger.as_ref().unwrap().operations[0] {
+        RecoveredOperationRecord::Completed(record) => record.clone(),
+        _ => panic!("creation must be completed"),
+    };
+    let assessed = fixture.execute(
+        Command::AssessKillWorkspace { workspace },
+        PendingKind::AtomicMutation,
+    );
+    let Resolution::Completed(Outcome::Assessment(assessment)) = assessed.resolution else {
+        panic!("assessment required");
+    };
+    let command = Command::KillWorkspaceConfirmed {
+        workspace,
+        assessment: assessment.reference(),
+    };
+    let mut context = admit_reduction(
+        &mut fixture,
+        &command,
+        PendingKind::External {
+            effect: ExternalEffectKind::SessionLifecycle,
+        },
+    );
+    context.facts.retirement_outcome =
+        Some(AppliedRetirementOutcome::new(&CanonicalCodec).unwrap());
+    let reduction = fixture.reducer.prepare_command(&command, &context).unwrap();
+    let revision = reduction.resulting_organization_revision();
+    let accepted = fixture.commit_reduction(reduction, Some(context.binding()));
+    assert!(accepted.publication.is_some());
+    assert!(
+        !accepted
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, OrganizationEffect::RetireSession { .. }))
+    );
+    let deleted = fixture.fixture.store.recover().unwrap();
+    assert!(deleted.organization.workspaces.is_empty());
+    assert!(deleted.organization.tabs.is_empty());
+    assert!(deleted.organization.panes.is_empty());
+    let Resolution::AwaitingRetirement(plan) = accepted.resolution else {
+        panic!("accepted retirement required");
+    };
+    assert!(plan.descriptor.sessions().is_empty());
+    assert!(plan.descriptor.cleanup_confirmed());
+    assert_eq!(plan.descriptor.binding(), context.binding());
+    assert_eq!(plan.descriptor.acceptance_revision(), revision);
+    let completion = fixture
+        .reducer
+        .prepare_retirement_completion(plan.descriptor.batch())
+        .unwrap();
+    assert_eq!(completion.resulting_organization_revision(), revision);
+    let completed = fixture.commit_reduction(completion, None);
+    assert!(completed.publication.is_none() && completed.effects.is_empty());
+    assert!(matches!(
+        completed.resolution,
+        Resolution::RetirementCompleted(value) if value.descriptor == plan.descriptor
+    ));
+    let (surviving_workspace, _, _) = fixture.create();
+    let before_reopen = fixture.fixture.store.recover().unwrap();
+    assert!(before_reopen.organization.revision > revision);
+    drop(fixture);
+    let mut store = reopen(directory.path());
+    let recovered = store.recover().unwrap();
+    assert_eq!(recovered, before_reopen);
+    let mut ledger = OperationLedger::recover(server(), recovered.ledger.clone().unwrap()).unwrap();
+    let binding = StreamBinding::from_stream(context.operation.stream());
+    let expected = OperationLookup::Completed {
+        result: Outcome::Applied,
+        publication_revision: revision,
+    };
+    assert_eq!(
+        ledger
+            .lookup(&binding, context.operation, Some(context.request_digest))
+            .unwrap(),
+        expected
+    );
+    let transaction_context = TransactionContext::new(
+        recovered.store_revision,
+        recovered.organization.revision,
+        recovered.organization.revision,
+        None,
+    )
+    .unwrap();
+    assert!(matches!(
+        ledger.prepare_admission(
+            &binding,
+            context.operation,
+            &command,
+            PendingKind::External { effect: ExternalEffectKind::SessionLifecycle },
+            transaction_context,
+        ).unwrap(),
+        AdmissionPreparation::Existing(result) if result == expected
+    ));
+    assert_eq!(
+        ledger
+            .lookup(
+                &binding,
+                original_creation.binding.id,
+                Some(original_creation.binding.digest)
+            )
+            .unwrap(),
+        OperationLookup::Completed {
+            result: original_creation.outcome.outcome(&CanonicalCodec).unwrap(),
+            publication_revision: original_creation.outcome_revision,
+        }
+    );
+    assert_eq!(store.recover().unwrap(), recovered);
+    assert!(
+        recovered
+            .organization
+            .workspaces
+            .iter()
+            .all(|record| record.id != workspace)
+    );
+    assert!(
+        recovered
+            .organization
+            .tabs
+            .iter()
+            .all(|record| record.id != tab)
+    );
+    assert!(
+        recovered
+            .organization
+            .panes
+            .iter()
+            .all(|record| record.id != pane)
+    );
+    assert_eq!(recovered.organization.workspaces[0].id, surviving_workspace);
 }
 
 struct FallbackFixture {

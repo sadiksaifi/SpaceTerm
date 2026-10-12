@@ -75,6 +75,14 @@ pub fn context(sequence: u64) -> ReductionContext {
         facts: ReductionFacts::default(),
     }
 }
+pub fn retiring_context(sequence: u64) -> ReductionContext {
+    let mut context = context(sequence);
+    context.facts.retirement_outcome = Some(
+        AppliedRetirementOutcome::new(&spaceterm_core::operation_ledger::canonical::CanonicalCodec)
+            .unwrap(),
+    );
+    context
+}
 pub fn facts(reducer: &OrganizationReducer, command: &Command, sequence: u64) -> ReductionContext {
     let mut context = context(sequence);
     let basis = reducer.directory_basis(command).unwrap();
@@ -128,6 +136,13 @@ pub fn apply(
             | Command::RepairPaneDirectory { .. }
     ) {
         facts(reducer, &command, sequence)
+    } else if matches!(
+        command,
+        Command::CloseConfirmed { .. }
+            | Command::KillWorkspaceConfirmed { .. }
+            | Command::EndAllSessions { .. }
+    ) {
+        retiring_context(sequence)
     } else {
         context(sequence)
     };

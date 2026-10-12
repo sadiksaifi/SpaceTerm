@@ -1008,26 +1008,122 @@ fn accepted_close_recovery_cannot_infer_cleanup_from_missing_handles_and_complet
 
 #[test]
 fn end_all_without_live_sessions_still_commits_ended_state_and_completes_without_effects() {
-    let mut reducer = reducer();
-    let (_, _, pane) = create(&mut reducer, 1);
-    let handle = assess_end_all(&mut reducer, 2);
-    let result = end_all(&mut reducer, handle, 3);
-    let descriptor = plan(&result).clone();
-    assert!(descriptor.sessions().is_empty());
-    assert!(descriptor.cleanup_confirmed());
-    assert_eq!(
-        runtime(&reducer, pane).phase,
-        SessionPhase::Ended {
-            reason: EndReason::EndAllSessions
+    for saved_pane in [false, true] {
+        let mut reducer = reducer();
+        let pane = saved_pane.then(|| create(&mut reducer, 1).2);
+        let handle = assess_end_all(&mut reducer, 2);
+        let before = reducer.snapshot();
+        let result = end_all(&mut reducer, handle, 3);
+        let descriptor = plan(&result).clone();
+        assert_eq!(descriptor.assessment(), handle);
+        assert_eq!(descriptor.panes().len(), usize::from(saved_pane));
+        assert!(descriptor.sessions().is_empty() && descriptor.cleanup_confirmed());
+        assert_eq!(
+            descriptor.acceptance_revision(),
+            reducer.snapshot().state().revision
+        );
+        assert_eq!(
+            reducer.snapshot().state().workspaces,
+            before.state().workspaces
+        );
+        assert_eq!(reducer.snapshot().state().tabs, before.state().tabs);
+        assert_eq!(reducer.snapshot().state().panes, before.state().panes);
+        if let Some(pane) = pane {
+            assert_eq!(runtime(&reducer, pane).control, before.runtime()[0].control);
+            assert_eq!(
+                runtime(&reducer, pane).phase,
+                SessionPhase::Ended {
+                    reason: EndReason::EndAllSessions
+                }
+            );
+            assert_eq!(
+                replay(before, result.publication.as_ref().unwrap()),
+                reducer.snapshot()
+            );
+        } else {
+            assert!(result.publication.is_none());
+            assert_eq!(reducer.snapshot(), before);
         }
-    );
-    assert_eq!(result.effects.len(), 2);
-    assert!(
-        complete(&mut reducer, descriptor.batch())
-            .effects
-            .is_empty()
-    );
-    start(&mut reducer, pane);
+        assert_eq!(result.effects.len(), usize::from(saved_pane) * 2);
+        let ended = reducer.snapshot();
+        let completed = complete(&mut reducer, descriptor.batch());
+        assert!(completed.publication.is_none() && completed.effects.is_empty());
+        assert!(matches!(
+            completed.resolution,
+            Resolution::RetirementCompleted(plan) if plan.descriptor == descriptor
+        ));
+        assert_eq!(reducer.snapshot(), ended);
+        assert!(reducer.retained().pending_retirements().is_empty());
+        if let Some(pane) = pane {
+            start(&mut reducer, pane);
+        } else {
+            create(&mut reducer, 4);
+        }
+    }
+}
+
+#[test]
+fn native_stop_without_live_sessions_records_acceptance_and_completes_store_only() {
+    for saved_pane in [false, true] {
+        let mut reducer = reducer();
+        let pane = saved_pane.then(|| create(&mut reducer, 1).2);
+        let before = reducer.snapshot();
+        let result = stop(&mut reducer, 1);
+        let descriptor = native_plan(&result).clone();
+        assert_eq!(descriptor.request(), native_request(1));
+        assert_eq!(descriptor.panes().len(), usize::from(saved_pane));
+        assert!(descriptor.sessions().is_empty() && descriptor.cleanup_confirmed());
+        assert_eq!(
+            descriptor.acceptance_revision(),
+            reducer.snapshot().state().revision
+        );
+        assert_eq!(
+            reducer.snapshot().state().workspaces,
+            before.state().workspaces
+        );
+        assert_eq!(reducer.snapshot().state().tabs, before.state().tabs);
+        assert_eq!(reducer.snapshot().state().panes, before.state().panes);
+        if let Some(pane) = pane {
+            assert_eq!(runtime(&reducer, pane).control, before.runtime()[0].control);
+            assert_eq!(
+                runtime(&reducer, pane).phase,
+                SessionPhase::Ended {
+                    reason: EndReason::Stop
+                }
+            );
+            assert_eq!(
+                replay(before, result.publication.as_ref().unwrap()),
+                reducer.snapshot()
+            );
+        } else {
+            assert!(result.publication.is_none());
+            assert_eq!(reducer.snapshot(), before);
+        }
+        assert_eq!(result.effects.len(), usize::from(saved_pane) * 2);
+        let ended = reducer.snapshot();
+        let completed = complete(&mut reducer, descriptor.batch());
+        assert!(completed.publication.is_none() && completed.effects.is_empty());
+        assert!(matches!(
+            completed.resolution,
+            Resolution::NativeRetirementCompleted(value) if *value == descriptor
+        ));
+        assert_eq!(reducer.snapshot(), ended);
+        assert!(reducer.retained().native_retirements().is_empty());
+        let rejected = apply(
+            &mut reducer,
+            Command::CreateWorkspace {
+                server: SERVER,
+                source: WorkspaceCreationSource::ServerHome { server: SERVER },
+                name: NameDraft::Automatic,
+            },
+            2,
+        );
+        assert_eq!(
+            rejected.resolution,
+            Resolution::Completed(Outcome::Failed(OperationFailure::BusyRetiring))
+        );
+        assert!(rejected.publication.is_none() && rejected.effects.is_empty());
+    }
 }
 
 #[test]
