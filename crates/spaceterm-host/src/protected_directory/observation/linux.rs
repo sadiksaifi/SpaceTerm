@@ -7,15 +7,8 @@ use std::os::fd::{AsRawFd, FromRawFd};
 use super::{MAX_DRAIN_CALLS, MAX_EVENTS, MAX_HANDLES, WorkBudget};
 use crate::protected_directory::ProtectedDirectoryError;
 
-const MUTATIONS: u32 = libc::IN_MODIFY
-    | libc::IN_ATTRIB
-    | libc::IN_CLOSE_WRITE
-    | libc::IN_MOVED_FROM
-    | libc::IN_MOVED_TO
-    | libc::IN_CREATE
-    | libc::IN_DELETE
-    | libc::IN_DELETE_SELF
-    | libc::IN_MOVE_SELF;
+const DIRECTORY_MUTATIONS: u32 = libc::IN_ATTRIB | libc::IN_DELETE_SELF | libc::IN_MOVE_SELF;
+const FILE_MUTATIONS: u32 = DIRECTORY_MUTATIONS | libc::IN_MODIFY | libc::IN_CLOSE_WRITE;
 const LOSSES: u32 = libc::IN_UNMOUNT | libc::IN_IGNORED;
 const HEADER_BYTES: usize = 16;
 const BUFFER_BYTES: usize = 4096;
@@ -103,6 +96,15 @@ impl Observation {
         if self.watches.len() == MAX_HANDLES {
             return Err(ProtectedDirectoryError::Unavailable);
         }
+        let status = status_of(held, work)?;
+        let directory = status.st_mode & libc::S_IFMT == libc::S_IFDIR;
+        // Retained children report their own moves/deletion. Parent namespace
+        // activity does not change the enrolled directory's protection or binding.
+        let mutations = if directory {
+            DIRECTORY_MUTATIONS
+        } else {
+            FILE_MUTATIONS
+        };
         let mut path = [0; 32];
         let reference = descriptor_reference(held, &mut path)?;
         let descriptor = work.call(|| {
@@ -116,7 +118,7 @@ impl Observation {
                 libc::inotify_add_watch(
                     self.queue.as_raw_fd(),
                     reference.as_ptr(),
-                    MUTATIONS | libc::IN_MASK_ADD,
+                    mutations | libc::IN_MASK_ADD,
                 )
             };
             if descriptor < 0 {
@@ -223,20 +225,24 @@ impl Observation {
                 .iter()
                 .find(|watch| watch.descriptor == descriptor)
                 .ok_or(ProtectedDirectoryError::Unavailable)?;
-            if mask & !(MUTATIONS | LOSSES | libc::IN_ISDIR) != 0
-                || mask & (MUTATIONS | LOSSES) == 0
+            let mutations = if watch.directory {
+                DIRECTORY_MUTATIONS
+            } else {
+                FILE_MUTATIONS
+            };
+            if mask & !(mutations | LOSSES | libc::IN_ISDIR) != 0
+                || mask & (mutations | LOSSES) == 0
                 || (!watch.directory && (length != 0 || mask & libc::IN_ISDIR != 0))
-                || (mask
-                    & (libc::IN_CREATE | libc::IN_DELETE | libc::IN_MOVED_FROM | libc::IN_MOVED_TO)
-                    != 0
-                    && length == 0)
-                || (cookie != 0 && mask & (libc::IN_MOVED_FROM | libc::IN_MOVED_TO) == 0)
+                || (length != 0 && mask & !(libc::IN_ATTRIB | libc::IN_ISDIR) != 0)
+                || cookie != 0
             {
                 return Err(ProtectedDirectoryError::Unavailable);
             }
-            // Parent namespace events are intentionally not name-filtered. A
-            // restored binding must not disappear from this operation's history.
-            self.changed = true;
+            // Directory IN_ATTRIB also reports named children. Each retained
+            // child is enrolled separately; only nameless events concern this inode.
+            if length == 0 {
+                self.changed = true;
+            }
             records = &records[end..];
         }
         Ok(())

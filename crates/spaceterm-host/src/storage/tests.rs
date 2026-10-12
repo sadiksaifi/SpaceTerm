@@ -1,7 +1,6 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-use std::sync::MutexGuard;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::directory::mutex;
@@ -15,12 +14,10 @@ const MIGRATIONS: &[Migration<'_>] = &[Migration {
 
 struct Fixture {
     path: PathBuf,
-    _namespace: MutexGuard<'static, ()>,
 }
 
 impl Fixture {
     fn new() -> Self {
-        let namespace = mutex(&crate::test_support::FIXTURE_NAMESPACE_LOCK);
         #[cfg(target_os = "macos")]
         let root = PathBuf::from("/private/tmp");
         #[cfg(target_os = "linux")]
@@ -32,10 +29,7 @@ impl Fixture {
         ));
         fs::create_dir(&path).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
-        Self {
-            path,
-            _namespace: namespace,
-        }
+        Self { path }
     }
 }
 impl Drop for Fixture {

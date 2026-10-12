@@ -38,17 +38,14 @@ struct DirectorySnapshot {
     children: Vec<DirectoryVersion>,
 }
 
-// Change time is a sampled attribute, not a mutation counter. Restored protection
-// changes can leave equal snapshots. Directory-entry changes can also update it,
-// so versions belong to one operation, not to the retained authority's lifetime.
+// Directory change time also advances for unrelated children. Compare protection
+// attributes here; enrolled inode events detect restored attribute and binding changes.
 #[derive(Clone, Copy, Eq, PartialEq)]
 struct DirectoryVersion {
     identity: EntryIdentity,
     mode: libc::mode_t,
     owner: libc::uid_t,
     group: libc::gid_t,
-    changed_seconds: libc::time_t,
-    changed_nanoseconds: libc::c_long,
 }
 
 // Access time is excluded because reading may update it. Modification and change
@@ -412,8 +409,6 @@ impl EntryStatus {
             mode: self.mode,
             owner: self.owner,
             group: self.group,
-            changed_seconds: self.changed_seconds,
-            changed_nanoseconds: self.changed_nanoseconds,
         }
     }
 }
@@ -519,7 +514,6 @@ mod equal_timestamp_regressions {
     use std::io::{self, Write};
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
     use std::path::{Path, PathBuf};
-    use std::sync::MutexGuard;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::EntryStatus;
@@ -527,7 +521,6 @@ mod equal_timestamp_regressions {
     use crate::protected_directory::{
         NativeDirectoryProtection, ProtectedDirectoryError, RetainedProtectedDirectory,
     };
-    use crate::test_support::FIXTURE_NAMESPACE_LOCK;
 
     const RECORD_NAME: &str = "registration";
     static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
@@ -592,14 +585,10 @@ mod equal_timestamp_regressions {
         directory: PathBuf,
         controlled_directories: [EntryIdentity; 3],
         owner_uid: u32,
-        _guard: MutexGuard<'static, ()>,
     }
 
     impl Fixture {
         fn new() -> Self {
-            let guard = FIXTURE_NAMESPACE_LOCK
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
             // Alias resolution is fixture setup, never production traversal.
             let parent = fixture_io(std::env::temp_dir().canonicalize());
             let mut root = None;
@@ -632,7 +621,6 @@ mod equal_timestamp_regressions {
                 directory,
                 controlled_directories,
                 owner_uid,
-                _guard: guard,
             }
         }
 
@@ -888,36 +876,72 @@ mod equal_timestamp_regressions {
     }
 
     #[test]
-    fn reading_rejects_file_substitution_then_original_binding_restoration_in_the_final_inspector()
-    {
-        let fixture = Fixture::new();
-        fixture.write_record(b"record");
-        let _timestamps = EqualTimestampObservation::begin();
-        let protection = CallbackProtection::new(&fixture, Callback::RegularFile(2), |file| {
-            let before = fixture_io(file.metadata());
-            let path = fixture.directory.join(RECORD_NAME);
-            let displaced = fixture.root.join("displaced-record");
-            fixture_io(fs::rename(&path, &displaced));
-            write_private_file(&path, b"shadow");
-            fixture_io(fs::remove_file(&path));
-            fixture_io(fs::rename(&displaced, &path));
-            let after = fixture_io(fs::metadata(&path));
-            assert_eq!(
-                metadata_without_times(&after),
-                metadata_without_times(&before)
+    fn reading_rejects_ancestor_substitution_then_original_binding_restoration_during_either_file_inspection()
+     {
+        for trigger in [Callback::RegularFile(1), Callback::RegularFile(2)] {
+            let fixture = Fixture::new();
+            fixture.write_record(b"record");
+            let _timestamps = EqualTimestampObservation::begin();
+            let protection = CallbackProtection::new(&fixture, trigger, |_| {
+                let before = fixture_io(fs::metadata(&fixture.ancestor));
+                let displaced = fixture.root.join("displaced-ancestor");
+                fixture_io(fs::rename(&fixture.ancestor, &displaced));
+                fixture_io(DirBuilder::new().mode(0o700).create(&fixture.ancestor));
+                fixture_io(fs::remove_dir(&fixture.ancestor));
+                fixture_io(fs::rename(&displaced, &fixture.ancestor));
+                let after = fixture_io(fs::metadata(&fixture.ancestor));
+                assert_eq!(
+                    metadata_without_times(&after),
+                    metadata_without_times(&before)
+                );
+            });
+            let directory = RetainedProtectedDirectory::open(&fixture.directory, &protection)
+                .expect("controlled protected directory opening failed");
+            protection.armed.set(true);
+
+            let read = directory.read_regular_file(OsStr::new(RECORD_NAME), 6);
+
+            assert!(
+                protection.action.borrow().is_none(),
+                "the mutation callback did not run"
             );
-        });
-        let directory = RetainedProtectedDirectory::open(&fixture.directory, &protection)
-            .expect("controlled protected directory opening failed");
-        protection.armed.set(true);
+            assert_eq!(read.err(), Some(ProtectedDirectoryError::Changed));
+        }
+    }
 
-        let read = directory.read_regular_file(OsStr::new(RECORD_NAME), 6);
+    #[test]
+    fn reading_rejects_file_substitution_then_original_binding_restoration_during_either_file_inspection()
+     {
+        for trigger in [Callback::RegularFile(1), Callback::RegularFile(2)] {
+            let fixture = Fixture::new();
+            fixture.write_record(b"record");
+            let _timestamps = EqualTimestampObservation::begin();
+            let protection = CallbackProtection::new(&fixture, trigger, |file| {
+                let before = fixture_io(file.metadata());
+                let path = fixture.directory.join(RECORD_NAME);
+                let displaced = fixture.root.join("displaced-record");
+                fixture_io(fs::rename(&path, &displaced));
+                write_private_file(&path, b"shadow");
+                fixture_io(fs::remove_file(&path));
+                fixture_io(fs::rename(&displaced, &path));
+                let after = fixture_io(fs::metadata(&path));
+                assert_eq!(
+                    metadata_without_times(&after),
+                    metadata_without_times(&before)
+                );
+            });
+            let directory = RetainedProtectedDirectory::open(&fixture.directory, &protection)
+                .expect("controlled protected directory opening failed");
+            protection.armed.set(true);
 
-        assert!(
-            protection.action.borrow().is_none(),
-            "the mutation callback did not run"
-        );
-        assert_eq!(read.err(), Some(ProtectedDirectoryError::Changed));
+            let read = directory.read_regular_file(OsStr::new(RECORD_NAME), 6);
+
+            assert!(
+                protection.action.borrow().is_none(),
+                "the mutation callback did not run"
+            );
+            assert_eq!(read.err(), Some(ProtectedDirectoryError::Changed));
+        }
     }
 
     #[test]
@@ -1158,6 +1182,57 @@ mod equal_timestamp_regressions {
         let read = directory.read_regular_file(OsStr::new(RECORD_NAME), 6);
 
         assert_eq!(read.err(), Some(ProtectedDirectoryError::Unavailable));
+    }
+
+    #[test]
+    fn opening_admits_unrelated_child_creation_during_directory_inspection() {
+        let fixture = Fixture::new();
+        let protection = CallbackProtection::new(&fixture, Callback::LeafDirectory, |_| {
+            for parent in [&fixture.root, &fixture.ancestor, &fixture.directory] {
+                fixture_io(
+                    DirBuilder::new()
+                        .mode(0o700)
+                        .create(parent.join("unrelated-child")),
+                );
+            }
+        });
+        protection.armed.set(true);
+
+        let opened = RetainedProtectedDirectory::open(&fixture.directory, &protection);
+
+        assert!(
+            protection.action.borrow().is_none(),
+            "the child creation did not run"
+        );
+        assert!(
+            opened.is_ok(),
+            "unrelated child creation invalidated opening: {opened:?}"
+        );
+    }
+
+    #[test]
+    fn verification_admits_unrelated_child_creation_during_directory_inspection() {
+        let fixture = Fixture::new();
+        let protection = CallbackProtection::new(&fixture, Callback::LeafDirectory, |_| {
+            for parent in [&fixture.root, &fixture.ancestor, &fixture.directory] {
+                fixture_io(
+                    DirBuilder::new()
+                        .mode(0o700)
+                        .create(parent.join("unrelated-child")),
+                );
+            }
+        });
+        let directory = RetainedProtectedDirectory::open(&fixture.directory, &protection)
+            .expect("controlled protected directory opening failed");
+        protection.armed.set(true);
+
+        let verified = directory.verify();
+
+        assert!(
+            protection.action.borrow().is_none(),
+            "the child creation did not run"
+        );
+        assert_eq!(verified, Ok(()));
     }
 
     #[test]

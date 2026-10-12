@@ -267,12 +267,10 @@ mod tests {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, symlink};
     use std::path::PathBuf;
     use std::rc::Rc;
-    use std::sync::MutexGuard;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use crate::protected_directory::ProtectedDirectoryError;
     use crate::startup::{BuildIdentity, DesiredServerState, InstallationId};
-    use crate::test_support::FIXTURE_NAMESPACE_LOCK;
 
     use super::*;
 
@@ -352,14 +350,10 @@ mod tests {
         directory: PathBuf,
         reader: NativeRegistrationReader,
         controls: Rc<InspectionControls>,
-        _guard: MutexGuard<'static, ()>,
     }
 
     impl Fixture {
         fn new() -> Self {
-            let guard = FIXTURE_NAMESPACE_LOCK
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
             // Only fixture setup resolves the temporary-directory alias, never production.
             let parent = fixture_io(std::env::temp_dir().canonicalize());
             let mut root = None;
@@ -406,7 +400,6 @@ mod tests {
                 directory,
                 reader,
                 controls,
-                _guard: guard,
             }
         }
 
@@ -487,6 +480,31 @@ mod tests {
         );
         assert!(fixture.controls.inspections.get() > 0);
         assert_eq!(fixture.entry_names(), before);
+    }
+
+    #[test]
+    fn reader_admits_unrelated_registration_publication_during_file_inspection() {
+        let fixture = Fixture::new();
+        fixture.write_entry(RECORD_NAME, &record_bytes());
+        let sibling = fixture.directory.join("release-501.registration");
+        *fixture.controls.on_file.borrow_mut() = Some(Box::new(move || {
+            let mut file = fixture_io(
+                OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(sibling),
+            );
+            fixture_io(file.write_all(&record_bytes()));
+        }));
+
+        let read = fixture.reader.read_fixed_registration(key());
+
+        assert_eq!(read, Ok(expected_record()));
+        assert!(
+            fixture.controls.on_file.borrow().is_none(),
+            "the publication did not run"
+        );
     }
 
     #[test]
