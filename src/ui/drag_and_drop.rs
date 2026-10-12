@@ -486,7 +486,9 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
                 SELECTION_DURATION
             };
             let from = previous.and_then(|previous| self.selection_start(previous, now));
-            let to = selected.and_then(|selected| self.settled_start(selected, now));
+            let to = selected.and_then(|selected| {
+                Some(self.settled_start(selected, now)? + self.slid(selected, now))
+            });
             self.flight = from
                 .zip(to)
                 .zip(selected)
@@ -510,17 +512,42 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
     }
 
     /// Where the selection drawn at the item `id` stands along the strip at `now`, or `None` when
-    /// the last frame did not draw the item.
+    /// the last frame did not draw the item. A selection in flight stands off the item's settled
+    /// start by what remains of its flight; otherwise it stands at the item's face, which items
+    /// growing in and gaps closing still displace.
     fn selection_start(&self, id: Id, now: Instant) -> Option<Pixels> {
         if !self.laid_out.contains_key(&id) {
             return None;
         }
-        let flying = self
+        let off_settled = self
             .flight
             .as_ref()
             .filter(|flight| flight.id == id)
-            .map_or(px(0.0), |flight| flight.from * (1.0 - flight.ease.at(now)));
-        Some(self.settled_start(id, now)? + flying)
+            .map_or_else(
+                || self.displacement(id, now) + self.lag(id, now),
+                |flight| flight.from * (1.0 - flight.ease.at(now)),
+            );
+        Some(self.settled_start(id, now)? + self.slid(id, now) + off_settled)
+    }
+
+    /// How far the item `id` slides along the strip at `now` toward where a drop placed it.
+    fn slid(&self, id: Id, now: Instant) -> Pixels {
+        self.slides
+            .get(&id)
+            .map_or(px(0.0), |slide| slide.at(now).along(self.axis))
+    }
+
+    /// How far the face of the item `id` starts short of its slot's start at `now`, while it grows
+    /// from its slot's far end and the slot still holds back part of it.
+    fn lag(&self, id: Id, now: Instant) -> Pixels {
+        if !self.growing_from_end.contains(&id) {
+            return px(0.0);
+        }
+        self.entering
+            .get(&id)
+            .filter(|(ease, _)| !ease.finished(now))
+            .and_then(|(ease, natural)| natural.map(|natural| natural * (ease.at(now) - 1.0)))
+            .unwrap_or(px(0.0))
     }
 
     /// Where the item `id` starts along the strip once every item has grown in and every gap has
@@ -825,12 +852,6 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
             .get(&id)
             .filter(|(ease, _)| !ease.finished(now));
         let grows_from_end = entering.is_some() && self.growing_from_end.contains(&id);
-        // A face that grows from its slot's far end starts short of the slot's start by the part
-        // of it the slot still holds back.
-        let lag = entering
-            .filter(|_| grows_from_end)
-            .and_then(|(ease, natural)| natural.map(|natural| natural * (ease.at(now) - 1.0)))
-            .unwrap_or(px(0.0));
         ItemMotion {
             offset: slide.map_or_else(Point::default, |slide| slide.at(now)),
             lifted: self.dragged() == Some(id),
@@ -844,7 +865,7 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
                 .map_or_else(Point::default, |flight| {
                     let offset = flight.from * (1.0 - flight.ease.at(now))
                         - self.displacement(id, now)
-                        - lag;
+                        - self.lag(id, now);
                     match self.axis {
                         Axis::Horizontal => point(offset, px(0.0)),
                         Axis::Vertical => point(px(0.0), offset),

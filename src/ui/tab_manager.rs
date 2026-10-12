@@ -6367,6 +6367,34 @@ mod tests {
     }
 
     #[gpui::test]
+    fn selecting_a_tab_while_a_closed_tab_closes_its_gap_should_leave_from_the_selection(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
+        click("create-tab-button", cx);
+        finish_slides(cx);
+        cx.update(|_, cx| cx.set_global(AnimatePresence));
+
+        click("tab-close-button-2", cx);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(100));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        let closing = cx.debug_bounds("tab-item-3-chip").unwrap().origin;
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| manager.activate_tab_at(0, window, cx));
+        });
+        cx.run_until_parked();
+        let leaving = cx.debug_bounds("tab-item-1-chip").unwrap().origin;
+
+        assert!(
+            (leaving.x - closing.x).abs() <= px(1.0),
+            "the selection must leave from where it stood at {closing:?}, got {leaving:?}"
+        );
+    }
+
+    #[gpui::test]
     fn closing_an_inactive_tab_should_keep_the_bar_where_it_was_scrolled(cx: &mut TestAppContext) {
         let (manager, _records, cx) = tab_manager(cx);
         for _ in 0..13 {
