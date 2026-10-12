@@ -16,6 +16,7 @@ pub(crate) mod directory_picker;
 mod drag_and_drop;
 mod native_remote_workspace_flow_backend;
 pub(crate) mod pane_lifecycle;
+mod pane_motion;
 pub(crate) mod permission_setup;
 mod remote_child_launch;
 pub(crate) mod remote_workspace_flow;

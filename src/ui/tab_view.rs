@@ -7,6 +7,7 @@ use super::chrome_icons::{IconRole, InteractiveIconRole};
 use super::chrome_typography::{ChromeTextStyleExt as _, ChromeTypography, TextRole};
 use super::drag_and_drop::{DragPreview, DragSession, drag_release_observer, grab_point};
 use super::pane_lifecycle::{PaneConstruction, RemoteHierarchyLifecycle};
+use super::pane_motion::{PaneFrames, PaneMotion};
 use super::terminal_status::{
     StatusColors, StatusGlyph, TerminalProgress, reported_glyph_is_drawable, reported_title,
 };
@@ -59,7 +60,7 @@ use crate::terminal::{
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Bounds, Context, DefiniteLength, Entity, EventEmitter, FocusHandle,
-    MouseDownEvent, Pixels, Point, Render, Window, div, px, relative,
+    MouseDownEvent, Pixels, Point, Render, Window, div, point, px, relative,
 };
 use spaceterm_ui::{
     Alert, AlertIntent, ButtonSize, ButtonVariant, HoverFade, Icon, IconButton, IconName,
@@ -476,6 +477,9 @@ pub(crate) struct TabView {
     pane_attention: BTreeMap<PaneId, u32>,
     resizing_split_id: Option<SplitId>,
     pane_drag: Option<PaneDrag>,
+    pane_motion: PaneMotion,
+    /// Where this frame draws each Pane, from `pane_motion`.
+    pane_frames: PaneFrames,
     active: bool,
     focus_branch_blocker: Option<TerminalFocusBlocker>,
     native_service_hierarchy_generation: u64,
@@ -562,6 +566,8 @@ impl TabView {
             pane_attention: BTreeMap::from([(initial_pane_id, 0)]),
             resizing_split_id: None,
             pane_drag: None,
+            pane_motion: PaneMotion::default(),
+            pane_frames: PaneFrames::default(),
             active: true,
             focus_branch_blocker: None,
             native_service_hierarchy_generation: 0,
@@ -1420,6 +1426,7 @@ impl TabView {
             Ok(true) => {
                 self.advance_native_service_hierarchy_generation(cx);
                 self.pane_layout_revision += 1;
+                self.pane_motion.expect_change();
                 self.split_bounds.clear();
                 self.sync_terminal_focus(cx);
                 cx.emit(TabViewEvent::PresentationChanged {
@@ -1489,6 +1496,7 @@ impl TabView {
             Ok(pane_id) => {
                 self.advance_native_service_hierarchy_generation(cx);
                 self.pane_layout_revision += 1;
+                self.pane_motion.expect_change();
                 if let Some(terminal) = self.tab.pane(pane_id) {
                     self.pane_titles.insert(pane_id, terminal.read(cx).title());
                     self.pane_captions
@@ -1548,6 +1556,7 @@ impl TabView {
             }) => {
                 self.advance_native_service_hierarchy_generation(cx);
                 self.pane_layout_revision += 1;
+                self.pane_motion.expect_change();
                 closed_pane.update(cx, |terminal, _| {
                     terminal.set_accessibility_hierarchy(false);
                     terminal.close();
@@ -1578,6 +1587,7 @@ impl TabView {
         }
         self.advance_native_service_hierarchy_generation(cx);
         self.pane_layout_revision += 1;
+        self.pane_motion.expect_change();
         self.sync_terminal_focus(cx);
         cx.emit(TabViewEvent::PresentationChanged {
             tab_id: self.tab.id(),
@@ -1623,7 +1633,10 @@ impl TabView {
         };
         let gap = pane_gap(cx);
         match self.tab.resize_split(split_id, available_size, gap, 0.5) {
-            Ok(_) => cx.notify(),
+            Ok(_) => {
+                self.pane_motion.expect_change();
+                cx.notify();
+            }
             Err(error) => eprintln!("failed to reset split: {error}"),
         }
     }
@@ -1960,24 +1973,18 @@ impl TabView {
             .into_any_element()
         };
 
-        div()
-            .on_children_prepainted(move |children, _, cx| {
-                let Some(first) = children.get(1) else {
-                    return;
-                };
-                let bounds = children
-                    .get(2)
-                    .map_or(*first, |terminal| first.union(terminal));
-                let _ = measure_view.update(cx, |view, _| {
-                    view.pane_bounds.insert(pane_id, bounds);
-                });
-            })
+        // The Pane is drawn inside its laid-out place, which it fills at rest. While the layout
+        // changes it moves on its own, and its Terminal keeps the size of the place, so the
+        // Terminal Session resizes once per change rather than once per frame.
+        let inset = self.pane_frames.inset(pane_id);
+        let surface = div()
             .id(("pane", pane_id.get()))
             .debug_selector(move || format!("pane-surface-{}", pane_id.get()))
-            .relative()
-            .size_full()
-            .min_w_0()
-            .min_h_0()
+            .absolute()
+            .top(inset.top)
+            .right(inset.right)
+            .bottom(inset.bottom)
+            .left(inset.left)
             .flex()
             .flex_col()
             .overflow_hidden()
@@ -2019,6 +2026,8 @@ impl TabView {
                     .flex_1()
                     .min_w_0()
                     .min_h_0()
+                    .mr(-(inset.left + inset.right))
+                    .mb(-(inset.top + inset.bottom))
                     .overflow_hidden()
                     .child(terminal),
             )
@@ -2028,7 +2037,23 @@ impl TabView {
             .when_some(drop_edge, |leaf, edge| {
                 leaf.child(render_pane_drop_target(pane_id, edge, radius, appearance))
             })
-            .when_some(hover, |leaf, (fade, _)| leaf.child(fade.tracker()))
+            .when_some(hover, |leaf, (fade, _)| leaf.child(fade.tracker()));
+
+        div()
+            .on_children_prepainted(move |children, _, cx| {
+                let Some(place) = children.first() else {
+                    return;
+                };
+                let _ = measure_view.update(cx, |view, _| {
+                    view.pane_bounds.insert(pane_id, *place);
+                });
+            })
+            .relative()
+            .size_full()
+            .min_w_0()
+            .min_h_0()
+            .child(div().absolute().inset_0())
+            .child(surface)
             .into_any_element()
     }
 
@@ -2134,13 +2159,23 @@ impl TabView {
                     .mt(px(-ratio * gap)),
             ),
         };
+        // Moving Panes reach outside their laid-out places and across the gap between them.
+        let moving = self.pane_frames.moving;
         split
-            .child(split_child("split-first", first, axis, ratio))
-            .child(spacer.bg(gpui_color(appearance.surface(
-                crate::appearance::SurfaceRole::Base,
-                super::workspace_frame::base_surface(&appearance.colors),
-            ))))
-            .child(split_child("split-second", second, axis, 1.0 - ratio))
+            .child(split_child("split-first", first, axis, ratio, !moving))
+            .child(spacer.when(!moving, |spacer| {
+                spacer.bg(gpui_color(appearance.surface(
+                    crate::appearance::SurfaceRole::Base,
+                    super::workspace_frame::base_surface(&appearance.colors),
+                )))
+            }))
+            .child(split_child(
+                "split-second",
+                second,
+                axis,
+                1.0 - ratio,
+                !moving,
+            ))
             .child(resize_target)
             .into_any_element()
     }
@@ -2193,6 +2228,42 @@ impl Render for TabView {
             },
         };
         let hovers = self.pane_hovers(appearance.active, window, cx);
+        let places = self
+            .pane_layout_size
+            .map(|layout_size| {
+                let bounds = Bounds::new(
+                    Point::default(),
+                    gpui::size(px(layout_size.width()), px(layout_size.height())),
+                );
+                let mut places = BTreeMap::new();
+                match zoom_state {
+                    ZoomState::Restored => {
+                        lay_out_panes(self.tab.root(), bounds, pane_gap(cx), &mut places);
+                    }
+                    ZoomState::Zoomed(pane_id) => {
+                        places.insert(pane_id, bounds);
+                    }
+                }
+                places
+            })
+            .unwrap_or_default();
+        self.pane_frames = self.pane_motion.present(&places, cx);
+        if self.pane_frames.moving {
+            window.request_animation_frame();
+        }
+        // Removed Panes take the material of the Pane that keeps focus.
+        let terminal_background = self
+            .tab
+            .pane(self.tab.focused_pane_id())
+            .map_or(appearance.colors.background, |terminal| {
+                terminal.read(cx).surface_background()
+            });
+        let closing = self
+            .pane_frames
+            .closing
+            .iter()
+            .map(|place| render_closing_pane(*place, terminal_background, &appearance, cx))
+            .collect::<Vec<_>>();
         let content = match zoom_state {
             ZoomState::Restored => {
                 self.render_tree(self.tab.root(), &hovers, view.clone(), &appearance, cx)
@@ -2207,13 +2278,21 @@ impl Render for TabView {
                     let Some(bounds) = children.first() else {
                         return;
                     };
-                    let pending_split = view
+                    let (first_measurement, pending_split) = view
                         .update(cx, |view, _| {
-                            view.pane_layout_size = pane_size(*bounds).ok();
-                            view.pending_split.take()
+                            let measured = pane_size(*bounds).ok();
+                            let first = view.pane_layout_size.is_none() && measured.is_some();
+                            view.pane_layout_size = measured;
+                            (first, view.pending_split.take())
                         })
-                        .ok()
-                        .flatten();
+                        .unwrap_or_default();
+                    // The first measured layout gives Pane motion a place to start from.
+                    if first_measurement {
+                        let view = view.clone();
+                        window.defer(cx, move |_, cx| {
+                            let _ = view.update(cx, |_, cx| cx.notify());
+                        });
+                    }
                     if let Some((pane_id, axis)) = pending_split {
                         let view = view.clone();
                         window.defer(cx, move |window, cx| {
@@ -2259,6 +2338,7 @@ impl Render for TabView {
                 }
             })
             .child(content)
+            .children(closing)
             .child({
                 let view = cx.entity().downgrade();
                 drag_release_observer(move |window, cx| {
@@ -3135,11 +3215,13 @@ fn render_pane_drop_target(
     .into_any_element()
 }
 
+/// One side of a Split, which clips its Panes to their places when `clip` is set.
 fn split_child(
     id: &'static str,
     child: AnyElement,
     axis: SplitAxis,
     ratio: f32,
+    clip: bool,
 ) -> impl IntoElement {
     let child = div()
         .id(id)
@@ -3154,7 +3236,7 @@ fn split_child(
         .flex_basis(DefiniteLength::Fraction(ratio))
         .min_w_0()
         .min_h_0()
-        .overflow_hidden()
+        .when(clip, |child| child.overflow_hidden())
         .child(child);
 
     match axis {
@@ -3197,6 +3279,81 @@ fn render_split_resize_handle(
         .flatten()
     })
     .into_any_element()
+}
+
+/// The place a removed Pane leaves while it closes: a Pane's material over `terminal_background`,
+/// without contents.
+fn render_closing_pane(
+    place: Bounds<Pixels>,
+    terminal_background: crate::appearance::Color,
+    appearance: &super::appearance::ChromeAppearance,
+    cx: &App,
+) -> AnyElement {
+    let frame = super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
+    div()
+        .debug_selector(|| "closing-pane".to_owned())
+        .absolute()
+        .left(place.left())
+        .top(place.top())
+        .w(place.size.width)
+        .h(place.size.height)
+        .rounded(frame.pane_radius())
+        .bg(gpui_color(appearance.pane_surface(terminal_background)))
+        .border(frame.pane_rim_width())
+        .border_color(gpui_color(appearance.pane_rim_on(terminal_background)))
+        .into_any_element()
+}
+
+/// Inserts each Pane's place in `bounds` into `places`, as the Splits of `tree` divide it.
+fn lay_out_panes(
+    tree: PaneTreeRef<'_>,
+    bounds: Bounds<Pixels>,
+    gap: f32,
+    places: &mut BTreeMap<PaneId, Bounds<Pixels>>,
+) {
+    match tree.node() {
+        PaneNodeRef::Leaf { pane_id } => {
+            places.insert(pane_id, bounds);
+        }
+        PaneNodeRef::Split {
+            axis,
+            ratio,
+            first,
+            second,
+            ..
+        } => {
+            let (first_bounds, second_bounds) = match axis {
+                SplitAxis::Horizontal => {
+                    let extent = px((f32::from(bounds.size.width) - gap).max(0.0) * ratio);
+                    (
+                        Bounds::from_corners(
+                            bounds.origin,
+                            point(bounds.left() + extent, bounds.bottom()),
+                        ),
+                        Bounds::from_corners(
+                            point(bounds.left() + extent + px(gap), bounds.top()),
+                            bounds.bottom_right(),
+                        ),
+                    )
+                }
+                SplitAxis::Vertical => {
+                    let extent = px((f32::from(bounds.size.height) - gap).max(0.0) * ratio);
+                    (
+                        Bounds::from_corners(
+                            bounds.origin,
+                            point(bounds.right(), bounds.top() + extent),
+                        ),
+                        Bounds::from_corners(
+                            point(bounds.left(), bounds.top() + extent + px(gap)),
+                            bounds.bottom_right(),
+                        ),
+                    )
+                }
+            };
+            lay_out_panes(first, first_bounds, gap, places);
+            lay_out_panes(second, second_bounds, gap, places);
+        }
+    }
 }
 
 // Splitting restores the grid, so a zoomed Pane must use its allocation in that grid.
@@ -3826,6 +3983,112 @@ mod tests {
             cx.simulate_mouse_move(*position, Some(MouseButton::Left), Modifiers::none());
             cx.run_until_parked();
         }
+    }
+
+    #[gpui::test]
+    fn a_split_should_open_the_new_pane_while_each_terminal_resizes_only_once(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::ui::drag_and_drop::{AnimatePresence, finish_slides};
+
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
+        let records = TestTerminalSessionRecords::default();
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            Rc::new(
+                TestTerminalSessionFactory::new(records.clone())
+                    .with_selection_copy_response(Ok(None)),
+            ),
+            crate::terminal::testing::test_local_directory(test_home_directory()),
+        );
+        let (view, cx) = cx
+            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
+        cx.run_until_parked();
+        let whole = cx.debug_bounds("pane-surface-1").unwrap();
+        let resizes = || {
+            records
+                .commands()
+                .iter()
+                .filter(|call| matches!(call.command, RecordedCommand::Resize(_)))
+                .count()
+        };
+
+        cx.update(|_, cx| cx.set_global(AnimatePresence));
+        split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(60));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        let moving = (
+            cx.debug_bounds("pane-surface-1").unwrap(),
+            cx.debug_bounds("pane-surface-2").unwrap(),
+        );
+        let resized_while_moving = resizes();
+        finish_slides(cx);
+        let rested = (
+            cx.debug_bounds("pane-surface-1").unwrap(),
+            cx.debug_bounds("pane-surface-2").unwrap(),
+        );
+
+        assert!(
+            moving.0.right() > rested.0.right() && moving.0.right() < whole.right(),
+            "the split Pane must still be making room: {moving:?} toward {rested:?}"
+        );
+        assert!(
+            moving.1.left() > rested.1.left() && moving.1.right() == whole.right(),
+            "the new Pane must open from its far edge: {moving:?} toward {rested:?}"
+        );
+        assert_eq!(
+            (rested.0.right() < rested.1.left(), resizes()),
+            (true, resized_while_moving),
+            "each Terminal must take its final size when the motion starts"
+        );
+    }
+
+    #[gpui::test]
+    fn a_closed_pane_should_close_its_place_as_its_neighbor_takes_it(cx: &mut TestAppContext) {
+        use crate::ui::drag_and_drop::{AnimatePresence, finish_slides};
+
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
+        let session_factory = test_session_factory();
+        let (view, cx) = cx
+            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
+        cx.run_until_parked();
+        let whole = cx.debug_bounds("pane-surface-1").unwrap();
+        split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
+        let split = cx.debug_bounds("pane-surface-1").unwrap();
+
+        cx.update(|_, cx| cx.set_global(AnimatePresence));
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| view.close_pane(PaneId::new(2), window, cx));
+        });
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(60));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        let moving = (
+            cx.debug_bounds("pane-surface-1").unwrap(),
+            cx.debug_bounds("closing-pane").unwrap(),
+        );
+        finish_slides(cx);
+
+        assert!(
+            moving.0.right() > split.right() && moving.0.right() < whole.right(),
+            "the remaining Pane must be taking the closed Pane's place: {moving:?}"
+        );
+        assert!(
+            moving.1.left() > moving.0.right() && moving.1.right() == whole.right(),
+            "the closed Pane's place must close toward its far edge: {moving:?}"
+        );
+        assert_eq!(
+            (
+                cx.debug_bounds("pane-surface-1"),
+                cx.debug_bounds("closing-pane")
+            ),
+            (Some(whole), None)
+        );
     }
 
     #[gpui::test]
