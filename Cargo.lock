@@ -5709,6 +5709,7 @@ dependencies = [
  "sha2",
  "smallvec",
  "spaceterm-directories",
+ "spaceterm-host",
  "spaceterm-ui",
  "tar",
  "thiserror 2.0.19",
@@ -5733,6 +5734,7 @@ name = "spaceterm-host"
 version = "0.0.0"
 dependencies = [
  "libc",
+ "same-file",
  "thiserror 2.0.19",
 ]
 

@@ -57,6 +57,7 @@ pollster = "=0.4.0"
 smallvec = "=1.15.2"
 rustc-hash = "=2.1.3"
 spaceterm-directories = { path = "crates/spaceterm-directories" }
+spaceterm-host = { path = "crates/spaceterm-host" }
 spaceterm-ui = { path = "crates/spaceterm-ui" }
 thiserror = "2.0.17"
 unicode-bidi = "=0.3.18"
