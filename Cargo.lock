@@ -6060,10 +6060,15 @@ dependencies = [
 name = "spaceterm-client-native"
 version = "0.0.0"
 dependencies = [
+ "aes",
  "base64 0.22.1",
+ "cbc",
+ "hkdf",
+ "num-bigint-dig",
  "ring",
  "serde",
  "serde_json",
+ "sha2",
  "spaceterm-client",
  "spaceterm-core",
  "spaceterm-host",
@@ -6163,6 +6168,7 @@ name = "spaceterm-server"
 version = "0.0.0"
 dependencies = [
  "getrandom 0.4.3",
+ "ring",
  "serde",
  "sha2",
  "spaceterm-client",
