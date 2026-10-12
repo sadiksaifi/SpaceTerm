@@ -14,11 +14,15 @@ spaceterm-core = { path = "../spaceterm-core" }
 spaceterm-protocol = { path = "../spaceterm-protocol" }
 spaceterm-terminal = { path = "../spaceterm-terminal", default-features = false, features = ["runtime", "kitty-graphics", "png"] }
 tokio = { version = "=1.53.1", default-features = false, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+rustls = { version = "=0.23.45", default-features = false, features = ["ring", "std"] }
 getrandom = "=0.4.3"
 sha2 = "=0.10.9"
 serde = { version = "=1.0.229", features = ["derive"] }
 thiserror = "=2.0.19"
 
 [dev-dependencies]
+rcgen = { version = "=0.14.5", default-features = false, features = ["ring"] }
+tokio = { version = "=1.53.1", default-features = false, features = ["test-util"] }
+ring = "=0.17.14"
 spaceterm-client = { path = "../spaceterm-client", default-features = false, features = ["test-support"] }
 spaceterm-host = { path = "../spaceterm-host", features = ["test-support", "native-tests"] }

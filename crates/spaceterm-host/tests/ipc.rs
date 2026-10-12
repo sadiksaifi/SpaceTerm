@@ -82,41 +82,76 @@ async fn ipc_connect_reports_a_refused_endpoint_as_unavailable_without_mutating_
     assert_eq!(error, Some(TransportError::Unavailable));
 }
 
-#[path = "support/cleanup_race.rs"]
-mod cleanup_race;
+#[tokio::test]
+async fn ipc_bind_reclaims_a_dead_owned_endpoint_and_accepts_a_new_connection() {
+    let (_temporary, directory) = directory();
+    let endpoint = directory.endpoint("s").unwrap();
+    // Retaining this descriptor prevents inode reuse while testing reclaim.
+    let dead = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None).unwrap();
+    dead.bind(&socket2::SockAddr::unix(endpoint.path()).unwrap())
+        .unwrap();
+    let old = fs::symlink_metadata(endpoint.path()).unwrap();
+
+    let listener =
+        IpcListener::bind(endpoint.clone(), MessageLimit::envelope(), admission()).unwrap();
+    let new = fs::symlink_metadata(endpoint.path()).unwrap();
+    assert_ne!((old.dev(), old.ino()), (new.dev(), new.ino()));
+    let client = IpcTransport::connect(&endpoint, MessageLimit::envelope())
+        .await
+        .unwrap();
+    let server = listener
+        .accept()
+        .await
+        .unwrap()
+        .finish_authentication()
+        .unwrap();
+    client.send(b"reclaimed").await.unwrap();
+    assert_eq!(server.recv().await.unwrap(), Some(b"reclaimed".to_vec()));
+}
 
 #[tokio::test]
-async fn ipc_cleanup_preserves_a_foreign_socket_substituted_after_the_native_inode_check() {
-    use std::io::{Read, Write};
-    use std::os::unix::fs::MetadataExt;
-
-    let (temporary, directory) = directory();
+async fn ipc_orderly_close_removes_only_its_registered_endpoint_and_allows_rebind() {
+    let (_temporary, directory) = directory();
     let endpoint = directory.endpoint("s").unwrap();
     let listener =
         IpcListener::bind(endpoint.clone(), MessageLimit::envelope(), admission()).unwrap();
-    let foreign_path = temporary.path().join("foreign");
-    let foreign = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None).unwrap();
-    foreign
-        .bind(&socket2::SockAddr::unix(&foreign_path).unwrap())
-        .unwrap();
-    let bound = fs::symlink_metadata(&foreign_path).unwrap();
-    let race = cleanup_race::CleanupRace::arm(endpoint.path(), &foreign_path);
     drop(listener);
-    race.restore_preserved_entry();
-    let retained = fs::symlink_metadata(endpoint.path())
-        .expect("the checked pathname was replaced with a live foreign socket before removal");
-    assert_eq!((retained.dev(), retained.ino()), (bound.dev(), bound.ino()));
-    foreign.listen(8).unwrap();
-    let mut client = std::os::unix::net::UnixStream::connect(endpoint.path()).unwrap();
-    client.write_all(b"retained").unwrap();
-    let (accepted, _) = foreign.accept().unwrap();
-    let mut accepted = std::os::unix::net::UnixStream::from(accepted);
-    accepted
-        .set_read_timeout(Some(Duration::from_secs(3)))
-        .unwrap();
-    let mut message = [0; 8];
-    accepted.read_exact(&mut message).unwrap();
-    assert_eq!(&message, b"retained");
+    assert!(!endpoint.path().exists());
+    let listener =
+        IpcListener::bind(endpoint.clone(), MessageLimit::envelope(), admission()).unwrap();
+    drop(listener);
+    assert!(!endpoint.path().exists());
+}
+
+#[tokio::test]
+async fn ipc_bind_preserves_live_foreign_listeners_and_non_socket_entries() {
+    for kind in 0..4 {
+        let (temporary, directory) = directory();
+        let endpoint = directory.endpoint("s").unwrap();
+        let foreign = match kind {
+            0 => Some(std::os::unix::net::UnixListener::bind(endpoint.path()).unwrap()),
+            1 => {
+                fs::write(endpoint.path(), b"retained").unwrap();
+                None
+            }
+            2 => {
+                std::os::unix::fs::symlink(temporary.path(), endpoint.path()).unwrap();
+                None
+            }
+            _ => {
+                fs::create_dir(endpoint.path()).unwrap();
+                None
+            }
+        };
+        let old = fs::symlink_metadata(endpoint.path()).unwrap();
+        assert_eq!(
+            IpcListener::bind(endpoint.clone(), MessageLimit::envelope(), admission()).err(),
+            Some(TransportError::UnsafeEndpoint)
+        );
+        let new = fs::symlink_metadata(endpoint.path()).unwrap();
+        assert_eq!((old.dev(), old.ino()), (new.dev(), new.ino()));
+        drop(foreign);
+    }
 }
 
 #[tokio::test]
@@ -446,4 +481,167 @@ async fn ipc_listener_cleanup_preserves_entries_in_both_a_moved_and_replacement_
     assert!(moved.join("s").exists());
     drop(replacement);
     fs::remove_dir_all(moved).unwrap();
+}
+
+#[test]
+fn ipc_cross_process_second_instance_cannot_disturb_the_first() {
+    if let Ok(path) = std::env::var("SPACETERM_IPC_SECOND_INSTANCE_FIXTURE") {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let directory = PrivateIpcDirectory::open(Path::new(&path)).unwrap();
+            assert_eq!(
+                IpcListener::bind(
+                    directory.endpoint("s").unwrap(),
+                    MessageLimit::envelope(),
+                    admission()
+                )
+                .err(),
+                Some(TransportError::UnsafeEndpoint)
+            );
+        });
+        return;
+    }
+    let (temporary, directory) = directory();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let endpoint = directory.endpoint("s").unwrap();
+    let listener = runtime.block_on(async {
+        IpcListener::bind(endpoint.clone(), MessageLimit::envelope(), admission()).unwrap()
+    });
+    let before = directory_entries(temporary.path());
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "ipc_cross_process_second_instance_cannot_disturb_the_first",
+        ])
+        .env("SPACETERM_IPC_SECOND_INSTANCE_FIXTURE", temporary.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(directory_entries(temporary.path()), before);
+    runtime.block_on(async {
+        let client = IpcTransport::connect(&endpoint, MessageLimit::envelope())
+            .await
+            .unwrap();
+        let server = listener
+            .accept()
+            .await
+            .unwrap()
+            .finish_authentication()
+            .unwrap();
+        client.send(b"original").await.unwrap();
+        assert_eq!(server.recv().await.unwrap(), Some(b"original".to_vec()));
+    });
+    listener.close().unwrap();
+    assert!(!endpoint.path().exists());
+}
+
+#[test]
+fn ipc_server_kill_then_restart_reclaims_the_same_endpoint() {
+    use std::io::{BufRead, Write};
+    if let Ok(path) = std::env::var("SPACETERM_IPC_KILLED_SERVER_FIXTURE") {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let directory = PrivateIpcDirectory::open(Path::new(&path)).unwrap();
+        let _listener = runtime.block_on(async {
+            IpcListener::bind(
+                directory.endpoint("s").unwrap(),
+                MessageLimit::envelope(),
+                admission(),
+            )
+            .unwrap()
+        });
+        println!("listener-ready");
+        std::io::stdout().flush().unwrap();
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line).unwrap();
+        return;
+    }
+    let (temporary, directory) = directory();
+    let endpoint = directory.endpoint("s").unwrap();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "ipc_server_kill_then_restart_reclaims_the_same_endpoint",
+            "--nocapture",
+        ])
+        .env("SPACETERM_IPC_KILLED_SERVER_FIXTURE", temporary.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut output = std::io::BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    loop {
+        line.clear();
+        assert!(output.read_line(&mut line).unwrap() > 0);
+        if line.contains("listener-ready") {
+            break;
+        }
+    }
+    let old = fs::symlink_metadata(endpoint.path()).unwrap();
+    #[cfg(target_os = "linux")]
+    let _pin = {
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_PATH | libc::O_CLOEXEC)
+            .open(endpoint.path())
+            .unwrap()
+    };
+    child.kill().unwrap();
+    assert!(!child.wait().unwrap().success());
+    assert!(endpoint.path().exists());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let listener =
+            IpcListener::bind(endpoint.clone(), MessageLimit::envelope(), admission()).unwrap();
+        let current = fs::symlink_metadata(endpoint.path()).unwrap();
+        assert_ne!((old.dev(), old.ino()), (current.dev(), current.ino()));
+        let client = IpcTransport::connect(&endpoint, MessageLimit::envelope())
+            .await
+            .unwrap();
+        let server = listener
+            .accept()
+            .await
+            .unwrap()
+            .finish_authentication()
+            .unwrap();
+        client.send(b"restarted").await.unwrap();
+        assert_eq!(server.recv().await.unwrap(), Some(b"restarted".to_vec()));
+        listener.close().unwrap();
+        assert!(!endpoint.path().exists());
+    });
+}
+
+#[tokio::test]
+async fn ipc_close_after_peer_eof_is_orderly_and_idempotent() {
+    let (_temporary, directory) = directory();
+    let endpoint = directory.endpoint("s").unwrap();
+    let listener =
+        IpcListener::bind(endpoint.clone(), MessageLimit::envelope(), admission()).unwrap();
+    let client = IpcTransport::connect(&endpoint, MessageLimit::envelope())
+        .await
+        .unwrap();
+    let server = listener
+        .accept()
+        .await
+        .unwrap()
+        .finish_authentication()
+        .unwrap();
+    client.close().await.unwrap();
+    assert_eq!(server.recv().await.unwrap(), None);
+    server.close().await.unwrap();
+    server.close().await.unwrap();
+    listener.close().unwrap();
 }

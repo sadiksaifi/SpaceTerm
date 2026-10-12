@@ -1,9 +1,11 @@
 //! Private same-account Unix IPC with retained endpoint identity and bounded framing.
 //!
-//! Endpoint leases are advisory. Native macOS and Linux pathname removal cannot
-//! atomically require the registered inode, so this adapter preserves socket entries
-//! on shutdown. The directory owner must remove stale entries with local authority
-//! before reusing their names.
+//! Servers reclaim dead owned entries under the endpoint lease. Orderly close
+//! removes only the registered socket identity after closing its listener. Clients
+//! never remove entries. The retained owner-only directory, native peer account and
+//! pinned protocol proof protect against foreign accounts and impostor listeners.
+//! A same-account replacement between the final identity check and unlinkat remains
+//! possible and is outside the owning-account threat model.
 
 use std::collections::HashSet;
 use std::ffi::CString;
@@ -288,11 +290,61 @@ impl IpcEndpoint {
         }))
     }
 
+    // Called only by the listener while its native and local endpoint leases live.
+    fn reclaim_dead(&self, required: Option<Identity>) -> Result<(), TransportError> {
+        let Some(identity) = self.socket_identity()? else {
+            return Ok(());
+        };
+        if required.is_some_and(|required| required != identity) {
+            return Err(TransportError::UnsafeEndpoint);
+        }
+        #[cfg(target_os = "linux")]
+        let pin = self.pin_socket()?.ok_or(TransportError::UnsafeEndpoint)?;
+        #[cfg(target_os = "linux")]
+        if pin.identity != identity {
+            return Err(TransportError::UnsafeEndpoint);
+        }
+        let probe = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)
+            .map_err(|_| TransportError::Unavailable)?;
+        probe
+            .set_nonblocking(true)
+            .map_err(|_| TransportError::Unavailable)?;
+        #[cfg(target_os = "linux")]
+        let address = pin.address()?;
+        #[cfg(target_os = "macos")]
+        let address =
+            socket2::SockAddr::unix(&self.path).map_err(|_| TransportError::UnsafeEndpoint)?;
+        match probe.connect(&address) {
+            Err(error) if error.raw_os_error() == Some(libc::ECONNREFUSED) => {}
+            _ => return Err(TransportError::UnsafeEndpoint),
+        }
+        self.verify()?;
+        if self.socket_identity()? != Some(identity) {
+            return Err(TransportError::UnsafeEndpoint);
+        }
+        // SAFETY: the verified retained directory and literal name remain live.
+        // The accepted same-account check/unlink race is documented above.
+        if unsafe { libc::unlinkat(self.directory.file.as_raw_fd(), self.name.as_ptr(), 0) } != 0 {
+            return Err(TransportError::Unavailable);
+        }
+        self.verify()?;
+        self.ensure_absent()
+    }
+
     pub(crate) fn register_socket(&self) -> Result<RegisteredSocket, TransportError> {
-        let identity = self
-            .socket_identity()?
-            .ok_or(TransportError::UnsafeEndpoint)?;
-        self.register_identity(identity)
+        #[cfg(target_os = "linux")]
+        {
+            self.pin_socket()?
+                .ok_or(TransportError::UnsafeEndpoint)?
+                .register(self)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let identity = self
+                .socket_identity()?
+                .ok_or(TransportError::UnsafeEndpoint)?;
+            self.register_identity(identity)
+        }
     }
 
     pub(crate) fn register_identity(
@@ -394,19 +446,26 @@ pub(crate) struct RegisteredSocket {
 }
 
 impl RegisteredSocket {
+    pub(crate) fn remove(&mut self) -> Result<(), TransportError> {
+        if !self.active {
+            return Ok(());
+        }
+        self.active = false;
+        self.endpoint.reclaim_dead(Some(self.identity))
+    }
+
+    // Legacy SSH cleanup remains inspection-only until the tunnel owner switches
+    // its fresh-name lifecycle to explicit remove after native process cleanup.
     pub(crate) fn cleanup(&mut self) -> Result<(), TransportError> {
         if !self.active {
             return Ok(());
         }
         self.active = false;
-        // A pinned inode or a random quarantine name cannot protect a deletion
-        // target from same-account replacement between fstatat and unlinkat.
-        // Inspect for a typed replacement failure, but never rename or remove it.
-        match status_at(&self.endpoint.directory.file, &self.endpoint.name) {
-            Ok(status) if socket_identity(&status)? == self.identity => Ok(()),
-            Ok(_) => Err(TransportError::UnsafeEndpoint),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(_) => Err(TransportError::Unavailable),
+        self.endpoint.verify()?;
+        match self.endpoint.socket_identity()? {
+            Some(identity) if identity == self.identity => Ok(()),
+            None => Ok(()),
+            _ => Err(TransportError::UnsafeEndpoint),
         }
     }
 }
@@ -462,7 +521,7 @@ pub(crate) fn validate_absolute_path(path: &Path, maximum: usize) -> Result<(), 
 
 /// A private listener with a bounded number of pending application handshakes.
 pub struct IpcListener {
-    listener: UnixListener,
+    listener: Option<UnixListener>,
     socket: RegisteredSocket,
     _lease: EndpointLease,
     limit: MessageLimit,
@@ -471,26 +530,43 @@ pub struct IpcListener {
 }
 
 impl IpcListener {
-    /// Binds a new socket in a retained directory. Existing entries are never unlinked.
-    /// Drop closes the listener but preserves its entry; reuse requires owner cleanup.
+    /// Reclaims a dead owned entry under the lease, then binds a new private socket.
     pub fn bind(
         endpoint: IpcEndpoint,
         limit: MessageLimit,
         admission: AdmissionLimits,
     ) -> Result<Self, TransportError> {
         let lease = endpoint.lease()?;
+        endpoint.reclaim_dead(None)?;
         endpoint.ensure_absent()?;
         let listener =
             UnixListener::bind(endpoint.path()).map_err(|_| TransportError::Unavailable)?;
         let socket = endpoint.register_socket()?;
         Ok(Self {
-            listener,
+            listener: Some(listener),
             socket,
             _lease: lease,
             limit,
             admission,
             slots: Arc::new(Semaphore::new(admission.connections)),
         })
+    }
+
+    /// Closes the listener before identity-checked removal. A replacement is preserved.
+    pub fn close(mut self) -> Result<(), TransportError> {
+        self.close_native_listener();
+        self.slots.close();
+        self.socket.remove()
+    }
+
+    fn close_native_listener(&mut self) {
+        if let Some(listener) = self.listener.take() {
+            // Shutdown also closes the listening side in a just-forked child
+            // before CLOEXEC runs. Descriptor close alone leaves that brief live
+            // duplicate visible to the dead-endpoint probe.
+            let _ = socket2::SockRef::from(&listener).shutdown(std::net::Shutdown::Both);
+            drop(listener);
+        }
     }
 
     /// Accepts only native same-account peers, eligible for a separate protocol handshake.
@@ -502,6 +578,8 @@ impl IpcListener {
             .map_err(|_| TransportError::Closed)?;
         let (stream, _) = self
             .listener
+            .as_ref()
+            .ok_or(TransportError::Closed)?
             .accept()
             .await
             .map_err(|_| TransportError::Unavailable)?;
@@ -517,9 +595,8 @@ impl IpcListener {
 
 impl Drop for IpcListener {
     fn drop(&mut self) {
-        // Keep the listener live while checking its pathname identity. The entry
-        // remains because native removal cannot exclude a concurrent replacement.
-        let _ = self.socket.cleanup();
+        self.close_native_listener();
+        let _ = self.socket.remove();
     }
 }
 
@@ -701,13 +778,42 @@ impl MessageTransport for IpcTransport {
             let writer = self.writer.lock().await.take();
             self.reader.lock().await.take();
             self.state.release_socket();
-            if let Some(mut writer) = writer {
-                writer
-                    .shutdown()
-                    .await
-                    .map_err(|_| TransportError::Unavailable)?;
+            if let Some(mut writer) = writer
+                && let Err(error) = writer.shutdown().await
+                && !matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotConnected | std::io::ErrorKind::BrokenPipe
+                )
+            {
+                return Err(TransportError::Unavailable);
             }
             Ok(())
         })
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn linux_socket_pin_cannot_register_a_replaced_inode() {
+        let temporary = tempfile::tempdir().unwrap();
+        fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let directory = PrivateIpcDirectory::open(temporary.path()).unwrap();
+        let endpoint = directory.endpoint("s").unwrap();
+        let old = std::os::unix::net::UnixListener::bind(endpoint.path()).unwrap();
+        let pin = endpoint.pin_socket().unwrap().unwrap();
+        fs::rename(endpoint.path(), temporary.path().join("old")).unwrap();
+        let replacement = std::os::unix::net::UnixListener::bind(endpoint.path()).unwrap();
+        let identity = endpoint.socket_identity().unwrap();
+        assert!(matches!(
+            pin.register(&endpoint),
+            Err(TransportError::UnsafeEndpoint)
+        ));
+        assert!(endpoint.socket_identity().unwrap() == identity);
+        drop(old);
+        drop(replacement);
     }
 }

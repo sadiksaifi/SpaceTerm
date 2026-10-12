@@ -1,1 +1,367 @@
-//! Owned by server-core Job B. Implements this module after the H0 declaration freeze.
+//! Purpose-separated, bounded dispatch. Status subscriptions replace complete
+//! bounded facts and never establish terminal-effect reconciliation.
+
+use crate::{
+    adapters::transport::{protocol_failure, transport_failure},
+    api::{AuthenticatedSession, ServerHandle, VerifiedPrincipal},
+    connection::{AuthenticatedPeer, Authenticator, PeerConnection},
+    contracts::*,
+    failure::failure,
+    listeners::ConnectionDispatchPort,
+};
+use spaceterm_core::management::{ServerStatus, StatusPublication, StatusQuery};
+use spaceterm_protocol::{
+    ProtocolError,
+    codec::Payload,
+    convert::management,
+    wire::{common, v1, v2},
+};
+use std::{num::NonZeroU64, sync::Arc};
+use tokio::sync::{Semaphore, watch};
+
+pub const MAX_DECODED_DISPATCH_MESSAGES: usize = 256;
+pub const MAX_DECODED_DISPATCH_BYTES: usize = 16 * 1024 * 1024;
+
+/// The ordinary adapter consumes only an authenticated principal. Identified
+/// operations must use actor ledger admission, never an ephemeral request ID.
+/// Publication and terminal resource replies retain their owning egress policy.
+pub trait OrdinaryDispatchPort: Send + Sync {
+    fn dispatch(
+        &self,
+        principal: VerifiedPrincipal,
+        payload: Payload,
+        handle: ServerHandle,
+    ) -> ServerFuture<'_, Result<Option<Payload>, ServerFailure>>;
+}
+/// Pairing owns this restricted policy. It receives no ServerHandle and cannot
+/// acquire an ordinary principal or dispatch terminal work through this port.
+pub trait RestrictedDispatchPort: Send + Sync {
+    fn dispatch(
+        &self,
+        principal: spaceterm_protocol::authentication::Principal,
+        payload: common::RestrictedMessage,
+    ) -> ServerFuture<'_, Result<common::RestrictedMessage, ServerFailure>>;
+}
+
+pub struct ProtocolDispatcher {
+    authenticator: Authenticator,
+    status: watch::Receiver<ServerStatus>,
+    ordinary: Arc<dyn OrdinaryDispatchPort>,
+    restricted: Arc<dyn RestrictedDispatchPort>,
+    messages: Arc<Semaphore>,
+    bytes: Arc<Semaphore>,
+}
+impl ProtocolDispatcher {
+    /// The native/actor status producer supplies this validated bounded feed.
+    /// NativeVerification remains part of every publication, not implied by IPC.
+    pub fn new(
+        authenticator: Authenticator,
+        status: watch::Receiver<ServerStatus>,
+        ordinary: Arc<dyn OrdinaryDispatchPort>,
+        restricted: Arc<dyn RestrictedDispatchPort>,
+    ) -> Self {
+        Self {
+            authenticator,
+            status,
+            ordinary,
+            restricted,
+            messages: Arc::new(Semaphore::new(MAX_DECODED_DISPATCH_MESSAGES)),
+            bytes: Arc::new(Semaphore::new(MAX_DECODED_DISPATCH_BYTES)),
+        }
+    }
+    async fn run_peer(
+        &self,
+        peer: &mut AuthenticatedPeer,
+        handle: ServerHandle,
+    ) -> Result<(), ServerFailure> {
+        let mut status = self.status.clone();
+        let mut subscription: Option<StatusQuery> = None;
+        let mut sent: Option<(spaceterm_core::authority::ServerEpoch, NonZeroU64)> = None;
+        loop {
+            enum Wake {
+                Message(Option<Vec<u8>>),
+                Status,
+            }
+            let wake = tokio::select! {
+                biased;
+                _ = peer.closing.wait_for(|value| *value) => return Ok(()),
+                result = peer.transport.recv() => Wake::Message(result.map_err(transport_failure)?),
+                changed = status.changed(), if subscription.is_some() => { changed.map_err(|_| failure(ServerFailureClass::RuntimeUnavailable))?; Wake::Status },
+            };
+            match wake {
+                Wake::Status => {
+                    let query =
+                        subscription.ok_or_else(|| failure(ServerFailureClass::StaleAuthority))?;
+                    let snapshot = status.borrow_and_update().clone();
+                    let publication = match sent {
+                        Some((epoch, base))
+                            if epoch == snapshot.parts().epoch
+                                && base.get().checked_add(1)
+                                    == Some(snapshot.parts().revision.get()) =>
+                        {
+                            StatusPublication::Changed {
+                                request: query.request,
+                                generation: query.generation,
+                                base,
+                                status: snapshot,
+                            }
+                        }
+                        _ => StatusPublication::Snapshot {
+                            request: query.request,
+                            generation: query.generation,
+                            status: snapshot,
+                        },
+                    };
+                    let PeerConnection::Ordinary(session) = &mut peer.connection else {
+                        return Err(failure(ServerFailureClass::Authentication));
+                    };
+                    sent = Some(
+                        self.send_status(session, &peer.transport, publication)
+                            .await?,
+                    );
+                }
+                Wake::Message(None) => return Ok(()),
+                Wake::Message(Some(bytes)) => {
+                    let _message = self
+                        .messages
+                        .clone()
+                        .try_acquire_owned()
+                        .map_err(|_| failure(ServerFailureClass::Capacity))?;
+                    // Charge retained wire bytes and a conservative decoded-object
+                    // allowance. Overflow fails before generated DTO construction.
+                    let charge = bytes
+                        .len()
+                        .checked_mul(8)
+                        .and_then(|v| u32::try_from(v).ok())
+                        .ok_or_else(|| failure(ServerFailureClass::Capacity))?;
+                    let _bytes = self
+                        .bytes
+                        .clone()
+                        .try_acquire_many_owned(charge)
+                        .map_err(|_| failure(ServerFailureClass::Capacity))?;
+                    match &mut peer.connection {
+                        PeerConnection::Restricted(codec) => {
+                            let payload = codec.decode(&bytes).map_err(protocol_failure)?;
+                            let response =
+                                self.restricted.dispatch(codec.principal(), payload).await?;
+                            let bytes = codec.encode(&response).map_err(protocol_failure)?;
+                            peer.transport
+                                .send(&bytes)
+                                .await
+                                .map_err(transport_failure)?;
+                        }
+                        PeerConnection::Ordinary(session) => {
+                            self.authenticator.check_current(session.principal)?;
+                            let payload = session.codec.decode(&bytes).map_err(protocol_failure)?;
+                            let action = status_action(&payload, session.principal)?;
+                            match action {
+                                Some(StatusAction::Cancel {
+                                    request,
+                                    generation,
+                                }) => {
+                                    if subscription.is_some_and(|query| {
+                                        query.request == request && query.generation == generation
+                                    }) {
+                                        subscription = None;
+                                        sent = None;
+                                    }
+                                }
+                                Some(StatusAction::Query(query, legacy)) => {
+                                    if subscription.is_some_and(|old| {
+                                        old.request == query.request
+                                            && old.generation > query.generation
+                                    }) {
+                                        return Err(failure(ServerFailureClass::StaleAuthority));
+                                    }
+                                    let snapshot = status.borrow_and_update().clone();
+                                    if legacy {
+                                        validate_status(session.principal, &snapshot)?;
+                                        let payload = legacy_status(
+                                            session.codec.major(),
+                                            query.request.get(),
+                                            &snapshot,
+                                        )
+                                        .map_err(protocol_failure)?;
+                                        self.send(session, &peer.transport, &payload).await?;
+                                        subscription = None;
+                                        sent = None;
+                                    } else {
+                                        let publication = StatusPublication::Snapshot {
+                                            request: query.request,
+                                            generation: query.generation,
+                                            status: snapshot,
+                                        };
+                                        sent = Some(
+                                            self.send_status(session, &peer.transport, publication)
+                                                .await?,
+                                        );
+                                        subscription = query.subscribe.then_some(query);
+                                    }
+                                }
+                                None => {
+                                    // One sequential request is stricter than the
+                                    // four-effectful-request per-connection ceiling.
+                                    if let Some(response) = self
+                                        .ordinary
+                                        .dispatch(session.principal, payload, handle.clone())
+                                        .await?
+                                    {
+                                        self.send(session, &peer.transport, &response).await?;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    async fn send_status(
+        &self,
+        session: &mut AuthenticatedSession,
+        transport: &Arc<dyn spaceterm_host::transport::MessageTransport>,
+        publication: StatusPublication,
+    ) -> Result<(spaceterm_core::authority::ServerEpoch, NonZeroU64), ServerFailure> {
+        let snapshot = match &publication {
+            StatusPublication::Snapshot { status, .. }
+            | StatusPublication::Changed { status, .. } => status,
+            _ => return Err(failure(ServerFailureClass::ScopeMismatch)),
+        };
+        validate_status(session.principal, snapshot)?;
+        let sent = (snapshot.parts().epoch, snapshot.parts().revision);
+        let payload = match session.codec.major() {
+            1 => Payload::Major1(v1::Message {
+                kind: Some(v1::message::Kind::StatusPublication(
+                    management::v1::encode_publication(&publication),
+                )),
+            }),
+            2 => Payload::Major2(v2::Message {
+                kind: Some(v2::message::Kind::StatusPublication(
+                    management::v2::encode_publication(&publication),
+                )),
+            }),
+            _ => return Err(failure(ServerFailureClass::ScopeMismatch)),
+        };
+        self.send(session, transport, &payload).await?;
+        Ok(sent)
+    }
+    async fn send(
+        &self,
+        session: &mut AuthenticatedSession,
+        transport: &Arc<dyn spaceterm_host::transport::MessageTransport>,
+        payload: &Payload,
+    ) -> Result<(), ServerFailure> {
+        self.authenticator.check_current(session.principal)?;
+        let bytes = session.codec.encode(payload).map_err(protocol_failure)?;
+        tokio::time::timeout(std::time::Duration::from_secs(5), transport.send(&bytes))
+            .await
+            .map_err(|_| failure(ServerFailureClass::Capacity))?
+            .map_err(transport_failure)
+    }
+}
+impl ConnectionDispatchPort for ProtocolDispatcher {
+    fn run<'a>(
+        &'a self,
+        peer: &'a mut AuthenticatedPeer,
+        handle: ServerHandle,
+    ) -> ServerFuture<'a, Result<(), ServerFailure>> {
+        Box::pin(self.run_peer(peer, handle))
+    }
+}
+
+fn validate_status(
+    principal: VerifiedPrincipal,
+    status: &ServerStatus,
+) -> Result<(), ServerFailure> {
+    if status.parts().server != principal.server() || status.parts().epoch != principal.epoch() {
+        return Err(failure(ServerFailureClass::ScopeMismatch));
+    }
+    Ok(())
+}
+enum StatusAction {
+    Query(StatusQuery, bool),
+    Cancel {
+        request: NonZeroU64,
+        generation: u64,
+    },
+}
+fn status_action(
+    payload: &Payload,
+    principal: VerifiedPrincipal,
+) -> Result<Option<StatusAction>, ServerFailure> {
+    macro_rules! profile {
+        ($message:expr,$p:ident) => {{
+            match &$message.kind {
+                Some($p::message::Kind::StatusQuery(query)) => {
+                    if query.cancel {
+                        if query.subscribe || query.known_epoch != 0 || query.known_revision != 0 {
+                            return Err(failure(ServerFailureClass::ScopeMismatch));
+                        }
+                        Ok(Some(StatusAction::Cancel {
+                            request: NonZeroU64::new(query.request)
+                                .ok_or_else(|| failure(ServerFailureClass::ScopeMismatch))?,
+                            generation: query.request_generation,
+                        }))
+                    } else {
+                        Ok(Some(StatusAction::Query(
+                            management::$p::decode_query(query, principal.binding())
+                                .map_err(protocol_failure)?,
+                            false,
+                        )))
+                    }
+                }
+                Some($p::message::Kind::ManagementRequest(request)) => {
+                    if request.action != 1 {
+                        return Ok(None);
+                    }
+                    if !request.authorization.is_empty()
+                        || !request.assessment.is_empty()
+                        || !request.version.is_empty()
+                    {
+                        return Err(failure(ServerFailureClass::ScopeMismatch));
+                    }
+                    Ok(Some(StatusAction::Query(
+                        StatusQuery {
+                            connection: principal.binding(),
+                            request: NonZeroU64::new(request.request)
+                                .ok_or_else(|| failure(ServerFailureClass::ScopeMismatch))?,
+                            generation: 0,
+                            known_epoch: None,
+                            known_revision: None,
+                            subscribe: false,
+                        },
+                        true,
+                    )))
+                }
+                _ => Ok(None),
+            }
+        }};
+    }
+    match payload {
+        Payload::Major1(message) => profile!(message, v1),
+        Payload::Major2(message) => profile!(message, v2),
+    }
+}
+fn legacy_status(
+    major: u32,
+    request: u64,
+    status: &ServerStatus,
+) -> Result<Payload, ProtocolError> {
+    match major {
+        1 => {
+            let mut value = management::v1::encode_status(status);
+            value.request = request;
+            Ok(Payload::Major1(v1::Message {
+                kind: Some(v1::message::Kind::ManagementStatus(value)),
+            }))
+        }
+        2 => {
+            let mut value = management::v2::encode_status(status);
+            value.request = request;
+            Ok(Payload::Major2(v2::Message {
+                kind: Some(v2::message::Kind::ManagementStatus(value)),
+            }))
+        }
+        _ => Err(ProtocolError::Incompatible),
+    }
+}
