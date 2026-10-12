@@ -174,6 +174,37 @@ impl fmt::Debug for RetainedProtectedDirectory<'_> {
     }
 }
 
+/// Owned form for native transaction leases. The inspector is retained with every ancestor.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub(crate) struct OwnedProtectedDirectory {
+    protection: std::sync::Arc<dyn NativeDirectoryProtection + Send + Sync>,
+    native: native::RetainedDirectory,
+}
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+impl OwnedProtectedDirectory {
+    pub(crate) fn open(
+        path: &Path,
+        protection: std::sync::Arc<dyn NativeDirectoryProtection + Send + Sync>,
+    ) -> Result<Self, ProtectedDirectoryError> {
+        let native = native::RetainedDirectory::open(path, protection.as_ref())?;
+        Ok(Self { protection, native })
+    }
+    pub(crate) fn verify(&self) -> Result<(), ProtectedDirectoryError> {
+        self.native.verify(self.protection.as_ref())
+    }
+    pub(crate) fn read(
+        &self,
+        name: &OsStr,
+        maximum: usize,
+    ) -> Result<Vec<u8>, ProtectedDirectoryError> {
+        self.native
+            .read_regular_file(name, maximum, self.protection.as_ref())
+    }
+    pub(crate) fn file(&self) -> &File {
+        self.native.leaf_file()
+    }
+}
+
 /// Bounded observed file bytes whose diagnostics never reveal the payload.
 ///
 /// This buffer is unauthenticated. Execution approval must authenticate the exact

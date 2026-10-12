@@ -131,6 +131,10 @@ impl RetainedDirectory {
         Ok(retained)
     }
 
+    pub(super) fn leaf_file(&self) -> &File {
+        &self.leaf().file
+    }
+
     pub(super) fn verify(
         &self,
         protection: &dyn NativeDirectoryProtection,

@@ -47,6 +47,11 @@ impl<Storage: RegistrationPublicationStorage> RegistrationHeadWriter<Storage> {
             state: Mutex::new(PublicationState::Open),
         }
     }
+    /// Consumes this writer and returns its retained native storage for explicit recovery.
+    /// This does not clear disk uncertainty or change the original publication result.
+    pub fn into_storage(self) -> Storage {
+        self.storage
+    }
     /// Returns the uncertainty latch. Poisoning is uncertainty, not a successful recovery.
     pub fn state(&self) -> PublicationState {
         self.state

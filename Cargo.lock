@@ -6117,6 +6117,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "flate2",
  "futures-util",
  "getrandom 0.4.3",
  "hkdf",
@@ -6137,6 +6138,7 @@ dependencies = [
  "spaceterm-distribution",
  "spaceterm-protocol",
  "subtle",
+ "tar",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",

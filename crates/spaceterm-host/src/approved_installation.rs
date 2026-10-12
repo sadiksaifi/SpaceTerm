@@ -130,9 +130,21 @@ impl fmt::Debug for ApprovedInstallationDescriptor {
     }
 }
 
-// There is no production freshness/custody issuer in the supplied checkout. Retained
-// authority cannot be fabricated from facts, permission changes, or a protection sample.
-pub(crate) enum InstallationCustody {}
+// Only the fresh publisher and native approved-selection reader can bind these handles.
+// Descriptor decoding and permission changes cannot construct this authority.
+pub(crate) struct InstallationCustody {
+    publication: crate::native_deployment::publication::RetainedPublication,
+}
+impl InstallationCustody {
+    pub(crate) fn from_publication(
+        publication: crate::native_deployment::publication::RetainedPublication,
+    ) -> Self {
+        Self { publication }
+    }
+    pub(crate) fn revalidate(&self) -> Result<(), NativeFailure> {
+        self.publication.verify()
+    }
+}
 
 /// Noncloneable authority retaining authenticated code, resources and native custody through use.
 pub struct RetainedApprovedInstallation {
@@ -141,6 +153,30 @@ pub struct RetainedApprovedInstallation {
     _custody: InstallationCustody,
 }
 impl RetainedApprovedInstallation {
+    pub(crate) fn from_publication(
+        descriptor: ApprovedInstallationDescriptor,
+        custody: InstallationCustody,
+    ) -> Result<Self, NativeFailure> {
+        custody.revalidate()?;
+        let binding = descriptor.installation_binding()?;
+        Ok(Self {
+            descriptor,
+            binding,
+            _custody: custody,
+        })
+    }
+    /// Revalidates retained file identities, destination bytes, ancestor links and native custody.
+    pub fn revalidate(&self) -> Result<(), NativeFailure> {
+        self._custody.revalidate()
+    }
+    /// Borrows the exact read-only main executable after revalidation, never reopening a caller path.
+    pub fn retained_server(&self) -> Result<&std::fs::File, NativeFailure> {
+        self._custody.publication.server()
+    }
+    /// Borrows the exact protected credential tool after revalidation.
+    pub fn retained_credential_tool(&self) -> Result<&std::fs::File, NativeFailure> {
+        self._custody.publication.credential_tool()
+    }
     /// Returns authenticated installation facts.
     pub fn descriptor(&self) -> &ApprovedInstallationDescriptor {
         &self.descriptor

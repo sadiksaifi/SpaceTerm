@@ -18,7 +18,7 @@ use macos as platform;
 
 // Leave one enrollment for the regular file. Each enrollment owns one duplicate;
 // the backend owns one queue, and Linux also retains one trusted proc directory.
-pub(super) const MAX_HANDLES: usize = 256;
+pub(crate) const MAX_HANDLES: usize = 256;
 pub(super) const MAX_DIRECTORY_HANDLES: usize = MAX_HANDLES - 1;
 const MAX_NATIVE_CALLS: usize = 4096;
 const MAX_INTERRUPTS: usize = 16;

@@ -239,9 +239,12 @@ fn stopped_still_revalidates_native_account_and_registration_generation() {
     assert_eq!(native.storage_calls.load(Ordering::SeqCst), 0);
 }
 #[test]
-fn missing_native_account_incarnation_is_unavailable_not_passwd_identity() {
+fn missing_native_account_is_unavailable_not_passwd_identity() {
     assert_eq!(
-        SystemAccountProvider.observe(key()),
+        SystemAccountProvider.observe(AccountBuildKey {
+            account_uid: u32::MAX - 1,
+            ..key()
+        }),
         Err(NativeFailure::AccountIdentityUnavailable)
     );
 }
@@ -281,4 +284,210 @@ fn roots_round_trip_non_utf8_unix_pathnames_without_debug_contents() {
     let retained = RegistrationProfile::decode(&p.encode().unwrap(), key()).unwrap();
     assert_eq!(retained.roots().config(), non_utf8);
     assert_eq!(format!("{:?}", retained.roots()), "RegisteredRoots(..)");
+}
+
+#[test]
+fn registered_storage_retry_preserves_identity_roots_and_data_until_unlock() {
+    use spaceterm_host::startup::RegisteredStorageRetry;
+    let mut native = Inspection::new(DesiredServerState::Running);
+    native.storage_failure = Some(NativeFailure::StorageLocked);
+    let original_profile = native.profile.encode().unwrap();
+    let original_head = native.head.clone();
+    let retry = RegisteredStorageRetry::begin(key(), native.head.generation, &native).unwrap();
+    assert_eq!(
+        retry.retry(&native),
+        Ok(StartupPreflight::WaitingStorage(
+            NativeFailure::StorageLocked
+        ))
+    );
+    native.storage_failure = Some(NativeFailure::StorageUnavailable);
+    assert_eq!(
+        retry.retry(&native),
+        Ok(StartupPreflight::WaitingStorage(
+            NativeFailure::StorageUnavailable
+        ))
+    );
+    native.storage_failure = None;
+    assert_eq!(
+        retry.retry(&native),
+        Ok(StartupPreflight::RetainApproved(
+            original_head.approved_installation
+        ))
+    );
+    assert!(native.profile.encode().unwrap() == original_profile);
+    assert_eq!(native.head, original_head);
+    assert_eq!(native.storage_calls.load(Ordering::SeqCst), 4);
+    assert_eq!(format!("{retry:?}"), "RegisteredStorageRetry(..)");
+}
+#[test]
+fn storage_retry_rejects_replacement_registration_and_respects_a_new_stop() {
+    use spaceterm_host::startup::RegisteredStorageRetry;
+    for fault in 0..4 {
+        let mut native = Inspection::new(DesiredServerState::Running);
+        native.storage_failure = Some(NativeFailure::StorageLocked);
+        let retry = RegisteredStorageRetry::begin(key(), native.head.generation, &native).unwrap();
+        match fault {
+            0 => native.head.server_id = [9; 16],
+            1 => native.head.approved_data_generation = DataGenerationId::new(2).unwrap(),
+            2 => {
+                let roots = RegisteredRoots::new(
+                    "/replacement/config".into(),
+                    "/replacement/data".into(),
+                    "/replacement/state".into(),
+                    "/replacement/cache".into(),
+                )
+                .unwrap();
+                native.profile = RegistrationProfile::new(
+                    key(),
+                    20,
+                    [1; 16],
+                    [4; 16],
+                    roots,
+                    native.profile.boot_credential().clone(),
+                    native.profile.storage().clone(),
+                )
+                .unwrap();
+                native.head.profile_sha256 =
+                    Sha256::digest(native.profile.encode().unwrap()).into();
+            }
+            _ => {
+                native.head.generation = NonZeroU64::new(8).unwrap();
+                native.head.lifecycle_generation = NonZeroU64::new(3).unwrap();
+                native.head.desired_state = DesiredServerState::Stopped;
+            }
+        }
+        let outcome = retry.retry(&native);
+        if fault == 3 {
+            assert_eq!(outcome, Ok(StartupPreflight::Stopped));
+        } else {
+            assert!(outcome.is_err());
+        }
+        assert_eq!(native.storage_calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+struct WaitingAuthority(std::sync::Mutex<Inspection>);
+impl spaceterm_host::startup::NativeStartupAuthority for WaitingAuthority {
+    fn admit(
+        &self,
+        key: AccountBuildKey,
+        generation: NonZeroU64,
+    ) -> Result<spaceterm_host::startup::NativeStartupAdmission, NativeFailure> {
+        Ok(
+            spaceterm_host::startup::NativeStartupAdmission::WaitingStorage(
+                spaceterm_host::startup::UnprivilegedWaitPlan::begin(
+                    key,
+                    generation,
+                    &*self.0.lock().unwrap(),
+                )?,
+            ),
+        )
+    }
+    fn authorize_release(
+        &self,
+        _: &spaceterm_host::startup::PendingStartup,
+        _: &spaceterm_host::startup::PostExecProof,
+    ) -> Result<spaceterm_host::boot_credentials::CredentialReleasePermit, NativeFailure> {
+        Err(NativeFailure::NativeUnavailable)
+    }
+    fn recheck_release(
+        &self,
+        _: &spaceterm_host::boot_credentials::CredentialReleasePermit,
+    ) -> Result<(), NativeFailure> {
+        Err(NativeFailure::NativeUnavailable)
+    }
+}
+struct WaitingDriver<'a> {
+    authority: &'a WaitingAuthority,
+    case: u8,
+    waits: usize,
+    resumptions: usize,
+}
+impl spaceterm_host::startup::OneShotLauncher for WaitingDriver<'_> {
+    fn wait_for_storage(
+        &mut self,
+        plan: spaceterm_host::startup::UnprivilegedWaitPlan,
+        _: &dyn spaceterm_host::startup::NativeStartupAuthority,
+        _: &dyn spaceterm_host::boot_credentials::BootCredentialAdapter,
+    ) -> Result<(), NativeFailure> {
+        self.waits += 1;
+        let mut native = self.authority.0.lock().unwrap();
+        assert_eq!(plan.profile().roots(), profile().roots());
+        assert_eq!(
+            plan.head().approved_data_generation,
+            DataGenerationId::new(1).unwrap()
+        );
+        assert_eq!(
+            plan.retry(&*native),
+            Ok(StartupPreflight::WaitingStorage(
+                NativeFailure::StorageLocked
+            ))
+        );
+        match self.case {
+            0 => native.storage_failure = None,
+            1 => native.storage_failure = Some(NativeFailure::StorageUnavailable),
+            2 => {
+                native.head.generation = NonZeroU64::new(8).unwrap();
+                native.head.lifecycle_generation = NonZeroU64::new(3).unwrap();
+                native.head.desired_state = DesiredServerState::Stopped;
+            }
+            _ => {
+                native.head.approved_data_generation = DataGenerationId::new(2).unwrap();
+                native.head.data_high_water = 2;
+            }
+        }
+        let calls = native.storage_calls.load(Ordering::SeqCst);
+        match plan.retry(&*native)? {
+            StartupPreflight::Stopped => {
+                assert_eq!(native.storage_calls.load(Ordering::SeqCst), calls);
+                Ok(())
+            }
+            StartupPreflight::WaitingStorage(failure) => Err(failure),
+            StartupPreflight::RetainApproved(installation) => {
+                assert_eq!(installation, plan.head().approved_installation);
+                self.resumptions += 1;
+                // This injected driver stops at the protected reentry boundary. It cannot
+                // fabricate PendingStartup or claim native exec/credential evidence.
+                Err(NativeFailure::NativeUnavailable)
+            }
+        }
+    }
+    fn launch(
+        &mut self,
+        _: spaceterm_host::startup::PendingStartup,
+        _: &dyn spaceterm_host::startup::NativeStartupAuthority,
+        _: &dyn spaceterm_host::boot_credentials::BootCredentialAdapter,
+    ) -> Result<std::convert::Infallible, NativeFailure> {
+        panic!("storage waiting cannot directly enter the credential launcher")
+    }
+}
+#[test]
+fn launcher_hands_original_storage_wait_to_the_unprivileged_driver() {
+    for (case, expected) in [
+        (0, Err(NativeFailure::NativeUnavailable)),
+        (1, Err(NativeFailure::StorageUnavailable)),
+        (2, Ok(())),
+        (3, Err(NativeFailure::GenerationMismatch)),
+    ] {
+        let mut native = Inspection::new(DesiredServerState::Running);
+        native.storage_failure = Some(NativeFailure::StorageLocked);
+        let generation = native.head.generation;
+        let authority = WaitingAuthority(std::sync::Mutex::new(native));
+        let mut driver = WaitingDriver {
+            authority: &authority,
+            case,
+            waits: 0,
+            resumptions: 0,
+        };
+        let result = spaceterm_host::startup::launch_once(
+            key(),
+            generation,
+            &authority,
+            &spaceterm_host::boot_credentials::UnavailableBootCredentials,
+            &mut driver,
+        );
+        assert_eq!(result, expected);
+        assert_eq!(driver.waits, 1);
+        assert_eq!(driver.resumptions, usize::from(case == 0));
+    }
 }
