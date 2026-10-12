@@ -50,5 +50,10 @@ pub fn authorize_native_request<
     )
 }
 
+#[path = "execution.rs"]
+pub mod execution;
 #[path = "polkit.rs"]
 pub mod polkit;
+#[cfg(target_os = "linux")]
+#[path = "system_polkit.rs"]
+pub mod system_polkit;

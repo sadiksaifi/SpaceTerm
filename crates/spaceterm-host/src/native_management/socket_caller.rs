@@ -11,6 +11,17 @@ use std::{
 /// Retained actual stream writer. This is caller proof, never a management grant.
 #[derive(Clone)]
 pub struct BrokerCaller(Arc<Sender>);
+impl BrokerCaller {
+    /// PID observed from the actual kernel-authenticated writer, not request fields.
+    pub fn observed_pid(&self) -> u32 {
+        self.0.pid()
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn start_ticks(&self) -> Result<u64, NativeFailure> {
+        self.0.recheck()?;
+        Ok(self.0.start_ticks)
+    }
+}
 impl std::fmt::Debug for BrokerCaller {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("BrokerCaller(..)")
@@ -68,6 +79,7 @@ impl NativeCallerAuthentication for BrokerCallerPeer {
 pub(crate) struct Sender {
     credentials: libc::ucred,
     process: OwnedFd,
+    start_ticks: u64,
 }
 #[cfg(target_os = "linux")]
 impl Sender {
@@ -84,6 +96,7 @@ impl Sender {
         let sender = Self {
             credentials,
             process: unsafe { OwnedFd::from_raw_fd(fd as i32) },
+            start_ticks: linux_start_ticks(credentials.pid as u32)?,
         };
         sender.recheck()?;
         Ok(sender)
@@ -106,11 +119,54 @@ impl Sender {
             revents: 0,
         };
         // SAFETY: poll inspects the retained original pidfd with no blocking or pointer escape.
-        if unsafe { libc::poll(&mut status, 1, 0) } != 0 {
+        if unsafe { libc::poll(&mut status, 1, 0) } != 0
+            || linux_start_ticks(self.pid())? != self.start_ticks
+            || linux_effective_uid(self.pid())? != self.uid()
+        {
             return Err(NativeFailure::ProcessIdentityMismatch);
         }
         Ok(())
     }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_process_record(pid: u32, record: &str) -> Result<String, NativeFailure> {
+    use std::io::Read;
+    let file = std::fs::File::open(format!("/proc/{pid}/{record}"))
+        .map_err(|_| NativeFailure::ProcessIdentityMismatch)?;
+    let mut bytes = Vec::new();
+    file.take(16_385)
+        .read_to_end(&mut bytes)
+        .map_err(|_| NativeFailure::ProcessIdentityMismatch)?;
+    if bytes.len() > 16_384 {
+        return Err(NativeFailure::ProcessIdentityMismatch);
+    }
+    String::from_utf8(bytes).map_err(|_| NativeFailure::ProcessIdentityMismatch)
+}
+#[cfg(target_os = "linux")]
+fn linux_start_ticks(pid: u32) -> Result<u64, NativeFailure> {
+    let record = linux_process_record(pid, "stat")?;
+    let (_, fields) = record
+        .rsplit_once(')')
+        .ok_or(NativeFailure::ProcessIdentityMismatch)?;
+    fields
+        .split_whitespace()
+        .nth(19)
+        .and_then(|field| field.parse().ok())
+        .filter(|ticks| *ticks != 0)
+        .ok_or(NativeFailure::ProcessIdentityMismatch)
+}
+#[cfg(target_os = "linux")]
+fn linux_effective_uid(pid: u32) -> Result<u32, NativeFailure> {
+    let record = linux_process_record(pid, "status")?;
+    let line = record
+        .lines()
+        .find_map(|line| line.strip_prefix("Uid:"))
+        .ok_or(NativeFailure::ProcessIdentityMismatch)?;
+    line.split_whitespace()
+        .nth(1)
+        .and_then(|uid| uid.parse().ok())
+        .ok_or(NativeFailure::ProcessIdentityMismatch)
 }
 
 #[cfg(target_os = "macos")]

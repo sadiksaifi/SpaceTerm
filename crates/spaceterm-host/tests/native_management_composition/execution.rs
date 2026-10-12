@@ -138,6 +138,7 @@ fn native_sudo_bounds_reply_discards_stderr_and_does_not_trust_exit_or_stdout_al
         (4, NativeFailure::AuthorizationUnavailable),
         (5, NativeFailure::CustodyUnavailable),
         (6, NativeFailure::AuthorizationUnavailable),
+        (8, NativeFailure::AuthorizationUnavailable),
     ] {
         let observations = Arc::new(Mutex::new((0, 0, 0)));
         let adapter = SudoAdapter::new(NativeSudoBoundary::new(Custody {
@@ -173,4 +174,106 @@ fn manager_reply_rejects_unknown_reserved_truncated_or_additional_records() {
         reply::decode(reply::encode(progress).as_bytes()),
         Ok(Ok(progress))
     );
+}
+
+use native_management::cli_sudo::protected_execution::{
+    ManagementBroker, NativeManagementExecutionCustody, ProtectedManagementExecution,
+};
+impl NativeManagementExecutionCustody for Custody {
+    type Lease = RetainedClosure;
+    fn retain(
+        &self,
+        request: &ManagementRequest,
+        _: ManagementBroker,
+    ) -> Result<Self::Lease, NativeFailure> {
+        RetainedSudoExecution::retain(self, request)
+    }
+    fn manager<'a>(&self, _: &'a Self::Lease) -> &'a std::path::Path {
+        std::path::Path::new("fixture-manager")
+    }
+    fn recheck(&self, lease: &mut Self::Lease) -> Result<(), NativeFailure> {
+        RetainedSudoExecution::recheck(self, lease)
+    }
+    fn bind_exec(
+        &self,
+        lease: &mut Self::Lease,
+        broker: ManagementBroker,
+        command: &mut Command,
+    ) -> Result<(), NativeFailure> {
+        let expected = match broker {
+            ManagementBroker::Sudo => "/usr/bin/sudo",
+            ManagementBroker::Pkexec => "/usr/bin/pkexec",
+        };
+        assert_eq!(command.get_program(), expected);
+        let arguments: Vec<_> = command.get_args().map(std::ffi::OsStr::to_owned).collect();
+        // This fake replaces only the native exec edge. The owned fixed argv and
+        // actual transport/correlation/cleanup code remain under test.
+        *command = Command::new(&lease.fixture.program);
+        command.args(arguments);
+        lease.replaced = self.replace_in_prepare;
+        Ok(())
+    }
+}
+#[test]
+fn fixed_sudo_and_pkexec_routes_share_retained_custody_and_authenticated_transport() {
+    let program = fixture(0);
+    for broker in [ManagementBroker::Sudo, ManagementBroker::Pkexec] {
+        let observations = Arc::new(Mutex::new((0, 0, 0)));
+        let custody = Custody {
+            fixture: program.clone(),
+            observations: observations.clone(),
+            replace_in_prepare: false,
+        };
+        let execution = ProtectedManagementExecution::new(custody);
+        let result = match broker {
+            ManagementBroker::Sudo => SudoAdapter::new(NativeSudoBoundary::new(execution))
+                .execute(&request(OperationTag::Start), SudoMode::NonInteractive),
+            ManagementBroker::Pkexec => {
+                native_management::linux::execution::NativePkexecManagement::new(execution)
+                    .execute_request(&request(OperationTag::Start))
+            }
+        };
+        assert_eq!(result.unwrap().state, ProgressState::Complete);
+        let observed = observations.lock().unwrap();
+        assert_eq!(observed.0, 1);
+        assert_eq!(observed.2, 1);
+        assert!(observed.1 >= 3);
+    }
+}
+#[test]
+fn fixed_broker_routes_refuse_lost_execution_binding_before_spawn() {
+    let program = fixture(0);
+    for broker in [ManagementBroker::Sudo, ManagementBroker::Pkexec] {
+        let observations = Arc::new(Mutex::new((0, 0, 0)));
+        let custody = Custody {
+            fixture: program.clone(),
+            observations: observations.clone(),
+            replace_in_prepare: true,
+        };
+        let execution = ProtectedManagementExecution::new(custody);
+        let result = match broker {
+            ManagementBroker::Sudo => SudoAdapter::new(NativeSudoBoundary::new(execution))
+                .execute(&request(OperationTag::Start), SudoMode::NonInteractive),
+            ManagementBroker::Pkexec => {
+                native_management::linux::execution::NativePkexecManagement::new(execution)
+                    .execute_request(&request(OperationTag::Start))
+            }
+        };
+        assert_eq!(result, Err(NativeFailure::ExecutionBindingUnproven));
+        assert_eq!(observations.lock().unwrap().2, 1);
+    }
+}
+
+#[test]
+fn pkexec_cancellation_before_manager_entry_is_typed_and_releases_custody() {
+    let observations = Arc::new(Mutex::new((0, 0, 0)));
+    let execution = ProtectedManagementExecution::new(Custody {
+        fixture: fixture(7),
+        observations: observations.clone(),
+        replace_in_prepare: false,
+    });
+    let result = native_management::linux::execution::NativePkexecManagement::new(execution)
+        .execute_request(&request(OperationTag::Start));
+    assert_eq!(result, Err(NativeFailure::AuthorizationCancelled));
+    assert_eq!(observations.lock().unwrap().2, 1);
 }

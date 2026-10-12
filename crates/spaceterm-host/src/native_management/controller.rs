@@ -9,8 +9,9 @@ use super::request::{ManagementRequest, OperationTag};
 use crate::native_deployment::contracts::{NativeFailure, PublicationDisposition};
 use crate::startup::DesiredServerState;
 
-/// Maximum native helper work window. A drain is polled, never waited out here.
-pub const HELPER_LIFETIME: Duration = Duration::from_secs(2);
+/// Default one-request manager bound, including native authentication and installation.
+/// Trusted composition may select another bound; assessments still expire after 30 seconds.
+pub const HELPER_LIFETIME: Duration = Duration::from_secs(300);
 /// A confirmation's original assessment window. OS prompts do not extend it.
 pub const ASSESSMENT_LIFETIME: Duration = Duration::from_secs(30);
 
@@ -30,7 +31,7 @@ pub enum AuthorizationRoute {
 pub enum ManagementPhase {
     /// Native request durably admitted.
     Admitted,
-    /// Stopped intent and advanced generations durably committed.
+    /// Lifecycle intent or Restart barrier and advanced generations durably committed.
     IntentCommitted,
     /// Automatic restart suspended without killing the tracked process.
     StartupSuspended,
@@ -169,6 +170,17 @@ pub trait ManagementBackend: Send + Sync {
         transaction: &mut Self::Transaction,
         deadline: HelperDeadline,
     ) -> IntentDisposition;
+    /// Preserve Running while durably inhibiting startup/release for this Restart.
+    /// Advance lifecycle generations under the same lock used by credential release.
+    /// The barrier stays closed until exact old-instance absence and the journaled
+    /// restart of the original approved installation. No Stopped head is published.
+    fn commit_restart(
+        &self,
+        _transaction: &mut Self::Transaction,
+        _deadline: HelperDeadline,
+    ) -> IntentDisposition {
+        IntentDisposition::NotApplied(NativeFailure::NativeUnavailable)
+    }
     /// Suspend automatic startup without sending a termination signal or bootout.
     fn suspend_automatic_start(
         &self,
@@ -253,8 +265,8 @@ impl<B: ManagementBackend> ManagementController<B> {
             let _serial = self.serial.try_lock().map_err(lock_failure)?;
             return self.advance(existing, *request.request_bytes(), deadline);
         }
-        // Interactive OS authentication happens in unprivileged orchestration.
-        // This port verifies already-obtained authority without prompting as root.
+        // Native GUI authentication is bound to the retained caller's OS session.
+        // CLI authentication remains in the fixed sudo broker, never application password input.
         let authority = self.backend.authorize(request, route, deadline)?;
         deadline.check()?;
         let _serial = self.serial.try_lock().map_err(lock_failure)?;
@@ -411,18 +423,37 @@ impl<B: ManagementBackend> ManagementController<B> {
             return Err(NativeFailure::UnsafeNativeState);
         }
         match phase {
-            ManagementPhase::Admitted => self.quiesce(transaction, true, deadline),
+            ManagementPhase::Admitted => match self.backend.commit_restart(transaction, deadline) {
+                IntentDisposition::Durable(()) => {
+                    self.require_phase(transaction, ManagementPhase::IntentCommitted)?;
+                    Ok(None)
+                }
+                IntentDisposition::NotApplied(failure) => Err(failure),
+                IntentDisposition::Indeterminate => Ok(Some(ProgressState::Indeterminate)),
+            },
+            ManagementPhase::IntentCommitted => {
+                self.backend
+                    .suspend_automatic_start(transaction, deadline)?;
+                self.require_phase(transaction, ManagementPhase::StartupSuspended)?;
+                Ok(None)
+            }
+            ManagementPhase::StartupSuspended => self.quiesce(transaction, true, deadline),
             ManagementPhase::Quiescing => self.quiesce(transaction, false, deadline),
-            ManagementPhase::Quiesced => {
+            ManagementPhase::Quiesced | ManagementPhase::SupervisionRemoved => {
                 let request = *self.backend.request(transaction).request_bytes();
                 let progress = bind_progress(
                     self.backend.restart_approved(transaction, deadline)?,
                     request,
                 )?;
+                if progress.phase != self.backend.phase(transaction)
+                    || (progress.state == ProgressState::Complete
+                        && progress.phase != ManagementPhase::Completed)
+                {
+                    return Err(NativeFailure::UnsafeNativeState);
+                }
                 Ok(Some(progress.state))
             }
             ManagementPhase::Completed => Ok(Some(ProgressState::Complete)),
-            _ => Err(NativeFailure::UnsafeNativeState),
         }
     }
 }

@@ -436,6 +436,10 @@ impl ManagementBackend for Owner {
         t: &mut Self::Transaction,
         d: HelperDeadline,
     ) -> Result<ManagementProgress, NativeFailure> {
+        d.check()?;
+        if t.request.operation() == OperationTag::Install {
+            return Ok(self.0.finish(t, "installation-owner-applied"));
+        }
         self.0.apply_owned_operation(t, d)
     }
 }
@@ -558,13 +562,16 @@ fn a_grant_for_another_operation_cannot_reach_controller_effects() {
 fn a_new_helper_guard_cannot_extend_an_issued_native_lease() {
     let (peer, accounts, clock) = setup();
     let peer = Arc::new(peer);
-    let original = native_management::helper_lifetime::HelperLifetimeGuard::install().unwrap();
+    let original = native_management::helper_lifetime::HelperLifetimeGuard::install_for(
+        Duration::from_secs(2),
+    )
+    .unwrap();
     let lease = issuer(peer.clone(), accounts, clock)
         .authorize(&peer.original, AuthorizationRoute::Gui, original.deadline())
         .unwrap();
     // The test retires its watchdog thread, not a production manager or a native grant.
     drop(original);
-    std::thread::sleep(native_management::controller::HELPER_LIFETIME + Duration::from_millis(25));
+    std::thread::sleep(Duration::from_secs(2) + Duration::from_millis(25));
     let another = native_management::helper_lifetime::HelperLifetimeGuard::install().unwrap();
     assert_eq!(
         lease.recheck(another.deadline()),
@@ -929,4 +936,762 @@ fn polkit_pkexec_uses_authenticated_subject_and_typed_native_outcome() {
         Err(NativeFailure::IdentityMismatch)
     ));
     assert_eq!(*calls.lock().unwrap(), ["subject"]);
+}
+
+impl native_management::facade::operation_authority::NativeAssessmentScopes<Caller> for Arc<Peer> {
+    type Scope = OriginalAssessment;
+    fn retain(
+        &self,
+        caller: &Caller,
+        request: &ManagementRequest,
+        deadline: HelperDeadline,
+    ) -> Result<Self::Scope, NativeFailure> {
+        self.retain_assessment(caller, request, deadline)
+    }
+    fn request<'a>(&self, scope: &'a Self::Scope) -> &'a ManagementRequest {
+        &scope.request
+    }
+    fn issued(&self, scope: &Self::Scope) -> Duration {
+        scope.issued
+    }
+    fn recheck(
+        &self,
+        caller: &Caller,
+        scope: &Self::Scope,
+        deadline: HelperDeadline,
+    ) -> Result<(), NativeFailure> {
+        self.recheck_caller(caller, scope, deadline)
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod linked_local_right {
+    use super::*;
+    use std::sync::OnceLock;
+    static SERIAL: Mutex<()> = Mutex::new(());
+    static LIBRARY: OnceLock<usize> = OnceLock::new();
+    fn native_fixture() {
+        LIBRARY.get_or_init(|| {
+            let scratch = tempfile::tempdir().unwrap();
+            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+            let library = scratch.path().join("management-fixture.dylib");
+            let output = std::process::Command::new("/usr/bin/xcrun")
+                .args([
+                    "--sdk",
+                    "macosx",
+                    "clang",
+                    "-std=c11",
+                    "-Wall",
+                    "-Wextra",
+                    "-Werror",
+                    "-DST_MANAGEMENT_TESTING",
+                    "-dynamiclib",
+                    "-mmacosx-version-min=26.0",
+                ])
+                .arg(root.join("native/macos/management.c"))
+                .arg(root.join("tests/native_management_composition/local_right_fixture.c"))
+                .args([
+                    "-framework",
+                    "Security",
+                    "-framework",
+                    "CoreFoundation",
+                    "-o",
+                ])
+                .arg(&library)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "native fixture compilation failed");
+            use std::os::unix::ffi::OsStrExt;
+            let library = std::ffi::CString::new(library.as_os_str().as_bytes()).unwrap();
+            // SAFETY: this private test dylib is compiled from the actual native boundary
+            // plus injected OS peers. It contains no production admission or host mutation.
+            let handle =
+                unsafe { libc::dlopen(library.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL) };
+            assert!(!handle.is_null(), "native fixture linking failed");
+            // Keep the linked object until test-process exit, through every native lease.
+            handle as usize
+        });
+    }
+    fn mode(value: u32) {
+        native_fixture();
+        // SAFETY: the private test symbol has this fixed signature and remains loaded.
+        let symbol = unsafe {
+            libc::dlsym(
+                libc::RTLD_DEFAULT,
+                c"st_management_composition_mode".as_ptr(),
+            )
+        };
+        assert!(!symbol.is_null());
+        let mode: unsafe extern "C" fn(u32) = unsafe { std::mem::transmute(symbol) };
+        unsafe {
+            mode(value);
+        }
+    }
+    fn retired() -> u32 {
+        // SAFETY: same private linked test object and exact fixed function ABI.
+        let symbol = unsafe {
+            libc::dlsym(
+                libc::RTLD_DEFAULT,
+                c"st_management_composition_retired".as_ptr(),
+            )
+        };
+        assert!(!symbol.is_null());
+        let read: unsafe extern "C" fn() -> u32 = unsafe { std::mem::transmute(symbol) };
+        unsafe { read() }
+    }
+    impl native_management::macos::authorization::AuthorizationServicesCaller for AuditPeer {
+        fn join_session(
+            &self,
+            caller: &Caller,
+            deadline: HelperDeadline,
+        ) -> Result<(), NativeFailure> {
+            self.recheck(caller, deadline)
+        }
+    }
+    fn execute(
+        mode_value: u32,
+        change_account_under_lock: bool,
+    ) -> (Result<ManagementProgress, NativeFailure>, TestBackend, u32) {
+        use native_management::facade::assembly::InstallationManagerAssembly;
+        mode(mode_value);
+        let mut owner = assembled_entry::owner(
+            OperationTag::Start,
+            native_management::cli_sudo::authorization::PrivilegedBroker::Sudo,
+        );
+        owner.change_account_under_lock = change_account_under_lock;
+        let request = owner.scopes.original.clone();
+        let journal = owner.journal.clone();
+        let assembly = InstallationManagerAssembly::new(BuildIdentity::Development, owner);
+        let guard = native_management::helper_lifetime::HelperLifetimeGuard::install().unwrap();
+        let manager = assembly
+            .assemble_gui(Arc::new(AuditPeer(501)), &request, guard.deadline())
+            .unwrap();
+        let mut outcome = None;
+        manager.dispatch(
+            guard,
+            ManagerInvocation::GuiDemand,
+            request,
+            &mut |result, _| outcome = Some(result),
+        );
+        (outcome.unwrap(), journal, retired())
+    }
+    #[test]
+    fn native_manager_linked_authorization_services_reaches_transaction_and_controller() {
+        let _serial = SERIAL.lock().unwrap();
+        let (result, owner, retired) = execute(0, false);
+        assert_eq!(result.unwrap().state, ProgressState::Complete);
+        assert_eq!(owner.0.lock().unwrap().started, [42]);
+        assert_eq!(retired, 1);
+    }
+    #[test]
+    fn native_manager_linked_denials_and_original_expiry_have_zero_effects() {
+        let _serial = SERIAL.lock().unwrap();
+        for (mode, failure) in [
+            (1, NativeFailure::AuthorizationDenied),
+            (2, NativeFailure::AuthorizationCancelled),
+            (3, NativeFailure::AuthorizationUnavailable),
+            (4, NativeFailure::AuthorizationDenied),
+            (5, NativeFailure::StaleAssessment),
+            (6, NativeFailure::AuthorizationDenied),
+        ] {
+            let (result, owner, retired) = execute(mode, false);
+            assert_eq!(result, Err(failure));
+            assert!(owner.0.lock().unwrap().events.is_empty());
+            assert_eq!(retired, u32::from(mode != 6));
+        }
+    }
+    #[test]
+    fn native_manager_linked_account_incarnation_change_refuses_before_effects() {
+        let _serial = SERIAL.lock().unwrap();
+        let (result, owner, retired) = execute(0, true);
+        assert_eq!(result, Err(NativeFailure::IdentityMismatch));
+        assert!(owner.0.lock().unwrap().events.is_empty());
+        assert_eq!(retired, 1);
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod linked_polkit {
+    use super::*;
+    use native_management::linux::{
+        polkit::PolkitOperationRights,
+        system_polkit::{NativePolkitPolicy, NativePolkitProcessCaller, SystemPolkitPeer},
+    };
+    use std::sync::OnceLock;
+    static SERIAL: Mutex<()> = Mutex::new(());
+    static LIBRARY: OnceLock<usize> = OnceLock::new();
+    impl NativePolkitProcessCaller for AuditPeer {
+        fn process(&self, caller: &Caller) -> Result<(u32, u64), NativeFailure> {
+            if caller.0 != self.0 {
+                return Err(NativeFailure::IdentityMismatch);
+            }
+            Ok((777, 42))
+        }
+    }
+    struct Policy;
+    impl NativePolkitPolicy for Policy {
+        fn recheck(&self, _: &ManagementRequest) -> Result<(), NativeFailure> {
+            Ok(())
+        }
+    }
+    fn fixture(mode: u32) {
+        LIBRARY.get_or_init(|| {
+            let scratch = tempfile::tempdir().unwrap();
+            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+            let library = scratch.path().join("polkit-fixture.so");
+            let output = std::process::Command::new("cc")
+                .args([
+                    "-std=c11",
+                    "-Wall",
+                    "-Wextra",
+                    "-Werror",
+                    "-shared",
+                    "-fPIC",
+                    "-DST_MANAGEMENT_TESTING",
+                    "-DST_MANAGEMENT_COMPOSITION_FIXTURE",
+                ])
+                .arg(root.join("native/linux/management/polkit.c"))
+                .arg(root.join("native/macos/management.c"))
+                .arg(root.join("../../tests/server_native/linux/management/polkit_tests.c"))
+                .args(["-ldl", "-o"])
+                .arg(&library)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "native polkit fixture compilation failed"
+            );
+            use std::os::unix::ffi::OsStrExt;
+            let library = std::ffi::CString::new(library.as_os_str().as_bytes()).unwrap();
+            // SAFETY: the private dylib contains the actual native boundary with a
+            // test-only system-bus peer. It opens no native bus or privileged facility.
+            let handle =
+                unsafe { libc::dlopen(library.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL) };
+            assert!(!handle.is_null());
+            handle as usize // Retain through every native token and test-process exit.
+        });
+        // SAFETY: the test-only setter has this exact ABI and remains loaded.
+        let symbol = unsafe {
+            libc::dlsym(
+                libc::RTLD_DEFAULT,
+                c"st_management_polkit_composition_mode".as_ptr(),
+            )
+        };
+        assert!(!symbol.is_null());
+        let set: unsafe extern "C" fn(u32) = unsafe { std::mem::transmute(symbol) };
+        unsafe {
+            set(mode);
+        }
+    }
+    fn retired() -> u32 {
+        // SAFETY: the loaded test-only counter has this exact ABI.
+        let symbol = unsafe {
+            libc::dlsym(
+                libc::RTLD_DEFAULT,
+                c"st_management_polkit_composition_retired".as_ptr(),
+            )
+        };
+        assert!(!symbol.is_null());
+        let read: unsafe extern "C" fn() -> u32 = unsafe { std::mem::transmute(symbol) };
+        unsafe { read() }
+    }
+    fn execute(
+        mode: u32,
+        change_account_under_lock: bool,
+    ) -> (Result<ManagementProgress, NativeFailure>, TestBackend, u32) {
+        use native_management::facade::entry::NativeManagerDependencies;
+        fixture(mode);
+        let (mut peer, accounts, clock) = setup();
+        let mut bytes = frame(OperationTag::Stop);
+        bytes[56..88].copy_from_slice(&account(1).sha256());
+        peer.original = ManagementRequest::decode(&bytes).unwrap();
+        let request = peer.original.clone();
+        let callers = Arc::new(AuditPeer(501));
+        let native = SystemPolkitPeer::new(callers.clone(), Arc::new(Policy));
+        let rights = PolkitOperationRights::new(native);
+        let transactions = TransactionPeer {
+            calls: Arc::new(Mutex::new(0)),
+            accounts: accounts.clone(),
+            change_account_under_lock,
+        };
+        let owner = TestBackend::new();
+        let dependencies = NativeManagerDependencies::new(
+            callers,
+            Arc::new(peer),
+            rights,
+            accounts,
+            clock,
+            transactions,
+            Owner(owner.clone()),
+        );
+        let guard = native_management::helper_lifetime::HelperLifetimeGuard::install().unwrap();
+        let mut result = None;
+        let manager: Box<dyn native_management::facade::entry::NativeManagerExecution> =
+            Box::new(dependencies);
+        manager.dispatch(
+            guard,
+            ManagerInvocation::Polkit(OperationTag::Stop),
+            request,
+            &mut |outcome, _| result = Some(outcome),
+        );
+        (result.unwrap(), owner, retired())
+    }
+    fn authorization_checks() -> u32 {
+        // SAFETY: the loaded test-only counter has this exact ABI.
+        let symbol = unsafe {
+            libc::dlsym(
+                libc::RTLD_DEFAULT,
+                c"st_management_polkit_composition_checks".as_ptr(),
+            )
+        };
+        assert!(!symbol.is_null());
+        let read: unsafe extern "C" fn() -> u32 = unsafe { std::mem::transmute(symbol) };
+        unsafe { read() }
+    }
+    #[test]
+    fn native_manager_pkexec_consumes_authorization_without_second_conversation() {
+        let _serial = SERIAL.lock().unwrap();
+        // pkexec has already completed its one-shot auth_admin conversation.
+        // The manager must consume that retained execution, not ask polkit again.
+        fixture(0);
+        let owner = assembled_entry::owner(
+            OperationTag::Stop,
+            native_management::cli_sudo::authorization::PrivilegedBroker::Pkexec(
+                OperationTag::Stop,
+            ),
+        );
+        let journal = owner.journal.clone();
+        let execution = owner.execution.clone();
+        let result = assembled_entry::execute(owner, ManagerInvocation::Polkit(OperationTag::Stop));
+        assert_eq!(result.unwrap().state, ProgressState::Complete);
+        assert_eq!(*execution.retained.lock().unwrap(), 1);
+        assert!(journal.0.lock().unwrap().events.contains(&"bootout"));
+        assert_eq!(authorization_checks(), 0);
+    }
+    #[test]
+    fn native_manager_linked_polkit_reaches_transaction_and_controller() {
+        let _serial = SERIAL.lock().unwrap();
+        for mode in [0, 8] {
+            let (result, owner, retired) = execute(mode, false);
+            assert_eq!(result.unwrap().state, ProgressState::Complete);
+            assert_eq!(owner.0.lock().unwrap().intent, DesiredServerState::Stopped);
+            assert!(owner.0.lock().unwrap().events.contains(&"bootout"));
+            assert_eq!(retired, 1);
+        }
+    }
+    #[test]
+    fn native_manager_linked_polkit_denials_and_bad_native_evidence_have_zero_effects() {
+        let _serial = SERIAL.lock().unwrap();
+        for (mode, failure) in [
+            (1, NativeFailure::AuthorizationDenied),
+            (2, NativeFailure::AuthorizationCancelled),
+            (3, NativeFailure::AuthorizationUnavailable),
+            (4, NativeFailure::AuthorizationUnavailable),
+            (5, NativeFailure::AuthorizationUnavailable),
+            (6, NativeFailure::AuthorizationUnavailable),
+            (7, NativeFailure::AuthorizationUnavailable),
+            (9, NativeFailure::AuthorizationDenied),
+            (10, NativeFailure::AuthorizationCancelled),
+        ] {
+            let (result, owner, retired) = execute(mode, false);
+            assert_eq!(result, Err(failure));
+            assert!(owner.0.lock().unwrap().events.is_empty());
+            assert_eq!(retired, 1);
+        }
+    }
+    #[test]
+    fn native_manager_linked_polkit_account_incarnation_change_refuses_before_effects() {
+        let _serial = SERIAL.lock().unwrap();
+        let (result, owner, retired) = execute(0, true);
+        assert_eq!(result, Err(NativeFailure::IdentityMismatch));
+        assert!(owner.0.lock().unwrap().events.is_empty());
+        assert_eq!(retired, 1);
+    }
+}
+
+#[test]
+fn manager_injected_assembly_cannot_bypass_the_production_source_gate() {
+    use native_management::facade::entry::{
+        NativeManagerAssembly, NativeManagerExecution, production_with_assembly,
+    };
+    struct Assembly(Mutex<u32>);
+    impl NativeManagerAssembly for Assembly {
+        fn broker(
+            &self,
+            _: Arc<native_management::facade::socket_caller::BrokerCallerPeer>,
+            _: ManagerInvocation,
+            _: &ManagementRequest,
+            _: HelperDeadline,
+        ) -> Result<Box<dyn NativeManagerExecution>, NativeFailure> {
+            *self.0.lock().unwrap() += 1;
+            Err(NativeFailure::AuthorizationUnavailable)
+        }
+        #[cfg(target_os = "macos")]
+        fn gui(
+            &self,
+            _: Arc<native_management::macos::demand::MachDemandCallerPeer>,
+            _: &ManagementRequest,
+            _: HelperDeadline,
+        ) -> Result<Box<dyn NativeManagerExecution>, NativeFailure> {
+            *self.0.lock().unwrap() += 1;
+            Err(NativeFailure::AuthorizationUnavailable)
+        }
+    }
+    let assembly = Assembly(Mutex::new(0));
+    let guard = native_management::helper_lifetime::HelperLifetimeGuard::install().unwrap();
+    let code = production_with_assembly(
+        &["--gui-demand".into()],
+        guard,
+        BuildIdentity::Development,
+        &assembly,
+    );
+    assert_eq!(code, NativeFailure::CustodyUnavailable as u8);
+    assert_eq!(*assembly.0.lock().unwrap(), 0);
+}
+
+mod assembled_entry {
+    use super::*;
+    use native_management::{
+        cli_sudo::authorization::{PrivilegedBroker, PrivilegedManagerCustody},
+        facade::assembly::{
+            InstallationManagerAssembly, NativeBrokerManagerOwner, NativeManagerOwner,
+            NativeManagerPorts,
+        },
+    };
+
+    pub(super) struct ReceivedCaller(pub u32);
+    impl NativeCallerAuthentication for ReceivedCaller {
+        type Caller = Caller;
+        fn bind(
+            &self,
+            _: AuthorizationRoute,
+            deadline: HelperDeadline,
+        ) -> Result<Caller, NativeFailure> {
+            deadline.check()?;
+            Ok(Caller(self.0))
+        }
+        fn uid(&self, caller: &Caller) -> Result<u32, NativeFailure> {
+            Ok(caller.0)
+        }
+        fn recheck(&self, caller: &Caller, deadline: HelperDeadline) -> Result<(), NativeFailure> {
+            deadline.check()?;
+            if caller.0 != self.0 {
+                return Err(NativeFailure::ProcessIdentityMismatch);
+            }
+            Ok(())
+        }
+    }
+
+    pub(super) struct Execution {
+        request: ManagementRequest,
+        broker: PrivilegedBroker,
+        failure: Option<NativeFailure>,
+        pub retained: Mutex<u32>,
+        invalidate_confirmation: bool,
+        journal: TestBackend,
+    }
+    pub(super) struct ExecutionLease {
+        request: ManagementRequest,
+        broker: PrivilegedBroker,
+    }
+    impl PrivilegedManagerCustody<Caller> for Arc<Execution> {
+        type Lease = ExecutionLease;
+        fn retain_current(
+            &self,
+            caller: &Caller,
+            request: &ManagementRequest,
+            broker: PrivilegedBroker,
+            deadline: HelperDeadline,
+        ) -> Result<Self::Lease, NativeFailure> {
+            deadline.check()?;
+            *self.retained.lock().unwrap() += 1;
+            if let Some(failure) = self.failure {
+                return Err(failure);
+            }
+            if caller.0 != 501 || request != &self.request || broker != self.broker {
+                return Err(NativeFailure::IdentityMismatch);
+            }
+            if self.invalidate_confirmation {
+                self.journal.0.lock().unwrap().revalidation =
+                    Some(NativeFailure::GenerationMismatch);
+            }
+            Ok(ExecutionLease {
+                request: self.request.clone(),
+                broker,
+            })
+        }
+        fn recheck(
+            &self,
+            lease: &Self::Lease,
+            caller: &Caller,
+            request: &ManagementRequest,
+            broker: PrivilegedBroker,
+            deadline: HelperDeadline,
+        ) -> Result<(), NativeFailure> {
+            deadline.check()?;
+            if caller.0 != 501
+                || request != &lease.request
+                || broker != lease.broker
+                || broker != self.broker
+            {
+                return Err(NativeFailure::IdentityMismatch);
+            }
+            Ok(())
+        }
+    }
+    pub(super) struct InstallationOwner {
+        pub scopes: Arc<Peer>,
+        pub accounts: Arc<Accounts>,
+        pub clock: Arc<Clock>,
+        pub journal: TestBackend,
+        pub execution: Arc<Execution>,
+        pub transactions: Arc<Mutex<u32>>,
+        pub change_account_under_lock: bool,
+        pub retained: Arc<Mutex<u32>>,
+    }
+    impl<C: NativeCallerAuthentication<Caller = Caller>> NativeManagerOwner<C> for InstallationOwner {
+        type Scopes = Arc<Peer>;
+        type Transactions = TransactionPeer;
+        type Journal = Owner;
+        fn retain(
+            &self,
+            _: &C,
+            _: &ManagementRequest,
+            deadline: HelperDeadline,
+        ) -> Result<
+            NativeManagerPorts<Self::Scopes, Self::Transactions, Self::Journal>,
+            NativeFailure,
+        > {
+            deadline.check()?;
+            *self.retained.lock().unwrap() += 1;
+            Ok(NativeManagerPorts::new(
+                self.scopes.clone(),
+                self.accounts.clone(),
+                self.clock.clone(),
+                TransactionPeer {
+                    calls: self.transactions.clone(),
+                    accounts: self.accounts.clone(),
+                    change_account_under_lock: self.change_account_under_lock,
+                },
+                Owner(self.journal.clone()),
+            ))
+        }
+    }
+    impl<C: NativeCallerAuthentication<Caller = Caller>> NativeBrokerManagerOwner<C>
+        for InstallationOwner
+    {
+        type Custody = Arc<Execution>;
+        fn custody(&self) -> Result<Self::Custody, NativeFailure> {
+            Ok(self.execution.clone())
+        }
+    }
+    pub(super) fn owner(operation: OperationTag, broker: PrivilegedBroker) -> InstallationOwner {
+        let (mut peer, accounts, clock) = setup();
+        let mut bytes = frame(operation);
+        bytes[56..88].copy_from_slice(&account(1).sha256());
+        peer.original = ManagementRequest::decode(&bytes).unwrap();
+        let journal = TestBackend::new();
+        let execution = Arc::new(Execution {
+            request: peer.original.clone(),
+            broker,
+            failure: None,
+            retained: Mutex::new(0),
+            invalidate_confirmation: false,
+            journal: journal.clone(),
+        });
+        InstallationOwner {
+            scopes: Arc::new(peer),
+            accounts,
+            clock,
+            journal,
+            execution,
+            transactions: Arc::new(Mutex::new(0)),
+            change_account_under_lock: false,
+            retained: Arc::new(Mutex::new(0)),
+        }
+    }
+    pub(super) fn execute(
+        owner: InstallationOwner,
+        invocation: ManagerInvocation,
+    ) -> Result<ManagementProgress, NativeFailure> {
+        let request = owner.scopes.original.clone();
+        let assembly = InstallationManagerAssembly::new(BuildIdentity::Development, owner);
+        let guard = native_management::helper_lifetime::HelperLifetimeGuard::install().unwrap();
+        let manager = assembly.assemble_broker(
+            Arc::new(ReceivedCaller(501)),
+            invocation,
+            &request,
+            guard.deadline(),
+        )?;
+        let mut result = None;
+        manager.dispatch(guard, invocation, request, &mut |outcome, _| {
+            result = Some(outcome)
+        });
+        result.unwrap()
+    }
+    #[test]
+    fn native_manager_assembled_entry_reaches_transaction_authority_and_controller() {
+        for operation in [
+            OperationTag::Start,
+            OperationTag::Stop,
+            OperationTag::Install,
+        ] {
+            let owner = owner(operation, PrivilegedBroker::Sudo);
+            let journal = owner.journal.clone();
+            let transactions = owner.transactions.clone();
+            let retained = owner.retained.clone();
+            assert_eq!(
+                execute(owner, ManagerInvocation::Sudo).unwrap().state,
+                ProgressState::Complete
+            );
+            assert_eq!(*retained.lock().unwrap(), 1);
+            assert_eq!(*transactions.lock().unwrap(), 1);
+            assert!(
+                journal
+                    .0
+                    .lock()
+                    .unwrap()
+                    .events
+                    .contains(&"journal-admitted")
+            );
+        }
+    }
+    fn routes(operation: OperationTag) -> Vec<(PrivilegedBroker, ManagerInvocation)> {
+        #[cfg(target_os = "linux")]
+        {
+            vec![
+                (PrivilegedBroker::Sudo, ManagerInvocation::Sudo),
+                (
+                    PrivilegedBroker::Pkexec(operation),
+                    ManagerInvocation::Polkit(operation),
+                ),
+            ]
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let _ = operation;
+            vec![(PrivilegedBroker::Sudo, ManagerInvocation::Sudo)]
+        }
+    }
+    #[test]
+    fn native_manager_assembled_entry_account_incarnation_change_refuses_before_effects() {
+        for (broker, invocation) in routes(OperationTag::Stop) {
+            let mut owner = owner(OperationTag::Stop, broker);
+            owner.change_account_under_lock = true;
+            let journal = owner.journal.clone();
+            let transactions = owner.transactions.clone();
+            assert_eq!(
+                execute(owner, invocation),
+                Err(NativeFailure::IdentityMismatch)
+            );
+            assert_eq!(*transactions.lock().unwrap(), 1);
+            assert!(journal.0.lock().unwrap().events.is_empty());
+        }
+    }
+    #[test]
+    fn native_manager_assembled_entry_revalidates_destructive_confirmation_after_native_authority()
+    {
+        for (broker, invocation) in routes(OperationTag::Stop) {
+            let mut owner = owner(OperationTag::Stop, broker);
+            Arc::get_mut(&mut owner.execution)
+                .unwrap()
+                .invalidate_confirmation = true;
+            let journal = owner.journal.clone();
+            let transactions = owner.transactions.clone();
+            let native = owner.execution.clone();
+            assert_eq!(
+                execute(owner, invocation),
+                Err(NativeFailure::GenerationMismatch)
+            );
+            assert_eq!(*native.retained.lock().unwrap(), 1);
+            assert_eq!(*transactions.lock().unwrap(), 0);
+            assert!(journal.0.lock().unwrap().events.is_empty());
+        }
+    }
+    #[test]
+    fn native_manager_assembled_entry_native_denial_cancellation_and_failed_custody_have_zero_effects()
+     {
+        for (broker, invocation) in routes(OperationTag::Stop) {
+            for failure in [
+                NativeFailure::AuthorizationDenied,
+                NativeFailure::AuthorizationCancelled,
+                NativeFailure::AuthorizationUnavailable,
+                NativeFailure::ExecutionBindingUnproven,
+            ] {
+                let mut owner = owner(OperationTag::Stop, broker);
+                Arc::get_mut(&mut owner.execution).unwrap().failure = Some(failure);
+                let journal = owner.journal.clone();
+                let transactions = owner.transactions.clone();
+                assert_eq!(execute(owner, invocation), Err(failure));
+                assert_eq!(*transactions.lock().unwrap(), 0);
+                assert!(journal.0.lock().unwrap().events.is_empty());
+            }
+        }
+    }
+    #[test]
+    fn native_manager_assembled_entry_original_expiry_and_execution_substitution_have_zero_effects()
+    {
+        for (broker, invocation) in routes(OperationTag::Stop) {
+            for expired in [true, false] {
+                let mut owner = owner(OperationTag::Stop, broker);
+                if expired {
+                    // Native authorization completed after the original scope expired.
+                    *owner.clock.0.lock().unwrap() = Duration::from_secs(31);
+                } else {
+                    let execution = Arc::get_mut(&mut owner.execution).unwrap();
+                    let mut bytes = execution.request.encode();
+                    bytes[88] ^= 1;
+                    execution.request = ManagementRequest::decode(&bytes).unwrap();
+                }
+                let journal = owner.journal.clone();
+                let transactions = owner.transactions.clone();
+                assert_eq!(
+                    execute(owner, invocation),
+                    Err(if expired {
+                        NativeFailure::StaleAssessment
+                    } else {
+                        NativeFailure::IdentityMismatch
+                    })
+                );
+                assert_eq!(*transactions.lock().unwrap(), 0);
+                assert!(journal.0.lock().unwrap().events.is_empty());
+            }
+        }
+    }
+    #[test]
+    fn native_manager_assembled_entry_rejects_wrong_build_or_fixed_operation_before_owner_access() {
+        for wrong_build in [true, false] {
+            let owner = owner(OperationTag::Stop, PrivilegedBroker::Sudo);
+            let request = owner.scopes.original.clone();
+            let retained = owner.retained.clone();
+            let journal = owner.journal.clone();
+            let build = if wrong_build {
+                BuildIdentity::Release
+            } else {
+                BuildIdentity::Development
+            };
+            let assembly = InstallationManagerAssembly::new(build, owner);
+            let guard = native_management::helper_lifetime::HelperLifetimeGuard::install().unwrap();
+            let invocation = if wrong_build {
+                ManagerInvocation::Sudo
+            } else {
+                ManagerInvocation::Polkit(OperationTag::Start)
+            };
+            assert!(matches!(
+                assembly.assemble_broker(
+                    Arc::new(ReceivedCaller(501)),
+                    invocation,
+                    &request,
+                    guard.deadline()
+                ),
+                Err(NativeFailure::IdentityMismatch)
+            ));
+            assert_eq!(*retained.lock().unwrap(), 0);
+            assert!(journal.0.lock().unwrap().events.is_empty());
+        }
+    }
 }

@@ -9,17 +9,32 @@
 #define OUTPUT_MODE 0
 #endif
 int main(int argc, char **argv) {
-    int position = 1;
-    if (argc < 5 || strcmp(argv[position++], "-k") != 0) return 91;
-    if (strcmp(argv[position], "-n") == 0) position++;
-    if (strcmp(argv[position++], "--") != 0
-        || strcmp(argv[position++], "fixture-manager") != 0
-        || strcmp(argv[position++], "--request-stdin") != 0 || position != argc) return 92;
+    int position = 1, polkit = 0;
+    const char *operation = NULL;
+    if (argc < 5) return 91;
+    if (strcmp(argv[position], "--disable-internal-agent") == 0) {
+        polkit = 1; position++;
+        if (strcmp(argv[position++], "fixture-manager") != 0) return 92;
+        operation = argv[position++];
+    } else {
+        if (strcmp(argv[position++], "-k") != 0) return 91;
+        if (strcmp(argv[position], "-n") == 0) position++;
+        if (strcmp(argv[position++], "--") != 0
+            || strcmp(argv[position++], "fixture-manager") != 0) return 92;
+    }
+    if (strcmp(argv[position++], "--request-stdin") != 0 || position != argc) return 92;
     if (getenv("LD_PRELOAD") != NULL || getenv("DYLD_INSERT_LIBRARIES") != NULL
         || getenv("SSH_ASKPASS") != NULL || getenv("SUDO_ASKPASS") != NULL
         || getenv("SPACETERM_SIGNING_KEYCHAIN") != NULL) return 93;
     if (getenv("PATH") == NULL || strcmp(getenv("PATH"), "/usr/bin:/bin") != 0
         || getenv("LC_ALL") == NULL || strcmp(getenv("LC_ALL"), "C") != 0) return 94;
+#if OUTPUT_MODE == 7
+    /* pkexec's documented pre-exec cancellation, before any manager request. */
+    return 126;
+#elif OUTPUT_MODE == 8
+    /* Denial, a missing agent or a native launch failure before manager exec. */
+    return 127;
+#endif
     struct stat transport;
     if (fstat(0, &transport) != 0 || !S_ISSOCK(transport.st_mode)) return 97;
     unsigned char request[160]; size_t used = 0;
@@ -28,6 +43,7 @@ int main(int argc, char **argv) {
         if (count <= 0) return 95;
         used += (size_t)count;
     }
+    if (polkit && (request[5] != 4 || strcmp(operation, "start") != 0)) return 92;
 #if OUTPUT_MODE == 5
     fputs("classification=3\n", stdout); return 3;
 #elif OUTPUT_MODE == 6

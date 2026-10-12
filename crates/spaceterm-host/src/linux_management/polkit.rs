@@ -217,3 +217,66 @@ impl<P: NativePolkitPeer, S: NativeAuthorizationBoundary<Caller = P::Subject>>
         self.scopes.revoke(&mut grant.enrollment);
     }
 }
+
+/// Direct native polkit rights used with the installation owner's original assessment.
+/// The fixed pkexec manager instead consumes BrokerOperationRights: auth_admin is one-shot,
+/// so it must not issue another interactive CheckAuthorization after pkexec accepts.
+/// This direct adapter does not enroll or export a second grant representation.
+pub struct PolkitOperationRights<P>(P);
+impl<P: NativePolkitPeer> PolkitOperationRights<P> {
+    /// Selects the native subject/action provider by trusted composition.
+    pub fn new(native: P) -> Self {
+        Self(native)
+    }
+}
+impl<P: NativePolkitPeer>
+    crate::native_management::facade::operation_authority::NativeOperationRights<P::Subject>
+    for PolkitOperationRights<P>
+{
+    type Right = P::Grant;
+    fn acquire(
+        &self,
+        caller: &P::Subject,
+        request: &ManagementRequest,
+        _: Duration,
+        route: AuthorizationRoute,
+        deadline: HelperDeadline,
+    ) -> Result<Self::Right, NativeFailure> {
+        if route != AuthorizationRoute::Gui {
+            return Err(NativeFailure::AuthorizationUnavailable);
+        }
+        self.0.recheck_subject(caller, deadline)?;
+        if self.0.uid(caller)? != request.key().account_uid {
+            return Err(NativeFailure::IdentityMismatch);
+        }
+        self.0
+            .authorize(
+                caller,
+                request,
+                &authorization_right(request.key().build_identity, request.operation()),
+                deadline,
+            )
+            .granted()
+    }
+    fn policy(&self, right: &Self::Right) -> Result<NativeGrantPolicy, NativeFailure> {
+        self.0.policy(right)
+    }
+    fn recheck(
+        &self,
+        caller: &P::Subject,
+        right: &Self::Right,
+        request: &ManagementRequest,
+        deadline: HelperDeadline,
+    ) -> Result<(), NativeFailure> {
+        self.0.recheck_grant(
+            caller,
+            right,
+            request,
+            &authorization_right(request.key().build_identity, request.operation()),
+            deadline,
+        )
+    }
+    fn revoke(&self, right: &mut Self::Right) {
+        self.0.revoke(right);
+    }
+}

@@ -9,6 +9,8 @@ use sha2::{Digest, Sha256};
 use std::os::unix::ffi::OsStrExt;
 use std::time::Duration;
 
+#[path = "assembly.rs"]
+pub mod assembly;
 #[path = "authorization.rs"]
 pub mod authorization;
 #[path = "backend.rs"]
@@ -17,8 +19,14 @@ pub mod backend;
 pub mod caller;
 #[path = "entry.rs"]
 pub mod entry;
+#[path = "native_api.rs"]
+pub(crate) mod native_api;
+#[path = "operation_authority.rs"]
+pub mod operation_authority;
 #[path = "socket_caller.rs"]
 pub mod socket_caller;
+#[path = "supervision.rs"]
+pub mod supervision;
 #[path = "transaction.rs"]
 pub mod transaction;
 #[path = "transport.rs"]

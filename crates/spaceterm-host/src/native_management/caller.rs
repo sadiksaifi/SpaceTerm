@@ -131,3 +131,24 @@ impl<C: NativeCallerAuthentication, S: NativeAuthorizationBoundary<Caller = C::C
         self.scopes.revoke(grant);
     }
 }
+
+impl<T: NativeCallerAuthentication> NativeCallerAuthentication for std::sync::Arc<T> {
+    type Caller = T::Caller;
+    fn bind(
+        &self,
+        route: AuthorizationRoute,
+        deadline: HelperDeadline,
+    ) -> Result<Self::Caller, NativeFailure> {
+        (**self).bind(route, deadline)
+    }
+    fn uid(&self, caller: &Self::Caller) -> Result<u32, NativeFailure> {
+        (**self).uid(caller)
+    }
+    fn recheck(
+        &self,
+        caller: &Self::Caller,
+        deadline: HelperDeadline,
+    ) -> Result<(), NativeFailure> {
+        (**self).recheck(caller, deadline)
+    }
+}

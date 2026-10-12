@@ -1,6 +1,6 @@
 //! Private broker exchange. Native custody owns executable identity through exec and reaping.
 
-use super::{SudoBoundary, SudoInvocation, reply};
+use super::{SudoBoundary, SudoInvocation, protected_execution::ManagementBroker, reply};
 use crate::native_deployment::contracts::NativeFailure;
 use crate::native_management::{
     controller::ManagementProgress,
@@ -13,7 +13,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-// This is the unprivileged OS-authentication wait, never the manager's two-second work budget.
+// This bounds the unprivileged broker wait, including native authentication and execution.
 const BROKER_WAIT: Duration = Duration::from_secs(300);
 
 /// Native retention and final exec binding for the fixed system sudo and registered manager.
@@ -68,40 +68,75 @@ impl<C: RetainedSudoExecution> SudoBoundary for NativeSudoBoundary<C> {
         invocation: SudoInvocation,
         bytes: &[u8; REQUEST_BYTES],
     ) -> Result<ManagementProgress, NativeFailure> {
-        let mut command = self.custody.prepare(&mut helper, invocation)?;
-        // No inherited or prepared injection, AskPass, agent, signing, or credential value survives.
-        command
-            .env_clear()
-            .env("PATH", "/usr/bin:/bin")
-            .env("LC_ALL", "C");
-        let (mut channel, stdin) = crate::native_management::stdin::broker_request_channel()?;
-        command
-            .stdin(Stdio::from(stdin))
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        self.custody.recheck(&mut helper)?;
-        // The native exec binding installed by prepare remains active during this spawn.
-        let child = command
-            .spawn()
-            .map_err(|_| NativeFailure::AuthorizationUnavailable)?;
-        // Command owns its configured stdin even after spawn. Close that unpublished
-        // receiver copy now, or a helper refusal cannot deliver EOF on the native channel.
-        drop(command);
-        let mut running = RunningBroker::new(child, helper);
-        let result = exchange(running.child_mut()?, &mut channel, bytes);
-        // No result, including malformed output, releases custody while the broker remains live.
-        match running.reap() {
-            Ok(status) => {
-                let progress = result?;
-                match progress {
-                    Ok(progress) if status.success() => Ok(progress),
-                    Ok(_) => Err(NativeFailure::AuthorizationUnavailable),
-                    Err(failure) if status.code() == Some(failure as i32) => Err(failure),
-                    Err(_) => Err(NativeFailure::AuthorizationUnavailable),
-                }
+        let command = self.custody.prepare(&mut helper, invocation)?;
+        invoke_broker(command, helper, bytes, ManagementBroker::Sudo, |helper| {
+            self.custody.recheck(helper)
+        })
+    }
+}
+
+pub(crate) fn invoke_broker<H: Send + Sync + 'static>(
+    mut command: Command,
+    mut helper: H,
+    bytes: &[u8; REQUEST_BYTES],
+    broker: ManagementBroker,
+    recheck: impl FnOnce(&mut H) -> Result<(), NativeFailure>,
+) -> Result<ManagementProgress, NativeFailure> {
+    // No inherited or prepared injection, AskPass, agent, signing, or credential value survives.
+    command
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("LC_ALL", "C");
+    let (mut channel, stdin) = crate::native_management::stdin::broker_request_channel()?;
+    command
+        .stdin(Stdio::from(stdin))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    recheck(&mut helper)?;
+    // The native exec binding installed by prepare remains active during this spawn.
+    let child = command
+        .spawn()
+        .map_err(|_| NativeFailure::AuthorizationUnavailable)?;
+    // Command owns its configured stdin even after spawn. Close that unpublished
+    // receiver copy now, or a helper refusal cannot deliver EOF on the native channel.
+    drop(command);
+    let mut running = RunningBroker::new(child, helper);
+    let mut observed = ExchangeObservation::default();
+    let result = exchange(running.child_mut()?, &mut channel, bytes, &mut observed);
+    // No result, including malformed output, releases custody while the broker remains live.
+    match running.reap() {
+        Ok(status) => {
+            if broker == ManagementBroker::Pkexec
+                && status.code() == Some(126)
+                && !observed.manager_started
+                && !observed.response_seen
+            {
+                // The retained fixed pkexec documents 126 for dismissed authentication,
+                // before exec. It cannot supply successful authority or hide a helper reply.
+                return Err(NativeFailure::AuthorizationCancelled);
             }
-            Err(failure) => Err(failure),
+            if !observed.manager_started
+                && !observed.response_seen
+                && !status.success()
+                && matches!(
+                    result,
+                    Err(NativeFailure::InvalidRecord | NativeFailure::IoUnavailable)
+                )
+            {
+                // A broker can close with an unread request, producing EOF or ECONNRESET.
+                // Denial, a missing agent and exec failure can share an exit status. Neither
+                // an empty reply nor that pre-manager reset is a malformed manager request.
+                return Err(NativeFailure::AuthorizationUnavailable);
+            }
+            let progress = result?;
+            match progress {
+                Ok(progress) if status.success() => Ok(progress),
+                Ok(_) => Err(NativeFailure::AuthorizationUnavailable),
+                Err(failure) if status.code() == Some(failure as i32) => Err(failure),
+                Err(_) => Err(NativeFailure::AuthorizationUnavailable),
+            }
         }
+        Err(failure) => Err(failure),
     }
 }
 
@@ -173,10 +208,17 @@ impl<H: Send + Sync + 'static> Drop for RunningBroker<H> {
     }
 }
 
+#[derive(Default)]
+struct ExchangeObservation {
+    manager_started: bool,
+    response_seen: bool,
+}
+
 fn exchange(
     child: &mut Child,
     channel: &mut std::os::unix::net::UnixStream,
     bytes: &[u8; REQUEST_BYTES],
+    observed: &mut ExchangeObservation,
 ) -> Result<Result<ManagementProgress, NativeFailure>, NativeFailure> {
     let expires = Instant::now() + BROKER_WAIT;
     channel
@@ -197,7 +239,10 @@ fn exchange(
         match channel.read(&mut challenge[used..]) {
             Ok(0) if used == 0 => break, // A source-gated helper may refuse before the handshake.
             Ok(0) => return Err(NativeFailure::InvalidRecord),
-            Ok(count) => used += count,
+            Ok(count) => {
+                observed.manager_started = true;
+                used += count;
+            }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(error)
                 if matches!(
@@ -244,6 +289,7 @@ fn exchange(
                 return Ok(result);
             }
             Ok(count) => {
+                observed.response_seen = true;
                 used += count;
                 if used > reply::REPLY_LIMIT {
                     return Err(NativeFailure::LimitExceeded);

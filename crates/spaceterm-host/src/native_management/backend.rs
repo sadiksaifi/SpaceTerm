@@ -133,6 +133,13 @@ impl<P: NativeAuthorizationBoundary, J: NativeRetainedRequestLookup> ManagementB
     ) -> IntentDisposition {
         self.owner.commit_stopped(transaction, deadline)
     }
+    fn commit_restart(
+        &self,
+        transaction: &mut Self::Transaction,
+        deadline: HelperDeadline,
+    ) -> IntentDisposition {
+        self.owner.commit_restart(transaction, deadline)
+    }
     fn suspend_automatic_start(
         &self,
         transaction: &mut Self::Transaction,

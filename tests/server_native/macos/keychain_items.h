@@ -24,25 +24,15 @@ enum {
     ST_KC_LIMIT_EXCEEDED = 30,
     ST_KC_CLEANUP_UNRESOLVED = 33,
     ST_KC_INVALID_RECORD = 9,
-    ST_KC_ATTRIBUTE_BYTES = 96,
+    ST_KC_ATTRIBUTE_BYTES = 112,
     ST_KC_PERSISTENT_BYTES = 1024
 };
 
-typedef struct {
-    uint32_t uid;
-    uint32_t gid;
-    uint32_t build;
-    uint8_t native_account[16];
-    uint8_t server_id[16];
-    uint8_t slot[16];
-    uint8_t account_binding[32];
-    const uint8_t *persistent_identity;
-    size_t persistent_identity_length;
-} st_keychain_test_binding_facts;
+typedef st_keychain_scope_snapshot st_keychain_test_binding_facts;
 
 typedef struct {
     uint32_t item_class;
-    uint8_t account[32]; /* lowercase hexadecimal slot */
+    uint8_t account[64]; /* lowercase hexadecimal slot */
     uint8_t generic[ST_KC_ATTRIBUTE_BYTES];
     const uint8_t *service;
     size_t service_length;
@@ -81,6 +71,15 @@ typedef struct {
     void (*wipe_destination)(void *context, st_native_locked_secret *destination);
     st_native_result (*lock_staging)(void *context, uint8_t *bytes, size_t length);
     st_native_result (*unlock_staging)(void *context, uint8_t *bytes, size_t length);
+    st_native_result (*collision)(void *, void *, const uint8_t *, size_t, const uint8_t *, size_t);
+    st_native_result (*reserve_slot)(void *);
+    st_native_result (*enrollment_secret)(void *, const uint8_t **, size_t *);
+    st_native_result (*create_item)(void *, void *, const st_keychain_test_attributes *, SecAccessRef,
+                                    const uint8_t *, size_t, void **);
+    st_native_result (*record_identity)(void *, const uint8_t *, size_t);
+    st_native_result (*delete_item)(void *, void *);
+    st_native_result (*mark_removed)(void *);
+    void (*uncertain)(void *);
 } st_keychain_test_calls;
 
 /* Test-only binding construction. No production issuer or native authority is

@@ -28,6 +28,14 @@ st_management_result st_management_format_right(
     uint32_t build, uint32_t operation, char *destination, size_t capacity);
 st_management_result st_management_classify_authorization(int32_t native_status);
 st_management_result st_management_classify_background_items(uint32_t native_status);
+/* Read-only SMAppService status for the fixed daemon plist in the admitted
+ * service-owner bundle. It neither registers a service nor prompts. */
+st_management_result st_management_observe_background_items(
+    uint32_t build, uint32_t account_uid, uint32_t *out_status);
+#if defined(ST_MANAGEMENT_TESTING)
+typedef st_management_result (*st_management_background_observer)(const char *, uint32_t *);
+void st_management_test_set_background_observer(st_management_background_observer observer);
+#endif
 
 /* Own the single exact right through request admission or cancellation. A
  * least-privileged token carries no reusable authenticated-user credential.
@@ -85,7 +93,29 @@ st_management_result st_management_demand_external(const st_management_demand_me
 st_management_result st_management_demand_caller_uid(const st_management_demand_message *message,
     uint32_t *out_uid);
 st_management_result st_management_demand_recheck(const st_management_demand_message *message);
+/* Join only the kernel sender's audit session before requesting interactive rights. */
+st_management_result st_management_demand_join_session(const st_management_demand_message *message);
 void st_management_demand_release(st_management_demand_message **owned_message);
+#define ST_MANAGEMENT_REPLY_BYTES 96u
+/* The send-once reply belongs to the kernel-audited original message. This call
+ * keeps the helper alive until the exact caller acknowledges the original
+ * request on a private send-once right. Sending and waiting share remaining_ms;
+ * a queued reply alone is not authenticated receipt. */
+st_management_result st_management_demand_reply(st_management_demand_message *message,
+    const uint8_t *reply, size_t length, uint32_t remaining_ms);
+/* No external grant travels on the helper-local authorization route. */
+st_management_result st_management_send_gui_demand(uint32_t build, const uint8_t request[160],
+    uint8_t out_reply[ST_MANAGEMENT_REPLY_BYTES], size_t *out_length, uint32_t remaining_ms);
+
+/* Helper-local Authorization Services route. The authenticated native owner
+ * supplies the original issuance time. No external form is produced or accepted. */
+typedef struct st_management_local_authorization st_management_local_authorization;
+st_management_result st_management_request_local_right(const uint8_t request[160],
+    uint64_t original_issued_ns, uint32_t native_caller_uid,
+    st_management_local_authorization **out_owned);
+st_management_result st_management_local_right_recheck(st_management_local_authorization *lease,
+    const uint8_t request[160]);
+st_management_result st_management_local_right_release(st_management_local_authorization **owned);
 
 /* Unbound legacy entry has no native caller scope and cannot authorize effects. */
 st_management_result st_management_authorize_request(void);
@@ -95,6 +125,7 @@ st_management_result st_management_authorize_request(void);
 #include <CoreFoundation/CoreFoundation.h>
 #include <Security/SecCode.h>
 #include <mach/mach.h>
+#include <bsm/audit.h>
 /* Compiled only into ordinary tests. These callbacks never enter production. */
 typedef struct {
     OSStatus (*create)(const AuthorizationRights *, const AuthorizationEnvironment *,
@@ -113,11 +144,14 @@ typedef struct {
     uint32_t (*real_uid)(void);
     uint32_t (*effective_uid)(void);
     kern_return_t (*check_in)(mach_port_t, const char *, mach_port_t *);
+    kern_return_t (*look_up)(mach_port_t, const char *, mach_port_t *);
     mach_msg_return_t (*receive)(mach_msg_header_t *, mach_msg_option_t,
         mach_msg_size_t, mach_msg_size_t, mach_port_name_t, mach_msg_timeout_t, mach_port_name_t);
     OSStatus (*guest)(SecCodeRef, CFDictionaryRef, SecCSFlags, SecCodeRef *);
     OSStatus (*validate)(SecCodeRef, SecCSFlags, SecRequirementRef);
     kern_return_t (*deallocate)(ipc_space_t, mach_port_name_t);
+    int (*session_port)(au_asid_t, mach_port_name_t *);
+    au_asid_t (*session_join)(mach_port_name_t);
 } st_management_demand_test_calls;
 void st_management_demand_test_set_calls(const st_management_demand_test_calls *calls);
 #endif

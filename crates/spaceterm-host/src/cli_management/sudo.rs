@@ -13,6 +13,10 @@ pub struct SudoInvocation {
     mode: SudoMode,
 }
 impl SudoInvocation {
+    /// Selects only the closed controlling-terminal or noninteractive policy.
+    pub fn for_mode(mode: SudoMode) -> Self {
+        Self { mode }
+    }
     /// Trusted OS executable. Its complete closure must also be retained by the boundary.
     pub fn executable(self) -> &'static str {
         "/usr/bin/sudo"
@@ -116,7 +120,13 @@ impl SudoBoundary for UnavailableSudoBoundary {
 }
 
 #[path = "execution.rs"]
-mod execution;
+pub(crate) mod execution;
 pub use execution::{NativeSudoBoundary, RetainedSudoExecution};
+#[path = "authorization.rs"]
+pub mod authorization;
+#[path = "protected_execution.rs"]
+pub mod protected_execution;
 #[path = "reply.rs"]
 pub mod reply;
+#[path = "ssh_authorization.rs"]
+pub mod ssh_authorization;

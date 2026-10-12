@@ -137,6 +137,8 @@ struct TestState {
     assessment_age: std::time::Duration,
     authorization_delay: std::time::Duration,
     quiescence_gate: Option<(Arc<std::sync::Barrier>, Arc<std::sync::Barrier>)>,
+    release_serial: Arc<Mutex<()>>,
+    stop_commit_attempt: Option<std::sync::mpsc::Sender<()>>,
     drained: bool,
     cleanup_unresolved: bool,
     events: Vec<&'static str>,
@@ -158,6 +160,8 @@ impl TestBackend {
             assessment_age: std::time::Duration::ZERO,
             authorization_delay: std::time::Duration::ZERO,
             quiescence_gate: None,
+            release_serial: Arc::new(Mutex::new(())),
+            stop_commit_attempt: None,
             drained: true,
             cleanup_unresolved: false,
             events: Vec::new(),
@@ -347,6 +351,11 @@ impl ManagementBackend for TestBackend {
         transaction: &mut TestTransaction,
         _deadline: HelperDeadline,
     ) -> IntentDisposition {
+        let serial = self.0.lock().unwrap().release_serial.clone();
+        if let Some(attempt) = &self.0.lock().unwrap().stop_commit_attempt {
+            attempt.send(()).unwrap();
+        }
+        let _release_fence = serial.lock().unwrap();
         if let Some(failure) = self.0.lock().unwrap().not_applied {
             return IntentDisposition::NotApplied(failure);
         }
@@ -364,6 +373,21 @@ impl ManagementBackend for TestBackend {
         if self.0.lock().unwrap().invalid_commit_phase {
             transaction.phase = ManagementPhase::Completed;
         }
+        IntentDisposition::Durable(())
+    }
+    fn commit_restart(
+        &self,
+        transaction: &mut TestTransaction,
+        _deadline: HelperDeadline,
+    ) -> IntentDisposition {
+        if self.0.lock().unwrap().uncertain {
+            return IntentDisposition::Indeterminate;
+        }
+        self.advance(
+            transaction,
+            ManagementPhase::IntentCommitted,
+            "restart-durable-generation-advanced-release-fenced",
+        );
         IntentDisposition::Durable(())
     }
     fn suspend_automatic_start(
@@ -437,7 +461,10 @@ impl ManagementBackend for TestBackend {
         transaction: &mut TestTransaction,
         _deadline: HelperDeadline,
     ) -> Result<ManagementProgress, NativeFailure> {
-        assert_eq!(transaction.phase, ManagementPhase::Quiesced);
+        assert!(matches!(
+            transaction.phase,
+            ManagementPhase::Quiesced | ManagementPhase::SupervisionRemoved
+        ));
         self.start_approved(transaction, _deadline)
     }
     fn apply_owned_operation(
@@ -700,7 +727,11 @@ fn stalled_management_backend_child() {
     }
     let backend = TestBackend::new();
     backend.0.lock().unwrap().authorization_delay = std::time::Duration::from_secs(60);
-    let controller = controller(backend);
+    let lifetime = native_management::helper_lifetime::HelperLifetimeGuard::install_for(
+        std::time::Duration::from_secs(2),
+    )
+    .unwrap();
+    let controller = ManagementController::new(backend, lifetime);
     let _ = controller.execute(&request(OperationTag::Stop), AuthorizationRoute::Gui);
     panic!("stalled native call returned rather than helper retirement");
 }
@@ -869,9 +900,10 @@ fn pkexec_uses_exact_operation_action_without_gui_environment_fallback() {
 fn management_helper_exits_after_bounded_request() {
     let started = std::time::Instant::now();
     for (arguments, code) in [
-        (vec!["--request-stdin"], 9),
+        (vec!["--request-stdin"], 3),
         (vec!["--gui-demand"], 3),
-        (vec!["stop", "--request-stdin"], 9),
+        (vec!["stop", "--request-stdin"], 3),
+        (vec!["--force"], 9),
     ] {
         let output = std::process::Command::new(env!("CARGO_BIN_EXE_spaceterm-server-manager"))
             .args(arguments)
@@ -1286,13 +1318,13 @@ mod authorization_composition;
 mod facade_composition;
 
 #[test]
-fn manager_reads_exact_request_and_rejects_operation_substitution_before_admission() {
+fn production_manager_refuses_before_parsing_request_or_operation_substitution() {
     use std::io::Write;
     use std::process::Stdio;
     for (arguments, expected) in [
         (vec!["--request-stdin"], 3),
         (vec!["start", "--request-stdin"], 3),
-        (vec!["stop", "--request-stdin"], 12),
+        (vec!["stop", "--request-stdin"], 3),
     ] {
         let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_spaceterm-server-manager"))
             .args(arguments)
@@ -1341,8 +1373,7 @@ fn production_native_broker_route_refuses_before_request_or_challenge_without_ev
 }
 
 #[test]
-fn manager_entry_installs_guard_before_waiting_for_request_eof() {
-    use std::io::Write;
+fn manager_entry_source_gate_refuses_before_waiting_for_request_eof() {
     use std::process::Stdio;
     let started = std::time::Instant::now();
     let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_spaceterm-server-manager"))
@@ -1353,15 +1384,242 @@ fn manager_entry_installs_guard_before_waiting_for_request_eof() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let mut writer = child.stdin.take().unwrap();
-    writer.write_all(&frame(OperationTag::Start)).unwrap();
-    // Retain the writer: the helper must not wait for EOF beyond its original deadline.
+    let writer = child.stdin.take().unwrap();
+    // Retain the writer without delivering EOF or a request. The closed source gate
+    // must refuse without entering request reception or native authorization.
     let output = child.wait_with_output().unwrap();
     drop(writer);
-    assert_eq!(output.status.code(), Some(NativeFailure::TimedOut as i32));
-    assert!(output.stdout.is_empty() && output.stderr.is_empty());
+    assert_eq!(
+        output.status.code(),
+        Some(NativeFailure::CustodyUnavailable as i32)
+    );
+    assert_eq!(output.stdout, b"classification=3\n");
+    assert!(output.stderr.is_empty());
     assert!(started.elapsed() < std::time::Duration::from_secs(6));
 }
 
 #[path = "native_management_composition/execution.rs"]
 mod native_execution_composition;
+
+#[test]
+fn manager_work_is_not_cut_off_at_two_seconds() {
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "manager_work_past_two_seconds_child",
+            "--nocapture",
+        ])
+        .env("SPACETERM_MANAGEMENT_LONG_WORK_CHILD", "1")
+        .stdout(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "valid manager work was retired after two seconds"
+    );
+}
+
+#[test]
+fn manager_work_past_two_seconds_child() {
+    if std::env::var_os("SPACETERM_MANAGEMENT_LONG_WORK_CHILD").is_none() {
+        return;
+    }
+    let backend = TestBackend::new();
+    backend.0.lock().unwrap().authorization_delay = std::time::Duration::from_millis(2100);
+    let result =
+        controller(backend).execute(&request(OperationTag::Start), AuthorizationRoute::Gui);
+    assert_eq!(result.unwrap().state, ProgressState::Complete);
+}
+
+#[path = "native_management_composition/ssh_authorization.rs"]
+mod ssh_authorization_composition;
+
+#[test]
+fn restart_fences_release_and_automatic_start_before_draining_the_previous_instance() {
+    let backend = TestBackend::new();
+    backend.0.lock().unwrap().drained = false;
+    let controller = controller(backend.clone());
+    let progress = controller
+        .execute(&request(OperationTag::Restart), AuthorizationRoute::Gui)
+        .unwrap();
+    assert_eq!(progress.state, ProgressState::Pending);
+    assert_eq!(
+        backend.0.lock().unwrap().intent,
+        DesiredServerState::Running
+    );
+    assert_eq!(
+        backend.0.lock().unwrap().events,
+        [
+            "journal-admitted",
+            "restart-durable-generation-advanced-release-fenced",
+            "suspend-restart-without-termination",
+            "close-admissions-cancel-reads-drain-started-writes",
+        ]
+    );
+    assert!(backend.0.lock().unwrap().started.is_empty());
+    backend.0.lock().unwrap().drained = true;
+    assert_eq!(
+        controller.resolve(progress.request).unwrap().state,
+        ProgressState::Complete
+    );
+    assert_eq!(backend.0.lock().unwrap().started, [42]);
+    assert_eq!(
+        backend
+            .0
+            .lock()
+            .unwrap()
+            .events
+            .iter()
+            .filter(|event| **event == "journal-admitted")
+            .count(),
+        1
+    );
+}
+
+#[path = "native_management_composition/supervision.rs"]
+mod supervision;
+
+#[test]
+fn stop_committed_before_native_release_has_zero_retrieval_and_delivery_effects() {
+    let backend = TestBackend::new();
+    backend.0.lock().unwrap().drained = false;
+    let controller = controller(backend.clone());
+    assert_eq!(
+        controller
+            .execute(&request(OperationTag::Stop), AuthorizationRoute::Gui)
+            .unwrap()
+            .state,
+        ProgressState::Pending
+    );
+    // The injected native release port checks intent while holding the same owner lock.
+    let serial = backend.0.lock().unwrap().release_serial.clone();
+    let _release = serial.lock().unwrap();
+    let mut state = backend.0.lock().unwrap();
+    if state.intent == DesiredServerState::Running {
+        state.events.extend(["native-retrieval", "native-delivery"]);
+    }
+    assert!(!state.events.contains(&"native-retrieval"));
+    assert!(!state.events.contains(&"native-delivery"));
+    assert!(!state.events.contains(&"bootout"));
+}
+
+#[test]
+fn native_release_wins_stop_waits_for_delivery_then_exact_retriever_retirement() {
+    let backend = TestBackend::new();
+    backend.0.lock().unwrap().cleanup_unresolved = true;
+    let serial = backend.0.lock().unwrap().release_serial.clone();
+    let release_entered = Arc::new(std::sync::Barrier::new(2));
+    let release_finish = Arc::new(std::sync::Barrier::new(2));
+    let entered = release_entered.clone();
+    let finish = release_finish.clone();
+    let release_backend = backend.clone();
+    let releasing = std::thread::spawn(move || {
+        let _lease = serial.lock().unwrap();
+        assert_eq!(
+            release_backend.0.lock().unwrap().intent,
+            DesiredServerState::Running
+        );
+        release_backend
+            .0
+            .lock()
+            .unwrap()
+            .events
+            .push("native-retrieval");
+        entered.wait();
+        finish.wait();
+        release_backend
+            .0
+            .lock()
+            .unwrap()
+            .events
+            .push("native-delivery");
+    });
+    release_entered.wait();
+    let (attempt, attempted) = std::sync::mpsc::channel();
+    backend.0.lock().unwrap().stop_commit_attempt = Some(attempt);
+    let controller = Arc::new(controller(backend.clone()));
+    let stopping = controller.clone();
+    let stopping = std::thread::spawn(move || {
+        stopping.execute(&request(OperationTag::Stop), AuthorizationRoute::Gui)
+    });
+    attempted
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .unwrap();
+    assert_eq!(
+        backend.0.lock().unwrap().intent,
+        DesiredServerState::Running
+    );
+    assert!(!backend.0.lock().unwrap().events.contains(&"bootout"));
+    release_finish.wait();
+    releasing.join().unwrap();
+    let pending = stopping.join().unwrap().unwrap();
+    assert_eq!(pending.state, ProgressState::CleanupUnresolved);
+    let events = backend.0.lock().unwrap().events.clone();
+    assert!(
+        events
+            .iter()
+            .position(|event| *event == "native-delivery")
+            .unwrap()
+            < events
+                .iter()
+                .position(|event| *event == "stopped-durable-generation-advanced-release-fenced")
+                .unwrap()
+    );
+    assert!(!events.contains(&"bootout"));
+    backend.0.lock().unwrap().cleanup_unresolved = false;
+    assert_eq!(
+        controller.resolve(pending.request).unwrap().state,
+        ProgressState::Complete
+    );
+}
+
+#[test]
+fn uncertain_restart_or_unresolved_prior_retirement_never_restarts_or_publishes_stopped() {
+    let backend = TestBackend::new();
+    backend.0.lock().unwrap().uncertain = true;
+    let controller = controller(backend.clone());
+    assert_eq!(
+        controller
+            .execute(&request(OperationTag::Restart), AuthorizationRoute::Gui)
+            .unwrap()
+            .state,
+        ProgressState::Indeterminate
+    );
+    assert_eq!(backend.0.lock().unwrap().events, ["journal-admitted"]);
+    assert_eq!(
+        backend.0.lock().unwrap().intent,
+        DesiredServerState::Running
+    );
+    backend.0.lock().unwrap().uncertain = false;
+    backend.0.lock().unwrap().cleanup_unresolved = true;
+    assert_eq!(
+        controller.resolve([1; 16]).unwrap().state,
+        ProgressState::CleanupUnresolved
+    );
+    assert!(backend.0.lock().unwrap().started.is_empty());
+    assert!(!backend.0.lock().unwrap().events.contains(&"bootout"));
+    backend.0.lock().unwrap().cleanup_unresolved = false;
+    assert_eq!(
+        controller.resolve([1; 16]).unwrap().state,
+        ProgressState::Complete
+    );
+    assert_eq!(backend.0.lock().unwrap().started, [42]);
+}
+
+#[test]
+fn restart_controller_resolves_replacement_startup_after_journaled_supervision_removal() {
+    let backend = TestBackend::new();
+    let request = request(OperationTag::Restart);
+    backend.0.lock().unwrap().transaction = Some(TestTransaction {
+        request: request.clone(),
+        phase: ManagementPhase::SupervisionRemoved,
+    });
+    let result = controller(backend.clone())
+        .resolve(*request.request_bytes())
+        .unwrap();
+    assert_eq!(result.state, ProgressState::Complete);
+    let state = backend.0.lock().unwrap();
+    assert_eq!(state.intent, DesiredServerState::Running);
+    assert_eq!(state.started, [42]);
+    assert_eq!(state.events, ["start-approved"]);
+}

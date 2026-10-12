@@ -13,8 +13,11 @@
 #include <Security/SecCode.h>
 #include <Security/SecBase.h>
 #include <Security/SecStaticCode.h>
+#include <Security/SecRequirement.h>
 #include <mach/mach.h>
+#include <bsm/audit.h>
 #include <servers/bootstrap.h>
+#include <dlfcn.h>
 #endif
 
 static void wipe(void *memory, size_t length) {
@@ -239,6 +242,218 @@ st_management_result st_management_demand_recheck(const st_management_demand_mes
     return result;
 }
 
+st_management_result st_management_demand_join_session(const st_management_demand_message *message) {
+    st_management_result result = st_management_demand_recheck(message);
+    if (result != 0) return result;
+    if (DEMAND_CALL(real_uid, getuid)() != 0 || DEMAND_CALL(effective_uid, geteuid)() != 0
+        || message->audit.val[0] != message->audit.val[1]
+        || message->audit.val[6] == 0 || message->audit.val[6] > INT32_MAX)
+        return ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
+    /* authd locates its GUI agent by audit session. A launchd system helper must
+     * join the authenticated sender's session, never a request-selected session.
+     * This helper handles one request and exits; no later caller shares it. */
+    au_asid_t asid = (au_asid_t)message->audit.val[6];
+    mach_port_name_t session = MACH_PORT_NULL;
+    if (DEMAND_CALL(session_port, audit_session_port)(asid, &session) != 0
+        || session == MACH_PORT_NULL) return ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
+    au_asid_t joined = DEMAND_CALL(session_join, audit_session_join)(session);
+    kern_return_t released = DEMAND_CALL(deallocate, mach_port_deallocate)(mach_task_self(), session);
+    if (joined != asid || released != KERN_SUCCESS) return ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
+    return st_management_demand_recheck(message);
+}
+
+typedef struct {
+    mach_msg_header_t header;
+    uint32_t length;
+    uint8_t bytes[ST_MANAGEMENT_REPLY_BYTES];
+} st_management_reply_wire;
+typedef struct {
+    mach_msg_header_t header;
+    uint8_t request_id[16];
+} st_management_ack_wire;
+
+static uint64_t monotonic_ns(void);
+typedef struct { uint64_t started, expires; } demand_deadline;
+static st_management_result demand_begin_wait(uint32_t remaining_ms, demand_deadline *deadline) {
+    uint64_t now = monotonic_ns();
+    uint64_t budget = (uint64_t)remaining_ms * UINT64_C(1000000);
+    if (now == 0 || now > UINT64_MAX - budget) return ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
+    deadline->started = now; deadline->expires = now + budget;
+    return ST_MANAGEMENT_OK;
+}
+static st_management_result demand_remaining(demand_deadline deadline, uint32_t *remaining_ms) {
+    uint64_t now = monotonic_ns();
+    if (now == 0 || now < deadline.started) return ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
+    if (now >= deadline.expires) return ST_MANAGEMENT_TIMED_OUT;
+    uint64_t milliseconds = (deadline.expires - now) / UINT64_C(1000000);
+    *remaining_ms = milliseconds == 0 ? 1 : (uint32_t)milliseconds;
+    return ST_MANAGEMENT_OK;
+}
+static st_management_result demand_message_result(mach_msg_return_t status) {
+    if (status == MACH_MSG_SUCCESS) return ST_MANAGEMENT_OK;
+    if (status == MACH_RCV_TIMED_OUT || status == MACH_SEND_TIMED_OUT) return ST_MANAGEMENT_TIMED_OUT;
+    return ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
+}
+
+st_management_result st_management_demand_reply(st_management_demand_message *message,
+    const uint8_t *reply, size_t length, uint32_t remaining_ms) {
+    if (message == NULL || reply == NULL || length == 0 || length > ST_MANAGEMENT_REPLY_BYTES
+        || remaining_ms == 0 || message->reply == MACH_PORT_NULL) return ST_MANAGEMENT_INVALID_RECORD;
+    demand_deadline deadline;
+    st_management_result result = demand_begin_wait(remaining_ms, &deadline);
+    if (result != 0) return result;
+    /* The reply transfers a private send-once acknowledgement right. A queued
+     * reply is not yet authenticated: keep this exact helper alive until the
+     * original sender has validated and copied it, or the original budget ends. */
+    mach_port_t ack = MACH_PORT_NULL;
+    if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &ack) != KERN_SUCCESS)
+        return ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
+    st_management_reply_wire outgoing;
+    memset(&outgoing, 0, sizeof(outgoing));
+    outgoing.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_MOVE_SEND_ONCE, MACH_MSG_TYPE_MAKE_SEND_ONCE);
+    outgoing.header.msgh_remote_port = message->reply; outgoing.header.msgh_local_port = ack;
+    outgoing.header.msgh_size = sizeof(outgoing); outgoing.header.msgh_id = 0x53544d52;
+    outgoing.length = (uint32_t)length; memcpy(outgoing.bytes, reply, length);
+    result = demand_remaining(deadline, &remaining_ms);
+    if (result == 0) {
+        mach_msg_return_t status = DEMAND_CALL(receive, mach_msg)(&outgoing.header,
+            MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof(outgoing), 0, MACH_PORT_NULL,
+            remaining_ms, MACH_PORT_NULL);
+        result = demand_message_result(status);
+        if (status == MACH_MSG_SUCCESS) message->reply = MACH_PORT_NULL;
+    }
+    wipe(&outgoing, sizeof(outgoing));
+    struct { st_management_ack_wire wire; mach_msg_max_trailer_t trailer; } incoming;
+    memset(&incoming, 0, sizeof(incoming));
+    if (result == 0) result = demand_remaining(deadline, &remaining_ms);
+    if (result == 0) {
+        mach_msg_return_t status = DEMAND_CALL(receive, mach_msg)(&incoming.wire.header,
+            MACH_RCV_MSG | MACH_RCV_TIMEOUT | MACH_RCV_TRAILER_TYPE(MACH_MSG_TRAILER_FORMAT_0)
+                | MACH_RCV_TRAILER_ELEMENTS(MACH_RCV_TRAILER_AUDIT),
+            0, sizeof(incoming), ack, remaining_ms, MACH_PORT_NULL);
+        result = demand_message_result(status);
+        if (status == MACH_MSG_SUCCESS) {
+            const mach_msg_audit_trailer_t *audit = (const mach_msg_audit_trailer_t *)&incoming.trailer;
+            mach_msg_header_t *header = &incoming.wire.header;
+            if (header->msgh_size != sizeof(incoming.wire) || header->msgh_id != 0x53544d41
+                || (header->msgh_bits & MACH_MSGH_BITS_COMPLEX) != 0
+                || header->msgh_remote_port != MACH_PORT_NULL || header->msgh_local_port != ack
+                || audit->msgh_trailer_type != MACH_MSG_TRAILER_FORMAT_0
+                || audit->msgh_trailer_size < sizeof(*audit) || audit->msgh_trailer_size > sizeof(incoming.trailer)
+                || memcmp(&audit->msgh_audit, &message->audit, sizeof(message->audit)) != 0
+                || memcmp(incoming.wire.request_id, message->request + 16, 16) != 0)
+                result = ST_MANAGEMENT_IDENTITY_MISMATCH;
+            header->msgh_local_port = MACH_PORT_NULL; mach_msg_destroy(header);
+        }
+    }
+    if (result == 0) result = demand_remaining(deadline, &remaining_ms);
+    wipe(&incoming, sizeof(incoming));
+    if (mach_port_mod_refs(mach_task_self(), ack, MACH_PORT_RIGHT_RECEIVE, -1) != KERN_SUCCESS)
+        result = ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
+    return result;
+}
+
+st_management_result st_management_send_gui_demand(uint32_t build, const uint8_t request[160],
+    uint8_t out[ST_MANAGEMENT_REPLY_BYTES], size_t *out_length, uint32_t remaining_ms) {
+    if (out == NULL || out_length == NULL) return ST_MANAGEMENT_INVALID_RECORD;
+    memset(out, 0, ST_MANAGEMENT_REPLY_BYTES); *out_length = 0;
+    if (request == NULL || build < 1 || build > 3 || request[6] != build || remaining_ms == 0)
+        return ST_MANAGEMENT_INVALID_RECORD;
+    uint32_t uid = ((uint32_t)request[12] << 24) | ((uint32_t)request[13] << 16)
+        | ((uint32_t)request[14] << 8) | request[15];
+    if (uid == 0 || uid != DEMAND_CALL(real_uid, getuid)()
+        || uid != DEMAND_CALL(effective_uid, geteuid)()) return ST_MANAGEMENT_IDENTITY_MISMATCH;
+    demand_deadline deadline;
+    st_management_result result = demand_begin_wait(remaining_ms, &deadline);
+    if (result != 0) return result;
+    char endpoint[ST_MANAGEMENT_RIGHT_BYTES];
+    result = st_management_format_right(build, 4, endpoint, sizeof(endpoint));
+    if (result != 0) return result;
+    char *suffix = strstr(endpoint, ".manage.start");
+    if (suffix == NULL) return ST_MANAGEMENT_INVALID_RECORD;
+    memcpy(suffix, ".manager.demand", sizeof(".manager.demand"));
+    mach_port_t server = MACH_PORT_NULL, reply = MACH_PORT_NULL;
+    if (DEMAND_CALL(look_up, bootstrap_look_up)(bootstrap_port, endpoint, &server) != KERN_SUCCESS
+        || mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &reply) != KERN_SUCCESS) {
+        if (server != MACH_PORT_NULL) (void)mach_port_deallocate(mach_task_self(), server);
+        return ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
+    }
+    st_management_demand_wire outgoing;
+    memset(&outgoing, 0, sizeof(outgoing));
+    outgoing.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MAKE_SEND_ONCE);
+    outgoing.header.msgh_remote_port = server; outgoing.header.msgh_local_port = reply;
+    outgoing.header.msgh_size = sizeof(outgoing); outgoing.header.msgh_id = 0x53544d47;
+    memcpy(outgoing.request, request, sizeof(outgoing.request));
+    result = demand_remaining(deadline, &remaining_ms);
+    if (result == 0) result = demand_message_result(DEMAND_CALL(receive, mach_msg)(
+        &outgoing.header, MACH_SEND_MSG | MACH_SEND_TIMEOUT,
+        sizeof(outgoing), 0, MACH_PORT_NULL, remaining_ms, MACH_PORT_NULL));
+    wipe(&outgoing, sizeof(outgoing));
+    struct { st_management_reply_wire wire; mach_msg_max_trailer_t trailer; } incoming;
+    memset(&incoming, 0, sizeof(incoming));
+    if (result == 0) result = demand_remaining(deadline, &remaining_ms);
+    if (result == 0) result = demand_message_result(DEMAND_CALL(receive, mach_msg)(&incoming.wire.header,
+        MACH_RCV_MSG | MACH_RCV_TIMEOUT | MACH_RCV_TRAILER_TYPE(MACH_MSG_TRAILER_FORMAT_0)
+            | MACH_RCV_TRAILER_ELEMENTS(MACH_RCV_TRAILER_AUDIT),
+        0, sizeof(incoming), reply, remaining_ms, MACH_PORT_NULL));
+    if (result == 0) {
+        result = ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
+        const mach_msg_audit_trailer_t *audit = (const mach_msg_audit_trailer_t *)&incoming.trailer;
+        mach_msg_header_t *header = &incoming.wire.header;
+        if (header->msgh_size == sizeof(incoming.wire) && header->msgh_id == 0x53544d52
+            && (header->msgh_bits & MACH_MSGH_BITS_COMPLEX) == 0
+            && MACH_MSGH_BITS_REMOTE(header->msgh_bits) == MACH_MSG_TYPE_PORT_SEND_ONCE
+            && header->msgh_remote_port != MACH_PORT_NULL && header->msgh_local_port == reply
+            && audit->msgh_trailer_type == MACH_MSG_TRAILER_FORMAT_0
+            && audit->msgh_trailer_size >= sizeof(*audit) && audit->msgh_trailer_size <= sizeof(incoming.trailer)
+            && audit->msgh_audit.val[1] == 0 && incoming.wire.length > 0
+            && incoming.wire.length <= ST_MANAGEMENT_REPLY_BYTES) {
+            SecCodeRef code = NULL; SecRequirementRef requirement = NULL;
+            result = demand_guest(&audit->msgh_audit, &code);
+            char name[ST_MANAGEMENT_RIGHT_BYTES];
+            if (result == 0) {
+                /* Same pinned signing identity as the native credential boundary. */
+                const char *base = build == 1 ? "io.github.sadiksaifi.spaceterm.server.manager"
+                    : build == 2 ? "io.github.sadiksaifi.spaceterm-preflight.server.manager"
+                    : "io.github.sadiksaifi.spaceterm-development.server.manager";
+                int size = snprintf(name, sizeof(name), "identifier \"%s\" and certificate leaf = H\"9e07cd5c15c5c862a21b93ea55d4303bc19b7366\"", base);
+                CFStringRef text = size > 0 && (size_t)size < sizeof(name)
+                    ? CFStringCreateWithCString(NULL, name, kCFStringEncodingASCII) : NULL;
+                if (text == NULL || SecRequirementCreateWithString(text, 0, &requirement) != errSecSuccess)
+                    result = ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
+                if (text != NULL) CFRelease(text);
+                if (result == 0 && DEMAND_CALL(validate, SecCodeCheckValidity)(code, kSecCSStrictValidate, requirement) != errSecSuccess)
+                    result = ST_MANAGEMENT_AUTHORIZATION_DENIED;
+            }
+            if (requirement != NULL) CFRelease(requirement);
+            if (code != NULL) CFRelease(code);
+            if (result == 0) result = demand_remaining(deadline, &remaining_ms);
+            if (result == 0) {
+                *out_length = incoming.wire.length; memcpy(out, incoming.wire.bytes, *out_length);
+                st_management_ack_wire ack;
+                memset(&ack, 0, sizeof(ack));
+                ack.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_MOVE_SEND_ONCE, 0);
+                ack.header.msgh_remote_port = header->msgh_remote_port;
+                ack.header.msgh_size = sizeof(ack); ack.header.msgh_id = 0x53544d41;
+                memcpy(ack.request_id, request + 16, 16);
+                mach_msg_return_t sent = DEMAND_CALL(receive, mach_msg)(&ack.header,
+                    MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof(ack), 0, MACH_PORT_NULL,
+                    remaining_ms, MACH_PORT_NULL);
+                result = demand_message_result(sent);
+                if (sent == MACH_MSG_SUCCESS) header->msgh_remote_port = MACH_PORT_NULL;
+                if (result == 0) result = demand_remaining(deadline, &remaining_ms);
+                wipe(&ack, sizeof(ack));
+            }
+        }
+        header->msgh_local_port = MACH_PORT_NULL; mach_msg_destroy(header);
+    }
+    if (result != 0) { memset(out, 0, ST_MANAGEMENT_REPLY_BYTES); *out_length = 0; }
+    wipe(&incoming, sizeof(incoming));
+    (void)mach_port_deallocate(mach_task_self(), server);
+    (void)mach_port_mod_refs(mach_task_self(), reply, MACH_PORT_RIGHT_RECEIVE, -1);
+    return result;
+}
+
 static int boolean_value(CFDictionaryRef dictionary, CFStringRef key, int expected) {
     CFTypeRef value = CFDictionaryGetValue(dictionary, key);
     return value != NULL && CFGetTypeID(value) == CFBooleanGetTypeID()
@@ -458,6 +673,82 @@ st_management_result st_management_verify_gui_right_bound(
     }
     return result;
 }
+struct st_management_local_authorization {
+    AuthorizationRef authorization;
+    uint8_t request[160];
+    uint64_t issued_ns;
+};
+
+static st_management_result local_expiry(uint64_t issued) {
+    uint64_t now = monotonic_ns();
+    if (issued == 0 || now == 0 || now < issued) return ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
+    return now - issued >= UINT64_C(30000000000) ? ST_MANAGEMENT_STALE_ASSESSMENT : ST_MANAGEMENT_OK;
+}
+
+st_management_result st_management_local_right_release(st_management_local_authorization **owned) {
+    if (owned == NULL) return ST_MANAGEMENT_INVALID_RECORD;
+    st_management_local_authorization *lease = *owned;
+    *owned = NULL;
+    if (lease == NULL) return ST_MANAGEMENT_OK;
+    OSStatus status = errAuthorizationSuccess;
+    if (lease->authorization != NULL)
+        status = NATIVE_CALL(free_authorization, AuthorizationFree)(lease->authorization,
+            kAuthorizationFlagDestroyRights);
+    wipe(lease, sizeof(*lease)); free(lease);
+    return st_management_classify_authorization(status);
+}
+
+st_management_result st_management_request_local_right(const uint8_t request[160],
+    uint64_t issued, uint32_t caller_uid, st_management_local_authorization **out) {
+    if (out == NULL) return ST_MANAGEMENT_INVALID_RECORD;
+    *out = NULL;
+    if (request == NULL || memcmp(request, "STMG", 4) != 0 || request[4] != 1)
+        return ST_MANAGEMENT_INVALID_RECORD;
+    uint32_t uid = ((uint32_t)request[12] << 24) | ((uint32_t)request[13] << 16)
+        | ((uint32_t)request[14] << 8) | request[15];
+    if (uid == 0 || uid == UINT32_MAX || caller_uid != uid) return ST_MANAGEMENT_IDENTITY_MISMATCH;
+    if (DEMAND_CALL(real_uid, getuid)() != 0 || DEMAND_CALL(effective_uid, geteuid)() != 0)
+        return ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
+    st_management_result result = local_expiry(issued);
+    if (result != 0) return result;
+    char right[ST_MANAGEMENT_RIGHT_BYTES];
+    result = st_management_format_right(request[6], request[5], right, sizeof(right));
+    if (result == 0) result = inspect_right_policy(right);
+    if (result != 0) return result;
+    st_management_local_authorization *lease = calloc(1, sizeof(*lease));
+    if (lease == NULL) return ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
+    result = st_management_classify_authorization(NATIVE_CALL(create, AuthorizationCreate)(NULL,
+        kAuthorizationEmptyEnvironment, ST_MANAGEMENT_LEAST_PRIVILEGED_FLAG, &lease->authorization));
+    if (result == 0 && lease->authorization == NULL) result = ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
+    if (result == 0) result = copy_exact_right(lease->authorization, right, 1);
+    if (result == 0) result = local_expiry(issued);
+    if (result != 0) {
+        st_management_result retired = st_management_local_right_release(&lease);
+        return retired == 0 ? result : ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
+    }
+    memcpy(lease->request, request, sizeof(lease->request)); lease->issued_ns = issued;
+    *out = lease; return ST_MANAGEMENT_OK;
+}
+
+st_management_result st_management_local_right_recheck(st_management_local_authorization *lease,
+    const uint8_t request[160]) {
+    if (lease == NULL || request == NULL || lease->authorization == NULL)
+        return ST_MANAGEMENT_AUTHORIZATION_DENIED;
+    st_management_result result = memcmp(lease->request, request, 160) == 0
+        ? local_expiry(lease->issued_ns) : ST_MANAGEMENT_IDENTITY_MISMATCH;
+    char right[ST_MANAGEMENT_RIGHT_BYTES];
+    if (result == 0) result = st_management_format_right(request[6], request[5], right, sizeof(right));
+    if (result == 0) result = inspect_right_policy(right);
+    if (result == 0) result = copy_exact_right(lease->authorization, right, 0);
+    if (result == 0) result = local_expiry(lease->issued_ns);
+    if (result != 0) {
+        OSStatus retired = NATIVE_CALL(free_authorization, AuthorizationFree)(lease->authorization,
+            kAuthorizationFlagDestroyRights);
+        lease->authorization = NULL;
+        if (retired != 0) return ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
+    }
+    return result;
+}
 #else
 st_management_result st_management_receive_gui_demand(uint32_t build, uint32_t remaining,
     st_management_demand_message **out) {
@@ -478,6 +769,9 @@ st_management_result st_management_demand_caller_uid(const st_management_demand_
     *out = 0; return ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
 }
 st_management_result st_management_demand_recheck(const st_management_demand_message *message) {
+    (void)message; return ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
+}
+st_management_result st_management_demand_join_session(const st_management_demand_message *message) {
     (void)message; return ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
 }
 void st_management_demand_release(st_management_demand_message **owned) { if (owned != NULL) *owned = NULL; }
@@ -512,6 +806,24 @@ st_management_result st_management_verify_gui_right_bound(
 }
 #endif
 
+#if !defined(__APPLE__)
+st_management_result st_management_request_local_right(const uint8_t request[160],
+    uint64_t issued, uint32_t caller_uid, st_management_local_authorization **out) {
+    (void)request; (void)issued; (void)caller_uid;
+    if (out == NULL) return ST_MANAGEMENT_INVALID_RECORD;
+    *out = NULL; return ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
+}
+st_management_result st_management_local_right_recheck(st_management_local_authorization *lease,
+    const uint8_t request[160]) {
+    (void)lease; (void)request; return ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
+}
+st_management_result st_management_local_right_release(st_management_local_authorization **owned) {
+    if (owned == NULL) return ST_MANAGEMENT_INVALID_RECORD;
+    *owned = NULL; return ST_MANAGEMENT_OK;
+}
+
+#endif
+
 st_management_result st_management_authorize_request(void) {
     return ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
 }
@@ -522,4 +834,81 @@ st_management_result st_management_verify_gui_right(uint32_t build, uint32_t ope
     if (out == NULL || external == NULL) return ST_MANAGEMENT_INVALID_RECORD;
     memset(out, 0, sizeof(*out));
     return ST_MANAGEMENT_AUTHORIZATION_UNAVAILABLE;
+}
+
+#if defined(ST_MANAGEMENT_TESTING)
+static st_management_background_observer background_observer;
+void st_management_test_set_background_observer(st_management_background_observer observer) {
+    background_observer = observer;
+}
+#endif
+#if defined(__APPLE__)
+static int background_symbol(const char *name, void *destination, size_t size) {
+    void *symbol = dlsym(RTLD_DEFAULT, name);
+    if (symbol == NULL || size != sizeof(symbol)) return 0;
+    memcpy(destination, &symbol, size);
+    return 1;
+}
+static st_management_result native_background_status(const char *plist, uint32_t *out_status) {
+    /* The sealed system framework is the only library opened. The admitted
+     * helper bundle owns the daemon plist; no account path or plugin is loaded. */
+    void *framework = dlopen("/System/Library/Frameworks/ServiceManagement.framework/ServiceManagement",
+        RTLD_NOW | RTLD_LOCAL);
+    if (framework == NULL) return ST_MANAGEMENT_NATIVE_UNAVAILABLE;
+    void *(*get_class)(const char *) = NULL;
+    void *(*selector)(const char *) = NULL;
+    void *(*pool_push)(void) = NULL;
+    void (*pool_pop)(void *) = NULL;
+    void *(*message_object)(void *, void *, CFStringRef) = NULL;
+    uintptr_t (*message_status)(void *, void *) = NULL;
+    if (!background_symbol("objc_getClass", &get_class, sizeof(get_class)) ||
+        !background_symbol("sel_registerName", &selector, sizeof(selector)) ||
+        !background_symbol("objc_autoreleasePoolPush", &pool_push, sizeof(pool_push)) ||
+        !background_symbol("objc_autoreleasePoolPop", &pool_pop, sizeof(pool_pop)) ||
+        !background_symbol("objc_msgSend", &message_object, sizeof(message_object)) ||
+        !background_symbol("objc_msgSend", &message_status, sizeof(message_status))) {
+        dlclose(framework); return ST_MANAGEMENT_NATIVE_UNAVAILABLE;
+    }
+    void *pool = pool_push();
+    CFStringRef name = CFStringCreateWithCString(NULL, plist, kCFStringEncodingUTF8);
+    void *class = get_class("SMAppService");
+    void *service = class != NULL && name != NULL ?
+        message_object(class, selector("daemonServiceWithPlistName:"), name) : NULL;
+    uintptr_t status = service != NULL ? message_status(service, selector("status")) : UINTPTR_MAX;
+    if (name != NULL) CFRelease(name);
+    pool_pop(pool);
+    dlclose(framework);
+    if (status > 3) return ST_MANAGEMENT_NATIVE_UNAVAILABLE;
+    *out_status = (uint32_t)status;
+    return ST_MANAGEMENT_OK;
+}
+#endif
+st_management_result st_management_observe_background_items(
+    uint32_t build, uint32_t account_uid, uint32_t *out_status) {
+    if (out_status != NULL) *out_status = UINT32_MAX;
+    if (out_status == NULL || build < 1 || build > 3 || account_uid == 0 || account_uid == UINT32_MAX)
+        return ST_MANAGEMENT_INVALID_RECORD;
+    static const char *const identifiers[] = {
+        "io.github.sadiksaifi.spaceterm.server",
+        "io.github.sadiksaifi.spaceterm-preflight.server",
+        "io.github.sadiksaifi.spaceterm-development.server"
+    };
+    char plist[160];
+    int written = snprintf(plist, sizeof(plist), "%s.%u.plist", identifiers[build - 1], account_uid);
+    if (written < 0 || (size_t)written >= sizeof(plist)) return ST_MANAGEMENT_INVALID_RECORD;
+    uint32_t status = UINT32_MAX;
+    st_management_result result;
+#if defined(ST_MANAGEMENT_TESTING)
+    if (background_observer != NULL) result = background_observer(plist, &status);
+    else
+#endif
+#if defined(__APPLE__)
+        result = native_background_status(plist, &status);
+#else
+        result = ST_MANAGEMENT_NATIVE_UNAVAILABLE;
+#endif
+    if (result != ST_MANAGEMENT_OK) return result;
+    if (status > 3) return ST_MANAGEMENT_NATIVE_UNAVAILABLE;
+    *out_status = status;
+    return ST_MANAGEMENT_OK;
 }

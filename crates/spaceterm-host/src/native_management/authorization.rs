@@ -86,7 +86,8 @@ pub trait NativeAuthorizationBoundary: Send + Sync + 'static {
         assessment: &Self::Assessment,
         deadline: HelperDeadline,
     ) -> Result<(), NativeFailure>;
-    /// Verifies the locally derived exact right without prompting in the privileged helper.
+    /// Obtains the exact native right. GUI interaction uses only the authenticated caller's
+    /// audit session; sudo and pkexec authenticate through their fixed OS brokers.
     fn verify_right(
         &self,
         caller: &Self::Caller,

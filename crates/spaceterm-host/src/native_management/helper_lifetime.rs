@@ -21,6 +21,17 @@ impl HelperDeadline {
             .filter(|remaining| !remaining.is_zero())
             .ok_or(NativeFailure::TimedOut)
     }
+    /// Reserves time before this helper's original exit deadline for exact child retirement.
+    /// The returned budget is shorter and cannot extend the original lifetime.
+    pub fn reserve_cleanup(self, reserve: Duration) -> Result<Self, NativeFailure> {
+        let expires = self
+            .expires
+            .checked_sub(reserve)
+            .ok_or(NativeFailure::TimedOut)?;
+        let deadline = Self { expires };
+        deadline.check()?;
+        Ok(deadline)
+    }
     /// Refuse another effect once the original request budget has elapsed.
     pub fn check(self) -> Result<(), NativeFailure> {
         self.remaining().map(|_| ())
@@ -41,11 +52,17 @@ pub struct HelperLifetimeGuard {
     worker: Option<JoinHandle<()>>,
 }
 impl HelperLifetimeGuard {
-    /// Install the independent native thread before any potentially stalled call.
+    /// Installs the manager's bounded wait before any potentially stalled call.
     pub fn install() -> Result<Self, NativeFailure> {
-        let deadline = HelperDeadline {
-            expires: Instant::now() + HELPER_LIFETIME,
-        };
+        Self::install_for(HELPER_LIFETIME)
+    }
+    /// Installs a bound chosen by trusted composition, never a request or environment value.
+    pub fn install_for(lifetime: Duration) -> Result<Self, NativeFailure> {
+        let expires = Instant::now()
+            .checked_add(lifetime)
+            .filter(|_| !lifetime.is_zero())
+            .ok_or(NativeFailure::LimitExceeded)?;
+        let deadline = HelperDeadline { expires };
         let control = Arc::new((Mutex::new(true), Condvar::new()));
         let worker_control = Arc::clone(&control);
         let worker = thread::Builder::new()
