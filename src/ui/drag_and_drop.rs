@@ -68,6 +68,8 @@ pub(crate) struct ReorderableStrip<Id> {
     /// Where each item of the last frame started along the strip, and its size, in layout
     /// coordinates.
     laid_out: HashMap<Id, (Pixels, Pixels)>,
+    /// When the strip prepared the frame `laid_out` comes from.
+    laid_out_at: Option<Instant>,
     /// The selected item at the last refresh.
     selected: Option<Id>,
     /// The selection moving to the selected item.
@@ -225,6 +227,7 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
             leading_gaps: HashMap::new(),
             trailing_gaps: HashMap::new(),
             refreshed_at: None,
+            laid_out_at: None,
             laid_out: HashMap::new(),
             selected: None,
             flight: None,
@@ -506,23 +509,26 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
         }
     }
 
-    /// Where the selection drawn at the item `id` started along the strip in the last frame.
+    /// Where the selection drawn at the item `id` stands along the strip at `now`, or `None` when
+    /// the last frame did not draw the item.
     fn selection_start(&self, id: Id, now: Instant) -> Option<Pixels> {
-        let (start, _) = *self.laid_out.get(&id)?;
+        if !self.laid_out.contains_key(&id) {
+            return None;
+        }
         let flying = self
             .flight
             .as_ref()
             .filter(|flight| flight.id == id)
-            .map_or(px(0.0), |flight| {
-                flight.from * (1.0 - flight.ease.at(now)) - self.displacement(id, now)
-            });
-        Some(start + flying)
+            .map_or(px(0.0), |flight| flight.from * (1.0 - flight.ease.at(now)));
+        Some(self.settled_start(id, now)? + flying)
     }
 
     /// Where the item `id` starts along the strip once every item has grown in and every gap has
     /// closed. A new item starts where the item after it, or the end of the item before it, stood
-    /// in the last frame, and settles as far beyond as the items before it still grow.
+    /// in the last frame, and settles as far beyond as the items before it still grew then. The
+    /// last frame's layout pairs with the growth of that frame's time, not `now`'s.
     fn settled_start(&self, id: Id, now: Instant) -> Option<Pixels> {
+        let now = self.laid_out_at.unwrap_or(now);
         if let Some((start, _)) = self.laid_out.get(&id) {
             return Some(*start - self.displacement(id, now));
         }
@@ -594,6 +600,7 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
             return;
         };
         self.scrolled = items.offset().along(axis);
+        self.laid_out_at = self.refreshed_at;
         let viewport = items.bounds();
         let visible_end = viewport.origin.along(axis) + viewport.size.along(axis);
         let bounds = (0..known.len())

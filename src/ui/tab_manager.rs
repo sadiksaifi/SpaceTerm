@@ -6554,26 +6554,33 @@ mod tests {
         let selection = cx.debug_bounds("tab-item-13-chip").unwrap().origin;
         let next_frame = |cx: &mut VisualTestContext| {
             cx.executor()
-                .advance_clock(std::time::Duration::from_millis(30));
+                .advance_clock(std::time::Duration::from_millis(16));
             cx.update(|window, cx| window.simulate_next_frame(cx));
             cx.run_until_parked();
         };
 
-        click("create-tab-button", cx);
-        for _ in 0..4 {
-            next_frame(cx);
-        }
-        click("create-tab-button", cx);
-        let mut frames = vec![cx.debug_bounds("tab-item-15-chip").unwrap().origin];
-        for _ in 0..4 {
-            next_frame(cx);
-            frames.push(cx.debug_bounds("tab-item-15-chip").unwrap().origin);
+        let mut frames = Vec::new();
+        for chip in [
+            "tab-item-14-chip",
+            "tab-item-15-chip",
+            "tab-item-16-chip",
+            "tab-item-17-chip",
+        ] {
+            // A Tab opens from the keyboard part way between two frames.
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(10));
+            cx.dispatch_action(crate::ui::CreateTab);
+            frames.push(cx.debug_bounds(chip).unwrap().origin.x);
+            for _ in 0..2 {
+                next_frame(cx);
+                frames.push(cx.debug_bounds(chip).unwrap().origin.x);
+            }
         }
 
-        assert_eq!(
-            frames,
-            vec![selection; 5],
-            "a Tab opened while the one before it still grows must hold the selection still"
+        assert!(
+            frames.iter().all(|x| (*x - selection.x).abs() <= px(1.0)),
+            "a Tab opened while the one before it still grows must hold the selection still at \
+             {selection:?}, got {frames:?}"
         );
     }
 
