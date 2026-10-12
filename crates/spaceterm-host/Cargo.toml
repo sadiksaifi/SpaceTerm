@@ -19,6 +19,10 @@ futures-util = { version = "=0.3.34", default-features = false, features = ["sin
 x509-parser = "=0.18.1"
 zeroize = "=1.9.0"
 socket2 = "=0.6.5"
+sha2 = "=0.10.9"
+hmac = "=0.12.1"
+hkdf = "=0.12.4"
+subtle = "=2.6.1"
 
 [dev-dependencies]
 tokio = { version = "=1.53.1", features = ["test-util"] }

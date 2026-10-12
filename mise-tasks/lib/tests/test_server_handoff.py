@@ -2187,3 +2187,71 @@ if __name__ == "__main__":
         unittest.main(argv=[sys.argv[0]])
     else:
         unittest.main()
+
+
+class LauncherToolContractTests(unittest.TestCase):
+    """The new task inherits the existing supervisor without weakening record bounds."""
+
+    def probe(self, mode):
+        source = _TASK.with_name("launcher_tests.py")
+        script = r"""
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("_launcher_tools_contract", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+driver = module.supervisor()
+records = [dict(schema=1, scope=driver.SCOPE, case=name, result="pass") for name in module.CASES]
+mode = sys.argv[2]
+if mode == "signal-contract":
+    import signal
+    print(json.dumps({"accepted": [driver._native_scope_retired(code) for code in
+        (-signal.SIGTERM, -signal.SIGINT, 125, 128 + signal.SIGTERM, 128 + signal.SIGINT)]}))
+    raise SystemExit(0)
+if mode == "missing": records.pop()
+if mode == "unknown": records[0]["case"] = "unapproved-case"
+if mode == "native-text": records[0]["detail"] = "native diagnostic must never pass"
+if mode == "duplicate": records.insert(0, records[0])
+data = b"".join(json.dumps(record, separators=(",", ":")).encode() + b"\n" for record in records)
+try:
+    accepted = driver.validate_records(data, 0)
+    report = {"accepted": True, "count": len(accepted)}
+except driver.TaskFailure as error:
+    report = {"accepted": False, "failure": error.classification}
+print(json.dumps(report, separators=(",", ":")))
+"""
+        result = subprocess.run(
+            [_PYTHON, "-I", "-c", script, str(source), mode],
+            env={},
+            capture_output=True,
+            timeout=5,
+            check=True,
+        )
+        self.assertEqual(result.stderr, b"")
+        self.assertLess(len(result.stdout), 256)
+        return json.loads(result.stdout)
+
+    def test_launcher_requires_all_sixteen_executed_cases(self):
+        self.assertEqual(self.probe("valid"), {"accepted": True, "count": 16})
+        self.assertEqual(
+            self.probe("missing"),
+            {"accepted": False, "failure": "driver-invalid-output"},
+        )
+
+    def test_launcher_rejects_unknown_and_duplicate_cases(self):
+        for mode in ("unknown", "duplicate"):
+            with self.subTest(mode=mode):
+                self.assertEqual(
+                    self.probe(mode),
+                    {"accepted": False, "failure": "driver-invalid-output"},
+                )
+
+    def test_launcher_never_relays_native_diagnostic_fields(self):
+        self.assertEqual(
+            self.probe("native-text"),
+            {"accepted": False, "failure": "driver-invalid-output"},
+        )
+
+    def test_launcher_raw_signal_death_is_not_child_retirement(self):
+        self.assertEqual(
+            self.probe("signal-contract"), {"accepted": [False, False, False, True, True]}
+        )
