@@ -16,6 +16,7 @@ from spaceterm_tasks import ROOT, TaskError, main
 REQUIRED_CRATES = (
     "spaceterm-core",
     "spaceterm-client",
+    "spaceterm-client-native",
     "spaceterm-server",
     "spaceterm-host",
     "spaceterm-protocol",

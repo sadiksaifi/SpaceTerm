@@ -1,0 +1,51 @@
+syntax = "proto3";
+package spaceterm.git.v2;
+import "common.proto";
+import "directories_v2.proto";
+message BranchText { string value = 1; }
+enum GitAssessmentKind { GIT_ASSESSMENT_UNSPECIFIED = 0; CREATE = 1; REMOVE = 2; }
+message GitAssessmentToken { spaceterm.common.Identity server = 1; uint64 epoch = 2; spaceterm.common.Entity pairing = 3; spaceterm.common.Entity client = 4; GitAssessmentKind kind = 5; bytes random = 6; }
+message GitCommand { oneof action { GitAssessmentToken create_confirmed = 1; GitAssessmentToken remove_confirmed = 2; } }
+enum GitFailure { GIT_FAILURE_UNSPECIFIED = 0; GIT_UNAUTHORIZED = 1; GIT_WRONG_SERVER = 2; GIT_TARGET_GONE = 3; GIT_OFFLINE = 4; GIT_BUSY = 5; GIT_CAPACITY = 6; GIT_EXPIRED_ASSESSMENT = 7; GIT_STALE_ASSESSMENT = 8; GIT_MAIN_WORKTREE = 9; GIT_LOCKED_WORKTREE = 10; GIT_UNLISTED_WORKTREE = 11; GIT_HOLDS_PINNED_DIRECTORY = 12; GIT_NO_FALLBACK = 13; GIT_INVALID_BRANCH = 14; GIT_INVALID_TEMPLATE = 15; GIT_INVALID_DIRECTORY = 16; GIT_OCCUPIED_TARGET = 17; GIT_BRANCH_EXISTS = 18; GIT_BRANCH_MISSING = 19; GIT_BRANCH_CHECKED_OUT = 20; GIT_IDENTITY_REPLACED = 21; GIT_GIT_STATE_CHANGED = 22; GIT_UNCHECKED = 23; GIT_TOOL_MISSING = 24; GIT_TOOL_TOO_OLD = 25; GIT_CANCELLED_READ = 26; GIT_TIMED_OUT_READ = 27; GIT_INVALID_RESPONSE = 28; GIT_OUTPUT_TOO_LARGE = 29; GIT_WRITE_FAILED = 30; GIT_EXTERNAL_STATE_UNCERTAIN = 31; GIT_RECOVERY_NEEDS_REVIEW = 32; GIT_STORAGE_LOCKED = 33; GIT_STORAGE_UNAVAILABLE = 34; GIT_UNSAFE_STORAGE = 35; GIT_STORAGE_FAILURE = 36; GIT_INDETERMINATE_DURABILITY = 37; }
+enum ExternalDisposition { EXTERNAL_UNSPECIFIED = 0; NO_EFFECT_ESTABLISHED = 1; DESIRED_STATE_OBSERVED = 2; PARTIAL_OR_AMBIGUOUS = 3; UNAVAILABLE = 4; }
+message GitCreated { spaceterm.common.Entity worktree = 1; uint64 revision = 2; }
+message GitRemoved { spaceterm.common.Entity worktree = 1; uint32 closed_tabs = 2; uint32 ended_sessions = 3; uint64 revision = 4; }
+message GitFailed { spaceterm.common.Identity server = 1; GitFailure failure = 2; uint32 ended_sessions = 3; ExternalDisposition external = 4; }
+enum RecoveryObservation { RECOVERY_OBSERVATION_UNSPECIFIED = 0; RECOVERY_DESIRED_STATE = 1; RECOVERY_PRE_STATE = 2; RECOVERY_PARTIAL_OR_AMBIGUOUS = 3; RECOVERY_UNAVAILABLE = 4; }
+message GitRecovered { spaceterm.common.Identity server = 1; RecoveryObservation observation = 2; optional uint64 revision = 3; }
+message GitMutationOutcome { oneof result { GitCreated created = 1; GitRemoved removed = 2; GitFailed failed = 3; GitRecovered recovered = 4; } }
+message RepositoryScope { spaceterm.common.Identity server = 1; spaceterm.common.Entity repository = 2; }
+message GitPageCursor { RepositoryScope scope = 1; uint64 epoch = 2; uint64 observation = 3; bytes random = 4; }
+message GitInventoryRecord { spaceterm.common.Entity worktree = 1; spaceterm.directories.v2.ServerDirectory directory = 2; bool main = 3; bool missing = 4; bool listed = 5; uint64 version = 6; }
+message GitInventoryPage { repeated GitInventoryRecord records = 1; GitPageCursor next = 2; uint64 version = 3; }
+message GitBranchRecord { BranchText name = 1; bool remote = 2; bool checked_out = 3; }
+message GitBranchPage { repeated GitBranchRecord records = 1; GitPageCursor next = 2; }
+message GitAffectedTab { spaceterm.common.Entity workspace = 1; spaceterm.common.Entity tab = 2; spaceterm.common.Entity worktree = 3; uint64 membership_version = 4; }
+message GitAffectedPane { spaceterm.common.Entity pane = 1; spaceterm.common.Entity tab = 2; uint64 session_generation = 3; uint64 control_generation = 4; uint64 work_generation = 5; bool starting = 6; }
+message GitFallback { spaceterm.common.Entity workspace = 1; spaceterm.common.Entity worktree = 2; spaceterm.directories.v2.ServerDirectory directory = 3; }
+message GitAssessmentPage { GitAssessmentToken token = 1; repeated GitAffectedTab tabs = 2; repeated GitAffectedPane panes = 3; repeated GitFallback fallbacks = 4; GitPageCursor next = 5; bool requires_confirmation = 6; WorktreeCreationPreview creation_preview = 7; }
+message GitChange { bytes path = 1; uint32 kind = 2; }
+message GitStatusFacts { uint64 revision = 1; BranchText branch = 2; repeated GitChange changes = 3; bool dirty = 4; bool unchecked = 5; }
+message GitCreateAssessmentRequest { spaceterm.directories.v2.ServerDirectory directory = 1; BranchText name = 2; BranchText base = 3; bool remote_base = 4; WorktreeCreateDraft draft = 5; }
+message GitQuery { uint64 request = 1; uint64 request_generation = 2; RepositoryScope scope = 3; bool subscribe = 4; GitPageCursor cursor = 5; oneof action { bool inventory = 6; bool branches = 7; bool status = 8; GitCreateAssessmentRequest assess_create = 9; spaceterm.common.Entity assess_remove = 10; GitAssessmentToken assessment_page = 11; GitStatusTarget status_target = 12; GitInventoryRequest workspace_inventory = 13; } }
+message GitQueryResult { uint64 request = 1; uint64 request_generation = 2; RepositoryScope scope = 3; oneof result { GitInventoryPage inventory = 4; GitBranchPage branches = 5; GitStatusFacts status = 6; GitAssessmentPage assessment = 7; spaceterm.common.Failure failure = 8; GitFailure typed_failure = 9; } }
+
+// SERVER_GIT canonical creation choices. Legacy request fields remain readable.
+message BranchReference { oneof reference { BranchText local = 1; BranchText remote = 2; } }
+message NewBranchChoice { BranchText name = 1; BranchReference base = 2; }
+message RemoteBranchChoice { BranchText remote = 1; BranchText name = 2; }
+message WorktreeBranchChoice { oneof choice { NewBranchChoice new = 1; BranchText existing = 2; RemoteBranchChoice remote = 3; } }
+message ServerTemplateChoice { uint64 expected_version = 1; }
+message WorktreeLocationChoice { oneof choice { ServerTemplateChoice server_template = 1; spaceterm.directories.v2.ServerDirectory explicit = 2; } }
+message WorktreeCreateDraft { RepositoryScope repository = 1; WorktreeBranchChoice branch = 2; WorktreeLocationChoice location = 3; }
+message WorktreeCreationPreview { WorktreeCreateDraft draft = 1; spaceterm.directories.v2.ServerDirectory directory = 2; optional uint64 template_version = 3; }
+
+// SERVER_GIT qualified discovery selectors. RepositoryScope is not required for
+// a status target or Workspace inventory. Existing boolean actions stay legacy.
+message GitStatusTarget {
+  oneof target {
+    spaceterm.common.Entity pane = 1; spaceterm.common.Entity workspace = 2;
+    spaceterm.common.Entity worktree = 3;
+  }
+}
+message GitInventoryRequest { spaceterm.common.Entity workspace = 1; }

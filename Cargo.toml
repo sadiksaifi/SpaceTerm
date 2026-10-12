@@ -2,11 +2,13 @@
 name = "spaceterm"
 publish = false
 edition = "2024"
+default-run = "spaceterm"
 
 [workspace]
 members = [
     "crates/spaceterm-core",
     "crates/spaceterm-client",
+    "crates/spaceterm-client-native",
     "crates/spaceterm-server",
     "crates/spaceterm-directories",
     "crates/spaceterm-host",
@@ -34,6 +36,7 @@ native-tests = [
     "spaceterm-terminal/native-tests",
 ]
 developer-tools = ["spaceterm-ui/control-preview"]
+status-companion = ["objc2-app-kit/NSButton", "objc2-app-kit/NSControl", "objc2-app-kit/NSStatusBar", "objc2-app-kit/NSStatusBarButton", "objc2-app-kit/NSStatusItem"]
 
 [[test]]
 name = "macos_quick_look_ownership"
@@ -47,7 +50,21 @@ path = "tests/macos_native_main_thread.rs"
 harness = false
 required-features = ["native-tests"]
 
+[[bin]]
+name = "spaceterm"
+path = "src/main.rs"
+
+[[bin]]
+name = "spaceterm-status"
+path = "src/bin/spaceterm-status.rs"
+required-features = ["status-companion"]
+
 [dependencies]
+spaceterm-core = { path = "crates/spaceterm-core" }
+spaceterm-client = { path = "crates/spaceterm-client", default-features = false }
+spaceterm-client-native = { path = "crates/spaceterm-client-native" }
+spaceterm-protocol = { path = "crates/spaceterm-protocol" }
+tokio = { version = "=1.53.1", default-features = false, features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
@@ -67,7 +84,7 @@ rustc-hash = "=2.1.3"
 spaceterm-directories = { path = "crates/spaceterm-directories" }
 spaceterm-host = { path = "crates/spaceterm-host" }
 spaceterm-ui = { path = "crates/spaceterm-ui" }
-spaceterm-terminal = { path = "crates/spaceterm-terminal" }
+spaceterm-terminal = { path = "crates/spaceterm-terminal", features = ["runtime"] }
 thiserror = "2.0.17"
 unicode-bidi = "=0.3.18"
 unicode-segmentation = "=1.13.3"
@@ -81,6 +98,7 @@ base64 = "=0.22.1"
 serde_json_lenient = "=0.2.4"
 
 [target.'cfg(target_os = "linux")'.dependencies]
+oo7 = { version = "=0.6.0", default-features = false, features = ["async-std", "native_crypto"] }
 fontconfig_sys = { package = "yeslogic-fontconfig-sys", version = "=6.0.1" }
 zbus = { version = "=5.19.0", features = ["blocking-api"] }
 roxmltree = "=0.21.1"
@@ -97,6 +115,7 @@ objc2-user-notifications = { version = "=0.3.2", default-features = false, featu
 raw-window-handle = "=0.6.2"
 
 [dev-dependencies]
+spaceterm-client = { path = "crates/spaceterm-client", default-features = false, features = ["test-support"] }
 spaceterm-terminal = { path = "crates/spaceterm-terminal", features = ["test-support"] }
 accesskit_consumer = "=0.38.0"
 gpui = { git = "https://github.com/sadiksaifi/zed", tag = "spaceterm-2026-10-10.1", features = ["test-support"] }

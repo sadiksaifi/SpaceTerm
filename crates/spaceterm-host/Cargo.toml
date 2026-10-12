@@ -8,6 +8,12 @@ native-tests = []
 test-support = []
 
 [dependencies]
+spaceterm-core = { path = "../spaceterm-core" }
+spaceterm-protocol = { path = "../spaceterm-protocol" }
+serde = { version = "=1.0.229", features = ["derive"] }
+ring = "=0.17.14"
+zeroize = "=1.9.0"
+getrandom = "=0.4.3"
 same-file = "=1.0.6"
 thiserror = "=2.0.19"
 rusqlite = { version = "=0.37.0", features = ["bundled", "hooks"] }
@@ -16,3 +22,41 @@ rusqlite = { version = "=0.37.0", features = ["bundled", "hooks"] }
 libc = "=0.2.189"
 anyhow = "1.0.100"
 portable-pty = "=0.9.0"
+
+[dev-dependencies]
+tempfile = "=3.27.0"
+
+[[test]]
+name = "organization_store"
+path = "tests/organization_store.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "organization_store_schema"
+path = "tests/organization_store_schema.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "organization_store_recovery"
+path = "tests/organization_store_recovery.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "organization_store_auxiliary"
+path = "tests/organization_store_auxiliary.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "organization_store_seed"
+path = "tests/organization_store_seed.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "organization_store_faults"
+path = "tests/organization_store_faults.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "organization_store_crash"
+path = "tests/organization_store_crash.rs"
+required-features = ["test-support"]
