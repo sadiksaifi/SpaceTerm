@@ -75,6 +75,27 @@ class ServerPackageTests(unittest.TestCase):
                     package_server.verify_archive(bad)
         self.assertEqual(manifest["entry_points"]["server"], "bin/spaceterm-server")
 
+    def test_build_requires_the_credential_free_spawner(self):
+        binaries = {
+            name: self.root / path
+            for name, path in (
+                ("spaceterm-server", "bin/spaceterm-server"),
+                ("spaceterm-server-launcher", "libexec/spaceterm-server-launcher"),
+                ("spaceterm-server-manager", "libexec/spaceterm-server-manager"),
+            )
+        }
+        with self.assertRaisesRegex(TaskError, "spawner"):
+            package_server.copy_built_executables(
+                binaries, self.root / "destination", self.metadata
+            )
+
+    def test_production_manifest_refuses_evidence_only_executables(self):
+        evidence = self.root / "libexec/spaceterm-native-evidence-client"
+        evidence.parent.mkdir(exist_ok=True)
+        evidence.write_bytes(b"evidence-only code")
+        with self.assertRaises(TaskError):
+            package_server.write_manifest(self.root, self.metadata)
+
     def test_manifest_rejects_resource_substitution(self):
         package_server.write_manifest(self.root, self.metadata)
         (self.root / "bin/spaceterm-server").unlink()
@@ -189,7 +210,12 @@ class CredentialClosureStagingTests(unittest.TestCase):
         )
         closure.with_name(closure.name + ".json").write_text(json.dumps(receipt))
         binaries = {}
-        for name in ("spaceterm-server", "spaceterm-server-launcher", "spaceterm-server-manager"):
+        for name in (
+            "spaceterm-server",
+            "spaceterm-server-launcher",
+            "spaceterm-server-manager",
+            "spaceterm-server-spawner",
+        ):
             path = root / name
             path.write_bytes(name.encode())
             binaries[name] = path
@@ -238,6 +264,44 @@ class CredentialClosureStagingTests(unittest.TestCase):
         ):
             package_server_linux.package()
         return root / "spaceterm-server-preflight-linux-x86_64.tar.gz", notice
+
+    def test_evidence_candidate_authenticates_unrun_closure_without_production_approval(self):
+        import copy
+        import json
+        from unittest.mock import patch
+
+        from spaceterm_tasks import package_server_linux
+
+        with tempfile.TemporaryDirectory() as temporary:
+            closure, approved, _, _ = self.fixture(temporary)
+            with (
+                patch.object(package_server_linux, "credential_tool_pin", return_value=approved),
+                self.assertRaises(TaskError),
+            ):
+                package_server_linux.validate_evidence_credential_closure(closure)
+            fresh = copy.deepcopy(approved)
+            fresh["runtime"].update(
+                jammy_result="unrun", host_key_result="unrun", tpm_result="unrun", evidence={}
+            )
+            with patch.object(package_server_linux, "credential_tool_pin", return_value=fresh):
+                self.assertEqual(
+                    package_server_linux.validate_evidence_credential_closure(closure), fresh
+                )
+                with self.assertRaisesRegex(TaskError, "Jammy evidence are unavailable"):
+                    package_server_linux.validate_credential_closure(closure)
+                (closure / "lib/credential-tools/libfixture.so").write_bytes(b"replacement")
+                with self.assertRaises(TaskError):
+                    package_server_linux.validate_evidence_credential_closure(closure)
+            # Replaying a previous construction's receipt cannot authorize a new candidate.
+            receipt_path = closure.with_name(closure.name + ".json")
+            receipt = json.loads(receipt_path.read_bytes())
+            receipt["build"]["build_id"] = "b" * 64
+            receipt_path.write_text(json.dumps(receipt))
+            with (
+                patch.object(package_server_linux, "credential_tool_pin", return_value=fresh),
+                self.assertRaises(TaskError),
+            ):
+                package_server_linux.validate_evidence_credential_closure(closure)
 
     def test_credential_tool_patch_and_corresponding_source_are_in_manifest(self):
         from unittest.mock import patch
@@ -728,6 +792,7 @@ class CargoServerArtifactTests(unittest.TestCase):
                 "spaceterm-server",
                 "spaceterm-server-launcher",
                 "spaceterm-server-manager",
+                "spaceterm-server-spawner",
             )
             for name in names:
                 (stale / name).write_bytes(b"stale artifact")
@@ -832,6 +897,7 @@ class MacosDependencyClosureTests(unittest.TestCase):
                 "spaceterm-server",
                 "spaceterm-server-launcher",
                 "spaceterm-server-manager",
+                "spaceterm-server-spawner",
             ):
                 binary = root / name
                 binary.write_bytes(bytes.fromhex("cffaedfe") + b"fixture")
@@ -931,6 +997,7 @@ if sys.platform == "darwin":
                 )
                 for case, flags in (
                     ("headless", []),
+                    ("headless-iconv", ["-liconv"]),
                     ("graphical", ["-Wl,-needed_framework,AppKit"]),
                     ("external", [f"-Wl,-needed_library,{external}"]),
                     ("rpath", [f"-Wl,-rpath,{external.parent}"]),
@@ -943,7 +1010,7 @@ if sys.platform == "darwin":
                         check=True,
                     )
                     with self.subTest(case=case):
-                        if case == "headless":
+                        if case.startswith("headless"):
                             verify_macho_closure(root, [executable])
                         else:
                             with self.assertRaises(TaskError):
@@ -1019,6 +1086,24 @@ if sys.platform == "linux":
             verify_elf_closure(root)
             result = subprocess.run([tool], env={}, check=True, capture_output=True, timeout=5)
             self.assertEqual(result.stdout, b"7\n")
+
+        def test_complete_package_requires_native_helpers_and_rejects_unrecorded_code(self):
+            import shutil
+
+            from spaceterm_tasks.package_server_linux import verify_elf_closure
+
+            root, tool, _ = self.fixture()
+            extra = root / "share/unrecorded-executable"
+            extra.parent.mkdir()
+            shutil.copyfile(tool, extra)
+            with self.assertRaises(TaskError):
+                verify_elf_closure(root)
+            extra.unlink()
+            server = root / "bin/spaceterm-server"
+            server.parent.mkdir()
+            server.write_bytes(b"#!/bin/sh\nexit 0\n")
+            with self.assertRaises(TaskError):
+                verify_elf_closure(root)
 
         def test_actual_elf_search_paths_reject_nested_missing_duplicate_and_non_elf_libraries(
             self,

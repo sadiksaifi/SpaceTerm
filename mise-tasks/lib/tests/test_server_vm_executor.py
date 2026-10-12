@@ -163,7 +163,7 @@ class ControlledVmNative:
             retained, "qcow2", size, False, False, os.fstat(disk_fd).st_blocks * 512
         )
 
-    def create_seed(self, directory_fd: int) -> None:
+    def create_seed(self, directory_fd: int, token: str) -> None:
         self.boundary("create-seed")
         write_private(directory_fd, "seed.iso", b"controlled CIDATA NoCloud seed fixture")
 
@@ -1676,12 +1676,6 @@ class VmExecutorTests(unittest.TestCase):
         self.assertEqual(self.journal()["container_id"], CONTAINER_ID)
         self.assertEqual(self.native.image_reads, [self.image_bytes])
         self.assertIsNone(receipt.container_id)
-        self.assertEqual(
-            self.executor.stop(result.receipt).classification, Classification.GATE_NOT_READY
-        )
-        self.assertEqual(
-            self.executor.remove(result.receipt).classification, Classification.GATE_NOT_READY
-        )
         self.assertNotIn("stop-container", [name for name, _ in self.native.calls])
         self.assertNotIn("remove-container", [name for name, _ in self.native.calls])
 
@@ -2939,6 +2933,433 @@ class VmExecutorTests(unittest.TestCase):
                     self.assert_bounded_namespace_rejection(
                         observed, allowed, foreign_first=foreign_first
                     )
+
+    def started_receipt(self):
+        prepared = self.executor.prepare(self.request, state_directory=self.state_identity)
+        self.assertEqual(prepared.classification, Classification.PREPARED)
+        assert prepared.receipt is not None
+        self.native.observation = ContainerObservation(
+            CONTAINER_ID,
+            prepared.receipt.token,
+            self.directory,
+            False,
+            bounded_configuration(self.directory, self.runner, LOCAL_RUNNER_IMAGE),
+            bounded_policy(),
+        )
+        started = self.executor.start(prepared.receipt)
+        self.assertEqual(started.classification, Classification.STARTED)
+        assert started.receipt is not None
+        self.native.observation = replace(self.native.observation, running=True)
+        return started.receipt
+
+    def stop_native_guest(self):
+        assert self.native.observation is not None
+        self.native.observation = replace(self.native.observation, running=False)
+
+    def test_stop_observes_exact_id_absence_before_recording_stopped(self):
+        receipt = self.started_receipt()
+        self.native.callbacks["stop-container"] = self.stop_native_guest
+        stopped = self.executor.stop(receipt)
+        self.assertEqual(stopped.classification, Classification.STOPPED)
+        self.assertEqual(self.journal()["stage"], "stopped")
+        self.assertEqual(
+            self.native.calls[-3:],
+            [
+                ("inspect", CONTAINER_ID),
+                ("stop-container", CONTAINER_ID),
+                ("inspect", CONTAINER_ID),
+            ],
+        )
+        self.assertIsNotNone(stopped.receipt)
+
+    def test_stop_does_not_credit_command_exit_if_guest_is_still_running(self):
+        receipt = self.started_receipt()
+        stopped = self.executor.stop(receipt)
+        self.assertEqual(stopped.classification, Classification.CLEANUP_INCOMPLETE)
+        self.assertEqual(self.journal()["stage"], "stop-pending")
+        self.assertIsNotNone(stopped.receipt)
+
+    def test_stop_rejects_changed_policy_and_binding_before_effect(self):
+        for changed in ("token", "configuration", "directory", "disk"):
+            with self.subTest(changed=changed):
+                self.new_fixture()
+                receipt = self.started_receipt()
+                assert self.native.observation is not None
+                if changed == "token":
+                    self.native.observation = replace(self.native.observation, owner_token="b" * 64)
+                elif changed == "configuration":
+                    config = self.native.observation.configuration
+                    assert config is not None
+                    self.native.observation = replace(
+                        self.native.observation, configuration=replace(config, privileged=True)
+                    )
+                elif changed == "directory":
+                    self.directory.rename(self.root / "original-vm")
+                    self.directory.mkdir(mode=0o700)
+                else:
+                    disk = self.directory / "os.qcow2"
+                    disk.rename(self.directory / "foreign-original")
+                    disk.touch(mode=0o600)
+                start = len(self.native.calls)
+                stopped = self.executor.stop(receipt)
+                self.assertEqual(stopped.classification, Classification.OWNERSHIP_MISMATCH)
+                self.assertNotIn("stop-container", [name for name, _ in self.native.calls[start:]])
+
+    def test_stop_accepts_guest_disk_writes_without_rehashing_downloads(self):
+        receipt = self.started_receipt()
+        with (self.directory / "os.qcow2").open("ab") as file:
+            file.write(b"ordinary guest disk write")
+        self.request.image.path.unlink()
+        self.native.callbacks["stop-container"] = self.stop_native_guest
+        stopped = self.executor.stop(receipt)
+        self.assertEqual(stopped.classification, Classification.STOPPED)
+
+    def test_cleanup_requires_stopped_exact_container_and_removes_only_retained_entries(self):
+        receipt = self.started_receipt()
+        self.native.callbacks["stop-container"] = self.stop_native_guest
+        stopped = self.executor.stop(receipt)
+        self.assertEqual(stopped.classification, Classification.STOPPED)
+        assert stopped.receipt is not None
+        self.native.callbacks["remove-container"] = lambda: setattr(
+            self.native, "observation", None
+        )
+        removed = self.executor.remove(stopped.receipt)
+        self.assertEqual(removed.classification, Classification.REMOVED)
+        self.assertFalse(self.directory.exists())
+        self.assertEqual(self.journal()["stage"], "removed")
+        self.assertIsNotNone(removed.receipt)
+        self.assertTrue(self.request.image.path.exists())
+        self.assertTrue(self.checkout.exists())
+
+    def test_cleanup_refuses_running_guest_foreign_entries_and_replacements(self):
+        for changed in ("running", "foreign-entry", "key"):
+            with self.subTest(changed=changed):
+                self.new_fixture()
+                receipt = self.started_receipt()
+                if changed != "running":
+                    self.native.callbacks["stop-container"] = self.stop_native_guest
+                    stopped = self.executor.stop(receipt)
+                    assert stopped.receipt is not None
+                    receipt = stopped.receipt
+                if changed == "foreign-entry":
+                    (self.directory / "unowned").touch(mode=0o600)
+                elif changed == "key":
+                    key = self.directory / "credentials/id_ed25519"
+                    key.unlink()
+                    key.touch(mode=0o600)
+                    key.write_bytes(b"replacement fixture")
+                start = len(self.native.calls)
+                removed = self.executor.remove(receipt)
+                self.assertIn(
+                    removed.classification,
+                    (
+                        Classification.INVALID_STATE,
+                        Classification.OWNERSHIP_MISMATCH,
+                    ),
+                )
+                self.assertNotIn(
+                    "remove-container", [name for name, _ in self.native.calls[start:]]
+                )
+                self.assertTrue(self.directory.exists())
+
+    def test_stop_interruption_retains_durable_intent_and_never_removes_guest(self):
+        receipt = self.started_receipt()
+        self.native.errors["stop-container"] = KeyboardInterrupt()
+        with self.assertRaises(KeyboardInterrupt):
+            self.executor.stop(receipt)
+        self.assertEqual(self.journal()["stage"], "stop-pending")
+        self.assertNotIn("remove-container", [name for name, _ in self.native.calls])
+        self.assertTrue(self.directory.exists())
+
+    def test_remove_checks_absence_and_preserves_files_when_native_result_is_lost(self):
+        receipt = self.started_receipt()
+        self.native.callbacks["stop-container"] = self.stop_native_guest
+        stopped = self.executor.stop(receipt)
+        assert stopped.receipt is not None
+        removed = self.executor.remove(stopped.receipt)
+        self.assertEqual(removed.classification, Classification.CLEANUP_INCOMPLETE)
+        self.assertEqual(self.journal()["stage"], "remove-pending")
+        self.assertTrue((self.directory / "credentials/id_ed25519").exists())
+
+    def test_stop_sync_uncertainty_prevents_native_effect_and_preserves_intent(self):
+        receipt = self.started_receipt()
+
+        def fail_sync(_fd):
+            raise OSError("private sync diagnostic")
+
+        before = len(self.native.calls)
+        with patch("os.fsync", side_effect=fail_sync):
+            stopped = self.executor.stop(receipt)
+        self.assertEqual(stopped.classification, Classification.CLEANUP_INCOMPLETE)
+        self.assertNotIn("stop-container", [name for name, _ in self.native.calls[before:]])
+        self.assertEqual(self.journal()["stage"], "stop-pending")
+        self.assertIsNotNone(stopped.receipt)
+
+    def test_unsynced_final_stopped_receipt_never_authorizes_removal(self):
+        for kind in ("journal", "directory"):
+            with self.subTest(kind=kind):
+                self.new_fixture()
+                receipt = self.started_receipt()
+                self.native.callbacks["stop-container"] = self.stop_native_guest
+                real_fsync = os.fsync
+                failed = []
+
+                def fail_final_stop(fd):
+                    observed = os.fstat(fd)
+                    journal = self.journal()
+                    target = (
+                        stat.S_ISREG(observed.st_mode) and state_document(fd, self.state) == journal
+                        if kind == "journal"
+                        else (observed.st_dev, observed.st_ino)
+                        == (self.state_identity.device, self.state_identity.inode)
+                    )
+                    if journal["stage"] == "stopped" and target:
+                        failed.append(kind)
+                        raise OSError("controlled final stopped synchronization failure")
+                    real_fsync(fd)
+
+                with patch("os.fsync", side_effect=fail_final_stop):
+                    stopped = self.executor.stop(receipt)
+                self.assertEqual(failed, [kind])
+                self.assertEqual(stopped.classification, Classification.CLEANUP_INCOMPLETE)
+                self.assertEqual(self.journal()["stage"], "stopped")
+                assert stopped.receipt is not None
+                self.native.callbacks["remove-container"] = lambda: setattr(
+                    self.native, "observation", None
+                )
+                before = len(self.native.calls)
+                removed = self.executor.remove(stopped.receipt)
+                self.assertEqual(removed.classification, Classification.INVALID_STATE)
+                self.assertEqual(self.native.calls[before:], [])
+                self.assertTrue((self.directory / "os.qcow2").exists())
+                self.assertTrue((self.directory / "credentials/id_ed25519").exists())
+                self.assertEqual(self.journal()["stage"], "stopped")
+
+    def test_final_cleanup_lookup_race_preserves_replacement_for_review(self):
+        receipt = self.started_receipt()
+        self.native.callbacks["stop-container"] = self.stop_native_guest
+        stopped = self.executor.stop(receipt)
+        assert stopped.receipt is not None
+        self.native.callbacks["remove-container"] = lambda: setattr(
+            self.native, "observation", None
+        )
+        credentials = (self.directory / "credentials").stat()
+        real_stat = os.stat
+        replaced = []
+        unrelated = b"unrelated nonsecret cleanup race control"
+        outside = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        self.addCleanup(os.close, outside)
+
+        def replace_after_lookup(name, *args, **kwargs):
+            observed = real_stat(name, *args, **kwargs)
+            parent = kwargs.get("dir_fd")
+            if name == "id_ed25519" and parent is not None and not replaced:
+                stamp = os.fstat(parent)
+                if (stamp.st_dev, stamp.st_ino) == (credentials.st_dev, credentials.st_ino):
+                    os.rename(name, "retained-original", src_dir_fd=parent, dst_dir_fd=outside)
+                    write_private(parent, name, unrelated)
+                    replaced.append(True)
+            return observed
+
+        with patch("os.stat", side_effect=replace_after_lookup):
+            removed = self.executor.remove(stopped.receipt)
+        self.assertEqual(replaced, [True])
+        self.assertEqual(removed.classification, Classification.CLEANUP_INCOMPLETE)
+        assert removed.receipt is not None and removed.receipt.cleanup_directory is not None
+        self.assertEqual(
+            self.journal()["cleanup_directory"]["inode"], removed.receipt.cleanup_directory.inode
+        )
+        surviving = [
+            path
+            for path in self.root.rglob("*")
+            if path.is_file() and path.read_bytes() == unrelated
+        ]
+        self.assertEqual(len(surviving), 1)
+        self.assertTrue((self.root / "retained-original").exists())
+        self.assertNotEqual(self.journal()["stage"], "removed")
+
+    def test_atomic_detachment_never_overwrites_an_existing_cleanup_entry(self):
+        receipt = self.started_receipt()
+        self.native.callbacks["stop-container"] = self.stop_native_guest
+        stopped = self.executor.stop(receipt)
+        assert stopped.receipt is not None
+        self.native.callbacks["remove-container"] = lambda: setattr(
+            self.native, "observation", None
+        )
+        original = executor_module._rename_noreplace
+        injected = []
+        control = b"unrelated no-overwrite control"
+
+        def collide(source_fd, source, destination_fd, destination):
+            if not injected:
+                write_private(destination_fd, destination, control)
+                injected.append(True)
+            original(source_fd, source, destination_fd, destination)
+
+        with patch.object(executor_module, "_rename_noreplace", side_effect=collide):
+            removed = self.executor.remove(stopped.receipt)
+        self.assertEqual(injected, [True])
+        self.assertEqual(removed.classification, Classification.CLEANUP_INCOMPLETE)
+        assert removed.receipt is not None and removed.receipt.cleanup_directory is not None
+        cleanup = removed.receipt.cleanup_directory
+        self.assertEqual(self.journal()["cleanup_directory"]["inode"], cleanup.inode)
+        self.assertEqual((cleanup.path / "entry-1").read_bytes(), control)
+        self.assertTrue((self.directory / "credentials/id_ed25519").exists())
+        self.assertEqual(self.journal()["stage"], "detach-pending")
+
+    def test_replaced_directory_at_detachment_is_preserved_with_its_contents(self):
+        for target in ("credentials", "vm"):
+            with self.subTest(target=target):
+                self.new_fixture()
+                receipt = self.started_receipt()
+                self.native.callbacks["stop-container"] = self.stop_native_guest
+                stopped = self.executor.stop(receipt)
+                assert stopped.receipt is not None
+                self.native.callbacks["remove-container"] = lambda: setattr(
+                    self.native, "observation", None
+                )
+                original = executor_module._rename_noreplace
+                injected = []
+                outside = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+                self.addCleanup(os.close, outside)
+
+                def substitute(source_fd, source, destination_fd, destination):
+                    if destination == target and not injected:
+                        os.rename(
+                            source,
+                            "retained-empty-directory",
+                            src_dir_fd=source_fd,
+                            dst_dir_fd=outside,
+                        )
+                        os.mkdir(source, 0o700, dir_fd=source_fd)
+                        fd = os.open(
+                            source,
+                            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                            dir_fd=source_fd,
+                        )
+                        try:
+                            write_private(fd, "unrelated", b"unrelated directory control")
+                        finally:
+                            os.close(fd)
+                        injected.append(True)
+                    original(source_fd, source, destination_fd, destination)
+
+                with patch.object(executor_module, "_rename_noreplace", side_effect=substitute):
+                    removed = self.executor.remove(stopped.receipt)
+                self.assertEqual(injected, [True])
+                self.assertEqual(removed.classification, Classification.CLEANUP_INCOMPLETE)
+                assert removed.receipt is not None and removed.receipt.cleanup_directory is not None
+                cleanup = removed.receipt.cleanup_directory
+                self.assertEqual(
+                    (cleanup.path / target / "unrelated").read_bytes(),
+                    b"unrelated directory control",
+                )
+                self.assertTrue((self.root / "retained-empty-directory").is_dir())
+                self.assertEqual(self.journal()["stage"], "detach-pending")
+
+    def test_unsynced_detachment_keeps_original_inode_for_review(self):
+        receipt = self.started_receipt()
+        self.native.callbacks["stop-container"] = self.stop_native_guest
+        stopped = self.executor.stop(receipt)
+        assert stopped.receipt is not None
+        key = (self.directory / "credentials/id_ed25519").stat()
+        self.native.callbacks["remove-container"] = lambda: setattr(
+            self.native, "observation", None
+        )
+        real_fsync = os.fsync
+        failed = []
+
+        def fail_detachment_sync(fd):
+            if self.journal()["stage"] == "detach-pending" and stat.S_ISDIR(os.fstat(fd).st_mode):
+                names = os.listdir(fd)
+                if "entry-1" in names:
+                    failed.append(True)
+                    raise OSError("controlled detachment synchronization failure")
+            real_fsync(fd)
+
+        with patch("os.fsync", side_effect=fail_detachment_sync):
+            removed = self.executor.remove(stopped.receipt)
+        self.assertEqual(failed, [True])
+        self.assertEqual(removed.classification, Classification.CLEANUP_INCOMPLETE)
+        assert removed.receipt is not None and removed.receipt.cleanup_directory is not None
+        cleanup = removed.receipt.cleanup_directory
+        observed = (cleanup.path / "entry-1").stat()
+        self.assertEqual((observed.st_dev, observed.st_ino), (key.st_dev, key.st_ino))
+        self.assertTrue((self.directory / "os.qcow2").exists())
+        self.assertEqual(
+            self.executor.remove(removed.receipt).classification, Classification.INVALID_STATE
+        )
+        self.assertEqual(self.journal()["stage"], "detach-pending")
+
+    def test_remove_native_inspection_failure_never_becomes_absence(self):
+        receipt = self.started_receipt()
+        self.native.callbacks["stop-container"] = self.stop_native_guest
+        stopped = self.executor.stop(receipt)
+        assert stopped.receipt is not None
+
+        def fail_inspection():
+            self.native.errors["inspect"] = OSError("private inspection diagnostic")
+
+        self.native.callbacks["remove-container"] = fail_inspection
+        removed = self.executor.remove(stopped.receipt)
+        self.assertEqual(removed.classification, Classification.CLEANUP_INCOMPLETE)
+        self.assertTrue((self.directory / "os.qcow2").exists())
+        self.assertEqual(self.journal()["stage"], "remove-pending")
+
+    def test_remove_revalidates_after_native_removal_before_unlinking_files(self):
+        receipt = self.started_receipt()
+        self.native.callbacks["stop-container"] = self.stop_native_guest
+        stopped = self.executor.stop(receipt)
+        assert stopped.receipt is not None
+
+        def replace_key():
+            self.native.observation = None
+            key = self.directory / "credentials/id_ed25519"
+            key.rename(self.root / "retained-original-key")
+            key.touch(mode=0o600)
+            key.write_bytes(b"replacement control data")
+
+        self.native.callbacks["remove-container"] = replace_key
+        removed = self.executor.remove(stopped.receipt)
+        self.assertEqual(removed.classification, Classification.CLEANUP_INCOMPLETE)
+        self.assertTrue((self.directory / "credentials/id_ed25519").exists())
+        self.assertTrue((self.directory / "os.qcow2").exists())
+
+    def test_stopped_receipt_cannot_be_restarted_or_removed_twice(self):
+        receipt = self.started_receipt()
+        self.native.callbacks["stop-container"] = self.stop_native_guest
+        stopped = self.executor.stop(receipt)
+        assert stopped.receipt is not None
+        self.assertEqual(
+            self.executor.start(stopped.receipt).classification, Classification.INVALID_STATE
+        )
+        self.native.callbacks["remove-container"] = lambda: setattr(
+            self.native, "observation", None
+        )
+        removed = self.executor.remove(stopped.receipt)
+        self.assertEqual(removed.classification, Classification.REMOVED)
+        assert removed.receipt is not None
+        before = len(self.native.calls)
+        self.assertEqual(
+            self.executor.remove(removed.receipt).classification, Classification.INVALID_STATE
+        )
+        self.assertEqual(len(self.native.calls), before)
+
+    def test_remove_never_adopts_an_unretained_runtime_socket_as_cleanup_authority(self):
+        self.new_fixture(temporary_directory="/tmp")
+        receipt = self.started_receipt()
+        self.native.callbacks["stop-container"] = self.stop_native_guest
+        stopped = self.executor.stop(receipt)
+        assert stopped.receipt is not None
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as control:
+            control.bind(str(self.directory / "qmp.sock"))
+            (self.directory / "qmp.sock").chmod(0o700)
+            before = len(self.native.calls)
+            removed = self.executor.remove(stopped.receipt)
+            self.assertEqual(removed.classification, Classification.CLEANUP_INCOMPLETE)
+            self.assertNotIn("remove-container", [name for name, _ in self.native.calls[before:]])
+            self.assertTrue((self.directory / "qmp.sock").exists())
+            self.assertTrue((self.directory / "credentials/id_ed25519").exists())
 
 
 if __name__ == "__main__":

@@ -107,6 +107,7 @@ def build(release_tag=None):
             ("spaceterm-server", "spaceterm-server"),
             ("spaceterm-server-launcher", "spaceterm-host"),
             ("spaceterm-server-manager", "spaceterm-host"),
+            ("spaceterm-server-spawner", "spaceterm-host"),
         )
     }
 
@@ -124,6 +125,39 @@ def copy_file(source, destination, mode=0o644):
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(source, destination)
     destination.chmod(mode)
+
+
+def copy_built_executables(binaries, root, metadata):
+    """Keep the reusable spawner in the authenticated closure without changing manifest schema."""
+    destinations = {
+        "spaceterm-server": artifacts.entry_points(
+            metadata["platform"], metadata["build_identity"]
+        )["server"],
+        **{
+            name: "libexec/" + name
+            for name in (
+                "spaceterm-server-launcher",
+                "spaceterm-server-manager",
+                "spaceterm-server-spawner",
+            )
+        },
+    }
+    if set(binaries) != set(destinations):
+        raise TaskError("server build must contain the server, launcher, manager, and spawner")
+    pins = {name: artifacts.digest(source) for name, source in binaries.items()}
+    copied = []
+    for name, destination in destinations.items():
+        target = root / destination
+        mode = (
+            0o501
+            if name == "spaceterm-server" and metadata["platform"] == "linux-x86_64"
+            else 0o555
+        )
+        copy_file(binaries[name], target, mode)
+        if artifacts.digest(target) != pins[name]:
+            raise TaskError("copied server executable differs from its build output")
+        copied.append(target)
+    return copied
 
 
 def copy_resources(destination, *, additional_notices=b""):

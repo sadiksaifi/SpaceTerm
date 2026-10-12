@@ -34,10 +34,12 @@ Python (-I) from a trusted directory, separate from downloaded or extracted code
 import ctypes
 import errno
 import hashlib
+import json
 import os
 import re
 import secrets
 import selectors
+import shlex
 import signal
 import stat
 import struct
@@ -46,14 +48,20 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from enum import StrEnum
 from pathlib import Path
 from types import FrameType
-from typing import Never
+from typing import TYPE_CHECKING, Never, Protocol
 
-from spaceterm_tasks import ROOT
+from spaceterm_tasks import ROOT, TaskError
+from spaceterm_tasks import server_vm as vm
+
+if TYPE_CHECKING:
+    from spaceterm_tasks.linux_custody_evidence import GuestObservation
+    from spaceterm_tasks.server_vm_executor import ExecutionReceipt, VmExecutor
 
 # Private OS seam. Callers cannot select an executable or supply command vectors.
 _popen = subprocess.Popen
@@ -1070,7 +1078,9 @@ def _retire_child(child: _ChildLease, *, exited: bool, cleanup: _Cleanup) -> int
     return _reap_child(child, cleanup)
 
 
-def _read_output(process: subprocess.Popen, deadline: float) -> bytes:
+def _read_output(
+    process: subprocess.Popen, deadline: float, maximum: int = _MAX_OUTPUT_BYTES
+) -> bytes:
     if process.stdout is None or process.stderr is None:
         raise _Denied(NativeClassification.NATIVE_FAILED)
     output = bytearray()
@@ -1090,14 +1100,15 @@ def _read_output(process: subprocess.Popen, deadline: float) -> bytes:
                     raise _Denied(NativeClassification.TIMED_OUT)
                 index = key.data
                 try:
-                    chunk = os.read(key.fd, min(_READ_BYTES, _MAX_OUTPUT_BYTES + 1 - counts[index]))
+                    limit = maximum if index == 0 else _MAX_OUTPUT_BYTES
+                    chunk = os.read(key.fd, min(_READ_BYTES, limit + 1 - counts[index]))
                 except BlockingIOError:
                     continue
                 if not chunk:
                     selector.unregister(key.fd)
                     continue
                 counts[index] += len(chunk)
-                if counts[index] > _MAX_OUTPUT_BYTES:
+                if counts[index] > (maximum if index == 0 else _MAX_OUTPUT_BYTES):
                     raise _Denied(NativeClassification.OUTPUT_LIMIT)
                 if index == 0:
                     output.extend(chunk)
@@ -1626,3 +1637,1153 @@ class NativeSignatureVerifier:
         if cleanup.interruption is not None:
             raise cleanup.interruption
         return result
+
+
+# NoCloud reads a read-only CIDATA ISO. Joliet preserves the fixed lower-case,
+# hyphenated filenames without a filesystem builder or a writable staging tree.
+_ISO_BLOCK = 2048
+
+
+def _both(value: int, width: int) -> bytes:
+    return value.to_bytes(width, "little") + value.to_bytes(width, "big")
+
+
+def _iso_record(name: bytes, extent: int, length: int, *, directory: bool = False) -> bytes:
+    size = 33 + len(name) + (not len(name) % 2)
+    result = bytearray(size)
+    result[0] = size
+    result[2:10] = _both(extent, 4)
+    result[10:18] = _both(length, 4)
+    result[18:25] = bytes((126, 10, 12, 0, 0, 0, 0))
+    result[25] = 2 if directory else 0
+    result[28:32] = _both(1, 2)
+    result[32] = len(name)
+    result[33 : 33 + len(name)] = name
+    return bytes(result)
+
+
+def _iso_volume(kind: int, blocks: int, root: int, little_table: int, big_table: int) -> bytes:
+    result = bytearray(_ISO_BLOCK)
+    result[:7] = bytes((kind,)) + b"CD001\x01"
+    wide = kind == 2
+    for start, text in ((8, "SPACETERM"), (40, "CIDATA")):
+        result[start : start + 32] = (
+            text.ljust(16).encode("utf-16-be") if wide else text.ljust(32).encode("ascii")
+        )
+    result[80:88] = _both(blocks, 4)
+    if wide:
+        result[88:91] = b"%/E"
+    result[120:124] = _both(1, 2)
+    result[124:128] = _both(1, 2)
+    result[128:132] = _both(_ISO_BLOCK, 2)
+    result[132:140] = _both(10, 4)
+    result[140:144] = little_table.to_bytes(4, "little")
+    result[148:152] = big_table.to_bytes(4, "big")
+    result[156:190] = _iso_record(b"\x00", root, _ISO_BLOCK, directory=True)
+    result[881] = 1
+    return bytes(result)
+
+
+def _nocloud_iso(user_data: bytes, meta_data: bytes) -> bytes:
+    contents = (user_data, meta_data)
+    sizes = tuple((len(data) + _ISO_BLOCK - 1) // _ISO_BLOCK for data in contents)
+    extents = (25, 25 + sizes[0])
+    blocks = extents[1] + sizes[1]
+    result = bytearray(blocks * _ISO_BLOCK)
+    for index, kind, root, little, big in ((16, 1, 19, 21, 22), (17, 2, 20, 23, 24)):
+        result[index * _ISO_BLOCK : (index + 1) * _ISO_BLOCK] = _iso_volume(
+            kind, blocks, root, little, big
+        )
+        records = _iso_record(b"\x00", root, _ISO_BLOCK, directory=True) + _iso_record(
+            b"\x01", root, _ISO_BLOCK, directory=True
+        )
+        for name, extent, data in zip(("user-data", "meta-data"), extents, contents, strict=True):
+            identifier = (
+                name.encode("utf-16-be") if kind == 2 else (name.upper() + ";1").encode("ascii")
+            )
+            records += _iso_record(identifier, extent, len(data))
+        result[root * _ISO_BLOCK : root * _ISO_BLOCK + len(records)] = records
+        for table, endian in ((little, "little"), (big, "big")):
+            path_record = (
+                b"\x01\x00" + root.to_bytes(4, endian) + (1).to_bytes(2, endian) + b"\x00\x00"
+            )
+            result[table * _ISO_BLOCK : table * _ISO_BLOCK + 10] = path_record
+    result[18 * _ISO_BLOCK : 18 * _ISO_BLOCK + 7] = b"\xffCD001\x01"
+    for data, extent in zip(contents, extents, strict=True):
+        result[extent * _ISO_BLOCK : extent * _ISO_BLOCK + len(data)] = data
+    return bytes(result)
+
+
+def jammy_seed(
+    token: str, administrator_key: bytes, host_public_key: bytes, host_private_key: bytes
+) -> bytes:
+    """Stock security policy, separate fixed accounts and a pre-pinned SSH host key.
+
+    The administrator is disposable orchestration authority, never the admitted
+    account. Neither package installation nor host/security policy changes occur
+    in cloud-init. The owner file is protected by the authenticated stock image.
+    """
+    if not _DIGEST.fullmatch(token) or any(
+        not 0 < len(value) <= 8192
+        for value in (administrator_key, host_public_key, host_private_key)
+    ):
+        raise _Denied(NativeClassification.INVALID_INPUT)
+    owner = {"token": token, "administrator_uid": 20000, "server_uid": 20001}
+    document = {
+        "users": [
+            {
+                "name": "stvm-admin",
+                "uid": 20000,
+                "groups": ["sudo"],
+                "shell": "/bin/bash",
+                "lock_passwd": True,
+                "sudo": ["ALL=(ALL) NOPASSWD:ALL"],
+                "ssh_authorized_keys": [administrator_key.decode("ascii").strip()],
+            },
+            {
+                "name": "stvm-server",
+                "uid": 20001,
+                "groups": [],
+                "shell": "/bin/bash",
+                "lock_passwd": True,
+                "sudo": False,
+            },
+        ],
+        "disable_root": True,
+        "ssh_pwauth": False,
+        "ssh_deletekeys": True,
+        "ssh_genkeytypes": [],
+        "ssh_keys": {
+            "ed25519_private": host_private_key.decode("ascii"),
+            "ed25519_public": host_public_key.decode("ascii").strip(),
+        },
+        "write_files": [
+            {
+                "path": "/var/lib/spaceterm-vm/owner.json",
+                "owner": "root:root",
+                "permissions": "0600",
+                "content": json.dumps(owner, separators=(",", ":")),
+            }
+        ],
+    }
+    user = b"#cloud-config\n" + json.dumps(document, separators=(",", ":")).encode("ascii")
+    meta = json.dumps({"instance-id": "stvm-" + token, "local-hostname": "stvm-jammy"}).encode(
+        "ascii"
+    )
+    return _nocloud_iso(user, meta)
+
+
+def read_jammy_seed(data: bytes) -> dict[str, bytes]:
+    """Inspect only our bounded two-file Joliet image, never execute its contents."""
+    failure = NativeClassification.INVALID_INPUT
+    if not 26 * _ISO_BLOCK <= len(data) <= vm._MAX_SEED_BYTES or len(data) % _ISO_BLOCK:
+        raise _Denied(failure)
+    volume = data[17 * _ISO_BLOCK : 18 * _ISO_BLOCK]
+    if (
+        volume[:7] != b"\x02CD001\x01"
+        or volume[40:72].decode("utf-16-be").strip() != "CIDATA"
+        or volume[128:132] != _both(_ISO_BLOCK, 2)
+        or volume[80:88] != _both(len(data) // _ISO_BLOCK, 4)
+    ):
+        raise _Denied(failure)
+    records = data[20 * _ISO_BLOCK : 21 * _ISO_BLOCK]
+    offset = 0
+    result = {}
+    while offset < len(records) and records[offset]:
+        size = records[offset]
+        record = records[offset : offset + size]
+        if len(record) != size or size < 34:
+            raise _Denied(failure)
+        name_size = record[32]
+        name = record[33 : 33 + name_size]
+        if name not in (b"\x00", b"\x01"):
+            try:
+                key = name.decode("utf-16-be")
+            except UnicodeError:
+                raise _Denied(failure) from None
+            extent = int.from_bytes(record[2:6], "little")
+            length = int.from_bytes(record[10:14], "little")
+            if (
+                key not in ("user-data", "meta-data")
+                or key in result
+                or record[25] != 0
+                or extent < 25
+                or not 0 < length <= vm._MAX_DOCUMENT_BYTES
+                or extent * _ISO_BLOCK + length > len(data)
+                or record[2:10] != _both(extent, 4)
+                or record[10:18] != _both(length, 4)
+            ):
+                raise _Denied(failure)
+            result[key] = data[extent * _ISO_BLOCK : extent * _ISO_BLOCK + length]
+        offset += size
+    if set(result) != {"user-data", "meta-data"}:
+        raise _Denied(failure)
+    return result
+
+
+_VM_TOOLS = {name: Path("/usr/bin") / name for name in ("ssh-keygen", "qemu-img", "docker", "ssh")}
+
+
+def _run_vm_tool(
+    program: str,
+    arguments: tuple[str, ...],
+    *,
+    inherited: tuple[int, ...] = (),
+    timeout: float = 30,
+    maximum: int = _MAX_OUTPUT_BYTES,
+) -> _OperationResult:
+    """Fixed protected utility, bounded output and the existing unreaped group lease.
+
+    The held executable is selected through procfd, including for SSH and keygen.
+    No inherited environment, SSH agent, Docker context, stdin or raw stderr is
+    forwarded. These processes do not own guest authority or daemon cancellation.
+    """
+    _require_acquisition_context()
+    if program not in _VM_TOOLS or not 0 < timeout <= 900 or not 0 < maximum <= 32 * 1024**2:
+        raise _Denied(NativeClassification.INVALID_INPUT)
+    files, cleanup = _VerificationFiles(), _Cleanup()
+    process = child = None
+    failure = None
+    output, returncode, exited = b"", None, False
+    deadline = time.monotonic() + timeout
+    acquisition = _AcquisitionSignals(cleanup)
+    try:
+        tool = files.hold(_VM_TOOLS[program], directory=False, private=False)
+        for entry in tool.entries:
+            current = entry.observation
+            if current.st_uid != 0 or current.st_mode & 0o022:
+                raise _Denied(NativeClassification.UNSAFE_PATH)
+        if (
+            not stat.S_ISREG(tool.entry.observation.st_mode)
+            or tool.entry.observation.st_mode & 0o6000
+            or not tool.entry.observation.st_mode & 0o111
+        ):
+            raise _Denied(NativeClassification.UNSAFE_PATH)
+        proc = _ProcBindings(files, _LinuxNative())
+        executable = proc.reference(tool.entry)
+        try:
+            acquisition.install()
+            acquisition.check()
+            process = _popen(
+                (executable, *arguments),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+                close_fds=True,
+                pass_fds=tuple(dict.fromkeys((tool.entry.fd, *inherited))),
+                cwd=ROOT,
+                env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C", "HOME": "/nonexistent"},
+            )
+            child = _ChildLease(process, process.pid)
+        finally:
+            while acquisition.handlers:
+                cleanup.attempt(acquisition.restore)
+        acquisition.check()
+        output = _read_output(process, deadline, maximum)
+        exited = _await_exit(process, deadline)
+        if not tool.matches():
+            raise _Denied(NativeClassification.UNSAFE_PATH)
+        proc.check()
+    except _Denied as error:
+        failure = error.classification
+    except (KeyboardInterrupt, SystemExit) as error:
+        cleanup.interrupted(error)
+    except Exception:
+        failure = NativeClassification.NATIVE_FAILED
+    finally:
+        if process is not None:
+            if child is None:
+                child = _ChildLease(process, process.pid)
+            try:
+                returncode = _retire_child(child, exited=exited, cleanup=cleanup)
+            except (KeyboardInterrupt, SystemExit) as error:
+                cleanup.interrupted(error)
+            except Exception:
+                cleanup.complete = False
+            finally:
+                if child.signals_open:
+                    cleanup.attempt(lambda: _kill_owned(child, cleanup))
+                    cleanup.attempt(lambda: _reap_child(child, cleanup))
+                child.close_pipes(cleanup)
+        files.cleanup(cleanup)
+    if cleanup.interruption is not None:
+        raise cleanup.interruption
+    if not cleanup.complete:
+        raise _Denied(NativeClassification.CLEANUP_INCOMPLETE)
+    if failure is not None:
+        raise _Denied(failure)
+    return _OperationResult(output, returncode)
+
+
+def _successful_tool(program: str, arguments: tuple[str, ...], **kwargs) -> bytes:
+    result = _run_vm_tool(program, arguments, **kwargs)
+    if result.returncode != 0:
+        raise _Denied(NativeClassification.PROCESS_FAILED)
+    return result.status
+
+
+def _native_json(data: bytes):
+    try:
+        return json.loads(
+            data, object_pairs_hook=vm._unique_json_object, parse_constant=vm._invalid_json_constant
+        )
+    except (ValueError, UnicodeError, RecursionError, vm._Denied):
+        raise _Denied(NativeClassification.INVALID_STATUS) from None
+
+
+@contextmanager
+def _new_file(directory_fd: int, name: str):
+    fd = os.open(
+        name,
+        os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+        0o600,
+        dir_fd=directory_fd,
+    )
+    try:
+        yield fd
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    remaining = memoryview(data)
+    while remaining:
+        count = os.write(fd, remaining)
+        if count <= 0:
+            raise _Denied(NativeClassification.NATIVE_FAILED)
+        remaining = remaining[count:]
+
+
+class NativeVm:
+    """Concrete unprivileged QEMU provisioning and fixed local Docker operations.
+
+    No pulls, privileged containers, host policy changes, host reboot or cleanup
+    by name. The executor admits every output and records exact IDs before start.
+    A lost Docker response remains uncertain in that executor, never a retry.
+    """
+
+    def __init__(self, request: vm.PrepareRequest, runner_image_id: str):
+        _require_acquisition_context()
+        if not vm._local_image_id(runner_image_id):
+            raise _Denied(NativeClassification.INVALID_AUTHORITY)
+        self.request, self.runner_image_id = request, runner_image_id
+        self._credentials: vm.OwnedPath | None = None
+        self._runner: vm.RunnerIdentity | None = None
+
+    def create_credentials(self, directory_fd: int) -> None:
+        os.mkdir("credentials", 0o700, dir_fd=directory_fd)
+        fd = os.open(
+            "credentials",
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=directory_fd,
+        )
+        try:
+            for name in ("id_ed25519", "host_ed25519"):
+                _successful_tool(
+                    "ssh-keygen",
+                    ("-q", "-t", "ed25519", "-N", "", "-C", "", "-f", f"/proc/self/fd/{fd}/{name}"),
+                    inherited=(fd,),
+                )
+                for leaf in (name, name + ".pub"):
+                    key = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+                    try:
+                        os.fchmod(key, 0o600)
+                        os.fsync(key)
+                    finally:
+                        os.close(key)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        self._credentials = vm.OwnedPath.capture(self.request.directory / "credentials")
+
+    def create_os_disk(self, directory_fd: int, image_fd: int, virtual_size_bytes: int) -> None:
+        # Check capacity for the declared storage bound before allocating sparse disks.
+        available = os.fstatvfs(directory_fd)
+        required = (
+            self.request.resources.disk_gib + self.request.resources.encrypted_disk_gib + 2
+        ) * 1024**3
+        if available.f_bavail * available.f_frsize < required:
+            raise _Denied(NativeClassification.INPUT_LIMIT)
+        with _new_file(directory_fd, "os.qcow2") as output:
+            _successful_tool(
+                "qemu-img",
+                (
+                    "convert",
+                    "-f",
+                    "qcow2",
+                    "-O",
+                    "qcow2",
+                    f"/proc/self/fd/{image_fd}",
+                    f"/proc/self/fd/{output}",
+                ),
+                inherited=(image_fd, output),
+                timeout=180,
+            )
+            _successful_tool(
+                "qemu-img",
+                ("resize", "-f", "qcow2", f"/proc/self/fd/{output}", str(virtual_size_bytes)),
+                inherited=(output,),
+            )
+
+    def create_encrypted_disk(self, directory_fd: int, virtual_size_bytes: int) -> None:
+        with _new_file(directory_fd, "encrypted.qcow2") as output:
+            _successful_tool(
+                "qemu-img",
+                ("create", "-f", "qcow2", f"/proc/self/fd/{output}", str(virtual_size_bytes)),
+                inherited=(output,),
+            )
+
+    def inspect_disk(self, disk_fd: int, retained: vm.OwnedPath) -> vm.DiskEvidence:
+        value = _native_json(
+            _successful_tool(
+                "qemu-img",
+                ("info", "--output=json", f"/proc/self/fd/{disk_fd}"),
+                inherited=(disk_fd,),
+            )
+        )
+        if (
+            type(value) is not dict
+            or type(value.get("virtual-size")) is not int
+            or type(value.get("actual-size")) is not int
+        ):
+            raise _Denied(NativeClassification.INVALID_STATUS)
+        return vm.DiskEvidence(
+            retained,
+            value.get("format"),
+            value["virtual-size"],
+            any(name in value for name in ("backing-filename", "full-backing-filename")),
+            b'"data-file"' in json.dumps(value).encode(),
+            value["actual-size"],
+        )
+
+    def create_seed(self, directory_fd: int, token: str) -> None:
+        with ExitStack() as handles:
+            keys = {}
+            for name in ("id_ed25519.pub", "host_ed25519.pub", "host_ed25519"):
+                opened = handles.enter_context(
+                    vm._open_path(
+                        self.request.directory / "credentials" / name,
+                        vm.Classification.OWNERSHIP_MISMATCH,
+                    )
+                )
+                vm._private(opened, directory=False, failure=vm.Classification.OWNERSHIP_MISMATCH)
+                keys[name] = vm._read_bounded(opened, 8192, vm.Classification.OWNERSHIP_MISMATCH)
+                vm._unchanged(opened, vm.Classification.OWNERSHIP_MISMATCH)
+            seed = jammy_seed(
+                token, keys["id_ed25519.pub"], keys["host_ed25519.pub"], keys["host_ed25519"]
+            )
+            with _new_file(directory_fd, "seed.iso") as output:
+                _write_all(output, seed)
+
+    def inspect_seed(self, seed_fd: int, retained: vm.OwnedPath) -> vm.SeedEvidence:
+        size = os.fstat(seed_fd).st_size
+        data = _read_bytes(seed_fd, size) if 0 < size <= vm._MAX_SEED_BYTES else b""
+        read_jammy_seed(data)
+        return vm.SeedEvidence(retained, size, hashlib.sha256(data).hexdigest(), "CIDATA")
+
+    def _docker(self, arguments: tuple[str, ...], *, timeout: float = 30) -> _OperationResult:
+        if self._credentials is None:
+            raise _Denied(NativeClassification.INVALID_AUTHORITY)
+        with vm._open_path(self._credentials.path, vm.Classification.OWNERSHIP_MISMATCH) as config:
+            vm._private(config, directory=True, failure=vm.Classification.OWNERSHIP_MISMATCH)
+            if config.owned != self._credentials:
+                raise _Denied(NativeClassification.UNSAFE_PATH)
+            vm._directory_names(
+                config.fd,
+                frozenset(("id_ed25519", "id_ed25519.pub", "host_ed25519", "host_ed25519.pub")),
+                vm.Classification.OWNERSHIP_MISMATCH,
+            )
+            # The fixed local daemon socket and ancestors cannot be replaced by
+            # the account. Its connect ACL grants Docker API use, not path writes.
+            for path in (Path("/"), Path("/run"), Path("/run/docker.sock")):
+                current = path.lstat()
+                if (
+                    current.st_uid != 0
+                    or (path.name != "docker.sock" and current.st_mode & 0o022)
+                    or stat.S_ISLNK(current.st_mode)
+                ):
+                    raise _Denied(NativeClassification.UNSAFE_PATH)
+            if not stat.S_ISSOCK(Path("/run/docker.sock").lstat().st_mode):
+                raise _Denied(NativeClassification.UNSAFE_PATH)
+            result = _run_vm_tool(
+                "docker",
+                (
+                    "--host",
+                    "unix:///run/docker.sock",
+                    "--config",
+                    f"/proc/self/fd/{config.fd}",
+                    *arguments,
+                ),
+                inherited=(config.fd,),
+                timeout=timeout,
+            )
+            vm._unchanged(config, vm.Classification.OWNERSHIP_MISMATCH)
+            if result.returncode != 0:
+                raise _Denied(NativeClassification.PROCESS_FAILED)
+            return result
+
+    def _image(self) -> None:
+        result = _native_json(self._docker(("image", "inspect", self.request.runner_image)).status)
+        if (
+            type(result) is not list
+            or len(result) != 1
+            or type(result[0]) is not dict
+            or result[0].get("Id") != self.runner_image_id
+        ):
+            raise _Denied(NativeClassification.INVALID_AUTHORITY)
+        config = result[0].get("Config")
+        if type(config) is not dict or any(
+            config.get(key) not in (None, [], {})
+            for key in ("Env", "Healthcheck", "Volumes", "ExposedPorts")
+        ):
+            raise _Denied(NativeClassification.INVALID_AUTHORITY)
+
+    def create_container(self, vm: vm.PreparedVm, runner: vm.RunnerIdentity) -> str | None:
+        from spaceterm_tasks import server_vm as vm_module
+
+        prepared = vm
+        if (
+            prepared.request != self.request
+            or os.geteuid() == 0
+            or runner.uid != os.geteuid()
+            or runner.gid != os.getegid()
+        ):
+            raise _Denied(NativeClassification.INVALID_AUTHORITY)
+        kvm = Path("/dev/kvm").stat()
+        if (
+            not stat.S_ISCHR(kvm.st_mode)
+            or (os.major(kvm.st_rdev), os.minor(kvm.st_rdev)) != (10, 232)
+            or kvm.st_gid != runner.kvm_gid
+        ):
+            raise _Denied(NativeClassification.UNSAFE_PATH)
+        memory = Path("/proc/meminfo").read_bytes()
+        match = re.search(rb"^MemAvailable:\s+([0-9]+) kB$", memory, re.MULTILINE)
+        if match is None or int(match[1]) < 8 * 1024**2:
+            raise _Denied(NativeClassification.INPUT_LIMIT)
+        self._image()
+        self._runner = runner
+        command = vm_module._start_command(prepared, runner)
+        # Creation is separate from start, so the executor can durably bind the ID.
+        arguments = tuple(arg for arg in command[2:] if arg != "--detach")
+        output = self._docker(("create", *arguments)).status
+        try:
+            identifier = output.decode("ascii").strip()
+        except UnicodeError:
+            raise _Denied(NativeClassification.INVALID_STATUS) from None
+        return identifier if _DIGEST.fullmatch(identifier) else None
+
+    def inspect(self, container_id: str) -> vm.ContainerObservation | None:
+        if not _DIGEST.fullmatch(container_id) or self._runner is None:
+            raise _Denied(NativeClassification.INVALID_AUTHORITY)
+        # Utility failure is unavailable, not absence. An exact-ID successful
+        # listing is the independent absence observation after remove.
+        found = self._docker(
+            (
+                "container",
+                "ls",
+                "--all",
+                "--no-trunc",
+                "--format",
+                "{{.ID}}",
+                "--filter",
+                "id=" + container_id,
+            )
+        ).status
+        if found == b"":
+            return None
+        if found != container_id.encode("ascii") + b"\n":
+            raise _Denied(NativeClassification.INVALID_STATUS)
+        raw = _native_json(self._docker(("container", "inspect", container_id)).status)
+        return _container_observation(
+            raw, self.request, self._runner, self.runner_image_id, container_id
+        )
+
+    def start_container(self, container_id: str) -> None:
+        if not _DIGEST.fullmatch(container_id):
+            raise _Denied(NativeClassification.INVALID_INPUT)
+        self._docker(("start", container_id))
+        deadline = time.monotonic() + 10
+        with vm._open_path(
+            self.request.directory, vm.Classification.OWNERSHIP_MISMATCH
+        ) as directory:
+            while True:
+                try:
+                    fd = os.open(
+                        "qmp.sock", os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory.fd
+                    )
+                except FileNotFoundError:
+                    if time.monotonic() >= deadline:
+                        raise _Denied(NativeClassification.TIMED_OUT) from None
+                    time.sleep(0.05)
+                    continue
+                try:
+                    current = os.fstat(fd)
+                    if not stat.S_ISSOCK(current.st_mode) or current.st_uid != os.geteuid():
+                        raise _Denied(NativeClassification.UNSAFE_PATH)
+                    # QEMU inherits the runner's umask. Restrict only its held
+                    # socket inode, never chmod a re-resolved name or host policy.
+                    os.chmod(f"/proc/self/fd/{fd}", 0o600)
+                    selected = os.stat("qmp.sock", dir_fd=directory.fd, follow_symlinks=False)
+                    if (selected.st_dev, selected.st_ino) != (current.st_dev, current.st_ino):
+                        raise _Denied(NativeClassification.UNSAFE_PATH)
+                finally:
+                    os.close(fd)
+                return
+
+    def stop_container(self, container_id: str, timeout_seconds: int) -> None:
+        if timeout_seconds != 30 or not _DIGEST.fullmatch(container_id):
+            raise _Denied(NativeClassification.INVALID_INPUT)
+        self._docker(("stop", "--time", "30", container_id), timeout=45)
+
+    def remove_container(self, container_id: str) -> None:
+        if not _DIGEST.fullmatch(container_id):
+            raise _Denied(NativeClassification.INVALID_INPUT)
+        self._docker(("rm", container_id))
+
+
+def _container_observation(
+    raw, request: vm.PrepareRequest, runner: vm.RunnerIdentity, image_id: str, container_id: str
+) -> vm.ContainerObservation:
+    """Compare effective Docker policy without dropping inherited or extra grants."""
+    failure = NativeClassification.INVALID_STATUS
+    if type(raw) is not list or len(raw) != 1 or type(raw[0]) is not dict:
+        raise _Denied(failure)
+    value = raw[0]
+    config, host, state = (value.get(key) for key in ("Config", "HostConfig", "State"))
+    if any(type(item) is not dict for item in (config, host, state)):
+        raise _Denied(failure)
+
+    def matches(document: dict, expected: dict) -> None:
+        for key, selected in expected.items():
+            if key not in document or not vm._same_typed_value(document[key], selected):
+                raise _Denied(failure)
+
+    matches(value, {"Id": container_id, "Image": image_id})
+    matches(
+        config,
+        {
+            "Image": request.runner_image,
+            "User": f"{runner.uid}:{runner.gid}",
+            "Env": None,
+            "WorkingDir": "/vm",
+            "Entrypoint": ["/usr/bin/qemu-system-x86_64"],
+            "Cmd": list(vm._guest_arguments(request)),
+            "Volumes": None,
+            "ExposedPorts": {"2222/tcp": {}},
+            "Tty": False,
+            "OpenStdin": False,
+        },
+    )
+    if config.get("Healthcheck") not in (None, {}) or config.get("StopSignal", "") not in (
+        "",
+        "SIGTERM",
+    ):
+        raise _Denied(failure)
+    matches(
+        host,
+        {
+            "NanoCpus": 2_000_000_000,
+            "Memory": 6144 * 1024**2,
+            "MemorySwap": 6144 * 1024**2,
+            "PidsLimit": 256,
+            "ReadonlyRootfs": True,
+            "Privileged": False,
+            "CapDrop": ["ALL"],
+            "CapAdd": None,
+            "SecurityOpt": ["no-new-privileges:true"],
+            "GroupAdd": [str(runner.kvm_gid)],
+            "Tmpfs": {"/tmp": "rw,noexec,nosuid,size=64m"},
+            "Devices": [
+                {"PathOnHost": "/dev/kvm", "PathInContainer": "/dev/kvm", "CgroupPermissions": "rw"}
+            ],
+            "NetworkMode": "bridge",
+            "PidMode": "",
+            "IpcMode": "private",
+            "UTSMode": "",
+            "UsernsMode": "",
+            "CgroupnsMode": "private",
+            "PublishAllPorts": False,
+            "PortBindings": {
+                "2222/tcp": [{"HostIp": "127.0.0.1", "HostPort": str(request.ssh.port)}]
+            },
+            "LogConfig": {"Type": "local", "Config": {"max-size": "10m", "max-file": "2"}},
+            "RestartPolicy": {"Name": "no", "MaximumRetryCount": 0},
+            "AutoRemove": False,
+            "Runtime": "runc",
+            "OomKillDisable": False,
+            "OomScoreAdj": 0,
+            "CgroupParent": "",
+            "Binds": None,
+            "VolumesFrom": None,
+            "DeviceRequests": None,
+            "DeviceCgroupRules": None,
+            "Sysctls": None,
+            "StorageOpt": None,
+            "Ulimits": None,
+        },
+    )
+    for key in (
+        "CpuShares",
+        "CpuPeriod",
+        "CpuQuota",
+        "CpuRealtimePeriod",
+        "CpuRealtimeRuntime",
+        "BlkioWeight",
+        "MemoryReservation",
+        "MemorySwappiness",
+    ):
+        if key in host and host[key] not in (None, 0):
+            raise _Denied(failure)
+    for key in ("CpusetCpus", "CpusetMems"):
+        if key not in host or host[key] != "":
+            raise _Denied(failure)
+    for key in (
+        "BlkioWeightDevice",
+        "BlkioDeviceReadBps",
+        "BlkioDeviceWriteBps",
+        "BlkioDeviceReadIOps",
+        "BlkioDeviceWriteIOps",
+    ):
+        if key not in host or host[key] not in (None, []):
+            raise _Denied(failure)
+    if (
+        host.get("Init") not in (None, False)
+        or host.get("Links") not in (None, [])
+        or host.get("ExtraHosts") not in (None, [])
+    ):
+        raise _Denied(failure)
+    if type(host.get("Mounts")) is not list or len(host["Mounts"]) != 1:
+        raise _Denied(failure)
+    source = host["Mounts"][0]
+    if type(source) is not dict or set(source) - {
+        "Type",
+        "Source",
+        "Target",
+        "ReadOnly",
+        "BindOptions",
+        "Consistency",
+    }:
+        raise _Denied(failure)
+    matches(
+        source,
+        {
+            "Type": "bind",
+            "Source": str(request.directory),
+            "Target": "/vm",
+            "BindOptions": {"NonRecursive": True},
+        },
+    )
+    if source.get("ReadOnly", False) is not False or source.get("Consistency", "") != "":
+        raise _Denied(failure)
+    mounts = value.get("Mounts")
+    if type(mounts) is not list or len(mounts) != 1 or type(mounts[0]) is not dict:
+        raise _Denied(failure)
+    matches(
+        mounts[0],
+        {
+            "Type": "bind",
+            "Source": str(request.directory),
+            "Destination": "/vm",
+            "RW": True,
+            "Propagation": "rprivate",
+        },
+    )
+    if (
+        value.get("AppArmorProfile") != "docker-default"
+        or type(state.get("Running")) is not bool
+        or config.get("StopTimeout") != 30
+    ):
+        raise _Denied(failure)
+    labels = config.get("Labels")
+    if (
+        type(labels) is not dict
+        or type(labels.get(vm.OWNER_LABEL)) is not str
+        or not _DIGEST.fullmatch(labels[vm.OWNER_LABEL])
+    ):
+        raise _Denied(failure)
+    # These closed records are returned only after every represented fact matched
+    # the effective native observation. Absent required fields never default safe.
+    return vm.ContainerObservation(
+        container_id,
+        labels[vm.OWNER_LABEL],
+        request.directory,
+        state["Running"],
+        vm._expected_configuration(request, runner),
+        vm._expected_policy(image_id),
+    )
+
+
+_GUEST_OBSERVE = r"""
+import ctypes, json, os, pwd, re, stat, subprocess
+from pathlib import Path
+p = Path("/var/lib/spaceterm-vm/owner.json")
+for x in (Path("/"), Path("/var"), Path("/var/lib"), p.parent, p):
+    s = x.lstat()
+    if s.st_uid != 0 or s.st_mode & 0o022 or stat.S_ISLNK(s.st_mode):
+        raise SystemExit(2)
+fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+try:
+    if os.fstat(fd).st_size > 8192:
+        raise SystemExit(2)
+    owner = json.loads(os.read(fd, 8193))
+finally:
+    os.close(fd)
+if set(owner) != {"token", "administrator_uid", "server_uid"} or pwd.getpwnam("stvm-admin").pw_uid != 20000 or pwd.getpwnam("stvm-server").pw_uid != 20001:
+    raise SystemExit(2)
+os_release = Path("/etc/os-release").read_text()
+if not re.search(r'^ID=ubuntu$', os_release, re.M) or not re.search(r'^VERSION_ID="22.04"$', os_release, re.M):
+    raise SystemExit(2)
+libc = ctypes.CDLL(None).gnu_get_libc_version
+libc.restype = ctypes.c_char_p
+version = libc().decode().split(".")
+kernel = re.match(r"(\d+)\.(\d+)\.(\d+)", os.uname().release)
+systemd = subprocess.run(("/usr/bin/systemctl", "--version"), env={"PATH":"/usr/bin:/bin", "LC_ALL":"C"}, capture_output=True, timeout=5)
+if systemd.returncode or len(systemd.stdout) > 8192:
+    raise SystemExit(2)
+supervisor = re.match(rb"systemd (\d+)", systemd.stdout)
+if not kernel or not supervisor:
+    raise SystemExit(2)
+owner.update(os_version=[22,4,0], kernel_version=[int(x) for x in kernel.groups()], libc_version=[int(x) for x in version] + [0], systemd_version=int(supervisor[1]), apparmor_enabled=Path("/sys/module/apparmor/parameters/enabled").read_text().strip()=="Y", apport_enabled=bool(re.search(r"^enabled=1$", Path("/etc/default/apport").read_text(), re.M)), suid_dumpable=int(Path("/proc/sys/fs/suid_dumpable").read_text()))
+print(json.dumps(owner, separators=(",", ":")))
+"""
+
+
+class LinuxGuestTransport:
+    """Strict SSH transport to the original seeded guest, using disposable keys.
+
+    Host-key checking is mandatory before any remote command. Agent forwarding,
+    TOFU, user/system configuration, multiplexing and host-key updates are off.
+    Authentication inputs are sealed descriptor copies of independently retained
+    credentials. Fixed protected guest operations never accept a caller command.
+    """
+
+    def __init__(self, receipt: "ExecutionReceipt", native: vm.ContainerInspector):
+        if (
+            receipt.prepared is None
+            or receipt.container_id is None
+            or len(receipt.prepared.ownership.credential_files) != 4
+        ):
+            raise TaskError("ownership-mismatch")
+        self.receipt, self.native = receipt, native
+
+    def _ssh(self, script: str, *, maximum: int = 8192, timeout: float = 30) -> bytes:
+        prepared = self.receipt.prepared
+        assert prepared is not None
+        with ExitStack() as handles:
+            before = self.native.inspect(self.receipt.container_id or "")
+            if before is None or not before.running or before.owner_token != self.receipt.token:
+                raise TaskError("ownership-mismatch")
+            pins = {item.path.name: item for item in prepared.ownership.credential_files}
+            files = _VerificationFiles()
+            cleanup = _Cleanup()
+            handles.callback(files.cleanup, cleanup)
+            for name in ("id_ed25519", "host_ed25519.pub"):
+                owned = pins[name]
+                opened = handles.enter_context(
+                    vm._open_path(owned.path, vm.Classification.OWNERSHIP_MISMATCH)
+                )
+                vm._private(opened, directory=False, failure=vm.Classification.OWNERSHIP_MISMATCH)
+                data = vm._read_bounded(opened, 8192, vm.Classification.OWNERSHIP_MISMATCH)
+                if (
+                    opened.owned != owned
+                    or hashlib.sha256(data).hexdigest() != owned.content_sha256
+                ):
+                    raise TaskError("ownership-mismatch")
+                vm._unchanged(opened, vm.Classification.OWNERSHIP_MISMATCH)
+                if name == "id_ed25519":
+                    files.seal("guest-identity", data)
+                else:
+                    alias = "stvm-" + self.receipt.token
+                    public = data.decode("ascii").strip()
+                    if not re.fullmatch(r"ssh-ed25519 [A-Za-z0-9+/=]{64,128}", public):
+                        raise TaskError("ownership-mismatch")
+                    files.seal("guest-known-hosts", (alias + " " + public + "\n").encode("ascii"))
+            key, known = (entry.entry.fd for entry in files.inputs)
+            command = "/usr/bin/sudo -n -- /usr/bin/python3 -I -c " + shlex.quote(script)
+            arguments = (
+                "-F",
+                "/dev/null",
+                "-p",
+                str(prepared.request.ssh.port),
+                "-i",
+                f"/proc/self/fd/{key}",
+                "-o",
+                "IdentitiesOnly=yes",
+                "-o",
+                "IdentityAgent=none",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "PasswordAuthentication=no",
+                "-o",
+                "KbdInteractiveAuthentication=no",
+                "-o",
+                "PreferredAuthentications=publickey",
+                "-o",
+                "StrictHostKeyChecking=yes",
+                "-o",
+                "HostKeyAlgorithms=ssh-ed25519",
+                "-o",
+                "HostKeyAlias=" + alias,
+                "-o",
+                f"UserKnownHostsFile=/proc/self/fd/{known}",
+                "-o",
+                "GlobalKnownHostsFile=/dev/null",
+                "-o",
+                "UpdateHostKeys=no",
+                "-o",
+                "ForwardAgent=no",
+                "-o",
+                "ClearAllForwardings=yes",
+                "-o",
+                "ControlMaster=no",
+                "-o",
+                "ControlPath=none",
+                "-o",
+                "ConnectTimeout=10",
+                "-o",
+                "ConnectionAttempts=1",
+                "-o",
+                "LogLevel=ERROR",
+                "-T",
+                "stvm-admin@127.0.0.1",
+                command,
+            )
+            output = _successful_tool(
+                "ssh", arguments, inherited=(key, known), timeout=timeout, maximum=maximum
+            )
+            after = self.native.inspect(self.receipt.container_id or "")
+            if after != before:
+                raise TaskError("ownership-mismatch")
+        if not cleanup.complete:
+            raise TaskError("cleanup-unresolved")
+        return output
+
+    def observe(self) -> "GuestObservation":
+        from spaceterm_tasks.linux_custody_evidence import GuestObservation, admit_guest_observation
+
+        try:
+            value = _native_json(self._ssh(_GUEST_OBSERVE))
+            fields = {
+                "token",
+                "administrator_uid",
+                "server_uid",
+                "os_version",
+                "kernel_version",
+                "libc_version",
+                "systemd_version",
+                "apparmor_enabled",
+                "apport_enabled",
+                "suid_dumpable",
+            }
+            if (
+                type(value) is not dict
+                or set(value) != fields
+                or value["token"] != self.receipt.token
+                or value["administrator_uid"] != 20000
+                or value["server_uid"] != 20001
+            ):
+                raise TaskError("ownership-mismatch")
+            return admit_guest_observation(
+                self.receipt,
+                GuestObservation(
+                    self.receipt.container_id or "",
+                    value["token"],
+                    value["administrator_uid"],
+                    value["server_uid"],
+                    tuple(value["os_version"]),
+                    tuple(value["kernel_version"]),
+                    tuple(value["libc_version"]),
+                    value["systemd_version"],
+                    value["apparmor_enabled"],
+                    value["apport_enabled"],
+                    value["suid_dumpable"],
+                ),
+            )
+        except (vm._Denied, _Denied, ValueError, TypeError, KeyError, OSError):
+            raise TaskError("native-unavailable") from None
+
+
+class GuestObserver(Protocol):
+    def observe(self) -> "GuestObservation": ...
+
+
+def run_owned_jammy_transport(
+    executor: "VmExecutor",
+    request: vm.PrepareRequest,
+    state_directory: vm.OwnedPath,
+    peer_factory: "Callable[[ExecutionReceipt], GuestObserver]",
+) -> None:
+    """One receipt owner from fresh allocation through authenticated observation.
+
+    This is a provisioning/transport check, not custody evidence. Failed or lost
+    phase responses retain the independent journal for reviewed recovery. Cleanup
+    uses only a successfully admitted Started receipt and the executor's atomic
+    no-overwrite detachment. Interruption never creates a second VM or credential.
+    """
+    from spaceterm_tasks.linux_custody_evidence import admit_guest_observation
+
+    prepared = executor.prepare(request, state_directory=state_directory)
+    if prepared.classification != vm.Classification.PREPARED or prepared.receipt is None:
+        raise TaskError(prepared.classification.value)
+    started = executor.start(prepared.receipt)
+    if started.classification != vm.Classification.STARTED or started.receipt is None:
+        # A timeout can leave an exact native effect. A path or new observation
+        # cannot supply the missing successful phase transition.
+        raise TaskError(started.classification.value)
+    receipt = started.receipt
+    primary = None
+    try:
+        peer = peer_factory(receipt)
+        deadline = time.monotonic() + request.resources.boot_timeout_seconds
+        while True:
+            try:
+                admit_guest_observation(receipt, peer.observe())
+                if time.monotonic() >= deadline:
+                    raise TaskError("timed-out")
+                break
+            except TaskError as error:
+                if str(error) != "native-unavailable":
+                    raise
+                if time.monotonic() >= deadline:
+                    raise TaskError("timed-out") from None
+                time.sleep(min(1, max(0, deadline - time.monotonic())))
+    except BaseException as error:
+        primary = error
+    finally:
+        # Defer further termination during bounded exact-ID stop and detachment.
+        # This mask is installed after child creation, never inherited by a guest.
+        previous = signal.pthread_sigmask(
+            signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM, signal.SIGHUP}
+        )
+        cleanup_error = None
+        try:
+            stopped = executor.stop(receipt)
+            if stopped.classification != vm.Classification.STOPPED or stopped.receipt is None:
+                cleanup_error = TaskError("cleanup-unresolved")
+            else:
+                removed = executor.remove(stopped.receipt)
+                if removed.classification != vm.Classification.REMOVED:
+                    cleanup_error = TaskError("cleanup-unresolved")
+        except BaseException:
+            cleanup_error = TaskError("cleanup-unresolved")
+        finally:
+            try:
+                signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+            except BaseException as error:
+                if primary is None:
+                    primary = error
+        if cleanup_error is not None:
+            raise cleanup_error from None
+    if primary is not None:
+        if isinstance(primary, (KeyboardInterrupt, SystemExit, TaskError)):
+            raise primary
+        raise TaskError("native-unavailable") from None
+
+
+def owned_vm_transport(approval: Path) -> None:
+    """Executable one-shot composition from independently provisioned local pins.
+
+    Approval is local operator input, separate from downloaded data and all
+    checkouts. It contains public pins and allocation paths, never credentials.
+    This approves only disposable VM operations, not SpaceTerm native admission.
+    The original ExecutionReceipt is never reconstructed from a manifest or path.
+    """
+    from spaceterm_tasks.server_vm_executor import VmExecutor
+
+    try:
+        _require_acquisition_context()
+        if os.geteuid() == 0 or os.uname().machine != "x86_64":
+            raise TaskError("unsupported-host")
+        with vm._open_path(approval, vm.Classification.UNSAFE_PATH) as opened:
+            vm._private(opened, directory=False, failure=vm.Classification.UNSAFE_PATH)
+            document = _native_json(
+                vm._read_bounded(opened, vm._MAX_DOCUMENT_BYTES, vm.Classification.UNSAFE_PATH)
+            )
+            vm._unchanged(opened, vm.Classification.UNSAFE_PATH)
+        fields = {
+            "schema",
+            "directory",
+            "state_directory",
+            "scratch_directory",
+            "image",
+            "runner_image",
+            "runner_image_id",
+            "ssh_port",
+            "keyring",
+        }
+        if (
+            type(document) is not dict
+            or set(document) != fields
+            or type(document["schema"]) is not int
+            or document["schema"] != 1
+        ):
+            raise TaskError("invalid-request")
+        image, keyring = document["image"], document["keyring"]
+        if (
+            type(image) is not dict
+            or set(image)
+            != {"path", "checksums", "signature", "sha256", "signer_fingerprint", "size_bytes"}
+            or type(keyring) is not dict
+            or set(keyring) != {"path", "sha256", "size_bytes", "primary_fingerprints"}
+            or type(keyring["primary_fingerprints"]) is not list
+        ):
+            raise TaskError("invalid-request")
+        paths = [
+            Path(value)
+            for value in (
+                approval,
+                document["directory"],
+                document["state_directory"],
+                document["scratch_directory"],
+                image["path"],
+                image["checksums"],
+                image["signature"],
+                keyring["path"],
+            )
+        ]
+        if any(not path.is_absolute() for path in paths) or any(
+            path.is_relative_to(ROOT) for path in paths
+        ):
+            raise TaskError("unsafe-path")
+        # Approval, trust, and each downloaded object have distinct directories.
+        if len({path.parent for path in (paths[0], *paths[4:])}) != 5:
+            raise TaskError("unsafe-path")
+        guest = vm.GuestImage(
+            paths[4],
+            paths[5],
+            paths[6],
+            image["sha256"],
+            image["signer_fingerprint"],
+            image["size_bytes"],
+        )
+        request = vm.PrepareRequest(
+            paths[1], guest, document["runner_image"], ssh=vm.SshEndpoint(port=document["ssh_port"])
+        )
+        approved = ApprovedKeyring(
+            paths[7],
+            keyring["sha256"],
+            keyring["size_bytes"],
+            tuple(keyring["primary_fingerprints"]),
+        )
+        kvm = Path("/dev/kvm").stat()
+        if not os.access("/dev/kvm", os.R_OK | os.W_OK, effective_ids=True):
+            raise TaskError("native-unavailable")
+        runner = vm.RunnerIdentity(os.geteuid(), os.getegid(), kvm.st_gid)
+        native = NativeVm(request, document["runner_image_id"])
+        signatures = NativeSignatureVerifier(
+            expected_primary=guest.signer_fingerprint, keyring=approved, scratch_directory=paths[3]
+        )
+        executor = VmExecutor(
+            ROOT, signatures, native, runner, request.runner_image, document["runner_image_id"]
+        )
+        run_owned_jammy_transport(
+            executor,
+            request,
+            vm.OwnedPath.capture(paths[2]),
+            lambda receipt: LinuxGuestTransport(receipt, native),
+        )
+    except (vm._Denied, _Denied, KeyError, TypeError, ValueError, OSError):
+        raise TaskError("native-unavailable") from None

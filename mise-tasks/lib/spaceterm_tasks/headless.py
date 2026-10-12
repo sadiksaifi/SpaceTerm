@@ -21,6 +21,7 @@ REQUIRED_CRATES = (
     "spaceterm-host",
     "spaceterm-protocol",
     "spaceterm-terminal",
+    "spaceterm-distribution",
 )
 
 # Normalize underscores so package spelling and Cargo aliases cannot hide a family.
@@ -163,6 +164,26 @@ def check_metadata(metadata):
             for package, dependencies in graph.items()
         ):
             raise ValueError
+        if any(
+            set(node["dependencies"]) != {dep["pkg"] for dep in node["deps"]}
+            or any(
+                not dep["dep_kinds"]
+                or any(kind["kind"] not in (None, "build", "dev") for kind in dep["dep_kinds"])
+                for dep in node["deps"]
+            )
+            for node in nodes
+        ):
+            raise ValueError
+        normal = {
+            node["id"]: [
+                dep["pkg"]
+                for dep in node["deps"]
+                if any(kind["kind"] is None for kind in dep["dep_kinds"])
+            ]
+            for node in nodes
+        }
+        if any(dep not in graph[package] for package, deps in normal.items() for dep in deps):
+            raise ValueError
         if any(root not in graph for root in roots.values()):
             raise ValueError
     except (KeyError, TypeError, ValueError, AttributeError):
@@ -186,6 +207,24 @@ def check_metadata(metadata):
                 if dependency not in parents:
                     parents[dependency] = package
                     queue.append(dependency)
+    # Test-only client peers are allowed. Normal host/server edges must not pull
+    # client credential or journal ownership back into the daemon.
+    for name in ("spaceterm-distribution", "spaceterm-host", "spaceterm-server"):
+        forbidden = {"spaceterm-client", "spaceterm-client-native"}
+        if name == "spaceterm-distribution":
+            forbidden.update(("spaceterm-host", "spaceterm-server", "spaceterm"))
+        queue = deque([roots[name]])
+        visited = set()
+        while queue:
+            package = queue.popleft()
+            if package in visited:
+                continue
+            visited.add(package)
+            if names[package] in forbidden:
+                raise TaskError(
+                    f"headless dependency direction forbidden: {name} -> {names[package]}"
+                )
+            queue.extend(normal[package])
     return tuple(checked)
 
 

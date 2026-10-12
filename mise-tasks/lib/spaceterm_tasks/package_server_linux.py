@@ -233,13 +233,22 @@ def verify_copied_credential_files(root, pinned_files, notices_sha256):
 
 
 def validate_credential_closure(root=None):
-    root = CLOSURE if root is None else root
+    """Production packaging requires every runtime gate on this exact construction."""
+    return _validate_credential_closure(CLOSURE if root is None else root, evidence_candidate=False)
+
+
+def validate_evidence_credential_closure(root=None):
+    """Authenticate a fresh unrun construction, not production admission."""
+    return _validate_credential_closure(CLOSURE if root is None else root, evidence_candidate=True)
+
+
+def _validate_credential_closure(root, *, evidence_candidate):
     pin = credential_tool_pin()
     build = pin["build"]
     runtime = pin["runtime"]
-    validate_runtime(pin)
+    validate_runtime(pin, fresh=evidence_candidate)
     if (
-        not build["complete"]
+        build["complete"] is not True
         or any(
             not build[field]
             for field in (
@@ -251,9 +260,7 @@ def validate_credential_closure(root=None):
                 "ninja_version",
             )
         )
-        or runtime["jammy_result"] != "passed"
-        or runtime["host_key_result"] != "passed"
-        or runtime["tpm_result"] != "passed"
+        or (not evidence_candidate and any(runtime[field] != "passed" for field in RUNTIME_RESULTS))
     ):
         raise TaskError("pinned credential-tool closure and Jammy evidence are unavailable")
     if (
@@ -369,6 +376,22 @@ def verify_elf_closure(root):
     libraries = root / "lib/credential-tools"
     private_names = set()
     elves = {}
+    entry_points = {root / "libexec/credential-tools/systemd-creds"}
+    server = root / "bin/spaceterm-server"
+    if server.exists():
+        entry_points.update(
+            {
+                server,
+                *(
+                    root / "libexec" / name
+                    for name in (
+                        "spaceterm-server-launcher",
+                        "spaceterm-server-manager",
+                        "spaceterm-server-spawner",
+                    )
+                ),
+            }
+        )
     for path in root.rglob("*"):
         if path.is_symlink():
             raise TaskError("server ELF closure contains a linked file")
@@ -382,7 +405,11 @@ def verify_elf_closure(root):
             private_names.add(path.name)
         with path.open("rb") as source:
             if source.read(4) == b"\x7fELF":
+                if path not in entry_points and path.parent != libraries:
+                    raise TaskError("server ELF closure contains unrecorded native code")
                 elves[path] = verify_elf(path, private=credential)
+    if not entry_points <= elves.keys():
+        raise TaskError("server ELF closure is missing a native executable")
     for path, needed in elves.items():
         credential = "credential-tools" in path.relative_to(root).parts
         search = (
@@ -535,7 +562,41 @@ def build_credential_tool():
 def package(release_tag=None):
     if sys.platform != "linux":
         raise TaskError("Linux server packaging requires Linux")
-    pin = validate_credential_closure()
+    destination = _package(validate_credential_closure(), release_tag)
+    print("Linux server archive and complete licensed closure verified.")
+    return destination
+
+
+def package_evidence_candidate():
+    """Build separately named Preflight input. No release feed or authority gate changes."""
+    if sys.platform != "linux":
+        raise TaskError("Linux evidence-candidate construction requires Linux")
+    destination = _package(validate_evidence_credential_closure(), None, evidence_candidate=True)
+    print(
+        "Authenticated Linux evidence candidate built; production and runtime evidence remain unavailable."
+    )
+    return destination
+
+
+def package_publisher(release_tag=None):
+    """Build the production APT prerequisite only after closure-bound runtime evidence."""
+    if sys.platform != "linux":
+        raise TaskError("native publisher construction requires Linux")
+    return _package(validate_credential_closure(), release_tag, publisher=True)
+
+
+def _package(pin, release_tag, *, evidence_candidate=False, publisher=False):
+    candidate = DIST / "spaceterm-server-evidence-linux-x86_64.tar.gz"
+    publisher_output = DIST / (
+        "spaceterm-native-publisher-evidence-linux-x86_64.deb"
+        if evidence_candidate
+        else f"spaceterm-native-publisher-{'release' if release_tag else 'preflight'}-linux-x86_64.deb"
+    )
+    if evidence_candidate and any(
+        path.exists() or path.is_symlink()
+        for path in (candidate, candidate.with_name(candidate.name + ".json"), publisher_output)
+    ):
+        raise TaskError("native evidence-candidate output already exists")
     dependencies = [
         {
             key: value
@@ -562,12 +623,7 @@ def package(release_tag=None):
                     source, root / source.relative_to(CLOSURE), source.stat().st_mode & 0o777
                 )
         verify_credential_files(root, pin["build"]["files"])
-        for name, destination, mode in (
-            ("spaceterm-server", "bin/spaceterm-server", 0o501),
-            ("spaceterm-server-launcher", "libexec/spaceterm-server-launcher", 0o555),
-            ("spaceterm-server-manager", "libexec/spaceterm-server-manager", 0o555),
-        ):
-            package_server.copy_file(binaries[name], root / destination, mode)
+        package_server.copy_built_executables(binaries, root, metadata)
         notices = root / "share/spaceterm-server/THIRD-PARTY-NOTICES.txt"
         if notices.stat().st_size > 1024 * 1024:
             raise TaskError("credential-tool notices exceed their bound")
@@ -581,6 +637,29 @@ def package(release_tag=None):
         output = Path(temporary) / "server.tar.gz"
         package_server.write_archive(root, output)
         package_server.verify_archive(output)
-        destination = package_server.archive_path("linux-x86_64", build)
-        shutil.copyfile(output, destination)
-    print("Linux server archive and complete licensed closure verified.")
+        if publisher or evidence_candidate:
+            from spaceterm_tasks.linux_custody_packaging import build_publisher_package
+
+            build_publisher_package(root, publisher_output)
+        destination = (
+            candidate if evidence_candidate else package_server.archive_path("linux-x86_64", build)
+        )
+        if evidence_candidate:
+            with output.open("rb") as source, destination.open("xb") as target:
+                shutil.copyfileobj(source, target)
+        else:
+            shutil.copyfile(output, destination)
+        if evidence_candidate:
+            receipt = {
+                "schema_version": 1,
+                "purpose": "native-evidence-candidate",
+                "build_identity": "preflight",
+                "runtime_evidence": "unrun",
+                "credential_closure_sha256": pin["runtime"]["closure_sha256"],
+                "archive_sha256": artifacts.digest(destination),
+                "manifest_sha256": artifacts.digest(root / "installation.json"),
+                "publisher_package_sha256": artifacts.digest(publisher_output),
+            }
+            with destination.with_name(destination.name + ".json").open("x") as stream:
+                stream.write(json.dumps(receipt, sort_keys=True, separators=(",", ":")))
+    return publisher_output if publisher else destination

@@ -1,11 +1,13 @@
 """Admitted descriptor-based prepare and exact-ID create-before-start execution.
 
-Stop/remove remain closed until bounded shutdown and identity-relative cleanup have
-separate evidence. No method accepts commands, Docker flags, guest code or cleanup
-paths. STARTED means the admitted native start returned, not guest/KVM readiness.
+Stop/remove require the retained started receipt, exact native policy, observed
+shutdown and descriptor-relative cleanup. No method accepts commands, Docker
+flags, guest code or cleanup paths. STARTED means the admitted native start
+returned, not guest/KVM readiness.
 The nonexecuting planner's proposals are never consumed as execution authority.
 """
 
+import ctypes
 import errno
 import fcntl
 import hashlib
@@ -13,6 +15,7 @@ import json
 import os
 import secrets
 import stat
+import sys
 from contextlib import ExitStack
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -23,6 +26,7 @@ from spaceterm_tasks import server_vm as _vm
 from spaceterm_tasks.server_vm import (
     Classification,
     ContainerInspector,
+    ContainerObservation,
     DiskEvidence,
     ImageEvidence,
     OwnedPath,
@@ -41,6 +45,7 @@ JOURNAL_NAME = "journal.json"
 JOURNAL_SCHEMA = 1
 _VM_NAMES = frozenset(("credentials", "os.qcow2", "encrypted.qcow2", "seed.iso", _vm.MANIFEST_NAME))
 _CREDENTIAL_NAMES = frozenset(("id_ed25519", "id_ed25519.pub"))
+_HOST_CREDENTIAL_NAMES = frozenset(("host_ed25519", "host_ed25519.pub"))
 _STATE_NAMES = frozenset((JOURNAL_NAME,))
 _RUNTIME_NAMES = frozenset(("qmp.sock",))
 
@@ -75,6 +80,7 @@ class ExecutionReceipt:
     image_evidence: ImageEvidence | None = field(default=None, repr=False)
     directory: OwnedPath | None = field(default=None, repr=False)
     checkout: OwnedPath | None = field(default=None, repr=False)
+    cleanup_directory: OwnedPath | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,7 +93,10 @@ class ExecutionResult:
 
 
 class VmNative(ContainerInspector, Protocol):
-    """Intentional operations on held files or independently retained exact IDs.
+    """inspect returns None only for positively observed exact-ID absence.
+
+    Inspection failures raise instead; unavailable evidence is never absence.
+    Intentional operations on held files or independently retained exact IDs.
 
     Adapters enforce capacity admission, deadlines and output bounds without host
     changes. They do not reopen downloaded paths, normalize away effective policy,
@@ -113,7 +122,7 @@ class VmNative(ContainerInspector, Protocol):
         """Inspect this offline disk without reopening its path or repairing it."""
         ...
 
-    def create_seed(self, directory_fd: int) -> None:
+    def create_seed(self, directory_fd: int, token: str) -> None:
         """Create bounded trusted NoCloud seed.iso, CIDATA, using disposable keys."""
         ...
 
@@ -158,8 +167,9 @@ def _record(
     *,
     directory: OwnedPath,
     checkout: OwnedPath,
+    cleanup_directory: OwnedPath | None = None,
 ) -> dict:
-    return {
+    document = {
         "schema": JOURNAL_SCHEMA,
         "stage": stage,
         "token": token,
@@ -168,6 +178,33 @@ def _record(
         "checkout": _created_record(checkout),
         "created_paths": [_created_record(path) for path in paths],
     }
+    if cleanup_directory is not None:
+        document["cleanup_directory"] = _created_record(cleanup_directory)
+    return document
+
+
+def _rename_noreplace(source_fd: int, source: str, destination_fd: int, destination: str) -> None:
+    """Atomic detachment, never an overwrite or a check-then-rename fallback."""
+    if sys.platform == "linux":
+        native = ctypes.CDLL("libc.so.6", use_errno=True)
+        operation = native.renameat2
+        flags = 1  # RENAME_NOREPLACE
+    elif sys.platform == "darwin":
+        native = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+        operation = native.renameatx_np
+        flags = 4  # RENAME_EXCL
+    else:
+        raise _vm._Denied(Classification.NATIVE_UNAVAILABLE)
+    operation.argtypes = (
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    )
+    operation.restype = ctypes.c_int
+    if operation(source_fd, os.fsencode(source), destination_fd, os.fsencode(destination), flags):
+        raise OSError(ctypes.get_errno(), "native detachment failed")
 
 
 def _document_bytes(document: dict) -> bytes:
@@ -212,6 +249,7 @@ class _Journal:
     def __init__(self, execution: "_Execution", retained: OwnedPath | None = None):
         self.execution = execution
         self.expected: dict | None = None
+        self.synchronized = retained is not None
         failure = Classification.OWNERSHIP_MISMATCH
         state = execution.state
         flags = os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
@@ -264,8 +302,16 @@ class _Journal:
             execution.created_paths,
             directory=execution.directory_identity,
             checkout=execution.checkout_identity,
+            cleanup_directory=(
+                execution.cleanup_directory.owned
+                if execution.cleanup_directory is not None
+                else None
+            ),
         )
         data = _document_bytes(document)
+        # Visible bytes cannot admit the next lifecycle operation after a failed
+        # write, sync or final validation. The receipt retains cleanup scope only.
+        self.synchronized = False
         _write_bytes(self.fd, data)
         self.opened = replace(self.opened, observation=os.fstat(self.fd))
         self.retained = replace(self.opened.owned, content_sha256=hashlib.sha256(data).hexdigest())
@@ -276,6 +322,7 @@ class _Journal:
         os.fsync(execution.state.fd)
         self.check()
         execution.check_state()
+        self.synchronized = True
 
 
 class _Execution:
@@ -298,6 +345,7 @@ class _Execution:
         *,
         directory: OwnedPath | None = None,
         checkout: OwnedPath | None = None,
+        runtime_started: bool = False,
     ):
         self.planner, self.handles, self.request = planner, handles, request
         failure = Classification.OWNERSHIP_MISMATCH
@@ -326,8 +374,9 @@ class _Execution:
         self.image: tuple[_vm._OpenedPath, ...] = ()
         self.journal: _Journal | None = None
         self.journal_identity: OwnedPath | None = None
-        self.start_attempted = False
-        self.check_roots()
+        self.cleanup_directory: _vm._OpenedPath | None = None
+        self.start_attempted = runtime_started
+        self.check_roots(runtime_started=runtime_started)
         for opened in (self.state, self.directory):
             try:
                 fcntl.flock(opened.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -338,7 +387,7 @@ class _Execution:
         # Never adopt a newer stamp or stage after obtaining the namespace claim.
         # ExitStack closes the descriptors and releases both locks on every exit,
         # including KeyboardInterrupt and SystemExit.
-        self.check_roots()
+        self.check_roots(runtime_started=runtime_started)
 
     @property
     def created_paths(self) -> tuple[OwnedPath, ...]:
@@ -442,9 +491,15 @@ class _Execution:
                 raise _vm._Denied(failure)
         credentials = self.paths.get(self.request.directory / "credentials")
         if credentials is not None:
-            _vm._directory_names(credentials.fd, _CREDENTIAL_NAMES, failure)
+            _vm._directory_names(
+                credentials.fd, _CREDENTIAL_NAMES, failure, optional=_HOST_CREDENTIAL_NAMES
+            )
         if self.journal is not None:
-            _vm._directory_names(self.state.fd, _STATE_NAMES, failure)
+            expected_state = _STATE_NAMES
+            if self.cleanup_directory is not None:
+                expected_state |= frozenset((self.cleanup_directory.owned.path.name,))
+                _vm._unchanged_directory(self.cleanup_directory, failure)
+            _vm._directory_names(self.state.fd, expected_state, failure)
             self.journal.check()
 
     def check(self, *, runtime_started: bool = False, creating: str | None = None) -> None:
@@ -529,8 +584,17 @@ class _Execution:
         self.check(creating=name)  # Previously retained bytes must survive the callback.
         opened = self.remember(self.request.directory / name, directory=credentials)
         if credentials:
-            _vm._directory_names(opened.fd, _CREDENTIAL_NAMES, Classification.CLEANUP_INCOMPLETE)
-            for leaf in ("id_ed25519", "id_ed25519.pub"):
+            names = _vm._directory_names(
+                opened.fd,
+                _CREDENTIAL_NAMES,
+                Classification.CLEANUP_INCOMPLETE,
+                optional=_HOST_CREDENTIAL_NAMES,
+            )
+            if names & _HOST_CREDENTIAL_NAMES not in (frozenset(), _HOST_CREDENTIAL_NAMES):
+                raise _vm._Denied(Classification.CLEANUP_INCOMPLETE)
+            for leaf in ("id_ed25519", "id_ed25519.pub", "host_ed25519", "host_ed25519.pub"):
+                if leaf not in names:
+                    continue
                 child = self.remember(opened.owned.path / leaf)
                 os.fsync(child.fd)
             os.fsync(opened.fd)
@@ -544,7 +608,11 @@ class _Execution:
         journal = self.journal.retained if self.journal is not None else self.journal_identity
         if journal is None:
             return None
-        prepared = self.prepared if self.prepared_admitted and self.journal is not None else None
+        prepared = (
+            self.prepared
+            if self.prepared_admitted and self.journal is not None and self.journal.synchronized
+            else None
+        )
         if prepared is not None and self.container_id is not None:
             prepared = replace(
                 prepared, ownership=replace(prepared.ownership, container_id=self.container_id)
@@ -559,6 +627,9 @@ class _Execution:
             image_evidence=self.image_evidence,
             directory=self.directory_identity,
             checkout=self.checkout_identity,
+            cleanup_directory=(
+                self.cleanup_directory.owned if self.cleanup_directory is not None else None
+            ),
         )
 
     def create_manifest(self) -> _vm._OpenedPath:
@@ -600,9 +671,9 @@ class VmExecutor:
     """Admit independently pinned inputs, then retain descriptors through each effect.
 
     prepare takes a fresh independently captured private state directory. start
-    accepts a retained prepared receipt, not a manifest or proposal. Interrupted
-    phases, known IDs with uncertain durability, and lifecycle cleanup need later
-    recovery cycles; they never grant implicit re-execution here.
+    accepts a retained prepared receipt, not a manifest or proposal. stop and remove
+    require the original started and stopped receipts respectively. Interrupted
+    phases and uncertain durability require reviewed recovery, not re-execution.
     """
 
     def __init__(
@@ -680,7 +751,7 @@ class VmExecutor:
 
                 execution.journal.commit("seed-pending")
                 execution.check()
-                self._native.create_seed(execution.directory.fd)
+                self._native.create_seed(execution.directory.fd, execution.token)
                 seed = execution.admit_created("seed.iso")
                 execution.journal.commit("seed-created")
                 seed_evidence = self._seed(execution, seed)
@@ -696,7 +767,13 @@ class VmExecutor:
                     credentials,
                     tuple(
                         execution.paths[credentials.path / leaf].owned
-                        for leaf in ("id_ed25519", "id_ed25519.pub")
+                        for leaf in (
+                            "id_ed25519",
+                            "id_ed25519.pub",
+                            "host_ed25519",
+                            "host_ed25519.pub",
+                        )
+                        if credentials.path / leaf in execution.paths
                     ),
                 )
                 vm = PreparedVm(
@@ -758,7 +835,7 @@ class VmExecutor:
             or not _vm._valid_owned_path(receipt.journal)
             or receipt.journal.path != receipt.state_directory.path / JOURNAL_NAME
             or type(receipt.created_paths) is not tuple
-            or len(receipt.created_paths) != 7
+            or len(receipt.created_paths) != 5 + len(vm.ownership.credential_files)
             or not all(_vm._valid_owned_path(path) for path in receipt.created_paths)
         ):
             raise _vm._Denied(failure)
@@ -878,8 +955,256 @@ class VmExecutor:
             )
             return ExecutionResult(Phase.START, classification, retained)
 
+    def _admit_cleanup(
+        self, receipt: ExecutionReceipt, handles: ExitStack, stage: str
+    ) -> _Execution:
+        failure = Classification.OWNERSHIP_MISMATCH
+        if (
+            not isinstance(receipt, ExecutionReceipt)
+            or not isinstance(receipt.prepared, PreparedVm)
+            or not isinstance(receipt.container_id, str)
+            or not _vm._HEX_DIGEST.fullmatch(receipt.container_id)
+        ):
+            raise _vm._Denied(Classification.INVALID_STATE)
+        vm = receipt.prepared
+        owner, artifacts = vm.ownership, vm.artifacts
+        if (
+            not isinstance(owner, Ownership)
+            or not isinstance(artifacts, VmArtifacts)
+            or receipt.container_id != owner.container_id
+            or receipt.token != owner.token
+            or not isinstance(receipt.token, str)
+            or not _vm._HEX_DIGEST.fullmatch(receipt.token)
+            or receipt.directory != owner.directory
+            or receipt.checkout != owner.checkout
+            or not _vm._valid_owned_path(receipt.journal)
+            or receipt.journal.path != receipt.state_directory.path / JOURNAL_NAME
+        ):
+            raise _vm._Denied(failure)
+        expected = (
+            owner.credential_directory,
+            *owner.credential_files,
+            artifacts.os_disk.file,
+            artifacts.encrypted_disk.file,
+            artifacts.seed.file,
+            owner.manifest,
+        )
+        if (
+            type(receipt.created_paths) is not tuple
+            or receipt.created_paths != expected
+            or len(expected) != 5 + len(owner.credential_files)
+            or not all(_vm._valid_owned_path(p) for p in expected)
+        ):
+            raise _vm._Denied(failure)
+        if self._native is None:
+            raise _vm._Denied(Classification.NATIVE_UNAVAILABLE)
+        execution = _Execution(
+            self._planner,
+            handles,
+            vm.request,
+            receipt.state_directory,
+            directory=receipt.directory,
+            checkout=receipt.checkout,
+            runtime_started=True,
+        )
+        execution.token, execution.container_id = receipt.token, receipt.container_id
+        execution.prepared = vm
+        for retained in receipt.created_paths:
+            opened = handles.enter_context(_vm._open_path(retained.path, failure))
+            if opened.owned != retained:
+                raise _vm._Denied(failure)
+            execution.paths[retained.path] = replace(opened, owned=retained)
+        execution.journal = _Journal(execution, receipt.journal)
+        execution.journal.expected = _record(
+            stage,
+            receipt.token,
+            receipt.container_id,
+            receipt.created_paths,
+            directory=execution.directory_identity,
+            checkout=execution.checkout_identity,
+        )
+        execution.check(runtime_started=True)
+        execution.prepared_admitted = True
+        return execution
+
+    def _runtime_observation(self, execution: _Execution) -> ContainerObservation:
+        assert self._native is not None and execution.prepared is not None
+        assert execution.container_id is not None
+        execution.check(runtime_started=True)
+        observed = self._native.inspect(execution.container_id)
+        execution.check(runtime_started=True)
+        if not isinstance(observed, _vm.ContainerObservation) or type(observed.running) is not bool:
+            raise _vm._Denied(Classification.OWNERSHIP_MISMATCH)
+        # Running is the sole permitted difference from the pre-start policy.
+        self._planner._container_matches(execution.prepared, replace(observed, running=False))
+        return observed
+
     def stop(self, receipt: ExecutionReceipt) -> ExecutionResult:
-        return ExecutionResult(Phase.STOP, Classification.GATE_NOT_READY)
+        execution = None
+        effect = False
+        try:
+            with ExitStack() as handles:
+                execution = self._admit_cleanup(receipt, handles, "started")
+                self._runtime_observation(execution)
+                assert self._native is not None and execution.journal is not None
+                assert execution.container_id is not None
+                execution.journal.commit("stop-pending")
+                execution.check(runtime_started=True)
+                effect = True
+                self._native.stop_container(execution.container_id, timeout_seconds=30)
+                if self._runtime_observation(execution).running:
+                    raise _vm._Denied(Classification.CLEANUP_INCOMPLETE)
+                execution.journal.commit("stopped")
+                return ExecutionResult(Phase.STOP, Classification.STOPPED, execution.receipt())
+        except _vm._Denied as denial:
+            return ExecutionResult(
+                Phase.STOP,
+                Classification.CLEANUP_INCOMPLETE if effect else denial.classification,
+                execution.receipt() if execution is not None else None,
+            )
+        except Exception:
+            return ExecutionResult(
+                Phase.STOP,
+                Classification.CLEANUP_INCOMPLETE,
+                execution.receipt() if execution is not None else None,
+            )
+
+    def _remove_files(self, execution: _Execution) -> None:
+        failure = Classification.OWNERSHIP_MISMATCH
+        directory = execution.directory
+        credentials = execution.paths[execution.request.directory / "credentials"]
+        assert execution.journal is not None
+        journal = execution.journal
+        # The runner can write only the VM bind. This independently admitted state
+        # namespace is outside that bind, never exposed to the runner or guest.
+        # Same-account host compromise is not contained by a disposable VM receipt.
+        name = "cleanup-" + secrets.token_hex(16)
+        execution.check(runtime_started=True)
+        os.mkdir(name, 0o700, dir_fd=execution.state.fd)
+        execution.cleanup_directory = execution.handles.enter_context(
+            _vm._open_path(execution.state.owned.path / name, failure)
+        )
+        cleanup = execution.cleanup_directory
+        _vm._private(cleanup, directory=True, failure=failure)
+        _vm._directory_names(cleanup.fd, frozenset(), failure)
+        execution.refresh_directory(state=True)
+        os.fsync(cleanup.fd)
+        os.fsync(execution.state.fd)
+        # Retain this recovery namespace durably before detaching anything. Failed
+        # detachment, identity or sync leaves its contents for reviewed recovery.
+        journal.commit("detach-pending")
+
+        def detach(parent_fd: int, source: str, target: str, retained: _vm._OpenedPath) -> None:
+            execution.check_state()
+            journal.check()
+            _vm._unchanged_directory(cleanup, failure)
+            current = os.stat(source, dir_fd=parent_fd, follow_symlinks=False)
+            expected = _vm._directory_protection(retained.observation)
+            if _vm._directory_protection(current) != expected:
+                raise _vm._Denied(failure)
+            _rename_noreplace(parent_fd, source, cleanup.fd, target)
+            os.fsync(parent_fd)
+            os.fsync(cleanup.fd)
+            # The source may have been replaced after the observation. Inspect
+            # the atomically detached object, not the still-writable source name.
+            current = os.stat(target, dir_fd=cleanup.fd, follow_symlinks=False)
+            if (
+                _vm._directory_protection(current) != expected
+                or _vm._directory_protection(os.fstat(retained.fd)) != expected
+            ):
+                raise _vm._Denied(failure)
+
+        for index, retained in enumerate(tuple(execution.paths.values())):
+            if retained.owned.path == credentials.owned.path:
+                continue
+            parent = (
+                credentials if retained.owned.path.parent == credentials.owned.path else directory
+            )
+            execution.check_roots(runtime_started=True)
+            _vm._directory_names(directory.fd, execution.expected_names(), failure)
+            _vm._directory_names(
+                credentials.fd,
+                frozenset(
+                    path.name for path in execution.paths if path.parent == credentials.owned.path
+                ),
+                failure,
+            )
+            target = f"entry-{index}"
+            detach(parent.fd, retained.owned.path.name, target, retained)
+            # Only the controller can change this unexposed destination namespace.
+            os.unlink(target, dir_fd=cleanup.fd)
+            os.fsync(cleanup.fd)
+            execution.paths.pop(retained.owned.path)
+            if parent is credentials:
+                credentials = replace(credentials, observation=os.fstat(credentials.fd))
+                execution.paths[credentials.owned.path] = credentials
+            execution.refresh_directory()
+        _vm._directory_names(credentials.fd, frozenset(), failure)
+        detach(directory.fd, "credentials", "credentials", credentials)
+        os.rmdir("credentials", dir_fd=cleanup.fd)
+        os.fsync(cleanup.fd)
+        execution.paths.clear()
+        execution.refresh_directory()
+        _vm._directory_names(directory.fd, frozenset(), failure)
+        with _vm._open_path(directory.owned.path.parent, failure) as parent:
+            if (
+                parent.owned.ancestors != directory.owned.ancestors[:-1]
+                or (parent.owned.device, parent.owned.inode) != directory.owned.ancestors[-1]
+            ):
+                raise _vm._Denied(failure)
+            detach(parent.fd, directory.owned.path.name, "vm", directory)
+            os.rmdir("vm", dir_fd=cleanup.fd)
+            os.fsync(cleanup.fd)
+        _vm._directory_names(cleanup.fd, frozenset(), failure)
+        os.rmdir(name, dir_fd=execution.state.fd)
+        execution.cleanup_directory = None
+        execution.refresh_directory(state=True)
+        os.fsync(execution.state.fd)
 
     def remove(self, receipt: ExecutionReceipt) -> ExecutionResult:
-        return ExecutionResult(Phase.REMOVE, Classification.GATE_NOT_READY)
+        execution = None
+        effect = False
+        try:
+            with ExitStack() as handles:
+                execution = self._admit_cleanup(receipt, handles, "stopped")
+                if self._runtime_observation(execution).running:
+                    raise _vm._Denied(Classification.INVALID_STATE)
+                # Optional runtime entries are not independently retained cleanup
+                # authority. QEMU must retire its socket; otherwise keep the whole
+                # directory for reviewed recovery rather than unlinking by name.
+                _vm._directory_names(
+                    execution.directory.fd,
+                    execution.expected_names(),
+                    Classification.CLEANUP_INCOMPLETE,
+                )
+                # Atomic detachment has no cross-filesystem fallback. Refuse this
+                # unsupported cleanup layout before retiring the native container.
+                if execution.directory.owned.device != execution.state.owned.device:
+                    raise _vm._Denied(Classification.UNSAFE_PATH)
+                assert self._native is not None and execution.journal is not None
+                assert execution.container_id is not None
+                execution.journal.commit("remove-pending")
+                execution.check(runtime_started=True)
+                effect = True
+                self._native.remove_container(execution.container_id)
+                execution.check(runtime_started=True)
+                # None must mean positively observed absence, not failed inspection.
+                if self._native.inspect(execution.container_id) is not None:
+                    raise _vm._Denied(Classification.CLEANUP_INCOMPLETE)
+                execution.check(runtime_started=True)
+                execution.prepared = None
+                self._remove_files(execution)
+                execution.journal.commit("removed")
+                return ExecutionResult(Phase.REMOVE, Classification.REMOVED, execution.receipt())
+        except _vm._Denied as denial:
+            return ExecutionResult(
+                Phase.REMOVE,
+                Classification.CLEANUP_INCOMPLETE if effect else denial.classification,
+                execution.receipt() if execution is not None else None,
+            )
+        except Exception:
+            return ExecutionResult(
+                Phase.REMOVE,
+                Classification.CLEANUP_INCOMPLETE,
+                execution.receipt() if execution is not None else None,
+            )

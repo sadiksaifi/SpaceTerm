@@ -15,6 +15,7 @@ MANDATORY = (
     "spaceterm-host",
     "spaceterm-protocol",
     "spaceterm-terminal",
+    "spaceterm-distribution",
 )
 
 
@@ -32,7 +33,14 @@ def metadata(edges=None, *, roots=MANDATORY):
         "workspace_members": [ids[name] for name in roots],
         "resolve": {
             "nodes": [
-                {"id": ids[name], "dependencies": [ids[dep] for dep in edges.get(name, ())]}
+                {
+                    "id": ids[name],
+                    "dependencies": [ids[dep] for dep in edges.get(name, ())],
+                    "deps": [
+                        {"pkg": ids[dep], "dep_kinds": [{"kind": None, "target": None}]}
+                        for dep in edges.get(name, ())
+                    ],
+                }
                 for name in sorted(names)
             ]
         },
@@ -62,7 +70,9 @@ class HeadlessTests(unittest.TestCase):
 
     def test_missing_required_root_fails_closed(self):
         with self.assertRaisesRegex(TaskError, "crates missing: spaceterm-terminal"):
-            check_metadata(metadata(roots=MANDATORY[:-1]))
+            check_metadata(
+                metadata(roots=tuple(name for name in MANDATORY if name != "spaceterm-terminal"))
+            )
 
     def test_protocol_and_terminal_roots_are_checked(self):
         with self.assertRaisesRegex(TaskError, "spaceterm-terminal -> font-kit"):
@@ -70,9 +80,31 @@ class HeadlessTests(unittest.TestCase):
         with self.assertRaisesRegex(TaskError, "spaceterm-protocol -> gpui"):
             check_metadata(metadata({"spaceterm-protocol": ("gpui",)}))
 
+    def test_distribution_is_mandatory_and_cannot_reach_graphical_dependencies(self):
+        with self.assertRaisesRegex(TaskError, "crates missing: spaceterm-distribution"):
+            check_metadata(metadata(roots=MANDATORY[:-1]))
+        with self.assertRaisesRegex(TaskError, "spaceterm-distribution -> parser -> gpui"):
+            check_metadata(metadata({"spaceterm-distribution": ("parser",), "parser": ("gpui",)}))
+
     def test_native_client_composition_cannot_reach_a_desktop_dependency(self):
         with self.assertRaisesRegex(TaskError, "spaceterm-client-native -> gpui"):
             check_metadata(metadata({"spaceterm-client-native": ("gpui",)}))
+
+    def test_host_and_server_cannot_normally_depend_on_client_composition(self):
+        for root in ("spaceterm-host", "spaceterm-server", "spaceterm-distribution"):
+            graph = metadata({root: ("adapter",), "adapter": ("spaceterm-client-native",)})
+            with self.subTest(root=root), self.assertRaisesRegex(TaskError, "dependency direction"):
+                check_metadata(graph)
+        graph = metadata({"spaceterm-server": ("spaceterm-client",)})
+        node = next(node for node in graph["resolve"]["nodes"] if "spaceterm-server#" in node["id"])
+        node["deps"][0]["dep_kinds"][0]["kind"] = "dev"
+        self.assertEqual(check_metadata(graph), MANDATORY)
+
+    def test_distribution_cannot_depend_on_host_even_transitively(self):
+        with self.assertRaisesRegex(TaskError, "dependency direction"):
+            check_metadata(
+                metadata({"spaceterm-distribution": ("adapter",), "adapter": ("spaceterm-host",)})
+            )
 
     def test_cycle_in_a_portable_graph_terminates(self):
         graph = metadata({"spaceterm-core": ("portable",), "portable": ("spaceterm-core",)})
@@ -134,6 +166,22 @@ class HeadlessTests(unittest.TestCase):
         graph["resolve"] = None
         with self.assertRaisesRegex(TaskError, "incomplete dependency graph"):
             check_metadata(graph)
+
+    def test_missing_or_unknown_dependency_kind_cannot_hide_a_normal_client_edge(self):
+        for change in ("missing", "unknown"):
+            graph = metadata({"spaceterm-host": ("spaceterm-client-native",)})
+            node = next(
+                node for node in graph["resolve"]["nodes"] if "spaceterm-host#" in node["id"]
+            )
+            if change == "missing":
+                node["deps"] = []
+            else:
+                node["deps"][0]["dep_kinds"][0]["kind"] = "unknown"
+            with (
+                self.subTest(change=change),
+                self.assertRaisesRegex(TaskError, "incomplete dependency graph"),
+            ):
+                check_metadata(graph)
 
     def test_untrusted_package_names_cannot_enter_diagnostics(self):
         graph = metadata()

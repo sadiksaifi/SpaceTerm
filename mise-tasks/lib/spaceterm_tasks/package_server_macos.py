@@ -63,13 +63,14 @@ def verify_server_signature(path, identifier):
 
 
 def verify_macho_closure(root, code):
-    """Admit only the three packaged executables and fixed headless OS dependencies.
+    """Admit only the packaged executables and fixed headless OS dependencies.
 
     Private dylibs and loader-relative paths have no packaging policy yet. Reject
     them rather than letting signatures stand in for dependency resolution.
     """
     system = {
         "/usr/lib/libSystem.B.dylib",
+        "/usr/lib/libiconv.2.dylib",
         "/usr/lib/libc++.1.dylib",
         "/usr/lib/libc++abi.dylib",
         "/usr/lib/libobjc.A.dylib",
@@ -180,17 +181,14 @@ def package(release_tag=None):
                 )
         (app / "Contents").mkdir(parents=True)
         (app / "Contents/Info.plist").write_bytes(plistlib.dumps(info))
-        package_server.copy_file(
-            binaries["spaceterm-server"], app / "Contents/MacOS/spaceterm-server", 0o755
-        )
+        package_server.copy_built_executables(binaries, root, metadata)
         package_server.copy_resources(app / "Contents/Resources")
-        for name in ("spaceterm-server-launcher", "spaceterm-server-manager"):
-            package_server.copy_file(binaries[name], root / "libexec" / name, 0o555)
         server_identifier = metadata["native_identifier"]
         sign_targets = [
             (app / "Contents/MacOS/spaceterm-server", server_identifier),
             (root / "libexec/spaceterm-server-launcher", server_identifier + ".launcher"),
             (root / "libexec/spaceterm-server-manager", server_identifier + ".manager"),
+            (root / "libexec/spaceterm-server-spawner", server_identifier + ".spawner"),
         ]
         known_code = {target for target, _ in sign_targets}
         verify_macho_closure(root, known_code)
