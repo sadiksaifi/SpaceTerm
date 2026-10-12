@@ -21,7 +21,7 @@
     "identifier \"io.github.sadiksaifi.spaceterm-development.server\" " \
     "and certificate leaf = H\"9e07cd5c15c5c862a21b93ea55d4303bc19b7366\""
 
-struct st_native_release_permit { bool live; };
+struct st_native_release_permit { bool live; const st_native_keychain_scope *scope; };
 struct st_native_locked_secret { uint8_t bytes[32]; };
 
 /* This is the test composition's owned-memory operation, not a native permit
@@ -57,8 +57,14 @@ typedef struct {
     bool change_policy_on_read, change_identity_on_read;
     st_native_result guard_result, secret_result, free_result, write_result, lock_result, unlock_result;
     size_t secret_length;
-    unsigned invalidate_at_recheck;
+    unsigned invalidate_at_recheck, invalidate_at_guard;
+    unsigned reservations, creates, records, deletions, removed, uncertain;
+    bool slot_reserved, collision_present, item_exists, replace_before_delete, replacement_exists;
+    st_native_result create_result, record_result, removed_result;
+    uint8_t *enrollment_staging;
 } fixture;
+
+struct st_native_keychain_scope { fixture *value; };
 
 static void word(CSSM_LIST_ELEMENT *node, CSSM_WORDID_TYPE value)
 {
@@ -148,7 +154,8 @@ static bool access_create(fixture *value, policy_kind kind)
 
 static st_native_result guard(void *context)
 {
-    fixture *value = context; ++value->guards; return value->guard_result;
+    fixture *value = context; ++value->guards;
+    return value->guards == value->invalidate_at_guard ? ST_KC_EXECUTION_UNPROVEN : value->guard_result;
 }
 static st_native_result disable(void *context)
 {
@@ -259,10 +266,68 @@ static st_native_result unlock_staging(void *context, uint8_t *bytes, size_t len
     if (munlock(bytes, length) != 0) return ST_KC_CLEANUP_UNRESOLVED;
     return value->unlock_result;
 }
+static st_native_result collision(void *context, void *keychain, const uint8_t *service,
+                                   size_t service_length, const uint8_t *account, size_t account_length)
+{
+    fixture *value = context;
+    if (keychain != value || service_length != value->attributes.service_length ||
+        memcmp(service, value->attributes.service, service_length) != 0 || account_length != 64 ||
+        memcmp(account, value->attributes.account, account_length) != 0) return ST_KC_INVALID_RECORD;
+    return value->collision_present ? ST_KC_IDENTITY_MISMATCH : ST_KC_OK;
+}
+static st_native_result reserve_slot(void *context)
+{
+    fixture *value = context; ++value->reservations;
+    if (value->slot_reserved) return ST_KC_IDENTITY_MISMATCH;
+    value->slot_reserved = true; return ST_KC_OK;
+}
+static st_native_result enrollment_secret(void *context, const uint8_t **bytes, size_t *length)
+{
+    fixture *value = context;
+    *bytes = value->enrollment_staging; *length = 32;
+    return *bytes != NULL ? ST_KC_OK : ST_KC_NATIVE_UNAVAILABLE;
+}
+static st_native_result create_item(void *context, void *keychain,
+                                     const st_keychain_test_attributes *attributes_value,
+                                     SecAccessRef access, const uint8_t *bytes, size_t length, void **out)
+{
+    fixture *value = context; ++value->creates;
+    if (!value->slot_reserved || keychain != value || !value->interactions_disabled ||
+        bytes != value->enrollment_staging || length != 32 || access == NULL ||
+        attributes_value->item_class != kSecGenericPasswordItemClass ||
+        memcmp(attributes_value->generic, value->attributes.generic, ST_KC_ATTRIBUTE_BYTES) != 0 ||
+        memcmp(attributes_value->account, value->attributes.account, 64) != 0) return ST_KC_INVALID_RECORD;
+    if (value->create_result != ST_KC_OK) return value->create_result;
+    if (value->access != NULL) CFRelease(value->access);
+    value->access = (SecAccessRef)CFRetain(access);
+    value->item_exists = true; *out = value;
+    if (value->change_policy_on_read && !access_create(value, AUXILIARY)) return ST_KC_NATIVE_UNAVAILABLE;
+    return ST_KC_OK;
+}
+static st_native_result record_identity(void *context, const uint8_t *identity, size_t length)
+{
+    fixture *value = context; ++value->records;
+    if (!value->item_exists || length != sizeof value->identity ||
+        memcmp(identity, value->identity, length) != 0) return ST_KC_INVALID_RECORD;
+    return value->record_result;
+}
+static st_native_result delete_item(void *context, void *item)
+{
+    fixture *value = context; ++value->deletions;
+    if (item != value || !value->item_exists) return ST_KC_IDENTITY_MISMATCH;
+    if (value->replace_before_delete) value->replacement_exists = true;
+    value->item_exists = false; return ST_KC_OK;
+}
+static st_native_result mark_removed(void *context)
+{
+    fixture *value = context; ++value->removed; return value->removed_result;
+}
+static void uncertain(void *context) { fixture *value = context; ++value->uncertain; }
 static const st_keychain_test_calls calls = {
     guard, disable, open_system, resolve, attributes, release_attributes,
     copy_access, secret, release_secret, release_item, release_keychain,
-    recheck, write_secret, wipe_destination, lock_staging, unlock_staging
+    recheck, write_secret, wipe_destination, lock_staging, unlock_staging,
+    collision, reserve_slot, enrollment_secret, create_item, record_identity, delete_item, mark_removed, uncertain
 };
 
 static void put_u32(uint8_t *out, uint32_t value)
@@ -272,12 +337,12 @@ static void put_u32(uint8_t *out, uint32_t value)
 static bool fixture_create(fixture *value)
 {
     *value = (fixture){.secret_length = 32};
-    value->facts = (st_keychain_test_binding_facts){.uid = 501, .gid = 20, .build = 3,
+    value->facts = (st_keychain_test_binding_facts){.uid = 501, .gid = 20, .build = 3, .operation = ST_KEYCHAIN_RELEASE,
         .persistent_identity = value->identity, .persistent_identity_length = sizeof value->identity};
     memset(value->identity, 0x16, sizeof value->identity);
     memset(value->facts.native_account, 0x2a, 16);
     memset(value->facts.server_id, 0x31, 16);
-    memset(value->facts.slot, 0x45, 16);
+    memset(value->facts.slot, 0x45, 32);
     memset(value->facts.account_binding, 0x63, 32);
     value->attributes.item_class = kSecGenericPasswordItemClass;
     value->attributes.service = (const uint8_t *)"io.github.sadiksaifi.spaceterm-development.server.boot.v1";
@@ -286,19 +351,23 @@ static bool fixture_create(fixture *value)
     value->attributes.label_length = strlen((const char *)value->attributes.label);
     value->attributes.persistent_identity = value->identity;
     value->attributes.persistent_identity_length = sizeof value->identity;
-    for (unsigned i = 0; i < 16; ++i) { value->attributes.account[2*i] = '4'; value->attributes.account[2*i+1] = '5'; }
+    for (unsigned i = 0; i < 32; ++i) { value->attributes.account[2*i] = '4'; value->attributes.account[2*i+1] = '5'; }
     uint8_t *generic = value->attributes.generic;
-    memcpy(generic, "STKB", 4); generic[4] = 1; generic[6] = 3;
+    memcpy(generic, "STKB", 4); generic[4] = 2; generic[6] = 3;
     put_u32(generic + 8, 501); put_u32(generic + 12, 20);
     memcpy(generic + 16, value->facts.native_account, 16);
     memcpy(generic + 32, value->facts.server_id, 16);
-    memcpy(generic + 48, value->facts.slot, 16);
-    memcpy(generic + 64, value->facts.account_binding, 32);
+    memcpy(generic + 48, value->facts.slot, 32);
+    memcpy(generic + 80, value->facts.account_binding, 32);
     return access_create(value, VALID) &&
            st_keychain_test_binding_create(&value->facts, &calls, value, &value->binding) == ST_KC_OK;
 }
 static void fixture_release(fixture *value)
 {
+    if (value->enrollment_staging != NULL) {
+        memset(value->enrollment_staging, 0, 32);
+        munlock(value->enrollment_staging, 32); munmap(value->enrollment_staging, 32);
+    }
     st_keychain_test_binding_release(&value->binding);
     if (value->access != NULL) CFRelease(value->access);
 }
@@ -344,7 +413,7 @@ static bool inspection(void)
 static bool wrong_account(void)
 {
     bool ok = true;
-    const size_t offsets[] = {6, 8, 12, 16, 32, 48, 64};
+    const size_t offsets[] = {6, 8, 12, 16, 32, 48, 80};
     for (size_t i = 0; i < sizeof offsets / sizeof offsets[0]; ++i) {
         fixture value;
         if (!fixture_create(&value)) { fixture_release(&value); return false; }
@@ -353,6 +422,16 @@ static bool wrong_account(void)
         fixture_release(&value);
     }
     return ok;
+}
+static bool slot_suffix(void)
+{
+    fixture value;
+    if (!fixture_create(&value)) { fixture_release(&value); return false; }
+    st_keychain_test_binding_release(&value.binding);
+    value.facts.slot[31] = 1;
+    bool ok = st_keychain_test_binding_create(&value.facts, &calls, &value, &value.binding) == ST_KC_OK &&
+              inspect(&value, ST_KC_IDENTITY_MISMATCH);
+    fixture_release(&value); return ok;
 }
 static bool persistent_identity(void)
 {
@@ -511,6 +590,151 @@ static bool no_native_calls(void)
     fixture_release(&value); return ok;
 }
 
+static bool lifecycle_fixture(fixture *value, unsigned operation)
+{
+    if (!fixture_create(value)) return false;
+    st_keychain_test_binding_release(&value->binding);
+    value->facts.operation = operation;
+    value->item_exists = operation == ST_KEYCHAIN_REMOVE;
+    if (operation == ST_KEYCHAIN_ENROLL) {
+        value->facts.persistent_identity = NULL; value->facts.persistent_identity_length = 0;
+        void *bytes = mmap(NULL, 32, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        if (bytes == MAP_FAILED) return false;
+        value->enrollment_staging = bytes;
+        if (mlock(bytes, 32) != 0) return false;
+        memset(bytes, 0xa7, 32);
+    }
+    return st_keychain_test_binding_create(&value->facts, &calls, value, &value->binding) == ST_KC_OK;
+}
+static bool enrollment(void)
+{
+    fixture value;
+    if (!lifecycle_fixture(&value, ST_KEYCHAIN_ENROLL)) { fixture_release(&value); return false; }
+    bool ok = st_keychain_enroll_owned_item(value.binding) == ST_KC_OK &&
+              value.reservations == 1 && value.creates == 1 && value.records == 1 &&
+              value.attributes_copied == 2 && value.secrets == 0 && value.deletions == 0 &&
+              value.item_exists && value.items_released == 1 && value.keychains_released == 1;
+    fixture_release(&value); return ok;
+}
+static bool enrollment_scope_refusal(void)
+{
+    bool ok = true;
+    for (unsigned i = 1; i <= 3; ++i) {
+        fixture value;
+        if (!lifecycle_fixture(&value, ST_KEYCHAIN_ENROLL)) { fixture_release(&value); return false; }
+        value.invalidate_at_guard = i;
+        ok = ok && st_keychain_enroll_owned_item(value.binding) == ST_KC_EXECUTION_UNPROVEN &&
+             value.creates == 0 && value.records == 0 && value.deletions == 0;
+        if (i == 1) ok = ok && value.opens == 0 && value.reservations == 0;
+        fixture_release(&value);
+    }
+    return ok;
+}
+static bool collision_refusal(void)
+{
+    fixture value;
+    if (!lifecycle_fixture(&value, ST_KEYCHAIN_ENROLL)) { fixture_release(&value); return false; }
+    value.collision_present = true;
+    bool ok = st_keychain_enroll_owned_item(value.binding) == ST_KC_IDENTITY_MISMATCH &&
+              value.reservations == 0 && value.creates == 0 && value.records == 0;
+    fixture_release(&value); return ok;
+}
+static bool slot_reuse(void)
+{
+    fixture value;
+    if (!lifecycle_fixture(&value, ST_KEYCHAIN_ENROLL)) { fixture_release(&value); return false; }
+    value.create_result = ST_KC_CREDENTIAL_UNAVAILABLE;
+    bool ok = st_keychain_enroll_owned_item(value.binding) == ST_KC_CREDENTIAL_UNAVAILABLE;
+    value.create_result = ST_KC_OK;
+    ok = ok && st_keychain_enroll_owned_item(value.binding) == ST_KC_IDENTITY_MISMATCH &&
+         value.reservations == 2 && value.creates == 1 && value.records == 0 && value.slot_reserved;
+    fixture_release(&value); return ok;
+}
+static bool partial_enrollment(void)
+{
+    fixture value;
+    if (!lifecycle_fixture(&value, ST_KEYCHAIN_ENROLL)) { fixture_release(&value); return false; }
+    value.change_policy_on_read = true;
+    bool ok = st_keychain_enroll_owned_item(value.binding) == ST_KC_POLICY_REJECTED &&
+              value.records == 1 && value.deletions == 0 && value.item_exists;
+    st_keychain_test_binding_release(&value.binding);
+    value.facts.operation = ST_KEYCHAIN_REMOVE;
+    value.facts.persistent_identity = value.identity;
+    value.facts.persistent_identity_length = sizeof value.identity;
+    ok = ok && st_keychain_test_binding_create(&value.facts, &calls, &value, &value.binding) == ST_KC_OK &&
+         st_keychain_remove_owned_item(value.binding) == ST_KC_OK && value.deletions == 1 && value.removed == 1;
+    fixture_release(&value); return ok;
+}
+static bool identity_record_failure(void)
+{
+    fixture value;
+    if (!lifecycle_fixture(&value, ST_KEYCHAIN_ENROLL)) { fixture_release(&value); return false; }
+    value.record_result = ST_KC_CLEANUP_UNRESOLVED;
+    bool ok = st_keychain_enroll_owned_item(value.binding) == ST_KC_CLEANUP_UNRESOLVED &&
+              value.records == 1 && value.uncertain == 1 && value.item_exists && value.deletions == 0;
+    fixture_release(&value); return ok;
+}
+static bool uncertain_creation(void)
+{
+    fixture value;
+    if (!lifecycle_fixture(&value, ST_KEYCHAIN_ENROLL)) { fixture_release(&value); return false; }
+    value.create_result = ST_KC_CLEANUP_UNRESOLVED;
+    bool ok = st_keychain_enroll_owned_item(value.binding) == ST_KC_CLEANUP_UNRESOLVED &&
+              value.creates == 1 && value.slot_reserved && value.records == 0 &&
+              value.deletions == 0 && value.uncertain == 1;
+    fixture_release(&value); return ok;
+}
+static bool exact_removal(void)
+{
+    fixture value;
+    if (!lifecycle_fixture(&value, ST_KEYCHAIN_REMOVE)) { fixture_release(&value); return false; }
+    value.replace_before_delete = true;
+    bool ok = st_keychain_remove_owned_item(value.binding) == ST_KC_OK && value.resolves == 1 &&
+              value.deletions == 1 && value.removed == 1 && !value.item_exists && value.replacement_exists &&
+              value.items_released == 1 && value.secrets == 0;
+    fixture_release(&value); return ok;
+}
+static bool removal_refusals(void)
+{
+    bool ok = true;
+    for (unsigned i = 0; i < 4; ++i) {
+        fixture value;
+        if (!lifecycle_fixture(&value, ST_KEYCHAIN_REMOVE)) { fixture_release(&value); return false; }
+        if (i == 0) value.guard_result = ST_KC_EXECUTION_UNPROVEN;
+        if (i == 1) value.attributes.generic[80] ^= 1;
+        uint8_t replacement[24] = {0x17};
+        if (i == 2) value.attributes.persistent_identity = replacement;
+        if (i == 3) value.invalidate_at_guard = 2;
+        ok = ok && st_keychain_remove_owned_item(value.binding) ==
+             (i == 0 || i == 3 ? ST_KC_EXECUTION_UNPROVEN : ST_KC_IDENTITY_MISMATCH) &&
+             value.deletions == 0 && value.removed == 0 && value.item_exists;
+        fixture_release(&value);
+    }
+    return ok;
+}
+static bool removal_record_failure(void)
+{
+    fixture value;
+    if (!lifecycle_fixture(&value, ST_KEYCHAIN_REMOVE)) { fixture_release(&value); return false; }
+    value.removed_result = ST_KC_CLEANUP_UNRESOLVED;
+    bool ok = st_keychain_remove_owned_item(value.binding) == ST_KC_CLEANUP_UNRESOLVED &&
+              value.deletions == 1 && value.removed == 1 && value.uncertain == 1;
+    fixture_release(&value); return ok;
+}
+
+static bool permit_scoped_public_retrieval(void)
+{
+    fixture value;
+    if (!fixture_create(&value)) { fixture_release(&value); return false; }
+    st_native_keychain_scope scope = {.value = &value};
+    st_native_release_permit permit = {.live = true, .scope = &scope};
+    st_native_locked_secret destination;
+    memset(&destination, 0xee, sizeof destination);
+    bool ok = st_keychain_retrieve_for_startup(&permit, &destination) == ST_KC_OK &&
+              value.secrets == 1 && value.rechecks == 3 && value.writes == 1 &&
+              value.secret_wiped && value.staging_wiped && destination.bytes[0] == 0xa7;
+    fixture_release(&value); return ok;
+}
 static bool unavailable_public_retrieval(void)
 {
     st_native_release_permit permit = {.live = true};
@@ -543,7 +767,19 @@ int main(void)
         {"staging_lock_failure_prevents_secret_read", locking_failure},
         {"staging_unlock_failure_wipes_destination", unlock_failure},
         {"fixed_item_rejects_alternate_attributes_and_class", fixed_attributes},
-        {"unavailable_public_retrieval_wipes_destination", unavailable_public_retrieval}
+        {"unavailable_public_retrieval_wipes_destination", unavailable_public_retrieval},
+        {"fixed_item_rejects_slot_suffix_substitution", slot_suffix},
+        {"public_retrieval_resolves_only_the_live_permit_scoped_item", permit_scoped_public_retrieval},
+        {"enrollment_records_exact_identity_and_reinspects_persisted_policy", enrollment},
+        {"enrollment_collision_has_zero_effects", collision_refusal},
+        {"enrollment_rechecks_scope_before_reservation_and_creation", enrollment_scope_refusal},
+        {"enrollment_never_reuses_a_reserved_slot_after_failure", slot_reuse},
+        {"weakened_persisted_enrollment_keeps_receipt_for_exact_removal", partial_enrollment},
+        {"partial_install_record_failure_preserves_item_and_uncertainty", identity_record_failure},
+        {"uncertain_creation_keeps_the_original_pending_slot", uncertain_creation},
+        {"removal_retains_exact_item_through_namespace_replacement", exact_removal},
+        {"removal_rejects_unauthorized_or_replaced_receipt_items", removal_refusals},
+        {"removal_record_failure_is_cleanup_unresolved", removal_record_failure}
     };
     size_t failed = 0;
     for (size_t i = 0; i < sizeof cases / sizeof cases[0]; ++i) {
@@ -558,3 +794,61 @@ int main(void)
 }
 
 #pragma clang diagnostic pop
+
+/* Native issuance is replaced only in this uninstalled test composition. The
+ * Rust runner uses actual host types and the public C item operations.
+ */
+#if defined(ST_KEYCHAIN_RUST_TESTING)
+static st_native_keychain_scope *rust_scope;
+static uint8_t rust_binding_digest[32];
+st_native_result st_keychain_fixture_prepare(const uint8_t *digest, uint32_t scenario)
+{
+    if (rust_scope != NULL) return ST_KC_INVALID_RECORD;
+    rust_scope = calloc(1, sizeof *rust_scope);
+    if (rust_scope == NULL) return ST_KC_NATIVE_UNAVAILABLE;
+    rust_scope->value = calloc(1, sizeof *rust_scope->value);
+    if (rust_scope->value == NULL) return ST_KC_NATIVE_UNAVAILABLE;
+    memcpy(rust_binding_digest, digest, 32);
+    if (!fixture_create(rust_scope->value)) return ST_KC_NATIVE_UNAVAILABLE;
+    if (scenario == 1 && !access_create(rust_scope->value, AUXILIARY)) return ST_KC_NATIVE_UNAVAILABLE;
+    if (scenario == 2) rust_scope->value->attributes.generic[80] ^= 1;
+    if (scenario == 3) rust_scope->value->guard_result = ST_KC_EXECUTION_UNPROVEN;
+    return ST_KC_OK;
+}
+st_native_result st_native_keychain_inspection_scope(const uint8_t *digest, st_native_keychain_scope **out)
+{
+    *out = NULL;
+    if (rust_scope == NULL || memcmp(digest, rust_binding_digest, 32) != 0) return ST_KC_IDENTITY_MISMATCH;
+    *out = rust_scope; return ST_KC_OK;
+}
+void st_native_keychain_scope_release(st_native_keychain_scope **scope)
+{
+    if (scope == NULL || *scope == NULL) return;
+    fixture_release((*scope)->value); free((*scope)->value); free(*scope); *scope = NULL; rust_scope = NULL;
+}
+void st_keychain_fixture_finish(void)
+{
+    st_native_keychain_scope_release(&rust_scope);
+}
+#endif
+st_native_result st_keychain_test_scope_binding(const st_native_keychain_scope *scope, st_keychain_item_binding **out)
+{
+    if (scope == NULL) return ST_KC_NATIVE_UNAVAILABLE;
+    fixture *value = scope->value;
+    return st_keychain_test_binding_create(&value->facts, &calls, value, out);
+}
+
+st_native_result st_native_release_permit_recheck(const st_native_release_permit *permit)
+{
+    return permit != NULL && permit->live ? ST_KC_OK : ST_KC_EXECUTION_UNPROVEN;
+}
+st_native_result st_native_keychain_release_scope(const st_native_release_permit *permit, const st_native_keychain_scope **out)
+{
+    *out = permit->scope;
+    return *out != NULL ? ST_KC_OK : ST_KC_NATIVE_UNAVAILABLE;
+}
+st_native_result st_native_locked_secret_write(st_native_locked_secret *destination, const uint8_t *bytes, size_t length)
+{
+    if (destination == NULL || length != 32) return ST_KC_INVALID_RECORD;
+    memcpy(destination->bytes, bytes, length); return ST_KC_OK;
+}

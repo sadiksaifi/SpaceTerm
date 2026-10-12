@@ -13,6 +13,10 @@ pub struct SudoInvocation {
     mode: SudoMode,
 }
 impl SudoInvocation {
+    /// Selects only the closed controlling-terminal or noninteractive policy.
+    pub fn for_mode(mode: SudoMode) -> Self {
+        Self { mode }
+    }
     /// Trusted OS executable. Its complete closure must also be retained by the boundary.
     pub fn executable(self) -> &'static str {
         "/usr/bin/sudo"
@@ -20,8 +24,8 @@ impl SudoInvocation {
     /// Fixed flags before the boundary's admitted manager. No -S, -E, or AskPass.
     pub fn prefix(self) -> &'static [&'static str] {
         match self.mode {
-            SudoMode::Interactive => &["--"],
-            SudoMode::NonInteractive => &["-n", "--"],
+            SudoMode::Interactive => &["-k", "--"],
+            SudoMode::NonInteractive => &["-k", "-n", "--"],
         }
     }
     /// Manager request transport. No credentials are passed in arguments.
@@ -88,10 +92,10 @@ impl<B: SudoBoundary> SudoAdapter<B> {
 }
 
 /// Unavailable until authenticated OS caller and retained exec providers are wired.
-pub struct NativeSudoBoundary;
+pub struct UnavailableSudoBoundary;
 /// No success-shaped retained helper exists in unavailable production composition.
 pub enum UnavailableHelper {}
-impl SudoBoundary for NativeSudoBoundary {
+impl SudoBoundary for UnavailableSudoBoundary {
     type RetainedHelper = UnavailableHelper;
     fn retain_fixed_helper(
         &self,
@@ -114,3 +118,15 @@ impl SudoBoundary for NativeSudoBoundary {
         match helper {}
     }
 }
+
+#[path = "execution.rs"]
+pub(crate) mod execution;
+pub use execution::{NativeSudoBoundary, RetainedSudoExecution};
+#[path = "authorization.rs"]
+pub mod authorization;
+#[path = "protected_execution.rs"]
+pub mod protected_execution;
+#[path = "reply.rs"]
+pub mod reply;
+#[path = "ssh_authorization.rs"]
+pub mod ssh_authorization;

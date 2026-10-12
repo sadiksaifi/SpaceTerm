@@ -4,6 +4,7 @@
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -39,6 +40,18 @@ CASES = frozenset(
         "staging_unlock_failure_wipes_destination",
         "fixed_item_rejects_alternate_attributes_and_class",
         "unavailable_public_retrieval_wipes_destination",
+        "fixed_item_rejects_slot_suffix_substitution",
+        "public_retrieval_resolves_only_the_live_permit_scoped_item",
+        "enrollment_records_exact_identity_and_reinspects_persisted_policy",
+        "enrollment_collision_has_zero_effects",
+        "enrollment_rechecks_scope_before_reservation_and_creation",
+        "enrollment_never_reuses_a_reserved_slot_after_failure",
+        "weakened_persisted_enrollment_keeps_receipt_for_exact_removal",
+        "partial_install_record_failure_preserves_item_and_uncertainty",
+        "uncertain_creation_keeps_the_original_pending_slot",
+        "removal_retains_exact_item_through_namespace_replacement",
+        "removal_rejects_unauthorized_or_replaced_receipt_items",
+        "removal_record_failure_is_cleanup_unresolved",
     )
 )
 
@@ -98,6 +111,127 @@ def executed_counts(output: bytes) -> tuple[int, int]:
     except (UnicodeError, ValueError, TypeError):
         raise TaskError("keychain-tests-invalid-output") from None
     return len(seen), failed
+
+
+def rust_composition(
+    directory: Path, compiler: list[str], environment: dict[str, str], *, sanitizers: bool
+) -> int:
+    """Link the actual host crate to a native peer with no item-framework imports."""
+    native = ROOT / "tests" / "server_native" / "macos"
+    library = directory / "keychain-peer.dylib"
+    command = [
+        *compiler,
+        "-dynamiclib",
+        "-DST_KEYCHAIN_TESTING",
+        "-DST_KEYCHAIN_RUST_TESTING",
+        str(native / "keychain_items.c"),
+        str(native / "keychain_items_tests.c"),
+        "-framework",
+        "Security",
+        "-framework",
+        "CoreFoundation",
+        "-o",
+        str(library),
+    ]
+    if sanitizers:
+        command.extend(["-g", "-O1", "-fsanitize=address,undefined", "-fno-omit-frame-pointer"])
+    result = subprocess.run(command, cwd=ROOT, env=environment, timeout=60)
+    if result.returncode:
+        return result.returncode
+    symbols = subprocess.run(
+        ["/usr/bin/nm", "-u", str(library)],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        timeout=10,
+        check=True,
+    )
+    if b"_SecKeychain" in symbols.stdout or b"_SecItem" in symbols.stdout:
+        raise TaskError("keychain-tests-composition-rejected")
+    built = subprocess.run(
+        [
+            "cargo",
+            "build",
+            "--lib",
+            "--package",
+            "spaceterm-host",
+            "--locked",
+            "--message-format=json",
+        ],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        timeout=240,
+        check=True,
+    )
+    artifacts = []
+    for line in built.stdout.splitlines():
+        record = json.loads(line)
+        if (
+            record.get("reason") == "compiler-artifact"
+            and record["target"]["name"] == "spaceterm_host"
+        ):
+            artifacts.extend(Path(name) for name in record["filenames"] if name.endswith(".rlib"))
+    if len(artifacts) != 1:
+        raise TaskError("keychain-tests-composition-rejected")
+    binary = directory / "keychain-rust-tests"
+    result = subprocess.run(
+        [
+            "rustc",
+            "--edition=2024",
+            "--test",
+            "--extern",
+            f"spaceterm_host={artifacts[0]}",
+            "-L",
+            f"dependency={artifacts[0].parent / 'deps'}",
+            "-L",
+            f"dependency={artifacts[0].parent}",
+            str(
+                ROOT
+                / "crates"
+                / "spaceterm-host"
+                / "tests"
+                / "native_management_composition"
+                / "keychain_rust.rs"
+            ),
+            "-o",
+            str(binary),
+        ],
+        cwd=ROOT,
+        env=environment,
+        timeout=60,
+    )
+    if result.returncode:
+        return result.returncode
+    peer_environment = {**environment, "SPACETERM_KEYCHAIN_TEST_PEER": str(library)}
+    if sanitizers:
+        runtime = subprocess.run(
+            ["/usr/bin/xcrun", "clang", "-print-file-name=libclang_rt.asan_osx_dynamic.dylib"],
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        ).stdout.strip()
+        if not Path(runtime).is_absolute() or not Path(runtime).is_file():
+            raise TaskError("keychain-tests-composition-rejected")
+        peer_environment["DYLD_INSERT_LIBRARIES"] = runtime
+    result = subprocess.run(
+        [str(binary), "--test-threads=1"],
+        cwd=ROOT,
+        env=peer_environment,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    counts = re.findall(
+        r"test result: (?:ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored", result.stdout
+    )
+    if result.returncode != 0 or counts != [("1", "0", "0")]:
+        raise TaskError("keychain-tests-rust-composition-failed")
+    print("proof=synthetic scope=actual-host-rust-c tests=1 failed=0")
+    return 0
 
 
 def run_task(*, sanitizers: bool = False) -> int:
@@ -181,7 +315,11 @@ def run_task(*, sanitizers: bool = False) -> int:
             )
             count, failed = executed_counts(result.stdout)
             print(f"proof=synthetic cases={count} failed={failed}")
-            return 0 if result.returncode == 0 and failed == 0 else 1
+            if result.returncode != 0 or failed != 0:
+                return 1
+            return rust_composition(Path(directory), compiler, environment, sanitizers=sanitizers)
+        except subprocess.CalledProcessError:
+            raise TaskError("keychain-tests-composition-rejected") from None
         except subprocess.TimeoutExpired:
             raise TaskError("keychain-tests-timeout") from None
 
