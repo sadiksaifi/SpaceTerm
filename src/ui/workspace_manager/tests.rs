@@ -8067,6 +8067,71 @@ fn switching_to_a_workspace_with_an_overflowing_tab_strip_should_keep_its_tabs_i
 }
 
 #[gpui::test]
+fn a_new_workspace_should_start_its_tab_strip_from_a_scrolled_old_one(cx: &mut TestAppContext) {
+    let (_manager, _records, cx) = workspace_manager(cx);
+    for _ in 0..13 {
+        cx.simulate_keystrokes("cmd-t");
+    }
+    finish_slides(cx);
+    cx.update(|_, cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
+    let selection = cx.debug_bounds("tab-item-14-chip").unwrap().origin;
+    let create = cx.debug_bounds("create-tab-button").unwrap().origin;
+
+    cx.simulate_keystrokes("cmd-n");
+    cx.run_until_parked();
+    let leaving = (
+        cx.debug_bounds("tab-item-1-chip")
+            .expect("the new Workspace's Tab chip was not rendered")
+            .origin,
+        cx.debug_bounds("create-tab-button").unwrap().origin,
+    );
+
+    assert_eq!(
+        leaving,
+        (selection, create),
+        "the selection and the strip's end must leave from where a scrolled strip drew them"
+    );
+}
+
+#[gpui::test]
+fn switching_workspaces_while_a_dropped_tab_settles_should_move_the_selection_from_where_it_is_drawn(
+    cx: &mut TestAppContext,
+) {
+    let (_manager, _records, cx) = workspace_manager(cx);
+    cx.simulate_keystrokes("cmd-t cmd-t");
+    finish_slides(cx);
+    cx.update(|_, cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
+    let first = cx.debug_bounds("tab-item-1-inactive").unwrap();
+    let third = cx.debug_bounds("tab-item-3-active").unwrap();
+    cx.simulate_mouse_move(third.center(), None, Modifiers::none());
+    cx.simulate_mouse_down(third.center(), MouseButton::Left, Modifiers::none());
+    for position in [
+        third.center() - point(px(8.0), px(0.0)),
+        first.center() + point(px(30.0), px(0.0)),
+    ] {
+        cx.simulate_mouse_move(position, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+    }
+    finish_slides(cx);
+    let release = first.center() + point(px(30.0), px(0.0));
+    cx.simulate_mouse_up(release, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    let drawn = cx.debug_bounds("tab-item-3-chip").unwrap().origin;
+
+    cx.simulate_keystrokes("cmd-n");
+    cx.run_until_parked();
+    let leaving = cx
+        .debug_bounds("tab-item-1-chip")
+        .expect("the new Workspace's Tab chip was not rendered")
+        .origin;
+
+    assert_eq!(
+        leaving, drawn,
+        "the selection must leave from where the settling Tab drew it"
+    );
+}
+
+#[gpui::test]
 fn a_new_workspace_should_start_its_tab_strip_from_the_old_one(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
     cx.simulate_keystrokes("cmd-t cmd-t");

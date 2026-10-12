@@ -6141,6 +6141,78 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_tab_dragged_while_it_grows_should_lift_at_its_full_size(cx: &mut TestAppContext) {
+        let (_manager, _records, cx) = tab_manager(cx);
+        let full = cx.debug_bounds("tab-item-1-active").unwrap().size;
+        cx.update(|_, cx| cx.set_global(AnimatePresence));
+        click("create-tab-button", cx);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(60));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        let grabbed = cx.debug_bounds("tab-item-2-active").unwrap().center();
+
+        drag_tab(grabbed, &[grabbed - point(px(8.0), px(0.0))], cx);
+        let lifted = cx
+            .debug_bounds("tab-preview-2-active")
+            .map(|preview| preview.size);
+        cx.simulate_mouse_up(
+            grabbed - point(px(8.0), px(0.0)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.run_until_parked();
+
+        assert_eq!(
+            lifted,
+            Some(full),
+            "a Tab lifted while it grows must lift at its full size"
+        );
+    }
+
+    #[gpui::test]
+    fn a_tab_dropped_while_a_gap_closes_should_land_without_a_jump(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = tab_manager(cx);
+        for _ in 0..3 {
+            click("create-tab-button", cx);
+        }
+        finish_slides(cx);
+        let rest = [
+            "tab-item-1-inactive",
+            "tab-item-3-inactive",
+            "tab-item-4-active",
+        ]
+        .map(|selector| cx.debug_bounds(selector).unwrap());
+        cx.update(|_, cx| cx.set_global(AnimatePresence));
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.close_tab(TabId::new(2), window, cx);
+            })
+        });
+        cx.run_until_parked();
+        let grabbed = rest[0].center();
+        let release = rest[2].center() + point(px(40.0), px(0.0));
+        drag_tab(grabbed, &[grabbed + point(px(8.0), px(0.0)), release], cx);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(60));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        let drawn = ["tab-item-3-inactive", "tab-item-4-active"]
+            .map(|selector| cx.debug_bounds(selector).unwrap().origin);
+
+        cx.simulate_mouse_up(release, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        let dropped = ["tab-item-3-inactive", "tab-item-4-active"]
+            .map(|selector| cx.debug_bounds(selector).unwrap().origin);
+
+        assert_eq!(tab_order(&manager, cx), vec![3, 4, 1]);
+        assert_eq!(
+            dropped, drawn,
+            "the Tabs a drop passes must stay where they were drawn as it lands"
+        );
+    }
+
+    #[gpui::test]
     fn a_tab_drag_released_on_its_first_move_should_land(cx: &mut TestAppContext) {
         let (manager, _records, cx) = tab_manager(cx);
         click("create-tab-button", cx);
