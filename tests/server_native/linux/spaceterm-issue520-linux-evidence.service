@@ -1,0 +1,20 @@
+[Unit]
+Description=SpaceTerm issue 520 disposable Linux launcher evidence
+After=local-fs.target systemd-sysctl.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+SupplementaryGroups=adm disk systemd-journal
+ExecStart=/opt/spaceterm-issue520-linux-evidence/launcher
+Restart=always
+RestartSec=2
+RestartPreventExitStatus=78
+KillMode=control-group
+TimeoutStopSec=10
+LimitCORE=0
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

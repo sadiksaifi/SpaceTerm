@@ -1,0 +1,46 @@
+policy_module(spaceterm_issue520_linux_evidence, 1.0.0)
+
+# Mechanism experiment only. This does not constrain every account-reachable
+# domain, authorize a publisher, authenticate artifacts, or issue host custody.
+type stln_probe_t;
+domain_type(stln_probe_t)
+type stln_probe_exec_t;
+domain_entry_file(stln_probe_t, stln_probe_exec_t)
+type stln_custody_t;
+files_type(stln_custody_t)
+type stln_control_t;
+files_type(stln_control_t)
+
+gen_require(`
+    type unconfined_t, init_t, sshd_t;
+    role unconfined_r;
+')
+role unconfined_r types stln_probe_t;
+allow unconfined_t stln_probe_t:process { transition dyntransition };
+allow stln_probe_t self:process getattr;
+allow stln_probe_t { unconfined_t sshd_t }:fd use;
+allow stln_probe_t { unconfined_t sshd_t }:fifo_file { getattr read write ioctl };
+kernel_read_system_state(stln_probe_t)
+term_use_all_terms(stln_probe_t)
+
+files_search_usr(stln_probe_t)
+files_search_etc(stln_probe_t)
+files_search_var(stln_probe_t)
+files_search_tmp(stln_probe_t)
+files_search_mnt(stln_probe_t)
+files_read_etc_files(stln_probe_t)
+libs_use_ld_so(stln_probe_t)
+libs_use_shared_libs(stln_probe_t)
+miscfiles_read_localization(stln_probe_t)
+
+allow stln_probe_t stln_custody_t:dir { getattr search open read };
+allow stln_probe_t stln_custody_t:file { getattr open read map };
+allow stln_probe_t stln_control_t:dir manage_dir_perms;
+allow stln_probe_t stln_control_t:file { manage_file_perms map };
+neverallow stln_probe_t stln_custody_t:file { write append create unlink link rename setattr relabelfrom relabelto };
+neverallow stln_probe_t stln_custody_t:dir { write add_name remove_name create rmdir rename setattr relabelfrom relabelto };
+
+# Keep the credential-free systemd fixture executable while testing. This is
+# not a production server-domain or authenticated execution-closure design.
+allow init_t stln_custody_t:dir { getattr search open read };
+allow init_t stln_custody_t:file { getattr open read map execute execute_no_trans };
