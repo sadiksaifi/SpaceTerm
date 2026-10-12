@@ -40,13 +40,16 @@ pub(crate) use preferences::RepositoryStatusPreferences;
 #[cfg(test)]
 pub(crate) use spaceterm_host::git::MINIMUM_GIT_VERSION;
 
+#[cfg(any(test, feature = "developer-tools"))]
+pub(crate) use spaceterm_host::git::{ChangeEntry, Divergence};
+
 pub(crate) use spaceterm_host::git::{
-    ApplyMarkers, ChangeEntry, ChangeKind, ChangeSummary, ChangeTotal, Divergence, FsmonitorPolicy,
-    GitToolStatus, MAXIMUM_MARKER_BYTES, OperationMarkers, OperationStep, ProbeOutcome,
-    ProbedRepository, ProgramError, ProgramExit, ProgramRequest, RemoteMachineKey,
-    RepositoryConfig, RepositoryHead, RepositoryKey, RepositoryMachine, RepositoryMarkerReader,
-    RepositoryOperation, RepositoryProgramRunner, RepositoryReadError, RepositoryRoot, StepMarkers,
-    ToolVersion, Upstream, tool_search_path,
+    ApplyMarkers, ChangeKind, ChangeSummary, ChangeTotal, FsmonitorPolicy, GitToolStatus,
+    MAXIMUM_MARKER_BYTES, OperationMarkers, OperationStep, ProbeOutcome, ProbedRepository,
+    ProgramError, ProgramExit, ProgramRequest, RemoteMachineKey, RepositoryConfig, RepositoryHead,
+    RepositoryKey, RepositoryMachine, RepositoryMarkerReader, RepositoryOperation,
+    RepositoryProgramRunner, RepositoryReadError, RepositoryRoot, StepMarkers, ToolVersion,
+    Upstream, tool_search_path,
 };
 
 /// An open or draft GitHub pull request for a branch.
