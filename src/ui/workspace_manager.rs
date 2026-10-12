@@ -2699,7 +2699,10 @@ impl WorkspaceManager {
             sidebar.cancel_rename_for(workspace_id, cx)
         });
         self.sync_terminal_focus_blocker(window, cx);
-        self.scroll_active_workspace_into_view(cx);
+        // Closing another Workspace leaves the sidebar where it was scrolled.
+        if was_active {
+            self.scroll_active_workspace_into_view(cx);
+        }
 
         cx.notify();
     }
@@ -2753,7 +2756,9 @@ impl WorkspaceManager {
                     sidebar.cancel_rename_for(workspace_id, cx)
                 });
                 self.sync_terminal_focus_blocker(window, cx);
-                self.scroll_active_workspace_into_view(cx);
+                if was_active {
+                    self.scroll_active_workspace_into_view(cx);
+                }
 
                 cx.notify();
             }

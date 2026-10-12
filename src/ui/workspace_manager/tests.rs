@@ -8291,6 +8291,48 @@ fn workspace_scrollbar_thumb_should_drag_the_list(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn closing_an_inactive_workspace_should_keep_the_sidebar_where_it_was_scrolled(
+    cx: &mut TestAppContext,
+) {
+    let (manager, _records, cx) = workspace_manager(cx);
+    for _ in 0..24 {
+        cx.simulate_keystrokes("cmd-n");
+    }
+    finish_slides(cx);
+    manager.update(cx, |manager, cx| {
+        manager
+            .sidebar
+            .read(cx)
+            .scroll_handle()
+            .set_offset(point(px(0.0), px(0.0)));
+    });
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+
+    right_click("workspace-row-2-inactive", cx);
+    click("workspace-menu-row-close", cx);
+    if cx
+        .debug_bounds("modal-action-close-confirmation-confirm")
+        .is_some()
+    {
+        click("modal-action-close-confirmation-confirm", cx);
+    }
+    finish_slides(cx);
+
+    let state = manager.read_with(cx, |manager, cx| {
+        (
+            manager.workspaces.len(),
+            manager.sidebar.read(cx).scroll_handle().offset().y,
+        )
+    });
+    assert_eq!(
+        state,
+        (24, px(0.0)),
+        "closing an inactive Workspace must not scroll the sidebar back to the active one"
+    );
+}
+
+#[gpui::test]
 fn creating_workspaces_should_scroll_the_active_workspace_into_view(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
     for _ in 0..24 {

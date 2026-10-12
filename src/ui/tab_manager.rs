@@ -1643,7 +1643,10 @@ impl TabManager {
                 }
                 self.sync_terminal_focus_blocker(cx);
                 debug_assert_eq!(active_tab_id, self.tabs.active_tab_id());
-                self.scroll_active_tab_into_view();
+                // Closing another Tab leaves the bar where it was scrolled.
+                if was_active {
+                    self.scroll_active_tab_into_view();
+                }
                 cx.emit(TabManagerEvent::PresentationChanged);
                 cx.notify();
             }
@@ -6288,6 +6291,31 @@ mod tests {
                 Some(selection.origin)
             ),
             "the next Tab must slide in under the selection, which stays where it was"
+        );
+    }
+
+    #[gpui::test]
+    fn closing_an_inactive_tab_should_keep_the_bar_where_it_was_scrolled(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = tab_manager(cx);
+        for _ in 0..13 {
+            click("create-tab-button", cx);
+        }
+        finish_slides(cx);
+        manager.update(cx, |manager, _| {
+            manager
+                .tab_bar_scroll_handle
+                .set_offset(point(px(0.0), px(0.0)));
+        });
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+
+        click("tab-close-button-2", cx);
+        finish_slides(cx);
+
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager.tab_bar_scroll_handle.offset().x),
+            px(0.0),
+            "closing an inactive Tab must not scroll the bar back to the active one"
         );
     }
 
