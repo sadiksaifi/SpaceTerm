@@ -1,0 +1,4 @@
+/opt/spaceterm-issue520-linux-evidence(/.*)? gen_context(system_u:object_r:stln_custody_t,s0)
+/etc/spaceterm-issue520-linux-evidence(/.*)? gen_context(system_u:object_r:stln_custody_t,s0)
+/opt/spaceterm-issue520-linux-evidence/custody-probe -- gen_context(system_u:object_r:stln_probe_exec_t,s0)
+/var/tmp/spaceterm-issue520-linux-evidence-control(/.*)? gen_context(system_u:object_r:stln_control_t,s0)

@@ -305,6 +305,59 @@ run = "python -m unittest tests.test_server_vm_executor"
 description = "Test VM artifact authentication and bounded native processes"
 run = "python -m unittest tests.test_server_vm_linux"
 
+[tasks."test:server:vm:linux:prototype"]
+description = "Test the bounded Linux prototype registration and build its native fixtures"
+run = "bash mise-tasks/server/vm/linux/test.sh"
+
+[tasks."test:server:vm:linux:prototype:asan"]
+description = "Test the Linux prototype registration with address and undefined behavior sanitizers"
+run = "bash mise-tasks/server/vm/linux/test.sh --sanitizers"
+
+[tasks."test:server:vm:linux:selinux:cleanup"]
+description = "Test SELinux fixture cleanup and enforcement restoration inside the disposable guest"
+run = "sudo -n bash tests/server_native/linux/selinux_verify_tests.sh"
+
+[tasks."lint:server:vm:linux"]
+description = "Check disposable Linux evidence shell scripts"
+run = "shellcheck mise-tasks/server/vm/linux/*.sh tests/server_native/linux/*.sh"
+
+[tasks."server:vm:linux:prepare"]
+description = "Install the pinned build tools inside the disposable Jammy guest"
+run = "bash mise-tasks/server/vm/linux/prepare.sh --disposable-jammy"
+
+[tasks."server:vm:linux:install"]
+description = "Install the credential-free system service prototype inside the disposable guest"
+run = "sudo -n bash mise-tasks/server/vm/linux/install.sh --disposable-jammy"
+
+[tasks."server:vm:linux:verify"]
+description = "Observe final account credentials, nondumpability, and listener absence"
+run = "sudo -n bash mise-tasks/server/vm/linux/verify.sh"
+
+[tasks."server:vm:linux:lifecycle"]
+description = "Test crash restart and durable Stop and Start in the disposable guest"
+run = "sudo -n bash mise-tasks/server/vm/linux/lifecycle.sh"
+
+[tasks."server:vm:linux:boot-check"]
+description = "Observe the registered desired state after a guest reboot"
+usage = 'arg "state" help="Expected running or stopped registration state"'
+run = "sudo -n bash mise-tasks/server/vm/linux/boot-check.sh {{usage.state | quote}}"
+
+[tasks."server:vm:linux:reboot"]
+description = "Reboot only the explicitly selected disposable Jammy guest"
+run = "sudo -n bash mise-tasks/server/vm/linux/reboot.sh --disposable-jammy"
+
+[tasks."server:vm:linux:selinux:prepare"]
+description = "Install permissive SELinux in the disposable Jammy guest for the next boot"
+run = "sudo -n bash mise-tasks/server/vm/linux/selinux-prepare.sh --disposable-jammy"
+
+[tasks."server:vm:linux:selinux:policy"]
+description = "Install the confined-domain SELinux mechanism experiment"
+run = "sudo -n bash mise-tasks/server/vm/linux/selinux-policy.sh --disposable-jammy"
+
+[tasks."server:vm:linux:selinux:verify"]
+description = "Test confined inode write denials without claiming full account custody"
+run = "sudo -n bash mise-tasks/server/vm/linux/selinux-verify.sh"
+
 [tasks."check:server:host"]
 description = "Check headless server host adapters"
 run = "cargo check --package spaceterm-host --all-targets --locked"
