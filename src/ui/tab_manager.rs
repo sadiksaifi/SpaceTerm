@@ -13,8 +13,8 @@ use thiserror::Error;
 use super::chrome_icons::IconRole;
 use super::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use super::drag_and_drop::{
-    DragPreview, DragSession, ItemMotion, ReorderableStrip, drag_release_observer, lift_shadow,
-    painted_item_size,
+    DragPreview, DragSession, ItemMotion, ReorderableStrip, StripShape, drag_release_observer,
+    lift_shadow, painted_item_size,
 };
 use super::selection_chip::{ChipPaint, ChipShape, SelectionChip};
 use super::terminal_focus::{TabFocusOwners, TerminalFocusBlocker, TerminalFocusCoordinator};
@@ -626,6 +626,18 @@ impl TabManager {
             .active_tab()
             .update(cx, |view, cx| view.activate_without_focus(cx));
         self.sync_terminal_focus_blocker(cx);
+    }
+
+    /// Where the Tab strip's Tabs and selection stand in the window, so the strip of the
+    /// Workspace that takes this one's place can start from there.
+    pub(crate) fn tab_strip_shape(&self, cx: &App) -> Option<StripShape> {
+        self.tab_reorder.shape(&self.tab_bar_scroll_handle, cx)
+    }
+
+    /// Starts the Tab strip from `from`, the shape of the strip it takes the place of.
+    pub(crate) fn arrive_from(&mut self, from: StripShape, cx: &mut Context<Self>) {
+        self.tab_reorder.arrive(from, cx);
+        cx.notify();
     }
 
     pub(crate) fn deactivate(&mut self, cx: &mut Context<Self>) {
@@ -6194,6 +6206,51 @@ mod tests {
                 Some(selection.origin)
             ),
             "the next Tab must slide in under the selection, which stays where it was"
+        );
+    }
+
+    #[gpui::test]
+    fn closing_the_last_tab_of_a_bar_scrolled_to_its_end_should_slide_the_others_under_the_selection(
+        cx: &mut TestAppContext,
+    ) {
+        let (_manager, _records, cx) = tab_manager(cx);
+        for _ in 0..13 {
+            click("create-tab-button", cx);
+        }
+        finish_slides(cx);
+        cx.update(|_, cx| cx.set_global(AnimatePresence));
+        let selection = cx.debug_bounds("tab-item-14-chip").unwrap().origin;
+        let last = cx.debug_bounds("tab-item-14-active").unwrap().origin;
+        let before = cx.debug_bounds("tab-item-13-inactive").unwrap().origin;
+        let frame = |cx: &mut VisualTestContext| {
+            (
+                cx.debug_bounds("tab-item-13-active")
+                    .expect("the newly active Tab was not rendered")
+                    .origin,
+                cx.debug_bounds("tab-item-13-chip")
+                    .expect("the selection was not rendered")
+                    .origin,
+            )
+        };
+
+        click("tab-close-button-14", cx);
+        let closing = frame(cx);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(60));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        let (moving, held) = frame(cx);
+        finish_slides(cx);
+        let closed = frame(cx);
+
+        assert_eq!(
+            (closing, held, closed),
+            ((before, selection), selection, (last, selection)),
+            "the Tabs must slide over to fill the closed Tab's place while the selection stays put"
+        );
+        assert!(
+            before.x < moving.x && moving.x < last.x,
+            "the Tabs must be on their way shortly after the close, got {moving:?}"
         );
     }
 

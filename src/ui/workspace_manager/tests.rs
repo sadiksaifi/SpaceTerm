@@ -7987,6 +7987,143 @@ fn selecting_another_workspace_should_move_the_selection_from_the_old_row(cx: &m
 }
 
 #[gpui::test]
+fn switching_to_a_workspace_with_fewer_tabs_should_start_its_tab_strip_from_the_old_one(
+    cx: &mut TestAppContext,
+) {
+    let (_manager, _records, cx) = workspace_manager(cx);
+    cx.simulate_keystrokes("cmd-t cmd-t cmd-n");
+    finish_slides(cx);
+    click("workspace-row-1-inactive", cx);
+    finish_slides(cx);
+    cx.update(|_, cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
+    let first = cx.debug_bounds("tab-item-1-inactive").unwrap().origin;
+    let third = cx.debug_bounds("tab-item-3-active").unwrap().origin;
+    let selection = cx.debug_bounds("tab-item-3-chip").unwrap().origin;
+    let create = cx.debug_bounds("create-tab-button").unwrap().origin;
+    let strip = |cx: &mut VisualTestContext| {
+        (
+            cx.debug_bounds("tab-item-1-chip")
+                .expect("the arriving Tab's chip was not rendered")
+                .origin,
+            cx.debug_bounds("create-tab-button").unwrap().origin,
+        )
+    };
+
+    click("workspace-row-2-inactive", cx);
+    let (leaving, closing) = strip(cx);
+    finish_slides(cx);
+    let (landed, closed) = strip(cx);
+
+    assert_eq!(
+        (leaving, closing, landed),
+        (selection, create, selection + (first - third)),
+        "the selection must leave from the old active Tab, and the strip's end from the old end"
+    );
+    assert!(
+        closed.x < create.x,
+        "the strip must close the place of the Tabs it lacks, got {closed:?} from {create:?}"
+    );
+}
+
+#[gpui::test]
+fn switching_to_a_workspace_with_an_overflowing_tab_strip_should_keep_its_tabs_in_place(
+    cx: &mut TestAppContext,
+) {
+    let (_manager, _records, cx) = workspace_manager(cx);
+    for _ in 0..13 {
+        cx.simulate_keystrokes("cmd-t");
+    }
+    cx.simulate_keystrokes("cmd-n");
+    finish_slides(cx);
+    click("workspace-row-1-inactive", cx);
+    finish_slides(cx);
+    let strip = cx.debug_bounds("tab-items").unwrap();
+    let rest = ["tab-item-13-inactive", "tab-item-14-active"]
+        .map(|selector| cx.debug_bounds(selector).map(|tab| tab.origin));
+    click("workspace-row-2-inactive", cx);
+    finish_slides(cx);
+    cx.update(|_, cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
+    let selection = cx.debug_bounds("tab-item-1-chip").unwrap().origin;
+    let tabs = |cx: &mut VisualTestContext| {
+        ["tab-item-13-inactive", "tab-item-14-active"]
+            .map(|selector| cx.debug_bounds(selector).map(|tab| tab.origin))
+    };
+
+    click("workspace-row-1-inactive", cx);
+    let arriving = tabs(cx);
+    let leaving = cx.debug_bounds("tab-item-14-chip").unwrap().origin;
+    finish_slides(cx);
+
+    assert!(
+        rest[1].is_some_and(|last| strip.right() < last.x + strip.size.width),
+        "the strip must overflow for this test, got {rest:?} in {strip:?}"
+    );
+    assert_eq!(
+        (arriving, leaving, tabs(cx)),
+        (rest, selection, rest),
+        "an overflowing strip's Tabs must keep their places while the selection leaves from the \
+         old one"
+    );
+}
+
+#[gpui::test]
+fn a_new_workspace_should_start_its_tab_strip_from_the_old_one(cx: &mut TestAppContext) {
+    let (_manager, _records, cx) = workspace_manager(cx);
+    cx.simulate_keystrokes("cmd-t cmd-t");
+    finish_slides(cx);
+    cx.update(|_, cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
+    let first = cx.debug_bounds("tab-item-1-inactive").unwrap().origin;
+    let third = cx.debug_bounds("tab-item-3-active").unwrap().origin;
+    let selection = cx.debug_bounds("tab-item-3-chip").unwrap().origin;
+    let chip = |cx: &mut VisualTestContext| {
+        cx.debug_bounds("tab-item-1-chip")
+            .expect("the new Workspace's Tab chip was not rendered")
+            .origin
+    };
+
+    cx.simulate_keystrokes("cmd-n");
+    cx.run_until_parked();
+    let leaving = chip(cx);
+    finish_slides(cx);
+    let landed = chip(cx);
+
+    assert_eq!(
+        (leaving, landed),
+        (selection, selection + (first - third)),
+        "the selection must leave from the old Workspace's active Tab"
+    );
+}
+
+#[gpui::test]
+fn switching_to_a_workspace_with_more_tabs_should_grow_the_tabs_the_old_strip_lacked(
+    cx: &mut TestAppContext,
+) {
+    let (_manager, _records, cx) = workspace_manager(cx);
+    cx.simulate_keystrokes("cmd-t cmd-t cmd-n");
+    finish_slides(cx);
+    cx.update(|_, cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
+    let selection = cx.debug_bounds("tab-item-1-chip").unwrap().origin;
+    let create = cx.debug_bounds("create-tab-button").unwrap().origin;
+    let end = |cx: &mut VisualTestContext| cx.debug_bounds("create-tab-button").unwrap().origin;
+
+    click("workspace-row-1-inactive", cx);
+    let leaving = cx.debug_bounds("tab-item-3-chip").unwrap().origin;
+    let growing = end(cx);
+    finish_slides(cx);
+    let grown = end(cx);
+
+    assert_eq!(
+        (leaving, growing),
+        (selection, create),
+        "the selection must leave from the old active Tab, and the strip's end from the old end"
+    );
+    assert!(
+        create.x < grown.x,
+        "the Tabs the old strip lacked must grow in, got {grown:?} from {create:?}"
+    );
+}
+
+#[gpui::test]
 fn escape_should_cancel_a_workspace_row_drag_and_return_every_row_to_its_place(
     cx: &mut TestAppContext,
 ) {
