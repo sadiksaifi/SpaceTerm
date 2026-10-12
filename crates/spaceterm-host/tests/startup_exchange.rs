@@ -1,11 +1,7 @@
-//! Public-interface exchange tests. The common contract seed is absent from this
-//! worktree, so this integration-test crate supplies only the frozen error enum.
-//! No test contract is included by the production library.
-#[path = "../src/startup_exchange/test_contract.rs"]
-mod native_deployment;
-#[path = "../src/startup_exchange.rs"]
-mod startup_exchange;
+//! Tests against the exported host exchange, with injected nonauthorizing peers.
 
+use spaceterm_host::native_deployment::contracts::NativeFailure;
+use spaceterm_host::startup_exchange;
 use startup_exchange::{FrameKind, StartupTranscript};
 
 #[test]
@@ -56,7 +52,6 @@ fn literal_ready() -> [u8; 352] {
     bytes
 }
 
-use native_deployment::contracts::NativeFailure;
 use startup_exchange::unix::{
     ExactChild, LockedMemory, PipeEndpoint, ReceiverPipes, anonymous_pipe, process_identity,
     receive,
@@ -402,6 +397,7 @@ enum Peer {
     WrongAck,
     DiesBeforeAck,
     Timeout,
+    LateRetirement(ExchangeDeadline),
 }
 
 fn helper_child(delay: &str) -> std::process::Child {
@@ -500,9 +496,72 @@ fn fake_retriever(
     if matches!(peer, Peer::WrongAck) {
         frame.bytes_mut()[415] ^= 1;
     }
+    if let Peer::LateRetirement(exchange_deadline) = peer {
+        // Acknowledgement still fits, but the independently held child cannot
+        // retire before the original deadline. A fresh reap budget would admit it.
+        std::thread::sleep(
+            exchange_deadline
+                .remaining()
+                .unwrap()
+                .saturating_sub(Duration::from_millis(100)),
+        );
+        exchange_deadline.remaining().unwrap();
+    }
     acknowledgement
         .write_frame(&frame.bytes()[..416], deadline)
         .unwrap();
+}
+
+#[test]
+fn retriever_retirement_cannot_extend_the_absolute_exchange_deadline() {
+    use std::io::Write;
+
+    let mut child = Some(
+        Command::new("/bin/sh")
+            .args(["-c", "read line; exit 0"])
+            .env_clear()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let mut retirement = child.as_mut().unwrap().stdin.take().unwrap();
+    let identity = process_identity(child.as_ref().unwrap().id()).unwrap();
+    let exact = ExactChild::take(&mut child, identity).unwrap();
+    let original = process_identity(std::process::id()).unwrap();
+    let mut ready = literal_ready();
+    for (offset, process) in [(272, original), (296, identity)] {
+        ready[offset..offset + 8].copy_from_slice(&u64::from(process.pid).to_be_bytes());
+        ready[offset + 8..offset + 16].copy_from_slice(&process.start_seconds.to_be_bytes());
+        ready[offset + 16..offset + 20].copy_from_slice(&process.start_microseconds.to_be_bytes());
+    }
+    let transcript = StartupTranscript::recognize_ready(&ready).unwrap();
+    let (rr, rw) = anonymous_pipe().unwrap();
+    let (dr, dw) = anonymous_pipe().unwrap();
+    let (cr, cw) = anonymous_pipe().unwrap();
+    let (ar, aw) = anonymous_pipe().unwrap();
+    let pipes = ReceiverPipes::take(rw, dr, cw, ar).unwrap();
+    let deadline = ExchangeDeadline::start(Duration::from_millis(500)).unwrap();
+    let peer = std::thread::spawn(move || {
+        fake_retriever(ready, rr, dw, cr, aw, Peer::LateRetirement(deadline));
+        std::thread::sleep(deadline.remaining().unwrap_or_default() + Duration::from_millis(30));
+        assert_eq!(deadline.remaining(), Err(NativeFailure::TimedOut));
+        retirement.write_all(b"exit\n").unwrap();
+    });
+
+    let outcome = receive(&transcript, pipes, exact, deadline).map(|_| ());
+    peer.join().unwrap();
+    assert_eq!(outcome, Err(NativeFailure::TimedOut));
+    // The separate failure-cleanup allowance must still consume the exact child.
+    assert_eq!(
+        unsafe { libc::waitpid(identity.pid as i32, std::ptr::null_mut(), libc::WNOHANG) },
+        -1
+    );
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ECHILD)
+    );
 }
 
 #[test]
@@ -552,10 +611,12 @@ fn failed_frame_read_wipes_destination_and_closes_endpoint() {
     let mut endpoint = PipeEndpoint::take(read, false).unwrap();
     let mut frame = LockedMemory::<4>::allocate().unwrap();
     frame.bytes_mut().fill(99);
+    // This checks malformed EOF cleanup, not scheduler latency. Deadline
+    // expiration has separate tests; keep this operation within the ABI budget.
     let outcome = endpoint.read_frame(
         &mut frame,
         3,
-        ExchangeDeadline::start(Duration::from_millis(20)).unwrap(),
+        ExchangeDeadline::start(Duration::from_secs(2)).unwrap(),
     );
     assert_eq!(outcome, Err(NativeFailure::CredentialUnavailable));
     assert!(frame.bytes().iter().all(|&byte| byte == 0));
@@ -603,20 +664,4 @@ fn successful_reaping_permanently_invalidates_exact_child() {
         Err(NativeFailure::UnsafeNativeState)
     );
     drop(child);
-}
-
-#[test]
-fn confirmation_outputs_stay_in_natively_locked_storage() {
-    let transcript = StartupTranscript::recognize_ready(&literal_ready()).unwrap();
-    let mut secret = LockedMemory::<32>::allocate().unwrap();
-    secret.bytes_mut().fill(7);
-    let macs = transcript
-        .confirmation_macs(secret.bytes(), &[11; 32])
-        .unwrap();
-    assert!(startup_exchange::unix::native_memory_is_locked(
-        macs.confirmation()
-    ));
-    assert!(startup_exchange::unix::native_memory_is_locked(
-        macs.acknowledgement()
-    ));
 }

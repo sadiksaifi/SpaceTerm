@@ -45,7 +45,19 @@ pub(super) fn calculate(
     secret: &[u8; 32],
     challenge: &[u8; 32],
 ) -> Result<ConfirmationMacs, NativeFailure> {
-    calculate_using(ready, secret, challenge, worker, |_, _, _| {})
+    calculate_using(
+        ready,
+        secret,
+        challenge,
+        worker,
+        |thread| unsafe { libc::pthread_join(thread, ptr::null_mut()) },
+        |stack, request, output| {
+            mem::forget(stack);
+            mem::forget(request);
+            mem::forget(output);
+        },
+        |_, _, _| {},
+    )
 }
 
 fn calculate_using(
@@ -53,6 +65,8 @@ fn calculate_using(
     secret: &[u8; 32],
     challenge: &[u8; 32],
     callback: extern "C" fn(*mut libc::c_void) -> *mut libc::c_void,
+    join: impl FnOnce(libc::pthread_t) -> i32,
+    unresolved: impl FnOnce(LockedMemory<STACK_BYTES>, LockedMemory<REQUEST_BYTES>, LockedMemory<64>),
     retired: impl FnOnce(&LockedMemory<STACK_BYTES>, &LockedMemory<REQUEST_BYTES>, &LockedMemory<64>),
 ) -> Result<ConfirmationMacs, NativeFailure> {
     let mut stack = LockedMemory::<STACK_BYTES>::allocate()?;
@@ -92,12 +106,10 @@ fn calculate_using(
     }
     // SAFETY: this is the sole waiter for the successfully created joinable worker.
     // No secret input remains borrowed from the caller by the worker.
-    if unsafe { libc::pthread_join(thread, ptr::null_mut()) } != 0 {
+    if join(thread) != 0 {
         // An unresolved worker may still use these mappings. Never unmap its
         // stack or inputs; retain locked resources and refuse exchange completion.
-        mem::forget(stack);
-        mem::forget(request);
-        mem::forget(output);
+        unresolved(stack, request, output);
         return Err(NativeFailure::CleanupUnresolved);
     }
     let result = unsafe { (*request_pointer).result };
@@ -112,6 +124,39 @@ fn calculate_using(
     } else {
         Err(NativeFailure::UnsafeNativeState)
     }
+}
+
+#[cfg(test)]
+pub(super) fn failed_join(
+    ready: &[u8; PREFIX_BYTES],
+    secret: &[u8; 32],
+    challenge: &[u8; 32],
+) -> Result<ConfirmationMacs, NativeFailure> {
+    calculate_using(
+        ready,
+        secret,
+        challenge,
+        worker,
+        |thread| {
+            // Retire the real worker before injecting the boundary's failure so
+            // the test can safely reclaim mappings that production must retain.
+            assert_eq!(unsafe { libc::pthread_join(thread, ptr::null_mut()) }, 0);
+            libc::EINVAL
+        },
+        |mut stack, mut request, mut output| {
+            for bytes in [
+                stack.bytes().as_slice(),
+                request.bytes().as_slice(),
+                output.bytes().as_slice(),
+            ] {
+                assert!(super::unix::native_memory_is_locked(bytes));
+            }
+            stack.wipe();
+            request.wipe();
+            output.wipe();
+        },
+        |_, _, _| panic!("failed join cannot publish MACs"),
+    )
 }
 
 extern "C" fn worker(pointer: *mut libc::c_void) -> *mut libc::c_void {
@@ -188,6 +233,8 @@ mod tests {
             &[7; 32],
             &[11; 32],
             failed_worker,
+            |thread| unsafe { libc::pthread_join(thread, ptr::null_mut()) },
+            |_, _, _| panic!("unexpected join failure"),
             |stack, request, output| {
                 for bytes in [
                     stack.bytes().as_slice(),
@@ -209,6 +256,8 @@ mod tests {
             &[7; 32],
             &[11; 32],
             worker,
+            |thread| unsafe { libc::pthread_join(thread, ptr::null_mut()) },
+            |_, _, _| panic!("unexpected join failure"),
             |stack, request, output| {
                 assert!(stack.bytes().iter().all(|byte| *byte == 0));
                 assert!(request.bytes().iter().all(|byte| *byte == 0));

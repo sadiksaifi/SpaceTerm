@@ -110,18 +110,26 @@ def cancellation_cases(driver, binary: Path, environment: dict[str, str]) -> boo
             passed = passed and orderly
             driver.emit(name, "pass" if orderly else "red")
         finally:
-            # Even RED leaves no live helper. The fixed child owns an alarm and
-            # the witness stays open through its exec until actual retirement.
-            if process is not None:
-                if process.poll() is None:
-                    driver.stop_process(process, native=True)
-                if process.stdout is not None:
-                    process.stdout.close()
-            if not select.select([read], [], [], 3.0)[0] or os.read(read, 1) != b"":
-                raise driver.TaskFailure("cleanup-unresolved")
-            os.close(read)
-            if write >= 0:
-                os.close(write)
+            # A failed spawn publishes no witness owner. Close our writer before
+            # any EOF observation, and close both endpoints even if cleanup fails.
+            try:
+                if write >= 0:
+                    os.close(write)
+                    write = -1
+                if process is not None:
+                    try:
+                        if process.poll() is None:
+                            driver.stop_process(process, native=True)
+                    finally:
+                        if process.stdout is not None:
+                            process.stdout.close()
+                    # The fixed child keeps its witness through exec until death.
+                    if not select.select([read], [], [], 3.0)[0] or os.read(read, 1) != b"":
+                        raise driver.TaskFailure("cleanup-unresolved")
+            finally:
+                os.close(read)
+                if write >= 0:
+                    os.close(write)
     return passed
 
 
@@ -182,6 +190,8 @@ def run_task(
             "-I",
             str(native),
             "-I",
+            str(native.parent / "include"),
+            "-I",
             str(test_include),
         ]
         if sanitizers:
@@ -210,6 +220,21 @@ def run_task(
         for record in records:
             driver.emit(record["case"], record["result"])
         retain = any(record["result"] == "cleanup-unresolved" for record in records)
+        remote_code, remote_data = driver.bounded_process(
+            [str(binary), "--remote-credentials"], environment, timeout=5.0, native=True
+        )
+        driver.CASES = ("remote-group-proof-stays-unavailable",)
+        try:
+            remote_records = driver.validate_records(remote_data, remote_code)
+        finally:
+            driver.CASES = CASES
+        for record in remote_records:
+            driver.emit(record["case"], record["result"])
+        retain = retain or any(
+            record["result"] == "cleanup-unresolved" for record in remote_records
+        )
+        if remote_code != 0:
+            code = 1
         if not cancellation_cases(driver, binary, environment):
             code = 1
         driver.emit("driver", "mechanics-green-native-gated" if code == 0 else "red")

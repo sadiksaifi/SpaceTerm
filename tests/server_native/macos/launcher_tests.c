@@ -3,6 +3,7 @@
 #include "launcher_test.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <grp.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -10,6 +11,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/resource.h>
+#include <sys/param.h>
+#include <sys/sysctl.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -268,6 +271,30 @@ static bool descriptor_exec(void) {
     return pid > 0 && wait_child(pid);
 }
 
+static bool remote_credentials(void) {
+    int lease[2];
+    if (pipe(lease) != 0) return false;
+    pid_t pid = owned_fork();
+    if (pid == 0) {
+        alarm(3); close(lease[1]);
+        char byte; (void)read(lease[0], &byte, 1); _exit(0);
+    }
+    close(lease[0]);
+    st_native_privilege_observation observed;
+    gid_t groups[256];
+    int count = getgroups(256, groups);
+    bool valid = pid > 0 && count > 0 &&
+        st_native_observe_process((uint32_t)pid, &observed) == 0 &&
+        observed.groups_observed == 0 && observed.saved_ids_observed == 1 &&
+        observed.group_count == 0 && observed.real_uid == getuid() &&
+        observed.effective_uid == geteuid() && observed.saved_uid == geteuid() &&
+        observed.real_gid == getgid() && observed.effective_gid == getegid() &&
+        observed.saved_gid == getegid();
+    close(lease[1]);
+    bool retired = pid > 0 && wait_child(pid);
+    return valid && retired;
+}
+
 typedef struct { const char *name; bool (*run)(void); } test_case;
 static const test_case cases[] = {
     {"drop-groups-gid-uid-in-order", drop_order},
@@ -320,6 +347,27 @@ int main(int argc, char **argv) {
         if (retirement_fd < 3 || !install_cancellation() || !reset()) return 2;
         bool passed = strcmp(argv[2], "descriptor") == 0 ? descriptor_exec() : exec_identity();
         return cleanup_unresolved ? 125 : first_signal != 0 ? 128 + first_signal : passed ? 0 : 1;
+    }
+    if (argc == 2 && strcmp(argv[1], "--group-snapshot-probe") == 0) {
+        struct kinfo_proc kernel;
+        memset(&kernel, 0, sizeof(kernel));
+        size_t length = sizeof(kernel);
+        int mib[] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()};
+        gid_t groups[256];
+        int count = getgroups(256, groups);
+        if (count < 1 || count > 256 ||
+            sysctl(mib, 4, &kernel, &length, NULL, 0) != 0 || length != sizeof(kernel) ||
+            kernel.kp_eproc.e_ucred.cr_ngroups < 1 || kernel.kp_eproc.e_ucred.cr_ngroups > NGROUPS) return 2;
+        unsigned kernel_count = (unsigned)kernel.kp_eproc.e_ucred.cr_ngroups;
+        printf("{\"schema\":1,\"scope\":\"darwin-group-proof\",\"case\":\"kernel-snapshot\",\"result\":\"%s\",\"kernel_count\":%u,\"native_count\":%u}\n",
+            kernel_count < (unsigned)count ? "incomplete" : "not-demonstrated", kernel_count, (unsigned)count);
+        return 0;
+    }
+    if (argc == 2 && strcmp(argv[1], "--remote-credentials") == 0) {
+        if (!install_cancellation()) return 2;
+        bool valid = remote_credentials();
+        printf("{\"schema\":1,\"scope\":\"launcher-native-mechanics\",\"case\":\"remote-group-proof-stays-unavailable\",\"result\":\"%s\"}\n", valid ? "pass" : "red");
+        return cleanup_unresolved ? 125 : valid ? 0 : 1;
     }
     if (argc != 1 || !install_cancellation()) return 2;
     self_path = argv[0];

@@ -147,16 +147,8 @@ impl StartupTranscript {
     }
 }
 
-/// Process comparison facts. They do not authorize signals or credential release.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ProcessIdentity {
-    /// Nonzero native PID bounded by i32::MAX.
-    pub pid: u32,
-    /// Native process start time seconds.
-    pub start_seconds: u64,
-    /// Native process start time fraction, below one million.
-    pub start_microseconds: u32,
-}
+/// The shared native process comparison identity. No comparison grants authority.
+pub use crate::startup::ProcessIdentity;
 
 /// Owned locked MAC bytes, wiped before unlock, with redacted diagnostics.
 pub struct ConfirmationMacs {
