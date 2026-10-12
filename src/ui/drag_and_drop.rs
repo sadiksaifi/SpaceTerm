@@ -20,8 +20,8 @@ use super::appearance::gpui_color;
 const SHIFT_DURATION: Duration = Duration::from_millis(200);
 /// How long a released item takes to settle into its slot, and the others to follow it.
 const SETTLE_DURATION: Duration = Duration::from_millis(260);
-/// How long a new item takes to grow into the strip, and a removed item to shrink out of it.
-const PRESENCE_DURATION: Duration = Duration::from_millis(250);
+/// How long a new item takes to grow into the strip, and the gap a removed item leaves to close.
+const PRESENCE_DURATION: Duration = Duration::from_millis(300);
 /// How deep into either end of a strip the pointer starts scrolling it.
 const AUTOSCROLL_EDGE: f32 = 40.0;
 /// How fast a strip scrolls, in points per second, with the pointer at or past its end.
@@ -54,39 +54,9 @@ pub(crate) struct ReorderableStrip<Id> {
     /// The items that finished growing at the last refresh, and take their full size this frame.
     grown: Vec<Id>,
     /// The closing gap a removed item left before each item.
-    leading_gaps: HashMap<Id, Gap<Id>>,
+    leading_gaps: HashMap<Id, Gap>,
     /// The closing gap a removed last item left after the item that is now last.
-    trailing_gaps: HashMap<Id, Gap<Id>>,
-}
-
-/// A removed item shrinking out of the strip beside the item that now carries its place.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct Departure<Id> {
-    /// The removed item.
-    pub(crate) id: Id,
-    /// How much of the strip the removed item still takes.
-    extent: Pixels,
-    /// How much of the removed item still shows, from 1 at removal to 0.
-    opacity: f32,
-    /// Whether the removed item stands before its carrier rather than after it.
-    leading: bool,
-}
-
-impl<Id> Departure<Id> {
-    /// The removed item's `face`, clipped to the space it still takes in a strip along `axis` and
-    /// fading out. It belongs inside its carrier's slot, which keeps that space beside it.
-    pub(crate) fn render(&self, axis: Axis, face: AnyElement) -> AnyElement {
-        let extent = self.extent;
-        let space = div().absolute().overflow_hidden().opacity(self.opacity);
-        match (axis, self.leading) {
-            (Axis::Horizontal, true) => space.top_0().bottom_0().left(-extent).w(extent),
-            (Axis::Horizontal, false) => space.top_0().bottom_0().right(-extent).w(extent),
-            (Axis::Vertical, true) => space.left_0().right_0().top(-extent).h(extent),
-            (Axis::Vertical, false) => space.left_0().right_0().bottom(-extent).h(extent),
-        }
-        .child(face)
-        .into_any_element()
-    }
+    trailing_gaps: HashMap<Id, Gap>,
 }
 
 /// The item a strip's drag carries, its session, and where a release would land it.
@@ -157,8 +127,7 @@ impl ItemMotion {
         let slot = match axis {
             Axis::Horizontal => slot.ml(self.leading_gap).mr(self.trailing_gap),
             Axis::Vertical => slot.mt(self.leading_gap).mb(self.trailing_gap),
-        }
-        .relative();
+        };
         let Some(extent) = self.extent else {
             return slot;
         };
@@ -188,35 +157,6 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
             leading_gaps: HashMap::new(),
             trailing_gaps: HashMap::new(),
         }
-    }
-
-    /// The removed items shrinking out beside the item `carrier`, to render in its slot.
-    pub(crate) fn departures(&self, carrier: Id, cx: &App) -> Vec<Departure<Id>> {
-        let now = now(cx);
-        let departure = |gap: &Gap<Id>, leading: bool| Departure {
-            id: gap.departed,
-            extent: gap.at(now),
-            opacity: 1.0 - gap.ease.at(now),
-            leading,
-        };
-        self.leading_gaps
-            .get(&carrier)
-            .map(|gap| departure(gap, true))
-            .into_iter()
-            .chain(
-                self.trailing_gaps
-                    .get(&carrier)
-                    .map(|gap| departure(gap, false)),
-            )
-            .collect()
-    }
-
-    /// Every removed item still shrinking out of the strip.
-    pub(crate) fn departing(&self) -> impl Iterator<Item = Id> + '_ {
-        self.leading_gaps
-            .values()
-            .chain(self.trailing_gaps.values())
-            .map(|gap| gap.departed)
     }
 
     /// Keeps the new item `id`, one of the strip's `ids`, scrolled into view while it grows and
@@ -286,7 +226,6 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
             gaps.insert(
                 carrier,
                 Gap {
-                    departed: *id,
                     extent: open + extent,
                     ease: Ease::new(PRESENCE_DURATION, now, motion),
                 },
@@ -716,7 +655,7 @@ fn presence_motion(cx: &App) -> spaceterm_ui::ControlMotion {
     super::appearance_runtime::control_motion(cx)
 }
 
-/// A progress from 0 to 1 that starts at `since` and eases in and out, without overshoot.
+/// A progress from 0 to 1 that starts at `since` and eases out, without overshoot.
 #[derive(Clone, Copy, Debug)]
 struct Ease {
     since: Instant,
@@ -749,19 +688,18 @@ impl Ease {
     }
 
     fn at(&self, now: Instant) -> f32 {
-        ease_in_out(self.progress(now))
+        ease_out(self.progress(now))
     }
 }
 
-/// The space the removed item `departed` left in the strip, closing from `extent` to nothing.
+/// The space a removed item left in the strip, closing from `extent` to nothing.
 #[derive(Clone, Copy, Debug)]
-struct Gap<Id> {
-    departed: Id,
+struct Gap {
     extent: Pixels,
     ease: Ease,
 }
 
-impl<Id> Gap<Id> {
+impl Gap {
     fn at(&self, now: Instant) -> Pixels {
         self.extent * (1.0 - self.ease.at(now))
     }
@@ -830,11 +768,6 @@ impl Slide {
 /// Fast at the start and gentle at the end, as CSS `cubic-bezier(0.2, 0.8, 0.2, 1)`.
 fn ease_out(progress: f32) -> f32 {
     cubic_bezier((0.2, 0.8), (0.2, 1.0), progress)
-}
-
-/// Gentle at both ends: CSS `ease`, `cubic-bezier(0.25, 0.1, 0.25, 1)`.
-fn ease_in_out(progress: f32) -> f32 {
-    cubic_bezier((0.25, 0.1), (0.25, 1.0), progress)
 }
 
 /// Fast at the start, past the target, and back onto it, as CSS

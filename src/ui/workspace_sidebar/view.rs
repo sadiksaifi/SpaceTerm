@@ -239,8 +239,6 @@ pub(super) fn row_background(
 pub(super) enum RowRole {
     InList,
     Lifted,
-    /// A closed Workspace's row shrinking out of the list.
-    Departing,
 }
 
 impl WorkspaceSidebar {
@@ -278,9 +276,7 @@ impl WorkspaceSidebar {
         let row_background = row_background(appearance);
         let emphasized = appearance.active && self.has_visible_focus(window);
         let lifted = role == RowRole::Lifted;
-        // A lifted or departing row only paints, and claims no pointer input.
-        let paint_only = role != RowRole::InList;
-        let selected = if paint_only {
+        let selected = if lifted {
             active
         } else {
             self.selected_key() == Some(SidebarRowKey::Workspace(workspace_id))
@@ -292,7 +288,7 @@ impl WorkspaceSidebar {
         let hover = if appearance.active { hover } else { 0.0 };
         let level = f64::from(hover);
         let (chip, row_colors) = row_paint(selected, emphasized, hover, appearance, cx);
-        let chip = if paint_only {
+        let chip = if lifted {
             chip
         } else if self.workspace_reorder.motion(workspace_id, cx).lifted {
             chip.landing(row_colors.row_foreground)
@@ -440,15 +436,15 @@ impl WorkspaceSidebar {
         let owner = sidebar.entity_id();
         // The lifted copy shows its whole lift; the row in the list shows what remains of its
         // lift as it settles.
-        let lift = match role {
-            RowRole::InList => self.workspace_reorder.motion(workspace_id, cx).lift,
-            RowRole::Lifted => 1.0,
-            RowRole::Departing => 0.0,
+        let lift = if lifted {
+            1.0
+        } else {
+            self.workspace_reorder.motion(workspace_id, cx).lift
         };
-        let element_name = match role {
-            RowRole::InList => "workspace-row",
-            RowRole::Lifted => "workspace-row-preview",
-            RowRole::Departing => "workspace-row-departing",
+        let element_name = if lifted {
+            "workspace-row-preview"
+        } else {
+            "workspace-row"
         };
         // The chevron, and the "+" of an expanded row, trail the name on line 1, so line 2 runs
         // to the row's end like a row without Worktrees. A collapsed row offers New Worktree from
@@ -459,7 +455,7 @@ impl WorkspaceSidebar {
                 .flex()
                 .items_center()
                 .when(
-                    expanded && creates_worktrees && !paint_only && !renaming,
+                    expanded && creates_worktrees && !lifted && !renaming,
                     |trailing| {
                         trailing.child(new_worktree_button(
                             workspace_id,
@@ -473,7 +469,7 @@ impl WorkspaceSidebar {
                 .child(self.render_disclosure(
                     workspace_id,
                     expanded,
-                    !paint_only,
+                    !lifted,
                     row_colors.row_icon,
                     sidebar.clone(),
                     appearance,
@@ -502,7 +498,7 @@ impl WorkspaceSidebar {
             .flex_row()
             .items_center()
             .gap(appearance.spacing(ROW_CONTENT_GAP))
-            .when(!paint_only, |row| row.block_mouse_except_scroll())
+            .when(!lifted, |row| row.block_mouse_except_scroll())
             .when_some(row_background, |row, background| {
                 row.bg(gpui_color(background))
             })
@@ -515,7 +511,7 @@ impl WorkspaceSidebar {
                     chip.render(selector, hover)
                 }
             })
-            .when(!paint_only, |row| {
+            .when(!lifted, |row| {
                 row.on_click(move |_, _, cx| {
                     let _ = click_sidebar.update(cx, |sidebar, cx| {
                         sidebar.cursor = None;
@@ -527,7 +523,7 @@ impl WorkspaceSidebar {
                     cx.stop_propagation();
                 })
             })
-            .when(!renaming && !paint_only, |row| {
+            .when(!renaming && !lifted, |row| {
                 row.on_drag(
                     DraggedWorkspace {
                         workspace_id,
@@ -609,7 +605,7 @@ impl WorkspaceSidebar {
             // Rows rest on the continuous base surface without separators. The hover and selection
             // chips alone give each Workspace its shape; collection focus never adds a row ring.
             .when_some(tracker, |row, tracker| row.child(tracker.tracker()));
-        if paint_only {
+        if lifted {
             return row_content.into_any_element();
         }
         let row = Tooltip::new(("workspace-row-tooltip", workspace_id.get()), tooltip_label)
@@ -891,30 +887,8 @@ impl WorkspaceSidebar {
                     });
                 },
             );
-            let departures = self
-                .workspace_reorder
-                .departures(workspace_id, cx)
-                .into_iter()
-                .filter_map(|departure| {
-                    let row = self.departed_rows.get(&departure.id)?.clone();
-                    let face = self.render_workspace_row(
-                        row,
-                        RowRole::Departing,
-                        RowHover {
-                            level: 0.0,
-                            tracker: None,
-                        },
-                        sidebar.clone(),
-                        presentation,
-                        window,
-                        appearance,
-                        cx,
-                    );
-                    Some(departure.render(gpui::Axis::Vertical, face))
-                })
-                .collect::<Vec<_>>();
             rows = rows.child(
-                slot.children(departures).child(
+                slot.child(
                     div()
                         .on_children_prepainted(move |bounds, _, cx| {
                             let _ = measure_sidebar.update(cx, |sidebar, _| {
