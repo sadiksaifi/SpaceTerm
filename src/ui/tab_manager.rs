@@ -6662,6 +6662,49 @@ mod tests {
     }
 
     #[gpui::test]
+    fn selecting_a_tab_scrolled_out_of_view_should_leave_from_where_the_selection_stood(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _records, cx) = tab_manager(cx);
+        for _ in 0..12 {
+            click("create-tab-button", cx);
+        }
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| manager.activate_tab_at(0, window, cx));
+        });
+        finish_slides(cx);
+        let strip = cx.debug_bounds("tab-items").unwrap();
+        let stood = cx.debug_bounds("tab-item-1-chip").unwrap().origin.x;
+        assert!(
+            cx.debug_bounds("tab-item-13-inactive")
+                .is_none_or(|tab| tab.left() >= strip.right()),
+            "the last Tab is out of view"
+        );
+        cx.update(|_, cx| cx.set_global(AnimatePresence));
+
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| manager.activate_tab_at(12, window, cx));
+        });
+        cx.run_until_parked();
+        let mut frames = Vec::new();
+        for _ in 0..3 {
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+            cx.run_until_parked();
+            frames.push(cx.debug_bounds("tab-item-13-chip").unwrap().origin.x);
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(16));
+        }
+
+        assert!(
+            (frames[0] - stood).abs() <= px(1.0)
+                && frames
+                    .iter()
+                    .all(|x| strip.left() - px(1.0) <= *x && *x <= strip.right()),
+            "the selection must leave from {stood:?} inside the strip {strip:?}, got {frames:?}"
+        );
+    }
+
+    #[gpui::test]
     fn a_new_tab_in_an_overflowing_bar_should_end_fully_in_view(cx: &mut TestAppContext) {
         let (_manager, _records, cx) = tab_manager(cx);
         for _ in 0..12 {

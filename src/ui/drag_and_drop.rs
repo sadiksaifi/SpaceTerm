@@ -117,6 +117,9 @@ struct Flight<Id> {
     /// Where the selection started along the strip, from where the item settles.
     from: Pixels,
     ease: Ease,
+    /// How far the strip was scrolled when the selection left, until the next layout shows
+    /// whether revealing the selected item scrolled it.
+    left_scrolled: Option<Pixels>,
 }
 
 /// The item a strip's drag carries, its session, and where a release would land it.
@@ -383,6 +386,8 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
                 id,
                 from: px(0.0),
                 ease: Ease::new(SELECTION_DURATION, now, motion),
+                // The arrival aims the selection from the strip's latest scroll on every frame.
+                left_scrolled: None,
             });
         self.arrival = Some(Arrival {
             from,
@@ -500,6 +505,9 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
                     id,
                     from: from - to,
                     ease: Ease::new(duration, now, motion),
+                    // A strip whose items grow in scrolls along with their growth, which the
+                    // selection follows.
+                    left_scrolled: Some(self.scrolled).filter(|_| self.entering.is_empty()),
                 });
         }
         self.begin_arrival(now, cx);
@@ -630,6 +638,14 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
             return;
         };
         self.scrolled = items.offset().along(axis);
+        // A strip that scrolls to reveal the newly selected item does so on the frame the
+        // selection leaves, so the selection leaves from where it was drawn before that scroll.
+        // Later scrolling carries the selection along.
+        if let Some(flight) = self.flight.as_mut()
+            && let Some(left_scrolled) = flight.left_scrolled.take()
+        {
+            flight.from += left_scrolled - self.scrolled;
+        }
         self.laid_out_at = self.refreshed_at;
         let viewport = items.bounds();
         let visible_end = viewport.origin.along(axis) + viewport.size.along(axis);
