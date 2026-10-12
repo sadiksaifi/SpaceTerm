@@ -2090,7 +2090,6 @@ impl TabManager {
             .debug_selector(|| "tab-items".to_owned())
             .h_full()
             .min_w_0()
-            .ml(leading_alignment)
             .flex()
             .flex_row()
             .overflow_x_scroll()
@@ -2107,23 +2106,34 @@ impl TabManager {
                 });
             });
         let last_index = self.visible_len() - 1;
+        // The strip's own ends carry the outer marks, so they stay put while Tabs slide or scroll.
+        let strip_marks = self
+            .visible_tabs()
+            .next()
+            .filter(|&(tab_id, _)| self.sidebar_visible && tab_id != active_tab_id)
+            .map(|(tab_id, _)| TabBoundary::StripStart(tab_id))
+            .into_iter()
+            .chain(
+                self.visible_tabs()
+                    .last()
+                    .filter(|&(tab_id, _)| tab_id != active_tab_id)
+                    .map(|(tab_id, _)| TabBoundary::StripEnd(tab_id)),
+            )
+            .map(|boundary| render_tab_separator(boundary, presentation, appearance))
+            .collect::<Vec<_>>();
         let mut previous_inactive_tab = None;
         for (index, ((tab_id, view), (fade, hover))) in self.visible_tabs().zip(hovers).enumerate()
         {
             let active = tab_id == active_tab_id;
-            let leading_boundary = if index == 0 {
-                (self.sidebar_visible && !active).then_some(TabBoundary::StripStart(tab_id))
-            } else {
-                previous_inactive_tab
-                    .filter(|_| !active)
-                    .map(|leading_tab_id| TabBoundary::Between(leading_tab_id, tab_id))
-            };
-            let trailing_boundary =
-                (index == last_index && !active).then_some(TabBoundary::StripEnd(tab_id));
-            let separators = leading_boundary
-                .into_iter()
-                .chain(trailing_boundary)
-                .map(|boundary| render_tab_separator(boundary, presentation, appearance));
+            let separator = previous_inactive_tab
+                .filter(|_| !active)
+                .map(|leading_tab_id| {
+                    render_tab_separator(
+                        TabBoundary::Between(leading_tab_id, tab_id),
+                        presentation,
+                        appearance,
+                    )
+                });
             previous_inactive_tab = (!active).then_some(tab_id);
             let identity = view.read(cx).tab_identity();
             let tab_focus = view.read(cx).tab_focus().clone();
@@ -2161,7 +2171,7 @@ impl TabManager {
                     window,
                     cx,
                 )
-                .children(separators)
+                .children(separator)
                 .child(fade.tracker());
             let open_manager = manager.clone();
             let lifecycle_manager = manager.clone();
@@ -2233,7 +2243,17 @@ impl TabManager {
             .flex()
             .flex_row()
             .items_center()
-            .child(items)
+            .child(
+                div()
+                    .relative()
+                    .h_full()
+                    .min_w_0()
+                    .ml(leading_alignment)
+                    .flex()
+                    .flex_row()
+                    .child(items)
+                    .children(strip_marks),
+            )
             .child(release_observer)
             .child(
                 div()
@@ -2488,7 +2508,8 @@ impl TabBoundary {
 }
 
 /// The quiet mark at one boundary of the Tab strip whose Tabs are all inactive.
-/// It paints inside the Tab on whole points so layout rounding cannot move it. It uses its own
+/// It paints inside its host, the trailing Tab or the strip itself, on whole points so layout
+/// rounding cannot move it. It uses its own
 /// `tab_separator` role because `border` is too close to the bar to show on a mark this short.
 fn render_tab_separator(
     boundary: TabBoundary,
@@ -4262,6 +4283,9 @@ mod tests {
 
                 let items = (1..=4_u64).map(|tab| item(tab, cx)).collect::<Vec<_>>();
                 let item_bounds = |tab: u64| items[tab as usize - 1];
+                let strip = cx
+                    .debug_bounds("tab-items")
+                    .expect("the Tab item strip was not rendered");
                 let forward = item_bounds(1).right() == item_bounds(2).left();
                 let leading_edge = |bounds: gpui::Bounds<Pixels>| {
                     if forward {
@@ -4333,10 +4357,15 @@ mod tests {
                                 (separator.center().y - owner.center().y).abs() <= px(0.5),
                                 "{selector} should be centred on the bar, got {separator:?}"
                             );
+                            // A strip end belongs to the strip; a mark between Tabs belongs to a Tab.
                             assert!(
-                                tabs.iter().any(|&tab| within(separator, item_bounds(tab))),
-                                "{selector} should paint inside one of Tabs {tabs:?} rather than \
-                                 across their edge, got {separator:?}"
+                                if tabs.len() == 1 {
+                                    within(separator, strip)
+                                } else {
+                                    tabs.iter().any(|&tab| within(separator, item_bounds(tab)))
+                                },
+                                "{selector} should paint inside its strip or one of Tabs {tabs:?} \
+                                 rather than across their edge, got {separator:?}"
                             );
                             assert!(
                                 separator.left() == edge || separator.right() == edge,
@@ -6181,6 +6210,37 @@ mod tests {
         assert!(end < px(0.0), "twelve Tabs must overflow the Tab bar");
         assert_eq!(offset, end, "the Tab bar must scroll to its end");
         assert_eq!(tab_order(&manager, cx).last(), Some(&1));
+    }
+
+    #[gpui::test]
+    fn the_strip_end_mark_should_stay_at_the_end_of_an_overflowing_tab_bar(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _records, cx) = tab_manager(cx);
+        for _ in 0..12 {
+            click("create-tab-button", cx);
+        }
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| manager.activate_tab_at(0, window, cx));
+        });
+        manager.read_with(cx, |manager, _| {
+            manager
+                .tab_bar_scroll_handle
+                .set_offset(point(px(0.0), px(0.0)));
+        });
+        manager.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        let last = *tab_order(&manager, cx).last().unwrap();
+        let strip = cx.debug_bounds("tab-items").unwrap();
+        let mark = cx
+            .debug_bounds(leaked_selector(format!("tab-separator-{last}-end")))
+            .expect("the last Tab is inactive, so the strip end should be marked");
+
+        assert_eq!(
+            mark.right(),
+            strip.right(),
+            "the mark should rest at the strip end while the last Tab is scrolled out of view"
+        );
     }
 
     #[gpui::test]
