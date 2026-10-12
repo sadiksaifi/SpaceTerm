@@ -201,7 +201,7 @@ fn missing_application_ownership_does_not_admit_an_existing_store() {
     let (_directory, database) = schema_fixture();
     assert_eq!(
         schema::validate_existing(&database),
-        Err(StorageFailure::InvalidState)
+        Err(StorageFailure::RecoveryRequired)
     );
 }
 

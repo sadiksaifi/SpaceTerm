@@ -38,8 +38,8 @@ pub(super) fn preflight(
         || (parts.expected_organization_revision != parts.resulting_organization_revision
             && parts.expected_organization_revision.checked_successor()
                 != Some(parts.resulting_organization_revision))
-        || (parts.organization_writes.is_empty()
-            != (parts.expected_organization_revision == parts.resulting_organization_revision))
+        || (!parts.organization_writes.is_empty()
+            && parts.expected_organization_revision == parts.resulting_organization_revision)
     {
         return Err(StoreFailure::InvalidTransaction);
     }

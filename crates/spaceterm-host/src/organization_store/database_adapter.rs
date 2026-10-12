@@ -7,35 +7,32 @@ use crate::storage::{
 use spaceterm_core::storage::{CommitDisposition, CommitReceipt, StoreFailure};
 
 pub(super) struct DatabaseAdapter {
-    database: Database,
-    #[cfg(feature = "test-support")]
-    fixture_snapshot: bool,
+    pub(super) database: Database,
 }
 impl DatabaseAdapter {
-    #[cfg(feature = "test-support")]
-    pub(super) fn test_fixture(database: Database) -> Self {
-        Self {
-            database,
-            fixture_snapshot: true,
-        }
+    pub(super) fn new(database: Database) -> Self {
+        Self { database }
     }
 
     pub(super) fn snapshot<T>(
         &mut self,
         read: impl FnOnce(&Transaction<'_>) -> Result<T, StoreFailure>,
     ) -> Result<T, StoreFailure> {
-        #[cfg(feature = "test-support")]
-        if self.fixture_snapshot {
-            return match transact(&mut self.database, read) {
-                Disposition::Durable(value) => Ok(value),
-                Disposition::NotApplied(error) => Err(error),
-                Disposition::Indeterminate => Err(StoreFailure::RecoveryRequired),
-            };
-        }
-        // Database currently has only independent query_row calls. They do not
-        // establish a consistent multi-table recovery snapshot (issue #520).
-        let _ = read;
-        Err(StoreFailure::RecoveryRequired)
+        let mut rejection = None;
+        let result = self.database.read_transaction(|sql| match read(sql) {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                rejection = Some(error);
+                Err(StorageFailure::InvalidState)
+            }
+        });
+        result.map_err(|error| {
+            if error == StorageFailure::RecoveryRequired {
+                StoreFailure::RecoveryRequired
+            } else {
+                rejection.unwrap_or_else(|| classify(error))
+            }
+        })
     }
 
     pub(super) fn commit(
@@ -103,10 +100,7 @@ pub(super) fn check_existing_prerequisites(
     {
         return Err(StoreFailure::IdentityMismatch);
     }
-    // Do not call schema::validate_existing: the current authority forbids the
-    // application-ID read and lacks pre-migration ownership evidence. Metadata
-    // containing our application ID is not a substitute (issue #520).
-    Err(StoreFailure::RecoveryRequired)
+    schema::validate_existing(database).map_err(classify)
 }
 
 #[cfg(feature = "test-support")]

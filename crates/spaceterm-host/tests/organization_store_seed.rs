@@ -1,4 +1,4 @@
-//! Bootstrap tests use private real-authority fixtures, not native new-storage evidence.
+//! Production bootstrap and opening against private authority-owned fixtures.
 
 use spaceterm_core::storage::StoreFailure;
 use spaceterm_host::organization_store::bootstrap::{
@@ -32,12 +32,17 @@ fn database() -> (tempfile::TempDir, Database) {
     let directory = tempfile::tempdir_in(root).unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-    let database = Database::open(directory.path(), migrations()).unwrap();
+    let database = Database::open_for_application(
+        directory.path(),
+        migrations(),
+        spaceterm_host::organization_store::schema::APPLICATION_ID,
+    )
+    .unwrap();
     (directory, database)
 }
 
 fn initialize(database: Database, origin: NewServerOrigin) -> SqliteOrganizationStore {
-    match SqliteOrganizationStore::initialize_test_fixture(
+    match SqliteOrganizationStore::initialize_new(
         database,
         NewStoreSeed {
             identity: support::identity(),
@@ -82,8 +87,13 @@ fn new_local_desktop_server_seeds_legacy_template_once() {
         template
     );
     drop(store);
-    let reopened = Database::open_existing(directory.path(), migrations()).unwrap();
-    let result = SqliteOrganizationStore::initialize_test_fixture(
+    let reopened = Database::open_existing_for_application(
+        directory.path(),
+        migrations(),
+        spaceterm_host::organization_store::schema::APPLICATION_ID,
+    )
+    .unwrap();
+    let result = SqliteOrganizationStore::initialize_new(
         reopened,
         NewStoreSeed {
             identity: support::identity(),
@@ -94,10 +104,15 @@ fn new_local_desktop_server_seeds_legacy_template_once() {
     );
     assert!(matches!(
         result,
-        InitializationDisposition::NotApplied(StoreFailure::InvalidTransaction)
+        InitializationDisposition::NotApplied(StoreFailure::RecoveryRequired)
     ));
-    let database = Database::open_existing(directory.path(), migrations()).unwrap();
-    let mut store = SqliteOrganizationStore::from_test_database(
+    let database = Database::open_existing_for_application(
+        directory.path(),
+        migrations(),
+        spaceterm_host::organization_store::schema::APPLICATION_ID,
+    )
+    .unwrap();
+    let mut store = SqliteOrganizationStore::open_existing_with_services(
         database,
         support::identity(),
         StoreLimits::production(),
@@ -172,8 +187,15 @@ fn invalid_seed_is_rejected_before_initialization() {
 }
 
 #[test]
-fn production_initialization_requires_native_new_storage_evidence() {
-    let (_directory, database) = database();
+fn incomplete_initialization_does_not_replace_native_identity() {
+    let (directory, database) = database();
+    drop(database);
+    let database = Database::open_existing_for_application(
+        directory.path(),
+        migrations(),
+        spaceterm_host::organization_store::schema::APPLICATION_ID,
+    )
+    .unwrap();
     let result = SqliteOrganizationStore::initialize_new(
         database,
         NewStoreSeed {
@@ -181,6 +203,7 @@ fn production_initialization_requires_native_new_storage_evidence() {
             origin: NewServerOrigin::LocalHeadless,
         },
         StoreLimits::production(),
+        support::services(),
     );
     assert!(matches!(
         result,
@@ -203,7 +226,7 @@ fn existing_partial_inventory_does_not_authorize_initialization() {
         }),
         spaceterm_host::storage::CommitDisposition::Durable(())
     );
-    let result = SqliteOrganizationStore::initialize_test_fixture(
+    let result = SqliteOrganizationStore::initialize_new(
         database,
         NewStoreSeed {
             identity: support::identity(),
@@ -223,8 +246,13 @@ fn desktop_discovery_cannot_seed_existing_headless_server() {
     let (directory, database) = database();
     let store = initialize(database, NewServerOrigin::LocalHeadless);
     drop(store);
-    let result = SqliteOrganizationStore::initialize_test_fixture(
-        Database::open_existing(directory.path(), migrations()).unwrap(),
+    let result = SqliteOrganizationStore::initialize_new(
+        Database::open_existing_for_application(
+            directory.path(),
+            migrations(),
+            spaceterm_host::organization_store::schema::APPLICATION_ID,
+        )
+        .unwrap(),
         NewStoreSeed {
             identity: support::identity(),
             origin: NewServerOrigin::LocalDesktop {
@@ -238,9 +266,14 @@ fn desktop_discovery_cannot_seed_existing_headless_server() {
     );
     assert!(matches!(
         result,
-        InitializationDisposition::NotApplied(StoreFailure::InvalidTransaction)
+        InitializationDisposition::NotApplied(StoreFailure::RecoveryRequired)
     ));
-    let database = Database::open_existing(directory.path(), migrations()).unwrap();
+    let database = Database::open_existing_for_application(
+        directory.path(),
+        migrations(),
+        spaceterm_host::organization_store::schema::APPLICATION_ID,
+    )
+    .unwrap();
     assert_eq!(
         database
             .query_row(
@@ -251,7 +284,7 @@ fn desktop_discovery_cannot_seed_existing_headless_server() {
             .unwrap(),
         (1, 0)
     );
-    let mut store = SqliteOrganizationStore::from_test_database(
+    let mut store = SqliteOrganizationStore::open_existing_with_services(
         database,
         support::identity(),
         StoreLimits::production(),
@@ -318,7 +351,7 @@ fn seed_and_initialization_marker_are_atomic() {
         }
     }
     let (directory, database) = database();
-    let result = SqliteOrganizationStore::initialize_test_fixture(
+    let result = SqliteOrganizationStore::initialize_new(
         database,
         NewStoreSeed {
             identity: support::identity(),
@@ -335,7 +368,12 @@ fn seed_and_initialization_marker_are_atomic() {
         result,
         InitializationDisposition::NotApplied(StoreFailure::InvalidDurableState)
     ));
-    let database = Database::open_existing(directory.path(), migrations()).unwrap();
+    let database = Database::open_existing_for_application(
+        directory.path(),
+        migrations(),
+        spaceterm_host::organization_store::schema::APPLICATION_ID,
+    )
+    .unwrap();
     for table in spaceterm_host::organization_store::schema::TABLES {
         assert_eq!(
             database
@@ -344,5 +382,134 @@ fn seed_and_initialization_marker_are_atomic() {
                 .unwrap(),
             0
         );
+    }
+}
+
+#[test]
+fn production_open_validate_recover_uses_real_authority_and_advances_epoch() {
+    use spaceterm_core::storage::*;
+    let (directory, database) = database();
+    let mut store = initialize(database, NewServerOrigin::LocalHeadless);
+    let before = store.recover_bundle().unwrap().core;
+    drop(store);
+    let mut store = SqliteOrganizationStore::open_existing_with_services(
+        Database::open_existing_for_application(
+            directory.path(),
+            migrations(),
+            spaceterm_host::organization_store::schema::APPLICATION_ID,
+        )
+        .unwrap(),
+        support::identity(),
+        StoreLimits::production(),
+        support::services(),
+    )
+    .unwrap();
+    assert_eq!(store.recover().unwrap(), before);
+    let proposal = DurableTransaction::new(TransactionParts {
+        server: before.organization.server,
+        expected_store_revision: before.store_revision,
+        resulting_store_revision: before.store_revision.checked_successor().unwrap(),
+        expected_organization_revision: before.organization.revision,
+        resulting_organization_revision: before.organization.revision,
+        expected_epoch: before.last_epoch,
+        resulting_epoch: before.last_epoch.checked_successor().unwrap(),
+        expected_high_water: before.high_water,
+        resulting_high_water: before.high_water,
+        organization_writes: vec![],
+        operation_writes: vec![],
+    })
+    .unwrap();
+    assert!(matches!(
+        store.commit(&proposal),
+        CommitDisposition::Durable(_)
+    ));
+    drop(store);
+    let mut store = SqliteOrganizationStore::open_existing_with_services(
+        Database::open_existing_for_application(
+            directory.path(),
+            migrations(),
+            spaceterm_host::organization_store::schema::APPLICATION_ID,
+        )
+        .unwrap(),
+        support::identity(),
+        StoreLimits::production(),
+        support::services(),
+    )
+    .unwrap();
+    let recovered = store.recover().unwrap();
+    assert_eq!(recovered.last_epoch, proposal.parts().resulting_epoch);
+    assert_eq!(
+        recovered.store_revision,
+        proposal.parts().resulting_store_revision
+    );
+}
+
+#[test]
+fn schema_v1_initialization_is_transactional() {
+    use spaceterm_host::storage::testing::FaultPoint;
+    for point in [
+        FaultPoint::BeforeCommit,
+        FaultPoint::Write,
+        FaultPoint::Sync,
+        FaultPoint::AfterCommit,
+    ] {
+        let (directory, database) = database();
+        let control = database.test_control();
+        control.fail_once(point, 0);
+        let result = SqliteOrganizationStore::initialize_new(
+            database,
+            NewStoreSeed {
+                identity: support::identity(),
+                origin: NewServerOrigin::LocalDesktop {
+                    legacy_worktree_location: Some(
+                        LegacyWorktreeLocation::parse("~/atomic-seed/{branch}".into()).unwrap(),
+                    ),
+                },
+            },
+            StoreLimits::production(),
+            support::services(),
+        );
+        if point == FaultPoint::BeforeCommit {
+            assert!(matches!(
+                result,
+                InitializationDisposition::NotApplied(StoreFailure::Io)
+            ));
+        } else {
+            assert!(matches!(result, InitializationDisposition::Indeterminate));
+        }
+        assert!(!control.fault_pending());
+        let database = Database::open_existing_for_application(
+            directory.path(),
+            migrations(),
+            spaceterm_host::organization_store::schema::APPLICATION_ID,
+        )
+        .unwrap();
+        let metadata: u64 = database
+            .query_row("SELECT count(*) FROM store_metadata", [], |r| r.get(0))
+            .unwrap();
+        for table in ["identity_high_water", "server_settings"] {
+            assert_eq!(
+                database
+                    .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r
+                        .get::<_, u64>(0))
+                    .unwrap(),
+                metadata
+            );
+        }
+        if point == FaultPoint::AfterCommit {
+            assert_eq!(metadata, 1);
+        }
+        assert!(matches!(
+            SqliteOrganizationStore::initialize_new(
+                database,
+                NewStoreSeed {
+                    identity: support::identity(),
+                    origin: NewServerOrigin::Remote
+                },
+                StoreLimits::production(),
+                support::services()
+            ),
+            InitializationDisposition::NotApplied(StoreFailure::RecoveryRequired)
+        ));
     }
 }

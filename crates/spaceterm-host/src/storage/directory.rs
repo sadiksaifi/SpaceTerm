@@ -415,11 +415,21 @@ impl Directory {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(super) fn open_entry(
         self: &Arc<Self>,
         kind: Kind,
         create: bool,
     ) -> Result<Arc<Entry>, StorageFailure> {
+        self.open_entry_with_evidence(kind, create)
+            .map(|(entry, _)| entry)
+    }
+
+    pub(super) fn open_entry_with_evidence(
+        self: &Arc<Self>,
+        kind: Kind,
+        create: bool,
+    ) -> Result<(Arc<Entry>, bool), StorageFailure> {
         if !matches!(kind, Kind::Database | Kind::Journal) {
             return Err(StorageFailure::InvalidState);
         }
@@ -437,7 +447,7 @@ impl Directory {
                 return Err(StorageFailure::UnsafeStorage);
             }
             entry.verify(self)?;
-            return Ok(entry);
+            return Ok((entry, false));
         }
         let flags = libc::O_RDWR | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK;
         let flags = if before.is_none() && create {
@@ -492,7 +502,7 @@ impl Directory {
         if before.is_none() {
             self.sync()?;
         }
-        Ok(entry)
+        Ok((entry, before.is_none() && create))
     }
 
     pub(super) fn delete(&self, kind: Kind) -> Result<(), StorageFailure> {

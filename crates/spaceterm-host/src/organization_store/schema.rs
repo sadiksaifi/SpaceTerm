@@ -101,22 +101,15 @@ pub fn validate_migration_source(database: &Database) -> Result<(), StorageFailu
 
 /// Checks application ownership and the exact v1 inventory after authority open.
 /// This cannot substitute for the authority's pre-migration ownership check.
-/// The current authority denies application-ID pragmas, including table functions;
-/// that provider prerequisite fails closed rather than accepting metadata alone.
+/// Ownership is retained by the application's authority opener, never inferred
+/// from metadata or an unrestricted pragma query.
 pub fn validate_existing(database: &Database) -> Result<(), StorageFailure> {
     let found = database.schema_version()?;
     check_version(found)?;
     if found != SCHEMA_VERSION {
         return Err(StorageFailure::InvalidState);
     }
-    let application: u32 = database.query_row(
-        "SELECT application_id FROM pragma_application_id",
-        [],
-        |row| row.get(0),
-    )?;
-    if application != APPLICATION_ID {
-        return Err(StorageFailure::InvalidState);
-    }
+    database.verify_application(APPLICATION_ID)?;
     validate_inventory(database)
 }
 

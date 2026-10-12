@@ -16,15 +16,20 @@ pub(super) struct Context {
     canonical: CString,
     failure: Mutex<Option<StorageFailure>>,
     pub(super) uncertain: AtomicBool,
-    #[cfg(target_os = "macos")]
-    database: Mutex<std::sync::Weak<Entry>>,
-    #[cfg(test)]
+    pub(super) created: AtomicBool,
+    #[cfg(any(target_os = "macos", test, feature = "test-support"))]
+    pub(super) database: Mutex<std::sync::Weak<Entry>>,
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) faults: Mutex<Option<(FaultPoint, usize)>>,
-    #[cfg(all(test, target_os = "macos"))]
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) barrier: Mutex<Option<super::testing::Barrier>>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) sql_calls: AtomicU64,
+    #[cfg(all(any(test, feature = "test-support"), target_os = "macos"))]
     pub(super) durability_events: Mutex<Vec<DurabilityEvent>>,
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(all(any(test, feature = "test-support"), target_os = "macos"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum DurabilityEvent {
     JournalSync,
@@ -34,17 +39,8 @@ pub(super) enum DurabilityEvent {
     DeleteFullSync,
 }
 
-#[cfg(test)]
-#[derive(Clone, Copy, Eq, PartialEq)]
-pub(super) enum FaultPoint {
-    Write,
-    Sync,
-    DirectorySync,
-    #[cfg(target_os = "macos")]
-    DeleteFullSync,
-    BeforeCommit,
-    AfterCommit,
-}
+#[cfg(any(test, feature = "test-support"))]
+pub(super) use super::testing::FaultPoint;
 
 impl Context {
     pub(super) fn reset(&self) {
@@ -86,8 +82,22 @@ impl Context {
         Err(StorageFailure::UnsafeStorage)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn hit(&self, point: FaultPoint) -> bool {
+        let callback = {
+            let mut barrier = mutex(&self.barrier);
+            if barrier
+                .as_ref()
+                .is_some_and(|barrier| barrier.point == point)
+            {
+                barrier.take().map(|barrier| barrier.callback)
+            } else {
+                None
+            }
+        };
+        if let Some(callback) = callback {
+            callback();
+        }
         let mut faults = mutex(&self.faults);
         if let Some((armed, remaining)) = faults.as_mut()
             && *armed == point
@@ -102,12 +112,12 @@ impl Context {
     }
 
     fn sync_directory(&self) -> Result<(), StorageFailure> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if self.hit(FaultPoint::DirectorySync) {
             return Err(StorageFailure::Io);
         }
         self.directory.sync()?;
-        #[cfg(all(test, target_os = "macos"))]
+        #[cfg(all(any(test, feature = "test-support"), target_os = "macos"))]
         mutex(&self.durability_events).push(DurabilityEvent::DirectorySync);
         Ok(())
     }
@@ -125,7 +135,7 @@ impl Context {
                 .upgrade()
                 .ok_or(StorageFailure::UnsafeStorage)?;
             database.verify(&self.directory)?;
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             if self.hit(FaultPoint::DeleteFullSync) {
                 return Err(StorageFailure::Io);
             }
@@ -134,7 +144,7 @@ impl Context {
             if unsafe { libc::fcntl(database.fd(), libc::F_FULLFSYNC) } != 0 {
                 return Err(io_failure());
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             mutex(&self.durability_events).push(DurabilityEvent::DeleteFullSync);
         }
         Ok(())
@@ -174,11 +184,16 @@ impl Registration {
             canonical,
             failure: Mutex::new(None),
             uncertain: AtomicBool::new(false),
-            #[cfg(target_os = "macos")]
+            created: AtomicBool::new(false),
+            #[cfg(any(target_os = "macos", test, feature = "test-support"))]
             database: Mutex::new(std::sync::Weak::new()),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             faults: Mutex::new(None),
-            #[cfg(all(test, target_os = "macos"))]
+            #[cfg(any(test, feature = "test-support"))]
+            barrier: Mutex::new(None),
+            #[cfg(any(test, feature = "test-support"))]
+            sql_calls: AtomicU64::new(0),
+            #[cfg(all(any(test, feature = "test-support"), target_os = "macos"))]
             durability_events: Mutex::new(Vec::new()),
         });
         // SAFETY: zero is valid for optional callbacks and unused VFS fields.
@@ -285,14 +300,17 @@ unsafe extern "C" fn open(
     {
         return ctx.fail(StorageFailure::InvalidState, ffi::SQLITE_CANTOPEN, false);
     }
-    let entry = match ctx
+    let (entry, created) = match ctx
         .directory
-        .open_entry(kind, flags & ffi::SQLITE_OPEN_CREATE != 0)
+        .open_entry_with_evidence(kind, flags & ffi::SQLITE_OPEN_CREATE != 0)
     {
         Ok(entry) => entry,
         Err(error) => return ctx.fail(error, ffi::SQLITE_CANTOPEN, true),
     };
-    #[cfg(target_os = "macos")]
+    if kind == Kind::Database {
+        ctx.created.store(created, Ordering::Relaxed);
+    }
+    #[cfg(any(target_os = "macos", test, feature = "test-support"))]
     if kind == Kind::Database {
         *mutex(&ctx.database) = Arc::downgrade(&entry);
     }
@@ -328,7 +346,7 @@ unsafe extern "C" fn delete(
         .kind(name)
         .and_then(|kind| ctx.directory.delete(kind))
         .and_then(|()| {
-            #[cfg(all(test, target_os = "macos"))]
+            #[cfg(all(any(test, feature = "test-support"), target_os = "macos"))]
             mutex(&ctx.durability_events).push(DurabilityEvent::JournalDeleted);
             ctx.sync_journal_deletion()
         });
@@ -495,8 +513,10 @@ unsafe extern "C" fn write(
     if let Err(error) = state.verify() {
         return state.fail(error, ffi::SQLITE_IOERR_WRITE, true);
     }
-    #[cfg(test)]
-    if state.context.hit(FaultPoint::Write) {
+    #[cfg(any(test, feature = "test-support"))]
+    if state.context.hit(FaultPoint::Write)
+        || (state.entry.kind == Kind::Database && state.context.hit(FaultPoint::DatabaseWrite))
+    {
         return state.fail(StorageFailure::Io, ffi::SQLITE_IOERR_WRITE, true);
     }
     if amount < 0 || offset < 0 || offset.checked_add(i64::from(amount)).is_none() {
@@ -544,8 +564,10 @@ unsafe extern "C" fn sync(file: *mut ffi::sqlite3_file, _flags: c_int) -> c_int 
     if let Err(error) = state.verify() {
         return state.fail(error, ffi::SQLITE_IOERR_FSYNC, true);
     }
-    #[cfg(test)]
-    if state.context.hit(FaultPoint::Sync) {
+    #[cfg(any(test, feature = "test-support"))]
+    if state.context.hit(FaultPoint::Sync)
+        || (state.entry.kind == Kind::Database && state.context.hit(FaultPoint::DatabaseSync))
+    {
         return state.fail(StorageFailure::Io, ffi::SQLITE_IOERR_FSYNC, true);
     }
     // SAFETY: fd is a retained regular file. Never fall back after a failed sync.
@@ -557,7 +579,7 @@ unsafe extern "C" fn sync(file: *mut ffi::sqlite3_file, _flags: c_int) -> c_int 
         if unsafe { libc::fcntl(state.entry.fd(), libc::F_FULLFSYNC) } != 0 {
             return state.fail(io_failure(), ffi::SQLITE_IOERR_FSYNC, true);
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         {
             let event = if state.entry.kind == Kind::Journal {
                 DurabilityEvent::JournalSync

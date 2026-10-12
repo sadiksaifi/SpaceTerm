@@ -38,6 +38,13 @@ mod tests;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod vfs;
 
+/// Faults and crash barriers for private fixtures, absent from production builds.
+#[cfg(all(
+    any(test, feature = "test-support"),
+    any(target_os = "macos", target_os = "linux")
+))]
+pub mod testing;
+
 /// Fixed database entry name within the supplied private directory.
 pub const DATABASE_FILE_NAME: &str = "organization.sqlite3";
 
@@ -109,6 +116,10 @@ pub struct Database {
     registration: vfs::Registration,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     recovery_required: bool,
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    pre_migration_application_id: Option<u32>,
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    owned_application_id: Option<u32>,
 }
 
 impl std::fmt::Debug for Database {
@@ -130,7 +141,7 @@ impl Database {
         directory: &Path,
         migrations: &[Migration<'_>],
     ) -> Result<Self, StorageFailure> {
-        Self::open_inner(directory, migrations, false)
+        Self::open_inner(directory, migrations, false, None)
     }
 
     /// Opens, recovers, validates, and migrates the fixed organization database.
@@ -147,13 +158,119 @@ impl Database {
     /// Returns bounded classifications for unsafe authority, unavailable storage,
     /// unsupported schema, invalid data, or I/O. Unsupported hosts fail closed.
     pub fn open(directory: &Path, migrations: &[Migration<'_>]) -> Result<Self, StorageFailure> {
-        Self::open_inner(directory, migrations, true)
+        Self::open_inner(directory, migrations, true, None)
+    }
+
+    /// Creates or opens storage only for the specified nonzero application ID.
+    /// Existing empty or foreign databases are never adopted. Ownership is checked
+    /// before migrations, and new ownership commits with the migration version.
+    pub fn open_for_application(
+        directory: &Path,
+        migrations: &[Migration<'_>],
+        application_id: u32,
+    ) -> Result<Self, StorageFailure> {
+        Self::open_inner(directory, migrations, true, Some(application_id))
+    }
+
+    /// Opens registered application storage without creating a missing database.
+    pub fn open_existing_for_application(
+        directory: &Path,
+        migrations: &[Migration<'_>],
+        application_id: u32,
+    ) -> Result<Self, StorageFailure> {
+        Self::open_inner(directory, migrations, false, Some(application_id))
+    }
+
+    /// Reports creation by this opener's exclusive descriptor-relative create,
+    /// never by an empty file, schema or missing metadata. Evidence remains bound
+    /// to this live authority and does not survive disposal or reopen.
+    pub fn is_new_storage(&self) -> Result<bool, StorageFailure> {
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            self.admit()?;
+            Ok(self
+                .registration
+                .context
+                .created
+                .load(std::sync::atomic::Ordering::Relaxed))
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            Err(StorageFailure::Unavailable)
+        }
+    }
+
+    pub(crate) fn claim_new_storage(&mut self) -> Result<(), StorageFailure> {
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            self.admit()?;
+            if !self
+                .registration
+                .context
+                .created
+                .swap(false, std::sync::atomic::Ordering::Relaxed)
+            {
+                return Err(StorageFailure::RecoveryRequired);
+            }
+            Ok(())
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            Err(StorageFailure::Unavailable)
+        }
+    }
+
+    /// Original application ID observed before any migration or policy change.
+    /// Generic opening supplies no application-ownership evidence.
+    pub fn pre_migration_application_id(&self) -> Option<u32> {
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            self.pre_migration_application_id
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            None
+        }
+    }
+
+    /// Checks current application ownership through the retained connection.
+    pub fn application_id(&self) -> Result<u32, StorageFailure> {
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            self.admit()?;
+            application_id(&self.connection)
+                .map_err(|error| self.registration.context.failure_or(error))
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            Err(StorageFailure::Unavailable)
+        }
+    }
+
+    /// Verifies retained pre-migration ownership and current application binding.
+    pub fn verify_application(&self, expected: u32) -> Result<(), StorageFailure> {
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            if self.owned_application_id.is_none() {
+                return Err(StorageFailure::RecoveryRequired);
+            }
+            if self.owned_application_id != Some(expected) || self.application_id()? != expected {
+                return Err(StorageFailure::InvalidState);
+            }
+            Ok(())
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            let _ = expected;
+            Err(StorageFailure::Unavailable)
+        }
     }
 
     fn open_inner(
         directory: &Path,
         migrations: &[Migration<'_>],
         create: bool,
+        owner: Option<u32>,
     ) -> Result<Self, StorageFailure> {
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
@@ -161,6 +278,9 @@ impl Database {
             let supported =
                 u32::try_from(migrations.len()).map_err(|_| StorageFailure::InvalidState)?;
             if supported > i32::MAX as u32 {
+                return Err(StorageFailure::InvalidState);
+            }
+            if owner.is_some_and(|id| id == 0 || id > i32::MAX as u32) {
                 return Err(StorageFailure::InvalidState);
             }
             let directory = directory::Directory::open(directory)?;
@@ -184,6 +304,8 @@ impl Database {
                 connection,
                 registration,
                 recovery_required: false,
+                pre_migration_application_id: None,
+                owned_application_id: None,
             };
             database
                 .connection
@@ -200,6 +322,22 @@ impl Database {
             let found = version(&database.connection)
                 .map_err(|error| database.registration.context.failure_or(error))?;
             check_version(found, supported)?;
+            let source_application = application_id(&database.connection)?;
+            let created = database.is_new_storage()?;
+            if let Some(expected) = owner {
+                if created {
+                    let objects: u64 = database
+                        .connection
+                        .query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get(0))
+                        .map_err(classify_sqlite)?;
+                    if source_application != 0 || found != 0 || objects != 0 {
+                        return Err(StorageFailure::InvalidState);
+                    }
+                } else if source_application != expected {
+                    return Err(StorageFailure::InvalidState);
+                }
+                database.pre_migration_application_id = Some(source_application);
+            }
             validate(&database.connection)
                 .map_err(|error| database.registration.context.classify(error))?;
             let mode: String = database
@@ -209,11 +347,22 @@ impl Database {
             if mode != "delete" {
                 return Err(StorageFailure::InvalidState);
             }
-            if found < supported {
+            if found < supported || (owner.is_some() && created) {
                 let outcome = database.transaction(|transaction| {
                     // Recheck under the writer lock: another opener may have migrated.
                     let found = schema_operation(transaction, version)?;
                     check_version(found, supported)?;
+                    if let Some(expected) = owner {
+                        schema_operation(transaction, |connection| {
+                            let current = application_id(connection)?;
+                            if current != if created { 0 } else { expected } {
+                                return Err(StorageFailure::InvalidState);
+                            }
+                            connection
+                                .pragma_update(None, "application_id", expected)
+                                .map_err(classify_sqlite)
+                        })?;
+                    }
                     for (index, migration) in migrations.iter().enumerate().skip(found as usize) {
                         transaction.execute_batch(migration.sql)?;
                         // Only the internal schema adapter advances this marker.
@@ -235,12 +384,13 @@ impl Database {
                     }
                 }
             }
+            database.owned_application_id = owner;
             database.admit()?;
             Ok(database)
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
-            let _ = (directory, migrations, create);
+            let _ = (directory, migrations, create, owner);
             Err(StorageFailure::Unavailable)
         }
     }
@@ -308,6 +458,53 @@ impl Database {
         }
     }
 
+    /// Reads multiple tables from one SQLite snapshot with read-only SQL authority.
+    /// The callback cannot write, commit, attach databases or change pragmas.
+    /// A panic or uncertain I/O fences the handle until disposal and reopen.
+    pub fn read_transaction<T>(
+        &mut self,
+        read: impl FnOnce(&Transaction<'_>) -> Result<T, StorageFailure>,
+    ) -> Result<T, StorageFailure> {
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            self.admit()?;
+            let context = &self.registration.context;
+            context.reset();
+            self.recovery_required = true;
+            let native = match self
+                .connection
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)
+            {
+                Ok(native) => native,
+                Err(error) => {
+                    let failure = context.classify(error);
+                    if !context.uncertain.load(std::sync::atomic::Ordering::Relaxed) {
+                        self.recovery_required = false;
+                    }
+                    return Err(failure);
+                }
+            };
+            let result = {
+                let _guard = AuthorizationGuard::new(&native, true);
+                read(&Transaction {
+                    connection: &native,
+                    context,
+                })
+            };
+            if !rollback(native) || context.uncertain.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(StorageFailure::RecoveryRequired);
+            }
+            self.recovery_required = false;
+            self.admit()?;
+            result
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            let _ = read;
+            Err(StorageFailure::Unavailable)
+        }
+    }
+
     /// Runs one immediate transaction and reports its durability disposition.
     ///
     /// Callback failure rolls back. Commit/sync/write I/O uncertainty poisons the
@@ -351,7 +548,7 @@ impl Database {
                     context,
                 })
             };
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             let result = if context.hit(vfs::FaultPoint::BeforeCommit) {
                 Err(StorageFailure::Io)
             } else {
@@ -385,7 +582,7 @@ impl Database {
                 return CommitDisposition::NotApplied(classified);
             }
             drop(native);
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             if context.hit(vfs::FaultPoint::AfterCommit) {
                 context.uncertain.store(true, Ordering::Relaxed);
             }
@@ -439,6 +636,13 @@ impl Transaction<'_> {
     /// Returns only content-free SQL/storage failure classifications.
     pub fn execute<P: Params>(&self, sql: &str, parameters: P) -> Result<usize, StorageFailure> {
         self.admit()?;
+        #[cfg(all(
+            any(test, feature = "test-support"),
+            any(target_os = "macos", target_os = "linux")
+        ))]
+        self.context
+            .sql_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.connection
             .execute(sql, parameters)
             .map_err(|error| self.classify(error))
@@ -451,6 +655,13 @@ impl Transaction<'_> {
     /// failure must be propagated by the callback to roll back the whole batch.
     pub fn execute_batch(&self, sql: &str) -> Result<(), StorageFailure> {
         self.admit()?;
+        #[cfg(all(
+            any(test, feature = "test-support"),
+            any(target_os = "macos", target_os = "linux")
+        ))]
+        self.context
+            .sql_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.connection
             .execute_batch(sql)
             .map_err(|error| self.classify(error))
@@ -470,6 +681,13 @@ impl Transaction<'_> {
         F: FnOnce(&Row<'_>) -> rusqlite::Result<T>,
     {
         self.admit()?;
+        #[cfg(all(
+            any(test, feature = "test-support"),
+            any(target_os = "macos", target_os = "linux")
+        ))]
+        self.context
+            .sql_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         query(self.connection, sql, parameters, decode).map_err(|error| self.classify(error))
     }
 
@@ -551,6 +769,14 @@ fn classify_sqlite(error: rusqlite::Error) -> StorageFailure {
 fn version(connection: &Connection) -> Result<u32, StorageFailure> {
     let found: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(classify_sqlite)?;
+    u32::try_from(found).map_err(|_| StorageFailure::InvalidState)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn application_id(connection: &Connection) -> Result<u32, StorageFailure> {
+    let found: i64 = connection
+        .query_row("PRAGMA application_id", [], |row| row.get(0))
         .map_err(classify_sqlite)?;
     u32::try_from(found).map_err(|_| StorageFailure::InvalidState)
 }

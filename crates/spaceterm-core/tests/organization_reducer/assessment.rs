@@ -51,7 +51,7 @@ fn inactive_close_assessment_has_exact_counts_without_publication() {
 }
 
 #[test]
-fn confirmed_close_uses_one_cascade_and_leaves_empty_organization() {
+fn confirmed_close_without_live_sessions_uses_one_cascade_and_completes_store_only() {
     let mut reducer = reducer();
     let (_, _, pane) = create(&mut reducer, 1);
     let target = CloseTarget::Pane(pane);
@@ -62,14 +62,27 @@ fn confirmed_close_uses_one_cascade_and_leaves_empty_organization() {
         target,
         assessment: value.reference(),
     };
-    let prepared = reducer.prepare_command(&command, &context(3)).unwrap();
+    let context = retiring_context(3);
+    let prepared = reducer.prepare_command(&command, &context).unwrap();
     assert_eq!(reducer.snapshot(), before);
     assert_eq!(
         prepared.resulting_organization_revision(),
         before.state().revision.checked_successor().unwrap()
     );
     let result = commit(&mut reducer, prepared);
-    assert_eq!(result.resolution, Resolution::Completed(Outcome::Applied));
+    let Resolution::AwaitingRetirement(plan) = &result.resolution else {
+        panic!("accepted retirement required");
+    };
+    let descriptor = plan.descriptor.clone();
+    assert_eq!(descriptor.binding(), context.binding());
+    assert_eq!(descriptor.assessment(), value.reference());
+    assert_eq!(descriptor.target(), AssessmentTarget::Close(target));
+    assert_eq!(descriptor.panes()[0].pane(), pane);
+    assert!(descriptor.sessions().is_empty() && descriptor.cleanup_confirmed());
+    assert_eq!(
+        descriptor.acceptance_revision(),
+        reducer.snapshot().state().revision
+    );
     let delta = result.publication.as_ref().unwrap();
     assert_eq!(replay(before, delta), reducer.snapshot());
     assert!(reducer.snapshot().state().workspaces.is_empty());
@@ -83,12 +96,145 @@ fn confirmed_close_uses_one_cascade_and_leaves_empty_organization() {
     assert!(
         matches!(result.effects[1], OrganizationEffect::InvalidatePaneRuntime { pane: id, clear_content: true, clear_approvals: true, .. } if id == pane)
     );
+    let deleted = reducer.snapshot();
+    let completion = reducer
+        .prepare_retirement_completion(descriptor.batch())
+        .unwrap();
+    assert!(completion.writes().operation_writes().is_empty());
+    assert_eq!(
+        completion.resulting_organization_revision(),
+        deleted.state().revision
+    );
+    let completed = commit(&mut reducer, completion);
+    assert!(completed.publication.is_none() && completed.effects.is_empty());
+    assert!(matches!(
+        completed.resolution,
+        Resolution::RetirementCompleted(plan) if plan.descriptor == descriptor
+    ));
+    assert_eq!(reducer.snapshot(), deleted);
+    assert!(reducer.retained().pending_retirements().is_empty());
     let repeated = apply(&mut reducer, command, 4);
     assert_eq!(
         repeated.resolution,
         Resolution::Completed(Outcome::Failed(OperationFailure::TargetDeleted))
     );
     assert!(repeated.publication.is_none() && repeated.effects.is_empty());
+}
+
+#[test]
+fn confirmed_tab_and_workspace_close_without_live_sessions_complete_store_only() {
+    for whole_workspace in [false, true] {
+        let mut reducer = reducer();
+        let (workspace, tab, pane) = create(&mut reducer, 1);
+        let target = if whole_workspace {
+            CloseTarget::Workspace(workspace)
+        } else {
+            CloseTarget::Tab(tab)
+        };
+        let value = assess(&mut reducer, AssessmentTarget::Close(target), 2);
+        let before = reducer.snapshot();
+        let result = apply(
+            &mut reducer,
+            Command::CloseConfirmed {
+                target,
+                assessment: value.reference(),
+            },
+            3,
+        );
+        let Resolution::AwaitingRetirement(plan) = result.resolution else {
+            panic!("accepted retirement required");
+        };
+        let descriptor = plan.descriptor;
+        assert_eq!(descriptor.target(), AssessmentTarget::Close(target));
+        assert_eq!(descriptor.panes()[0].pane(), pane);
+        assert!(descriptor.sessions().is_empty() && descriptor.cleanup_confirmed());
+        assert_eq!(
+            replay(before, result.publication.as_ref().unwrap()),
+            reducer.snapshot()
+        );
+        assert!(
+            !result
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, OrganizationEffect::RetireSession { .. }))
+        );
+        let deleted = reducer.snapshot();
+        assert!(deleted.state().workspaces.is_empty());
+        assert!(deleted.state().tabs.is_empty());
+        assert!(deleted.state().panes.is_empty());
+        assert_eq!(descriptor.acceptance_revision(), deleted.state().revision);
+        let completion = reducer
+            .prepare_retirement_completion(descriptor.batch())
+            .unwrap();
+        assert_eq!(
+            completion.resulting_organization_revision(),
+            deleted.state().revision
+        );
+        let completed = commit(&mut reducer, completion);
+        assert!(completed.publication.is_none() && completed.effects.is_empty());
+        assert!(matches!(
+            completed.resolution,
+            Resolution::RetirementCompleted(plan) if plan.descriptor == descriptor
+        ));
+        assert_eq!(reducer.snapshot(), deleted);
+        assert!(reducer.retained().pending_retirements().is_empty());
+    }
+}
+
+#[test]
+fn confirmed_kill_workspace_without_live_sessions_completes_store_only() {
+    let mut reducer = reducer();
+    let (workspace, _, pane) = create(&mut reducer, 1);
+    let value = assess(&mut reducer, AssessmentTarget::KillWorkspace(workspace), 2);
+    let before = reducer.snapshot();
+    let result = apply(
+        &mut reducer,
+        Command::KillWorkspaceConfirmed {
+            workspace,
+            assessment: value.reference(),
+        },
+        3,
+    );
+    let Resolution::AwaitingRetirement(plan) = result.resolution else {
+        panic!("accepted retirement required");
+    };
+    let descriptor = plan.descriptor;
+    assert_eq!(
+        descriptor.target(),
+        AssessmentTarget::KillWorkspace(workspace)
+    );
+    assert_eq!(descriptor.panes()[0].pane(), pane);
+    assert!(descriptor.sessions().is_empty() && descriptor.cleanup_confirmed());
+    assert_eq!(
+        replay(before, result.publication.as_ref().unwrap()),
+        reducer.snapshot()
+    );
+    assert!(
+        !result
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, OrganizationEffect::RetireSession { .. }))
+    );
+    let deleted = reducer.snapshot();
+    assert!(deleted.state().workspaces.is_empty());
+    assert!(deleted.state().tabs.is_empty());
+    assert!(deleted.state().panes.is_empty());
+    assert_eq!(descriptor.acceptance_revision(), deleted.state().revision);
+    let completion = reducer
+        .prepare_retirement_completion(descriptor.batch())
+        .unwrap();
+    assert_eq!(
+        completion.resulting_organization_revision(),
+        deleted.state().revision
+    );
+    let completed = commit(&mut reducer, completion);
+    assert!(completed.publication.is_none() && completed.effects.is_empty());
+    assert!(matches!(
+        completed.resolution,
+        Resolution::RetirementCompleted(plan) if plan.descriptor == descriptor
+    ));
+    assert_eq!(reducer.snapshot(), deleted);
+    assert!(reducer.retained().pending_retirements().is_empty());
 }
 
 fn validate(
@@ -294,7 +440,10 @@ fn unrelated_workspace_change_and_field_only_edits_preserve_hierarchy_assessment
         },
         8,
     );
-    assert_eq!(result.resolution, Resolution::Completed(Outcome::Applied));
+    assert!(matches!(
+        result.resolution,
+        Resolution::AwaitingRetirement(plan) if plan.descriptor.sessions().is_empty()
+    ));
     assert_eq!(reducer.snapshot().state().workspaces.len(), 1);
     assert_eq!(reducer.snapshot().state().workspaces[0].id, other);
 }
@@ -331,10 +480,14 @@ fn assessment_is_published_to_registry_and_consumed_only_after_durable_acceptanc
         target: CloseTarget::Pane(pane),
         assessment: value.reference(),
     };
-    let unapplied = reducer.prepare_command(&command, &context(4)).unwrap();
+    let unapplied = reducer
+        .prepare_command(&command, &retiring_context(4))
+        .unwrap();
     drop(unapplied);
     assert_eq!(validate(&reducer, value, 10), Ok(()));
-    let invalid = reducer.prepare_command(&command, &context(4)).unwrap();
+    let invalid = reducer
+        .prepare_command(&command, &retiring_context(4))
+        .unwrap();
     let receipt = CommitReceipt {
         store_revision: StoreRevision::new(999),
         organization_revision: invalid.resulting_organization_revision(),
@@ -344,7 +497,9 @@ fn assessment_is_published_to_registry_and_consumed_only_after_durable_acceptanc
         Err(ReducerFailure::InvalidCommitReceipt)
     ));
     assert_eq!(validate(&reducer, value, 10), Ok(()));
-    let prepared = reducer.prepare_command(&command, &context(4)).unwrap();
+    let prepared = reducer
+        .prepare_command(&command, &retiring_context(4))
+        .unwrap();
     commit(&mut reducer, prepared);
     assert_eq!(
         validate(&reducer, value, 10),
@@ -469,7 +624,7 @@ fn assessment_registry_transition_invalidates_prepared_close_without_publication
                 target: CloseTarget::Pane(pane),
                 assessment: value.reference(),
             },
-            &context(3),
+            &retiring_context(3),
         )
         .unwrap();
     assess(

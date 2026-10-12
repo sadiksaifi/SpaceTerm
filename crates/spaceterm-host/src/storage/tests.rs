@@ -277,3 +277,72 @@ fn failed_journal_deletion_full_sync_fences_the_handle_until_reopen() {
     let database = Database::open_existing(&fixture.path, MIGRATIONS).unwrap();
     assert_eq!(count(&database), 1);
 }
+
+#[test]
+fn application_open_retains_creation_evidence_and_refuses_existing_empty_or_foreign_storage() {
+    const APPLICATION: u32 = 0x5354_4f52;
+    let fixture = Fixture::new();
+    let database = Database::open_for_application(&fixture.path, MIGRATIONS, APPLICATION).unwrap();
+    assert!(database.is_new_storage().unwrap());
+    assert_eq!(database.pre_migration_application_id(), Some(0));
+    assert_eq!(database.application_id().unwrap(), APPLICATION);
+    drop(database);
+    let database =
+        Database::open_existing_for_application(&fixture.path, MIGRATIONS, APPLICATION).unwrap();
+    assert!(!database.is_new_storage().unwrap());
+    assert_eq!(database.pre_migration_application_id(), Some(APPLICATION));
+    drop(database);
+    assert!(matches!(
+        Database::open_existing_for_application(&fixture.path, MIGRATIONS, APPLICATION + 1),
+        Err(StorageFailure::InvalidState)
+    ));
+    let empty = Fixture::new();
+    drop(Database::open(&empty.path, &[]).unwrap());
+    assert!(matches!(
+        Database::open_for_application(&empty.path, MIGRATIONS, APPLICATION),
+        Err(StorageFailure::InvalidState)
+    ));
+    assert_eq!(
+        Database::open_existing(&empty.path, &[])
+            .unwrap()
+            .schema_version()
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn read_callback_is_consistent_and_cannot_write_or_control_the_transaction() {
+    let fixture = Fixture::new();
+    let mut reader = Database::open(&fixture.path, MIGRATIONS).unwrap();
+    let mut writer = Database::open_existing(&fixture.path, MIGRATIONS).unwrap();
+    assert_eq!(
+        reader.read_transaction(|sql| {
+            assert_eq!(
+                sql.query_row("SELECT count(*) FROM items", [], |r| r.get::<_, u64>(0))?,
+                0
+            );
+            assert_eq!(
+                insert(&mut writer),
+                CommitDisposition::NotApplied(StorageFailure::Unavailable)
+            );
+            assert_eq!(
+                sql.execute("INSERT INTO items VALUES (9)", []),
+                Err(StorageFailure::InvalidState)
+            );
+            assert_eq!(
+                sql.execute_batch("COMMIT"),
+                Err(StorageFailure::InvalidState)
+            );
+            sql.query_row("SELECT count(*) FROM items", [], |r| r.get::<_, u64>(0))
+        }),
+        Ok(0)
+    );
+    assert_eq!(insert(&mut writer), CommitDisposition::Durable(()));
+    assert_eq!(
+        reader.read_transaction(
+            |sql| sql.query_row("SELECT count(*) FROM items", [], |r| r.get::<_, u64>(0))
+        ),
+        Ok(1)
+    );
+}

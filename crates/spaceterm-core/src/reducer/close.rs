@@ -71,46 +71,42 @@ pub(crate) fn plan_confirmed_close(
             );
         }
     }
-    let descriptor = if sessions.is_empty() {
-        None
-    } else {
-        let eventual_result = context
-            .facts
-            .retirement_outcome
-            .as_ref()
-            .ok_or(ReducerFailure::InvalidFacts)?
-            .compact()
-            .clone();
-        let batch = state.next_retirement_batch()?;
-        let descriptor = RetirementDescriptor::new(RetirementDescriptorParts {
+    // Even an empty Session set needs accepted progress before ledger completion.
+    let eventual_result = context
+        .facts
+        .retirement_outcome
+        .as_ref()
+        .ok_or(ReducerFailure::InvalidFacts)?
+        .compact()
+        .clone();
+    let batch = state.next_retirement_batch()?;
+    let descriptor = RetirementDescriptor::new(RetirementDescriptorParts {
+        batch,
+        binding: context.binding(),
+        assessment: *handle,
+        acceptance_revision: state
+            .organization()
+            .revision
+            .checked_successor()
+            .ok_or(ReducerFailure::CounterExhausted)?,
+        target: *intent,
+        panes: retired_panes,
+        sessions,
+        completion: RetirementCompletion::AppliedAtAcceptanceRevision,
+        eventual_result,
+    })
+    .map_err(|error| match error {
+        RetirementRecordError::TooLarge => ReducerFailure::QuotaExceeded,
+        _ => ReducerFailure::InvalidFacts,
+    })?;
+    check_retirement_capacity(state, &descriptor)?;
+    for session in descriptor.sessions() {
+        effects.push(OrganizationEffect::RetireSession {
             batch,
-            binding: context.binding(),
-            assessment: *handle,
-            acceptance_revision: state
-                .organization()
-                .revision
-                .checked_successor()
-                .ok_or(ReducerFailure::CounterExhausted)?,
-            target: *intent,
-            panes: retired_panes,
-            sessions,
-            completion: RetirementCompletion::AppliedAtAcceptanceRevision,
-            eventual_result,
-        })
-        .map_err(|error| match error {
-            RetirementRecordError::TooLarge => ReducerFailure::QuotaExceeded,
-            _ => ReducerFailure::InvalidFacts,
-        })?;
-        check_retirement_capacity(state, &descriptor)?;
-        for session in descriptor.sessions() {
-            effects.push(OrganizationEffect::RetireSession {
-                batch,
-                session: session.session(),
-                reason: session.first_reason(),
-            });
-        }
-        Some(descriptor)
-    };
+            session: session.session(),
+            reason: session.first_reason(),
+        });
+    }
     // Deletion is the acceptance transaction, never a cleanup continuation. Both
     // ordinary exit and confirmed close call this one cascade and Root policy.
     let mut patch = super::remove_hierarchy(state, &panes)?.into_reduction();
@@ -119,14 +115,12 @@ pub(crate) fn plan_confirmed_close(
         patch.candidate.startup_reservations.remove(pane);
     }
     patch.effects = effects;
-    if let Some(descriptor) = descriptor {
-        patch.candidate.retirement_sequence = descriptor.batch().sequence();
-        patch
-            .candidate
-            .retirements
-            .insert(descriptor.batch(), descriptor.clone());
-        patch.resolution = Resolution::AwaitingRetirement(Box::new(RetirementPlan { descriptor }));
-    }
+    patch.candidate.retirement_sequence = descriptor.batch().sequence();
+    patch
+        .candidate
+        .retirements
+        .insert(descriptor.batch(), descriptor.clone());
+    patch.resolution = Resolution::AwaitingRetirement(Box::new(RetirementPlan { descriptor }));
     Ok(patch)
 }
 
