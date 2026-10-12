@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=@NAME@
+Comment=Show @DESKTOP_NAME@ server status in the status area
+Exec=spaceterm-status
+Icon=@ICON@
+Terminal=false
+StartupNotify=false
+Categories=System;Monitor;
+Keywords=server;status;
