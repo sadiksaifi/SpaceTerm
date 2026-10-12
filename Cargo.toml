@@ -6,6 +6,7 @@ edition = "2024"
 [workspace]
 members = [
     "crates/spaceterm-directories",
+    "crates/spaceterm-host",
     "crates/spaceterm-ui",
     "third_party/libghostty-vt",
     "third_party/libghostty-vt-sys",

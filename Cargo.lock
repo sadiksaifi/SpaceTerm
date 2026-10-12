@@ -5729,6 +5729,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "spaceterm-host"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "spaceterm-ui"
 version = "0.0.0"
 dependencies = [
