@@ -261,6 +261,8 @@ def manifest_artifact_record(artifacts: VmArtifacts | None) -> dict | None:
 
 class VmPlanningTests(unittest.TestCase):
     def setUp(self):
+        # Fixture files must not inherit a group-writable host umask such as Debian's 0002.
+        self.addCleanup(os.umask, os.umask(0o022))
         self.temporary = tempfile.TemporaryDirectory(prefix="spaceterm-vm-test-")
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name).resolve()
