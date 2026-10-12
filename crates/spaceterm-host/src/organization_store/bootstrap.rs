@@ -1,10 +1,14 @@
 //! One-time Worktree Location selection. Initialization data grants no native authority.
 
-use super::{SqliteOrganizationStore, StoreIdentity, StoreLimits};
+use super::{
+    Health, SqliteOrganizationStore, StoreIdentity, StoreLimits, StoreServices,
+    database_adapter::DatabaseAdapter,
+};
 use crate::git::path_template;
-#[cfg(feature = "test-support")]
 use crate::git::path_template::DEFAULT_WORKTREE_PATH_TEMPLATE;
+use crate::startup::BuildIdentity;
 use crate::storage::Database;
+use spaceterm_core::authority::{OrganizationRevision, StoreRevision};
 use spaceterm_core::organization::WorktreeLocationTemplate;
 use spaceterm_core::storage::{CommitReceipt, StoreFailure};
 use thiserror::Error;
@@ -88,34 +92,80 @@ impl std::fmt::Debug for InitializationDisposition {
 }
 
 impl SqliteOrganizationStore {
-    /// Fails closed until the SQLite owner supplies retained new-storage and
-    /// pre-migration application-ownership evidence. An empty inventory is not
-    /// evidence, and this entry point never writes initialization data.
+    /// Initializes only storage exclusively created by this application opener.
+    /// Existing empty or incomplete storage never authorizes replacement or seeding.
+    /// Domain services validate all resulting records before the one durable commit.
     pub fn initialize_new(
+        mut database: Database,
+        seed: NewStoreSeed,
+        limits: StoreLimits,
+        services: StoreServices,
+    ) -> InitializationDisposition {
+        let prerequisites = validate_identity(seed.identity).and_then(|()| {
+            database
+                .verify_application(super::schema::APPLICATION_ID)
+                .map_err(super::database_adapter::classify)?;
+            database
+                .claim_new_storage()
+                .map_err(super::database_adapter::classify)?;
+            super::schema::validate_existing(&database).map_err(super::database_adapter::classify)
+        });
+        if let Err(error) = prerequisites {
+            return InitializationDisposition::NotApplied(error);
+        }
+        Self::initialize_validated(database, seed, limits, services)
+    }
+
+    pub(super) fn initialize_validated(
         database: Database,
         seed: NewStoreSeed,
         limits: StoreLimits,
+        services: StoreServices,
     ) -> InitializationDisposition {
-        let _ = limits;
-        if let Err(error) = database
-            .verify_authority()
-            .map_err(super::database_adapter::classify)
-        {
-            return InitializationDisposition::NotApplied(error);
+        let (origin, legacy, template) = match selection(&seed.origin) {
+            Ok(value) => value,
+            Err(error) => return InitializationDisposition::NotApplied(error),
+        };
+        let mut adapter = DatabaseAdapter::new(database);
+        let identity = seed.identity;
+        let disposition = adapter.commit(|sql| {
+            // Missing metadata alone cannot distinguish a fixture from partially
+            // initialized state. Any retained row rejects the whole bootstrap.
+            for table in super::schema::TABLES {
+                let count: u64 = sql.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get(0)).map_err(super::database_adapter::classify)?;
+                if count != 0 {
+                    return Err(spaceterm_core::storage::StoreFailure::InvalidTransaction);
+                }
+            }
+            let zero = 0_u64.to_be_bytes();
+            let one = 1_u64.to_be_bytes();
+            let build = match identity.account.build_identity { BuildIdentity::Release => 0, BuildIdentity::Preflight => 1, BuildIdentity::Development => 2 };
+            sql.execute("INSERT INTO store_metadata VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?9, ?10)", rusqlite::params![super::schema::APPLICATION_ID, super::schema::ENCODING_VERSION, identity.server.bytes().as_slice(), u64::from(identity.account.account_uid).to_be_bytes().as_slice(), build, identity.server_public_key.as_slice(), one.as_slice(), zero.as_slice(), origin, legacy]).map_err(super::database_adapter::classify)?;
+            sql.execute("INSERT INTO identity_high_water VALUES (1, ?1, ?1, ?1, ?1, ?1, ?1, ?1, ?1, ?1)", [zero.as_slice()]).map_err(super::database_adapter::classify)?;
+            sql.execute("INSERT INTO server_settings VALUES (1, ?1, ?2, ?2)", rusqlite::params![template.as_str(), one.as_slice()]).map_err(super::database_adapter::classify)?;
+            super::recovery::load(sql, identity, &limits, &services)?;
+            Ok(CommitReceipt { store_revision: StoreRevision::new(1), organization_revision: OrganizationRevision::new(0) })
+        });
+        match disposition {
+            spaceterm_core::storage::CommitDisposition::Durable(receipt) => {
+                InitializationDisposition::Durable {
+                    store: Self {
+                        database: adapter,
+                        identity,
+                        limits,
+                        services,
+                        health: Health::Healthy,
+                    },
+                    receipt,
+                }
+            }
+            spaceterm_core::storage::CommitDisposition::NotApplied(error) => {
+                InitializationDisposition::NotApplied(error)
+            }
+            spaceterm_core::storage::CommitDisposition::Indeterminate => {
+                InitializationDisposition::Indeterminate
+            }
         }
-        if let Err(error) = database
-            .schema_version()
-            .map_err(super::database_adapter::classify)
-            .and_then(|version| {
-                super::schema::check_version(version).map_err(super::database_adapter::classify)
-            })
-        {
-            return InitializationDisposition::NotApplied(error);
-        }
-        if let Err(error) = validate_identity(seed.identity) {
-            return InitializationDisposition::NotApplied(error);
-        }
-        InitializationDisposition::NotApplied(StoreFailure::RecoveryRequired)
     }
 }
 
@@ -130,7 +180,6 @@ pub(super) fn validate_identity(identity: StoreIdentity) -> Result<(), StoreFail
     Ok(())
 }
 
-#[cfg(feature = "test-support")]
 pub(super) fn selection(
     origin: &NewServerOrigin,
 ) -> Result<(i64, i64, WorktreeLocationTemplate), StoreFailure> {

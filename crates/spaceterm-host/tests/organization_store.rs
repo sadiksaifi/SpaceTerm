@@ -1,5 +1,5 @@
-//! Physical organization projection tests. Domain producers remain injected fakes
-//! of their frozen validation port; no real-ledger composition is claimed here.
+//! Relational projection tests plus real ledger/reducer composition regressions.
+//! Organization-only tests reject every auxiliary row through their narrow adapter.
 
 use spaceterm_core::authority::*;
 use spaceterm_core::identity::*;
@@ -858,8 +858,13 @@ fn missing_unlisted_worktree_membership_survives_recovery() {
 fn production_opening_does_not_borrow_test_fixture_authority() {
     let (directory, database) = fixture();
     assert_eq!(
-        SqliteOrganizationStore::open_existing(database, identity(), StoreLimits::production())
-            .unwrap_err(),
+        SqliteOrganizationStore::open_existing(
+            database,
+            identity(),
+            StoreLimits::production(),
+            services()
+        )
+        .unwrap_err(),
         StoreFailure::RecoveryRequired
     );
     let database = Database::open_existing(directory.path(), migrations()).unwrap();
@@ -1186,18 +1191,38 @@ fn unwound_authority_callback_fences_same_handle_until_fresh_open() {
 }
 
 #[test]
-fn empty_organization_projection_cannot_fabricate_publication_revision() {
-    let (_directory, database) = fixture();
-    let mut store = store(database, StoreLimits::production());
-    let before = store.recover().unwrap();
-    let mut parts = unchanged(&before);
-    parts.resulting_organization_revision =
-        before.organization.revision.checked_successor().unwrap();
+fn runtime_only_publication_revision_commits_without_retaining_live_authority() {
+    let directory = organization_store_support::private_directory();
+    let mut fixture = organization_store_support::ReducedFixture::new(directory.path());
+    let (_, _, pane) = fixture.create();
+    let before = fixture.fixture.store.recover().unwrap();
+    let session = fixture.start(pane);
+    let after = fixture.fixture.store.recover().unwrap();
     assert_eq!(
-        store.commit(&proposal(parts)),
-        CommitDisposition::NotApplied(StoreFailure::InvalidTransaction)
+        after.organization.revision.get(),
+        before.organization.revision.get() + 2
     );
-    assert_eq!(store.recover().unwrap(), before);
+    let generation = after.organization.retained.unwrap().pane_generations()[0];
+    assert_eq!(generation.session(), session.generation);
+    drop(fixture);
+    let mut store = organization_store_support::reopen(directory.path());
+    let state = store.recover().unwrap();
+    let ledger = spaceterm_core::operation_ledger::model::OperationLedger::recover(
+        organization_store_support::identity().server,
+        state.ledger.unwrap(),
+    )
+    .unwrap();
+    let recovered =
+        organization_store_support::ReducedFixture::from_recovered(store, ledger, directory.path());
+    let runtime = recovered.reducer.snapshot();
+    assert_eq!(
+        runtime.runtime()[0].control,
+        spaceterm_core::organization::ControlRecord::Unclaimed
+    );
+    assert!(matches!(
+        runtime.runtime()[0].phase,
+        spaceterm_core::organization::SessionPhase::Ended { .. }
+    ));
 }
 
 #[test]
@@ -1250,4 +1275,135 @@ fn remote_policy_keeps_exact_ipv4_ipv6_scope_and_field_version() {
             .remote_access(),
         &policy
     );
+}
+
+#[expect(
+    dead_code,
+    reason = "The shared fixture also serves authority fault and crash suites."
+)]
+mod organization_store_support;
+
+#[test]
+fn session_lifecycle_admission_recovers_without_starting_effects() {
+    use spaceterm_core::operation_ledger_contracts::{
+        ExternalEffectKind, PendingKind, RecoveredOperationRecord,
+    };
+    let directory = organization_store_support::private_directory();
+    let mut fixture = organization_store_support::Fixture::new(directory.path());
+    let binding = fixture.binding;
+    let operation = fixture.admit_command(
+        binding,
+        &spaceterm_core::operations::Command::EndAllSessions {
+            server: organization_store_support::identity().server,
+            assessment: spaceterm_core::operations::AssessmentRef {
+                operation: fixture.operation(1),
+                digest: spaceterm_core::operations::RequestDigest::from_bytes([8; 32]),
+            },
+        },
+        PendingKind::External {
+            effect: ExternalEffectKind::SessionLifecycle,
+        },
+    );
+    drop(fixture);
+    let recovered = organization_store_support::reopen(directory.path())
+        .recover()
+        .unwrap();
+    assert!(
+        matches!(&recovered.ledger.unwrap().operations[..], [RecoveredOperationRecord::Pending(v)] if v.binding == operation && v.kind == PendingKind::External { effect: ExternalEffectKind::SessionLifecycle })
+    );
+}
+
+#[test]
+fn storage_create_close_recover() {
+    use organization_store_support::*;
+    use spaceterm_core::operation_ledger::canonical::canonical_request_digest;
+    use spaceterm_core::operation_ledger::model::{OperationLedger, TransitionResolution};
+    use spaceterm_core::operation_ledger_contracts::*;
+    use spaceterm_core::operations::*;
+    use spaceterm_core::reducer::Resolution;
+    let directory = private_directory();
+    let mut fixture = ReducedFixture::new(directory.path());
+    let binding = fixture.fixture.binding;
+    let command = Command::CreateWorkspace {
+        server: identity().server,
+        source: WorkspaceCreationSource::ServerHome {
+            server: identity().server,
+        },
+        name: NameDraft::Automatic,
+    };
+    let (workspace, _, pane) = fixture.create();
+    let session = fixture.start(pane);
+    let original = fixture.fixture.operation(1);
+    let digest = canonical_request_digest(&binding, original, &command).unwrap();
+    let original_result = fixture
+        .fixture
+        .ledger
+        .lookup(&binding, original, Some(digest))
+        .unwrap();
+    let assessment = fixture.execute(
+        Command::AssessClose {
+            target: CloseTarget::Pane(pane),
+        },
+        PendingKind::AtomicMutation,
+    );
+    let Resolution::Completed(Outcome::Assessment(assessment)) = assessment.resolution else {
+        panic!("assessment required");
+    };
+    let accepted = fixture.execute(
+        Command::CloseConfirmed {
+            target: CloseTarget::Pane(pane),
+            assessment: assessment.reference(),
+        },
+        PendingKind::External {
+            effect: ExternalEffectKind::SessionLifecycle,
+        },
+    );
+    let Resolution::AwaitingRetirement(plan) = accepted.resolution else {
+        panic!("pending retirement required");
+    };
+    fixture.event(
+        spaceterm_core::reducer::OrganizationEvent::RetirementCleanup {
+            batch: plan.descriptor.batch(),
+            session,
+            result: spaceterm_core::retirement::CleanupResult::Confirmed(
+                spaceterm_core::retirement::ConfirmedCleanupClass::ReapedAndReleased,
+            ),
+        },
+    );
+    let complete = fixture
+        .reducer
+        .prepare_retirement_completion(plan.descriptor.batch())
+        .unwrap();
+    fixture.commit_reduction(complete, None);
+    drop(fixture);
+    let mut store = reopen(directory.path());
+    let state = store.recover().unwrap();
+    assert!(state.organization.workspaces.is_empty());
+    let ledger = OperationLedger::recover(identity().server, state.ledger.unwrap()).unwrap();
+    assert_eq!(
+        ledger.lookup(&binding, original, Some(digest)).unwrap(),
+        original_result
+    );
+    let mut fixture = ReducedFixture::from_recovered(store, ledger, directory.path());
+    let (new_workspace, _, _) = fixture.create();
+    assert!(new_workspace.local() > workspace.local());
+    let context = fixture.fixture.context();
+    let acknowledgement = fixture
+        .fixture
+        .ledger
+        .prepare_acknowledgement(&binding, 3, context)
+        .unwrap()
+        .unwrap();
+    let receipt = fixture.fixture.transaction(&acknowledgement, false);
+    assert!(matches!(
+        fixture.fixture.commit_proposal(acknowledgement, receipt),
+        TransitionResolution::Acknowledged { through: 3 }
+    ));
+    drop(fixture);
+    let state = reopen(directory.path()).recover().unwrap();
+    let ledger = OperationLedger::recover(identity().server, state.ledger.unwrap()).unwrap();
+    assert!(matches!(
+        ledger.lookup(&binding, original, Some(digest)).unwrap(),
+        OperationLookup::AcknowledgedRetired
+    ));
 }

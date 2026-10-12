@@ -1,16 +1,15 @@
 //! SQLite projection of the core's single organization durability boundary.
 //!
 //! Domain owners supply complete borrowed validation and operation projections.
-//! There is no default Wave 2 validator. Production opening remains fenced until
-//! the SQLite authority supplies pre-migration application ownership and a
-//! consistent read callback. Test composition uses the real authority transaction
-//! for a consistent snapshot, not a replacement opener or durability receipt.
+//! Application ownership and creation evidence come from the SQLite authority.
+//! Every recovery uses its read-only multi-table snapshot.
 
 pub mod auxiliary;
 pub mod bootstrap;
 pub mod codec;
 mod database_adapter;
 mod git_intents;
+mod ledger;
 pub mod limits;
 mod organization;
 pub mod pairing;
@@ -19,6 +18,7 @@ pub mod schema;
 #[cfg(feature = "test-support")]
 pub mod testing;
 mod transaction;
+mod validation;
 
 use spaceterm_core::authority::StoreRevision;
 use spaceterm_core::identity::ServerId;
@@ -90,6 +90,22 @@ pub struct StoreServices {
     operations: Box<dyn OperationProjection>,
 }
 impl StoreServices {
+    /// Composes canonical ledger SQL and the real reducer, ledger, pairing and Git
+    /// validators. The caller supplies the native server home and pairing owner's
+    /// exact-byte receipt reader. There is no default signer or credential fallback.
+    pub fn production(
+        server_home: spaceterm_core::organization::ServerDirectory,
+        receipts: std::sync::Arc<dyn pairing::PairingReceiptReader>,
+    ) -> Self {
+        Self::new(
+            Box::new(validation::DomainValidator {
+                home: server_home,
+                receipts: receipts.clone(),
+            }),
+            Box::new(ledger::LedgerSql(receipts)),
+        )
+    }
+
     /// Composes the real reducer, ledger, Git and exact-byte receipt validator with
     /// the operation SQL projection. Test doubles belong only in test composition.
     pub fn new(
@@ -100,6 +116,17 @@ impl StoreServices {
             validator,
             operations,
         }
+    }
+}
+impl DurabilityValidator for StoreServices {
+    fn validate_transaction_projection(
+        &self,
+        parts: &spaceterm_core::storage::TransactionParts,
+    ) -> Result<(), StoreFailure> {
+        self.validator.validate_transaction_projection(parts)
+    }
+    fn validate_recovery(&self, recovered: &RecoveredState) -> Result<(), StoreFailure> {
+        self.validator.validate_recovery(recovered)
     }
 }
 impl std::fmt::Debug for StoreServices {
@@ -144,36 +171,38 @@ impl std::fmt::Debug for SqliteOrganizationStore {
 }
 
 impl SqliteOrganizationStore {
-    /// Checks an existing authority without initializing missing metadata.
-    /// The declaration-only owner services and native read/ownership handoff are
-    /// not installed by this entry point. It returns RecoveryRequired, never a
-    /// success-shaped store with partial validation.
+    /// Opens existing application-owned storage with explicit domain services.
+    /// Full recovery validation completes before the handle can commit.
     pub fn open_existing(
         database: Database,
         expected: StoreIdentity,
         limits: StoreLimits,
+        services: StoreServices,
     ) -> Result<Self, StoreFailure> {
-        let _ = limits;
         database_adapter::check_existing_prerequisites(&database, expected)?;
-        Err(StoreFailure::RecoveryRequired)
+        let mut store = Self {
+            database: DatabaseAdapter::new(database),
+            identity: expected,
+            limits,
+            services,
+            health: Health::AwaitingRecovery,
+        };
+        store.recover_bundle()?;
+        Ok(store)
     }
 
-    /// Opens with explicit domain services. Native authority capabilities are
-    /// still mandatory and cannot be supplied by a caller's validator.
+    /// Explicit-service opening; identical to [`Self::open_existing`].
     pub fn open_existing_with_services(
         database: Database,
         expected: StoreIdentity,
         limits: StoreLimits,
         services: StoreServices,
     ) -> Result<Self, StoreFailure> {
-        let _ = (limits, services);
-        database_adapter::check_existing_prerequisites(&database, expected)?;
-        Err(StoreFailure::RecoveryRequired)
+        Self::open_existing(database, expected, limits, services)
     }
 
     /// Uses a private fixture through the real SQLite authority. The test-only
-    /// snapshot takes its immediate transaction lock; this is not evidence of the
-    /// missing production read callback or application-ID ownership guarantee.
+    /// opener may lack application ownership. Production opening never uses it.
     #[cfg(feature = "test-support")]
     pub fn from_test_database(
         database: Database,
@@ -183,7 +212,7 @@ impl SqliteOrganizationStore {
     ) -> Result<Self, StoreFailure> {
         database_adapter::check_test_fixture(&database)?;
         Ok(Self {
-            database: DatabaseAdapter::test_fixture(database),
+            database: DatabaseAdapter::new(database),
             identity: expected,
             limits,
             services,

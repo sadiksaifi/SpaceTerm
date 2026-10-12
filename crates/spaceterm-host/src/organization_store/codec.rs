@@ -10,7 +10,7 @@ use std::num::NonZeroU64;
 
 use spaceterm_core::authority::{
     CloseWorkGeneration, ContextGeneration, ControlGeneration, CreationOrdinal, FieldVersion,
-    OrganizationRevision, ServerEpoch, SessionGeneration, SessionKey,
+    OrganizationRevision, ServerEpoch, SessionGeneration, SessionKey, StoreRevision,
 };
 use spaceterm_core::identity::{
     ClientId, IdentityHighWater, LocalIdentity, OperationStreamId, OperationStreamKey, PairingId,
@@ -98,6 +98,8 @@ pub enum RecordKind {
     NativeRetirement = 12,
     /// Retirement comparison descriptor inside ledger pending external progress.
     Retirement = 13,
+    /// Effect classification and typed prerequisite inside a pending ledger entry.
+    ExternalProgress = 14,
 }
 impl RecordKind {
     /// Maximum payload bytes, excluding the fixed envelope header.
@@ -115,7 +117,8 @@ impl RecordKind {
             Self::GitRemovalScope
             | Self::GitAllocation
             | Self::NativeRetirement
-            | Self::Retirement => 16 * 1024 * 1024 - HEADER_BYTES,
+            | Self::Retirement
+            | Self::ExternalProgress => 16 * 1024 * 1024 - HEADER_BYTES,
         }
     }
 }
@@ -1294,6 +1297,299 @@ pub fn decode_native_retirement(
             acceptance_revision,
             panes,
             sessions,
+        })
+        .map_err(|_| CodecFailure::InvalidEncoding)
+    })
+}
+
+use spaceterm_core::operation_ledger_contracts::{
+    CompactOutcome, ExternalEffectKind, ExternalIntentPhase, ExternalIntentReference,
+    ExternalIntentReferenceParts, ExternalIntentScope, ExternalProgressState,
+    MAX_COMPACT_OUTCOME_BYTES, PendingExternalProgress, PendingExternalProgressParts,
+};
+use spaceterm_core::operations::{AssessmentRef, AssessmentTarget, CloseTarget};
+use spaceterm_core::retirement::{
+    RetirementCompletion, RetirementDescriptor, RetirementDescriptorParts,
+};
+
+fn write_target(writer: &mut Writer, target: AssessmentTarget) -> Result<(), CodecFailure> {
+    match target {
+        AssessmentTarget::Close(target) => {
+            writer.tag(0)?;
+            match target {
+                CloseTarget::Pane(id) => {
+                    writer.tag(0)?;
+                    writer.u64(id.local())
+                }
+                CloseTarget::Tab(id) => {
+                    writer.tag(1)?;
+                    writer.u64(id.local())
+                }
+                CloseTarget::Workspace(id) => {
+                    writer.tag(2)?;
+                    writer.u64(id.local())
+                }
+                CloseTarget::WorktreeTabs {
+                    workspace,
+                    worktree,
+                } => {
+                    writer.tag(3)?;
+                    writer.u64(workspace.local())?;
+                    writer.u64(worktree.local())
+                }
+            }
+        }
+        AssessmentTarget::KillWorkspace(id) => {
+            writer.tag(1)?;
+            writer.u64(id.local())
+        }
+        AssessmentTarget::EndAllSessions(server) => {
+            writer.tag(2)?;
+            writer.fixed(&server.bytes())
+        }
+        AssessmentTarget::RemoveWorktree { scope, worktree } => {
+            writer.tag(3)?;
+            writer.u64(scope.repository.local())?;
+            writer.u64(worktree.local())
+        }
+    }
+}
+fn read_target(
+    reader: &mut Reader<'_>,
+    server: ServerId,
+) -> Result<AssessmentTarget, CodecFailure> {
+    Ok(match reader.tag()? {
+        0 => AssessmentTarget::Close(match reader.tag()? {
+            0 => CloseTarget::Pane(local(reader, server)?),
+            1 => CloseTarget::Tab(local(reader, server)?),
+            2 => CloseTarget::Workspace(local(reader, server)?),
+            3 => CloseTarget::WorktreeTabs {
+                workspace: local(reader, server)?,
+                worktree: local(reader, server)?,
+            },
+            _ => return Err(CodecFailure::InvalidEncoding),
+        }),
+        1 => AssessmentTarget::KillWorkspace(local(reader, server)?),
+        2 => AssessmentTarget::EndAllSessions(self::server(reader, server)?),
+        3 => AssessmentTarget::RemoveWorktree {
+            scope: RepositoryScope {
+                server,
+                repository: local(reader, server)?,
+            },
+            worktree: local(reader, server)?,
+        },
+        _ => return Err(CodecFailure::InvalidEncoding),
+    })
+}
+
+/// Encodes the reducer's accepted descriptor. Compact results retain the ledger's
+/// canonical encoding; cleanup states remain comparison facts, not native proof.
+pub fn encode_retirement(value: &RetirementDescriptor) -> Result<Vec<u8>, CodecFailure> {
+    let p = value.parts();
+    encode_record(RecordKind::Retirement, |writer| {
+        writer.fixed(&p.batch.server().bytes())?;
+        writer.u64(p.batch.epoch().get())?;
+        writer.u64(p.batch.sequence())?;
+        writer.operation_binding(p.binding)?;
+        write_stream(writer, p.assessment.operation.stream())?;
+        writer.u64(p.assessment.operation.sequence().get())?;
+        writer.fixed(&p.assessment.digest.bytes())?;
+        writer.u64(p.acceptance_revision.get())?;
+        write_target(writer, p.target)?;
+        writer.count(p.panes.len(), MAX_RETIREMENT_PANES)?;
+        for pane in &p.panes {
+            write_retirement_pane(writer, *pane)?;
+        }
+        writer.count(p.sessions.len(), MAX_RETIREMENT_SESSIONS)?;
+        for session in &p.sessions {
+            write_retired_session(writer, *session)?;
+        }
+        writer.tag(match p.completion {
+            RetirementCompletion::AppliedAtAcceptanceRevision => 0,
+            RetirementCompletion::ContinueGitSettlement => 1,
+        })?;
+        writer.bytes(p.eventual_result.as_encoded(), MAX_COMPACT_OUTCOME_BYTES)
+    })
+}
+/// Decodes bounded collections before invoking the reducer's checked constructor.
+pub fn decode_retirement(
+    bytes: &[u8],
+    expected: ServerId,
+) -> Result<RetirementDescriptor, CodecFailure> {
+    decode_record(RecordKind::Retirement, bytes, |reader| {
+        let server = server(reader, expected)?;
+        let batch = RetirementBatchId::new(server, ServerEpoch::new(reader.u64()?), reader.u64()?)
+            .map_err(|_| CodecFailure::InvalidEncoding)?;
+        let binding = reader.operation_binding()?;
+        let operation = OperationId::new(
+            read_stream(reader)?,
+            OperationSequence::new(reader.u64()?).map_err(|_| CodecFailure::InvalidEncoding)?,
+        );
+        let assessment = AssessmentRef {
+            operation,
+            digest: RequestDigest::from_bytes(array(reader.fixed(32)?)?),
+        };
+        let acceptance_revision = OrganizationRevision::new(reader.u64()?);
+        let target = read_target(reader, server)?;
+        let panes = vector(reader, MAX_RETIREMENT_PANES, 33, |reader| {
+            read_retirement_pane(reader, server)
+        })?;
+        let sessions = vector(reader, MAX_RETIREMENT_SESSIONS, 26, |reader| {
+            read_retired_session(reader, server)
+        })?;
+        let completion = match reader.tag()? {
+            0 => RetirementCompletion::AppliedAtAcceptanceRevision,
+            1 => RetirementCompletion::ContinueGitSettlement,
+            _ => return Err(CodecFailure::InvalidEncoding),
+        };
+        let eventual_result =
+            CompactOutcome::from_encoded(reader.bytes(MAX_COMPACT_OUTCOME_BYTES)?.to_vec())
+                .map_err(|_| CodecFailure::InvalidEncoding)?;
+        eventual_result
+            .outcome(&spaceterm_core::operation_ledger::canonical::CanonicalCodec)
+            .map_err(|_| CodecFailure::InvalidEncoding)?;
+        RetirementDescriptor::new(RetirementDescriptorParts {
+            batch,
+            binding,
+            assessment,
+            acceptance_revision,
+            target,
+            panes,
+            sessions,
+            completion,
+            eventual_result,
+        })
+        .map_err(|_| CodecFailure::InvalidEncoding)
+    })
+}
+
+/// Conservative prepared-residency charge, including nested descriptor encoding.
+pub fn external_progress_size(value: &PendingExternalProgress) -> Result<usize, CodecFailure> {
+    let retirement = match value.state() {
+        ExternalProgressState::AcceptedRetirement(v) => Some(v),
+        ExternalProgressState::RecordedIntent { retirement, .. } => retirement.as_ref(),
+        ExternalProgressState::AwaitingIntent => None,
+    };
+    retirement.map_or(Ok(512), |v| {
+        v.value_bytes()
+            .map_err(|_| CodecFailure::ResourceLimit)?
+            .checked_mul(2)
+            .and_then(|n| n.checked_add(512))
+            .ok_or(CodecFailure::ResourceLimit)
+    })
+}
+/// Encodes every effect class and progress phase without retaining a request body.
+pub fn encode_external_progress(value: &PendingExternalProgress) -> Result<Vec<u8>, CodecFailure> {
+    encode_record(RecordKind::ExternalProgress, |writer| {
+        writer.operation_binding(value.binding())?;
+        writer.tag(match value.effect() {
+            ExternalEffectKind::GitWrite => 0,
+            ExternalEffectKind::SessionLifecycle => 1,
+            ExternalEffectKind::ServerManagement => 2,
+        })?;
+        match value.state() {
+            ExternalProgressState::AwaitingIntent => writer.tag(0),
+            ExternalProgressState::AcceptedRetirement(value) => {
+                writer.tag(1)?;
+                writer.bytes(
+                    &encode_retirement(value)?,
+                    RecordKind::Retirement.maximum_payload() + HEADER_BYTES,
+                )
+            }
+            ExternalProgressState::RecordedIntent {
+                reference,
+                retirement,
+            } => {
+                writer.tag(2)?;
+                match reference.scope() {
+                    ExternalIntentScope::Git(scope) => {
+                        writer.tag(0)?;
+                        writer.u64(scope.repository.local())?;
+                    }
+                    ExternalIntentScope::Management => writer.tag(1)?,
+                }
+                writer.tag(match reference.phase() {
+                    ExternalIntentPhase::Prepared => 0,
+                    ExternalIntentPhase::Started => 1,
+                    ExternalIntentPhase::ExternalFinished => 2,
+                })?;
+                writer.u64(reference.recorded_at().get())?;
+                writer.tag(u8::from(retirement.is_some()))?;
+                if let Some(value) = retirement {
+                    writer.bytes(
+                        &encode_retirement(value)?,
+                        RecordKind::Retirement.maximum_payload() + HEADER_BYTES,
+                    )?;
+                }
+                Ok(())
+            }
+        }
+    })
+}
+/// Validates framing, binding and owner constructors without external effects.
+pub fn decode_external_progress(
+    bytes: &[u8],
+    expected: ServerId,
+) -> Result<PendingExternalProgress, CodecFailure> {
+    decode_record(RecordKind::ExternalProgress, bytes, |reader| {
+        let binding = reader.operation_binding()?;
+        if binding.id.stream().server() != expected {
+            return Err(CodecFailure::WrongServer);
+        }
+        let effect = match reader.tag()? {
+            0 => ExternalEffectKind::GitWrite,
+            1 => ExternalEffectKind::SessionLifecycle,
+            2 => ExternalEffectKind::ServerManagement,
+            _ => return Err(CodecFailure::InvalidEncoding),
+        };
+        let retirement = |reader: &mut Reader<'_>| {
+            decode_retirement(
+                reader.bytes(RecordKind::Retirement.maximum_payload() + HEADER_BYTES)?,
+                expected,
+            )
+            .map(Box::new)
+        };
+        let state = match reader.tag()? {
+            0 => ExternalProgressState::AwaitingIntent,
+            1 => ExternalProgressState::AcceptedRetirement(retirement(reader)?),
+            2 => {
+                let scope = match reader.tag()? {
+                    0 => ExternalIntentScope::Git(RepositoryScope {
+                        server: expected,
+                        repository: local(reader, expected)?,
+                    }),
+                    1 => ExternalIntentScope::Management,
+                    _ => return Err(CodecFailure::InvalidEncoding),
+                };
+                let phase = match reader.tag()? {
+                    0 => ExternalIntentPhase::Prepared,
+                    1 => ExternalIntentPhase::Started,
+                    2 => ExternalIntentPhase::ExternalFinished,
+                    _ => return Err(CodecFailure::InvalidEncoding),
+                };
+                let reference = ExternalIntentReference::new(ExternalIntentReferenceParts {
+                    binding,
+                    scope,
+                    phase,
+                    recorded_at: StoreRevision::new(reader.u64()?),
+                })
+                .map_err(|_| CodecFailure::InvalidEncoding)?;
+                let retirement = match reader.tag()? {
+                    0 => None,
+                    1 => Some(retirement(reader)?),
+                    _ => return Err(CodecFailure::InvalidEncoding),
+                };
+                ExternalProgressState::RecordedIntent {
+                    reference,
+                    retirement,
+                }
+            }
+            _ => return Err(CodecFailure::InvalidEncoding),
+        };
+        PendingExternalProgress::new(PendingExternalProgressParts {
+            binding,
+            effect,
+            state,
         })
         .map_err(|_| CodecFailure::InvalidEncoding)
     })
