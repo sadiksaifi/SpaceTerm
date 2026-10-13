@@ -40,6 +40,7 @@ pub(crate) use spaceterm_client::{
     },
 };
 
+pub(crate) use super::pane_presentation::DisplayName;
 pub(crate) use crate::ui::settings_window::SelectedServerAction;
 
 /// One local attachment of a Workspace. Reattaching allocates a new one.

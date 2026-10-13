@@ -49,7 +49,7 @@ use super::{
     PreviousWorktree, RemoteChildLaunchUnavailable, ScrollPageDown, ScrollPageUp, ScrollToBottom,
     ScrollToTop, ShowRepositoryStatus, SplitDown, SplitRight, SwitchWorkspace,
     TERMINAL_KEY_CONTEXT, TabManager, TabManagerEvent, TogglePaneZoom, ToggleSidebar,
-    ToggleSidebarFocus, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
+    ToggleSidebarFocus,
 };
 use crate::appearance::Color;
 use crate::close_confirmation::{
@@ -76,9 +76,12 @@ use crate::terminal::{
 };
 use gpui::prelude::*;
 
+#[cfg(test)]
+use super::WORKSPACE_SIDEBAR_DEFAULT_WIDTH;
+#[cfg(test)]
+use gpui::px;
 use gpui::{
     Action, AnyElement, App, Context, Edges, Entity, Pixels, Render, Task, WeakEntity, Window, div,
-    px,
 };
 use spaceterm_ui::{
     Alert, AlertIntent, AlertOutcome, AnchoredAlignment, AnchoredPlacement,
@@ -259,6 +262,7 @@ enum LocalPinSelection {
 }
 
 enum WorkspaceSource {
+    #[cfg(test)]
     Legacy {
         factory: Rc<dyn TerminalSessionFactory>,
         home: PathBuf,
@@ -300,6 +304,7 @@ pub(crate) struct WorkspaceManager {
 }
 
 impl WorkspaceManager {
+    #[cfg(test)]
     pub(crate) fn new_with_adapters(
         session_factory: Rc<dyn TerminalSessionFactory>,
         local_home_directory_path: PathBuf,
@@ -365,6 +370,7 @@ impl WorkspaceManager {
         );
         let (session_factory, local_home_directory_path, local_home_identity, workspaces, runtime) =
             match source {
+                #[cfg(test)]
                 WorkspaceSource::Legacy {
                     factory: session_factory,
                     home: local_home_directory_path,
@@ -4107,25 +4113,15 @@ fn remote_machine(account: &RemoteWorkspaceAccount) -> crate::terminal::metadata
     )
 }
 
+#[cfg(test)]
 fn initial_home_directory(
     path: PathBuf,
-    local_filesystem: &LocalFilesystemAuthority,
+    _local_filesystem: &LocalFilesystemAuthority,
 ) -> (ValidatedLocalDirectory, Option<String>) {
-    #[cfg(test)]
-    let _ = local_filesystem;
-    #[cfg(test)]
-    return (
+    (
         ValidatedLocalDirectory::new(path, LocalDirectoryIdentity::for_test(0)),
         None,
-    );
-    #[cfg(not(test))]
-    match local_filesystem.validate_directory(&path) {
-        Ok(directory) => (directory, None),
-        Err(error) => (
-            ValidatedLocalDirectory::new(path, LocalDirectoryIdentity::unavailable()),
-            Some(error.to_string()),
-        ),
-    }
+    )
 }
 
 #[cfg(test)]

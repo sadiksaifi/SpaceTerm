@@ -139,7 +139,7 @@ impl<S: ViewStore + 'static> ComposedDesktopClientProvider<S> {
             operations,
             pending,
             persistence,
-            view,
+            mut view,
             executor,
             servers,
         } = composition;
@@ -154,6 +154,10 @@ impl<S: ViewStore + 'static> ComposedDesktopClientProvider<S> {
             .journal()
             .snapshot()
             .map_err(DesktopClientError::from)?;
+        // A detach can commit while native recovery is awaiting the GUI executor. Apply the
+        // latest markers before any attachment, lease or save becomes observable, even when
+        // no server has published a retained replica yet.
+        view.filter_suppressed(&saved).map_err(view_error)?;
         let mut sources = BTreeMap::new();
         let mut order = Vec::new();
         for name in servers {
@@ -262,6 +266,21 @@ impl<S: ViewStore + 'static> ComposedDesktopClientProvider<S> {
 
 impl Inner {
     fn install(self: &Rc<Self>, cx: &mut App) -> Result<(), DesktopClientError> {
+        // Subscribe before the final snapshot so a concurrent suppression commit cannot land
+        // between the initial read and the watcher and disappear from both observations.
+        let mut revisions = self.tracker.journal().revisions();
+        let mut health = self.tracker.journal().health();
+        self.state
+            .borrow_mut()
+            .view
+            .filter_suppressed(
+                &self
+                    .tracker
+                    .journal()
+                    .snapshot()
+                    .map_err(DesktopClientError::from)?,
+            )
+            .map_err(view_error)?;
         for (&server, source) in &self.sources {
             self.refresh(server)?;
             let mut connection = source.state.clone();
@@ -279,8 +298,6 @@ impl Inner {
                 }
             }));
         }
-        let mut revisions = self.tracker.journal().revisions();
-        let mut health = self.tracker.journal().health();
         let weak = Rc::downgrade(self);
         self.tasks.borrow_mut().push(cx.spawn(async move |_| {
             loop {
