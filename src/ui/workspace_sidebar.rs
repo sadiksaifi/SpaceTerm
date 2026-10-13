@@ -2,7 +2,9 @@
 //! Workspace policy stays with the application; the sidebar emits typed requests.
 mod server;
 pub(in crate::ui) mod server_group;
-pub(super) use server::{ServerSidebarEvent, ServerSidebarSection, ServerWorkspaceRow};
+pub(super) use server::{
+    ServerSidebarEvent, ServerSidebarSection, ServerWorkspaceRow, ServerWorktreeRow,
+};
 mod text;
 mod view;
 

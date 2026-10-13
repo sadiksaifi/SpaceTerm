@@ -6,9 +6,11 @@ use super::server_group::{
     ServerConnection, ServerHeaderKey, ServerSection, ServerSectionId, ServerSectionModel,
 };
 use super::*;
+use crate::repository_status::presentation::SidebarBadge;
 use crate::ui::chrome_typography::ChromeTextStyleExt;
 use crate::ui::pane_presentation::DisplayName;
 use crate::ui::server_desktop_contracts::{ServerId, WorkspaceId as QualifiedWorkspaceId};
+use spaceterm_core::identity::WorktreeId as QualifiedWorktreeId;
 use spaceterm_ui::ContextMenuTarget;
 
 #[derive(Clone)]
@@ -18,6 +20,20 @@ pub(crate) struct ServerWorkspaceRow {
     pub(crate) pinned: bool,
     pub(crate) active: bool,
     pub(crate) paused: bool,
+    pub(crate) repository: Option<SidebarBadge>,
+    pub(crate) worktrees: Vec<ServerWorktreeRow>,
+    pub(crate) creates_worktrees: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct ServerWorktreeRow {
+    pub(crate) worktree: QualifiedWorktreeId,
+    pub(crate) name: SharedString,
+    pub(crate) path: SharedString,
+    pub(crate) repository: Option<SidebarBadge>,
+    pub(crate) active: bool,
+    pub(crate) has_tabs: bool,
+    pub(crate) removable: bool,
 }
 
 #[derive(Clone)]
@@ -34,12 +50,16 @@ pub(crate) enum ServerSidebarEvent {
     Attach(ServerId),
     Detach(QualifiedWorkspaceId),
     Kill(QualifiedWorkspaceId),
+    NewWorktree(QualifiedWorkspaceId),
+    OpenWorktree(QualifiedWorkspaceId, QualifiedWorktreeId),
+    RemoveWorktree(QualifiedWorktreeId),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ServerRowKey {
     Server(ServerId),
     Workspace(QualifiedWorkspaceId),
+    Worktree(QualifiedWorkspaceId, QualifiedWorktreeId),
 }
 
 #[derive(Default)]
@@ -54,11 +74,15 @@ pub(crate) struct ServerSidebar {
 enum ServerWorkspaceCommand {
     Detach,
     Kill,
+    NewWorktree,
 }
 
 impl ServerSidebar {
     pub(super) fn needs_root_focus(&self) -> bool {
-        !matches!(self.selected(), Some(ServerRowKey::Workspace(_)))
+        !matches!(
+            self.selected(),
+            Some(ServerRowKey::Workspace(_) | ServerRowKey::Worktree(_, _))
+        )
     }
     fn keys(&self) -> Vec<ServerRowKey> {
         self.sections
@@ -69,7 +93,13 @@ impl ServerSidebar {
                         .rows
                         .iter()
                         .filter(|_| self.expanded.get(&section.server).copied().unwrap_or(true))
-                        .map(|row| ServerRowKey::Workspace(row.workspace)),
+                        .flat_map(|row| {
+                            std::iter::once(ServerRowKey::Workspace(row.workspace)).chain(
+                                row.worktrees.iter().map(|worktree| {
+                                    ServerRowKey::Worktree(row.workspace, worktree.worktree)
+                                }),
+                            )
+                        }),
                 )
             })
             .collect()
@@ -169,6 +199,10 @@ impl WorkspaceSidebar {
             "home" => 0,
             "end" => keys.len() - 1,
             "left" => match key {
+                ServerRowKey::Worktree(workspace, _) => keys
+                    .iter()
+                    .position(|key| *key == ServerRowKey::Workspace(workspace))
+                    .unwrap_or(current),
                 ServerRowKey::Workspace(workspace) => keys
                     .iter()
                     .position(|key| *key == ServerRowKey::Server(workspace.server()))
@@ -176,10 +210,14 @@ impl WorkspaceSidebar {
                 _ => current,
             },
             "enter" | "space" => {
-                if let ServerRowKey::Workspace(workspace) = key {
-                    cx.emit(SidebarEvent::Server(ServerSidebarEvent::Activate(
-                        workspace,
-                    )));
+                match key {
+                    ServerRowKey::Workspace(workspace) => cx.emit(SidebarEvent::Server(
+                        ServerSidebarEvent::Activate(workspace),
+                    )),
+                    ServerRowKey::Worktree(workspace, worktree) => cx.emit(SidebarEvent::Server(
+                        ServerSidebarEvent::OpenWorktree(workspace, worktree),
+                    )),
+                    _ => {}
                 }
                 current
             }
@@ -190,12 +228,25 @@ impl WorkspaceSidebar {
             _ => return,
         };
         server.cursor = Some(keys[next]);
-        if next != current
-            && let ServerRowKey::Workspace(workspace) = keys[next]
-        {
-            cx.emit(SidebarEvent::Server(ServerSidebarEvent::Activate(
-                workspace,
-            )));
+        if next != current {
+            match keys[next] {
+                ServerRowKey::Workspace(workspace) => cx.emit(SidebarEvent::Server(
+                    ServerSidebarEvent::Activate(workspace),
+                )),
+                ServerRowKey::Worktree(workspace, worktree)
+                    if server
+                        .sections
+                        .iter()
+                        .flat_map(|section| &section.rows)
+                        .flat_map(|row| &row.worktrees)
+                        .any(|row| row.worktree == worktree && row.has_tabs) =>
+                {
+                    cx.emit(SidebarEvent::Server(ServerSidebarEvent::OpenWorktree(
+                        workspace, worktree,
+                    )))
+                }
+                _ => {}
+            }
         }
         self.focus_visible = true;
         self.scroll_handle.scroll_to_item(next);
@@ -270,7 +321,30 @@ impl WorkspaceSidebar {
                             )
                             .text_color(crate::ui::appearance::gpui_color(colors.row_foreground))
                             .child(chip.render(workspace_selector(workspace, "chip"), 0.0))
-                            .child(div().min_w_0().flex_1().truncate().child(name.clone()))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .flex()
+                                    .flex_col()
+                                    .child(div().truncate().child(name.clone()))
+                                    .child(text::detail(
+                                        SharedString::default(),
+                                        row.repository.clone().map(|badge| text::RowRepository {
+                                            badge,
+                                            pull_request_paint: appearance.colors.pull_request(
+                                                crate::ui::workspace_frame::base_surface(
+                                                    &appearance.colors,
+                                                ),
+                                            ),
+                                        }),
+                                        false,
+                                        None,
+                                        None,
+                                        workspace.local(),
+                                        appearance.clone(),
+                                    )),
+                            )
                             .when(row.paused, |row| row.child("Paused"))
                             .into_any_element();
                         let press = owner.clone();
@@ -297,6 +371,16 @@ impl WorkspaceSidebar {
                         let open = owner.clone();
                         let lifecycle = owner.clone();
                         let entries = vec![
+                            MenuEntry::action(
+                                "New Worktree...",
+                                ServerWorkspaceCommand::NewWorktree,
+                            )
+                            .disabled(
+                                !row.creates_worktrees
+                                    || section.connection != ServerConnection::Connected,
+                            )
+                            .debug_selector("server-workspace-menu-new-worktree"),
+                            MenuEntry::separator(),
                             MenuEntry::action("Detach Workspace", ServerWorkspaceCommand::Detach)
                                 .icon(|foreground, size| {
                                     Icon::new(IconName::Unlink, size, foreground).into_any_element()
@@ -311,7 +395,7 @@ impl WorkspaceSidebar {
                                 })
                                 .debug_selector("workspace-menu-row-close"),
                         ];
-                        ContextMenu::new(
+                        let menu = ContextMenu::new(
                             workspace_selector(workspace, "menu"),
                             format!("Workspace actions for {name}"),
                             content,
@@ -346,12 +430,33 @@ impl WorkspaceSidebar {
                                     ServerSidebarEvent::Detach(workspace)
                                 }
                                 ServerWorkspaceCommand::Kill => ServerSidebarEvent::Kill(workspace),
+                                ServerWorkspaceCommand::NewWorktree => {
+                                    ServerSidebarEvent::NewWorktree(workspace)
+                                }
                             };
                             let _ =
                                 activate.update(cx, |_, cx| cx.emit(SidebarEvent::Server(event)));
                         })
                         .debug_selector(workspace_selector(workspace, "menu"))
-                        .into_any_element()
+                        .into_any_element();
+                        div()
+                            .w_full()
+                            .flex()
+                            .flex_col()
+                            .child(menu)
+                            .children(row.worktrees.iter().map(|worktree| {
+                                render_server_worktree(
+                                    row.workspace,
+                                    worktree,
+                                    server.selected(),
+                                    section.connection,
+                                    owner.clone(),
+                                    appearance,
+                                    &self.focus,
+                                    cx,
+                                )
+                            }))
+                            .into_any_element()
                     })
                     .collect();
                 let toggle = owner.clone();
@@ -395,4 +500,113 @@ pub(crate) fn workspace_selector(workspace: QualifiedWorkspaceId, part: &str) ->
         u128::from_be_bytes(workspace.server().bytes()),
         workspace.local()
     )
+}
+
+#[derive(Clone, Copy)]
+enum WorktreeCommand {
+    Open,
+    Remove,
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "source-list rendering receives the owner, focus and resolved appearance separately"
+)]
+fn render_server_worktree(
+    workspace: QualifiedWorkspaceId,
+    row: &ServerWorktreeRow,
+    selected: Option<ServerRowKey>,
+    connection: ServerConnection,
+    owner: WeakEntity<WorkspaceSidebar>,
+    appearance: &crate::ui::appearance::ChromeAppearance,
+    focus: &FocusHandle,
+    cx: &App,
+) -> AnyElement {
+    let worktree = row.worktree;
+    let selected = selected == Some(ServerRowKey::Worktree(workspace, worktree));
+    let (chip, colors) = super::view::row_paint(selected || row.active, false, 0.0, appearance, cx);
+    let activate = owner.clone();
+    let id = format!(
+        "{}-worktree-{}",
+        workspace_selector(workspace, "group"),
+        worktree.local()
+    );
+    let selector = id.clone();
+    let content = div()
+        .id(id.clone())
+        .debug_selector(move || selector)
+        .relative()
+        .w_full()
+        .pl(appearance.spacing(40.0))
+        .pr(appearance.spacing(8.0))
+        .py(appearance.spacing(4.0))
+        .chrome_text(
+            appearance
+                .typography
+                .style(crate::ui::chrome_typography::TextRole::Navigation),
+        )
+        .text_color(crate::ui::appearance::gpui_color(colors.row_foreground))
+        .child(chip.render(format!("{id}-chip"), 0.0))
+        .child(div().truncate().child(row.name.clone()))
+        .child(text::detail(
+            row.path.clone(),
+            row.repository.clone().map(|badge| text::RowRepository {
+                badge,
+                pull_request_paint: appearance
+                    .colors
+                    .pull_request(crate::ui::workspace_frame::base_surface(&appearance.colors)),
+            }),
+            false,
+            None,
+            None,
+            worktree.local(),
+            appearance.clone(),
+        ));
+    let click = owner.clone();
+    let content = content.on_click(move |_, _, cx| {
+        let _ = click.update(cx, |sidebar, cx| {
+            if let Some(server) = &mut sidebar.server {
+                server.cursor = Some(ServerRowKey::Worktree(workspace, worktree));
+            }
+            cx.emit(SidebarEvent::Server(ServerSidebarEvent::OpenWorktree(
+                workspace, worktree,
+            )));
+        });
+    });
+    let press = owner.clone();
+    let target = ContextMenuTarget::new(gpui::accesskit::Role::TreeItem, row.name.clone())
+        .level(3)
+        .selected(selected)
+        .description(row.path.clone())
+        .on_press(move |_, cx| {
+            let _ = press.update(cx, |_, cx| {
+                cx.emit(SidebarEvent::Server(ServerSidebarEvent::OpenWorktree(
+                    workspace, worktree,
+                )))
+            });
+        });
+    ContextMenu::new(
+        format!("{id}-menu"),
+        "Worktree actions",
+        content,
+        vec![
+            MenuEntry::action("Open Worktree", WorktreeCommand::Open)
+                .disabled(!row.has_tabs && connection != ServerConnection::Connected),
+            MenuEntry::separator(),
+            MenuEntry::action("Remove Worktree...", WorktreeCommand::Remove)
+                .destructive(true)
+                .disabled(!row.removable || connection != ServerConnection::Connected),
+        ],
+    )
+    .target(target)
+    .size(MenuSize::Wide)
+    .when(selected, |menu| menu.keyboard_trigger(focus))
+    .on_activate(move |activation, _, cx| {
+        let event = match activation.action() {
+            WorktreeCommand::Open => ServerSidebarEvent::OpenWorktree(workspace, worktree),
+            WorktreeCommand::Remove => ServerSidebarEvent::RemoveWorktree(worktree),
+        };
+        let _ = activate.update(cx, |_, cx| cx.emit(SidebarEvent::Server(event)));
+    })
+    .into_any_element()
 }
