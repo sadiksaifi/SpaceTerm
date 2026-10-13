@@ -644,6 +644,218 @@ async fn initial_status_resync_response_recovers_once_in_both_majors() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn status_resync_retries_after_ordinary_egress_saturation_in_both_majors() {
+    use spaceterm_client::{api::ConnectionState, failure::ClientFailureClass};
+    use spaceterm_protocol::limits::{MAX_EGRESS_ENVELOPES, RESERVED_LIFECYCLE_ENVELOPES};
+
+    for major in [1, 2] {
+        let (server, runtime, journal, plan) = setup(major, None).await;
+        let subscription = server
+            .queries(journal)
+            .unwrap()
+            .subscribe_status()
+            .await
+            .unwrap();
+        let original = plan
+            .messages
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|message| status_request(message).is_some())
+            .unwrap()
+            .clone();
+        let (request, generation, _) = status_request(&original).unwrap();
+        let query_count = || {
+            plan.messages
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(status_request)
+                .filter(|&(id, _, cancel)| id == request && !cancel)
+                .count()
+        };
+        let info = match *server.state().borrow() {
+            ConnectionState::Connected { info } => info,
+            _ => panic!("not ready"),
+        };
+        plan.client_send_gate
+            .forget_permits(plan.client_send_gate.available_permits());
+        let ordinary_capacity = MAX_EGRESS_ENVELOPES - RESERVED_LIFECYCLE_ENVELOPES;
+        let mut ordinary = tokio::task::JoinSet::new();
+        for offset in 0..=ordinary_capacity {
+            let mut message = original.clone();
+            match &mut message {
+                Payload::Major1(message) => {
+                    if let Some(v1::message::Kind::StatusQuery(query)) = &mut message.kind {
+                        query.request = 100 + u64::try_from(offset).unwrap();
+                    }
+                }
+                Payload::Major2(message) => {
+                    if let Some(v2::message::Kind::StatusQuery(query)) = &mut message.kind {
+                        query.request = 100 + u64::try_from(offset).unwrap();
+                    }
+                }
+            }
+            let server = server.clone();
+            ordinary.spawn(async move { server.dispatch(info, message).await });
+        }
+        settle().await;
+        assert_eq!(
+            ordinary
+                .join_next()
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap_err()
+                .class(),
+            ClientFailureClass::ResourceLimit
+        );
+        plan.control(PeerControl::publication(publication(
+            major,
+            StatusPublication::ResyncRequired {
+                request: NonZeroU64::new(request).unwrap(),
+                generation,
+            },
+        )))
+        .await;
+        settle().await;
+        assert!(subscription.needs_resync().unwrap());
+        assert_eq!(query_count(), 1);
+        for revision in [2, 3] {
+            plan.control(PeerControl::publication(publication(
+                major,
+                StatusPublication::Changed {
+                    request: NonZeroU64::new(request).unwrap(),
+                    generation,
+                    base: NonZeroU64::new(revision - 1).unwrap(),
+                    status: status(server.identity(), revision),
+                },
+            )))
+            .await;
+        }
+        tokio::time::advance(Duration::from_secs(5)).await;
+        settle().await;
+        assert_eq!(query_count(), 1);
+        assert!(matches!(
+            *server.state().borrow(),
+            ConnectionState::Connected { .. }
+        ));
+
+        plan.client_send_gate.add_permits(MAX_EGRESS_ENVELOPES);
+        while let Some(result) = ordinary.join_next().await {
+            result.unwrap().unwrap();
+        }
+        settle().await;
+        assert_eq!(query_count(), 1);
+        tokio::time::advance(Duration::from_secs(5)).await;
+        settle().await;
+        assert_eq!(
+            query_count(),
+            2,
+            "status recovery was stranded after queue drain, major {major}"
+        );
+        plan.control(PeerControl::publication(publication(
+            major,
+            StatusPublication::Snapshot {
+                request: NonZeroU64::new(request).unwrap(),
+                generation,
+                status: status(server.identity(), 3),
+            },
+        )))
+        .await;
+        settle().await;
+        assert!(!subscription.needs_resync().unwrap());
+        assert_eq!(
+            subscription
+                .latest()
+                .unwrap()
+                .unwrap()
+                .parts()
+                .revision
+                .get(),
+            3
+        );
+        tokio::time::advance(Duration::from_secs(6)).await;
+        settle().await;
+        assert_eq!(query_count(), 2);
+        drop(subscription);
+        settle().await;
+        runtime.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn status_recovery_stops_when_subscription_or_connection_is_invalidated() {
+    for major in [1, 2] {
+        for stopped in [false, true] {
+            let (server, runtime, journal, plan) = setup(major, None).await;
+            let subscription = server
+                .queries(journal)
+                .unwrap()
+                .subscribe_status()
+                .await
+                .unwrap();
+            let (request, generation, _) = plan
+                .messages
+                .lock()
+                .unwrap()
+                .iter()
+                .find_map(status_request)
+                .unwrap();
+            plan.control(PeerControl::publication(publication(
+                major,
+                StatusPublication::ResyncRequired {
+                    request: NonZeroU64::new(request).unwrap(),
+                    generation,
+                },
+            )))
+            .await;
+            settle().await;
+            assert_eq!(
+                plan.messages
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter_map(status_request)
+                    .count(),
+                2
+            );
+            let retained = if stopped {
+                plan.control(PeerControl::Stopped).await;
+                settle().await;
+                assert!(matches!(
+                    *server.state().borrow(),
+                    spaceterm_client::api::ConnectionState::Stopped
+                ));
+                Some(subscription)
+            } else {
+                drop(subscription);
+                None
+            };
+            settle().await;
+            tokio::time::advance(Duration::from_secs(11)).await;
+            settle().await;
+            let queries: Vec<_> = plan
+                .messages
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(status_request)
+                .collect();
+            assert_eq!(queries.iter().filter(|&&(_, _, cancel)| !cancel).count(), 2);
+            assert_eq!(
+                queries.iter().filter(|&&(_, _, cancel)| cancel).count(),
+                usize::from(!stopped)
+            );
+            assert_eq!(plan.opens.load(Ordering::SeqCst), 1);
+            drop(retained);
+            settle().await;
+            runtime.shutdown().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn status_initial_and_resync_response_deadlines_schedule_one_replacement() {
     for major in [1, 2] {
         let (server, runtime, journal, plan) = setup(major, None).await;

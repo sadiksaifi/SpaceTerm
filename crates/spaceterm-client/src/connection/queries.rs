@@ -104,11 +104,12 @@ impl QueryHub {
                         let _ =
                             reply.send(Err(ClientFailure::new(ClientFailureClass::StaleAuthority)));
                     }
-                    Reply::Status(subscription, _) => {
+                    Reply::Status(subscription, refresh) => {
                         let _ = subscription.apply(StatusPublication::ResyncRequired {
                             request: NonZeroU64::new(request).unwrap_or(NonZeroU64::MIN),
                             generation: entry.info.attempt,
                         });
+                        refresh.deadline.send_replace(None);
                     }
                 }
             }
@@ -686,7 +687,8 @@ impl StatusResync for StatusRefresh {
                 };
                 server.dispatch_query(info, message).await
             }.await;
-            if result.is_err() {
+            // Queue rejection leaves the connection live. Keep its bounded retry deadline.
+            if result.is_err_and(|error| error.class() != ClientFailureClass::ResourceLimit) {
                 deadline.send_if_modified(|current| {
                     if *current == Some(next) {
                         *current = None;
