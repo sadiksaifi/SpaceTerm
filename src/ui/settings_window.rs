@@ -1102,6 +1102,8 @@ impl SettingsWindow {
             let position = usize::from(has_lead_group);
             rendered.insert(position.min(rendered.len()), heading);
         }
+        let enrollment = (section == SettingsSectionId::Servers)
+            .then(|| self.render_server_enrollment_action(cx));
         let unpair_notices = (section == SettingsSectionId::Servers)
             .then(|| self.render_unpair_notices(settings, group_spacing(appearance), cx))
             .flatten();
@@ -1113,6 +1115,7 @@ impl SettingsWindow {
             .gap(group_spacing(appearance))
             .children(notice)
             .children(unpair_notices)
+            .children(enrollment)
             .children(shortcut_search)
             .children(no_shortcuts)
             .children(rendered)

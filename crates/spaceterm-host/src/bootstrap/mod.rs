@@ -1,7 +1,5 @@
-//! Owned by pairing Job C. Implements this module after the H0 declaration freeze.
-
+//! Deliberate SSH Bootstrap adapters. Probes are read-only; native publication owns mutation.
 pub mod command;
-
+pub mod linger;
 pub mod probe;
-
 pub mod process;

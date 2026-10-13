@@ -5,6 +5,7 @@ mod domain;
 mod journal;
 mod pane;
 mod transport;
+pub use journal::MemoryJournal;
 pub use pane::FakePaneConnection;
 
 use crate::{
@@ -39,6 +40,35 @@ use std::{
     },
 };
 use tokio::sync::mpsc;
+
+/// Explicit remote-account facts for portable Bootstrap consumers. This fixture does not select
+/// a local OS adapter, inspect the test host or execute a service-manager operation.
+pub fn bootstrap_host_facts(
+    route: crate::pairing::bootstrap::BootstrapRoute,
+    registration: crate::pairing::bootstrap::BootstrapRegistration,
+) -> crate::pairing::bootstrap::BootstrapHostFacts {
+    use crate::pairing::bootstrap::*;
+    BootstrapHostFacts {
+        route,
+        account_uid: route.account_uid(),
+        os: BootstrapOs::Linux,
+        architecture: BootstrapArchitecture::X86_64,
+        os_version: HostVersion::new(22, 4, 0),
+        libc: BootstrapLibc::Glibc(HostVersion::new(2, 35, 0)),
+        kernel: HostVersion::new(5, 15, 0),
+        supervision: BootstrapSupervision::SystemdUser {
+            version: 249,
+            reachable: true,
+        },
+        registration,
+        storage: BootstrapPrerequisite::Available,
+        installation: BootstrapPrerequisite::Available,
+        linger: BootstrapLinger::Enabled,
+        sudo: BootstrapSudo::ResponseRequired,
+        authorization_agent: true,
+        background_items_allowed: true,
+    }
+}
 
 pub struct DeterministicKey(Ed25519KeyPair);
 impl DeterministicKey {
