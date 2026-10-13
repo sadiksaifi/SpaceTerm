@@ -684,7 +684,7 @@ fn quiescence_rejects_first_retirement_acceptance() {
     }
 }
 #[test]
-fn quiescence_rejects_first_git_retirement_even_after_started() {
+fn quiescence_allows_first_git_retirement_of_already_started_work() {
     for revoked in [false, true] {
         let mut h = Harness::new();
         h.register(binding(1));
@@ -728,7 +728,7 @@ fn quiescence_rejects_first_git_retirement_even_after_started() {
                 .unwrap();
             h.commit(p);
         }
-        let expected = quiesce(&mut h, revoked);
+        quiesce(&mut h, revoked);
         let context = h.rows.reduction(permit.binding(), true);
         let retirement = retirement_progress(
             permit.binding(),
@@ -767,16 +767,27 @@ fn quiescence_rejects_first_git_retirement_even_after_started() {
         })
         .unwrap();
         let tx = external_progress_parts(&h, permit.binding(), progress.clone(), context);
-        assert_class(validate_transaction_projection(&h.ledger, &tx), expected);
-        assert_class(
-            h.ledger.prepare_external_progress(
+        validate_transaction_projection(&h.ledger, &tx).unwrap();
+        let prepared = h
+            .ledger
+            .prepare_external_progress(
                 &binding(1),
                 permit.binding().id,
                 permit.binding().digest,
                 progress,
                 context,
-            ),
-            expected,
+            )
+            .unwrap();
+        h.commit(prepared);
+        assert_eq!(
+            h.ledger
+                .lookup(
+                    &binding(1),
+                    permit.binding().id,
+                    Some(permit.binding().digest)
+                )
+                .unwrap(),
+            OperationLookup::Pending
         );
     }
 }

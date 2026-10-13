@@ -138,6 +138,16 @@ pub struct RecoveryEdits {
     pub transactions: Vec<TransactionParts>,
 }
 pub trait ExternalWorkPort: Send + Sync {
+    /// One bounded recovery proposal against freshly recovered committed facts.
+    /// The state owner commits it and supplies the next basis. Trusted native
+    /// cleanup is comparison evidence, never synthesized by the extension.
+    fn prepare_recovery_step<'a>(
+        &'a self,
+        _recovered: &'a RecoveredState,
+        _cleanup: &'a [SessionCleanupObservation],
+    ) -> ServerFuture<'a, Result<Option<TransactionParts>, ServerFailure>> {
+        Box::pin(async { Ok(None) })
+    }
     fn cancel_reads(&self);
     fn finish_started_writes(&self) -> ServerFuture<'_, Result<(), ServerFailure>>;
     fn reconcile<'a>(

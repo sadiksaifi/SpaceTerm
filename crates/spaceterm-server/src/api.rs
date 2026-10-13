@@ -29,10 +29,17 @@
 //! store receipts. Native key delivery and runtime providers remain injected.
 //! The S1a handoff is not complete. Purpose-bound pairing admission, serialized
 //! `PairingMutation` planning, restricted history and ticket invalidation remain
-//! missing actor primitives. Started Git retirement, settlement and pre-Started
-//! revalidation remain unavailable through the production reducer composition.
-//! Bridges cannot compose those paths yet. Ordinary entry points cannot be
-//! reused with fabricated principals or streams.
+//! missing actor primitives. Ordinary entry points cannot be reused with
+//! fabricated principals or streams.
+//!
+//! Git's production provider is the `GitOrganizationPort` implementation for
+//! `ServerHandle`. `git_authority_snapshot`, `lookup_git_operation` and
+//! `reserve_confirmed_git` use the installed actor, canonical codec and ledger.
+//! `persist_prepared_git`, `barrier_and_revalidate_git` and `persist_started_git`
+//! establish the durable external prerequisite. `retire_started_git` joins exact
+//! cleanup. `complete_git` retains external progress and atomically commits final
+//! membership, allocation consumption, intent removal and the original outcome.
+//! These settlement requests remain available during quiescence, not new admission.
 
 use crate::adapters::{
     core::CorePorts,

@@ -1899,7 +1899,7 @@ fn inventory_version(
         .find(|v| v.id() == repository)
         .map(|v| v.version())
 }
-fn inventory_memberships(
+pub(crate) fn inventory_memberships(
     host: &dyn ServerGitHost,
     basis: &GitAuthoritySnapshot,
     inventory: &HostGitInventory,

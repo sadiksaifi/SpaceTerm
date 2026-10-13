@@ -301,6 +301,39 @@ pub fn validate_recovered_state(recovered: &RecoveredState) -> Result<(), Ledger
                                         LedgerFailureClass::InvalidExternalProgress,
                                     ));
                                 }
+                                if let Some(retirement) = progress_retirement(progress) {
+                                    let affected = intent.parts().affected.parts();
+                                    let target_matches = matches!(retirement.target(), crate::operations::AssessmentTarget::RemoveWorktree { scope: target, worktree }
+                                        if target == scope && worktree == intent.parts().action.worktree());
+                                    let hierarchy_matches = retirement.panes().len()
+                                        == affected.panes.len()
+                                        && retirement.panes().iter().all(|pane| {
+                                            affected.panes.iter().any(|old| {
+                                                let hierarchy = old.hierarchy;
+                                                let tag = affected
+                                                    .tabs
+                                                    .iter()
+                                                    .find(|v| v.id == hierarchy.tab)
+                                                    .and_then(|v| v.worktree);
+                                                pane.pane() == hierarchy.pane
+                                                    && pane.tab() == hierarchy.tab
+                                                    && pane.workspace() == hierarchy.workspace
+                                                    && pane.worktree() == tag
+                                                    && pane.invalidation_generation()
+                                                        > hierarchy.session_generation
+                                            })
+                                        });
+                                    let sessions: std::collections::BTreeSet<_> =
+                                        affected.panes.iter().filter_map(|v| v.session).collect();
+                                    let retired: std::collections::BTreeSet<_> =
+                                        retirement.sessions().iter().map(|v| v.session()).collect();
+                                    if !target_matches || !hierarchy_matches || sessions != retired
+                                    {
+                                        return Err(failure(
+                                            LedgerFailureClass::InvalidExternalProgress,
+                                        ));
+                                    }
+                                }
                             }
                             // H0 has no pairing-bound management intent slot. Native
                             // management has its own identity and is never fabricated.

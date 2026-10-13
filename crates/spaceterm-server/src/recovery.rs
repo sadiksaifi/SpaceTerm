@@ -168,6 +168,20 @@ pub(crate) async fn recover(
         };
         let cursor = CommitCursor::from_recovered(&recovered);
         let mut parts = cursor.parts().map_err(store_failure)?;
+        // A crash after allocation but before Prepared still owns burned IDs.
+        // Cancel that original AwaitingIntent and abandon its reservation together.
+        if matches!(progress.state(), ExternalProgressState::AwaitingIntent)
+            && recovered
+                .git_allocations
+                .iter()
+                .any(|v| v.binding() == record.binding)
+        {
+            parts.operation_writes.push(OperationWrite::GitAllocation(
+                spaceterm_core::worktrees::GitAllocationMutation::Abandon {
+                    binding: record.binding,
+                },
+            ));
+        }
         if let Some(basis) = basis {
             parts
                 .operation_writes
@@ -223,6 +237,46 @@ pub(crate) async fn recover(
             .validate_with(config.core.validator.as_ref())
             .map_err(store_failure)?;
     }
+    // Each external step uses a real durable recovery basis. Never apply an
+    // invented receipt to a shadow owner to plan later Git transitions.
+    let mut settled = false;
+    for _ in 0..256 {
+        let Some(parts) = external_work
+            .prepare_recovery_step(&recovered, &cleanup)
+            .await?
+        else {
+            settled = true;
+            break;
+        };
+        let cursor = CommitCursor::from_recovered(&recovered);
+        if parts.server != cursor.server
+            || parts.expected_store_revision != cursor.store
+            || parts.expected_organization_revision != cursor.organization
+            || parts.expected_epoch != cursor.epoch
+            || parts.resulting_epoch != cursor.epoch
+            || parts.expected_high_water != cursor.high_water
+        {
+            return Err(failure(ServerFailureClass::RecoveryRequired));
+        }
+        let transaction = Arc::new(
+            DurableTransaction::new_with_validation(parts, config.core.validator.as_ref())
+                .map_err(store_failure)?,
+        );
+        let receipt = checked_commit(&store, transaction).await?;
+        recovered = store.recover().await?;
+        recovered
+            .validate_with(config.core.validator.as_ref())
+            .map_err(store_failure)?;
+        if recovered.store_revision != receipt.store_revision
+            || recovered.organization.revision != receipt.organization_revision
+        {
+            return Err(failure(ServerFailureClass::RecoveryRequired));
+        }
+    }
+    if !settled {
+        return Err(failure(ServerFailureClass::Capacity));
+    }
+    config.core.ledger.recover(&recovered)?;
     let reduction = config
         .core
         .reducer
@@ -333,6 +387,21 @@ fn expected_cleanup(
     }
     for native in &recovered.native_retirements {
         insert(native.sessions())?;
+    }
+    for intent in &recovered.git_intents {
+        if matches!(
+            intent.phase(),
+            spaceterm_core::worktrees::GitIntentPhase::Started
+                | spaceterm_core::worktrees::GitIntentPhase::ExternalFinished
+        ) {
+            for pane in &intent.parts().affected.parts().panes {
+                if let Some(session) = pane.session {
+                    expected
+                        .entry(session)
+                        .or_insert(spaceterm_core::organization::RetirementReason::WorktreeRemoval);
+                }
+            }
+        }
     }
     if expected.len() > 64 {
         return Err(failure(ServerFailureClass::RecoveryRequired));

@@ -2684,6 +2684,38 @@ async fn native_status_keeps_last_known_facts_when_its_source_directory_disappea
     let fixture = NativeFixture::new("status-source-disappears");
     std::fs::write(fixture.main().join("change"), "test").unwrap();
     let actor = native_actor(&fixture);
+    // This regression is about failed source reads, not initial discovery. Seed
+    // the real observation before the refresh poller can race its first binding.
+    let basis = actor.snapshot.lock().unwrap().clone();
+    let source = basis.organization.state().panes[0]
+        .starting_directory
+        .clone();
+    let host = fixture.host.clone();
+    let observed_basis = basis.clone();
+    let inventory = tokio::task::spawn_blocking(move || {
+        host.inventory(&source, &observed_basis, &GitReadCancellation::default())
+    })
+    .await
+    .unwrap()
+    .unwrap()
+    .unwrap();
+    let destination = inventory.current;
+    let tab = basis.organization.state().tabs[0].id;
+    actor
+        .reconcile_inventory(
+            principal(1),
+            GitInventoryReconciliation {
+                basis,
+                inventory,
+                memberships: vec![GitInventoryMembership {
+                    tab,
+                    expected_version: FieldVersion::new(1),
+                    destination,
+                }],
+            },
+        )
+        .await
+        .unwrap();
     let service = GitService::new(
         server(),
         ServerEpoch::new(1),

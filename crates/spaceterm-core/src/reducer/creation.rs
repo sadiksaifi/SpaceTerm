@@ -429,7 +429,7 @@ pub(crate) fn plan_git_inventory(
     state: &ReducerState,
     inventory: &GitInventoryPatch,
     memberships: &[GitInventoryMembership],
-    context: &ReductionContext,
+    binding: Option<OperationBinding>,
 ) -> Result<ReductionPatch, ReducerFailure> {
     let old = state.organization();
     let server = old.server;
@@ -442,7 +442,14 @@ pub(crate) fn plan_git_inventory(
     {
         return Err(ReducerFailure::WrongServer);
     }
-    if state.creation_barrier() {
+    if state.creation_barrier()
+        && (binding.is_some()
+            || state.retirements.values().any(|v| !v.cleanup_confirmed())
+            || state
+                .native_retirements
+                .values()
+                .any(|v| !v.cleanup_confirmed()))
+    {
         return Ok(ReductionPatch::rejected(
             state,
             OperationFailure::BusyRetiring,
@@ -528,16 +535,17 @@ pub(crate) fn plan_git_inventory(
             })
         })
         .collect::<Result<Vec<_>, ReducerFailure>>()?;
-    let patch = WorktreeOrganizationPatch {
-        binding: context.binding(),
+    let repositories = [RepositoryRecord {
+        id: repository,
+        directory: inventory.directory.clone(),
+    }];
+    let patch = WorktreeUpdate {
+        binding,
         scope: RepositoryScope { server, repository },
         expected_inventory_version: inventory.expected_inventory_version,
-        repositories: vec![RepositoryRecord {
-            id: repository,
-            directory: inventory.directory.clone(),
-        }],
-        worktrees,
-        memberships,
+        repositories: &repositories,
+        worktrees: &worktrees,
+        memberships: &memberships,
         settlement: None,
     };
     plan_worktree_patch_with_allocation(state, &patch, Some(marks))
@@ -547,14 +555,66 @@ pub(crate) fn plan_worktree_patch(
     state: &ReducerState,
     patch: &WorktreeOrganizationPatch,
 ) -> Result<ReductionPatch, ReducerFailure> {
-    plan_worktree_patch_with_allocation(state, patch, None)
+    plan_worktree_patch_with_allocation(
+        state,
+        &WorktreeUpdate {
+            binding: Some(patch.binding),
+            scope: patch.scope,
+            expected_inventory_version: patch.expected_inventory_version,
+            repositories: &patch.repositories,
+            worktrees: &patch.worktrees,
+            memberships: &patch.memberships,
+            settlement: patch.settlement.as_ref(),
+        },
+        None,
+    )
+}
+
+// Borrowed planning inputs share the ordinary and service-owned inventory path.
+// Read-side metadata has no operation identity or external execution authority.
+struct WorktreeUpdate<'a> {
+    binding: Option<OperationBinding>,
+    scope: RepositoryScope,
+    expected_inventory_version: Option<FieldVersion>,
+    repositories: &'a [RepositoryRecord],
+    worktrees: &'a [(WorktreeRecord, bool)],
+    memberships: &'a [WorktreeMembershipEdit],
+    settlement: Option<&'a GitOrganizationSettlement>,
+}
+pub(crate) fn plan_server_memberships(
+    state: &ReducerState,
+    scope: RepositoryScope,
+    memberships: &[WorktreeMembershipEdit],
+) -> Result<ReductionPatch, ReducerFailure> {
+    let version = state
+        .organization()
+        .retained
+        .as_ref()
+        .ok_or(ReducerFailure::InvalidFacts)?
+        .repository_inventory_versions()
+        .iter()
+        .find(|v| v.id() == scope.repository)
+        .map(|v| v.version());
+    plan_worktree_patch_with_allocation(
+        state,
+        &WorktreeUpdate {
+            binding: None,
+            scope,
+            expected_inventory_version: version,
+            repositories: &[],
+            worktrees: &[],
+            memberships,
+            settlement: None,
+        },
+        None,
+    )
 }
 
 /// Only inventory planning can supply fresh marks here. Those identities are
 /// allocated and inserted in this transaction, never borrowed from a reservation.
 fn plan_worktree_patch_with_allocation(
     state: &ReducerState,
-    patch: &WorktreeOrganizationPatch,
+    patch: &WorktreeUpdate<'_>,
     fresh_marks: Option<IdentityHighWater>,
 ) -> Result<ReductionPatch, ReducerFailure> {
     if patch.repositories.len() > state.limits.repositories
@@ -589,7 +649,9 @@ fn plan_worktree_patch_with_allocation(
     }
     if patch.scope.validate().is_err()
         || patch.scope.server != state.organization().server
-        || !super::state::binding_fits(patch.binding, state.high_water, patch.scope.server)
+        || patch.binding.is_some_and(|binding| {
+            !super::state::binding_fits(binding, state.high_water, patch.scope.server)
+        })
     {
         return Err(ReducerFailure::WrongServer);
     }
@@ -618,8 +680,12 @@ fn plan_worktree_patch_with_allocation(
         if !matches!(
             settlement.phase,
             GitIntentPhase::Started | GitIntentPhase::ExternalFinished
-        ) || settlement.reservation.binding() != patch.binding
-            || state.git_allocations.get(&patch.binding.id) != Some(&settlement.reservation)
+        ) || settlement.reservation.binding()
+            != patch.binding.ok_or(ReducerFailure::InvalidFacts)?
+            || state
+                .git_allocations
+                .get(&patch.binding.ok_or(ReducerFailure::InvalidFacts)?.id)
+                != Some(&settlement.reservation)
         {
             return Ok(ReductionPatch::rejected(
                 state,
@@ -647,7 +713,7 @@ fn plan_worktree_patch_with_allocation(
         if state
             .retirements
             .values()
-            .filter(|v| v.binding() != patch.binding)
+            .filter(|v| Some(v.binding()) != patch.binding)
             .any(|v| v.panes().iter().any(|p| remove.contains(&p.pane())))
         {
             return Ok(ReductionPatch::rejected(
@@ -678,7 +744,7 @@ fn plan_worktree_patch_with_allocation(
             || state
                 .retirements
                 .values()
-                .any(|v| v.binding() == patch.binding && !v.cleanup_confirmed())
+                .any(|v| Some(v.binding()) == patch.binding && !v.cleanup_confirmed())
         {
             return Ok(ReductionPatch::rejected(
                 state,
@@ -686,7 +752,7 @@ fn plan_worktree_patch_with_allocation(
             ));
         }
         reduction = super::remove_hierarchy(state, &remove)?.into_reduction();
-    } else if state.creation_barrier() {
+    } else if state.creation_barrier() && fresh_marks.is_none() {
         return Ok(ReductionPatch::rejected(
             state,
             OperationFailure::BusyRetiring,
@@ -702,7 +768,7 @@ fn plan_worktree_patch_with_allocation(
     let reservation = patch.settlement.as_ref().map(|v| v.reservation.parts());
     // Compare identity-keyed values; upsert order is not an inventory change.
     let mut inventory_changed = false;
-    for repository in &patch.repositories {
+    for repository in patch.repositories {
         if repository.id != patch.scope.repository
             || repository.directory.server() != patch.scope.server
         {
@@ -722,7 +788,7 @@ fn plan_worktree_patch_with_allocation(
         org.repositories.retain(|v| v.id != repository.id);
         org.repositories.push(repository.clone());
     }
-    for (worktree, listed) in &patch.worktrees {
+    for (worktree, listed) in patch.worktrees {
         if worktree.repository != patch.scope.repository
             || worktree.id.server() != patch.scope.server
             || worktree.directory.server() != patch.scope.server
@@ -766,7 +832,7 @@ fn plan_worktree_patch_with_allocation(
             .worktree_inventory
             .push(WorktreeInventoryFacts::new(worktree.id, *listed, version));
     }
-    for edit in &patch.memberships {
+    for edit in patch.memberships {
         let Some(tab) = org.tabs.iter_mut().find(|v| v.id == edit.tab) else {
             return Ok(ReductionPatch::rejected(
                 state,
@@ -877,7 +943,12 @@ fn plan_worktree_patch_with_allocation(
             ));
             let control = if settlement.creator_still_authorized {
                 ControlRecord::Held {
-                    client: patch.binding.id.stream().client(),
+                    client: patch
+                        .binding
+                        .ok_or(ReducerFailure::InvalidFacts)?
+                        .id
+                        .stream()
+                        .client(),
                     generation,
                 }
             } else {
@@ -897,7 +968,12 @@ fn plan_worktree_patch_with_allocation(
                         pane: fallback.pane,
                         initial_grant: ControlGrant::new(
                             fallback.pane,
-                            patch.binding.id.stream().client(),
+                            patch
+                                .binding
+                                .ok_or(ReducerFailure::InvalidFacts)?
+                                .id
+                                .stream()
+                                .client(),
                             generation,
                         )
                         .map_err(|_| ReducerFailure::InvalidFacts)?,
@@ -907,14 +983,14 @@ fn plan_worktree_patch_with_allocation(
         reduction
             .candidate
             .git_allocations
-            .remove(&patch.binding.id);
+            .remove(&patch.binding.ok_or(ReducerFailure::InvalidFacts)?.id);
         reduction
             .candidate
             .retirements
-            .retain(|_, value| value.binding() != patch.binding);
+            .retain(|_, value| Some(value.binding()) != patch.binding);
         reduction.operations.push(OperationWrite::GitAllocation(
             GitAllocationMutation::Consume {
-                binding: patch.binding,
+                binding: patch.binding.ok_or(ReducerFailure::InvalidFacts)?,
             },
         ));
     }

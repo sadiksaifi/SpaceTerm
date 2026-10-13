@@ -156,8 +156,12 @@ impl OrganizationReducer {
     ) -> Result<PreparedReduction, ReducerFailure> {
         self.state.check_admission()?;
         self.state.check_principal(context)?;
-        let patch = match creation::plan_git_inventory(&self.state, inventory, memberships, context)
-        {
+        let patch = match creation::plan_git_inventory(
+            &self.state,
+            inventory,
+            memberships,
+            Some(context.binding()),
+        ) {
             Ok(patch) => patch,
             Err(ReducerFailure::QuotaExceeded) => {
                 ReductionPatch::rejected(&self.state, OperationFailure::Capacity)
@@ -165,6 +169,31 @@ impl OrganizationReducer {
             Err(error) => return Err(error),
         };
         self.prepare_patch(patch, Some(context.binding()))
+    }
+
+    /// Owning-server inventory reconciliation is metadata, not a user mutation.
+    /// It allocates through this reducer without manufacturing an operation ID.
+    pub fn prepare_server_git_inventory(
+        &self,
+        inventory: &GitInventoryPatch,
+        memberships: &[GitInventoryMembership],
+    ) -> Result<PreparedReduction, ReducerFailure> {
+        self.state.check_admission()?;
+        self.prepare_patch(
+            creation::plan_git_inventory(&self.state, inventory, memberships, None)?,
+            None,
+        )
+    }
+    pub fn prepare_server_worktree_memberships(
+        &self,
+        scope: RepositoryScope,
+        memberships: &[WorktreeMembershipEdit],
+    ) -> Result<PreparedReduction, ReducerFailure> {
+        self.state.check_admission()?;
+        self.prepare_patch(
+            creation::plan_server_memberships(&self.state, scope, memberships)?,
+            None,
+        )
     }
 
     pub fn prepare_git_allocation(

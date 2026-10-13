@@ -11,3 +11,5 @@ pub mod writes;
 pub mod recovery;
 
 pub mod directories;
+
+pub mod dispatch;

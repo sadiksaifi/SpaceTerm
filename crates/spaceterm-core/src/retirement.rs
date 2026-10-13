@@ -328,9 +328,9 @@ impl RetirementDescriptor {
                     worktree,
                 }) => pane.workspace() == workspace && pane.worktree() == Some(worktree),
                 AssessmentTarget::EndAllSessions(_) => true,
-                AssessmentTarget::RemoveWorktree { worktree, .. } => {
-                    pane.worktree() == Some(worktree)
-                }
+                // Git's exact intent also includes directory-contained work whose
+                // saved tag differs. The reducer compares that complete hierarchy.
+                AssessmentTarget::RemoveWorktree { .. } => true,
             };
             if !target_matches || panes.insert(pane.pane(), *pane).is_some() {
                 return Err(RetirementRecordError::InvalidBinding);
