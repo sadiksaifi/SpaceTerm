@@ -18,6 +18,14 @@ pub struct ServerBuildMetadata {
     pub native_identifier: &'static str,
 }
 
+/// The validated compiled version shared by metadata, help and version queries.
+/// Runtime environment variables cannot select a different artifact identity.
+pub fn version() -> Result<BuildVersion, DistributionFailure> {
+    BuildVersion::parse(
+        option_env!("SPACETERM_SERVER_VERSION").ok_or(DistributionFailure::InvalidRecord)?,
+    )
+}
+
 /// Owning protocol and store modules supply their implemented compatibility values.
 /// The caller routes `--distribution-metadata` here before ordinary startup composition.
 pub fn encode(
@@ -35,9 +43,7 @@ pub fn encode(
         Some("linux-x86_64") => ServerPlatform::LinuxX86_64,
         _ => return Err(DistributionFailure::IdentityMismatch),
     };
-    let version = BuildVersion::parse(
-        option_env!("SPACETERM_SERVER_VERSION").ok_or(DistributionFailure::InvalidRecord)?,
-    )?;
+    let version = version()?;
     let build_commit =
         option_env!("SPACETERM_SERVER_COMMIT").ok_or(DistributionFailure::InvalidRecord)?;
     if build_commit.len() != 40

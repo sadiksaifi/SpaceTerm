@@ -37,9 +37,9 @@ use crate::ui::sidebar_window::form::{CaptionTone, action_button, badge, row_hor
 use crate::worktrees::path_template::validate;
 use copy::{Confirmation, StatusTone};
 use model::{
-    BindScope, IncompatibleSide, InstalledServers, PendingUnpair, RemoteAccess, ServerKey,
-    ServerPermissionKind, ServerRequest, ServerStatus, ServerSummary, ServerTextSetting, Servers,
-    ServersSnapshot, SettingEditState,
+    BindScope, BoundServerRequest, IncompatibleSide, InstalledServers, PendingUnpair, RemoteAccess,
+    ServerKey, ServerPermissionKind, ServerRequest, ServerStatus, ServerSummary, ServerTextSetting,
+    Servers, ServersSnapshot, SettingEditState,
 };
 
 /// The outline level of the selected server's name. The groups that present it sit one level
@@ -163,6 +163,7 @@ impl SentLocation {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct SyncedText {
     server: ServerKey,
+    pairing: spaceterm_core::pairing::LocalPairingKey,
     text: SharedString,
     revision: u64,
 }
@@ -280,18 +281,32 @@ impl ServersSection {
 
     fn receive(&mut self, snapshot: ServersSnapshot) {
         self.dismissed.retain(|id| {
-            snapshot
-                .pending_unpairs
-                .iter()
-                .any(|pending| pending.id == *id)
+            snapshot.pending_unpairs.iter().any(|pending| {
+                pending.id == *id
+                    && self.snapshot.pending_unpairs.iter().any(|previous| {
+                        previous.id == *id
+                            && previous.original_pairing == pending.original_pairing
+                            && previous.operation == pending.operation
+                    })
+            })
         });
-        self.proposed_scopes
-            .retain(|key, _| snapshot.servers.iter().any(|server| server.key == *key));
+        let same_pairing = |server: &ServerSummary| {
+            self.snapshot
+                .servers
+                .iter()
+                .any(|previous| previous.key == server.key && previous.pairing == server.pairing)
+        };
+        self.proposed_scopes.retain(|key, _| {
+            snapshot
+                .servers
+                .iter()
+                .any(|server| server.key == *key && same_pairing(server))
+        });
         self.worktree.sent.retain(|key, sent| {
             snapshot
                 .servers
                 .iter()
-                .find(|server| server.key == *key)
+                .find(|server| server.key == *key && same_pairing(server))
                 .and_then(|server| server.worktree_location.as_ref())
                 .is_some_and(|setting| !sent.answered(setting))
         });
@@ -419,9 +434,10 @@ fn status_action(server: &ServerSummary) -> Option<StatusAction> {
     let host = server.route.manages_host();
     match server.status {
         ServerStatus::Stopped => Some(StatusAction::Start { enabled: host }),
-        ServerStatus::Running | ServerStatus::Starting | ServerStatus::Incompatible(_) => {
-            Some(StatusAction::Stop { enabled: host })
-        }
+        ServerStatus::Running
+        | ServerStatus::Starting
+        | ServerStatus::Incompatible(_)
+        | ServerStatus::UnsupportedProfiles => Some(StatusAction::Stop { enabled: host }),
         ServerStatus::Stopping => Some(StatusAction::Stop { enabled: false }),
         ServerStatus::Connecting | ServerStatus::Offline | ServerStatus::Updating { .. } => None,
     }
@@ -447,6 +463,14 @@ fn version_action(server: &ServerSummary) -> VersionAction {
         Some(version) => VersionAction::Update {
             version: version.clone(),
             enabled: server.route.manages_host()
+                && server
+                    .installations
+                    .activation
+                    .as_ref()
+                    .is_some_and(|assessment| {
+                        server.activation_matches(assessment)
+                            && &assessment.candidate.version == version
+                    })
                 && matches!(
                     server.status,
                     ServerStatus::Running
@@ -516,9 +540,19 @@ impl SettingsWindow {
 
     /// Sends one request to the installed servers.
     fn send_server_request(&mut self, request: ServerRequest, cx: &mut Context<Self>) {
+        let Some(request) = BoundServerRequest::bind(request, &self.servers.snapshot) else {
+            return;
+        };
+        self.send_bound_server_request(request, cx);
+    }
+
+    fn send_bound_server_request(&mut self, request: BoundServerRequest, cx: &mut Context<Self>) {
         let Some(servers) = self.servers.source.clone() else {
             return;
         };
+        if !request.still_matches(servers.read(cx).snapshot()) {
+            return;
+        }
         let requests = servers.read(cx).requests();
         requests.send(request, cx);
     }
@@ -677,7 +711,7 @@ impl SettingsWindow {
         let guidance = |text: SharedString| Some((text, CaptionTone::Guidance));
         match row {
             SettingsRowId::ServerStatus => {
-                let tone = if matches!(server.status, ServerStatus::Incompatible(_)) {
+                let tone = if matches!(server.status, ServerStatus::Incompatible(_) | ServerStatus::UnsupportedProfiles) {
                     CaptionTone::Warning
                 } else {
                     CaptionTone::Guidance
@@ -1272,9 +1306,13 @@ impl SettingsWindow {
                         version: version.clone(),
                         enabled: true,
                     };
+                    let Some(assessment) = server.installations.activation.clone() else {
+                        return;
+                    };
                     let request = ServerRequest::InstallUpdate {
                         server: key.clone(),
                         version: version.clone(),
+                        assessment,
                     };
                     settings.present_confirmation(
                         confirmation,
@@ -1339,6 +1377,9 @@ impl SettingsWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let Some(bound) = BoundServerRequest::bind(request, &self.servers.snapshot) else {
+            return;
+        };
         let confirm = ModalAction::new(
             true,
             confirmation.confirm,
@@ -1387,14 +1428,15 @@ impl SettingsWindow {
             let _ = owner.update(cx, |settings, cx| {
                 // Another window may have unpaired the server, or its connection or state may have
                 // changed, since the person was asked.
-                let still_allowed = request
+                let still_allowed = bound
+                    .request
                     .server()
                     .and_then(|server| settings.servers.find(server))
                     .is_some_and(&allowed);
-                if !still_allowed {
+                if !still_allowed || !bound.still_matches(&settings.servers.snapshot) {
                     return;
                 }
-                settings.send_server_request(request, cx);
+                settings.send_bound_server_request(bound, cx);
                 cx.notify();
             });
         });
@@ -1532,7 +1574,9 @@ impl SettingsWindow {
     ) {
         let field = &mut self.servers.worktree;
         let Some(setting) = &server.worktree_location else {
-            if field.synced.as_ref().map(|synced| &synced.server) != Some(&server.key) {
+            if !field.synced.as_ref().is_some_and(|synced| {
+                synced.server == server.key && synced.pairing == server.pairing
+            }) {
                 field
                     .input
                     .update(cx, |input, cx| input.set_value(String::new(), cx));
@@ -1549,7 +1593,7 @@ impl SettingsWindow {
         };
         let current = SharedString::from(field.input.read(cx).value().to_owned());
         let resting = match &field.synced {
-            Some(synced) if synced.server == server.key => {
+            Some(synced) if synced.server == server.key && synced.pairing == server.pairing => {
                 current == synced.text || current == desired
             }
             _ => true,
@@ -1566,6 +1610,7 @@ impl SettingsWindow {
         }
         field.synced = Some(SyncedText {
             server: server.key.clone(),
+            pairing: server.pairing.clone(),
             text: desired,
             revision: setting.revision,
         });
@@ -1582,7 +1627,7 @@ impl SettingsWindow {
         let Some(synced) = self.servers.worktree.synced.clone() else {
             return;
         };
-        if synced.server != server.key || !server.connected() {
+        if synced.server != server.key || synced.pairing != server.pairing || !server.connected() {
             return;
         }
         let text = SharedString::from(self.servers.worktree.input.read(cx).value().to_owned());
@@ -1639,6 +1684,7 @@ impl SettingsWindow {
             .update(cx, |input, cx| input.set_value(text, cx));
         self.servers.worktree.synced = Some(SyncedText {
             server: server.key.clone(),
+            pairing: server.pairing.clone(),
             text: value,
             revision: setting.revision,
         });
