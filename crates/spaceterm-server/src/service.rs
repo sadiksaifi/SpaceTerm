@@ -55,6 +55,14 @@ impl OperationReply {
     }
 }
 pub(crate) enum ActorRequest {
+    OrganizationSnapshot {
+        principal: VerifiedPrincipal,
+        major: u32,
+        request: u64,
+        generation: u64,
+        maximum_payload_bytes: usize,
+        reply: Reply<crate::publication::SnapshotTransfer>,
+    },
     Register {
         principal: VerifiedPrincipal,
         reply: Reply<ConnectionAccessSnapshot>,
@@ -346,6 +354,7 @@ impl RecoveredServer {
             worker,
         )
         .await?;
+        let publication = crate::publication::PublicationHub::new(config.core.reducer.snapshot())?;
         let registry = RuntimeRegistry::new(config.limits.runtime_owners, config.cleanup.clone())?;
         let (requests, incoming) = mpsc::channel(config.limits.actor_requests);
         let (lifecycle, lifecycle_incoming) = mpsc::channel(64);
@@ -360,6 +369,8 @@ impl RecoveredServer {
             snapshot: snapshot_received,
         };
         let actor = Actor {
+            publication,
+            pending_publication: None,
             config,
             store: Some(recovered.store),
             cursor: recovered.cursor,
@@ -476,6 +487,8 @@ struct ShutdownState {
     replies: Vec<Reply<ShutdownReport>>,
 }
 struct Actor {
+    publication: crate::publication::PublicationHub,
+    pending_publication: Option<(CommitReceipt, Option<Arc<OrganizationDelta>>)>,
     config: ServerConfig,
     store: Option<StoreWorker>,
     cursor: CommitCursor,
@@ -685,6 +698,24 @@ impl Actor {
     }
     fn request(&mut self, request: ActorRequest) {
         match request {
+            ActorRequest::OrganizationSnapshot {
+                principal,
+                major,
+                request,
+                generation,
+                maximum_payload_bytes,
+                reply,
+            } => {
+                let result = self.check_principal(principal, false).and_then(|_| {
+                    self.publication.begin_snapshot(
+                        major,
+                        request,
+                        generation,
+                        maximum_payload_bytes,
+                    )
+                });
+                let _ = reply.send(result);
+            }
             ActorRequest::Register { principal, reply } => {
                 let result = self.register(principal);
                 let _ = reply.send(result);
@@ -2240,10 +2271,7 @@ impl Actor {
                     }
                     Ok(())
                 })();
-                if result.is_ok() {
-                    self.snapshot
-                        .send_replace(self.config.core.reducer.snapshot());
-                }
+                let result = result.and_then(|_| self.publish_installed());
                 let binding = match &request {
                     OwnedRetirement::Operation(descriptor) => Some(descriptor.binding()),
                     OwnedRetirement::Native(_) => None,
@@ -2328,10 +2356,8 @@ impl Actor {
                 });
                 self.busy = false;
                 self.delivery_pending = None;
-                if result.is_ok() {
-                    self.snapshot
-                        .send_replace(self.config.core.reducer.snapshot());
-                } else {
+                let result = result.and_then(|_| self.publish_installed());
+                if result.is_err() {
                     self.enter_recovery();
                 }
                 reply.send(result.map(|_| response));
@@ -2439,10 +2465,8 @@ impl Actor {
                 if let Some(reply) = reply {
                     self.busy = false;
                     self.delivery_pending = None;
-                    if result.is_ok() {
-                        self.snapshot
-                            .send_replace(self.config.core.reducer.snapshot());
-                    } else {
+                    let result = result.and_then(|_| self.publish_installed());
+                    if result.is_err() {
                         self.enter_recovery();
                     }
                     reply.send(result.and_then(|_| {
@@ -2716,8 +2740,20 @@ impl Actor {
                 if let Err(error) = result {
                     self.shutdown_error = Some(error);
                 }
+                self.drain_external_work();
             }
         }
+    }
+    fn publish_installed(&mut self) -> Result<(), ServerFailure> {
+        let snapshot = self.config.core.reducer.snapshot();
+        if let Some((receipt, delta)) = self.pending_publication.take() {
+            self.publication
+                .committed(&receipt, snapshot.clone(), delta)?;
+        }
+        if self.snapshot.borrow().state().revision != snapshot.state().revision {
+            self.snapshot.send_replace(snapshot);
+        }
+        Ok(())
     }
     fn committed(&mut self, disposition: CommitDisposition) {
         let Some(pending) = self.pending.take() else {
@@ -2741,6 +2777,13 @@ impl Actor {
                     self.enter_recovery();
                     return;
                 }
+                let delta = match &pending.action {
+                    CommitAction::Completed { reduction, .. }
+                    | CommitAction::Startup { reduction, .. }
+                    | CommitAction::PairingCompleted { reduction, .. } => reduction.delta.clone(),
+                    _ => None,
+                };
+                self.pending_publication = Some((receipt, delta));
                 let publication_barrier = matches!(&pending.action, CommitAction::PairingCompleted { revoked_clients, .. } if !revoked_clients.is_empty())
                     || matches!(&pending.action, CommitAction::Completed { control: Some(pane), .. } if self.registry.as_ref().is_some_and(|v| v.contains_pane(*pane)))
                     || matches!(
@@ -2752,9 +2795,11 @@ impl Actor {
                                 ..
                             }
                     );
-                if !publication_barrier {
-                    self.snapshot
-                        .send_replace(self.config.core.reducer.snapshot());
+                if !publication_barrier && let Err(error) = self.publish_installed() {
+                    reject_action(pending.action, error);
+                    self.busy = false;
+                    self.enter_recovery();
+                    return;
                 }
                 self.busy = publication_barrier;
                 match pending.action {
@@ -4034,13 +4079,6 @@ impl Actor {
                 }
             }
         }
-        self.external_work.cancel_reads();
-        let work = self.external_work.clone();
-        let events = self.events.clone();
-        tokio::spawn(async move {
-            let result = work.finish_started_writes().await;
-            let _ = events.send(Event::WritesFinished(result)).await;
-        });
         if let Some(listeners) = self.listeners.clone() {
             let events = self.events.clone();
             tokio::spawn(async move {
@@ -4049,7 +4087,19 @@ impl Actor {
             });
         } else {
             self.listeners_closed = true;
+            self.drain_external_work();
         }
+    }
+    fn drain_external_work(&mut self) {
+        // Listener close joins connection admission and its transports. Started
+        // writes retain their original durable authority after those joins.
+        self.external_work.cancel_reads();
+        let work = self.external_work.clone();
+        let events = self.events.clone();
+        tokio::spawn(async move {
+            let result = work.finish_started_writes().await;
+            let _ = events.send(Event::WritesFinished(result)).await;
+        });
     }
     fn enter_recovery(&mut self) {
         self.phase.send_replace(ServicePhase::RecoveryRequired);

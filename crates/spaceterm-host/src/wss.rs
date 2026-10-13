@@ -24,7 +24,7 @@ use crate::transport::{
     PendingConnection, SendGuard, TransportError, TransportFuture, TransportRoute,
 };
 
-type Socket = WebSocketStream<TlsStream<TcpStream>>;
+type Socket = WebSocketStream<TlsStream<crate::transport::ProgressIo<TcpStream>>>;
 
 /// Explicit remote-access enablement, reconstructed only from the owning Server's durable setting.
 ///
@@ -177,7 +177,7 @@ impl WssListener {
                 let websocket = tokio::time::timeout_at(deadline, async {
                     let tls = self
                         .tls
-                        .accept(tcp)
+                        .accept(crate::transport::ProgressIo::new(tcp))
                         .await
                         .map_err(|_| TransportError::TlsIdentityRejected)?;
                     accept_async_with_config(
@@ -246,6 +246,7 @@ pub struct WssTransport {
     state: ConnectionState,
     limit: MessageLimit,
     facts: PeerFacts,
+    write_progress: tokio::sync::watch::Receiver<Instant>,
 }
 
 impl WssTransport {
@@ -254,13 +255,15 @@ impl WssTransport {
         limit: MessageLimit,
         pin: Option<EnrolledServerKey>,
     ) -> Result<Self, TransportError> {
-        let native = socket2::SockRef::from(socket.get_ref().get_ref().0)
+        let native = socket2::SockRef::from(socket.get_ref().get_ref().0.get_ref())
             .try_clone()
             .map_err(|_| TransportError::Unavailable)?;
+        let write_progress = socket.get_ref().get_ref().0.progress();
         let (writer, reader) = socket.split();
         Ok(Self {
             writer: Mutex::new(Some(writer)),
             reader: Mutex::new(Some(reader)),
+            write_progress,
             state: ConnectionState::with_socket(native),
             limit,
             facts: PeerFacts {
@@ -301,7 +304,7 @@ impl WssTransport {
                 .await
                 .map_err(|_| TransportError::Unavailable)?;
             let tls = connector
-                .connect(name, tcp)
+                .connect(name, crate::transport::ProgressIo::new(tcp))
                 .await
                 .map_err(|_| TransportError::TlsIdentityRejected)?;
             let (socket, response) = client_async_with_config(
@@ -322,6 +325,9 @@ impl WssTransport {
 }
 
 impl MessageTransport for WssTransport {
+    fn write_progress(&self) -> Option<tokio::sync::watch::Receiver<Instant>> {
+        Some(self.write_progress.clone())
+    }
     fn peer_facts(&self) -> PeerFacts {
         self.facts
     }

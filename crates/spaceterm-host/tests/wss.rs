@@ -77,9 +77,19 @@ async fn wss_binary_round_trip_uses_the_enrolled_key_and_disabling_closes_the_li
     let client = client.unwrap();
     let server = server.unwrap().finish_authentication().unwrap();
     assert_eq!(client.peer_facts().pinned_server_key, Some(pin));
+    let mut client_progress = client
+        .write_progress()
+        .expect("native TCP progress below TLS");
+    client_progress.borrow_and_update();
     client.send(b"envelope").await.unwrap();
+    assert!(client_progress.has_changed().unwrap());
     assert_eq!(server.recv().await.unwrap(), Some(b"envelope".to_vec()));
+    let mut server_progress = server
+        .write_progress()
+        .expect("native TCP progress below TLS");
+    server_progress.borrow_and_update();
     server.send(b"reply").await.unwrap();
+    assert!(server_progress.has_changed().unwrap());
     assert_eq!(client.recv().await.unwrap(), Some(b"reply".to_vec()));
     listener.disable().await;
     assert!(tokio::net::TcpStream::connect(address).await.is_err());

@@ -310,6 +310,27 @@ impl ServerHandle {
     pub fn subscribe_snapshot(&self) -> watch::Receiver<Arc<OrganizationSnapshot>> {
         self.snapshot.clone()
     }
+    /// Plan one bounded organization transfer from the committed actor hub.
+    /// A transfer is read-only and cannot establish effect reconciliation.
+    pub async fn organization_snapshot(
+        &self,
+        principal: VerifiedPrincipal,
+        major: u32,
+        request: u64,
+        generation: u64,
+        maximum_payload_bytes: usize,
+    ) -> Result<crate::publication::SnapshotTransfer, ServerFailure> {
+        let (reply, result) = oneshot::channel();
+        self.send(ActorRequest::OrganizationSnapshot {
+            principal,
+            major,
+            request,
+            generation,
+            maximum_payload_bytes,
+            reply,
+        })?;
+        receive(result).await
+    }
     pub async fn register(
         &self,
         principal: VerifiedPrincipal,

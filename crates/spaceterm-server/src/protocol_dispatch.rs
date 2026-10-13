@@ -6,6 +6,7 @@ use crate::{
     api::{AuthenticatedSession, ServerHandle, VerifiedPrincipal},
     connection::{AuthenticatedPeer, Authenticator, PeerConnection},
     contracts::*,
+    egress::{ConnectionEgress, EgressBudget, EgressReservation},
     failure::failure,
     listeners::ConnectionDispatchPort,
 };
@@ -13,7 +14,7 @@ use spaceterm_core::management::{ServerStatus, StatusPublication, StatusQuery};
 use spaceterm_protocol::{
     ProtocolError,
     codec::Payload,
-    convert::management,
+    convert::{management, organization},
     wire::{common, v1, v2},
 };
 use std::{num::NonZeroU64, sync::Arc};
@@ -204,6 +205,7 @@ pub struct ProtocolDispatcher {
     pairing: Option<crate::pairing::service::PairingService>,
     messages: Arc<Semaphore>,
     bytes: Arc<Semaphore>,
+    egress: Arc<EgressBudget>,
 }
 impl ProtocolDispatcher {
     /// The native/actor status producer supplies this validated bounded feed.
@@ -222,7 +224,12 @@ impl ProtocolDispatcher {
             pairing: None,
             messages: Arc::new(Semaphore::new(MAX_DECODED_DISPATCH_MESSAGES)),
             bytes: Arc::new(Semaphore::new(MAX_DECODED_DISPATCH_BYTES)),
+            egress: EgressBudget::new(),
         }
+    }
+    pub fn with_egress_budget(mut self, budget: Arc<EgressBudget>) -> Self {
+        self.egress = budget;
+        self
     }
     /// Select pairing's additive restricted grammar before receiving any frame.
     /// A failed decode never falls back to another grammar or ordinary dispatch.
@@ -248,21 +255,48 @@ impl ProtocolDispatcher {
         peer: &mut AuthenticatedPeer,
         handle: ServerHandle,
     ) -> Result<(), ServerFailure> {
+        let mut egress = ConnectionEgress::new(self.egress.clone());
         let mut status = self.status.clone();
+        let mut organization = handle.subscribe_snapshot();
+        let mut organization_query: Option<organization::OrganizationQuery> = None;
+        let mut awaiting_organization_resync = false;
+        let mut organization_resyncs = 0u8;
         let mut subscription: Option<StatusQuery> = None;
         let mut sent: Option<(spaceterm_core::authority::ServerEpoch, NonZeroU64)> = None;
         loop {
             enum Wake {
                 Message(Option<Vec<u8>>),
                 Status,
+                Organization,
+            }
+            if *peer.closing.borrow() {
+                return Ok(());
             }
             let wake = tokio::select! {
-                biased;
                 _ = peer.closing.wait_for(|value| *value) => return Ok(()),
                 result = peer.transport.recv() => Wake::Message(result.map_err(transport_failure)?),
                 changed = status.changed(), if subscription.is_some() => { changed.map_err(|_| failure(ServerFailureClass::RuntimeUnavailable))?; Wake::Status },
+                changed = organization.changed(), if organization_query.is_some() && !awaiting_organization_resync => { changed.map_err(|_| failure(ServerFailureClass::RuntimeUnavailable))?; Wake::Organization },
             };
             match wake {
+                Wake::Organization => {
+                    let query = organization_query
+                        .ok_or_else(|| failure(ServerFailureClass::ScopeMismatch))?;
+                    organization.borrow_and_update();
+                    let PeerConnection::Ordinary(session) = &mut peer.connection else {
+                        return Err(failure(ServerFailureClass::Authentication));
+                    };
+                    awaiting_organization_resync = !self
+                        .send_organization(
+                            session,
+                            &peer.transport,
+                            &handle,
+                            query,
+                            &mut egress,
+                            &mut organization_resyncs,
+                        )
+                        .await?;
+                }
                 Wake::Status => {
                     let query =
                         subscription.ok_or_else(|| failure(ServerFailureClass::StaleAuthority))?;
@@ -290,7 +324,7 @@ impl ProtocolDispatcher {
                         return Err(failure(ServerFailureClass::Authentication));
                     };
                     sent = Some(
-                        self.send_status(session, &peer.transport, publication)
+                        self.send_status(session, &peer.transport, publication, &mut egress)
                             .await?,
                     );
                 }
@@ -335,6 +369,29 @@ impl ProtocolDispatcher {
                         PeerConnection::Ordinary(session) => {
                             self.authenticator.check_current(session.principal)?;
                             let payload = session.codec.decode(&bytes).map_err(protocol_failure)?;
+                            if let Some(query) = organization_action(&payload)? {
+                                if organization_query.is_some_and(|old| {
+                                    (old.request == query.request
+                                        && old.generation > query.generation)
+                                        || (awaiting_organization_resync
+                                            && query.generation <= old.generation)
+                                }) {
+                                    return Err(failure(ServerFailureClass::StaleAuthority));
+                                }
+                                organization.borrow_and_update();
+                                awaiting_organization_resync = !self
+                                    .send_organization(
+                                        session,
+                                        &peer.transport,
+                                        &handle,
+                                        query,
+                                        &mut egress,
+                                        &mut organization_resyncs,
+                                    )
+                                    .await?;
+                                organization_query = Some(query);
+                                continue;
+                            }
                             let action = status_action(&payload, session.principal)?;
                             match action {
                                 Some(StatusAction::Cancel {
@@ -364,7 +421,14 @@ impl ProtocolDispatcher {
                                             &snapshot,
                                         )
                                         .map_err(protocol_failure)?;
-                                        self.send(session, &peer.transport, &payload).await?;
+                                        self.send(
+                                            session,
+                                            &peer.transport,
+                                            &payload,
+                                            &mut egress,
+                                            None,
+                                        )
+                                        .await?;
                                         subscription = None;
                                         sent = None;
                                     } else {
@@ -374,8 +438,13 @@ impl ProtocolDispatcher {
                                             status: snapshot,
                                         };
                                         sent = Some(
-                                            self.send_status(session, &peer.transport, publication)
-                                                .await?,
+                                            self.send_status(
+                                                session,
+                                                &peer.transport,
+                                                publication,
+                                                &mut egress,
+                                            )
+                                            .await?,
                                         );
                                         subscription = query.subscribe.then_some(query);
                                     }
@@ -383,12 +452,23 @@ impl ProtocolDispatcher {
                                 None => {
                                     // One sequential request is stricter than the
                                     // four-effectful-request per-connection ceiling.
+                                    let reserved = effectful_reply(&payload)
+                                        .then(|| egress.reserve_operation_reply())
+                                        .transpose()
+                                        .map_err(egress_failure)?;
                                     if let Some(response) = self
                                         .ordinary
                                         .dispatch(session.principal, payload, handle.clone())
                                         .await?
                                     {
-                                        self.send(session, &peer.transport, &response).await?;
+                                        self.send(
+                                            session,
+                                            &peer.transport,
+                                            &response,
+                                            &mut egress,
+                                            reserved,
+                                        )
+                                        .await?;
                                     }
                                 }
                             }
@@ -398,11 +478,126 @@ impl ProtocolDispatcher {
             }
         }
     }
+    async fn send_organization(
+        &self,
+        session: &mut AuthenticatedSession,
+        transport: &Arc<dyn spaceterm_host::transport::MessageTransport>,
+        handle: &ServerHandle,
+        query: organization::OrganizationQuery,
+        egress: &mut ConnectionEgress,
+        resyncs: &mut u8,
+    ) -> Result<bool, ServerFailure> {
+        let mut transfer = handle
+            .organization_snapshot(
+                session.principal,
+                session.codec.major(),
+                query.request.get(),
+                query.generation,
+                // Both profiles need at most 128 framing bytes: fixed binding,
+                // direction, purpose, major, a full u64 sequence, length prefixes
+                // and Ed25519 signature under the 2 MiB envelope ceiling.
+                session
+                    .codec
+                    .limits()
+                    .management_bytes
+                    .min(session.codec.limits().frame_bytes.saturating_sub(128)),
+            )
+            .await?;
+        loop {
+            let result = match transfer.next_page() {
+                Ok(Some(page)) => self
+                    .send_snapshot_page(session, transport, page, egress)
+                    .await
+                    .map(|_| false),
+                Ok(None) => Ok(true),
+                Err(error) => Err(error),
+            };
+            match result {
+                Ok(true) => return Ok(true),
+                Ok(false) => {}
+                Err(error) if error.class == ServerFailureClass::StaleAuthority => {
+                    // A partially staged client graph can only be replaced by a
+                    // fresh request generation after an explicit reset marker.
+                    if *resyncs != 0 {
+                        return Err(failure(ServerFailureClass::Capacity));
+                    }
+                    *resyncs += 1;
+                    let current = handle.snapshot();
+                    let payload = match session.codec.major() {
+                        1 => Payload::Major1(v1::Message {
+                            kind: Some(v1::message::Kind::OrganizationResync(
+                                v1::OrganizationResync {
+                                    request: query.request.get(),
+                                    request_generation: query.generation,
+                                    epoch: current.epoch().get(),
+                                    revision: current.state().revision.get(),
+                                },
+                            )),
+                        }),
+                        2 => Payload::Major2(v2::Message {
+                            kind: Some(v2::message::Kind::OrganizationResync(
+                                v2::OrganizationResync {
+                                    request: query.request.get(),
+                                    request_generation: query.generation,
+                                    epoch: current.epoch().get(),
+                                    revision: current.state().revision.get(),
+                                },
+                            )),
+                        }),
+                        _ => return Err(failure(ServerFailureClass::ScopeMismatch)),
+                    };
+                    self.send(session, transport, &payload, egress, None)
+                        .await?;
+                    return Ok(false);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    async fn send_snapshot_page(
+        &self,
+        session: &mut AuthenticatedSession,
+        transport: &Arc<dyn spaceterm_host::transport::MessageTransport>,
+        page: crate::publication::SnapshotPage,
+        egress: &mut ConnectionEgress,
+    ) -> Result<(), ServerFailure> {
+        egress
+            .enqueue(OutboundMessage::SnapshotPart(page), None)
+            .map_err(egress_failure)?;
+        self.authenticator.check_current(session.principal)?;
+        let access = ConnectionAccessSnapshot {
+            server: session.principal.server(),
+            device: session.principal.device(),
+            pairing: session.principal.pairing(),
+            client: session.principal.client(),
+            binding: session.principal.binding(),
+            epoch: session.principal.epoch(),
+            reconciled_revision: spaceterm_core::authority::OrganizationRevision::new(0),
+            effects_enabled: false,
+        };
+        let pending = egress
+            .take_next(&access)
+            .ok_or_else(|| failure(ServerFailureClass::StaleAuthority))?;
+        let id = pending.id();
+        let result = async {
+            let pending = pending.snapshot_payload()?;
+            self.authenticator.check_current(session.principal)?;
+            let bytes = session
+                .codec
+                .encode(pending.payload())
+                .map_err(protocol_failure)?;
+            self.write(transport, &bytes).await
+        }
+        .await;
+        egress.complete_send(id);
+        result
+    }
     async fn send_status(
         &self,
         session: &mut AuthenticatedSession,
         transport: &Arc<dyn spaceterm_host::transport::MessageTransport>,
         publication: StatusPublication,
+        egress: &mut ConnectionEgress,
     ) -> Result<(spaceterm_core::authority::ServerEpoch, NonZeroU64), ServerFailure> {
         let snapshot = match &publication {
             StatusPublication::Snapshot { status, .. }
@@ -424,7 +619,8 @@ impl ProtocolDispatcher {
             }),
             _ => return Err(failure(ServerFailureClass::ScopeMismatch)),
         };
-        self.send(session, transport, &payload).await?;
+        self.send(session, transport, &payload, egress, None)
+            .await?;
         Ok(sent)
     }
     async fn send(
@@ -432,13 +628,53 @@ impl ProtocolDispatcher {
         session: &mut AuthenticatedSession,
         transport: &Arc<dyn spaceterm_host::transport::MessageTransport>,
         payload: &Payload,
+        egress: &mut ConnectionEgress,
+        reserved: Option<EgressReservation>,
     ) -> Result<(), ServerFailure> {
+        let _reservation = match reserved {
+            Some(reserved) => {
+                egress
+                    .validate_reply_reservation(payload, &reserved)
+                    .map_err(egress_failure)?;
+                reserved
+            }
+            None => egress.reserve_reply(payload).map_err(egress_failure)?,
+        };
         self.authenticator.check_current(session.principal)?;
         let bytes = session.codec.encode(payload).map_err(protocol_failure)?;
-        tokio::time::timeout(std::time::Duration::from_secs(5), transport.send(&bytes))
-            .await
-            .map_err(|_| failure(ServerFailureClass::Capacity))?
-            .map_err(transport_failure)
+        self.write(transport, &bytes).await
+    }
+    async fn write(
+        &self,
+        transport: &Arc<dyn spaceterm_host::transport::MessageTransport>,
+        bytes: &[u8],
+    ) -> Result<(), ServerFailure> {
+        let window = std::time::Duration::from_secs(5);
+        let mut deadline = tokio::time::Instant::now() + window;
+        let mut progress = transport.write_progress();
+        let sending = transport.send(bytes);
+        tokio::pin!(sending);
+        loop {
+            tokio::select! {
+                biased;
+                result = &mut sending => return result.map_err(transport_failure),
+                changed = async {
+                    match &mut progress {
+                        Some(progress) => progress.changed().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if changed.is_err() {
+                        progress = None;
+                    } else if let Some(progress) = &mut progress {
+                        // Only successful native byte writes advance this clock.
+                        // Buffered acceptance, wakeups and reads cannot extend it.
+                        deadline = deadline.max(*progress.borrow_and_update() + window);
+                    }
+                }
+                _ = tokio::time::sleep_until(deadline) => return Err(failure(ServerFailureClass::Capacity)),
+            }
+        }
     }
 }
 impl ConnectionDispatchPort for ProtocolDispatcher {
@@ -546,4 +782,49 @@ fn legacy_status(
         }
         _ => Err(ProtocolError::Incompatible),
     }
+}
+
+fn organization_action(
+    payload: &Payload,
+) -> Result<Option<organization::OrganizationQuery>, ServerFailure> {
+    match payload {
+        Payload::Major1(v1::Message {
+            kind: Some(v1::message::Kind::OrganizationQuery(query)),
+        }) => organization::v1::decode_query(query)
+            .map(Some)
+            .map_err(protocol_failure),
+        Payload::Major2(v2::Message {
+            kind: Some(v2::message::Kind::OrganizationQuery(query)),
+        }) => organization::v2::decode_query(query)
+            .map(Some)
+            .map_err(protocol_failure),
+        _ => Ok(None),
+    }
+}
+
+fn effectful_reply(payload: &Payload) -> bool {
+    match payload {
+        Payload::Major1(v1::Message {
+            kind: Some(v1::message::Kind::Operation(_) | v1::message::Kind::RuntimeCommand(_)),
+        })
+        | Payload::Major2(v2::Message {
+            kind: Some(v2::message::Kind::Operation(_) | v2::message::Kind::RuntimeCommand(_)),
+        }) => true,
+        Payload::Major1(v1::Message {
+            kind: Some(v1::message::Kind::PairingRequest(request)),
+        }) => request.operation.is_some(),
+        Payload::Major2(v2::Message {
+            kind: Some(v2::message::Kind::PairingRequest(request)),
+        }) => request.operation.is_some(),
+        _ => false,
+    }
+}
+fn egress_failure(error: crate::egress::EgressFailure) -> ServerFailure {
+    use crate::egress::EgressFailure;
+    failure(match error {
+        EgressFailure::Capacity => ServerFailureClass::Capacity,
+        EgressFailure::ReservationMismatch => ServerFailureClass::ScopeMismatch,
+        EgressFailure::Closed => ServerFailureClass::StaleAuthority,
+        EgressFailure::Exhausted => ServerFailureClass::Exhausted,
+    })
 }

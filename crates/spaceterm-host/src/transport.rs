@@ -163,10 +163,86 @@ pub trait MessageTransport: Send + Sync {
     fn peer_facts(&self) -> PeerFacts;
     /// Sends one whole message, awaiting socket backpressure.
     fn send<'a>(&'a self, message: &'a [u8]) -> TransportFuture<'a, ()>;
+    /// Observes successful native byte writes, not buffered application/TLS acceptance.
+    /// Adapters without a native feed retain a conservative send deadline.
+    fn write_progress(&self) -> Option<watch::Receiver<Instant>> {
+        None
+    }
     /// Receives one whole message, or `None` after orderly shutdown.
     fn recv(&self) -> TransportFuture<'_, Option<Vec<u8>>>;
     /// Closes the connection and wakes blocked operations. Repeated closes are harmless.
     fn close(&self) -> TransportFuture<'_, ()>;
+}
+
+/// Observe the socket below framing and TLS so buffering cannot reset a deadline.
+pub(crate) struct ProgressIo<T> {
+    inner: T,
+    progress: watch::Sender<Instant>,
+}
+impl<T> ProgressIo<T> {
+    pub(crate) fn new(inner: T) -> Self {
+        Self {
+            inner,
+            progress: watch::channel(Instant::now()).0,
+        }
+    }
+    pub(crate) fn get_ref(&self) -> &T {
+        &self.inner
+    }
+    pub(crate) fn progress(&self) -> watch::Receiver<Instant> {
+        self.progress.subscribe()
+    }
+    fn observe(&self, result: &std::task::Poll<std::io::Result<usize>>) {
+        if matches!(result, std::task::Poll::Ready(Ok(bytes)) if *bytes != 0) {
+            self.progress.send_replace(Instant::now());
+        }
+    }
+}
+impl<T: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for ProgressIo<T> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buffer: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_read(cx, buffer)
+    }
+}
+impl<T: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for ProgressIo<T> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bytes: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        let result = Pin::new(&mut this.inner).poll_write(cx, bytes);
+        this.observe(&result);
+        result
+    }
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bytes: &[std::io::IoSlice<'_>],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        let result = Pin::new(&mut this.inner).poll_write_vectored(cx, bytes);
+        this.observe(&result);
+        result
+    }
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
 }
 
 pub(crate) struct ConnectionState {
@@ -382,6 +458,9 @@ impl<T: MessageTransport + 'static> Drop for PendingConnection<T> {
 }
 
 impl<T: MessageTransport + 'static> MessageTransport for PendingConnection<T> {
+    fn write_progress(&self) -> Option<watch::Receiver<Instant>> {
+        self.state.transport.write_progress()
+    }
     fn peer_facts(&self) -> PeerFacts {
         self.state.transport.peer_facts()
     }
@@ -519,5 +598,43 @@ mod tests {
         assert_eq!(client.recv().await.unwrap(), Some(vec![2]));
         native.close().await.unwrap();
         listener.close().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test(start_paused = true)]
+    async fn only_successful_byte_writes_advance_native_progress() {
+        let (writer, mut reader) = tokio::io::duplex(1);
+        let mut writer = ProgressIo::new(writer);
+        let mut progress = writer.progress();
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(writer.write(&[]).await.unwrap(), 0);
+        assert!(!progress.has_changed().unwrap());
+        writer.write_all(&[1]).await.unwrap();
+        assert!(progress.has_changed().unwrap());
+        assert_eq!(*progress.borrow_and_update(), Instant::now());
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        writer.flush().await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), writer.write(&[2]))
+                .await
+                .is_err()
+        );
+        assert!(!progress.has_changed().unwrap());
+        assert_eq!(reader.read_u8().await.unwrap(), 1);
+        assert!(!progress.has_changed().unwrap());
+
+        let written = writer
+            .write_vectored(&[std::io::IoSlice::new(&[2])])
+            .await
+            .unwrap();
+        assert_eq!(written, 1);
+        assert!(progress.has_changed().unwrap());
+        assert_eq!(*progress.borrow_and_update(), Instant::now());
     }
 }
