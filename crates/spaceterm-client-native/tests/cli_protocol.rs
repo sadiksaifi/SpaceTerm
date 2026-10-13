@@ -151,6 +151,7 @@ struct Backend {
     context: AuthenticatedManagementContext,
     submitted: Arc<Mutex<Vec<Command>>>,
     resolved: Arc<Mutex<Vec<OperationId>>>,
+    saved_assessment: Mutex<Option<ManagementAssessment>>,
 }
 fn progress(state: ManagementProgressState) -> ManagementProgress {
     ManagementProgress {
@@ -188,15 +189,42 @@ impl ManagementBackend for Backend {
             .unwrap())
         })
     }
-    fn assess(&self, _: ManagementAction) -> ManagementFuture<'_, ManagementAssessment> {
-        Box::pin(async { Ok(assessment()) })
+    fn assess(&self, action: ManagementAction) -> ManagementFuture<'_, ManagementAssessment> {
+        Box::pin(async move {
+            let value = match action {
+                ManagementAction::RemoteAccess { policy } => ManagementAssessment::new(
+                    AssessmentToken::new("remote_token".to_owned()).unwrap(),
+                    ManagementAction::RemoteAccess { policy },
+                    AssessmentEvidence::RemoteAccess {
+                        current_version: FieldVersion::new(1),
+                    },
+                    MonotonicTick::new(0),
+                    MonotonicTick::new(30_000),
+                )
+                .unwrap(),
+                _ => assessment(),
+            };
+            *self.saved_assessment.lock().unwrap() = Some(value.clone());
+            Ok(value)
+        })
     }
     fn restore_assessment(
         &self,
         _: ManagementAction,
-        _: AssessmentToken,
+        token: AssessmentToken,
     ) -> ManagementFuture<'_, ManagementAssessment> {
-        Box::pin(async { Ok(assessment()) })
+        Box::pin(async move {
+            let saved = self
+                .saved_assessment
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(assessment);
+            if saved.token() != &token {
+                return Err(ManagementFailure::StaleAssessment);
+            }
+            Ok(saved)
+        })
     }
     fn submit(&self, command: Command) -> ManagementFuture<'_, ManagementProgress> {
         self.submitted.lock().unwrap().push(command);
@@ -248,6 +276,7 @@ fn dependencies(major: u32) -> (CliDependencies, Trace<Command>, Trace<Operation
             context,
             submitted: submitted.clone(),
             resolved: resolved.clone(),
+            saved_assessment: Mutex::new(None),
         },
         Arc::new(Clock),
     );
@@ -381,6 +410,7 @@ async fn cli_status_reports_the_authenticated_negotiated_major_not_an_observed_p
                 .unwrap(),
                 submitted: Arc::new(Mutex::new(vec![])),
                 resolved: Arc::new(Mutex::new(vec![])),
+                saved_assessment: Mutex::new(None),
             },
             Arc::new(Clock),
         );
@@ -598,4 +628,110 @@ fn companion_saved(client_local: u64, additional: bool) -> spaceterm_client::jou
         &ReceiptVerifier,
     )
     .unwrap()
+}
+
+#[tokio::test]
+async fn remote_policy_uses_authenticated_protocol_and_exact_explicit_scope_without_native_authority()
+ {
+    for major in [1, 2] {
+        let (deps, submitted, _) = dependencies(major);
+        let (code, io) = run(
+            &[
+                "--json",
+                "--non-interactive",
+                "remote-access",
+                "enable",
+                "--bind",
+                "0.0.0.0:0",
+                "--bind",
+                "[::]:4000",
+                "--assess",
+            ],
+            &deps,
+        )
+        .await;
+        assert_eq!(code, 0);
+        let result: serde_json::Value = serde_json::from_slice(&io.stdout).unwrap();
+        assert_eq!(result["result"]["action"], "remote_access");
+        assert!(submitted.lock().unwrap().is_empty());
+        let token = result["result"]["token"].as_str().unwrap();
+        // A token cannot silently disable the listener or broaden/change its bind scope.
+        assert_eq!(
+            run(
+                &[
+                    "--non-interactive",
+                    "remote-access",
+                    "disable",
+                    "--confirm",
+                    token,
+                ],
+                &deps
+            )
+            .await
+            .0,
+            2
+        );
+        assert!(submitted.lock().unwrap().is_empty());
+        let (code, io) = run(
+            &[
+                "--non-interactive",
+                "remote-access",
+                "enable",
+                "--bind",
+                "0.0.0.0:0",
+                "--bind",
+                "[::]:4000",
+                "--confirm",
+                token,
+            ],
+            &deps,
+        )
+        .await;
+        assert_eq!(code, 75);
+        assert_eq!(io.read_terminal, 0);
+        assert_eq!(
+            *submitted.lock().unwrap(),
+            [Command::SetRemoteAccess {
+                server: stream().server(),
+                expected_version: FieldVersion::new(1),
+                value: RemoteAccessPolicy::enabled(
+                    stream().server(),
+                    vec!["0.0.0.0:0".parse().unwrap(), "[::]:4000".parse().unwrap(),]
+                )
+                .unwrap(),
+            }]
+        );
+    }
+}
+
+#[tokio::test]
+async fn remote_disable_is_confirmed_protocol_work_and_noninteractive_enable_cannot_auto_confirm() {
+    for major in [1, 2] {
+        let (deps, submitted, _) = dependencies(major);
+        assert_eq!(
+            parse(
+                [
+                    "--non-interactive",
+                    "remote-access",
+                    "enable",
+                    "--bind",
+                    "127.0.0.1:4000",
+                ]
+                .map(std::ffi::OsString::from)
+            ),
+            Err(ManagementFailure::ConfirmationRequired)
+        );
+        assert!(submitted.lock().unwrap().is_empty());
+        let (code, io) = run(&["remote-access", "disable"], &deps).await;
+        assert_eq!(code, 75);
+        assert_eq!(io.read_terminal, 1);
+        assert_eq!(
+            *submitted.lock().unwrap(),
+            [Command::SetRemoteAccess {
+                server: stream().server(),
+                expected_version: FieldVersion::new(1),
+                value: RemoteAccessPolicy::disabled(stream().server()),
+            }]
+        );
+    }
 }

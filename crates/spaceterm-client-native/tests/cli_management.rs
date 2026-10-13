@@ -776,29 +776,6 @@ async fn native_dispatch_preserves_exact_action_scope_confirmation_and_sudo_mode
             SudoMode::NonInteractive,
         ),
         (
-            vec![
-                "remote-access",
-                "enable",
-                "--bind",
-                "0.0.0.0:0",
-                "--bind",
-                "[::]:4000",
-                "--confirm",
-                "original_1",
-            ],
-            NativeCliCommand::RemoteAccess {
-                endpoints: vec!["0.0.0.0:0".parse().unwrap(), "[::]:4000".parse().unwrap()],
-            },
-            ConfirmationMode::Token(token.clone()),
-            SudoMode::Interactive,
-        ),
-        (
-            vec!["remote-access", "disable", "--assess"],
-            NativeCliCommand::RemoteAccess { endpoints: vec![] },
-            ConfirmationMode::Assess,
-            SudoMode::Interactive,
-        ),
-        (
             vec!["update", "check"],
             NativeCliCommand::UpdateCheck,
             ConfirmationMode::Assess,
