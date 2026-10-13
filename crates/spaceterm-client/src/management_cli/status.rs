@@ -1,7 +1,7 @@
 //! One replaceable authenticated status value. Gaps request the worker's resync.
 //! Waiters learn that the value changed, never how many publications arrived.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use spaceterm_core::{
     authority::{ConnectionBinding, ServerEpoch},
@@ -17,12 +17,20 @@ pub trait StatusResync: Send + Sync {
     /// Schedule the existing connection-worker query, without starting or enrolling.
     /// The worker coalesces requests into one pending query while a query is in flight.
     fn request_resync(&self);
+    /// Cancels only this read interest. Test providers may have no external interest.
+    fn cancel(&self) {}
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StatusUpdate {
     Replaced,
     Ignored,
     ResyncRequired,
+}
+struct StatusObserver(Arc<dyn StatusResync>);
+impl Drop for StatusObserver {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
 }
 struct SubscriptionState {
     latest: Option<ServerStatus>,
@@ -41,6 +49,8 @@ pub struct StatusSubscription {
     resync: Arc<dyn StatusResync>,
     changes: watch::Sender<u64>,
     observed: watch::Receiver<u64>,
+    observer: Option<Arc<StatusObserver>>,
+    observers: Weak<StatusObserver>,
 }
 impl StatusSubscription {
     pub fn new(
@@ -59,6 +69,7 @@ impl StatusSubscription {
             return Err(ManagementFailure::UnsafeNativeState);
         }
         let (changes, observed) = watch::channel(0);
+        let observer = Arc::new(StatusObserver(Arc::clone(&resync)));
         Ok(Self {
             server,
             query,
@@ -71,7 +82,24 @@ impl StatusSubscription {
             resync,
             changes,
             observed,
+            observers: Arc::downgrade(&observer),
+            observer: Some(observer),
         })
+    }
+    pub(crate) fn has_observers(&self) -> bool {
+        self.observers.strong_count() != 0
+    }
+    pub(crate) fn subscriber(&self) -> Option<Self> {
+        let observer = self.observers.upgrade()?;
+        let mut subscriber = self.clone();
+        subscriber.observer = Some(observer);
+        Some(subscriber)
+    }
+    /// The connection publishes without extending the frontend subscription lifetime.
+    pub(crate) fn publisher(&self) -> Self {
+        let mut publisher = self.clone();
+        publisher.observer = None;
+        publisher
     }
     pub fn server(&self) -> ServerId {
         self.server

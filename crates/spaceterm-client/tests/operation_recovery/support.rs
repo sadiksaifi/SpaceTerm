@@ -104,18 +104,27 @@ impl ReceiptVerifier for Verifier {
     }
 }
 pub struct MemoryJournal {
+    scheduler: Arc<AtomicBool>,
+    fence: spaceterm_client::pairing::credentials::PairingAuthorityFence,
     state: Mutex<RecoveredClientState>,
     fault: Mutex<Option<JournalCommitDisposition>>,
     applied_uncertainty: AtomicBool,
-    codec: Arc<Codec>,
+    codec: Arc<dyn LedgerCodec>,
+    verifier: Arc<dyn ReceiptVerifier>,
 }
 impl MemoryJournal {
-    pub fn new(codec: Arc<Codec>) -> Self {
+    pub fn new(codec: Arc<dyn LedgerCodec>) -> Self {
+        Self::with_verifier(codec, Arc::new(Verifier))
+    }
+    pub fn with_verifier(codec: Arc<dyn LedgerCodec>, verifier: Arc<dyn ReceiptVerifier>) -> Self {
         Self {
+            scheduler: Arc::default(),
+            fence: Default::default(),
             state: Mutex::new(RecoveredClientState::empty()),
             fault: Mutex::new(None),
             applied_uncertainty: AtomicBool::new(false),
             codec,
+            verifier,
         }
     }
     pub fn apply_then_indeterminate(&self) {
@@ -129,6 +138,15 @@ impl MemoryJournal {
     }
 }
 impl ClientJournal for MemoryJournal {
+    fn admission_latch(&self) -> Arc<spaceterm_client::journal::JournalAdmission> {
+        Arc::default()
+    }
+    fn scheduler_claim(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.scheduler)
+    }
+    fn authority_fence(&self) -> &spaceterm_client::pairing::credentials::PairingAuthorityFence {
+        &self.fence
+    }
     fn recover(&self) -> ClientFuture<'_, RecoveredClientState> {
         Box::pin(async { Ok(self.state()) })
     }
@@ -141,7 +159,12 @@ impl ClientJournal for MemoryJournal {
                 return Ok(fault);
             }
             let mut state = self.state.lock().unwrap();
-            match state.apply(tx, self.codec.as_ref(), &Verifier, JournalLimits::default()) {
+            match state.apply(
+                tx,
+                self.codec.as_ref(),
+                self.verifier.as_ref(),
+                JournalLimits::default(),
+            ) {
                 Ok(candidate) => {
                     let receipt = JournalReceipt::new(candidate.revision());
                     *state = candidate;

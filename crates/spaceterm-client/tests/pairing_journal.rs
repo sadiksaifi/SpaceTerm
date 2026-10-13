@@ -30,9 +30,9 @@ impl PairingClientJournal for Journal {
     ) -> PairingFuture<'a, PairingCommitDisposition> {
         Box::pin(async move {
             self.calls.lock().unwrap().push(tx.clone());
-            PairingCommitDisposition::Durable(PairingJournalReceipt {
-                revision: tx.expected_revision + 1,
-            })
+            PairingCommitDisposition::Durable(PairingJournalReceipt::new(
+                spaceterm_client::journal::ClientJournalRevision::new(tx.expected_revision + 1),
+            ))
         })
     }
 }

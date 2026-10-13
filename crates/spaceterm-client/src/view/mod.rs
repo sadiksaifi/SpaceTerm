@@ -9,6 +9,7 @@
 //! focus and reconnect never do.
 
 mod arrangement;
+pub mod launch;
 mod persistence;
 mod presentation;
 mod replica_bridge;

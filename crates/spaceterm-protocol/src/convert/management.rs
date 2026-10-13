@@ -197,14 +197,20 @@ macro_rules! profile {
                                 },
                                 completed_units: v.completed_units,
                                 total_units: v.total_units,
+                                operation_digest: match v.request {
+                                    ManagementRequestReference::Operation(binding) => {
+                                        binding.digest.bytes().to_vec()
+                                    }
+                                    ManagementRequestReference::Native(_) => Vec::new(),
+                                },
                             }
                         })
                         .collect(),
                 }
             }
-            /// The frozen status schema retains OperationId but not its digest.
-            /// Resolve that digest from the caller's original operation journal.
-            /// Unknown references fail instead of inventing an operation binding.
+            /// Progress carries authenticated operation comparison data for every
+            /// Client. The callback reads legacy records without the additive
+            /// digest field; it never supplies a fabricated binding.
             pub fn decode_status(
                 value: &wire::ManagementStatus,
                 resolve_digest: &dyn Fn(OperationId) -> Result<RequestDigest, ProtocolError>,
@@ -270,10 +276,19 @@ macro_rules! profile {
                                 let id = decode_operation(operation)?;
                                 ManagementRequestReference::Operation(OperationBinding {
                                     id,
-                                    digest: resolve_digest(id)?,
+                                    digest: if v.operation_digest.is_empty() {
+                                        resolve_digest(id)?
+                                    } else {
+                                        RequestDigest::from_bytes(
+                                            v.operation_digest
+                                                .as_slice()
+                                                .try_into()
+                                                .map_err(|_| ProtocolError::Malformed)?,
+                                        )
+                                    },
                                 })
                             }
-                            (None, bytes) if bytes.len() == 16 => {
+                            (None, bytes) if bytes.len() == 16 && v.operation_digest.is_empty() => {
                                 ManagementRequestReference::Native(
                                     bytes.try_into().map_err(|_| ProtocolError::Malformed)?,
                                 )
@@ -464,6 +479,80 @@ mod tests {
     );
     tests!(
         major_2_preserves_native_verification_policy_listener_failure_and_progress,
+        v2
+    );
+    macro_rules! progress_tests {
+        ($name:ident, $profile:ident) => {
+            #[test]
+            fn $name() {
+                use spaceterm_core::{
+                    identity::*, operation_ledger::canonical::CanonicalCodec,
+                    operation_ledger_contracts::CanonicalOperationRequest,
+                };
+                let mut parts = status().parts().clone();
+                let stream = OperationStreamId::new(
+                    OperationStreamKey::new(parts.server, 9).unwrap(),
+                    PairingId::new(parts.server, 2).unwrap(),
+                    ClientId::new(parts.server, 3).unwrap(),
+                )
+                .unwrap();
+                let binding = CanonicalOperationRequest::new(
+                    OperationId::new(stream, OperationSequence::new(1).unwrap()),
+                    Command::AssessEndAllSessions {
+                        server: parts.server,
+                    },
+                    &CanonicalCodec,
+                )
+                .unwrap()
+                .binding();
+                parts.progress.push(ManagementProgress {
+                    request: ManagementRequestReference::Operation(binding),
+                    state: ManagementProgressState::Draining,
+                    completed_units: 0,
+                    total_units: 1,
+                });
+                let value = ServerStatus::new(parts).unwrap();
+                let mut wire = $profile::encode_status(&value);
+                assert_eq!(
+                    $profile::decode_status(&wire, &|_| panic!(
+                        "authenticated progress cannot require local operation ownership"
+                    )),
+                    Ok(value.clone())
+                );
+                wire.progress[1].operation_digest.pop();
+                assert_eq!(
+                    $profile::decode_status(&wire, &|_| panic!(
+                        "malformed digest cannot fall back"
+                    )),
+                    Err(ProtocolError::Malformed)
+                );
+                wire.progress[1].operation_digest.clear();
+                assert_eq!(
+                    $profile::decode_status(&wire, &|id| {
+                        assert_eq!(id, binding.id);
+                        Ok(binding.digest)
+                    }),
+                    Ok(value.clone())
+                );
+                assert_eq!(
+                    $profile::decode_status(&wire, &|_| Err(ProtocolError::Malformed)),
+                    Err(ProtocolError::Malformed)
+                );
+                let mut wire = $profile::encode_status(&value);
+                wire.progress[0].operation_digest = binding.digest.bytes().to_vec();
+                assert_eq!(
+                    $profile::decode_status(&wire, &|_| panic!("native progress has no operation")),
+                    Err(ProtocolError::Malformed)
+                );
+            }
+        };
+    }
+    progress_tests!(
+        major_1_progress_carries_checked_digest_and_reads_legacy_local_bindings,
+        v1
+    );
+    progress_tests!(
+        major_2_progress_carries_checked_digest_and_reads_legacy_local_bindings,
         v2
     );
 }

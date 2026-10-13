@@ -23,6 +23,7 @@ fn slot(generation: u64, device: bool) -> JournalCredentialSlot {
         reference: CredentialReference::new([if device { 9 } else { 4 }; 16]),
         public_key: None,
         route_reference: None,
+        route: None,
         generation: LocalPairingGeneration::new(generation).unwrap(),
     }
 }

@@ -394,9 +394,9 @@ impl PairingClientJournal for Journal {
             }
             self.changes.lock().unwrap().push(tx.change.clone());
             state.revision += 1;
-            PairingCommitDisposition::Durable(PairingJournalReceipt {
-                revision: state.revision,
-            })
+            PairingCommitDisposition::Durable(PairingJournalReceipt::new(
+                spaceterm_client::journal::ClientJournalRevision::new(state.revision),
+            ))
         })
     }
 }
@@ -2134,4 +2134,302 @@ async fn confirmed_revocation_retains_credential_until_original_enrollment_is_ac
     );
     assert!(deleted.lock().unwrap().is_empty());
     assert_eq!(journal.state.lock().unwrap().revocations.len(), 1);
+}
+
+#[path = "operation_recovery/support.rs"]
+mod canonical_journal;
+struct SignedReceiptVerifier;
+impl spaceterm_client::journal::ReceiptVerifier for SignedReceiptVerifier {
+    fn verify(
+        &self,
+        pin: ServerPin,
+        proof: &SignedPairingReceipt,
+    ) -> Result<(), spaceterm_client::failure::ClientFailure> {
+        ReceiptCodec::new(pin)
+            .verify(proof)
+            .map(|_| ())
+            .map_err(|_| {
+                spaceterm_client::failure::ClientFailure::new(
+                    spaceterm_client::failure::ClientFailureClass::InvalidPeer,
+                )
+            })
+    }
+}
+struct NoLocalEffects;
+impl spaceterm_client::pending::LocalUseInvalidator for NoLocalEffects {
+    fn invalidate_workspace(
+        &self,
+        _: &LocalPairingKey,
+        _: WorkspaceId,
+    ) -> Result<
+        Vec<spaceterm_core::authority::GrantedControl>,
+        spaceterm_client::failure::ClientFailure,
+    > {
+        panic!("restricted scheduler cannot detach");
+    }
+    fn invalidate_attachment(
+        &self,
+        _: &LocalPairingKey,
+        _: spaceterm_client::view::WorkspaceAttachment,
+    ) -> Result<
+        Vec<spaceterm_core::authority::GrantedControl>,
+        spaceterm_client::failure::ClientFailure,
+    > {
+        panic!("restricted scheduler cannot detach");
+    }
+    fn invalidate_pairing(&self, _: &LocalPairingKey) {
+        panic!("revocation already recorded");
+    }
+    fn remove_pairing<'a>(
+        &'a self,
+        _: &'a LocalPairingKey,
+    ) -> spaceterm_client::ports::ClientFuture<'a, ()> {
+        Box::pin(async {
+            panic!("revocation already recorded");
+        })
+    }
+}
+struct RestrictedCredentials(Arc<Key>);
+impl NativeDeviceCredentials for RestrictedCredentials {
+    fn create(
+        &self,
+        _: CredentialCreationReservation,
+    ) -> PairingFuture<'_, Result<PreparedCredential, CredentialFailure>> {
+        Box::pin(async {
+            panic!("background cannot enroll");
+        })
+    }
+    fn recover_preparation<'a>(
+        &'a self,
+        _: &'a CredentialScope,
+    ) -> PairingFuture<'a, Result<Option<PreparedCredential>, CredentialFailure>> {
+        Box::pin(async {
+            panic!("background cannot prepare enrollment");
+        })
+    }
+    fn signing_key<'a>(
+        &'a self,
+        credential: &'a PreparedCredential,
+        lease: &'a CredentialUse,
+    ) -> PairingFuture<'a, Result<Arc<dyn SigningKey>, CredentialFailure>> {
+        Box::pin(async move {
+            lease.validate(&credential.scope)?;
+            assert!(matches!(
+                lease.purpose(),
+                CredentialUsePurpose::Restricted { .. }
+            ));
+            assert_eq!(
+                lease.native_access(),
+                NativeCredentialAccess::Noninteractive
+            );
+            Ok(self.0.clone() as Arc<dyn SigningKey>)
+        })
+    }
+    fn delete_pairing_key<'a>(
+        &'a self,
+        _: &'a PreparedCredential,
+    ) -> PairingFuture<'a, Result<CredentialDeletion, CredentialFailure>> {
+        Box::pin(async {
+            panic!("failed restricted attempt cannot delete a credential");
+        })
+    }
+}
+struct FailingRestrictedRoute {
+    task: PendingRevocationTask,
+    failure: PairingFailure,
+    attempts: Arc<Mutex<Vec<tokio::time::Instant>>>,
+}
+impl RestrictedConnector for FailingRestrictedRoute {
+    fn open<'a>(
+        &'a self,
+        task: &'a PendingRevocationTask,
+    ) -> PairingFuture<'a, Result<Box<dyn PairingTransport>, PairingFailure>> {
+        Box::pin(async move {
+            assert_eq!(task, &self.task);
+            self.attempts
+                .lock()
+                .unwrap()
+                .push(tokio::time::Instant::now());
+            Err(self.failure)
+        })
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn real_pairing_driver_retries_failed_restricted_routes_from_one_second_to_fifteen_minutes() {
+    use spaceterm_client::{
+        api::*,
+        journal::{
+            ClientJournalChange, JournalController, JournalCredentialSlot, JournalLimits,
+            SavedBinding,
+        },
+        pending::PendingTasks,
+    };
+    use std::time::Duration;
+    async fn settle() {
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+    }
+    for failure in [
+        PairingFailure::Offline,
+        PairingFailure::AuthorizationRequired,
+    ] {
+        let fixture = Fixture::new(1, 1);
+        let binding = PairedServerBinding::new(
+            ConnectionTarget::new(
+                fixture.prepared.pin,
+                fixture.prepared.device,
+                fixture.prepared.local_pairing.parts().pairing,
+                fixture.prepared.client,
+                RouteDescription::new(RouteParts::Ipc {
+                    directory: "/restricted/test".into(),
+                    name: "server".into(),
+                })
+                .unwrap(),
+                fixture.prepared.credential.scope.reference(),
+                fixture.prepared.local_pairing.parts().generation,
+            )
+            .unwrap(),
+        );
+        let codec = Arc::new(spaceterm_core::operation_ledger::canonical::CanonicalCodec);
+        let storage = Arc::new(canonical_journal::MemoryJournal::with_verifier(
+            codec.clone(),
+            Arc::new(SignedReceiptVerifier),
+        ));
+        let journal = Arc::new(
+            JournalController::recover(
+                storage,
+                codec.clone(),
+                Arc::new(SignedReceiptVerifier),
+                JournalLimits::default(),
+            )
+            .await
+            .unwrap(),
+        );
+        let proof = ReceiptCodec::new(fixture.prepared.pin)
+            .sign(
+                PairingReceiptBody::ClientBinding {
+                    target: fixture.target(),
+                    keys: fixture.prepared.keys.clone(),
+                    client: fixture.saved.client().clone(),
+                    operation: fixture.prepared.enrollment,
+                    revision: StoreRevision::new(7),
+                },
+                fixture.server.as_ref(),
+            )
+            .unwrap();
+        journal
+            .transact(vec![
+                ClientJournalChange::ReserveCredential(JournalCredentialSlot {
+                    namespace: fixture
+                        .prepared
+                        .credential
+                        .scope
+                        .parts()
+                        .namespace
+                        .as_str()
+                        .into(),
+                    server: Some(binding.target().server()),
+                    reference: binding.target().credential(),
+                    public_key: None,
+                    route_reference: None,
+                    route: None,
+                    generation: binding.target().incarnation(),
+                }),
+                ClientJournalChange::RecordCredentialPublicKey {
+                    reference: binding.target().credential(),
+                    public_key: fixture.prepared.credential.public_key,
+                },
+                ClientJournalChange::BindCredentialRoute {
+                    reference: binding.target().credential(),
+                    route_reference: fixture.prepared.route,
+                    route: binding.target().route().clone(),
+                },
+                ClientJournalChange::SaveBinding(Box::new(
+                    SavedBinding::verified(
+                        binding.clone(),
+                        fixture.saved.client().clone(),
+                        proof,
+                        &SignedReceiptVerifier,
+                    )
+                    .unwrap(),
+                )),
+            ])
+            .await
+            .unwrap();
+        let store = JournalPairingStore::new(journal.clone());
+        let authority = store.ordinary_authority(fixture.saved.key()).await.unwrap();
+        let operation = fixture.task().parts().original.operation();
+        PairingController::new(store, codec.clone())
+            .self_unpair(
+                &authority,
+                ConfirmedSelfUnpair::confirm(fixture.saved.key().clone(), operation).unwrap(),
+            )
+            .await
+            .unwrap();
+        let task = journal.snapshot().unwrap().revocations()[0].task.clone();
+        let attempts = Arc::new(Mutex::new(Vec::new()));
+        let driver = Arc::new(RevocationDriver::new(
+            RestrictedCredentials(fixture.auth.clone()),
+            FailingRestrictedRoute {
+                task,
+                failure,
+                attempts: attempts.clone(),
+            },
+            codec,
+            HandshakeConfig::default(),
+        ));
+        let tasks = PendingTasks::new(journal.clone(), Arc::new(NoLocalEffects));
+        let runtime = tasks.start_pairing_scheduler(driver.clone()).unwrap();
+        assert!(tasks.start_pairing_scheduler(driver.clone()).is_err());
+        settle().await;
+        assert_eq!(attempts.lock().unwrap().len(), 1);
+        for (index, seconds) in [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 900, 900]
+            .into_iter()
+            .enumerate()
+        {
+            let minimum = Duration::from_secs(seconds);
+            tokio::time::advance(minimum - Duration::from_millis(1)).await;
+            settle().await;
+            assert_eq!(
+                attempts.lock().unwrap().len(),
+                index + 1,
+                "retry cannot precede {seconds}s minimum"
+            );
+            let headroom = if seconds == 900 {
+                Duration::from_millis(1)
+            } else {
+                minimum / 10 + Duration::from_millis(1)
+            };
+            tokio::time::advance(headroom).await;
+            settle().await;
+            let observed = attempts.lock().unwrap();
+            assert_eq!(
+                observed.len(),
+                index + 2,
+                "one restricted attempt must follow the backoff"
+            );
+            let delay = observed[index + 1] - observed[index];
+            assert!(
+                delay >= minimum && delay <= (minimum + minimum / 10).min(Duration::from_secs(900))
+            );
+        }
+        assert!(journal.snapshot().unwrap().revocations().len() == 1);
+        runtime.shutdown().await.unwrap();
+        let resumed = tasks.start_pairing_scheduler(driver).unwrap();
+        settle().await;
+        assert_eq!(
+            attempts.lock().unwrap().len(),
+            13,
+            "restarting the scheduler cannot bypass retained retry backoff"
+        );
+        tokio::time::advance(Duration::from_secs(900) - Duration::from_millis(1)).await;
+        settle().await;
+        assert_eq!(attempts.lock().unwrap().len(), 13);
+        tokio::time::advance(Duration::from_millis(1)).await;
+        settle().await;
+        assert_eq!(attempts.lock().unwrap().len(), 14);
+        resumed.shutdown().await.unwrap();
+    }
 }

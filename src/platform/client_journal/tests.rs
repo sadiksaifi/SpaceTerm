@@ -3,6 +3,7 @@ use crate::platform::{
     app_directories::{AppDirectories, AppDirectoryEnvironment},
     unix_secure_filesystem::UnixSecureFilesystem,
 };
+use spaceterm_client::journal::ClientJournal;
 use spaceterm_core::{operation_ledger_contracts::*, operations::*, pairing::*};
 use spaceterm_protocol::authentication::ServerPin;
 use std::{
@@ -178,4 +179,42 @@ async fn desktop_journal_initialization_does_not_overwrite_existing_state() {
     .unwrap();
     assert_eq!(error.class(), ClientFailureClass::UnsafeStorage);
     assert_eq!(journal.recover().await.unwrap().revision().get(), 0);
+}
+
+#[tokio::test]
+async fn desktop_pairing_facade_shares_the_operation_journal_revision() {
+    use spaceterm_client::pairing::{
+        credentials::*,
+        journal::{LocalPairingStore, reserve_native_credential},
+    };
+    let fixture = Fixture::new();
+    let journal = open(
+        &fixture.paths,
+        JournalOpenMode::Initialize,
+        Arc::new(Codec),
+        Arc::new(Verifier),
+        JournalLimits::default(),
+    )
+    .await
+    .unwrap();
+    let store = crate::platform::client_pairing_store::from_client_journal(journal.clone());
+    let scope = CredentialScope::new(CredentialScopeParts {
+        namespace: CredentialNamespace::new("dev.spaceterm.test".into()).unwrap(),
+        purpose: CredentialPurpose::DeviceIdentity,
+        reference: CredentialReference::new([44; 16]),
+    })
+    .unwrap();
+    let reservation = reserve_native_credential(&store, scope.clone())
+        .await
+        .unwrap();
+    let state = journal.snapshot().unwrap();
+    assert_eq!(state.pairing().slots()[0].reference, scope.reference());
+    assert_eq!(
+        state.pairing().slots()[0].generation,
+        reservation.generation()
+    );
+    assert_eq!(
+        store.recover().await.unwrap().revision,
+        state.revision().get()
+    );
 }

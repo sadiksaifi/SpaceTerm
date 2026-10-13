@@ -1,5 +1,4 @@
 use super::*;
-use crate::limits::{RETRY_MAXIMUM, RETRY_MINIMUM};
 use spaceterm_core::operations::OperationId;
 use std::{
     collections::BTreeMap,
@@ -7,6 +6,10 @@ use std::{
     time::Duration,
 };
 use tokio::{sync::watch, time::Instant};
+
+// Restricted revocation retries are slower than ordinary connection retries.
+const REVOCATION_RETRY_MINIMUM: Duration = Duration::from_secs(1);
+const REVOCATION_RETRY_MAXIMUM: Duration = Duration::from_secs(15 * 60);
 
 struct Claim(Arc<AtomicBool>);
 impl Drop for Claim {
@@ -44,14 +47,14 @@ impl Drop for PendingRuntime {
 
 pub(super) fn start(
     tasks: PendingTasks,
-    driver: Arc<dyn RevocationDriver>,
+    attempt: impl Fn(OperationId) -> ClientFuture<'static, bool> + Send + 'static,
 ) -> Result<PendingRuntime, ClientFailure> {
     let claim = Claim(tasks.journal.claim_scheduler()?);
     let (stop, stopped) = watch::channel(false);
     let (finished, done) = watch::channel(None);
     let worker = tokio::spawn(async move {
         let _claim = claim;
-        run(tasks, driver, stopped).await
+        run(tasks, attempt, stopped).await
     });
     tokio::spawn(async move {
         let result = worker
@@ -65,7 +68,7 @@ pub(super) fn start(
 
 async fn run(
     tasks: PendingTasks,
-    driver: Arc<dyn RevocationDriver>,
+    attempt: impl Fn(OperationId) -> ClientFuture<'static, bool> + Send + 'static,
     mut stopped: watch::Receiver<bool>,
 ) -> Result<(), ClientFailure> {
     let mut revisions = tasks.journal.revisions();
@@ -83,13 +86,22 @@ async fn run(
         });
         for record in snapshot.revocations() {
             let id = record.task.parts().original.operation();
-            let deadline = deadlines.entry(id).or_insert_with(Instant::now);
+            let deadline = deadlines.entry(id).or_insert_with(|| {
+                let now = Instant::now();
+                if record.attempts != 0
+                    && matches!(record.phase, RevocationPhase::AwaitingConfirmation)
+                {
+                    now + delay(id, record.attempts)
+                } else {
+                    now
+                }
+            });
             if *deadline > Instant::now() {
                 continue;
             }
             // Do not cancel a driver halfway through owned native cleanup. The
             // driver bounds network readiness and joins its exact native effects.
-            let result = tasks.retry_revocation(id, driver.as_ref()).await;
+            let result = attempt(id).await;
             if *stopped.borrow() {
                 return Ok(());
             }
@@ -118,9 +130,9 @@ async fn run(
     }
 }
 fn delay(id: OperationId, attempts: u32) -> Duration {
-    let multiplier = 1u64 << attempts.saturating_sub(1).min(7);
-    let base =
-        (RETRY_MINIMUM.as_millis() as u64 * multiplier).min(RETRY_MAXIMUM.as_millis() as u64);
+    let multiplier = 1u64 << attempts.saturating_sub(1).min(10);
+    let base = (REVOCATION_RETRY_MINIMUM.as_millis() as u64 * multiplier)
+        .min(REVOCATION_RETRY_MAXIMUM.as_millis() as u64);
     let jitter = u64::from(id.stream().server().bytes()[0]) * base / 2560;
-    Duration::from_millis((base + jitter).min(RETRY_MAXIMUM.as_millis() as u64))
+    Duration::from_millis((base + jitter).min(REVOCATION_RETRY_MAXIMUM.as_millis() as u64))
 }

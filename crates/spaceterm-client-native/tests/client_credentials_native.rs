@@ -118,9 +118,9 @@ impl spaceterm_client::journal::PairingClientJournal for EvidenceJournal {
                 _ => panic!("credential evidence cannot enroll"),
             }
             state.revision += 1;
-            PairingCommitDisposition::Durable(PairingJournalReceipt {
-                revision: state.revision,
-            })
+            PairingCommitDisposition::Durable(PairingJournalReceipt::new(
+                spaceterm_client::journal::ClientJournalRevision::new(state.revision),
+            ))
         })
     }
 }

@@ -25,6 +25,7 @@ use support::*;
 
 #[derive(Default)]
 struct UseGate {
+    attachment: Mutex<Option<spaceterm_client::view::WorkspaceAttachment>>,
     grants: Mutex<Vec<GrantedControl>>,
     invalidated: AtomicUsize,
     removed: AtomicUsize,
@@ -37,6 +38,18 @@ impl LocalUseInvalidator for UseGate {
     ) -> Result<Vec<GrantedControl>, ClientFailure> {
         self.invalidated.fetch_add(1, Ordering::SeqCst);
         Ok(self.grants.lock().unwrap().clone())
+    }
+    fn invalidate_attachment(
+        &self,
+        pairing: &LocalPairingKey,
+        attachment: spaceterm_client::view::WorkspaceAttachment,
+    ) -> Result<Vec<GrantedControl>, ClientFailure> {
+        let mut current = self.attachment.lock().unwrap();
+        if current.is_some_and(|current| current != attachment) {
+            return Err(ClientFailure::new(ClientFailureClass::StaleAuthority));
+        }
+        *current = None;
+        self.invalidate_workspace(pairing, attachment.workspace())
     }
     fn invalidate_pairing(&self, _: &LocalPairingKey) {
         self.invalidated.fetch_add(1, Ordering::SeqCst);
@@ -751,6 +764,15 @@ async fn retained_byte_saturation_transfers_reserved_capacity_to_exact_release()
 
 #[tokio::test]
 async fn completed_acquire_detach_metadata_transfers_reserved_bytes_at_saturation() {
+    reserved_marker_detach(false).await;
+}
+
+#[tokio::test]
+async fn incarnation_detach_uses_the_reserved_marker_at_ordinary_saturation() {
+    reserved_marker_detach(true).await;
+}
+
+async fn reserved_marker_detach(incarnation: bool) {
     let f = Fixture::new().await;
     let limits = JournalLimits {
         cleanup_grants: 1,
@@ -767,6 +789,21 @@ async fn completed_acquire_detach_metadata_transfers_reserved_bytes_at_saturatio
         .await
         .unwrap(),
     );
+    let attachment = incarnation.then(|| {
+        spaceterm_client::view::WorkspaceAttachment::new(
+            workspace(),
+            f.binding.target().pairing(),
+            f.binding.target().client(),
+            spaceterm_client::view::AttachmentIncarnation::new(1).unwrap(),
+        )
+        .unwrap()
+    });
+    if let Some(attachment) = attachment {
+        journal
+            .record_attachment(f.binding.target().local_pairing().unwrap(), attachment)
+            .await
+            .unwrap();
+    }
     let tracker = OperationTracker::new(journal.clone());
     let acquisition = tracker
         .submit(
@@ -795,10 +832,11 @@ async fn completed_acquire_detach_metadata_transfers_reserved_bytes_at_saturatio
         .unwrap();
     let gate = Arc::new(UseGate::default());
     let tasks = PendingTasks::new(journal, gate.clone());
-    tasks
-        .detach_workspace(&f.binding, workspace())
-        .await
-        .expect("admitted grant must retain its detach marker without new byte capacity");
+    let removal = match attachment {
+        Some(attachment) => tasks.detach_attachment(&f.binding, attachment).await,
+        None => tasks.detach_workspace(&f.binding, workspace()).await,
+    };
+    removal.expect("admitted grant must retain its detach marker without new byte capacity");
     assert_eq!(gate.invalidated.load(Ordering::SeqCst), 1);
 
     let recovered = Arc::new(
@@ -813,7 +851,7 @@ async fn completed_acquire_detach_metadata_transfers_reserved_bytes_at_saturatio
     );
     let state = recovered.snapshot().unwrap();
     assert_eq!(state.detaches()[0].grants, vec![grant(1, 4)]);
-    assert_eq!(state.suppressed_workspaces()[0].workspace, workspace());
+    assert_reserved_marker(&state, attachment);
     assert!(matches!(
         state.operation(acquisition.id()).unwrap().state,
         RetainedOperationState::Completed {
@@ -854,7 +892,7 @@ async fn completed_acquire_detach_metadata_transfers_reserved_bytes_at_saturatio
     let state = recovered.snapshot().unwrap();
     assert!(state.detaches().is_empty());
     assert!(state.operation(release.binding().id).is_none());
-    assert_eq!(state.suppressed_workspaces().len(), 1);
+    assert_reserved_marker(&state, attachment);
     assert!(matches!(
         state.operation(acquisition.id()).unwrap().state,
         RetainedOperationState::Completed {
@@ -862,6 +900,20 @@ async fn completed_acquire_detach_metadata_transfers_reserved_bytes_at_saturatio
             ..
         }
     ));
+}
+
+fn assert_reserved_marker(
+    state: &RecoveredClientState,
+    attachment: Option<spaceterm_client::view::WorkspaceAttachment>,
+) {
+    use spaceterm_client::view::AttachmentSuppression;
+    if let Some(attachment) = attachment {
+        assert!(state.suppressed_workspaces().is_empty());
+        assert!(state.suppresses(&attachment));
+    } else {
+        assert_eq!(state.suppressed_workspaces().len(), 1);
+        assert_eq!(state.suppressed_workspaces()[0].workspace, workspace());
+    }
 }
 
 #[tokio::test]
@@ -1080,7 +1132,7 @@ async fn pending_revocation_scheduler_retries_dismissed_task_with_bounded_backof
         tokio::task::yield_now().await;
     }
     assert_eq!(driver.resolved.load(Ordering::SeqCst), 1);
-    tokio::time::advance(std::time::Duration::from_millis(100)).await;
+    tokio::time::advance(std::time::Duration::from_millis(800)).await;
     for _ in 0..50 {
         tokio::task::yield_now().await;
     }
@@ -1447,5 +1499,49 @@ async fn detach_cleanup_identity_cannot_target_a_later_grant() {
             .is_err()
     );
     assert!(f.journal.snapshot().unwrap().operations().is_empty());
+    assert!(f.peer.sent.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn delayed_detach_of_old_incarnation_cannot_capture_reattached_control() {
+    use spaceterm_client::view::{AttachmentIncarnation, WorkspaceAttachment};
+    let f = Fixture::new().await;
+    let gate = Arc::new(UseGate::default());
+    let tasks = PendingTasks::new(f.journal.clone(), gate.clone());
+    let attachment = |incarnation| {
+        WorkspaceAttachment::new(
+            workspace(),
+            f.binding.target().pairing(),
+            f.binding.target().client(),
+            AttachmentIncarnation::new(incarnation).unwrap(),
+        )
+        .unwrap()
+    };
+    let old = attachment(7);
+    *gate.attachment.lock().unwrap() = Some(old);
+    f.journal
+        .record_attachment(f.binding.target().local_pairing().unwrap(), old)
+        .await
+        .unwrap();
+    tasks.detach_attachment(&f.binding, old).await.unwrap();
+    assert!(
+        tasks
+            .drain_detach(&f.binding, workspace(), &f.peer)
+            .await
+            .unwrap()
+    );
+    let current = attachment(8);
+    *gate.attachment.lock().unwrap() = Some(current);
+    f.journal
+        .record_attachment(f.binding.target().local_pairing().unwrap(), current)
+        .await
+        .unwrap();
+    gate.grants.lock().unwrap().push(grant(2, 4));
+    let revision = f.journal.snapshot().unwrap().revision();
+    let invalidations = gate.invalidated.load(Ordering::SeqCst);
+    assert!(tasks.detach_attachment(&f.binding, old).await.is_err());
+    assert_eq!(gate.invalidated.load(Ordering::SeqCst), invalidations);
+    assert_eq!(f.journal.snapshot().unwrap().revision(), revision);
+    assert!(f.journal.snapshot().unwrap().detaches().is_empty());
     assert!(f.peer.sent.lock().unwrap().is_empty());
 }

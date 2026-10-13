@@ -33,11 +33,22 @@ pub(super) fn validate(
         (state.tombstones.len(), MAX_HEADERS),
         (state.suppressed_workspaces.len(), MAX_HEADERS),
         (state.detaches.len(), MAX_HEADERS),
+        (state.suppressed_attachments.len(), MAX_HEADERS),
         (state.revocations.len(), limits.pending_revocations),
         (state.grants.len(), limits.cleanup_grants),
     ] {
         if count > ceiling {
             return Err(resource_limit());
+        }
+    }
+    let mut attachments = BTreeSet::new();
+    for marker in &state.suppressed_attachments {
+        marker.validate()?;
+        if marker.incarnation > state.attachment_incarnation_high_water
+            || !generation_retained(state, &marker.local_pairing)
+            || !attachments.insert((marker.workspace, marker.client, marker.incarnation))
+        {
+            return Err(invalid());
         }
     }
     let mut generations = BTreeSet::new();
@@ -169,6 +180,12 @@ pub(super) fn validate(
         .suppressed_workspaces
         .iter()
         .map(|marker| (key_tuple(&marker.local_pairing), marker.workspace))
+        .chain(
+            state
+                .suppressed_attachments
+                .iter()
+                .map(|marker| (key_tuple(&marker.local_pairing), marker.workspace)),
+        )
         .collect();
     let mut unknown_workspaces = 0;
     for grant in &state.grants {
@@ -317,7 +334,10 @@ pub(super) fn validate(
     let mut detached = BTreeSet::new();
     for task in &state.detaches {
         if !detached.insert((key_tuple(&task.local_pairing), task.workspace))
-            || !suppressed.contains(&(key_tuple(&task.local_pairing), task.workspace))
+            || (!suppressed.contains(&(key_tuple(&task.local_pairing), task.workspace))
+                && !state.suppressed_attachments.iter().any(|marker| {
+                    marker.local_pairing == task.local_pairing && marker.workspace == task.workspace
+                }))
         {
             return Err(invalid());
         }
@@ -469,7 +489,47 @@ fn apply_change(
         return Ok(());
     }
     match change {
+        ClientJournalChange::RecordAttachment(marker) => {
+            marker.validate()?;
+            if marker.incarnation <= state.attachment_incarnation_high_water
+                || !marker.belongs_to_active_binding(state)
+            {
+                return Err(invalid());
+            }
+            state.attachment_incarnation_high_water = marker.incarnation;
+            // Explicit reattachment supersedes the legacy Workspace-wide marker,
+            // never its pending exact-grant barrier or old-incarnation markers.
+            state.suppressed_workspaces.retain(|old| {
+                old.local_pairing != marker.local_pairing || old.workspace != marker.workspace
+            });
+        }
+        ClientJournalChange::SuppressAttachment(marker) => {
+            marker.validate()?;
+            if !marker.belongs_to_active_binding(state) {
+                return Err(invalid());
+            }
+            state.attachment_incarnation_high_water = state
+                .attachment_incarnation_high_water
+                .max(marker.incarnation);
+            // The incarnation watermark replaces the legacy Workspace marker
+            // inside this transaction and spends the same reserved metadata slot.
+            state.suppressed_workspaces.retain(|old| {
+                old.local_pairing != marker.local_pairing || old.workspace != marker.workspace
+            });
+            // A detach also suppresses every older file for this same local
+            // attachment scope. One watermark bounds repeated detach lifetimes.
+            if let Some(old) = state.suppressed_attachments.iter_mut().find(|old| {
+                old.local_pairing == marker.local_pairing
+                    && old.workspace == marker.workspace
+                    && old.client == marker.client
+            }) {
+                old.incarnation = old.incarnation.max(marker.incarnation);
+            } else {
+                state.suppressed_attachments.push(marker.clone());
+            }
+        }
         ClientJournalChange::ReserveCredential(_)
+        | ClientJournalChange::BindCredentialRoute { .. }
         | ClientJournalChange::RecordCredentialPublicKey { .. }
         | ClientJournalChange::PrepareEnrollment(_)
         | ClientJournalChange::SaveEnrollment { .. }
@@ -526,6 +586,18 @@ fn apply_change(
                 confirmed_prefix: 0,
                 retired: false,
             });
+            if let Some(slot) = state
+                .pairing
+                .slots
+                .iter_mut()
+                .find(|slot| slot.reference == target.credential())
+            {
+                slot.route = None;
+                state
+                    .pairing
+                    .credential_preparations
+                    .retain(|reference| *reference != target.credential());
+            }
             state.bindings.push(*saved.clone());
         }
         ClientJournalChange::Prepare(record) => {
@@ -1347,5 +1419,92 @@ pub(crate) fn release_settled(
                 ))
         ),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use spaceterm_core::{
+        authority::{ControlGeneration, ControlGrant, ServerEpoch},
+        control::ReleaseControlRequest,
+        identity::{OperationStreamKey, PaneId},
+        operation_ledger::canonical::CanonicalCodec,
+        operations::OperationSequence,
+    };
+    use spaceterm_protocol::{
+        codec::Payload,
+        pairing_adapter::operation_to_wire,
+        wire::{common, v1, v2},
+    };
+
+    #[test]
+    fn canonical_release_reservation_covers_both_major_exact_cleanup_requests() {
+        let server = ServerId::new([255; 16]);
+        let pairing = PairingId::new(server, u64::MAX).unwrap();
+        let client = ClientId::new(server, u64::MAX).unwrap();
+        let stream = OperationStreamId::new(
+            OperationStreamKey::new(server, u64::MAX).unwrap(),
+            pairing,
+            client,
+        )
+        .unwrap();
+        let request_reservation = release_request_reservation(stream, &CanonicalCodec).unwrap();
+        let result = CompactOutcome::new(&Outcome::Applied, &CanonicalCodec).unwrap();
+        let entity = |local| common::Entity {
+            server: Some(common::Identity {
+                value: server.bytes().to_vec(),
+            }),
+            local_id: local,
+        };
+        for value in [1, 127, 128, 65535, u64::MAX] {
+            let id = OperationId::new(stream, OperationSequence::new(value).unwrap());
+            let command = Command::ReleaseControl(ReleaseControlRequest {
+                epoch: ServerEpoch::new(value),
+                grant: ControlGrant::new(
+                    PaneId::new(server, value).unwrap(),
+                    client,
+                    ControlGeneration::new(value),
+                )
+                .unwrap(),
+            });
+            let request =
+                CanonicalOperationRequest::new(id, command.clone(), &CanonicalCodec).unwrap();
+            let bytes = request.encode(&CanonicalCodec).unwrap();
+            assert!(bytes.len() <= request_reservation);
+            assert_eq!(
+                CanonicalOperationRequest::decode(&bytes, &CanonicalCodec)
+                    .unwrap()
+                    .command(),
+                &command
+            );
+            macro_rules! profile {
+                ($version:ident, $variant:ident) => {{
+                    let payload = Payload::$variant($version::Message {
+                        kind: Some($version::message::Kind::Operation($version::Operation {
+                            id: Some(operation_to_wire(id)),
+                            action: Some($version::operation::Action::ReleaseControl(
+                                $version::ReleaseControl {
+                                    pane: Some(entity(value)),
+                                    client: Some(entity(u64::MAX)),
+                                    epoch: value,
+                                    generation: value,
+                                },
+                            )),
+                        })),
+                    });
+                    let wire = payload.encode().unwrap();
+                    assert_eq!(Payload::decode(payload.major(), &wire).unwrap(), payload);
+                    // Request, compact result and wire framing all fit the same
+                    // dormant exact-release capacity used by the real journal.
+                    assert!(
+                        bytes.len() + result.encoded_len() + wire.len() + 4
+                            <= request_reservation + RELEASE_RESERVATION
+                    );
+                }};
+            }
+            profile!(v1, Major1);
+            profile!(v2, Major2);
+        }
     }
 }

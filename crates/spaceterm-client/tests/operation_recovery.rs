@@ -484,6 +484,15 @@ struct CommitGate {
     resume: tokio::sync::Notify,
 }
 impl spaceterm_client::journal::ClientJournal for CommitGate {
+    fn admission_latch(&self) -> std::sync::Arc<spaceterm_client::journal::JournalAdmission> {
+        self.storage.admission_latch()
+    }
+    fn authority_fence(&self) -> &spaceterm_client::pairing::credentials::PairingAuthorityFence {
+        self.storage.authority_fence()
+    }
+    fn scheduler_claim(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        self.storage.scheduler_claim()
+    }
     fn recover(
         &self,
     ) -> spaceterm_client::ports::ClientFuture<'_, spaceterm_client::journal::RecoveredClientState>

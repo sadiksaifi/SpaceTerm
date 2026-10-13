@@ -3,3 +3,5 @@
 pub mod replica;
 
 pub mod rpc;
+
+mod connection;

@@ -381,7 +381,7 @@ message FindEvent { oneof item { FindChunk chunk = 1; FindCompletion complete = 
 message StatusQuery { uint64 request = 1; uint64 request_generation = 2; uint64 known_epoch = 3; uint64 known_revision = 4; bool subscribe = 5; bool cancel = 6; }
 message CapabilityStatus { uint32 capability = 1; uint32 availability = 2; }
 message ListenerStatus { uint64 generation = 1; RemoteEndpoint endpoint = 2; uint32 state = 3; }
-message ManagementProgress { spaceterm.common.OperationId operation = 1; bytes native_request = 2; uint32 state = 3; uint32 completed_units = 4; uint32 total_units = 5; }
+message ManagementProgress { spaceterm.common.OperationId operation = 1; bytes native_request = 2; uint32 state = 3; uint32 completed_units = 4; uint32 total_units = 5; bytes operation_digest = 6; }
 message StatusPublication { uint64 request = 1; uint64 request_generation = 2; uint64 base = 3; ManagementStatus status = 4; bool resync_required = 5; }
 
 message RepositoryRecord { spaceterm.common.Entity id = 1; ServerDirectoryValue directory = 2; uint64 inventory_version = 3; }

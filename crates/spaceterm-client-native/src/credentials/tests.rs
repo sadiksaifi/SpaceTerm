@@ -499,9 +499,9 @@ impl PairingClientJournal for PreparationJournal {
                 _ => panic!("native preparation test cannot activate bindings"),
             }
             state.revision += 1;
-            PairingCommitDisposition::Durable(PairingJournalReceipt {
-                revision: state.revision,
-            })
+            PairingCommitDisposition::Durable(PairingJournalReceipt::new(
+                spaceterm_client::journal::ClientJournalRevision::new(state.revision),
+            ))
         })
     }
 }

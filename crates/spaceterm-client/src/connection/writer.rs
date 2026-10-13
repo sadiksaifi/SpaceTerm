@@ -25,6 +25,10 @@ struct Write {
     message: Payload,
     delegate: Option<DelegateBinding>,
     state: Option<watch::Receiver<ConnectionState>>,
+    query: Option<(
+        Arc<super::queries::QueryHub>,
+        crate::api::PairedServerBinding,
+    )>,
     completion: Option<oneshot::Sender<Result<(), ClientFailure>>>,
     _reservation: EgressReservation,
 }
@@ -63,7 +67,11 @@ impl Writer {
                         }
                     }
                     if let Some((delegate, info)) = &write.delegate {
-                        delegate.admit(*info, &write.message)?;
+                        if let Some((queries, binding)) = &write.query {
+                            queries.admit(*info, &write.message, binding)?;
+                        } else {
+                            delegate.admit(*info, &write.message)?;
+                        }
                     }
                     Ok(())
                 })();
@@ -129,6 +137,7 @@ impl Writer {
             message: message.clone(),
             delegate,
             state: None,
+            query: None,
             completion: None,
             _reservation: reservation,
         })
@@ -138,11 +147,14 @@ impl Writer {
         request: DispatchRequest,
         delegate: Arc<dyn ConnectionDelegate>,
         state: watch::Receiver<ConnectionState>,
+        queries: Arc<super::queries::QueryHub>,
+        binding: crate::api::PairedServerBinding,
     ) -> Result<(), ClientFailure> {
         self.push(Write {
             message: request.message,
             delegate: Some((delegate, request.captured)),
             state: Some(state),
+            query: request.query.then_some((queries, binding)),
             completion: Some(request.completion),
             _reservation: request._reservation,
         })

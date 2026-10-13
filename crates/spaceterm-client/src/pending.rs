@@ -35,6 +35,12 @@ pub trait LocalUseInvalidator: Send + Sync {
         pairing: &LocalPairingKey,
         workspace: WorkspaceId,
     ) -> Result<Vec<GrantedControl>, ClientFailure>;
+    /// Reject an obsolete incarnation before invalidation or grant capture.
+    fn invalidate_attachment(
+        &self,
+        pairing: &LocalPairingKey,
+        attachment: crate::view::WorkspaceAttachment,
+    ) -> Result<Vec<GrantedControl>, ClientFailure>;
     fn invalidate_pairing(&self, pairing: &LocalPairingKey);
     fn remove_pairing<'a>(&'a self, pairing: &'a LocalPairingKey) -> ClientFuture<'a, ()>;
 }
@@ -100,13 +106,44 @@ impl PendingTasks {
         binding: &PairedServerBinding,
         workspace: WorkspaceId,
     ) -> Result<DetachReceipt, ClientFailure> {
+        self.detach(binding, workspace, None).await
+    }
+    pub async fn detach_attachment(
+        &self,
+        binding: &PairedServerBinding,
+        attachment: crate::view::WorkspaceAttachment,
+    ) -> Result<DetachReceipt, ClientFailure> {
+        if attachment.pairing() != binding.target().pairing()
+            || attachment.client() != binding.target().client()
+        {
+            return Err(invalid_peer());
+        }
+        self.detach(binding, attachment.workspace(), Some(attachment))
+            .await
+    }
+    async fn detach(
+        &self,
+        binding: &PairedServerBinding,
+        workspace: WorkspaceId,
+        attachment: Option<crate::view::WorkspaceAttachment>,
+    ) -> Result<DetachReceipt, ClientFailure> {
         let key = binding.target().local_pairing()?;
         if workspace.server() != binding.target().server() {
             return Err(invalid_peer());
         }
         // Invalidation precedes storage and all notifications. A persistence
         // failure leaves old leases blocked, rather than restoring old authority.
-        let grants = self.invalidator.invalidate_workspace(&key, workspace)?;
+        let grants = if let Some(attachment) = attachment {
+            if crate::view::AttachmentSuppression::suppresses(
+                &self.journal.snapshot()?,
+                &attachment,
+            ) {
+                return Err(ClientFailure::new(ClientFailureClass::StaleAuthority));
+            }
+            self.invalidator.invalidate_attachment(&key, attachment)?
+        } else {
+            self.invalidator.invalidate_workspace(&key, workspace)?
+        };
         for grant in &grants {
             if grant.grant().client() != binding.target().client() {
                 return Err(invalid_peer());
@@ -145,16 +182,19 @@ impl PendingTasks {
                     })
                     .map(|record| record.binding)
                     .collect();
-                Ok((
-                    vec![ClientJournalChange::BeginDetach(DetachTask {
-                        local_pairing: key,
-                        workspace,
-                        grants,
-                        dependencies,
-                        releases: vec![],
-                    })],
-                    (),
-                ))
+                let mut changes = vec![ClientJournalChange::BeginDetach(DetachTask {
+                    local_pairing: key.clone(),
+                    workspace,
+                    grants,
+                    dependencies,
+                    releases: vec![],
+                })];
+                if let Some(attachment) = attachment {
+                    changes.push(ClientJournalChange::SuppressAttachment(
+                        crate::journal::JournalAttachment::new(key, attachment)?,
+                    ));
+                }
+                Ok((changes, ()))
             })
             .await?;
         Ok(DetachReceipt {
@@ -373,11 +413,84 @@ impl PendingTasks {
             }
         }
     }
+    /// Pairing's real driver owns one attempt, including receipt verification,
+    /// restricted acknowledgement and exact native cleanup. This journal owns
+    /// its only clock, backoff, lifetime claim and cancellation drain.
+    pub fn start_pairing_scheduler<N, R>(
+        &self,
+        driver: Arc<crate::pairing::revocation::RevocationDriver<N, R>>,
+    ) -> Result<PendingRuntime, ClientFailure>
+    where
+        N: crate::pairing::credentials::NativeDeviceCredentials + 'static,
+        R: crate::pairing::revocation::RestrictedConnector + 'static,
+    {
+        self.journal.ensure_healthy()?;
+        let tasks = self.clone();
+        scheduler::start(self.clone(), move |id| {
+            let tasks = tasks.clone();
+            let driver = Arc::clone(&driver);
+            Box::pin(async move {
+                let _serial = tasks.serial.lock().await;
+                if !tasks
+                    .journal
+                    .snapshot()?
+                    .revocations()
+                    .iter()
+                    .any(|record| record.task.parts().original.operation() == id)
+                {
+                    return Ok(true);
+                }
+                tasks
+                    .journal
+                    .transact(vec![ClientJournalChange::RevocationAttempt(id)])
+                    .await?;
+                let store =
+                    crate::pairing::journal::JournalPairingStore::new(Arc::clone(&tasks.journal));
+                driver.run_once(&store, id).await.map_err(pairing_failure)?;
+                Ok(true)
+            })
+        })
+    }
     pub fn start_scheduler(
         &self,
         driver: Arc<dyn RevocationDriver>,
     ) -> Result<PendingRuntime, ClientFailure> {
         self.journal.ensure_healthy()?;
-        scheduler::start(self.clone(), driver)
+        let tasks = self.clone();
+        scheduler::start(self.clone(), move |id| {
+            let tasks = tasks.clone();
+            let driver = Arc::clone(&driver);
+            Box::pin(async move { tasks.retry_revocation(id, driver.as_ref()).await })
+        })
     }
+}
+
+fn pairing_failure(failure: spaceterm_core::pairing::PairingFailure) -> ClientFailure {
+    use spaceterm_core::pairing::PairingFailure;
+    ClientFailure::new(match failure {
+        PairingFailure::Offline
+        | PairingFailure::TimedOut
+        | PairingFailure::RevocationUnconfirmed => ClientFailureClass::Unavailable,
+        PairingFailure::AuthorizationRequired
+        | PairingFailure::AuthorizationDenied
+        | PairingFailure::AuthorizationUnavailable
+        | PairingFailure::PairingRevoked
+        | PairingFailure::ClientNotBound
+        | PairingFailure::CredentialUnavailable => ClientFailureClass::AuthorizationDenied,
+        PairingFailure::IdentityMismatch | PairingFailure::FingerprintMismatch => {
+            ClientFailureClass::PinMismatch
+        }
+        PairingFailure::Incompatible => ClientFailureClass::Incompatible,
+        PairingFailure::StaleAssessment | PairingFailure::RouteChanged => {
+            ClientFailureClass::StaleAuthority
+        }
+        PairingFailure::LimitExceeded => ClientFailureClass::ResourceLimit,
+        PairingFailure::StorageUnavailable => ClientFailureClass::StorageUnavailable,
+        PairingFailure::UnsafeStorage => ClientFailureClass::UnsafeStorage,
+        PairingFailure::UnknownSchema => ClientFailureClass::UnknownSchema,
+        PairingFailure::InvalidDurableState => ClientFailureClass::InvalidStorage,
+        PairingFailure::RecoveryRequired => ClientFailureClass::RecoveryRequired,
+        PairingFailure::Cancelled => ClientFailureClass::Cancelled,
+        _ => ClientFailureClass::InvalidPeer,
+    })
 }
