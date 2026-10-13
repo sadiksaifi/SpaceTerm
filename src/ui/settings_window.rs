@@ -1253,6 +1253,7 @@ impl SettingsWindow {
             | SettingsRowId::ServerPermissions
             | SettingsRowId::ServerRemoteAccess
             | SettingsRowId::ServerRemoteAccessScope
+            | SettingsRowId::ServerPairedDevices
             | SettingsRowId::ServerUnpair => self.render_server_row(row, appearance, window, cx),
             SettingsRowId::Shortcut(command) => self.render_shortcut(command, cx),
             SettingsRowId::SettingsFile => self.render_settings_file(appearance, cx),
@@ -2083,7 +2084,8 @@ fn row_layout(row: SettingsRowId) -> FormRowLayout {
         | SettingsRowId::InstalledThemes
         | SettingsRowId::SettingsFile
         | SettingsRowId::ServerList
-        | SettingsRowId::ServerPermissions => FormRowLayout::Full,
+        | SettingsRowId::ServerPermissions
+        | SettingsRowId::ServerPairedDevices => FormRowLayout::Full,
         SettingsRowId::ServerWorktreeLocation => FormRowLayout::Above,
         _ => FormRowLayout::Beside,
     }

@@ -27,6 +27,9 @@ use crate::ui::settings_window::SettingsWindow;
 use crate::ui::settings_window::catalog::{SettingsRowId, SettingsSectionId};
 use crate::worktrees::path_template::WorktreePathTemplateError;
 
+#[path = "servers/paired_devices/tests.rs"]
+mod paired_devices_tests;
+
 const LOCATION: &str = "~/Worktrees/{repository}/{branch}";
 
 /// Records every request the section sends.
@@ -298,6 +301,7 @@ pub(super) fn local() -> ServerSummary {
         compatibility: None,
         installations: model::ServerInstallations::default(),
         paired_devices: None,
+        unpair_assessment: None,
         name: "Studio".into(),
         route: ServerRoute::Local,
         status: ServerStatus::Running,
@@ -339,6 +343,7 @@ fn ssh() -> ServerSummary {
         compatibility: None,
         installations: model::ServerInstallations::default(),
         paired_devices: None,
+        unpair_assessment: None,
         name: "Build Box".into(),
         route: ServerRoute::Ssh {
             destination: "dev@build.example.com".into(),
@@ -361,6 +366,7 @@ fn wss() -> ServerSummary {
         compatibility: None,
         installations: model::ServerInstallations::default(),
         paired_devices: None,
+        unpair_assessment: None,
         name: "Lab".into(),
         route: ServerRoute::Wss {
             authority: "lab.example.com:7443".into(),
@@ -575,7 +581,7 @@ fn servers_installed_after_settings_opens_appear_without_reopening(cx: &mut Test
         window.read_with(cx, |window, _| window
             .rows_for(SettingsSectionId::Servers)
             .len()),
-        10
+        11
     );
 }
 
@@ -1827,7 +1833,7 @@ fn assert_rows_share_one_right_edge(fixture: &mut Fixture<'_>) {
     let rows = fixture.window.read_with(fixture.cx, |window, _| {
         window.rows_for(SettingsSectionId::Servers)
     });
-    assert_eq!(rows.len(), 10);
+    assert_eq!(rows.len(), 11);
     let mut right = None;
     for row in rows {
         let bounds = fixture
@@ -1866,6 +1872,7 @@ fn no_settings_reset_reaches_a_server_row() {
         SettingsRowId::ServerPermissions,
         SettingsRowId::ServerRemoteAccess,
         SettingsRowId::ServerRemoteAccessScope,
+        SettingsRowId::ServerPairedDevices,
         SettingsRowId::ServerUnpair,
     ] {
         for appearance in [Appearance::Light, Appearance::Dark] {

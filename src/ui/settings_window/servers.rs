@@ -6,6 +6,7 @@
 
 mod copy;
 pub(crate) mod model;
+mod paired_devices;
 
 #[cfg(test)]
 #[path = "servers_tests.rs"]
@@ -59,19 +60,21 @@ fn presents_selected_server(row: SettingsRowId) -> bool {
             | SettingsRowId::ServerPermissions
             | SettingsRowId::ServerRemoteAccess
             | SettingsRowId::ServerRemoteAccessScope
+            | SettingsRowId::ServerPairedDevices
             | SettingsRowId::ServerUnpair
     )
 }
 
 /// The server rows whose controls take keyboard focus. Each one is a focus scope, so focus that
 /// the keyboard moves into it scrolls the row into view.
-const FOCUSABLE_ROWS: [SettingsRowId; 7] = [
+const FOCUSABLE_ROWS: [SettingsRowId; 8] = [
     SettingsRowId::ServerStatus,
     SettingsRowId::ServerVersion,
     SettingsRowId::ServerEndAllSessions,
     SettingsRowId::ServerWorktreeLocation,
     SettingsRowId::ServerRemoteAccess,
     SettingsRowId::ServerRemoteAccessScope,
+    SettingsRowId::ServerPairedDevices,
     SettingsRowId::ServerUnpair,
 ];
 
@@ -85,6 +88,7 @@ pub(super) struct ServersSection {
     selected: Option<ServerKey>,
     list_focus: FocusHandle,
     worktree: WorktreeField,
+    devices: paired_devices::DeviceInventoryView,
     /// Bind scopes chosen while remote connections are off, used when they are turned on.
     proposed_scopes: HashMap<ServerKey, SharedString>,
     /// Notices dismissed here that the next snapshot has not dropped yet.
@@ -242,6 +246,7 @@ impl ServersSection {
                 sent: HashMap::new(),
                 _events: events,
             },
+            devices: paired_devices::DeviceInventoryView::default(),
             proposed_scopes: HashMap::new(),
             dismissed: HashSet::new(),
             row_focus,
@@ -559,6 +564,7 @@ impl SettingsWindow {
 
     fn select_server(&mut self, key: ServerKey, cx: &mut Context<Self>) {
         if self.servers.selected.as_ref() != Some(&key) {
+            self.servers.devices.selection_changed();
             self.servers.selected = Some(key);
             cx.notify();
         }
@@ -615,7 +621,11 @@ impl SettingsWindow {
         let Some(server) = self.servers.selected_server().cloned() else {
             return div().into_any_element();
         };
-        let control = self.render_selected_server_row(row, &server, appearance, cx);
+        let control = if row == SettingsRowId::ServerPairedDevices {
+            self.render_paired_devices(&server, appearance, window, cx)
+        } else {
+            self.render_selected_server_row(row, &server, appearance, cx)
+        };
         match self.servers.row_focus.get(&row) {
             // The scope wraps the control without a box of its own, so the row keeps its layout.
             Some(focus) => div()
@@ -624,9 +634,13 @@ impl SettingsWindow {
                 .flex()
                 .flex_row()
                 .items_center()
-                .when(row == SettingsRowId::ServerWorktreeLocation, |scope| {
-                    scope.w_full()
-                })
+                .when(
+                    matches!(
+                        row,
+                        SettingsRowId::ServerWorktreeLocation | SettingsRowId::ServerPairedDevices
+                    ),
+                    |scope| scope.w_full(),
+                )
                 .child(control)
                 .into_any_element(),
             None => control,
