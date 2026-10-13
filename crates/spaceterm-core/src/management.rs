@@ -19,6 +19,10 @@ pub const MAX_SERVER_RUNTIME_OWNERS: usize = 64;
 pub const MAX_STATUS_CAPABILITIES: usize = 16;
 pub const MAX_STATUS_PROGRESS: usize = 8;
 pub const MAX_STATUS_LISTENERS: usize = 8;
+/// Native account-service supervision and lifecycle management availability.
+pub const CAPABILITY_NATIVE_LIFECYCLE: u32 = 1;
+/// Authenticated, independently installed server code selection availability.
+pub const CAPABILITY_SIGNED_SERVER_INSTALLATION: u32 = 2;
 pub const MAX_PUBLICATION_PARTS: u32 = 4096;
 pub type ServerVersion = BoundedText<128>;
 

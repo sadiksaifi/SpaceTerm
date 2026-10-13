@@ -32,7 +32,7 @@ use spaceterm_core::{
 };
 use spaceterm_terminal::runtime_contracts::{FencedRuntimeCommand, RuntimeStartRequest};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     sync::Arc,
 };
 use tokio::sync::{mpsc, oneshot, watch};
@@ -441,6 +441,7 @@ impl RecoveredServer {
                 storage: spaceterm_core::management::StorageStatus::Ready,
                 intent: spaceterm_core::management::ServerRunIntent::Running,
             });
+        let (management_progress, management_progress_received) = watch::channel(Vec::new());
         let (snapshot, snapshot_received) = watch::channel(config.core.reducer.snapshot());
         let (owner_drop, owner_dropped) = oneshot::channel();
         let handle = ServerHandle {
@@ -448,6 +449,7 @@ impl RecoveredServer {
             lifecycle,
             phase: phase_received,
             runtime_status: runtime_status_received,
+            management_progress: management_progress_received,
             snapshot: snapshot_received,
             pairing_snapshot,
         };
@@ -472,6 +474,8 @@ impl RecoveredServer {
             pairing_waiting: None,
             pending: None,
             delivery_pending: None,
+            waiting_submissions: VecDeque::new(),
+            prefer_submissions: true,
             busy: false,
             terminal_barrier: false,
             retirements: BTreeMap::new(),
@@ -517,6 +521,7 @@ impl RecoveredServer {
             events,
             phase,
             runtime_status,
+            management_progress,
             snapshot,
             handle: handle.clone(),
             inspection_inflight: false,
@@ -653,6 +658,8 @@ struct Actor {
     pairing_waiting: Option<(TransactionParts, CommitAction)>,
     pending: Option<PendingCommit>,
     delivery_pending: Option<OperationBinding>,
+    waiting_submissions: VecDeque<(VerifiedPrincipal, CanonicalOperationRequest, OperationReply)>,
+    prefer_submissions: bool,
     busy: bool,
     terminal_barrier: bool,
     retirements: BTreeMap<OperationId, Arc<RetirementDescriptor>>,
@@ -671,6 +678,7 @@ struct Actor {
     events: mpsc::Sender<Event>,
     phase: watch::Sender<ServicePhase>,
     runtime_status: watch::Sender<spaceterm_core::management::ServerRuntimeStatus>,
+    management_progress: watch::Sender<Vec<spaceterm_core::management::ManagementProgress>>,
     snapshot: watch::Sender<Arc<OrganizationSnapshot>>,
     handle: ServerHandle,
     inspection_inflight: bool,
@@ -706,15 +714,26 @@ impl Actor {
                     self.begin_pairing_commit(parts, action);
                 }
             }
-            if self.pending.is_none()
-                && !self.busy
-                && let Some(request) = self.git.waiting.pop_front()
-            {
-                self.git_request(request);
+            if self.pending.is_none() && !self.busy {
+                // Alternate the two bounded mutation queues so continuous Git
+                // reconciliation cannot starve an ordinary startup request.
+                if (self.prefer_submissions && !self.waiting_submissions.is_empty())
+                    || self.git.waiting.is_empty()
+                {
+                    if let Some((principal, request, reply)) = self.waiting_submissions.pop_front()
+                    {
+                        self.prefer_submissions = false;
+                        self.submit_reserved(principal, request, reply);
+                    }
+                } else if let Some(request) = self.git.waiting.pop_front() {
+                    self.prefer_submissions = true;
+                    self.git_request(request);
+                }
             }
             if self.pending.is_none() && !self.busy && self.advance().is_err() {
                 self.enter_recovery();
             }
+            self.publish_management_progress();
             if self.can_finish() {
                 break;
             }
@@ -736,6 +755,9 @@ impl Actor {
                     }
                 },
             }
+        }
+        for (_, _, reply) in self.waiting_submissions.drain(..) {
+            reply.send(Err(failure(ServerFailureClass::RecoveryRequired)));
         }
         for (_, waiters) in std::mem::take(&mut self.git_cleanup_waiters) {
             for reply in waiters {
@@ -780,6 +802,39 @@ impl Actor {
         }
         result
     }
+    fn publish_management_progress(&self) {
+        use spaceterm_core::management::{MAX_STATUS_PROGRESS, ManagementRequestReference};
+        let progress = self
+            .native_retirement
+            .iter()
+            .map(|descriptor| {
+                let mut progress = crate::listeners::retirement_progress(
+                    ManagementRequestReference::Native(descriptor.request().id_bytes()),
+                    descriptor.sessions(),
+                );
+                if self.native_completed {
+                    progress.state = spaceterm_core::management::ManagementProgressState::Completed;
+                }
+                progress
+            })
+            .chain(self.retirements.values().map(|descriptor| {
+                crate::listeners::retirement_progress(
+                    ManagementRequestReference::OperationReference(descriptor.binding().id),
+                    descriptor.sessions(),
+                )
+            }))
+            .take(MAX_STATUS_PROGRESS)
+            .collect::<Vec<_>>();
+        self.management_progress.send_if_modified(|current| {
+            if *current == progress {
+                false
+            } else {
+                *current = progress;
+                true
+            }
+        });
+    }
+
     fn ordinary_open(&self) -> bool {
         matches!(
             *self.phase.borrow(),
@@ -1379,6 +1434,15 @@ impl Actor {
             sender: OperationReplySender::Ordinary(sender),
             permit: Some(permit),
         };
+        self.submit_reserved(principal, request, reply);
+    }
+
+    fn submit_reserved(
+        &mut self,
+        principal: VerifiedPrincipal,
+        request: CanonicalOperationRequest,
+        reply: OperationReply,
+    ) {
         let preflight = (|| {
             self.check_principal(principal, false)?;
             self.check_binding(principal, request.binding())?;
@@ -1436,6 +1500,21 @@ impl Actor {
                 }
             }
             Ok(OperationLookup::NeverAdmitted) => {
+                // Internal observation and ledger commits are serialization, not
+                // exhausted operation capacity. Retain one reliable reply permit
+                // while waiting, then revalidate the principal and request.
+                if (self.pending.is_some() || self.busy)
+                    && self.ordinary_open()
+                    && !self.terminal_barrier
+                {
+                    if self.waiting_submissions.len() < self.config.limits.actor_requests {
+                        self.waiting_submissions
+                            .push_back((principal, request, reply));
+                    } else {
+                        reply.send(Err(failure(ServerFailureClass::Capacity)));
+                    }
+                    return;
+                }
                 let result = (|| {
                     self.available()?;
                     self.check_principal(principal, true)?;

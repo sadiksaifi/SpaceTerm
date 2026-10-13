@@ -245,3 +245,98 @@ async fn account_setup_requires_verified_artifact_and_retained_native_request() 
         Some(ServiceFailure::RequestConflict)
     );
 }
+
+#[tokio::test]
+async fn account_native_status_authenticates_live_approved_and_staged_code_without_mutation() {
+    use spaceterm_core::{identity::ServerId, management::*};
+    use spaceterm_server::{
+        account_startup::test_support,
+        listeners::{AccountNativeStatusObserver, NativeStatusObserver},
+    };
+    let root = tempfile::tempdir().unwrap();
+    let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+    let (key, artifact) = fixture("1.2.3", 91, native_machine());
+    let approved = InstallationStatus {
+        installation: spaceterm_host::startup::InstallationId(std::num::NonZeroU64::MIN),
+        version: artifact.manifest().version.clone(),
+        artifact_sha256: artifact.artifact_sha256(),
+    };
+    let registration = account
+        .initialize_with_installation(DesiredServerState::Stopped, Some(approved.clone()))
+        .unwrap();
+    let store =
+        spaceterm_host::server_installation::test_support::store(&registration, key.clone())
+            .unwrap();
+    let id = store.stage(&artifact).unwrap();
+    assert_eq!(id, approved.installation);
+    store
+        .activate(
+            id,
+            store.snapshot().unwrap().generation,
+            spaceterm_host::organization_store::schema::SCHEMA_VERSION,
+        )
+        .unwrap();
+    let (_, staged) = fixture("1.2.4", 91, native_machine());
+    let staged_id = store.stage(&staged).unwrap();
+    account
+        .stage_installation(InstallationStatus {
+            installation: staged_id,
+            version: staged.manifest().version.clone(),
+            artifact_sha256: staged.artifact_sha256(),
+        })
+        .unwrap();
+    let supervisor =
+        test_support::supervisor(root.path(), Arc::new(test_support::StartupAbsence)).unwrap();
+    let supervisor = Arc::new(account.with_installation_trust((*supervisor).clone(), key));
+    let observer = AccountNativeStatusObserver::new(supervisor.clone());
+    let before = std::fs::read(account.anchor().join("registration")).unwrap();
+    let status = observer
+        .observe(ServerId::new(registration.server_pin().identity))
+        .await
+        .unwrap();
+    assert_eq!(status.verification, NativeVerification::Verified);
+    assert_eq!(status.approved.as_ref().unwrap().as_str(), "1.2.3");
+    assert_eq!(status.staged.as_ref().unwrap().as_str(), "1.2.4");
+    assert!(
+        status
+            .capabilities
+            .iter()
+            .all(|value| value.availability == CapabilityAvailability::Available)
+    );
+    assert!(std::fs::read(account.anchor().join("registration")).unwrap() == before);
+    assert_eq!(
+        supervisor.discover().unwrap().unwrap().desired_state(),
+        DesiredServerState::Stopped
+    );
+    assert!(!registration.endpoint().unwrap().path().exists());
+    let request = supervisor.allocate_request().unwrap();
+    spaceterm_host::account_service::test_support::interrupt_after_phase(ServicePhase::Accepted);
+    assert_eq!(
+        supervisor.start(request).await.err(),
+        Some(ServiceFailure::SupervisorUnavailable)
+    );
+    let journal_before = std::fs::read(account.anchor().join("requests")).unwrap();
+    let pending = observer
+        .observe(ServerId::new(registration.server_pin().identity))
+        .await
+        .unwrap();
+    assert_eq!(
+        pending.progress[0].request,
+        ManagementRequestReference::Native(*request.as_bytes())
+    );
+    assert_eq!(pending.progress[0].state, ManagementProgressState::Pending);
+    assert!(std::fs::read(account.anchor().join("requests")).unwrap() == journal_before);
+    assert!(std::fs::read(account.anchor().join("registration")).unwrap() == before);
+    let executable = store.retain_approved().unwrap();
+    std::fs::write(executable.path(), b"corrupted approved artifact").unwrap();
+    let failed = observer
+        .observe(ServerId::new(registration.server_pin().identity))
+        .await
+        .unwrap();
+    assert_eq!(failed.verification, NativeVerification::Unverified);
+    assert!(failed.approved.is_none());
+    assert!(failed.capabilities.iter().any(|value| value.capability
+        == CAPABILITY_SIGNED_SERVER_INSTALLATION
+        && value.availability == CapabilityAvailability::Unavailable));
+    assert!(std::fs::read(account.anchor().join("registration")).unwrap() == before);
+}

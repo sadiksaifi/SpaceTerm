@@ -303,6 +303,8 @@ pub struct ServerHandle {
     pub(crate) lifecycle: mpsc::Sender<LifecycleRequest>,
     pub(crate) phase: watch::Receiver<ServicePhase>,
     pub(crate) runtime_status: watch::Receiver<spaceterm_core::management::ServerRuntimeStatus>,
+    pub(crate) management_progress:
+        watch::Receiver<Vec<spaceterm_core::management::ManagementProgress>>,
     pub(crate) snapshot: watch::Receiver<Arc<OrganizationSnapshot>>,
     pub(crate) pairing_snapshot:
         watch::Receiver<Option<spaceterm_core::pairing::policy::PairingSnapshot>>,
@@ -318,6 +320,15 @@ impl ServerHandle {
         &self,
     ) -> watch::Receiver<spaceterm_core::management::ServerRuntimeStatus> {
         self.runtime_status.clone()
+    }
+    /// Bounded committed retirement comparisons, without execution digests.
+    pub fn management_progress(&self) -> Vec<spaceterm_core::management::ManagementProgress> {
+        self.management_progress.borrow().clone()
+    }
+    pub fn subscribe_management_progress(
+        &self,
+    ) -> watch::Receiver<Vec<spaceterm_core::management::ManagementProgress>> {
+        self.management_progress.clone()
     }
     pub fn snapshot(&self) -> Arc<OrganizationSnapshot> {
         self.snapshot.borrow().clone()

@@ -845,6 +845,71 @@ impl ServiceSupervisor {
         }
         Ok(())
     }
+    /// Reads the original durable progress without resolving or executing it.
+    pub fn request_progress(
+        &self,
+        request: NativeRequestId,
+    ) -> Result<ServiceProgress, ServiceFailure> {
+        let (_, _, journal) = self.read_journal()?;
+        let record = &journal.reservations[journal.reservation(request)?];
+        if let Some(install) = &record.install {
+            return Ok(install.progress(request));
+        }
+        record
+            .service
+            .as_ref()
+            .map(|service| service.progress(request))
+            .ok_or(ServiceFailure::Pending)
+    }
+
+    /// Authenticates selected code and resources again. No directory scan,
+    /// activation, initialization, process start or authorization is performed.
+    pub fn verified_installation_selection(
+        &self,
+    ) -> Result<super::VerifiedInstallationSelection, ServiceFailure> {
+        let registration = self.discover()?.ok_or(ServiceFailure::Missing)?;
+        #[cfg(feature = "test-support")]
+        let store = match &self.test_installation_trust {
+            Some(key) => crate::server_installation::test_support::existing_store(
+                &registration,
+                key.clone(),
+            )?,
+            None => {
+                crate::server_installation::ServerInstallationStore::open_existing(&registration)?
+            }
+        };
+        #[cfg(not(feature = "test-support"))]
+        let store =
+            crate::server_installation::ServerInstallationStore::open_existing(&registration)?;
+        let before = store.snapshot()?;
+        let approved = store
+            .retain_compatible_approved(crate::organization_store::schema::SCHEMA_VERSION)?
+            .status();
+        let staged = store.staged_status()?;
+        if store.snapshot()? != before {
+            return Err(ServiceFailure::Pending);
+        }
+        let convert =
+            |value: crate::server_installation::InstallationStatus| super::InstallationStatus {
+                installation: value.installation,
+                version: value.version,
+                artifact_sha256: value.artifact_sha256,
+            };
+        let selected = super::VerifiedInstallationSelection {
+            approved: convert(approved),
+            staged: staged.map(convert),
+        };
+        let current = self.discover()?.ok_or(ServiceFailure::Missing)?;
+        if current.server_pin() != registration.server_pin()
+            || current.generation() != registration.generation()
+            || current.approved_installation() != Some(&selected.approved)
+            || current.staged_installation() != selected.staged.as_ref()
+        {
+            return Err(ServiceFailure::IdentityMismatch);
+        }
+        Ok(selected)
+    }
+
     /// Observes current facts without keys, authorization, initialization or startup.
     pub fn status(&self) -> ServiceFuture<'_, ServiceStatus> {
         Box::pin(async move {

@@ -426,6 +426,29 @@ async fn close_publishes_deletion_at_acceptance_and_completion_does_not_delete_t
     let result = handle.submit(principal, operation).await.unwrap();
     assert_eq!(result, OperationResponse::Pending(binding));
     gate.entered().await;
+    let mut progress = handle.subscribe_management_progress();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        progress.wait_for(|value| !value.is_empty()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        progress.borrow()[0].request,
+        spaceterm_core::management::ManagementRequestReference::OperationReference(binding.id)
+    );
+    assert_eq!(
+        progress.borrow()[0].state,
+        spaceterm_core::management::ManagementProgressState::WaitingForCleanup
+    );
+    assert_eq!(
+        (
+            progress.borrow()[0].completed_units,
+            progress.borrow()[0].total_units
+        ),
+        (0, 1)
+    );
     assert!(handle.snapshot().state().workspaces.is_empty());
     let acceptance = handle.snapshot().state().revision;
     gate.release();
@@ -440,6 +463,13 @@ async fn close_publishes_deletion_at_acceptance_and_completion_does_not_delete_t
         }
         tokio::task::yield_now().await;
     }
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        progress.wait_for(Vec::is_empty),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     {
         let db = db.lock().unwrap();
         let completions:Vec<_>=db.transactions.iter().filter(|p|p.operation_writes.iter().any(|v|matches!(v,spaceterm_core::storage::OperationWrite::Ledger(v) if matches!(v.as_ref(),spaceterm_core::operation_ledger_contracts::LedgerWrite::CompleteOperation{record,..} if record.binding==binding)))).collect();
@@ -3712,4 +3742,90 @@ async fn shutdown_joins_a_long_native_git_write_before_retiring_sessions() {
         .unwrap();
     assert!(output.status.success());
     assert_eq!(output.stdout, b"1\n");
+}
+
+#[tokio::test]
+async fn complete_startup_waits_for_an_inflight_commit_without_capacity_retries() {
+    let fixture = Fixture::new();
+    let principal = fixture.principal(1, 1);
+    let codec = fixture.codec.clone();
+    let host = fixture.host.clone();
+    let db = fixture.db.clone();
+    let server = RecoveredServer::recover(fixture.config, fixture.dependencies)
+        .await
+        .unwrap();
+    let handle = server.handle();
+    connect(&handle, principal).await;
+    let grant = acquire(&handle, principal, &codec).await;
+    let fence = EffectFence::new(
+        SessionKey {
+            pane: pane(),
+            epoch: principal.epoch(),
+            generation: handle.snapshot().runtime()[0].session_generation,
+        },
+        grant,
+        principal.binding(),
+        ContextGeneration::new(1),
+        None,
+    )
+    .unwrap();
+    let intent =
+        StartupIntent::new(operation(1, 2), fence, StartupSource::ExplicitSelection).unwrap();
+    handle
+        .submit(
+            principal,
+            request(&codec, 1, 2, Command::BeginStartup(intent)),
+        )
+        .await
+        .unwrap();
+    let gate = StoreGate::new();
+    db.lock().unwrap().gate = Some(gate.clone());
+    let renamed = handle.clone();
+    let rename = request(
+        &codec,
+        1,
+        3,
+        Command::RenameWorkspace {
+            workspace: workspace(),
+            expected_version: FieldVersion::new(1),
+            draft: NameDraft::Custom(NameText::new("renamed".into()).unwrap()),
+        },
+    );
+    let renaming = tokio::spawn(async move { renamed.submit(principal, rename).await });
+    gate.entered().await;
+    let grid = spaceterm_core::geometry::MeasuredGrid::new(
+        37,
+        113,
+        spaceterm_core::geometry::CellPixels::new(9, 18).unwrap(),
+        spaceterm_core::geometry::SUPPORTED_GRID_LIMITS,
+    )
+    .unwrap();
+    let complete = request(
+        &codec,
+        1,
+        4,
+        Command::CompleteMeasuredStartup(MeasuredStartupMeasurement {
+            intent: intent.id(),
+            fence,
+            grid,
+        }),
+    );
+    let started = handle.clone();
+    let mut starting = tokio::spawn(async move { started.submit(principal, complete).await });
+    let early = tokio::time::timeout(std::time::Duration::from_millis(50), &mut starting).await;
+    gate.release();
+    renaming.await.unwrap().unwrap();
+    assert!(
+        early.is_err(),
+        "startup must wait, not fail with transient Capacity: {early:?}"
+    );
+    assert!(matches!(
+        starting.await.unwrap().unwrap(),
+        OperationResponse::Completed {
+            outcome: Outcome::SessionStarted(_),
+            ..
+        }
+    ));
+    stop(&handle, host).await.unwrap();
+    server.wait().await.unwrap();
 }
