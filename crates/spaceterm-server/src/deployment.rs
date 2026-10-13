@@ -6,6 +6,12 @@ use spaceterm_distribution::{DistributionFailure, StorageCompatibility};
 
 use crate::account_startup::StartupFailure;
 
+pub mod owner;
+pub mod setup;
+mod stdio;
+
+pub use stdio::{run_native, run_native_with_supervisor};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ServerInvocation {
     Serve,
@@ -13,6 +19,9 @@ pub enum ServerInvocation {
     Help,
     Version,
     Status,
+    ReserveNativeRequest,
+    OwnerEnrollment,
+    SetupConfirmed,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InvalidServerArguments;
@@ -20,7 +29,7 @@ pub struct InvalidServerArguments;
 impl ServerInvocation {
     /// Accepts exactly "serve" for service startup, or one query operation.
     /// Status alone accepts unique leading bootstrap output/interaction flags.
-    /// No invocation grants installation or owner-enrollment authority.
+    /// Mutations have distinct deliberate entry points. Setup requires confirmation.
     pub fn parse(
         arguments: impl IntoIterator<Item = OsString>,
     ) -> Result<Self, InvalidServerArguments> {
@@ -37,6 +46,14 @@ impl ServerInvocation {
                 Some(argument) if !json && !non_interactive => {
                     break match argument.to_str() {
                         Some("serve") => Self::Serve,
+                        Some("reserve-native-request") => Self::ReserveNativeRequest,
+                        Some("owner-enrollment") => Self::OwnerEnrollment,
+                        Some("setup")
+                            if arguments.next().as_deref()
+                                == Some(std::ffi::OsStr::new("--confirm")) =>
+                        {
+                            Self::SetupConfirmed
+                        }
                         Some("--distribution-metadata") => Self::DistributionMetadata,
                         Some("--help") => Self::Help,
                         Some("--version") => Self::Version,
@@ -53,7 +70,7 @@ impl ServerInvocation {
     }
 }
 
-pub const USAGE: &str = "usage: spaceterm-server serve | [--json] [--non-interactive] status | --distribution-metadata | --help | --version";
+pub const USAGE: &str = "usage: spaceterm-server serve | [--json] [--non-interactive] status | reserve-native-request | owner-enrollment | setup --confirm | --distribution-metadata | --help | --version";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum QueryFailure {
@@ -73,7 +90,10 @@ impl QueryFailure {
 /// Status only reads existing account registration and cannot enter serve/setup.
 pub fn query_output(invocation: ServerInvocation) -> Result<Option<Vec<u8>>, QueryFailure> {
     match invocation {
-        ServerInvocation::Serve => Ok(None),
+        ServerInvocation::Serve
+        | ServerInvocation::ReserveNativeRequest
+        | ServerInvocation::OwnerEnrollment
+        | ServerInvocation::SetupConfirmed => Ok(None),
         ServerInvocation::Status => crate::account_startup::production_status()
             .map(Some)
             .map_err(QueryFailure::Account),

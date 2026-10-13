@@ -6409,12 +6409,15 @@ dependencies = [
 name = "spaceterm-server"
 version = "0.0.0"
 dependencies = [
+ "base64 0.22.1",
+ "flate2",
  "getrandom 0.4.3",
  "libc",
  "prost",
  "rcgen",
  "ring",
  "rusqlite",
+ "rustix",
  "rustls",
  "serde",
  "serde_json",
@@ -6425,9 +6428,11 @@ dependencies = [
  "spaceterm-host",
  "spaceterm-protocol",
  "spaceterm-terminal",
+ "tar",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "zeroize",
 ]
 
 [[package]]

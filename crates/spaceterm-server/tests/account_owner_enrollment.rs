@@ -1249,3 +1249,7 @@ fn foreign_account_registration_cannot_validate_retained_owner_authority() {
         journal
     );
 }
+
+#[cfg(feature = "test-support")]
+#[path = "support/native_owner_endpoint.rs"]
+mod native_endpoint;
