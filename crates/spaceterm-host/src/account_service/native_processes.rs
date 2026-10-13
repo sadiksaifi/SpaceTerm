@@ -18,6 +18,7 @@ use spaceterm_core::{
 pub struct ServiceProcessIdentity {
     pid: u32,
     uid: u32,
+    fully_account_owned: bool,
     start: u64,
     executable: PathBuf,
 }
@@ -66,7 +67,7 @@ impl NativeServiceProcessTable {
     }
     fn approved(&self, path: &Path) -> Result<Vec<ServiceProcessIdentity>, ServiceFailure> {
         let mut found = Vec::new();
-        for pid in native::pids()? {
+        for pid in native::pids(self.uid)? {
             if let Some(process) = self.observe(pid)?
                 && (process.executable == path
                     || process
@@ -76,6 +77,11 @@ impl NativeServiceProcessTable {
                         .strip_suffix(b" (deleted)")
                         == Some(path.as_os_str().as_encoded_bytes()))
             {
+                // A system agent with saved privileges says nothing about this code.
+                // Reject mixed credentials only when its executable actually matches.
+                if !process.fully_account_owned {
+                    return Err(ServiceFailure::CleanupUnresolved);
+                }
                 found.push(process);
             }
         }
@@ -211,6 +217,11 @@ impl ServiceProcesses for NativeServiceProcesses {
     ) -> ServiceFuture<'a, Vec<SessionCleanupObservation>> {
         Box::pin(async move {
             self.account(registration)?;
+            super::processes::validate_previous_scope(
+                spaceterm_core::identity::ServerId::new(registration.server_pin().identity),
+                epoch,
+                sessions,
+            )?;
             if let Some(runtime) = &self.runtime {
                 let observations = runtime
                     .previous_instance_cleanup(registration, epoch, sessions)
@@ -219,12 +230,13 @@ impl ServiceProcesses for NativeServiceProcesses {
                 self.absent(registration, true)?;
                 return Ok(observations);
             }
-            self.absent(registration, true)?;
-            if sessions.is_empty() {
-                Ok(Vec::new())
-            } else {
-                Err(ServiceFailure::CleanupUnresolved)
+            // Only a never-started store can use native root/listener absence alone.
+            // An old epoch may own Git or other descendants even with no Sessions.
+            if epoch.get() != 0 || !sessions.is_empty() {
+                return Err(ServiceFailure::CleanupUnresolved);
             }
+            self.absent(registration, true)?;
+            Ok(Vec::new())
         })
     }
 }

@@ -390,6 +390,16 @@ pub mod test_support {
                 test_installation_trust: None,
             }
         }
+        /// Retains the production current-account factory and only redirects its anchor to this fixture.
+        /// No real service-manager mutation is permitted by this isolated composition.
+        pub fn native_current(&self) -> Result<ServiceSupervisor, ServiceFailure> {
+            let mut supervisor = ServiceSupervisor::current(None)?;
+            if supervisor.key != self.key {
+                return Err(ServiceFailure::IdentityMismatch);
+            }
+            supervisor.anchor = self.anchor.clone();
+            Ok(supervisor)
+        }
         /// Injects native manager, runtime and clock boundaries into the real lifecycle core.
         pub fn with_providers(
             &self,
@@ -419,7 +429,14 @@ pub mod test_support {
             &self,
             artifact: crate::server_installation::VerifiedServerArtifact,
         ) -> super::ConfirmedServiceInstall {
-            super::install::test_confirmation(artifact)
+            self.assess_test_install(artifact).confirm()
+        }
+        /// Prepares an isolated assessment; the installation store still verifies its real signature.
+        pub fn assess_test_install(
+            &self,
+            artifact: crate::server_installation::VerifiedServerArtifact,
+        ) -> super::ServiceInstallAssessment {
+            super::install::test_assessment(artifact, self.data.clone(), self.runtime.clone())
         }
         /// Supplies an internal initialization scope for exclusive identity tests.
         pub fn identity_scope(

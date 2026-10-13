@@ -582,7 +582,7 @@ mod account_installation {
         );
     }
     #[tokio::test]
-    async fn concurrent_confirmed_installs_converge_on_one_identity_and_approved_version() {
+    async fn concurrent_first_install_reuses_one_identity_and_first_approved_xdg_roots() {
         use spaceterm_host::account_service::{
             ServiceFailure, ServiceOutcome, ServiceRequestState,
         };
@@ -595,8 +595,38 @@ mod account_installation {
         let right = installer(&account, key, manager.clone());
         let left_id = left.allocate_request().unwrap();
         let right_id = right.allocate_request().unwrap();
-        let first = account.confirm_install(first);
-        let second = account.confirm_install(second);
+        let roots = [
+            (
+                root.path()
+                    .canonicalize()
+                    .unwrap()
+                    .join("first-xdg-data/server"),
+                root.path()
+                    .canonicalize()
+                    .unwrap()
+                    .join("first-xdg-runtime/server"),
+            ),
+            (
+                root.path()
+                    .canonicalize()
+                    .unwrap()
+                    .join("second-xdg-data/server"),
+                root.path()
+                    .canonicalize()
+                    .unwrap()
+                    .join("second-xdg-runtime/server"),
+            ),
+        ];
+        let first = account
+            .assess_test_install(first)
+            .with_roots(roots[0].0.clone(), roots[0].1.clone())
+            .unwrap()
+            .confirm();
+        let second = account
+            .assess_test_install(second)
+            .with_roots(roots[1].0.clone(), roots[1].1.clone())
+            .unwrap()
+            .confirm();
         let barrier = std::sync::Barrier::new(2);
         let (left_result, right_result) = std::thread::scope(|scope| {
             let left = left.clone();
@@ -621,16 +651,26 @@ mod account_installation {
             (first.join().unwrap(), second.join().unwrap())
         });
         let mut outcomes = Vec::new();
-        for (provider, request, initial) in [
-            (&left, left_id, left_result),
-            (&right, right_id, right_result),
+        for (provider, request, initial, root_index) in [
+            (&left, left_id, left_result, 0),
+            (&right, right_id, right_result, 1),
         ] {
             let result = match initial {
                 Ok(result) => result,
                 Err(ServiceFailure::Pending) => {
                     let (_, retry) = fixture("1.2.3", 7, native_machine());
                     provider
-                        .install(request, account.confirm_install(retry))
+                        .install(
+                            request,
+                            account
+                                .assess_test_install(retry)
+                                .with_roots(
+                                    roots[root_index].0.clone(),
+                                    roots[root_index].1.clone(),
+                                )
+                                .unwrap()
+                                .confirm(),
+                        )
                         .await
                         .unwrap()
                 }
@@ -649,6 +689,17 @@ mod account_installation {
         assert_eq!(outcomes[0].0, outcomes[1].0);
         assert_eq!(outcomes[0].1, outcomes[1].1);
         assert_ne!(outcomes[0].2, outcomes[1].2);
+        let winner = usize::from(outcomes[0].2);
+        let retained = left.discover().unwrap().unwrap();
+        assert_eq!(retained.data_directory(), roots[winner].0);
+        assert!(roots[winner].1.exists());
+        assert!(!roots[1 - winner].0.exists());
+        assert!(!roots[1 - winner].1.exists());
+        assert_eq!(
+            right.discover().unwrap().unwrap().data_directory(),
+            roots[winner].0
+        );
+
         assert_eq!(
             manager.effects.lock().unwrap().as_slice(),
             &["configure", "start"]
@@ -740,40 +791,374 @@ mod account_installation {
     }
 
     #[tokio::test]
-    async fn install_resumes_published_staging_from_original_request_after_provider_reconstruction()
-    {
-        use spaceterm_host::account_service::{
-            ServiceFailure, ServiceOutcome, ServicePhase, ServiceRequestState,
-        };
+    async fn interrupted_first_install_keeps_approved_roots_before_identity_creation() {
+        use spaceterm_host::account_service::{ServiceFailure, ServicePhase, ServiceRequestState};
         let root = tempfile::tempdir().unwrap();
+        let canonical = root.path().canonicalize().unwrap();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let (key, artifact) = fixture("1.2.3", 7, native_machine());
         let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
         let supervisor = installer(&account, key.clone(), manager.clone());
         let request = supervisor.allocate_request().unwrap();
+        let data = canonical.join("approved-data/server");
+        let runtime = canonical.join("approved-runtime/server");
+        let confirmation = account
+            .assess_test_install(artifact)
+            .with_roots(data.clone(), runtime.clone())
+            .unwrap()
+            .confirm();
         spaceterm_host::account_service::test_support::interrupt_after_phase(
-            ServicePhase::Publishing,
+            ServicePhase::Accepted,
         );
         assert_eq!(
-            supervisor
-                .install(request, account.confirm_install(artifact))
-                .await,
+            supervisor.install(request, confirmation).await,
             Err(ServiceFailure::SupervisorUnavailable)
         );
-        assert!(matches!(
-            supervisor.admit_startup(),
-            Err(ServiceFailure::Pending)
-        ));
+        assert!(supervisor.discover().unwrap().is_none());
+        assert!(!data.exists());
         let reopened = installer(&account, key, manager.clone());
-        let result = reopened.resolve(request).await.unwrap();
-        assert!(matches!(
-            result.state,
-            ServiceRequestState::Completed(ServiceOutcome::Installed { reused: false, .. })
-        ));
-        assert_eq!(result.request, request);
+        let pending = reopened.resolve_install(request).await.unwrap();
+        assert_eq!(pending.state, ServiceRequestState::Pending);
+        let (_, artifact) = fixture("1.2.3", 7, native_machine());
+        let changed = canonical.join("replacement-data/server");
+        let changed_runtime = canonical.join("replacement-runtime/server");
+        let different = account
+            .assess_test_install(artifact)
+            .with_roots(changed.clone(), changed_runtime.clone())
+            .unwrap()
+            .confirm();
+        assert_eq!(
+            reopened.install(request, different).await,
+            Err(ServiceFailure::RequestConflict)
+        );
+        assert!(!changed.exists());
+        assert!(!changed_runtime.exists());
+        assert!(manager.effects.lock().unwrap().is_empty());
+        let (_, artifact) = fixture("1.2.3", 7, native_machine());
+        let original = account
+            .assess_test_install(artifact)
+            .with_roots(data.clone(), runtime.clone())
+            .unwrap()
+            .confirm();
+        let completed = reopened.install(request, original).await.unwrap();
+        assert_eq!(completed.request, request);
+        assert_eq!(completed.request_digest, pending.request_digest);
+        assert_eq!(reopened.discover().unwrap().unwrap().data_directory(), data);
+        assert!(runtime.exists());
+        let (_, artifact) = fixture("1.2.3", 7, native_machine());
+        let different = account
+            .assess_test_install(artifact)
+            .with_roots(changed, changed_runtime)
+            .unwrap()
+            .confirm();
+        assert_eq!(
+            reopened.install(request, different).await,
+            Err(ServiceFailure::RequestConflict)
+        );
+        assert_eq!(reopened.resolve_install(request).await.unwrap(), completed);
         assert_eq!(
             manager.effects.lock().unwrap().as_slice(),
             &["configure", "start"]
+        );
+    }
+
+    #[tokio::test]
+    async fn signed_install_and_stage_response_loss_resolve_original_request() {
+        use spaceterm_host::account_service::{
+            ServiceFailure, ServiceOutcome, ServicePhase, ServiceRequestState,
+        };
+        for phase in [ServicePhase::Publishing, ServicePhase::Completed] {
+            let root = tempfile::tempdir().unwrap();
+            let account =
+                AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+            let (key, artifact) = fixture("1.2.3", 7, native_machine());
+            let artifact_sha256 = artifact.artifact_sha256();
+            let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
+            let supervisor = installer(&account, key.clone(), manager.clone());
+            let request = supervisor.allocate_request().unwrap();
+            spaceterm_host::account_service::test_support::interrupt_after_phase(phase);
+            assert_eq!(
+                supervisor
+                    .install(request, account.confirm_install(artifact))
+                    .await,
+                Err(ServiceFailure::SupervisorUnavailable)
+            );
+            let original = supervisor.discover().unwrap().unwrap().server_pin();
+            let reopened = installer(&account, key, manager.clone());
+            let result = reopened.resolve(request).await.unwrap();
+            let ServiceRequestState::Completed(ServiceOutcome::Installed {
+                server,
+                installation,
+                reused: false,
+            }) = &result.state
+            else {
+                panic!("original signed installation did not resolve");
+            };
+            assert_eq!(*server, original);
+            assert_eq!(installation.artifact_sha256, artifact_sha256);
+            assert_eq!(result.request, request);
+            assert_eq!(reopened.resolve_install(request).await.unwrap(), result);
+            assert_eq!(
+                manager.effects.lock().unwrap().as_slice(),
+                &["configure", "start"]
+            );
+        }
+    }
+
+    struct SignedInstallations(UpdateKey);
+    impl spaceterm_host::account_service::ServiceInstallations for SignedInstallations {
+        fn approved_executable(
+            &self,
+            registration: &spaceterm_host::account_service::RegisteredServer,
+        ) -> Result<std::path::PathBuf, spaceterm_host::account_service::ServiceFailure> {
+            let selected = test_support::existing_store(registration, self.0.clone())?
+                .retain_compatible_approved(1)?;
+            let status = selected.status();
+            let expected = registration
+                .approved_installation()
+                .ok_or(spaceterm_host::account_service::ServiceFailure::Missing)?;
+            if status.installation != expected.installation
+                || status.artifact_sha256 != expected.artifact_sha256
+                || status.version != expected.version
+            {
+                return Err(spaceterm_host::account_service::ServiceFailure::IdentityMismatch);
+            }
+            Ok(selected.path().to_owned())
+        }
+        fn uninstall(
+            &self,
+            _: &spaceterm_host::account_service::RegisteredServer,
+        ) -> Result<(), spaceterm_host::account_service::ServiceFailure> {
+            Err(spaceterm_host::account_service::ServiceFailure::ConfirmationRequired)
+        }
+    }
+
+    struct PreviousRuntime {
+        expected: Vec<spaceterm_core::authority::SessionKey>,
+        observations: Vec<spaceterm_core::retirement::SessionCleanupObservation>,
+    }
+    impl spaceterm_host::account_service::ServiceProcesses for PreviousRuntime {
+        fn assess<'a>(
+            &'a self,
+            _: &'a spaceterm_host::account_service::RegisteredServer,
+        ) -> spaceterm_host::account_service::ServiceFuture<
+            'a,
+            spaceterm_host::account_service::RuntimeAssessment,
+        > {
+            Box::pin(async {
+                Err(spaceterm_host::account_service::ServiceFailure::SupervisorUnavailable)
+            })
+        }
+        fn revalidate<'a>(
+            &'a self,
+            _: &'a spaceterm_host::account_service::RegisteredServer,
+            _: &'a spaceterm_host::account_service::RuntimeAssessment,
+        ) -> spaceterm_host::account_service::ServiceFuture<'a, ()> {
+            Box::pin(async {
+                Err(spaceterm_host::account_service::ServiceFailure::SupervisorUnavailable)
+            })
+        }
+        fn abort_reservation<'a>(
+            &'a self,
+            _: &'a spaceterm_host::account_service::RegisteredServer,
+            _: &'a spaceterm_host::account_service::RuntimeAssessment,
+        ) -> spaceterm_host::account_service::ServiceFuture<'a, ()> {
+            Box::pin(async {
+                Err(spaceterm_host::account_service::ServiceFailure::SupervisorUnavailable)
+            })
+        }
+        fn quiesce<'a>(
+            &'a self,
+            _: &'a spaceterm_host::account_service::RegisteredServer,
+            _: spaceterm_core::native_management::NativeManagementRequestRef,
+            _: spaceterm_core::native_management::NativeRetirementAction,
+            _: &'a spaceterm_host::account_service::RuntimeAssessment,
+        ) -> spaceterm_host::account_service::ServiceFuture<
+            'a,
+            Vec<spaceterm_core::retirement::SessionCleanupObservation>,
+        > {
+            Box::pin(async {
+                Err(spaceterm_host::account_service::ServiceFailure::SupervisorUnavailable)
+            })
+        }
+        fn verify_absent<'a>(
+            &'a self,
+            _: &'a spaceterm_host::account_service::RegisteredServer,
+        ) -> spaceterm_host::account_service::ServiceFuture<'a, ()> {
+            Box::pin(async {
+                Err(spaceterm_host::account_service::ServiceFailure::CleanupUnresolved)
+            })
+        }
+        fn previous_instance_cleanup<'a>(
+            &'a self,
+            _: &'a spaceterm_host::account_service::RegisteredServer,
+            epoch: spaceterm_core::authority::ServerEpoch,
+            sessions: &'a [spaceterm_core::authority::SessionKey],
+        ) -> spaceterm_host::account_service::ServiceFuture<
+            'a,
+            Vec<spaceterm_core::retirement::SessionCleanupObservation>,
+        > {
+            Box::pin(async move {
+                assert_eq!(sessions, self.expected);
+                assert_eq!(epoch, self.expected[0].epoch);
+                Ok(self.observations.clone())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn trusted_previous_instance_cleanup_matches_every_old_session() {
+        use spaceterm_core::{
+            authority::{ServerEpoch, SessionGeneration, SessionKey},
+            identity::{PaneId, ServerId},
+            organization::{FailureClass, RetirementReason},
+            retirement::{CleanupResult, ConfirmedCleanupClass, SessionCleanupObservation},
+        };
+        use spaceterm_host::account_service::{
+            NativeServiceProcesses, ServiceFailure, ServiceProcesses,
+        };
+        let root = tempfile::Builder::new()
+            .prefix("hn")
+            .tempdir_in(if cfg!(target_os = "macos") {
+                "/private/tmp"
+            } else {
+                "/tmp"
+            })
+            .unwrap();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
+        let supervisor = installer(&account, key.clone(), manager);
+        let request = supervisor.allocate_request().unwrap();
+        supervisor
+            .install(request, account.confirm_install(artifact))
+            .await
+            .unwrap();
+        let registration = supervisor.discover().unwrap().unwrap();
+        let server = ServerId::new(registration.server_pin().identity);
+        let epoch = ServerEpoch::new(4);
+        let sessions: Vec<_> = [1, 2]
+            .map(|pane| SessionKey {
+                epoch,
+                pane: PaneId::new(server, pane).unwrap(),
+                generation: SessionGeneration::new(3),
+            })
+            .into();
+        let observations: Vec<_> = sessions
+            .iter()
+            .map(|session| {
+                SessionCleanupObservation::new(
+                    *session,
+                    RetirementReason::ServerRecovery,
+                    CleanupResult::Confirmed(
+                        ConfirmedCleanupClass::AlreadyAbsentWithConfirmedOwnership,
+                    ),
+                )
+                .unwrap()
+            })
+            .collect();
+        let installations = std::sync::Arc::new(SignedInstallations(key));
+        let missing_runtime = NativeServiceProcesses::current(installations.clone()).unwrap();
+        assert_eq!(
+            missing_runtime
+                .previous_instance_cleanup(&registration, epoch, &sessions)
+                .await,
+            Err(ServiceFailure::CleanupUnresolved)
+        );
+        assert_eq!(
+            missing_runtime
+                .previous_instance_cleanup(&registration, epoch, &[])
+                .await,
+            Err(ServiceFailure::CleanupUnresolved)
+        );
+        assert_eq!(
+            missing_runtime
+                .previous_instance_cleanup(&registration, ServerEpoch::new(0), &[])
+                .await,
+            Ok(Vec::new())
+        );
+        let failed = SessionCleanupObservation::new(
+            sessions[1],
+            RetirementReason::ServerRecovery,
+            CleanupResult::Failed(FailureClass::RuntimeUnavailable),
+        )
+        .unwrap();
+        let changed = SessionCleanupObservation::new(
+            SessionKey {
+                generation: SessionGeneration::new(4),
+                ..sessions[1]
+            },
+            RetirementReason::ServerRecovery,
+            CleanupResult::Confirmed(ConfirmedCleanupClass::ReapedAndReleased),
+        )
+        .unwrap();
+        for returned in [
+            vec![],
+            vec![observations[0]],
+            vec![observations[0], observations[0]],
+            vec![observations[1], observations[0]],
+            vec![observations[0], changed],
+            vec![observations[0], failed],
+        ] {
+            let native = NativeServiceProcesses::current(installations.clone())
+                .unwrap()
+                .with_runtime(std::sync::Arc::new(PreviousRuntime {
+                    expected: sessions.clone(),
+                    observations: returned,
+                }));
+            assert_eq!(
+                native
+                    .previous_instance_cleanup(&registration, epoch, &sessions)
+                    .await,
+                Err(ServiceFailure::CleanupUnresolved)
+            );
+        }
+        let native = NativeServiceProcesses::current(installations)
+            .unwrap()
+            .with_runtime(std::sync::Arc::new(PreviousRuntime {
+                expected: sessions.clone(),
+                observations: observations.clone(),
+            }));
+        assert_eq!(
+            native
+                .previous_instance_cleanup(&registration, epoch, &sessions)
+                .await
+                .unwrap(),
+            observations
+        );
+        assert_eq!(
+            native
+                .previous_instance_cleanup(&registration, ServerEpoch::new(5), &sessions)
+                .await,
+            Err(ServiceFailure::InvalidRecord)
+        );
+        assert_eq!(
+            native
+                .previous_instance_cleanup(&registration, epoch, &[sessions[0], sessions[0]])
+                .await,
+            Err(ServiceFailure::InvalidRecord)
+        );
+        assert_eq!(
+            native
+                .previous_instance_cleanup(&registration, epoch, &[sessions[1], sessions[0]])
+                .await,
+            Err(ServiceFailure::InvalidRecord)
+        );
+        let endpoint = registration.endpoint().unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(endpoint.path()).unwrap();
+        assert_eq!(
+            native
+                .previous_instance_cleanup(&registration, epoch, &sessions)
+                .await,
+            Err(ServiceFailure::CleanupUnresolved)
+        );
+        drop(listener);
+        assert_eq!(
+            native
+                .previous_instance_cleanup(&registration, epoch, &sessions)
+                .await
+                .unwrap(),
+            observations
         );
     }
 

@@ -185,6 +185,7 @@ fn user_unit_allows_crash_recovery_with_a_surviving_session_child() {
 async fn launchctl_uses_only_the_login_domain_and_never_replaces_running_code() {
     let runner = Arc::new(RecordingRunner::new([
         CommandReply::success(b"domain"),
+        CommandReply::success(b"disabled services = {\n}\n"),
         CommandReply::exit(113, b""),
         CommandReply::success(b""),
         CommandReply::success(b""),
@@ -201,6 +202,7 @@ async fn launchctl_uses_only_the_login_domain_and_never_replaces_running_code() 
         runner.arguments(),
         vec![
             vec!["print", "gui/501"],
+            vec!["print-disabled", "gui/501"],
             vec!["print", "gui/501/io.github.sadiksaifi.spaceterm.server"],
             vec![
                 "bootstrap",
@@ -397,7 +399,12 @@ async fn linger_checks_before_authorizing_and_elevates_only_loginctl() {
     );
     assert_eq!(
         runner.arguments()[1],
-        ["/usr/bin/loginctl", "enable-linger", "1000"]
+        [
+            "--disable-internal-agent",
+            "/usr/bin/loginctl",
+            "enable-linger",
+            "1000"
+        ]
     );
 }
 
@@ -474,9 +481,12 @@ fn launchctl_state_ignores_nested_values_and_rejects_duplicate_states() {
 
 #[tokio::test]
 async fn loaded_launch_agent_is_kickstarted_without_bootstrap_or_force_replace() {
-    let runner = Arc::new(RecordingRunner::new(
-        (0..3).map(|_| CommandReply::success(b"")),
-    ));
+    let runner = Arc::new(RecordingRunner::new([
+        CommandReply::success(b""),
+        CommandReply::success(b"disabled services = {\n}\n"),
+        CommandReply::success(b""),
+        CommandReply::success(b""),
+    ]));
     native::launch_start(
         runner.clone(),
         501,
@@ -489,6 +499,7 @@ async fn loaded_launch_agent_is_kickstarted_without_bootstrap_or_force_replace()
         runner.arguments(),
         [
             vec!["print", "gui/501"],
+            vec!["print-disabled", "gui/501"],
             vec![
                 "print",
                 "gui/501/io.github.sadiksaifi.spaceterm-preflight.server"
@@ -763,9 +774,13 @@ impl spaceterm_host::account_service::ServiceInstallations for TestInstallations
 async fn launch_agent_public_operations_publish_and_remove_only_service_configuration() {
     let directory = private_fixture_directory();
     let root = directory.path().canonicalize().unwrap();
-    let runner = Arc::new(RecordingRunner::new(
-        (0..7).map(|_| CommandReply::success(b"")),
-    ));
+    let runner = Arc::new(RecordingRunner::new((0..8).map(|index| {
+        CommandReply::success(if index == 3 {
+            b"disabled services = {\n}\n"
+        } else {
+            b""
+        })
+    })));
     let fixture = native::managers(
         &root,
         runner.clone(),
@@ -812,13 +827,14 @@ async fn launch_agent_public_operations_publish_and_remove_only_service_configur
             "print",
             "enable",
             "print",
+            "print-disabled",
             "print",
             "kickstart",
             "print",
             "bootout"
         ]
     );
-    assert_eq!(runner.arguments()[6], ["bootout", target.as_str()]);
+    assert_eq!(runner.arguments()[7], ["bootout", target.as_str()]);
 }
 
 #[tokio::test]
@@ -1082,4 +1098,119 @@ async fn sudo_interrupt_is_reported_as_cancellation_not_denial() {
             .await,
         Err(ServiceFailure::AuthorizationCancelled)
     );
+}
+
+#[tokio::test]
+async fn pkexec_missing_agent_and_denial_are_distinct_typed_failures() {
+    for (stderr, expected) in [
+        (
+            b"Error executing command as another user: No authentication agent found.\n".as_slice(),
+            ServiceFailure::AuthorizationUnavailable,
+        ),
+        (
+            b"Error executing command as another user: Not authorized\n".as_slice(),
+            ServiceFailure::AuthorizationDenied,
+        ),
+    ] {
+        let runner = Arc::new(RecordingRunner::new([
+            CommandReply::success(b"no\n"),
+            CommandReply::exit_with_stderr(127, b"", stderr),
+        ]));
+        let result = native::pkexec_authorization(runner.clone())
+            .enable_linger(&native::linger_request(1000))
+            .await;
+        assert_eq!(result, Err(expected));
+        assert_eq!(runner.arguments()[1][0], "--disable-internal-agent");
+        assert_eq!(runner.programs().len(), 2);
+        assert!(!format!("{result:?}").contains("Error executing"));
+    }
+}
+
+#[tokio::test]
+async fn launch_agent_background_items_suppression_blocks_start_and_reports_status() {
+    let directory = private_fixture_directory();
+    let root = directory.path().canonicalize().unwrap();
+    let disabled = b"\n\tdisabled services = {\n \"io.github.sadiksaifi.spaceterm-development.server\" => disabled\n}\n";
+    let runner = Arc::new(RecordingRunner::new([
+        CommandReply::success(b"domain"),
+        CommandReply::success(disabled),
+        CommandReply::success(b"domain"),
+        CommandReply::success(disabled),
+    ]));
+    let fixture = native::managers(
+        &root,
+        runner.clone(),
+        Arc::new(TestInstallations),
+        DesiredServerState::Running,
+    )
+    .unwrap();
+    assert_eq!(
+        fixture.launchd.status(Some(fixture.registration())).await,
+        Ok(SupervisorState::Suppressed)
+    );
+    assert_eq!(
+        fixture.launchd.start(fixture.registration()).await,
+        Err(ServiceFailure::Suppressed)
+    );
+    assert_eq!(
+        runner
+            .arguments()
+            .iter()
+            .map(|a| a[0].as_str())
+            .collect::<Vec<_>>(),
+        ["print", "print-disabled", "print", "print-disabled"]
+    );
+}
+
+#[tokio::test]
+async fn launch_agent_disabled_observation_checks_only_the_exact_top_level_label() {
+    for (dictionary, expected) in [
+        (b"disabled services = {\n \"io.github.sadiksaifi.spaceterm-development.server\" => true\n}\n".as_slice(), Ok(SupervisorState::Suppressed)),
+        (b"disabled services = {\n \"io.github.sadiksaifi.spaceterm-development.server\" => enabled\n}\n".as_slice(), Ok(SupervisorState::Running)),
+        (b"disabled services = {\n \"other-service\" => disabled\n}\n".as_slice(), Ok(SupervisorState::Running)),
+        (b"disabled services = {\n other = {\n \"io.github.sadiksaifi.spaceterm-development.server\" => disabled\n }\n}\n".as_slice(), Ok(SupervisorState::Running)),
+        (b"disabled services = {\n \"io.github.sadiksaifi.spaceterm-development.server\" => enabled\n \"io.github.sadiksaifi.spaceterm-development.server\" => disabled\n}\n".as_slice(), Err(ServiceFailure::SupervisorUnavailable)),
+        (b"disabled services = {\n \"io.github.sadiksaifi.spaceterm-development.server\" => unknown\n}\n".as_slice(), Err(ServiceFailure::SupervisorUnavailable)),
+        (b"disabled services = {\n".as_slice(), Err(ServiceFailure::SupervisorUnavailable)),
+    ] {
+        let directory = private_fixture_directory();
+        let root = directory.path().canonicalize().unwrap();
+        let runner = Arc::new(RecordingRunner::new([
+            CommandReply::success(b"domain"),
+            CommandReply::success(dictionary),
+            CommandReply::success(b"service = {\n state = running\n}\n"),
+        ]));
+        let fixture = native::managers(&root, runner, Arc::new(TestInstallations), DesiredServerState::Running).unwrap();
+        assert_eq!(fixture.launchd.status(Some(fixture.registration())).await, expected);
+    }
+}
+
+#[tokio::test]
+async fn pkexec_internal_error_is_unavailable_not_an_authorization_denial() {
+    let runner = Arc::new(RecordingRunner::new([
+        CommandReply::success(b"no\n"),
+        CommandReply::exit_with_stderr(127, b"", b"private service error"),
+    ]));
+    assert_eq!(
+        native::pkexec_authorization(runner)
+            .enable_linger(&native::linger_request(1000))
+            .await,
+        Err(ServiceFailure::AuthorizationUnavailable)
+    );
+}
+
+#[tokio::test]
+async fn sudo_refusal_is_typed_and_never_runs_a_post_refusal_linger_probe() {
+    for mode in [SudoMode::Interactive, SudoMode::NonInteractive] {
+        let runner = Arc::new(RecordingRunner::new([
+            CommandReply::success(b"no\n"),
+            CommandReply::exit_with_stderr(1, b"", b"private sudo policy or password refusal"),
+        ]));
+        let outcome = native::sudo_authorization(runner.clone(), mode)
+            .enable_linger(&native::linger_request(1000))
+            .await;
+        assert_eq!(outcome, Err(ServiceFailure::AuthorizationDenied));
+        assert_eq!(runner.programs(), ["/usr/bin/loginctl", "/usr/bin/sudo"]);
+        assert!(!format!("{outcome:?}").contains("password"));
+    }
 }

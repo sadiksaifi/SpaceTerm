@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use spaceterm_core::operations::RequestDigest;
+use std::path::PathBuf;
 
 use super::{
     InstallationStatus, RegisteredServer, ServiceFailure, ServiceFuture, ServiceOutcome,
@@ -20,18 +21,45 @@ use crate::{
 /// artifact but never initializes identity, publishes configuration or starts code.
 pub struct ServiceInstallAssessment {
     artifact: VerifiedServerArtifact,
+    roots: InstallRoots,
+}
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InstallRoots {
+    data: PathBuf,
+    runtime: PathBuf,
+}
+impl InstallRoots {
+    fn validate(&self) -> Result<(), ServiceFailure> {
+        super::registration::validate_path(&self.data)?;
+        super::registration::validate_path(&self.runtime)?;
+        if self.data == self.runtime {
+            return Err(ServiceFailure::InvalidRecord);
+        }
+        Ok(())
+    }
 }
 impl ServiceInstallAssessment {
+    /// Selects explicit local first-install roots. Confirmation covers these exact paths.
+    /// Existing registration always keeps its previously approved roots.
+    pub fn with_roots(mut self, data: PathBuf, runtime: PathBuf) -> Result<Self, ServiceFailure> {
+        let roots = InstallRoots { data, runtime };
+        roots.validate()?;
+        self.roots = roots;
+        Ok(self)
+    }
     /// Explicitly confirms installation of the exact authenticated artifact.
     pub fn confirm(self) -> ConfirmedServiceInstall {
         ConfirmedServiceInstall {
             artifact: self.artifact,
+            roots: self.roots,
         }
     }
 }
 /// Noncloneable local confirmation, separate from artifact verification and request allocation.
 pub struct ConfirmedServiceInstall {
     artifact: VerifiedServerArtifact,
+    roots: InstallRoots,
 }
 
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -43,6 +71,8 @@ pub(super) struct InstallRecord {
     pub(super) phase: ServicePhase,
     state: ServiceRequestState,
     reused: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    roots: Option<InstallRoots>,
     pub(super) installation: Option<InstallationStatus>,
 }
 impl InstallRecord {
@@ -54,8 +84,18 @@ impl InstallRecord {
         key: AccountBuildKey,
         request: NativeRequestId,
     ) -> Result<(), ServiceFailure> {
+        if let Some(roots) = &self.roots {
+            roots.validate()?;
+        }
         if self.artifact_sha256 == [0; 32]
-            || self.digest != install_digest(key, request, self.artifact_sha256, &self.version)?
+            || self.digest
+                != install_digest(
+                    key,
+                    request,
+                    self.artifact_sha256,
+                    &self.version,
+                    self.roots.as_ref(),
+                )?
             || !matches!(
                 self.phase,
                 ServicePhase::Accepted
@@ -109,6 +149,7 @@ fn install_digest(
     request: NativeRequestId,
     digest: [u8; 32],
     version: &spaceterm_distribution::BuildVersion,
+    roots: Option<&InstallRoots>,
 ) -> Result<RequestDigest, ServiceFailure> {
     let mut hash = Sha256::new();
     hash.update(b"spaceterm-account-install-v1\0");
@@ -116,6 +157,10 @@ fn install_digest(
     hash.update(request.as_bytes());
     hash.update(digest);
     hash.update(serde_json::to_vec(version).map_err(|_| ServiceFailure::InvalidRecord)?);
+    if let Some(roots) = roots {
+        hash.update(b"first-approved-roots-v1\0");
+        hash.update(serde_json::to_vec(roots).map_err(|_| ServiceFailure::InvalidRecord)?);
+    }
     Ok(RequestDigest::from_bytes(hash.finalize().into()))
 }
 impl ServiceSupervisor {
@@ -125,9 +170,26 @@ impl ServiceSupervisor {
         &self,
         artifact: VerifiedServerArtifact,
     ) -> Result<ServiceInstallAssessment, ServiceFailure> {
-        Ok(ServiceInstallAssessment {
-            artifact: crate::server_installation::verify_server_artifact(artifact)?,
-        })
+        let artifact = crate::server_installation::verify_server_artifact(artifact)?;
+        let account = super::TrustedAccountFacts::current()?;
+        let mut environment = spaceterm_directories::AppDirectoryEnvironment::capture();
+        environment.home = Some(account.home().as_os_str().to_owned());
+        let name = match self.key.build_identity {
+            crate::startup::BuildIdentity::Release => "spaceterm",
+            crate::startup::BuildIdentity::Preflight => "spaceterm-preflight",
+            crate::startup::BuildIdentity::Development => "spaceterm-development",
+        };
+        let directories =
+            spaceterm_directories::AppDirectories::resolve_xdg(name, &environment, None)
+                .map_err(|_| ServiceFailure::InvalidRecord)?;
+        let roots = InstallRoots {
+            data: directories.data.join("server"),
+            // Native endpoint registration is independent of ephemeral login XDG_RUNTIME_DIR.
+            // Keep the same account-owned route across logout, reboot and client environments.
+            runtime: self.anchor.join("runtime"),
+        };
+        roots.validate()?;
+        Ok(ServiceInstallAssessment { artifact, roots })
     }
     /// Installs the original confirmed artifact, or reuses an established service without starting it.
     /// The retained request owns effects even if its observer is dropped.
@@ -141,11 +203,7 @@ impl ServiceSupervisor {
             let handle = tokio::runtime::Handle::try_current()
                 .map_err(|_| ServiceFailure::SupervisorUnavailable)?;
             handle
-                .spawn(async move {
-                    supervisor
-                        .run_install(request, Some(confirmation.artifact))
-                        .await
-                })
+                .spawn(async move { supervisor.run_install(request, Some(confirmation)).await })
                 .await
                 .map_err(|_| ServiceFailure::Indeterminate)?
         })
@@ -221,15 +279,21 @@ impl ServiceSupervisor {
     pub(super) async fn run_install(
         &self,
         request: NativeRequestId,
-        artifact: Option<VerifiedServerArtifact>,
+        confirmation: Option<ConfirmedServiceInstall>,
     ) -> Result<ServiceProgress, ServiceFailure> {
+        let artifact = confirmation.as_ref().map(|value| &value.artifact);
+        let proposed_roots = confirmation.as_ref().map(|value| &value.roots);
         self.reconcile_storage(request)?;
         if let Some(original) = self.original_install(request)?
             && original.phase == ServicePhase::Completed
         {
-            if let Some(artifact) = &artifact
+            if let Some(artifact) = artifact
                 && (original.artifact_sha256 != artifact.artifact_sha256()
-                    || original.version != artifact.manifest().version)
+                    || original.version != artifact.manifest().version
+                    || original
+                        .roots
+                        .as_ref()
+                        .is_some_and(|roots| Some(roots) != proposed_roots))
             {
                 return Err(ServiceFailure::RequestConflict);
             }
@@ -239,16 +303,20 @@ impl ServiceSupervisor {
         self.ensure_no_pending(request)?;
         let mut record = match self.original_install(request)? {
             Some(record) => {
-                if let Some(artifact) = &artifact
+                if let Some(artifact) = artifact
                     && (record.artifact_sha256 != artifact.artifact_sha256()
-                        || record.version != artifact.manifest().version)
+                        || record.version != artifact.manifest().version
+                        || record
+                            .roots
+                            .as_ref()
+                            .is_some_and(|roots| Some(roots) != proposed_roots))
                 {
                     return Err(ServiceFailure::RequestConflict);
                 }
                 record
             }
             None => {
-                let artifact = artifact.as_ref().ok_or(ServiceFailure::UnknownRequest)?;
+                let artifact = artifact.ok_or(ServiceFailure::UnknownRequest)?;
                 let record = InstallRecord {
                     artifact_sha256: artifact.artifact_sha256(),
                     version: artifact.manifest().version.clone(),
@@ -257,6 +325,7 @@ impl ServiceSupervisor {
                         request,
                         artifact.artifact_sha256(),
                         &artifact.manifest().version,
+                        proposed_roots,
                     )?,
                     phase: ServicePhase::Accepted,
                     state: ServiceRequestState::Pending,
@@ -264,6 +333,7 @@ impl ServiceSupervisor {
                         .discover()?
                         .is_some_and(|registered| registered.is_installed()),
                     installation: None,
+                    roots: proposed_roots.cloned(),
                 };
                 self.write_install(request, &record)?;
                 record
@@ -294,8 +364,14 @@ impl ServiceSupervisor {
             }
             let registered = self.initialize_registration(
                 &lease,
-                self.anchor.join("data"),
-                self.anchor.join("runtime"),
+                record
+                    .roots
+                    .as_ref()
+                    .map_or_else(|| self.anchor.join("data"), |roots| roots.data.clone()),
+                record.roots.as_ref().map_or_else(
+                    || self.anchor.join("runtime"),
+                    |roots| roots.runtime.clone(),
+                ),
                 DesiredServerState::Running,
                 None,
             )?;
@@ -369,7 +445,7 @@ impl ServiceSupervisor {
                 let status = if snapshot.staged.is_some() {
                     store.staged_status()?.ok_or(ServiceFailure::Missing)?
                 } else {
-                    let Some(artifact) = &artifact else {
+                    let Some(artifact) = artifact else {
                         return Ok(record.progress(request));
                     };
                     let id = store.stage(&scope, artifact)?;
@@ -512,6 +588,13 @@ impl InstallationAdmission for InstallAdmission<'_> {
     }
 }
 #[cfg(feature = "test-support")]
-pub(super) fn test_confirmation(artifact: VerifiedServerArtifact) -> ConfirmedServiceInstall {
-    ConfirmedServiceInstall { artifact }
+pub(super) fn test_assessment(
+    artifact: VerifiedServerArtifact,
+    data: PathBuf,
+    runtime: PathBuf,
+) -> ServiceInstallAssessment {
+    ServiceInstallAssessment {
+        artifact,
+        roots: InstallRoots { data, runtime },
+    }
 }
