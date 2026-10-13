@@ -102,7 +102,7 @@ impl NativeRuntime {
         server: ServerId,
         uid: u32,
         account: Arc<dyn AccountLaunchProvider>,
-        clock: Arc<NativeRuntimeClock>,
+        clock: Arc<dyn RuntimeClock>,
         limits: RuntimeLimits,
     ) -> Result<Arc<Self>, ServerFailure> {
         let factory = RuntimeFactory::new(limits, clock).map_err(runtime_failure)?;

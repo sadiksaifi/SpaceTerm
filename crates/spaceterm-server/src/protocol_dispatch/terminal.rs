@@ -589,7 +589,20 @@ impl TerminalConnection {
                     } => text.as_str().len(),
                     _ => 0,
                 };
-                let reservation = match egress.reserve_content_reply((text_bytes + 4096) as u32) {
+                let maximum_text = match request.kind() {
+                    spaceterm_core::native_requests::NativeRequestKind::ClipboardWrite(_) => {
+                        session.codec.limits().clipboard_bytes
+                    }
+                    spaceterm_core::native_requests::NativeRequestKind::UnsafePaste { .. } => {
+                        session.codec.limits().paste_bytes
+                    }
+                    _ => 0,
+                };
+                if text_bytes > maximum_text {
+                    deny_native(handle, session.principal, &request).await;
+                    return Ok(());
+                }
+                let reservation = match egress.reserve_native_reply(text_bytes) {
                     Ok(reservation) => reservation,
                     Err(EgressFailure::Capacity) => {
                         deny_native(handle, session.principal, &request).await;
@@ -612,6 +625,13 @@ impl TerminalConnection {
                     }),
                     _ => return Err(failure(ServerFailureClass::ScopeMismatch)),
                 };
+                // The signed-envelope bound is the same 128-byte allowance
+                // used by organization paging. Oversized native work is denied,
+                // not truncated or turned into a connection-fatal encode error.
+                if payload.encoded_len() > session.codec.limits().frame_bytes.saturating_sub(128) {
+                    deny_native(handle, session.principal, &request).await;
+                    return Ok(());
+                }
                 let now = clock.now()?;
                 if !native_current(handle, session.principal, request.fence()).await?
                     || request.deadline().is_some_and(|deadline| deadline <= now)
@@ -619,10 +639,14 @@ impl TerminalConnection {
                     deny_native(handle, session.principal, &request).await;
                     return Ok(());
                 }
-                self.native
-                    .insert((request.fence().session(), request.id().get()), request);
+                self.native.insert(
+                    (request.fence().session(), request.id().get()),
+                    native_completion_binding(&request)?,
+                );
+                // Completion needs the original kind, approval and fences, not text.
+                drop(request);
                 dispatcher
-                    .send(session, transport, &payload, egress, Some(reservation))
+                    .send_native(session, transport, payload, egress, reservation)
                     .await?;
             }
             _ => {}
@@ -668,6 +692,31 @@ async fn current(
         Err(error) if error.class == ServerFailureClass::StaleAuthority => Ok(false),
         Err(error) => Err(error),
     }
+}
+
+fn native_completion_binding(
+    request: &spaceterm_core::native_requests::NativeRequest,
+) -> Result<spaceterm_core::native_requests::NativeRequest, ServerFailure> {
+    use spaceterm_core::native_requests::{NativeRequest, NativeRequestKind, NativeText};
+    let empty =
+        || NativeText::new(String::new()).map_err(|_| failure(ServerFailureClass::ScopeMismatch));
+    let kind = match request.kind() {
+        NativeRequestKind::ClipboardWrite(_) => NativeRequestKind::ClipboardWrite(empty()?),
+        NativeRequestKind::UnsafePaste { approval, .. } => NativeRequestKind::UnsafePaste {
+            approval: *approval,
+            text: empty()?,
+        },
+        kind => kind.clone(),
+    };
+    NativeRequest::new(
+        request.fence(),
+        request.id(),
+        request.issued_at(),
+        request.not_before(),
+        request.deadline(),
+        kind,
+    )
+    .map_err(|_| failure(ServerFailureClass::ScopeMismatch))
 }
 
 async fn native_current(

@@ -223,6 +223,7 @@ impl<S: PairingSnapshotPort + 'static> AuthenticationFactoryPort for ProductionA
                     spaceterm_protocol::negotiation::CAPABILITY_CANONICAL_DOMAIN,
                     spaceterm_protocol::negotiation::CAPABILITY_ORGANIZATION_COMPARISONS,
                     spaceterm_protocol::negotiation::CAPABILITY_TERMINAL_STREAMS,
+                    spaceterm_protocol::negotiation::CAPABILITY_NATIVE_NOTIFICATIONS,
                 ],
                 ..HandshakeConfig::default()
             },

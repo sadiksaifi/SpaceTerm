@@ -826,6 +826,24 @@ impl ProtocolDispatcher {
         let bytes = session.codec.encode(payload).map_err(protocol_failure)?;
         self.write(transport, &bytes).await
     }
+    async fn send_native(
+        &self,
+        session: &mut AuthenticatedSession,
+        transport: &Arc<dyn spaceterm_host::transport::MessageTransport>,
+        payload: Payload,
+        egress: &ConnectionEgress,
+        reservation: EgressReservation,
+    ) -> Result<(), ServerFailure> {
+        egress
+            .validate_native_reply_reservation(&payload, &reservation)
+            .map_err(egress_failure)?;
+        let _reservation = reservation;
+        self.authenticator.check_current(session.principal)?;
+        let bytes = session.codec.encode(&payload).map_err(protocol_failure)?;
+        // Native content is not retained beside the WSS frame and write buffer.
+        drop(payload);
+        self.write(transport, &bytes).await
+    }
     async fn write(
         &self,
         transport: &Arc<dyn spaceterm_host::transport::MessageTransport>,
