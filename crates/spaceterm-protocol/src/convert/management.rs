@@ -182,6 +182,9 @@ macro_rules! profile {
                                 ManagementRequestReference::Operation(binding) => {
                                     (Some(encode_operation(binding.id)), Vec::new())
                                 }
+                                ManagementRequestReference::OperationReference(id) => {
+                                    (Some(encode_operation(id)), Vec::new())
+                                }
                                 ManagementRequestReference::Native(bytes) => (None, bytes.to_vec()),
                             };
                             wire::ManagementProgress {
@@ -202,12 +205,11 @@ macro_rules! profile {
                         .collect(),
                 }
             }
-            /// The frozen status schema retains OperationId but not its digest.
-            /// Resolve that digest from the caller's original operation journal.
-            /// Unknown references fail instead of inventing an operation binding.
+            /// Progress is a comparison-only reference. It grants no operation
+            /// execution or retry authority and needs no originating journal.
             pub fn decode_status(
                 value: &wire::ManagementStatus,
-                resolve_digest: &dyn Fn(OperationId) -> Result<RequestDigest, ProtocolError>,
+                _resolve_digest: &dyn Fn(OperationId) -> Result<RequestDigest, ProtocolError>,
             ) -> Result<ServerStatus, ProtocolError> {
                 if value.failure.is_some() || value.state != 1 {
                     return Err(ProtocolError::UnexpectedMessage);
@@ -268,10 +270,7 @@ macro_rules! profile {
                         let request = match (&v.operation, v.native_request.as_slice()) {
                             (Some(operation), []) => {
                                 let id = decode_operation(operation)?;
-                                ManagementRequestReference::Operation(OperationBinding {
-                                    id,
-                                    digest: resolve_digest(id)?,
-                                })
+                                ManagementRequestReference::OperationReference(id)
                             }
                             (None, bytes) if bytes.len() == 16 => {
                                 ManagementRequestReference::Native(
@@ -426,6 +425,34 @@ mod tests {
             }],
         })
         .unwrap()
+    }
+    #[test]
+    fn shared_progress_never_requires_the_initiating_clients_digest() {
+        use spaceterm_core::identity::*;
+        let server = ServerId::new([1; 16]);
+        let stream = OperationStreamId::new(
+            OperationStreamKey::new(server, 4).unwrap(),
+            PairingId::new(server, 5).unwrap(),
+            ClientId::new(server, 6).unwrap(),
+        )
+        .unwrap();
+        let id = OperationId::new(stream, OperationSequence::new(1).unwrap());
+        let mut parts = status().parts().clone();
+        parts.progress[0].request = ManagementRequestReference::Operation(OperationBinding {
+            id,
+            digest: RequestDigest::from_bytes([8; 32]),
+        });
+        let status = ServerStatus::new(parts).unwrap();
+        for decoded in [
+            v1::decode_status(&v1::encode_status(&status), &|_| {
+                panic!("shared progress is comparison-only")
+            }),
+            v2::decode_status(&v2::encode_status(&status), &|_| {
+                panic!("shared progress is comparison-only")
+            }),
+        ] {
+            assert!(decoded.is_ok());
+        }
     }
     macro_rules! tests {
         ($name:ident, $p:ident) => {

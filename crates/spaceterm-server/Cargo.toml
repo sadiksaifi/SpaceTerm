@@ -4,6 +4,8 @@ publish = false
 edition = "2024"
 
 [features]
+default = ["graphics"]
+graphics = ["spaceterm-terminal/kitty-graphics", "spaceterm-terminal/png"]
 native-tests = ["spaceterm-host/native-tests"]
 test-support = ["spaceterm-host/test-support"]
 
@@ -12,7 +14,7 @@ spaceterm-host = { path = "../spaceterm-host" }
 spaceterm-distribution = { path = "../spaceterm-distribution" }
 spaceterm-core = { path = "../spaceterm-core" }
 spaceterm-protocol = { path = "../spaceterm-protocol" }
-spaceterm-terminal = { path = "../spaceterm-terminal", default-features = false, features = ["runtime", "kitty-graphics", "png"] }
+spaceterm-terminal = { path = "../spaceterm-terminal", default-features = false, features = ["runtime"] }
 tokio = { version = "=1.53.1", default-features = false, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 rustls = { version = "=0.23.45", default-features = false, features = ["ring", "std"] }
 getrandom = "=0.4.3"

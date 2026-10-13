@@ -146,8 +146,7 @@ async fn run(
                 tokio::time::timeout(STATUS_READ_DEADLINE, deps.protocol.resolve(operation))
                     .await
                     .map_err(|_| CliFailure::OutcomePending)??;
-            if !matches!(progress.request, spaceterm_core::management::ManagementRequestReference::Operation(binding) if binding.id == operation)
-            {
+            if progress.request.operation_id() != Some(operation) {
                 return Err(CliFailure::UnsafeNativeState);
             }
             output::CliOutput::Progress(progress)

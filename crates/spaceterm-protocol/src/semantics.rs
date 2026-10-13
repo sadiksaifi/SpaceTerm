@@ -14,6 +14,17 @@ pub(crate) fn validate(value: &Payload) -> Result<(), ProtocolError> {
         ($message:expr, $profile:ident) => {{
             use $profile::message::Kind;
             match &$message.kind {
+                Some(Kind::Outcome(outcome)) => {
+                    if let Some($profile::outcome::Result::Conflict(conflict)) = &outcome.result {
+                        conflict_value!($profile, conflict)?;
+                    }
+                }
+                Some(Kind::OperationLookupResult(result)) => {
+                    if let Some($profile::operation_lookup_result::Disposition::Completed(outcome)) = &result.disposition
+                        && let Some($profile::outcome::Result::Conflict(conflict)) = &outcome.result {
+                        conflict_value!($profile, conflict)?;
+                    }
+                }
                 Some(Kind::SemanticPage(page)) => {
                     let mut rows = BTreeSet::new();
                     for row in &page.rows {
@@ -87,6 +98,21 @@ pub(crate) fn validate(value: &Payload) -> Result<(), ProtocolError> {
                 _ => {}
             }
             Ok(())
+        }};
+    }
+    macro_rules! conflict_value {
+        ($profile:ident, $value:expr) => {{
+            // Keep every frozen oneof value readable. Additive values without a
+            // oneof member must select exactly one canonical alternative.
+            if $value.current_value.is_none()
+                && usize::from($value.directory_value.is_some())
+                    + usize::from($value.remote_access.is_some())
+                    != 1
+            {
+                Err(ProtocolError::Malformed)
+            } else {
+                Ok(())
+            }
         }};
     }
     macro_rules! row_cells {
