@@ -840,6 +840,8 @@ fn intent_io_and_sync_uncertainty_poison_admission_until_validated_reopen() {
             FaultPoint::DatabaseWrite,
             FaultPoint::DatabaseSync,
             FaultPoint::DirectorySync,
+            #[cfg(target_os = "macos")]
+            FaultPoint::DeleteFullSync,
             FaultPoint::AfterCommit,
         ] {
             let root = private_root();
@@ -907,6 +909,8 @@ fn completion_io_and_sync_uncertainty_resolves_original_result_without_second_wr
         FaultPoint::DatabaseWrite,
         FaultPoint::DatabaseSync,
         FaultPoint::DirectorySync,
+        #[cfg(target_os = "macos")]
+        FaultPoint::DeleteFullSync,
         FaultPoint::AfterCommit,
     ] {
         let root = private_root();

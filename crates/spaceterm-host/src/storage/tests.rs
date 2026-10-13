@@ -53,6 +53,92 @@ fn count(database: &Database) -> i64 {
 }
 
 #[test]
+fn native_filesystem_and_rollback_journal_policy_are_observed_without_reopening_database() {
+    let fixture = Fixture::new();
+    let mut database = Database::open(&fixture.path, MIGRATIONS).unwrap();
+    // Query the retained SQLite connection, never open a second database inode.
+    let journal: String = database
+        .connection
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .unwrap();
+    let pragma = |name: &str| -> i64 {
+        database
+            .connection
+            .query_row(name, [], |row| row.get(0))
+            .unwrap()
+    };
+    let synchronous = pragma("PRAGMA synchronous");
+    let fullfsync = pragma("PRAGMA fullfsync");
+    let checkpoint_fullfsync = pragma("PRAGMA checkpoint_fullfsync");
+    assert_eq!(journal, "delete");
+    assert_eq!((synchronous, fullfsync, checkpoint_fullfsync), (2, 1, 1));
+    // Only the private fixture directory is opened for filesystem observation.
+    // No generic helper reopens the live database inode or changes its locks.
+    use std::os::fd::AsRawFd;
+    let directory = fs::File::open(&fixture.path).unwrap();
+    // SAFETY: fstatfs initializes this structure from a held directory descriptor.
+    let mut filesystem: libc::statfs = unsafe { std::mem::zeroed() };
+    assert_eq!(
+        unsafe { libc::fstatfs(directory.as_raw_fd(), &mut filesystem) },
+        0
+    );
+    #[cfg(target_os = "macos")]
+    let (filesystem, native_sync) = {
+        let name = filesystem
+            .f_fstypename
+            .iter()
+            .take_while(|byte| **byte != 0)
+            .map(|byte| *byte as u8)
+            .collect::<Vec<_>>();
+        let name = match name.as_slice() {
+            b"apfs" => "apfs",
+            b"hfs" => "hfs",
+            _ => panic!("native storage fixture used an unadmitted filesystem"),
+        };
+        assert_ne!(filesystem.f_flags & libc::MNT_LOCAL as u32, 0);
+        assert_eq!(filesystem.f_flags & libc::MNT_IGNORE_OWNERSHIP as u32, 0);
+        (name, "fsync-and-f-fullfsync")
+    };
+    #[cfg(target_os = "linux")]
+    let (filesystem, native_sync) = (
+        match filesystem.f_type {
+            0xef53 => "ext",
+            0x5846_5342 => "xfs",
+            0x9123_683e => "btrfs",
+            _ => panic!("native storage fixture used an unadmitted filesystem"),
+        },
+        "fsync-only",
+    );
+    assert_eq!(insert(&mut database), CommitDisposition::Durable(()));
+    assert_eq!(count(&database), 1);
+    drop(database);
+    let database = Database::open_existing(&fixture.path, MIGRATIONS).unwrap();
+    assert_eq!(count(&database), 1);
+    for suffix in ["-journal", "-wal", "-shm"] {
+        assert!(
+            !fixture
+                .path
+                .join(format!("{}{suffix}", super::DATABASE_FILE_NAME))
+                .exists()
+        );
+    }
+    // DELETE journal commits have no checkpoint. Do not label a PRAGMA setting
+    // as checkpoint execution or call an orderly reopen power-loss evidence.
+    println!(
+        "SPACETERM_STORAGE_EVIDENCE {}",
+        serde_json::json!({
+            "filesystem": filesystem,
+            "journal_mode": journal,
+            "synchronous": synchronous,
+            "fullfsync": fullfsync,
+            "checkpoint_fullfsync": checkpoint_fullfsync,
+            "checkpoint": "not-applicable-delete-journal",
+            "native_sync": native_sync,
+        })
+    );
+}
+
+#[test]
 fn before_commit_failure_is_not_applied_and_keeps_the_handle_writable() {
     let fixture = Fixture::new();
     let mut database = Database::open(&fixture.path, MIGRATIONS).unwrap();

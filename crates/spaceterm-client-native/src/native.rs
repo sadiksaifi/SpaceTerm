@@ -452,6 +452,27 @@ impl NativeCommandBindings for NativeServiceManagement {
                     .map(CliOutput::ServiceProgress)
                     .map_err(classify_service);
             }
+            if let NativeCliCommand::Install { version } = command {
+                // The command itself is deliberate installation consent. Signed
+                // download and native admission precede request allocation and all
+                // identity/service effects. Only the host may authorize lingering.
+                let artifact = self.download_installation(version).await?;
+                let assessment = self
+                    .supervisor
+                    .assess_install(artifact)
+                    .map_err(classify_service)?;
+                let request = self
+                    .supervisor
+                    .allocate_request()
+                    .map_err(classify_service)?;
+                crate::cli::output::emit_native_request(request, io)?;
+                return self
+                    .supervisor
+                    .install(request, assessment.confirm())
+                    .await
+                    .map(CliOutput::ServiceProgress)
+                    .map_err(classify_service);
+            }
             if command == NativeCliCommand::UpdateCheck {
                 return Ok(CliOutput::Update {
                     available_version: self

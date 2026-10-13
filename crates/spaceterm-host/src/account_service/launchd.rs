@@ -100,8 +100,18 @@ impl LaunchdServiceManager {
             Err(ServiceFailure::LoginSessionUnavailable)
         }
     }
+    async fn suppressed(&self) -> Result<bool, ServiceFailure> {
+        let reply = self
+            .call(vec!["print-disabled".into(), self.domain().into()])
+            .await?;
+        reply.success()?;
+        disabled(&reply.bytes, label(self.account.key.build_identity))
+    }
     pub(super) async fn start_service(&self) -> Result<(), ServiceFailure> {
         self.domain_available().await?;
+        if self.suppressed().await? {
+            return Err(ServiceFailure::Suppressed);
+        }
         let reply = self
             .call(vec!["print".into(), self.target().into()])
             .await?;
@@ -145,6 +155,15 @@ impl ServiceManager for LaunchdServiceManager {
                 return Ok(SupervisorState::NotInstalled);
             }
             self.domain_available().await?;
+            if self.suppressed().await? {
+                return Ok(
+                    if registration.desired_state() == DesiredServerState::Stopped {
+                        SupervisorState::Disabled
+                    } else {
+                        SupervisorState::Suppressed
+                    },
+                );
+            }
             let output = self
                 .call(vec!["print".into(), self.target().into()])
                 .await?;
@@ -263,4 +282,51 @@ pub(super) fn state(bytes: &[u8]) -> Result<SupervisorState, ServiceFailure> {
         }
     }
     result.ok_or(ServiceFailure::SupervisorUnavailable)
+}
+
+// Only the requested label in the account domain's disabled dictionary is authority.
+// Nested values and other services never classify this LaunchAgent.
+fn disabled(bytes: &[u8], target: &str) -> Result<bool, ServiceFailure> {
+    if bytes.len() > 16 * 1024 {
+        return Err(ServiceFailure::LimitExceeded);
+    }
+    let text = std::str::from_utf8(bytes).map_err(|_| ServiceFailure::SupervisorUnavailable)?;
+    let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty());
+    if lines.next() != Some("disabled services = {") {
+        return Err(ServiceFailure::SupervisorUnavailable);
+    }
+    let prefix = format!("\"{target}\" => ");
+    let mut result = None;
+    let mut depth = 1usize;
+    let mut closed = false;
+    for line in lines {
+        if closed {
+            return Err(ServiceFailure::SupervisorUnavailable);
+        }
+        if depth == 1
+            && let Some(value) = line.strip_prefix(&prefix)
+        {
+            if result.is_some() {
+                return Err(ServiceFailure::SupervisorUnavailable);
+            }
+            result = Some(match value {
+                "true" | "disabled" => true,
+                "false" | "enabled" => false,
+                _ => return Err(ServiceFailure::SupervisorUnavailable),
+            });
+        }
+        if line.ends_with('{') {
+            depth += 1;
+        }
+        if line == "}" {
+            depth = depth
+                .checked_sub(1)
+                .ok_or(ServiceFailure::SupervisorUnavailable)?;
+            closed = depth == 0;
+        }
+    }
+    if !closed {
+        return Err(ServiceFailure::SupervisorUnavailable);
+    }
+    Ok(result.unwrap_or(false))
 }

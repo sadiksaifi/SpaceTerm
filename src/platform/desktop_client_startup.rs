@@ -197,6 +197,7 @@ pub(crate) async fn recover<S: ViewStore + 'static>(
         view,
         executor: tokio::runtime::Handle::current(),
         servers,
+        settings: crate::ui::settings_window::server_runtime::SettingsServices::default(),
     })
 }
 

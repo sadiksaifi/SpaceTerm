@@ -142,6 +142,9 @@ impl SettingsWindow {
                         runtime_epoch: server.runtime_epoch,
                         route: server.route.clone(),
                         inventory_version: Some(page.version),
+                        assessment: None,
+                        management_comparison: None,
+                        remote_policy: None,
                     },
                     request: ServerRequest::AssessUnpairDevice {
                         server: server.key.clone(),

@@ -193,6 +193,26 @@ impl ServiceClock for NativeClock {
     }
 }
 
+pub(super) fn validate_previous_scope(
+    server: ServerId,
+    epoch: ServerEpoch,
+    sessions: &[SessionKey],
+) -> Result<(), ServiceFailure> {
+    // Epoch zero represents a newly installed store before its first runtime.
+    if (epoch.get() == 0 && !sessions.is_empty())
+        || sessions.len() > 64
+        || !sessions.windows(2).all(|pair| pair[0] < pair[1])
+        || sessions.iter().any(|session| {
+            session.pane.server() != server
+                || session.epoch != epoch
+                || session.generation.get() == 0
+        })
+    {
+        return Err(ServiceFailure::InvalidRecord);
+    }
+    Ok(())
+}
+
 pub(super) fn cleanup_matches(
     sessions: &[SessionKey],
     observations: &[SessionCleanupObservation],

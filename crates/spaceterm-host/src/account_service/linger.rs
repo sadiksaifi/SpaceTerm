@@ -56,6 +56,7 @@ fn pkexec_command(uid: u32) -> ServiceCommand {
     ServiceCommand::new(
         "/usr/bin/pkexec",
         [
+            "--disable-internal-agent".into(),
             "/usr/bin/loginctl".into(),
             "enable-linger".into(),
             uid.to_string().into(),
@@ -176,7 +177,21 @@ impl LingerAuthorization for PkexecLingerAuthorization {
             match output.code {
                 0 => verify_enabled(self.runner.as_ref(), uid).await,
                 126 => Err(ServiceFailure::AuthorizationCancelled),
-                127 => Err(ServiceFailure::AuthorizationDenied),
+                127 if output
+                    .stderr
+                    .windows(b"No authentication agent found".len())
+                    .any(|part| part == b"No authentication agent found") =>
+                {
+                    Err(ServiceFailure::AuthorizationUnavailable)
+                }
+                127 if output
+                    .stderr
+                    .windows(b"Not authorized".len())
+                    .any(|part| part == b"Not authorized") =>
+                {
+                    Err(ServiceFailure::AuthorizationDenied)
+                }
+                127 => Err(ServiceFailure::AuthorizationUnavailable),
                 _ => Err(ServiceFailure::AuthorizationUnavailable),
             }
         })

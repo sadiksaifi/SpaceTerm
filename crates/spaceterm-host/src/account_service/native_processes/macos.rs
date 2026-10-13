@@ -1,19 +1,27 @@
 use super::{ServiceFailure, ServiceProcessIdentity};
 use std::{ffi::OsString, os::unix::ffi::OsStringExt, path::PathBuf};
 
-pub(super) fn pids() -> Result<Vec<u32>, ServiceFailure> {
+pub(super) fn pids(account: u32) -> Result<Vec<u32>, ServiceFailure> {
     let mut pids = vec![0_i32; 65536];
+    // PROC_UID_ONLY selects this account before querying protected system processes.
+    // proc_listpids returns bytes, unlike proc_listallpids' process count.
+    const PROC_UID_ONLY: u32 = 4;
     // SAFETY: libproc writes only within the supplied live PID buffer.
-    let count = unsafe {
-        libc::proc_listallpids(
+    let bytes = unsafe {
+        libc::proc_listpids(
+            PROC_UID_ONLY,
+            account,
             pids.as_mut_ptr().cast(),
             (pids.len() * std::mem::size_of::<i32>()) as i32,
         )
     };
-    if count <= 0 || count as usize >= pids.len() {
+    let bytes = usize::try_from(bytes).map_err(|_| ServiceFailure::CleanupUnresolved)?;
+    let capacity = pids.len() * std::mem::size_of::<i32>();
+    if bytes == 0 || bytes >= capacity || !bytes.is_multiple_of(std::mem::size_of::<i32>()) {
         return Err(ServiceFailure::CleanupUnresolved);
     }
-    Ok(pids[..count as usize]
+    let count = bytes / std::mem::size_of::<i32>();
+    Ok(pids[..count]
         .iter()
         .copied()
         .filter(|pid| *pid > 0)
@@ -60,7 +68,7 @@ pub(super) fn observe(
     if before.pbi_uid != account {
         return Ok(None);
     }
-    if before.pbi_pid != pid || before.pbi_ruid != account || before.pbi_svuid != account {
+    if before.pbi_pid != pid {
         return Err(ServiceFailure::CleanupUnresolved);
     }
     let start = birth(&before)?;
@@ -88,8 +96,8 @@ pub(super) fn observe(
     };
     if after.pbi_pid != pid
         || after.pbi_uid != account
-        || after.pbi_ruid != account
-        || after.pbi_svuid != account
+        || after.pbi_ruid != before.pbi_ruid
+        || after.pbi_svuid != before.pbi_svuid
         || birth(&after)? != start
     {
         return Err(ServiceFailure::CleanupUnresolved);
@@ -97,6 +105,7 @@ pub(super) fn observe(
     Ok(Some(ServiceProcessIdentity {
         pid,
         uid: account,
+        fully_account_owned: before.pbi_ruid == account && before.pbi_svuid == account,
         start,
         executable,
     }))

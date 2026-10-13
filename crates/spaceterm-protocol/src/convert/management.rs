@@ -127,6 +127,18 @@ macro_rules! profile {
                 wire::ManagementStatus {
                     request: 0,
                     state: 1,
+                    storage_state: match parts.runtime.storage {
+                        StorageStatus::Unknown => 0,
+                        StorageStatus::Ready => 1,
+                        StorageStatus::Locked => 2,
+                        StorageStatus::Unavailable => 3,
+                        StorageStatus::RecoveryRequired => 4,
+                    },
+                    run_intent: match parts.runtime.intent {
+                        ServerRunIntent::Unknown => 0,
+                        ServerRunIntent::Running => 1,
+                        ServerRunIntent::Stopped => 2,
+                    },
                     epoch: parts.epoch.get(),
                     runtime_version: parts
                         .running
@@ -296,6 +308,22 @@ macro_rules! profile {
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 ServerStatus::new(ServerStatusParts {
+                    runtime: ServerRuntimeStatus {
+                        storage: match value.storage_state {
+                            0 => StorageStatus::Unknown,
+                            1 => StorageStatus::Ready,
+                            2 => StorageStatus::Locked,
+                            3 => StorageStatus::Unavailable,
+                            4 => StorageStatus::RecoveryRequired,
+                            _ => return Err(ProtocolError::Malformed),
+                        },
+                        intent: match value.run_intent {
+                            0 => ServerRunIntent::Unknown,
+                            1 => ServerRunIntent::Running,
+                            2 => ServerRunIntent::Stopped,
+                            _ => return Err(ProtocolError::Malformed),
+                        },
+                    },
                     server,
                     epoch: ServerEpoch::new(value.epoch),
                     revision: nonzero(value.status_revision)?,
@@ -396,6 +424,7 @@ mod tests {
     fn status() -> ServerStatus {
         let server = ServerId::new([1; 16]);
         ServerStatus::new(ServerStatusParts {
+            runtime: Default::default(),
             server,
             epoch: ServerEpoch::new(3),
             revision: NonZeroU64::new(7).unwrap(),
@@ -493,4 +522,51 @@ mod tests {
         major_2_preserves_native_verification_policy_listener_failure_and_progress,
         v2
     );
+    #[test]
+    fn both_majors_preserve_storage_and_deliberate_intent_without_granting_authority() {
+        for storage in [
+            StorageStatus::Ready,
+            StorageStatus::Locked,
+            StorageStatus::Unavailable,
+            StorageStatus::RecoveryRequired,
+        ] {
+            for intent in [ServerRunIntent::Running, ServerRunIntent::Stopped] {
+                let mut parts = status().parts().clone();
+                parts.runtime = ServerRuntimeStatus { storage, intent };
+                let status = ServerStatus::new(parts).unwrap();
+                assert_eq!(
+                    v1::decode_status(&v1::encode_status(&status), &|_| {
+                        Err(ProtocolError::UnexpectedMessage)
+                    }),
+                    Ok(status.clone())
+                );
+                assert_eq!(
+                    v2::decode_status(&v2::encode_status(&status), &|_| {
+                        Err(ProtocolError::UnexpectedMessage)
+                    }),
+                    Ok(status)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn older_status_without_runtime_fields_stays_unknown_and_unknown_tags_are_rejected() {
+        let mut wire = v2::encode_status(&status());
+        wire.storage_state = 0;
+        wire.run_intent = 0;
+        let decoded = v2::decode_status(&wire, &|_| Err(ProtocolError::UnexpectedMessage)).unwrap();
+        assert_eq!(decoded.parts().runtime, ServerRuntimeStatus::default());
+        wire.storage_state = 99;
+        assert_eq!(
+            v2::decode_status(&wire, &|_| Err(ProtocolError::UnexpectedMessage)),
+            Err(ProtocolError::Malformed)
+        );
+        wire.storage_state = 0;
+        wire.run_intent = 99;
+        assert_eq!(
+            v2::decode_status(&wire, &|_| Err(ProtocolError::UnexpectedMessage)),
+            Err(ProtocolError::Malformed)
+        );
+    }
 }
