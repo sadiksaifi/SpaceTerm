@@ -22,11 +22,11 @@ use zbus::{MatchRule, MessageStream};
 use super::CompanionIdentity;
 use super::controller::{
     ActionIngress, CompanionAction, CompanionController, CompanionDependencies, CompanionFailure,
-    DesktopActivation, StatusArea, StatusSource,
+    DesktopActivation, StatusArea,
 };
 use super::model::{CompanionModel, MenuEntry, mnemonic_label};
 use super::native::{
-    ActivationToken, ModelSlot, TokioTimer, UnavailableNativeStatus, sibling_desktop_executable,
+    ActivationToken, ModelSlot, NativeCompanion, TokioTimer, sibling_desktop_executable,
 };
 
 const WATCHER: &str = "org.kde.StatusNotifierWatcher";
@@ -913,9 +913,10 @@ pub(super) fn run(identity: CompanionIdentity) -> Result<(), CompanionFailure> {
         let executable = std::env::current_exe()
             .ok()
             .and_then(|executable| sibling_desktop_executable(&executable));
+        let client = Arc::new(NativeCompanion::current());
         let dependencies = CompanionDependencies {
-            status: StatusSource::Unbound,
-            native: Arc::new(UnavailableNativeStatus),
+            status: client.clone(),
+            native: client,
             desktop: Arc::new(SiblingDesktop {
                 executable,
                 token,

@@ -38,7 +38,7 @@ use tokio::sync::watch;
 
 use super::controller::{
     ActionIngress, CompanionAction, CompanionController, CompanionDependencies, CompanionFailure,
-    CompanionTimer, DesktopActivation, NativeStatus, StatusArea, StatusSource,
+    CompanionTimer, DesktopActivation, NativeStatus, StatusArea,
 };
 use super::model::{CompanionModel, MenuEntry, Notice, Reason, ServerState, mnemonic_label};
 use super::native::{ModelSlot, enclosing_desktop_bundle, sibling_desktop_executable};
@@ -374,20 +374,13 @@ impl Harness {
         area_available: bool,
         desktop_available: bool,
     ) -> Self {
-        Self::compose(mode, desired, area_available, desktop_available, true)
-    }
-    /// The production composition until pairing binds the companion's own Client. The
-    /// fake server still records any request, so a test can show that none was made.
-    fn start_unbound() -> Self {
-        let mode = Mode::Serving(Box::new(running(1, "1.0.0")));
-        Self::compose(mode, None, true, true, false)
+        Self::compose(mode, desired, area_available, desktop_available)
     }
     fn compose(
         mode: Mode,
         desired: Option<DesiredServerState>,
         area_available: bool,
         desktop_available: bool,
-        bound: bool,
     ) -> Self {
         let log = Arc::new(Log::default());
         let server = FakeServer::new(log.clone(), mode);
@@ -396,11 +389,7 @@ impl Harness {
         let ingress = Arc::new(ActionIngress::new());
         let timer = FakeTimer::new();
         let dependencies = CompanionDependencies {
-            status: if bound {
-                StatusSource::Bound(server.clone())
-            } else {
-                StatusSource::Unbound
-            },
+            status: server.clone(),
             native: native.clone(),
             desktop: Arc::new(FakeDesktop {
                 log: log.clone(),
@@ -617,12 +606,24 @@ fn local(value: u64) -> [u8; 16] {
 }
 /// An ordinary authenticated connection for one Client of one pairing.
 fn authenticated(client: u64) -> (AuthenticatedConnection, OperationStreamId) {
-    let server: Arc<dyn SigningKey> =
-        Arc::new(Key(Ed25519KeyPair::from_seed_unchecked(&[41; 32]).unwrap()));
+    authenticated_on_server(
+        client,
+        SERVER,
+        Arc::new(Key(Ed25519KeyPair::from_seed_unchecked(&[41; 32]).unwrap())),
+        1,
+    )
+}
+
+fn authenticated_on_server(
+    client: u64,
+    server_id: ServerId,
+    server: Arc<dyn SigningKey>,
+    major: u32,
+) -> (AuthenticatedConnection, OperationStreamId) {
     let device: Arc<dyn SigningKey> =
         Arc::new(Key(Ed25519KeyPair::from_seed_unchecked(&[42; 32]).unwrap()));
     let principal = Principal {
-        server: SERVER.bytes(),
+        server: server_id.bytes(),
         device: [2; 16],
         pairing: local(3),
         client: local(client),
@@ -640,7 +641,7 @@ fn authenticated(client: u64) -> (AuthenticatedConnection, OperationStreamId) {
         principal,
         Purpose::Ordinary,
         HandshakeConfig {
-            majors: vec![1],
+            majors: vec![major],
             ..Default::default()
         },
         device,
@@ -661,9 +662,9 @@ fn authenticated(client: u64) -> (AuthenticatedConnection, OperationStreamId) {
         panic!("an ordinary connection");
     };
     let stream = OperationStreamId::new(
-        OperationStreamKey::new(SERVER, 5).unwrap(),
-        PairingId::new(SERVER, 3).unwrap(),
-        ClientId::new(SERVER, client).unwrap(),
+        OperationStreamKey::new(server_id, 5).unwrap(),
+        PairingId::new(server_id, 3).unwrap(),
+        ClientId::new(server_id, client).unwrap(),
     )
     .unwrap();
     (connection, stream)
@@ -786,6 +787,87 @@ async fn status_gap_requires_resync() {
 }
 
 #[tokio::test]
+async fn stale_subscription_after_reconnect_cannot_replace_current_status() {
+    let harness = Harness::start(Mode::Serving(Box::new(running(1, "1.0.0"))), None);
+    harness
+        .presented
+        .until(|model| model.running_version() == Some("1.0.0"))
+        .await;
+    let stale = harness
+        .server
+        .worker
+        .lock()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    harness
+        .server
+        .set(Mode::Failing(ManagementFailure::Offline));
+    harness.timer.release_after(1).await;
+    harness
+        .presented
+        .until(|model| model.state() == ServerState::Offline)
+        .await;
+    harness
+        .server
+        .set(Mode::Serving(Box::new(running(2, "2.0.0"))));
+    harness.act(CompanionAction::RetryConnection);
+    harness
+        .presented
+        .until(|model| model.running_version() == Some("2.0.0"))
+        .await;
+    assert_eq!(harness.log.count(Call::Subscribe), 2);
+    stale.apply(snapshot(running(100, "9.9.9"))).unwrap();
+    settle().await;
+    assert_eq!(
+        harness.presented.last().unwrap().running_version(),
+        Some("2.0.0")
+    );
+    harness.quit().await;
+}
+
+#[tokio::test]
+async fn delayed_resync_must_reach_the_highest_observed_epoch_and_revision() {
+    let harness = Harness::start(Mode::Serving(Box::new(running(1, "1.0.0"))), None);
+    harness
+        .presented
+        .until(|model| model.running_version() == Some("1.0.0"))
+        .await;
+    let newer = |epoch, revision, text| {
+        let mut parts = running(revision, text).parts().clone();
+        parts.epoch = ServerEpoch::new(epoch);
+        ServerStatus::new(parts).unwrap()
+    };
+    harness
+        .server
+        .publish(changed(2, newer(EPOCH + 1, 4, "4.0.0")));
+    harness.presented.until(CompanionModel::is_refreshing).await;
+    harness
+        .server
+        .publish(changed(4, newer(EPOCH + 1, 8, "8.0.0")));
+    for delayed in [running(100, "9.9.9"), newer(EPOCH + 1, 7, "7.0.0")] {
+        assert_eq!(
+            harness.server.publish(snapshot(delayed)),
+            StatusUpdate::ResyncRequired
+        );
+    }
+    settle().await;
+    let shown = harness.presented.last().unwrap();
+    assert_eq!(shown.running_version(), Some("1.0.0"));
+    assert!(shown.is_refreshing());
+    harness
+        .server
+        .publish(snapshot(newer(EPOCH + 1, 8, "8.0.0")));
+    let shown = harness
+        .presented
+        .until(|model| model.running_version() == Some("8.0.0"))
+        .await;
+    assert!(!shown.is_refreshing());
+    harness.quit().await;
+}
+
+#[tokio::test]
 async fn liveness_reads_during_a_resync_keep_the_shown_status_fenced() {
     let harness = Harness::start(Mode::Serving(Box::new(running(1, "1.0.0"))), None);
     harness
@@ -841,35 +923,6 @@ async fn liveness_reads_during_a_resync_keep_the_shown_status_fenced() {
         Some("3.0.0")
     );
     harness.quit().await;
-}
-
-/// Without the companion's own Client binding no read can succeed. That is a fact of the
-/// composition, so the companion says so once and neither reads nor offers Retry.
-#[tokio::test]
-async fn an_unbound_companion_reports_unsupported_without_reading() {
-    let harness = Harness::start_unbound();
-    let unsupported = harness
-        .presented
-        .until(|model| model.state() == ServerState::Unavailable)
-        .await;
-    assert_eq!(unsupported.reason(), Some(Reason::Unsupported));
-    assert!(!unsupported.offers_retry());
-    assert!(!unsupported.retries_automatically());
-    assert_eq!(
-        actions(&unsupported.menu(identity())),
-        vec![CompanionAction::OpenDesktop, CompanionAction::Quit]
-    );
-
-    harness.act(CompanionAction::RetryConnection);
-    harness.act(CompanionAction::OpenDesktop);
-    settle().await;
-    let harness = harness.quit().await;
-    assert!(harness.timer.requests().is_empty());
-    assert_eq!(harness.log.calls(), vec![Call::OpenDesktop]);
-    assert_eq!(
-        harness.presented.all().first().map(CompanionModel::state),
-        Some(ServerState::Unavailable)
-    );
 }
 
 /// A host the server cannot run on stays unsupported, so nothing polls it.
@@ -937,6 +990,87 @@ async fn native_unavailability_from_a_bound_backend_retries_automatically() {
         harness.timer.requested(2).await;
         assert_eq!(harness.log.count(Call::Subscribe), 2, "{failure:?}");
         harness.quit().await;
+    }
+}
+
+#[tokio::test]
+async fn absent_native_setup_is_not_reported_as_an_offline_or_stopped_server() {
+    let harness = Harness::start(
+        Mode::Failing(ManagementFailure::Offline),
+        Some(DesiredServerState::Stopped),
+    );
+    harness
+        .native
+        .observation
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .availability = RegistrationAvailability::Missing;
+    let shown = harness
+        .presented
+        .until(|model| model.state() != ServerState::Connecting)
+        .await;
+    assert_eq!(shown.reason(), Some(Reason::NotSetUp));
+    assert!(shown.offers_retry());
+    harness.quit().await;
+}
+
+#[tokio::test]
+async fn native_setup_failures_override_offline_without_hiding_authentication_failures() {
+    for (failure, reason) in [
+        (ManagementFailure::NativeUnavailable, Reason::NotSetUp),
+        (ManagementFailure::StorageLocked, Reason::StorageLocked),
+        (ManagementFailure::UnsafeNativeState, Reason::Unavailable),
+        (ManagementFailure::UnsupportedHost, Reason::Unsupported),
+    ] {
+        let harness = Harness::start(Mode::Failing(ManagementFailure::Offline), None);
+        *harness.native.observation.lock().unwrap() = Err(failure);
+        let shown = harness
+            .presented
+            .until(|model| model.state() != ServerState::Connecting)
+            .await;
+        assert_eq!(shown.reason(), Some(reason));
+        harness.quit().await;
+    }
+    let harness = Harness::start(Mode::Failing(ManagementFailure::Revoked), None);
+    *harness.native.observation.lock().unwrap() = Err(ManagementFailure::NativeUnavailable);
+    let shown = harness
+        .presented
+        .until(|model| model.state() != ServerState::Connecting)
+        .await;
+    assert_eq!(shown.reason(), Some(Reason::Revoked));
+    assert_eq!(harness.log.count(Call::Inspect), 0);
+    harness.quit().await;
+}
+
+#[tokio::test]
+async fn unavailable_native_observations_never_claim_stopped_or_offline() {
+    for (availability, reason) in [
+        (RegistrationAvailability::Missing, Reason::NotSetUp),
+        (RegistrationAvailability::Unavailable, Reason::NotSetUp),
+        (RegistrationAvailability::Locked, Reason::StorageLocked),
+        (RegistrationAvailability::Unsafe, Reason::Unavailable),
+        (RegistrationAvailability::Unsupported, Reason::Unsupported),
+    ] {
+        for desired in [None, Some(DesiredServerState::Stopped)] {
+            let harness = Harness::start(Mode::Failing(ManagementFailure::Offline), desired);
+            harness
+                .native
+                .observation
+                .lock()
+                .unwrap()
+                .as_mut()
+                .unwrap()
+                .availability = availability;
+            let shown = harness
+                .presented
+                .until(|model| model.state() != ServerState::Connecting)
+                .await;
+            assert_eq!(shown.state(), ServerState::Unavailable);
+            assert_eq!(shown.reason(), Some(reason));
+            harness.quit().await;
+        }
     }
 }
 
@@ -2142,3 +2276,6 @@ mod linux_session {
         assert_eq!(items.lock().unwrap().len(), 1);
     }
 }
+
+#[path = "production_tests.rs"]
+mod production;
