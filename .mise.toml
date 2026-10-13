@@ -812,4 +812,4 @@ run = "python -m spaceterm_tasks.account_service_checks startup"
 
 [tasks."test:server:artifacts"]
 description = "Test account server packaging, signed channels and guarded task composition"
-run = "python -m unittest tests.test_server_artifacts tests.test_package_server tests.test_release_server tests.test_account_service_checks tests.test_packaged_headless_linux"
+run = "python -m unittest tests.test_server_artifacts tests.test_package_server tests.test_release_server tests.test_account_service_checks tests.test_packaged_headless_linux tests.test_packaged_headless_macos"

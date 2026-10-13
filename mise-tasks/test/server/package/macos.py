@@ -1,6 +1,6 @@
 #!/usr/bin/env python
-# MISE description="Test portable macos server package and release policies"
-"""Run unprivileged package regressions, not native signing or baseline evidence."""
+# MISE description="Test macos server packaging, ad hoc archive execution and release policies"
+"""Run package regressions and disposable ad hoc signing without service mutation."""
 
 import argparse
 import sys
@@ -18,6 +18,7 @@ def test():
             "tests.test_server_artifacts",
             "tests.test_release_server",
             "tests.test_macos_signing.SigningSerializationTests",
+            "tests.test_packaged_headless_macos",
         ]
     )
     result = unittest.TextTestRunner(verbosity=2).run(suite)
