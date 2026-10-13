@@ -393,8 +393,10 @@ impl ResizeHandle {
     }
 
     /// Controls whether the handle takes pointer input, for a divider that moving content covers
-    /// for a moment. Without it, the pointer reaches what lies under the handle, and keyboard and
-    /// assistive-technology input still work. A pointer drag under way continues until it ends.
+    /// for a moment. Without it, the pointer reaches what lies under the handle and a press does
+    /// not focus it. A focused handle keeps keyboard input, an unfocused one leaves the tab order,
+    /// and assistive-technology actions still work. A pointer drag under way continues until it
+    /// ends.
     pub fn pointer_input(mut self, enabled: bool) -> Self {
         self.pointer_input = enabled;
         self
@@ -777,7 +779,11 @@ impl RenderOnce for ResizeHandle {
             .items_center()
             .justify_center()
             .flex_shrink_0()
-            .track_focus(&focus_handle)
+            // A focusable element takes focus from presses on it, so a handle without pointer
+            // input tracks focus only while it keeps keyboard focus.
+            .when(pointer_input || focused, |root| {
+                root.track_focus(&focus_handle)
+            })
             .when(axis == ResizeAxis::Horizontal, |root| {
                 root.w(target_thickness)
                     .h_full()
@@ -1633,16 +1639,24 @@ mod tests {
     ) {
         let (root, events, cx) = resize_window(cx, ResizeAxis::Horizontal);
         let start = hitbox(cx).center();
-        root.update(cx, |root, cx| {
-            root.pointer_input = false;
-            cx.notify();
-        });
-        cx.run_until_parked();
+        let set_pointer_input = |enabled, cx: &mut VisualTestContext| {
+            root.update(cx, |root, cx| {
+                root.pointer_input = enabled;
+                cx.notify();
+            });
+            cx.run_until_parked();
+        };
+        set_pointer_input(false, cx);
 
         cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
         cx.simulate_mouse_up(start, MouseButton::Left, Modifiers::none());
-        let pressed = events.borrow().len();
+        let pressed = (
+            events.borrow().len(),
+            cx.update(|window, cx| window.focused(cx).is_some()),
+        );
+        set_pointer_input(true, cx);
         cx.update(|window, cx| window.focus_next(cx));
+        set_pointer_input(false, cx);
         cx.simulate_keystrokes("right");
 
         assert_eq!(
@@ -1657,7 +1671,7 @@ mod tests {
                     }
                 )),
             ),
-            (None, 0, true)
+            (None, (0, false), true)
         );
     }
 

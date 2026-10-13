@@ -1457,8 +1457,10 @@ impl TabView {
         }
         let mut panes = Vec::new();
         collect_pane_order(self.tab.root(), &mut panes);
+        // Later Panes paint over earlier ones where moving Panes overlap.
         let (target_pane_id, bounds) = panes
             .into_iter()
+            .rev()
             .filter_map(|candidate| Some((candidate, *self.pane_surfaces.get(&candidate)?)))
             .find(|(_, bounds)| bounds.contains(&pointer))?;
         if target_pane_id == pane_id {
@@ -1993,8 +1995,15 @@ impl TabView {
             .flex()
             .flex_col()
             .overflow_hidden()
-            .capture_any_mouse_down(move |_: &MouseDownEvent, _, cx| {
-                let _ = focus_view.update(cx, |view, cx| view.focus_pane(pane_id, cx));
+            // A moving Pane's surface reaches past its Terminal, so a press there also moves input
+            // focus, as a press on the caption does.
+            .capture_any_mouse_down(move |_: &MouseDownEvent, window, cx| {
+                let _ = focus_view.update(cx, |view, cx| {
+                    if view.tab.focused_pane_id() != pane_id {
+                        view.focus_pane(pane_id, cx);
+                        view.focus(window, cx);
+                    }
+                });
             })
             .rounded(frame.pane_radius())
             .child(
@@ -2290,6 +2299,11 @@ impl Render for TabView {
                             let measured = pane_size(*bounds).ok();
                             let resized = view.pane_layout_size != measured && measured.is_some();
                             view.pane_layout_size = measured;
+                            // A change that also resizes the Pane Layout, such as an unzoom that
+                            // raises its minimum size, moves Panes to the measured layout instead.
+                            if resized && view.pane_frames.started {
+                                view.pane_motion.expect_change();
+                            }
                             (resized, view.pending_split.take())
                         })
                         .unwrap_or_default();
@@ -4223,6 +4237,82 @@ mod tests {
     }
 
     #[gpui::test]
+    fn an_unzoom_that_widens_the_pane_layout_to_its_minimum_should_still_move_the_panes(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::ui::drag_and_drop::AnimatePresence;
+
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
+        let session_factory = test_session_factory();
+        let (view, cx) = cx
+            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
+        cx.run_until_parked();
+        for _ in 0..4 {
+            split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
+        }
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.focus_pane(PaneId::new(1), cx);
+                view.toggle_zoom(window, cx);
+            });
+        });
+        cx.run_until_parked();
+        let minimum = cx.update(|_, cx| {
+            let gap = pane_gap(cx);
+            view.read(cx).tab.minimum_size(gap).unwrap()
+        });
+        cx.simulate_resize(gpui::size(
+            px(minimum.width() - 30.0),
+            px(minimum.height() + 200.0),
+        ));
+        cx.run_until_parked();
+
+        cx.update(|_, cx| cx.set_global(AnimatePresence));
+        cx.update(|window, cx| view.update(cx, |view, cx| view.toggle_zoom(window, cx)));
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(60));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+
+        assert_eq!(
+            view.read_with(cx, |view, _| (
+                view.tab.pane_count(),
+                view.pane_frames.moving
+            )),
+            (5, true),
+            "the Panes must keep moving once the layout widens to its minimum"
+        );
+    }
+
+    #[gpui::test]
+    fn a_pane_dropped_where_moving_panes_overlap_should_land_on_the_one_drawn_on_top(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
+        let session_factory = test_session_factory();
+        let (view, cx) = cx
+            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
+        cx.run_until_parked();
+        split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
+        split_test_pane(&view, PaneId::new(2), SplitAxis::Horizontal, cx);
+        let first = cx.debug_bounds("pane-surface-1").unwrap();
+
+        // Pane 3 paints after Pane 2, so where their surfaces overlap mid-motion it is on top.
+        let target = cx.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.pane_surfaces.insert(PaneId::new(2), first);
+                view.pane_surfaces.insert(PaneId::new(3), first);
+                view.drop_target(PaneId::new(1), first.center(), pane_gap(cx))
+            })
+        });
+
+        assert_eq!(target.map(|(pane_id, _)| pane_id), Some(PaneId::new(3)));
+    }
+
+    #[gpui::test]
     fn a_press_on_a_split_gap_that_moving_panes_cover_should_not_resize_the_split(
         cx: &mut TestAppContext,
     ) {
@@ -4237,6 +4327,10 @@ mod tests {
 
         cx.update(|_, cx| cx.set_global(AnimatePresence));
         split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
+        cx.update(|window, cx| {
+            window.activate_window();
+            view.update(cx, |view, cx| view.focus(window, cx));
+        });
         cx.executor()
             .advance_clock(std::time::Duration::from_millis(60));
         cx.update(|window, cx| window.simulate_next_frame(cx));
@@ -4247,7 +4341,13 @@ mod tests {
             "Pane 1 must still cover the gap it moves toward"
         );
         cx.simulate_mouse_down(gap, MouseButton::Left, Modifiers::none());
-        let while_moving = view.read_with(cx, |view, _| view.resizing_split_id);
+        let while_moving = cx.update(|window, cx| {
+            let view = view.read(cx);
+            (
+                view.resizing_split_id,
+                view.focused_terminal_has_input_focus(window, cx),
+            )
+        });
         cx.simulate_mouse_up(gap, MouseButton::Left, Modifiers::none());
         finish_slides(cx);
         cx.simulate_mouse_down(gap, MouseButton::Left, Modifiers::none());
@@ -4256,7 +4356,7 @@ mod tests {
 
         assert_eq!(
             (while_moving, at_rest),
-            (None, Some(SplitId::new(1))),
+            ((None, true), Some(SplitId::new(1))),
             "the split must take the press only once its gap shows"
         );
     }

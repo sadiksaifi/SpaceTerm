@@ -56,6 +56,8 @@ pub(crate) struct PaneFrames {
     pub(crate) closing: Vec<Bounds<Pixels>>,
     /// Whether any Pane or closing place is still moving.
     pub(crate) moving: bool,
+    /// Whether this frame started moving Panes toward an announced change.
+    pub(crate) started: bool,
 }
 
 impl Default for PaneFrames {
@@ -65,6 +67,7 @@ impl Default for PaneFrames {
             scale_factor: 1.0,
             closing: Vec::new(),
             moving: false,
+            started: false,
         }
     }
 }
@@ -119,7 +122,8 @@ impl PaneMotion {
         if targets.is_empty() {
             return PaneFrames::default();
         }
-        if std::mem::take(&mut self.expected) && !self.drawn.is_empty() {
+        let started = std::mem::take(&mut self.expected) && !self.drawn.is_empty();
+        if started {
             self.follow_change(targets, now, motion);
         } else if *targets != self.targets {
             self.moves.clear();
@@ -151,6 +155,7 @@ impl PaneMotion {
                 .map(|closing| between(closing.from, closing.to, closing.ease.at(now)))
                 .collect(),
             moving: !self.moves.is_empty() || !self.closing.is_empty(),
+            started,
             ..PaneFrames::default()
         }
     }
