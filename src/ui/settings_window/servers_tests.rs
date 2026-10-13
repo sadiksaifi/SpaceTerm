@@ -34,8 +34,8 @@ const LOCATION: &str = "~/Worktrees/{repository}/{branch}";
 struct Recorder(RefCell<Vec<ServerRequest>>);
 
 impl ServerRequests for Recorder {
-    fn send(&self, request: ServerRequest, _: &mut App) {
-        self.0.borrow_mut().push(request);
+    fn send(&self, request: model::BoundServerRequest, _: &mut App) {
+        self.0.borrow_mut().push(request.request);
     }
 }
 
@@ -219,9 +219,85 @@ fn scopes() -> Vec<BindScope> {
     ]
 }
 
-fn local() -> ServerSummary {
+pub(super) fn pairing(server: u8, generation: u64) -> spaceterm_core::pairing::LocalPairingKey {
+    use spaceterm_core::{
+        identity::{PairingId, ServerId},
+        pairing::{LocalPairingGeneration, LocalPairingKey, LocalPairingKeyParts},
+    };
+    let server = ServerId::new([server; 16]);
+    LocalPairingKey::new(LocalPairingKeyParts {
+        server,
+        pairing: PairingId::new(server, 1).unwrap(),
+        generation: LocalPairingGeneration::new(generation).unwrap(),
+    })
+    .unwrap()
+}
+
+pub(super) fn operation(server: u8) -> spaceterm_core::operations::OperationId {
+    use spaceterm_core::{
+        identity::{ClientId, OperationStreamId, OperationStreamKey},
+        operations::{OperationId, OperationSequence},
+    };
+    let key = pairing(server, 1);
+    let id = key.parts().server;
+    OperationId::new(
+        OperationStreamId::new(
+            OperationStreamKey::new(id, 1).unwrap(),
+            key.parts().pairing,
+            ClientId::new(id, 1).unwrap(),
+        )
+        .unwrap(),
+        OperationSequence::new(1).unwrap(),
+    )
+}
+
+pub(super) fn staged_server(mut server: ServerSummary) -> ServerSummary {
+    use spaceterm_host::{
+        native_deployment::contracts::NativeRequestId,
+        startup::{DesiredServerState, InstallationId},
+    };
+    use std::num::NonZeroU64;
+    let candidate = model::ServerInstallation {
+        installation: InstallationId(NonZeroU64::new(2).unwrap()),
+        artifact_sha256: [2; 32],
+        version: "1.5.0".into(),
+    };
+    let generation = NonZeroU64::new(1).unwrap();
+    server.installations = model::ServerInstallations {
+        selection_generation: Some(generation),
+        staged: Some(candidate.clone()),
+        activation: Some(model::UpdateAssessment {
+            reference: spaceterm_client::management_cli::confirmation::AssessmentToken::new(
+                "activation-1".into(),
+            )
+            .unwrap(),
+            native_request: NativeRequestId::new([1; 16]).unwrap(),
+            original_pairing: server.pairing.clone(),
+            selection_generation: generation,
+            approved: None,
+            running: None,
+            candidate,
+            runtime_epoch: server.runtime_epoch,
+            desired: if server.status == ServerStatus::Stopped {
+                DesiredServerState::Stopped
+            } else {
+                DesiredServerState::Running
+            },
+        }),
+        ..model::ServerInstallations::default()
+    };
+    server
+}
+
+pub(super) fn local() -> ServerSummary {
     ServerSummary {
         key: ServerKey::new("local"),
+        pairing: pairing(1, 1),
+        runtime_epoch: Some(spaceterm_core::authority::ServerEpoch::new(1)),
+        service_lifecycle: Some(model::ServerServiceLifecycle::LoginSession),
+        compatibility: None,
+        installations: model::ServerInstallations::default(),
+        paired_devices: None,
         name: "Studio".into(),
         route: ServerRoute::Local,
         status: ServerStatus::Running,
@@ -257,6 +333,12 @@ fn local() -> ServerSummary {
 fn ssh() -> ServerSummary {
     ServerSummary {
         key: ServerKey::new("build"),
+        pairing: pairing(2, 1),
+        runtime_epoch: Some(spaceterm_core::authority::ServerEpoch::new(1)),
+        service_lifecycle: Some(model::ServerServiceLifecycle::BootWithLingering),
+        compatibility: None,
+        installations: model::ServerInstallations::default(),
+        paired_devices: None,
         name: "Build Box".into(),
         route: ServerRoute::Ssh {
             destination: "dev@build.example.com".into(),
@@ -273,6 +355,12 @@ fn ssh() -> ServerSummary {
 fn wss() -> ServerSummary {
     ServerSummary {
         key: ServerKey::new("lab"),
+        pairing: pairing(3, 1),
+        runtime_epoch: Some(spaceterm_core::authority::ServerEpoch::new(1)),
+        service_lifecycle: Some(model::ServerServiceLifecycle::BootWithLingering),
+        compatibility: None,
+        installations: model::ServerInstallations::default(),
+        paired_devices: None,
         name: "Lab".into(),
         route: ServerRoute::Wss {
             authority: "lab.example.com:7443".into(),
@@ -396,6 +484,7 @@ fn every_status_reads_as_words_with_its_own_explanation() {
         ServerStatus::Offline,
         ServerStatus::Incompatible(IncompatibleSide::ThisDevice),
         ServerStatus::Incompatible(IncompatibleSide::Server),
+        ServerStatus::UnsupportedProfiles,
         ServerStatus::Updating {
             version: "1.5.0".into(),
         },
@@ -699,7 +788,7 @@ fn restart_confirms_that_every_client_loses_its_sessions(cx: &mut TestAppContext
 fn a_staged_version_offers_an_update_that_names_its_effect(cx: &mut TestAppContext) {
     let staged = ServerSummary {
         staged_version: Some("1.5.0".into()),
-        ..local()
+        ..staged_server(local())
     };
     let mut fixture = open(Appearance::Dark, snapshot(vec![staged.clone()]), cx);
     assert!(!fixture.rendered("settings-server-restart"));
@@ -715,6 +804,7 @@ fn a_staged_version_offers_an_update_that_names_its_effect(cx: &mut TestAppConte
         vec![ServerRequest::InstallUpdate {
             server: ServerKey::new("local"),
             version: "1.5.0".into(),
+            assessment: staged.installations.activation.clone().unwrap(),
         }]
     );
 
@@ -746,7 +836,10 @@ fn installing_an_update_needs_host_access_as_start_and_stop_do() {
     let staged = |server: ServerSummary| ServerSummary {
         status: ServerStatus::Running,
         staged_version: Some("1.5.0".into()),
-        ..server
+        ..staged_server(ServerSummary {
+            status: ServerStatus::Running,
+            ..server
+        })
     };
     let update = |enabled| VersionAction::Update {
         version: "1.5.0".into(),
@@ -773,7 +866,10 @@ fn over_wss_an_update_explains_where_it_can_be_installed(cx: &mut TestAppContext
     let staged = ServerSummary {
         status: ServerStatus::Running,
         staged_version: Some("1.5.0".into()),
-        ..wss()
+        ..staged_server(ServerSummary {
+            status: ServerStatus::Running,
+            ..wss()
+        })
     };
     let mut fixture = open(Appearance::Dark, snapshot(vec![staged]), cx);
 
@@ -791,7 +887,10 @@ fn a_confirmation_accepted_after_its_server_changed_sends_nothing(cx: &mut TestA
     let stopped_with_update = ServerSummary {
         status: ServerStatus::Stopped,
         staged_version: Some("1.5.0".into()),
-        ..ssh()
+        ..staged_server(ServerSummary {
+            status: ServerStatus::Stopped,
+            ..ssh()
+        })
     };
     let mut fixture = open(
         Appearance::Dark,
@@ -899,6 +998,11 @@ fn a_pending_unpair_notice_dismisses_without_cancelling_the_revocation(cx: &mut 
     let pending = PendingUnpair {
         id: "unpair-1".into(),
         server_name: "Old Box".into(),
+        original_pairing: pairing(4, 1),
+        operation: operation(4),
+        phase: model::PendingUnpairPhase::AwaitingConfirmation(
+            model::PendingUnpairReason::Unreachable,
+        ),
     };
     let mut fixture = open(
         Appearance::Dark,
@@ -922,7 +1026,7 @@ fn a_pending_unpair_notice_dismisses_without_cancelling_the_revocation(cx: &mut 
     assert!(tree.find_text("Unpair pending for Old Box").is_some());
     assert!(
         tree.find_text(
-            "This device's connection to Old Box was removed. SpaceTerm keeps asking Old Box to confirm in the background, including after you dismiss this."
+            "This device's connection to Old Box was removed. The server can't be reached. SpaceTerm keeps asking Old Box to confirm in the background, including after you dismiss this."
         )
         .is_some()
     );
@@ -1768,4 +1872,106 @@ fn no_settings_reset_reaches_a_server_row() {
             assert_eq!(row.reset_target(appearance), None, "{row:?}");
         }
     }
+}
+
+#[gpui::test]
+fn a_confirmation_cannot_target_a_repaired_server_under_the_same_ui_key(cx: &mut TestAppContext) {
+    let mut fixture = open(Appearance::Dark, snapshot(vec![local()]), cx);
+    fixture.click("settings-server-stop");
+    assert!(fixture.modal_open());
+    let replacement = ServerSummary {
+        pairing: pairing(1, 2),
+        ..local()
+    };
+    fixture.publish(snapshot(vec![replacement]));
+    fixture.click("modal-action-settings-server-stop-confirm");
+    assert!(fixture.requests.take().is_empty());
+}
+
+#[gpui::test]
+fn a_worktree_draft_cannot_follow_a_repaired_server_under_the_same_ui_key(cx: &mut TestAppContext) {
+    let mut fixture = open(Appearance::Dark, snapshot(vec![local()]), cx);
+    fixture.click("settings-server-worktree-location");
+    fixture.cx.simulate_keystrokes("cmd-a");
+    fixture.cx.simulate_input("~/old-draft/{branch}");
+    let replacement = ServerSummary {
+        pairing: pairing(1, 2),
+        worktree_location: Some(ServerTextSetting {
+            value: "~/new-pairing/{branch}".into(),
+            revision: 1,
+            edit: None,
+        }),
+        ..local()
+    };
+    fixture.publish(snapshot(vec![replacement]));
+    fixture.cx.simulate_keystrokes("enter");
+    fixture.cx.run_until_parked();
+    assert!(fixture.requests.take().is_empty());
+    assert_eq!(fixture.field(), "~/new-pairing/{branch}");
+}
+
+#[gpui::test]
+fn an_unanswered_worktree_change_cannot_follow_a_repaired_server(cx: &mut TestAppContext) {
+    let mut fixture = open(Appearance::Dark, snapshot(vec![local()]), cx);
+    fixture.enter_location("~/old-request/{branch}");
+    assert_eq!(fixture.requests.take().len(), 1);
+    fixture.publish(snapshot(vec![ServerSummary {
+        pairing: pairing(1, 2),
+        ..local()
+    }]));
+    assert_eq!(fixture.field(), LOCATION);
+    assert_ne!(
+        fixture
+            .caption(SettingsRowId::ServerWorktreeLocation)
+            .as_deref(),
+        Some("Saving to Studio…")
+    );
+}
+
+#[gpui::test]
+fn importing_and_resetting_client_settings_never_reseed_an_existing_server(
+    cx: &mut TestAppContext,
+) {
+    use crate::ui::sidebar_window::SidebarOwner as _;
+    let original = snapshot(vec![local()]);
+    let mut fixture = open(Appearance::Dark, original.clone(), cx);
+    let mut imported = SettingsDocument::default();
+    imported.git.worktree_path_template = "~/client-import/{branch}".into();
+    let bytes = crate::settings::export_settings(&imported)
+        .unwrap()
+        .into_bytes();
+    let window = fixture.window.clone();
+    fixture.cx.update(|native, cx| {
+        window.update(cx, |settings, cx| {
+            settings.select_section(SettingsSectionId::Advanced, cx);
+            settings.finish_settings_import(Ok(bytes), native, cx);
+        });
+    });
+    fixture.cx.run_until_parked();
+    fixture.click("modal-action-settings-import-confirm");
+    assert_eq!(
+        fixture.document().git.worktree_path_template,
+        "~/client-import/{branch}"
+    );
+    assert!(fixture.requests.take().is_empty());
+    fixture.cx.update(|_, cx| {
+        assert_eq!(fixture.servers.read(cx).snapshot(), &original);
+    });
+    fixture.click("settings-reset-all");
+    fixture.click("modal-action-settings-reset-all-confirm");
+    assert_eq!(
+        fixture.document().git.worktree_path_template,
+        crate::worktrees::path_template::DEFAULT_WORKTREE_PATH_TEMPLATE
+    );
+    assert!(fixture.requests.take().is_empty());
+    fixture.cx.update(|_, cx| {
+        assert_eq!(fixture.servers.read(cx).snapshot(), &original);
+    });
+    fixture.cx.update(|_, cx| {
+        window.update(cx, |settings, cx| {
+            settings.select_section(SettingsSectionId::Servers, cx)
+        });
+    });
+    fixture.cx.run_until_parked();
+    assert_eq!(fixture.field(), LOCATION);
 }

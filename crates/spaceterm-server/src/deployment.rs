@@ -1,33 +1,95 @@
-//! Strict executable dispatch. Metadata selection precedes account effects.
+//! Strict executable dispatch. Queries never enter service startup or setup.
 
 use std::ffi::OsString;
 
 use spaceterm_distribution::{DistributionFailure, StorageCompatibility};
 
+use crate::account_startup::StartupFailure;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ServerInvocation {
     Serve,
     DistributionMetadata,
+    Help,
+    Version,
+    Status,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InvalidServerArguments;
 
 impl ServerInvocation {
-    /// Accepts exactly "serve" for service startup, or one metadata flag.
-    /// An empty invocation cannot start an unsupervised server.
+    /// Accepts exactly "serve" for service startup, or one query operation.
+    /// Status alone accepts unique leading bootstrap output/interaction flags.
+    /// No invocation grants installation or owner-enrollment authority.
     pub fn parse(
         arguments: impl IntoIterator<Item = OsString>,
     ) -> Result<Self, InvalidServerArguments> {
         let mut arguments = arguments.into_iter();
-        let invocation = match arguments.next() {
-            Some(argument) if argument == "serve" => Self::Serve,
-            Some(argument) if argument == "--distribution-metadata" => Self::DistributionMetadata,
-            _ => return Err(InvalidServerArguments),
+        let mut json = false;
+        let mut non_interactive = false;
+        let invocation = loop {
+            match arguments.next() {
+                Some(argument) if argument == "--json" && !json => json = true,
+                Some(argument) if argument == "--non-interactive" && !non_interactive => {
+                    non_interactive = true;
+                }
+                Some(argument) if argument == "status" => break Self::Status,
+                Some(argument) if !json && !non_interactive => {
+                    break match argument.to_str() {
+                        Some("serve") => Self::Serve,
+                        Some("--distribution-metadata") => Self::DistributionMetadata,
+                        Some("--help") => Self::Help,
+                        Some("--version") => Self::Version,
+                        _ => return Err(InvalidServerArguments),
+                    };
+                }
+                _ => return Err(InvalidServerArguments),
+            }
         };
         if arguments.next().is_some() {
             return Err(InvalidServerArguments);
         }
         Ok(invocation)
+    }
+}
+
+pub const USAGE: &str = "usage: spaceterm-server serve | [--json] [--non-interactive] status | --distribution-metadata | --help | --version";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum QueryFailure {
+    Distribution(DistributionFailure),
+    Account(StartupFailure),
+}
+impl QueryFailure {
+    pub const fn classification(self) -> &'static str {
+        match self {
+            Self::Distribution(_) => "server distribution metadata unavailable",
+            Self::Account(failure) => failure.classification(),
+        }
+    }
+}
+
+/// Help, version and artifact metadata require no account or credential access.
+/// Status only reads existing account registration and cannot enter serve/setup.
+pub fn query_output(invocation: ServerInvocation) -> Result<Option<Vec<u8>>, QueryFailure> {
+    match invocation {
+        ServerInvocation::Serve => Ok(None),
+        ServerInvocation::Status => crate::account_startup::production_status()
+            .map(Some)
+            .map_err(QueryFailure::Account),
+        ServerInvocation::DistributionMetadata => distribution_metadata()
+            .map(Some)
+            .map_err(QueryFailure::Distribution),
+        ServerInvocation::Help | ServerInvocation::Version => {
+            let version =
+                crate::distribution_metadata::version().map_err(QueryFailure::Distribution)?;
+            let mut output = format!("spaceterm-server {}\n", version.as_str());
+            if invocation == ServerInvocation::Help {
+                output.push_str(USAGE);
+                output.push('\n');
+            }
+            Ok(Some(output.into_bytes()))
+        }
     }
 }
 

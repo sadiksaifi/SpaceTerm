@@ -45,12 +45,7 @@ fn home(root: &Path, registration: &RegisteredServer) -> ServerDirectory {
 }
 
 fn initialize_store(root: &Path, registration: &RegisteredServer) {
-    fs::create_dir(registration.organization_directory()).unwrap();
-    fs::set_permissions(
-        registration.organization_directory(),
-        fs::Permissions::from_mode(0o700),
-    )
-    .unwrap();
+    // Account installation establishes the private directory, not the domain store.
     let identity = StoreIdentity {
         server: ServerId::new(registration.server_pin().identity),
         account: registration.key(),
@@ -106,6 +101,7 @@ fn deliberately_stopped_precedes_key_store_and_endpoint_reads() {
     let (_root, fixture) = fixture();
     let registration = fixture.initialize(DesiredServerState::Stopped).unwrap();
     fs::remove_file(fixture.data_directory().join("identity")).unwrap();
+    fs::remove_dir(registration.organization_directory()).unwrap();
     // The missing organization directory and broken key do not authorize repair.
     assert_eq!(
         AccountStartup::open(registration).unwrap_err(),
@@ -120,6 +116,7 @@ fn missing_key_never_creates_a_replacement_or_organization_store() {
     let (_root, fixture) = fixture();
     let registration = fixture.initialize(DesiredServerState::Running).unwrap();
     fs::remove_file(fixture.data_directory().join("identity")).unwrap();
+    fs::remove_dir(registration.organization_directory()).unwrap();
     assert_eq!(
         AccountStartup::open(registration).unwrap_err(),
         StartupFailure::Key(KeyStoreFailure::Missing)
@@ -175,6 +172,7 @@ fn unavailable_organization_store_never_initializes_or_changes_the_key() {
     let (_root, fixture) = fixture();
     let registration = fixture.initialize(DesiredServerState::Running).unwrap();
     let before = fs::read(fixture.data_directory().join("identity")).unwrap();
+    fs::remove_dir(registration.organization_directory()).unwrap();
     assert_eq!(
         AccountStartup::open(registration).unwrap_err(),
         StartupFailure::Storage(StorageFailure::Unavailable)

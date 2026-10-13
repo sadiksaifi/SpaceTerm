@@ -63,6 +63,7 @@ hint = "Run mise run setup:packages"
 # Debian and Ubuntu packages for building and testing on Linux.
 [bootstrap.packages]
 "apt:build-essential" = { os = "linux" }
+"apt:bubblewrap" = { os = "linux" }
 "apt:pkg-config" = { os = "linux" }
 "apt:libxkbcommon-dev" = { os = "linux" }
 "apt:libxkbcommon-x11-dev" = { os = "linux" }
@@ -811,4 +812,4 @@ run = "python -m spaceterm_tasks.account_service_checks startup"
 
 [tasks."test:server:artifacts"]
 description = "Test account server packaging, signed channels and guarded task composition"
-run = "python -m unittest tests.test_server_artifacts tests.test_package_server tests.test_release_server tests.test_account_service_checks"
+run = "python -m unittest tests.test_server_artifacts tests.test_package_server tests.test_release_server tests.test_account_service_checks tests.test_packaged_headless_linux"
