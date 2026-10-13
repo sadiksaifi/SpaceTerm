@@ -614,6 +614,8 @@ struct PresentationActionGuard {
 pub(crate) struct TerminalPane {
     server_session: Option<Rc<super::server_pane_session::ServerPaneSession>>,
     server_presentation: PanePresentation,
+    server_client_runtime: Option<Entity<super::server_client_runtime::DesktopClientRuntime>>,
+    _server_provider_subscription: Option<gpui::Subscription>,
     server_presentation_observation: Option<spaceterm_client::pane_channel::PaneChannelState>,
     server_offline_cause: super::pane_presentation::OfflineCause,
     server_takeover_armed: bool,
@@ -986,6 +988,8 @@ impl TerminalPane {
         Self {
             terminal_session,
             server_session: None,
+            server_client_runtime: None,
+            _server_provider_subscription: None,
             server_presentation: PanePresentation::Live,
             server_presentation_observation: None,
             server_offline_cause: super::pane_presentation::OfflineCause::Unreachable,
@@ -4696,6 +4700,38 @@ impl TerminalPane {
         cx: &mut Context<Self>,
     ) -> Result<Self, DesktopClientError> {
         let server = super::server_pane_session::ServerPaneSession::bind(channel, token)?;
+        let events = server
+            .channel()
+            .events()
+            .map_err(DesktopClientError::from)?;
+        Ok(Self::new_server_bound(
+            server,
+            events,
+            presentation,
+            key_input_adapter,
+            accessibility_adapter_factory,
+            native_service_adapters,
+            lifecycle_dependencies,
+            window,
+            cx,
+        ))
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "independent native capabilities are constructor-injected"
+    )]
+    pub(crate) fn new_server_bound(
+        server: Rc<super::server_pane_session::ServerPaneSession>,
+        mut events: spaceterm_client::pane_channel::PaneEvents,
+        presentation: PanePresentation,
+        key_input_adapter: Box<dyn TerminalKeyInputAdapter>,
+        accessibility_adapter_factory: &dyn TerminalAccessibilityAdapterFactory,
+        native_service_adapters: NativeServiceAdapters,
+        lifecycle_dependencies: PaneLifecycleDependencies,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         server.start_content_tasks(cx.background_executor().clone());
         let mut pane = Self::new_with_lifecycle(
             PaneTerminalSessionLifecycle::server(server.clone()),
@@ -4708,7 +4744,8 @@ impl TerminalPane {
             cx,
         );
         pane.server_session = Some(server.clone());
-        pane.set_presentation(presentation, cx)?;
+        // The bound constructor always installs a server Session before presentation.
+        let _ = pane.set_presentation(presentation, cx);
         let mut state = server.channel().state();
         pane._server_task = Some(cx.spawn(async move |pane, cx| {
             loop {
@@ -4729,10 +4766,6 @@ impl TerminalPane {
                 let _ = pane.update(cx, |pane, cx| pane.sync_server_state(cx));
             }
         }));
-        let mut events = server
-            .channel()
-            .events()
-            .map_err(DesktopClientError::from)?;
         pane._server_native_task = Some(cx.spawn(async move |pane, cx| {
             use crate::terminal::native_services::clipboard::TextClipboardTarget;
             use spaceterm_client::pane_channel::{EffectKind, PaneEvent};
@@ -4837,7 +4870,25 @@ impl TerminalPane {
                 });
             }
         }));
-        Ok(pane)
+        pane
+    }
+
+    pub(crate) fn bind_server_client(
+        &mut self,
+        runtime: Entity<super::server_client_runtime::DesktopClientRuntime>,
+        cx: &mut Context<Self>,
+    ) {
+        self._server_provider_subscription = Some(cx.subscribe(&runtime, |pane, _, event, cx| {
+            if let super::server_client_runtime::DesktopClientEvent::FrameChanged(server) = event
+                && pane
+                    .server_pane_id()
+                    .is_some_and(|id| id.server() == *server)
+            {
+                pane.sync_server_state(cx);
+            }
+        }));
+        self.server_client_runtime = Some(runtime);
+        self.sync_server_state(cx);
     }
 
     /// The nonblocking native facade. Callers retain its original permits across native work;
@@ -5111,6 +5162,60 @@ impl TerminalPane {
     }
 
     fn sync_server_presentation(&mut self, cx: &mut Context<Self>) {
+        if let Some(runtime) = self.server_client_runtime.clone() {
+            let Some(pane) = self.server_pane_id() else {
+                return;
+            };
+            match runtime
+                .read(cx)
+                .pane_presentation(pane, self.server_screen_session)
+            {
+                Ok(delivery) => {
+                    if self
+                        .set_portable_presentation(
+                            delivery.token,
+                            delivery.observation,
+                            delivery.decision,
+                            delivery.device,
+                            delivery.cause,
+                            cx,
+                        )
+                        .is_err()
+                    {
+                        if let Some(server) = &self.server_session {
+                            server.set_enabled(false);
+                        }
+                        self.invalidate_server_native_state(cx);
+                        return;
+                    }
+                    if let Some(request) = runtime.read(cx).pane_measurement(pane)
+                        && self.measurement_request
+                            != Some((request.token, request.ticket, request.layout))
+                    {
+                        let _ = self.request_measurement(
+                            request.token,
+                            request.ticket,
+                            request.layout,
+                            cx,
+                        );
+                    }
+                }
+                Err(_) => {
+                    if let Some(server) = &self.server_session {
+                        server.set_enabled(false);
+                    }
+                    let _ = self.set_presentation(
+                        PanePresentation::Failed {
+                            class: super::pane_presentation::PaneFailureClass::Unavailable,
+                        },
+                        cx,
+                    );
+                    self.invalidate_server_native_state(cx);
+                    self.clear_server_screen(cx);
+                }
+            }
+            return;
+        }
         use super::pane_presentation::{DisplayName, OfflinePrior, PaneFailureClass};
         use spaceterm_client::pane_channel::PaneReadiness;
         use spaceterm_core::organization::SessionPhase;
@@ -5233,11 +5338,19 @@ impl TerminalPane {
     }
 
     fn sync_server_state(&mut self, cx: &mut Context<Self>) {
+        if let (Some(runtime), Some(pane)) =
+            (self.server_client_runtime.clone(), self.server_pane_id())
+        {
+            runtime.update(cx, |runtime, cx| runtime.revalidate_pane(pane, cx));
+        }
         self.sync_server_presentation(cx);
         let Some(server) = self.server_session.clone() else {
             return;
         };
-        if self.pending_paste.is_some_and(|paste| !server.paste_confirmation_is_current(paste.id)) {
+        if self
+            .pending_paste
+            .is_some_and(|paste| !server.paste_confirmation_is_current(paste.id))
+        {
             self.cancel_pending_paste();
         }
         if self.server_presentation.accepts_input() {

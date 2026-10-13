@@ -124,6 +124,27 @@ impl PaneConstruction {
         )
     }
 
+    pub(crate) fn create_bound_server(
+        &self,
+        server: Rc<super::server_pane_session::ServerPaneSession>,
+        events: spaceterm_client::pane_channel::PaneEvents,
+        presentation: super::pane_presentation::PanePresentation,
+        window: &mut Window,
+        cx: &mut Context<super::TerminalPane>,
+    ) -> super::TerminalPane {
+        super::TerminalPane::new_server_bound(
+            server,
+            events,
+            presentation,
+            self.key_input.create(),
+            self.accessibility.as_ref(),
+            self.native_services.clone(),
+            self.lifecycle.clone(),
+            window,
+            cx,
+        )
+    }
+
     #[cfg(test)]
     pub(crate) fn testing() -> Self {
         Self::new(

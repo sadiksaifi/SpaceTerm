@@ -123,6 +123,14 @@ impl PaneMeasurement {
     }
 }
 
+/// The tags a Pane must return with one requested measurement. They grant no authority.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct PaneMeasurementRequest {
+    pub(crate) token: PaneViewToken,
+    pub(crate) ticket: UseTicket,
+    pub(crate) layout: LayoutRevision,
+}
+
 /// One local UI request. Client-core allocates and persists the durable operation identity
 /// separately.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]

@@ -2,8 +2,9 @@
 //!
 //! It admits local UI requests, at most [`MAX_PENDING_UI_REQUESTS`] at a time, and forwards each
 //! one to the injected [`DesktopClientProvider`]. Client-core and client-view supply the
-//! production provider. Production composition constructs none until native credential delivery
-//! exists, so no window presents server state it is not authorized to show.
+//! composed provider over the recovered client registry, journal, personal view, and authenticated
+//! Pane ports. Native enrollment installs it once; window reopening reuses it. Missing native
+//! composition fails closed rather than substituting a local Terminal or test connection.
 //!
 //! The provider reports between requests through a [`DesktopClientNotifier`]. Frame changes share
 //! one wakeup slot and name each changed server once. Subscribers then read that server's latest
@@ -27,6 +28,8 @@ use super::server_desktop_contracts::{
     DesktopClientError, DesktopRequest, DesktopServerFrame, DesktopServerInfo, DesktopViewRevision,
     OperationId, Outcome, PaneId, PaneViewToken, ServerId, UiRequestId,
 };
+
+pub(crate) mod composed;
 
 #[cfg(test)]
 pub(crate) mod testing;
@@ -65,6 +68,33 @@ pub(crate) trait DesktopClientProvider {
     /// The comparison token of `pane`'s current presentation.
     fn pane_view_token(&self, pane: PaneId) -> Result<PaneViewToken, DesktopClientError>;
 
+    /// The authenticated disposable presentation channel for an attached Pane.
+    fn pane_channel(
+        &self,
+        _pane: PaneId,
+    ) -> Result<spaceterm_client::pane_channel::PaneChannel, DesktopClientError> {
+        Err(DesktopClientError::UnsupportedCapability)
+    }
+
+    /// A portable decision and the exact channel observation that produced its facts.
+    fn pane_presentation(
+        &self,
+        _pane: PaneId,
+        _displayed: Option<spaceterm_core::authority::SessionKey>,
+    ) -> Result<PanePresentationDelivery, DesktopClientError> {
+        Err(DesktopClientError::UnsupportedCapability)
+    }
+
+    fn pane_measurement(
+        &self,
+        _pane: PaneId,
+    ) -> Option<super::server_desktop_contracts::PaneMeasurementRequest> {
+        None
+    }
+
+    /// Revalidates pending use after native context or personal-view changes. It begins none.
+    fn revalidate_pane(&self, _pane: PaneId, _cx: &mut App) {}
+
     /// Starts one admitted request without blocking on network or filesystem IO. A refusal
     /// returns before any effect. The task resolves when the local request finishes, with the
     /// durable operation it submitted, if any. It must not update the runtime.
@@ -97,6 +127,14 @@ pub(crate) trait DesktopClientProvider {
     /// Saves the personal view and closes client connections. It never releases control,
     /// detaches a Workspace, or ends server work.
     fn prepare_quit(&self, cx: &mut App) -> Task<Result<(), DesktopClientError>>;
+}
+
+pub(crate) struct PanePresentationDelivery {
+    pub(crate) token: PaneViewToken,
+    pub(crate) observation: spaceterm_client::pane_channel::PaneChannelState,
+    pub(crate) decision: spaceterm_client::view::PresentationDecision,
+    pub(crate) device: super::pane_presentation::DisplayName,
+    pub(crate) cause: super::pane_presentation::OfflineCause,
 }
 
 /// One operation outcome client-core retains whether or not a window still listens.
@@ -368,6 +406,32 @@ impl DesktopClientRuntime {
         pane: PaneId,
     ) -> Result<PaneViewToken, DesktopClientError> {
         self.provider.pane_view_token(pane)
+    }
+
+    pub(crate) fn pane_channel(
+        &self,
+        pane: PaneId,
+    ) -> Result<spaceterm_client::pane_channel::PaneChannel, DesktopClientError> {
+        self.provider.pane_channel(pane)
+    }
+
+    pub(crate) fn pane_presentation(
+        &self,
+        pane: PaneId,
+        displayed: Option<spaceterm_core::authority::SessionKey>,
+    ) -> Result<PanePresentationDelivery, DesktopClientError> {
+        self.provider.pane_presentation(pane, displayed)
+    }
+
+    pub(crate) fn pane_measurement(
+        &self,
+        pane: PaneId,
+    ) -> Option<super::server_desktop_contracts::PaneMeasurementRequest> {
+        self.provider.pane_measurement(pane)
+    }
+
+    pub(crate) fn revalidate_pane(&self, pane: PaneId, cx: &mut App) {
+        self.provider.revalidate_pane(pane, cx);
     }
 
     /// Admits one local request and returns its local identity. It performs no blocking IO.
