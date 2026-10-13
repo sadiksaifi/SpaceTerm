@@ -208,7 +208,9 @@ impl ServiceSupervisor {
         let manager: Arc<dyn ServiceManager> = Arc::new(super::SystemdServiceManager::current(
             Arc::clone(&installations),
         )?);
-        let processes = Arc::new(super::NativeServiceProcesses::current(installations)?);
+        let processes = Arc::new(
+            super::NativeServiceProcesses::current(installations)?.with_manager(manager.clone()),
+        );
         Ok(Self {
             key: AccountBuildKey {
                 account_uid: uid,
@@ -234,7 +236,14 @@ impl ServiceSupervisor {
         let installations: Arc<dyn super::ServiceInstallations> =
             Arc::new(super::NativeServiceInstallations);
         self.processes = Some(Arc::new(
-            super::NativeServiceProcesses::current(installations)?.with_runtime(runtime),
+            super::NativeServiceProcesses::current(installations)?
+                .with_manager(
+                    self.manager
+                        .as_ref()
+                        .ok_or(ServiceFailure::SupervisorUnavailable)?
+                        .clone(),
+                )
+                .with_runtime(runtime),
         ));
         Ok(self)
     }

@@ -222,6 +222,7 @@ impl<S: PairingSnapshotPort + 'static> AuthenticationFactoryPort for ProductionA
                     spaceterm_protocol::negotiation::CAPABILITY_NORMALIZED_CREATION_TOPOLOGY,
                     spaceterm_protocol::negotiation::CAPABILITY_CANONICAL_DOMAIN,
                     spaceterm_protocol::negotiation::CAPABILITY_ORGANIZATION_COMPARISONS,
+                    spaceterm_protocol::negotiation::CAPABILITY_TERMINAL_STREAMS,
                 ],
                 ..HandshakeConfig::default()
             },
@@ -338,6 +339,7 @@ impl ListenerLifecyclePort for StatusListeners {
                 let mut stop = self.stop.subscribe();
                 let sender = self.status.clone();
                 let running = self.running.clone();
+                let source = handle.clone();
                 *monitor = Some(tokio::spawn(async move {
                     loop {
                         tokio::select! { biased;
@@ -346,10 +348,10 @@ impl ListenerLifecyclePort for StatusListeners {
                             changed = listeners.changed() => { if changed.is_err() { return Ok(()); } },
                             changed = runtime.changed() => { if changed.is_err() { return Ok(()); } },
                         }
-                        let snapshot = organization.borrow_and_update().clone();
-                        let facts = listeners.borrow_and_update().clone();
-                        let runtime = *runtime.borrow_and_update();
-                        publish_status(&sender, &snapshot, &running, facts, runtime)?;
+                        organization.mark_unchanged();
+                        listeners.mark_unchanged();
+                        runtime.mark_unchanged();
+                        publish_status(&sender, &source, &running, &listeners)?;
                     }
                 }));
             }
@@ -393,30 +395,28 @@ impl StatusListeners {
     fn publish_current(&self) -> Result<(), ServerFailure> {
         publish_status(
             &self.status,
-            &self.handle.snapshot(),
+            &self.handle,
             &self.running,
-            self.listeners.subscribe_status().borrow().clone(),
-            self.handle.runtime_status(),
+            &self.listeners.subscribe_status(),
         )
     }
 }
 
 fn publish_status(
     sender: &watch::Sender<ServerStatus>,
-    snapshot: &OrganizationSnapshot,
+    handle: &ServerHandle,
     running: &spaceterm_distribution::BuildVersion,
-    listeners: Vec<spaceterm_core::management::ListenerStatus>,
-    runtime: ServerRuntimeStatus,
+    listeners: &watch::Receiver<Vec<spaceterm_core::management::ListenerStatus>>,
 ) -> Result<(), ServerFailure> {
     let mut result = Ok(());
     sender.send_if_modified(|current| {
         let replacement = (|| {
             let next = status(
-                snapshot,
+                &handle.snapshot(),
                 current.parts().revision,
                 running,
-                listeners,
-                runtime,
+                listeners.borrow().clone(),
+                handle.runtime_status(),
             )?;
             if next == *current {
                 return Ok(None);

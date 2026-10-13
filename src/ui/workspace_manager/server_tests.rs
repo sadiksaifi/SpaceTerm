@@ -1,5 +1,6 @@
 use super::*;
 use crate::domain::server_view_testing::{A, B, Org, Replica, ready, server, tab, ws};
+use crate::ui::server_client_runtime::DesktopClientProvider as _;
 use crate::ui::server_desktop_contracts::DesktopServerInfo;
 use crate::ui::tab_view::server_testing::{
     TestPanes, TestRuntime, frame, operation, view_revision,
@@ -1102,4 +1103,129 @@ fn desktop_server_old_detach_recovery_cannot_target_a_new_attachment(cx: &mut Te
         "an old recovery Alert cannot start another detach against the replacement incarnation"
     );
     assert!(cx.debug_bounds("unavailable-workspace").is_none());
+}
+
+#[gpui::test]
+fn desktop_directory_repair_uses_server_picker_and_routes_only_the_confirmed_start(
+    cx: &mut TestAppContext,
+) {
+    use crate::ui::server_desktop_contracts::{
+        AttachmentGeneration, PaneAction, PaneViewToken, SelectionSource,
+    };
+    use spaceterm_core::{
+        authority::{ContextGeneration, FieldVersion, OrganizationRevision},
+        organization::{ControlRecord, OrganizationSnapshot, SessionPhase},
+    };
+    let (manager, runtime, cx) = harness(cx);
+    servers(&runtime, &[7]);
+    let replica = replica(7);
+    let pane = replica.org.snapshot().state().panes[0].id;
+    let token = PaneViewToken {
+        pane,
+        attachment_generation: AttachmentGeneration::FIRST,
+        context_generation: ContextGeneration::new(1),
+    };
+    runtime.provider.set_pane_token(token);
+    runtime.provider.set_directory_connection(
+        server(7),
+        crate::ui::directory_picker::server_tests::Peer::new(),
+    );
+    publish(&replica, 1, &runtime, cx);
+    let mut initial = frame(&replica, ReplicaStatus::Ready);
+    initial.connection = runtime
+        .provider
+        .frame(server(7))
+        .unwrap()
+        .connection
+        .clone();
+    initial.view_revision = view_revision(1);
+    let mut facts = initial.organization.runtime().to_vec();
+    facts[0].control = ControlRecord::Held {
+        client: ready(7).client,
+        generation: facts[0].control_generation,
+    };
+    facts[0].phase = SessionPhase::DirectoryUnavailable;
+    initial.organization = Arc::new(
+        OrganizationSnapshot::new(
+            initial.organization.epoch(),
+            initial.organization.state().clone(),
+            facts,
+        )
+        .unwrap(),
+    );
+    runtime.provider.set_frame(Arc::new(DesktopServerFrame {
+        server: initial.server,
+        connection: initial.connection.clone(),
+        replica_status: initial.replica_status,
+        organization: initial.organization.clone(),
+        personal: initial.personal.clone(),
+        view_revision: initial.view_revision,
+    }));
+    runtime.notifier.frame_changed(server(7));
+    cx.run_until_parked();
+    assert!(runtime.begun().is_empty());
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.server_tab_event(
+                ServerTabManagerEvent::PaneAction {
+                    pane,
+                    action: PaneAction::ChooseDirectory,
+                },
+                window,
+                cx,
+            )
+        })
+    });
+    cx.run_until_parked();
+    assert!(manager.read_with(cx, |manager, cx| {
+        manager
+            .server
+            .as_ref()
+            .unwrap()
+            .repair
+            .as_ref()
+            .unwrap()
+            .read(cx)
+            .picker()
+            .read(cx)
+            .blocks_terminal_input()
+    }));
+    cx.simulate_keystrokes("cmd-enter");
+    cx.run_until_parked();
+    assert_eq!(runtime.begun().len(), 1);
+    assert!(
+        matches!(&runtime.begun()[0], DesktopRequest::Shared { command: Command::RepairPaneDirectory { pane: target, .. }, .. } if *target == pane)
+    );
+    let id = operation(server(7), 1);
+    runtime.provider.finish(0, Ok(Some(id)));
+    runtime
+        .provider
+        .set_outcome_at(id, Arc::new(Outcome::Applied), OrganizationRevision::new(2));
+    cx.run_until_parked();
+    assert_eq!(runtime.begun().len(), 1);
+    let mut state = initial.organization.state().clone();
+    state.revision = OrganizationRevision::new(2);
+    state.panes[0].starting_directory =
+        spaceterm_core::organization::ServerDirectory::new(server(7), b"/server/home".to_vec())
+            .unwrap();
+    state.panes[0].confirmed_restoration_directory.value = None;
+    state.panes[0].confirmed_restoration_directory.version = FieldVersion::new(2);
+    let mut facts = initial.organization.runtime().to_vec();
+    facts[0].phase = SessionPhase::NotStarted;
+    initial.organization =
+        Arc::new(OrganizationSnapshot::new(initial.organization.epoch(), state, facts).unwrap());
+    initial.view_revision = view_revision(2);
+    runtime.provider.set_frame(Arc::new(initial));
+    runtime.notifier.frame_changed(server(7));
+    cx.run_until_parked();
+    assert_eq!(
+        runtime.begun()[1],
+        DesktopRequest::StartSession {
+            pane,
+            source: SelectionSource::Command
+        }
+    );
+    runtime.notifier.frame_changed(server(7));
+    cx.run_until_parked();
+    assert_eq!(runtime.begun().len(), 2);
 }

@@ -23,8 +23,16 @@ use std::cell::{Cell, RefCell};
 struct Provider {
     recorded: RecordingClientProvider,
     token: Cell<PaneViewToken>,
+    retained: RefCell<Option<(OperationId, Command)>>,
 }
 impl DesktopClientProvider for Provider {
+    fn retained_pane_repair(
+        &self,
+        _: PaneId,
+        _: &mut App,
+    ) -> Result<Option<(OperationId, Command)>, DesktopClientError> {
+        Ok(self.retained.borrow().clone())
+    }
     fn frame(&self, server: spaceterm_core::identity::ServerId) -> Option<Arc<DesktopServerFrame>> {
         self.recorded.frame(server)
     }
@@ -116,6 +124,7 @@ fn harness(cx: &mut TestAppContext) -> (Harness, &mut VisualTestContext) {
     cx.update(crate::ui::init).unwrap();
     let provider = Rc::new(Provider {
         recorded: RecordingClientProvider::default(),
+        retained: RefCell::new(None),
         token: Cell::new(PaneViewToken {
             pane: pane(),
             attachment_generation: AttachmentGeneration::FIRST,
@@ -504,5 +513,76 @@ fn pane_repair_receipt_from_another_operation_principal_never_starts(cx: &mut Te
     assert_eq!(
         h.repair.read_with(cx, |r, _| r.status()),
         PaneRepairStatus::Unresolved
+    );
+}
+
+#[gpui::test]
+fn desktop_pane_directory_repair_restores_original_operation_after_window_recreation(
+    cx: &mut TestAppContext,
+) {
+    let (h, cx) = harness(cx);
+    choose(&h, cx);
+    let id = operation(server(), 1);
+    let command = Command::RepairPaneDirectory {
+        pane: pane(),
+        expected_version: FieldVersion::new(1),
+        value: dir("/server/home"),
+    };
+    *h.provider.retained.borrow_mut() = Some((id, command));
+    h.provider.recorded.finish(0, Ok(Some(id)));
+    cx.run_until_parked();
+    let runtime = h.repair.read_with(cx, |r, _| r.runtime.clone());
+    let restored = cx.update(|window, cx| {
+        cx.new(|cx| {
+            ServerPaneRepair::new(
+                runtime,
+                pane(),
+                SelectionSource::Command,
+                "Owning server",
+                h.peer.clone(),
+                window,
+                cx,
+            )
+            .unwrap()
+        })
+    });
+    assert_eq!(
+        restored.read_with(cx, |r, _| r.original_operation()),
+        Some(id)
+    );
+    cx.update(|window, cx| {
+        restored.update(cx, |r, cx| {
+            assert!(!r.open(window, cx));
+            r.retry(window, cx);
+        })
+    });
+    cx.run_until_parked();
+    assert_eq!(h.provider.recorded.begun().len(), 1);
+    assert_eq!(
+        restored.read_with(cx, |r, _| r.status()),
+        PaneRepairStatus::Unresolved
+    );
+}
+
+#[gpui::test]
+fn cancelled_original_directory_repair_cannot_be_restarted_by_retry(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    choose(&h, cx);
+    let id = operation(server(), 1);
+    h.provider.recorded.finish(0, Ok(Some(id)));
+    cx.run_until_parked();
+    cx.update(|window, cx| h.repair.update(cx, |repair, cx| repair.cancel(window, cx)));
+    h.provider.recorded.set_outcome_at(
+        id,
+        Arc::new(Outcome::Applied),
+        OrganizationRevision::new(2),
+    );
+    publish_repair(&h, 2, cx);
+    cx.update(|window, cx| h.repair.update(cx, |repair, cx| repair.retry(window, cx)));
+    cx.run_until_parked();
+    assert!(starts(&h).is_empty());
+    assert_eq!(
+        h.repair.read_with(cx, |repair, _| repair.status()),
+        PaneRepairStatus::Cancelled
     );
 }

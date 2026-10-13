@@ -1214,3 +1214,121 @@ async fn sudo_refusal_is_typed_and_never_runs_a_post_refusal_linger_probe() {
         assert!(!format!("{outcome:?}").contains("password"));
     }
 }
+
+#[tokio::test]
+async fn launch_agent_scope_ignores_nested_pids_and_rejects_unobserved_running_jobs() {
+    for (observation, expected) in [
+        (
+            b"job = {\n state = running\n pid = 42\n environment = {\n pid = 99\n }\n}\n"
+                .as_slice(),
+            Ok(vec![42]),
+        ),
+        (
+            b"job = {\n state = exited\n environment = {\n pid = 99\n }\n}\n".as_slice(),
+            Ok(vec![]),
+        ),
+        (
+            b"job = {\n state = running\n}\n".as_slice(),
+            Err(ServiceFailure::CleanupUnresolved),
+        ),
+        (
+            b"job = {\n state = running\n pid = 42\n pid = 43\n}\n".as_slice(),
+            Err(ServiceFailure::CleanupUnresolved),
+        ),
+    ] {
+        let directory = private_fixture_directory();
+        let runner = Arc::new(RecordingRunner::new([
+            CommandReply::success(b"domain"),
+            CommandReply::success(observation),
+        ]));
+        let fixture = native::managers(
+            directory.path(),
+            runner.clone(),
+            Arc::new(TestInstallations),
+            DesiredServerState::Running,
+        )
+        .unwrap();
+        assert_eq!(
+            fixture
+                .launchd
+                .scoped_processes(fixture.registration())
+                .await,
+            expected
+        );
+        assert_eq!(
+            runner.arguments(),
+            [
+                vec!["print", &format!("gui/{}", native::current_uid())],
+                vec![
+                    "print",
+                    &format!(
+                        "gui/{}/io.github.sadiksaifi.spaceterm-development.server",
+                        native::current_uid()
+                    )
+                ],
+            ]
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn user_service_scope_uses_manager_main_pid_and_refuses_incomplete_facts() {
+    for (observation, expected) in [
+        (
+            b"LoadState=loaded\nActiveState=active\nMainPID=42\nControlGroup=\n".as_slice(),
+            Ok(vec![42]),
+        ),
+        (
+            b"LoadState=not-found\nActiveState=inactive\nMainPID=0\nControlGroup=\n".as_slice(),
+            Ok(vec![]),
+        ),
+        (
+            b"LoadState=loaded\nActiveState=active\nMainPID=0\nControlGroup=\n".as_slice(),
+            Err(ServiceFailure::CleanupUnresolved),
+        ),
+        (
+            b"LoadState=loaded\nActiveState=inactive\nMainPID=0\n".as_slice(),
+            Err(ServiceFailure::CleanupUnresolved),
+        ),
+        (
+            b"LoadState=loaded\nActiveState=inactive\nMainPID=0\nMainPID=1\nControlGroup=\n"
+                .as_slice(),
+            Err(ServiceFailure::CleanupUnresolved),
+        ),
+        (
+            b"LoadState=loaded\nActiveState=active\nMainPID=42\nControlGroup=/../unrelated\n"
+                .as_slice(),
+            Err(ServiceFailure::CleanupUnresolved),
+        ),
+    ] {
+        let directory = private_fixture_directory();
+        let runner = Arc::new(RecordingRunner::new([CommandReply::success(observation)]));
+        let fixture = native::managers(
+            directory.path(),
+            runner.clone(),
+            Arc::new(TestInstallations),
+            DesiredServerState::Running,
+        )
+        .unwrap();
+        assert_eq!(
+            fixture
+                .systemd
+                .scoped_processes(fixture.registration())
+                .await,
+            expected
+        );
+        assert_eq!(
+            runner.arguments(),
+            [vec![
+                "--user",
+                "--no-pager",
+                "--no-ask-password",
+                "show",
+                "--property=LoadState,ActiveState,MainPID,ControlGroup",
+                "--",
+                "spaceterm-development-server.service"
+            ]]
+        );
+    }
+}

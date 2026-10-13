@@ -35,7 +35,7 @@ mod remote_source;
 pub(crate) mod server_source;
 
 #[cfg(test)]
-mod server_tests;
+pub(in crate::ui) mod server_tests;
 
 pub(crate) use local_source::LocalDirectorySource;
 pub(crate) use remote_source::{

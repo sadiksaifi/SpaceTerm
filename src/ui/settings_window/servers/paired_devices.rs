@@ -143,6 +143,7 @@ impl SettingsWindow {
                         route: server.route.clone(),
                         inventory_version: Some(page.version),
                         assessment: None,
+                        management_comparison: None,
                         remote_policy: None,
                     },
                     request: ServerRequest::AssessUnpairDevice {

@@ -587,7 +587,10 @@ fn status_separates_committed_remote_policy_from_listener_failure() {
         value["result"]["authenticated"]["listeners"][0]["state"],
         "Unavailable"
     );
-    assert_eq!(value["result"]["authenticated"]["storage_state"], "Unavailable");
+    assert_eq!(
+        value["result"]["authenticated"]["storage_state"],
+        "Unavailable"
+    );
     assert_eq!(value["result"]["authenticated"]["run_intent"], "Stopped");
     let mut human = Io::default();
     emit(&output, false, &mut human).unwrap();
@@ -595,7 +598,6 @@ fn status_separates_committed_remote_policy_from_listener_failure() {
     assert!(human.contains("Epoch: 1\n"));
     assert!(human.contains("Storage state: Unavailable\n"));
     assert!(human.contains("Run intent: Stopped\n"));
-
 }
 
 #[tokio::test]

@@ -200,6 +200,16 @@ pub(crate) struct RemoteAccess {
     pub(crate) scopes: Vec<BindScope>,
     /// A change this device sent that the server has not confirmed.
     pub(crate) pending: bool,
+    /// Authenticated current bind endpoints. Kept separate from offered scope labels.
+    pub(crate) endpoints: Vec<std::net::SocketAddr>,
+    pub(crate) edit: Option<RemoteAccessEdit>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RemoteAccessEdit {
+    pub(crate) draft: spaceterm_core::remote_access::RemoteAccessPolicy,
+    pub(crate) base_version: FieldVersion,
+    pub(crate) state: SettingEditState,
 }
 
 /// Protocol facts verified by the connection owner, never inferred from release labels.
@@ -329,6 +339,7 @@ impl PairedDevices {
 /// Retained original requests and exact comparison prompts. Failures contain no native text.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ServerManagement {
+    pub(crate) pending: bool,
     pub(crate) end_all: Option<ManagementAssessment>,
     pub(crate) stop: Option<HostAssessment>,
     pub(crate) restart: Option<HostAssessment>,
@@ -424,6 +435,12 @@ pub(crate) enum PendingUnpairPhase {
     CredentialCleanup,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ManagementComparison {
+    EndAll(Box<ManagementAssessment>),
+    Host(HostAssessment),
+}
+
 /// Canonical target captured when an action is presented, not resolved from later selection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ServerRequestTarget {
@@ -434,6 +451,7 @@ pub(crate) enum ServerRequestTarget {
         /// A device inventory action cannot follow a replacement page revision.
         inventory_version: Option<FieldVersion>,
         assessment: Option<AssessmentToken>,
+        management_comparison: Option<ManagementComparison>,
         remote_policy: Option<(
             FieldVersion,
             spaceterm_core::remote_access::RemoteAccessPolicy,
@@ -546,6 +564,24 @@ impl BoundServerRequest {
                                 })
                         })
                     }
+                    _ => None,
+                },
+                management_comparison: match &request {
+                    ServerRequest::EndAllSessions(_) => server
+                        .management
+                        .end_all
+                        .clone()
+                        .map(|assessment| ManagementComparison::EndAll(Box::new(assessment))),
+                    ServerRequest::Stop(_) => server
+                        .management
+                        .stop
+                        .clone()
+                        .map(ManagementComparison::Host),
+                    ServerRequest::Restart(_) => server
+                        .management
+                        .restart
+                        .clone()
+                        .map(ManagementComparison::Host),
                     _ => None,
                 },
                 assessment: match &request {
@@ -663,6 +699,8 @@ pub(crate) enum ServerRequest {
     },
     /// Turns remote connections off, whatever scope they use.
     DisableRemoteAccess(ServerKey),
+    /// Drops this client's rejected remote policy without changing server listeners.
+    DiscardRemoteAccessEdit(ServerKey),
     /// Hides one pending-unpair notice. Revocation keeps retrying.
     DismissUnpairNotice(SharedString),
 }
@@ -681,6 +719,7 @@ impl ServerRequest {
             | Self::UnpairThisDevice(server)
             | Self::DiscardWorktreeLocationEdit(server)
             | Self::DisableRemoteAccess(server)
+            | Self::DiscardRemoteAccessEdit(server)
             | Self::InstallUpdate { server, .. }
             | Self::ReadPairedDevices { server, .. }
             | Self::AssessUnpairDevice { server, .. }
