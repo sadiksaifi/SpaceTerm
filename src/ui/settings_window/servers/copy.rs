@@ -5,8 +5,9 @@ use gpui::SharedString;
 use spaceterm_ui::IconName;
 
 use super::model::{
-    BindScope, IncompatibleSide, PendingUnpair, ServerPermissionKind, ServerPermissionState,
-    ServerRoute, ServerStatus, ServerSummary, SettingRejection,
+    BindScope, IncompatibleSide, PendingUnpair, PendingUnpairPhase, PendingUnpairReason,
+    ServerPermissionKind, ServerPermissionState, ServerRoute, ServerServiceLifecycle, ServerStatus,
+    ServerSummary, SettingRejection,
 };
 use crate::platform::permission_access::AccessibilityNaming;
 use crate::worktrees::path_template::WorktreePathTemplateError;
@@ -28,7 +29,7 @@ pub(super) fn status_label(status: &ServerStatus) -> SharedString {
         ServerStatus::Stopping => "Stopping…".into(),
         ServerStatus::Stopped => "Stopped".into(),
         ServerStatus::Offline => "Offline".into(),
-        ServerStatus::Incompatible(_) => "Incompatible".into(),
+        ServerStatus::Incompatible(_) | ServerStatus::UnsupportedProfiles => "Incompatible".into(),
         ServerStatus::Updating { version } => format!("Updating to {version}…").into(),
     }
 }
@@ -41,7 +42,9 @@ pub(super) fn status_icon(status: &ServerStatus) -> IconName {
         }
         ServerStatus::Stopped => IconName::CircleStop,
         ServerStatus::Offline => IconName::CloudOff,
-        ServerStatus::Incompatible(_) => IconName::TriangleAlert,
+        ServerStatus::Incompatible(_) | ServerStatus::UnsupportedProfiles => {
+            IconName::TriangleAlert
+        }
         ServerStatus::Updating { .. } => IconName::CircleFadingArrowUp,
     }
 }
@@ -49,7 +52,7 @@ pub(super) fn status_icon(status: &ServerStatus) -> IconName {
 pub(super) fn status_tone(status: &ServerStatus) -> StatusTone {
     match status {
         ServerStatus::Running => StatusTone::Positive,
-        ServerStatus::Incompatible(_) => StatusTone::Attention,
+        ServerStatus::Incompatible(_) | ServerStatus::UnsupportedProfiles => StatusTone::Attention,
         _ => StatusTone::Neutral,
     }
 }
@@ -60,7 +63,11 @@ pub(super) fn status_explanation(server: &ServerSummary) -> SharedString {
     match &server.status {
         ServerStatus::Connecting => format!("Connecting to {name}.").into(),
         ServerStatus::Running if server.route.is_local() => {
-            "Its Terminal Sessions keep running when SpaceTerm quits.".into()
+            match server.service_lifecycle {
+                Some(ServerServiceLifecycle::LoginSession) => "Its Terminal Sessions keep running when SpaceTerm quits. The server starts at login and stops at logout. Installing and managing it does not require a password.".into(),
+                Some(ServerServiceLifecycle::BootWithLingering) => "Its Terminal Sessions keep running when SpaceTerm quits. With lingering enabled, the server starts at boot and keeps running after logout. Enabling lingering asks for administrator authorization once. Start, Stop, Restart, and updates do not require a password.".into(),
+                None => "Its Terminal Sessions keep running when SpaceTerm quits.".into(),
+            }
         }
         ServerStatus::Running if server.route.manages_host() => {
             "Its Terminal Sessions keep running when this device disconnects.".into()
@@ -94,6 +101,9 @@ pub(super) fn status_explanation(server: &ServerSummary) -> SharedString {
             "{name} runs an older SpaceTerm Server than this device can use. Update {name} to connect. It restarts, and its Terminal Sessions end for every client."
         )
         .into(),
+        ServerStatus::UnsupportedProfiles => format!(
+            "{name} and this device support different protocol profiles. Their verified profiles do not establish which side needs updating. Other compatible servers remain available."
+        ).into(),
         ServerStatus::Updating { version } => {
             format!("Installing version {version}. {name} restarts when it finishes.").into()
         }
@@ -408,11 +418,24 @@ pub(super) fn disable_remote_access_confirmation(server: &ServerSummary) -> Conf
 /// The notice for one pending unpair. Dismissing it leaves the background revocation running.
 pub(super) fn pending_unpair_text(pending: &PendingUnpair) -> (SharedString, SharedString) {
     let name = &pending.server_name;
-    (
-        format!("Unpair pending for {name}").into(),
-        format!(
-            "This device's connection to {name} was removed. SpaceTerm keeps asking {name} to confirm in the background, including after you dismiss this."
-        )
-        .into(),
-    )
+    match pending.phase {
+        PendingUnpairPhase::AwaitingConfirmation(reason) => {
+            let reason = match reason {
+                PendingUnpairReason::Unreachable => "The server can't be reached.",
+                PendingUnpairReason::Incompatible => "This device and the server cannot use one protocol.",
+                PendingUnpairReason::RouteChanged => "The saved route no longer identifies the original server.",
+                PendingUnpairReason::CredentialUnavailable => "The required credential is unavailable.",
+                PendingUnpairReason::StorageUnavailable => "The revocation record is unavailable.",
+                PendingUnpairReason::OutcomeUnknown => "The server's reply could not be verified.",
+            };
+            (
+                format!("Unpair pending for {name}").into(),
+                format!("This device's connection to {name} was removed. {reason} SpaceTerm keeps asking {name} to confirm in the background, including after you dismiss this.").into(),
+            )
+        }
+        PendingUnpairPhase::CredentialCleanup => (
+            format!("Unpair cleanup pending for {name}").into(),
+            format!("{name} confirmed revocation. SpaceTerm is removing only this pairing's retained credential in the background, including after you dismiss this.").into(),
+        ),
+    }
 }
