@@ -1,9 +1,9 @@
 use super::*;
-use spaceterm_core::server_directories::*;
 use spaceterm_client::{
     directories::DirectoryConnectionPort,
     git::rpc::{GitClientFuture, GitConnectionState, GitReadiness},
 };
+use spaceterm_core::server_directories::*;
 use spaceterm_core::{
     authority::{ConnectionGeneration, ServerEpoch},
     identity::{ClientId, PairingId, ServerId},
@@ -60,7 +60,9 @@ impl DirectoryConnectionPort for Connection {
                 }
                 DirectoryQueryAction::Browse { directory, .. } => {
                     let mut child = directory.bytes().to_vec();
-                    if child.last() != Some(&b'/') { child.push(b'/'); }
+                    if child.last() != Some(&b'/') {
+                        child.push(b'/');
+                    }
                     child.extend_from_slice(b"child");
                     Ok(DirectoryQueryResult::Page(Box::new(
                         DirectoryPage::new(DirectoryPageParts {
@@ -86,14 +88,18 @@ impl DirectoryConnectionPort for Connection {
     }
 }
 
-fn source(connection: Arc<Connection>, _runtime: &tokio::runtime::Runtime) -> ServerDirectorySource {
+fn source(
+    connection: Arc<Connection>,
+    _runtime: &tokio::runtime::Runtime,
+) -> ServerDirectorySource {
     let server = connection.state().unwrap().context.server();
     ServerDirectorySource::new(
         server,
         "Build server",
         connection,
         DirectoryPurpose::PaneRepair,
-    ).unwrap()
+    )
+    .unwrap()
 }
 
 #[test]
@@ -117,6 +123,7 @@ fn desktop_server_directory_selection_validates_the_owning_server_without_local_
         })
     ));
     assert!(source.is_server_backed());
+    assert!(!source.can_create());
     assert!(
         runtime
             .block_on(source.pin(PickerPath::new("/same/path".into()).unwrap()))
@@ -166,4 +173,42 @@ fn desktop_server_directory_selection_does_not_repair_a_missing_target() {
         runtime.block_on(source.select(path)),
         Err(DirectorySourceError::Missing)
     ));
+}
+
+struct NativeDeadline(Arc<Connection>);
+impl DirectoryConnectionPort for NativeDeadline {
+    fn state(&self) -> Result<GitConnectionState, ClientDirectoryFailure> {
+        self.0.state()
+    }
+    fn query(
+        &self,
+        query: DirectoryQuery,
+    ) -> GitClientFuture<'_, Result<DirectoryQueryResult, ClientDirectoryFailure>> {
+        Box::pin(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            self.0.query(query).await
+        })
+    }
+}
+#[gpui::test]
+async fn desktop_server_directory_queries_keep_native_deadlines_off_the_gui_executor(
+    cx: &mut gpui::TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let connection = Connection::new(DirectoryValidationClass::AvailableDirectory);
+    let source = ServerDirectorySource::new(
+        ServerId::new([1; 16]),
+        "Build server",
+        on_executor(
+            Arc::new(NativeDeadline(connection)),
+            runtime.handle().clone(),
+        ),
+        DirectoryPurpose::PaneRepair,
+    )
+    .unwrap();
+    let task = cx
+        .foreground_executor()
+        .spawn(async move { source.discover_home().await });
+    assert_eq!(task.await.unwrap().as_str(), "/server/home");
 }

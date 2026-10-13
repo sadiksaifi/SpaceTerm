@@ -115,6 +115,60 @@ impl OperationTracker {
         let record = self
             .prepare(binding.clone(), command, workspace, false, None)
             .await?;
+        self.dispatch_prepared(binding, record, peer).await
+    }
+
+    /// Allocates the intent and its durable operation in one journal transaction.
+    /// Concurrent shared edits cannot change the intent's operation identity.
+    pub async fn begin_startup(
+        &self,
+        binding: &PairedServerBinding,
+        fence: spaceterm_core::authority::EffectFence,
+        source: spaceterm_core::control::StartupSource,
+        workspace: WorkspaceId,
+        peer: &dyn OperationPeer,
+    ) -> Result<(spaceterm_core::control::StartupIntent, OperationTicket), ClientFailure> {
+        peer.validate_submission(
+            binding,
+            &Command::CompareAcquire(spaceterm_core::control::CompareAcquireRequest {
+                epoch: fence.session().epoch,
+                pane: fence.session().pane,
+                client: fence.grant().client(),
+                expected_generation: fence.grant().generation(),
+            }),
+            Some(workspace),
+        )?;
+        self.prune_tickets()?;
+        let record = self
+            .prepare_command(
+                binding.clone(),
+                move |id| {
+                    Ok(Command::BeginStartup(
+                        spaceterm_core::control::StartupIntent::new(id, fence, source)
+                            .map_err(|_| invalid_peer())?,
+                    ))
+                },
+                Some(workspace),
+                false,
+                None,
+            )
+            .await?;
+        let request = CanonicalOperationRequest::decode(&record.request, self.journal.codec())
+            .map_err(|_| invalid_peer())?;
+        let Command::BeginStartup(intent) = request.command() else {
+            return Err(invalid_peer());
+        };
+        let intent = *intent;
+        let ticket = self.dispatch_prepared(binding, record, peer).await?;
+        Ok((intent, ticket))
+    }
+
+    async fn dispatch_prepared(
+        &self,
+        binding: &PairedServerBinding,
+        record: JournalOperation,
+        peer: &dyn OperationPeer,
+    ) -> Result<OperationTicket, ClientFailure> {
         let ticket = self.ticket(record.binding.id)?;
         let request = CanonicalOperationRequest::decode(&record.request, self.journal.codec())
             .map_err(|_| invalid_peer())?;
@@ -123,7 +177,7 @@ impl OperationTracker {
             return Ok(ticket);
         }
         if peer
-            .validate_submission(binding, request.command(), workspace)
+            .validate_submission(binding, request.command(), record.workspace)
             .is_err()
         {
             return Ok(ticket);
@@ -141,6 +195,18 @@ impl OperationTracker {
         &self,
         binding: PairedServerBinding,
         command: Command,
+        workspace: Option<WorkspaceId>,
+        cleanup: bool,
+        detach: Option<spaceterm_core::pairing::LocalPairingKey>,
+    ) -> Result<JournalOperation, ClientFailure> {
+        self.prepare_command(binding, move |_| Ok(command), workspace, cleanup, detach)
+            .await
+    }
+
+    async fn prepare_command(
+        &self,
+        binding: PairedServerBinding,
+        command: impl FnOnce(OperationId) -> Result<Command, ClientFailure> + Send + 'static,
         workspace: Option<WorkspaceId>,
         cleanup: bool,
         detach: Option<spaceterm_core::pairing::LocalPairingKey>,
@@ -168,7 +234,7 @@ impl OperationTracker {
                     stream,
                     OperationSequence::new(next).map_err(|_| exhausted())?,
                 );
-                let request = CanonicalOperationRequest::new(id, command, journal.codec())
+                let request = CanonicalOperationRequest::new(id, command(id)?, journal.codec())
                     .map_err(|_| invalid_peer())?;
                 let record = JournalOperation {
                     binding: request.binding(),

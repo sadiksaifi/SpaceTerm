@@ -115,6 +115,9 @@ impl DirectorySource for ServerDirectorySource {
     fn is_server_backed(&self) -> bool {
         true
     }
+    fn can_create(&self) -> bool {
+        false
+    }
 
     fn discover_home(&self) -> SourceFuture<PickerPath> {
         let ready = self.ready();
@@ -246,3 +249,48 @@ fn classify(error: ClientDirectoryFailure) -> DirectorySourceError {
 
 #[cfg(test)]
 mod tests;
+
+/// The GPUI chooser retains local presentation state. Its authenticated query worker
+/// runs on the native executor, where the connection's bounded read deadline lives.
+pub(crate) fn on_executor(
+    connection: Arc<dyn DirectoryConnectionPort>,
+    executor: tokio::runtime::Handle,
+) -> Arc<dyn DirectoryConnectionPort> {
+    Arc::new(ExecutorConnection {
+        connection,
+        executor,
+    })
+}
+struct ExecutorConnection {
+    connection: Arc<dyn DirectoryConnectionPort>,
+    executor: tokio::runtime::Handle,
+}
+struct CancelQuery(tokio::task::AbortHandle);
+impl Drop for CancelQuery {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+impl DirectoryConnectionPort for ExecutorConnection {
+    fn state(&self) -> Result<GitConnectionState, ClientDirectoryFailure> {
+        self.connection.state()
+    }
+    fn query(
+        &self,
+        query: spaceterm_core::server_directories::DirectoryQuery,
+    ) -> spaceterm_client::git::rpc::GitClientFuture<
+        '_,
+        Result<spaceterm_core::server_directories::DirectoryQueryResult, ClientDirectoryFailure>,
+    > {
+        let connection = self.connection.clone();
+        let task = self
+            .executor
+            .spawn(async move { connection.query(query).await });
+        let cancellation = CancelQuery(task.abort_handle());
+        Box::pin(async move {
+            let _cancellation = cancellation;
+            task.await
+                .map_err(|_| ClientDirectoryFailure::Unavailable)?
+        })
+    }
+}

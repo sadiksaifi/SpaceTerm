@@ -199,6 +199,7 @@ fn compose(
     let appearance = Rc::new(super::linux_appearance::LinuxAppearancePlatform::new(
         bus.clone(),
     ));
+    let desktop_client_startup = super::desktop_client_startup::production(startup.paths())?;
     let settings_storage = startup.settings_storage();
     let settings_file = startup.settings_file();
     let activity: Rc<dyn crate::platform::application_activity::ApplicationActivity> =
@@ -312,7 +313,9 @@ fn compose(
         window_chrome: super::window_chrome::WindowChrome::client().with_controls(controls),
     })
     .map(|host| {
-        host.with_modal_prompts(true).with_appearance(
+        host.with_desktop_client_startup(desktop_client_startup)
+            .with_modal_prompts(true)
+            .with_appearance(
             settings_storage,
             appearance,
         )

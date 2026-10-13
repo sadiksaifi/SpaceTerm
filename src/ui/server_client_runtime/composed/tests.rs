@@ -1184,3 +1184,76 @@ fn desktop_composed_retry_detach_preserves_a_deliberately_reattached_workspace(
     );
     assert!(harness.provider.pane_channel(harness.pane).is_ok());
 }
+
+#[gpui::test]
+fn desktop_offline_navigation_materializes_never_presented_pane(cx: &mut TestAppContext) {
+    let harness = Harness::new(cx);
+    harness
+        .tokio
+        .block_on(harness.peer.submit(
+            Command::CreatePane {
+                tab: harness.tab,
+                source: harness.pane,
+                axis: spaceterm_core::organization::SplitAxis::Horizontal,
+                edge: spaceterm_core::organization::SplitEdge::After,
+            },
+            Some(harness.workspace),
+        ))
+        .unwrap();
+    harness.publish(cx);
+    let pane = harness
+        .server
+        .snapshot()
+        .unwrap()
+        .state()
+        .panes
+        .last()
+        .unwrap()
+        .id;
+    assert_ne!(pane, harness.pane);
+    assert!(
+        !harness
+            .provider
+            .inner
+            .state
+            .borrow()
+            .channels
+            .contains_key(&pane)
+    );
+    let before = harness.server.received_operations().unwrap().len();
+    harness
+        .provider
+        .inner
+        .channels
+        .invalidate(
+            harness.server.server(),
+            spaceterm_client::ports::ConnectionInvalidation::ConnectionLost,
+        )
+        .unwrap();
+    harness.connection.send_replace(ConnectionState::Stopped);
+    cx.run_until_parked();
+    let channel = harness.provider.pane_channel(pane).unwrap();
+    assert!(channel.state().borrow().connection.is_none());
+    assert!(
+        channel
+            .permit(spaceterm_client::pane_channel::EffectKind::Key)
+            .is_err()
+    );
+    harness.request(
+        DesktopRequest::SelectPane {
+            pane,
+            source: SelectionSource::Command,
+        },
+        cx,
+    );
+    assert!(matches!(
+        harness
+            .provider
+            .pane_presentation(pane, None)
+            .unwrap()
+            .cause,
+        OfflineCause::Stopped(_)
+    ));
+    assert_eq!(harness.server.received_operations().unwrap().len(), before);
+    assert!(harness.provider.pane_measurement(pane).is_none());
+}

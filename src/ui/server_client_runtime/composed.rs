@@ -1237,8 +1237,15 @@ impl<S: ViewStore + 'static> DesktopClientProvider for ComposedDesktopClientProv
             .map_err(DesktopClientError::from)?;
         let source = crate::ui::directory_picker::ServerDirectorySource::new(
             server,
-            source.name.name.get().map_or("Server", |name| name.as_str()),
-            Arc::new(queries),
+            source
+                .name
+                .name
+                .get()
+                .map_or("Server", |name| name.as_str()),
+            crate::ui::directory_picker::server_source::on_executor(
+                Arc::new(queries),
+                self.inner.executor.clone(),
+            ),
             spaceterm_core::server_directories::DirectoryPurpose::PaneRepair,
         )
         .map_err(|_| DesktopClientError::UnsupportedCapability)?;

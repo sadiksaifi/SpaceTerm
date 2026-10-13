@@ -99,11 +99,11 @@ impl LocalUseInvalidator for Invalidator {
         Box::pin(async { panic!("recovery removed a pairing") })
     }
 }
-struct MemoryView {
-    bytes: Option<Vec<u8>>,
-    failure: Option<ViewStoreFailureClass>,
-    writes: Arc<AtomicUsize>,
-    saved: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
+pub(super) struct MemoryView {
+    pub(super) bytes: Option<Vec<u8>>,
+    pub(super) failure: Option<ViewStoreFailureClass>,
+    pub(super) writes: Arc<AtomicUsize>,
+    pub(super) saved: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
 }
 impl ViewStore for MemoryView {
     type Version = u64;
@@ -206,6 +206,8 @@ impl Fixture {
             operations: self.server.clone(),
             invalidator: Arc::new(Invalidator(self.channels.clone())),
             local_server: Some(self.server.server()),
+            tracker: None,
+            registry_binding: None,
         }
     }
     fn store(&self) -> MemoryView {
@@ -467,4 +469,117 @@ fn desktop_recovery_keeps_two_saved_servers_and_their_attachments_independent() 
         assert_eq!(fixture.ports.opens.load(Ordering::SeqCst), 0);
         composition.runtime.shutdown().await.unwrap();
     });
+}
+
+struct UnlockableView {
+    store: MemoryView,
+    locked: Arc<std::sync::atomic::AtomicBool>,
+}
+impl ViewStore for UnlockableView {
+    type Version = u64;
+    fn load(&mut self, maximum: usize) -> Result<Option<StoredView<u64>>, ViewStoreFailure> {
+        if self.locked.load(Ordering::SeqCst) {
+            return Err(ViewStoreFailure {
+                class: ViewStoreFailureClass::Locked,
+                stage: ViewStoreStage::Load,
+            });
+        }
+        self.store.load(maximum)
+    }
+    fn replace(&mut self, expected: Option<&u64>, value: &EncodedView) -> ViewCommit<u64> {
+        self.store.replace(expected, value)
+    }
+}
+
+#[gpui::test]
+async fn desktop_native_startup_retries_original_recovery_after_storage_unlock(
+    cx: &mut gpui::TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let executor = Arc::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap(),
+    );
+    let fixture = executor.block_on(Fixture::new());
+    let before = fixture.journal.snapshot().unwrap().revision();
+    let locked = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let startup = NativeDesktopStartup::new(
+        fixture.owners(),
+        UnlockableView {
+            store: fixture.store(),
+            locked: locked.clone(),
+        },
+        executor,
+    );
+    assert!(matches!(
+        cx.update(|cx| startup.recover(cx)).await,
+        Err(DesktopClientError::LocalStorageUnavailable)
+    ));
+    locked.store(false, Ordering::SeqCst);
+    let recovered = cx.update(|cx| startup.recover(cx)).await.unwrap();
+    let installed = cx.update(|cx| recovered.install(cx).unwrap());
+    assert_eq!(cx.update(|cx| installed.read(cx).servers().len()), 1);
+    assert_eq!(fixture.journal.snapshot().unwrap().revision(), before);
+    assert_eq!(fixture.writes.load(Ordering::SeqCst), 0);
+}
+
+#[gpui::test]
+async fn desktop_startup_gate_retries_storage_unlock_without_replacing_owners(
+    cx: &mut gpui::TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let executor = Arc::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap(),
+    );
+    let fixture = executor.block_on(Fixture::new());
+    let before = fixture.journal.snapshot().unwrap().revision();
+    let locked = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let provider: Rc<dyn DesktopClientStartup> = Rc::new(NativeDesktopStartup::new(
+        fixture.owners(),
+        UnlockableView {
+            store: fixture.store(),
+            locked: locked.clone(),
+        },
+        executor,
+    ));
+    let results = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let observed = results.clone();
+    cx.update(|cx| {
+        begin(provider.clone(), cx, move |result, _| {
+            observed.borrow_mut().push(result)
+        })
+    });
+    cx.update(|cx| cx.global_mut::<DesktopStartupState>().task.take().unwrap())
+        .await;
+    assert_eq!(
+        results.borrow().as_slice(),
+        &[Err(DesktopClientError::LocalStorageUnavailable)]
+    );
+    assert_eq!(fixture.ports.opens.load(Ordering::SeqCst), 0);
+    locked.store(false, Ordering::SeqCst);
+    let observed = results.clone();
+    cx.update(|cx| {
+        begin(provider, cx, move |result, _| {
+            observed.borrow_mut().push(result)
+        })
+    });
+    cx.update(|cx| cx.global_mut::<DesktopStartupState>().task.take().unwrap())
+        .await;
+    assert_eq!(
+        results.borrow().as_slice(),
+        &[Err(DesktopClientError::LocalStorageUnavailable), Ok(())]
+    );
+    assert!(cx.update(|cx| {
+        cx.try_global::<crate::ui::server_client_runtime::InstalledDesktopClient>()
+            .is_some()
+    }));
+    assert_eq!(fixture.journal.snapshot().unwrap().revision(), before);
+    assert_eq!(fixture.writes.load(Ordering::SeqCst), 0);
 }
