@@ -258,6 +258,7 @@ async fn save_client(
             public_key: None,
             route_reference: None,
             route: None,
+            ssh_capture: None,
             generation: LocalPairingGeneration::new(1).unwrap(),
         }),
         ClientJournalChange::RecordCredentialPublicKey {

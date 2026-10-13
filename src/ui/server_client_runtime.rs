@@ -65,13 +65,6 @@ pub(crate) trait DesktopClientProvider {
     /// The latest coherent publication for `server`.
     fn frame(&self, server: ServerId) -> Option<Arc<DesktopServerFrame>>;
 
-    fn directory_source(
-        &self,
-        _server: ServerId,
-    ) -> Result<Rc<dyn crate::ui::directory_picker::DirectorySource>, DesktopClientError> {
-        Err(DesktopClientError::UnsupportedCapability)
-    }
-
     /// The comparison token of `pane`'s current presentation.
     fn pane_view_token(&self, pane: PaneId) -> Result<PaneViewToken, DesktopClientError>;
 
@@ -80,6 +73,14 @@ pub(crate) trait DesktopClientProvider {
         &self,
         _pane: PaneId,
     ) -> Result<spaceterm_client::pane_channel::PaneChannel, DesktopClientError> {
+        Err(DesktopClientError::UnsupportedCapability)
+    }
+
+    /// Browses the owning server for a Workspace pin without granting local path authority.
+    fn directory_source(
+        &self,
+        _server: ServerId,
+    ) -> Result<Rc<dyn crate::ui::directory_picker::DirectorySource>, DesktopClientError> {
         Err(DesktopClientError::UnsupportedCapability)
     }
 
@@ -434,18 +435,18 @@ impl DesktopClientRuntime {
         self.provider.pane_view_token(pane)
     }
 
-    pub(crate) fn directory_source(
-        &self,
-        server: ServerId,
-    ) -> Result<Rc<dyn crate::ui::directory_picker::DirectorySource>, DesktopClientError> {
-        self.provider.directory_source(server)
-    }
-
     pub(crate) fn pane_channel(
         &self,
         pane: PaneId,
     ) -> Result<spaceterm_client::pane_channel::PaneChannel, DesktopClientError> {
         self.provider.pane_channel(pane)
+    }
+
+    pub(crate) fn directory_source(
+        &self,
+        server: ServerId,
+    ) -> Result<Rc<dyn crate::ui::directory_picker::DirectorySource>, DesktopClientError> {
+        self.provider.directory_source(server)
     }
 
     pub(crate) fn directory_connection(

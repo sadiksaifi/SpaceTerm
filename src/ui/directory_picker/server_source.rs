@@ -247,11 +247,8 @@ fn classify(error: ClientDirectoryFailure) -> DirectorySourceError {
     }
 }
 
-#[cfg(test)]
-mod tests;
-
-/// The GPUI chooser retains local presentation state. Its authenticated query worker
-/// runs on the native executor, where the connection's bounded read deadline lives.
+/// Runs authenticated directory reads on the application's retained native executor.
+/// Dropping the chooser's read aborts its worker, including a pending native deadline.
 pub(crate) fn on_executor(
     connection: Arc<dyn DirectoryConnectionPort>,
     executor: tokio::runtime::Handle,
@@ -261,20 +258,25 @@ pub(crate) fn on_executor(
         executor,
     })
 }
+
 struct ExecutorConnection {
     connection: Arc<dyn DirectoryConnectionPort>,
     executor: tokio::runtime::Handle,
 }
+
 struct CancelQuery(tokio::task::AbortHandle);
+
 impl Drop for CancelQuery {
     fn drop(&mut self) {
         self.0.abort();
     }
 }
+
 impl DirectoryConnectionPort for ExecutorConnection {
     fn state(&self) -> Result<GitConnectionState, ClientDirectoryFailure> {
         self.connection.state()
     }
+
     fn query(
         &self,
         query: spaceterm_core::server_directories::DirectoryQuery,
@@ -294,3 +296,6 @@ impl DirectoryConnectionPort for ExecutorConnection {
         })
     }
 }
+
+#[cfg(test)]
+mod tests;

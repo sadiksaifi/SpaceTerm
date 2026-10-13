@@ -1,5 +1,5 @@
 //! Production native desktop owners. All routes use the pinned authenticated actor.
-//! This factory reads retained bindings. It cannot install, Start, enroll or replace keys.
+//! Recovery reads retained bindings. Only the explicit foreground setup offer may install or enroll.
 
 mod protocol;
 
@@ -33,6 +33,7 @@ pub(crate) fn production(
         owners: Arc::new(tokio::sync::Mutex::new(None)),
         factory: Some(Arc::new(Factory {
             paths: paths.clone(),
+            context: tokio::sync::Mutex::new(None),
         })),
         store: SharedViewStore(Arc::new(std::sync::Mutex::new(NativeViewStore::new(paths)))),
         consumed: Arc::new(AtomicBool::new(false)),
@@ -43,57 +44,118 @@ pub(crate) fn production(
 
 struct Factory {
     paths: Arc<AppPaths>,
+    context: tokio::sync::Mutex<Option<Arc<Context>>>,
+}
+struct Context {
+    journal: Arc<JournalController>,
+    native: Option<NativeClientProvider>,
+}
+impl Factory {
+    async fn context(&self) -> Result<Arc<Context>, ClientFailure> {
+        let mut retained = self.context.lock().await;
+        if let Some(context) = retained.as_ref() {
+            return Ok(context.clone());
+        }
+        use crate::platform::{
+            app_directories::AppDirectoryRoot,
+            client_journal::{self, JournalOpenMode},
+        };
+        let paths = self.paths.clone();
+        let inspect = paths.clone();
+        let existing = tokio::task::spawn_blocking(move || {
+            inspect
+                .filesystem()
+                .open_private_directory(
+                    &inspect
+                        .directories()
+                        .root(AppDirectoryRoot::State)
+                        .join("client-connections")
+                        .join("desktop"),
+                )
+                .map(|directory| directory.is_some())
+                .map_err(|_| fail(ClientFailureClass::StorageUnavailable))
+        })
+        .await
+        .map_err(|_| fail(ClientFailureClass::StorageUnavailable))??;
+        let journal = client_journal::open(
+            &paths,
+            if existing {
+                JournalOpenMode::Existing
+            } else {
+                JournalOpenMode::Initialize
+            },
+            Arc::new(spaceterm_core::operation_ledger::canonical::CanonicalCodec),
+            Arc::new(Verifier),
+            JournalLimits::default(),
+        )
+        .await?;
+        let native = tokio::task::spawn_blocking(|| {
+            #[cfg(target_os = "linux")]
+            let authorization = Some(Arc::new(
+                spaceterm_host::account_service::PkexecLingerAuthorization::new(),
+            )
+                as Arc<dyn spaceterm_host::account_service::LingerAuthorization>);
+            #[cfg(not(target_os = "linux"))]
+            let authorization = None;
+            NativeClientProvider::with_authorization(authorization)
+        })
+        .await
+        .map_err(|_| fail(ClientFailureClass::Unavailable))?
+        .ok();
+        let context = Arc::new(Context { journal, native });
+        *retained = Some(context.clone());
+        Ok(context)
+    }
 }
 impl NativeOwnerFactory for Factory {
+    fn foreground_setup(
+        &self,
+    ) -> ClientFuture<
+        '_,
+        Option<Arc<dyn crate::platform::local_server_client::foreground::ForegroundSetup>>,
+    > {
+        Box::pin(async {
+            let context = self.context().await?;
+            let Some(native) = context.native.clone() else {
+                return Ok(None);
+            };
+            let journal = context.journal.clone();
+            // Failure of local native discovery cannot retire healthy saved remote servers.
+            tokio::task::spawn_blocking(move || {
+                crate::platform::local_server_client::setup_offer(native, journal)
+            })
+            .await
+            .map_err(|_| fail(ClientFailureClass::Unavailable))
+            .map(|offer| offer.ok().flatten())
+        })
+    }
     fn recover(&self) -> ClientFuture<'_, NativeDesktopOwners> {
         Box::pin(async {
-            use crate::platform::{
-                app_directories::AppDirectoryRoot,
-                client_journal::{self, JournalOpenMode},
-            };
-            let paths = self.paths.clone();
-            let inspect = paths.clone();
-            let existing = tokio::task::spawn_blocking(move || {
-                inspect
-                    .filesystem()
-                    .open_private_directory(
-                        &inspect
-                            .directories()
-                            .root(AppDirectoryRoot::State)
-                            .join("client-connections")
-                            .join("desktop"),
-                    )
-                    .map(|directory| directory.is_some())
-                    .map_err(|_| fail(ClientFailureClass::StorageUnavailable))
-            })
-            .await
-            .map_err(|_| fail(ClientFailureClass::StorageUnavailable))??;
-            let journal = client_journal::open(
-                &paths,
-                if existing {
-                    JournalOpenMode::Existing
-                } else {
-                    JournalOpenMode::Initialize
-                },
-                Arc::new(spaceterm_core::operation_ledger::canonical::CanonicalCodec),
-                Arc::new(Verifier),
-                JournalLimits::default(),
-            )
-            .await?;
-            let native = tokio::task::spawn_blocking(NativeClientProvider::current)
+            let context = self.context().await?;
+            let journal = context.journal.clone();
+            let native = context.native.clone();
+            let local = if let Some(provider) = native.clone() {
+                let discovery_journal = journal.clone();
+                tokio::task::spawn_blocking(move || {
+                    crate::platform::local_server_client::discover(&provider, &discovery_journal)
+                })
                 .await
                 .map_err(|_| fail(ClientFailureClass::Unavailable))?
-                .map_err(|_| fail(ClientFailureClass::Unavailable))?;
-            let provider = native.clone();
-            let discovery_journal = journal.clone();
-            let local = tokio::task::spawn_blocking(move || {
-                crate::platform::local_server_client::discover(&provider, &discovery_journal)
-            })
-            .await
-            .map_err(|_| fail(ClientFailureClass::Unavailable))??;
+                .ok()
+                .flatten()
+            } else {
+                None
+            };
             let local_server = local.as_ref().map(|local| {
                 spaceterm_core::identity::ServerId::new(local.registration.server_pin().identity)
             });
+            let mut settings =
+                crate::ui::settings_window::server_runtime::SettingsServices::default();
+            if let (Some(native), Some(local)) = (&native, &local)
+                && let Some(binding) = &local.binding
+            {
+                settings.admit_native(native, &local.registration, binding)?;
+            }
             let routes = crate::platform::server_client_route::connector(
                 local.and_then(|local| local.route).into_iter().collect(),
                 None,
@@ -118,9 +180,7 @@ impl NativeOwnerFactory for Factory {
                     journal: journal.clone(),
                     organization: Arc::new(protocol::Decoder),
                     delegate: protocol.clone(),
-                    discovery: Some(crate::platform::local_server_client::trusted_discovery(
-                        native,
-                    )),
+                    discovery: native.map(crate::platform::local_server_client::trusted_discovery),
                     limits: spaceterm_client::limits::ClientLimits::default(),
                     additional_capabilities: vec![
                         spaceterm_protocol::negotiation::CAPABILITY_SERVER_GIT,
@@ -134,6 +194,7 @@ impl NativeOwnerFactory for Factory {
                 invalidator: protocol.clone(),
                 local_server,
                 registry_binding: Some(protocol),
+                settings,
             })
         })
     }

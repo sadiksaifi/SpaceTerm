@@ -94,7 +94,7 @@ impl SettingsConnection {
 
 /// Recovered foreground native capabilities and authenticated inventory adapters, scoped to
 /// the exact original local pairing. Defaults refuse effects rather than inventing providers.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct SettingsServices {
     pub(crate) lifecycles: Vec<(
         spaceterm_core::pairing::LocalPairingKey,
@@ -179,7 +179,7 @@ impl SettingsServices {
         }
         Ok(result)
     }
-    fn admit_native(
+    pub(crate) fn admit_native(
         &mut self,
         provider: &spaceterm_client_native::NativeClientProvider,
         registration: &spaceterm_host::account_service::RegisteredServer,

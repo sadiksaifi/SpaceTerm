@@ -6257,6 +6257,7 @@ dependencies = [
  "spaceterm-distribution",
  "spaceterm-host",
  "spaceterm-protocol",
+ "spaceterm-server",
  "spaceterm-terminal",
  "spaceterm-ui",
  "tar",

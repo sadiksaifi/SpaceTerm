@@ -392,6 +392,7 @@ async fn native_enrollment_publishes_into_existing_desktop_and_settings(cx: &mut
         local_server: None,
         tracker: None,
         registry_binding: None,
+        settings: Default::default(),
     };
     let startup = NativeDesktopStartup::new(owners, EmptyView, h.fixture.storage.runtime.clone())
         .with_enrollment(h.provider.services.as_ref().clone());

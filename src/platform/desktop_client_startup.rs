@@ -1,6 +1,7 @@
 //! Recovery handoff from native client composition to the one application runtime.
 //! Native providers supply authenticated ports and the already recovered journal. This
-//! module neither enrolls devices nor installs, starts or activates server code.
+//! module offers separate foreground setup before recovery. Ordinary recovery never
+//! installs, starts or enrolls, and the desktop runtime never owns service lifetime.
 
 use std::{rc::Rc, sync::Arc};
 
@@ -42,6 +43,7 @@ pub(crate) struct NativeDesktopOwners {
     pub(crate) local_server: Option<ServerId>,
     pub(crate) tracker: Option<OperationTracker>,
     pub(crate) registry_binding: Option<Arc<dyn NativeRegistryBinding>>,
+    pub(crate) settings: crate::ui::settings_window::server_runtime::SettingsServices,
 }
 
 impl Clone for NativeDesktopOwners {
@@ -64,6 +66,7 @@ impl Clone for NativeDesktopOwners {
             local_server: self.local_server,
             tracker: self.tracker.clone(),
             registry_binding: self.registry_binding.clone(),
+            settings: self.settings.clone(),
         }
     }
 }
@@ -75,6 +78,14 @@ pub(crate) trait NativeRegistryBinding: Send + Sync {
     ) -> Result<(), spaceterm_client::failure::ClientFailure>;
 }
 trait NativeOwnerFactory: Send + Sync {
+    fn foreground_setup(
+        &self,
+    ) -> spaceterm_client::ports::ClientFuture<
+        '_,
+        Option<Arc<dyn crate::platform::local_server_client::foreground::ForegroundSetup>>,
+    > {
+        Box::pin(async { Ok(None) })
+    }
     fn recover(&self) -> spaceterm_client::ports::ClientFuture<'_, NativeDesktopOwners>;
 }
 
@@ -276,38 +287,101 @@ impl<S: ViewStore + 'static> DesktopClientStartup for NativeDesktopStartup<S> {
         let executor = self.executor.clone();
         let factory = self.factory.clone();
         let enrollment = self.enrollment.clone();
-        let recovery = executor.spawn(async move {
-            let result = async {
-                let mut retained = owners.lock().await;
-                if retained.is_none() {
-                    let factory = factory.ok_or(DesktopClientError::LocalStorageUnavailable)?;
-                    *retained = Some(factory.recover().await.map_err(DesktopClientError::from)?);
-                }
-                let original = retained
-                    .as_ref()
-                    .ok_or(DesktopClientError::LocalStorageUnavailable)?
-                    .clone();
-                drop(retained);
-                recover(original, store).await.map(|composition| {
-                    let enrollment = enrollment
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .take();
-                    Box::new(RecoveredWithEnrollment {
-                        composition,
-                        enrollment,
-                    }) as Box<dyn RecoveredDesktopClient>
+        cx.spawn(async move |cx| {
+            let setup_factory = factory.clone();
+            let setup = executor
+                .spawn(async move {
+                    match setup_factory {
+                        Some(factory) => factory.foreground_setup().await,
+                        None => Ok(None),
+                    }
                 })
-            }
-            .await;
-            // Retry retains the original recovered owners and store. A failed load never
-            // grants enrollment, fresh credentials or replacement state.
-            if result.is_err() {
+                .await;
+            let result = match setup {
+                Ok(Ok(Some(setup))) => {
+                    if cx.update(|cx| {
+                        cx.try_global::<DesktopStartupState>()
+                            .is_some_and(|state| state.cancelled)
+                    }) {
+                        return Err(DesktopClientError::Cancelled);
+                    }
+                    let consent = cx.update(|cx| {
+                        crate::platform::local_server_client::foreground::confirm(setup.kind(), cx)
+                    });
+                    if consent.await {
+                        if cx.update(|cx| {
+                            cx.try_global::<DesktopStartupState>()
+                                .is_some_and(|state| state.cancelled)
+                        }) {
+                            return Err(DesktopClientError::Cancelled);
+                        }
+                        let result = executor
+                            .spawn(async move { setup.execute().await })
+                            .await
+                            .unwrap_or_else(|_| {
+                                Err(spaceterm_client::failure::ClientFailure::new(
+                                    spaceterm_client::failure::ClientFailureClass::RecoveryRequired,
+                                ))
+                            });
+                        if let Err(failure) = result {
+                            if cx.update(|cx| {
+                                cx.try_global::<DesktopStartupState>()
+                                    .is_some_and(|state| state.cancelled)
+                            }) {
+                                return Err(DesktopClientError::Cancelled);
+                            }
+                            cx.update(|cx| {
+                                crate::platform::local_server_client::foreground::notify_failure(
+                                    failure, cx,
+                                )
+                            })
+                            .await;
+                        }
+                        Ok(())
+                    } else {
+                        Ok(())
+                    }
+                }
+                Ok(Ok(None)) => Ok(()),
+                Ok(Err(error)) => Err(DesktopClientError::from(error)),
+                Err(_) => Err(DesktopClientError::LocalStorageUnavailable),
+            };
+            if let Err(error) = result {
                 consumed.store(false, Ordering::Release);
+                return Err(error);
             }
-            result
-        });
-        cx.spawn(async move |_| {
+            let recovery = executor.spawn(async move {
+                let result = async {
+                    let mut retained = owners.lock().await;
+                    if retained.is_none() {
+                        let factory = factory.ok_or(DesktopClientError::LocalStorageUnavailable)?;
+                        *retained =
+                            Some(factory.recover().await.map_err(DesktopClientError::from)?);
+                    }
+                    let original = retained
+                        .as_ref()
+                        .ok_or(DesktopClientError::LocalStorageUnavailable)?
+                        .clone();
+                    drop(retained);
+                    recover(original, store).await.map(|composition| {
+                        let enrollment = enrollment
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .take();
+                        Box::new(RecoveredWithEnrollment {
+                            composition,
+                            enrollment,
+                        }) as Box<dyn RecoveredDesktopClient>
+                    })
+                }
+                .await;
+                // Retry retains the original recovered owners and store. A failed load never
+                // grants enrollment, fresh credentials or replacement state.
+                if result.is_err() {
+                    consumed.store(false, Ordering::Release);
+                }
+                result
+            });
             let _executor = executor;
             recovery
                 .await
@@ -336,6 +410,7 @@ pub(crate) async fn recover<S: ViewStore + 'static>(
         local_server,
         tracker,
         registry_binding,
+        mut settings,
     } = owners;
     journal.ensure_healthy().map_err(DesktopClientError::from)?;
     let view_journal = journal.clone();
@@ -373,13 +448,13 @@ pub(crate) async fn recover<S: ViewStore + 'static>(
             local: local_server == Some(summary.server),
         })
         .collect();
-    let provider = spaceterm_client_native::NativeClientProvider::current().ok();
-    let settings = crate::ui::settings_window::server_runtime::SettingsServices::recover(
-        &registry,
-        &journal,
-        provider.as_ref(),
+    // Retain the factory's live native capabilities, including foreground authorization.
+    // Registry recovery adds authenticated inventory without discovering another host provider.
+    let recovered_settings = crate::ui::settings_window::server_runtime::SettingsServices::recover(
+        &registry, &journal, None,
     )
     .map_err(DesktopClientError::from)?;
+    settings.inventories.extend(recovered_settings.inventories);
     Ok(DesktopClientComposition {
         registry,
         runtime,

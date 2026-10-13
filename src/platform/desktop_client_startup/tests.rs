@@ -208,6 +208,7 @@ impl Fixture {
             local_server: Some(self.server.server()),
             tracker: None,
             registry_binding: None,
+            settings: Default::default(),
         }
     }
     fn store(&self) -> MemoryView {
@@ -235,7 +236,27 @@ fn desktop_recovery_restores_saved_attachments_before_any_connection_or_startup(
         .unwrap();
     runtime.block_on(async {
         let fixture = Fixture::new().await;
-        let composition = recover(fixture.owners(), fixture.store()).await.unwrap();
+        let mut owners = fixture.owners();
+        let pairing = fixture
+            .server
+            .binding(1)
+            .unwrap()
+            .target()
+            .local_pairing()
+            .unwrap();
+        let lifecycle =
+            crate::ui::settings_window::server_runtime::ServerServiceLifecycle::BootWithLingering;
+        owners
+            .settings
+            .lifecycles
+            .push((pairing.clone(), lifecycle));
+        let composition = recover(owners, fixture.store()).await.unwrap();
+        assert_eq!(
+            composition.settings.lifecycles,
+            vec![(pairing.clone(), lifecycle)]
+        );
+        assert_eq!(composition.settings.inventories.len(), 1);
+        assert_eq!(composition.settings.inventories[0].0, pairing);
         assert_eq!(composition.view.attachments(), fixture.view.attachments());
         assert_eq!(composition.servers.len(), 1);
         assert!(composition.servers[0].local);
@@ -519,3 +540,6 @@ fn desktop_application_composes_native_directory_ports_for_all_paired_servers(
     );
     assert_eq!(fixture.ports.opens.load(Ordering::SeqCst), 0);
 }
+
+#[path = "foreground_tests.rs"]
+mod foreground;
