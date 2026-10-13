@@ -231,6 +231,26 @@ impl NativePairingRuntime {
                     notice_dismissed: false,
                 }),
         );
+        work.extend(
+            inventory
+                .additional_client_acknowledgements
+                .iter()
+                .filter_map(|saved| {
+                    let spaceterm_core::pairing::PairingReceiptBody::ClientBinding {
+                        operation,
+                        ..
+                    } = &saved.receipt().parts().claims
+                    else {
+                        return None;
+                    };
+                    Some(PendingPairingWork {
+                        operation: operation.id,
+                        phase: PendingPairingPhase::EnrollmentAcknowledgement,
+                        reason: PendingPairingReason::ServerConfirmationPending,
+                        notice_dismissed: false,
+                    })
+                }),
+        );
         work.extend(inventory.revocations.iter().map(|pending| {
             let (phase, reason) = match pending.phase {
                 RevocationPhase::AwaitingConfirmation => (
@@ -512,7 +532,9 @@ impl NativePairingRuntime {
 
     /// A server-issued additional identity is verified and retained before the
     /// originating ordinary worker acknowledges its tracked operation outcome.
-    /// This method does not submit another request or invent a Client identity.
+    /// The receiving binding remains unusable across restart until the caller
+    /// confirms that worker's durable acknowledgement. This method does not
+    /// submit another request or invent a Client identity.
     pub async fn save_additional_client(
         &self,
         prepared: &PreparedEnrollment,
@@ -521,15 +543,79 @@ impl NativePairingRuntime {
         save_binding(&self.store(), prepared, receipt, true).await
     }
 
+    /// The receiving consumer cannot infer acknowledgement from a receipt or
+    /// from successful transmission. The original operation worker must first
+    /// retain the server-confirmed prefix in its own durable journal. This read
+    /// also works after that worker has compacted its consumed result.
+    pub async fn confirm_additional_client_acknowledgement(
+        &self,
+        key: &LocalPairingKey,
+        client: ClientId,
+        originating_journal: &JournalController,
+    ) -> Result<(), PairingFailure> {
+        use spaceterm_core::{
+            operation_ledger_contracts::StreamPurpose, pairing::PairingReceiptBody,
+        };
+        let state = self.journal.snapshot().map_err(classify)?;
+        let saved = state
+            .bindings()
+            .iter()
+            .find(|saved| {
+                saved.binding().is_ok_and(|binding| {
+                    binding.target().client() == client
+                        && binding.target().local_pairing().as_ref() == Ok(key)
+                })
+            })
+            .ok_or(PairingFailure::ClientNotBound)?;
+        let PairingReceiptBody::ClientBinding { operation, .. } = &saved.proof().parts().claims
+        else {
+            return Err(PairingFailure::InvalidRequest);
+        };
+        let originating = originating_journal.snapshot().map_err(classify)?;
+        let header = originating
+            .stream(operation.id.stream())
+            .ok_or(PairingFailure::RecoveryRequired)?;
+        if header.purpose != StreamPurpose::Ordinary
+            || header.local_pairing.parts().server != key.parts().server
+            || header.local_pairing.parts().pairing != key.parts().pairing
+            || header.confirmed_prefix < operation.id.sequence().get()
+        {
+            return Err(PairingFailure::RecoveryRequired);
+        }
+        if let Some(record) = originating.operation(operation.id)
+            && record.binding != *operation
+        {
+            return Err(PairingFailure::RequestIdentityReused);
+        }
+        let operation = *operation;
+        if saved.additional_client_acknowledgement_pending() {
+            self.journal
+                .transact(vec![
+                    ClientJournalChange::FinishAdditionalClientAcknowledgement {
+                        pairing: key.clone(),
+                        client,
+                        operation,
+                    },
+                ])
+                .await
+                .map_err(classify)?;
+        }
+        Ok(())
+    }
+
     async fn require_enrollment_acknowledged(
         &self,
         key: &LocalPairingKey,
     ) -> Result<(), PairingFailure> {
         let inventory = self.inventory().await?;
         if inventory
-            .enrollment_acknowledgements
+            .additional_client_acknowledgements
             .iter()
-            .any(|work| &work.prepared.local_pairing == key)
+            .any(|saved| saved.key() == key)
+            || inventory
+                .enrollment_acknowledgements
+                .iter()
+                .any(|work| &work.prepared.local_pairing == key)
         {
             return Err(PairingFailure::RecoveryRequired);
         }
@@ -685,6 +771,14 @@ struct SharedConnector {
     restricted: Arc<dyn spaceterm_client::pairing::revocation::RestrictedConnector>,
 }
 impl EnrollmentConnector for SharedConnector {
+    fn open_foreground<'a>(
+        &'a self,
+        pin: ServerPin,
+        route: RevocationRouteReference,
+        authorization: &'a CredentialUse,
+    ) -> PairingFuture<'a, Result<Box<dyn PairingTransport>, PairingFailure>> {
+        self.enrollment.open_foreground(pin, route, authorization)
+    }
     fn open<'a>(
         &'a self,
         pin: ServerPin,

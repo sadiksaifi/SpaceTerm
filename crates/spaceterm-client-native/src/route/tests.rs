@@ -392,7 +392,12 @@ impl RouteConnector for GatedRoutes {
         Box::pin(async {
             let (transport, tunnel) = self
                 .ssh
-                .open("fixture-host", "/private/server", MessageLimit::envelope())
+                .open(
+                    "fixture-host",
+                    "/private/server",
+                    MessageLimit::envelope(),
+                    None,
+                )
                 .await?;
             *self.tunnel.lock().unwrap() =
                 Some((tunnel.process_id().unwrap(), tunnel.completion()));
@@ -864,7 +869,13 @@ async fn captured_ssh_rejects_changed_effective_host_account_and_jump() {
     ] {
         fs::write(&configuration, changed).unwrap();
         let result = ssh
-            .open_captured("target", "/server", MessageLimit::envelope(), &capture)
+            .open_captured(
+                "target",
+                "/server",
+                MessageLimit::envelope(),
+                &capture,
+                None,
+            )
             .await;
         assert!(
             matches!(result, Err(error) if error.class() == ClientFailureClass::StaleAuthority)
@@ -954,7 +965,7 @@ while True:
     );
     assert_eq!(
         fs::read_to_string(observed).unwrap(),
-        capture.configuration()
+        format!("Host *\n BatchMode yes\n{}", capture.configuration())
     );
     connected
         .sender
@@ -1051,7 +1062,13 @@ async fn restricted_ssh_capture_binds_literal_and_glob_includes_before_execution
     assert!(capture.configuration().contains("hostname 127.0.0.1"));
     fs::write(included, "Host target\n HostName 127.0.0.2\n User other\n").unwrap();
     let result = ssh
-        .open_captured("target", "/server", MessageLimit::envelope(), &capture)
+        .open_captured(
+            "target",
+            "/server",
+            MessageLimit::envelope(),
+            &capture,
+            None,
+        )
         .await;
     assert!(matches!(result, Err(error) if error.class() == ClientFailureClass::StaleAuthority));
 }

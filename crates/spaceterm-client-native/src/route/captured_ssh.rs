@@ -41,6 +41,7 @@ impl SshRouteConfiguration {
         remote_socket: &str,
         limit: MessageLimit,
         original: &JournalSshCapture,
+        foreground: Option<&CredentialUse>,
     ) -> Result<
         (
             Arc<dyn MessageTransport>,
@@ -49,12 +50,17 @@ impl SshRouteConfiguration {
         ),
         ClientFailure,
     > {
+        let askpass = self.foreground_askpass(foreground)?;
         if self.capture(destination).await? != *original {
             return Err(changed());
         }
         // No user configuration is read after this comparison. A later alias,
         // Include, account or jump-host edit cannot redirect the spawned tunnel.
         let mut file = tempfile::NamedTempFile::new().map_err(|_| unavailable())?;
+        // Jump processes read this same file. The parent's -o BatchMode alone
+        // does not set their authentication policy.
+        let batch = if askpass.is_some() { "no" } else { "yes" };
+        write!(file, "Host *\n BatchMode {batch}\n").map_err(|_| unavailable())?;
         file.write_all(original.configuration().as_bytes())
             .map_err(|_| unavailable())?;
         file.as_file()
@@ -68,14 +74,18 @@ impl SshRouteConfiguration {
             SshDestination::new("st-route-0").map_err(classify)?,
             endpoint,
             RemoteSocketPath::new(remote_socket).map_err(classify)?,
-            AuthenticationMode::BatchMode,
+            if askpass.is_some() {
+                AuthenticationMode::AskPass
+            } else {
+                AuthenticationMode::BatchMode
+            },
         )
         .map_err(classify)?;
         let environment =
             SshEnvironment::new(self.home.clone(), self.environment.clone()).map_err(classify)?;
         let deadline = tokio::time::Instant::now() + DIAL_DEADLINE;
         let tunnel = Arc::new(
-            SshTunnel::start(command, environment, None, DIAL_DEADLINE)
+            SshTunnel::start(command, environment, askpass, DIAL_DEADLINE)
                 .await
                 .map_err(classify)?,
         );

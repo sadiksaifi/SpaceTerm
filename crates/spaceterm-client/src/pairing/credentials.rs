@@ -356,7 +356,10 @@ impl PairingAuthorityFence {
         let bindings: Vec<_> = recovered
             .saved
             .iter()
-            .filter(|saved| !suppressed.contains(&pairing_lifetime(saved.key())))
+            .filter(|saved| {
+                !suppressed.contains(&pairing_lifetime(saved.key()))
+                    && !recovered.additional_client_acknowledgements.contains(saved)
+            })
             .map(|saved| (saved.key().clone(), saved.credential().scope.clone()))
             .collect();
         state.gates.retain(|(key, gate)| {

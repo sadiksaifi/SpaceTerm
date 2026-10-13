@@ -7,6 +7,7 @@ use spaceterm_client::{
     api::{ConnectionTarget, RouteDescription, RouteParts},
     failure::{ClientFailure, ClientFailureClass},
     limits::DIAL_DEADLINE,
+    pairing::credentials::{CredentialUse, CredentialUsePurpose, NativeCredentialAccess},
     ports::{
         ClientFuture, ConnectedRoute, ConnectionPurpose, MessageReceiver, MessageSender, PeerFacts,
         RouteConnector, RouteKind,
@@ -133,7 +134,9 @@ impl SshRouteConfiguration {
         destination: &str,
         remote_socket: &str,
         limit: MessageLimit,
+        foreground: Option<&CredentialUse>,
     ) -> Result<(Arc<dyn MessageTransport>, Arc<SshTunnel>), ClientFailure> {
+        let askpass = self.foreground_askpass(foreground)?;
         let deadline = tokio::time::Instant::now() + DIAL_DEADLINE;
         let endpoint = self.endpoints.allocate()?;
         let command = SshTunnelCommand::new(
@@ -142,7 +145,7 @@ impl SshRouteConfiguration {
             SshDestination::new(destination).map_err(classify)?,
             endpoint,
             RemoteSocketPath::new(remote_socket).map_err(classify)?,
-            if self.askpass.is_some() {
+            if askpass.is_some() {
                 AuthenticationMode::AskPass
             } else {
                 AuthenticationMode::BatchMode
@@ -152,7 +155,7 @@ impl SshRouteConfiguration {
         let environment =
             SshEnvironment::new(self.home.clone(), self.environment.clone()).map_err(classify)?;
         let tunnel = Arc::new(
-            SshTunnel::start(command, environment, self.askpass.clone(), DIAL_DEADLINE)
+            SshTunnel::start(command, environment, askpass, DIAL_DEADLINE)
                 .await
                 .map_err(classify)?,
         );
@@ -170,6 +173,45 @@ impl SshRouteConfiguration {
                 Err(error)
             }
         }
+    }
+}
+
+/// Reuses the existing zeroized native broker and revalidates the foreground
+/// lease at the host's final spawn handoff, after asynchronous route capture.
+struct ForegroundAskPass {
+    broker: Arc<dyn TunnelAskPass>,
+    authorization: CredentialUse,
+}
+impl TunnelAskPass for ForegroundAskPass {
+    fn handoff(&self) -> Result<spaceterm_host::ssh_tunnel::AskPassHandoff, TransportError> {
+        self.authorization
+            .validate(self.authorization.scope())
+            .map_err(|_| TransportError::PeerAccountRejected)?;
+        self.broker.handoff()
+    }
+}
+impl SshRouteConfiguration {
+    fn foreground_askpass(
+        &self,
+        foreground: Option<&CredentialUse>,
+    ) -> Result<Option<Arc<dyn TunnelAskPass>>, ClientFailure> {
+        let Some(authorization) = foreground else {
+            return Ok(None);
+        };
+        authorization
+            .validate(authorization.scope())
+            .map_err(|_| ClientFailure::new(ClientFailureClass::AuthorizationDenied))?;
+        if authorization.purpose() != CredentialUsePurpose::Enrollment
+            || authorization.native_access() != NativeCredentialAccess::Foreground
+        {
+            return Err(ClientFailure::new(ClientFailureClass::AuthorizationDenied));
+        }
+        Ok(self.askpass.as_ref().map(|broker| {
+            Arc::new(ForegroundAskPass {
+                broker: broker.clone(),
+                authorization: authorization.clone(),
+            }) as Arc<dyn TunnelAskPass>
+        }))
     }
 }
 
@@ -209,6 +251,25 @@ impl NativeRouteConnector {
         pin: spaceterm_protocol::authentication::ServerPin,
         route: &RouteDescription,
         capture: Option<&spaceterm_client::journal::JournalSshCapture>,
+    ) -> Result<ConnectedRoute, ClientFailure> {
+        self.open_native_route(pin, route, capture, None).await
+    }
+    pub(crate) async fn open_foreground_pairing_route(
+        &self,
+        pin: spaceterm_protocol::authentication::ServerPin,
+        route: &RouteDescription,
+        capture: Option<&spaceterm_client::journal::JournalSshCapture>,
+        authorization: &CredentialUse,
+    ) -> Result<ConnectedRoute, ClientFailure> {
+        self.open_native_route(pin, route, capture, Some(authorization))
+            .await
+    }
+    async fn open_native_route(
+        &self,
+        pin: spaceterm_protocol::authentication::ServerPin,
+        route: &RouteDescription,
+        capture: Option<&spaceterm_client::journal::JournalSshCapture>,
+        foreground: Option<&CredentialUse>,
     ) -> Result<ConnectedRoute, ClientFailure> {
         let limit =
             MessageLimit::new(spaceterm_protocol::limits::MAX_FRAME_BYTES).map_err(classify)?;
@@ -258,13 +319,13 @@ impl NativeRouteConnector {
                     let configuration = self.ssh.as_ref().ok_or_else(invalid_route)?;
                     let (transport, tunnel) = if let Some(capture) = capture {
                         let (transport, tunnel, lease) = configuration
-                            .open_captured(destination, remote_socket, limit, capture)
+                            .open_captured(destination, remote_socket, limit, capture, foreground)
                             .await?;
                         configuration_lease = Some(lease);
                         (transport, tunnel)
                     } else {
                         configuration
-                            .open(destination, remote_socket, limit)
+                            .open(destination, remote_socket, limit, foreground)
                             .await?
                     };
                     (transport, Some(tunnel))
