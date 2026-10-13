@@ -12,6 +12,7 @@ use std::time::Instant;
 
 use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Global, Task};
 
+use super::server_git::{InstalledServerGit, ServerGitStore, ServerPullRequestAdapters};
 use crate::domain::RemoteDirectory;
 use crate::repository_status::local_read::LocalRepositoryReader;
 use crate::repository_status::pull_request::pull_request_query;
@@ -156,10 +157,17 @@ impl InstalledRepositoryStatus {
     pub(crate) fn store(cx: &App) -> Option<Entity<RepositoryStatusStore>> {
         cx.try_global::<Self>().map(|installed| installed.0.clone())
     }
+
+    /// Server-backed Panes use the shared client-port store, never this legacy
+    /// store's local/SSH discovery scheduler or native adapters.
+    pub(crate) fn server_store(cx: &App) -> Option<Entity<ServerGitStore>> {
+        InstalledServerGit::store(cx)
+    }
 }
 
 /// Installs the store and follows the Git Settings.
 pub(crate) fn install(settings: &Settings, adapters: RepositoryStatusAdapters, cx: &mut App) {
+    InstalledServerGit::install(cx);
     let store = cx.new(|cx| {
         RepositoryStatusStore::new(
             settings.snapshot().candidate.git.repository_status(),
@@ -369,6 +377,29 @@ impl RepositoryStatusStore {
         }
         let update = self.scheduler.set_toggles(preferences, Instant::now());
         self.apply(update, cx);
+        let github_cli = cx
+            .try_global::<RepositoryTools>()
+            .map_or(GitHubCliStatus::Unknown, |tools| tools.github_cli);
+        self.configure_server_pull_requests(github_cli, cx);
+    }
+
+    /// Lends only client-local GitHub lookup to the owning-server store. Git,
+    /// marker, watcher and SSH adapters remain confined to this legacy store.
+    fn configure_server_pull_requests(&self, github_cli: GitHubCliStatus, cx: &mut Context<Self>) {
+        if let Some(store) = InstalledRepositoryStatus::server_store(cx) {
+            store.update(cx, |store, cx| {
+                let _ = store.configure_pull_requests(
+                    self.preferences,
+                    github_cli,
+                    ServerPullRequestAdapters {
+                        lookup: self.tools.github_cli.clone(),
+                        hosts: self.github_hosts.clone(),
+                        spawn: self.spawn.clone(),
+                    },
+                    cx,
+                );
+            });
+        }
     }
 
     fn apply(&mut self, update: SchedulerUpdate, cx: &mut Context<Self>) {
@@ -589,6 +620,7 @@ impl RepositoryStatusStore {
                 .unwrap_or_default();
             tools.github_cli = github_cli;
             cx.set_global(tools);
+            self.configure_server_pull_requests(github_cli, cx);
         }
         let update = self
             .scheduler
@@ -696,6 +728,7 @@ impl RepositoryStatusStore {
             ))
         });
         cx.set_global(RepositoryTools { git, github_cli });
+        self.configure_server_pull_requests(github_cli, cx);
         let update = self.scheduler.set_github_cli(github_cli, Instant::now());
         self.apply(update, cx);
         for effect in std::mem::take(&mut self.tools.waiting) {
