@@ -980,6 +980,11 @@ impl TabView {
         }
     }
 
+    /// Personal edits whose completion, application receipt and publication have not all arrived.
+    pub(crate) fn has_unsettled_personal_edits(&self) -> bool {
+        matches!(&self.panes, Panes::Server(panes) if !panes.edits.is_empty())
+    }
+
     /// The server Pane that has native focus within this Tab View, if any.
     pub(crate) fn focused_server_pane(&self) -> Option<ServerPaneId> {
         match &self.panes {

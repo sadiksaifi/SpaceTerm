@@ -98,6 +98,12 @@ const MENU_ITEM_ICONS: &[MenuItemIcon] = &[
     MenuItemIcon {
         menu: "File",
         submenu: None,
+        item: "Detach Workspace",
+        symbol: "link",
+    },
+    MenuItemIcon {
+        menu: "File",
+        submenu: None,
         item: "Kill Workspace",
         symbol: "trash",
     },
@@ -931,6 +937,7 @@ mod tests {
                 "|",
                 "Close Pane",
                 "Close Tab",
+                "Detach Workspace",
                 "Kill Workspace",
                 "|",
                 "Export Terminal Diagnostics…",
@@ -959,6 +966,7 @@ mod tests {
                 crate::ui::server_pane_actions::TakeOverPane.name(),
                 ClosePane.name(),
                 CloseTab.name(),
+                crate::ui::DetachWorkspace.name(),
                 CloseWorkspace.name(),
                 ExportTerminalDiagnostics.name(),
             ]

@@ -349,6 +349,7 @@ enum ApplicationQuitCoordinatorState {
     Prompting,
     WaitingForSettings,
     WaitingForUpdater,
+    WaitingForClientViews,
 }
 
 struct ApplicationQuitCoordinator {
@@ -439,12 +440,68 @@ impl ApplicationQuitCoordinator {
                 *self.state.borrow_mut() = ApplicationQuitCoordinatorState::WaitingForUpdater;
                 return;
             }
-            if let Some(adapter) = self.adapter.upgrade() {
-                adapter.confirm_quit(cx);
-            }
+            self.wait_for_client_views(cx);
         } else {
             self.present_confirmation(current, cx);
         }
+    }
+
+    fn wait_for_client_views(self: &Rc<Self>, cx: &mut App) {
+        if cx
+            .try_global::<crate::ui::server_client_runtime::InstalledDesktopClient>()
+            .is_none()
+            && !workspace_windows(cx).iter().any(|window| {
+                window
+                    .read(cx)
+                    .is_ok_and(WorkspaceManager::is_server_backed)
+            })
+        {
+            if let Some(adapter) = self.adapter.upgrade() {
+                adapter.confirm_quit(cx);
+            }
+            return;
+        }
+        *self.state.borrow_mut() = ApplicationQuitCoordinatorState::WaitingForClientViews;
+        let windows = workspace_windows(cx);
+        let has_workspace = !windows.is_empty();
+        let mut saves: Vec<_> = windows
+            .into_iter()
+            .filter_map(|window| {
+                window
+                    .update(cx, |manager, _, cx| manager.save_server_view(true, cx))
+                    .ok()
+            })
+            .collect();
+        if !has_workspace
+            && let Some(client) =
+                cx.try_global::<crate::ui::server_client_runtime::InstalledDesktopClient>()
+        {
+            let runtime = client.0.clone();
+            saves.push(runtime.update(cx, |runtime, cx| runtime.prepare_client_quit(cx)));
+        }
+        let coordinator = Rc::clone(self);
+        cx.spawn(async move |cx| {
+            for save in saves {
+                if save.await.is_err() {
+                    cx.update(|_| {
+                        *coordinator.state.borrow_mut() = ApplicationQuitCoordinatorState::Idle
+                    });
+                    return;
+                }
+            }
+            cx.update(|cx| {
+                if *coordinator.state.borrow()
+                    != ApplicationQuitCoordinatorState::WaitingForClientViews
+                {
+                    return;
+                }
+                *coordinator.state.borrow_mut() = ApplicationQuitCoordinatorState::Idle;
+                if let Some(adapter) = coordinator.adapter.upgrade() {
+                    adapter.confirm_quit(cx);
+                }
+            });
+        })
+        .detach();
     }
 
     fn wait_for_settings(
@@ -552,6 +609,20 @@ pub(crate) fn open(
     {
         return Err(RuntimeError::Initialization);
     }
+    let client_runtime = cx
+        .try_global::<crate::ui::server_client_runtime::InstalledDesktopClient>()
+        .map(|client| client.0.clone());
+    if client_runtime.is_some()
+        && let Some(window) = workspace_windows(cx).into_iter().next()
+    {
+        let _ = window.update(cx, |_, window, _| window.activate_window());
+        return Ok(window);
+    }
+    #[cfg(not(test))]
+    if client_runtime.is_none() {
+        // Missing native credentials or journal authority cannot select a desktop-owned PTY.
+        return Err(RuntimeError::Initialization);
+    }
     let adapters = crate::ui::WorkspaceManagerAdapters {
         local_filesystem: host.adapters.local_filesystem.clone(),
         key_input: Rc::clone(&host.adapters.key_input),
@@ -573,14 +644,18 @@ pub(crate) fn open(
         .unwrap_or_default();
     let result = cx.open_window(workspace_window_options(host, cx), |window, cx| {
         let workspace_manager = cx.new(|cx| {
-            WorkspaceManager::new_with_adapters(
-                session_factory,
-                home_directory,
-                adapters,
-                default_sidebar,
-                window,
-                cx,
-            )
+            if let Some(runtime) = client_runtime {
+                WorkspaceManager::new_server(runtime, adapters, default_sidebar, window, cx)
+            } else {
+                WorkspaceManager::new_with_adapters(
+                    session_factory,
+                    home_directory,
+                    adapters,
+                    default_sidebar,
+                    window,
+                    cx,
+                )
+            }
         });
         workspace_manager.update(cx, |workspace_manager, cx| {
             workspace_manager.focus(window, cx);
@@ -2387,5 +2462,99 @@ mod runtime_tests {
     #[cfg(all(test, target_os = "macos", feature = "native-tests"))]
     mod macos_adapter_tests {
         include!("platform/macos_adapter_tests/traffic_lights.rs");
+    }
+    fn desktop_client_runtime(
+        cx: &mut gpui::TestAppContext,
+    ) -> (
+        gpui::Entity<crate::ui::server_client_runtime::DesktopClientRuntime>,
+        Rc<crate::ui::server_client_runtime::testing::RecordingClientProvider>,
+    ) {
+        use crate::ui::server_client_runtime::{
+            DesktopClientDependencies, DesktopClientRuntime, notification_channel,
+        };
+        let provider =
+            Rc::new(crate::ui::server_client_runtime::testing::RecordingClientProvider::default());
+        let (_, notifications) = notification_channel();
+        let dependencies = DesktopClientDependencies {
+            provider: provider.clone(),
+            notifications,
+        };
+        let runtime = cx.new(|cx| DesktopClientRuntime::new(dependencies, cx));
+        (runtime, provider)
+    }
+
+    #[gpui::test]
+    fn desktop_server_startup_and_reopen_reuse_one_runtime_without_legacy_launch(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let host = host_with_settings();
+        let (runtime, provider) = desktop_client_runtime(cx);
+        let first = cx.update(|cx| {
+            cx.set_global(crate::ui::server_client_runtime::InstalledDesktopClient(
+                runtime.clone(),
+            ));
+            start_application(cx, &host).unwrap()
+        });
+        cx.run_until_parked();
+        let second = cx.update(|cx| open(cx, &host).unwrap());
+        assert_eq!(first, second);
+        assert_eq!(cx.update(|cx| workspace_windows(cx).len()), 1);
+        assert_eq!(
+            cx.update(|cx| first.read(cx).unwrap().active_server_workspace()),
+            None
+        );
+        assert!(provider.begun().is_empty());
+    }
+
+    #[gpui::test]
+    fn desktop_server_application_quit_saves_views_without_terminal_confirmation(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut host = host_with_settings();
+        let quit = Rc::new(
+            crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
+        );
+        Rc::get_mut(&mut host).unwrap().adapters.application_quit = quit.clone();
+        let (runtime, provider) = desktop_client_runtime(cx);
+        cx.update(|cx| {
+            cx.set_global(crate::ui::server_client_runtime::InstalledDesktopClient(
+                runtime.clone(),
+            ));
+            start_application(cx, &host).unwrap();
+        });
+        cx.run_until_parked();
+        cx.update(|cx| cx.dispatch_action(&QuitApplication));
+        cx.run_until_parked();
+        assert!(!cx.has_pending_prompt());
+        assert_eq!(quit.confirmations(), 1);
+        assert_eq!(provider.quits(), 1);
+        assert!(provider.begun().is_empty());
+    }
+
+    #[gpui::test]
+    fn desktop_server_application_view_save_failure_keeps_the_client_open(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut host = host_with_settings();
+        let quit = Rc::new(
+            crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
+        );
+        Rc::get_mut(&mut host).unwrap().adapters.application_quit = quit.clone();
+        let (runtime, provider) = desktop_client_runtime(cx);
+        provider.fail_save(
+            crate::ui::server_desktop_contracts::DesktopClientError::LocalStorageUnavailable,
+        );
+        cx.update(|cx| {
+            cx.set_global(crate::ui::server_client_runtime::InstalledDesktopClient(
+                runtime.clone(),
+            ));
+            start_application(cx, &host).unwrap();
+        });
+        cx.run_until_parked();
+        cx.update(|cx| cx.dispatch_action(&QuitApplication));
+        cx.run_until_parked();
+        assert_eq!(quit.confirmations(), 0);
+        assert_eq!(provider.quits(), 1);
+        assert_eq!(cx.update(|cx| workspace_windows(cx).len()), 1);
     }
 }

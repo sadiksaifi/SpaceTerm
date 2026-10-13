@@ -148,6 +148,16 @@ pub(crate) trait SecureFilesystem: Send + Sync {
         path: &Path,
     ) -> Result<SecureDirectory, SecureFilesystemError>;
 
+    /// Provisions private storage and durably publishes every directory entry from the root.
+    /// File publication in the final directory does not replace these ancestry barriers.
+    /// Adapters without this guarantee refuse before preparing a document.
+    fn ensure_durable_private_directory(
+        &self,
+        _path: &Path,
+    ) -> Result<SecureDirectory, SecureFilesystemError> {
+        Err(SecureFilesystemError::Unavailable)
+    }
+
     fn create_private_child(
         &self,
         parent: &SecureDirectory,

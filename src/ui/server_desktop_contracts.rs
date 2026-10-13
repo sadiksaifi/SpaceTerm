@@ -59,6 +59,14 @@ pub(crate) struct DesktopServerFrame {
     pub(crate) view_revision: DesktopViewRevision,
 }
 
+/// A paired server's bounded display identity. Reachability and display names confer no authority.
+#[derive(Clone, Debug)]
+pub(crate) struct DesktopServerInfo {
+    pub(crate) server: ServerId,
+    pub(crate) name: crate::ui::pane_presentation::DisplayName,
+    pub(crate) local: bool,
+}
+
 /// How current a frame's organization is.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ReplicaStatus {
@@ -255,14 +263,20 @@ pub(crate) enum ViewEdit {
 #[derive(Clone, PartialEq)]
 pub(crate) enum DesktopRequest {
     /// A shared organization command. Client-core submits it under a durable operation.
-    Shared { server: ServerId, command: Command },
+    Shared {
+        server: ServerId,
+        command: Command,
+    },
     /// A person explicitly selected a Pane. Focus restoration never sends this.
     SelectPane {
         pane: PaneId,
         source: SelectionSource,
     },
     /// A person explicitly opened a Tab. Applying a publication never sends this.
-    OpenTab { tab: TabId, source: SelectionSource },
+    OpenTab {
+        tab: TabId,
+        source: SelectionSource,
+    },
     /// A person chose Start Session on a Pane with no running Session.
     StartSession {
         pane: PaneId,
@@ -283,6 +297,13 @@ pub(crate) enum DesktopRequest {
     Measured(PaneMeasurement),
     AttachWorkspace(WorkspaceId),
     DetachWorkspace(WorkspaceId),
+    /// Resumes only the original local detach transaction, including its pairing, attachment,
+    /// and captured grants. If that transaction cannot be recovered, refuse instead of capturing
+    /// the current attachment or grants. The UI request is correlation, not release authority.
+    RetryDetachWorkspace {
+        workspace: WorkspaceId,
+        original_request: UiRequestId,
+    },
     PersonalEdit(ViewEdit),
     /// One connection attempt. It never starts a server.
     RetryConnection(ServerId),
@@ -301,6 +322,7 @@ impl std::fmt::Debug for DesktopRequest {
             Self::Measured(_) => "DesktopRequest::Measured",
             Self::AttachWorkspace(_) => "DesktopRequest::AttachWorkspace",
             Self::DetachWorkspace(_) => "DesktopRequest::DetachWorkspace",
+            Self::RetryDetachWorkspace { .. } => "DesktopRequest::RetryDetachWorkspace",
             Self::PersonalEdit(_) => "DesktopRequest::PersonalEdit",
             Self::RetryConnection(_) => "DesktopRequest::RetryConnection",
             Self::ServerAction(_) => "DesktopRequest::ServerAction",

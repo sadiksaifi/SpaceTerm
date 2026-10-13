@@ -83,7 +83,10 @@ fn row_chip(
 }
 
 /// The leading and trailing row padding that keeps a row's content balanced inside its chip.
-fn row_padding(appearance: &crate::ui::appearance::ChromeAppearance, cx: &App) -> (Pixels, Pixels) {
+pub(super) fn row_padding(
+    appearance: &crate::ui::appearance::ChromeAppearance,
+    cx: &App,
+) -> (Pixels, Pixels) {
     let frame = crate::ui::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
     let air = appearance.spacing(SIDEBAR_ROW_CHIP_PADDING);
     (
@@ -94,7 +97,7 @@ fn row_padding(appearance: &crate::ui::appearance::ChromeAppearance, cx: &App) -
 
 /// A row's chip and the Panel-host row colors its text and icons use, promoted for a selected row
 /// and eased toward hover paint.
-fn row_paint(
+pub(super) fn row_paint(
     selected: bool,
     emphasized: bool,
     hover: f32,
@@ -858,6 +861,7 @@ impl WorkspaceSidebar {
                 sidebar.finish_workspace_drag(pointer, cx);
             });
         });
+        rows = rows.children(self.render_server_sections(sidebar.clone(), window, cx));
         // Each Workspace and its Worktrees are one scroll child, so reordering, revealing, and
         // drag previews stay indexed by Workspace.
         for (row, fade) in self.rows.iter().zip(hovers) {
@@ -975,6 +979,12 @@ impl WorkspaceSidebar {
             .attach(new_workspace_menu, TooltipTargetVisibility::Visible);
         let sidebar = div()
             .id("workspace-sidebar")
+            .when(
+                self.server
+                    .as_ref()
+                    .is_some_and(|server| server.needs_root_focus()),
+                |root| root.track_focus(&self.focus),
+            )
             .debug_selector(|| "workspace-sidebar".to_owned())
             .absolute()
             .top(

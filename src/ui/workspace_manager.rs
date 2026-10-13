@@ -258,7 +258,16 @@ enum LocalPinSelection {
     Failed,
 }
 
+enum WorkspaceSource {
+    Legacy {
+        factory: Rc<dyn TerminalSessionFactory>,
+        home: PathBuf,
+    },
+    Server(Entity<super::server_client_runtime::DesktopClientRuntime>),
+}
+
 pub(crate) struct WorkspaceManager {
+    server: Option<server::ServerWorkspaces>,
     window_appearance: super::appearance_runtime::WindowAppearanceOwner,
     window_traffic_lights: super::appearance_runtime::WindowTrafficLightOwner,
     transient: WorkspaceTransientUi,
@@ -267,10 +276,10 @@ pub(crate) struct WorkspaceManager {
     sidebar: Entity<WorkspaceSidebar>,
     local_filesystem: LocalFilesystemAuthority,
     workspaces: WorkspaceCollection<Entity<TabManager>>,
-    session_factory: Rc<dyn TerminalSessionFactory>,
+    session_factory: Option<Rc<dyn TerminalSessionFactory>>,
     pane_construction: PaneConstruction,
     local_home_directory_path: PathBuf,
-    local_home_identity: LocalDirectoryIdentity,
+    local_home_identity: Option<LocalDirectoryIdentity>,
     directory_selection: Rc<dyn SystemDirectorySelection>,
     remote_workspace_backend: Option<Arc<dyn RemoteWorkspaceFlowBackend>>,
     remote_workspace_unavailable_reason: Option<String>,
@@ -294,6 +303,25 @@ impl WorkspaceManager {
     pub(crate) fn new_with_adapters(
         session_factory: Rc<dyn TerminalSessionFactory>,
         local_home_directory_path: PathBuf,
+        adapters: WorkspaceManagerAdapters,
+        default_sidebar: SidebarState,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_with_source(
+            WorkspaceSource::Legacy {
+                factory: session_factory,
+                home: local_home_directory_path,
+            },
+            adapters,
+            default_sidebar,
+            window,
+            cx,
+        )
+    }
+
+    fn new_with_source(
+        source: WorkspaceSource,
         adapters: WorkspaceManagerAdapters,
         default_sidebar: SidebarState,
         window: &mut Window,
@@ -335,38 +363,66 @@ impl WorkspaceManager {
             native_service_adapters,
             lifecycle_dependencies,
         );
-        let (default_directory, initial_directory_error) =
-            initial_home_directory(local_home_directory_path.clone(), &local_filesystem);
-        let local_home_identity = default_directory.identity();
-        let initial_workspace_identity = default_directory.identity();
-        let initial_window_drag_platform = Rc::clone(&operating_system_window_drag_platform);
-        let mut workspaces =
-            WorkspaceCollection::new_local(default_directory, |workspace_id, home_directory| {
-                Self::create_local_tab_manager(
-                    WorkspaceTerminalSessionFactory::new_local_with_authority(
-                        Rc::clone(&session_factory),
-                        ValidatedLocalDirectory::new(
-                            home_directory.to_path_buf(),
-                            initial_workspace_identity,
-                        ),
-                        local_filesystem.clone(),
-                    ),
-                    TabManagerCreation {
-                        workspace_id,
-                        sidebar_visible,
-                        sidebar_width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
-                        operating_system_window_drag_platform: Rc::clone(
-                            &initial_window_drag_platform,
-                        ),
-                        pane_construction: pane_construction.clone(),
-                    },
-                    window,
-                    cx,
-                )
-            });
-        if let Some(reason) = initial_directory_error {
-            let _ = workspaces.set_directory_unavailable(workspaces.active_workspace_id(), reason);
-        }
+        let (session_factory, local_home_directory_path, local_home_identity, workspaces, runtime) =
+            match source {
+                WorkspaceSource::Legacy {
+                    factory: session_factory,
+                    home: local_home_directory_path,
+                } => {
+                    let (default_directory, initial_directory_error) = initial_home_directory(
+                        local_home_directory_path.clone(),
+                        &local_filesystem,
+                    );
+                    let local_home_identity = Some(default_directory.identity());
+                    let initial_workspace_identity = default_directory.identity();
+                    let initial_window_drag_platform =
+                        Rc::clone(&operating_system_window_drag_platform);
+                    let mut workspaces = WorkspaceCollection::new_local(
+                        default_directory,
+                        |workspace_id, home_directory| {
+                            Self::create_local_tab_manager(
+                                WorkspaceTerminalSessionFactory::new_local_with_authority(
+                                    Rc::clone(&session_factory),
+                                    ValidatedLocalDirectory::new(
+                                        home_directory.to_path_buf(),
+                                        initial_workspace_identity,
+                                    ),
+                                    local_filesystem.clone(),
+                                ),
+                                TabManagerCreation {
+                                    workspace_id,
+                                    sidebar_visible,
+                                    sidebar_width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
+                                    operating_system_window_drag_platform: Rc::clone(
+                                        &initial_window_drag_platform,
+                                    ),
+                                    pane_construction: pane_construction.clone(),
+                                },
+                                window,
+                                cx,
+                            )
+                        },
+                    );
+                    if let Some(reason) = initial_directory_error {
+                        let _ = workspaces
+                            .set_directory_unavailable(workspaces.active_workspace_id(), reason);
+                    }
+                    (
+                        Some(session_factory),
+                        local_home_directory_path,
+                        local_home_identity,
+                        workspaces,
+                        None,
+                    )
+                }
+                WorkspaceSource::Server(runtime) => (
+                    None,
+                    PathBuf::new(),
+                    None,
+                    WorkspaceCollection::empty(),
+                    Some(runtime),
+                ),
+            };
         cx.on_release(|manager, cx| {
             manager.release_sidebar_repositories(cx);
             manager.release_sidebar_worktrees(cx);
@@ -382,7 +438,7 @@ impl WorkspaceManager {
         )
         .detach();
         let mut remote_unavailable_reason = remote_workspace_backend_factory.unavailable_reason();
-        let remote_workspace_backend = if remote_unavailable_reason.is_some() {
+        let remote_workspace_backend = if runtime.is_some() || remote_unavailable_reason.is_some() {
             None
         } else {
             match remote_workspace_backend_factory.create(window, cx) {
@@ -411,7 +467,8 @@ impl WorkspaceManager {
         })
         .detach();
 
-        Self {
+        let mut manager = Self {
+            server: None,
             window_appearance,
             window_traffic_lights,
             transient: WorkspaceTransientUi {
@@ -444,7 +501,11 @@ impl WorkspaceManager {
             close_confirmation: CloseConfirmation::default(),
             sidebar_repositories: repository::SidebarRepositories::default(),
             sidebar_worktrees: worktrees::SidebarWorktrees::default(),
+        };
+        if let Some(runtime) = runtime {
+            manager.initialize_server(runtime, window, cx);
         }
+        manager
     }
 
     fn create_local_tab_manager(
@@ -603,6 +664,10 @@ impl WorkspaceManager {
     }
 
     pub(crate) fn focus(&self, window: &mut Window, cx: &mut App) {
+        if let Some(server) = &self.server {
+            server.restore_focus(window, cx);
+            return;
+        }
         let manager = self.workspaces.active_workspace().payload().clone();
         manager.update(cx, |manager, cx| {
             manager.set_parent_focus_blocker(None, cx);
@@ -622,6 +687,9 @@ impl WorkspaceManager {
         window: &Window,
         cx: &mut App,
     ) -> NativeServiceStatus {
+        if self.server.is_some() {
+            return NativeServiceStatus::default();
+        }
         let workspace_id = self.workspaces.active_workspace_id();
         let blocker = self.terminal_focus_blocker(window, cx);
         self.workspaces
@@ -638,6 +706,9 @@ impl WorkspaceManager {
         origin: NativeServiceOrigin,
         cx: &App,
     ) -> Option<Entity<super::TerminalPane>> {
+        if self.server.is_some() {
+            return None;
+        }
         if self.workspaces.active_workspace_id() != origin.workspace_id() {
             return None;
         }
@@ -748,6 +819,10 @@ impl WorkspaceManager {
     }
 
     pub(crate) fn open_workspace_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.server.is_some() {
+            self.open_server_workspace_switcher(None, window, cx);
+            return;
+        }
         if window_modal_is_open(window, cx) {
             return;
         }
@@ -765,6 +840,14 @@ impl WorkspaceManager {
 
     fn sync_terminal_focus_blocker(&self, window: &Window, cx: &mut Context<Self>) {
         let blocker = self.non_modal_terminal_focus_blocker(window, cx);
+        if let Some(server) = &self.server {
+            if let Some(manager) = server.active_manager() {
+                manager.update(cx, |manager, cx| {
+                    manager.set_parent_focus_blocker(blocker, cx)
+                });
+            }
+            return;
+        }
         self.workspaces
             .active_workspace()
             .payload()
@@ -941,6 +1024,9 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        let Some(factory) = self.session_factory.as_ref() else {
+            return false;
+        };
         let previous_manager = self.workspaces.active_workspace().payload().clone();
         let pane_construction = self.pane_construction.clone();
         let window_drag_platform = Rc::clone(&self.operating_system_window_drag_platform);
@@ -954,7 +1040,7 @@ impl WorkspaceManager {
             }
         };
         let mut session_factory = WorkspaceTerminalSessionFactory::new_local_with_authority(
-            Rc::clone(&self.session_factory),
+            Rc::clone(factory),
             directory.clone(),
             self.local_filesystem.clone(),
         );
@@ -1483,11 +1569,17 @@ impl WorkspaceManager {
             self.activate_workspace(workspace_id, window, cx);
             return;
         }
+        let (Some(factory), Some(home_identity)) = (
+            self.session_factory.as_ref(),
+            self.local_home_identity.as_ref(),
+        ) else {
+            return;
+        };
         let mut terminal_factory = WorkspaceTerminalSessionFactory::new_remote(
-            Rc::clone(&self.session_factory),
+            Rc::clone(factory),
             ValidatedLocalDirectory::new(
                 self.local_home_directory_path.clone(),
-                self.local_home_identity.clone(),
+                home_identity.clone(),
             ),
             RemoteTerminalMetadataContext::new(
                 completion.destination().clone(),
@@ -1844,11 +1936,17 @@ impl WorkspaceManager {
         let pinned_directory = workspace.pinned_directory().cloned();
         let expected_identity = key.physical_directory().clone();
         let tab_manager = workspace.payload().clone();
+        let (Some(factory), Some(home_identity)) = (
+            self.session_factory.as_ref(),
+            self.local_home_identity.as_ref(),
+        ) else {
+            return;
+        };
         let local_root = ValidatedLocalDirectory::new(
             self.local_home_directory_path.clone(),
-            self.local_home_identity.clone(),
+            home_identity.clone(),
         );
-        let session_factory = Rc::clone(&self.session_factory);
+        let session_factory = Rc::clone(factory);
         let cancelled = Arc::new(AtomicBool::new(false));
         let Some(progress) = self.present_remote_workspace_reconnect_progress(
             RemoteWorkspaceReconnectProgressIdentity {
@@ -2387,6 +2485,13 @@ impl WorkspaceManager {
     }
 
     fn activate_workspace_at(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(server) = &self.server {
+            let workspace = server.sidebar_order(cx).get(index).copied();
+            if let Some(workspace) = workspace {
+                self.select_server_workspace(workspace, window, cx);
+            }
+            return;
+        }
         let workspace_id = self
             .workspaces
             .iter()
@@ -2572,6 +2677,9 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if self.server.is_some() {
+            return self.close_server_window(window, cx);
+        }
         if self.close_confirmation.pending().is_some() {
             return false;
         }
@@ -2586,10 +2694,16 @@ impl WorkspaceManager {
     }
 
     pub(crate) fn application_close_facts(&self, cx: &App) -> ApplicationCloseFacts {
+        if self.server.is_some() {
+            return ApplicationCloseFacts::default();
+        }
         self.close_hierarchy(cx).application_close_facts()
     }
 
     pub(crate) fn application_pane_facts(&self, cx: &App) -> Vec<ApplicationPaneFacts> {
+        if self.server.is_some() {
+            return Vec::new();
+        }
         self.close_hierarchy(cx).application_pane_facts().collect()
     }
 
@@ -2608,6 +2722,12 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let (Some(factory), Some(home_identity)) = (
+            self.session_factory.as_ref(),
+            self.local_home_identity.as_ref(),
+        ) else {
+            return;
+        };
         let replacement = if self.workspaces.len() == 1 {
             match self.local_home_directory() {
                 Ok(directory) => directory,
@@ -2619,13 +2739,13 @@ impl WorkspaceManager {
         } else {
             ValidatedLocalDirectory::new(
                 self.local_home_directory_path.clone(),
-                self.local_home_identity.clone(),
+                home_identity.clone(),
             )
         };
+        let session_factory = Rc::clone(factory);
         self.begin_remote_workspace_close(workspace_id, window, cx);
         let was_active = self.workspaces.active_workspace_id() == workspace_id;
         let local_filesystem = self.local_filesystem.clone();
-        let session_factory = Rc::clone(&self.session_factory);
         let pane_construction = self.pane_construction.clone();
         let window_drag_platform = Rc::clone(&self.operating_system_window_drag_platform);
         let sidebar_visible = self.sidebar.read(cx).layout().visible;
@@ -2802,7 +2922,27 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.server.is_some() {
+            match event {
+                SidebarEvent::Server(event) => self.handle_server_sidebar_event(event, window, cx),
+                SidebarEvent::Create(WorkspaceCreation::Local) => {
+                    self.create_server_workspace(None, String::new(), window, cx)
+                }
+                SidebarEvent::Create(_) => self.show_server_error(
+                    super::server_desktop_contracts::DesktopClientError::UnsupportedCapability,
+                    window,
+                    cx,
+                ),
+                SidebarEvent::FocusPane => self.focus(window, cx),
+                SidebarEvent::LayoutChanged | SidebarEvent::FocusChanged => {}
+                _ => {}
+            }
+            self.sync_terminal_focus_blocker(window, cx);
+            cx.notify();
+            return;
+        }
         match event {
+            SidebarEvent::Server(event) => self.handle_server_sidebar_event(event, window, cx),
             SidebarEvent::Activate {
                 workspace_id,
                 focus_pane,
@@ -3051,6 +3191,14 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(workspace) = self.active_server_workspace() {
+            self.request_server_close(
+                spaceterm_core::operations::AssessmentTarget::KillWorkspace(workspace),
+                window,
+                cx,
+            );
+            return;
+        }
         let workspace_id = self.workspaces.active_workspace_id();
         self.request_close(CloseTarget::Workspace(workspace_id), window, cx);
     }
@@ -3584,10 +3732,15 @@ impl Drop for WorkspaceManager {
 
 impl Render for WorkspaceManager {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.server.is_some() {
+            return self.render_server(window, cx).into_any_element();
+        }
         self.sync_sidebar_repositories(cx);
         self.sync_sidebar_worktrees(cx);
         let activity = super::appearance::window_activity(window);
-        activity.mount(activity.with_scope(|| self.render_chrome(window, cx)))
+        activity
+            .mount(activity.with_scope(|| self.render_chrome(window, cx)))
+            .into_any_element()
     }
 }
 
@@ -3994,3 +4147,5 @@ mod worktrees;
 #[cfg(test)]
 #[path = "workspace_manager/tests.rs"]
 pub(crate) mod tests;
+
+mod server;
