@@ -23,6 +23,8 @@ spaceterm-client = { path = "../spaceterm-client" }
 spaceterm-core = { path = "../spaceterm-core" }
 spaceterm-host = { path = "../spaceterm-host" }
 spaceterm-protocol = { path = "../spaceterm-protocol" }
+spaceterm-distribution = { path = "../spaceterm-distribution" }
+reqwest = { version = "=0.12.28", default-features = false, features = ["blocking", "rustls-tls-webpki-roots"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 thiserror = "=2.0.19"
@@ -30,6 +32,10 @@ base64 = "=0.22.1"
 ring = "=0.17.14"
 zeroize = "=1.9.0"
 tokio = { version = "=1.53.1", default-features = false, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+
+[dev-dependencies]
+spaceterm-host = { path = "../spaceterm-host", features = ["test-support"] }
+tempfile = "=3.27.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = { version = "=5.19.0", default-features = false, features = ["async-io"] }

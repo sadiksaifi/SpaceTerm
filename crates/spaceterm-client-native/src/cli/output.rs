@@ -36,6 +36,8 @@ pub enum CliOutput {
     Assessment(ManagementAssessment),
     Progress(ManagementProgress),
     NativeProgress(NativeProgress),
+    ServiceAssessment(crate::native::NativeActionPrompt),
+    ServiceProgress(spaceterm_host::account_service::ServiceProgress),
     Unpair(UnpairReport),
     Devices(Vec<PublicPairedDevice>),
     Update {
@@ -52,6 +54,13 @@ impl CliOutput {
             Self::Progress(p) if p.state == ManagementProgressState::Unavailable => 69,
             Self::Progress(p) if p.state != ManagementProgressState::Completed => 75,
             Self::NativeProgress(p) if p.state != ProgressState::Complete => 75,
+            Self::ServiceProgress(p) => match &p.state {
+                spaceterm_host::account_service::ServiceRequestState::Completed(_) => 0,
+                spaceterm_host::account_service::ServiceRequestState::NotApplied(failure) => {
+                    crate::native::classify_service(*failure).exit_code()
+                }
+                _ => 75,
+            },
             Self::Unpair(p) if p.revocation != RevocationState::Confirmed => 75,
             _ => 0,
         }
@@ -68,6 +77,17 @@ impl CliOutput {
                         && p.phase != ManagementPhase::Completed) =>
             {
                 Err(CliFailure::UnsafeNativeState)
+            }
+            Self::ServiceProgress(p)
+                if matches!(
+                    p.state,
+                    spaceterm_host::account_service::ServiceRequestState::Completed(_)
+                ) && p.phase != spaceterm_host::account_service::ServicePhase::Completed =>
+            {
+                Err(CliFailure::UnsafeNativeState)
+            }
+            Self::ServiceAssessment(a) if a.affected_sessions > 64 => {
+                Err(CliFailure::LimitExceeded)
             }
             Self::Progress(p) if p.completed_units > p.total_units => {
                 Err(CliFailure::UnsafeNativeState)
@@ -113,6 +133,13 @@ impl CliOutput {
             Self::NativeProgress(p) => {
                 json!({"kind":"native_operation","native_request":hex(&p.request),"state":format!("{:?}",p.state),"phase":format!("{:?}",p.phase)})
             }
+            Self::ServiceAssessment(a) => {
+                json!({"kind":"native_assessment","native_request":hex(a.request.as_bytes()),"action":a.action,"token":a.token.as_str(),"affected_sessions":a.affected_sessions,"description":a.description()})
+            }
+            Self::ServiceProgress(p) => {
+                // Serialize only bounded lifecycle facts, never installation paths.
+                json!({"kind":"native_operation","native_request":hex(p.request.as_bytes()),"phase":p.phase,"state":service_state_name(&p.state),"failure":match p.state {spaceterm_host::account_service::ServiceRequestState::NotApplied(failure)=>Some(crate::native::classify_service(failure)),_=>None},"outcome":service_outcome_name(&p.state)})
+            }
             Self::Unpair(p) => {
                 json!({"kind":"unpair","server":hex(&p.server.bytes()),"device":hex(&p.device.bytes()),"pairing":p.pairing.local(),"local_connection_removed":p.local_connection_removed,"revocation":p.revocation})
             }
@@ -130,6 +157,34 @@ impl CliOutput {
     }
 }
 
+fn service_state_name(
+    state: &spaceterm_host::account_service::ServiceRequestState,
+) -> &'static str {
+    use spaceterm_host::account_service::ServiceRequestState;
+    match state {
+        ServiceRequestState::Pending => "pending",
+        ServiceRequestState::Completed(_) => "completed",
+        ServiceRequestState::NotApplied(_) => "not_applied",
+        ServiceRequestState::Indeterminate => "indeterminate",
+    }
+}
+fn service_outcome_name(
+    state: &spaceterm_host::account_service::ServiceRequestState,
+) -> Option<&'static str> {
+    use spaceterm_host::account_service::{ServiceOutcome, ServiceRequestState};
+    let ServiceRequestState::Completed(outcome) = state else {
+        return None;
+    };
+    Some(match outcome {
+        ServiceOutcome::Installed { .. } => "installed",
+        ServiceOutcome::Staged(_) => "staged",
+        ServiceOutcome::Started => "started",
+        ServiceOutcome::Stopped => "stopped",
+        ServiceOutcome::Restarted => "restarted",
+        ServiceOutcome::Activated(_) => "activated",
+        ServiceOutcome::Uninstalled => "uninstalled",
+    })
+}
 fn status_value(status: &ServerStatus) -> Value {
     let p = status.parts();
     json!({
@@ -264,6 +319,19 @@ fn validate_display_values(value: &Value) -> Result<(), CliFailure> {
         _ => Ok(()),
     }
 }
+/// Announces a provider-issued durable reservation before polling any native
+/// mutation or destructive assessment. Stderr leaves final stdout output intact.
+/// This lookup reference is not completion acknowledgement or authority.
+pub fn emit_native_request(
+    request: spaceterm_host::native_deployment::contracts::NativeRequestId,
+    io: &mut dyn CliIo,
+) -> Result<(), CliFailure> {
+    io.write_stderr(&encoded(&json!({
+        "schema": 1,
+        "request": { "native_request": hex(request.as_bytes()) }
+    }))?)
+}
+
 pub fn emit_failure(
     failure: CliFailure,
     json_output: bool,
@@ -276,7 +344,7 @@ pub fn emit_failure(
     }
 }
 
-pub const USAGE: &str = "Usage: spaceterm-cli [--json] [--non-interactive] <command>\n\nstatus [--operation <server:pairing:client:stream:sequence|native:request>]\nstart\nstop [--assess | --confirm <assessment>]\npair enroll [--server-fingerprint <64 lowercase hex digits>] [--recover-account]\npair authorize <32 lowercase hex request digits> --device-fingerprint <64 lowercase hex digits>\npair list\nunpair --device <32 lowercase hex digits> [--assess | --confirm <assessment>]\nunpair --retry-pending\nremote-access enable --bind <ip:port>... [--assess | --confirm <assessment>]\nremote-access disable [--assess | --confirm <assessment>]\nend-all-sessions [--assess | --confirm <assessment>]\nupdate check\nupdate stage [--version <stable-version>]\nupdate activate --installation <installation-id> [--assess | --confirm <assessment>]\n--help\n--version\nserve (requires the daemon's native-startup composition)\n\nRun as the owning account, not root. Noninteractive destructive actions require an exact, unexpired assessment. No discovery action installs, pairs, starts or updates a server.\n";
+pub const USAGE: &str = "Usage: spaceterm-cli [--json] [--non-interactive] <command>\n\nstatus [--operation <server:pairing:client:stream:sequence|native:request>]\ninstall [--version <stable-version>]\nstart\nrestart [--assess | --confirm <assessment>]\nuninstall [--assess | --confirm <assessment>]\nstop [--assess | --confirm <assessment>]\npair enroll [--server-fingerprint <64 lowercase hex digits>] [--recover-account]\npair authorize <32 lowercase hex request digits> --device-fingerprint <64 lowercase hex digits>\npair list\nunpair --device <32 lowercase hex digits> [--assess | --confirm <assessment>]\nunpair --retry-pending\nremote-access enable --bind <ip:port>... [--assess | --confirm <assessment>]\nremote-access disable [--assess | --confirm <assessment>]\nend-all-sessions [--assess | --confirm <assessment>]\nupdate check\nupdate stage [--version <stable-version>]\nupdate activate --installation <installation-id> [--assess | --confirm <assessment>]\n--help\n--version\nserve (requires the daemon's native-startup composition)\n\nRun as the owning account, not root. Noninteractive destructive actions require an exact, unexpired assessment. No discovery action installs, pairs, starts or updates a server.\n";
 
 pub fn emit_text(
     kind: &str,
@@ -367,6 +435,19 @@ fn human_output(output: &CliOutput) -> String {
             hex(&p.request),
             p.state,
             p.phase
+        ),
+        CliOutput::ServiceAssessment(a) => format!(
+            "{}\nRequest: native:{}\nAssessment: {}\n",
+            a.description(),
+            hex(a.request.as_bytes()),
+            a.token.as_str()
+        ),
+        CliOutput::ServiceProgress(p) => format!(
+            "Request: native:{}\nState: {}\nPhase: {:?}\nOutcome: {}\n",
+            hex(p.request.as_bytes()),
+            service_state_name(&p.state),
+            p.phase,
+            service_outcome_name(&p.state).unwrap_or("unresolved")
         ),
         CliOutput::Unpair(p) => format!(
             "Server: {}\nDevice: {}\nLocal connection removed: {}\nServer revocation: {:?}\n",

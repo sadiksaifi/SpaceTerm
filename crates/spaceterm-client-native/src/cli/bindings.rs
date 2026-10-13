@@ -56,8 +56,13 @@ pub enum NativeCliCommand {
     Resolve {
         request: spaceterm_host::native_deployment::contracts::NativeRequestId,
     },
+    Install {
+        version: Option<StableVersion>,
+    },
     Start,
     Stop,
+    Restart,
+    Uninstall,
     RemoteAccess {
         endpoints: Vec<std::net::SocketAddr>,
     },
@@ -70,9 +75,10 @@ pub enum NativeCliCommand {
     },
 }
 /// The bridge is supplied by the native provider. It must preserve that owner's
-/// original NativeRequestId, exact assessment, expiry and protected sudo path.
-/// In particular RemoteAccess obtains BOTH pairing and OS authority before the
-/// actor transition. This port cannot mutate SQL or construct listener authority.
+/// original NativeRequestId, exact assessment and expiry. Only missing Linux
+/// linger invokes the supplied authorization adapter. Remote policy is paired
+/// protocol work, not a native or administrator-authorized lifecycle operation.
+/// This port cannot mutate SQL or construct listener authority.
 pub trait NativeCommandBindings: Send + Sync {
     fn inspect(&self, key: AccountBuildKey) -> ManagementFuture<'_, NativeObservation>;
     fn run<'a>(
@@ -312,34 +318,12 @@ pub fn classify_native(failure: NativeFailure) -> ManagementFailure {
     }
 }
 
-/// Identity selection is compile-time only. The coordinator's validated shared
-/// build-identity handoff is required before enabling packaged Release/Preflight.
-pub const COMPILED_BUILD_IDENTITY: spaceterm_host::startup::BuildIdentity =
-    spaceterm_host::startup::BuildIdentity::Development;
-pub const CLI_VERSION: &str = "spaceterm-cli development";
+pub const CLI_VERSION: &str = "spaceterm-cli";
 
+/// Uses the host's compiled identity and independently resolved account.
+/// Environment values and command-line flags cannot choose another registration.
 pub fn invoking_account_key() -> Result<AccountBuildKey, ManagementFailure> {
-    #[cfg(unix)]
-    {
-        unsafe extern "C" {
-            fn getuid() -> u32;
-            fn geteuid() -> u32;
-        }
-        // These C functions take no pointers and return the current process IDs.
-        let (real, effective) = unsafe { (getuid(), geteuid()) };
-        if real == 0 || effective == 0 {
-            return Err(ManagementFailure::AuthorizationDenied);
-        }
-        if real != effective || real == u32::MAX {
-            return Err(ManagementFailure::UnsafeNativeState);
-        }
-        Ok(AccountBuildKey {
-            account_uid: real,
-            build_identity: COMPILED_BUILD_IDENTITY,
-        })
-    }
-    #[cfg(not(unix))]
-    {
-        Err(ManagementFailure::UnsupportedHost)
-    }
+    spaceterm_host::account_service::ServiceSupervisor::current(None)
+        .map(|supervisor| supervisor.key())
+        .map_err(crate::native::classify_service)
 }

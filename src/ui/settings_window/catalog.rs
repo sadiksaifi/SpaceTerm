@@ -171,6 +171,8 @@ pub(super) enum SettingsRowId {
     ServerRemoteAccess,
     /// The addresses the selected server accepts network connections on.
     ServerRemoteAccessScope,
+    /// The selected server's authorized devices and exact-target unpair actions.
+    ServerPairedDevices,
     /// Removes this device's pairing with the selected server.
     ServerUnpair,
     /// The Keybinding of one Command.
@@ -235,6 +237,7 @@ impl SettingsRowId {
             | Self::ServerPermissions
             | Self::ServerRemoteAccess
             | Self::ServerRemoteAccessScope
+            | Self::ServerPairedDevices
             | Self::ServerUnpair
             // Keybindings live outside the appearance preferences and reset through the keymap
             // profile, which returns a displaced default to its Command.
@@ -823,6 +826,20 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         selector: "settings-row-server-remote-access-scope",
     },
     SettingsRowDescriptor {
+        id: SettingsRowId::ServerPairedDevices,
+        section: SettingsSectionId::Servers,
+        group: "Pairing",
+        label: "Paired devices",
+        keywords: &[
+            "authorized devices",
+            "this device",
+            "unpair device",
+            "revoke",
+            "last device",
+        ],
+        selector: "settings-row-server-paired-devices",
+    },
+    SettingsRowDescriptor {
         id: SettingsRowId::ServerUnpair,
         section: SettingsSectionId::Servers,
         group: "Pairing",
@@ -1025,7 +1042,7 @@ mod tests {
     }
 
     /// The complete preference row identity set, so the catalog cannot silently omit one.
-    const EVERY_PREFERENCE_ROW: [SettingsRowId; 42] = [
+    const EVERY_PREFERENCE_ROW: [SettingsRowId; 43] = [
         SettingsRowId::AppearanceMode,
         SettingsRowId::Opacity,
         SettingsRowId::Blur,
@@ -1063,6 +1080,7 @@ mod tests {
         SettingsRowId::ServerPermissions,
         SettingsRowId::ServerRemoteAccess,
         SettingsRowId::ServerRemoteAccessScope,
+        SettingsRowId::ServerPairedDevices,
         SettingsRowId::ServerUnpair,
         SettingsRowId::SettingsFile,
         SettingsRowId::ExportSettings,
@@ -1373,6 +1391,7 @@ mod tests {
                     | SettingsRowId::ServerPermissions
                     | SettingsRowId::ServerRemoteAccess
                     | SettingsRowId::ServerRemoteAccessScope
+                    | SettingsRowId::ServerPairedDevices
                     | SettingsRowId::ServerUnpair
                     | SettingsRowId::Shortcut(_)
                     | SettingsRowId::SettingsFile
@@ -1441,7 +1460,7 @@ mod tests {
             ("server permissions", SettingsRowId::ServerPermissions),
             ("remote access", SettingsRowId::ServerRemoteAccess),
             ("bind", SettingsRowId::ServerRemoteAccessScope),
-            ("unpair", SettingsRowId::ServerUnpair),
+            ("unpair", SettingsRowId::ServerPairedDevices),
         ] {
             let first = matching_rows(query).first().copied();
             assert_eq!(first, Some(row), "{query:?} should rank {row:?} first");
@@ -1500,6 +1519,7 @@ mod tests {
                     | SettingsRowId::ServerPermissions
                     | SettingsRowId::ServerRemoteAccess
                     | SettingsRowId::ServerRemoteAccessScope
+                    | SettingsRowId::ServerPairedDevices
                     | SettingsRowId::ServerUnpair
             );
             assert_eq!(

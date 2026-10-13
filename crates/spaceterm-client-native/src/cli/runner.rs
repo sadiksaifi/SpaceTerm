@@ -28,6 +28,14 @@ pub trait CliIo: Send {
     ) -> Result<(), CliFailure> {
         Err(CliFailure::ConfirmationRequired)
     }
+    /// Confirms a native all-client lifecycle assessment through the controlling
+    /// terminal. Implementations must not silently confirm or consume stdin.
+    fn confirm_native_action(
+        &mut self,
+        _prompt: &crate::native::NativeActionPrompt,
+    ) -> Result<(), CliFailure> {
+        Err(CliFailure::ConfirmationRequired)
+    }
     /// Read a bounded controlling-terminal reply, never stdin.
     fn read_confirmation(
         &mut self,
@@ -88,6 +96,33 @@ pub async fn dispatch(
         }
     }
 }
+/// Ends only this client's wait when interrupted. Admitted host work retains its
+/// original durable request; interruption neither acknowledges nor reissues it.
+pub async fn dispatch_until(
+    invocation: CliInvocation,
+    dependencies: &CliDependencies,
+    io: &mut dyn CliIo,
+    interrupted: impl std::future::Future<Output = ()>,
+) -> Dispatch {
+    let json = invocation.json;
+    let completed = {
+        let waiting = dispatch(invocation, dependencies, io);
+        tokio::pin!(waiting);
+        tokio::pin!(interrupted);
+        tokio::select! {
+            biased;
+            () = &mut interrupted => None,
+            result = &mut waiting => Some(result),
+        }
+    };
+    completed.unwrap_or_else(|| {
+        let failure = output::emit_failure(CliFailure::OutcomePending, json, io)
+            .err()
+            .unwrap_or(CliFailure::OutcomePending);
+        Dispatch::Exit(CliExit(failure.exit_code()))
+    })
+}
+
 async fn run(
     invocation: CliInvocation,
     deps: &CliDependencies,
@@ -166,8 +201,12 @@ async fn run(
             )
             .await
             .map_err(|_| CliFailure::OutcomePending)??;
-            if !matches!(&result, output::CliOutput::NativeProgress(progress) if progress.request == *request.as_bytes())
-            {
+            let original_request = match &result {
+                output::CliOutput::NativeProgress(progress) => Some(progress.request),
+                output::CliOutput::ServiceProgress(progress) => Some(*progress.request.as_bytes()),
+                _ => None,
+            };
+            if original_request != Some(*request.as_bytes()) {
                 return Err(CliFailure::UnsafeNativeState);
             }
             result
@@ -200,6 +239,31 @@ async fn run(
             }
             output::CliOutput::Status(status)
         }
+        CliCommand::Install { version } => {
+            deps.native
+                .run(
+                    key,
+                    NativeCliCommand::Install { version },
+                    ConfirmationMode::Interactive,
+                    mode,
+                    io,
+                )
+                .await?
+        }
+        CliCommand::Restart { confirmation } => {
+            native_confirmed(deps, key, NativeCliCommand::Restart, confirmation, mode, io).await?
+        }
+        CliCommand::Uninstall { confirmation } => {
+            native_confirmed(
+                deps,
+                key,
+                NativeCliCommand::Uninstall,
+                confirmation,
+                mode,
+                io,
+            )
+            .await?
+        }
         CliCommand::Start => {
             deps.native
                 .run(
@@ -218,12 +282,18 @@ async fn run(
             endpoints,
             confirmation,
         } => {
-            native_confirmed(
+            require_confirmation(&confirmation, mode)?;
+            let server = read_query(deps.protocol.status()).await?.parts().server;
+            let policy = if endpoints.is_empty() {
+                spaceterm_core::remote_access::RemoteAccessPolicy::disabled(server)
+            } else {
+                spaceterm_core::remote_access::RemoteAccessPolicy::enabled(server, endpoints)
+                    .map_err(|_| CliFailure::Usage)?
+            };
+            protocol_confirmed(
                 deps,
-                key,
-                NativeCliCommand::RemoteAccess { endpoints },
+                ManagementAction::RemoteAccess { policy },
                 confirmation,
-                mode,
                 io,
             )
             .await?
@@ -282,26 +352,13 @@ async fn run(
         CliCommand::EndAllSessions { confirmation } => {
             require_confirmation(&confirmation, mode)?;
             let server = read_query(deps.protocol.status()).await?.parts().server;
-            let action = ManagementAction::EndAllSessions { server };
-            let assessment = match &confirmation {
-                ConfirmationMode::Token(token) => {
-                    read_query(
-                        deps.protocol
-                            .restore_assessment(action.clone(), token.clone()),
-                    )
-                    .await?
-                }
-                _ => read_query(deps.protocol.assess(action.clone())).await?,
-            };
-            if assessment.action() != &action {
-                return Err(CliFailure::StaleAssessment);
-            }
-            if confirmation == ConfirmationMode::Assess {
-                output::CliOutput::Assessment(assessment)
-            } else {
-                let confirmed = confirm_assessment(assessment, confirmation, io)?;
-                output::CliOutput::Progress(deps.protocol.execute(confirmed).await?)
-            }
+            protocol_confirmed(
+                deps,
+                ManagementAction::EndAllSessions { server },
+                confirmation,
+                io,
+            )
+            .await?
         }
         CliCommand::Unpair {
             device,
@@ -410,6 +467,34 @@ async fn native_confirmed(
 ) -> Result<output::CliOutput, CliFailure> {
     require_confirmation(&confirmation, mode)?;
     deps.native.run(key, command, confirmation, mode, io).await
+}
+async fn protocol_confirmed(
+    deps: &CliDependencies,
+    action: ManagementAction,
+    confirmation: ConfirmationMode,
+    io: &mut dyn CliIo,
+) -> Result<output::CliOutput, CliFailure> {
+    let assessment = match &confirmation {
+        ConfirmationMode::Token(token) => {
+            read_query(
+                deps.protocol
+                    .restore_assessment(action.clone(), token.clone()),
+            )
+            .await?
+        }
+        _ => read_query(deps.protocol.assess(action.clone())).await?,
+    };
+    if assessment.action() != &action {
+        return Err(CliFailure::StaleAssessment);
+    }
+    if confirmation == ConfirmationMode::Assess {
+        Ok(output::CliOutput::Assessment(assessment))
+    } else {
+        let confirmed = confirm_assessment(assessment, confirmation, io)?;
+        Ok(output::CliOutput::Progress(
+            deps.protocol.execute(confirmed).await?,
+        ))
+    }
 }
 fn confirm_assessment(
     assessment: spaceterm_client::management_cli::ManagementAssessment,

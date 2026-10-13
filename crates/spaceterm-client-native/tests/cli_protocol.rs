@@ -151,6 +151,7 @@ struct Backend {
     context: AuthenticatedManagementContext,
     submitted: Arc<Mutex<Vec<Command>>>,
     resolved: Arc<Mutex<Vec<OperationId>>>,
+    saved_assessment: Mutex<Option<ManagementAssessment>>,
 }
 fn progress(state: ManagementProgressState) -> ManagementProgress {
     ManagementProgress {
@@ -188,15 +189,42 @@ impl ManagementBackend for Backend {
             .unwrap())
         })
     }
-    fn assess(&self, _: ManagementAction) -> ManagementFuture<'_, ManagementAssessment> {
-        Box::pin(async { Ok(assessment()) })
+    fn assess(&self, action: ManagementAction) -> ManagementFuture<'_, ManagementAssessment> {
+        Box::pin(async move {
+            let value = match action {
+                ManagementAction::RemoteAccess { policy } => ManagementAssessment::new(
+                    AssessmentToken::new("remote_token".to_owned()).unwrap(),
+                    ManagementAction::RemoteAccess { policy },
+                    AssessmentEvidence::RemoteAccess {
+                        current_version: FieldVersion::new(1),
+                    },
+                    MonotonicTick::new(0),
+                    MonotonicTick::new(30_000),
+                )
+                .unwrap(),
+                _ => assessment(),
+            };
+            *self.saved_assessment.lock().unwrap() = Some(value.clone());
+            Ok(value)
+        })
     }
     fn restore_assessment(
         &self,
         _: ManagementAction,
-        _: AssessmentToken,
+        token: AssessmentToken,
     ) -> ManagementFuture<'_, ManagementAssessment> {
-        Box::pin(async { Ok(assessment()) })
+        Box::pin(async move {
+            let saved = self
+                .saved_assessment
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(assessment);
+            if saved.token() != &token {
+                return Err(ManagementFailure::StaleAssessment);
+            }
+            Ok(saved)
+        })
     }
     fn submit(&self, command: Command) -> ManagementFuture<'_, ManagementProgress> {
         self.submitted.lock().unwrap().push(command);
@@ -248,6 +276,7 @@ fn dependencies(major: u32) -> (CliDependencies, Trace<Command>, Trace<Operation
             context,
             submitted: submitted.clone(),
             resolved: resolved.clone(),
+            saved_assessment: Mutex::new(None),
         },
         Arc::new(Clock),
     );
@@ -381,6 +410,7 @@ async fn cli_status_reports_the_authenticated_negotiated_major_not_an_observed_p
                 .unwrap(),
                 submitted: Arc::new(Mutex::new(vec![])),
                 resolved: Arc::new(Mutex::new(vec![])),
+                saved_assessment: Mutex::new(None),
             },
             Arc::new(Clock),
         );
@@ -398,5 +428,310 @@ async fn cli_status_reports_the_authenticated_negotiated_major_not_an_observed_p
         let output: serde_json::Value = serde_json::from_slice(&io.stdout).unwrap();
         assert_eq!(output["result"]["negotiated_protocol_major"], major);
         assert_eq!(output["result"]["native"]["verified"], false);
+    }
+}
+
+struct CompanionBackend {
+    context: AuthenticatedManagementContext,
+    reads: Arc<std::sync::atomic::AtomicUsize>,
+}
+impl StatusBackend for CompanionBackend {
+    fn context(&self) -> Result<AuthenticatedManagementContext, ManagementFailure> {
+        Ok(self.context)
+    }
+    fn status(&self) -> ManagementFuture<'_, ServerStatus> {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async { Err(ManagementFailure::Offline) })
+    }
+    fn subscribe_status(&self) -> ManagementFuture<'_, StatusSubscription> {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async { Err(ManagementFailure::Offline) })
+    }
+}
+
+#[tokio::test]
+async fn native_companion_rejects_borrowed_cli_identity_and_reports_missing_setup_before_offline() {
+    for major in [1, 2] {
+        let root = tempfile::tempdir().unwrap();
+        let account = spaceterm_host::account_service::test_support::AccountServiceFixture::new(
+            root.path(),
+            BuildIdentity::Development,
+        )
+        .unwrap();
+        let provider =
+            spaceterm_client_native::NativeClientProvider::from_supervisor(account.reopen());
+        let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let backend = |kind| CompanionBackend {
+            context: AuthenticatedManagementContext::from_connection(
+                &authenticated(major, true, true).unwrap(),
+                stream(),
+                kind,
+            )
+            .unwrap(),
+            reads: reads.clone(),
+        };
+        assert!(matches!(
+            provider.clone().with_companion_backend(
+                companion_saved(4, true),
+                &ReceiptVerifier,
+                backend(ManagementClientKind::Cli)
+            ),
+            Err(ManagementFailure::AuthorizationDenied)
+        ));
+        for saved in [companion_saved(4, false), companion_saved(7, true)] {
+            assert!(matches!(
+                provider.clone().with_companion_backend(
+                    saved,
+                    &ReceiptVerifier,
+                    backend(ManagementClientKind::StatusCompanion)
+                ),
+                Err(ManagementFailure::AuthorizationDenied)
+            ));
+        }
+        let provider = provider
+            .with_companion_backend(
+                companion_saved(4, true),
+                &ReceiptVerifier,
+                backend(ManagementClientKind::StatusCompanion),
+            )
+            .unwrap();
+        let status = provider.companion_status().unwrap();
+        assert_eq!(
+            status.status().await,
+            Err(ManagementFailure::NativeUnavailable)
+        );
+        assert!(matches!(
+            status.subscribe_status().await,
+            Err(ManagementFailure::NativeUnavailable)
+        ));
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(!account.anchor().exists());
+    }
+}
+
+struct ReceiptVerifier;
+impl spaceterm_client::journal::ReceiptVerifier for ReceiptVerifier {
+    fn verify(
+        &self,
+        pin: ServerPin,
+        receipt: &spaceterm_core::pairing::SignedPairingReceipt,
+    ) -> Result<(), spaceterm_client::failure::ClientFailure> {
+        let failure = || {
+            spaceterm_client::failure::ClientFailure::new(
+                spaceterm_client::failure::ClientFailureClass::InvalidPeer,
+            )
+        };
+        let canonical = serde_json::to_vec(&receipt.parts().claims).map_err(|_| failure())?;
+        if canonical != receipt.parts().canonical_body {
+            return Err(failure());
+        }
+        ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, pin.public_key)
+            .verify(&canonical, &receipt.parts().signature)
+            .map_err(|_| failure())
+    }
+}
+fn companion_saved(client_local: u64, additional: bool) -> spaceterm_client::journal::SavedBinding {
+    use spaceterm_client::api::{
+        ConnectionTarget, PairedServerBinding, RouteDescription, RouteParts,
+    };
+    use spaceterm_core::authority::StoreRevision;
+    use spaceterm_core::pairing::*;
+    let issuer = Ed25519KeyPair::from_seed_unchecked(&[51; 32]).unwrap();
+    let original = stream();
+    let client = ClientId::new(original.server(), client_local).unwrap();
+    let streams = PairingClientStreams::new(PairingClientStreamsParts {
+        client: ClientRecord {
+            id: client,
+            pairing: original.pairing(),
+        },
+        ordinary: OperationStreamId::new(original.key(), original.pairing(), client).unwrap(),
+        self_revocation: OperationStreamId::new(
+            OperationStreamKey::new(original.server(), 6).unwrap(),
+            original.pairing(),
+            client,
+        )
+        .unwrap(),
+    })
+    .unwrap();
+    let pin = ServerPin {
+        identity: original.server().bytes(),
+        public_key: issuer.public_key().as_ref().try_into().unwrap(),
+    };
+    let device = DeviceId::new([2; 16]);
+    let target = ConnectionTarget::new(
+        pin,
+        device,
+        original.pairing(),
+        client,
+        RouteDescription::new(RouteParts::Ipc {
+            directory: "/private/local".into(),
+            name: "s".into(),
+        })
+        .unwrap(),
+        CredentialReference::new([4; 16]),
+        LocalPairingGeneration::new(1).unwrap(),
+    )
+    .unwrap();
+    let pairing = PairingTarget::new(PairingTargetParts {
+        server: original.server(),
+        device,
+        pairing: original.pairing(),
+    })
+    .unwrap();
+    let keys = PairingKeys::new(PairingKeysParts {
+        device_identity_public_key: [5; 32],
+        pairing_authentication_public_key: [6; 32],
+    })
+    .unwrap();
+    let operation = OperationBinding {
+        id: OperationId::new(
+            OperationStreamId::new(
+                OperationStreamKey::new(original.server(), 8).unwrap(),
+                original.pairing(),
+                client,
+            )
+            .unwrap(),
+            OperationSequence::new(1).unwrap(),
+        ),
+        digest: RequestDigest::from_bytes([7; 32]),
+    };
+    let claims = if additional {
+        PairingReceiptBody::ClientBinding {
+            target: pairing,
+            keys,
+            client: streams.clone(),
+            operation,
+            revision: StoreRevision::new(1),
+        }
+    } else {
+        PairingReceiptBody::Enrollment {
+            target: pairing,
+            keys,
+            client: streams.clone(),
+            enrollment: operation,
+            revision: StoreRevision::new(1),
+        }
+    };
+    let canonical = serde_json::to_vec(&claims).unwrap();
+    let signature = issuer.sign(&canonical).as_ref().to_vec();
+    let receipt = SignedPairingReceipt::new(SignedPairingReceiptParts {
+        schema: 1,
+        claims,
+        canonical_body: canonical,
+        signature,
+    })
+    .unwrap();
+    spaceterm_client::journal::SavedBinding::verified(
+        PairedServerBinding::new(target),
+        streams,
+        receipt,
+        &ReceiptVerifier,
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn remote_policy_uses_authenticated_protocol_and_exact_explicit_scope_without_native_authority()
+ {
+    for major in [1, 2] {
+        let (deps, submitted, _) = dependencies(major);
+        let (code, io) = run(
+            &[
+                "--json",
+                "--non-interactive",
+                "remote-access",
+                "enable",
+                "--bind",
+                "0.0.0.0:0",
+                "--bind",
+                "[::]:4000",
+                "--assess",
+            ],
+            &deps,
+        )
+        .await;
+        assert_eq!(code, 0);
+        let result: serde_json::Value = serde_json::from_slice(&io.stdout).unwrap();
+        assert_eq!(result["result"]["action"], "remote_access");
+        assert!(submitted.lock().unwrap().is_empty());
+        let token = result["result"]["token"].as_str().unwrap();
+        // A token cannot silently disable the listener or broaden/change its bind scope.
+        assert_eq!(
+            run(
+                &[
+                    "--non-interactive",
+                    "remote-access",
+                    "disable",
+                    "--confirm",
+                    token,
+                ],
+                &deps
+            )
+            .await
+            .0,
+            2
+        );
+        assert!(submitted.lock().unwrap().is_empty());
+        let (code, io) = run(
+            &[
+                "--non-interactive",
+                "remote-access",
+                "enable",
+                "--bind",
+                "0.0.0.0:0",
+                "--bind",
+                "[::]:4000",
+                "--confirm",
+                token,
+            ],
+            &deps,
+        )
+        .await;
+        assert_eq!(code, 75);
+        assert_eq!(io.read_terminal, 0);
+        assert_eq!(
+            *submitted.lock().unwrap(),
+            [Command::SetRemoteAccess {
+                server: stream().server(),
+                expected_version: FieldVersion::new(1),
+                value: RemoteAccessPolicy::enabled(
+                    stream().server(),
+                    vec!["0.0.0.0:0".parse().unwrap(), "[::]:4000".parse().unwrap(),]
+                )
+                .unwrap(),
+            }]
+        );
+    }
+}
+
+#[tokio::test]
+async fn remote_disable_is_confirmed_protocol_work_and_noninteractive_enable_cannot_auto_confirm() {
+    for major in [1, 2] {
+        let (deps, submitted, _) = dependencies(major);
+        assert_eq!(
+            parse(
+                [
+                    "--non-interactive",
+                    "remote-access",
+                    "enable",
+                    "--bind",
+                    "127.0.0.1:4000",
+                ]
+                .map(std::ffi::OsString::from)
+            ),
+            Err(ManagementFailure::ConfirmationRequired)
+        );
+        assert!(submitted.lock().unwrap().is_empty());
+        let (code, io) = run(&["remote-access", "disable"], &deps).await;
+        assert_eq!(code, 75);
+        assert_eq!(io.read_terminal, 1);
+        assert_eq!(
+            *submitted.lock().unwrap(),
+            [Command::SetRemoteAccess {
+                server: stream().server(),
+                expected_version: FieldVersion::new(1),
+                value: RemoteAccessPolicy::disabled(stream().server()),
+            }]
+        );
     }
 }

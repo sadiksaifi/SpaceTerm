@@ -181,3 +181,27 @@ fn non_utf8_arguments_fail_without_lossy_echo() {
         Err(CliFailure::Usage)
     );
 }
+
+#[test]
+fn account_install_is_explicit_and_restart_and_uninstall_require_exact_confirmation() {
+    assert!(invocation(&["install"]).is_ok());
+    assert!(invocation(&["install", "--version", "1.2.3"]).is_ok());
+    for command in ["restart", "uninstall"] {
+        assert_eq!(
+            invocation(&["--non-interactive", command]),
+            Err(CliFailure::ConfirmationRequired)
+        );
+        assert!(invocation(&[command, "--assess"]).is_ok());
+        assert!(invocation(&["--non-interactive", command, "--confirm", "original_1"]).is_ok());
+        assert_eq!(invocation(&[command, "--force"]), Err(CliFailure::Usage));
+    }
+    for args in [
+        vec!["install", "--executable", "/tmp/server"],
+        vec!["install", "--version", "01.2.3"],
+        vec!["install", "--version", "18446744073709551616.0.0"],
+        vec!["install", "--build", "release"],
+        vec!["uninstall", "--delete-data"],
+    ] {
+        assert_eq!(invocation(&args), Err(CliFailure::Usage));
+    }
+}

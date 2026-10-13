@@ -1,7 +1,5 @@
 use std::{
-    ffi::{CStr, OsString},
     fmt,
-    os::unix::ffi::OsStringExt,
     path::PathBuf,
     sync::{
         Arc,
@@ -60,6 +58,8 @@ pub(super) struct Reservation {
     pub(super) acknowledged: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) service: Option<RequestRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) install: Option<super::install::InstallRecord>,
 }
 
 impl Journal {
@@ -101,15 +101,25 @@ impl Journal {
         if self
             .reservations
             .iter()
-            .filter(|r| r.service.as_ref().is_some_and(|s| s.pending()))
+            .filter(|r| {
+                r.service.as_ref().is_some_and(|s| s.pending())
+                    || r.install.as_ref().is_some_and(|s| s.pending())
+            })
             .count()
             > 1
         {
             return Err(ServiceFailure::InvalidRecord);
         }
         for reservation in &self.reservations {
-            if reservation.owner.is_some() && reservation.service.is_some() {
+            if usize::from(reservation.owner.is_some())
+                + usize::from(reservation.service.is_some())
+                + usize::from(reservation.install.is_some())
+                > 1
+            {
                 return Err(ServiceFailure::InvalidRecord);
+            }
+            if let Some(install) = &reservation.install {
+                install.validate(key, self.request(reservation.sequence)?)?;
             }
             if let Some(service) = &reservation.service {
                 service.validate(key, self.request(reservation.sequence)?)?;
@@ -160,6 +170,8 @@ pub struct ServiceSupervisor {
     pub(super) manager: Option<Arc<dyn ServiceManager>>,
     pub(super) processes: Option<Arc<dyn ServiceProcesses>>,
     pub(super) clock: Arc<dyn ServiceClock>,
+    #[cfg(feature = "test-support")]
+    pub(super) test_installation_trust: Option<spaceterm_distribution::UpdateKey>,
 }
 
 impl fmt::Debug for ServiceSupervisor {
@@ -186,6 +198,17 @@ impl ServiceSupervisor {
             BuildIdentity::Preflight => "preflight",
             BuildIdentity::Development => "development",
         };
+        let installations: Arc<dyn super::ServiceInstallations> =
+            Arc::new(super::NativeServiceInstallations);
+        #[cfg(target_os = "macos")]
+        let manager: Arc<dyn ServiceManager> = Arc::new(super::LaunchdServiceManager::current(
+            Arc::clone(&installations),
+        )?);
+        #[cfg(target_os = "linux")]
+        let manager: Arc<dyn ServiceManager> = Arc::new(super::SystemdServiceManager::current(
+            Arc::clone(&installations),
+        )?);
+        let processes = Arc::new(super::NativeServiceProcesses::current(installations)?);
         Ok(Self {
             key: AccountBuildKey {
                 account_uid: uid,
@@ -194,10 +217,26 @@ impl ServiceSupervisor {
             anchor: home.join(".spaceterm-services").join(name),
             indeterminate: Arc::new(AtomicBool::new(false)),
             authorization,
-            manager: None,
-            processes: None,
+            manager: Some(manager),
+            processes: Some(processes),
             clock: Arc::new(NativeClock),
+            #[cfg(feature = "test-support")]
+            test_installation_trust: None,
         })
+    }
+    /// Composes the owning runtime's admission and descendant-custody port with
+    /// actual-account native process and signed executable observations.
+    /// This does not replace account, storage, manager or artifact authority.
+    pub fn with_runtime_processes(
+        mut self,
+        runtime: Arc<dyn ServiceProcesses>,
+    ) -> Result<Self, ServiceFailure> {
+        let installations: Arc<dyn super::ServiceInstallations> =
+            Arc::new(super::NativeServiceInstallations);
+        self.processes = Some(Arc::new(
+            super::NativeServiceProcesses::current(installations)?.with_runtime(runtime),
+        ));
+        Ok(self)
     }
     /// Returns the current account and compiled identity.
     pub fn key(&self) -> AccountBuildKey {
@@ -259,7 +298,7 @@ impl ServiceSupervisor {
                 let Some(unsubmitted) = journal
                     .reservations
                     .iter()
-                    .position(|r| r.owner.is_none() && r.service.is_none())
+                    .position(|r| r.owner.is_none() && r.service.is_none() && r.install.is_none())
                 else {
                     return Err(ServiceFailure::LimitExceeded);
                 };
@@ -275,6 +314,7 @@ impl ServiceSupervisor {
                 owner: None,
                 acknowledged: false,
                 service: None,
+                install: None,
             });
             match self.publish_journal(&directory, &journal, snapshot.as_ref()) {
                 Ok(()) => return Ok(request),
@@ -300,11 +340,16 @@ impl ServiceSupervisor {
             return self.acknowledge_owner_request(request);
         }
         self.mutate_request(request, |journal, index| {
-            let service = journal.reservations[index]
+            let reservation = &journal.reservations[index];
+            if !reservation
                 .service
                 .as_ref()
-                .ok_or(ServiceFailure::Pending)?;
-            if service.phase != ServicePhase::Completed {
+                .is_some_and(|record| record.phase == ServicePhase::Completed)
+                && !reservation
+                    .install
+                    .as_ref()
+                    .is_some_and(|record| record.phase == ServicePhase::Completed)
+            {
                 return Err(ServiceFailure::Pending);
             }
             journal.reservations.remove(index);
@@ -356,6 +401,16 @@ impl ServiceSupervisor {
                 .checked_add(service.reserved_growth()?)
                 .ok_or(ServiceFailure::LimitExceeded)?;
         }
+        reserved = reserved
+            .checked_add(
+                journal
+                    .reservations
+                    .iter()
+                    .filter(|r| r.install.as_ref().is_some_and(|record| record.pending()))
+                    .count()
+                    * 4096,
+            )
+            .ok_or(ServiceFailure::LimitExceeded)?;
         if reserved > JOURNAL_LIMIT {
             return Err(ServiceFailure::LimitExceeded);
         }
@@ -401,48 +456,8 @@ pub(super) fn decode<T: Serialize + serde::de::DeserializeOwned>(
 }
 
 pub(super) fn current_account() -> Result<(u32, PathBuf), ServiceFailure> {
-    // SAFETY: credential reads have no preconditions and do not change authority.
-    let (uid, effective) = unsafe { (libc::getuid(), libc::geteuid()) };
-    if uid == 0 || effective == 0 {
-        return Err(ServiceFailure::RootAccount);
-    }
-    if uid != effective || uid == u32::MAX {
-        return Err(ServiceFailure::IdentityMismatch);
-    }
-    let mut buffer = vec![0_u8; 64 * 1024];
-    let mut result = std::ptr::null_mut();
-    let mut account = std::mem::MaybeUninit::<libc::passwd>::uninit();
-    // SAFETY: writable passwd and buffer live through extraction. getpwuid_r
-    // bounds all writes by the supplied length. result is checked before use.
-    let status = unsafe {
-        libc::getpwuid_r(
-            uid,
-            account.as_mut_ptr(),
-            buffer.as_mut_ptr().cast(),
-            buffer.len(),
-            &mut result,
-        )
-    };
-    if status != 0 || result.is_null() {
-        return Err(ServiceFailure::StorageUnavailable);
-    }
-    let account = unsafe { account.assume_init() };
-    if account.pw_dir.is_null() || account.pw_uid != uid {
-        return Err(ServiceFailure::IdentityMismatch);
-    }
-    let home = PathBuf::from(OsString::from_vec(
-        unsafe { CStr::from_ptr(account.pw_dir) }
-            .to_bytes()
-            .to_vec(),
-    ));
-    validate_path(&home)?;
-    // Never manufacture a missing account home, including an unavailable volume.
-    let facts = std::fs::symlink_metadata(&home).map_err(|_| ServiceFailure::StorageUnavailable)?;
-    use std::os::unix::fs::MetadataExt as _;
-    if !facts.is_dir() || facts.uid() != uid {
-        return Err(ServiceFailure::UnsafeStorage);
-    }
-    Ok((uid, home))
+    let account = super::TrustedAccountFacts::current()?;
+    Ok((account.uid(), account.home().to_owned()))
 }
 
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -659,7 +674,7 @@ impl RequestRecord {
 }
 
 impl ServiceSupervisor {
-    fn manager(&self) -> Result<&dyn ServiceManager, ServiceFailure> {
+    pub(super) fn manager(&self) -> Result<&dyn ServiceManager, ServiceFailure> {
         self.manager
             .as_deref()
             .ok_or(ServiceFailure::SupervisorUnavailable)
@@ -669,7 +684,7 @@ impl ServiceSupervisor {
             .as_deref()
             .ok_or(ServiceFailure::CleanupUnresolved)
     }
-    fn lifecycle_lease(&self) -> Result<Lease, ServiceFailure> {
+    pub(super) fn lifecycle_lease(&self) -> Result<Lease, ServiceFailure> {
         Directory::open(&self.anchor)?
             .ok_or(ServiceFailure::Missing)?
             .lease("service-lock")
@@ -678,19 +693,25 @@ impl ServiceSupervisor {
     fn original(&self, request: NativeRequestId) -> Result<Option<RequestRecord>, ServiceFailure> {
         let (_, _, journal) = self.read_journal()?;
         let index = journal.reservation(request)?;
-        if journal.reservations[index].owner.is_some() {
+        if journal.reservations[index].owner.is_some()
+            || journal.reservations[index].install.is_some()
+        {
             return Err(ServiceFailure::RequestConflict);
         }
         Ok(journal.reservations[index].service.clone())
     }
-    fn ensure_no_pending(&self, request: NativeRequestId) -> Result<(), ServiceFailure> {
+    pub(super) fn ensure_no_pending(&self, request: NativeRequestId) -> Result<(), ServiceFailure> {
         let (_, _, journal) = self.read_journal()?;
         if journal.reservations.iter().any(|reservation| {
             journal.request(reservation.sequence).ok() != Some(request)
-                && reservation
+                && (reservation
                     .service
                     .as_ref()
                     .is_some_and(RequestRecord::pending)
+                    || reservation
+                        .install
+                        .as_ref()
+                        .is_some_and(|record| record.pending()))
         }) {
             return Err(ServiceFailure::Pending);
         }
@@ -702,7 +723,9 @@ impl ServiceSupervisor {
         record: &RequestRecord,
     ) -> Result<(), ServiceFailure> {
         self.mutate_request(request, |journal, index| {
-            if journal.reservations[index].owner.is_some() {
+            if journal.reservations[index].owner.is_some()
+                || journal.reservations[index].install.is_some()
+            {
                 return Err(ServiceFailure::RequestConflict);
             }
             if let Some(original) = &journal.reservations[index].service {
@@ -821,7 +844,10 @@ impl ServiceSupervisor {
                 Ok((_, _, journal)) => journal
                     .reservations
                     .iter()
-                    .find(|r| r.service.as_ref().is_some_and(RequestRecord::pending))
+                    .find(|r| {
+                        r.service.as_ref().is_some_and(RequestRecord::pending)
+                            || r.install.as_ref().is_some_and(|record| record.pending())
+                    })
                     .map(|r| journal.request(r.sequence))
                     .transpose()?,
                 Err(ServiceFailure::Missing | ServiceFailure::UnknownRequest) => None,
@@ -993,6 +1019,13 @@ impl ServiceSupervisor {
         let supervisor = self.clone();
         Box::pin(async move {
             supervisor.reconcile_storage(request)?;
+            let (_, _, journal) = supervisor.read_journal()?;
+            if journal.reservations[journal.reservation(request)?]
+                .install
+                .is_some()
+            {
+                return supervisor.resolve_install(request).await;
+            }
             let original = supervisor
                 .original(request)?
                 .ok_or(ServiceFailure::Pending)?;
@@ -1007,7 +1040,7 @@ impl ServiceSupervisor {
             worker.await.map_err(|_| ServiceFailure::Indeterminate)?
         })
     }
-    fn reconcile_storage(&self, request: NativeRequestId) -> Result<(), ServiceFailure> {
+    pub(super) fn reconcile_storage(&self, request: NativeRequestId) -> Result<(), ServiceFailure> {
         Directory::reconcile_initialization(&self.anchor)?;
         match Directory::open(&self.anchor) {
             Ok(Some(directory)) => {
@@ -1383,7 +1416,7 @@ impl RequestBinding {
 }
 
 impl ServiceSupervisor {
-    async fn ensure_linger(&self) -> Result<(), ServiceFailure> {
+    pub(super) async fn ensure_linger(&self) -> Result<(), ServiceFailure> {
         match self.manager()?.linger().await? {
             None if cfg!(target_os = "linux") => Err(ServiceFailure::SupervisorUnavailable),
             None | Some(LingerState::Enabled) => Ok(()),
@@ -1562,6 +1595,19 @@ impl ServiceSupervisor {
             Err(ServiceFailure::Missing | ServiceFailure::UnknownRequest) => return Ok(()),
             Err(error) => return Err(error),
         };
+        for install in journal
+            .reservations
+            .iter()
+            .filter_map(|r| r.install.as_ref())
+            .filter(|record| record.pending())
+        {
+            if install.phase != ServicePhase::Starting
+                || install.installation.as_ref() != registration.approved.as_ref()
+                || !registration.installed
+            {
+                return Err(ServiceFailure::Pending);
+            }
+        }
         for record in journal
             .reservations
             .iter()
@@ -1767,10 +1813,13 @@ impl ServiceSupervisor {
     ) -> ServiceFuture<'a, Vec<SessionCleanupObservation>> {
         Box::pin(async move {
             let registration = self.discover()?.ok_or(ServiceFailure::Missing)?;
-            if registration.server_pin().identity != server.bytes() || epoch.get() == 0 {
+            if registration.server_pin().identity != server.bytes() {
                 return Err(ServiceFailure::IdentityMismatch);
             }
-            if sessions.len() > 64
+            // Epoch zero is the retained new store before its first runtime.
+            // It still requires the native producer's independent absence proof.
+            if (epoch.get() == 0 && !sessions.is_empty())
+                || sessions.len() > 64
                 || !sessions.windows(2).all(|pair| pair[0] < pair[1])
                 || sessions.iter().any(|session| {
                     session.pane.server() != server
@@ -1861,5 +1910,85 @@ impl ServiceSupervisor {
             }
             Err(error) => Err(error.into()),
         }
+    }
+}
+
+/// Exclusive, listener-free execution of one retained owner enrollment while
+/// deliberate Stop remains in force. The instance lease also excludes normal startup.
+pub struct StoppedOwnerAdmission {
+    registration: RegisteredServer,
+    lease: Lease,
+    supervisor: ServiceSupervisor,
+    request: NativeRequestId,
+    digest: RequestDigest,
+    claim: RequestDigest,
+}
+impl StoppedOwnerAdmission {
+    /// Returns the original deliberate request, not a new allocation.
+    pub fn request(&self) -> NativeRequestId {
+        self.request
+    }
+    /// Returns the exact stopped registration admitted under the instance lease.
+    pub fn registration(&self) -> &RegisteredServer {
+        &self.registration
+    }
+    /// Rechecks the original journal and exact registration, never Start.
+    pub fn revalidate(&self) -> Result<(), ServiceFailure> {
+        self.lease.verify()?;
+        let current = self.supervisor.discover()?.ok_or(ServiceFailure::Missing)?;
+        self.supervisor.check_startup_barrier(&current.record)?;
+        if current.desired_state() != DesiredServerState::Stopped
+            || current.key() != self.registration.key()
+            || current.record.data != self.registration.record.data
+            || current.record.organization != self.registration.record.organization
+            || current.record.runtime != self.registration.record.runtime
+            || RegistrationBasis::capture_record(&current.record)
+                != RegistrationBasis::capture_record(&self.registration.record)
+        {
+            return Err(ServiceFailure::IdentityMismatch);
+        }
+        self.supervisor.validate_owner_enrollment(
+            &self.request,
+            self.digest,
+            spaceterm_core::identity::ServerId::new(self.registration.server_pin().identity),
+            self.claim,
+        )
+    }
+}
+impl fmt::Debug for StoppedOwnerAdmission {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("StoppedOwnerAdmission(..)")
+    }
+}
+impl ServiceSupervisor {
+    /// The deliberate request must have been retained before any key/store access.
+    /// An existing actor must receive Running requests instead of opening this path.
+    pub fn admit_stopped_owner(
+        &self,
+        request: NativeRequestId,
+        digest: RequestDigest,
+        server: spaceterm_core::identity::ServerId,
+        claim: RequestDigest,
+    ) -> Result<StoppedOwnerAdmission, ServiceFailure> {
+        let lifecycle = self.lifecycle_lease()?;
+        self.validate_owner_enrollment(&request, digest, server, claim)?;
+        let registration = self.discover()?.ok_or(ServiceFailure::Missing)?;
+        if registration.desired_state() != DesiredServerState::Stopped {
+            return Err(ServiceFailure::Pending);
+        }
+        self.check_startup_barrier(&registration.record)?;
+        let directory = Directory::open(&self.anchor)?.ok_or(ServiceFailure::Missing)?;
+        let lease = directory.lease("instance-lock")?;
+        lifecycle.verify()?;
+        let admission = StoppedOwnerAdmission {
+            registration,
+            lease,
+            supervisor: self.clone(),
+            request,
+            digest,
+            claim,
+        };
+        admission.revalidate()?;
+        Ok(admission)
     }
 }

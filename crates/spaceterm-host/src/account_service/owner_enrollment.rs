@@ -40,8 +40,19 @@ impl ServiceSupervisor {
         server: ServerId,
         claim_digest: RequestDigest,
     ) -> Result<RequestDigest, ServiceFailure> {
-        let (_, _, journal) = self.read_journal()?;
-        journal.reservation(request)?;
+        let (directory, _, journal) = self.read_journal()?;
+        match journal.reservation(request) {
+            Ok(_) => {}
+            Err(ServiceFailure::RequestRetired) => {
+                let original = read_archived_owner(&directory, self.key, request)?
+                    .ok_or(ServiceFailure::RequestRetired)?;
+                if original.server != server || original.claim_digest != claim_digest {
+                    return Err(ServiceFailure::RequestConflict);
+                }
+                return Ok(original.request_digest);
+            }
+            Err(failure) => return Err(failure),
+        }
         if server.bytes() == [0; 16] || claim_digest.bytes() == [0; 32] {
             return Err(ServiceFailure::InvalidRecord);
         }
@@ -68,7 +79,9 @@ impl ServiceSupervisor {
             return Err(ServiceFailure::IdentityMismatch);
         }
         self.mutate_request(request, |journal, index| {
-            if journal.reservations[index].service.is_some() {
+            if journal.reservations[index].service.is_some()
+                || journal.reservations[index].install.is_some()
+            {
                 return Err(ServiceFailure::RequestConflict);
             }
             let retained = &mut journal.reservations[index].owner;

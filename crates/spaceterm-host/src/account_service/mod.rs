@@ -3,11 +3,21 @@
 //! The native manager and runtime producers are selected at composition. Read-only
 //! discovery and owner validation never initialize storage or issue authority.
 
+mod install;
+pub use install::{ConfirmedServiceInstall, ServiceInstallAssessment};
+mod account;
+pub use account::TrustedAccountFacts;
 mod commands;
+mod installations;
 mod launchd;
 mod linger;
+mod native_processes;
 mod owner_enrollment;
 mod processes;
+pub use installations::NativeServiceInstallations;
+pub use native_processes::{
+    NativeServiceProcessTable, NativeServiceProcesses, ServiceProcessIdentity,
+};
 mod systemd;
 
 pub use commands::{
@@ -27,7 +37,9 @@ pub use processes::{
     RuntimeAssessment, ServiceClock, ServiceManager, ServiceProcesses, ServiceTime,
 };
 pub use registration::RegisteredServer;
-pub use supervisor::{AccountStartup, AccountStartupAdmission, ServiceSupervisor, StorageWait};
+pub use supervisor::{
+    AccountStartup, AccountStartupAdmission, ServiceSupervisor, StoppedOwnerAdmission, StorageWait,
+};
 
 use crate::{
     native_deployment::contracts::NativeRequestId,
@@ -377,6 +389,7 @@ pub mod test_support {
                 manager: None,
                 processes: None,
                 clock: std::sync::Arc::new(super::processes::NativeClock),
+                test_installation_trust: None,
             }
         }
         /// Injects native manager, runtime and clock boundaries into the real lifecycle core.
@@ -393,6 +406,22 @@ pub mod test_support {
             supervisor.clock = clock;
             supervisor.authorization = authorization;
             supervisor
+        }
+        /// Injects a signed artifact trust root only in isolated test composition.
+        pub fn with_installation_trust(
+            &self,
+            mut supervisor: ServiceSupervisor,
+            key: spaceterm_distribution::UpdateKey,
+        ) -> ServiceSupervisor {
+            supervisor.test_installation_trust = Some(key);
+            supervisor
+        }
+        /// Confirms a test artifact whose real signature is checked by the injected store.
+        pub fn confirm_install(
+            &self,
+            artifact: crate::server_installation::VerifiedServerArtifact,
+        ) -> super::ConfirmedServiceInstall {
+            super::install::test_confirmation(artifact)
         }
         /// Supplies an internal initialization scope for exclusive identity tests.
         pub fn identity_scope(

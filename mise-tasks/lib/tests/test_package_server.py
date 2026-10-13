@@ -512,6 +512,7 @@ if sys.platform == "darwin":
                 for case, flags in (
                     ("headless", []),
                     ("headless-iconv", ["-liconv"]),
+                    ("headless-account", ["-Wl,-needed_framework,OpenDirectory"]),
                     ("graphical", ["-Wl,-needed_framework,AppKit"]),
                     ("external", [f"-Wl,-needed_library,{external}"]),
                     ("rpath", [f"-Wl,-rpath,{external.parent}"]),

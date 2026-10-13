@@ -46,6 +46,24 @@ impl CliIo for TerminalIo {
         }
         Ok(())
     }
+    fn confirm_native_action(
+        &mut self,
+        prompt: &crate::native::NativeActionPrompt,
+    ) -> Result<(), CliFailure> {
+        let mut tty = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/tty")
+            .map_err(|_| CliFailure::ConfirmationRequired)?;
+        tty.write_all(prompt.description().as_bytes())
+            .and_then(|()| tty.write_all(b"\nType 'confirm' to continue: "))
+            .and_then(|()| tty.flush())
+            .map_err(|_| CliFailure::IoUnavailable)?;
+        if read_confirmation_line(&mut tty)? != b"confirm" {
+            return Err(CliFailure::ConfirmationRequired);
+        }
+        Ok(())
+    }
     fn read_confirmation(
         &mut self,
         prompt: &ConfirmationPrompt,

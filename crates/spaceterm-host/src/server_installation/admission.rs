@@ -36,6 +36,8 @@ pub enum InstallationOperation {
     },
     /// Finish only cleanup already recorded by this installation store.
     Cleanup,
+    /// Remove all verified installed versions after confirmed service quiescence.
+    Uninstall,
 }
 
 /// Injected lifecycle admission until the account-service provider supplies its capability.
