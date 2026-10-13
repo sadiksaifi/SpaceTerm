@@ -213,11 +213,13 @@ fn scopes() -> Vec<BindScope> {
             id: "lan".into(),
             label: "Local network".into(),
             addresses: "192.168.1.20".into(),
+            endpoints: vec!["192.168.1.20:7443".parse().unwrap()],
         },
         BindScope {
             id: "tailnet".into(),
             label: "Tailnet".into(),
             addresses: "100.64.0.20".into(),
+            endpoints: vec!["100.64.0.20:7443".parse().unwrap()],
         },
     ]
 }
@@ -302,6 +304,7 @@ pub(super) fn local() -> ServerSummary {
         installations: model::ServerInstallations::default(),
         paired_devices: None,
         unpair_assessment: None,
+        management: model::ServerManagement::default(),
         name: "Studio".into(),
         route: ServerRoute::Local,
         status: ServerStatus::Running,
@@ -326,6 +329,7 @@ pub(super) fn local() -> ServerSummary {
             ],
         }),
         remote_access: Some(RemoteAccess {
+            version: spaceterm_core::authority::FieldVersion::new(1),
             enabled: false,
             scope: None,
             scopes: scopes(),
@@ -344,6 +348,7 @@ fn ssh() -> ServerSummary {
         installations: model::ServerInstallations::default(),
         paired_devices: None,
         unpair_assessment: None,
+        management: model::ServerManagement::default(),
         name: "Build Box".into(),
         route: ServerRoute::Ssh {
             destination: "dev@build.example.com".into(),
@@ -367,6 +372,7 @@ fn wss() -> ServerSummary {
         installations: model::ServerInstallations::default(),
         paired_devices: None,
         unpair_assessment: None,
+        management: model::ServerManagement::default(),
         name: "Lab".into(),
         route: ServerRoute::Wss {
             authority: "lab.example.com:7443".into(),
@@ -938,6 +944,7 @@ fn a_confirmation_accepted_after_its_server_changed_sends_nothing(cx: &mut TestA
     assert!(fixture.modal_open());
     fixture.publish(snapshot(vec![ServerSummary {
         remote_access: Some(RemoteAccess {
+            version: spaceterm_core::authority::FieldVersion::new(1),
             enabled: true,
             scope: Some("tailnet".into()),
             scopes: scopes(),
@@ -1479,6 +1486,7 @@ fn remote_access_is_off_by_default_and_turning_it_on_names_the_server_and_scope(
 
 fn remote_access_on() -> Option<RemoteAccess> {
     Some(RemoteAccess {
+        version: spaceterm_core::authority::FieldVersion::new(1),
         enabled: true,
         scope: Some("lan".into()),
         scopes: scopes(),
@@ -1624,6 +1632,7 @@ fn moving_remote_access_asks_and_warns_a_wss_device_that_it_may_disconnect(
 fn a_pending_remote_access_change_waits_for_the_server(cx: &mut TestAppContext) {
     let pending = ServerSummary {
         remote_access: Some(RemoteAccess {
+            version: spaceterm_core::authority::FieldVersion::new(1),
             enabled: false,
             scope: None,
             scopes: scopes(),
@@ -1647,6 +1656,7 @@ fn a_pending_remote_access_change_waits_for_the_server(cx: &mut TestAppContext) 
 fn remote_access_turns_off_after_the_server_stops_offering_its_addresses(cx: &mut TestAppContext) {
     let stranded = ServerSummary {
         remote_access: Some(RemoteAccess {
+            version: spaceterm_core::authority::FieldVersion::new(1),
             enabled: true,
             scope: Some("lan".into()),
             scopes: Vec::new(),
@@ -1678,6 +1688,7 @@ fn remote_access_turns_off_after_the_server_stops_offering_its_addresses(cx: &mu
 fn listen_on_never_presents_other_addresses_as_the_ones_in_use(cx: &mut TestAppContext) {
     let moved = ServerSummary {
         remote_access: Some(RemoteAccess {
+            version: spaceterm_core::authority::FieldVersion::new(1),
             enabled: true,
             scope: Some("wifi".into()),
             scopes: scopes(),
@@ -1725,6 +1736,7 @@ fn listen_on_never_presents_other_addresses_as_the_ones_in_use(cx: &mut TestAppC
 fn a_server_without_addresses_says_why_remote_access_cannot_turn_on(cx: &mut TestAppContext) {
     let unoffered = ServerSummary {
         remote_access: Some(RemoteAccess {
+            version: spaceterm_core::authority::FieldVersion::new(1),
             enabled: false,
             scope: None,
             scopes: Vec::new(),

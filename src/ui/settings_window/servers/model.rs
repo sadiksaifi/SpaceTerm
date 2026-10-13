@@ -185,12 +185,14 @@ pub(crate) struct BindScope {
     pub(crate) label: SharedString,
     /// The addresses, such as "192.168.1.20, fd00::20".
     pub(crate) addresses: SharedString,
+    pub(crate) endpoints: Vec<std::net::SocketAddr>,
 }
 
 /// Whether a server accepts SpaceTerm connections over the network. It is off until someone turns
 /// it on for one server and one bind scope.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RemoteAccess {
+    pub(crate) version: FieldVersion,
     pub(crate) enabled: bool,
     /// The scope the server listens on, or listened on last.
     pub(crate) scope: Option<SharedString>,
@@ -324,6 +326,25 @@ impl PairedDevices {
     }
 }
 
+/// Retained original requests and exact comparison prompts. Failures contain no native text.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ServerManagement {
+    pub(crate) end_all: Option<ManagementAssessment>,
+    pub(crate) stop: Option<HostAssessment>,
+    pub(crate) restart: Option<HostAssessment>,
+    pub(crate) failure: Option<spaceterm_client::management_cli::ManagementFailure>,
+    pub(crate) operation: Option<OperationId>,
+    pub(crate) native_request: Option<NativeRequestId>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct HostAssessment {
+    pub(crate) reference: AssessmentToken,
+    pub(crate) request: NativeRequestId,
+    pub(crate) action: spaceterm_host::account_service::ServiceAction,
+    pub(crate) affected_sessions: u32,
+}
+
 /// One server this device is paired with.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ServerSummary {
@@ -337,6 +358,7 @@ pub(crate) struct ServerSummary {
     pub(crate) paired_devices: Option<PairedDevices>,
     /// Latest owner-issued unpair assessment. It carries no authority until the owner revalidates it.
     pub(crate) unpair_assessment: Option<ManagementAssessment>,
+    pub(crate) management: ServerManagement,
     pub(crate) name: SharedString,
     pub(crate) route: ServerRoute,
     pub(crate) status: ServerStatus,
@@ -411,6 +433,11 @@ pub(crate) enum ServerRequestTarget {
         route: ServerRoute,
         /// A device inventory action cannot follow a replacement page revision.
         inventory_version: Option<FieldVersion>,
+        assessment: Option<AssessmentToken>,
+        remote_policy: Option<(
+            FieldVersion,
+            spaceterm_core::remote_access::RemoteAccessPolicy,
+        )>,
     },
     PendingUnpair {
         pairing: LocalPairingKey,
@@ -492,6 +519,51 @@ impl BoundServerRequest {
                 pairing: server.pairing.clone(),
                 runtime_epoch: server.runtime_epoch,
                 route: server.route.clone(),
+                remote_policy: match &request {
+                    ServerRequest::DisableRemoteAccess(_) => {
+                        server.remote_access.as_ref().map(|access| {
+                            (
+                                access.version,
+                                spaceterm_core::remote_access::RemoteAccessPolicy::disabled(
+                                    server.pairing.parts().server,
+                                ),
+                            )
+                        })
+                    }
+                    ServerRequest::EnableRemoteAccess { scope, .. } => {
+                        server.remote_access.as_ref().and_then(|access| {
+                            access
+                                .scopes
+                                .iter()
+                                .find(|candidate| candidate.id == *scope)
+                                .and_then(|candidate| {
+                                    spaceterm_core::remote_access::RemoteAccessPolicy::enabled(
+                                        server.pairing.parts().server,
+                                        candidate.endpoints.clone(),
+                                    )
+                                    .ok()
+                                    .map(|policy| (access.version, policy))
+                                })
+                        })
+                    }
+                    _ => None,
+                },
+                assessment: match &request {
+                    ServerRequest::EndAllSessions(_) => server
+                        .management
+                        .end_all
+                        .as_ref()
+                        .map(|v| v.token().clone()),
+                    ServerRequest::Stop(_) => {
+                        server.management.stop.as_ref().map(|v| v.reference.clone())
+                    }
+                    ServerRequest::Restart(_) => server
+                        .management
+                        .restart
+                        .as_ref()
+                        .map(|v| v.reference.clone()),
+                    _ => None,
+                },
                 inventory_version: match &request {
                     ServerRequest::AssessUnpairDevice { version, .. } => Some(*version),
                     ServerRequest::ReadPairedDevices { version, .. } => *version,
@@ -538,6 +610,10 @@ pub(crate) struct ServersSnapshot {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ServerRequest {
     Start(ServerKey),
+    /// Read-only comparison prompts. They grant no execution authority.
+    AssessStop(ServerKey),
+    AssessRestart(ServerKey),
+    AssessEndAllSessions(ServerKey),
     /// Stops the server and suspends automatic startup until Start.
     Stop(ServerKey),
     /// Restarts the running version.
@@ -596,6 +672,9 @@ impl ServerRequest {
     pub(crate) fn server(&self) -> Option<&ServerKey> {
         match self {
             Self::Start(server)
+            | Self::AssessStop(server)
+            | Self::AssessRestart(server)
+            | Self::AssessEndAllSessions(server)
             | Self::Stop(server)
             | Self::Restart(server)
             | Self::EndAllSessions(server)
