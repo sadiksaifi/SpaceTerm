@@ -2673,7 +2673,6 @@ fn rendered_control_selector(row: SettingsRowId) -> Option<String> {
             SettingsRowId::ShowPullRequests => "settings-show-pull-requests",
             SettingsRowId::GitTool => "settings-row-git-tool-control",
             SettingsRowId::GitHubCli => "settings-row-github-cli-control",
-            SettingsRowId::WorktreeLocation => "settings-worktree-location-frame",
             // The fixture installs no update service, so this row presents no action control.
             SettingsRowId::UpdateStatus => return None,
             SettingsRowId::AutomaticUpdateDownloads => "settings-automatic-update-downloads",
@@ -4170,51 +4169,30 @@ fn git_switches_save_reset_and_hiding_repository_status_locks_pull_requests(
 }
 
 #[gpui::test]
-fn the_worktree_location_saves_valid_templates_and_explains_invalid_ones(cx: &mut TestAppContext) {
+fn the_legacy_worktree_location_has_no_client_editor_or_reset(cx: &mut TestAppContext) {
     let (window, harness, cx) = open_settings(cx);
     select_section(SettingsSectionId::Git, cx);
-    let saved = |harness: &Harness| {
-        harness
-            .storage
-            .document()
-            .map(|document| document.git.worktree_path_template)
-    };
-    let default = crate::worktrees::path_template::DEFAULT_WORKTREE_PATH_TEMPLATE;
+    let original = document_of(&window, cx).git.worktree_path_template;
+    assert!(cx.debug_bounds("settings-worktree-location").is_none());
+    assert!(cx.debug_bounds("settings-row-worktree-location").is_none());
     assert!(
         cx.debug_bounds("settings-row-worktree-location-reset")
             .is_none()
     );
-
-    click("settings-worktree-location", cx);
-    cx.simulate_keystrokes("cmd-a");
-    cx.simulate_input("~/wt/{repository}");
-    settle(cx);
-    let explained = cx
-        .debug_bounds("settings-worktree-location-invalid")
-        .is_some();
-    cx.simulate_keystrokes("enter");
-    settle(cx);
-    let refused = document_of(&window, cx).git.worktree_path_template;
-    cx.simulate_input("/{branch}");
-    cx.simulate_keystrokes("enter");
-    settle(cx);
-    let accepted = saved(&harness);
-    click("settings-row-worktree-location-reset", cx);
-    settle(cx);
-
-    assert!(
-        explained,
-        "a template without {{branch}} is explained as it is typed"
+    set_query(&window, "worktree", cx);
+    assert!(cx.debug_bounds("settings-row-worktree-location").is_none());
+    assert_eq!(
+        document_of(&window, cx).git.worktree_path_template,
+        original
     );
     assert_eq!(
-        refused, default,
-        "Return keeps an invalid template out of Settings"
-    );
-    assert_eq!(accepted.as_deref(), Some("~/wt/{repository}/{branch}"));
-    assert_eq!(saved(&harness).as_deref(), Some(default));
-    assert!(
-        cx.debug_bounds("settings-worktree-location-invalid")
-            .is_none()
+        harness
+            .storage
+            .document()
+            .unwrap()
+            .git
+            .worktree_path_template,
+        original
     );
 }
 
@@ -4860,8 +4838,7 @@ fn a_search_that_orders_a_group_apart_should_still_show_it_as_one_card(cx: &mut 
             "Repository Status",
             "Pull Requests",
             "Pull Requests",
-            "Repository Status",
-            "Worktrees"
+            "Repository Status"
         ]
     );
 

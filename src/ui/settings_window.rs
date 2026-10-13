@@ -282,8 +282,6 @@ pub(crate) struct SettingsWindow {
     shortcuts: ShortcutRows,
     /// The read-only settings file in the Advanced section.
     settings_file: advanced::SettingsFileView,
-    /// The Worktree Path Template field, kept so an edit survives re-rendering.
-    worktree_location: git::WorktreeLocationField,
     /// The servers this device is paired with, and the person's choices among them.
     servers: servers::ServersSection,
 }
@@ -508,11 +506,6 @@ impl SettingsWindow {
         let theme_store = cx.new(|cx| ThemeStore::new(owner, theme_registry, window, cx));
         let shortcuts = ShortcutRows::new(window, cx);
         let settings_file = advanced::SettingsFileView::new(window, cx);
-        let worktree_location = git::WorktreeLocationField::new(
-            &editor.document().git.worktree_path_template,
-            window,
-            cx,
-        );
         let servers = servers::ServersSection::new(window, cx);
         let permission_changes =
             PermissionAccessChanges::observe(permissions.system_permissions.as_ref(), cx);
@@ -573,7 +566,6 @@ impl SettingsWindow {
             theme_store,
             shortcuts,
             settings_file,
-            worktree_location,
             servers,
         }
     }
@@ -1194,9 +1186,6 @@ impl SettingsWindow {
                     .presentation()
                     .explanation,
             );
-        } else if row == SettingsRowId::WorktreeLocation {
-            let (caption, tone) = self.worktree_location_caption(cx);
-            rendered = rendered.caption(caption, tone);
         } else if let SettingsRowId::Shortcut(command) = row {
             if let Some(description) = self.shortcut_description(command, cx) {
                 rendered = rendered.caption(description.text, description.tone);
@@ -1251,7 +1240,6 @@ impl SettingsWindow {
             SettingsRowId::GitTool | SettingsRowId::GitHubCli => {
                 self.render_git_tool(row, appearance, cx)
             }
-            SettingsRowId::WorktreeLocation => self.render_worktree_location(appearance, cx),
             SettingsRowId::UpdateStatus => self.render_update_status(cx),
             SettingsRowId::AutomaticUpdateDownloads => self.render_automatic_update_downloads(cx),
             SettingsRowId::UpdateCheckInterval => self.render_update_check_interval(cx),
@@ -2096,9 +2084,7 @@ fn row_layout(row: SettingsRowId) -> FormRowLayout {
         | SettingsRowId::SettingsFile
         | SettingsRowId::ServerList
         | SettingsRowId::ServerPermissions => FormRowLayout::Full,
-        SettingsRowId::WorktreeLocation | SettingsRowId::ServerWorktreeLocation => {
-            FormRowLayout::Above
-        }
+        SettingsRowId::ServerWorktreeLocation => FormRowLayout::Above,
         _ => FormRowLayout::Beside,
     }
 }
