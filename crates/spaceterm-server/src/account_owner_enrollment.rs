@@ -201,6 +201,21 @@ impl AccountOwnerRequestExecutor {
             .await
     }
 
+    pub(crate) fn handle(&self) -> ServerHandle {
+        self.handle.clone()
+    }
+
+    pub(crate) fn retained_reservation(
+        &self,
+        ticket: &spaceterm_core::pairing::EnrollmentTicketId,
+    ) -> Result<spaceterm_core::pairing::EnrollmentReservation, PairingFailure> {
+        let snapshot = self
+            .handle
+            .pairing_snapshot()
+            .map_err(|_| PairingFailure::RecoveryRequired)?;
+        snapshot.reservation(ticket).cloned()
+    }
+
     /// Public comparison data for the protocol's proof-of-possession handshake.
     pub fn enrollment_reservation(
         &self,

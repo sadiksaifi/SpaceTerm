@@ -31,6 +31,10 @@ use std::{
 };
 use tokio::sync::watch;
 
+mod native_ports;
+mod server_ports;
+use server_ports::{GitPublication, RepairAdmission};
+
 /// Owners recovered on the client's Tokio executor before installing the desktop runtime.
 /// The tracker, pending tasks and Pane channels must use the registry's single journal.
 pub(crate) struct DesktopClientComposition<S: ViewStore> {
@@ -163,11 +167,14 @@ struct State {
     revalidated: HashMap<PaneId, (PaneViewToken, view::ViewRevision)>,
     outcomes: HashMap<OperationId, (Arc<Outcome>, OrganizationRevision)>,
     watching: std::collections::HashSet<OperationId>,
+    repair_admissions: std::collections::HashSet<PaneId>,
     detach_requests: HashMap<UiRequestId, view::WorkspaceAttachment>,
     blocked: HashMap<ServerId, (BlockedLocation, IntendedAction)>,
 }
 
 struct Inner {
+    git: gpui::Entity<crate::ui::server_git::ServerGitStore>,
+    git_publications: RefCell<BTreeMap<ServerId, GitPublication>>,
     sources: BTreeMap<ServerId, Source>,
     order: Vec<ServerId>,
     channels: Arc<PaneChannels>,
@@ -256,6 +263,8 @@ impl<S: ViewStore + 'static> ComposedDesktopClientProvider<S> {
             }
         }
         let inner = Rc::new(Inner {
+            git: crate::ui::server_git::InstalledServerGit::install(cx),
+            git_publications: RefCell::new(BTreeMap::new()),
             sources,
             order,
             channels,
@@ -341,61 +350,39 @@ impl Inner {
             .map_err(view_error)?;
         for (&server, source) in &self.sources {
             self.refresh(server)?;
+            self.sync_git(server, cx);
             let mut connection = source.state.clone();
             let mut replica = source.replica.clone();
             let weak = Rc::downgrade(self);
-            let mut releases = self.tracker.journal().revisions();
-            let mut release_health = self.tracker.journal().health();
-            let background = cx.background_executor().clone();
             self.tasks.borrow_mut().push(cx.spawn(async move |cx| {
                 loop {
-                    let Some(inner) = weak.upgrade() else {
-                        break;
-                    };
-                    // The connection owner's watcher resumes journaled releases. It never
-                    // captures current grants, reattaches a Workspace or starts a Session.
-                    let _ = inner.drain_detaches(server).await;
-                    let pending = inner.ready_detaches(server).unwrap_or_default();
-                    drop(inner);
-                    let retry = async {
-                        if pending {
-                            background.timer(std::time::Duration::from_secs(1)).await;
-                        } else {
-                            std::future::pending::<()>().await;
-                        }
-                    };
-                    let alive = tokio::select! {
-                        result = connection.changed() => result.is_ok(),
-                        result = replica.changed() => result.is_ok(),
-                        result = releases.changed() => result.is_ok(),
-                        result = release_health.changed() => result.is_ok(),
-                        () = retry => true,
-                    };
-                    if !alive {
-                        break;
-                    }
-                    let Some(inner) = weak.upgrade() else {
-                        break;
-                    };
+                    let alive = tokio::select! { result = connection.changed() => result.is_ok(), result = replica.changed() => result.is_ok() };
+                    if !alive { break; }
+                    let Some(inner) = weak.upgrade() else { break; };
                     let _edit = inner.edits.lock().await;
-                    let effects = cx.update(|_| inner.refresh(server)).unwrap_or_default();
+                    let effects = cx.update(|cx| {
+                        inner.sync_git(server, cx);
+                        inner.refresh(server)
+                    }).unwrap_or_default();
                     drop(_edit);
                     let _ = inner.execute(effects, cx).await;
                 }
             }));
         }
         let weak = Rc::downgrade(self);
-        self.tasks.borrow_mut().push(cx.spawn(async move |_| {
+        self.tasks.borrow_mut().push(cx.spawn(async move |cx| {
             loop {
                 let alive = tokio::select! { changed = revisions.changed() => changed.is_ok(), changed = health.changed() => changed.is_ok() };
                 if !alive { break; }
                 let Some(inner) = weak.upgrade() else { break; };
                 let _edit = inner.edits.lock().await;
+                cx.update(|cx| {
+                    for server in &inner.order { inner.sync_git(*server, cx); }
+                });
                 let markers = inner.tracker.journal().snapshot();
                 let mut state = inner.state.borrow_mut();
                 if let Ok(markers) = markers {
                     let _ = state.view.filter_suppressed(&markers);
-                    prune_presentation(&mut state);
                     state.outcomes.retain(|operation, _| markers.operation(*operation).is_some());
                     state.watching.retain(|operation| markers.operation(*operation).is_some());
                     let _ = inner.publish_frames(&mut state);
@@ -406,156 +393,6 @@ impl Inner {
             }
         }));
         Ok(())
-    }
-
-    fn shared_binding(&self, server: ServerId) -> Result<PairedServerBinding, DesktopClientError> {
-        let source = self
-            .sources
-            .get(&server)
-            .ok_or(DesktopClientError::TargetGone)?;
-        if !self
-            .tracker
-            .journal()
-            .ordinary_use_allowed(&source.binding)
-            .map_err(DesktopClientError::from)?
-        {
-            return Err(DesktopClientError::AccessDenied);
-        }
-        match &*source.state.borrow() {
-            ConnectionState::Connected { info } => {
-                if info.server != server
-                    || info.pairing != source.binding.target().pairing()
-                    || info.client != source.binding.target().client()
-                {
-                    return Err(DesktopClientError::AccessDenied);
-                }
-            }
-            ConnectionState::Offline { .. } => return Err(DesktopClientError::Offline),
-            ConnectionState::Stopped => return Err(DesktopClientError::Stopped),
-            ConnectionState::Incompatible { .. } => return Err(DesktopClientError::Incompatible),
-            ConnectionState::Connecting { .. } => return Err(DesktopClientError::Reconciling),
-        }
-        let snapshot = self.snapshot(server)?;
-        if self.observation(server, &snapshot, false)?.readiness() != ReplicaReadiness::Ready {
-            return Err(DesktopClientError::Reconciling);
-        }
-        Ok(source.binding.clone())
-    }
-
-    fn ready_detaches(&self, server: ServerId) -> Result<bool, DesktopClientError> {
-        let source = self
-            .sources
-            .get(&server)
-            .ok_or(DesktopClientError::TargetGone)?;
-        if !self
-            .tracker
-            .journal()
-            .ordinary_use_allowed(&source.binding)
-            .map_err(DesktopClientError::from)?
-        {
-            return Ok(false);
-        }
-        let snapshot = match self.snapshot(server) {
-            Ok(snapshot) => snapshot,
-            Err(DesktopClientError::Reconciling) => return Ok(false),
-            Err(error) => return Err(error),
-        };
-        if self.observation(server, &snapshot, false)?.readiness() != ReplicaReadiness::Ready {
-            return Ok(false);
-        }
-        let key = source
-            .binding
-            .target()
-            .local_pairing()
-            .map_err(DesktopClientError::from)?;
-        Ok(self
-            .tracker
-            .journal()
-            .snapshot()
-            .map_err(DesktopClientError::from)?
-            .detaches()
-            .iter()
-            .any(|task| task.local_pairing == key))
-    }
-
-    async fn drain_detaches(&self, server: ServerId) -> Result<(), DesktopClientError> {
-        if !self.ready_detaches(server)? {
-            return Ok(());
-        }
-        let binding = self
-            .sources
-            .get(&server)
-            .ok_or(DesktopClientError::TargetGone)?
-            .binding
-            .clone();
-        let key = binding
-            .target()
-            .local_pairing()
-            .map_err(DesktopClientError::from)?;
-        let workspaces: Vec<_> = self
-            .tracker
-            .journal()
-            .snapshot()
-            .map_err(DesktopClientError::from)?
-            .detaches()
-            .iter()
-            .filter(|task| task.local_pairing == key)
-            .take(32)
-            .map(|task| task.workspace)
-            .collect();
-        let pending = self.pending.clone();
-        let peer = self.operations.clone();
-        self.executor
-            .spawn(async move {
-                for workspace in workspaces {
-                    // A submission and its original lookup may both settle in this pass. Stop
-                    // when no durable progress occurs; unresolved outcomes retry without new IDs.
-                    for _ in 0..4 {
-                        let before = pending.journal().snapshot()?.revision();
-                        if pending
-                            .drain_detach(&binding, workspace, peer.as_ref())
-                            .await?
-                        {
-                            break;
-                        }
-                        if pending.journal().snapshot()?.revision() == before {
-                            break;
-                        }
-                    }
-                }
-                Ok::<_, spaceterm_client::failure::ClientFailure>(())
-            })
-            .await
-            .map_err(|_| DesktopClientError::Cancelled)?
-            .map_err(DesktopClientError::from)
-    }
-
-    fn finish_detach(
-        &self,
-        attachment: view::WorkspaceAttachment,
-    ) -> Result<DesktopViewRevision, DesktopClientError> {
-        let journal = self
-            .tracker
-            .journal()
-            .snapshot()
-            .map_err(DesktopClientError::from)?;
-        if !view::AttachmentSuppression::suppresses(&journal, &attachment) {
-            return Err(DesktopClientError::LocalStorageUnavailable);
-        }
-        let mut state = self.state.borrow_mut();
-        if let Some(current) = state.view.workspace(attachment.workspace()) {
-            if current.attachment() != attachment {
-                return Err(DesktopClientError::StaleContext);
-            }
-            let plan = state
-                .view
-                .prepare_detach(attachment.workspace())
-                .map_err(view_error)?;
-            state.view.apply_detach(plan).map_err(view_error)?;
-        }
-        prune_presentation(&mut state);
-        self.publish_frames(&mut state)?;
-        Ok(state.revision)
     }
 
     fn snapshot(&self, server: ServerId) -> Result<Arc<ReplicaSnapshot>, DesktopClientError> {
@@ -637,7 +474,37 @@ impl Inner {
             )
             .map_err(view_error)?;
         state.view.reconcile(&observation).map_err(view_error)?;
-        prune_presentation(&mut state);
+        let represented: std::collections::HashSet<_> = state
+            .view
+            .workspaces()
+            .iter()
+            .flat_map(|workspace| {
+                workspace
+                    .tab_order()
+                    .iter()
+                    .filter_map(|&tab| workspace.arrangement(tab))
+                    .flat_map(|arrangement| arrangement.pane_ids())
+            })
+            .collect();
+        state.channels.retain(|pane, _| represented.contains(pane));
+        state
+            .presentations
+            .retain(|pane, _| represented.contains(pane));
+        state
+            .revalidated
+            .retain(|pane, _| represented.contains(pane));
+        state
+            .measurements
+            .retain(|pane, _| represented.contains(pane));
+        let attachments: HashMap<_, _> = state
+            .view
+            .attachments()
+            .iter()
+            .map(|attachment| (attachment.workspace(), attachment.incarnation()))
+            .collect();
+        state
+            .leases
+            .retain(|workspace, lease| attachments.get(workspace) == Some(&lease.incarnation()));
         let context = state
             .startup
             .get(&server)
@@ -1191,6 +1058,22 @@ impl Inner {
 }
 
 impl<S: ViewStore + 'static> DesktopClientProvider for ComposedDesktopClientProvider<S> {
+    fn directory_connection(
+        &self,
+        server: ServerId,
+    ) -> Result<Arc<dyn spaceterm_client::directories::DirectoryConnectionPort>, DesktopClientError>
+    {
+        server_ports::directory_connection(&self.inner, server)
+    }
+
+    fn retained_pane_repair(
+        &self,
+        pane: PaneId,
+        cx: &mut App,
+    ) -> Result<Option<(OperationId, Command)>, DesktopClientError> {
+        server_ports::retained_pane_repair(&self.inner, pane, cx)
+    }
+
     fn servers(&self) -> Vec<DesktopServerInfo> {
         self.inner
             .order
@@ -1219,39 +1102,6 @@ impl<S: ViewStore + 'static> DesktopClientProvider for ComposedDesktopClientProv
         }
         self.inner.state.borrow().frames.get(&server).cloned()
     }
-    fn directory_source(
-        &self,
-        server: ServerId,
-    ) -> Result<Rc<dyn crate::ui::directory_picker::DirectorySource>, DesktopClientError> {
-        let source = self
-            .inner
-            .sources
-            .get(&server)
-            .ok_or(DesktopClientError::TargetGone)?;
-        let handle = source
-            .handle
-            .as_ref()
-            .ok_or(DesktopClientError::UnsupportedCapability)?;
-        let queries = handle
-            .queries(self.inner.tracker.journal().clone())
-            .map_err(DesktopClientError::from)?;
-        let source = crate::ui::directory_picker::ServerDirectorySource::new(
-            server,
-            source
-                .name
-                .name
-                .get()
-                .map_or("Server", |name| name.as_str()),
-            crate::ui::directory_picker::server_source::on_executor(
-                Arc::new(queries),
-                self.inner.executor.clone(),
-            ),
-            spaceterm_core::server_directories::DirectoryPurpose::PaneRepair,
-        )
-        .map_err(|_| DesktopClientError::UnsupportedCapability)?;
-        Ok(Rc::new(source))
-    }
-
     fn pane_view_token(&self, pane: PaneId) -> Result<PaneViewToken, DesktopClientError> {
         self.inner.token(pane)
     }
@@ -1426,9 +1276,28 @@ impl<S: ViewStore + 'static> DesktopClientProvider for ComposedDesktopClientProv
                     ReplicaStatus::Resynchronizing => return Err(DesktopClientError::Reconciling),
                     ReplicaStatus::RetainedOffline => return Err(DesktopClientError::Offline),
                 }
-                inner.shared_binding(server)?;
+                let binding = inner
+                    .sources
+                    .get(&server)
+                    .ok_or(DesktopClientError::TargetGone)?
+                    .binding
+                    .clone();
+                let reservation = if let Command::RepairPaneDirectory { pane, .. } = &command {
+                    if self.retained_pane_repair(*pane, cx)?.is_some() {
+                        return Err(DesktopClientError::Reconciling);
+                    }
+                    if !inner.state.borrow_mut().repair_admissions.insert(*pane) {
+                        return Err(DesktopClientError::AdmissionFull);
+                    }
+                    Some(RepairAdmission {
+                        pane: *pane,
+                        owner: Rc::downgrade(&inner),
+                    })
+                } else {
+                    None
+                };
                 Ok(cx.spawn(async move |cx| {
-                    let binding = inner.shared_binding(server)?;
+                    let _reservation = reservation;
                     let tracker = inner.tracker.clone();
                     let peer = inner.operations.clone();
                     let ticket = inner
@@ -1556,49 +1425,37 @@ impl<S: ViewStore + 'static> DesktopClientProvider for ComposedDesktopClientProv
                         .await
                         .map_err(|_| DesktopClientError::Cancelled)?
                         .map_err(DesktopClientError::from)?;
-                    let revision = inner.finish_detach(attachment)?;
+                    let revision = {
+                        let mut state = inner.state.borrow_mut();
+                        let current = state
+                            .view
+                            .workspace(workspace)
+                            .ok_or(DesktopClientError::TargetGone)?;
+                        if current.attachment() != attachment {
+                            return Err(DesktopClientError::StaleContext);
+                        }
+                        let removed: std::collections::HashSet<_> = current
+                            .tab_order()
+                            .iter()
+                            .filter_map(|&tab| current.arrangement(tab))
+                            .flat_map(|arrangement| arrangement.pane_ids())
+                            .collect();
+                        let plan = state.view.prepare_detach(workspace).map_err(view_error)?;
+                        state.view.apply_detach(plan).map_err(view_error)?;
+                        state.channels.retain(|pane, _| !removed.contains(pane));
+                        state.measurements.retain(|pane, _| !removed.contains(pane));
+                        state.leases.remove(&workspace);
+                        inner.publish_frames(&mut state)?;
+                        state.revision
+                    };
                     inner.state.borrow_mut().detach_requests.remove(&id);
                     inner.notifier.personal_edit_applied(id, revision).await?;
                     Ok(None)
                 }))
             }
-            DesktopRequest::RetryDetachWorkspace {
-                workspace,
-                original_request,
-            } => {
-                let attachment = inner
-                    .state
-                    .borrow()
-                    .detach_requests
-                    .get(&original_request)
-                    .copied()
-                    .ok_or(DesktopClientError::StaleContext)?;
-                if attachment.workspace() != workspace {
-                    return Err(DesktopClientError::StaleContext);
-                }
-                let markers = inner
-                    .tracker
-                    .journal()
-                    .snapshot()
-                    .map_err(DesktopClientError::from)?;
-                if !view::AttachmentSuppression::suppresses(&markers, &attachment) {
-                    // The original grants cannot be reconstructed from current authority.
-                    // Storage recovery must resolve the original transaction first.
-                    return Err(DesktopClientError::LocalStorageUnavailable);
-                }
-                Ok(cx.spawn(async move |_| {
-                    let _edit = admission;
-                    let revision = inner.finish_detach(attachment)?;
-                    inner
-                        .state
-                        .borrow_mut()
-                        .detach_requests
-                        .remove(&original_request);
-                    inner.notifier.personal_edit_applied(id, revision).await?;
-                    Ok(None)
-                }))
+            DesktopRequest::RetryDetachWorkspace { .. } | DesktopRequest::ServerAction(_) => {
+                Err(DesktopClientError::UnsupportedCapability)
             }
-            DesktopRequest::ServerAction(_) => Err(DesktopClientError::UnsupportedCapability),
         }
     }
     fn save_view(&self, cx: &mut App) -> Task<Result<(), DesktopClientError>> {
@@ -1621,40 +1478,6 @@ impl<S: ViewStore + 'static> DesktopClientProvider for ComposedDesktopClientProv
             Ok(())
         })
     }
-}
-
-fn prune_presentation(state: &mut State) {
-    let represented: std::collections::HashSet<_> = state
-        .view
-        .workspaces()
-        .iter()
-        .flat_map(|workspace| {
-            workspace
-                .tab_order()
-                .iter()
-                .filter_map(|&tab| workspace.arrangement(tab))
-                .flat_map(|arrangement| arrangement.pane_ids())
-        })
-        .collect();
-    state.channels.retain(|pane, _| represented.contains(pane));
-    state
-        .presentations
-        .retain(|pane, _| represented.contains(pane));
-    state
-        .revalidated
-        .retain(|pane, _| represented.contains(pane));
-    state
-        .measurements
-        .retain(|pane, _| represented.contains(pane));
-    let attachments: HashMap<_, _> = state
-        .view
-        .attachments()
-        .iter()
-        .map(|attachment| (attachment.workspace(), attachment.incarnation()))
-        .collect();
-    state
-        .leases
-        .retain(|workspace, lease| attachments.get(workspace) == Some(&lease.incarnation()));
 }
 
 fn apply_edit(
@@ -1751,3 +1574,6 @@ fn offline_cause(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod native_git_tests;

@@ -66,7 +66,7 @@ impl Drop for NativeRequestSubscription {
 }
 
 pub(crate) enum OutputEffect {
-    Terminal(Vec<u8>),
+    Terminal(Vec<u8>, Option<AuthorityStamp>),
     Clipboard(osc::Osc52Operation, Option<AuthorityStamp>),
     Permission(PermissionNotice, Option<AuthorityStamp>),
 }
@@ -104,6 +104,7 @@ impl OutputFilter {
         const PERMISSION: &[u8] = b"\x1b]7701;";
         let mut effects = VecDeque::new();
         let mut terminal = Vec::with_capacity(bytes.len());
+        let mut terminal_fence = fence;
         for &byte in bytes {
             if matches!(
                 self.state,
@@ -125,9 +126,12 @@ impl OutputFilter {
                 FilterState::Ground => {
                     if byte == 0x1b {
                         if !terminal.is_empty() {
-                            effects
-                                .push_back(OutputEffect::Terminal(std::mem::take(&mut terminal)));
+                            effects.push_back(OutputEffect::Terminal(
+                                std::mem::take(&mut terminal),
+                                terminal_fence,
+                            ));
                         }
+                        terminal_fence = fence;
                         self.candidate.push(byte);
                         self.fence = fence;
                         self.state = FilterState::Prefix;
@@ -144,6 +148,9 @@ impl OutputFilter {
                     } else if !CLIP.starts_with(&self.candidate)
                         && !PERMISSION.starts_with(&self.candidate)
                     {
+                        if self.fence != fence {
+                            terminal_fence = None;
+                        }
                         let candidate = std::mem::take(&mut self.candidate);
                         self.state = if matches!(byte, 0x18 | 0x1a)
                             || candidate.starts_with(b"\x1b]") && byte == 7
@@ -170,6 +177,9 @@ impl OutputFilter {
                     }
                 }
                 FilterState::Other(bell, escape) => {
+                    if self.fence != fence {
+                        terminal_fence = None;
+                    }
                     terminal.push(byte);
                     self.state = if bell && byte == 7
                         || escape && byte == b'\\'
@@ -246,7 +256,7 @@ impl OutputFilter {
             }
         }
         if !terminal.is_empty() {
-            effects.push_back(OutputEffect::Terminal(terminal));
+            effects.push_back(OutputEffect::Terminal(terminal, terminal_fence));
         }
         effects
     }
@@ -267,6 +277,7 @@ pub(crate) struct NativeRequests {
     clipboard: Option<ClipboardPending>,
     paste: Option<PastePending>,
     permission: Option<RoutedNativeRequest>,
+    notification: Option<RoutedNativeRequest>,
     next_request: u64,
     next_paste: u64,
 }
@@ -575,6 +586,54 @@ impl NativeRequests {
         }
         Ok(())
     }
+    pub fn notify(
+        &mut self,
+        notice: NotificationNotice,
+        captured: Option<AuthorityStamp>,
+        now: MonotonicTick,
+        shared: &Shared,
+    ) -> Result<(), RuntimeFailure> {
+        if self.notification.is_some()
+            || !shared
+                .native_routed
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Ok(());
+        }
+        let Some(stamp) = captured.filter(|stamp| {
+            shared
+                .authority
+                .read()
+                .is_ok_and(|authority| authority.permits_native(*stamp))
+        }) else {
+            return Ok(());
+        };
+        let deadline = MonotonicTick::new(
+            now.get()
+                .checked_add(5000)
+                .ok_or(RuntimeFailure::capacity(RuntimeStage::Counter))?,
+        );
+        let request = NativeRequest::new(
+            stamp.fence,
+            self.id()?,
+            now,
+            now,
+            Some(deadline),
+            NativeRequestKind::Notification(notice),
+        )
+        .map_err(|_| RuntimeFailure::internal(RuntimeStage::NativeRequest))?;
+        if shared
+            .native_sender
+            .try_send(Ok(RoutedNativeRequest {
+                request: request.clone(),
+                stamp,
+            }))
+            .is_ok()
+        {
+            self.notification = Some(RoutedNativeRequest { request, stamp });
+        }
+        Ok(())
+    }
     pub fn complete(
         &mut self,
         completion: &NativeCompletion,
@@ -657,6 +716,21 @@ impl NativeRequests {
             reply.complete(Ok(EffectDisposition::Cancelled));
             return Ok(());
         }
+        if self.notification.as_ref().is_some_and(|routed| {
+            let request = &routed.request;
+            shared
+                .authority
+                .read()
+                .is_ok_and(|authority| authority.permits_native(routed.stamp))
+                && request.id() == completion.id()
+                && request.fence() == completion.fence()
+                && request.deadline().is_some_and(|deadline| now < deadline)
+                && NativeCompletion::new(request, completion.kind().clone()).is_ok()
+        }) {
+            self.notification = None;
+            reply.complete(Ok(EffectDisposition::Applied));
+            return Ok(());
+        }
         if self.permission.as_ref().is_some_and(|routed| {
             let request = &routed.request;
             shared
@@ -713,6 +787,18 @@ impl NativeRequests {
         }) {
             self.paste = None;
         }
+        if self.notification.as_ref().is_some_and(|routed| {
+            routed
+                .request
+                .deadline()
+                .is_some_and(|deadline| now >= deadline)
+                || shared
+                    .authority
+                    .read()
+                    .is_ok_and(|authority| !authority.permits_native(routed.stamp))
+        }) {
+            self.notification = None;
+        }
         if self.permission.as_ref().is_some_and(|routed| {
             shared
                 .authority
@@ -727,6 +813,7 @@ impl NativeRequests {
         self.clipboard = None;
         self.paste = None;
         self.permission = None;
+        self.notification = None;
     }
 }
 

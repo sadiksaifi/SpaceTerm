@@ -83,6 +83,25 @@ pub(crate) trait DesktopClientProvider {
         Err(DesktopClientError::UnsupportedCapability)
     }
 
+    /// Borrowed authenticated reads from the paired server's existing connection.
+    fn directory_connection(
+        &self,
+        _server: ServerId,
+    ) -> Result<Arc<dyn spaceterm_client::directories::DirectoryConnectionPort>, DesktopClientError>
+    {
+        Err(DesktopClientError::UnsupportedCapability)
+    }
+
+    /// Restores a retained repair before a window may submit a replacement operation.
+    fn retained_pane_repair(
+        &self,
+        _pane: PaneId,
+        _cx: &mut App,
+    ) -> Result<Option<(OperationId, spaceterm_core::operations::Command)>, DesktopClientError>
+    {
+        Ok(None)
+    }
+
     /// A portable decision and the exact channel observation that produced its facts.
     fn pane_presentation(
         &self,
@@ -427,6 +446,23 @@ impl DesktopClientRuntime {
         pane: PaneId,
     ) -> Result<spaceterm_client::pane_channel::PaneChannel, DesktopClientError> {
         self.provider.pane_channel(pane)
+    }
+
+    pub(crate) fn directory_connection(
+        &self,
+        server: ServerId,
+    ) -> Result<Arc<dyn spaceterm_client::directories::DirectoryConnectionPort>, DesktopClientError>
+    {
+        self.provider.directory_connection(server)
+    }
+
+    pub(crate) fn retained_pane_repair(
+        &self,
+        pane: PaneId,
+        cx: &mut App,
+    ) -> Result<Option<(OperationId, spaceterm_core::operations::Command)>, DesktopClientError>
+    {
+        self.provider.retained_pane_repair(pane, cx)
     }
 
     pub(crate) fn pane_presentation(

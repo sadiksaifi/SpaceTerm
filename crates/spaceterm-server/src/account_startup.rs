@@ -6,7 +6,7 @@ use std::{fmt, sync::Arc};
 mod production;
 #[cfg(feature = "test-support")]
 pub mod test_support;
-pub use production::{RecoveredAccountServer, production_run};
+pub use production::{RecoveredAccountServer, production_run, production_stopped_owner};
 
 use spaceterm_core::{
     identity::ServerId,

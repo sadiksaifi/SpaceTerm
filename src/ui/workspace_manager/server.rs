@@ -38,83 +38,7 @@ pub(super) struct ServerWorkspaces {
     paused_detaches: BTreeMap<QualifiedWorkspaceId, PausedDetach>,
     presentation_errors: BTreeMap<QualifiedWorkspaceId, DesktopClientError>,
     pub(super) navigation: u64,
-    directory_repair: Option<PaneDirectoryRepair>,
-}
-
-#[derive(Clone, Copy)]
-struct PaneDirectoryRepair {
-    pane: spaceterm_core::identity::PaneId,
-    tab: spaceterm_core::identity::TabId,
-    attachment: spaceterm_client::view::WorkspaceAttachment,
-    epoch: spaceterm_core::authority::ServerEpoch,
-    version: spaceterm_core::authority::FieldVersion,
-}
-
-impl PaneDirectoryRepair {
-    fn capture(
-        frame: &DesktopServerFrame,
-        pane: spaceterm_core::identity::PaneId,
-    ) -> Result<Self, DesktopClientError> {
-        if frame.server != pane.server() {
-            return Err(DesktopClientError::WrongServer);
-        }
-        if frame.replica_status != ReplicaStatus::Ready {
-            return Err(DesktopClientError::Offline);
-        }
-        let record = frame
-            .organization
-            .state()
-            .panes
-            .iter()
-            .find(|record| record.id == pane)
-            .ok_or(DesktopClientError::TargetGone)?;
-        let tab = frame
-            .organization
-            .state()
-            .tabs
-            .iter()
-            .find(|tab| tab.id == record.tab)
-            .ok_or(DesktopClientError::TargetGone)?;
-        let attachment = frame
-            .personal
-            .workspace(tab.workspace)
-            .ok_or(DesktopClientError::TargetGone)?
-            .attachment();
-        Ok(Self {
-            pane,
-            tab: record.tab,
-            attachment,
-            epoch: frame.organization.epoch(),
-            version: record.confirmed_restoration_directory.version,
-        })
-    }
-
-    fn still_matches(self, frame: &DesktopServerFrame) -> bool {
-        Self::capture(frame, self.pane).is_ok_and(|current| {
-            current.tab == self.tab
-                && current.attachment == self.attachment
-                && current.epoch == self.epoch
-                && current.version == self.version
-        })
-    }
-
-    fn command(
-        self,
-        frame: &DesktopServerFrame,
-        directory: spaceterm_core::organization::ServerDirectory,
-    ) -> Result<Command, DesktopClientError> {
-        if directory.server() != self.pane.server() {
-            return Err(DesktopClientError::WrongServer);
-        }
-        if !self.still_matches(frame) {
-            return Err(DesktopClientError::StaleContext);
-        }
-        Ok(Command::RepairPaneDirectory {
-            pane: self.pane,
-            expected_version: self.version,
-            value: directory,
-        })
-    }
+    pub(super) repair: Option<Entity<crate::ui::directory_picker::pane_repair::ServerPaneRepair>>,
 }
 
 struct WorkspaceRequest {
@@ -267,7 +191,7 @@ impl WorkspaceManager {
             paused_detaches: BTreeMap::new(),
             presentation_errors: BTreeMap::new(),
             navigation: 0,
-            directory_repair: None,
+            repair: None,
         });
         let frames: Vec<_> = runtime
             .read(cx)
@@ -325,14 +249,6 @@ impl WorkspaceManager {
                 .is_some_and(|previous| frame.view_revision < previous.view_revision)
         {
             return;
-        }
-        if server.directory_repair.is_some_and(|repair| {
-            repair.pane.server() == frame.server && !repair.still_matches(&frame)
-        }) {
-            server.directory_repair = None;
-            if let Some(picker) = self.pin_picker.take() {
-                picker.update(cx, |picker, cx| picker.cancel(window, cx));
-            }
         }
         let previous = server.active_manager().map(Entity::entity_id);
         let removed = server
@@ -545,17 +461,7 @@ impl WorkspaceManager {
                 if let Some(frame) = frame {
                     self.apply_server_frame(frame, cx);
                 } else {
-                    if server
-                        .directory_repair
-                        .is_some_and(|repair| repair.pane.server() == *id)
-                    {
-                        server.directory_repair = None;
-                        if let Some(picker) = self.pin_picker.take() {
-                            picker.update(cx, |picker, cx| picker.cancel(window, cx));
-                        }
-                    }
                     self.refresh_server_sidebar(cx);
-                    self.sync_terminal_focus_blocker(window, cx);
                     cx.notify();
                 }
             }
@@ -743,35 +649,6 @@ impl WorkspaceManager {
                 {
                     attach.push(workspace);
                 }
-            } else if let DesktopRequest::Shared {
-                server: target,
-                command: Command::RepairPaneDirectory { .. },
-            } = pending.request
-            {
-                let Some(operation) = pending.operation else {
-                    continue;
-                };
-                let Some(outcome) = server.runtime.read(cx).outcome(operation) else {
-                    continue;
-                };
-                if !matches!(outcome.as_ref(), Outcome::Applied) {
-                    finished.push(*id);
-                    errors.push(match outcome.as_ref() {
-                        Outcome::Failed(failure) => {
-                            DesktopClientError::SharedOperationRejected(*failure)
-                        }
-                        _ => DesktopClientError::StaleContext,
-                    });
-                    continue;
-                }
-                let Some(revision) = server.runtime.read(cx).outcome_revision(operation) else {
-                    continue;
-                };
-                if server.frames.get(&target).is_some_and(|frame| {
-                    shared_ready(frame) && frame.organization.state().revision >= revision
-                }) {
-                    finished.push(*id);
-                }
             } else if pending.settled(&server.frames) {
                 finished.push(*id);
                 if let DesktopRequest::AttachWorkspace(workspace) = pending.request
@@ -816,7 +693,7 @@ impl WorkspaceManager {
                 | DesktopRequest::DetachWorkspace(_)
                 | DesktopRequest::RetryDetachWorkspace { .. }
                 | DesktopRequest::Shared {
-                    command: Command::CreateWorkspace { .. } | Command::RepairPaneDirectory { .. },
+                    command: Command::CreateWorkspace { .. },
                     ..
                 }
         );
@@ -974,137 +851,137 @@ impl WorkspaceManager {
                 );
                 return;
             }
-            ServerTabManagerEvent::PaneAction { pane, action } => match action.route(pane) {
-                crate::ui::server_desktop_contracts::PaneActionRoute::Request(request) => request,
-                crate::ui::server_desktop_contracts::PaneActionRoute::ChooseDirectory(pane) => {
-                    self.choose_server_pane_directory(pane, window, cx);
+            ServerTabManagerEvent::PaneAction { pane, action } => {
+                if let crate::ui::server_desktop_contracts::PaneAction::Retry(source) = action
+                    && self.server.as_ref().and_then(|server| server.frames.get(&pane.server()))
+                        .is_some_and(|frame| frame.organization.runtime().iter().any(|runtime| {
+                            runtime.pane == pane && runtime.phase == spaceterm_core::organization::SessionPhase::DirectoryUnavailable
+                        }))
+                {
+                    self.begin_server_pane_repair(pane, source, false, window, cx);
                     return;
                 }
-                crate::ui::server_desktop_contracts::PaneActionRoute::ServerSettings(server) => {
-                    crate::ui::settings_window::open_for_server(server, cx);
-                    return;
+                match action.route(pane) {
+                    crate::ui::server_desktop_contracts::PaneActionRoute::Request(request) => {
+                        request
+                    }
+                    crate::ui::server_desktop_contracts::PaneActionRoute::ChooseDirectory(pane) => {
+                        self.begin_server_pane_repair(
+                            pane,
+                            crate::ui::server_desktop_contracts::SelectionSource::Command,
+                            true,
+                            window,
+                            cx,
+                        );
+                        return;
+                    }
+                    _ => {
+                        self.show_server_error(
+                            DesktopClientError::UnsupportedCapability,
+                            window,
+                            cx,
+                        );
+                        return;
+                    }
                 }
-            },
+            }
         };
         self.submit_server(request, window, cx);
     }
 
-    fn choose_server_pane_directory(
+    fn begin_server_pane_repair(
         &mut self,
-        pane: spaceterm_core::identity::PaneId,
+        pane: crate::ui::server_desktop_contracts::PaneId,
+        source: crate::ui::server_desktop_contracts::SelectionSource,
+        choose: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if window_modal_is_open(window, cx) || self.pin_picker.is_some() {
+        use crate::ui::directory_picker::pane_repair::{PaneRepairEvent, ServerPaneRepair};
+        let Some(server) = &self.server else { return };
+        if window_modal_is_open(window, cx) {
             return;
         }
-        let result = (|| {
-            let server = self.server.as_ref().ok_or(DesktopClientError::TargetGone)?;
-            let frame = server
-                .runtime
-                .read(cx)
-                .frame(pane.server())
-                .ok_or(DesktopClientError::TargetGone)?;
-            let repair = PaneDirectoryRepair::capture(&frame, pane)?;
-            let source = server.runtime.read(cx).directory_source(pane.server())?;
-            Ok::<_, DesktopClientError>((repair, source))
-        })();
-        let (repair, source) = match result {
-            Ok(result) => result,
+        if let Some(repair) =
+            server
+                .repair
+                .as_ref()
+                .filter(|repair| {
+                    repair.read(cx).pane() == pane
+                        && !matches!(repair.read(cx).status(),
+                crate::ui::directory_picker::pane_repair::PaneRepairStatus::Cancelled
+                | crate::ui::directory_picker::pane_repair::PaneRepairStatus::Completed)
+                })
+                .cloned()
+        {
+            repair.update(cx, |repair, cx| {
+                if choose {
+                    repair.open(window, cx);
+                } else {
+                    repair.retry(window, cx);
+                }
+            });
+            return;
+        }
+        let runtime = server.runtime.clone();
+        let port = match runtime.read(cx).directory_connection(pane.server()) {
+            Ok(port) => port,
             Err(error) => {
                 self.show_server_error(error, window, cx);
                 return;
             }
         };
-        let picker = cx.new(|cx| DirectoryPicker::new(source, "Choose Directory", window, cx));
-        cx.subscribe_in(
-            &picker,
-            window,
-            move |manager, picker, event: &DirectoryPickerEvent, window, cx| {
-                if manager.pin_picker.as_ref() != Some(picker) {
+        let name = runtime
+            .read(cx)
+            .servers()
+            .into_iter()
+            .find(|info| info.server == pane.server())
+            .and_then(|info| info.name.get().cloned())
+            .map_or_else(|| "Unnamed Server".to_owned(), |name| name.to_string());
+        if let Some(previous) = self.server.as_mut().and_then(|server| server.repair.take()) {
+            previous.update(cx, |repair, cx| repair.cancel(window, cx));
+        }
+        let repair =
+            match ServerPaneRepair::install(runtime.clone(), pane, source, &name, port, window, cx)
+            {
+                Ok(repair) => repair,
+                Err(error) => {
+                    self.show_server_error(error, window, cx);
                     return;
                 }
-                match event {
-                    DirectoryPickerEvent::ConfirmedServer(directory) => {
-                        let result = (|| {
-                            let server = manager
-                                .server
-                                .as_ref()
-                                .ok_or(DesktopClientError::StaleContext)?;
-                            let current = server
-                                .directory_repair
-                                .ok_or(DesktopClientError::StaleContext)?;
-                            if current.attachment != repair.attachment {
-                                return Err(DesktopClientError::StaleContext);
-                            }
-                            let frame = server
-                                .runtime
-                                .read(cx)
-                                .frame(pane.server())
-                                .ok_or(DesktopClientError::StaleContext)?;
-                            repair.command(&frame, directory.clone())
-                        })();
-                        match result {
-                            Ok(command) => {
-                                // Repair changes only the captured Pane. Publication makes Start
-                                // Session available later; directory selection itself cannot start it.
-                                if manager
-                                    .submit_server(
-                                        DesktopRequest::Shared {
-                                            server: pane.server(),
-                                            command,
-                                        },
-                                        window,
-                                        cx,
-                                    )
-                                    .is_none()
-                                {
-                                    picker.update(cx, |picker, cx| {
-                                        picker.activation_failed(window, cx)
-                                    });
-                                    return;
-                                }
-                                let picker = picker.clone();
-                                let owner = cx.entity();
-                                window.defer(cx, move |window, cx| {
-                                    if owner.read(cx).pin_picker.as_ref() != Some(&picker) {
-                                        return;
-                                    }
-                                    picker.update(cx, |picker, cx| {
-                                        picker.complete_activation(window, cx)
-                                    });
-                                    owner.update(cx, |manager, cx| {
-                                        if manager.pin_picker.as_ref() != Some(&picker) {
-                                            return;
-                                        }
-                                        manager.pin_picker = None;
-                                        if let Some(server) = &mut manager.server {
-                                            server.directory_repair = None;
-                                        }
-                                        manager.sync_terminal_focus_blocker(window, cx);
-                                        manager.focus(window, cx);
-                                        cx.notify();
-                                    });
-                                });
-                            }
-                            Err(error) => {
-                                picker
-                                    .update(cx, |picker, cx| picker.activation_failed(window, cx));
-                                manager.show_server_error(error, window, cx);
-                            }
-                        }
-                    }
-                    DirectoryPickerEvent::Dismissed => {
-                        manager.pin_picker = None;
-                        if let Some(server) = &mut manager.server {
-                            server.directory_repair = None;
-                        }
-                    }
-                    DirectoryPickerEvent::StateChanged => {}
-                    DirectoryPickerEvent::Confirmed(_)
-                    | DirectoryPickerEvent::SystemSelectionRequested => {
-                        // No local or SSH filesystem fallback is admitted on a server-backed Pane.
-                        manager.show_server_error(DesktopClientError::WrongServer, window, cx);
+            };
+        cx.subscribe_in(
+            &repair,
+            window,
+            |manager, repair, event: &PaneRepairEvent, window, cx| {
+                if manager
+                    .server
+                    .as_ref()
+                    .and_then(|server| server.repair.as_ref())
+                    != Some(repair)
+                {
+                    return;
+                }
+                if let PaneRepairEvent::StartRequested { token, request } = event {
+                    let Some(runtime) =
+                        manager.server.as_ref().map(|server| server.runtime.clone())
+                    else {
+                        return;
+                    };
+                    let current = runtime.read(cx).pane_view_token(token.pane);
+                    let focused = runtime
+                        .read(cx)
+                        .frame(token.pane.server())
+                        .and_then(|frame| {
+                            spaceterm_client::view::SelectionTarget::focused(
+                                &frame.personal,
+                                frame.personal.active_workspace()?,
+                            )
+                        })
+                        .is_some_and(|target| target.pane == token.pane);
+                    if current.as_ref().ok() == Some(token) && focused {
+                        // StartSession enters the same measured-use runtime as the normal Pane action.
+                        manager.submit_server(request.as_ref().clone(), window, cx);
                     }
                 }
                 manager.sync_terminal_focus_blocker(window, cx);
@@ -1113,11 +990,14 @@ impl WorkspaceManager {
         )
         .detach();
         if let Some(server) = &mut self.server {
-            server.directory_repair = Some(repair);
+            server.repair = Some(repair.clone());
         }
-        self.pin_picker = Some(picker.clone());
-        picker.update(cx, |picker, cx| {
-            picker.open(window, cx);
+        repair.update(cx, |repair, cx| {
+            if choose {
+                repair.open(window, cx);
+            } else {
+                repair.retry(window, cx);
+            }
         });
         self.sync_terminal_focus_blocker(window, cx);
         cx.notify();
@@ -1870,6 +1750,7 @@ impl WorkspaceManager {
             .on_action(cx.listener(Self::on_activate_workspace_9))
             .child(Self::render_top_left_chrome_surface(chrome, window, cx))
             .child(div().relative().size_full().child(content))
+            .children(server.repair.iter().map(|repair| repair.read(cx).picker()))
             .when(sidebar_visible, |root| root.child(self.sidebar.clone()))
             .child(self.sidebar.read(cx).render_resize_handle(
                 self.sidebar.downgrade(),
@@ -1887,13 +1768,7 @@ impl WorkspaceManager {
                         .child(top),
                 ),
             );
-        let transients = div()
-            .absolute()
-            .inset_0()
-            .children(self.pin_picker.iter().cloned());
-        ModalLayer::new(super::super::window_shell::render(root, window, cx))
-            .transient(transients)
-            .into_any_element()
+        ModalLayer::new(super::super::window_shell::render(root, window, cx)).into_any_element()
     }
 }
 
@@ -2003,12 +1878,6 @@ fn server_error_message(error: DesktopClientError) -> &'static str {
         DesktopClientError::Stopped => "The server is stopped. Nothing changed.",
         DesktopClientError::Incompatible => "The server needs an update first. Nothing changed.",
         DesktopClientError::Reconciling => "The server is catching up. Try again in a moment.",
-        DesktopClientError::SharedOperationRejected(OperationFailure::DirectoryUnavailable) => {
-            "That directory is unavailable on the server. Choose an existing directory and try again."
-        }
-        DesktopClientError::SharedOperationRejected(OperationFailure::StorageUnavailable) => {
-            "The server can't save this change right now. Nothing changed."
-        }
         DesktopClientError::AdmissionFull => {
             "SpaceTerm is still finishing earlier requests. Try again in a moment."
         }

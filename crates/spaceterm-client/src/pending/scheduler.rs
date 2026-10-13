@@ -49,12 +49,23 @@ pub(super) fn start(
     tasks: PendingTasks,
     attempt: impl Fn(OperationId) -> ClientFuture<'static, bool> + Send + 'static,
 ) -> Result<PendingRuntime, ClientFailure> {
+    start_with_enrollment(tasks, attempt, None)
+}
+
+pub(super) type EnrollmentAcknowledgementAttempt =
+    Arc<dyn Fn(OperationId) -> ClientFuture<'static, ()> + Send + Sync>;
+
+pub(super) fn start_with_enrollment(
+    tasks: PendingTasks,
+    attempt: impl Fn(OperationId) -> ClientFuture<'static, bool> + Send + 'static,
+    enrollment: Option<EnrollmentAcknowledgementAttempt>,
+) -> Result<PendingRuntime, ClientFailure> {
     let claim = Claim(tasks.journal.claim_scheduler()?);
     let (stop, stopped) = watch::channel(false);
     let (finished, done) = watch::channel(None);
     let worker = tokio::spawn(async move {
         let _claim = claim;
-        run(tasks, attempt, stopped).await
+        run(tasks, attempt, enrollment, stopped).await
     });
     tokio::spawn(async move {
         let result = worker
@@ -69,10 +80,12 @@ pub(super) fn start(
 async fn run(
     tasks: PendingTasks,
     attempt: impl Fn(OperationId) -> ClientFuture<'static, bool> + Send + 'static,
+    enrollment: Option<EnrollmentAcknowledgementAttempt>,
     mut stopped: watch::Receiver<bool>,
 ) -> Result<(), ClientFailure> {
     let mut revisions = tasks.journal.revisions();
     let mut deadlines = BTreeMap::<OperationId, Instant>::new();
+    let mut enrollment_attempts = BTreeMap::<OperationId, u32>::new();
     loop {
         if *stopped.borrow() {
             return Ok(());
@@ -83,7 +96,38 @@ async fn run(
                 .revocations()
                 .iter()
                 .any(|record| record.task.parts().original.operation() == *id)
+                || enrollment.is_some()
+                    && snapshot
+                        .pairing()
+                        .acknowledgements()
+                        .iter()
+                        .any(|work| work.prepared.enrollment.id == *id)
         });
+        enrollment_attempts.retain(|id, _| deadlines.contains_key(id));
+        if let Some(enrollment) = &enrollment {
+            for work in snapshot.pairing().acknowledgements() {
+                let id = work.prepared.enrollment.id;
+                let deadline = deadlines.entry(id).or_insert_with(Instant::now);
+                if *deadline > Instant::now() {
+                    continue;
+                }
+                // Acknowledge the original durable receipt before any revocation
+                // can delete its retained authentication credential.
+                let result = enrollment(id).await;
+                if *stopped.borrow() {
+                    return Ok(());
+                }
+                tasks.journal.ensure_healthy()?;
+                if result.is_ok() {
+                    deadlines.remove(&id);
+                    enrollment_attempts.remove(&id);
+                } else {
+                    let attempts = enrollment_attempts.entry(id).or_default();
+                    *attempts = attempts.saturating_add(1);
+                    deadlines.insert(id, Instant::now() + delay(id, *attempts));
+                }
+            }
+        }
         for record in snapshot.revocations() {
             let id = record.task.parts().original.operation();
             let deadline = deadlines.entry(id).or_insert_with(|| {

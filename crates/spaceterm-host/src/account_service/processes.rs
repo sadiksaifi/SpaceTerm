@@ -53,6 +53,16 @@ pub trait ServiceManager: Send + Sync {
         &'a self,
         registration: Option<&'a RegisteredServer>,
     ) -> ServiceFuture<'a, SupervisorState>;
+    /// Observes only this fixed service's native process scope. Linux includes
+    /// the unit cgroup and MainPID; macOS includes the LaunchAgent's PID.
+    /// Runtime-owned Session custody is proved separately. Unsupported providers
+    /// fail closed rather than substituting an account-wide process scan.
+    fn scoped_processes<'a>(
+        &'a self,
+        _registration: &'a RegisteredServer,
+    ) -> ServiceFuture<'a, Vec<u32>> {
+        Box::pin(async { Err(ServiceFailure::CleanupUnresolved) })
+    }
     /// Observes independently resolved Linux linger; macOS returns None.
     fn linger(&self) -> ServiceFuture<'_, Option<super::LingerState>>;
     /// Publishes fixed supervision content for the exact approved registration.

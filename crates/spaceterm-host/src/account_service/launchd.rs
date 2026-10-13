@@ -180,6 +180,23 @@ impl ServiceManager for LaunchdServiceManager {
             state(&output.bytes)
         })
     }
+    fn scoped_processes<'a>(
+        &'a self,
+        registration: &'a RegisteredServer,
+    ) -> ServiceFuture<'a, Vec<u32>> {
+        Box::pin(async move {
+            self.account.check(registration)?;
+            self.domain_available().await?;
+            let output = self
+                .call(vec!["print".into(), self.target().into()])
+                .await?;
+            if matches!(output.code, 3 | 113) {
+                return Ok(Vec::new());
+            }
+            output.success()?;
+            process_scope(&output.bytes)
+        })
+    }
     fn linger(&self) -> ServiceFuture<'_, Option<LingerState>> {
         Box::pin(async { Ok(None) })
     }
@@ -329,4 +346,39 @@ fn disabled(bytes: &[u8], target: &str) -> Result<bool, ServiceFailure> {
         return Err(ServiceFailure::SupervisorUnavailable);
     }
     Ok(result.unwrap_or(false))
+}
+
+fn process_scope(bytes: &[u8]) -> Result<Vec<u32>, ServiceFailure> {
+    let observed_state = state(bytes)?;
+    let text = std::str::from_utf8(bytes).map_err(|_| ServiceFailure::CleanupUnresolved)?;
+    let mut depth = 0usize;
+    let mut pid = None;
+    for line in text.lines().map(str::trim) {
+        if depth == 1
+            && let Some(value) = line.strip_prefix("pid = ")
+        {
+            if pid.is_some() {
+                return Err(ServiceFailure::CleanupUnresolved);
+            }
+            pid = Some(
+                value
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|pid| *pid != 0 && *pid <= i32::MAX as u32)
+                    .ok_or(ServiceFailure::CleanupUnresolved)?,
+            );
+        }
+        if line.ends_with('{') {
+            depth += 1;
+        }
+        if line == "}" {
+            depth = depth
+                .checked_sub(1)
+                .ok_or(ServiceFailure::CleanupUnresolved)?;
+        }
+    }
+    if depth != 0 || (observed_state == SupervisorState::Running && pid.is_none()) {
+        return Err(ServiceFailure::CleanupUnresolved);
+    }
+    Ok(pid.into_iter().collect())
 }

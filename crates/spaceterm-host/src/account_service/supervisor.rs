@@ -208,7 +208,9 @@ impl ServiceSupervisor {
         let manager: Arc<dyn ServiceManager> = Arc::new(super::SystemdServiceManager::current(
             Arc::clone(&installations),
         )?);
-        let processes = Arc::new(super::NativeServiceProcesses::current(installations)?);
+        let processes = Arc::new(
+            super::NativeServiceProcesses::current(installations)?.with_manager(manager.clone()),
+        );
         Ok(Self {
             key: AccountBuildKey {
                 account_uid: uid,
@@ -234,7 +236,14 @@ impl ServiceSupervisor {
         let installations: Arc<dyn super::ServiceInstallations> =
             Arc::new(super::NativeServiceInstallations);
         self.processes = Some(Arc::new(
-            super::NativeServiceProcesses::current(installations)?.with_runtime(runtime),
+            super::NativeServiceProcesses::current(installations)?
+                .with_manager(
+                    self.manager
+                        .as_ref()
+                        .ok_or(ServiceFailure::SupervisorUnavailable)?
+                        .clone(),
+                )
+                .with_runtime(runtime),
         ));
         Ok(self)
     }
@@ -869,6 +878,33 @@ impl ServiceSupervisor {
                 pending,
             })
         })
+    }
+    /// Reads protocol compatibility from the exact authenticated approved installation.
+    /// Neither the helper's own version nor the newest staged artifact substitutes for it.
+    pub fn approved_protocol_majors(&self) -> Result<Vec<u16>, ServiceFailure> {
+        let registration = self.discover()?.ok_or(ServiceFailure::Missing)?;
+        let expected = registration
+            .approved_installation()
+            .ok_or(ServiceFailure::Missing)?;
+        #[cfg(feature = "test-support")]
+        let store = if let Some(key) = &self.test_installation_trust {
+            crate::server_installation::test_support::existing_store(&registration, key.clone())?
+        } else {
+            crate::server_installation::ServerInstallationStore::open_existing(&registration)?
+        };
+        #[cfg(not(feature = "test-support"))]
+        let store =
+            crate::server_installation::ServerInstallationStore::open_existing(&registration)?;
+        let executable =
+            store.retain_compatible_approved(crate::organization_store::schema::SCHEMA_VERSION)?;
+        let actual = executable.status();
+        if actual.installation != expected.installation
+            || actual.version != expected.version
+            || actual.artifact_sha256 != expected.artifact_sha256
+        {
+            return Err(ServiceFailure::IdentityMismatch);
+        }
+        Ok(executable.protocol_majors().to_vec())
     }
     /// Captures and persists one exact runtime scope and its original 30-second expiry.
     pub fn assess(

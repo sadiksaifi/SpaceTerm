@@ -783,7 +783,14 @@ impl WorkspaceManager {
             picker: self
                 .pin_picker
                 .as_ref()
-                .is_some_and(|picker| picker.read(cx).blocks_terminal_input()),
+                .is_some_and(|picker| picker.read(cx).blocks_terminal_input())
+                || self
+                    .server
+                    .as_ref()
+                    .and_then(|server| server.repair.as_ref())
+                    .is_some_and(|repair| {
+                        repair.read(cx).picker().read(cx).blocks_terminal_input()
+                    }),
             remote_flow: self
                 .remote_workspace_flow
                 .as_ref()

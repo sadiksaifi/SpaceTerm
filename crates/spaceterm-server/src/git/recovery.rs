@@ -407,6 +407,12 @@ impl GitExternalWork {
                 .retain_committed()
                 .map_err(|_| failure(ServerFailureClass::RecoveryRequired))?;
         }
+        // The newly initialized store has no previous runtime epoch. A live
+        // reducer cannot be restored with epoch zero. Inventory reconciliation
+        // starts after the actor publishes its first epoch, not before it exists.
+        if recovered.last_epoch.get() == 0 {
+            return Ok(None);
+        }
         let mut core = CorePorts::production_with_git_host(
             self.identity,
             self.home.clone(),
