@@ -247,6 +247,23 @@ impl NativeServiceManagement {
         })
     }
 
+    /// Checks the compiled channel's signed feed against approved code. This
+    /// reads registration without contacting a manager or changing Stopped intent.
+    pub fn check_update(
+        &self,
+    ) -> ManagementFuture<'_, Option<spaceterm_distribution::BuildVersion>> {
+        Box::pin(async move {
+            let registration = self.supervisor.discover().map_err(classify_service)?;
+            let feed = self.check_installation(None).await?;
+            let candidate = &feed.document().version;
+            let current = registration
+                .as_ref()
+                .and_then(|registration| registration.approved_installation())
+                .map(|approved| &approved.version);
+            Ok(newer_version(candidate, current).then(|| candidate.clone()))
+        })
+    }
+
     /// Downloads and verifies one signed artifact on the blocking pool. It never
     /// creates identity, service configuration, credentials or registration.
     pub fn download_installation(
@@ -435,11 +452,20 @@ impl NativeCommandBindings for NativeServiceManagement {
                     .map(CliOutput::ServiceProgress)
                     .map_err(classify_service);
             }
+            if command == NativeCliCommand::UpdateCheck {
+                return Ok(CliOutput::Update {
+                    available_version: self
+                        .check_update()
+                        .await?
+                        .map(|version| version.as_str().to_owned()),
+                });
+            }
             if command == NativeCliCommand::Start {
                 let request = self
                     .supervisor
                     .allocate_request()
                     .map_err(classify_service)?;
+                crate::cli::output::emit_native_request(request, io)?;
                 return self
                     .start(request)
                     .await
@@ -462,7 +488,17 @@ impl NativeCommandBindings for NativeServiceManagement {
                 ConfirmationMode::Token(token) => {
                     self.restore_assessment(action, token.clone()).await?
                 }
-                _ => self.assess(action).await.map_err(classify_service)?,
+                _ => {
+                    let request = self
+                        .supervisor
+                        .allocate_request()
+                        .map_err(classify_service)?;
+                    crate::cli::output::emit_native_request(request, io)?;
+                    self.supervisor
+                        .assess(request, action)
+                        .await
+                        .map_err(classify_service)?
+                }
             };
             let prompt = NativeActionPrompt::from_assessment(&assessment)?;
             match confirmation {
@@ -480,6 +516,19 @@ impl NativeCommandBindings for NativeServiceManagement {
             .map_err(classify_service)?;
             Ok(CliOutput::ServiceProgress(progress))
         })
+    }
+}
+
+fn newer_version(
+    candidate: &spaceterm_distribution::BuildVersion,
+    current: Option<&spaceterm_distribution::BuildVersion>,
+) -> bool {
+    let Some(current) = current else { return true };
+    match spaceterm_distribution::StableVersion::parse(candidate.as_str()) {
+        Ok(candidate) if spaceterm_distribution::StableVersion::parse(current.as_str()).is_ok() => {
+            candidate.supersedes(current.as_str())
+        }
+        _ => candidate != current,
     }
 }
 
@@ -514,5 +563,30 @@ pub fn classify_service(failure: ServiceFailure) -> ManagementFailure {
             ManagementFailure::OutcomePending
         }
         ServiceFailure::Indeterminate => ManagementFailure::Indeterminate,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::newer_version;
+    use spaceterm_distribution::BuildVersion;
+
+    #[test]
+    fn signed_update_candidate_compares_numeric_versions_and_never_offers_a_stable_downgrade() {
+        for (candidate, current, expected) in [
+            ("1.10.0", Some("1.9.9"), true),
+            ("2.0.0", Some("1.99.99"), true),
+            ("1.2.3", Some("1.2.3"), false),
+            ("1.2.2", Some("1.2.3"), false),
+            ("1.9.0", Some("1.10.0"), false),
+            ("1.2.3", None, true),
+            ("dev.123456789abc", Some("dev.123456789abc"), false),
+            ("dev.123456789abc", Some("dev.abcdef123456"), true),
+            ("dev.123456789abc.dirty", Some("dev.123456789abc"), true),
+        ] {
+            let candidate = BuildVersion::parse(candidate).unwrap();
+            let current = current.map(|current| BuildVersion::parse(current).unwrap());
+            assert_eq!(newer_version(&candidate, current.as_ref()), expected);
+        }
     }
 }
