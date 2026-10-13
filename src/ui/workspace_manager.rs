@@ -3259,7 +3259,7 @@ impl WorkspaceManager {
                 .host_colors(spaceterm_ui::ControlHost::Floating)
                 .text_placeholder,
         );
-        let sidebar_visible = self.sidebar.read(cx).layout().visible;
+        let sidebar_visible = layout.expanded();
         let (toggle_icon, toggle_label) =
             sidebar_toggle_presentation(self.sidebar.read(cx).layout().visible);
         let drag_manager = manager.clone();
@@ -3617,8 +3617,13 @@ impl WorkspaceManager {
         let active_tab_manager = self.workspaces.active_workspace().payload().clone();
         let workspace = self.workspaces.active_workspace();
         let sidebar_layout = self.sidebar.read(cx).layout();
-        let chrome = WorkspaceChromeLayout::resolve(
+        let sidebar_frame = self.sidebar.update(cx, |sidebar, cx| sidebar.present(cx));
+        if sidebar_frame.moving {
+            window.request_animation_frame();
+        }
+        let chrome = WorkspaceChromeLayout::presented(
             sidebar_layout,
+            sidebar_frame,
             &self.chrome_identity(workspace.id(), cx),
             window,
             cx,
@@ -3635,6 +3640,7 @@ impl WorkspaceManager {
                 chrome.width,
                 cx,
             );
+            manager.present_sidebar(sidebar_frame.reveal, cx);
             manager.set_trailing_accessory(Some(update_control), cx);
             manager.set_window_close_handler(close);
         });
@@ -3678,13 +3684,14 @@ impl WorkspaceManager {
                     .min_h_0()
                     .child(active_tab_manager),
             )
-            .when(self.sidebar.read(cx).layout().visible, |root| {
+            .when(sidebar_frame.reveal > 0.0, |root| {
                 root.child(self.sidebar.clone())
             })
             .child(
                 self.sidebar.read(cx).render_resize_handle(
                     self.sidebar.downgrade(),
                     chrome.width,
+                    !sidebar_frame.moving,
                     super::workspace_frame::WorkspaceFrame::for_appearance(
                         super::appearance::chrome(cx),
                         cx,

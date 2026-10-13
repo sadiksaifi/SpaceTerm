@@ -982,7 +982,8 @@ impl WorkspaceSidebar {
                     .top_chrome_height(appearance.top_height()),
             )
             .bottom_0()
-            .left_0()
+            // The sidebar slides in from the window's leading edge as it shows.
+            .left(self.frame.between(-self.layout.width, px(0.0)))
             .w(self.layout.width)
             .min_h_0()
             .flex()
@@ -1054,6 +1055,7 @@ impl WorkspaceSidebar {
         &self,
         sidebar: WeakEntity<Self>,
         handle_width: Pixels,
+        pointer_input: bool,
         top_chrome_height: Pixels,
     ) -> AnyElement {
         let pointer_guard = Self::pointer_guard(sidebar.clone());
@@ -1070,6 +1072,8 @@ impl WorkspaceSidebar {
         // The sidebar and the content stage share one continuous base surface, so the edge keeps
         // its resize target and cursor while only keyboard focus reveals an indicator.
         .paint_divider(false)
+        // A moving sidebar's edge takes no pointer input until it settles.
+        .pointer_input(pointer_input)
         .target(ResizeHandleTarget::SpaciousLeading(top_chrome_height))
         .debug_selector(selector)
         .on_event_with_accepted_value(move |event, window, cx| {

@@ -405,6 +405,8 @@ pub(crate) struct TabManager {
     pane_construction: PaneConstruction,
     active: bool,
     sidebar_visible: bool,
+    /// How much of the sidebar the current frame shows, from 0 when hidden to 1 when shown.
+    sidebar_reveal: f32,
     sidebar_width: Pixels,
     top_chrome_width: Pixels,
     trailing_accessory: Option<gpui::AnyView>,
@@ -493,6 +495,7 @@ impl TabManager {
             pane_construction,
             active: true,
             sidebar_visible: true,
+            sidebar_reveal: 1.0,
             sidebar_width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
             top_chrome_width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
             trailing_accessory: None,
@@ -900,13 +903,26 @@ impl TabManager {
         top_chrome_width: Pixels,
         cx: &mut Context<Self>,
     ) {
+        let reveal = if visible { 1.0 } else { 0.0 };
         if self.sidebar_visible != visible
+            || self.sidebar_reveal != reveal
             || self.sidebar_width != sidebar_width
             || self.top_chrome_width != top_chrome_width
         {
             self.sidebar_visible = visible;
+            self.sidebar_reveal = reveal;
             self.sidebar_width = sidebar_width;
             self.top_chrome_width = top_chrome_width;
+            cx.notify();
+        }
+    }
+
+    /// Presents `reveal` of the sidebar in the current frame while it shows or hides. The stage's
+    /// leading edge follows the sidebar, and the active Tab keeps the width it has at rest, so its
+    /// Terminal Sessions resize once per change rather than once per frame.
+    pub(crate) fn present_sidebar(&mut self, reveal: f32, cx: &mut Context<Self>) {
+        if self.sidebar_reveal != reveal {
+            self.sidebar_reveal = reveal;
             cx.notify();
         }
     }
@@ -2136,7 +2152,7 @@ impl TabManager {
         let strip_marks = self
             .visible_tabs()
             .next()
-            .filter(|_| self.sidebar_visible)
+            .filter(|_| self.sidebar_reveal > 0.0)
             .map(|(tab_id, _)| (TabBoundary::StripStart(tab_id), StripEdge::Start))
             .into_iter()
             .chain(
@@ -2452,6 +2468,18 @@ impl Render for TabManager {
         let tab_bar = self.render_tab_bar(&presentation, hovers, manager.clone(), window, cx);
         let frame = super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
         let stage_surface = super::workspace_frame::base_surface(&appearance.colors);
+        // The stage's leading margin and inset beside `reveal` of the sidebar.
+        let leading_edge = |reveal: f32| {
+            let hidden = frame.stage_leading_inset(false);
+            let inset = hidden + (frame.stage_leading_inset(true) - hidden) * reveal;
+            (self.sidebar_width * reveal, inset)
+        };
+        let (leading_margin, leading_inset) = leading_edge(self.sidebar_reveal);
+        let leading = leading_margin + leading_inset;
+        let rest_leading = {
+            let (margin, inset) = leading_edge(if self.sidebar_visible { 1.0 } else { 0.0 });
+            margin + inset
+        };
 
         div()
             .id("tab-manager")
@@ -2512,7 +2540,7 @@ impl Render for TabManager {
                     .min_h_0()
                     .relative()
                     .overflow_hidden()
-                    .when(self.sidebar_visible, |body| body.ml(self.sidebar_width))
+                    .ml(leading_margin)
                     // No top edge: the chrome above carries that space. No leading edge beside a
                     // sidebar: the sidebar chip's trailing margin is already that gap.
                     .border_color(gpui_color(
@@ -2520,7 +2548,7 @@ impl Render for TabManager {
                     ))
                     .border_b(frame.window_edge_inset())
                     .border_r(frame.window_edge_inset())
-                    .border_l(frame.stage_leading_inset(self.sidebar_visible))
+                    .border_l(leading_inset)
                     .child(
                         div()
                             .debug_selector(move || {
@@ -2532,7 +2560,7 @@ impl Render for TabManager {
                             .absolute()
                             .inset_0(),
                     )
-                    .child(active_tab),
+                    .child(div().h_full().mr(rest_leading - leading).child(active_tab)),
             )
     }
 }

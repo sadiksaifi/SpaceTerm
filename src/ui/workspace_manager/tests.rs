@@ -6240,6 +6240,100 @@ fn workspace_popup_name_should_fit_at_fractional_scales(cx: &mut TestAppContext)
     );
 }
 
+/// Draws the frame 30ms into a sidebar motion and reports the sidebar, the stage, the Pane, and
+/// whether the collapsed Workspace identity shows.
+fn sidebar_motion_frame(
+    cx: &mut VisualTestContext,
+) -> (
+    Option<gpui::Bounds<Pixels>>,
+    gpui::Bounds<Pixels>,
+    gpui::Bounds<Pixels>,
+    bool,
+) {
+    cx.run_until_parked();
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(30));
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+    sidebar_presentation(cx)
+}
+
+fn sidebar_presentation(
+    cx: &mut VisualTestContext,
+) -> (
+    Option<gpui::Bounds<Pixels>>,
+    gpui::Bounds<Pixels>,
+    gpui::Bounds<Pixels>,
+    bool,
+) {
+    (
+        cx.debug_bounds("workspace-sidebar"),
+        cx.debug_bounds("tab-manager-content").unwrap(),
+        cx.debug_bounds("pane-surface-1").unwrap(),
+        cx.debug_bounds("workspace-chip-label").is_some(),
+    )
+}
+
+#[gpui::test]
+fn toggling_the_sidebar_should_slide_it_while_the_terminal_resizes_once(cx: &mut TestAppContext) {
+    use crate::ui::drag_and_drop::AnimatePresence;
+
+    let (manager, records, cx) = workspace_manager(cx);
+    let resizes = || {
+        records
+            .commands()
+            .iter()
+            .filter(|call| matches!(call.command, RecordedCommand::Resize(_)))
+            .count()
+    };
+    let (Some(sidebar), stage, pane, false) = sidebar_presentation(cx) else {
+        panic!("the sidebar must start shown");
+    };
+    let before = resizes();
+    cx.update(|_, cx| cx.set_global(AnimatePresence));
+
+    cx.update(|window, cx| manager.update(cx, |manager, cx| manager.toggle_sidebar(window, cx)));
+    let hiding = sidebar_motion_frame(cx);
+    let hiding_resizes = resizes();
+    finish_slides(cx);
+    let hidden = sidebar_presentation(cx);
+    let hidden_resizes = resizes();
+    cx.update(|window, cx| manager.update(cx, |manager, cx| manager.toggle_sidebar(window, cx)));
+    let showing = sidebar_motion_frame(cx);
+    finish_slides(cx);
+    let shown = sidebar_presentation(cx);
+
+    let (Some(hiding_sidebar), hiding_stage, hiding_pane, false) = hiding else {
+        panic!("the sidebar must still show, without the collapsed identity: {hiding:?}");
+    };
+    assert!(
+        hiding_sidebar.left() < sidebar.left() && hiding_sidebar.right() > px(0.0),
+        "the sidebar must be sliding out: {hiding_sidebar:?} from {sidebar:?}"
+    );
+    assert!(
+        hiding_stage.left() < stage.left() && hiding_stage.left() > hidden.1.left(),
+        "the stage must follow the sidebar: {hiding_stage:?} between {stage:?} and {:?}",
+        hidden.1
+    );
+    assert_eq!(
+        (hiding_pane.size.width, hiding_resizes),
+        (hidden.2.size.width, hidden_resizes),
+        "the Terminal must take its final size when the motion starts"
+    );
+    assert_eq!((hidden.0, hidden.3), (None, true));
+    assert_eq!(hidden_resizes, before + 1, "the Terminal must resize once");
+
+    let (Some(showing_sidebar), showing_stage, _, false) = showing else {
+        panic!("the sidebar must slide in without the collapsed identity: {showing:?}");
+    };
+    assert!(
+        showing_sidebar.left() < sidebar.left() && showing_stage.left() < stage.left(),
+        "the sidebar and stage must be sliding in: {showing:?}"
+    );
+    assert_eq!(shown, (Some(sidebar), stage, pane, false));
+    assert_eq!(resizes(), before + 2);
+}
+
 /// The Workspace identity keeps its glyph in both sidebar states.
 #[gpui::test]
 fn workspace_identity_should_keep_its_icon_when_the_sidebar_is_hidden(cx: &mut TestAppContext) {

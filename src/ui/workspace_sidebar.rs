@@ -4,6 +4,7 @@ mod text;
 mod view;
 
 use super::drag_and_drop::{DragPreview, DragSession, ReorderableStrip};
+use super::sidebar_motion::{SidebarFrame, SidebarMotion};
 use super::workspace_chrome::{
     WorkspaceChromeIdentity, WorkspaceChromeLayout, WorkspaceChromeStatus,
 };
@@ -277,6 +278,10 @@ pub(super) struct WorkspaceSidebar {
     resize_origin: Option<SidebarLayout>,
     suppress_pointer_until_release: bool,
     workspace_reorder: ReorderableStrip<WorkspaceId>,
+    /// How the sidebar moves as it shows and hides.
+    motion: SidebarMotion,
+    /// How the current frame presents the sidebar.
+    frame: SidebarFrame,
 }
 
 impl WorkspaceSidebar {
@@ -342,7 +347,18 @@ impl WorkspaceSidebar {
             resize_origin: None,
             suppress_pointer_until_release: false,
             workspace_reorder: ReorderableStrip::new(gpui::Axis::Vertical),
+            motion: SidebarMotion::new(visible),
+            frame: SidebarFrame {
+                reveal: if visible { 1.0 } else { 0.0 },
+                moving: false,
+            },
         }
+    }
+
+    /// Presents the sidebar in the current frame, which the Workspace chrome around it follows.
+    pub(super) fn present(&mut self, cx: &App) -> SidebarFrame {
+        self.frame = self.motion.present(self.layout.visible, cx);
+        self.frame
     }
 
     pub(super) fn dismiss_editing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1275,6 +1291,7 @@ impl WorkspaceSidebar {
             dismiss_active_menu(window, cx);
         }
         self.cancel_rename(cx);
+        self.motion.expect_change();
         self.set_layout(!self.layout.visible, self.layout.width, window, cx);
         if !self.layout.visible && restore {
             cx.emit(SidebarEvent::FocusPane);
@@ -1285,6 +1302,9 @@ impl WorkspaceSidebar {
             self.cancel_rename(cx);
             cx.emit(SidebarEvent::FocusPane);
         } else {
+            if !self.layout.visible {
+                self.motion.expect_change();
+            }
             self.set_layout(true, self.layout.width, window, cx);
             if let Some(index) = self.rows.iter().position(|row| row.active) {
                 self.reveal_row(index, cx);

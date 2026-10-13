@@ -8,6 +8,7 @@ use spaceterm_ui::{ButtonSize, ButtonTheme, ComboBoxTheme, CustomIconName, Icon,
 use super::appearance::{ChromeAppearance, chrome};
 use super::chrome_icons::IconRole;
 use super::chrome_typography::{ChromeTextStyleExt as _, TextRole};
+use super::sidebar_motion::SidebarFrame;
 use super::workspace_sidebar::SidebarLayout;
 use super::workspace_status::{WorkspaceStatusPaint, resolve as resolve_workspace_status};
 use crate::appearance::Color;
@@ -71,6 +72,30 @@ impl WorkspaceChromeLayout {
                 cx,
             ),
         }
+    }
+
+    /// The layout one frame presents while the sidebar `frame` moves: as wide as the part of the
+    /// sidebar that shows, and expanded while any of it shows, so the collapsed Workspace identity
+    /// appears only once the sidebar is hidden.
+    pub(super) fn presented(
+        sidebar: SidebarLayout,
+        frame: SidebarFrame,
+        identity: &WorkspaceChromeIdentity,
+        window: &Window,
+        cx: &App,
+    ) -> Self {
+        let collapsed = Self::collapsed_width(identity, window, cx);
+        Self {
+            width: frame.between(collapsed, sidebar.width),
+            sidebar_visible: frame.reveal > 0.0,
+            ..Self::resolve(sidebar, identity, window, cx)
+        }
+    }
+
+    /// Whether the chrome presents the sidebar's expanded controls rather than the collapsed
+    /// Workspace identity.
+    pub(super) fn expanded(self) -> bool {
+        self.sidebar_visible
     }
 
     pub(super) fn collapsed_width(
