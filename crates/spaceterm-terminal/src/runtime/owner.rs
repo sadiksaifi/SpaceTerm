@@ -483,19 +483,10 @@ impl RuntimeOwner {
         }
     }
     pub fn lifecycle_snapshot(&self) -> RuntimeLifecycle {
-        *self
-            .shared
-            .lifecycle
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
+        self.handle().lifecycle_snapshot()
     }
     pub fn metadata_snapshot(&self) -> Option<RuntimeMetadataSnapshot> {
-        self.shared
-            .observations
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .metadata
-            .clone()
+        self.handle().metadata_snapshot()
     }
     /// Blocking only. Lifecycle and cleanup remain independently observable.
     pub fn join(&mut self) -> Result<SessionCleanupObservation, RuntimeFailure> {
@@ -532,39 +523,22 @@ impl RuntimeOwner {
 }
 impl RuntimeObservationSource for RuntimeOwner {
     fn session(&self) -> SessionKey {
-        self.shared.session
+        self.handle().session()
     }
     fn display_directory_snapshot(&self) -> Option<DisplayDirectoryObservation> {
-        self.shared
-            .observations
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .display
-            .clone()
+        self.handle().display_directory_snapshot()
     }
     fn confirmed_directory_snapshot(&self) -> Option<ConfirmedDirectoryObservation> {
-        self.shared
-            .observations
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .confirmed
-            .clone()
+        self.handle().confirmed_directory_snapshot()
     }
     fn close_work_snapshot(&self) -> Option<CloseWorkObservation> {
-        self.shared
-            .observations
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .close_work
+        self.handle().close_work_snapshot()
     }
     fn cleanup_snapshot(&self) -> Option<SessionCleanupObservation> {
-        self.shared
-            .observations
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .cleanup
+        self.handle().cleanup_snapshot()
     }
 }
+
 impl Drop for RuntimeOwner {
     fn drop(&mut self) {
         if self.worker.is_some() {
@@ -773,5 +747,67 @@ impl RuntimeHandle {
         request: GraphicsRequest,
     ) -> Result<ResourceStream<GraphicsChunk>, RuntimeFailure> {
         self.resource(ResourceRequest::Graphics(request), StreamSink::Graphics)
+    }
+}
+
+// Snapshot handles carry no lifetime authority; subscriber loss cannot retire the owner.
+impl RuntimeHandle {
+    /// Retained semantic comparison base, independent of every subscriber viewport.
+    pub fn content_base_snapshot(&self) -> Option<spaceterm_core::content::ContentBase> {
+        *self
+            .shared
+            .base
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    }
+    pub fn lifecycle_snapshot(&self) -> RuntimeLifecycle {
+        *self
+            .shared
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    }
+    pub fn metadata_snapshot(&self) -> Option<RuntimeMetadataSnapshot> {
+        self.shared
+            .observations
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .metadata
+            .clone()
+    }
+}
+impl RuntimeObservationSource for RuntimeHandle {
+    fn session(&self) -> SessionKey {
+        self.shared.session
+    }
+    fn display_directory_snapshot(&self) -> Option<DisplayDirectoryObservation> {
+        self.shared
+            .observations
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .display
+            .clone()
+    }
+    fn confirmed_directory_snapshot(&self) -> Option<ConfirmedDirectoryObservation> {
+        self.shared
+            .observations
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .confirmed
+            .clone()
+    }
+    fn close_work_snapshot(&self) -> Option<CloseWorkObservation> {
+        self.shared
+            .observations
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .close_work
+    }
+    fn cleanup_snapshot(&self) -> Option<SessionCleanupObservation> {
+        self.shared
+            .observations
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .cleanup
     }
 }

@@ -13,6 +13,14 @@ use spaceterm_host::{
 };
 use std::sync::Arc;
 
+fn private_fixture_directory() -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt as _;
+    tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap()
+}
+
 #[test]
 fn launch_agent_uses_each_identity_and_escapes_the_approved_executable() {
     for (identity, label) in [
@@ -106,7 +114,7 @@ fn user_unit_offline_parser_resolves_the_exact_dollar_executable() {
         os::unix::fs::PermissionsExt,
         process::{Command, Stdio},
     };
-    let directory = tempfile::tempdir().unwrap();
+    let directory = private_fixture_directory();
     let root = directory.path().canonicalize().unwrap();
     let installation = root.join("$data % approved");
     std::fs::create_dir(&installation).unwrap();
@@ -395,7 +403,7 @@ async fn linger_checks_before_authorizing_and_elevates_only_loginctl() {
 
 #[tokio::test]
 async fn stopped_configuration_suppresses_without_resolving_executable() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = private_fixture_directory();
     let root = directory.path().canonicalize().unwrap();
     let search = format!("{}\n", root.join("preferences/systemd/user").display());
     let runner = Arc::new(RecordingRunner::new([
@@ -496,7 +504,7 @@ async fn loaded_launch_agent_is_kickstarted_without_bootstrap_or_force_replace()
 #[test]
 fn configuration_publication_is_private_and_rejects_symlinks_and_hardlinks() {
     use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
-    let directory = tempfile::tempdir().unwrap();
+    let directory = private_fixture_directory();
     let root = directory.path().canonicalize().unwrap();
     native::publish_configuration(&root, b"first").unwrap();
     let file = root.join("services/fixture.service");
@@ -534,7 +542,7 @@ fn configuration_publication_is_private_and_rejects_symlinks_and_hardlinks() {
 #[cfg(target_os = "macos")]
 #[test]
 fn configuration_refuses_allow_acls_but_accepts_home_deny_delete() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = private_fixture_directory();
     let root = directory.path().canonicalize().unwrap();
     let status = spaceterm_host::process::spawn(
         std::process::Command::new("/bin/chmod")
@@ -589,7 +597,7 @@ async fn native_utility_output_and_deadlines_are_bounded() {
 #[tokio::test]
 async fn dropping_a_utility_observer_does_not_cancel_accepted_execution() {
     use std::time::Duration;
-    let directory = tempfile::tempdir().unwrap();
+    let directory = private_fixture_directory();
     let script = format!(
         "sleep 0.1; printf done > '{}/completed'",
         directory.path().display()
@@ -753,7 +761,7 @@ impl spaceterm_host::account_service::ServiceInstallations for TestInstallations
 
 #[tokio::test]
 async fn launch_agent_public_operations_publish_and_remove_only_service_configuration() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = private_fixture_directory();
     let root = directory.path().canonicalize().unwrap();
     let runner = Arc::new(RecordingRunner::new(
         (0..7).map(|_| CommandReply::success(b"")),
@@ -815,7 +823,7 @@ async fn launch_agent_public_operations_publish_and_remove_only_service_configur
 
 #[tokio::test]
 async fn user_service_public_operations_publish_in_the_observed_search_path() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = private_fixture_directory();
     let root = directory.path().canonicalize().unwrap();
     let search = format!(
         "{} /etc/systemd/user\n",
@@ -882,7 +890,7 @@ async fn user_service_public_operations_publish_in_the_observed_search_path() {
 
 #[tokio::test]
 async fn user_service_retains_the_managers_nondefault_configuration_directory() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = private_fixture_directory();
     let root = directory.path().canonicalize().unwrap();
     let configuration = root.join("preferences");
     let search = format!(
@@ -935,10 +943,14 @@ async fn user_service_decodes_systemctl_quoted_unit_paths_without_shell_evaluati
         ("home\"$`name", "home\\\"\\$\\`name"),
         ("home'name", "home'name"),
     ] {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = private_fixture_directory();
         let root = directory.path().canonicalize().unwrap();
         let home = root.join(component);
-        std::fs::create_dir(&home).unwrap();
+        use std::os::unix::fs::DirBuilderExt as _;
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&home)
+            .unwrap();
         // systemctl 249 uses shell_maybe_quote(str, 0), not hex escaping or
         // shell evaluation. Single quotes remain literal inside double quotes.
         let search = format!(
@@ -986,7 +998,7 @@ async fn user_service_rejects_malformed_unit_path_quoting_before_publication() {
         "\"/home/control\\001\"\n",
         "\"/home/truncated\\\"",
     ] {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = private_fixture_directory();
         let runner = Arc::new(RecordingRunner::new([CommandReply::success(
             search.as_bytes(),
         )]));
@@ -1008,7 +1020,7 @@ async fn user_service_rejects_malformed_unit_path_quoting_before_publication() {
 
 #[tokio::test]
 async fn user_service_does_not_publish_outside_the_managers_search_path() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = private_fixture_directory();
     let root = directory.path().canonicalize().unwrap();
     let runner = Arc::new(RecordingRunner::new([CommandReply::success(
         b"/etc/systemd/user\n",
@@ -1030,7 +1042,7 @@ async fn user_service_does_not_publish_outside_the_managers_search_path() {
 
 #[tokio::test]
 async fn missing_user_unit_is_idempotent_only_after_a_native_absence_observation() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = private_fixture_directory();
     let root = directory.path().canonicalize().unwrap();
     let search = format!("{}\n", root.join(".config/systemd/user").display());
     let missing = b"LoadState=not-found\nActiveState=inactive\nSubState=dead\nUnitFileState=\n";

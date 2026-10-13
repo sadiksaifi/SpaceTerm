@@ -203,6 +203,7 @@ pub struct ProtocolDispatcher {
     ordinary: Arc<dyn OrdinaryDispatchPort>,
     restricted: Arc<dyn RestrictedDispatchPort>,
     pairing: Option<crate::pairing::service::PairingService>,
+    outcomes: Option<Arc<crate::listeners::outcomes::ConnectionOutcomes>>,
     messages: Arc<Semaphore>,
     bytes: Arc<Semaphore>,
     egress: Arc<EgressBudget>,
@@ -222,10 +223,19 @@ impl ProtocolDispatcher {
             ordinary,
             restricted,
             pairing: None,
+            outcomes: None,
             messages: Arc::new(Semaphore::new(MAX_DECODED_DISPATCH_MESSAGES)),
             bytes: Arc::new(Semaphore::new(MAX_DECODED_DISPATCH_BYTES)),
             egress: EgressBudget::new(),
         }
+    }
+    /// Shares the connection's reliable reply charge with actor admission.
+    pub fn with_outcomes(
+        mut self,
+        outcomes: Arc<crate::listeners::outcomes::ConnectionOutcomes>,
+    ) -> Self {
+        self.outcomes = Some(outcomes);
+        self
     }
     pub fn with_egress_budget(mut self, budget: Arc<EgressBudget>) -> Self {
         self.egress = budget;
@@ -456,11 +466,20 @@ impl ProtocolDispatcher {
                                         .then(|| egress.reserve_operation_reply())
                                         .transpose()
                                         .map_err(egress_failure)?;
+                                    let scope = match (&self.outcomes, &reserved) {
+                                        (Some(outcomes), Some(reserved)) => Some(
+                                            outcomes.begin(session.principal, reserved.retain())?,
+                                        ),
+                                        _ => None,
+                                    };
                                     if let Some(response) = self
                                         .ordinary
                                         .dispatch(session.principal, payload, handle.clone())
                                         .await?
                                     {
+                                        if let Some(scope) = &scope {
+                                            scope.validate_publication(&response)?;
+                                        }
                                         self.send(
                                             session,
                                             &peer.transport,

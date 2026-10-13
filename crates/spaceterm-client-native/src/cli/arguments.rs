@@ -32,7 +32,16 @@ pub enum CliCommand {
     Status {
         operation: Option<RequestSelector>,
     },
+    Install {
+        version: Option<StableVersion>,
+    },
     Start,
+    Restart {
+        confirmation: ConfirmationMode,
+    },
+    Uninstall {
+        confirmation: ConfirmationMode,
+    },
     Stop {
         confirmation: ConfirmationMode,
     },
@@ -159,7 +168,21 @@ pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<CliInvocat
                 parse_operation(value).map(RequestSelector::Protocol)
             }).transpose()? }
         }
+        ["install", rest @ ..] => {
+            let options = Options::new(rest, &[("--version", Flag::Value)])?;
+            CliCommand::Install {
+                version: options.value("--version").map(parse_version).transpose()?,
+            }
+        }
         ["start"] => CliCommand::Start,
+        ["restart", rest @ ..] => CliCommand::Restart {
+            confirmation: Options::new(rest, &confirmation_flags)?
+                .confirmation(invocation.non_interactive)?,
+        },
+        ["uninstall", rest @ ..] => CliCommand::Uninstall {
+            confirmation: Options::new(rest, &confirmation_flags)?
+                .confirmation(invocation.non_interactive)?,
+        },
         ["stop", rest @ ..] => CliCommand::Stop {
             confirmation: Options::new(rest, &confirmation_flags)?
                 .confirmation(invocation.non_interactive)?,
@@ -260,25 +283,7 @@ pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<CliInvocat
         ["update", "check"] => CliCommand::UpdateCheck,
         ["update", "stage", rest @ ..] => {
             let options = Options::new(rest, &[("--version", Flag::Value)])?;
-            let version = options
-                .value("--version")
-                .map(|value| {
-                    if value.len() > 128 {
-                        return Err(CliFailure::Usage);
-                    }
-                    let parts = value.split('.').collect::<Vec<_>>();
-                    if parts.len() != 3
-                        || parts.iter().any(|p| {
-                            p.is_empty()
-                                || !p.bytes().all(|b| b.is_ascii_digit())
-                                || (p.len() > 1 && p.starts_with('0'))
-                        })
-                    {
-                        return Err(CliFailure::Usage);
-                    }
-                    Ok(StableVersion(value.to_owned()))
-                })
-                .transpose()?;
+            let version = options.value("--version").map(parse_version).transpose()?;
             CliCommand::UpdateStage { version }
         }
         ["update", "activate", rest @ ..] => {
@@ -360,6 +365,10 @@ impl<'a> Options<'a> {
             _ => Ok(ConfirmationMode::Interactive),
         }
     }
+}
+fn parse_version(value: &str) -> Result<StableVersion, CliFailure> {
+    spaceterm_distribution::StableVersion::parse(value).map_err(|_| CliFailure::Usage)?;
+    Ok(StableVersion(value.to_owned()))
 }
 fn decimal(value: &str) -> Result<u64, CliFailure> {
     if value.is_empty() || value.starts_with('0') || !value.bytes().all(|b| b.is_ascii_digit()) {

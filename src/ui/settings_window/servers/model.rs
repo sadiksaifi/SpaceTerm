@@ -335,6 +335,8 @@ pub(crate) struct ServerSummary {
     pub(crate) compatibility: Option<VerifiedCompatibility>,
     pub(crate) installations: ServerInstallations,
     pub(crate) paired_devices: Option<PairedDevices>,
+    /// Latest owner-issued unpair assessment. It carries no authority until the owner revalidates it.
+    pub(crate) unpair_assessment: Option<ManagementAssessment>,
     pub(crate) name: SharedString,
     pub(crate) route: ServerRoute,
     pub(crate) status: ServerStatus,
@@ -407,6 +409,8 @@ pub(crate) enum ServerRequestTarget {
         pairing: LocalPairingKey,
         runtime_epoch: Option<ServerEpoch>,
         route: ServerRoute,
+        /// A device inventory action cannot follow a replacement page revision.
+        inventory_version: Option<FieldVersion>,
     },
     PendingUnpair {
         pairing: LocalPairingKey,
@@ -426,6 +430,13 @@ impl BoundServerRequest {
         let target = if let Some(key) = request.server() {
             let server = snapshot.servers.iter().find(|server| &server.key == key)?;
             match &request {
+                ServerRequest::ReadPairedDevices { .. }
+                | ServerRequest::AssessUnpairDevice { .. }
+                | ServerRequest::UnpairDevice { .. }
+                    if !server.connected() =>
+                {
+                    return None;
+                }
                 ServerRequest::SetWorktreeLocation {
                     base_revision: 0, ..
                 } => return None,
@@ -438,10 +449,40 @@ impl BoundServerRequest {
                 {
                     return None;
                 }
+                ServerRequest::ReadPairedDevices { after, version, .. }
+                    if match (after, version) {
+                        (None, None) => false,
+                        (Some(after), Some(version)) => {
+                            !server.paired_devices.as_ref().is_some_and(|page| {
+                                page.valid_for(&server.pairing)
+                                    && page.next == Some(*after)
+                                    && page.version == *version
+                            })
+                        }
+                        _ => true,
+                    } =>
+                {
+                    return None;
+                }
+                ServerRequest::AssessUnpairDevice {
+                    target, version, ..
+                } if !server.paired_devices.as_ref().is_some_and(|page| {
+                    page.valid_for(&server.pairing)
+                        && page.version == *version
+                        && page.devices.iter().any(|device| &device.target == target)
+                }) =>
+                {
+                    return None;
+                }
                 ServerRequest::UnpairDevice {
                     target, assessment, ..
                 } if target.parts().server != server.pairing.parts().server
-                    || !matches!(assessment.action(), ManagementAction::Unpair { target: assessed } if assessed == target) =>
+                    || !matches!(assessment.action(), ManagementAction::Unpair { target: assessed } if assessed == target)
+                    || server.unpair_assessment.as_ref() != Some(assessment.as_ref())
+                    || !server.paired_devices.as_ref().is_some_and(|page| {
+                        page.valid_for(&server.pairing)
+                            && page.devices.iter().any(|device| &device.target == target)
+                    }) =>
                 {
                     return None;
                 }
@@ -451,6 +492,14 @@ impl BoundServerRequest {
                 pairing: server.pairing.clone(),
                 runtime_epoch: server.runtime_epoch,
                 route: server.route.clone(),
+                inventory_version: match &request {
+                    ServerRequest::AssessUnpairDevice { version, .. } => Some(*version),
+                    ServerRequest::ReadPairedDevices { version, .. } => *version,
+                    ServerRequest::UnpairDevice { .. } => {
+                        server.paired_devices.as_ref().map(|page| page.version)
+                    }
+                    _ => None,
+                },
             }
         } else {
             let ServerRequest::DismissUnpairNotice(id) = &request else {
@@ -504,6 +553,15 @@ pub(crate) enum ServerRequest {
         after: Option<PairingId>,
         version: Option<FieldVersion>,
     },
+    /// Reads an assessment of the exact target from a revision-coherent device page.
+    AssessUnpairDevice {
+        server: ServerKey,
+        target: PairingTarget,
+        version: FieldVersion,
+    },
+    /// Unpairs the exact assessed lifetime. For the initiating device, the receiver first
+    /// records restricted pending revocation and removes ordinary local use. Sending only
+    /// the server command does not satisfy self-unpair's durable local-removal contract.
     UnpairDevice {
         server: ServerKey,
         target: PairingTarget,
@@ -546,6 +604,7 @@ impl ServerRequest {
             | Self::DisableRemoteAccess(server)
             | Self::InstallUpdate { server, .. }
             | Self::ReadPairedDevices { server, .. }
+            | Self::AssessUnpairDevice { server, .. }
             | Self::UnpairDevice { server, .. }
             | Self::SetWorktreeLocation { server, .. }
             | Self::EnableRemoteAccess { server, .. } => Some(server),

@@ -88,6 +88,16 @@ pub struct EgressReservation {
     charge: Arc<Charge>,
     maximum: usize,
 }
+impl EgressReservation {
+    /// Retain one reply's charge across the actor and its connection sender.
+    /// This is not a public capability to enqueue several messages for one charge.
+    pub(crate) fn retain(&self) -> Self {
+        Self {
+            charge: self.charge.clone(),
+            maximum: self.maximum,
+        }
+    }
+}
 struct Entry {
     message: Arc<OutboundMessage>,
     charge: Arc<Charge>,

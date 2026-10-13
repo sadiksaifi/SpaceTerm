@@ -315,6 +315,20 @@ fn paired_device_actions_carry_the_exact_assessed_pairing_not_the_device_name() 
         MonotonicTick::new(20),
     )
     .unwrap();
+    let server = ServerSummary {
+        paired_devices: Some(PairedDevices {
+            version: FieldVersion::new(3),
+            this_device: DeviceId::new([1; 16]),
+            total: 1,
+            devices: vec![PairedDevice {
+                target: target.clone(),
+                name: "This device".into(),
+            }],
+            next: None,
+        }),
+        unpair_assessment: Some(assessment.clone()),
+        ..server
+    };
     let state = snapshot(server.clone());
     let request = ServerRequest::UnpairDevice {
         server: server.key.clone(),
@@ -323,6 +337,15 @@ fn paired_device_actions_carry_the_exact_assessed_pairing_not_the_device_name() 
     };
     let bound = BoundServerRequest::bind(request, &state).unwrap();
     assert!(bound.still_matches(&state));
+    let mut revised = state.clone();
+    revised.servers[0].paired_devices.as_mut().unwrap().version = FieldVersion::new(4);
+    assert!(!bound.still_matches(&revised));
+    revised = state.clone();
+    revised.servers[0].unpair_assessment = None;
+    assert!(!bound.still_matches(&revised));
+    revised = state.clone();
+    revised.servers[0].status = ServerStatus::Offline;
+    assert!(!bound.still_matches(&revised));
     let wrong_device = PairingTarget::new(PairingTargetParts {
         device: DeviceId::new([2; 16]),
         ..target.parts().clone()
