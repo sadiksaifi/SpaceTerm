@@ -1,7 +1,12 @@
 //! Keeps PTY input ordered and bounded while the child applies backpressure.
+use spaceterm_terminal::runtime::budget::BudgetLease;
+use spaceterm_terminal::runtime::legacy::{LegacyInputBudget, LegacyInputReservation};
 use std::collections::VecDeque;
 use std::io::{self, Write};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+type InputLease = Arc<Mutex<BudgetLease>>;
 
 const MAX_PENDING_BYTES: usize = 4 * 1024 * 1024;
 const WRITE_BUDGET: usize = 64 * 1024;
@@ -9,24 +14,67 @@ const RETRY_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Default)]
 pub(super) struct PtyInput {
-    chunks: VecDeque<Vec<u8>>,
+    chunks: VecDeque<(Vec<u8>, Option<InputLease>)>,
+    budget: Option<LegacyInputBudget>,
+    command: Option<LegacyInputReservation>,
     offset: usize,
     retained_bytes: usize,
     retry: Option<Instant>,
 }
 
 impl PtyInput {
+    pub(super) fn with_budget(budget: LegacyInputBudget) -> Self {
+        Self {
+            budget: Some(budget),
+            ..Self::default()
+        }
+    }
+    pub(super) fn begin_command(&mut self, reservation: Option<LegacyInputReservation>) {
+        self.command = reservation;
+    }
+    pub(super) fn take_command_reservation(&mut self) -> Option<LegacyInputReservation> {
+        self.command.take()
+    }
+    pub(super) fn end_command(&mut self) {
+        self.command = None;
+    }
     pub(super) fn deadline(&self) -> Option<Instant> {
         self.retry
     }
 
     pub(super) fn enqueue(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.enqueue_with_origin(bytes, false)
+    }
+    pub(super) fn enqueue_reply(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.enqueue_with_origin(bytes, true)
+    }
+    fn enqueue_with_origin(&mut self, bytes: &[u8], reply: bool) -> io::Result<()> {
         if bytes.len() > MAX_PENDING_BYTES.saturating_sub(self.retained_bytes) {
             return Err(io::Error::other("PTY input queue is full"));
         }
         if !bytes.is_empty() {
+            let lease = if !reply && let Some(reservation) = &mut self.command {
+                Some(
+                    reservation
+                        .retain(bytes.len())
+                        .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?,
+                )
+            } else {
+                self.budget
+                    .as_ref()
+                    .map(|budget| {
+                        if reply {
+                            budget.reserve_reply(bytes.len())
+                        } else {
+                            budget.reserve(bytes.len())
+                        }
+                    })
+                    .transpose()
+                    .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?
+                    .map(|lease| Arc::new(Mutex::new(lease)))
+            };
             self.retained_bytes += bytes.len();
-            self.chunks.push_back(bytes.to_vec());
+            self.chunks.push_back((bytes.to_vec(), lease));
         }
         Ok(())
     }
@@ -35,7 +83,7 @@ impl PtyInput {
     pub(super) fn drain(&mut self, writer: &mut impl Write) -> io::Result<()> {
         let mut budget = WRITE_BUDGET;
         for _ in 0..16 {
-            let Some(chunk) = self.chunks.front() else {
+            let Some((chunk, _lease)) = self.chunks.front() else {
                 self.retry = None;
                 return writer.flush();
             };

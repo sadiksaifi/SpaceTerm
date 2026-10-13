@@ -48,7 +48,7 @@ pub struct RuntimeAppearance {
     pub bold_as_bright: bool,
     pub appearance: Appearance,
 }
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum RuntimeCommand {
     Key(KeyInput),
     InputMethodCommit(BoundedInputMethodText),
@@ -62,6 +62,26 @@ pub enum RuntimeCommand {
     RequestPaste(BoundedPaste),
     ResolvePaste(PasteApprovalId, PasteDecision),
     CompleteNativeRequest(NativeCompletion),
+}
+impl std::fmt::Debug for RuntimeCommand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // KeyInput is also a legacy local API. Its Debug includes text; the
+        // server command boundary must never inherit that diagnostic payload.
+        f.write_str(match self {
+            Self::Key(_) => "RuntimeCommand::Key",
+            Self::InputMethodCommit(_) => "RuntimeCommand::InputMethodCommit",
+            Self::Pointer(_) => "RuntimeCommand::Pointer",
+            Self::Wheel(_) => "RuntimeCommand::Wheel",
+            Self::Resize(_) => "RuntimeCommand::Resize",
+            Self::Appearance(_) => "RuntimeCommand::Appearance",
+            Self::FocusReport(_) => "RuntimeCommand::FocusReport",
+            Self::CellPixelMetrics(_) => "RuntimeCommand::CellPixelMetrics",
+            Self::ClearScreenAndScrollback => "RuntimeCommand::ClearScreenAndScrollback",
+            Self::RequestPaste(_) => "RuntimeCommand::RequestPaste",
+            Self::ResolvePaste(..) => "RuntimeCommand::ResolvePaste",
+            Self::CompleteNativeRequest(_) => "RuntimeCommand::CompleteNativeRequest",
+        })
+    }
 }
 /// The captured effect fence must be rechecked by the actor and worker. It is
 /// never rewritten to current authority after queuing or native completion.

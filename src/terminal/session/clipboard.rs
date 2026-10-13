@@ -18,13 +18,15 @@ impl ClipboardAuthority {
         let _ = self
             .0
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |old| {
-                (old & 1 != u64::from(focused))
-                    .then_some((old.wrapping_add(2) & !1) | u64::from(focused))
+                (old & 1 != u64::from(focused)).then_some(
+                    old.checked_add(2)
+                        .map_or(u64::MAX, |next| (next & !1) | u64::from(focused)),
+                )
             });
     }
     pub(super) fn grant(&self) -> Option<u64> {
         let epoch = self.0.load(Ordering::Acquire);
-        (epoch & 1 == 1).then_some(epoch)
+        (epoch != u64::MAX && epoch & 1 == 1).then_some(epoch)
     }
     fn permits(&self, epoch: u64) -> bool {
         self.grant() == Some(epoch)
@@ -155,7 +157,7 @@ pub(super) struct WorkerClipboard {
     next_id: u64,
     pub(super) effects: VecDeque<(Osc52Effect, Option<u64>)>,
     pub(super) deferred_readers: VecDeque<Option<u64>>,
-    pub(super) reader_stop: Option<Option<crate::platform::native_pty::NativePtyReadFailure>>,
+    pub(super) reader_stop: Option<Option<ReadFailure>>,
 }
 
 impl WorkerClipboard {
@@ -212,7 +214,10 @@ impl WorkerClipboard {
         ) else {
             return denied();
         };
-        self.next_id = self.next_id.wrapping_add(1);
+        let Some(next_id) = self.next_id.checked_add(1) else {
+            return denied();
+        };
+        self.next_id = next_id;
         let deadline = Instant::now() + REQUEST_TIMEOUT;
         let request = ClipboardRequest {
             id: self.next_id,
@@ -222,7 +227,14 @@ impl WorkerClipboard {
             deadline,
             commands: Some(commands.clone()),
         };
-        if requests.try_send(request).is_err() {
+        if let Err(error) = requests.try_send(request) {
+            let mut request = match error {
+                async_channel::TrySendError::Full(request)
+                | async_channel::TrySendError::Closed(request) => request,
+            };
+            // The worker denies this operation here. An unadmitted UI request must not
+            // enqueue another completion when dropped or crowd out reader wakeups.
+            request.commands = None;
             return denied();
         }
         self.pending = Some(PendingClipboard {
@@ -336,7 +348,7 @@ mod tests {
         async_channel::Receiver<ClipboardRequest>,
         CommandReceiver<Command>,
     ) {
-        let (sender, commands) = mpsc::channel();
+        let (sender, commands) = legacy_command_channel();
         let (worker, requests) = WorkerClipboard::connect(sender);
         worker.authority.focus(true);
         (worker, requests, commands)
@@ -753,5 +765,53 @@ mod tests {
         perform(request, ALLOW_READ, &clipboard, true, cx);
         assert!(clipboard.answer("late"));
         cx.run_until_parked();
+    }
+    #[test]
+    fn exhausted_clipboard_focus_generation_never_reissues_a_native_grant() {
+        let authority = ClipboardAuthority(AtomicU64::new(u64::MAX - 2));
+        let prior = authority.grant().unwrap();
+        authority.focus(false);
+        authority.focus(true);
+        assert_eq!(authority.grant(), None);
+        assert!(!authority.permits(prior));
+    }
+
+    #[test]
+    fn exhausted_clipboard_request_identity_denies_reads_without_native_execution() {
+        let (sender, _commands) = legacy_command_channel();
+        let (mut worker, requests) = WorkerClipboard::connect(sender);
+        worker.authority.focus(true);
+        worker.next_id = u64::MAX;
+        let reply = worker.begin(
+            Osc52Operation::Read {
+                target: Osc52Target::Standard,
+                terminator: Osc52Terminator::Bell,
+            },
+            worker.authority.grant(),
+        );
+        assert_eq!(reply, Some(b"\x1b]52;c;\x07".to_vec()));
+        assert!(requests.try_recv().is_err());
+        assert!(!worker.pending());
+    }
+    #[test]
+    fn unadmitted_clipboard_requests_do_not_fill_the_reliable_command_lane() {
+        let (sender, commands) = legacy_command_channel();
+        let (mut worker, _requests) = WorkerClipboard::connect(sender);
+        worker.authority.focus(true);
+        let write = || Osc52Operation::Write {
+            target: Osc52Target::Standard,
+            text: "fixture".to_owned(),
+        };
+        assert_eq!(worker.begin(write(), worker.authority.grant()), None);
+        // The runtime timed out, but the UI has not consumed its one queued request.
+        worker.complete(None, ClipboardCompletion::Denied);
+        for _ in 0..512 {
+            assert_eq!(worker.begin(write(), worker.authority.grant()), None);
+        }
+        assert!(matches!(
+            commands.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        assert!(!worker.pending());
     }
 }

@@ -81,13 +81,20 @@ impl TerminalSessionLaunch {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 /// A local Terminal Session launch bound to one validated local directory.
 ///
 /// Its directory is local filesystem authority and is the only launch directory passed to local
 /// process `chdir` and identity validation.
 pub(crate) struct LocalTerminalLaunchPlan {
     working_directory: crate::domain::ValidatedLocalDirectory,
+}
+
+impl fmt::Debug for LocalTerminalLaunchPlan {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LocalTerminalLaunchPlan")
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -272,18 +279,35 @@ impl TerminalSession {
         filesystem: LocalFilesystemAuthority,
         initial_appearance: TerminalAppearanceUpdate,
     ) -> Result<StartedTerminalSessionParts, TerminalSessionError> {
-        Self::start_deferred_with_context(
+        Self::start_compatibility_with_context(
             geometry,
             launch.metadata,
             launch.fallback_title,
             filesystem,
             initial_appearance,
-            move |size, output, close_handle| {
-                let prepared = launch.process.prepare()?;
-                let terminal_name = prepared.terminal_name();
-                let owner =
-                    NativePtyOwner::start(factory.as_ref(), prepared, size, output, close_handle)?;
-                Ok((owner, terminal_name))
+            move |runtime, context, reader| {
+                let prepared = launch.process.prepare().map_err(startup_failure)?;
+                context.terminal_name = prepared.terminal_name();
+                // Engine and grid allocations precede the first process effect.
+                let emulator = context.emulator()?;
+                let pty = CompatibilityPty::start(
+                    runtime,
+                    factory.as_ref(),
+                    prepared,
+                    reader.commands.clone(),
+                    Arc::clone(&reader.clipboard_authority),
+                )
+                .map_err(|error| TerminalSessionFailure::Startup {
+                    stage: if error.stage
+                        == spaceterm_terminal::runtime::ports::RuntimeStage::Reader
+                    {
+                        TerminalSessionStartupStage::Reader
+                    } else {
+                        TerminalSessionStartupStage::Pty
+                    },
+                    message: error.to_string(),
+                })?;
+                Ok((pty, emulator))
             },
         )
     }
@@ -319,6 +343,7 @@ impl TerminalSession {
         )
     }
 
+    #[cfg(test)]
     pub(super) fn start_deferred_with_context(
         geometry: TerminalGeometry,
         metadata_context: TerminalMetadataContext,
@@ -334,7 +359,42 @@ impl TerminalSession {
         + Send
         + 'static,
     ) -> Result<StartedTerminalSessionParts, TerminalSessionError> {
-        let (command_tx, command_rx) = mpsc::channel();
+        Self::start_compatibility_with_context(
+            geometry,
+            metadata_context,
+            fallback_title,
+            local_filesystem,
+            initial_appearance,
+            move |_runtime, context, reader| {
+                let (pty, terminal_name) = start_native_pty(
+                    pty_size(geometry),
+                    reader.output_sink(),
+                    &reader.close_handle,
+                )
+                .map_err(startup_failure)?;
+                context.terminal_name = terminal_name;
+                Ok((pty.into(), context.emulator()?))
+            },
+        )
+    }
+
+    fn start_compatibility_with_context(
+        geometry: TerminalGeometry,
+        metadata_context: TerminalMetadataContext,
+        fallback_title: String,
+        local_filesystem: LocalFilesystemAuthority,
+        initial_appearance: TerminalAppearanceUpdate,
+        start: impl FnOnce(
+            &spaceterm_terminal::runtime::legacy::LegacyRuntimeContext,
+            &mut TerminalWorkerContext,
+            &ReaderTransport,
+        )
+            -> Result<(CompatibilityPty, TerminalEmulator), TerminalSessionFailure>
+        + Send
+        + 'static,
+    ) -> Result<StartedTerminalSessionParts, TerminalSessionError> {
+        let factory = legacy_factory()?;
+        let (command_tx, command_rx) = factory.command_channel();
         let (clipboard, clipboard_requests) = WorkerClipboard::connect(command_tx.clone());
         let clipboard_authority = Arc::clone(&clipboard.authority);
         let reader_transport =
@@ -345,70 +405,66 @@ impl TerminalSession {
         let worker_metadata_state = metadata_state.clone();
         let permission_request_state = TerminalSessionPermissionRequestState::default();
         let worker_permission_request_state = permission_request_state.clone();
+        let lifecycle = TerminalSessionLifecycleState::default();
+        let worker_lifecycle = lifecycle.clone();
         let (event_tx, event_rx) = async_channel::bounded(2);
         let (accessibility_tx, accessibility_rx) = async_channel::bounded(1);
-        let native_pty_close = NativePtyCloseHandle::default();
-        let worker_native_pty_close = native_pty_close.clone();
-        let native_pty_output = reader_transport.output_sink();
-        let worker_events = event_tx.clone();
-
-        let worker = thread::Builder::new()
-            .name("spaceterm-terminal".to_owned())
-            .spawn(move || {
-                let (native_pty, terminal_name) = match start_native_pty(
-                    pty_size(geometry),
-                    native_pty_output,
-                    &worker_native_pty_close,
-                ) {
-                    Ok(owner) => owner,
-                    Err(error) => {
-                        let stage = match error.stage() {
-                            NativePtyStartupStage::Adapter => TerminalSessionStartupStage::Pty,
-                            NativePtyStartupStage::Reader => TerminalSessionStartupStage::Reader,
-                            NativePtyStartupStage::ReaderThread => {
-                                TerminalSessionStartupStage::ReaderThread
-                            }
-                        };
-                        send_session_event(
-                            &worker_events,
-                            TerminalSessionEvent::Failed(TerminalSessionFailure::Startup {
-                                stage,
-                                message: error.to_string(),
-                            }),
-                        );
-                        return;
+        #[cfg(test)]
+        let native_pty_close = reader_transport.close_handle.clone();
+        let worker = factory.start(
+            runtime_bridge::runtime_size(pty_size(geometry)),
+            move |runtime| {
+                if runtime.retirement_requested() {
+                    return Ok(());
+                }
+                let mut context = TerminalWorkerContext {
+                    input_budget: command_rx.input_budget(),
+                    runtime: Some(runtime.handle()),
+                    initial_geometry: geometry,
+                    metadata_context,
+                    fallback_title,
+                    terminal_name: spaceterm_terminal::identity::TERM_FALLBACK,
+                    local_filesystem,
+                    initial_appearance,
+                };
+                let (pty, emulator) = match start(&runtime, &mut context, &reader_transport) {
+                    Ok(parts) => parts,
+                    Err(failure) => {
+                        let event = TerminalSessionEvent::Failed(failure);
+                        worker_lifecycle.retain(&event);
+                        let _ = send_session_event(&event_tx, event);
+                        return Err(spaceterm_terminal::runtime::ports::RuntimeFailure::new(
+                            spaceterm_core::organization::FailureClass::RuntimeFault,
+                            spaceterm_terminal::runtime::ports::RuntimeStage::Launch,
+                        ));
                     }
                 };
                 TerminalWorker::run(
-                    native_pty,
-                    TerminalWorkerContext {
-                        initial_geometry: geometry,
-                        metadata_context,
-                        fallback_title,
-                        terminal_name,
-                        local_filesystem,
-                        initial_appearance,
-                    },
+                    pty,
+                    context,
                     command_rx,
                     reader_transport,
                     worker_schedule_input,
                     TerminalWorkerPublishers {
+                        lifecycle: worker_lifecycle,
                         clipboard,
                         metadata_state: worker_metadata_state,
                         permission_request_state: worker_permission_request_state,
                         events: event_tx,
                         accessibility: accessibility_tx,
                     },
-                );
-            })
-            .map_err(TerminalSessionError::from)?;
-
+                    emulator,
+                )
+            },
+        )?;
         Ok((
             Self {
+                lifecycle,
                 metadata_state,
                 permission_request_state,
                 commands: Some(command_tx),
                 worker: Some(worker),
+                #[cfg(test)]
                 native_pty_close: Some(native_pty_close),
                 schedule_input,
                 clipboard_requests,
@@ -417,5 +473,34 @@ impl TerminalSession {
             event_rx,
             accessibility_rx,
         ))
+    }
+}
+
+fn startup_failure(error: NativePtyStartupFailure) -> TerminalSessionFailure {
+    let stage = match error.stage() {
+        NativePtyStartupStage::Adapter => TerminalSessionStartupStage::Pty,
+        NativePtyStartupStage::Reader => TerminalSessionStartupStage::Reader,
+        NativePtyStartupStage::ReaderThread => TerminalSessionStartupStage::ReaderThread,
+    };
+    TerminalSessionFailure::Startup {
+        stage,
+        message: error.to_string(),
+    }
+}
+impl TerminalWorkerContext {
+    fn emulator(&self) -> Result<TerminalEmulator, TerminalSessionFailure> {
+        TerminalEmulator::new_with_local_filesystem(
+            self.initial_geometry,
+            self.metadata_context.clone(),
+            &self.fallback_title,
+            self.terminal_name,
+            Instant::now(),
+            self.local_filesystem.clone(),
+            self.initial_appearance.clone(),
+        )
+        .map_err(|_| TerminalSessionFailure::Startup {
+            stage: TerminalSessionStartupStage::Emulator,
+            message: "Terminal Emulator creation failed".to_owned(),
+        })
     }
 }

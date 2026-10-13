@@ -15,6 +15,14 @@ pub(crate) use launch::{
     LocalTerminalLaunchPlan, NativeTerminalSessionFactory, RemoteTerminalLaunchPlan,
     TerminalLaunchPlan,
 };
+use runtime_bridge::{CompatibilityPty, ReadFailure};
+use spaceterm_terminal::runtime::budget::RuntimeLimits;
+use spaceterm_terminal::runtime::legacy::{
+    LegacyCommand, LegacyCommandReceiver as CommandReceiver, LegacyCommandSender as CommandSender,
+};
+use spaceterm_terminal::runtime::legacy::{
+    LegacyRuntimeFactory, LegacyRuntimeHandle, LegacyRuntimeOwner,
+};
 use std::fmt;
 #[cfg(test)]
 use std::io::Write;
@@ -23,18 +31,22 @@ use std::path::Path;
 #[cfg(test)]
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver as CommandReceiver, Sender as CommandSender};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
-use std::thread::{self, JoinHandle};
+#[cfg(test)]
+use std::thread;
 use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
 use crate::appearance::{AppearanceGeneration, ResolvedTerminalAppearance};
 use crate::platform::native_pty::{
-    NativePtyAdapterFactory, NativePtyCloseHandle, NativePtyExit, NativePtyOperationFailure,
-    NativePtyOutput, NativePtyOutputSink, NativePtyOwner, NativePtySize, NativePtyStartupFailure,
-    NativePtyStartupStage, NativePtyWaitFailure,
+    NativePtyAdapterFactory, NativePtyExit, NativePtyOperationFailure, NativePtySize,
+    NativePtyStartupFailure, NativePtyStartupStage, NativePtyWaitFailure,
+};
+#[cfg(test)]
+use crate::platform::native_pty::{
+    NativePtyCloseHandle, NativePtyOutput, NativePtyOutputSink, NativePtyOwner,
 };
 use crate::platform::shell_launch::{PreparedShellLaunch, ShellLaunchPlanner};
 use crate::terminal::accessibility::AccessibilitySelectionRequest;
@@ -82,7 +94,6 @@ fn pty_size(geometry: TerminalGeometry) -> NativePtySize {
 
 // Screen events may supersede older screens. Failed and Exited are final events,
 // so the worker must not publish another screen after either one.
-#[derive(Debug)]
 pub(crate) enum TerminalSessionEvent {
     Screen(Arc<ScreenSnapshot>),
     /// Retained Terminal Metadata changed; read it from the retained snapshot.
@@ -93,6 +104,27 @@ pub(crate) enum TerminalSessionEvent {
     PermissionRequested(PermissionRequest),
     Exited(TerminalSessionExit),
     Failed(TerminalSessionFailure),
+}
+
+impl fmt::Debug for TerminalSessionEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Screen(screen) => f
+                .debug_struct("Screen")
+                .field("generation", &screen.generation)
+                .finish_non_exhaustive(),
+            Self::MetadataChanged(_) => f.write_str("MetadataChanged(..)"),
+            Self::Attention(event) => f.debug_tuple("Attention").field(event).finish(),
+            Self::HiddenInputChanged(hidden) => {
+                f.debug_tuple("HiddenInputChanged").field(hidden).finish()
+            }
+            Self::PermissionRequested(request) => {
+                f.debug_tuple("PermissionRequested").field(request).finish()
+            }
+            Self::Exited(exit) => f.debug_tuple("Exited").field(exit).finish(),
+            Self::Failed(failure) => f.debug_tuple("Failed").field(failure).finish(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -109,6 +141,39 @@ impl MetadataWakeup {
 impl Drop for MetadataWakeup {
     fn drop(&mut self) {
         self.queued.store(false, Ordering::Release);
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum TerminalSessionOutcome {
+    Exited(TerminalSessionExit),
+    Failed(TerminalSessionFailure),
+}
+#[derive(Clone, Default)]
+struct TerminalSessionLifecycleState(Arc<Mutex<Option<TerminalSessionOutcome>>>);
+impl TerminalSessionLifecycleState {
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "retained legacy lifecycle is exposed for desktop migration"
+        )
+    )]
+    fn snapshot(&self) -> Option<TerminalSessionOutcome> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+    fn retain(&self, event: &TerminalSessionEvent) {
+        let outcome = match event {
+            TerminalSessionEvent::Exited(exit) => TerminalSessionOutcome::Exited(exit.clone()),
+            TerminalSessionEvent::Failed(failure) => {
+                TerminalSessionOutcome::Failed(failure.clone())
+            }
+            _ => return,
+        };
+        let mut retained = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if retained.is_none() {
+            *retained = Some(outcome);
+        }
     }
 }
 
@@ -147,7 +212,7 @@ impl TerminalAppearanceUpdate {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub(crate) enum TerminalSessionExit {
     Success,
     ExitCode(u32),
@@ -156,19 +221,33 @@ pub(crate) enum TerminalSessionExit {
     ForcedShutdown,
 }
 
+impl fmt::Debug for TerminalSessionExit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Success => f.write_str("Success"),
+            Self::ExitCode(code) => f.debug_tuple("ExitCode").field(code).finish(),
+            Self::Signal(_) => f.write_str("Signal(..)"),
+            Self::GracefulShutdown => f.write_str("GracefulShutdown"),
+            Self::ForcedShutdown => f.write_str("ForcedShutdown"),
+        }
+    }
+}
+
 impl fmt::Display for TerminalSessionExit {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Success => formatter.write_str("Shell exited successfully"),
             Self::ExitCode(code) => write!(formatter, "Shell exited with code {code}"),
-            Self::Signal(signal) => write!(formatter, "Shell exited after signal {signal}"),
+            Self::Signal(_) => formatter.write_str("Shell exited after a native signal"),
             Self::GracefulShutdown => formatter.write_str("Shell shut down gracefully"),
             Self::ForcedShutdown => formatter.write_str("Shell shutdown was forced"),
         }
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+// Preserve the desktop compatibility fields. Adapters construct their text only from
+// closed classifications; neither Debug nor Display exposes supplied text.
+#[derive(Clone, Eq, PartialEq)]
 pub(crate) enum TerminalSessionFailure {
     Startup {
         stage: TerminalSessionStartupStage,
@@ -193,37 +272,37 @@ pub(crate) enum TerminalSessionStartupStage {
     Emulator,
 }
 
-impl fmt::Display for TerminalSessionFailure {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl fmt::Debug for TerminalSessionFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Startup { stage, message } => {
-                write!(
-                    formatter,
-                    "Terminal Session startup failed during {stage}: {message}"
-                )
+            Self::Startup { stage, .. } => f
+                .debug_struct("Startup")
+                .field("stage", stage)
+                .finish_non_exhaustive(),
+            Self::Runtime(failure) => f.debug_tuple("Runtime").field(failure).finish(),
+            Self::PtyRead { .. } => f.write_str("PtyRead(..)"),
+            Self::ShellWait { read_error, .. } => f
+                .debug_struct("ShellWait")
+                .field("read_failed", &read_error.is_some())
+                .finish_non_exhaustive(),
+        }
+    }
+}
+impl fmt::Display for TerminalSessionFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Startup { stage, .. } => {
+                write!(f, "Terminal Session startup failed during {stage}")
             }
-            Self::Runtime(failure) => failure.fmt(formatter),
-            Self::PtyRead {
-                read_error,
-                exit_status,
-            } => write!(
-                formatter,
-                "Shell output failed: {read_error}; shell exited ({exit_status})"
-            ),
+            Self::Runtime(failure) => failure.fmt(f),
+            Self::PtyRead { .. } => f.write_str("Shell output failed"),
             Self::ShellWait {
-                read_error: Some(read_error),
-                wait_error,
-            } => write!(
-                formatter,
-                "Shell output failed: {read_error}; waiting for the shell also failed: {wait_error}"
-            ),
+                read_error: Some(_),
+                ..
+            } => f.write_str("Shell output and shell wait failed"),
             Self::ShellWait {
-                read_error: None,
-                wait_error,
-            } => write!(
-                formatter,
-                "Shell output ended, but waiting for the shell failed: {wait_error}"
-            ),
+                read_error: None, ..
+            } => f.write_str("Shell output ended, but waiting for the shell failed"),
         }
     }
 }
@@ -252,6 +331,8 @@ pub(crate) enum TerminalSessionError {
     #[cfg(test)]
     #[error("terminal emulator initialization failed: {0}")]
     EmulatorStartup(String),
+    #[error(transparent)]
+    Runtime(#[from] spaceterm_terminal::runtime::ports::RuntimeFailure),
 }
 
 impl From<std::io::Error> for TerminalSessionError {
@@ -271,6 +352,19 @@ pub(crate) struct StartedTerminalSession {
 pub(crate) enum SelectionCopyError {
     Formatting,
     WorkerStopped,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SelectionPreparationError {
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "default asynchronous preparation preserves existing test doubles"
+        )
+    )]
+    Unsupported,
+    Copy(SelectionCopyError),
 }
 
 #[cfg_attr(
@@ -295,7 +389,7 @@ pub(crate) struct AccessibilitySelectionSender {
 impl AccessibilitySelectionSender {
     #[cfg(test)]
     pub(crate) fn recording_channel() -> (Self, RecordingAccessibilitySelectionReceiver) {
-        let (commands, receiver) = mpsc::channel();
+        let (commands, receiver) = legacy_command_channel();
         (
             Self { commands },
             RecordingAccessibilitySelectionReceiver(receiver),
@@ -415,6 +509,34 @@ impl TerminalSessionPermissionRequestState {
 }
 
 pub(crate) trait TerminalSessionHandle {
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "retained lifecycle consumer is part of desktop migration"
+        )
+    )]
+    fn terminal_outcome(&self) -> Option<TerminalSessionOutcome> {
+        None
+    }
+
+    /// Prepares one current local selection without waiting on the caller thread.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "asynchronous Copy consumer is part of desktop migration"
+        )
+    )]
+    fn prepare_selection_copy(
+        &self,
+        _generation: PresentationGeneration,
+    ) -> async_channel::Receiver<Result<Option<SelectionCopy>, SelectionPreparationError>> {
+        let (sender, receiver) = async_channel::bounded(1);
+        let _ = sender.try_send(Err(SelectionPreparationError::Unsupported));
+        receiver
+    }
+
     /// The newest Terminal Metadata the Terminal Session retained, presentable or not.
     fn metadata_snapshot(&self) -> Option<Arc<TerminalMetadataSnapshot>> {
         None
@@ -495,10 +617,19 @@ pub(crate) trait TerminalSessionFactory {
 }
 
 pub(crate) struct TerminalSession {
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "retained lifecycle consumer is part of desktop migration"
+        )
+    )]
+    lifecycle: TerminalSessionLifecycleState,
     metadata_state: TerminalSessionMetadataState,
     permission_request_state: TerminalSessionPermissionRequestState,
     commands: Option<CommandSender<Command>>,
-    worker: Option<JoinHandle<()>>,
+    worker: Option<LegacyRuntimeOwner>,
+    #[cfg(test)]
     native_pty_close: Option<NativePtyCloseHandle>,
     schedule_input: ScheduleInput,
     clipboard_requests: async_channel::Receiver<ClipboardRequest>,
@@ -542,11 +673,18 @@ impl TerminalSession {
 
     fn request_shutdown(&mut self) {
         self.clipboard_authority.focus(false);
-        // Request termination before transferring sole responsibility to off-thread PTY cleanup.
+        if let Some(owner) = &self.worker {
+            owner.retire();
+        }
+        // Fixtures still use the old owner; production retirement belongs to the legacy runtime.
+        #[cfg(test)]
         if let Some(close_handle) = self.native_pty_close.take()
             && let Err(error) = close_handle.request_close()
         {
-            eprintln!("failed to terminate shell while shutting down terminal worker: {error}");
+            eprintln!(
+                "failed to terminate shell while shutting down terminal worker: {:?}",
+                error.kind()
+            );
         }
         if let Some(commands) = self.commands.take()
             && commands.send(Command::Shutdown).is_err()
@@ -557,8 +695,8 @@ impl TerminalSession {
 
     fn shutdown(&mut self) {
         self.request_shutdown();
-        // Dropping a JoinHandle detaches the worker. It still owns the PTY and reader
-        // cleanup, but a close operation must never block its GPUI caller on either thread.
+        // The bounded runtime registry retains the worker join and cleanup receipt.
+        // Closing a local Pane never waits for native cleanup on its GPUI caller.
         drop(self.worker.take());
     }
 
@@ -566,12 +704,33 @@ impl TerminalSession {
     fn shutdown_and_join(&mut self) {
         self.request_shutdown();
         if let Some(worker) = self.worker.take() {
-            join_worker(worker);
+            let _ = worker.join();
         }
     }
 }
 
 impl TerminalSessionHandle for TerminalSession {
+    fn terminal_outcome(&self) -> Option<TerminalSessionOutcome> {
+        self.lifecycle.snapshot()
+    }
+
+    fn prepare_selection_copy(
+        &self,
+        generation: PresentationGeneration,
+    ) -> async_channel::Receiver<Result<Option<SelectionCopy>, SelectionPreparationError>> {
+        let (reply, receiver) = async_channel::bounded(1);
+        if !self.commands.as_ref().is_some_and(|commands| {
+            commands
+                .send(Command::PrepareSelectionCopy(generation, reply.clone()))
+                .is_ok()
+        }) {
+            let _ = reply.try_send(Err(SelectionPreparationError::Copy(
+                SelectionCopyError::WorkerStopped,
+            )));
+        }
+        receiver
+    }
+
     fn metadata_snapshot(&self) -> Option<Arc<TerminalMetadataSnapshot>> {
         self.metadata_state.snapshot()
     }
@@ -598,20 +757,24 @@ impl TerminalSessionHandle for TerminalSession {
 
     fn focus(&self, focused: bool) {
         self.clipboard_authority.focus(focused);
-        if let Some(commands) = &self.commands
-            && commands.send(Command::Focus(focused)).is_err()
-        {
-            eprintln!("terminal focus input was dropped because the worker has stopped");
+        if let Some(commands) = &self.commands {
+            self.schedule_input.enqueue_focus(
+                commands.accepted_sequence(),
+                if focused {
+                    TerminalFocusTarget::Terminal
+                } else {
+                    TerminalFocusTarget::Unfocused
+                },
+            );
         }
     }
 
     fn focus_paste_confirmation(&self, id: PasteConfirmationId) {
         self.clipboard_authority.focus(false);
-        if let Some(commands) = &self.commands
-            && commands.send(Command::FocusPasteConfirmation(id)).is_err()
-        {
-            eprintln!(
-                "terminal paste confirmation focus was dropped because the worker has stopped"
+        if let Some(commands) = &self.commands {
+            self.schedule_input.enqueue_focus(
+                commands.accepted_sequence(),
+                TerminalFocusTarget::PasteConfirmation(id),
             );
         }
     }
@@ -677,6 +840,9 @@ impl TerminalSessionHandle for TerminalSession {
     }
 
     fn set_find_query(&self, generation: FindQueryGeneration, query: String) {
+        if query.len() > 4096 {
+            return;
+        }
         if let Some(commands) = &self.commands
             && self.schedule_input.enqueue_find_query(generation, query)
             && commands.send(Command::FindQueryChanged).is_err()
@@ -709,15 +875,20 @@ impl TerminalSessionHandle for TerminalSession {
         text: PastePayload,
     ) -> async_channel::Receiver<Result<PasteRequestOutcome, String>> {
         let (reply, receiver) = async_channel::bounded(1);
-        let sent = self.commands.as_ref().is_some_and(|commands| {
-            commands
-                .send(Command::RequestPaste(text, reply.clone()))
-                .is_ok()
-        });
-        if !sent {
-            let _ = reply.try_send(Err(
-                "terminal paste could not be requested because the worker has stopped".to_owned(),
-            ));
+        match self
+            .commands
+            .as_ref()
+            .map(|commands| commands.try_send(Command::RequestPaste(text, reply.clone())))
+        {
+            Some(Ok(())) => {}
+            Some(Err((_, error)))
+                if error.class == spaceterm_core::organization::FailureClass::ResourceLimit =>
+            {
+                let _ = reply.try_send(Err("terminal input capacity is exhausted".to_owned()));
+            }
+            _ => {
+                let _ = reply.try_send(Err("terminal paste worker is unavailable".to_owned()));
+            }
         }
         receiver
     }
@@ -815,34 +986,50 @@ impl Drop for TerminalSession {
 }
 
 struct ReaderTransport {
+    commands: CommandSender<Command>,
+    clipboard_authority: Arc<ClipboardAuthority>,
+    #[cfg(test)]
+    close_handle: NativePtyCloseHandle,
+    #[cfg(test)]
     output: Arc<TerminalSessionNativePtyOutputSink>,
+    #[cfg(test)]
     event_rx: mpsc::Receiver<NativePtyOutput>,
 }
 
 impl ReaderTransport {
     fn new(commands: CommandSender<Command>, clipboard_authority: Arc<ClipboardAuthority>) -> Self {
+        #[cfg(test)]
         let (events, event_rx) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
         Self {
+            #[cfg(test)]
+            close_handle: NativePtyCloseHandle::default(),
+            #[cfg(test)]
             output: Arc::new(TerminalSessionNativePtyOutputSink {
-                commands,
+                commands: commands.clone(),
                 events,
-                clipboard_authority,
+                clipboard_authority: Arc::clone(&clipboard_authority),
             }),
+            commands,
+            clipboard_authority,
+            #[cfg(test)]
             event_rx,
         }
     }
 
+    #[cfg(test)]
     fn output_sink(&self) -> Arc<dyn NativePtyOutputSink> {
         self.output.clone()
     }
 }
 
+#[cfg(test)]
 struct TerminalSessionNativePtyOutputSink {
     clipboard_authority: Arc<ClipboardAuthority>,
     commands: CommandSender<Command>,
     events: mpsc::SyncSender<NativePtyOutput>,
 }
 
+#[cfg(test)]
 impl NativePtyOutputSink for TerminalSessionNativePtyOutputSink {
     fn publish(&self, output: NativePtyOutput) -> bool {
         // ReaderReady orders bounded PTY output against the reliable control command lane.
@@ -853,7 +1040,7 @@ impl NativePtyOutputSink for TerminalSessionNativePtyOutputSink {
 
 struct ReaderEventBatch {
     chunks: Vec<(Vec<u8>, Option<u64>)>,
-    reader_stopped: Option<Option<crate::platform::native_pty::NativePtyReadFailure>>,
+    reader_stopped: Option<Option<ReadFailure>>,
 }
 
 enum Command {
@@ -882,6 +1069,17 @@ enum Command {
         async_channel::Sender<Result<PasteResolution, String>>,
     ),
     PasteConfirmationExpired,
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "asynchronous Copy consumer is part of desktop migration"
+        )
+    )]
+    PrepareSelectionCopy(
+        PresentationGeneration,
+        async_channel::Sender<Result<Option<SelectionCopy>, SelectionPreparationError>>,
+    ),
     SelectionCopy(
         Option<PresentationGeneration>,
         mpsc::SyncSender<Result<Option<SelectionCopy>, SelectionCopyError>>,
@@ -925,6 +1123,70 @@ enum Command {
     FlushInput,
 }
 
+impl LegacyCommand for Command {
+    fn payload_bytes(&self) -> usize {
+        match self {
+            Self::Key(input) => input
+                .logical_key
+                .len()
+                .saturating_add(input.text.as_ref().map_or(0, String::len)),
+            Self::RequestPaste(text, _) => text.text().len(),
+            Self::CompleteClipboard(_, ClipboardCompletion::Text(text)) => text.len(),
+            _ => 0,
+        }
+    }
+    fn input_bytes(&self) -> usize {
+        match self {
+            Self::Key(_) => self.payload_bytes().saturating_mul(8).saturating_add(128),
+            Self::RequestPaste(payload, _) => payload.text().len().saturating_add(12),
+            Self::Pointer(_) | Self::PointerAndCopySelection(..) => 4096,
+            Self::Wheel(_) => 8192,
+            Self::CopyOrForward(..) => 512,
+            _ => 0,
+        }
+    }
+    fn internal(&self) -> bool {
+        matches!(self, Self::ReaderReady(_) | Self::CompleteClipboard(..))
+            || self.coalescing_key().is_some()
+    }
+    fn coalescing_key(&self) -> Option<u8> {
+        match self {
+            Self::Resize => Some(0),
+            Self::FindQueryChanged => Some(1),
+            Self::AppearanceChanged => Some(2),
+            Self::AccessibilityDemand => Some(3),
+            Self::GraphicsBudgetAvailable => Some(4),
+            _ => None,
+        }
+    }
+}
+fn legacy_factory() -> Result<LegacyRuntimeFactory, TerminalSessionError> {
+    #[cfg(test)]
+    {
+        // Scripted native adapters also lack cleanup receipts. Isolate each test's
+        // quarantine instead of spending other tests' runtime capacity.
+        LegacyRuntimeFactory::new(RuntimeLimits::default()).map_err(TerminalSessionError::Runtime)
+    }
+    #[cfg(not(test))]
+    {
+        static FACTORY: std::sync::OnceLock<
+            Result<LegacyRuntimeFactory, spaceterm_terminal::runtime::ports::RuntimeFailure>,
+        > = std::sync::OnceLock::new();
+        FACTORY
+            .get_or_init(|| LegacyRuntimeFactory::new(RuntimeLimits::default()))
+            .as_ref()
+            .cloned()
+            .map_err(|error| TerminalSessionError::Runtime(*error))
+    }
+}
+
+#[cfg(test)]
+fn legacy_command_channel() -> (CommandSender<Command>, CommandReceiver<Command>) {
+    LegacyRuntimeFactory::new(RuntimeLimits::default())
+        .unwrap()
+        .command_channel()
+}
+
 impl Command {
     fn requires_presentation_barrier(&self) -> bool {
         matches!(
@@ -933,6 +1195,7 @@ impl Command {
                 | Self::PointerAndCopySelection(..)
                 | Self::Wheel(..)
                 | Self::ScrollTo(..)
+                | Self::PrepareSelectionCopy(..)
                 | Self::SelectionCopy(Some(_), _)
                 | Self::AccessibilitySelection(..)
                 | Self::AccessibilityContinue
@@ -960,6 +1223,7 @@ impl fmt::Debug for Command {
             Self::ResolvePaste(..) => "ResolvePaste",
             Self::PasteConfirmationExpired => "PasteConfirmationExpired",
             Self::SelectionCopy(..) => "SelectionCopy",
+            Self::PrepareSelectionCopy(..) => "PrepareSelectionCopy",
             Self::AccessibilitySelection(..) => "AccessibilitySelection",
             Self::AccessibilityDemand => "AccessibilityDemand",
             Self::AccessibilityContinue => "AccessibilityContinue",
@@ -985,13 +1249,18 @@ impl fmt::Debug for Command {
     }
 }
 
+// This legacy-only driver retains selection, viewport and native desktop policy.
+// The identity-free runtime owns its thread, PTY, reader and confirmed cleanup.
 struct TerminalWorker {
+    lifecycle: TerminalSessionLifecycleState,
+    runtime: Option<LegacyRuntimeHandle>,
     metadata_state: TerminalSessionMetadataState,
     permission_request_state: TerminalSessionPermissionRequestState,
-    native_pty: NativePtyOwner,
+    native_pty: CompatibilityPty,
     input: PtyInput,
     emulator: TerminalEmulator,
     commands: CommandReceiver<Command>,
+    #[cfg(test)]
     reader_events: mpsc::Receiver<NativePtyOutput>,
     events: async_channel::Sender<TerminalSessionEvent>,
     accessibility: async_channel::Sender<Arc<TerminalAccessibilityModel>>,
@@ -1005,6 +1274,7 @@ struct TerminalWorker {
     clipboard: WorkerClipboard,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
 enum TerminalFocusTarget {
     Terminal,
     Unfocused,
@@ -1012,6 +1282,8 @@ enum TerminalFocusTarget {
 }
 
 struct TerminalWorkerContext {
+    input_budget: spaceterm_terminal::runtime::legacy::LegacyInputBudget,
+    runtime: Option<LegacyRuntimeHandle>,
     local_filesystem: LocalFilesystemAuthority,
     initial_geometry: TerminalGeometry,
     metadata_context: TerminalMetadataContext,
@@ -1021,6 +1293,7 @@ struct TerminalWorkerContext {
 }
 
 struct TerminalWorkerPublishers {
+    lifecycle: TerminalSessionLifecycleState,
     clipboard: WorkerClipboard,
     metadata_state: TerminalSessionMetadataState,
     permission_request_state: TerminalSessionPermissionRequestState,
@@ -1114,22 +1387,16 @@ impl HeldKeys {
 
 impl TerminalWorker {
     fn run(
-        native_pty: NativePtyOwner,
+        native_pty: CompatibilityPty,
         context: TerminalWorkerContext,
         commands: CommandReceiver<Command>,
         reader_transport: ReaderTransport,
         schedule_input: ScheduleInput,
         publishers: TerminalWorkerPublishers,
-    ) {
-        let TerminalWorkerContext {
-            initial_geometry,
-            metadata_context,
-            fallback_title,
-            terminal_name,
-            local_filesystem,
-            initial_appearance,
-        } = context;
+        mut emulator: TerminalEmulator,
+    ) -> Result<(), spaceterm_terminal::runtime::ports::RuntimeFailure> {
         let TerminalWorkerPublishers {
+            lifecycle,
             clipboard,
             metadata_state,
             permission_request_state,
@@ -1137,46 +1404,29 @@ impl TerminalWorker {
             accessibility,
         } = publishers;
         let ReaderTransport {
-            output,
-            event_rx: reader_event_rx,
+            commands: graphics_commands,
+            clipboard_authority: _,
+            #[cfg(test)]
+                close_handle: _,
+            #[cfg(test)]
+                output: _,
+            #[cfg(test)]
+                event_rx: reader_event_rx,
         } = reader_transport;
-
-        let mut emulator = match TerminalEmulator::new_with_local_filesystem(
-            initial_geometry,
-            metadata_context,
-            &fallback_title,
-            terminal_name,
-            Instant::now(),
-            local_filesystem,
-            initial_appearance,
-        ) {
-            Ok(emulator) => emulator,
-            Err(error) => {
-                send_session_event(
-                    &events,
-                    TerminalSessionEvent::Failed(TerminalSessionFailure::Startup {
-                        stage: TerminalSessionStartupStage::Emulator,
-                        message: error.to_string(),
-                    }),
-                );
-                drop(reader_event_rx);
-                drop(native_pty);
-                return;
-            }
-        };
-
-        let graphics_commands = output.commands.clone();
         emulator.set_graphics_budget_wakeup(move || {
             let _ = graphics_commands.send(Command::GraphicsBudgetAvailable);
         });
 
         let mut worker = Self {
+            lifecycle,
+            runtime: context.runtime,
             metadata_state,
             permission_request_state,
             native_pty,
-            input: PtyInput::default(),
+            input: PtyInput::with_budget(context.input_budget),
             emulator,
             commands,
+            #[cfg(test)]
             reader_events: reader_event_rx,
             events,
             accessibility,
@@ -1191,7 +1441,19 @@ impl TerminalWorker {
         };
 
         worker.run_commands();
+        let result = if matches!(
+            worker.lifecycle.snapshot(),
+            Some(TerminalSessionOutcome::Failed(_))
+        ) {
+            Err(spaceterm_terminal::runtime::ports::RuntimeFailure::new(
+                spaceterm_core::organization::FailureClass::RuntimeFault,
+                spaceterm_terminal::runtime::ports::RuntimeStage::Engine,
+            ))
+        } else {
+            Ok(())
+        };
         worker.finish();
+        result
     }
 
     fn run_commands(&mut self) {
@@ -1238,6 +1500,20 @@ impl TerminalWorker {
     }
 
     fn receive_next_command(&mut self) -> Option<Command> {
+        if self
+            .runtime
+            .as_ref()
+            .is_some_and(LegacyRuntimeHandle::retirement_requested)
+        {
+            return None;
+        }
+        if let Some(focus) = self.schedules.take_focus(
+            self.commands
+                .received_sequence()
+                .saturating_sub(u64::from(self.pending_command.is_some())),
+        ) {
+            return Some(focus);
+        }
         if self
             .input
             .deadline()
@@ -1291,6 +1567,16 @@ impl TerminalWorker {
         }
 
         loop {
+            if self
+                .runtime
+                .as_ref()
+                .is_some_and(LegacyRuntimeHandle::retirement_requested)
+            {
+                return None;
+            }
+            if let Some(focus) = self.schedules.take_focus(self.commands.received_sequence()) {
+                return Some(focus);
+            }
             let synchronized_output_deadline = self.emulator.synchronized_output_deadline();
             let deadline = [
                 self.schedules.deadline(synchronized_output_deadline),
@@ -1301,11 +1587,10 @@ impl TerminalWorker {
             .into_iter()
             .flatten()
             .min();
-            let Some(deadline) = deadline else {
-                let command = self.commands.recv().ok()?;
-                return Some(self.note_normal_command(command));
-            };
-            let timeout = deadline.saturating_duration_since(Instant::now());
+            let deadline = deadline.unwrap_or_else(|| Instant::now() + Duration::from_millis(10));
+            let timeout = deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_millis(10));
             match self.commands.recv_timeout(timeout) {
                 Ok(command) => return Some(self.note_normal_command(command)),
                 Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -1350,6 +1635,13 @@ impl TerminalWorker {
     }
 
     fn note_normal_command(&mut self, command: Command) -> Command {
+        if let Some(focus) = self
+            .schedules
+            .take_focus(self.commands.received_sequence().saturating_sub(1))
+        {
+            self.pending_command = Some(command);
+            return focus;
+        }
         if !matches!(&command, Command::AccessibilityContinue) {
             self.schedules.note_normal_command();
         }
@@ -1376,6 +1668,16 @@ impl TerminalWorker {
     }
 
     fn process_command(&mut self, command: Command) -> bool {
+        if command.input_bytes() > 0 {
+            self.input
+                .begin_command(self.commands.take_input_reservation());
+        }
+        let running = self.apply_command(command);
+        self.input.end_command();
+        running
+    }
+
+    fn apply_command(&mut self, command: Command) -> bool {
         match command {
             Command::Key(input) => self.process_key(input),
             Command::ClearScreenAndScrollback => {
@@ -1408,25 +1710,12 @@ impl TerminalWorker {
                 let Some(geometry) = self.schedules.take_resize() else {
                     return true;
                 };
-                let size = pty_size(geometry);
-                let winsize_changed = size != pty_size(self.emulator.geometry());
-                let result = (|| {
-                    self.native_pty.resize(size).map_err(|error| {
-                        TerminalFailure::pty("resize-pty")
-                            .with_reason(FailureReason::Io(error.kind()))
-                    })?;
-                    self.emulator
-                        .resize_for_pty(geometry, winsize_changed)
-                        .map_err(|error| {
-                            TerminalFailure::emulator_error("resize-terminal-state", error)
-                        })
-                })();
-
-                match result {
-                    Ok(()) => {
+                match self.native_pty.resize(geometry, &mut self.emulator) {
+                    Ok(true) => {
                         self.apply_emulator_action(EmulatorAction::screen_changed())
                             && self.refresh_selection_autoscroll()
                     }
+                    Ok(false) => true,
                     Err(message) => {
                         self.send_runtime_failure(message);
                         false
@@ -1530,6 +1819,32 @@ impl TerminalWorker {
                 let _ = reply.send(selection);
                 keep_running
             }
+            Command::PrepareSelectionCopy(generation, reply) => {
+                if reply.is_closed() {
+                    return true;
+                }
+                if self
+                    .runtime
+                    .as_ref()
+                    .is_some_and(LegacyRuntimeHandle::retirement_requested)
+                {
+                    let _ = reply.try_send(Err(SelectionPreparationError::Copy(
+                        SelectionCopyError::WorkerStopped,
+                    )));
+                    return true;
+                }
+                let selection = if generation != self.emulator.presentation_generation()
+                    || self.emulator.synchronized_output_deadline().is_some()
+                {
+                    Ok(None)
+                } else {
+                    self.emulator
+                        .selection_copy(SelectionCopyOptions::default())
+                        .map_err(|_| SelectionCopyError::Formatting)
+                };
+                let _ = reply.try_send(selection.map_err(SelectionPreparationError::Copy));
+                true
+            }
             Command::SelectionCopy(generation, reply) => {
                 let selection = if generation.is_some_and(|generation| {
                     generation != self.emulator.presentation_generation()
@@ -1630,10 +1945,7 @@ impl TerminalWorker {
             .schedules
             .update_hidden_input(Instant::now(), self.native_pty.hidden_input())
         {
-            send_session_event(
-                &self.events,
-                TerminalSessionEvent::HiddenInputChanged(active),
-            )
+            self.send_terminal_event(TerminalSessionEvent::HiddenInputChanged(active))
         } else {
             true
         }
@@ -1675,7 +1987,11 @@ impl TerminalWorker {
             let outcome = self
                 .schedules
                 .request_paste_confirmation(payload, Instant::now())
-                .map(PasteRequestOutcome::ConfirmationRequired)
+                .map(|confirmation| {
+                    self.schedules
+                        .retain_paste_input(self.input.take_command_reservation());
+                    PasteRequestOutcome::ConfirmationRequired(confirmation)
+                })
                 .unwrap_or(PasteRequestOutcome::Rejected(
                     PasteRejection::ConfirmationPending,
                 ));
@@ -1700,6 +2016,7 @@ impl TerminalWorker {
             let _ = reply.try_send(Ok(PasteResolution::Stale));
             return true;
         };
+        self.input.begin_command(self.schedules.take_paste_input());
         if decision == PasteDecision::Cancel
             || (!self.terminal_input_focused && !confirmation_focused)
         {
@@ -1791,10 +2108,14 @@ impl TerminalWorker {
         }
     }
 
-    fn finish_reader_output(
-        &mut self,
-        read_error: Option<crate::platform::native_pty::NativePtyReadFailure>,
-    ) -> bool {
+    fn finish_reader_output(&mut self, read_error: Option<ReadFailure>) -> bool {
+        if self
+            .runtime
+            .as_ref()
+            .is_some_and(LegacyRuntimeHandle::retirement_requested)
+        {
+            return false;
+        }
         if !self.end_synchronized_output() {
             return false;
         }
@@ -1802,10 +2123,17 @@ impl TerminalWorker {
             read_error,
             self.native_pty.wait_for_exit(FINAL_CHILD_WAIT_TIMEOUT),
         );
-        self.emulator.mark_metadata_stale();
-        if !self.publish_screen() || !self.publish_final_accessibility() {
+        if self
+            .runtime
+            .as_ref()
+            .is_some_and(LegacyRuntimeHandle::retirement_requested)
+        {
             return false;
         }
+        self.emulator.mark_metadata_stale();
+        self.lifecycle.retain(&event);
+        let _ = self.publish_screen();
+        let _ = self.publish_final_accessibility();
         self.send_terminal_event(event);
         false
     }
@@ -1822,10 +2150,16 @@ impl TerminalWorker {
         let mut commands_open = true;
 
         for index in 0..limit {
-            match self.reader_events.recv() {
-                Ok(NativePtyOutput::Bytes(bytes)) => batch.chunks.push((bytes, epoch)),
-                Ok(NativePtyOutput::Stopped(read_error)) => {
-                    batch.reader_stopped = Some(read_error);
+            match self.native_pty.receive_output(
+                epoch,
+                #[cfg(test)]
+                &self.reader_events,
+            ) {
+                Ok(spaceterm_terminal::runtime::legacy::LegacyPtyOutput::Bytes(bytes, receipt)) => {
+                    batch.chunks.push((bytes, receipt))
+                }
+                Ok(spaceterm_terminal::runtime::legacy::LegacyPtyOutput::Stopped(result)) => {
+                    batch.reader_stopped = Some(result.err().map(ReadFailure::Runtime));
                     break;
                 }
                 Err(_) => {
@@ -1881,7 +2215,7 @@ impl TerminalWorker {
                     }
                     self.clipboard
                         .begin(operation, epoch)
-                        .is_none_or(|bytes| self.write_pty(&bytes))
+                        .is_none_or(|bytes| self.write_pty_reply(&bytes))
                 }
                 Osc52Effect::Rejected(_) => true,
             };
@@ -1931,7 +2265,7 @@ impl TerminalWorker {
         if !completed {
             return true;
         }
-        if response.is_some_and(|bytes| !self.write_pty(&bytes)) {
+        if response.is_some_and(|bytes| !self.write_pty_reply(&bytes)) {
             return false;
         }
         if !self.process_output_chunks(Vec::new()) {
@@ -1995,7 +2329,7 @@ impl TerminalWorker {
 
     fn flush_ordered_terminal_replies(&mut self, focus_reports: &mut Vec<u8>) -> bool {
         self.write_pending_pty_responses()
-            && (focus_reports.is_empty() || self.write_pty(&mem::take(focus_reports)))
+            && (focus_reports.is_empty() || self.write_pty_reply(&mem::take(focus_reports)))
     }
 
     fn process_key(&mut self, input: KeyInput) -> bool {
@@ -2028,7 +2362,7 @@ impl TerminalWorker {
 
     fn cancel_pointer_drag(&mut self) -> bool {
         match self.emulator.cancel_pointer_drag() {
-            Ok(action) => self.apply_emulator_action(action) && self.refresh_selection_autoscroll(),
+            Ok(action) => self.apply_cleanup_action(action) && self.refresh_selection_autoscroll(),
             Err(message) => {
                 self.send_runtime_failure(message);
                 false
@@ -2052,7 +2386,11 @@ impl TerminalWorker {
                     self.schedules.cancel_paste_confirmation();
                 }
             }
-            TerminalFocusTarget::Terminal => {}
+            TerminalFocusTarget::Terminal => {
+                if !self.terminal_input_focused {
+                    self.schedules.cancel_paste_confirmation();
+                }
+            }
             TerminalFocusTarget::Unfocused | TerminalFocusTarget::PasteConfirmation(_) => {
                 self.schedules.cancel_paste_confirmation();
             }
@@ -2071,7 +2409,7 @@ impl TerminalWorker {
             for input in self.held_keys.take_releases() {
                 match self.emulator.key(input) {
                     Ok(action) => {
-                        if !self.apply_emulator_action(action) {
+                        if !self.apply_cleanup_action(action) {
                             return false;
                         }
                     }
@@ -2085,12 +2423,18 @@ impl TerminalWorker {
         self.terminal_input_focused = focused;
 
         match self.emulator.focus(focused) {
-            Ok(action) => self.apply_emulator_action(action),
+            Ok(action) => self.apply_cleanup_action(action),
             Err(message) => {
                 self.send_runtime_failure(message);
                 false
             }
         }
+    }
+
+    fn apply_cleanup_action(&mut self, action: EmulatorAction) -> bool {
+        self.write_pending_pty_responses()
+            && (action.bytes.is_empty() || self.write_pty_reply(&action.bytes))
+            && (!action.screen_changed || self.publish_visible_screen_change())
     }
 
     fn apply_emulator_action(&mut self, action: EmulatorAction) -> bool {
@@ -2123,11 +2467,22 @@ impl TerminalWorker {
 
     fn write_pending_pty_responses(&mut self) -> bool {
         let responses = self.emulator.take_pty_responses();
-        responses.is_empty() || self.write_pty(&responses)
+        responses.is_empty() || self.write_pty_reply(&responses)
     }
 
     fn write_pty(&mut self, bytes: &[u8]) -> bool {
-        if self.input.enqueue(bytes).is_err() {
+        self.write_pty_with_origin(bytes, false)
+    }
+    fn write_pty_reply(&mut self, bytes: &[u8]) -> bool {
+        self.write_pty_with_origin(bytes, true)
+    }
+    fn write_pty_with_origin(&mut self, bytes: &[u8], reply: bool) -> bool {
+        let admitted = if reply {
+            self.input.enqueue_reply(bytes)
+        } else {
+            self.input.enqueue(bytes)
+        };
+        if admitted.is_err() {
             let _ = self.send_runtime_failure(
                 TerminalFailure::pty("queue-shell-input")
                     .with_reason(FailureReason::CapacityExceeded),
@@ -2151,7 +2506,7 @@ impl TerminalWorker {
     fn publish_screen(&mut self) -> bool {
         self.metadata_state.publish(self.emulator.metadata());
         if self.events.is_closed() {
-            return false;
+            return true;
         }
 
         let snapshot = self.emulator.snapshot();
@@ -2174,7 +2529,7 @@ impl TerminalWorker {
                         self.schedules.disable_accessibility();
                     }
                 }
-                result
+                true
             }
             Ok(None) => true,
             Err(error) => {
@@ -2210,7 +2565,7 @@ impl TerminalWorker {
             .try_send(TerminalSessionEvent::MetadataChanged(wakeup))
         {
             Ok(()) | Err(async_channel::TrySendError::Full(_)) => true,
-            Err(async_channel::TrySendError::Closed(_)) => false,
+            Err(async_channel::TrySendError::Closed(_)) => true,
         }
     }
 
@@ -2323,7 +2678,9 @@ impl TerminalWorker {
     }
 
     fn send_terminal_event(&self, event: TerminalSessionEvent) -> bool {
-        send_session_event(&self.events, event)
+        self.lifecycle.retain(&event);
+        let _ = send_session_event(&self.events, event);
+        true
     }
 
     fn finish(self) {
@@ -2331,6 +2688,7 @@ impl TerminalWorker {
             native_pty,
             emulator: _emulator,
             commands: _commands,
+            #[cfg(test)]
             reader_events,
             events: _events,
             pending_command: _pending_command,
@@ -2339,14 +2697,16 @@ impl TerminalWorker {
             held_keys: _held_keys,
             ..
         } = self;
-        // The Native PTY Owner performs termination, waiting, and reaping off the GPUI thread.
+        // Clear legacy content before the runtime confirms native process and reader cleanup.
+        #[cfg(test)]
         drop(reader_events);
+        drop(_emulator);
         drop(native_pty);
     }
 }
 
 fn classify_reader_stop(
-    read_error: Option<crate::platform::native_pty::NativePtyReadFailure>,
+    read_error: Option<ReadFailure>,
     wait_result: Result<NativePtyExit, NativePtyWaitFailure>,
 ) -> TerminalSessionEvent {
     match (read_error, wait_result) {
@@ -2384,13 +2744,6 @@ fn send_session_event(
         Ok(()) => true,
         Err(async_channel::TrySendError::Full(event)) => events.force_send(event).is_ok(),
         Err(async_channel::TrySendError::Closed(_)) => false,
-    }
-}
-
-#[cfg(test)]
-fn join_worker(worker: JoinHandle<()>) {
-    if worker.join().is_err() {
-        eprintln!("terminal worker thread panicked");
     }
 }
 

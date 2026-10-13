@@ -1,0 +1,934 @@
+diff --git a/include/ghostty/vt.h b/include/ghostty/vt.h
+index 8e6bce8a8..ce6d1fd10 100644
+--- a/include/ghostty/vt.h
++++ b/include/ghostty/vt.h
+@@ -142,6 +142,7 @@ extern "C" {
+ 
+ #include <ghostty/vt/types.h>
+ #include <ghostty/vt/accessibility.h>
++#include <ghostty/vt/content.h>
+ #include <ghostty/vt/allocator.h>
+ #include <ghostty/vt/build_info.h>
+ #include <ghostty/vt/color.h>
+diff --git a/include/ghostty/vt/content.h b/include/ghostty/vt/content.h
+new file mode 100644
+--- /dev/null
++++ b/include/ghostty/vt/content.h
+@@ -0,0 +1,40 @@
++#ifndef GHOSTTY_VT_CONTENT_H
++#define GHOSTTY_VT_CONTENT_H
++#include <ghostty/vt/accessibility.h>
++#include <ghostty/vt/style.h>
++#ifdef __cplusplus
++extern "C" {
++#endif
++/* All callback data is borrowed until callback return. Copy before returning.
++ * Reads preserve compressed storage. Offsets refer to document order, not the
++ * viewport. Sized inputs reject a shorter layout. No selection is installed. */
++typedef struct GhosttyContentState GhosttyContentState;
++typedef struct GhosttyContentScan GhosttyContentScan;
++typedef struct { size_t size; uint64_t source_revision, topology_revision; GhosttyAccessibilityScreen screen; uint64_t screen_generation; uint32_t total_rows, active_start; uint16_t columns; bool synchronized; GhosttyAccessibilityRowId cursor; uint16_t cursor_column; int cursor_shape; } GhosttyContentSnapshot;
++typedef struct { size_t size; uint32_t row; uint16_t column; uint32_t end_row; uint16_t max_rows; uint32_t max_cells; size_t max_bytes; bool seek, seek_after; GhosttyAccessibilityRowId seek_row; } GhosttyContentOptions;
++typedef struct { size_t size; GhosttyAccessibilityRowId id; uint64_t revision; uint32_t document_row; uint16_t columns, start_column, emitted_columns; bool soft_wrapped; } GhosttyContentRow;
++typedef struct { size_t size; uint32_t codepoint; const uint32_t *extra_codepoints; size_t extra_codepoints_len; GhosttyAccessibilityCellWide wide; int semantic; bool has_text; GhosttyStyle style; const uint8_t *hyperlink; size_t hyperlink_len; } GhosttyContentCell;
++typedef struct { size_t size; uint32_t next_row; uint16_t next_column; uint32_t inspected_cells, emitted_cells; uint16_t emitted_rows; size_t accounted_bytes; bool complete; } GhosttyContentProgress;
++typedef bool (*GhosttyContentRowCallback)(void *, const GhosttyContentRow *);
++typedef bool (*GhosttyContentCellCallback)(void *, const GhosttyContentCell *);
++GHOSTTY_API GhosttyResult ghostty_content_state_new(GhosttyContentState **);
++GHOSTTY_API void ghostty_content_state_free(GhosttyContentState *);
++GHOSTTY_API GhosttyResult ghostty_content_state_capture(GhosttyContentState *, GhosttyTerminal, GhosttyContentSnapshot *);
++GHOSTTY_API GhosttyResult ghostty_content_read_page(GhosttyContentState *, GhosttyTerminal, const GhosttyContentOptions *, void *, GhosttyContentRowCallback, GhosttyContentCellCallback, GhosttyContentProgress *);
++GHOSTTY_API GhosttyResult ghostty_content_read_topology(GhosttyContentState *, GhosttyTerminal, const GhosttyContentOptions *, void *, GhosttyContentRowCallback, GhosttyContentProgress *);
++/* Copy/Find cursors retain a revision-exact semantic scan, not terminal state.
++ * The embedding performs incremental formatting/matching on returned cells. */
++GHOSTTY_API GhosttyResult ghostty_content_copy_begin(GhosttyContentState *, GhosttyTerminal, const GhosttyContentOptions *, GhosttyContentScan **);
++GHOSTTY_API GhosttyResult ghostty_content_find_begin(GhosttyContentState *, GhosttyTerminal, const GhosttyContentOptions *, GhosttyContentScan **);
++GHOSTTY_API GhosttyResult ghostty_content_copy_step(GhosttyContentState *, GhosttyTerminal, GhosttyContentScan *, const GhosttyContentOptions *, void *, GhosttyContentRowCallback, GhosttyContentCellCallback, GhosttyContentProgress *);
++GHOSTTY_API GhosttyResult ghostty_content_find_step(GhosttyContentState *, GhosttyTerminal, GhosttyContentScan *, const GhosttyContentOptions *, void *, GhosttyContentRowCallback, GhosttyContentCellCallback, GhosttyContentProgress *);
++GHOSTTY_API void ghostty_content_copy_free(GhosttyContentState *, GhosttyContentScan *);
++GHOSTTY_API void ghostty_content_find_free(GhosttyContentState *, GhosttyContentScan *);
++typedef struct { size_t size; uint32_t image_id; uint64_t placement_id; uint32_t document_row; int32_t column; uint32_t columns, rows, offset_x, offset_y, source_x, source_y, source_width, source_height, dest_width, dest_height; bool is_virtual; int32_t z; } GhosttyContentPlacement;
++typedef bool (*GhosttyContentPlacementCallback)(void *, const GhosttyContentPlacement *);
++GHOSTTY_API GhosttyResult ghostty_content_prepare_placements(GhosttyContentState *, GhosttyTerminal, GhosttyContentProgress *);
++GHOSTTY_API GhosttyResult ghostty_content_read_placements(GhosttyContentState *, GhosttyTerminal, const GhosttyContentOptions *, void *, GhosttyContentPlacementCallback);
++#ifdef __cplusplus
++}
++#endif
++#endif
+diff --git a/src/lib_vt.zig b/src/lib_vt.zig
+index c7434c139..128b78df4 100644
+--- a/src/lib_vt.zig
++++ b/src/lib_vt.zig
+@@ -252,6 +252,19 @@ comptime {
+         @export(&c.sys_set, .{ .name = "ghostty_sys_set" });
+         if (features.grid_introspection) {
+             @export(&c.grid_ref_hyperlink_userdata, .{ .name = "ghostty_grid_ref_hyperlink_userdata" });
++            @export(&c.content_prepare_placements, .{ .name = "ghostty_content_prepare_placements" });
++            @export(&c.content_read_placements, .{ .name = "ghostty_content_read_placements" });
++            @export(&c.content_state_new, .{ .name = "ghostty_content_state_new" });
++            @export(&c.content_state_free, .{ .name = "ghostty_content_state_free" });
++            @export(&c.content_state_capture, .{ .name = "ghostty_content_state_capture" });
++            @export(&c.content_read_page, .{ .name = "ghostty_content_read_page" });
++            @export(&c.content_read_topology, .{ .name = "ghostty_content_read_topology" });
++            @export(&c.content_copy_begin, .{ .name = "ghostty_content_copy_begin" });
++            @export(&c.content_copy_step, .{ .name = "ghostty_content_copy_step" });
++            @export(&c.content_copy_free, .{ .name = "ghostty_content_copy_free" });
++            @export(&c.content_find_begin, .{ .name = "ghostty_content_find_begin" });
++            @export(&c.content_find_step, .{ .name = "ghostty_content_find_step" });
++            @export(&c.content_find_free, .{ .name = "ghostty_content_find_free" });
+             @export(&c.accessibility_state_new, .{ .name = "ghostty_accessibility_state_new" });
+             @export(&c.accessibility_state_free, .{ .name = "ghostty_accessibility_state_free" });
+             @export(&c.accessibility_state_capture, .{ .name = "ghostty_accessibility_state_capture" });
+diff --git a/src/terminal/c/content.zig b/src/terminal/c/content.zig
+new file mode 100644
+--- /dev/null
++++ b/src/terminal/c/content.zig
+@@ -0,0 +1,746 @@
++//! Nonmutating, bounded styled reads. No viewport, selection or Find state is installed.
++const std = @import("std");
++const lib = @import("../lib.zig");
++const PageList = @import("../PageList.zig");
++const terminal_c = @import("terminal.zig");
++const accessibility = @import("accessibility.zig");
++const style_c = @import("style.zig");
++const Result = @import("result.zig").Result;
++const RowId = accessibility.RowId;
++const Screen = accessibility.Screen;
++
++pub const Snapshot = extern struct {
++    size: usize = @sizeOf(Snapshot),
++    source_revision: u64 = 0,
++    topology_revision: u64 = 0,
++    screen: Screen = .primary,
++    screen_generation: u64 = 0,
++    total_rows: u32 = 0,
++    active_start: u32 = 0,
++    columns: u16 = 0,
++    synchronized: bool = false,
++    cursor: RowId = .{},
++    cursor_column: u16 = 0,
++    cursor_shape: c_int = 0,
++};
++pub const Options = extern struct {
++    size: usize = @sizeOf(Options),
++    row: u32 = 0,
++    column: u16 = 0,
++    end_row: u32 = 0,
++    max_rows: u16 = 256,
++    max_cells: u32 = 16_384,
++    max_bytes: usize = 1024 * 1024,
++    seek: bool = false,
++    seek_after: bool = false,
++    seek_row: RowId = .{},
++};
++pub const Row = extern struct {
++    size: usize = @sizeOf(Row),
++    id: RowId,
++    revision: u64,
++    document_row: u32,
++    columns: u16,
++    start_column: u16,
++    emitted_columns: u16,
++    soft_wrapped: bool,
++};
++pub const Cell = extern struct {
++    size: usize = @sizeOf(Cell),
++    codepoint: u32,
++    extra_codepoints: ?[*]const u32,
++    extra_codepoints_len: usize,
++    wide: accessibility.CellWide,
++    semantic: c_int,
++    has_text: bool,
++    style: style_c.Style,
++    hyperlink: ?[*]const u8,
++    hyperlink_len: usize,
++};
++pub const Progress = extern struct {
++    size: usize = @sizeOf(Progress),
++    next_row: u32 = 0,
++    next_column: u16 = 0,
++    inspected_cells: u32 = 0,
++    emitted_cells: u32 = 0,
++    emitted_rows: u16 = 0,
++    accounted_bytes: usize = 4096,
++    complete: bool = false,
++};
++pub const RowCallback = *const fn (?*anyopaque, *const Row) callconv(lib.calling_conv) bool;
++pub const CellCallback = *const fn (?*anyopaque, *const Cell) callconv(lib.calling_conv) bool;
++pub const State = struct {
++    alloc: std.mem.Allocator,
++    // Eight page-local, evictable scans have at most 8 * 1024 * 80 bytes
++    // of descriptors. This fixed owner residency is separate from page output.
++    placements: [8]?*PlacementScan = @splat(null),
++    next_placement: usize = 0,
++};
++/// Cursors capture a comparison revision. Rust owns incremental formatting and
++/// matching over these semantic fragments, never a native terminal selection.
++pub const Scan = struct { snapshot: Snapshot, options: Options };
++
++pub fn state_new(out: ?**State) callconv(lib.calling_conv) Result {
++    const dest = out orelse return .invalid_value;
++    const alloc = std.heap.c_allocator;
++    const state = alloc.create(State) catch return .out_of_memory;
++    state.* = .{ .alloc = alloc };
++    dest.* = state;
++    return .success;
++}
++pub fn state_free(state: ?*State) callconv(lib.calling_conv) void {
++    const value = state orelse return;
++    for (value.placements) |scan| if (scan) |v| value.alloc.destroy(v);
++    value.alloc.destroy(value);
++}
++pub fn state_capture(state: ?*State, terminal_: terminal_c.Terminal, out_: ?*Snapshot) callconv(lib.calling_conv) Result {
++    _ = state orelse return .invalid_value;
++    const wrapper = terminal_ orelse return .invalid_value;
++    const out = out_ orelse return .invalid_value;
++    if (out.size < @sizeOf(Snapshot)) return .invalid_value;
++    const t = wrapper.terminal;
++    const screen = t.screens.active;
++    const tag: Screen = if (t.screens.active_key == .primary) .primary else .alternate;
++    const generation = std.math.add(u64, @intCast(t.screens.generation(t.screens.active_key)), 1) catch return .invalid_value;
++    var hash = std.hash.Wyhash.init(generation);
++    var total: u32 = 0;
++    var it = screen.pages.pageIterator(.right_down, .{ .screen = .{} }, null);
++    while (it.next()) |chunk| {
++        hash.update(std.mem.asBytes(&chunk.node.serial));
++        hash.update(std.mem.asBytes(&chunk.start));
++        hash.update(std.mem.asBytes(&chunk.end));
++        const cols = chunk.node.cols();
++        hash.update(std.mem.asBytes(&cols));
++        total = std.math.add(u32, total, chunk.end - chunk.start) catch return .invalid_value;
++    }
++    out.* = .{
++        .source_revision = wrapper.accessibility_revision,
++        .topology_revision = hash.final(),
++        .screen = tag,
++        .screen_generation = generation,
++        .total_rows = total,
++        .active_start = total -| screen.pages.rows,
++        .columns = screen.pages.cols,
++        .synchronized = t.modes.get(.synchronized_output),
++        .cursor = .{ .screen = tag, .screen_generation = generation, .node_serial = screen.cursor.page_pin.node.serial, .page_row = screen.cursor.page_pin.y },
++        .cursor_column = screen.cursor.x,
++        .cursor_shape = switch (screen.cursor.cursor_style) {
++            .bar => 2,
++            .underline => 1,
++            .block, .block_hollow => 0,
++        },
++    };
++    return .success;
++}
++fn nativeStyle(page: anytype, cell: anytype) style_c.Style {
++    var result: style_c.Style = .fromStyle(if (cell.style_id == 0) .{} else page.styles.get(page.memory, cell.style_id).*);
++    switch (cell.content_tag) {
++        .bg_color_palette => result.bg_color = .{ .tag = .palette, .value = .{ .palette = cell.content.color_palette.data } },
++        .bg_color_rgb => result.bg_color = .{ .tag = .rgb, .value = .{ .rgb = .{ .r = cell.content.color_rgb.r, .g = cell.content.color_rgb.g, .b = cell.content.color_rgb.b } } },
++        else => {},
++    }
++    return result;
++}
++fn cellValue(page: anytype, cell: anytype) Cell {
++    const extra = if (cell.hasGrapheme()) page.lookupGrapheme(cell) else null;
++    const uri: []const u8 = if (cell.hyperlink) uri: {
++        const id = page.lookupHyperlink(cell) orelse break :uri &.{};
++        break :uri page.hyperlink_set.get(page.memory, id).uri.slice(page.memory);
++    } else &.{};
++    return .{
++        .codepoint = if (cell.hasText()) cell.codepoint() else ' ',
++        .extra_codepoints = if (extra) |v| @ptrCast(v.ptr) else null,
++        .extra_codepoints_len = if (extra) |v| v.len else 0,
++        .wide = @enumFromInt(@intFromEnum(cell.wide)),
++        .semantic = @intFromEnum(cell.semantic_content),
++        .has_text = cell.hasText(),
++        .style = nativeStyle(page, cell),
++        .hyperlink = if (uri.len != 0) uri.ptr else null,
++        .hyperlink_len = uri.len,
++    };
++}
++fn read(state: ?*State, terminal_: terminal_c.Terminal, options_: ?*const Options, userdata: ?*anyopaque, row_callback_: ?RowCallback, cell_callback_: ?CellCallback, progress_: ?*Progress, topology: bool) Result {
++    _ = state orelse return .invalid_value;
++    const wrapper = terminal_ orelse return .invalid_value;
++    const options = options_ orelse return .invalid_value;
++    const callback = row_callback_ orelse return .invalid_value;
++    const progress = progress_ orelse return .invalid_value;
++    if (options.size < @sizeOf(Options) or progress.size < @sizeOf(Progress) or options.max_rows == 0 or options.max_cells == 0 or options.max_bytes < 4096) return .invalid_value;
++    if (!topology and cell_callback_ == null) return .invalid_value;
++    var snapshot: Snapshot = .{};
++    const captured = state_capture(state, terminal_, &snapshot);
++    if (captured != .success) return captured;
++    if (snapshot.synchronized or options.row >= snapshot.total_rows or options.column >= snapshot.columns) return .invalid_value;
++    const end = if (options.end_row == 0) snapshot.total_rows else @min(options.end_row, snapshot.total_rows);
++    if (options.row >= end) return .invalid_value;
++    var start_row = options.row;
++    if (options.seek) {
++        if (options.seek_row.screen != snapshot.screen or options.seek_row.screen_generation != snapshot.screen_generation) return .invalid_value;
++        var found = false;
++        var offset_seek: u32 = 0;
++        var seek_it = wrapper.terminal.screens.active.pages.pageIterator(.right_down, .{ .screen = .{} }, null);
++        while (seek_it.next()) |chunk| {
++            if (chunk.node.serial == options.seek_row.node_serial and options.seek_row.page_row >= chunk.start and options.seek_row.page_row < chunk.end) {
++                start_row = offset_seek + options.seek_row.page_row - chunk.start + @as(u32, @intFromBool(options.seek_after));
++                found = true;
++                break;
++            }
++            offset_seek += chunk.end - chunk.start;
++        }
++        if (!found) return .invalid_value;
++    }
++    progress.* = .{ .next_row = start_row, .next_column = options.column };
++    if (start_row >= end) {
++        progress.complete = true;
++        return .success;
++    }
++    const max_cells = @min(options.max_cells, 16_384);
++    const max_rows = @min(options.max_rows, 256);
++    const max_bytes = @min(options.max_bytes, 1024 * 1024);
++    const t = wrapper.terminal;
++    var offset: u32 = 0;
++    var it = t.screens.active.pages.pageIterator(.right_down, .{ .screen = .{} }, null);
++    while (it.next()) |chunk| {
++        const count = chunk.end - chunk.start;
++        if (offset + count <= progress.next_row) {
++            offset += count;
++            continue;
++        }
++        // This decodes compressed storage into temporary preserved memory.
++        // It does not install a resident page or alter compression metadata.
++        var preserved = chunk.node.pagePreservingState(t.gpa()) catch return .out_of_memory;
++        defer preserved.deinit();
++        const page = preserved.page();
++        for (chunk.start..chunk.end) |page_row| {
++            const doc = offset + @as(u32, @intCast(page_row - chunk.start));
++            if (doc < progress.next_row) continue;
++            if (doc >= end) {
++                progress.complete = true;
++                return .success;
++            }
++            const cols: u16 = chunk.node.cols();
++            if (progress.emitted_rows >= max_rows or progress.inspected_cells >= max_cells) return .success;
++            const row = &page.rows.ptr(page.memory)[page_row];
++            // Source invalidation precedes dirty-state consumption. A conservative
++            // revision for all rows avoids unbounded fingerprint work on every
++            // fragment (including repeated maximum-size hyperlink values).
++            const revision = std.math.add(u64, snapshot.source_revision, 1) catch return .invalid_value;
++            const start: u16 = if (doc == start_row) options.column else 0;
++            var stop: u16 = start;
++            var bytes: usize = 64;
++            if (topology) {
++                if (progress.emitted_cells + cols > max_cells) return if (progress.emitted_rows == 0) .out_of_space else .success;
++                stop = cols;
++                progress.inspected_cells += cols;
++            } else {
++                const cells = page.getCells(row);
++                if (cells[start].wide == .spacer_tail) return .invalid_value;
++                while (stop < cols) {
++                    if (progress.inspected_cells >= max_cells) break;
++                    const value = cellValue(page, &cells[stop]);
++                    // UTF-8 and protocol escaping are conservatively charged.
++                    const codepoints = std.math.add(usize, value.extra_codepoints_len, 1) catch return .invalid_value;
++                    if (codepoints > 1024 or value.hyperlink_len > 4096) return .out_of_space;
++                    var text_bytes: usize = std.unicode.utf8CodepointSequenceLength(@intCast(value.codepoint)) catch return .invalid_value;
++                    if (value.extra_codepoints) |extra| for (extra[0..value.extra_codepoints_len]) |cp| {
++                        text_bytes += std.unicode.utf8CodepointSequenceLength(@intCast(cp)) catch return .invalid_value;
++                    };
++                    if (text_bytes > 1024) return .out_of_space;
++                    const pair: u16 = if (value.wide == .wide) 2 else 1;
++                    if (stop + pair > cols) return .invalid_value;
++                    var charge: usize = 96 * pair + 6 * text_bytes;
++                    if (value.hyperlink_len > 0) charge += 32 + 6 * value.hyperlink_len;
++                    if (progress.emitted_cells + (stop - start) + pair > max_cells or progress.accounted_bytes + bytes + charge > max_bytes) break;
++                    // The complete grapheme/link inspection and its escaping
++                    // are included in this conservative byte charge.
++                    bytes += charge;
++                    progress.inspected_cells += pair;
++                    stop += pair;
++                }
++                if (stop == start) return if (progress.emitted_rows == 0) .out_of_space else .success;
++            }
++            if (progress.accounted_bytes + bytes > max_bytes) return if (progress.emitted_rows == 0) .out_of_space else .success;
++            const value: Row = .{ .id = .{ .screen = snapshot.screen, .screen_generation = snapshot.screen_generation, .node_serial = chunk.node.serial, .page_row = @intCast(page_row) }, .revision = revision, .document_row = doc, .columns = cols, .start_column = start, .emitted_columns = stop - start, .soft_wrapped = row.wrap };
++            if (!callback(userdata, &value)) return .invalid_value;
++            if (!topology) for (page.getCells(row)[start..stop]) |*cell| {
++                const output = cellValue(page, cell);
++                if (!cell_callback_.?(userdata, &output)) return .invalid_value;
++            };
++            progress.emitted_rows += 1;
++            progress.emitted_cells += stop - start;
++            progress.accounted_bytes += bytes;
++            progress.next_row = if (stop == cols) doc + 1 else doc;
++            progress.next_column = if (stop == cols) 0 else stop;
++            if (stop != cols) return .success;
++        }
++        offset += count;
++    }
++    progress.complete = progress.next_row >= end;
++    return .success;
++}
++pub fn read_page(state: ?*State, terminal_: terminal_c.Terminal, options: ?*const Options, userdata: ?*anyopaque, row: ?RowCallback, cell: ?CellCallback, progress: ?*Progress) callconv(lib.calling_conv) Result {
++    return read(state, terminal_, options, userdata, row, cell, progress, false);
++}
++pub fn read_topology(state: ?*State, terminal_: terminal_c.Terminal, options: ?*const Options, userdata: ?*anyopaque, row: ?RowCallback, progress: ?*Progress) callconv(lib.calling_conv) Result {
++    return read(state, terminal_, options, userdata, row, null, progress, true);
++}
++fn scanBegin(state: ?*State, terminal_: terminal_c.Terminal, options_: ?*const Options, out_: ?**Scan) Result {
++    const current = state orelse return .invalid_value;
++    const options = options_ orelse return .invalid_value;
++    const out = out_ orelse return .invalid_value;
++    if (options.size < @sizeOf(Options)) return .invalid_value;
++    var snapshot: Snapshot = .{};
++    const result = state_capture(state, terminal_, &snapshot);
++    if (result != .success) return result;
++    if (snapshot.synchronized) return .invalid_value;
++    const scan = current.alloc.create(Scan) catch return .out_of_memory;
++    scan.* = .{ .snapshot = snapshot, .options = options.* };
++    out.* = scan;
++    return .success;
++}
++fn scanStep(state: ?*State, terminal_: terminal_c.Terminal, scan_: ?*Scan, budget_: ?*const Options, userdata: ?*anyopaque, row: ?RowCallback, cell: ?CellCallback, progress_: ?*Progress) Result {
++    const scan = scan_ orelse return .invalid_value;
++    const budget = budget_ orelse return .invalid_value;
++    const progress = progress_ orelse return .invalid_value;
++    if (budget.size < @sizeOf(Options) or progress.size < @sizeOf(Progress)) return .invalid_value;
++    var current: Snapshot = .{};
++    const captured = state_capture(state, terminal_, &current);
++    if (captured != .success) return captured;
++    if (current.source_revision != scan.snapshot.source_revision or current.topology_revision != scan.snapshot.topology_revision or current.screen != scan.snapshot.screen or current.screen_generation != scan.snapshot.screen_generation) return .invalid_value;
++    var options = scan.options;
++    options.max_rows = budget.max_rows;
++    options.max_cells = budget.max_cells;
++    options.max_bytes = budget.max_bytes;
++    const result = read_page(state, terminal_, &options, userdata, row, cell, progress);
++    if (result == .success) {
++        scan.options.row = progress.next_row;
++        scan.options.column = progress.next_column;
++        scan.options.seek = false;
++    }
++    return result;
++}
++pub fn copy_begin(state: ?*State, terminal_: terminal_c.Terminal, options: ?*const Options, out: ?**Scan) callconv(lib.calling_conv) Result {
++    return scanBegin(state, terminal_, options, out);
++}
++pub fn find_begin(state: ?*State, terminal_: terminal_c.Terminal, options: ?*const Options, out: ?**Scan) callconv(lib.calling_conv) Result {
++    return scanBegin(state, terminal_, options, out);
++}
++pub fn copy_step(state: ?*State, terminal_: terminal_c.Terminal, scan: ?*Scan, budget: ?*const Options, userdata: ?*anyopaque, row: ?RowCallback, cell: ?CellCallback, progress: ?*Progress) callconv(lib.calling_conv) Result {
++    return scanStep(state, terminal_, scan, budget, userdata, row, cell, progress);
++}
++pub fn find_step(state: ?*State, terminal_: terminal_c.Terminal, scan: ?*Scan, budget: ?*const Options, userdata: ?*anyopaque, row: ?RowCallback, cell: ?CellCallback, progress: ?*Progress) callconv(lib.calling_conv) Result {
++    return scanStep(state, terminal_, scan, budget, userdata, row, cell, progress);
++}
++pub fn copy_free(state: ?*State, scan: ?*Scan) callconv(lib.calling_conv) void {
++    if (state) |s| {
++        if (scan) |v| s.alloc.destroy(v);
++    }
++}
++pub fn find_free(state: ?*State, scan: ?*Scan) callconv(lib.calling_conv) void {
++    copy_free(state, scan);
++}
++
++pub const Placement = extern struct {
++    size: usize = @sizeOf(Placement),
++    image_id: u32,
++    placement_id: u64,
++    document_row: u32,
++    column: i32,
++    columns: u32,
++    rows: u32,
++    offset_x: u32,
++    offset_y: u32,
++    source_x: u32,
++    source_y: u32,
++    source_width: u32,
++    source_height: u32,
++    dest_width: u32,
++    dest_height: u32,
++    is_virtual: bool,
++    z: i32,
++};
++pub const PlacementCallback = *const fn (?*anyopaque, *const Placement) callconv(lib.calling_conv) bool;
++const Storage = @import("../kitty/graphics_storage.zig").ImageStorage;
++const Image = @import("../kitty/graphics_image.zig").Image;
++const unicode = @import("../kitty/graphics_unicode.zig");
++
++fn taggedId(key: Storage.PlacementKey) u64 {
++    return @as(u64, key.placement_id.id) | (@as(u64, @intFromEnum(key.placement_id.tag)) << 32);
++}
++fn occurrenceId(key: Storage.PlacementKey, row: u32, col: u16) ?u64 {
++    // The low 33 bits preserve the native ID namespace. Occurrences occupy
++    // a disjoint namespace and bind the immutable document coordinate.
++    const position = std.math.add(u64, std.math.mul(u64, row, 1024) catch return null, col) catch return null;
++    if (position >= (1 << 30)) return null;
++    return (1 << 63) | (position << 33) | taggedId(key);
++}
++
++const Occurrence = struct { row: u32, col: u16 };
++fn emitPlacement(t: *const terminal_c.ZigTerminal, key: Storage.PlacementKey, p: Storage.Placement, image: Image, x: i64, y_: i64, first: u32, last: u32, occurrence: ?Occurrence, userdata: ?*anyopaque, callback: PlacementCallback) Result {
++    if (image.data.isPending()) return .success;
++    const grid = p.gridSize(image, t);
++    if (grid.cols == 0 or grid.rows == 0) return .success;
++    if (y_ >= last or y_ + grid.rows <= first or x >= t.cols or x + grid.cols <= 0) return .success;
++    var dest = p.pixelSize(image, t);
++    if (dest.width == 0 or dest.height == 0) return .success;
++    var source = p.sourceRect(image);
++    var offset = p.cellOffset(t);
++    var y = y_;
++    var rows = grid.rows;
++    // Stable row IDs cannot name a row before retained content. Crop only that
++    // pruned portion. Preserve signed columns and the unclipped horizontal size.
++    if (y < 0) {
++        const hidden = std.math.cast(u32, -y * @as(i64, t.height_px / t.rows) - offset.y) orelse return .invalid_value;
++        if (hidden >= dest.height) return .success;
++        const source_hidden: u32 = @intCast(@as(u64, hidden) * source.height / dest.height);
++        source.y += source_hidden;
++        source.height -= source_hidden;
++        dest.height -= hidden;
++        rows -= @intCast(-y);
++        offset.y = 0;
++        y = 0;
++    }
++    const value: Placement = .{
++        .image_id = image.id,
++        .placement_id = if (occurrence) |o| occurrenceId(key, o.row, o.col) orelse return .invalid_value else taggedId(key),
++        .document_row = std.math.cast(u32, y) orelse return .invalid_value,
++        .column = std.math.cast(i32, x) orelse return .invalid_value,
++        .columns = grid.cols,
++        .rows = rows,
++        .offset_x = offset.x,
++        .offset_y = offset.y,
++        .source_x = source.x,
++        .source_y = source.y,
++        .source_width = source.width,
++        .source_height = source.height,
++        .dest_width = dest.width,
++        .dest_height = dest.height,
++        .is_virtual = false,
++        .z = p.z,
++    };
++    return if (callback(userdata, &value)) .success else .out_of_space;
++}
++
++fn emitVirtual(t: *const terminal_c.ZigTerminal, p: unicode.Placement, doc: u32, userdata: ?*anyopaque, callback: PlacementCallback) Result {
++    const storage = &t.screens.active.kitty_images;
++    const target = storage.placeholderTarget(p.image_id, p.placement_id) orelse return .success;
++    const image = storage.imageById(p.image_id) orelse return .success;
++    if (image.data.isPending()) return .success;
++    const cw = t.width_px / t.cols;
++    const ch = t.height_px / t.rows;
++    if (cw == 0 or ch == 0) return .success;
++    const rp = p.renderPlacement(storage, &image, cw, ch) catch return .success;
++    if (rp.dest_width == 0 or rp.dest_height == 0) return .success;
++    const value: Placement = .{
++        .image_id = image.id,
++        .placement_id = occurrenceId(target.key, doc, p.pin.x) orelse return .invalid_value,
++        .document_row = doc,
++        .column = p.pin.x,
++        .columns = p.width,
++        .rows = 1,
++        .offset_x = rp.offset_x,
++        .offset_y = rp.offset_y,
++        .source_x = rp.source_x,
++        .source_y = rp.source_y,
++        .source_width = rp.source_width,
++        .source_height = rp.source_height,
++        .dest_width = rp.dest_width,
++        .dest_height = rp.dest_height,
++        .is_virtual = true,
++        .z = -1,
++    };
++    return if (callback(userdata, &value)) .success else .out_of_space;
++}
++
++const VirtualOrigin = struct { x: u16, y: u32 };
++fn virtualRows(t: *terminal_c.ZigTerminal, cursor: *u32, last: u32, root: ?Storage.PlacementKey, origin: *?VirtualOrigin, userdata: ?*anyopaque, callback: PlacementCallback, progress: *Progress) Result {
++    const first = cursor.*;
++    var inspected_rows: u32 = 0;
++    var offset: u32 = 0;
++    var it = t.screens.active.pages.pageIterator(.right_down, .{ .screen = .{} }, null);
++    while (it.next()) |chunk| {
++        const count = chunk.end - chunk.start;
++        defer offset += count;
++        if (offset + count <= first or offset >= last) continue;
++        var preserved = chunk.node.pagePreservingState(t.gpa()) catch return .out_of_memory;
++        defer preserved.deinit();
++        const page = preserved.page();
++        for (chunk.start..chunk.end) |py| {
++            const doc = offset + @as(u32, @intCast(py - chunk.start));
++            if (doc < first or doc >= last) continue;
++            if (inspected_rows >= 128) return .no_value;
++            const row = &page.rows.ptr(page.memory)[py];
++            if (row.kitty_virtual_placeholder and (progress.inspected_cells + chunk.node.cols() > 16_384 or progress.accounted_bytes + 64 + 128 * @as(usize, chunk.node.cols()) > 256 * 1024)) return .no_value;
++            inspected_rows += 1;
++            progress.accounted_bytes += 64;
++            if (!row.kitty_virtual_placeholder) {
++                cursor.* = doc + 1;
++                continue;
++            }
++            progress.inspected_cells += chunk.node.cols();
++            progress.accounted_bytes += 128 * @as(usize, chunk.node.cols());
++            var run: ?unicode.IncompletePlacement = null;
++            for (page.getCells(row), 0..) |*cell, x| {
++                var current: ?unicode.IncompletePlacement = null;
++                if (cell.codepoint() == unicode.placeholder) {
++                    const pin: PageList.Pin = .{ .node = chunk.node, .x = @intCast(x), .y = @intCast(py) };
++                    current = unicode.IncompletePlacement.initPreserved(&pin, page, cell);
++                }
++                if (run) |*previous| {
++                    if (current) |*value| {
++                        if (previous.append(value)) continue;
++                    }
++                    const p = previous.complete();
++                    if (root) |key| {
++                        if (t.screens.active.kitty_images.placeholderTarget(p.image_id, p.placement_id)) |target| {
++                            if (target.key.eql(key)) {
++                                if (origin.*) |*o| {
++                                    o.x = @min(o.x, p.pin.x);
++                                    o.y = @min(o.y, doc);
++                                } else {
++                                    origin.* = .{ .x = p.pin.x, .y = doc };
++                                }
++                            }
++                        }
++                    } else {
++                        const result = emitVirtual(t, p, doc, userdata, callback);
++                        if (result != .success) return result;
++                    }
++                    run = null;
++                }
++                if (current) |*value| {
++                    if (value.row == null) value.row = 0;
++                    if (value.col == null) value.col = 0;
++                    run = value.*;
++                }
++            }
++            if (run) |previous| {
++                const p = previous.complete();
++                if (root) |key| {
++                    if (t.screens.active.kitty_images.placeholderTarget(p.image_id, p.placement_id)) |target| {
++                        if (target.key.eql(key)) {
++                            if (origin.*) |*o| {
++                                o.x = @min(o.x, p.pin.x);
++                                o.y = @min(o.y, doc);
++                            } else {
++                                origin.* = .{ .x = p.pin.x, .y = doc };
++                            }
++                        }
++                    }
++                } else {
++                    const result = emitVirtual(t, p, doc, userdata, callback);
++                    if (result != .success) return result;
++                }
++            }
++            cursor.* = doc + 1;
++        }
++    }
++    return .success;
++}
++
++const PlacementIterator = std.AutoHashMapUnmanaged(Storage.PlacementKey, Storage.Placement).Iterator;
++const PendingRoot = struct {
++    key: Storage.PlacementKey,
++    p: Storage.Placement,
++    root: Storage.PlacementKey,
++    dx: i32,
++    dy: i32,
++    row: u32 = 0,
++    origin: ?VirtualOrigin = null,
++};
++const PlacementScan = struct {
++    terminal: usize,
++    source_revision: u64,
++    graphics_generation: u64,
++    topology_revision: u64,
++    screen: Screen,
++    screen_generation: u64,
++    first: u32,
++    last: u32,
++    iterator: PlacementIterator,
++    values: [1024]Placement = undefined,
++    count: usize = 0,
++    virtual_row: u32,
++    pending: ?PendingRoot = null,
++    stage: enum { placements, virtual, done, failed } = .placements,
++
++    fn valid(self: *const PlacementScan, t: *terminal_c.ZigTerminal, snapshot: Snapshot) bool {
++        return self.terminal == @intFromPtr(t) and self.source_revision == snapshot.source_revision and
++            self.graphics_generation == t.screens.active.kitty_images.generation and
++            self.topology_revision == snapshot.topology_revision and self.screen == snapshot.screen and self.screen_generation == snapshot.screen_generation;
++    }
++    fn append(userdata: ?*anyopaque, value: *const Placement) callconv(lib.calling_conv) bool {
++        const scan: *PlacementScan = @ptrCast(@alignCast(userdata.?));
++        if (scan.count == scan.values.len) return false;
++        scan.values[scan.count] = value.*;
++        scan.count += 1;
++        return true;
++    }
++    fn step(self: *PlacementScan, t: *terminal_c.ZigTerminal, snapshot: Snapshot, progress: *Progress) Result {
++        if (self.stage == .done or self.stage == .failed) return .success;
++        const storage = &t.screens.active.kitty_images;
++        if (self.pending) |*pending| {
++            const result = virtualRows(t, &pending.row, snapshot.total_rows, pending.root, &pending.origin, self, append, progress);
++            if (result == .no_value) return .success;
++            if (result != .success) return result;
++            if (pending.origin) |o| {
++                if (storage.imageById(pending.key.image_id)) |image| {
++                    const emitted = emitPlacement(t, pending.key, pending.p, image, @as(i64, o.x) + pending.dx, @as(i64, o.y) + pending.dy, self.first, self.last, .{ .row = o.y, .col = o.x }, self, append);
++                    if (emitted == .out_of_space) {
++                        self.stage = .failed;
++                        return .success;
++                    }
++                    if (emitted != .success) return emitted;
++                }
++            }
++            self.pending = null;
++            return .success;
++        }
++        if (self.stage == .placements) {
++            var visited: u32 = 0;
++            while (visited < 128) : (visited += 1) {
++                const entry = self.iterator.next() orelse {
++                    self.stage = .virtual;
++                    break;
++                };
++                progress.inspected_cells += 1;
++                progress.accounted_bytes += 128;
++                const p = entry.value_ptr;
++                const image = storage.imageById(entry.key_ptr.image_id) orelse continue;
++                var dx: i32 = 0;
++                var dy: i32 = 0;
++                const pin = switch (p.location) {
++                    .virtual => continue,
++                    .pin => |pin| pin,
++                    .relative => |rel| pin: {
++                        const chain = storage.resolveChain(rel) orelse continue;
++                        dx = chain.horizontal_offset;
++                        dy = chain.vertical_offset;
++                        switch (chain.root.location) {
++                            .pin => |pin| break :pin pin,
++                            .virtual => {
++                                self.pending = .{ .key = entry.key_ptr.*, .p = p.*, .root = chain.root_key, .dx = dx, .dy = dy };
++                                return .success;
++                            },
++                            .relative => unreachable,
++                        }
++                    },
++                };
++                if (pin.garbage) continue;
++                const position = t.screens.active.pages.pointFromPin(.screen, pin.*) orelse continue;
++                const emitted = emitPlacement(t, entry.key_ptr.*, p.*, image, @as(i64, pin.x) + dx, @as(i64, position.screen.y) + dy, self.first, self.last, null, self, append);
++                if (emitted == .out_of_space) {
++                    self.stage = .failed;
++                    return .success;
++                }
++                if (emitted != .success) return emitted;
++            }
++        }
++        if (self.stage == .virtual) {
++            var ignored: ?VirtualOrigin = null;
++            const result = virtualRows(t, &self.virtual_row, self.last, null, &ignored, self, append, progress);
++            if (result == .out_of_space) {
++                self.stage = .failed;
++                return .success;
++            }
++            if (result == .success) self.stage = .done;
++            if (result != .success and result != .no_value) return result;
++        }
++        return .success;
++    }
++};
++
++/// Advance one page-local scan. No quantum inspects the whole placement map or
++/// an unrestricted set of placeholder rows. Invalidation precedes iterator use.
++pub fn prepare_placements(state_: ?*State, terminal_: terminal_c.Terminal, progress_: ?*Progress) callconv(lib.calling_conv) Result {
++    if (comptime !@import("terminal_options").kitty_graphics) return .no_value;
++    const state = state_ orelse return .invalid_value;
++    const wrapper = terminal_ orelse return .invalid_value;
++    const progress = progress_ orelse return .invalid_value;
++    if (progress.size < @sizeOf(Progress)) return .invalid_value;
++    progress.* = .{};
++    var snapshot: Snapshot = .{};
++    const captured = state_capture(state, terminal_, &snapshot);
++    if (captured != .success) return captured;
++    const t = wrapper.terminal;
++    for (0..state.placements.len) |_| {
++        const index = state.next_placement;
++        state.next_placement = (index + 1) % state.placements.len;
++        const scan = state.placements[index] orelse continue;
++        if (!scan.valid(t, snapshot)) {
++            state.alloc.destroy(scan);
++            state.placements[index] = null;
++            continue;
++        }
++        if (snapshot.synchronized) return .success;
++        if (scan.stage == .done or scan.stage == .failed) continue;
++        progress.next_row = 1; // This call advanced a cache, including its final empty quantum.
++        const result = scan.step(t, snapshot, progress);
++        if (result != .success) return result;
++        progress.complete = scan.stage == .done or scan.stage == .failed;
++        return .success;
++    }
++    progress.complete = true;
++    return .success;
++}
++
++/// Descriptors are published only after a revision-exact bounded scan finishes.
++/// Pending work reports capacity, not a success-shaped partial graphics page.
++pub fn read_placements(state_: ?*State, terminal_: terminal_c.Terminal, options_: ?*const Options, userdata: ?*anyopaque, callback_: ?PlacementCallback) callconv(lib.calling_conv) Result {
++    if (comptime !@import("terminal_options").kitty_graphics) return .no_value;
++    const state = state_ orelse return .invalid_value;
++    const wrapper = terminal_ orelse return .invalid_value;
++    const options = options_ orelse return .invalid_value;
++    const callback = callback_ orelse return .invalid_value;
++    if (options.size < @sizeOf(Options)) return .invalid_value;
++    var snapshot: Snapshot = .{};
++    const captured = state_capture(state, terminal_, &snapshot);
++    if (captured != .success) return captured;
++    if (snapshot.synchronized) return .invalid_value;
++    const first = options.row;
++    const last = @min(options.end_row, snapshot.total_rows);
++    if (first >= last) return .invalid_value;
++    const t = wrapper.terminal;
++    if (t.screens.active.kitty_images.placements.count() == 0) return .success;
++    var found: ?*PlacementScan = null;
++    var free: ?usize = null;
++    for (&state.placements, 0..) |*value, index| {
++        if (value.*) |scan| {
++            if (!scan.valid(t, snapshot)) {
++                state.alloc.destroy(scan);
++                value.* = null;
++            } else if (scan.first == first and scan.last == last) {
++                found = scan;
++                break;
++            }
++        }
++        if (value.* == null) free = index;
++    }
++    const scan = found orelse new: {
++        const index = free orelse state.next_placement;
++        if (state.placements[index]) |old| state.alloc.destroy(old);
++        state.placements[index] = null;
++        const scan = state.alloc.create(PlacementScan) catch return .out_of_memory;
++        scan.* = .{
++            .terminal = @intFromPtr(t),
++            .source_revision = snapshot.source_revision,
++            .graphics_generation = t.screens.active.kitty_images.generation,
++            .topology_revision = snapshot.topology_revision,
++            .screen = snapshot.screen,
++            .screen_generation = snapshot.screen_generation,
++            .first = first,
++            .last = last,
++            .virtual_row = first,
++            .iterator = t.screens.active.kitty_images.placements.iterator(),
++        };
++        state.placements[index] = scan;
++        state.next_placement = (index + 1) % state.placements.len;
++        break :new scan;
++    };
++    var progress: Progress = .{};
++    const result = scan.step(t, snapshot, &progress);
++    if (result != .success) return result;
++    if (scan.stage != .done) return .out_of_space;
++    for (scan.values[0..scan.count]) |*value| if (!callback(userdata, value)) return .out_of_space;
++    return .success;
++}
+diff --git a/src/terminal/c/main.zig b/src/terminal/c/main.zig
+index 7a977298f..da1260cd9 100644
+--- a/src/terminal/c/main.zig
++++ b/src/terminal/c/main.zig
+@@ -1,3 +1,17 @@
++const content = @import("content.zig");
++pub const content_prepare_placements = content.prepare_placements;
++pub const content_read_placements = content.read_placements;
++pub const content_state_new = content.state_new;
++pub const content_state_free = content.state_free;
++pub const content_state_capture = content.state_capture;
++pub const content_read_page = content.read_page;
++pub const content_read_topology = content.read_topology;
++pub const content_copy_begin = content.copy_begin;
++pub const content_copy_step = content.copy_step;
++pub const content_copy_free = content.copy_free;
++pub const content_find_begin = content.find_begin;
++pub const content_find_step = content.find_step;
++pub const content_find_free = content.find_free;
+ const lib = @import("../lib.zig");
+ const CAllocator = lib.alloc.Allocator;
+ 
+diff --git a/src/terminal/kitty/graphics_unicode.zig b/src/terminal/kitty/graphics_unicode.zig
+--- a/src/terminal/kitty/graphics_unicode.zig
++++ b/src/terminal/kitty/graphics_unicode.zig
+@@ -393,7 +393,7 @@
+ /// IncompletePlacement is the placement information present in a single
+ /// cell. It is "incomplete" because the specification allows for missing
+ /// diacritics and so on that continue from previous valid placements.
+-const IncompletePlacement = struct {
++pub const IncompletePlacement = struct {
+     /// The pin of the cell that created this incomplete placement.
+     pin: terminal.Pin,
+ 
+@@ -426,8 +426,16 @@
+         row: *const terminal.Pin,
+         cell: *const terminal.Cell,
+     ) IncompletePlacement {
+-        assert(cell.codepoint() == placeholder);
+-        const style = row.style(cell);
++        return initValues(row, row.style(cell), row.grapheme(cell) orelse &.{});
++    }
++
++    /// Parse from temporarily preserved storage without decoding the live node.
++    pub fn initPreserved(row: *const terminal.Pin, page: *const terminal.Page, cell: *const terminal.Cell) IncompletePlacement {
++        const style: terminal.Style = if (cell.style_id == 0) .{} else page.styles.get(page.memory, cell.style_id).*;
++        return initValues(row, style, if (cell.hasGrapheme()) (page.lookupGrapheme(cell) orelse &.{}) else &.{});
++    }
++
++    fn initValues(row: *const terminal.Pin, style: terminal.Style, cps: []const u21) IncompletePlacement {
+ 
+         var result: IncompletePlacement = .{
+             .pin = row.*,
+@@ -438,44 +446,10 @@
+             },
+         };
+ 
+-        // Try to decode all our diacritics. Any invalid diacritics are
+-        // treated as if they don't exist. This isn't explicitly specified
+-        // at the time of writing this but it appears to be how Kitty behaves.
+-        const cps: []const u21 = row.grapheme(cell) orelse &.{};
+-        if (cps.len > 0) {
+-            result.row = getIndex(cps[0]) orelse value: {
+-                log.warn("virtual placement with invalid row diacritic cp={X}", .{cps[0]});
+-                break :value null;
+-            };
+-
+-            if (cps.len > 1) {
+-                result.col = getIndex(cps[1]) orelse value: {
+-                    log.warn("virtual placement with invalid col diacritic cp={X}", .{cps[1]});
+-                    break :value null;
+-                };
+-
+-                if (cps.len > 2) {
+-                    const high_ = getIndex(cps[2]) orelse value: {
+-                        log.warn("virtual placement with invalid high diacritic cp={X}", .{cps[2]});
+-                        break :value null;
+-                    };
+-
+-                    if (high_) |high| {
+-                        result.image_id_high = std.math.cast(
+-                            u8,
+-                            high,
+-                        ) orelse value: {
+-                            log.warn("virtual placement with invalid high diacritic cp={X} value={}", .{
+-                                cps[2],
+-                                high,
+-                            });
+-                            break :value null;
+-                        };
+-                    }
+-
+-                    // Any additional diacritics are ignored.
+-                }
+-            }
++        if (cps.len > 0) result.row = getIndex(cps[0]);
++        if (cps.len > 1) result.col = getIndex(cps[1]);
++        if (cps.len > 2) {
++            if (getIndex(cps[2])) |high| result.image_id_high = std.math.cast(u8, high);
+         }
+ 
+         return result;
