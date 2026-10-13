@@ -424,32 +424,79 @@ impl PendingTasks {
         N: crate::pairing::credentials::NativeDeviceCredentials + 'static,
         R: crate::pairing::revocation::RestrictedConnector + 'static,
     {
+        self.start_pairing_scheduler_inner(driver, None)
+    }
+    /// Settles enrollment acknowledgements and revocations under the same
+    /// journal lifetime claim and retry clock. Historical work never reenrolls.
+    pub fn start_pairing_scheduler_with_enrollment<N, R, E>(
+        &self,
+        driver: Arc<crate::pairing::revocation::RevocationDriver<N, R>>,
+        enrollment: Arc<
+            crate::pairing::enrollment::EnrollmentDriver<
+                crate::pairing::journal::JournalPairingStore<JournalController>,
+                N,
+                E,
+            >,
+        >,
+        majors: Vec<u32>,
+    ) -> Result<PendingRuntime, ClientFailure>
+    where
+        N: crate::pairing::credentials::NativeDeviceCredentials + 'static,
+        R: crate::pairing::revocation::RestrictedConnector + 'static,
+        E: crate::pairing::enrollment::EnrollmentConnector + 'static,
+    {
+        let attempt = Arc::new(move |id| {
+            let enrollment = enrollment.clone();
+            let majors = majors.clone();
+            Box::pin(async move {
+                enrollment
+                    .acknowledge_once(id, majors)
+                    .await
+                    .map_err(pairing_failure)
+            }) as ClientFuture<'static, ()>
+        });
+        self.start_pairing_scheduler_inner(driver, Some(attempt))
+    }
+    fn start_pairing_scheduler_inner<N, R>(
+        &self,
+        driver: Arc<crate::pairing::revocation::RevocationDriver<N, R>>,
+        enrollment: Option<scheduler::EnrollmentAcknowledgementAttempt>,
+    ) -> Result<PendingRuntime, ClientFailure>
+    where
+        N: crate::pairing::credentials::NativeDeviceCredentials + 'static,
+        R: crate::pairing::revocation::RestrictedConnector + 'static,
+    {
         self.journal.ensure_healthy()?;
         let tasks = self.clone();
-        scheduler::start(self.clone(), move |id| {
-            let tasks = tasks.clone();
-            let driver = Arc::clone(&driver);
-            Box::pin(async move {
-                let _serial = tasks.serial.lock().await;
-                if !tasks
-                    .journal
-                    .snapshot()?
-                    .revocations()
-                    .iter()
-                    .any(|record| record.task.parts().original.operation() == id)
-                {
-                    return Ok(true);
-                }
-                tasks
-                    .journal
-                    .transact(vec![ClientJournalChange::RevocationAttempt(id)])
-                    .await?;
-                let store =
-                    crate::pairing::journal::JournalPairingStore::new(Arc::clone(&tasks.journal));
-                driver.run_once(&store, id).await.map_err(pairing_failure)?;
-                Ok(true)
-            })
-        })
+        scheduler::start_with_enrollment(
+            self.clone(),
+            move |id| {
+                let tasks = tasks.clone();
+                let driver = Arc::clone(&driver);
+                Box::pin(async move {
+                    let _serial = tasks.serial.lock().await;
+                    if !tasks
+                        .journal
+                        .snapshot()?
+                        .revocations()
+                        .iter()
+                        .any(|record| record.task.parts().original.operation() == id)
+                    {
+                        return Ok(true);
+                    }
+                    tasks
+                        .journal
+                        .transact(vec![ClientJournalChange::RevocationAttempt(id)])
+                        .await?;
+                    let store = crate::pairing::journal::JournalPairingStore::new(Arc::clone(
+                        &tasks.journal,
+                    ));
+                    driver.run_once(&store, id).await.map_err(pairing_failure)?;
+                    Ok(true)
+                })
+            },
+            enrollment,
+        )
     }
     pub fn start_scheduler(
         &self,

@@ -19,6 +19,44 @@ use spaceterm_core::{
     pairing::{EnrollmentTicketId, PairingKeys, RevocationRouteReference},
 };
 
+/// Public OpenSSH effective configuration captured before enrollment. It is
+/// comparison data, not local file or credential authority. Older slots have no
+/// capture and native restricted SSH retries refuse them.
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct JournalSshCapture(String);
+impl JournalSshCapture {
+    pub const MAX_BYTES: usize = 16 * 1024;
+    pub fn new(configuration: String) -> Result<Self, ClientFailure> {
+        if configuration.is_empty()
+            || configuration.len() > Self::MAX_BYTES
+            || configuration.bytes().any(|b| b == 0 || b == b'\r')
+        {
+            return Err(invalid());
+        }
+        Ok(Self(configuration))
+    }
+    pub fn configuration(&self) -> &str {
+        &self.0
+    }
+}
+impl std::fmt::Debug for JournalSshCapture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("JournalSshCapture(..)")
+    }
+}
+impl TryFrom<String> for JournalSshCapture {
+    type Error = ClientFailure;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+impl From<JournalSshCapture> for String {
+    fn from(value: JournalSshCapture) -> Self {
+        value.0
+    }
+}
+
 /// A never-reused native slot and its public comparison metadata. None in server
 /// denotes the shared device-identity key; Some denotes pairing authentication.
 /// Pairing's native provider alone turns these columns into CredentialScope.
@@ -34,6 +72,8 @@ pub struct JournalCredentialSlot {
     /// Present only before enrollment transfers this route into SavedTarget.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route: Option<RouteDescription>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_capture: Option<JournalSshCapture>,
     pub generation: LocalPairingGeneration,
 }
 impl std::fmt::Debug for JournalCredentialSlot {
@@ -52,6 +92,8 @@ impl JournalCredentialSlot {
             || self.reference.opaque() == [0; 16]
             || self.server.is_some_and(|server| server.bytes() == [0; 16])
             || self.public_key == Some([0; 32])
+            || (self.ssh_capture.is_some()
+                && (self.server.is_none() || self.route_reference.is_none()))
             || self
                 .route_reference
                 .is_some_and(|route| self.server.is_none() || route.opaque() == [0; 16])
@@ -168,7 +210,12 @@ impl PairingJournalProjection {
                 return Err(invalid());
             }
             resident = resident
-                .checked_add(256)
+                .checked_add(
+                    256 + slot
+                        .ssh_capture
+                        .as_ref()
+                        .map_or(0, |capture| capture.configuration().len() * 2),
+                )
                 .ok_or_else(crate::failure::resource_limit)?;
         }
         let reservations = state
@@ -294,6 +341,7 @@ impl PairingJournalProjection {
                 slot.validate()?;
                 let projection = &mut state.pairing;
                 if slot.public_key.is_some()
+                    || slot.ssh_capture.is_some()
                     || slot.route_reference.is_some()
                     || slot.route.is_some()
                     || projection.slot(slot.reference).is_some()
@@ -331,6 +379,27 @@ impl PairingJournalProjection {
                 }
                 slot.route_reference = Some(*route_reference);
                 slot.route = Some(route.clone());
+            }
+            ClientJournalChange::CaptureRestrictedSsh { reference, capture } => {
+                let projection = &mut state.pairing;
+                if !projection.credential_preparations.contains(reference) {
+                    return Err(invalid());
+                }
+                let slot = projection
+                    .slots
+                    .iter_mut()
+                    .find(|slot| slot.reference == *reference)
+                    .ok_or_else(invalid)?;
+                if slot.route_reference.is_none()
+                    || !matches!(
+                        slot.route.as_ref().map(RouteDescription::parts),
+                        Some(crate::api::RouteParts::Ssh { .. })
+                    )
+                    || slot.ssh_capture.as_ref().is_some_and(|old| old != capture)
+                {
+                    return Err(invalid());
+                }
+                slot.ssh_capture = Some(capture.clone());
             }
             ClientJournalChange::RecordCredentialPublicKey {
                 reference,
