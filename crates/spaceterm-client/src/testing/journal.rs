@@ -15,11 +15,20 @@ impl ReceiptVerifier for Verifier {
             .map_err(Into::into)
     }
 }
-pub(super) struct MemoryJournal(
+pub struct MemoryJournal(
     Mutex<RecoveredClientState>,
     crate::pairing::credentials::PairingAuthorityFence,
     Arc<std::sync::atomic::AtomicBool>,
 );
+impl Default for MemoryJournal {
+    fn default() -> Self {
+        Self(
+            Mutex::new(RecoveredClientState::empty()),
+            Default::default(),
+            Arc::default(),
+        )
+    }
+}
 impl ClientJournal for MemoryJournal {
     fn admission_latch(&self) -> Arc<JournalAdmission> {
         Arc::default()

@@ -1912,3 +1912,83 @@ impl ServiceSupervisor {
         }
     }
 }
+
+/// Exclusive, listener-free execution of one retained owner enrollment while
+/// deliberate Stop remains in force. The instance lease also excludes normal startup.
+pub struct StoppedOwnerAdmission {
+    registration: RegisteredServer,
+    lease: Lease,
+    supervisor: ServiceSupervisor,
+    request: NativeRequestId,
+    digest: RequestDigest,
+    claim: RequestDigest,
+}
+impl StoppedOwnerAdmission {
+    /// Returns the original deliberate request, not a new allocation.
+    pub fn request(&self) -> NativeRequestId {
+        self.request
+    }
+    /// Returns the exact stopped registration admitted under the instance lease.
+    pub fn registration(&self) -> &RegisteredServer {
+        &self.registration
+    }
+    /// Rechecks the original journal and exact registration, never Start.
+    pub fn revalidate(&self) -> Result<(), ServiceFailure> {
+        self.lease.verify()?;
+        let current = self.supervisor.discover()?.ok_or(ServiceFailure::Missing)?;
+        self.supervisor.check_startup_barrier(&current.record)?;
+        if current.desired_state() != DesiredServerState::Stopped
+            || current.key() != self.registration.key()
+            || current.record.data != self.registration.record.data
+            || current.record.organization != self.registration.record.organization
+            || current.record.runtime != self.registration.record.runtime
+            || RegistrationBasis::capture_record(&current.record)
+                != RegistrationBasis::capture_record(&self.registration.record)
+        {
+            return Err(ServiceFailure::IdentityMismatch);
+        }
+        self.supervisor.validate_owner_enrollment(
+            &self.request,
+            self.digest,
+            spaceterm_core::identity::ServerId::new(self.registration.server_pin().identity),
+            self.claim,
+        )
+    }
+}
+impl fmt::Debug for StoppedOwnerAdmission {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("StoppedOwnerAdmission(..)")
+    }
+}
+impl ServiceSupervisor {
+    /// The deliberate request must have been retained before any key/store access.
+    /// An existing actor must receive Running requests instead of opening this path.
+    pub fn admit_stopped_owner(
+        &self,
+        request: NativeRequestId,
+        digest: RequestDigest,
+        server: spaceterm_core::identity::ServerId,
+        claim: RequestDigest,
+    ) -> Result<StoppedOwnerAdmission, ServiceFailure> {
+        let lifecycle = self.lifecycle_lease()?;
+        self.validate_owner_enrollment(&request, digest, server, claim)?;
+        let registration = self.discover()?.ok_or(ServiceFailure::Missing)?;
+        if registration.desired_state() != DesiredServerState::Stopped {
+            return Err(ServiceFailure::Pending);
+        }
+        self.check_startup_barrier(&registration.record)?;
+        let directory = Directory::open(&self.anchor)?.ok_or(ServiceFailure::Missing)?;
+        let lease = directory.lease("instance-lock")?;
+        lifecycle.verify()?;
+        let admission = StoppedOwnerAdmission {
+            registration,
+            lease,
+            supervisor: self.clone(),
+            request,
+            digest,
+            claim,
+        };
+        admission.revalidate()?;
+        Ok(admission)
+    }
+}

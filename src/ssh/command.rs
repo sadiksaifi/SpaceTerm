@@ -293,6 +293,18 @@ impl SshCommandContext {
         self.spec(arguments)
     }
 
+    /// Bootstrap uses the existing verified control route and never falls back to another host.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "The foreground bootstrap consumer is composed by desktop C3."
+        )
+    )]
+    pub(crate) fn bootstrap_read_only_probe(&self) -> SshCommandSpec {
+        self.remote_utility()
+    }
+
     pub(crate) fn terminal_session_channel(
         &self,
         command: ValidatedRemoteShellCommand,
@@ -954,6 +966,25 @@ mod tests {
             PathBuf::from("/private/runtime/spaceterm/ssh/control.sock"),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn bootstrap_probe_preserves_openssh_trust_and_never_falls_back() {
+        let args = arguments(&context().bootstrap_read_only_probe());
+        assert!(args.contains(&"ClearAllForwardings=yes".to_owned()));
+        assert!(args.contains(&"ProxyCommand=; exit 1".to_owned()));
+        assert!(args.contains(&"ControlMaster=no".to_owned()));
+        assert!(
+            args.windows(2)
+                .any(|values| values == ["-F", "/private/config/spaceterm/ssh_config"])
+        );
+        assert!(
+            !args
+                .iter()
+                .any(|value| value.starts_with("StrictHostKeyChecking=")
+                    || value.starts_with("UserKnownHostsFile="))
+        );
+        assert_eq!(&args[args.len() - 2..], ["/bin/sh", "-s"]);
     }
 
     fn arguments(spec: &SshCommandSpec) -> Vec<String> {

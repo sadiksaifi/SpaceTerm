@@ -3,14 +3,6 @@
 //! Desktop owners feed status and visibility changes, run returned tickets off the UI thread,
 //! and return each completion to this transient cache. No Git discovery or persistence runs here.
 
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "desktop Git and Pane owners compose this handoff separately"
-    )
-)]
-
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::sync::Arc;

@@ -65,6 +65,18 @@ class AccountCheckTests(unittest.TestCase):
         )
         self.assertEqual(checks.require_nonempty(output), 2)
 
+    def test_nonempty_gate_accepts_intentionally_killed_single_test_fixtures(self):
+        output = (
+            b"running 3 tests\n"
+            b"running 1 test\n"
+            b"running 1 test\n"
+            b"test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; "
+            b"finished in 0.01s\n"
+            b"test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; "
+            b"finished in 0.02s\n"
+        )
+        self.assertEqual(checks.require_nonempty(output), 3)
+
     def test_nonempty_gate_rejects_all_ignored_and_incomplete_targets(self):
         nested = (
             b"running 1 test\n"
@@ -113,6 +125,58 @@ class AccountCheckTests(unittest.TestCase):
                 )
             ],
         )
+
+    def test_update_gate_requires_signed_selection_lifecycle_and_real_git_targets(self):
+        output = (
+            b"running 1 test\n"
+            b"test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; "
+            b"finished in 0.01s\n"
+        )
+        with patch.object(checks.native, "run_tool", return_value=output) as run:
+            self.assertEqual(checks.run(["update"]), 0)
+        self.assertEqual(
+            [call.args[0] for call in run.call_args_list],
+            [
+                [
+                    "cargo",
+                    "test",
+                    "--quiet",
+                    "--locked",
+                    "-p",
+                    package,
+                    "--test",
+                    target,
+                    "--features",
+                    "test-support",
+                ]
+                for package, target in (
+                    ("spaceterm-host", "server_installation"),
+                    ("spaceterm-host", "account_service_lifecycle"),
+                    ("spaceterm-host", "account_service_managers"),
+                    ("spaceterm-server", "git_shutdown"),
+                )
+            ],
+        )
+        for call in run.call_args_list:
+            self.assertNotIn("--ignored", call.args[0])
+            self.assertNotIn("UPDATE_SIGNING_KEY", call.kwargs["environment"])
+            self.assertEqual(call.kwargs["environment"]["CARGO_BUILD_JOBS"], "4")
+
+    def test_update_gate_rejects_an_empty_target_after_a_nonempty_target(self):
+        nonempty = (
+            b"running 1 test\n"
+            b"test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; "
+            b"finished in 0.01s\n"
+        )
+        empty = (
+            b"running 0 tests\n"
+            b"test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; "
+            b"finished in 0.01s\n"
+        )
+        with patch.object(checks.native, "run_tool", side_effect=[nonempty, empty]) as run:
+            with self.assertRaises(TaskError):
+                checks.run(["update"])
+        self.assertEqual(run.call_count, 2)
 
     def test_bootstrap_gate_rejects_an_empty_target_after_a_nonempty_target(self):
         nonempty = (

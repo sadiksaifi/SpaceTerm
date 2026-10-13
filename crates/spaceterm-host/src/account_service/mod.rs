@@ -37,7 +37,9 @@ pub use processes::{
     RuntimeAssessment, ServiceClock, ServiceManager, ServiceProcesses, ServiceTime,
 };
 pub use registration::RegisteredServer;
-pub use supervisor::{AccountStartup, AccountStartupAdmission, ServiceSupervisor, StorageWait};
+pub use supervisor::{
+    AccountStartup, AccountStartupAdmission, ServiceSupervisor, StoppedOwnerAdmission, StorageWait,
+};
 
 use crate::{
     native_deployment::contracts::NativeRequestId,

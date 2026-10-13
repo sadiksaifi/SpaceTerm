@@ -43,6 +43,13 @@ impl AccountOwnerEnrollment {
         let server = proposal.parts().server;
         let claim =
             enrollment_proposal_digest(proposal).map_err(|_| PairingFailure::InvalidRequest)?;
+        if let Some(digest) = self
+            .supervisor
+            .retained_owner_enrollment_digest(request, server, claim)
+            .map_err(owner_failure)?
+        {
+            return Ok(digest);
+        }
         let digest = self
             .supervisor
             .owner_enrollment_digest(request, server, claim)
@@ -81,7 +88,7 @@ impl AccountOwnerEnrollmentPort for AccountOwnerEnrollment {
         self.revalidate_owner_issuance(request, digest, server, claim)
     }
 }
-fn owner_failure(failure: ServiceFailure) -> PairingFailure {
+pub(crate) fn owner_failure(failure: ServiceFailure) -> PairingFailure {
     match failure {
         ServiceFailure::Missing
         | ServiceFailure::UnknownRequest

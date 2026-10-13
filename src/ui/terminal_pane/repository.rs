@@ -44,6 +44,7 @@ struct PopoverRoom {
 #[derive(Default)]
 pub(super) struct PaneRepositoryStatus {
     interest: Option<RegisteredInterest>,
+    server_interest: Option<ServerRegisteredInterest>,
     view: RepositoryView,
     popover: Option<OpenPopover>,
 }
@@ -58,6 +59,14 @@ struct RegisteredInterest {
     store: Entity<RepositoryStatusStore>,
     id: InterestId,
     reported: PaneRepositoryFacts,
+    _changes: Subscription,
+}
+
+struct ServerRegisteredInterest {
+    store: Entity<crate::ui::server_git::ServerGitStore>,
+    id: crate::ui::server_git::ServerGitInterest,
+    workspace: spaceterm_core::identity::WorkspaceId,
+    directory: spaceterm_core::organization::ServerDirectory,
     _changes: Subscription,
 }
 
@@ -92,7 +101,12 @@ impl TerminalPane {
         // Server-qualified Git queries belong to the server adapter. Local display metadata
         // never authorizes a local git process, including for a private-IPC route.
         if self.server_session.is_some() {
-            self.release_repository_status(cx);
+            if let Some(interest) = self.repository_status.interest.take() {
+                interest
+                    .store
+                    .update(cx, |store, cx| store.unregister(interest.id, cx));
+            }
+            self.sync_server_repository_status(cx);
             return;
         }
         let Some(facts) = self.repository_facts() else {
@@ -128,6 +142,137 @@ impl TerminalPane {
                 store.set_visible(id, facts.visible, cx);
             }
         });
+    }
+
+    fn sync_server_repository_status(&mut self, cx: &mut Context<Self>) {
+        use spaceterm_core::worktrees::GitStatusTarget;
+        let Some(pane) = self.server_pane_id() else {
+            return;
+        };
+        let frame = cx
+            .try_global::<crate::ui::server_client_runtime::InstalledDesktopClient>()
+            .and_then(|installed| installed.0.read(cx).frame(pane.server()));
+        let source = frame.as_ref().and_then(|frame| {
+            let record = frame
+                .organization
+                .state()
+                .panes
+                .iter()
+                .find(|record| record.id == pane)?;
+            let tab = frame
+                .organization
+                .state()
+                .tabs
+                .iter()
+                .find(|tab| tab.id == record.tab)?;
+            frame.personal.workspace(tab.workspace)?;
+            Some((tab.workspace, record.restoration_directory().clone()))
+        });
+        let Some((workspace, directory)) = source else {
+            if let Some(interest) = self.repository_status.server_interest.take() {
+                interest
+                    .store
+                    .update(cx, |store, cx| store.unregister(interest.id, cx));
+            }
+            self.repository_status.view = RepositoryView::Hidden;
+            return;
+        };
+        if self
+            .repository_status
+            .server_interest
+            .as_ref()
+            .is_some_and(|interest| interest.workspace != workspace)
+            && let Some(interest) = self.repository_status.server_interest.take()
+        {
+            interest
+                .store
+                .update(cx, |store, cx| store.unregister(interest.id, cx));
+        }
+        if let Some(interest) = &mut self.repository_status.server_interest {
+            interest.directory = directory;
+        } else {
+            let Some(store) = InstalledRepositoryStatus::server_store(cx) else {
+                return;
+            };
+            let Ok(id) = store.update(cx, |store, cx| {
+                store.register_status(workspace, GitStatusTarget::Pane(pane), cx)
+            }) else {
+                return;
+            };
+            let changes = cx.subscribe(
+                &store,
+                |pane, _, event: &crate::ui::server_git::ServerGitChanged, cx| {
+                    if pane
+                        .repository_status
+                        .server_interest
+                        .as_ref()
+                        .is_some_and(|interest| interest.id == event.0)
+                    {
+                        pane.update_server_repository_view(cx);
+                        cx.notify();
+                    }
+                },
+            );
+            self.repository_status.server_interest = Some(ServerRegisteredInterest {
+                store,
+                id,
+                workspace,
+                directory,
+                _changes: changes,
+            });
+        }
+        self.update_server_repository_view(cx);
+    }
+
+    pub(super) fn server_repository_window_activated(&mut self, cx: &mut Context<Self>) {
+        if !self.product_focus.active_workspace || !self.product_focus.active_tab {
+            return;
+        }
+        if let Some(interest) = &self.repository_status.server_interest {
+            interest.store.update(cx, |store, cx| {
+                let _ = store.window_activated([interest.id], cx);
+            });
+        }
+    }
+
+    fn update_server_repository_view(&mut self, cx: &App) {
+        if let Some(interest) = &self.repository_status.server_interest {
+            self.repository_status.view = interest.store.read(cx).status(interest.id).map_or(
+                RepositoryView::Hidden,
+                |mut view| {
+                    let frame = cx
+                        .try_global::<crate::ui::server_client_runtime::InstalledDesktopClient>()
+                        .and_then(|installed| {
+                            installed.0.read(cx).frame(interest.workspace.server())
+                        });
+                    if frame.as_ref().is_none_or(|frame| {
+                        frame.replica_status
+                            != crate::ui::server_desktop_contracts::ReplicaStatus::Ready
+                            || !matches!(
+                                frame.connection,
+                                spaceterm_client::api::ConnectionState::Connected { .. }
+                            )
+                    }) {
+                        view.freshness = spaceterm_client::git::replica::GitFreshness::LastKnown;
+                    }
+                    let directory = frame
+                        .as_ref()
+                        .and_then(|frame| {
+                            view.scope.and_then(|scope| {
+                                frame
+                                    .organization
+                                    .state()
+                                    .repositories
+                                    .iter()
+                                    .find(|record| record.id == scope.repository)
+                                    .map(|record| &record.directory)
+                            })
+                        })
+                        .unwrap_or(&interest.directory);
+                    view.repository_view(directory)
+                },
+            );
+        }
     }
 
     /// Opens the Repository Status popover when the Pane presents Repository Status.
@@ -234,6 +379,11 @@ impl TerminalPane {
     }
 
     pub(super) fn release_repository_status(&mut self, cx: &mut App) {
+        if let Some(interest) = self.repository_status.server_interest.take() {
+            interest
+                .store
+                .update(cx, |store, cx| store.unregister(interest.id, cx));
+        }
         if let Some(interest) = self.repository_status.interest.take() {
             interest
                 .store

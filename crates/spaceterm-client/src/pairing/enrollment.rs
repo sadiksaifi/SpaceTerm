@@ -351,6 +351,7 @@ impl<S: LocalPairingStore, N: NativeDeviceCredentials, R: EnrollmentConnector>
             return Err(PairingFailure::AuthorizationRequired);
         }
         let recovered = self.store.recover().await?;
+        verified.validate()?;
         if recovered.is_suppressed(&prepared.local_pairing) {
             return Err(PairingFailure::PairingRevoked);
         }
@@ -404,6 +405,7 @@ impl<S: LocalPairingStore, N: NativeDeviceCredentials, R: EnrollmentConnector>
         };
         work.validate()?;
         let recovered = self.store.recover().await?;
+        verified.validate()?;
         if recovered.is_suppressed(saved.key()) {
             return Err(PairingFailure::PairingRevoked);
         }

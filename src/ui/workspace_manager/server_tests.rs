@@ -8,7 +8,7 @@ use gpui::{TestAppContext, VisualTestContext};
 use spaceterm_client::view::ReplicaObservation;
 use spaceterm_core::operations::{AssessmentRef, AssessmentSummary, RequestDigest};
 
-fn harness(
+pub(in crate::ui::workspace_manager) fn harness(
     cx: &mut TestAppContext,
 ) -> (
     Entity<WorkspaceManager>,
@@ -41,7 +41,12 @@ fn replica(byte: u8) -> Replica {
     Replica::attached(org, 1)
 }
 
-fn publish(replica: &Replica, revision: usize, runtime: &TestRuntime, cx: &mut VisualTestContext) {
+pub(in crate::ui::workspace_manager) fn publish(
+    replica: &Replica,
+    revision: usize,
+    runtime: &TestRuntime,
+    cx: &mut VisualTestContext,
+) {
     let mut publication = frame(replica, ReplicaStatus::Ready);
     publication.view_revision = view_revision(revision);
     let facts = ready(replica.org.server().bytes()[0]);
@@ -64,7 +69,7 @@ fn publish(replica: &Replica, revision: usize, runtime: &TestRuntime, cx: &mut V
     cx.run_until_parked();
 }
 
-fn servers(runtime: &TestRuntime, bytes: &[u8]) {
+pub(in crate::ui::workspace_manager) fn servers(runtime: &TestRuntime, bytes: &[u8]) {
     runtime.provider.set_servers(
         bytes
             .iter()
