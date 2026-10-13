@@ -15,6 +15,18 @@ pub enum FindNavigation {
     LoadChunk { index: u64 },
     NoMatches,
 }
+/// Cursor coordinates remain exact even when chunks contain different match counts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FindCursor {
+    pub chunk: u64,
+    pub index: usize,
+}
+/// Borrowed presentation of the one resident, protocol-bounded match chunk.
+pub struct FindWindow<'a> {
+    pub chunk: u64,
+    pub matches: &'a [FindMatch],
+    pub cursor: Option<usize>,
+}
 pub struct FindProjection {
     generation: u64,
     request: Option<FindRequest>,
@@ -22,6 +34,7 @@ pub struct FindProjection {
     cursor: Option<usize>,
     next_chunk: u64,
     complete: bool,
+    total_matches: u64,
     eligibility: Eligibility,
     residency: Arc<Residency>,
     query_charge: Option<Charge>,
@@ -36,6 +49,7 @@ impl FindProjection {
             cursor: None,
             next_chunk: 0,
             complete: false,
+            total_matches: 0,
             eligibility,
             residency,
             query_charge: None,
@@ -52,6 +66,7 @@ impl FindProjection {
         self.cursor = None;
         self.next_chunk = 0;
         self.complete = false;
+        self.total_matches = 0;
         Ok(())
     }
     pub fn generation(&self) -> RequestGeneration {
@@ -79,12 +94,40 @@ impl FindProjection {
         self.cursor = None;
         self.next_chunk = 0;
         self.complete = false;
+        self.total_matches = 0;
         Ok(())
     }
     pub fn request(&self) -> Option<&FindRequest> {
         self.request
             .as_ref()
             .filter(|request| self.eligibility.allows(request.stamp().fence(), false))
+    }
+    /// Count received so far; final only when is_complete() is true.
+    pub fn total_matches(&self) -> u64 {
+        if self.request().is_some() {
+            self.total_matches
+        } else {
+            0
+        }
+    }
+    pub fn is_complete(&self) -> bool {
+        self.request().is_some() && self.complete
+    }
+    pub fn current_window(&self) -> Option<FindWindow<'_>> {
+        self.request()?;
+        let chunk = self.window.as_ref()?;
+        Some(FindWindow {
+            chunk: chunk.index(),
+            matches: chunk.matches(),
+            cursor: self.cursor,
+        })
+    }
+    pub fn current_cursor(&self) -> Option<FindCursor> {
+        let window = self.current_window()?;
+        Some(FindCursor {
+            chunk: window.chunk,
+            index: window.cursor?,
+        })
     }
     pub fn accept(&mut self, item: FindStreamItem) -> Result<(), ClientFailure> {
         let stamp = match &item {
@@ -109,6 +152,10 @@ impl FindProjection {
                 if self.complete || chunk.index() != self.next_chunk {
                     return Err(invalid_peer());
                 }
+                self.total_matches = self
+                    .total_matches
+                    .checked_add(chunk.matches().len() as u64)
+                    .ok_or_else(exhausted)?;
                 // The initial window stays visible while the scan progresses. A
                 // requested navigation window can be installed with load_window.
                 if self.window.is_none() {

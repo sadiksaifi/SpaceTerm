@@ -17,11 +17,35 @@ pub struct FakePaneConnection {
     serialized: tokio::sync::Mutex<()>,
     info: Mutex<ConnectedInfo>,
     channels: Mutex<Weak<PaneChannels>>,
-    effects: Mutex<VecDeque<(EffectPermit, FencedRuntimeCommand)>>,
+    effects: Mutex<VecDeque<(EffectPermit, QueuedEffect)>>,
+    effect_requests: AtomicU64,
     reads: Mutex<VecDeque<VecDeque<Result<PaneReadItem, ClientFailure>>>>,
     cancelled: Mutex<Vec<StartupIntent>>,
     pub grid_limits: Mutex<GridLimits>,
     intent_response_gates: Mutex<VecDeque<Arc<tokio::sync::Semaphore>>>,
+}
+enum QueuedEffect {
+    Command(Box<FencedRuntimeCommand>),
+    Copy(spaceterm_terminal::InputModifiers),
+}
+impl QueuedEffect {
+    fn bytes(&self) -> usize {
+        // Conservative fixture accounting includes the maximum engine-free command.
+        let Self::Command(command) = self else {
+            return 4096;
+        };
+        match &command.command {
+            RuntimeEffect::RequestPaste(text) => text.as_str().len() + 4096,
+            RuntimeEffect::InputMethodCommit(text) => text.as_str().len() + 4096,
+            RuntimeEffect::CompleteNativeRequest(completion) => match completion.kind() {
+                spaceterm_core::native_requests::NativeCompletionKind::ClipboardText(text) => {
+                    text.as_str().len() + 4096
+                }
+                _ => 4096,
+            },
+            _ => 4096,
+        }
+    }
 }
 impl FakePaneConnection {
     pub async fn new(
@@ -40,6 +64,7 @@ impl FakePaneConnection {
             info: Mutex::new(info),
             channels: Mutex::new(Weak::new()),
             effects: Mutex::new(VecDeque::new()),
+            effect_requests: AtomicU64::new(0),
             reads: Mutex::new(VecDeque::new()),
             cancelled: Mutex::new(vec![]),
             grid_limits: Mutex::new(SUPPORTED_GRID_LIMITS),
@@ -56,6 +81,9 @@ impl FakePaneConnection {
         Ok(channels)
     }
     pub fn reconnect(&self, generation: u64, attempt: u64) -> Result<(), ClientFailure> {
+        let mut effects = self.effects.lock().map_err(|_| invalid_peer())?;
+        effects.clear();
+        self.effect_requests.store(0, Ordering::Release);
         let old = *self.info.lock().map_err(|_| invalid_peer())?;
         *self.info.lock().map_err(|_| invalid_peer())? =
             self.server
@@ -128,14 +156,73 @@ impl FakePaneConnection {
     }
     /// Simulates final wire dequeue with the original permits, never new fences.
     pub fn flush_effects(&self) -> Result<Vec<FencedRuntimeCommand>, ClientFailure> {
-        Ok(self
-            .effects
-            .lock()
-            .map_err(|_| invalid_peer())?
-            .drain(..)
-            .filter(|(permit, _)| permit.is_current())
-            .map(|(_, command)| command)
-            .collect())
+        let mut effects = self.effects.lock().map_err(|_| invalid_peer())?;
+        let mut sent = Vec::new();
+        for (permit, effect) in std::mem::take(&mut *effects) {
+            if !permit.is_current() {
+                continue;
+            }
+            match effect {
+                QueuedEffect::Command(command) => sent.push(*command),
+                copy => effects.push_back((permit, copy)),
+            }
+        }
+        Ok(sent)
+    }
+    pub fn flush_copies(
+        &self,
+    ) -> Result<Vec<(EffectFence, spaceterm_terminal::InputModifiers)>, ClientFailure> {
+        let mut effects = self.effects.lock().map_err(|_| invalid_peer())?;
+        let mut sent = Vec::new();
+        for (permit, effect) in std::mem::take(&mut *effects) {
+            if !permit.is_current() {
+                continue;
+            }
+            match effect {
+                QueuedEffect::Copy(modifiers) => sent.push((permit.fence(), modifiers)),
+                command => effects.push_back((permit, command)),
+            }
+        }
+        Ok(sent)
+    }
+    fn queue_effect(
+        &self,
+        permit: EffectPermit,
+        effect: QueuedEffect,
+    ) -> Result<EffectAdmission, ClientFailure> {
+        if !permit.is_current() {
+            return Err(stale());
+        }
+        let mut effects = self.effects.lock().map_err(|_| invalid_peer())?;
+        if !permit.is_current() {
+            return Err(stale());
+        }
+        if effects.len() >= spaceterm_protocol::limits::MAX_EGRESS_ENVELOPES
+            || effects
+                .iter()
+                .map(|(_, effect)| effect.bytes())
+                .sum::<usize>()
+                .checked_add(effect.bytes())
+                .is_none_or(|bytes| bytes > spaceterm_protocol::limits::MAX_EGRESS_BYTES)
+        {
+            return Err(resource_limit());
+        }
+        let admission = self.effect_admission(&permit)?;
+        effects.push_back((permit, effect));
+        Ok(admission)
+    }
+    fn effect_admission(&self, permit: &EffectPermit) -> Result<EffectAdmission, ClientFailure> {
+        let request = self
+            .effect_requests
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                value.checked_add(1)
+            })
+            .map_err(|_| exhausted())?
+            + 1;
+        Ok(EffectAdmission::Correlated(EffectCorrelation::new(
+            request,
+            permit.fence(),
+        )?))
     }
     /// Delays one completed server intent reply without blocking later requests.
     pub fn delay_next_intent_response(&self) -> Result<Arc<tokio::sync::Semaphore>, ClientFailure> {
@@ -290,34 +377,14 @@ impl PaneConnectionPort for FakePaneConnection {
         permit: EffectPermit,
         command: FencedRuntimeCommand,
     ) -> Result<EffectAdmission, ClientFailure> {
-        if !permit.is_current() {
-            return Err(stale());
-        }
-        let mut effects = self.effects.lock().map_err(|_| invalid_peer())?;
-        // Conservative fixture accounting includes the maximum engine-free command.
-        let bytes = |command: &FencedRuntimeCommand| match &command.command {
-            RuntimeEffect::RequestPaste(text) => text.as_str().len() + 4096,
-            RuntimeEffect::InputMethodCommit(text) => text.as_str().len() + 4096,
-            RuntimeEffect::CompleteNativeRequest(completion) => match completion.kind() {
-                spaceterm_core::native_requests::NativeCompletionKind::ClipboardText(text) => {
-                    text.as_str().len() + 4096
-                }
-                _ => 4096,
-            },
-            _ => 4096,
-        };
-        if effects.len() >= spaceterm_protocol::limits::MAX_EGRESS_ENVELOPES
-            || effects
-                .iter()
-                .map(|(_, command)| bytes(command))
-                .sum::<usize>()
-                .checked_add(bytes(&command))
-                .is_none_or(|bytes| bytes > spaceterm_protocol::limits::MAX_EGRESS_BYTES)
-        {
-            return Err(resource_limit());
-        }
-        effects.push_back((permit, command));
-        Ok(EffectAdmission::Queued)
+        self.queue_effect(permit, QueuedEffect::Command(Box::new(command)))
+    }
+    fn try_copy(
+        &self,
+        permit: EffectPermit,
+        modifiers: spaceterm_terminal::InputModifiers,
+    ) -> Result<EffectAdmission, ClientFailure> {
+        self.queue_effect(permit, QueuedEffect::Copy(modifiers))
     }
     fn read(
         &self,

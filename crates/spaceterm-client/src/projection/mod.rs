@@ -8,7 +8,7 @@ mod graphics;
 pub use crate::content_cache::{ResidentPage, SemanticFrame};
 pub use copy::{CopyPreparation, PreparedCopyLease};
 pub(crate) use eligibility::{Eligibility, stale};
-pub use find::{FindNavigation, FindProjection};
+pub use find::{FindCursor, FindNavigation, FindProjection, FindWindow};
 pub use graphics::{GraphicsAssetLease, GraphicsPreparation};
 
 use crate::{

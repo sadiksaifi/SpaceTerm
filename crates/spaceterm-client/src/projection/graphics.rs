@@ -14,10 +14,9 @@ use std::sync::Arc;
 pub struct GraphicsAssetLease(Arc<Asset>);
 struct Asset {
     request: GraphicsRequest,
-    bytes: Vec<u8>,
+    bytes: Arc<[u8]>,
     eligibility: Eligibility,
     paint: Eligibility,
-    _charge: Charge,
 }
 impl GraphicsAssetLease {
     pub fn key(&self) -> GraphicsResourceKey {
@@ -27,7 +26,12 @@ impl GraphicsAssetLease {
         self.0.paint.allows(self.0.request.stamp().fence(), true)
     }
     pub fn rgba(&self) -> Option<&[u8]> {
-        self.is_paintable().then_some(self.0.bytes.as_slice())
+        self.is_paintable().then_some(self.0.bytes.as_ref())
+    }
+    /// Immutable data only. Hold the lease and recheck is_paintable() before paint.
+    /// The residency charge follows every clone of this Arc, not the lease.
+    pub fn shared_rgba(&self) -> Option<Arc<[u8]>> {
+        self.is_paintable().then(|| Arc::clone(&self.0.bytes))
     }
     pub(crate) fn eligible(&self, eligibility: &Eligibility, paint: &Eligibility) -> bool {
         self.0.eligibility.same(eligibility)
@@ -117,13 +121,22 @@ impl GraphicsPreparation {
         {
             return Err(invalid_peer());
         }
+        // Vec -> Arc moves through a second allocation. Reserve both payloads
+        // before conversion; release the assembly charge only after Vec drops.
+        let charge = self
+            .charge
+            .as_ref()
+            .ok_or_else(stale)?
+            .reserve_shared(self.bytes.len() as u64)?;
+        let bytes: Arc<[u8]> = Arc::from(std::mem::take(&mut self.bytes));
+        charge.retain_shared(&bytes)?;
+        self.charge = None;
         self.finished = true;
         Ok(Some(GraphicsAssetLease(Arc::new(Asset {
             request: self.request,
-            bytes: std::mem::take(&mut self.bytes),
+            bytes,
             eligibility: self.eligibility.clone(),
             paint: self.paint.clone(),
-            _charge: self.charge.take().ok_or_else(stale)?,
         }))))
     }
 }

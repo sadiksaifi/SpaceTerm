@@ -443,7 +443,7 @@ fn graphics_request(fixture: &Fixture, stamp: QueryStamp, digest: [u8; 32]) -> G
 
 #[tokio::test]
 async fn complete_graphics_assets_have_separate_external_residency_and_frozen_paint() {
-    let graphics = Residency::new(8, 8).unwrap();
+    let graphics = Residency::new(16, 16).unwrap();
     let semantic = Residency::new(16384, 16384).unwrap();
     let fixture = Fixture::with_budgets(
         true,
@@ -496,6 +496,45 @@ async fn complete_graphics_assets_have_separate_external_residency_and_frozen_pa
     assert!(asset.rgba().is_none());
     assert_eq!(graphics.held_bytes().unwrap(), 8);
     drop(asset);
+    assert_eq!(graphics.held_bytes().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn graphics_shared_rgba_retains_charge_after_asset_and_projection_drop() {
+    let graphics = Residency::new(16, 16).unwrap();
+    let fixture = Fixture::with_budgets(
+        true,
+        ProjectionBudgets {
+            semantic: Residency::new(16384, 16384).unwrap(),
+            prepared_copy: Residency::new(16, 16).unwrap(),
+            graphics: graphics.clone(),
+        },
+    )
+    .await;
+    let stamp = fixture.frame(1);
+    let bytes = vec![1; 8];
+    let request = graphics_request(&fixture, stamp, Sha256::digest(&bytes).into());
+    let projection = fixture.pane.projection();
+    let mut preparation = projection.lock().unwrap().begin_graphics(request).unwrap();
+    let asset = preparation
+        .accept(GraphicsChunk::new(request, 0, bytes, true).unwrap())
+        .unwrap()
+        .unwrap();
+    let rgba = asset.shared_rgba().unwrap();
+    let other = asset.shared_rgba().unwrap();
+    let mut competing = projection.lock().unwrap().begin_graphics(request).unwrap();
+    assert!(
+        matches!(competing.accept(GraphicsChunk::new(request, 0, vec![1; 8], true).unwrap()), Err(failure) if failure.class() == ClientFailureClass::ResourceLimit)
+    );
+    assert!(std::sync::Arc::ptr_eq(&rgba, &other));
+    drop(preparation);
+    drop(asset);
+    drop(projection);
+    fixture.takeover().await;
+    assert_eq!(graphics.held_bytes().unwrap(), 8);
+    drop(rgba);
+    assert_eq!(graphics.held_bytes().unwrap(), 8);
+    drop(other);
     assert_eq!(graphics.held_bytes().unwrap(), 0);
 }
 

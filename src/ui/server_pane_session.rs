@@ -11,19 +11,21 @@ use std::time::{Duration, Instant};
 
 use gpui::{BackgroundExecutor, Task};
 use spaceterm_client::pane_channel::{
-    EffectKind, EffectPermit, PaneChannel, PaneContextFacts, PaneReadItem, PaneReadRequest,
-    RuntimeEffect,
+    EffectCorrelation, EffectKind, EffectPermit, NativeRequestLease, PaneChannel, PaneContextFacts,
+    PaneEvent, PaneReadItem, PaneReadRequest, PaneRuntimeEffect, RuntimeEffect,
 };
 use spaceterm_client::projection::{FindNavigation, FrameLease, PreparedCopyLease, Viewport};
 use spaceterm_core::content::{self, CellRef};
 use spaceterm_core::content_queries::*;
 use spaceterm_core::geometry::{CellPixels, MeasuredGrid, SUPPORTED_GRID_LIMITS};
+use spaceterm_client::failure::{ClientFailure, ClientFailureClass};
+use spaceterm_core::native_requests::{NativeRequestKind, NativeText};
 use spaceterm_terminal::runtime_contracts::{ApplicationPointerInput, ApplicationWheelInput};
 
 use super::server_desktop_contracts::{DesktopClientError, PaneViewToken};
 use crate::terminal::geometry::TerminalGeometry;
 use crate::terminal::{
-    FindDirection, FindQueryGeneration, InputModifiers, KeyInput, PasteDecision, PastePayload,
+    FindDirection, FindQueryGeneration, InputModifiers, KeyInput, PasteConfirmation, PasteDecision, PastePayload,
     PasteRequestOutcome, PasteResolution, PointerButton, PointerInput, PointerPhase,
     PresentationGeneration, ScreenSnapshot, ScrollbackMovement, SelectionCopy, SelectionCopyError,
     ShiftSelectionPolicy, TerminalAppearanceUpdate, TerminalSessionHandle, WheelInput,
@@ -53,6 +55,50 @@ struct ScrollbarFacts {
     first_row: Option<u64>,
 }
 
+enum PendingPaste {
+    Request {
+        correlation: EffectCorrelation,
+        permit: EffectPermit,
+        reply: async_channel::Sender<Result<PasteRequestOutcome, String>>,
+        expires: Instant,
+        _deadline: Task<()>,
+    },
+    Approval {
+        request: NativeRequestLease,
+        confirmation: PasteConfirmation,
+        expires: Instant,
+        _deadline: Task<()>,
+    },
+    Resolution {
+        correlation: EffectCorrelation,
+        permit: EffectPermit,
+        decision: PasteDecision,
+        reply: async_channel::Sender<Result<PasteResolution, String>>,
+        expires: Instant,
+        _deadline: Task<()>,
+    },
+}
+impl PendingPaste {
+    fn is_current(&self, now: Instant) -> bool {
+        match self {
+            Self::Request { permit, expires, .. } | Self::Resolution { permit, expires, .. } =>
+                now < *expires && permit.is_current(),
+            Self::Approval { request, expires, .. } => now < *expires && request.is_current(),
+        }
+    }
+    fn cancel(self) {
+        match self {
+            Self::Request { reply, .. } => {
+                let _ = reply.try_send(Ok(PasteRequestOutcome::Rejected(
+                    crate::terminal::paste::PasteRejection::TerminalUnfocused,
+                )));
+            }
+            Self::Resolution { reply, .. } => { let _ = reply.try_send(Ok(PasteResolution::Stale)); }
+            Self::Approval { .. } => {}
+        }
+    }
+}
+
 pub(crate) struct ServerPaneSession {
     channel: PaneChannel,
     token: Cell<PaneViewToken>,
@@ -72,6 +118,9 @@ pub(crate) struct ServerPaneSession {
     frame_requests: Arc<Mutex<FrameRequests>>,
     scrollbar_facts: Arc<Mutex<Option<ScrollbarFacts>>>,
     find_generation: Cell<FindQueryGeneration>,
+    pending_paste: RefCell<Option<PendingPaste>>,
+    next_paste_confirmation: Cell<u64>,
+    paste_confirmation_focused: Cell<bool>,
     selection_drag: Cell<Option<(QueryStamp, ContentSelection)>>,
     accessibility_model: RefCell<Option<crate::terminal::TerminalAccessibilityModel>>,
     accessibility_publication:
@@ -109,6 +158,9 @@ impl ServerPaneSession {
             frame_requests: Arc::new(Mutex::new(FrameRequests::default())),
             scrollbar_facts: Arc::new(Mutex::new(None)),
             find_generation: Cell::new(FindQueryGeneration::default()),
+            pending_paste: RefCell::new(None),
+            next_paste_confirmation: Cell::new(0),
+            paste_confirmation_focused: Cell::new(false),
             selection_drag: Cell::new(None),
             accessibility_publication: RefCell::new(None),
             accessibility_model: RefCell::new(None),
@@ -202,10 +254,13 @@ impl ServerPaneSession {
     pub(crate) fn accepts_input(&self) -> bool {
         !self.closed.load(Ordering::Acquire)
             && self.enabled.get()
+            && !self.paste_confirmation_focused.get()
             && self.channel.permit(EffectKind::ImeCommit).is_ok()
     }
     fn effect(&self, kind: EffectKind, effect: RuntimeEffect) {
-        if self.closed.load(Ordering::Acquire) || !self.enabled.get() {
+        if self.closed.load(Ordering::Acquire) || !self.enabled.get()
+            || (self.paste_confirmation_focused.get()
+                && matches!(kind, EffectKind::Key | EffectKind::ImeCommit | EffectKind::Paste | EffectKind::Pointer)) {
             return;
         }
         if let Ok(permit) = self.channel.permit(kind) {
@@ -226,6 +281,8 @@ impl ServerPaneSession {
         let _ = self.updates.try_send(());
     }
     pub(crate) fn cancel_content_tasks(&self) {
+        if let Some(paste) = self.pending_paste.borrow_mut().take() { paste.cancel(); }
+        self.paste_confirmation_focused.set(false);
         if let Some(publication) = self.accessibility_publication.borrow_mut().take() {
             publication.revoke();
         }
@@ -252,6 +309,98 @@ impl ServerPaneSession {
         let _ = self.channel.update_context(PaneContextFacts::default());
         self.updates.close();
     }
+    fn now(&self) -> Instant {
+        self.executor.borrow().as_ref().map_or_else(Instant::now, BackgroundExecutor::now)
+    }
+    fn expire_paste(&self) {
+        let expired = self.pending_paste.borrow().as_ref().is_some_and(|paste| !paste.is_current(self.now()));
+        if expired && let Some(paste) = self.pending_paste.borrow_mut().take() { paste.cancel(); }
+    }
+    pub(crate) fn paste_confirmation_is_current(&self, id: crate::terminal::paste::PasteConfirmationId) -> bool {
+        self.expire_paste();
+        matches!(&*self.pending_paste.borrow(), Some(PendingPaste::Approval { confirmation, .. }) if confirmation.id == id)
+    }
+    pub(crate) fn permits_native_request(&self) -> bool {
+        !self.paste_confirmation_focused.get() && self.native_permit().is_some()
+    }
+    fn paste_deadline<T: Send + 'static>(
+        &self,
+        executor: &BackgroundExecutor,
+        permit: &EffectPermit,
+        expires: Instant,
+        reply: async_channel::Sender<Result<T, String>>,
+        fallback: T,
+    ) -> Task<()> {
+        let mut state = self.channel.state();
+        let permit = permit.clone();
+        let timer = executor.timer(expires.saturating_duration_since(executor.now()));
+        let updates = self.updates.clone();
+        executor.spawn(async move {
+            wait_for_paste_invalidation(&permit, &mut state, timer).await;
+            let _ = reply.try_send(Ok(fallback));
+            let _ = updates.try_send(());
+        })
+    }
+    /// One subscriber routes non-native events here. Queue admission never completes a paste.
+    pub(crate) fn accept_event(&self, event: PaneEvent) {
+        self.expire_paste();
+        match event {
+            PaneEvent::Invalidated => {
+                if let Some(paste) = self.pending_paste.borrow_mut().take() { paste.cancel(); }
+            }
+            PaneEvent::PasteWritten { correlation, result } => {
+                let mut pending = self.pending_paste.borrow_mut();
+                if !matches!(&*pending, Some(PendingPaste::Request { correlation: current, .. }) if *current == correlation) { return; }
+                if let Some(PendingPaste::Request { reply, .. }) = pending.take() {
+                    let _ = reply.try_send(result.map(|()| PasteRequestOutcome::Written).map_err(|error| error.to_string()));
+                }
+            }
+            PaneEvent::PasteApproval { correlation, request, timing } => {
+                let mut pending = self.pending_paste.borrow_mut();
+                if !matches!(&*pending, Some(PendingPaste::Request { correlation: current, .. }) if *current == correlation)
+                    || !request.is_current() || !self.enabled.get() || self.closed.load(Ordering::Acquire) { return; }
+                let NativeRequestKind::UnsafePaste { text, .. } = request.kind() else { return; };
+                let Some(id) = self.next_paste_confirmation.get().checked_add(1) else { return; };
+                self.next_paste_confirmation.set(id);
+                let text = text.as_str();
+                let confirmation = PasteConfirmation {
+                    id: crate::terminal::paste::PasteConfirmationId::new(id),
+                    byte_len: text.len(),
+                    line_count: text.bytes().filter(|byte| *byte == b'\n').count() + 1,
+                    risk: crate::terminal::PasteRisk {
+                        multiline: text.contains('\n'),
+                        control_bytes: text.chars().any(|character| character.is_control() && !matches!(character, '\n' | '\t')),
+                        closing_fence: text.contains("\x1b[201~"),
+                    },
+                };
+                let Some(executor) = self.executor.borrow().clone() else { return; };
+                let Some(PendingPaste::Request { reply, expires: original, .. }) = pending.take() else { return; };
+                let expires = original.min(executor.now() + timing.expires_after.unwrap_or_default().min(Duration::from_secs(30)));
+                let updates = self.updates.clone();
+                let timer = executor.timer(expires.saturating_duration_since(executor.now()));
+                let deadline = executor.spawn(async move { timer.await; let _ = updates.try_send(()); });
+                *pending = Some(PendingPaste::Approval { request, confirmation, expires, _deadline: deadline });
+                let _ = reply.try_send(Ok(PasteRequestOutcome::ConfirmationRequired(confirmation)));
+            }
+            PaneEvent::PasteResolved { correlation, decision: native_decision, result, .. } => {
+                let mut pending = self.pending_paste.borrow_mut();
+                if !matches!(&*pending, Some(PendingPaste::Resolution { correlation: current, .. }) if *current == correlation) { return; }
+                if let Some(PendingPaste::Resolution { reply, decision, .. }) = pending.take() {
+                    let cancelled = decision == PasteDecision::Cancel && native_decision == spaceterm_core::native_requests::PasteDecision::Cancel;
+                    let result = match result {
+                        Ok(()) => Ok(if cancelled { PasteResolution::Cancelled } else { PasteResolution::Written }),
+                        Err(error) if cancelled && error.class() == ClientFailureClass::Cancelled => Ok(PasteResolution::Cancelled),
+                        Err(error) if matches!(error.class(), ClientFailureClass::StaleAuthority | ClientFailureClass::Cancelled) => Ok(PasteResolution::Stale),
+                        Err(error) => Err(error.to_string()),
+                    };
+                    let _ = reply.try_send(result);
+                }
+            }
+            PaneEvent::Metadata { .. } => self.wake(),
+            PaneEvent::Native { .. } => {}
+        }
+    }
+
     pub(crate) fn request_frame(&self) -> Result<(), DesktopClientError> {
         if !self.enabled.get() {
             return Err(DesktopClientError::StaleContext);
@@ -891,6 +1040,23 @@ impl<E: gpui::Element> gpui::Element for FencedPaneContent<E> {
     }
 }
 
+async fn wait_for_paste_invalidation(
+    permit: &EffectPermit,
+    state: &mut tokio::sync::watch::Receiver<spaceterm_client::pane_channel::PaneChannelState>,
+    timer: impl std::future::Future<Output = ()>,
+) {
+    let mut timer = std::pin::pin!(timer);
+    while permit.is_current() {
+        let changed = state.changed();
+        let mut changed = std::pin::pin!(changed);
+        let invalidated = std::future::poll_fn(|cx| {
+            if timer.as_mut().poll(cx).is_ready() { return std::task::Poll::Ready(true); }
+            changed.as_mut().poll(cx).map(|result| result.is_err())
+        }).await;
+        if invalidated { return; }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum ScrollTarget {
     Top,
@@ -1200,6 +1366,7 @@ impl TerminalSessionHandle for Rc<ServerPaneSession> {
         self.effect(EffectKind::Key, RuntimeEffect::ClearScreenAndScrollback);
     }
     fn focus(&self, focused: bool) {
+        if focused { self.paste_confirmation_focused.set(false); }
         self.effect(EffectKind::FocusReport, RuntimeEffect::FocusReport(focused));
     }
     fn resize(&self, geometry: TerminalGeometry) {
@@ -1456,39 +1623,99 @@ impl TerminalSessionHandle for Rc<ServerPaneSession> {
         &self,
         text: PastePayload,
     ) -> async_channel::Receiver<Result<PasteRequestOutcome, String>> {
-        // PaneChannel has no paste acknowledgement stream yet. Never claim a queued effect was
-        // written or bypass the runtime's unsafe-paste approval policy.
-        let (sender, receiver) = async_channel::bounded(1);
         use crate::terminal::paste::PasteRejection;
+        let (reply, receiver) = async_channel::bounded(1);
+        self.expire_paste();
         let rejection = if text.text().len() > crate::terminal::MAX_PASTE_BYTES {
-            Some(PasteRejection::TooLarge {
-                limit: crate::terminal::MAX_PASTE_BYTES,
-            })
+            Some(PasteRejection::TooLarge { limit: crate::terminal::MAX_PASTE_BYTES })
         } else if text.text().is_empty() {
             Some(PasteRejection::Empty)
-        } else if self.closed.load(Ordering::Acquire)
-            || !self.enabled.get()
-            || self.channel.permit(EffectKind::Paste).is_err()
-        {
+        } else if self.pending_paste.borrow().is_some() {
+            Some(PasteRejection::ConfirmationPending)
+        } else if !self.accepts_input() || self.paste_confirmation_focused.get()
+            || self.channel.permit(EffectKind::Paste).is_err() {
             Some(PasteRejection::TerminalUnfocused)
-        } else {
-            None
-        };
-        let result = rejection.map_or_else(
-            || Err("server paste acknowledgement is unavailable".to_owned()),
-            |rejection| Ok(PasteRequestOutcome::Rejected(rejection)),
-        );
-        let _ = sender.try_send(result);
+        } else { None };
+        if let Some(rejection) = rejection {
+            let _ = reply.try_send(Ok(PasteRequestOutcome::Rejected(rejection)));
+            return receiver;
+        }
+        let admitted = (|| {
+            let executor = self.executor.borrow().clone()
+                .ok_or_else(|| ClientFailure::new(ClientFailureClass::MissingCapability))?;
+            let permit = self.channel.permit(EffectKind::Paste)?;
+            let text = NativeText::new(text.text().to_owned())
+                .map_err(|_| ClientFailure::new(ClientFailureClass::ResourceLimit))?;
+            let correlation = self.channel.try_effect(&permit, RuntimeEffect::RequestPaste(text))?
+                .correlation().ok_or_else(|| ClientFailure::new(ClientFailureClass::MissingCapability))?;
+            let expires = executor.now() + Duration::from_secs(30);
+            let deadline = self.paste_deadline(&executor, &permit, expires, reply.clone(),
+                PasteRequestOutcome::Rejected(PasteRejection::TerminalUnfocused));
+            *self.pending_paste.borrow_mut() = Some(PendingPaste::Request {
+                correlation, permit, reply: reply.clone(), expires, _deadline: deadline,
+            });
+            Ok::<_, ClientFailure>(())
+        })();
+        if let Err(error) = admitted { let _ = reply.try_send(Err(error.to_string())); }
         receiver
     }
     fn resolve_paste(
         &self,
-        _id: crate::terminal::paste::PasteConfirmationId,
-        _decision: PasteDecision,
+        id: crate::terminal::paste::PasteConfirmationId,
+        decision: PasteDecision,
     ) -> async_channel::Receiver<Result<PasteResolution, String>> {
-        let (sender, receiver) = async_channel::bounded(1);
-        let _ = sender.try_send(Ok(PasteResolution::Stale));
+        let (reply, receiver) = async_channel::bounded(1);
+        self.expire_paste();
+        let Some(pending) = self.pending_paste.borrow_mut().take() else {
+            let _ = reply.try_send(Ok(PasteResolution::Stale));
+            return receiver;
+        };
+        let PendingPaste::Approval { request, confirmation, expires, .. } = &pending else {
+            *self.pending_paste.borrow_mut() = Some(pending);
+            let _ = reply.try_send(Ok(PasteResolution::Stale));
+            return receiver;
+        };
+        if confirmation.id != id {
+            *self.pending_paste.borrow_mut() = Some(pending);
+            let _ = reply.try_send(Ok(PasteResolution::Stale));
+            return receiver;
+        }
+        let NativeRequestKind::UnsafePaste { approval, .. } = request.kind() else {
+            let _ = reply.try_send(Ok(PasteResolution::Stale));
+            return receiver;
+        };
+        let admitted = (|| {
+            let executor = self.executor.borrow().clone()
+                .ok_or_else(|| ClientFailure::new(ClientFailureClass::MissingCapability))?;
+            let permit = self.channel.permit(EffectKind::Paste)?;
+            if permit.fence() != request.fence() || !request.is_current() {
+                return Err(ClientFailure::new(ClientFailureClass::StaleAuthority));
+            }
+            let native_decision = match decision {
+                PasteDecision::Confirm => spaceterm_core::native_requests::PasteDecision::Confirm,
+                PasteDecision::Cancel => spaceterm_core::native_requests::PasteDecision::Cancel,
+            };
+            let correlation = self.channel.try_effect(&permit, RuntimeEffect::ResolvePaste(*approval, native_decision))?
+                .correlation().ok_or_else(|| ClientFailure::new(ClientFailureClass::MissingCapability))?;
+            let deadline = self.paste_deadline(&executor, &permit, *expires, reply.clone(), PasteResolution::Stale);
+            *self.pending_paste.borrow_mut() = Some(PendingPaste::Resolution {
+                correlation, permit, decision, reply: reply.clone(), expires: *expires, _deadline: deadline,
+            });
+            Ok::<_, ClientFailure>(())
+        })();
+        if let Err(error) = admitted {
+            let result = if error.class() == ClientFailureClass::StaleAuthority {
+                Ok(PasteResolution::Stale)
+            } else { Err(error.to_string()) };
+            let _ = reply.try_send(result);
+        }
         receiver
+    }
+    fn focus_paste_confirmation(&self, id: crate::terminal::paste::PasteConfirmationId) {
+        if self.paste_confirmation_is_current(id) {
+            self.effect(EffectKind::FocusReport, RuntimeEffect::FocusReport(false));
+            self.paste_confirmation_focused.set(true);
+        }
     }
     fn copy_selection(&self) -> Result<Option<SelectionCopy>, SelectionCopyError> {
         match self.displayed.borrow().as_ref() {
@@ -1515,9 +1742,11 @@ impl TerminalSessionHandle for Rc<ServerPaneSession> {
         {
             return self.copy_selection();
         }
-        let _ = modifiers;
-        // Forwarding Copy requires the runtime's enhanced-keyboard-only operation. A generic key
-        // effect would send legacy text and is not a substitute for that missing port.
+        if !self.closed.load(Ordering::Acquire) && self.enabled.get()
+            && !self.paste_confirmation_focused.get()
+            && let Ok(permit) = self.channel.permit(EffectKind::Key) {
+            let _ = self.channel.try_effect(&permit, PaneRuntimeEffect::Copy(modifiers));
+        }
         Ok(None)
     }
     fn accessibility_selection_sender(

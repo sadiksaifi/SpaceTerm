@@ -205,6 +205,7 @@ pub(crate) struct EchoContentConnection {
     inner: Arc<FakePaneConnection>,
     pub page_reads: std::sync::atomic::AtomicUsize,
     pub copy_gate: std::sync::Mutex<Option<Arc<tokio::sync::Semaphore>>>,
+    pub effects: Mutex<Vec<(EffectCorrelation, RuntimeEffect)>>,
 }
 impl Fixture {
     pub(crate) fn echo_content(mut self) -> (Self, Arc<EchoContentConnection>) {
@@ -212,6 +213,7 @@ impl Fixture {
             inner: self.peer.clone(),
             page_reads: std::sync::atomic::AtomicUsize::new(0),
             copy_gate: std::sync::Mutex::new(None),
+            effects: Mutex::new(Vec::new()),
         });
         let info = self.channel.state().borrow().connection.unwrap();
         let channels = Arc::new(
@@ -282,7 +284,16 @@ impl PaneConnectionPort for EchoContentConnection {
         permit: EffectPermit,
         command: spaceterm_terminal::runtime_contracts::FencedRuntimeCommand,
     ) -> Result<EffectAdmission, spaceterm_client::failure::ClientFailure> {
-        self.inner.try_effect(permit, command)
+        let admission = self.inner.try_effect(permit, command.clone())?;
+        self.effects.lock().unwrap().push((admission.correlation().unwrap(), command.command));
+        Ok(admission)
+    }
+    fn try_copy(
+        &self,
+        permit: EffectPermit,
+        modifiers: InputModifiers,
+    ) -> Result<EffectAdmission, spaceterm_client::failure::ClientFailure> {
+        self.inner.try_copy(permit, modifiers)
     }
     fn read(
         &self,
@@ -537,16 +548,6 @@ async fn desktop_server_native_paste_rejects_oversize_and_stale_input_without_qu
             .await
             .unwrap(),
         Ok(PasteRequestOutcome::Rejected(PasteRejection::Empty)),
-    );
-    // A queued command is not a runtime acknowledgement. Until that port exists, valid text
-    // is refused rather than reporting Written or duplicating runtime-owned sanitation.
-    assert!(
-        session
-            .request_paste("x".repeat(crate::terminal::MAX_PASTE_BYTES).into())
-            .recv()
-            .await
-            .unwrap()
-            .is_err()
     );
     fixture.channel.update_context(Default::default()).unwrap();
     assert_eq!(

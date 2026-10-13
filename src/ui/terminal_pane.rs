@@ -1519,7 +1519,9 @@ impl TerminalPane {
                 terminal_input_focus: focused,
                 presentable: self.render_lifecycle.can_present(),
             };
-            let _ = server.update_context(facts);
+            if self.paste_confirmation_owner.is_none() {
+                let _ = server.update_context(facts);
+            }
         }
         self.apply_terminal_input_focus(focused);
         (focused, focus_gained)
@@ -4739,6 +4741,10 @@ impl TerminalPane {
             };
             while let Ok(Some(event)) = events.next().await {
                 let PaneEvent::Native { request, timing } = event else {
+                    let _ = pane.update(cx, |pane, cx| {
+                        server.accept_event(event);
+                        pane.sync_server_state(cx);
+                    });
                     continue;
                 };
                 if !timing.not_before.is_zero() {
@@ -4751,7 +4757,7 @@ impl TerminalPane {
                     if !request.is_current() || !permit.is_current() {
                         return None;
                     }
-                    if server.native_permit().is_none() {
+                    if !server.permits_native_request() {
                         return Some(Ok(NativeCompletionKind::Denied));
                     }
                     let preferences = cx
@@ -4823,7 +4829,7 @@ impl TerminalPane {
                     );
                     if request.is_current()
                         && permit.is_current()
-                        && (denial || server.native_permit().is_some())
+                        && (denial || server.permits_native_request())
                         && let Ok(completion) = NativeCompletion::new(&request, completion)
                     {
                         let _ = server.channel().complete_native(&permit, completion);
@@ -5231,6 +5237,9 @@ impl TerminalPane {
         let Some(server) = self.server_session.clone() else {
             return;
         };
+        if self.pending_paste.is_some_and(|paste| !server.paste_confirmation_is_current(paste.id)) {
+            self.cancel_pending_paste();
+        }
         if self.server_presentation.accepts_input() {
             let _ = server.request_frame();
             self.sync_server_screen(cx);
