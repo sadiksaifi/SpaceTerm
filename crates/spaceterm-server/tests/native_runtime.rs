@@ -252,11 +252,12 @@ async fn real_actor_runtime(end_all: bool) {
         .subscribe_runtime(principal, fence(access.authority, None))
         .await
         .unwrap();
+    // The output marker acknowledges the completed PID write.
     input(
         &handle,
         principal,
         session,
-        "printf 'START=%s\\n' \"$(/bin/stty size)\"; printf '%s' \"$$\" > runtime-pid\n",
+        "printf '%s' \"$$\" > runtime-pid; printf 'START=%s\\n' \"$(/bin/stty size)\"\n",
     )
     .await;
     output_contains(

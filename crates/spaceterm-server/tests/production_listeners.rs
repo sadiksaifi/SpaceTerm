@@ -126,8 +126,10 @@ impl Fixture {
     async fn new_registered(approved: bool) -> Self {
         #[cfg(target_os = "macos")]
         let parent = std::path::PathBuf::from("/private/tmp");
+        // /var/tmp is persistent temporary storage, separate from build output
+        // on the Linux test host. /tmp may be tmpfs and is not admitted by SQLite.
         #[cfg(target_os = "linux")]
-        let parent = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+        let parent = std::path::PathBuf::from("/var/tmp");
         let root = tempfile::tempdir_in(parent).unwrap();
         let native_account =
             AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();

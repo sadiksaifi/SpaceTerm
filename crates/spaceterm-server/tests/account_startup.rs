@@ -26,11 +26,12 @@ use spaceterm_host::{
 use spaceterm_server::{StartupFailure, account_startup::AccountStartup};
 
 fn fixture() -> (tempfile::TempDir, AccountServiceFixture) {
-    // Linux's /tmp may be tmpfs, which the production SQLite authority refuses.
+    // Linux /tmp may be tmpfs. Use persistent temporary storage instead of
+    // sharing the home filesystem with concurrent build output.
     #[cfg(target_os = "macos")]
     let parent = std::path::PathBuf::from("/private/tmp");
     #[cfg(target_os = "linux")]
-    let parent = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+    let parent = std::path::PathBuf::from("/var/tmp");
     let root = tempfile::tempdir_in(parent).unwrap();
     let fixture = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
     (root, fixture)
