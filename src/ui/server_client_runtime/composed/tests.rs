@@ -61,7 +61,7 @@ fn composed_blocked_cause_preserves_the_original_intended_action() {
 }
 
 #[derive(Default)]
-struct MemoryView {
+pub(super) struct MemoryView {
     version: u64,
     bytes: Option<Vec<u8>>,
 }
@@ -81,7 +81,7 @@ impl ViewStore for MemoryView {
     }
 }
 
-struct Invalidator(Arc<PaneChannels>);
+pub(super) struct Invalidator(pub(super) Arc<PaneChannels>);
 impl LocalUseInvalidator for Invalidator {
     fn invalidate_workspace(
         &self,
@@ -251,6 +251,8 @@ impl Harness {
         state.leases.insert(workspace, fixture.lease);
         state.channels.insert(pane, fixture.channel);
         let inner = Rc::new(Inner {
+            git: cx.update(crate::ui::server_git::InstalledServerGit::install),
+            git_publications: RefCell::new(BTreeMap::new()),
             sources,
             order,
             channels: fixture.channels.clone(),
@@ -309,7 +311,7 @@ impl Harness {
         finish(task, &self.tokio, cx).unwrap();
     }
 }
-fn finish<T: 'static>(
+pub(super) fn finish<T: 'static>(
     task: Task<T>,
     runtime: &tokio::runtime::Runtime,
     cx: &mut TestAppContext,
@@ -881,4 +883,80 @@ fn composed_personal_transaction_is_reserved_before_any_task_is_polled(cx: &mut 
     finish(first, &harness.tokio, cx).unwrap();
     let next = cx.update(|cx| harness.provider.begin(request, cx)).unwrap();
     finish(next, &harness.tokio, cx).unwrap();
+}
+
+#[gpui::test]
+fn composed_directory_repair_recovers_the_canonical_journal_operation(cx: &mut TestAppContext) {
+    let h = Harness::new(cx);
+    let command = Command::RepairPaneDirectory {
+        pane: h.pane,
+        expected_version: spaceterm_core::authority::FieldVersion::new(1),
+        value: spaceterm_core::organization::ServerDirectory::new(
+            h.pane.server(),
+            b"/replacement".to_vec(),
+        )
+        .unwrap(),
+    };
+    let binding = h.provider.inner.sources[&h.pane.server()].binding.clone();
+    let original = h
+        .tokio
+        .block_on(h.provider.inner.tracker.submit(
+            &binding,
+            command.clone(),
+            None,
+            h.server.as_ref(),
+        ))
+        .unwrap();
+    let recovered = cx
+        .update(|cx| h.provider.retained_pane_repair(h.pane, cx))
+        .unwrap();
+    assert_eq!(recovered, Some((original.id(), command.clone())));
+    h.tokio
+        .block_on(h.provider.inner.tracker.resolve(
+            original.id(),
+            spaceterm_core::operations::OperationLookup::Completed {
+                result: Outcome::Applied,
+                publication_revision: OrganizationRevision::new(5),
+            },
+            h.server.as_ref(),
+        ))
+        .unwrap();
+    // A durable outcome is not evidence that its directory has reached the replica.
+    assert_eq!(
+        cx.update(|cx| h.provider.retained_pane_repair(h.pane, cx))
+            .unwrap(),
+        Some((original.id(), command))
+    );
+}
+
+#[gpui::test]
+fn composed_admitted_directory_repair_blocks_replacement_before_task_poll(cx: &mut TestAppContext) {
+    let h = Harness::new(cx);
+    let request = DesktopRequest::Shared {
+        server: h.pane.server(),
+        command: Command::RepairPaneDirectory {
+            pane: h.pane,
+            expected_version: spaceterm_core::authority::FieldVersion::new(1),
+            value: spaceterm_core::organization::ServerDirectory::new(
+                h.pane.server(),
+                b"/replacement".to_vec(),
+            )
+            .unwrap(),
+        },
+    };
+    let first = cx
+        .update(|cx| h.provider.begin(request.clone(), cx))
+        .unwrap();
+    let replacement = cx.update(|cx| h.provider.begin(request.clone(), cx));
+    assert!(matches!(
+        replacement,
+        Err(DesktopClientError::AdmissionFull)
+    ));
+    assert!(matches!(
+        cx.update(|cx| h.provider.retained_pane_repair(h.pane, cx)),
+        Err(DesktopClientError::AdmissionFull)
+    ));
+    drop(first);
+    cx.run_until_parked();
+    assert!(cx.update(|cx| h.provider.begin(request, cx)).is_ok());
 }
