@@ -12,6 +12,7 @@ use std::time::Instant;
 use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Global, Task};
 
 use super::repository_status_store::{ReadSpawner, RepositoryStatusAdapters, thread_spawner};
+use super::server_git::{InstalledServerGit, ServerGitStore};
 use crate::platform::local_filesystem::LocalFilesystemAuthority;
 use crate::repository_status::tool_check::check_tools;
 use crate::repository_status::{GitToolStatus, RepositoryWatch, ToolInventory};
@@ -38,9 +39,20 @@ impl InstalledWorktrees {
     pub(crate) fn store(cx: &App) -> Option<Entity<WorktreeStore>> {
         cx.try_global::<Self>().map(|installed| installed.0.clone())
     }
+
+    /// Server-backed consumers use canonical Worktree identities and exact
+    /// server assessments. Native path-based listing/removal is legacy-only.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "Workspace consumers compose this hook separately")
+    )]
+    pub(crate) fn server_store(cx: &App) -> Option<Entity<ServerGitStore>> {
+        InstalledServerGit::store(cx)
+    }
 }
 
 pub(crate) fn install(settings: &Settings, adapters: RepositoryStatusAdapters, cx: &mut App) {
+    InstalledServerGit::install(cx);
     let settings = settings.clone();
     let store = cx.new(|cx| {
         let mut store = WorktreeStore::new(adapters, thread_spawner(), cx);
