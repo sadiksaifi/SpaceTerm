@@ -19,7 +19,7 @@ const EDGE_TOLERANCE: f32 = 0.5;
 /// under way. After a layout change, a Pane that stays eases from where it was drawn. A new Pane
 /// opens from its far edge as the Pane beside it makes room, and a removed Pane's place closes
 /// toward its far edge as the Pane beside it takes the space. A raised Pane, such as one zooming,
-/// moves alone above the others, which stay where they are.
+/// moves alone above the others, which stay where they are and fade while it covers them.
 #[derive(Default)]
 pub(crate) struct PaneMotion {
     /// Where each Pane was laid out in the last frame, in Pane Layout coordinates.
@@ -73,6 +73,8 @@ pub(crate) struct PaneFrames {
     pub(crate) moving: bool,
     /// The Pane moving above the others, and how far it has come.
     pub(crate) raised: Option<(PaneId, f32)>,
+    /// The opacity of the Panes beneath the raised Pane.
+    pub(crate) beneath_opacity: f32,
 }
 
 impl Default for PaneFrames {
@@ -83,6 +85,7 @@ impl Default for PaneFrames {
             closing: Vec::new(),
             moving: false,
             raised: None,
+            beneath_opacity: 1.0,
         }
     }
 }
@@ -197,7 +200,25 @@ impl PaneMotion {
             raised: self
                 .raised
                 .map(|pane_id| (pane_id, self.moves[&pane_id].ease.at(now))),
+            beneath_opacity: self
+                .raised
+                .map_or(1.0, |pane_id| self.beneath_opacity(pane_id, now)),
             ..PaneFrames::default()
+        }
+    }
+
+    /// How opaque the Panes beneath the raised Pane `pane_id` draw at `now`. The raised Pane's
+    /// surface lets them show through, so they fade out over the first half of its motion as it
+    /// grows over them, and fade in over the second half as it shrinks back into its place.
+    fn beneath_opacity(&self, pane_id: PaneId, now: Instant) -> f32 {
+        let motion = &self.moves[&pane_id];
+        let area =
+            |bounds: Bounds<Pixels>| f32::from(bounds.size.width) * f32::from(bounds.size.height);
+        let progress = motion.ease.at(now);
+        if area(self.targets[&pane_id]) > area(motion.from) {
+            (1.0 - 2.0 * progress).max(0.0)
+        } else {
+            (2.0 * progress - 1.0).max(0.0)
         }
     }
 
@@ -466,6 +487,52 @@ mod tests {
             (frame(&rested, 1), rested.raised, rested.moving),
             (zoomed[&PaneId::new(1)], None, false)
         );
+    }
+
+    #[test]
+    fn a_zoom_should_fade_out_the_other_panes_as_the_zoomed_pane_covers_them() {
+        let start = Instant::now();
+        let mut motion = PaneMotion::default();
+        motion.present_at(
+            &layout(&[(1, rect(0., 0., 100., 50.)), (2, rect(110., 0., 210., 50.))]),
+            start,
+            ControlMotion::Standard,
+        );
+        motion.expect_raise(PaneId::new(1));
+
+        let zoomed = layout(&[(1, rect(0., 0., 210., 50.))]);
+        let opacity = [
+            Duration::ZERO,
+            PRESENCE_DURATION / 16,
+            PRESENCE_DURATION / 2,
+        ]
+        .map(|at| motion.present_at(&zoomed, start + at, ControlMotion::Standard))
+        .map(|frames| frames.beneath_opacity);
+
+        assert_eq!(opacity[0], 1.0, "{opacity:?}");
+        assert!(opacity[1] > 0.0 && opacity[1] < 1.0, "{opacity:?}");
+        assert_eq!(opacity[2], 0.0, "{opacity:?}");
+    }
+
+    #[test]
+    fn an_unzoom_should_fade_in_the_other_panes_as_the_zoomed_pane_uncovers_them() {
+        let start = Instant::now();
+        let mut motion = PaneMotion::default();
+        motion.present_at(
+            &layout(&[(1, rect(0., 0., 210., 50.))]),
+            start,
+            ControlMotion::Standard,
+        );
+        motion.expect_raise(PaneId::new(1));
+
+        let grid = layout(&[(1, rect(0., 0., 100., 50.)), (2, rect(110., 0., 210., 50.))]);
+        let opacity = [Duration::ZERO, PRESENCE_DURATION / 4, PRESENCE_DURATION]
+            .map(|at| motion.present_at(&grid, start + at, ControlMotion::Standard))
+            .map(|frames| frames.beneath_opacity);
+
+        assert_eq!(opacity[0], 0.0, "{opacity:?}");
+        assert!(opacity[1] > 0.0 && opacity[1] < 1.0, "{opacity:?}");
+        assert_eq!(opacity[2], 1.0, "{opacity:?}");
     }
 
     #[test]

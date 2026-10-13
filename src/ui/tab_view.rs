@@ -2315,13 +2315,18 @@ impl Render for TabView {
                 div()
                     .relative()
                     .size_full()
-                    .child(self.render_tree(
-                        self.tab.root(),
-                        &hovers,
-                        view.clone(),
-                        &appearance,
-                        cx,
-                    ))
+                    .child(
+                        div()
+                            .size_full()
+                            .opacity(self.pane_frames.beneath_opacity)
+                            .child(self.render_tree(
+                                self.tab.root(),
+                                &hovers,
+                                view.clone(),
+                                &appearance,
+                                cx,
+                            )),
+                    )
                     .child(
                         div()
                             .absolute()
