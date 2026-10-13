@@ -2,23 +2,15 @@
 //!
 //! Owns authenticated transports, runtime worker composition, publication,
 //! recovery, management CLI, and orderly shutdown. Tokio drives transports and
-//! composition; terminal workers remain OS threads. Native host adapters supply
-//! credentials and process authority. Production startup must remain closed
-//! until native credential delivery exists, with no listener or test authority.
+//! composition; terminal workers remain OS threads. Account host adapters supply
+//! private file-backed server keys, retained storage and direct process ownership.
 
 #![forbid(unsafe_code)]
 
-/// Bounded production startup classification, without native error details.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum StartupFailure {
-    /// The native startup channel cannot yet deliver credentials.
-    NativeCredentialDeliveryUnavailable,
-}
-
-/// Validate production startup prerequisites before creating any listeners.
-pub fn production_startup() -> Result<(), StartupFailure> {
-    Err(StartupFailure::NativeCredentialDeliveryUnavailable)
-}
+pub mod account_startup;
+pub mod deployment;
+pub mod distribution_metadata;
+pub use account_startup::{StartupFailure, production_startup};
 
 pub mod api;
 
@@ -55,6 +47,3 @@ pub mod git;
 pub mod adapters;
 
 pub mod contracts;
-
-/// Safe native receiver adapter supplied by native-handoff B2.
-pub mod native_startup;

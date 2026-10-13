@@ -6172,8 +6172,10 @@ dependencies = [
  "getrandom 0.4.3",
  "rcgen",
  "ring",
+ "rusqlite",
  "rustls",
  "serde",
+ "serde_json",
  "sha2",
  "spaceterm-client",
  "spaceterm-core",
@@ -6181,6 +6183,7 @@ dependencies = [
  "spaceterm-host",
  "spaceterm-protocol",
  "spaceterm-terminal",
+ "tempfile",
  "thiserror 2.0.19",
  "tokio",
 ]
