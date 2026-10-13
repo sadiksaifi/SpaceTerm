@@ -11,11 +11,16 @@ use std::{
         net::UnixListener,
     },
     path::Path,
+    time::Duration,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::UnixListener as AsyncListener,
 };
+
+// Harness waits include native process startup and reaping under build load.
+// They do not change the production dial deadline or pending-operation checks.
+const HARNESS_TIMEOUT: Duration = Duration::from_secs(30);
 
 struct Directory(PathBuf);
 impl Directory {
@@ -445,7 +450,6 @@ async fn native_runtime_shutdown_during_dialing_joins_expired_open_cleanup() {
         ports::ClientServices,
         registry::ClientRegistry,
     };
-    use std::time::Duration;
     let directory = Directory::new();
     let executable = directory.0.join("tunnel-fixture");
     fs::write(
@@ -505,7 +509,7 @@ while True:
     .unwrap();
     let server = registry.server(binding.target().server()).unwrap();
     server.connect().await.unwrap();
-    let pid = tokio::time::timeout(Duration::from_secs(3), async {
+    let pid = tokio::time::timeout(HARNESS_TIMEOUT, async {
         loop {
             if let Ok(pid) = fs::read_to_string(directory.0.join("child-pid"))
                 && let Ok(pid) = pid.parse::<u32>()
@@ -524,20 +528,29 @@ while True:
         }
     ));
     let mut shutdown = tokio::spawn(runtime.shutdown());
+    // Native open signals only after its readiness deadline expires and the child
+    // is reaped. Race that event against shutdown instead of assuming cleanup is
+    // scheduled within a short interval after DIAL_DEADLINE.
+    tokio::time::timeout(HARNESS_TIMEOUT, async {
+        tokio::select! {
+            biased;
+            _ = &mut shutdown => {
+                panic!("shutdown dropped the pending SSH start at the outer dial deadline");
+            }
+            cleanup = routes.cleanup.acquire() => cleanup.unwrap().forget(),
+        }
+    })
+    .await
+    .unwrap();
     assert!(
-        tokio::time::timeout(DIAL_DEADLINE + Duration::from_millis(100), &mut shutdown)
+        tokio::time::timeout(Duration::from_millis(100), &mut shutdown)
             .await
             .is_err(),
         "shutdown dropped the pending SSH start at the outer dial deadline"
     );
-    tokio::time::timeout(Duration::from_secs(2), routes.cleanup.acquire())
-        .await
-        .unwrap()
-        .unwrap()
-        .forget();
     assert!(!shutdown.is_finished());
     routes.finish.add_permits(1);
-    tokio::time::timeout(Duration::from_secs(3), shutdown)
+    tokio::time::timeout(HARNESS_TIMEOUT, shutdown)
         .await
         .unwrap()
         .unwrap()
@@ -653,7 +666,6 @@ async fn native_cleanup_remains_runtime_owned(cleanup_owner: CleanupOwner) {
         ports::ClientServices,
         registry::ClientRegistry,
     };
-    use std::time::Duration;
     let directory = Directory::new();
     let executable = directory.0.join("tunnel-fixture");
     fs::write(
@@ -712,7 +724,7 @@ while True:
     let server = registry.server(binding.target().server()).unwrap();
     server.connect().await.unwrap();
     let mut state = server.state();
-    tokio::time::timeout(Duration::from_secs(3), async {
+    tokio::time::timeout(HARNESS_TIMEOUT, async {
         while !matches!(
             *state.borrow_and_update(),
             ConnectionState::Connecting {
@@ -734,7 +746,7 @@ while True:
         }))
     };
     let mut shutdown = if let Some(removal) = &removal {
-        tokio::time::timeout(Duration::from_secs(2), routes.closing.acquire())
+        tokio::time::timeout(HARNESS_TIMEOUT, routes.closing.acquire())
             .await
             .unwrap()
             .unwrap()
@@ -745,7 +757,7 @@ while True:
         tokio::spawn(runtime.shutdown())
     } else {
         let shutdown = tokio::spawn(runtime.shutdown());
-        tokio::time::timeout(Duration::from_secs(2), routes.closing.acquire())
+        tokio::time::timeout(HARNESS_TIMEOUT, routes.closing.acquire())
             .await
             .unwrap()
             .unwrap()
@@ -765,12 +777,12 @@ while True:
             .is_err()
     );
     routes.finish.add_permits(1);
-    tokio::time::timeout(Duration::from_secs(3), shutdown)
+    tokio::time::timeout(HARNESS_TIMEOUT, shutdown)
         .await
         .unwrap()
         .unwrap()
         .unwrap();
-    tokio::time::timeout(Duration::from_millis(30), completion.wait())
+    tokio::time::timeout(HARNESS_TIMEOUT, completion.wait())
         .await
         .unwrap()
         .unwrap();
