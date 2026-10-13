@@ -241,12 +241,15 @@ fn initialize(root: &Path) {
     let registration = account(root)
         .initialize(DesiredServerState::Running)
         .unwrap();
-    fs::create_dir(registration.organization_directory()).unwrap();
-    fs::set_permissions(
-        registration.organization_directory(),
-        fs::Permissions::from_mode(0o700),
-    )
-    .unwrap();
+    assert!(registration.organization_directory().is_dir());
+    assert_eq!(
+        fs::metadata(registration.organization_directory())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
     let identity = identity(&registration);
     let services = production_services(identity, home(root, identity.server)).unwrap();
     let database = Database::open_for_application(
