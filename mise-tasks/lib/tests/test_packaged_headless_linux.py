@@ -1,5 +1,7 @@
 """Run archive entry points in a real unprivileged, source-free Linux filesystem."""
 
+import contextlib
+import io
 import json
 import os
 import subprocess
@@ -16,6 +18,26 @@ from tests.test_package_server import metadata
 
 
 class PackagedHeadlessAdmissionTests(unittest.TestCase):
+    def test_unknown_cli_arguments_do_not_disclose_paths_or_enter_archive_execution(self):
+        diagnostics = io.StringIO()
+        with (
+            contextlib.redirect_stderr(diagnostics),
+            patch.object(acceptance, "run") as execute,
+            self.assertRaisesRegex(TaskError, "invalid-headless-arguments"),
+        ):
+            acceptance.cli(
+                [
+                    "--archive",
+                    "/unused/archive.tar.gz",
+                    "--source-commit",
+                    "1" * 40,
+                    "--unknown=/private/account/credential",
+                ]
+            )
+        execute.assert_not_called()
+        self.assertNotIn("/private/account/credential", diagnostics.getvalue())
+        self.assertNotIn("/unused/archive.tar.gz", diagnostics.getvalue())
+
     def test_root_and_unsupported_hosts_are_refused_before_reading_the_archive(self):
         for platform, uid in (("darwin", 501), ("linux", 0)):
             with (

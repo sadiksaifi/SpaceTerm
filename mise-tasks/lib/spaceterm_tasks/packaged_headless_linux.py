@@ -207,7 +207,9 @@ def cli(arguments):
     parser.add_argument("--archive", type=Path, required=True)
     parser.add_argument("--source-commit", required=True)
     parser.add_argument("--require-baseline-host", action="store_true")
-    args = parser.parse_args(arguments)
+    args, unknown = parser.parse_known_args(arguments)
+    if unknown:
+        raise TaskError("invalid-headless-arguments")
     result = run(
         args.archive,
         args.source_commit,
