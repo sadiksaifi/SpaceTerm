@@ -116,6 +116,24 @@ impl DesktopClientProvider for RecordingClientProvider {
         Task::ready(self.save_failure.get().map_or(Ok(()), Err))
     }
 
+    fn directory_source(
+        &self,
+        server: ServerId,
+    ) -> Result<std::rc::Rc<dyn crate::ui::directory_picker::DirectorySource>, DesktopClientError>
+    {
+        crate::ui::directory_picker::ServerDirectorySource::new(
+            server,
+            "Owning server",
+            self.directory_connection(server)?,
+            spaceterm_core::server_directories::DirectoryPurpose::WorkspacePin,
+        )
+        .map(|source| {
+            std::rc::Rc::new(source)
+                as std::rc::Rc<dyn crate::ui::directory_picker::DirectorySource>
+        })
+        .map_err(|_| DesktopClientError::Offline)
+    }
+
     fn directory_connection(
         &self,
         server: ServerId,
@@ -159,3 +177,7 @@ impl DesktopClientProvider for RecordingClientProvider {
         Task::ready(self.save_failure.get().map_or(Ok(()), Err))
     }
 }
+
+// The authenticated worker fixture is compiled once for native startup and runtime suites.
+#[path = "../../../crates/spaceterm-client/tests/support/mod.rs"]
+pub(crate) mod wire;

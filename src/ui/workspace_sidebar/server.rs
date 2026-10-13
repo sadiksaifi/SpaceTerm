@@ -48,6 +48,8 @@ pub(crate) struct ServerSidebarSection {
 pub(crate) enum ServerSidebarEvent {
     Activate(QualifiedWorkspaceId),
     Attach(ServerId),
+    Settings(ServerId),
+    StartingDirectory(QualifiedWorkspaceId),
     Detach(QualifiedWorkspaceId),
     Kill(QualifiedWorkspaceId),
     NewWorktree(QualifiedWorkspaceId),
@@ -72,6 +74,8 @@ pub(crate) struct ServerSidebar {
 
 #[derive(Clone, Copy)]
 enum ServerWorkspaceCommand {
+    StartingDirectory,
+    Settings,
     Detach,
     Kill,
     NewWorktree,
@@ -372,6 +376,18 @@ impl WorkspaceSidebar {
                         let lifecycle = owner.clone();
                         let entries = vec![
                             MenuEntry::action(
+                                "Starting Directory...",
+                                ServerWorkspaceCommand::StartingDirectory,
+                            )
+                            .disabled(section.connection != ServerConnection::Connected)
+                            .debug_selector("server-workspace-menu-starting-directory"),
+                            MenuEntry::action(
+                                "Server Settings...",
+                                ServerWorkspaceCommand::Settings,
+                            )
+                            .debug_selector("server-workspace-menu-settings"),
+                            MenuEntry::separator(),
+                            MenuEntry::action(
                                 "New Worktree...",
                                 ServerWorkspaceCommand::NewWorktree,
                             )
@@ -426,6 +442,12 @@ impl WorkspaceSidebar {
                         })
                         .on_activate(move |activation, _, cx| {
                             let event = match activation.action() {
+                                ServerWorkspaceCommand::StartingDirectory => {
+                                    ServerSidebarEvent::StartingDirectory(workspace)
+                                }
+                                ServerWorkspaceCommand::Settings => {
+                                    ServerSidebarEvent::Settings(workspace.server())
+                                }
                                 ServerWorkspaceCommand::Detach => {
                                     ServerSidebarEvent::Detach(workspace)
                                 }

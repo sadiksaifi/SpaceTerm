@@ -10,7 +10,6 @@ use spaceterm_client::{
 use spaceterm_core::{
     operation_ledger_contracts::CanonicalOperationRequest,
     operations::{Command, OperationId},
-    server_directories::{DirectoryQuery, DirectoryQueryResult},
     worktrees::{GitCommand, GitQuery, GitStatusTarget},
 };
 use std::{future::Future, sync::Arc};
@@ -23,25 +22,6 @@ async fn on_runtime<T>(executor: &Handle, future: impl Future<Output = T>) -> T 
         future.as_mut().poll(cx)
     })
     .await
-}
-
-pub(super) struct DirectoryPort {
-    pub(super) queries: ServerQueries,
-    pub(super) executor: Handle,
-}
-impl DirectoryConnectionPort for DirectoryPort {
-    fn state(&self) -> Result<GitConnectionState, ClientDirectoryFailure> {
-        DirectoryConnectionPort::state(&self.queries)
-    }
-    fn query(
-        &self,
-        query: DirectoryQuery,
-    ) -> GitClientFuture<'_, Result<DirectoryQueryResult, ClientDirectoryFailure>> {
-        Box::pin(on_runtime(
-            &self.executor,
-            DirectoryConnectionPort::query(&self.queries, query),
-        ))
-    }
 }
 
 pub(super) struct GitPort {
