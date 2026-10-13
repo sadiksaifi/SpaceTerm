@@ -4,6 +4,12 @@
 pub mod linux_pty_host;
 #[cfg(target_os = "macos")]
 pub mod macos_pty_host;
+#[cfg(all(
+    feature = "native-tests",
+    feature = "test-support",
+    any(target_os = "macos", target_os = "linux")
+))]
+pub mod native_fixture;
 pub mod native_pty;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod spawn;

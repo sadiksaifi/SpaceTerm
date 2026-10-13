@@ -82,16 +82,19 @@ impl PtyProcess for HostProcess {
 struct HostTermination(Arc<dyn crate::platform::native_pty::NativePtyTermination>);
 impl PtyTermination for HostTermination {
     fn request_termination(&self) -> Result<(), RuntimeFailure> {
-        self.0
-            .request_termination()
-            .map_err(|_| failure(RuntimeStage::Cleanup))?;
-        // The native port only acknowledges signalling. Its descendant settlement
-        // runs in Drop and exposes no classified receipt. Keep the launch quarantined
-        // until the host provider supplies joinable process-session cleanup evidence.
-        Err(RuntimeFailure::new(
-            FailureClass::RuntimeUnavailable,
-            RuntimeStage::Cleanup,
-        ))
+        use crate::platform::native_pty::NativePtySettlement;
+        // Signalling and retained shell exit are not evidence that descendants settled.
+        // Settlement can confirm cleanup even when an earlier signal attempt failed.
+        let _ = self.0.request_termination();
+        match self.0.settle() {
+            NativePtySettlement::Settled => Ok(()),
+            NativePtySettlement::StillRunning | NativePtySettlement::Unavailable => {
+                Err(RuntimeFailure::new(
+                    FailureClass::RuntimeUnavailable,
+                    RuntimeStage::Cleanup,
+                ))
+            }
+        }
     }
 }
 
