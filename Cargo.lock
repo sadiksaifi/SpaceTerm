@@ -6170,6 +6170,7 @@ name = "spaceterm-server"
 version = "0.0.0"
 dependencies = [
  "getrandom 0.4.3",
+ "libc",
  "prost",
  "rcgen",
  "ring",
