@@ -178,7 +178,7 @@ impl InstallRecord {
         }
         Ok(())
     }
-    fn progress(&self, request: NativeRequestId) -> ServiceProgress {
+    pub(super) fn progress(&self, request: NativeRequestId) -> ServiceProgress {
         ServiceProgress {
             request,
             request_digest: self.digest,

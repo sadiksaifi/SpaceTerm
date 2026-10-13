@@ -1,8 +1,13 @@
 //! Listener generations follow committed remote policy. IPC and SSH-forwarded
 //! IPC remain independent of WSS enablement. Native TLS keys are injected.
 
+mod native_status;
 pub mod outcomes;
+pub use native_status::{
+    AccountNativeStatusObserver, NativeStatusObservation, NativeStatusObserver,
+};
 mod production;
+pub(crate) use production::retirement_progress;
 pub use production::{
     ProductionListenerConfig, ProductionListenerPorts, production_listener_factories,
     production_listener_factories_with_dispatch,
