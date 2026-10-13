@@ -547,6 +547,7 @@ fn apply_change(
         }
         ClientJournalChange::ReserveCredential(_)
         | ClientJournalChange::BindCredentialRoute { .. }
+        | ClientJournalChange::CaptureRestrictedSsh { .. }
         | ClientJournalChange::RecordCredentialPublicKey { .. }
         | ClientJournalChange::PrepareEnrollment(_)
         | ClientJournalChange::SaveEnrollment { .. }
@@ -1025,6 +1026,16 @@ fn apply_change(
                 header.purpose != StreamPurpose::SelfRevocation || header.confirmed_prefix != 1
             }) {
                 return Err(invalid());
+            }
+            // Release only the original credential slot's public route capture.
+            // The reference and generation cannot identify a later pairing.
+            let record = &state.revocations[index];
+            if let Some(slot) = state.pairing.slots.iter_mut().find(|slot| {
+                slot.reference == record.task.parts().original.credential()
+                    && slot.generation == record.task.parts().local_pairing.parts().generation
+                    && slot.server == Some(record.task.parts().original.server())
+            }) {
+                slot.ssh_capture = None;
             }
             // Never consult/remove the current saved binding or any shared key.
             state.revocations.remove(index);

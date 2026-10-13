@@ -12,7 +12,7 @@ pub(crate) use controller::PaneJournalAdmission;
 pub use controller::{JournalController, JournalHealth};
 pub use pairing_projection::{
     JournalCredentialSlot, JournalEnrollment, JournalEnrollmentAcknowledgement,
-    JournalEnrollmentReservation, PairingJournalProjection,
+    JournalEnrollmentReservation, JournalSshCapture, PairingJournalProjection,
 };
 
 use crate::pairing::{
@@ -538,6 +538,10 @@ pub enum ClientJournalChange {
         reference: CredentialReference,
         route_reference: spaceterm_core::pairing::RevocationRouteReference,
         route: RouteDescription,
+    },
+    CaptureRestrictedSsh {
+        reference: CredentialReference,
+        capture: JournalSshCapture,
     },
     RecordCredentialPublicKey {
         reference: CredentialReference,

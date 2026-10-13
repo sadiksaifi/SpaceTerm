@@ -2335,6 +2335,7 @@ async fn real_pairing_driver_retries_failed_restricted_routes_from_one_second_to
                     public_key: None,
                     route_reference: None,
                     route: None,
+                    ssh_capture: None,
                     generation: binding.target().incarnation(),
                 }),
                 ClientJournalChange::RecordCredentialPublicKey {
