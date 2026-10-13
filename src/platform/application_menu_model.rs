@@ -19,6 +19,8 @@ use crate::ui::{
     SwitchWorkspace, TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus,
 };
 
+use crate::ui::server_pane_actions::TakeOverPane;
+
 pub(crate) const TOGGLE_PANE_ZOOM_TITLE: &str = "Toggle Pane Zoom";
 
 pub(crate) fn menus(application_name: &str) -> Vec<Menu> {
@@ -73,9 +75,11 @@ pub(crate) fn file_menu() -> Menu {
             MenuItem::action("New Tab", CreateTab),
             MenuItem::action("New Worktree…", crate::ui::NewWorktree),
             MenuItem::separator(),
+            MenuItem::action("Take Over Pane", TakeOverPane),
+            MenuItem::separator(),
             MenuItem::action("Close Pane", ClosePane),
             MenuItem::action("Close Tab", CloseTab),
-            MenuItem::action("Close Workspace", CloseWorkspace),
+            MenuItem::action("Kill Workspace", CloseWorkspace),
             MenuItem::separator(),
             MenuItem::action("Export Terminal Diagnostics…", ExportTerminalDiagnostics),
         ],
@@ -243,6 +247,144 @@ mod tests {
                 MenuItem::SystemMenu(menu) => menu.name.as_ref(),
             })
             .collect()
+    }
+
+    #[test]
+    fn desktop_server_file_menu_groups_take_over_before_close_and_labels_kill() {
+        assert_eq!(
+            labels(&file_menu())[8..],
+            [
+                "|",
+                "Take Over Pane",
+                "|",
+                "Close Pane",
+                "Close Tab",
+                "Kill Workspace",
+                "|",
+                "Export Terminal Diagnostics…",
+            ]
+        );
+        assert!(Command::CloseWorkspace.action().partial_eq(menu_action(
+            &menus("SpaceTerm"),
+            "File",
+            "Kill Workspace"
+        )));
+        assert_eq!(Command::CloseWorkspace.id(), "close_workspace");
+    }
+
+    #[test]
+    fn desktop_server_take_over_pane_menu_item_has_no_shortcut_or_retained_command() {
+        let profile = crate::desktop_profile::default_keymap::profile(
+            crate::platform::keyboard_layout::testing::us(),
+            Vec::new(),
+        )
+        .unwrap();
+        let keymap = Keymap::new(
+            profile
+                .resolve(&KeybindingPreferences::default())
+                .key_bindings(),
+        );
+        let menus = menus("SpaceTerm");
+        let action = menu_action(&menus, "File", "Take Over Pane");
+        assert!(action.as_any().is::<TakeOverPane>());
+        assert_eq!(
+            crate::desktop_profile::installed_shortcut(&keymap, action),
+            None
+        );
+        assert!(
+            Command::ALL
+                .into_iter()
+                .all(|command| !command.action().partial_eq(action))
+        );
+        assert_eq!(Command::from_id("take_over_pane"), None);
+    }
+
+    #[gpui::test]
+    fn desktop_server_native_take_over_delivers_to_the_available_focused_handler(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        use gpui::prelude::*;
+        use gpui::{Context, FocusHandle, Render, Window, div};
+
+        struct FocusedPane {
+            focus: FocusHandle,
+            available: bool,
+            deliveries: Rc<Cell<usize>>,
+        }
+        impl Render for FocusedPane {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let deliveries = Rc::clone(&self.deliveries);
+                div()
+                    .size_full()
+                    .track_focus(&self.focus)
+                    .when(self.available, |pane| {
+                        pane.on_action(move |_: &TakeOverPane, _, _| {
+                            deliveries.set(deliveries.get() + 1);
+                        })
+                    })
+            }
+        }
+
+        cx.update(|cx| cx.set_menus(menus("SpaceTerm")));
+        let app = cx.clone();
+        let deliveries = Rc::new(Cell::new(0));
+        let recorded = Rc::clone(&deliveries);
+        let (pane, cx) = cx.add_window_view(move |_, cx| FocusedPane {
+            focus: cx.focus_handle(),
+            available: false,
+            deliveries: recorded,
+        });
+        cx.update(|window, cx| {
+            window.activate_window();
+            pane.read(cx).focus.clone().focus(window, cx);
+        });
+        let action = cx.update(|_, cx| {
+            cx.get_menus()
+                .unwrap()
+                .into_iter()
+                .find(|menu| menu.name.as_ref() == "File")
+                .unwrap()
+                .items
+                .into_iter()
+                .find_map(|item| match item {
+                    gpui::OwnedMenuItem::Action { name, action, .. }
+                        if name == "Take Over Pane" =>
+                    {
+                        Some(action)
+                    }
+                    _ => None,
+                })
+                .unwrap()
+        });
+        cx.run_until_parked();
+        assert!(!app.update(|cx| cx.is_action_available(action.as_ref())));
+        app.update(|cx| cx.dispatch_action(action.as_ref()));
+        cx.run_until_parked();
+        assert_eq!(deliveries.get(), 0);
+
+        pane.update(cx, |pane, cx| {
+            pane.available = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(app.update(|cx| cx.is_action_available(action.as_ref())));
+        app.update(|cx| cx.dispatch_action(action.as_ref()));
+        cx.run_until_parked();
+        assert_eq!(deliveries.get(), 1);
+
+        pane.update(cx, |pane, cx| {
+            pane.available = false;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(!app.update(|cx| cx.is_action_available(action.as_ref())));
+        app.update(|cx| cx.dispatch_action(action.as_ref()));
+        cx.run_until_parked();
+        assert_eq!(deliveries.get(), 1);
     }
 
     #[test]

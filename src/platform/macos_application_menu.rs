@@ -92,8 +92,14 @@ const MENU_ITEM_ICONS: &[MenuItemIcon] = &[
     MenuItemIcon {
         menu: "File",
         submenu: None,
-        item: "Close Workspace",
+        item: "Take Over Pane",
         symbol: "rectangle.portrait.and.arrow.right",
+    },
+    MenuItemIcon {
+        menu: "File",
+        submenu: None,
+        item: "Kill Workspace",
+        symbol: "trash",
     },
     MenuItemIcon {
         menu: "File",
@@ -921,9 +927,11 @@ mod tests {
                 "New Tab",
                 "New Worktree…",
                 "|",
+                "Take Over Pane",
+                "|",
                 "Close Pane",
                 "Close Tab",
-                "Close Workspace",
+                "Kill Workspace",
                 "|",
                 "Export Terminal Diagnostics…",
             ]
@@ -948,6 +956,7 @@ mod tests {
                 SwitchWorkspace.name(),
                 CreateTab.name(),
                 crate::ui::NewWorktree.name(),
+                crate::ui::server_pane_actions::TakeOverPane.name(),
                 ClosePane.name(),
                 CloseTab.name(),
                 CloseWorkspace.name(),
