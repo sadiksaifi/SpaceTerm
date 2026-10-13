@@ -165,6 +165,8 @@ impl AuthorityRegistration {
 
 struct Shared {
     config: AuthenticationConfig,
+    enrollment:
+        Option<Arc<dyn spaceterm_protocol::pairing_adapter::EnrollmentLookup + Send + Sync>>,
     unauthenticated: Arc<Semaphore>,
     authenticated: Arc<Semaphore>,
     generations: AtomicU64,
@@ -180,6 +182,22 @@ struct Shared {
 pub struct Authenticator(Arc<Shared>);
 impl Authenticator {
     pub fn new(config: AuthenticationConfig) -> Result<Self, ServerFailure> {
+        Self::construct(config, None)
+    }
+    /// Enrollment has a separate pinned transcript and never registers an
+    /// ordinary principal, even when its prospective Client is already known.
+    pub fn new_with_enrollment(
+        config: AuthenticationConfig,
+        enrollment: Arc<dyn spaceterm_protocol::pairing_adapter::EnrollmentLookup + Send + Sync>,
+    ) -> Result<Self, ServerFailure> {
+        Self::construct(config, Some(enrollment))
+    }
+    fn construct(
+        config: AuthenticationConfig,
+        enrollment: Option<
+            Arc<dyn spaceterm_protocol::pairing_adapter::EnrollmentLookup + Send + Sync>,
+        >,
+    ) -> Result<Self, ServerFailure> {
         if config.server.bytes() == [0; 16]
             || config.epoch.get() == 0
             || config.unauthenticated_limit == 0
@@ -207,6 +225,7 @@ impl Authenticator {
             handshakes: AtomicUsize::new(0),
             handshakes_finished: tokio::sync::Notify::new(),
             config,
+            enrollment,
         })))
     }
     pub fn try_admit(&self) -> Result<UnauthenticatedPermit, ServerFailure> {
@@ -314,7 +333,7 @@ impl Authenticator {
         };
         let principal = match &connection {
             PeerConnection::Ordinary(session) => Some(session.principal),
-            PeerConnection::Restricted(_) => None,
+            PeerConnection::Restricted(_) | PeerConnection::Enrollment(_) => None,
         };
         // Install verified, in-progress identities before actor registration.
         // A durable revocation must also cancel readiness and join this teardown.
@@ -436,6 +455,35 @@ impl Authenticator {
             .map_err(transport_failure)?
             .ok_or_else(|| failure(ServerFailureClass::Authentication))?;
         let signer: Arc<dyn SigningKey> = self.0.config.credentials.clone();
+        if spaceterm_protocol::pairing_adapter::is_enrollment_hello(&hello) {
+            let lookup = self
+                .0
+                .enrollment
+                .as_ref()
+                .ok_or_else(|| failure(ServerFailureClass::Authentication))?;
+            let (handshake, reply) = spaceterm_protocol::pairing_adapter::EnrollmentServer::accept(
+                self.0.config.server.bytes(),
+                self.0.config.handshake.majors.clone(),
+                signer,
+                lookup.as_ref(),
+                &hello,
+            )
+            .map_err(protocol_failure)?;
+            pending.send(&reply).await.map_err(transport_failure)?;
+            let proof = pending
+                .recv()
+                .await
+                .map_err(transport_failure)?
+                .ok_or_else(|| failure(ServerFailureClass::Authentication))?;
+            let (connection, ready) = handshake
+                .receive_proof(lookup.as_ref(), &proof)
+                .map_err(protocol_failure)?;
+            return Ok((
+                PeerConnection::Enrollment(Box::new(connection)),
+                ready,
+                self.next_generation()?,
+            ));
+        }
         let (handshake, reply) = ServerHandshake::accept(
             self.0.config.server.bytes(),
             self.0.config.epoch.get(),
@@ -520,7 +568,7 @@ impl Authenticator {
     ) -> Result<AuthenticatedPeer, ServerFailure> {
         let principal = match &connection {
             PeerConnection::Ordinary(session) => Some(session.principal),
-            PeerConnection::Restricted(_) => None,
+            PeerConnection::Restricted(_) | PeerConnection::Enrollment(_) => None,
         };
         let signal = registration.signal.clone();
         let mut closing = signal.close.subscribe();
@@ -733,6 +781,7 @@ impl Authenticator {
 pub enum PeerConnection {
     Ordinary(AuthenticatedSession),
     Restricted(RestrictedConnection),
+    Enrollment(Box<spaceterm_protocol::pairing_adapter::EnrollmentConnection>),
 }
 /// Dropping presentation/protocol ownership asks the retained transport supervisor
 /// to close it. Admission releases only after that teardown, never before it.

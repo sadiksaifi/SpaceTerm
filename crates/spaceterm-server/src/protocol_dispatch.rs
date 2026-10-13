@@ -314,6 +314,17 @@ impl ProtocolDispatcher {
                         .try_acquire_many_owned(charge)
                         .map_err(|_| failure(ServerFailureClass::Capacity))?;
                     match &mut peer.connection {
+                        PeerConnection::Enrollment(codec) => {
+                            let service = self
+                                .pairing
+                                .as_ref()
+                                .ok_or_else(|| failure(ServerFailureClass::Authentication))?;
+                            let response = service.enrollment_frame(codec, &bytes).await?;
+                            peer.transport
+                                .send(&response)
+                                .await
+                                .map_err(transport_failure)?;
+                        }
                         PeerConnection::Restricted(codec) => {
                             let bytes = self.dispatch_restricted(codec, &bytes).await?;
                             peer.transport

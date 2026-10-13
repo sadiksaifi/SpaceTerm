@@ -586,6 +586,14 @@ fn exchange(kind: pairing::enrollment_exchange::Kind) -> Result<Vec<u8>, Protoco
     }
     Ok(bytes)
 }
+/// Purpose discrimination before authentication. This grants no authority; the
+/// enrollment handshake still verifies the exact reserved claim and both keys.
+pub fn is_enrollment_hello(bytes: &[u8]) -> bool {
+    matches!(
+        read_exchange(bytes),
+        Ok(pairing::enrollment_exchange::Kind::Hello(_))
+    )
+}
 fn read_exchange(bytes: &[u8]) -> Result<pairing::enrollment_exchange::Kind, ProtocolError> {
     let message: pairing::EnrollmentExchange = bound_decode(
         preflight::SPACETERM_PAIRING_ENROLLMENTEXCHANGE,
@@ -1405,6 +1413,19 @@ impl VerifiedEnrollmentSubmission {
         self.authorization_digest
     }
 }
+/// Comparison reference available only after verifying an enrollment-purpose
+/// request. Possession of this reference cannot construct an ordinary principal.
+pub struct VerifiedEnrollmentReference(EnrollmentReservation);
+impl VerifiedEnrollmentReference {
+    pub fn reservation(&self) -> &EnrollmentReservation {
+        &self.0
+    }
+}
+pub enum VerifiedEnrollmentRequest {
+    Submit(VerifiedEnrollmentSubmission),
+    Lookup(VerifiedEnrollmentReference),
+    Acknowledgement(VerifiedEnrollmentReference),
+}
 impl EnrollmentConnection {
     pub fn submission_message(
         &mut self,
@@ -1430,24 +1451,44 @@ impl EnrollmentConnection {
         scrub_submission(&mut message);
         result
     }
-    pub fn receive_submission(
+    /// Verify the envelope and purpose once, then consume its checked request.
+    /// No raw Submit bytes or bearer secret escape this type-state boundary.
+    pub fn receive_request(
         &mut self,
         bytes: &[u8],
-    ) -> Result<VerifiedEnrollmentSubmission, ProtocolError> {
+    ) -> Result<VerifiedEnrollmentRequest, ProtocolError> {
         let reservation = self
             .server_reservation
             .clone()
             .ok_or(ProtocolError::Authentication)?;
         let message = self.decode(bytes)?;
         match message.kind {
-            Some(pairing::enrollment_message::Kind::Submit(mut v)) => {
-                let secret =
-                    zeroize::Zeroizing::new(std::mem::take(&mut v.single_use_authorization));
-                Ok(VerifiedEnrollmentSubmission {
-                    reservation,
-                    authorization_digest: hash(&secret),
-                })
+            Some(pairing::enrollment_message::Kind::Submit(mut value)) => {
+                let secret = Zeroizing::new(std::mem::take(&mut value.single_use_authorization));
+                Ok(VerifiedEnrollmentRequest::Submit(
+                    VerifiedEnrollmentSubmission {
+                        reservation,
+                        authorization_digest: hash(&secret),
+                    },
+                ))
             }
+            Some(pairing::enrollment_message::Kind::Lookup(_)) => Ok(
+                VerifiedEnrollmentRequest::Lookup(VerifiedEnrollmentReference(reservation)),
+            ),
+            Some(pairing::enrollment_message::Kind::Acknowledgement(_)) => {
+                Ok(VerifiedEnrollmentRequest::Acknowledgement(
+                    VerifiedEnrollmentReference(reservation),
+                ))
+            }
+            _ => Err(ProtocolError::UnexpectedMessage),
+        }
+    }
+    pub fn receive_submission(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<VerifiedEnrollmentSubmission, ProtocolError> {
+        match self.receive_request(bytes)? {
+            VerifiedEnrollmentRequest::Submit(submission) => Ok(submission),
             _ => Err(ProtocolError::UnexpectedMessage),
         }
     }

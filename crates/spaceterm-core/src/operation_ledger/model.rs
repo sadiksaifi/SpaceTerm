@@ -200,6 +200,10 @@ impl OperationLedger {
             operations: self.state.operations.values().cloned().collect(),
         }
     }
+    /// Borrow permanent stream headers without cloning retained outcomes.
+    pub fn streams(&self) -> impl Iterator<Item = &StreamRecord> {
+        self.state.streams.values()
+    }
     pub fn stream(&self, binding: &StreamBinding) -> Result<&StreamRecord, LedgerFailure> {
         self.header(binding)
     }

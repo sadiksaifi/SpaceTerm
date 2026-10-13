@@ -314,6 +314,68 @@ impl PairingService {
             authorization: Some(authorization),
         })
     }
+    /// The listener consumes one checked request. Submit, historical lookup and
+    /// cumulative acknowledgement share no ordinary dispatch or authentication.
+    pub async fn enrollment_frame(
+        &self,
+        connection: &mut spaceterm_protocol::pairing_adapter::EnrollmentConnection,
+        bytes: &[u8],
+    ) -> Result<Vec<u8>, crate::contracts::ServerFailure> {
+        use spaceterm_protocol::{
+            pairing_adapter::{VerifiedEnrollmentRequest, operation_to_wire, receipt_to_wire},
+            wire::pairing,
+        };
+        let verified = connection
+            .receive_request(bytes)
+            .map_err(crate::adapters::transport::protocol_failure)?;
+        let receipt = match verified {
+            VerifiedEnrollmentRequest::Submit(submission) => match self
+                .enroll(submission)
+                .await
+                .map_err(server_failure)?
+                .outcome
+            {
+                PairingOutcome::Enrolled(receipt) => Some(receipt),
+                _ => return Err(server_failure(PairingFailure::InvalidDurableState)),
+            },
+            VerifiedEnrollmentRequest::Lookup(_) => self
+                .lookup_enrollment(connection)
+                .await
+                .map_err(server_failure)?,
+            VerifiedEnrollmentRequest::Acknowledgement(_) => {
+                self.acknowledge_enrollment(connection)
+                    .await
+                    .map_err(server_failure)?;
+                self.lookup_enrollment(connection)
+                    .await
+                    .map_err(server_failure)?
+            }
+        };
+        let e = connection.reservation().parts();
+        let message = pairing::EnrollmentMessage {
+            kind: Some(pairing::enrollment_message::Kind::Result(
+                pairing::EnrollmentResult {
+                    operation: Some(operation_to_wire(OperationId::new(
+                        e.enrollment_stream,
+                        OperationSequence::new(1)
+                            .map_err(|_| server_failure(PairingFailure::InvalidRequest))?,
+                    ))),
+                    request_digest: e.enrollment_request_digest.bytes().to_vec(),
+                    failure: receipt.is_none().then_some(
+                        spaceterm_protocol::wire::common::Failure {
+                            classification:
+                                spaceterm_protocol::wire::common::FailureClass::Unavailable as i32,
+                            retry_after_ms: 0,
+                        },
+                    ),
+                    receipt: receipt.as_ref().map(receipt_to_wire),
+                },
+            )),
+        };
+        connection
+            .encode(&message)
+            .map_err(crate::adapters::transport::protocol_failure)
+    }
     pub async fn lookup_enrollment(
         &self,
         connection: &spaceterm_protocol::pairing_adapter::EnrollmentConnection,

@@ -1,7 +1,10 @@
 //! Validation and old-instance reconciliation finish before any listener opens.
 
 use crate::{
-    adapters::{core::CommitCursor, store::StoreWorker},
+    adapters::{
+        core::{CommitCursor, observed_native_retirement, observed_retirement},
+        store::StoreWorker,
+    },
     api::ServerConfig,
     contracts::*,
     failure::{failure, ledger_failure, store_failure},
@@ -86,6 +89,140 @@ pub(crate) async fn recover(
         }
     }
     config.core.ledger.recover(&recovered)?;
+    // Resolve original identities before epoch publication. Each cancellation
+    // has its own operation basis; cleanup progress precedes final completion.
+    let pending = recovered
+        .ledger
+        .as_ref()
+        .map(|ledger| ledger.operations().to_vec())
+        .unwrap_or_default();
+    for entry in pending {
+        let RecoveredOperationRecord::Pending(record) = entry else {
+            continue;
+        };
+        let Some(progress) = &record.external_progress else {
+            continue;
+        };
+        let cursor = CommitCursor::from_recovered(&recovered);
+        let (outcome, revision, basis) = match progress.state() {
+            ExternalProgressState::AcceptedRetirement(descriptor) => {
+                let observed = observed_retirement(descriptor, &cleanup)?;
+                if &observed != descriptor.as_ref() {
+                    let progress = PendingExternalProgress::new(PendingExternalProgressParts {
+                        binding: record.binding,
+                        effect: progress.effect(),
+                        state: ExternalProgressState::AcceptedRetirement(Box::new(observed)),
+                    })
+                    .map_err(ledger_failure)?;
+                    let mut parts = cursor.parts().map_err(store_failure)?;
+                    config
+                        .core
+                        .ledger
+                        .prepare_external_progress(
+                            record.binding,
+                            progress,
+                            cursor.context().map_err(ledger_failure)?,
+                        )?
+                        .append_to(&mut parts)
+                        .map_err(ledger_failure)?;
+                    let transaction = Arc::new(
+                        DurableTransaction::new_with_validation(
+                            parts,
+                            config.core.validator.as_ref(),
+                        )
+                        .map_err(store_failure)?,
+                    );
+                    let receipt = checked_commit(&store, transaction).await?;
+                    config.core.ledger.committed(receipt)?;
+                    recovered = store.recover().await?;
+                    recovered
+                        .validate_with(config.core.validator.as_ref())
+                        .map_err(store_failure)?;
+                }
+                (
+                    descriptor
+                        .parts()
+                        .eventual_result
+                        .outcome(config.core.codec.as_ref())
+                        .map_err(ledger_failure)?,
+                    descriptor.acceptance_revision(),
+                    None,
+                )
+            }
+            ExternalProgressState::AwaitingIntent => {
+                let basis = OperationReductionBasis::new(OperationReductionBasisParts {
+                    binding: record.binding,
+                    base: cursor.organization,
+                    resulting: cursor.organization,
+                })
+                .map_err(ledger_failure)?;
+                (
+                    spaceterm_core::operations::Outcome::Failed(
+                        spaceterm_core::operations::OperationFailure::StaleAuthority,
+                    ),
+                    cursor.organization,
+                    Some(basis),
+                )
+            }
+            ExternalProgressState::RecordedIntent { .. } => continue,
+        };
+        let cursor = CommitCursor::from_recovered(&recovered);
+        let mut parts = cursor.parts().map_err(store_failure)?;
+        if let Some(basis) = basis {
+            parts
+                .operation_writes
+                .push(OperationWrite::ReductionBasis(basis));
+        }
+        let context = TransactionContext::new(
+            cursor.store,
+            cursor.organization,
+            cursor.organization,
+            basis,
+        )
+        .map_err(ledger_failure)?;
+        config
+            .core
+            .ledger
+            .prepare_completion(record.binding, &outcome, revision, context)?
+            .append_to(&mut parts)
+            .map_err(ledger_failure)?;
+        let transaction = Arc::new(
+            DurableTransaction::new_with_validation(parts, config.core.validator.as_ref())
+                .map_err(store_failure)?,
+        );
+        let receipt = checked_commit(&store, transaction).await?;
+        config.core.ledger.committed(receipt)?;
+        recovered = store.recover().await?;
+        recovered
+            .validate_with(config.core.validator.as_ref())
+            .map_err(store_failure)?;
+    }
+    for descriptor in recovered.native_retirements.clone() {
+        let observed = observed_native_retirement(&descriptor, &cleanup)?;
+        if observed == descriptor {
+            continue;
+        }
+        let cursor = CommitCursor::from_recovered(&recovered);
+        let mut parts = cursor.parts().map_err(store_failure)?;
+        parts
+            .operation_writes
+            .push(OperationWrite::NativeRetirement(
+                NativeRetirementMutation::Progress {
+                    expected: Box::new(descriptor),
+                    next: Box::new(observed),
+                },
+            ));
+        let transaction = Arc::new(
+            DurableTransaction::new_with_validation(parts, config.core.validator.as_ref())
+                .map_err(store_failure)?,
+        );
+        let receipt = checked_commit(&store, transaction).await?;
+        config.core.ledger.committed(receipt)?;
+        recovered = store.recover().await?;
+        recovered
+            .validate_with(config.core.validator.as_ref())
+            .map_err(store_failure)?;
+    }
     let reduction = config
         .core
         .reducer
