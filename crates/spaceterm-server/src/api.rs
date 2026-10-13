@@ -302,6 +302,7 @@ pub struct ServerHandle {
     pub(crate) requests: mpsc::Sender<ActorRequest>,
     pub(crate) lifecycle: mpsc::Sender<LifecycleRequest>,
     pub(crate) phase: watch::Receiver<ServicePhase>,
+    pub(crate) runtime_status: watch::Receiver<spaceterm_core::management::ServerRuntimeStatus>,
     pub(crate) snapshot: watch::Receiver<Arc<OrganizationSnapshot>>,
     pub(crate) pairing_snapshot:
         watch::Receiver<Option<spaceterm_core::pairing::policy::PairingSnapshot>>,
@@ -309,6 +310,14 @@ pub struct ServerHandle {
 impl ServerHandle {
     pub fn phase(&self) -> ServicePhase {
         *self.phase.borrow()
+    }
+    pub fn runtime_status(&self) -> spaceterm_core::management::ServerRuntimeStatus {
+        *self.runtime_status.borrow()
+    }
+    pub fn subscribe_runtime_status(
+        &self,
+    ) -> watch::Receiver<spaceterm_core::management::ServerRuntimeStatus> {
+        self.runtime_status.clone()
     }
     pub fn snapshot(&self) -> Arc<OrganizationSnapshot> {
         self.snapshot.borrow().clone()

@@ -104,6 +104,7 @@ async fn start_dispatch(
     let (mut peer, client, mut codec, listener) = wire.into_parts();
     let snapshot = fixture.handle.snapshot();
     let status = ServerStatus::new(ServerStatusParts {
+        runtime: Default::default(),
         server: fixture.stream.server(),
         epoch: snapshot.epoch(),
         revision: NonZeroU64::new(1).unwrap(),

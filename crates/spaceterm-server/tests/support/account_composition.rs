@@ -1,0 +1,1021 @@
+//! Real account startup, SQLite, native shells and IPC. Only the service-manager
+//! and previous-instance evidence boundaries are injected into this fixture.
+
+use super::*;
+use spaceterm_core::{
+    authority::*, content::ContentBase, content_queries::*, control::*, geometry::*,
+    native_management::*, retirement::*,
+};
+use spaceterm_host::account_service::{
+    NativeServiceProcessTable, RegisteredServer, RuntimeAssessment, ServiceAction, ServiceFailure,
+    ServiceFuture, ServiceProcesses,
+};
+use spaceterm_server::{
+    account_startup::{RecoveredAccountServer, StartupFailure, test_support},
+    adapters::terminal::AccountLaunchFacts,
+};
+use spaceterm_terminal::{metadata::LocalMachine, runtime_contracts::*};
+use std::sync::Mutex;
+
+struct Seed {
+    root: tempfile::TempDir,
+    registration: RegisteredServer,
+    identity: Arc<spaceterm_host::server_keys::ServerIdentity>,
+    streams: PairingClientStreams,
+    principal: authentication::Principal,
+    key: Arc<DeviceKey>,
+}
+impl Seed {
+    async fn new() -> Self {
+        let fixture = Fixture::new_registered(true).await;
+        let (streams, principal, key) = fixture.enroll(2).await;
+        let handle = fixture.server.handle();
+        handle
+            .shutdown(TrustedShutdownRequest {
+                authority: fixture.stop,
+            })
+            .await
+            .unwrap();
+        fixture.server.wait().await.unwrap();
+        let root = fixture._root;
+        fs::write(root.path().join("shell"), "#!/bin/sh\nprintf '%s' \"$$\" > shell-pid\necho ACCOUNT-SHELL-READY\nexec /bin/sh \"$@\"\n").unwrap();
+        fs::set_permissions(root.path().join("shell"), fs::Permissions::from_mode(0o700)).unwrap();
+        Self {
+            root,
+            registration: fixture.registration,
+            identity: fixture.identity,
+            streams,
+            principal,
+            key,
+        }
+    }
+    fn supervisor(
+        &self,
+        processes: Arc<dyn ServiceProcesses>,
+    ) -> Arc<spaceterm_host::account_service::ServiceSupervisor> {
+        test_support::supervisor(self.root.path(), processes).unwrap()
+    }
+    fn launch(&self) -> AccountLaunchFacts {
+        AccountLaunchFacts {
+            uid: self.registration.key().account_uid,
+            home: self.root.path().to_owned(),
+            planner: spaceterm_host::shell_launch::ShellLaunchPlanner::for_test(
+                self.root.path().join("shell"),
+                self.root.path().to_owned(),
+            ),
+            machine: LocalMachine::default(),
+        }
+    }
+    fn request(&self, sequence: u64, command: Command) -> CanonicalOperationRequest {
+        CanonicalOperationRequest::new(
+            OperationId::new(
+                self.streams.parts().ordinary,
+                OperationSequence::new(sequence).unwrap(),
+            ),
+            command,
+            &CanonicalCodec,
+        )
+        .unwrap()
+    }
+}
+
+/// The acceptance fixture knows exactly which shell it started. Cleanup success
+/// requires that native process to disappear and the real endpoint to be removed.
+struct ObservedProcesses {
+    epoch: ServerEpoch,
+    sessions: Vec<SessionKey>,
+    pid: Option<u32>,
+    reserved: Mutex<Option<RuntimeAssessment>>,
+}
+impl ObservedProcesses {
+    fn new(epoch: ServerEpoch, sessions: Vec<SessionKey>, pid: Option<u32>) -> Arc<Self> {
+        Arc::new(Self {
+            epoch,
+            sessions,
+            pid,
+            reserved: Mutex::default(),
+        })
+    }
+    fn absent(&self, registration: &RegisteredServer) -> Result<(), ServiceFailure> {
+        if registration.endpoint()?.path().exists()
+            || self.pid.is_some_and(|pid| {
+                NativeServiceProcessTable::current()
+                    .unwrap()
+                    .observe(pid)
+                    .unwrap()
+                    .is_some()
+            })
+        {
+            return Err(ServiceFailure::CleanupUnresolved);
+        }
+        Ok(())
+    }
+}
+impl ServiceProcesses for ObservedProcesses {
+    fn assess<'a>(
+        &'a self,
+        registration: &'a RegisteredServer,
+    ) -> ServiceFuture<'a, RuntimeAssessment> {
+        Box::pin(async move {
+            Ok(RuntimeAssessment {
+                server: ServerId::new(registration.server_pin().identity),
+                epoch: Some(self.epoch),
+                generation: 1,
+                sessions: self.sessions.clone(),
+                token: [9; 32],
+            })
+        })
+    }
+    fn revalidate<'a>(
+        &'a self,
+        _: &'a RegisteredServer,
+        assessment: &'a RuntimeAssessment,
+    ) -> ServiceFuture<'a, ()> {
+        Box::pin(async move {
+            if assessment.epoch != Some(self.epoch) || assessment.sessions != self.sessions {
+                return Err(ServiceFailure::StaleAssessment);
+            }
+            *self.reserved.lock().unwrap() = Some(assessment.clone());
+            Ok(())
+        })
+    }
+    fn abort_reservation<'a>(
+        &'a self,
+        _: &'a RegisteredServer,
+        assessment: &'a RuntimeAssessment,
+    ) -> ServiceFuture<'a, ()> {
+        Box::pin(async move {
+            if self
+                .reserved
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|value| value != assessment)
+            {
+                return Err(ServiceFailure::StaleAssessment);
+            }
+            self.reserved.lock().unwrap().take();
+            Ok(())
+        })
+    }
+    fn quiesce<'a>(
+        &'a self,
+        registration: &'a RegisteredServer,
+        _: NativeManagementRequestRef,
+        action: NativeRetirementAction,
+        assessment: &'a RuntimeAssessment,
+    ) -> ServiceFuture<'a, Vec<SessionCleanupObservation>> {
+        Box::pin(async move {
+            if self.reserved.lock().unwrap().as_ref() != Some(assessment) {
+                return Err(ServiceFailure::StaleAssessment);
+            }
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while self.absent(registration).is_err() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .map_err(|_| ServiceFailure::CleanupUnresolved)?;
+            assessment
+                .sessions
+                .iter()
+                .map(|session| {
+                    SessionCleanupObservation::new(
+                        *session,
+                        action.reason(),
+                        CleanupResult::Confirmed(ConfirmedCleanupClass::ReapedAndReleased),
+                    )
+                    .map_err(|_| ServiceFailure::InvalidRecord)
+                })
+                .collect()
+        })
+    }
+    fn verify_absent<'a>(&'a self, registration: &'a RegisteredServer) -> ServiceFuture<'a, ()> {
+        Box::pin(async move { self.absent(registration) })
+    }
+    fn previous_instance_cleanup<'a>(
+        &'a self,
+        registration: &'a RegisteredServer,
+        _: ServerEpoch,
+        sessions: &'a [SessionKey],
+    ) -> ServiceFuture<'a, Vec<SessionCleanupObservation>> {
+        Box::pin(async move {
+            self.absent(registration)?;
+            if sessions.is_empty() {
+                Ok(Vec::new())
+            } else {
+                Err(ServiceFailure::CleanupUnresolved)
+            }
+        })
+    }
+}
+async fn stop(seed: &Seed, epoch: ServerEpoch, sessions: Vec<SessionKey>, pid: Option<u32>) {
+    let supervisor = seed.supervisor(ObservedProcesses::new(epoch, sessions, pid));
+    let request = supervisor.allocate_request().unwrap();
+    let action = supervisor
+        .assess(request, ServiceAction::Stop)
+        .await
+        .unwrap()
+        .confirm()
+        .unwrap();
+    let progress = supervisor.stop(action).await.unwrap();
+    assert_eq!(
+        progress.phase,
+        spaceterm_host::account_service::ServicePhase::Completed
+    );
+    assert_eq!(
+        supervisor.discover().unwrap().unwrap().desired_state(),
+        DesiredServerState::Stopped
+    );
+}
+async fn operation(
+    seed: &Seed,
+    transport: &dyn MessageTransport,
+    codec: &mut spaceterm_protocol::connection::AuthenticatedConnection,
+    sequence: u64,
+    command: Command,
+) -> Outcome {
+    let request = seed.request(sequence, command);
+    transport
+        .send(&codec.encode(&request_payload(&request, 2)).unwrap())
+        .await
+        .unwrap();
+    loop {
+        let payload = codec
+            .decode(&transport.recv().await.unwrap().unwrap())
+            .unwrap();
+        match &payload {
+            Payload::Major2(v2::Message {
+                kind: Some(v2::message::Kind::Outcome(_)),
+            }) => return decode_outcome(payload, request.binding().id),
+            Payload::Major2(v2::Message {
+                kind:
+                    Some(
+                        v2::message::Kind::OrganizationSnapshot(_)
+                        | v2::message::Kind::OrganizationResync(_),
+                    ),
+            }) => {}
+            _ => panic!("operation reply"),
+        }
+    }
+}
+async fn create(
+    seed: &Seed,
+    transport: &dyn MessageTransport,
+    codec: &mut spaceterm_protocol::connection::AuthenticatedConnection,
+) -> (WorkspaceId, PaneId, ControlGrant) {
+    let result = operation(
+        seed,
+        transport,
+        codec,
+        1,
+        Command::CreateWorkspace {
+            server: ServerId::new(seed.identity.pin().identity),
+            source: WorkspaceCreationSource::ServerHome {
+                server: ServerId::new(seed.identity.pin().identity),
+            },
+            name: NameDraft::Automatic,
+        },
+    )
+    .await;
+    let Outcome::CreatedWithControl(created) = result else {
+        panic!("created workspace: {result:?}");
+    };
+    let CreatedEntities::Workspace {
+        workspace, pane, ..
+    } = created.entities()
+    else {
+        panic!("workspace identities");
+    };
+    (workspace, pane, created.control().grant())
+}
+async fn start_shell(
+    seed: &Seed,
+    transport: &dyn MessageTransport,
+    codec: &mut spaceterm_protocol::connection::AuthenticatedConnection,
+    epoch: ServerEpoch,
+    generation: SessionGeneration,
+    connection: ConnectionGeneration,
+    grant: ControlGrant,
+) -> SessionKey {
+    let pane = grant.pane();
+    let client = grant.client();
+    let fence = EffectFence::new(
+        SessionKey {
+            pane,
+            epoch,
+            generation,
+        },
+        grant,
+        ConnectionBinding::new(client, connection),
+        ContextGeneration::new(1),
+        None,
+    )
+    .unwrap();
+    let intent = StartupIntent::new(
+        OperationId::new(
+            seed.streams.parts().ordinary,
+            OperationSequence::new(2).unwrap(),
+        ),
+        fence,
+        StartupSource::ExplicitSelection,
+    )
+    .unwrap();
+    assert!(matches!(
+        operation(seed, transport, codec, 2, Command::BeginStartup(intent)).await,
+        Outcome::StartupAwaitingMeasurement { .. }
+    ));
+    let Outcome::SessionStarted(session) = operation(
+        seed,
+        transport,
+        codec,
+        3,
+        Command::CompleteMeasuredStartup(MeasuredStartupMeasurement {
+            intent: intent.id(),
+            fence,
+            grid: MeasuredGrid::new(
+                24,
+                80,
+                CellPixels::new(8, 16).unwrap(),
+                SUPPORTED_GRID_LIMITS,
+            )
+            .unwrap(),
+        }),
+    )
+    .await
+    else {
+        panic!("session started");
+    };
+    session
+}
+async fn wait_pid(seed: &Seed) -> u32 {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Ok(text) = fs::read_to_string(seed.root.path().join("shell-pid"))
+                && let Ok(pid) = text.parse()
+            {
+                break pid;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap()
+}
+fn fence(
+    authority: spaceterm_core::runtime_authority::RuntimeAuthority,
+    base: Option<ContentBase>,
+) -> EffectFence {
+    let p = authority.parts();
+    EffectFence::new(
+        p.session,
+        p.grant.unwrap(),
+        p.connection.unwrap(),
+        p.context,
+        base.map(|base| base.revision),
+    )
+    .unwrap()
+}
+async fn assert_output(
+    handle: &ServerHandle,
+    principal: VerifiedPrincipal,
+    session: SessionKey,
+    events: &mut dyn RuntimeStream<RuntimePresentationEvent>,
+    expected: &str,
+) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let mut base = None;
+        let mut generation = 0;
+        loop {
+            if let Some(current) = base {
+                generation += 1;
+                let access = handle.runtime_access(principal, session).await.unwrap();
+                let stamp = QueryStamp::new(
+                    fence(access.authority, Some(current)),
+                    current,
+                    ContentRequestId::new(generation).unwrap(),
+                    RequestGeneration::new(generation),
+                )
+                .unwrap();
+                let query = ContentPageRequest::new(
+                    stamp,
+                    ContentRange::ActiveGrid,
+                    None,
+                    PageLimits::new(128, 16384, 1024 * 1024).unwrap(),
+                )
+                .unwrap();
+                match access.handle.read_page(query).unwrap().await.unwrap() {
+                    ContentReadResult::Ready(reply) => {
+                        let text = reply
+                            .page()
+                            .parts()
+                            .rows
+                            .iter()
+                            .map(|row| {
+                                row.cells()
+                                    .iter()
+                                    .map(|cell| cell.content().text())
+                                    .collect::<String>()
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        if text.contains(expected) {
+                            break;
+                        }
+                    }
+                    ContentReadResult::ResyncRequired { current, .. } => {
+                        base = Some(current);
+                        continue;
+                    }
+                    ContentReadResult::Rejected { .. } => panic!("page rejected"),
+                }
+            }
+            if let RuntimePresentationEvent::ContentInvalidated(current) =
+                events.next().await.unwrap().unwrap()
+            {
+                base = Some(current);
+            }
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn admitted_account_composes_real_shell_and_holds_instance_until_native_stop() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let seed = Seed::new().await;
+        let supervisor = seed.supervisor(Arc::new(test_support::StartupAbsence));
+        let startup = AccountStartup::admit(&supervisor).unwrap();
+        assert_eq!(
+            AccountStartup::admit(&supervisor).unwrap_err(),
+            StartupFailure::Account(ServiceFailure::Pending)
+        );
+        let server = RecoveredAccountServer::recover(supervisor.clone(), startup, seed.launch())
+            .await
+            .unwrap();
+        let handle = server.handle();
+        let run = tokio::spawn(server.run_until(std::future::pending()));
+        let endpoint = seed.registration.endpoint().unwrap();
+        while handle.phase() != ServicePhase::Serving {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let transport = IpcTransport::connect(&endpoint, MessageLimit::envelope())
+            .await
+            .unwrap();
+        let mut codec = handshake(
+            &transport,
+            seed.identity.pin(),
+            seed.principal,
+            seed.key.clone(),
+            2,
+        )
+        .await;
+        let connection =
+            ConnectionGeneration::new(reconcile(&transport, &mut codec, &handle).await);
+        let principal = VerifiedPrincipal::from_authenticated(&codec, connection).unwrap();
+        let (workspace, pane, grant) = create(&seed, &transport, &mut codec).await;
+        let record = handle
+            .snapshot()
+            .runtime()
+            .iter()
+            .find(|value| value.pane == pane)
+            .copied()
+            .unwrap();
+        let session = start_shell(
+            &seed,
+            &transport,
+            &mut codec,
+            handle.snapshot().epoch(),
+            record.session_generation,
+            connection,
+            grant,
+        )
+        .await;
+        let pid = wait_pid(&seed).await;
+        while !handle.snapshot().runtime().iter().any(|record| {
+            record.pane == pane && matches!(record.phase, SessionPhase::Running { .. })
+        }) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        handle
+            .update_client_focus(
+                principal,
+                ClientFocusUpdate {
+                    context: ContextGeneration::new(2),
+                    focused_pane: Some(pane),
+                    terminal_input_focus: true,
+                    native_effects_eligible: true,
+                },
+            )
+            .await
+            .unwrap();
+        let access = handle.runtime_access(principal, session).await.unwrap();
+        let mut events = handle
+            .subscribe_runtime(principal, fence(access.authority, None))
+            .await
+            .unwrap();
+        handle
+            .runtime_command(
+                principal,
+                FencedRuntimeCommand {
+                    fence: fence(access.authority, None),
+                    command: RuntimeCommand::InputMethodCommit(
+                        BoundedInputMethodText::new("echo ACCOUNT-$(printf ECHO)-VERIFIED".into())
+                            .unwrap(),
+                    ),
+                },
+            )
+            .await
+            .unwrap();
+        let mut enter = spaceterm_terminal::KeyInput::text_input("");
+        enter.physical_key = spaceterm_terminal::PhysicalKey::Enter;
+        enter.logical_key = "enter".into();
+        enter.text = None;
+        handle
+            .runtime_command(
+                principal,
+                FencedRuntimeCommand {
+                    fence: fence(access.authority, None),
+                    command: RuntimeCommand::Key(enter),
+                },
+            )
+            .await
+            .unwrap();
+        assert_output(
+            &handle,
+            principal,
+            session,
+            &mut *events,
+            "ACCOUNT-ECHO-VERIFIED",
+        )
+        .await;
+        transport.close().await.unwrap();
+        assert!(
+            NativeServiceProcessTable::current()
+                .unwrap()
+                .observe(pid)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            AccountStartup::admit(&supervisor).unwrap_err(),
+            StartupFailure::Account(ServiceFailure::Pending)
+        );
+        stop(&seed, session.epoch, vec![session], Some(pid)).await;
+        let report = run.await.unwrap().unwrap();
+        assert!(
+            report.cleanup_confirmed && report.listeners_closed && report.started_writes_finished
+        );
+        assert!(!endpoint.path().exists());
+        assert!(
+            NativeServiceProcessTable::current()
+                .unwrap()
+                .observe(pid)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            AccountStartup::admit(&supervisor).unwrap_err(),
+            StartupFailure::DeliberatelyStopped
+        );
+        assert!(
+            handle
+                .snapshot()
+                .state()
+                .workspaces
+                .iter()
+                .any(|value| value.id == workspace)
+        );
+    })
+    .await
+    .unwrap();
+}
+
+struct Binary(std::process::Child);
+impl Binary {
+    fn start(seed: &Seed) -> Self {
+        Self(
+            std::process::Command::new(env!("CARGO_BIN_EXE_spaceterm-server"))
+                .args([
+                    std::ffi::OsStr::new("--test-account-root"),
+                    seed.root.path().as_os_str(),
+                ])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap(),
+        )
+    }
+    async fn wait(&mut self) -> std::process::ExitStatus {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(status) = self.0.try_wait().unwrap() {
+                    break status;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap()
+    }
+    async fn connect(&mut self, seed: &Seed) -> IpcTransport {
+        let endpoint = seed.registration.endpoint().unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(status) = self.0.try_wait().unwrap() {
+                    use std::io::Read;
+                    let mut message = String::new();
+                    self.0
+                        .stderr
+                        .take()
+                        .unwrap()
+                        .read_to_string(&mut message)
+                        .unwrap();
+                    panic!("account binary exited {status}: {message}");
+                }
+                if let Ok(transport) =
+                    IpcTransport::connect(&endpoint, MessageLimit::envelope()).await
+                {
+                    break transport;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap()
+    }
+}
+impl Drop for Binary {
+    fn drop(&mut self) {
+        if self.0.try_wait().unwrap().is_none() {
+            // Let the real owner join its PTY workers even when an assertion fails.
+            let _ = std::process::Command::new("/bin/kill")
+                .args(["-TERM", &self.0.id().to_string()])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while self.0.try_wait().unwrap().is_none() && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            if self.0.try_wait().unwrap().is_none() {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+    }
+}
+async fn snapshot(
+    transport: &dyn MessageTransport,
+    codec: &mut spaceterm_protocol::connection::AuthenticatedConnection,
+    generation: u64,
+) -> v2::OrganizationSnapshot {
+    let request = Payload::Major2(v2::Message {
+        kind: Some(v2::message::Kind::OrganizationQuery(
+            v2::OrganizationQuery {
+                request: generation,
+                request_generation: generation,
+                ..Default::default()
+            },
+        )),
+    });
+    transport
+        .send(&codec.encode(&request).unwrap())
+        .await
+        .unwrap();
+    loop {
+        let payload = codec
+            .decode(&transport.recv().await.unwrap().unwrap())
+            .unwrap();
+        let Payload::Major2(v2::Message {
+            kind: Some(v2::message::Kind::OrganizationSnapshot(value)),
+        }) = payload
+        else {
+            panic!("organization snapshot");
+        };
+        let part = value.part.as_ref().unwrap();
+        if part.request != generation || part.request_generation != generation {
+            continue;
+        }
+        assert!(value.complete);
+        spaceterm_protocol::convert::organization::v2::decode_snapshot_part(&value).unwrap();
+        return value;
+    }
+}
+async fn reconcile_snapshot(
+    transport: &dyn MessageTransport,
+    codec: &mut spaceterm_protocol::connection::AuthenticatedConnection,
+    snapshot: &v2::OrganizationSnapshot,
+) -> ConnectionGeneration {
+    let principal = codec.principal();
+    let client = ClientId::new(
+        ServerId::new(principal.server),
+        u64::from_be_bytes(principal.client[8..].try_into().unwrap()),
+    )
+    .unwrap();
+    let request = Payload::Major2(v2::Message {
+        kind: Some(v2::message::Kind::Reconciliation(v2::Reconciliation {
+            request: 1,
+            server: snapshot.server.clone(),
+            client: Some(spaceterm_protocol::convert::identity::encode_client(client)),
+            epoch: snapshot.epoch,
+            organization_revision: snapshot.revision,
+            ..Default::default()
+        })),
+    });
+    let Payload::Major2(v2::Message {
+        kind: Some(v2::message::Kind::Reconciliation(value)),
+    }) = round_trip(transport, codec, request).await
+    else {
+        panic!("reconciliation");
+    };
+    assert!(value.acknowledged);
+    ConnectionGeneration::new(value.connection_generation)
+}
+
+#[tokio::test]
+async fn real_binary_authenticates_starts_shell_stops_and_restores_organization() {
+    tokio::time::timeout(Duration::from_secs(45), async {
+        let seed = Seed::new().await;
+        let mut binary = Binary::start(&seed);
+        let transport = binary.connect(&seed).await;
+        let mut codec = handshake(
+            &transport,
+            seed.identity.pin(),
+            seed.principal,
+            seed.key.clone(),
+            2,
+        )
+        .await;
+        let before = snapshot(&transport, &mut codec, 1).await;
+        let connection = reconcile_snapshot(&transport, &mut codec, &before).await;
+        let (workspace, pane, grant) = create(&seed, &transport, &mut codec).await;
+        let created = snapshot(&transport, &mut codec, 2).await;
+        let (_, record) =
+            spaceterm_protocol::convert::organization::v2::decode_pane_record(&created.panes[0])
+                .unwrap();
+        let session = start_shell(
+            &seed,
+            &transport,
+            &mut codec,
+            ServerEpoch::new(created.epoch),
+            record.session_generation,
+            connection,
+            grant,
+        )
+        .await;
+        let pid = wait_pid(&seed).await;
+        assert_eq!(
+            NativeServiceProcessTable::current()
+                .unwrap()
+                .observe(pid)
+                .unwrap()
+                .unwrap()
+                .uid(),
+            seed.registration.key().account_uid
+        );
+        // The second binary cannot reopen the actor's store or replace its endpoint.
+        let mut duplicate = Binary::start(&seed);
+        assert!(!duplicate.wait().await.success());
+        assert!(
+            NativeServiceProcessTable::current()
+                .unwrap()
+                .observe(pid)
+                .unwrap()
+                .is_some()
+        );
+        transport.close().await.unwrap();
+        stop(&seed, session.epoch, vec![session], Some(pid)).await;
+        assert!(binary.wait().await.success());
+        assert!(!seed.registration.endpoint().unwrap().path().exists());
+        assert!(
+            NativeServiceProcessTable::current()
+                .unwrap()
+                .observe(pid)
+                .unwrap()
+                .is_none()
+        );
+        let mut stopped = Binary::start(&seed);
+        assert!(!stopped.wait().await.success());
+        assert!(!seed.registration.endpoint().unwrap().path().exists());
+        let supervisor = seed.supervisor(ObservedProcesses::new(session.epoch, Vec::new(), None));
+        let request = supervisor.allocate_request().unwrap();
+        supervisor.start(request).await.unwrap();
+        fs::remove_file(seed.root.path().join("shell-pid")).unwrap();
+        let mut restarted = Binary::start(&seed);
+        let transport = restarted.connect(&seed).await;
+        let mut codec = handshake(
+            &transport,
+            seed.identity.pin(),
+            seed.principal,
+            seed.key.clone(),
+            2,
+        )
+        .await;
+        let restored = snapshot(&transport, &mut codec, 1).await;
+        assert!(restored.epoch > created.epoch);
+        assert_eq!(
+            spaceterm_protocol::convert::identity::decode_workspace(
+                restored.workspaces[0].id.as_ref().unwrap()
+            )
+            .unwrap(),
+            workspace
+        );
+        assert_eq!(
+            spaceterm_protocol::convert::identity::decode_pane(
+                restored.panes[0].id.as_ref().unwrap()
+            )
+            .unwrap(),
+            pane
+        );
+        assert!(
+            !seed.root.path().join("shell-pid").exists(),
+            "restored panes must wait for explicit selection"
+        );
+        transport.close().await.unwrap();
+        stop(&seed, ServerEpoch::new(restored.epoch), Vec::new(), None).await;
+        assert!(restarted.wait().await.success());
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn real_binary_retains_only_explicit_remote_scope_across_stop_start_and_disable() {
+    tokio::time::timeout(Duration::from_secs(90), async {
+        let seed = Seed::new().await;
+        let server_id = ServerId::new(seed.identity.pin().identity);
+        let mut binary = Binary::start(&seed);
+        let transport = binary.connect(&seed).await;
+        let mut codec = handshake(
+            &transport,
+            seed.identity.pin(),
+            seed.principal,
+            seed.key.clone(),
+            2,
+        )
+        .await;
+        let before = snapshot(&transport, &mut codec, 1).await;
+        reconcile_snapshot(&transport, &mut codec, &before).await;
+        let initial = query_status(&transport, &mut codec).await;
+        assert!(!initial.parts().remote_access.value.is_enabled());
+        assert!(initial.parts().listeners.is_empty());
+        let reservation = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let mut endpoints = vec![reservation.local_addr().unwrap()];
+        drop(reservation);
+        match tokio::net::TcpListener::bind("[::1]:0").await {
+            Ok(reservation) => endpoints.push(reservation.local_addr().unwrap()),
+            Err(error)
+                if matches!(
+                    error.raw_os_error(),
+                    Some(libc::EAFNOSUPPORT | libc::EADDRNOTAVAIL)
+                ) => {}
+            Err(error) => panic!("IPv6 loopback probe failed: {error}"),
+        }
+        let policy = RemoteAccessPolicy::enabled(server_id, endpoints.clone()).unwrap();
+        operation(
+            &seed,
+            &transport,
+            &mut codec,
+            1,
+            Command::SetRemoteAccess {
+                server: server_id,
+                expected_version: initial.parts().remote_access.version,
+                value: policy.clone(),
+            },
+        )
+        .await;
+        let enabled = query_status(&transport, &mut codec).await;
+        assert_eq!(enabled.parts().remote_access.value, policy);
+        assert_eq!(enabled.parts().listeners.len(), endpoints.len());
+        let addresses: Vec<_> = enabled
+            .parts()
+            .listeners
+            .iter()
+            .map(|fact| fact.endpoint)
+            .collect();
+        for address in &addresses {
+            assert!(tokio::net::TcpStream::connect(address).await.is_ok());
+        }
+        transport.close().await.unwrap();
+        let live_wss = WssTransport::connect(
+            addresses[0],
+            "localhost",
+            EnrolledServerKey(seed.identity.pin().public_key),
+            MessageLimit::envelope(),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        let mut remote_codec = handshake(
+            &live_wss,
+            seed.identity.pin(),
+            seed.principal,
+            seed.key.clone(),
+            2,
+        )
+        .await;
+        assert_eq!(
+            query_status(&live_wss, &mut remote_codec)
+                .await
+                .parts()
+                .remote_access,
+            enabled.parts().remote_access
+        );
+        stop(&seed, ServerEpoch::new(before.epoch), Vec::new(), None).await;
+        assert!(binary.wait().await.success());
+        assert_eq!(live_wss.recv().await.unwrap(), None);
+        for address in &addresses {
+            assert!(tokio::net::TcpStream::connect(address).await.is_err());
+        }
+        let mut deliberately_stopped = Binary::start(&seed);
+        assert!(!deliberately_stopped.wait().await.success());
+        assert!(!seed.registration.endpoint().unwrap().path().exists());
+        let supervisor = seed.supervisor(ObservedProcesses::new(
+            ServerEpoch::new(before.epoch),
+            Vec::new(),
+            None,
+        ));
+        supervisor
+            .start(supervisor.allocate_request().unwrap())
+            .await
+            .unwrap();
+        let mut restarted = Binary::start(&seed);
+        let transport = restarted.connect(&seed).await;
+        let mut codec = handshake(
+            &transport,
+            seed.identity.pin(),
+            seed.principal,
+            seed.key.clone(),
+            2,
+        )
+        .await;
+        let restored = snapshot(&transport, &mut codec, 2).await;
+        reconcile_snapshot(&transport, &mut codec, &restored).await;
+        let status = query_status(&transport, &mut codec).await;
+        assert_eq!(status.parts().remote_access, enabled.parts().remote_access);
+        assert!(status.parts().epoch > enabled.parts().epoch);
+        assert_eq!(status.parts().listeners.len(), endpoints.len());
+        assert!(
+            status
+                .parts()
+                .listeners
+                .iter()
+                .all(|fact| fact.state == ListenerState::Listening)
+        );
+        operation(
+            &seed,
+            &transport,
+            &mut codec,
+            2,
+            Command::SetRemoteAccess {
+                server: server_id,
+                expected_version: status.parts().remote_access.version,
+                value: RemoteAccessPolicy::disabled(server_id),
+            },
+        )
+        .await;
+        let disabled = query_status(&transport, &mut codec).await;
+        assert!(!disabled.parts().remote_access.value.is_enabled());
+        assert!(disabled.parts().listeners.is_empty());
+        for listener in &status.parts().listeners {
+            assert!(
+                tokio::net::TcpStream::connect(listener.endpoint)
+                    .await
+                    .is_err()
+            );
+        }
+        transport.close().await.unwrap();
+        stop(&seed, ServerEpoch::new(restored.epoch), Vec::new(), None).await;
+        assert!(restarted.wait().await.success());
+        supervisor
+            .start(supervisor.allocate_request().unwrap())
+            .await
+            .unwrap();
+        let mut disabled_restart = Binary::start(&seed);
+        let transport = disabled_restart.connect(&seed).await;
+        let mut codec = handshake(
+            &transport,
+            seed.identity.pin(),
+            seed.principal,
+            seed.key.clone(),
+            2,
+        )
+        .await;
+        let final_status = query_status(&transport, &mut codec).await;
+        assert_eq!(
+            final_status.parts().remote_access,
+            disabled.parts().remote_access
+        );
+        assert!(final_status.parts().listeners.is_empty());
+        transport.close().await.unwrap();
+        stop(&seed, final_status.parts().epoch, Vec::new(), None).await;
+        assert!(disabled_restart.wait().await.success());
+    })
+    .await
+    .unwrap();
+}

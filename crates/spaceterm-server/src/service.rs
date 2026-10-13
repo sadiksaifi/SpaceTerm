@@ -436,12 +436,18 @@ impl RecoveredServer {
         let (lifecycle, lifecycle_incoming) = mpsc::channel(64);
         let (events, event_incoming) = mpsc::channel(128);
         let (phase, phase_received) = watch::channel(ServicePhase::Ready);
+        let (runtime_status, runtime_status_received) =
+            watch::channel(spaceterm_core::management::ServerRuntimeStatus {
+                storage: spaceterm_core::management::StorageStatus::Ready,
+                intent: spaceterm_core::management::ServerRunIntent::Running,
+            });
         let (snapshot, snapshot_received) = watch::channel(config.core.reducer.snapshot());
         let (owner_drop, owner_dropped) = oneshot::channel();
         let handle = ServerHandle {
             requests,
             lifecycle,
             phase: phase_received,
+            runtime_status: runtime_status_received,
             snapshot: snapshot_received,
             pairing_snapshot,
         };
@@ -510,6 +516,7 @@ impl RecoveredServer {
             startup_failures: BTreeMap::new(),
             events,
             phase,
+            runtime_status,
             snapshot,
             handle: handle.clone(),
             inspection_inflight: false,
@@ -531,9 +538,16 @@ impl RecoveredServer {
     pub fn handle(&self) -> ServerHandle {
         self.handle.clone()
     }
-    pub async fn run(
+    pub async fn run(self, listeners: ListenerFactories) -> Result<ShutdownReport, ServerFailure> {
+        self.run_until(listeners, std::future::pending()).await
+    }
+
+    /// Native process termination closes this owner without issuing durable Stop.
+    /// The same actor still drains started writes, retires workers and closes listeners.
+    pub async fn run_until(
         mut self,
         listeners: ListenerFactories,
+        shutdown: impl std::future::Future<Output = ()> + Send,
     ) -> Result<ShutdownReport, ServerFailure> {
         let (reply, result) = oneshot::channel();
         self.handle
@@ -554,13 +568,20 @@ impl RecoveredServer {
         {
             let _ = sender.send(());
         }
-        let join = self
+        let mut join = self
             .join
             .take()
             .ok_or_else(|| failure(ServerFailureClass::RecoveryRequired))?;
-        let result = join
-            .await
-            .map_err(|_| failure(ServerFailureClass::CleanupIncomplete))?;
+        let result = tokio::select! {
+            result = &mut join => result,
+            () = shutdown => {
+                if let Some(sender) = self.owner_drop.take() {
+                    let _ = sender.send(());
+                }
+                join.await
+            }
+        }
+        .map_err(|_| failure(ServerFailureClass::CleanupIncomplete))?;
         self.owner_drop.take();
         // An open in progress can finish after close. The owning listener port
         // must close that same generation before this composition returns.
@@ -649,6 +670,7 @@ struct Actor {
     startup_failures: BTreeMap<SessionKey, (SessionTerminalResult, SessionCleanupObservation)>,
     events: mpsc::Sender<Event>,
     phase: watch::Sender<ServicePhase>,
+    runtime_status: watch::Sender<spaceterm_core::management::ServerRuntimeStatus>,
     snapshot: watch::Sender<Arc<OrganizationSnapshot>>,
     handle: ServerHandle,
     inspection_inflight: bool,
@@ -2953,6 +2975,12 @@ impl Actor {
         };
         match disposition {
             CommitDisposition::Durable(receipt) => {
+                self.runtime_status.send_if_modified(|status| {
+                    let changed =
+                        status.storage != spaceterm_core::management::StorageStatus::Ready;
+                    status.storage = spaceterm_core::management::StorageStatus::Ready;
+                    changed
+                });
                 if self
                     .cursor
                     .install(pending.transaction.parts(), receipt)
@@ -3308,6 +3336,14 @@ impl Actor {
                 }
             }
             CommitDisposition::NotApplied(error) => {
+                self.runtime_status.send_modify(|status| {
+                    use spaceterm_core::{management::StorageStatus, storage::StoreFailure};
+                    status.storage = match error {
+                        StoreFailure::Locked => StorageStatus::Locked,
+                        StoreFailure::Unavailable | StoreFailure::Io => StorageStatus::Unavailable,
+                        _ => StorageStatus::RecoveryRequired,
+                    };
+                });
                 let released: Vec<_> = pending
                     .action
                     .retirement()
@@ -3344,6 +3380,9 @@ impl Actor {
                 }
             }
             CommitDisposition::Indeterminate => {
+                self.runtime_status.send_modify(|status| {
+                    status.storage = spaceterm_core::management::StorageStatus::RecoveryRequired;
+                });
                 self.busy = false;
                 reject_action(
                     pending.action,
@@ -3413,6 +3452,14 @@ impl Actor {
                                 let _ = reply.send(Err(failure(ServerFailureClass::Capacity)));
                             }
                         } else {
+                            // Only provider-verified deliberate Stop changes intent.
+                            // Restart/update and process termination remain Running.
+                            if action == NativeRetirementAction::Stop {
+                                self.runtime_status.send_modify(|status| {
+                                    status.intent =
+                                        spaceterm_core::management::ServerRunIntent::Stopped;
+                                });
+                            }
                             self.shutdown = Some(ShutdownState {
                                 request: Some((native, action)),
                                 replies: vec![reply],

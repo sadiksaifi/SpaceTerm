@@ -1,7 +1,9 @@
 //! Production composition reuses actor authentication, pairing and publication.
 
 use spaceterm_core::{
-    management::{NativeVerification, ServerStatus, ServerStatusParts, ServerVersion},
+    management::{
+        NativeVerification, ServerRuntimeStatus, ServerStatus, ServerStatusParts, ServerVersion,
+    },
     operation_ledger_contracts::LedgerCodec,
     organization::OrganizationSnapshot,
     organization::Versioned,
@@ -37,7 +39,9 @@ use crate::{
         protocol_lookup::{PairingProtocolLookup, PairingSnapshotPort},
         service::PairingService,
     },
-    protocol_dispatch::{ActorOrdinaryDispatch, ProtocolDispatcher, RestrictedDispatchPort},
+    protocol_dispatch::{
+        ActorOrdinaryDispatch, OrdinaryDispatchPort, ProtocolDispatcher, RestrictedDispatchPort,
+    },
 };
 
 /// Install these shared ports in ServerConfig before recovery. The constructor
@@ -46,10 +50,20 @@ use crate::{
 pub struct ProductionListenerPorts {
     pub outcomes: Arc<ConnectionOutcomes>,
     revocations: Arc<ListenerRevocations>,
+    status: Mutex<Option<watch::Receiver<ServerStatus>>>,
 }
 impl ProductionListenerPorts {
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
+    }
+    /// The same bounded feed used by authenticated clients, retained after close.
+    /// Status is comparison data and grants no native-management authority.
+    pub fn subscribe_status(&self) -> Result<watch::Receiver<ServerStatus>, ServerFailure> {
+        self.status
+            .lock()
+            .map_err(|_| failure(ServerFailureClass::RecoveryRequired))?
+            .clone()
+            .ok_or_else(|| failure(ServerFailureClass::RecoveryRequired))
     }
     pub fn extensions(
         &self,
@@ -98,6 +112,18 @@ pub fn production_listener_factories<S: PairingSnapshotPort + 'static>(
     config: ProductionListenerConfig<'_>,
     lookup: Arc<PairingProtocolLookup<S>>,
 ) -> Result<ListenerFactories, ServerFailure> {
+    let ordinary = Arc::new(ActorOrdinaryDispatch::new(config.codec.clone()));
+    production_listener_factories_with_dispatch(handle, config, lookup, ordinary)
+}
+
+/// Adds real Git or management dispatch while retaining the same pairing and
+/// authentication composition. The fallback never receives restricted traffic.
+pub fn production_listener_factories_with_dispatch<S: PairingSnapshotPort + 'static>(
+    handle: ServerHandle,
+    config: ProductionListenerConfig<'_>,
+    lookup: Arc<PairingProtocolLookup<S>>,
+    ordinary: Arc<dyn OrdinaryDispatchPort>,
+) -> Result<ListenerFactories, ServerFailure> {
     let snapshot = handle.snapshot();
     let pin = config.registration.server_pin();
     if pin != config.identity.pin()
@@ -106,7 +132,13 @@ pub fn production_listener_factories<S: PairingSnapshotPort + 'static>(
     {
         return Err(failure(ServerFailureClass::Authentication));
     }
-    let initial = status(&snapshot, NonZeroU64::MIN, &config.running, Vec::new())?;
+    let initial = status(
+        &snapshot,
+        NonZeroU64::MIN,
+        &config.running,
+        Vec::new(),
+        handle.runtime_status(),
+    )?;
     let (status_sender, status_receiver) = watch::channel(initial);
     let authentication = Arc::new(ProductionAuthentication {
         uid: config.registration.key().account_uid,
@@ -116,10 +148,10 @@ pub fn production_listener_factories<S: PairingSnapshotPort + 'static>(
         epoch: snapshot.epoch(),
     });
     let dispatch = Arc::new(ProductionDispatch {
-        status: status_receiver,
+        status: status_receiver.clone(),
         ordinary: Arc::new(PairingOrdinaryDispatch::new(
             config.pairing.clone(),
-            Arc::new(ActorOrdinaryDispatch::new(config.codec)),
+            ordinary,
         )),
         pairing: config.pairing,
         outcomes: config.ports.outcomes.clone(),
@@ -145,9 +177,15 @@ pub fn production_listener_factories<S: PairingSnapshotPort + 'static>(
     }
     *revocations = Arc::downgrade(&listeners);
     drop(revocations);
+    *config
+        .ports
+        .status
+        .lock()
+        .map_err(|_| failure(ServerFailureClass::RecoveryRequired))? = Some(status_receiver);
     Ok(ListenerFactories {
         lifecycle: Arc::new(StatusListeners {
             listeners,
+            handle,
             running: config.running,
             status: status_sender,
             monitor: Mutex::new(None),
@@ -243,6 +281,7 @@ fn status(
     revision: NonZeroU64,
     running: &spaceterm_distribution::BuildVersion,
     listeners: Vec<spaceterm_core::management::ListenerStatus>,
+    runtime: ServerRuntimeStatus,
 ) -> Result<ServerStatus, ServerFailure> {
     let retained = snapshot
         .state()
@@ -250,6 +289,7 @@ fn status(
         .as_ref()
         .ok_or_else(|| failure(ServerFailureClass::RecoveryRequired))?;
     ServerStatus::new(ServerStatusParts {
+        runtime,
         server: snapshot.state().server,
         epoch: snapshot.epoch(),
         revision,
@@ -271,6 +311,7 @@ fn status(
 }
 struct StatusListeners {
     listeners: Arc<ServerListeners>,
+    handle: ServerHandle,
     running: spaceterm_distribution::BuildVersion,
     status: watch::Sender<ServerStatus>,
     monitor: Mutex<Option<JoinHandle<Result<(), ServerFailure>>>>,
@@ -292,24 +333,23 @@ impl ListenerLifecyclePort for StatusListeners {
                     return Err(failure(ServerFailureClass::StaleAuthority));
                 }
                 let mut organization = handle.subscribe_snapshot();
+                let mut runtime = handle.subscribe_runtime_status();
                 let mut listeners = self.listeners.subscribe_status();
                 let mut stop = self.stop.subscribe();
                 let sender = self.status.clone();
                 let running = self.running.clone();
                 *monitor = Some(tokio::spawn(async move {
-                    let mut revision = NonZeroU64::MIN;
                     loop {
                         tokio::select! { biased;
                             _ = stop.wait_for(|closed| *closed) => return Ok(()),
                             changed = organization.changed() => { if changed.is_err() { return Ok(()); } },
                             changed = listeners.changed() => { if changed.is_err() { return Ok(()); } },
+                            changed = runtime.changed() => { if changed.is_err() { return Ok(()); } },
                         }
-                        revision = revision
-                            .checked_add(1)
-                            .ok_or_else(|| failure(ServerFailureClass::Exhausted))?;
                         let snapshot = organization.borrow_and_update().clone();
                         let facts = listeners.borrow_and_update().clone();
-                        sender.send_replace(status(&snapshot, revision, &running, facts)?);
+                        let runtime = *runtime.borrow_and_update();
+                        publish_status(&sender, &snapshot, &running, facts, runtime)?;
                     }
                 }));
             }
@@ -321,11 +361,18 @@ impl ListenerLifecyclePort for StatusListeners {
         policy: Versioned<RemoteAccessPolicy>,
         receipt: CommitReceipt,
     ) -> ServerFuture<'_, Result<(), ServerFailure>> {
-        self.listeners.apply_remote_policy(policy, receipt)
+        Box::pin(async move {
+            let result = self.listeners.apply_remote_policy(policy, receipt).await;
+            // Committed policy and final bind facts precede the operation reply.
+            self.publish_current()?;
+            result
+        })
     }
     fn close(&self) -> ServerFuture<'_, Result<(), ServerFailure>> {
         Box::pin(async move {
             let closed = self.listeners.close().await;
+            // Keep the last status truthful after the endpoint is gone.
+            self.publish_current()?;
             self.stop.send_replace(true);
             let monitor = self
                 .monitor
@@ -340,4 +387,60 @@ impl ListenerLifecyclePort for StatusListeners {
             closed
         })
     }
+}
+
+impl StatusListeners {
+    fn publish_current(&self) -> Result<(), ServerFailure> {
+        publish_status(
+            &self.status,
+            &self.handle.snapshot(),
+            &self.running,
+            self.listeners.subscribe_status().borrow().clone(),
+            self.handle.runtime_status(),
+        )
+    }
+}
+
+fn publish_status(
+    sender: &watch::Sender<ServerStatus>,
+    snapshot: &OrganizationSnapshot,
+    running: &spaceterm_distribution::BuildVersion,
+    listeners: Vec<spaceterm_core::management::ListenerStatus>,
+    runtime: ServerRuntimeStatus,
+) -> Result<(), ServerFailure> {
+    let mut result = Ok(());
+    sender.send_if_modified(|current| {
+        let replacement = (|| {
+            let next = status(
+                snapshot,
+                current.parts().revision,
+                running,
+                listeners,
+                runtime,
+            )?;
+            if next == *current {
+                return Ok(None);
+            }
+            let mut parts = next.parts().clone();
+            parts.revision = parts
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| failure(ServerFailureClass::Exhausted))?;
+            ServerStatus::new(parts)
+                .map(Some)
+                .map_err(|_| failure(ServerFailureClass::RecoveryRequired))
+        })();
+        match replacement {
+            Ok(Some(next)) => {
+                *current = next;
+                true
+            }
+            Ok(None) => false,
+            Err(error) => {
+                result = Err(error);
+                false
+            }
+        }
+    });
+    result
 }

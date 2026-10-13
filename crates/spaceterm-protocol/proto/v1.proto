@@ -341,6 +341,9 @@ message ManagementStatus { uint64 request = 1; ServerState state = 2; uint64 epo
   repeated ListenerStatus listeners = 15;
   repeated ManagementProgress progress = 16;
   bool native_verified = 17;
+  // Additive comparison facts. Zero means the older peer did not observe them.
+  uint32 storage_state = 18;
+  uint32 run_intent = 19;
 }
 message RepositoryQuery { spaceterm.common.Entity repository = 1; uint64 expected_revision = 2; bytes continuation = 3; }
 message RepositoryPage { spaceterm.common.Entity repository = 1; uint64 revision = 2; string branch = 3; uint32 added = 4; uint32 modified = 5; uint32 deleted = 6; repeated Worktree worktrees = 7; bytes continuation = 8; bool complete = 9; spaceterm.common.Failure failure = 10; }

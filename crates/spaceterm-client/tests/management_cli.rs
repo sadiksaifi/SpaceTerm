@@ -141,6 +141,7 @@ fn progress(n: u64) -> ManagementProgress {
 }
 fn status(revision: u64, epoch: u64) -> ServerStatus {
     ServerStatus::new(ServerStatusParts {
+        runtime: Default::default(),
         server: stream().server(),
         epoch: ServerEpoch::new(epoch),
         revision: NonZeroU64::new(revision).unwrap(),

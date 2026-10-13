@@ -171,6 +171,7 @@ impl ManagementBackend for Backend {
     fn status(&self) -> ManagementFuture<'_, ServerStatus> {
         Box::pin(async {
             Ok(ServerStatus::new(ServerStatusParts {
+                runtime: Default::default(),
                 server: stream().server(),
                 epoch: ServerEpoch::new(7),
                 revision: NonZeroU64::new(1).unwrap(),
