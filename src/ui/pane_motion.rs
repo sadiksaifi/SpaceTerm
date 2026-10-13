@@ -14,10 +14,12 @@ const EDGE_TOLERANCE: f32 = 0.5;
 /// The Panes of one Pane Layout easing from where they were drawn to where a split, close, move,
 /// zoom, or split reset lays them out.
 ///
-/// Only a change announced by [`PaneMotion::expect_change`] moves Panes, so a window resize or a
-/// split resize drag lays them out at once and stops any motion under way. A Pane that stays eases from where it was drawn. A new
-/// Pane opens from its far edge as the Pane beside it makes room, and a removed Pane's place
-/// closes toward its far edge as the Pane beside it takes the space.
+/// Only a change announced by [`PaneMotion::expect_change`] or [`PaneMotion::expect_raise`] moves
+/// Panes, so a window resize or a split resize drag lays them out at once and stops any motion
+/// under way. After a layout change, a Pane that stays eases from where it was drawn. A new Pane
+/// opens from its far edge as the Pane beside it makes room, and a removed Pane's place closes
+/// toward its far edge as the Pane beside it takes the space. A raised Pane, such as one zooming,
+/// moves alone above the others, which stay where they are.
 #[derive(Default)]
 pub(crate) struct PaneMotion {
     /// Where each Pane was laid out in the last frame, in Pane Layout coordinates.
@@ -28,8 +30,21 @@ pub(crate) struct PaneMotion {
     moves: BTreeMap<PaneId, Move>,
     /// The places of removed Panes as they close.
     closing: Vec<Closing>,
-    /// Whether the next frame's layout comes from an operation that moves Panes.
-    expected: bool,
+    /// The change the next frame's layout comes from, when an operation announced one.
+    expected: Option<Change>,
+    /// The change the last frame started moving Panes toward.
+    started: Option<Change>,
+    /// The Pane moving above the others.
+    raised: Option<PaneId>,
+}
+
+/// An announced change of the Pane Layout.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Change {
+    /// Every Pane moves to its new place.
+    Layout,
+    /// Only this Pane moves, above the others.
+    Raise(PaneId),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -56,8 +71,8 @@ pub(crate) struct PaneFrames {
     pub(crate) closing: Vec<Bounds<Pixels>>,
     /// Whether any Pane or closing place is still moving.
     pub(crate) moving: bool,
-    /// Whether this frame started moving Panes toward an announced change.
-    pub(crate) started: bool,
+    /// The Pane moving above the others, and how far it has come.
+    pub(crate) raised: Option<(PaneId, f32)>,
 }
 
 impl Default for PaneFrames {
@@ -67,7 +82,7 @@ impl Default for PaneFrames {
             scale_factor: 1.0,
             closing: Vec::new(),
             moving: false,
-            started: false,
+            raised: None,
         }
     }
 }
@@ -95,7 +110,22 @@ impl PaneMotion {
     /// Moves Panes from where they are drawn to the layout of the next frame, which an operation
     /// such as a split, close, move, or zoom changes.
     pub(crate) fn expect_change(&mut self) {
-        self.expected = true;
+        self.expected = Some(Change::Layout);
+    }
+
+    /// Moves only `pane_id` from where it is drawn to its place in the next frame's layout, above
+    /// the other Panes, which stay where they are. A zoom or unzoom changes the layout this way.
+    pub(crate) fn expect_raise(&mut self, pane_id: PaneId) {
+        self.expected = Some(Change::Raise(pane_id));
+    }
+
+    /// Starts the change the last frame started again, toward the next frame's layout. A change
+    /// that also resizes the Pane Layout, such as an unzoom that raises its minimum size, is laid
+    /// out at the measured size one frame late.
+    pub(crate) fn restart_change(&mut self) {
+        if let Some(change) = self.started {
+            self.expected = Some(change);
+        }
     }
 
     /// Where this frame draws each Pane laid out at `targets`, in Pane Layout coordinates, at
@@ -122,17 +152,26 @@ impl PaneMotion {
         if targets.is_empty() {
             return PaneFrames::default();
         }
-        let started = std::mem::take(&mut self.expected) && !self.drawn.is_empty();
-        if started {
-            self.follow_change(targets, now, motion);
-        } else if *targets != self.targets {
-            self.moves.clear();
-            self.closing.clear();
+        self.started = self.expected.take().filter(|_| !self.drawn.is_empty());
+        match self.started {
+            Some(Change::Layout) => {
+                self.raised = None;
+                self.follow_change(targets, now, motion);
+            }
+            Some(Change::Raise(pane_id)) => self.follow_raise(pane_id, targets, now, motion),
+            None if *targets != self.targets => {
+                self.moves.clear();
+                self.closing.clear();
+            }
+            None => {}
         }
         self.targets.clone_from(targets);
         self.moves
             .retain(|pane_id, motion| targets.contains_key(pane_id) && !motion.ease.finished(now));
         self.closing.retain(|closing| !closing.ease.finished(now));
+        self.raised = self
+            .raised
+            .filter(|pane_id| self.moves.contains_key(pane_id));
 
         let frames: BTreeMap<_, _> = targets
             .iter()
@@ -155,7 +194,9 @@ impl PaneMotion {
                 .map(|closing| between(closing.from, closing.to, closing.ease.at(now)))
                 .collect(),
             moving: !self.moves.is_empty() || !self.closing.is_empty(),
-            started,
+            raised: self
+                .raised
+                .map(|pane_id| (pane_id, self.moves[&pane_id].ease.at(now))),
             ..PaneFrames::default()
         }
     }
@@ -207,6 +248,27 @@ impl PaneMotion {
             })
             .collect::<Vec<_>>();
         self.closing.extend(closing);
+    }
+
+    /// Starts `pane_id` alone toward its place in `targets` from where it was last drawn.
+    fn follow_raise(
+        &mut self,
+        pane_id: PaneId,
+        targets: &BTreeMap<PaneId, Bounds<Pixels>>,
+        now: Instant,
+        motion: spaceterm_ui::ControlMotion,
+    ) {
+        let from = self.drawn.get(&pane_id).copied();
+        match from.zip(targets.get(&pane_id).copied()) {
+            Some((from, target)) if from != target => {
+                let ease = Ease::new(PRESENCE_DURATION, now, motion);
+                self.moves.insert(pane_id, Move { from, ease });
+                self.raised = Some(pane_id);
+            }
+            _ => {
+                self.moves.remove(&pane_id);
+            }
+        }
     }
 
     /// Where a new Pane laid out at `target` opens from: its far edge from the drawn Pane whose
@@ -368,7 +430,7 @@ mod tests {
     }
 
     #[test]
-    fn a_zoom_should_grow_the_pane_while_the_others_close_away_from_it() {
+    fn a_zoom_should_grow_only_the_zoomed_pane_above_the_others() {
         let start = Instant::now();
         let mut motion = PaneMotion::default();
         let grid = layout(&[
@@ -377,26 +439,66 @@ mod tests {
             (3, rect(0., 60., 100., 110.)),
         ]);
         motion.present_at(&grid, start, ControlMotion::Standard);
-        motion.expect_change();
+        motion.expect_raise(PaneId::new(1));
 
         let zoomed = layout(&[(1, rect(0., 0., 210., 110.))]);
-        let frames = motion.present_at(&zoomed, start, ControlMotion::Standard);
-        let closed = motion
-            .closing
-            .iter()
-            .map(|closing| closing.to)
-            .collect::<Vec<_>>();
+        let first = motion.present_at(&zoomed, start, ControlMotion::Standard);
+        let moving = motion.present_at(&zoomed, start + HALFWAY, ControlMotion::Standard);
         let rested = motion.present_at(&zoomed, start + PRESENCE_DURATION, ControlMotion::Standard);
 
-        assert_eq!(frame(&frames, 1), rect(0., 0., 100., 50.));
         assert_eq!(
-            closed,
-            vec![rect(210., 0., 210., 50.), rect(0., 110., 100., 110.)],
-            "a Pane beside the zoomed Pane closes sideways, and one below it closes downward"
+            (frame(&first, 1), first.closing.clone(), first.raised),
+            (
+                rect(0., 0., 100., 50.),
+                Vec::new(),
+                Some((PaneId::new(1), 0.0))
+            ),
+            "the other Panes must not close; the zoomed Pane covers them"
+        );
+        let grown = frame(&moving, 1);
+        assert!(grown.right() > px(100.) && grown.right() < px(210.));
+        assert!(
+            moving
+                .raised
+                .is_some_and(|(_, progress)| progress > 0.0 && progress < 1.0)
         );
         assert_eq!(
-            (frame(&rested, 1), rested.moving),
-            (zoomed[&PaneId::new(1)], false)
+            (frame(&rested, 1), rested.raised, rested.moving),
+            (zoomed[&PaneId::new(1)], None, false)
+        );
+    }
+
+    #[test]
+    fn an_unzoom_should_return_the_zoomed_pane_above_the_others_in_their_places() {
+        let start = Instant::now();
+        let mut motion = PaneMotion::default();
+        motion.present_at(
+            &layout(&[(1, rect(0., 0., 210., 110.))]),
+            start,
+            ControlMotion::Standard,
+        );
+        motion.expect_raise(PaneId::new(1));
+
+        let grid = layout(&[
+            (1, rect(0., 0., 100., 50.)),
+            (2, rect(110., 0., 210., 50.)),
+            (3, rect(0., 60., 100., 110.)),
+        ]);
+        let frames = motion.present_at(&grid, start, ControlMotion::Standard);
+
+        assert_eq!(
+            (
+                frame(&frames, 1),
+                frame(&frames, 2),
+                frame(&frames, 3),
+                frames.raised.map(|(pane_id, _)| pane_id),
+            ),
+            (
+                rect(0., 0., 210., 110.),
+                grid[&PaneId::new(2)],
+                grid[&PaneId::new(3)],
+                Some(PaneId::new(1)),
+            )
         );
     }
 
