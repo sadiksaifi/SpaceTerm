@@ -55,6 +55,9 @@ pub(crate) struct StartupDependencies<A: SshProcessAdapter> {
 }
 
 impl<A: SshProcessAdapter> StartupDependencies<A> {
+    pub(crate) fn paths(&self) -> Arc<AppPaths> {
+        self.paths.clone()
+    }
     pub(crate) fn settings_storage(&self) -> Arc<dyn crate::settings::storage::SettingsStorage> {
         Arc::new(crate::settings::storage::ConfigSettingsStorage::new(
             Arc::clone(&self.paths),

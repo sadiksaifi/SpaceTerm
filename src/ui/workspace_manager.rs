@@ -1378,7 +1378,8 @@ impl WorkspaceManager {
                         manager.pin_picker = None;
                         manager.transient.pin_target = None;
                     }
-                    DirectoryPickerEvent::StateChanged => {}
+                    DirectoryPickerEvent::StateChanged
+                    | DirectoryPickerEvent::ConfirmedServer(_) => {}
                 }
                 manager.sync_terminal_focus_blocker(window, cx);
                 cx.notify();

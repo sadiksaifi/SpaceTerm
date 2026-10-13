@@ -180,6 +180,7 @@ struct LeaseInner {
     shared: Arc<Shared>,
 }
 struct ServerState {
+    active: bool,
     info: ConnectedInfo,
     snapshot: Arc<ReplicaSnapshot>,
     transfers: Arc<Semaphore>,
@@ -324,6 +325,7 @@ impl PaneChannels {
             servers.insert(
                 info.server,
                 ServerState {
+                    active: true,
                     info,
                     snapshot: Arc::clone(&snapshot),
                     transfers,
@@ -399,11 +401,19 @@ impl PaneChannels {
         server: ServerId,
         reason: ConnectionInvalidation,
     ) -> Result<(), ClientFailure> {
-        self.shared
-            .servers
-            .lock()
-            .map_err(|_| stale())?
-            .remove(&server);
+        {
+            let mut servers = self.shared.servers.lock().map_err(|_| stale())?;
+            if matches!(
+                reason,
+                ConnectionInvalidation::Shutdown | ConnectionInvalidation::BindingRemoved
+            ) {
+                servers.remove(&server);
+            } else if let Some(retained) = servers.get_mut(&server) {
+                // Retained membership serves personal navigation only. It grants no
+                // connection, content permit, startup intent or runtime effect.
+                retained.active = false;
+            }
+        }
         for channel in self.channels(server)? {
             let mut state = channel.state.lock().map_err(|_| stale())?;
             state.intent = None;
@@ -502,10 +512,10 @@ impl WorkspaceLease {
                 lease: Arc::clone(&self.0),
             });
         }
-        let (info, snapshot) = {
+        let (info, snapshot, active) = {
             let servers = self.0.shared.servers.lock().map_err(|_| stale())?;
             let server = servers.get(&self.0.workspace.server()).ok_or_else(stale)?;
-            (server.info, Arc::clone(&server.snapshot))
+            (server.info, Arc::clone(&server.snapshot), server.active)
         };
         let record = snapshot
             .organization
@@ -523,8 +533,21 @@ impl WorkspaceLease {
             .ok_or_else(missing)?
             .id;
         let facts = PaneChannelState {
-            readiness: PaneReadiness::Reconciling,
-            runtime: None,
+            readiness: if active {
+                PaneReadiness::Reconciling
+            } else {
+                PaneReadiness::Offline
+            },
+            runtime: if active {
+                None
+            } else {
+                snapshot
+                    .organization
+                    .runtime()
+                    .iter()
+                    .find(|runtime| runtime.pane == pane)
+                    .copied()
+            },
             connection: None,
             context: self.0.shared.next_context()?,
             facts: PaneContextFacts::default(),
@@ -562,8 +585,10 @@ impl WorkspaceLease {
                 .try_acquire_owned()
                 .map_err(|_| resource_limit())?,
         });
-        channel.apply(info, &snapshot)?;
         channels.insert(pane, Arc::downgrade(&channel));
+        if active {
+            channel.apply(info, &snapshot)?;
+        }
         Ok(PaneChannel {
             inner: channel,
             lease: Arc::clone(&self.0),
@@ -1191,6 +1216,16 @@ impl ChannelInner {
             return Err(stale());
         }
         let mut state = self.state.lock().map_err(|_| stale())?;
+        if !self
+            .shared
+            .servers
+            .lock()
+            .map_err(|_| stale())?
+            .get(&info.server)
+            .is_some_and(|server| server.active && same_attempt(server.info, info))
+        {
+            return Err(stale());
+        }
         let present = snapshot
             .organization
             .state()

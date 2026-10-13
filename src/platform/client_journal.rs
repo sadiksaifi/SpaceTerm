@@ -14,13 +14,6 @@ use spaceterm_core::operation_ledger_contracts::LedgerCodec;
 use std::{ffi::OsStr, sync::Arc};
 
 #[derive(Clone, Copy)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "desktop C3 installs the native journal after the pairing/codec handoff"
-    )
-)]
 pub(crate) enum JournalOpenMode {
     Initialize,
     Existing,
@@ -29,13 +22,6 @@ pub(crate) enum JournalOpenMode {
 /// Only identity-scoped AppPaths establish this local path. Saved routes and
 /// server-supplied paths cannot provision client storage. Existing mode never
 /// creates a missing directory or database. SQLite work runs off the GUI thread.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "desktop C3 installs the native journal after the pairing/codec handoff"
-    )
-)]
 pub(crate) async fn open(
     paths: &AppPaths,
     mode: JournalOpenMode,
