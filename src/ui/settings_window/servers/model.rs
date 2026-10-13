@@ -12,9 +12,23 @@
     )
 )]
 
-use std::rc::Rc;
+use std::{num::NonZeroU64, rc::Rc};
 
 use gpui::{App, AppContext as _, Context, Entity, Global, SharedString};
+use spaceterm_client::management_cli::confirmation::{
+    AssessmentToken, ManagementAction, ManagementAssessment,
+};
+use spaceterm_core::{
+    authority::{FieldVersion, ServerEpoch},
+    identity::{DeviceId, PairingId},
+    operations::OperationId,
+    pairing::{LocalPairingKey, PairingTarget},
+};
+use spaceterm_host::{
+    native_deployment::contracts::NativeRequestId,
+    startup::{DesiredServerState, InstallationId},
+};
+use spaceterm_protocol::{ProtocolError, negotiation::Negotiator};
 
 use crate::platform::permission_access::AccessibilityNaming;
 use crate::worktrees::path_template::WorktreePathTemplateError;
@@ -81,6 +95,8 @@ pub(crate) enum ServerStatus {
     Offline,
     /// Reachable, but the two sides cannot use one protocol.
     Incompatible(IncompatibleSide),
+    /// Reachable, but disjoint profiles do not establish which side an update would fix.
+    UnsupportedProfiles,
     /// Installing `version`. The server restarts when it finishes.
     Updating {
         version: SharedString,
@@ -184,10 +200,141 @@ pub(crate) struct RemoteAccess {
     pub(crate) pending: bool,
 }
 
+/// Protocol facts verified by the connection owner, never inferred from release labels.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum VerifiedCompatibility {
+    Compatible {
+        major: u32,
+    },
+    Incompatible(IncompatibleSide),
+    /// Disjoint profiles do not establish which side an update would fix.
+    UnsupportedProfiles,
+}
+
+impl VerifiedCompatibility {
+    /// Projects authenticated protocol facts without comparing release labels.
+    pub(crate) fn connection_status(self) -> ServerStatus {
+        match self {
+            Self::Compatible { .. } => ServerStatus::Running,
+            Self::Incompatible(side) => ServerStatus::Incompatible(side),
+            Self::UnsupportedProfiles => ServerStatus::UnsupportedProfiles,
+        }
+    }
+
+    /// Call only with the authenticated peer's advertisement. Parsing alone grants no trust.
+    pub(crate) fn from_verified_advertisements(
+        client: &[u32],
+        server: &[u32],
+    ) -> Result<Self, ProtocolError> {
+        match Negotiator::select(client, server) {
+            Ok(major) => Ok(Self::Compatible { major }),
+            Err(ProtocolError::Incompatible) => {
+                let side = if client[0] < server[server.len() - 1] {
+                    Self::Incompatible(IncompatibleSide::ThisDevice)
+                } else if server[0] < client[client.len() - 1] {
+                    Self::Incompatible(IncompatibleSide::Server)
+                } else {
+                    Self::UnsupportedProfiles
+                };
+                Ok(side)
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+/// Supplied account-service lifecycle facts, not a selector for this client's host.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ServerServiceLifecycle {
+    LoginSession,
+    BootWithLingering,
+}
+
+/// Signed installation comparison facts. The version is a display label only.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ServerInstallation {
+    pub(crate) installation: InstallationId,
+    pub(crate) artifact_sha256: [u8; 32],
+    pub(crate) version: SharedString,
+}
+
+/// Exact activation proposal retained by the native owner. It is not OS authorization.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct UpdateAssessment {
+    pub(crate) reference: AssessmentToken,
+    pub(crate) native_request: NativeRequestId,
+    pub(crate) original_pairing: LocalPairingKey,
+    pub(crate) selection_generation: NonZeroU64,
+    pub(crate) approved: Option<InstallationId>,
+    pub(crate) running: Option<InstallationId>,
+    pub(crate) candidate: ServerInstallation,
+    pub(crate) runtime_epoch: Option<ServerEpoch>,
+    pub(crate) desired: DesiredServerState,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ServerInstallations {
+    pub(crate) selection_generation: Option<NonZeroU64>,
+    pub(crate) running: Option<ServerInstallation>,
+    pub(crate) approved: Option<ServerInstallation>,
+    pub(crate) staged: Option<ServerInstallation>,
+    pub(crate) activation: Option<UpdateAssessment>,
+}
+
+/// One exact authorized pairing. A device that reenrolls has a different target.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PairedDevice {
+    pub(crate) target: PairingTarget,
+    pub(crate) name: SharedString,
+}
+
+/// A bounded, revision-coherent page from the selected server's pairing owner.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PairedDevices {
+    pub(crate) version: FieldVersion,
+    pub(crate) this_device: DeviceId,
+    pub(crate) total: u64,
+    pub(crate) devices: Vec<PairedDevice>,
+    /// Exact last pairing of this page. The server checks the page revision on continuation.
+    pub(crate) next: Option<PairingId>,
+}
+
+impl PairedDevices {
+    pub(crate) fn valid_for(&self, pairing: &LocalPairingKey) -> bool {
+        let server = pairing.parts().server;
+        self.version.get() != 0
+            && self.this_device.bytes() != [0; 16]
+            && self.devices.len() <= 256
+            && self.total >= self.devices.len() as u64
+            && self
+                .devices
+                .iter()
+                .all(|device| device.target.parts().server == server)
+            && self.devices.iter().enumerate().all(|(index, device)| {
+                self.devices[..index]
+                    .iter()
+                    .all(|other| other.target.parts().pairing != device.target.parts().pairing)
+            })
+            && self.next.is_none_or(|next| {
+                self.devices
+                    .last()
+                    .is_some_and(|last| last.target.parts().pairing == next)
+                    && self.total > self.devices.len() as u64
+            })
+    }
+}
+
 /// One server this device is paired with.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ServerSummary {
+    /// Presentation lookup only. Requests carry `pairing` independently of this key.
     pub(crate) key: ServerKey,
+    pub(crate) pairing: LocalPairingKey,
+    pub(crate) runtime_epoch: Option<ServerEpoch>,
+    pub(crate) service_lifecycle: Option<ServerServiceLifecycle>,
+    pub(crate) compatibility: Option<VerifiedCompatibility>,
+    pub(crate) installations: ServerInstallations,
+    pub(crate) paired_devices: Option<PairedDevices>,
     pub(crate) name: SharedString,
     pub(crate) route: ServerRoute,
     pub(crate) status: ServerStatus,
@@ -206,6 +353,23 @@ impl ServerSummary {
     pub(crate) fn connected(&self) -> bool {
         self.status == ServerStatus::Running
     }
+
+    pub(crate) fn activation_matches(&self, assessment: &UpdateAssessment) -> bool {
+        assessment.original_pairing == self.pairing
+            && Some(assessment.selection_generation) == self.installations.selection_generation
+            && assessment.approved == self.installations.approved.as_ref().map(|v| v.installation)
+            && assessment.running == self.installations.running.as_ref().map(|v| v.installation)
+            && Some(&assessment.candidate) == self.installations.staged.as_ref()
+            && assessment.candidate.artifact_sha256 != [0; 32]
+            && assessment.runtime_epoch == self.runtime_epoch
+            && assessment.desired
+                == if self.status == ServerStatus::Stopped {
+                    DesiredServerState::Stopped
+                } else {
+                    DesiredServerState::Running
+                }
+            && self.installations.activation.as_ref() == Some(assessment)
+    }
 }
 
 /// A self-unpair whose server-side revocation is still being retried in the background. The
@@ -214,6 +378,102 @@ impl ServerSummary {
 pub(crate) struct PendingUnpair {
     pub(crate) id: SharedString,
     pub(crate) server_name: SharedString,
+    pub(crate) original_pairing: LocalPairingKey,
+    pub(crate) operation: OperationId,
+    pub(crate) phase: PendingUnpairPhase,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PendingUnpairReason {
+    Unreachable,
+    Incompatible,
+    RouteChanged,
+    CredentialUnavailable,
+    StorageUnavailable,
+    OutcomeUnknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PendingUnpairPhase {
+    AwaitingConfirmation(PendingUnpairReason),
+    /// A verified receipt is durable; only exact local credential cleanup remains.
+    CredentialCleanup,
+}
+
+/// Canonical target captured when an action is presented, not resolved from later selection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ServerRequestTarget {
+    Server {
+        pairing: LocalPairingKey,
+        runtime_epoch: Option<ServerEpoch>,
+        route: ServerRoute,
+    },
+    PendingUnpair {
+        pairing: LocalPairingKey,
+        operation: OperationId,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BoundServerRequest {
+    pub(crate) target: ServerRequestTarget,
+    pub(crate) request: ServerRequest,
+}
+
+impl BoundServerRequest {
+    /// Captures current canonical scope. Receivers must still validate it against their registry.
+    pub(crate) fn bind(request: ServerRequest, snapshot: &ServersSnapshot) -> Option<Self> {
+        let target = if let Some(key) = request.server() {
+            let server = snapshot.servers.iter().find(|server| &server.key == key)?;
+            match &request {
+                ServerRequest::SetWorktreeLocation {
+                    base_revision: 0, ..
+                } => return None,
+                ServerRequest::InstallUpdate {
+                    version,
+                    assessment,
+                    ..
+                } if !server.activation_matches(assessment)
+                    || version != &assessment.candidate.version =>
+                {
+                    return None;
+                }
+                ServerRequest::UnpairDevice {
+                    target, assessment, ..
+                } if target.parts().server != server.pairing.parts().server
+                    || !matches!(assessment.action(), ManagementAction::Unpair { target: assessed } if assessed == target) =>
+                {
+                    return None;
+                }
+                _ => {}
+            }
+            ServerRequestTarget::Server {
+                pairing: server.pairing.clone(),
+                runtime_epoch: server.runtime_epoch,
+                route: server.route.clone(),
+            }
+        } else {
+            let ServerRequest::DismissUnpairNotice(id) = &request else {
+                return None;
+            };
+            let pending = snapshot
+                .pending_unpairs
+                .iter()
+                .find(|pending| &pending.id == id)?;
+            if pending.operation.stream().pairing() != pending.original_pairing.parts().pairing {
+                return None;
+            }
+            ServerRequestTarget::PendingUnpair {
+                pairing: pending.original_pairing.clone(),
+                operation: pending.operation,
+            }
+        };
+        Some(Self { target, request })
+    }
+
+    pub(crate) fn still_matches(&self, snapshot: &ServersSnapshot) -> bool {
+        Self::bind(self.request.clone(), snapshot).as_ref() == Some(self)
+    }
 }
 
 /// Everything the Servers section presents at one moment.
@@ -237,6 +497,17 @@ pub(crate) enum ServerRequest {
     InstallUpdate {
         server: ServerKey,
         version: SharedString,
+        assessment: UpdateAssessment,
+    },
+    ReadPairedDevices {
+        server: ServerKey,
+        after: Option<PairingId>,
+        version: Option<FieldVersion>,
+    },
+    UnpairDevice {
+        server: ServerKey,
+        target: PairingTarget,
+        assessment: Box<ManagementAssessment>,
     },
     EndAllSessions(ServerKey),
     /// Removes this device's pairing now and revokes it at the server in the background.
@@ -274,6 +545,8 @@ impl ServerRequest {
             | Self::DiscardWorktreeLocationEdit(server)
             | Self::DisableRemoteAccess(server)
             | Self::InstallUpdate { server, .. }
+            | Self::ReadPairedDevices { server, .. }
+            | Self::UnpairDevice { server, .. }
             | Self::SetWorktreeLocation { server, .. }
             | Self::EnableRemoteAccess { server, .. } => Some(server),
             Self::DismissUnpairNotice(_) => None,
@@ -287,7 +560,7 @@ impl ServerRequest {
 /// Until a snapshot carries a New Worktree Location setting that differs from the one a change
 /// went out against, the section keeps showing the sent text as being saved.
 pub(crate) trait ServerRequests {
-    fn send(&self, request: ServerRequest, cx: &mut App);
+    fn send(&self, request: BoundServerRequest, cx: &mut App);
 }
 
 /// The published servers and the channel for requests about them.
@@ -329,3 +602,7 @@ pub(crate) fn install(requests: Rc<dyn ServerRequests>, cx: &mut App) -> Entity<
     cx.set_global(InstalledServers(servers.clone()));
     servers
 }
+
+#[cfg(test)]
+#[path = "model_tests.rs"]
+mod tests;
