@@ -117,9 +117,13 @@ struct Fixture {
     service: PairingService,
     ports: Arc<ProductionListenerPorts>,
     stop: Arc<native::Host>,
+    owner: Option<Arc<spaceterm_host::account_service::ServiceSupervisor>>,
 }
 impl Fixture {
     async fn new() -> Self {
+        Self::new_registered(false).await
+    }
+    async fn new_registered(approved: bool) -> Self {
         #[cfg(target_os = "macos")]
         let parent = std::path::PathBuf::from("/private/tmp");
         #[cfg(target_os = "linux")]
@@ -128,7 +132,16 @@ impl Fixture {
         let native_account =
             AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let registration = native_account
-            .initialize(DesiredServerState::Running)
+            .initialize_with_installation(
+                DesiredServerState::Running,
+                approved.then(|| spaceterm_host::account_service::InstallationStatus {
+                    installation: spaceterm_host::startup::InstallationId(
+                        std::num::NonZeroU64::MIN,
+                    ),
+                    version: spaceterm_server::distribution_metadata::version().unwrap(),
+                    artifact_sha256: [1; 32],
+                }),
+            )
             .unwrap();
         let pin = registration.server_pin();
         let identity = StoreIdentity {
@@ -185,11 +198,18 @@ impl Fixture {
         let server = RecoveredServer::recover(boundary.config, boundary.dependencies)
             .await
             .unwrap();
+        let owner = approved.then(|| Arc::new(native_account.reopen()));
+        let owner_port: Arc<dyn AccountOwnerEnrollmentPort> = match &owner {
+            Some(supervisor) => Arc::new(
+                spaceterm_server::account_startup::AccountOwnerEnrollment::new(supervisor.clone()),
+            ),
+            None => Arc::new(Owner),
+        };
         let service = PairingService::new(
             Arc::new(server.handle()),
             account.credentials.clone(),
             Arc::new(CanonicalCodec),
-            Arc::new(Owner),
+            owner_port,
             pin,
         )
         .unwrap();
@@ -201,6 +221,7 @@ impl Fixture {
             service,
             ports,
             stop,
+            owner,
         }
     }
     async fn enroll(
@@ -211,29 +232,50 @@ impl Fixture {
         authentication::Principal,
         Arc<DeviceKey>,
     ) {
-        let device = DeviceKey::new(71);
-        let auth = DeviceKey::new(72);
+        self.enroll_with_seed(major, 71).await
+    }
+    async fn enroll_with_seed(
+        &self,
+        major: u32,
+        seed: u8,
+    ) -> (
+        PairingClientStreams,
+        authentication::Principal,
+        Arc<DeviceKey>,
+    ) {
+        let device = DeviceKey::new(seed);
+        let auth = DeviceKey::new(seed + 1);
         let proposal = EnrollmentProposal::new(EnrollmentProposalParts {
             server: ServerId::new(self.identity.pin().identity),
-            device: DeviceId::new([71; 16]),
+            device: DeviceId::new([seed; 16]),
             keys: PairingKeys::new(PairingKeysParts {
                 device_identity_public_key: device.public_key(),
                 pairing_authentication_public_key: auth.public_key(),
             })
             .unwrap(),
-            claim_nonce: [71; 32],
+            claim_nonce: [seed; 32],
         })
         .unwrap();
         let (proof_device, proof_auth) =
             VerifiedDeviceClaim::proofs(&proposal, device.as_ref(), auth.as_ref()).unwrap();
+        let (owner_request, owner_digest) = match &self.owner {
+            Some(supervisor) => {
+                let request = supervisor.allocate_request().unwrap();
+                let owner = spaceterm_server::account_startup::AccountOwnerEnrollment::new(
+                    supervisor.clone(),
+                );
+                let digest = owner.record_authorization(request, &proposal).unwrap();
+                (request, digest)
+            }
+            None => (
+                NativeRequestId::new([seed; 16]).unwrap(),
+                RequestDigest::from_bytes([seed; 32]),
+            ),
+        };
         let claim = VerifiedDeviceClaim::verify(proposal, &proof_device, &proof_auth).unwrap();
         let issued = self
             .service
-            .issue_owner_authorization(
-                NativeRequestId::new([71; 16]).unwrap(),
-                RequestDigest::from_bytes([71; 32]),
-                claim,
-            )
+            .issue_owner_authorization(owner_request, owner_digest, claim)
             .await
             .unwrap();
         let PairingOutcome::AuthorizationReserved { ticket, .. } = issued.outcome else {
@@ -283,7 +325,7 @@ impl Fixture {
         let streams = client.clone();
         let principal = authentication::Principal {
             server: self.identity.pin().identity,
-            device: [71; 16],
+            device: [seed; 16],
             pairing: native::local(streams.parts().client.pairing.local()),
             client: native::local(streams.parts().client.id.local()),
         };
@@ -303,6 +345,7 @@ async fn handshake(
         capabilities: vec![
             spaceterm_protocol::negotiation::CAPABILITY_NORMALIZED_CREATION_TOPOLOGY,
             spaceterm_protocol::negotiation::CAPABILITY_CANONICAL_DOMAIN,
+            spaceterm_protocol::negotiation::CAPABILITY_ORGANIZATION_COMPARISONS,
         ],
         ..Default::default()
     };
@@ -349,7 +392,7 @@ async fn reconcile(
     transport: &dyn MessageTransport,
     codec: &mut spaceterm_protocol::connection::AuthenticatedConnection,
     handle: &ServerHandle,
-) {
+) -> u64 {
     let principal = codec.principal();
     let snapshot = handle.snapshot();
     macro_rules! profile {
@@ -382,10 +425,16 @@ async fn reconcile(
     match round_trip(transport, codec, request).await {
         Payload::Major1(v1::Message {
             kind: Some(v1::message::Kind::Reconciliation(value)),
-        }) => assert!(value.acknowledged),
+        }) => {
+            assert!(value.acknowledged);
+            value.connection_generation
+        }
         Payload::Major2(v2::Message {
             kind: Some(v2::message::Kind::Reconciliation(value)),
-        }) => assert!(value.acknowledged),
+        }) => {
+            assert!(value.acknowledged);
+            value.connection_generation
+        }
         _ => panic!("reconciliation"),
     }
 }
@@ -436,20 +485,46 @@ async fn query_status(
             })),
         })
     };
-    let publication = match round_trip(transport, codec, query).await {
-        Payload::Major1(v1::Message {
-            kind: Some(v1::message::Kind::StatusPublication(value)),
-        }) => {
-            management::v1::decode_publication(&value, &|_| Err(ProtocolError::UnexpectedMessage))
-                .unwrap()
-        }
-        Payload::Major2(v2::Message {
-            kind: Some(v2::message::Kind::StatusPublication(value)),
-        }) => {
-            management::v2::decode_publication(&value, &|_| Err(ProtocolError::UnexpectedMessage))
-                .unwrap()
-        }
-        _ => panic!("status publication"),
+    transport
+        .send(&codec.encode(&query).unwrap())
+        .await
+        .unwrap();
+    let publication = loop {
+        let payload = codec
+            .decode(&transport.recv().await.unwrap().unwrap())
+            .unwrap();
+        let publication = match payload {
+            Payload::Major1(v1::Message {
+                kind: Some(v1::message::Kind::StatusPublication(value)),
+            }) => management::v1::decode_publication(&value, &|_| {
+                Err(ProtocolError::UnexpectedMessage)
+            })
+            .unwrap(),
+            Payload::Major2(v2::Message {
+                kind: Some(v2::message::Kind::StatusPublication(value)),
+            }) => management::v2::decode_publication(&value, &|_| {
+                Err(ProtocolError::UnexpectedMessage)
+            })
+            .unwrap(),
+            Payload::Major1(v1::Message {
+                kind:
+                    Some(
+                        v1::message::Kind::OrganizationSnapshot(_)
+                        | v1::message::Kind::OrganizationDelta(_)
+                        | v1::message::Kind::OrganizationResync(_),
+                    ),
+            })
+            | Payload::Major2(v2::Message {
+                kind:
+                    Some(
+                        v2::message::Kind::OrganizationSnapshot(_)
+                        | v2::message::Kind::OrganizationDelta(_)
+                        | v2::message::Kind::OrganizationResync(_),
+                    ),
+            }) => continue,
+            _ => panic!("status publication"),
+        };
+        break publication;
     };
     let StatusPublication::Snapshot { status, .. } = publication else {
         panic!("snapshot");
@@ -463,6 +538,8 @@ async fn production_ipc_and_wss_use_real_identity_pairing_and_reliable_actor_out
         for major in [1, 2] {
             let fixture = Fixture::new().await;
             let (streams, principal, device) = fixture.enroll(major).await;
+            let (remote_streams, remote_principal, remote_device) =
+                fixture.enroll_with_seed(major, 81).await;
             let handle = fixture.server.handle();
             let pin = fixture.identity.pin();
             let endpoint = fixture.registration.endpoint().unwrap();
@@ -479,6 +556,7 @@ async fn production_ipc_and_wss_use_real_identity_pairing_and_reliable_actor_out
                 Arc::new(PairingProtocolLookup::new(handle.clone())),
             )
             .unwrap();
+            let feed = fixture.ports.subscribe_status().unwrap();
             let run = tokio::spawn(fixture.server.run(factories));
             while !endpoint.path().exists() {
                 tokio::task::yield_now().await;
@@ -493,6 +571,13 @@ async fn production_ipc_and_wss_use_real_identity_pairing_and_reliable_actor_out
             let mut ipc_codec = handshake(&ipc, pin, principal, device.clone(), major).await;
             reconcile(&ipc, &mut ipc_codec, &handle).await;
             let initial = query_status(&ipc, &mut ipc_codec).await;
+            assert_eq!(
+                initial.parts().runtime,
+                ServerRuntimeStatus {
+                    storage: StorageStatus::Ready,
+                    intent: ServerRunIntent::Running,
+                }
+            );
             assert!(!initial.parts().remote_access.value.is_enabled());
             assert!(initial.parts().listeners.is_empty());
             assert_eq!(initial.parts().epoch, handle.snapshot().epoch());
@@ -507,6 +592,16 @@ async fn production_ipc_and_wss_use_real_identity_pairing_and_reliable_actor_out
                     .unwrap();
             let address = reservation.local_addr().unwrap();
             drop(reservation);
+            let mut addresses = vec![address];
+            match tokio::net::TcpListener::bind("[::1]:0").await {
+                Ok(reservation) => addresses.push(reservation.local_addr().unwrap()),
+                Err(error)
+                    if matches!(
+                        error.raw_os_error(),
+                        Some(libc::EAFNOSUPPORT | libc::EADDRNOTAVAIL)
+                    ) => {}
+                Err(error) => panic!("IPv6 loopback probe failed: {error}"),
+            }
             let version = handle
                 .snapshot()
                 .state()
@@ -520,8 +615,11 @@ async fn production_ipc_and_wss_use_real_identity_pairing_and_reliable_actor_out
                 Command::SetRemoteAccess {
                     server: ServerId::new(pin.identity),
                     expected_version: version,
-                    value: RemoteAccessPolicy::enabled(ServerId::new(pin.identity), vec![address])
-                        .unwrap(),
+                    value: RemoteAccessPolicy::enabled(
+                        ServerId::new(pin.identity),
+                        addresses.clone(),
+                    )
+                    .unwrap(),
                 },
                 &CanonicalCodec,
             )
@@ -532,9 +630,12 @@ async fn production_ipc_and_wss_use_real_identity_pairing_and_reliable_actor_out
             );
             let enabled = query_status(&ipc, &mut ipc_codec).await;
             assert!(enabled.parts().remote_access.value.is_enabled());
-            assert_eq!(enabled.parts().listeners[0].endpoint, address);
-            assert_eq!(enabled.parts().listeners[0].state, ListenerState::Listening);
-            ipc.close().await.unwrap();
+            assert_eq!(enabled.parts().listeners.len(), addresses.len());
+            for (fact, address) in enabled.parts().listeners.iter().zip(&addresses) {
+                assert_eq!(fact.endpoint, *address);
+                assert_eq!(fact.state, ListenerState::Listening);
+                assert_eq!(fact.generation.get(), 2);
+            }
             let wrong = WssTransport::connect(
                 address,
                 "localhost",
@@ -553,10 +654,13 @@ async fn production_ipc_and_wss_use_real_identity_pairing_and_reliable_actor_out
             )
             .await
             .unwrap();
-            let mut codec = handshake(&wss, pin, principal, device, major).await;
+            let mut codec = handshake(&wss, pin, remote_principal, remote_device, major).await;
             reconcile(&wss, &mut codec, &handle).await;
             let create = CanonicalOperationRequest::new(
-                OperationId::new(streams.parts().ordinary, OperationSequence::new(2).unwrap()),
+                OperationId::new(
+                    remote_streams.parts().ordinary,
+                    OperationSequence::new(1).unwrap(),
+                ),
                 Command::CreateWorkspace {
                     server: ServerId::new(pin.identity),
                     source: WorkspaceCreationSource::ServerHome {
@@ -578,7 +682,51 @@ async fn production_ipc_and_wss_use_real_identity_pairing_and_reliable_actor_out
             );
             assert_eq!(first, replay);
             assert_eq!(handle.snapshot().state().workspaces.len(), 1);
-            wss.close().await.unwrap();
+            // Both IP families carry the same pinned authenticated protocol.
+            if let Some(ipv6) = addresses.get(1) {
+                let transport = WssTransport::connect(
+                    *ipv6,
+                    "localhost",
+                    EnrolledServerKey(pin.public_key),
+                    MessageLimit::envelope(),
+                    Duration::from_secs(2),
+                )
+                .await
+                .unwrap();
+                let mut ipv6_codec =
+                    handshake(&transport, pin, remote_principal, DeviceKey::new(82), major).await;
+                assert_eq!(
+                    query_status(&transport, &mut ipv6_codec)
+                        .await
+                        .parts()
+                        .server,
+                    ServerId::new(pin.identity)
+                );
+                transport.close().await.unwrap();
+            }
+            let disable = CanonicalOperationRequest::new(
+                OperationId::new(streams.parts().ordinary, OperationSequence::new(2).unwrap()),
+                Command::SetRemoteAccess {
+                    server: ServerId::new(pin.identity),
+                    expected_version: enabled.parts().remote_access.version,
+                    value: RemoteAccessPolicy::disabled(ServerId::new(pin.identity)),
+                },
+                &CanonicalCodec,
+            )
+            .unwrap();
+            let _ = decode_outcome(
+                round_trip(&ipc, &mut ipc_codec, request_payload(&disable, major)).await,
+                disable.binding().id,
+            );
+            assert_eq!(wss.recv().await.unwrap(), None);
+            for address in &addresses {
+                assert!(tokio::net::TcpStream::connect(address).await.is_err());
+            }
+            let disabled = query_status(&ipc, &mut ipc_codec).await;
+            assert!(!disabled.parts().remote_access.value.is_enabled());
+            assert!(disabled.parts().listeners.is_empty());
+            assert_eq!(disabled.parts().epoch, initial.parts().epoch);
+            ipc.close().await.unwrap();
             handle
                 .shutdown(TrustedShutdownRequest {
                     authority: fixture.stop,
@@ -586,6 +734,12 @@ async fn production_ipc_and_wss_use_real_identity_pairing_and_reliable_actor_out
                 .await
                 .unwrap();
             assert!(run.await.unwrap().unwrap().listeners_closed);
+            assert_eq!(handle.runtime_status().intent, ServerRunIntent::Stopped);
+            assert_eq!(
+                feed.borrow().parts().runtime.intent,
+                ServerRunIntent::Stopped
+            );
+            assert!(feed.borrow().parts().listeners.is_empty());
             assert!(!endpoint.path().exists());
             assert!(tokio::net::TcpStream::connect(address).await.is_err());
         }
@@ -629,4 +783,144 @@ async fn identified_actor_admission_requires_a_live_connection_reply_reservation
         .await
         .unwrap();
     server.wait().await.unwrap();
+}
+
+#[tokio::test]
+async fn listener_owner_shutdown_joins_actor_and_removes_endpoint() {
+    let fixture = Fixture::new().await;
+    let handle = fixture.server.handle();
+    let endpoint = fixture.registration.endpoint().unwrap();
+    let listeners = production_listener_factories(
+        handle.clone(),
+        ProductionListenerConfig {
+            registration: &fixture.registration,
+            identity: fixture.identity.clone(),
+            running: spaceterm_distribution::BuildVersion::parse("1.0.0").unwrap(),
+            codec: Arc::new(CanonicalCodec),
+            pairing: fixture.service,
+            ports: fixture.ports,
+        },
+        Arc::new(PairingProtocolLookup::new(handle.clone())),
+    )
+    .unwrap();
+    let (shutdown, received) = tokio::sync::oneshot::channel();
+    let run = tokio::spawn(fixture.server.run_until(listeners, async {
+        let _ = received.await;
+    }));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while handle.phase() != ServicePhase::Serving {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(endpoint.path().exists());
+    shutdown.send(()).unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        result.unwrap_err().class,
+        ServerFailureClass::RecoveryRequired
+    );
+    assert!(!endpoint.path().exists());
+    assert_eq!(handle.phase(), ServicePhase::RecoveryRequired);
+    assert_eq!(handle.runtime_status().intent, ServerRunIntent::Running);
+    assert_eq!(handle.runtime_status().storage, StorageStatus::Ready);
+}
+
+#[cfg(feature = "test-support")]
+#[path = "support/account_composition.rs"]
+mod account_composition;
+
+#[tokio::test]
+async fn actor_status_distinguishes_locked_unavailable_and_a_successful_storage_retry() {
+    use spaceterm_core::storage::{CommitDisposition, StoreFailure};
+    for (error, storage) in [
+        (StoreFailure::Locked, StorageStatus::Locked),
+        (StoreFailure::Unavailable, StorageStatus::Unavailable),
+        (StoreFailure::Io, StorageStatus::Unavailable),
+    ] {
+        let fixture = native::Fixture::new();
+        let principal = fixture.principal(1, 1);
+        let db = fixture.db.clone();
+        let codec = fixture.codec.clone();
+        let stop = fixture.host.clone();
+        let server = RecoveredServer::recover(fixture.config, fixture.dependencies)
+            .await
+            .unwrap();
+        let handle = server.handle();
+        native::connect(&handle, principal).await;
+        let request = native::request(
+            &codec,
+            1,
+            1,
+            Command::RenameWorkspace {
+                workspace: native::workspace(),
+                expected_version: spaceterm_core::authority::FieldVersion::new(1),
+                draft: NameDraft::Custom(NameText::new("storage retry".into()).unwrap()),
+            },
+        );
+        db.lock().unwrap().next = Some(CommitDisposition::NotApplied(error));
+        assert_eq!(
+            handle
+                .submit(principal, request.clone())
+                .await
+                .err()
+                .unwrap()
+                .class,
+            ServerFailureClass::StorageUnavailable
+        );
+        assert_eq!(handle.runtime_status().storage, storage);
+        assert_eq!(handle.runtime_status().intent, ServerRunIntent::Running);
+        handle.submit(principal, request).await.unwrap();
+        assert_eq!(handle.runtime_status().storage, StorageStatus::Ready);
+        handle
+            .shutdown(TrustedShutdownRequest { authority: stop })
+            .await
+            .unwrap();
+        server.wait().await.unwrap();
+        assert_eq!(handle.runtime_status().intent, ServerRunIntent::Stopped);
+    }
+}
+
+#[tokio::test]
+async fn indeterminate_storage_status_requires_recovery_without_claiming_deliberate_stop() {
+    use spaceterm_core::storage::CommitDisposition;
+    let fixture = native::Fixture::new();
+    let principal = fixture.principal(1, 1);
+    let db = fixture.db.clone();
+    let codec = fixture.codec.clone();
+    let server = RecoveredServer::recover(fixture.config, fixture.dependencies)
+        .await
+        .unwrap();
+    let handle = server.handle();
+    native::connect(&handle, principal).await;
+    db.lock().unwrap().next = Some(CommitDisposition::Indeterminate);
+    let request = native::request(
+        &codec,
+        1,
+        1,
+        Command::RenameWorkspace {
+            workspace: native::workspace(),
+            expected_version: spaceterm_core::authority::FieldVersion::new(1),
+            draft: NameDraft::Custom(NameText::new("uncertain write".into()).unwrap()),
+        },
+    );
+    assert_eq!(
+        handle.submit(principal, request).await.err().unwrap().class,
+        ServerFailureClass::RecoveryRequired
+    );
+    assert_eq!(
+        server.wait().await.unwrap_err().class,
+        ServerFailureClass::RecoveryRequired
+    );
+    assert_eq!(
+        handle.runtime_status(),
+        ServerRuntimeStatus {
+            storage: StorageStatus::RecoveryRequired,
+            intent: ServerRunIntent::Running,
+        }
+    );
 }

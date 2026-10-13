@@ -53,6 +53,9 @@ pub const CAPABILITY_CANONICAL_DOMAIN: u32 = 520_003;
 /// Frozen canonical-domain peers do not know these nested organization fields.
 pub const CAPABILITY_ORGANIZATION_COMPARISONS: u32 = 520_004;
 
+/// Fenced Pane presentation subscriptions and explicit connection context.
+pub const CAPABILITY_TERMINAL_STREAMS: u32 = 520_005;
+
 /// Additive envelope registration: tag, authenticated capability, permitted directions.
 pub const EXTENSION_ENVELOPES: &[(u32, u32, bool, bool)] = &[
     (32, CAPABILITY_SERVER_GIT, true, false),
@@ -71,4 +74,7 @@ pub const EXTENSION_ENVELOPES: &[(u32, u32, bool, bool)] = &[
     (45, CAPABILITY_CANONICAL_DOMAIN, false, true),
     (46, CAPABILITY_CANONICAL_DOMAIN, false, true),
     (47, CAPABILITY_CANONICAL_DOMAIN, false, true),
+    (48, CAPABILITY_TERMINAL_STREAMS, true, true),
+    (49, CAPABILITY_TERMINAL_STREAMS, true, false),
+    (50, CAPABILITY_TERMINAL_STREAMS, false, true),
 ];

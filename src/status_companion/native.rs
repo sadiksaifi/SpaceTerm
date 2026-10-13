@@ -4,11 +4,15 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use spaceterm_client::management_cli::{ManagementFailure, ManagementFuture};
-use spaceterm_client_native::cli::bindings::NativeObservation;
+use spaceterm_client::management_cli::{
+    ManagementFailure, ManagementFuture, ServerStatus, StatusManagement, StatusSubscription,
+};
+use spaceterm_client_native::NativeClientProvider;
+use spaceterm_client_native::cli::bindings::{NativeObservation, RegistrationAvailability};
+use spaceterm_host::startup::DesiredServerState;
 
 use super::controller::{CompanionTimer, NativeStatus};
 use super::model::CompanionModel;
@@ -112,13 +116,108 @@ impl ActivationToken {
     }
 }
 
-/// The production native observation until the native discovery provider is composed
-/// into this binary. It reports the capability as unavailable instead of guessing.
-pub(crate) struct UnavailableNativeStatus;
+type ProviderFactory = dyn Fn() -> Result<NativeClientProvider, ManagementFailure> + Send + Sync;
 
-impl NativeStatus for UnavailableNativeStatus {
+/// Read-only composition for both status areas. Each attempt obtains the shared native
+/// provider again, so setup or a saved companion binding can change while the item runs.
+/// The provider alone selects the account/build and validates the companion's own binding.
+pub(crate) struct NativeCompanion {
+    provider: Arc<ProviderFactory>,
+    // Liveness reads use the subscription's worker, not a second connection that
+    // could replace the same Client's active connection generation.
+    connected: Mutex<Option<NativeClientProvider>>,
+}
+
+impl NativeCompanion {
+    pub(crate) fn current() -> Self {
+        Self::new(NativeClientProvider::current)
+    }
+
+    pub(crate) fn new(
+        provider: impl Fn() -> Result<NativeClientProvider, ManagementFailure> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            provider: Arc::new(provider),
+            connected: Mutex::new(None),
+        }
+    }
+
+    async fn provider(&self) -> Result<NativeClientProvider, ManagementFailure> {
+        let provider = Arc::clone(&self.provider);
+        tokio::task::spawn_blocking(move || provider())
+            .await
+            .map_err(|_| ManagementFailure::NativeUnavailable)?
+    }
+
+    async fn status_client(
+        provider: &NativeClientProvider,
+    ) -> Result<Arc<dyn StatusManagement>, ManagementFailure> {
+        let observation = provider.inspect(provider.key()).await?;
+        match observation.availability {
+            RegistrationAvailability::Registered => {}
+            RegistrationAvailability::Missing | RegistrationAvailability::Unavailable => {
+                return Err(ManagementFailure::NativeUnavailable);
+            }
+            RegistrationAvailability::Locked => return Err(ManagementFailure::StorageLocked),
+            RegistrationAvailability::Unsafe => return Err(ManagementFailure::UnsafeNativeState),
+            RegistrationAvailability::Unsupported => {
+                return Err(ManagementFailure::UnsupportedHost);
+            }
+        }
+        // Missing companion authorization stays a pairing prerequisite even when
+        // the service is stopped. Never substitute another client's binding.
+        let status = provider.companion_status()?;
+        // A durable Stop is not missing setup. An offline result lets the controller
+        // show the advisory native Stop without opening or starting a connection.
+        if observation.desired == Some(DesiredServerState::Stopped) {
+            return Err(ManagementFailure::Offline);
+        }
+        Ok(status)
+    }
+}
+
+impl NativeStatus for NativeCompanion {
     fn inspect(&self) -> ManagementFuture<'_, NativeObservation> {
-        Box::pin(async { Err(ManagementFailure::NativeUnavailable) })
+        Box::pin(async {
+            let provider = self.provider().await?;
+            provider.inspect(provider.key()).await
+        })
+    }
+}
+
+impl StatusManagement for NativeCompanion {
+    fn status(&self) -> ManagementFuture<'_, ServerStatus> {
+        Box::pin(async {
+            let connected = self
+                .connected
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            let provider = match connected {
+                Some(provider) => provider,
+                None => self.provider().await?,
+            };
+            Self::status_client(&provider).await?.status().await
+        })
+    }
+
+    fn subscribe_status(&self) -> ManagementFuture<'_, StatusSubscription> {
+        Box::pin(async {
+            self.connected
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take();
+            let provider = self.provider().await?;
+            let subscription = Self::status_client(&provider)
+                .await?
+                .subscribe_status()
+                .await?;
+            *self
+                .connected
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some(provider);
+            Ok(subscription)
+        })
     }
 }
 

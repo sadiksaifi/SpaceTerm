@@ -5,6 +5,7 @@ pub mod outcomes;
 mod production;
 pub use production::{
     ProductionListenerConfig, ProductionListenerPorts, production_listener_factories,
+    production_listener_factories_with_dispatch,
 };
 
 use crate::{

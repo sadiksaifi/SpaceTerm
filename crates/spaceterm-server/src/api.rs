@@ -302,6 +302,7 @@ pub struct ServerHandle {
     pub(crate) requests: mpsc::Sender<ActorRequest>,
     pub(crate) lifecycle: mpsc::Sender<LifecycleRequest>,
     pub(crate) phase: watch::Receiver<ServicePhase>,
+    pub(crate) runtime_status: watch::Receiver<spaceterm_core::management::ServerRuntimeStatus>,
     pub(crate) snapshot: watch::Receiver<Arc<OrganizationSnapshot>>,
     pub(crate) pairing_snapshot:
         watch::Receiver<Option<spaceterm_core::pairing::policy::PairingSnapshot>>,
@@ -309,6 +310,14 @@ pub struct ServerHandle {
 impl ServerHandle {
     pub fn phase(&self) -> ServicePhase {
         *self.phase.borrow()
+    }
+    pub fn runtime_status(&self) -> spaceterm_core::management::ServerRuntimeStatus {
+        *self.runtime_status.borrow()
+    }
+    pub fn subscribe_runtime_status(
+        &self,
+    ) -> watch::Receiver<spaceterm_core::management::ServerRuntimeStatus> {
+        self.runtime_status.clone()
     }
     pub fn snapshot(&self) -> Arc<OrganizationSnapshot> {
         self.snapshot.borrow().clone()
@@ -562,13 +571,27 @@ impl ServerHandle {
         principal: VerifiedPrincipal,
         command: spaceterm_terminal::runtime_contracts::FencedRuntimeCommand,
     ) -> Result<spaceterm_core::runtime_authority::EffectDisposition, ServerFailure> {
+        self.try_runtime_command(principal, command)?.await
+    }
+    /// Admit in wire order without blocking the reader on paste approval or PTY writes.
+    pub fn try_runtime_command(
+        &self,
+        principal: VerifiedPrincipal,
+        command: spaceterm_terminal::runtime_contracts::FencedRuntimeCommand,
+    ) -> Result<
+        ServerFuture<
+            'static,
+            Result<spaceterm_core::runtime_authority::EffectDisposition, ServerFailure>,
+        >,
+        ServerFailure,
+    > {
         let (reply, result) = oneshot::channel();
         self.send(ActorRequest::RuntimeCommand {
             principal,
             command: Box::new(command),
             reply,
         })?;
-        receive(result).await
+        Ok(Box::pin(receive(result)))
     }
     /// Trusted notification of an already durable pairing revocation, not an
     /// ordinary wire command. The pairing owner supplies every retained Client.

@@ -1816,19 +1816,7 @@ impl ServiceSupervisor {
             if registration.server_pin().identity != server.bytes() {
                 return Err(ServiceFailure::IdentityMismatch);
             }
-            // Epoch zero is the retained new store before its first runtime.
-            // It still requires the native producer's independent absence proof.
-            if (epoch.get() == 0 && !sessions.is_empty())
-                || sessions.len() > 64
-                || !sessions.windows(2).all(|pair| pair[0] < pair[1])
-                || sessions.iter().any(|session| {
-                    session.pane.server() != server
-                        || session.epoch != epoch
-                        || session.generation.get() == 0
-                })
-            {
-                return Err(ServiceFailure::InvalidRecord);
-            }
+            super::processes::validate_previous_scope(server, epoch, sessions)?;
             let observations = self
                 .processes()?
                 .previous_instance_cleanup(&registration, epoch, sessions)

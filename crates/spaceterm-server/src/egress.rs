@@ -252,6 +252,18 @@ impl ConnectionEgress {
     pub fn reserve_operation_reply(&mut self) -> Result<EgressReservation, EgressFailure> {
         self.reserve(MANAGEMENT_REPLY_BYTES, true)
     }
+    /// Cover semantic construction before requesting a page from its runtime.
+    /// Domain accounting includes cell/descriptor expansion, not only wire bytes.
+    pub fn reserve_content_reply(
+        &self,
+        maximum_page_bytes: u32,
+    ) -> Result<EgressReservation, EgressFailure> {
+        let maximum = (maximum_page_bytes as usize)
+            .max(4096)
+            .checked_add(AUTHENTICATED_FRAMING_BYTES)
+            .ok_or(EgressFailure::Capacity)?;
+        self.reserve(maximum, false)
+    }
     pub fn reserve_reply(
         &self,
         payload: &spaceterm_protocol::codec::Payload,
@@ -434,7 +446,8 @@ fn reply_policy(payload: &spaceterm_protocol::codec::Payload) -> Result<bool, Eg
                     | Kind::Reconciliation(_)
                     | Kind::OrganizationResync(_)
                     | Kind::RuntimeOutcome(_)
-                    | Kind::PairingOutcome(_),
+                    | Kind::PairingOutcome(_)
+                    | Kind::ClientContext(_),
                 ) => Ok(true),
                 Some(
                     Kind::OrganizationSnapshot(_)
@@ -442,7 +455,11 @@ fn reply_policy(payload: &spaceterm_protocol::codec::Payload) -> Result<bool, Eg
                     | Kind::ManagementStatus(_)
                     | Kind::StatusPublication(_)
                     | Kind::GitQueryResult(_)
-                    | Kind::ServerDirectoryResult(_),
+                    | Kind::ServerDirectoryResult(_)
+                    | Kind::ContentReadResponse(_)
+                    | Kind::ContentPublication(_)
+                    | Kind::ContentInvalidation(_)
+                    | Kind::NativeRequest(_),
                 ) => Ok(false),
                 // A caller cannot promote arbitrary terminal or resource bytes
                 // into the reserved lifecycle lane.

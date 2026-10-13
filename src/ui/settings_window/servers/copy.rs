@@ -439,3 +439,25 @@ pub(super) fn pending_unpair_text(pending: &PendingUnpair) -> (SharedString, Sha
         ),
     }
 }
+
+/// Fixed classifications only. Native errors and provider text never enter presentation.
+pub(super) fn management_failure(
+    failure: spaceterm_client::management_cli::ManagementFailure,
+) -> SharedString {
+    use spaceterm_client::management_cli::ManagementFailure as Failure;
+    match failure {
+        Failure::StaleAssessment | Failure::ConfirmationRequired => "The affected work changed or the confirmation expired. Review the action again before confirming.",
+        Failure::OutcomePending | Failure::Indeterminate => "The original request is still being resolved. No replacement request will be sent.",
+        Failure::Offline => "The server is offline. Reconnect before reviewing this action.",
+        Failure::Incompatible => "The protocol is incompatible. Check which client or server needs updating before trying this action.",
+        Failure::StorageLocked => "Storage is locked. Unlock it before reviewing this action.",
+        Failure::StorageUnavailable | Failure::IoUnavailable => "Storage or the service connection is unavailable. The action was not confirmed.",
+        Failure::PairingRequired | Failure::Revoked => "This pairing is no longer authorized. Pair deliberately before using this server.",
+        Failure::AuthorizationDenied => "Authorization was denied. The action was not confirmed.",
+        Failure::AuthorizationUnavailable | Failure::NativeUnavailable | Failure::UnsupportedHost => "This connection cannot manage the server's account service. Use its machine or an authorized SSH connection.",
+        Failure::CredentialUnavailable => "The pairing credential is unavailable. The action was not confirmed.",
+        Failure::UnsafeNativeState => "The server's saved service state could not be verified. The action was not confirmed.",
+        Failure::LimitExceeded => "The server cannot accept this request now. No replacement request was sent.",
+        Failure::Usage => "The request was not accepted. Review the action again before confirming.",
+    }.into()
+}

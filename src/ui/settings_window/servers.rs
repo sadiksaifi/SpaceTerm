@@ -10,7 +10,7 @@ mod paired_devices;
 
 #[cfg(test)]
 #[path = "servers_tests.rs"]
-mod tests;
+pub(super) mod tests;
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
@@ -93,6 +93,8 @@ pub(super) struct ServersSection {
     devices: paired_devices::DeviceInventoryView,
     /// Bind scopes chosen while remote connections are off, used when they are turned on.
     proposed_scopes: HashMap<ServerKey, SharedString>,
+    management_review: Option<ManagementReview>,
+    management_notice: Option<(spaceterm_core::pairing::LocalPairingKey, SharedString)>,
     /// Notices dismissed here that the next snapshot has not dropped yet.
     dismissed: HashSet<SharedString>,
     /// The focus scope around each row in [`FOCUSABLE_ROWS`].
@@ -113,6 +115,7 @@ struct WorktreeField {
     /// The request sent to each server that no published snapshot has answered yet. The field
     /// shows what it sent until the answer arrives, so a draft never reverts in the meantime.
     sent: HashMap<ServerKey, SentLocation>,
+    unsent: HashMap<ServerKey, SyncedText>,
     _events: Subscription,
 }
 
@@ -172,6 +175,83 @@ struct SyncedText {
     pairing: spaceterm_core::pairing::LocalPairingKey,
     text: SharedString,
     revision: u64,
+}
+
+/// A read-only assessment in flight. Selection changes cancel its presentation, not its operation.
+struct ManagementReview {
+    captured: BoundServerRequest,
+    action: ManagementReviewAction,
+    previous: Option<spaceterm_client::management_cli::confirmation::AssessmentToken>,
+}
+
+#[derive(Clone, Copy)]
+enum ManagementReviewAction {
+    Stop,
+    Restart,
+    EndAll,
+}
+
+impl ManagementReviewAction {
+    fn read(self, key: ServerKey) -> ServerRequest {
+        match self {
+            Self::Stop => ServerRequest::AssessStop(key),
+            Self::Restart => ServerRequest::AssessRestart(key),
+            Self::EndAll => ServerRequest::AssessEndAllSessions(key),
+        }
+    }
+
+    fn execute(self, key: ServerKey) -> ServerRequest {
+        match self {
+            Self::Stop => ServerRequest::Stop(key),
+            Self::Restart => ServerRequest::Restart(key),
+            Self::EndAll => ServerRequest::EndAllSessions(key),
+        }
+    }
+
+    fn assessment(
+        self,
+        server: &ServerSummary,
+    ) -> Option<spaceterm_client::management_cli::confirmation::AssessmentToken> {
+        use spaceterm_client::management_cli::confirmation::ManagementAction;
+        use spaceterm_host::account_service::ServiceAction;
+        match self {
+            Self::Stop => server.management.stop.as_ref().filter(|value| value.action == ServiceAction::Stop).map(|value| value.reference.clone()),
+            Self::Restart => server.management.restart.as_ref().filter(|value| value.action == ServiceAction::Restart).map(|value| value.reference.clone()),
+            Self::EndAll => server.management.end_all.as_ref().filter(|value| {
+                matches!(value.action(), ManagementAction::EndAllSessions {server: id} if *id == server.pairing.parts().server)
+                    && value.epoch() == server.runtime_epoch
+            }).map(|value| value.token().clone()),
+        }
+    }
+
+    fn allowed(self, server: &ServerSummary) -> bool {
+        match self {
+            Self::Stop => status_action(server) == Some(StatusAction::Stop { enabled: true }),
+            Self::Restart => version_action(server) == VersionAction::Restart { enabled: true },
+            Self::EndAll => server.connected(),
+        }
+    }
+
+    fn confirmation(self, server: &ServerSummary) -> Confirmation {
+        let (mut prompt, count) = match self {
+            Self::Stop => (copy::stop_confirmation(server), server.management.stop.as_ref().map(|value| value.affected_sessions)),
+            Self::Restart => (copy::restart_confirmation(server), server.management.restart.as_ref().map(|value| value.affected_sessions)),
+            Self::EndAll => (copy::end_all_sessions_confirmation(server), server.management.end_all.as_ref().and_then(|value| match value.evidence() {
+                spaceterm_client::management_cli::confirmation::AssessmentEvidence::EndAllSessions(value) => Some(value.summary().live_session_count()),
+                _ => None,
+            })),
+        };
+        if let Some(count) = count {
+            prompt.detail = Some(
+                format!(
+                    "{} The assessment includes {count} live Terminal Sessions.",
+                    prompt.detail.as_deref().unwrap_or_default()
+                )
+                .into(),
+            );
+        }
+        prompt
+    }
 }
 
 impl ServersSection {
@@ -247,10 +327,13 @@ impl ServersSection {
                 input,
                 synced: None,
                 sent: HashMap::new(),
+                unsent: HashMap::new(),
                 _events: events,
             },
             devices: paired_devices::DeviceInventoryView::default(),
             proposed_scopes: HashMap::new(),
+            management_review: None,
+            management_notice: None,
             dismissed: HashSet::new(),
             row_focus,
             notices_focus,
@@ -317,6 +400,12 @@ impl ServersSection {
                 .find(|server| server.key == *key && same_pairing(server))
                 .and_then(|server| server.worktree_location.as_ref())
                 .is_some_and(|setting| !sent.answered(setting))
+        });
+        self.worktree.unsent.retain(|_, draft| {
+            snapshot
+                .servers
+                .iter()
+                .any(|server| server.pairing == draft.pairing)
         });
         self.snapshot = snapshot;
     }
@@ -470,9 +559,8 @@ enum VersionAction {
     },
 }
 
-/// Restart asks the running server to restart its own version under its service manager, which
-/// any live connection can ask. Installing a staged version replaces the server's approved
-/// installation, which needs the host's authorization, as Start and Stop do.
+/// Restart and activation use the selected host's native owner. A WSS connection has no such
+/// capability, so it cannot obtain the exact account-service assessment.
 fn version_action(server: &ServerSummary) -> VersionAction {
     match &server.staged_version {
         Some(version) => VersionAction::Update {
@@ -494,7 +582,7 @@ fn version_action(server: &ServerSummary) -> VersionAction {
                 ),
         },
         None => VersionAction::Restart {
-            enabled: server.connected(),
+            enabled: server.connected() && server.route.manages_host(),
         },
     }
 }
@@ -589,6 +677,7 @@ impl SettingsWindow {
         let requested = self.servers.requested.take().is_some();
         if requested || self.servers.selected.as_ref() != Some(&key) {
             self.servers.devices.selection_changed();
+            self.servers.management_review = None;
             self.servers.selected = Some(key);
             cx.notify();
         }
@@ -645,6 +734,7 @@ impl SettingsWindow {
         let Some(server) = self.servers.selected_server().cloned() else {
             return div().into_any_element();
         };
+        self.advance_management_review(&server, window, cx);
         let control = if row == SettingsRowId::ServerPairedDevices {
             self.render_paired_devices(&server, appearance, window, cx)
         } else {
@@ -691,16 +781,9 @@ impl SettingsWindow {
                 server_button(
                     "settings-server-end-all-sessions",
                     "End All Sessions…",
-                    server.connected(),
-                    move |settings, window, cx| {
-                        settings.confirm_server_request(
-                            &key,
-                            copy::end_all_sessions_confirmation,
-                            ServerRequest::EndAllSessions(key.clone()),
-                            ServerSummary::connected,
-                            window,
-                            cx,
-                        );
+                    server.connected() && !server.management.pending,
+                    move |settings, _, cx| {
+                        settings.review_management(&key, ManagementReviewAction::EndAll, cx);
                     },
                     cx,
                 )
@@ -709,7 +792,7 @@ impl SettingsWindow {
                 self.render_server_worktree_location(server, appearance, cx)
             }
             SettingsRowId::ServerPermissions => render_server_permissions(server, appearance),
-            SettingsRowId::ServerRemoteAccess => self.render_remote_access(server, cx),
+            SettingsRowId::ServerRemoteAccess => self.render_remote_access(server, appearance, cx),
             SettingsRowId::ServerRemoteAccessScope => {
                 self.render_remote_access_scope(server, appearance, cx)
             }
@@ -791,7 +874,7 @@ impl SettingsWindow {
                         format!("Connect to {name} to change this.").into()
                     }
                     None => format!("{name} doesn't offer remote connections.").into(),
-                    Some(remote) if remote.pending => {
+                    Some(remote) if remote.pending || remote.edit.as_ref().is_some_and(|edit| edit.state == SettingEditState::Saving) => {
                         format!("Waiting for {name} to confirm…").into()
                     }
                     Some(remote) if remote.enabled => format!(
@@ -808,6 +891,9 @@ impl SettingsWindow {
             SettingsRowId::ServerRemoteAccessScope => {
                 let remote = server.remote_access.as_ref()?;
                 let warning = |text: String| Some((text.into(), CaptionTone::Warning));
+                if remote.enabled && !remote.endpoints.is_empty() && self.servers.shown_scope(server).is_none() {
+                    return guidance(format!("Configured addresses: {}. Scope choices are unavailable on this connection.", remote.endpoints.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")).into());
+                }
                 match (remote.enabled, self.servers.shown_scope(server)) {
                     (true, Some(scope)) => guidance(scope.addresses),
                     (false, Some(scope)) => guidance(
@@ -1159,7 +1245,10 @@ impl SettingsWindow {
             .into_iter()
             .map(|pending| {
                 let (title, body) = copy::pending_unpair_text(&pending);
-                let id = pending.id.clone();
+                let captured = BoundServerRequest::bind(
+                    ServerRequest::DismissUnpairNotice(pending.id.clone()),
+                    &self.servers.snapshot,
+                );
                 let owner = cx.weak_entity();
                 let selector = format!("settings-server-unpair-notice-{}", pending.id);
                 let dismiss = format!("{selector}-dismiss");
@@ -1228,11 +1317,13 @@ impl SettingsWindow {
                                     .size(ButtonSize::Regular)
                                     .tab_stop(true)
                                     .debug_selector(dismiss)
-                                    .on_activate(move |_, _, cx| {
-                                        let id = id.clone();
-                                        let _ = owner.update(cx, |settings, cx| {
-                                            settings.dismiss_unpair_notice(id, cx);
-                                        });
+                                    .on_activate(move |_, window, cx| {
+                                        if let Some(captured) = captured.clone() {
+                                            let _ = owner.update(cx, |settings, cx| {
+                                                settings
+                                                    .dismiss_unpair_notice(captured, window, cx);
+                                            });
+                                        }
                                     }),
                             ),
                     )
@@ -1242,9 +1333,25 @@ impl SettingsWindow {
     }
 
     /// Hides the notice now. The background revocation keeps retrying.
-    fn dismiss_unpair_notice(&mut self, id: SharedString, cx: &mut Context<Self>) {
+    fn dismiss_unpair_notice(
+        &mut self,
+        bound: BoundServerRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !bound.still_matches(&self.servers.snapshot) {
+            return;
+        }
+        let ServerRequest::DismissUnpairNotice(id) = &bound.request else {
+            return;
+        };
         self.servers.dismissed.insert(id.clone());
-        self.send_server_request(ServerRequest::DismissUnpairNotice(id), cx);
+        self.send_bound_server_request(bound, cx);
+        if self.servers.snapshot.servers.is_empty() {
+            self.search.read(cx).focus_handle().focus(window, cx);
+        } else {
+            self.servers.list_focus.focus(window, cx);
+        }
         cx.notify();
     }
 
@@ -1259,7 +1366,7 @@ impl SettingsWindow {
             StatusAction::Start { enabled } => server_button(
                 "settings-server-start",
                 "Start Server",
-                enabled,
+                enabled && !server.management.pending,
                 move |settings, _, cx| {
                     settings.send_server_request(ServerRequest::Start(key.clone()), cx);
                 },
@@ -1268,21 +1375,43 @@ impl SettingsWindow {
             StatusAction::Stop { enabled } => server_button(
                 "settings-server-stop",
                 "Stop Server…",
-                enabled,
-                move |settings, window, cx| {
-                    settings.confirm_server_request(
-                        &key,
-                        copy::stop_confirmation,
-                        ServerRequest::Stop(key.clone()),
-                        |server| {
-                            status_action(server) == Some(StatusAction::Stop { enabled: true })
-                        },
-                        window,
-                        cx,
-                    );
+                enabled && !server.management.pending,
+                move |settings, _, cx| {
+                    settings.review_management(&key, ManagementReviewAction::Stop, cx);
                 },
                 cx,
             ),
+        });
+        let notice = self.management_status(server).map(|text| {
+            let announcement = text.clone();
+            div()
+                .id("settings-server-management-status")
+                .role(accesskit::Role::Group)
+                .aria_label("Server management status")
+                .debug_selector(|| "settings-server-management-status".to_owned())
+                .a11y_synthetic_children(move |builder| {
+                    let mut status = accesskit::Node::new(accesskit::Role::Status);
+                    status.set_label(announcement.as_ref());
+                    status.set_live(accesskit::Live::Polite);
+                    builder.push_child(builder.synthetic_node_id("management-status"), status);
+                })
+                .whitespace_normal()
+                .chrome_text(appearance.typography.style(TextRole::Secondary))
+                .text_color(gpui_color(appearance.colors.text_secondary))
+                .child(text)
+                .when(self.servers.management_review.is_some(), |notice| {
+                    notice.child(server_button(
+                        "settings-server-management-cancel-review",
+                        "Cancel Review",
+                        true,
+                        |settings, window, cx| {
+                            settings.servers.management_review = None;
+                            settings.servers.list_focus.focus(window, cx);
+                            cx.notify();
+                        },
+                        cx,
+                    ))
+                })
         });
         // The state reads as a badge beside its action, as every state row in Settings does.
         div()
@@ -1301,6 +1430,7 @@ impl SettingsWindow {
                     )),
             )
             .children(action)
+            .children(notice)
             .into_any_element()
     }
 
@@ -1315,23 +1445,16 @@ impl SettingsWindow {
             VersionAction::Restart { enabled } => server_button(
                 "settings-server-restart",
                 "Restart Server…",
-                enabled,
-                move |settings, window, cx| {
-                    settings.confirm_server_request(
-                        &key,
-                        copy::restart_confirmation,
-                        ServerRequest::Restart(key.clone()),
-                        |server| version_action(server) == VersionAction::Restart { enabled: true },
-                        window,
-                        cx,
-                    );
+                enabled && !server.management.pending,
+                move |settings, _, cx| {
+                    settings.review_management(&key, ManagementReviewAction::Restart, cx);
                 },
                 cx,
             ),
             VersionAction::Update { version, enabled } => server_button(
                 "settings-server-update",
                 "Update Server…",
-                enabled,
+                enabled && !server.management.pending,
                 move |settings, window, cx| {
                     let Some(server) = settings.servers.find(&key) else {
                         return;
@@ -1386,6 +1509,120 @@ impl SettingsWindow {
             )
             .child(action)
             .into_any_element()
+    }
+
+    fn review_management(
+        &mut self,
+        key: &ServerKey,
+        action: ManagementReviewAction,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(server) = self
+            .servers
+            .find(key)
+            .filter(|server| action.allowed(server) && !server.management.pending)
+        else {
+            return;
+        };
+        let previous = action.assessment(server);
+        let pairing = server.pairing.clone();
+        let Some(captured) =
+            BoundServerRequest::bind(action.read(key.clone()), &self.servers.snapshot)
+        else {
+            return;
+        };
+        self.servers.management_review = Some(ManagementReview {
+            captured: captured.clone(),
+            action,
+            previous,
+        });
+        self.servers.management_notice = None;
+        self.send_bound_server_request(captured, cx);
+        // A synchronous provider can publish a failure before returning.
+        if self
+            .servers
+            .find(key)
+            .is_none_or(|server| server.pairing != pairing)
+        {
+            self.servers.management_review = None;
+        }
+        cx.notify();
+    }
+
+    fn management_status(&self, server: &ServerSummary) -> Option<SharedString> {
+        if let Some((pairing, text)) = &self.servers.management_notice
+            && pairing == &server.pairing
+        {
+            return Some(text.clone());
+        }
+        if let Some(failure) = server.management.failure {
+            return Some(copy::management_failure(failure));
+        }
+        self.servers
+            .management_review
+            .as_ref()
+            .filter(|review| review.captured.request.server() == Some(&server.key))
+            .map(|_| format!("Checking the affected sessions on {}…", server.name).into())
+    }
+
+    fn advance_management_review(
+        &mut self,
+        server: &ServerSummary,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(review) = self.servers.management_review.as_ref() else {
+            return;
+        };
+        if review.captured.request.server() != Some(&server.key)
+            || !review.captured.still_matches(&self.servers.snapshot)
+            || !review.action.allowed(server)
+        {
+            self.servers.management_review = None;
+            self.servers.management_notice = Some((
+                server.pairing.clone(),
+                "The server changed. Review the action again before confirming.".into(),
+            ));
+            return;
+        }
+        if server.management.pending {
+            return;
+        }
+        if server.management.failure.is_some() {
+            self.servers.management_review = None;
+            return;
+        }
+        let Some(token) = review
+            .action
+            .assessment(server)
+            .filter(|token| Some(token) != review.previous.as_ref())
+        else {
+            return;
+        };
+        let Some(review) = self.servers.management_review.take() else {
+            return;
+        };
+        let captured_server = server.clone();
+        cx.defer_in(window, move |settings, window, cx| {
+            let Some(current) = settings.servers.find(&captured_server.key) else {
+                return;
+            };
+            if settings.servers.selected_server().map(|value| &value.key)
+                != Some(&captured_server.key)
+                || !review.captured.still_matches(&settings.servers.snapshot)
+                || review.action.assessment(current).as_ref() != Some(&token)
+                || !review.action.allowed(current)
+            {
+                return;
+            }
+            settings.present_confirmation(
+                review.action.confirmation(current),
+                review.action.execute(current.key.clone()),
+                move |server| review.action.allowed(server),
+                window,
+                cx,
+            );
+        });
     }
 
     /// Asks before a request that ends work, in the words `confirmation` gives for the server.
@@ -1453,6 +1690,7 @@ impl SettingsWindow {
             alert = alert.detail(detail);
         }
         let owner = cx.weak_entity();
+        let handle = window.window_handle();
         let presented = alert.present(window, cx, move |outcome, cx| {
             if !matches!(
                 outcome,
@@ -1472,6 +1710,14 @@ impl SettingsWindow {
                     .and_then(|server| settings.servers.find(server))
                     .is_some_and(&allowed);
                 if !still_allowed || !bound.still_matches(&settings.servers.snapshot) {
+                    let owner = cx.weak_entity();
+                    cx.defer(move |cx| {
+                        let _ = handle.update(cx, |_, window, cx| {
+                            let _ = owner.update(cx, |settings, cx| {
+                                settings.present_changed_confirmation(window, cx);
+                            });
+                        });
+                    });
                     return;
                 }
                 settings.send_bound_server_request(bound, cx);
@@ -1481,6 +1727,23 @@ impl SettingsWindow {
         if presented.is_err() {
             eprintln!("failed to present a SpaceTerm server confirmation");
         }
+    }
+
+    fn present_changed_confirmation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let alert = Alert::new(
+            ModalId::new("settings-server-confirmation-changed"),
+            "Server changed",
+            "Server changed",
+            "Nothing was submitted. Review the server and the action again before confirming.",
+            vec![ModalAction::new(
+                false,
+                "Cancel",
+                ModalActionRole::Cancel,
+                "settings-server-confirmation-changed-cancel",
+            )],
+        )
+        .intent(AlertIntent::Warning);
+        let _ = alert.present(window, cx, |_, _| {});
     }
 
     fn render_server_worktree_location(
@@ -1540,6 +1803,7 @@ impl SettingsWindow {
                 .map(|edit| edit.draft.clone())
                 .unwrap_or_default();
             let seen = setting.clone();
+            let pairing = server.pairing.clone();
             div()
                 .flex()
                 .flex_col()
@@ -1563,8 +1827,15 @@ impl SettingsWindow {
                         .child(server_button(
                             "settings-server-worktree-location-save-mine",
                             "Save My Change",
-                            true,
+                            server.connected(),
                             move |settings, _, cx| {
+                                if !settings.servers.find(&key).is_some_and(|server| {
+                                    server.connected()
+                                        && server.pairing == pairing
+                                        && server.worktree_location.as_ref() == Some(&seen)
+                                }) {
+                                    return;
+                                }
                                 settings.send_server_worktree_location(
                                     &key,
                                     SentLocation::Change {
@@ -1611,6 +1882,25 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) {
         let field = &mut self.servers.worktree;
+        let current = SharedString::from(field.input.read(cx).value().to_owned());
+        if let Some(synced) = &field.synced
+            && synced.pairing != server.pairing
+            && current != synced.text
+            && self
+                .servers
+                .snapshot
+                .servers
+                .iter()
+                .any(|value| value.pairing == synced.pairing)
+        {
+            field.unsent.insert(
+                synced.server.clone(),
+                SyncedText {
+                    text: current.clone(),
+                    ..synced.clone()
+                },
+            );
+        }
         let Some(setting) = &server.worktree_location else {
             if !field.synced.as_ref().is_some_and(|synced| {
                 synced.server == server.key && synced.pairing == server.pairing
@@ -1622,14 +1912,19 @@ impl SettingsWindow {
             }
             return;
         };
-        let desired = match field.sent.get(&server.key) {
-            Some(sent) => sent.shown(setting),
-            None => setting
+        let retained = field
+            .unsent
+            .get(&server.key)
+            .filter(|draft| draft.pairing == server.pairing)
+            .cloned();
+        let desired = match (retained.as_ref(), field.sent.get(&server.key)) {
+            (Some(draft), _) => draft.text.clone(),
+            (_, Some(sent)) => sent.shown(setting),
+            (_, None) => setting
                 .edit
                 .as_ref()
                 .map_or_else(|| setting.value.clone(), |edit| edit.draft.clone()),
         };
-        let current = SharedString::from(field.input.read(cx).value().to_owned());
         let resting = match &field.synced {
             Some(synced) if synced.server == server.key && synced.pairing == server.pairing => {
                 current == synced.text || current == desired
@@ -1650,7 +1945,7 @@ impl SettingsWindow {
             server: server.key.clone(),
             pairing: server.pairing.clone(),
             text: desired,
-            revision: setting.revision,
+            revision: retained.map_or(setting.revision, |draft| draft.revision),
         });
     }
 
@@ -1669,9 +1964,10 @@ impl SettingsWindow {
             return;
         }
         let text = SharedString::from(self.servers.worktree.input.read(cx).value().to_owned());
-        if text == synced.text {
+        if text == synced.text && !self.servers.worktree.unsent.contains_key(&server.key) {
             return;
         }
+        self.servers.worktree.unsent.remove(&server.key);
         self.servers.worktree.synced = Some(SyncedText {
             text: text.clone(),
             ..synced.clone()
@@ -1714,6 +2010,7 @@ impl SettingsWindow {
         let Some(setting) = server.worktree_location.as_ref() else {
             return;
         };
+        self.servers.worktree.unsent.remove(&server.key);
         let value = setting.value.clone();
         let text = value.to_string();
         self.servers
@@ -1780,6 +2077,7 @@ impl SettingsWindow {
     fn render_remote_access(
         &mut self,
         server: &ServerSummary,
+        appearance: &ChromeAppearance,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let enabled = server
@@ -1792,7 +2090,7 @@ impl SettingsWindow {
             .is_some_and(|remote| remote.enabled || !remote.scopes.is_empty());
         let owner = cx.weak_entity();
         let key = server.key.clone();
-        Switch::new(
+        let toggle = Switch::new(
             "settings-server-remote-access",
             "Allow remote connections",
             enabled,
@@ -1807,8 +2105,59 @@ impl SettingsWindow {
             let _ = owner.update(cx, |settings, cx| {
                 settings.request_remote_access(&key, requested, window, cx);
             });
-        })
-        .into_any_element()
+        });
+        let resolution = server.remote_access.as_ref().and_then(|remote| {
+            let edit = remote.edit.as_ref()?;
+            if edit.state == SettingEditState::Saving { return None; }
+            let current = if remote.enabled {
+                format!("On ({})", remote.endpoints.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "))
+            } else { "Off".to_owned() };
+            let draft = if edit.draft.is_enabled() {
+                format!("On ({})", edit.draft.endpoints().iter().map(ToString::to_string).collect::<Vec<_>>().join(", "))
+            } else { "Off".to_owned() };
+            let lead = if edit.state == SettingEditState::Conflict { "Another device changed remote access." } else { "The server did not save remote access." };
+            let text: SharedString = format!("{lead} Current value on {}: {current}. Your change: {draft}. Review before saving again.", server.name).into();
+            let announced = text.clone();
+            let key = server.key.clone();
+            let discard = key.clone();
+            let pairing = server.pairing.clone();
+            let seen = remote.clone();
+            let retryable = !edit.draft.is_enabled() || remote.scopes.iter().any(|scope| scope.endpoints == edit.draft.endpoints());
+            Some(div()
+                .id("settings-server-remote-access-conflict")
+                .debug_selector(|| "settings-server-remote-access-conflict".to_owned())
+                .role(accesskit::Role::Group)
+                .aria_label("Remote access change")
+                .a11y_synthetic_children(move |builder| {
+                    let mut status = accesskit::Node::new(accesskit::Role::Status);
+                    status.set_label(announced.as_ref());
+                    status.set_live(accesskit::Live::Polite);
+                    builder.push_child(builder.synthetic_node_id("remote-conflict"), status);
+                })
+                .flex().flex_col().gap(appearance.spacing(6.0))
+                .child(div().whitespace_normal().chrome_text(appearance.typography.style(TextRole::Secondary)).text_color(gpui_color(appearance.colors.warning)).child(text))
+                .child(div().flex().flex_row().gap(appearance.spacing(8.0))
+                    .child(server_button("settings-server-remote-access-save-mine", "Save My Change…", server.connected() && !remote.pending && retryable, move |settings, window, cx| {
+                        let Some(server) = settings.servers.find(&key).cloned().filter(|server| server.pairing == pairing && server.remote_access.as_ref() == Some(&seen)) else { return; };
+                        let Some(edit) = &seen.edit else { return; };
+                        if !edit.draft.is_enabled() {
+                            settings.present_confirmation(copy::disable_remote_access_confirmation(&server), ServerRequest::DisableRemoteAccess(key.clone()), |server| adjustable_remote_access(server).is_some(), window, cx);
+                        } else if let Some(scope) = seen.scopes.iter().find(|scope| scope.endpoints == edit.draft.endpoints()).cloned() {
+                            let prompt = if seen.enabled { copy::change_scope_confirmation(&server, &scope) } else { copy::enable_remote_access_confirmation(&server, &scope) };
+                            settings.present_confirmation(prompt, ServerRequest::EnableRemoteAccess {server: key.clone(), scope: scope.id.clone()}, move |server| adjustable_remote_access(server).is_some_and(|remote| remote.scopes.contains(&scope)), window, cx);
+                        }
+                    }, cx))
+                    .child(server_button("settings-server-remote-access-discard-mine", "Discard My Change", !remote.pending, move |settings, _, cx| settings.send_server_request(ServerRequest::DiscardRemoteAccessEdit(discard.clone()), cx), cx)))
+                .into_any_element())
+        });
+        div()
+            .flex()
+            .flex_col()
+            .min_w_0()
+            .gap(appearance.spacing(8.0))
+            .child(toggle)
+            .children(resolution)
+            .into_any_element()
     }
 
     /// Turning remote connections on asks, naming the server and the scope. Turning them off asks

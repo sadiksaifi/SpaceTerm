@@ -15,8 +15,10 @@ mod tests;
 use std::ffi::OsString;
 use std::io::Write as _;
 use std::process::ExitCode;
+#[cfg(test)]
 use std::sync::Arc;
 
+#[cfg(test)]
 use spaceterm_client::management_cli::{StatusBackend, StatusManagement, StatusOnlyManagement};
 
 use crate::application_identity::ApplicationIdentity;
@@ -66,16 +68,8 @@ impl CompanionIdentity {
     }
 }
 
-/// The only status client the companion composes: the status-only facade over a backend
-/// bound to the companion's own Client. Production composes
-/// [`controller::StatusSource::Unbound`] until pairing supplies that binding (C23).
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "production has no companion Client binding until pairing supplies it"
-    )
-)]
+/// Tests exercise the same status-only facade the native provider composes.
+#[cfg(test)]
 pub(crate) fn status_client(backend: impl StatusBackend + 'static) -> Arc<dyn StatusManagement> {
     Arc::new(StatusOnlyManagement::new(backend))
 }

@@ -3,7 +3,7 @@
 //! free text beyond a version, credentials or terminal content.
 
 use spaceterm_client::management_cli::{ManagementFailure, ServerStatus};
-use spaceterm_client_native::cli::bindings::NativeObservation;
+use spaceterm_client_native::cli::bindings::{NativeObservation, RegistrationAvailability};
 use spaceterm_host::startup::DesiredServerState;
 
 use super::CompanionIdentity;
@@ -270,8 +270,8 @@ impl CompanionModel {
         model
     }
 
-    /// Classifies a failed connection or read. Only offline-like failures consult the local
-    /// native observation, and only to tell a deliberately stopped server from a lost one.
+    /// Classifies a failed connection or read. Only offline-like failures consult local
+    /// discovery. A Stop is shown only for a usable registration with retained Stopped intent.
     pub(crate) fn disconnected(
         failure: ManagementFailure,
         native: Option<&NativeObservation>,
@@ -282,6 +282,21 @@ impl CompanionModel {
             | Failure::IoUnavailable
             | Failure::OutcomePending
             | Failure::Indeterminate => match native {
+                Some(observation)
+                    if observation.availability != RegistrationAvailability::Registered =>
+                {
+                    match observation.availability {
+                        RegistrationAvailability::Missing
+                        | RegistrationAvailability::Unavailable => {
+                            Self::new(ServerState::Unavailable, Some(Reason::NotSetUp))
+                        }
+                        RegistrationAvailability::Locked => {
+                            Self::new(ServerState::Unavailable, Some(Reason::StorageLocked))
+                        }
+                        RegistrationAvailability::Unsupported => Self::unsupported(),
+                        _ => Self::new(ServerState::Unavailable, Some(Reason::Unavailable)),
+                    }
+                }
                 Some(observation) if observation.desired == Some(DesiredServerState::Stopped) => {
                     let mut model = Self::new(ServerState::Stopped, Some(Reason::Stopped));
                     model.unverified = !observation.verified;

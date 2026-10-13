@@ -1,13 +1,23 @@
 use std::{io::Write as _, process::ExitCode};
 
 use spaceterm_server::{
-    StartupFailure,
+    account_startup::production_run,
     deployment::{ServerInvocation, USAGE, query_output},
-    production_startup,
 };
 
-fn main() -> ExitCode {
-    let invocation = match ServerInvocation::parse(std::env::args_os().skip(1)) {
+#[tokio::main]
+async fn main() -> ExitCode {
+    let arguments: Vec<_> = std::env::args_os().skip(1).collect();
+    #[cfg(feature = "test-support")]
+    if arguments.len() == 2 && arguments[0] == "--test-account-root" {
+        return exit_result(
+            spaceterm_server::account_startup::test_support::run(std::path::Path::new(
+                &arguments[1],
+            ))
+            .await,
+        );
+    }
+    let invocation = match ServerInvocation::parse(arguments) {
         Ok(invocation) => invocation,
         Err(_) => {
             eprintln!("{USAGE}");
@@ -28,15 +38,28 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
-    let failure = match production_startup() {
-        Err(failure) => failure,
-        Ok(_startup) => {
-            // TODO(#520): transfer account providers into the real runtime/actor
-            // composition when its implementation and host lifecycle API land.
-            // Opening a key and database alone is not authenticated readiness.
-            StartupFailure::RuntimeCompositionUnavailable
+    exit_result(production_run().await)
+}
+
+fn exit_result(
+    result: Result<spaceterm_server::shutdown::ShutdownReport, spaceterm_server::StartupFailure>,
+) -> ExitCode {
+    match result {
+        Ok(report)
+            if report.cleanup_confirmed
+                && report.listeners_closed
+                && report.started_writes_finished
+                && !report.recovery_required =>
+        {
+            ExitCode::SUCCESS
         }
-    };
-    eprintln!("{}", failure.classification());
-    ExitCode::FAILURE
+        Ok(_) => {
+            eprintln!("server cleanup incomplete");
+            ExitCode::FAILURE
+        }
+        Err(failure) => {
+            eprintln!("{}", failure.classification());
+            ExitCode::FAILURE
+        }
+    }
 }

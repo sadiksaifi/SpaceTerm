@@ -1,4 +1,5 @@
 use super::*;
+use spaceterm_core::server_directories::*;
 use spaceterm_client::{
     directories::DirectoryConnectionPort,
     git::rpc::{GitClientFuture, GitConnectionState, GitReadiness},
@@ -59,7 +60,8 @@ impl DirectoryConnectionPort for Connection {
                 }
                 DirectoryQueryAction::Browse { directory, .. } => {
                     let mut child = directory.bytes().to_vec();
-                    child.extend_from_slice(b"/child");
+                    if child.last() != Some(&b'/') { child.push(b'/'); }
+                    child.extend_from_slice(b"child");
                     Ok(DirectoryQueryResult::Page(Box::new(
                         DirectoryPage::new(DirectoryPageParts {
                             context: query.parts().context,
@@ -84,13 +86,14 @@ impl DirectoryConnectionPort for Connection {
     }
 }
 
-fn source(connection: Arc<Connection>, runtime: &tokio::runtime::Runtime) -> ServerDirectorySource {
+fn source(connection: Arc<Connection>, _runtime: &tokio::runtime::Runtime) -> ServerDirectorySource {
     let server = connection.state().unwrap().context.server();
     ServerDirectorySource::new(
-        DirectoryClient::new(server, connection).unwrap(),
-        "Build server".into(),
-        runtime.handle().clone(),
-    )
+        server,
+        "Build server",
+        connection,
+        DirectoryPurpose::PaneRepair,
+    ).unwrap()
 }
 
 #[test]
@@ -98,13 +101,14 @@ fn desktop_server_directory_selection_validates_the_owning_server_without_local_
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let connection = Connection::new(DirectoryValidationClass::AvailableDirectory);
     let source = source(connection.clone(), &runtime);
+    runtime.block_on(source.discover_home()).unwrap();
     let selection = runtime
         .block_on(source.select(PickerPath::new("~/project/".into()).unwrap()))
         .unwrap();
     let DirectorySelection::Server(directory) = selection else {
         panic!("server values must never become local pins")
     };
-    assert_eq!(directory.bytes(), b"/server/home/project");
+    assert_eq!(directory.bytes(), b"/server/home/project/");
     assert!(matches!(
         connection.queries.lock().unwrap().last(),
         Some(DirectoryQueryAction::Validate {
@@ -112,7 +116,7 @@ fn desktop_server_directory_selection_validates_the_owning_server_without_local_
             ..
         })
     ));
-    assert!(!source.can_create());
+    assert!(source.is_server_backed());
     assert!(
         runtime
             .block_on(source.pin(PickerPath::new("/same/path".into()).unwrap()))

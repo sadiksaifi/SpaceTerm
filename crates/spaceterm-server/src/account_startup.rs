@@ -3,6 +3,11 @@
 
 use std::{fmt, sync::Arc};
 
+mod production;
+#[cfg(feature = "test-support")]
+pub mod test_support;
+pub use production::{RecoveredAccountServer, production_run};
+
 use spaceterm_core::{
     identity::ServerId,
     operations::RequestDigest,
@@ -116,7 +121,8 @@ pub enum StartupFailure {
     Key(KeyStoreFailure),
     Storage(StorageFailure),
     Store(StoreFailure),
-    RuntimeCompositionUnavailable,
+    Runtime(crate::contracts::ServerFailure),
+    Distribution(spaceterm_distribution::DistributionFailure),
 }
 impl StartupFailure {
     pub const fn classification(self) -> &'static str {
@@ -126,7 +132,8 @@ impl StartupFailure {
             Self::DeliberatelyStopped => "server deliberately stopped",
             Self::Key(_) => "server key unavailable",
             Self::Storage(_) | Self::Store(_) => "server storage unavailable",
-            Self::RuntimeCompositionUnavailable => "server runtime composition unavailable",
+            Self::Runtime(_) => "server runtime unavailable",
+            Self::Distribution(_) => "server distribution metadata unavailable",
         }
     }
 }
@@ -139,6 +146,7 @@ pub struct AccountStartup {
     registration: RegisteredServer,
     credentials: Arc<ServerIdentity>,
     database: Database,
+    admission: Option<Arc<spaceterm_host::account_service::AccountStartup>>,
 }
 impl fmt::Debug for AccountStartup {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -166,6 +174,46 @@ impl AccountStartup {
             registration,
             credentials,
             database,
+            admission: None,
+        })
+    }
+
+    /// Retains the host's instance lease and the already loaded identity. The
+    /// organization database is opened once, after native admission succeeds.
+    pub fn admit(supervisor: &ServiceSupervisor) -> Result<Self, StartupFailure> {
+        use spaceterm_host::account_service::AccountStartupAdmission;
+        let admission = match supervisor.admit_startup().map_err(|failure| {
+            if failure == ServiceFailure::Missing {
+                StartupFailure::RegistrationMissing
+            } else {
+                StartupFailure::Account(failure)
+            }
+        })? {
+            AccountStartupAdmission::Stopped => return Err(StartupFailure::DeliberatelyStopped),
+            AccountStartupAdmission::WaitingStorage(wait) => {
+                return Err(StartupFailure::Account(wait.failure()));
+            }
+            AccountStartupAdmission::Ready(admission) => Arc::new(admission),
+        };
+        let registration = supervisor
+            .discover()
+            .map_err(StartupFailure::Account)?
+            .ok_or(StartupFailure::RegistrationMissing)?;
+        admission.revalidate().map_err(StartupFailure::Account)?;
+        if registration.server_pin() != admission.registration().server_pin() {
+            return Err(StartupFailure::Account(ServiceFailure::IdentityMismatch));
+        }
+        let database = Database::open_existing_for_application(
+            registration.organization_directory(),
+            migrations(),
+            schema::APPLICATION_ID,
+        )
+        .map_err(StartupFailure::Storage)?;
+        Ok(Self {
+            credentials: admission.identity(),
+            registration,
+            database,
+            admission: Some(admission),
         })
     }
 
@@ -199,6 +247,7 @@ impl AccountStartup {
             registration: self.registration,
             credentials: self.credentials,
             store,
+            admission: self.admission,
         })
     }
 }
@@ -208,6 +257,7 @@ pub struct AccountStore {
     pub registration: RegisteredServer,
     pub credentials: Arc<ServerIdentity>,
     pub store: SqliteOrganizationStore,
+    admission: Option<Arc<spaceterm_host::account_service::AccountStartup>>,
 }
 impl fmt::Debug for AccountStore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -219,11 +269,7 @@ impl fmt::Debug for AccountStore {
 /// fixed registration. Runtime flags and caller XDG roots cannot select it.
 pub fn production_startup() -> Result<AccountStartup, StartupFailure> {
     let supervisor = ServiceSupervisor::current(None).map_err(StartupFailure::Account)?;
-    let registration = supervisor
-        .discover()
-        .map_err(StartupFailure::Account)?
-        .ok_or(StartupFailure::RegistrationMissing)?;
-    AccountStartup::open(registration)
+    AccountStartup::admit(&supervisor)
 }
 
 /// Read-only registration facts. Running is durable intent, not a claim that a

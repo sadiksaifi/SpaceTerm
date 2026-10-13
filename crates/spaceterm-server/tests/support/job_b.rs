@@ -311,6 +311,7 @@ pub fn status(revision: u64) -> spaceterm_core::management::ServerStatus {
     };
     use std::num::NonZeroU64;
     ServerStatus::new(ServerStatusParts {
+        runtime: Default::default(),
         server: server_id(),
         epoch: ServerEpoch::new(2),
         revision: NonZeroU64::new(revision).unwrap(),

@@ -166,6 +166,7 @@ fn git_reply(payload: &Payload, target: &ConnectionTarget) -> Option<Payload> {
 }
 fn status(server: spaceterm_core::identity::ServerId, revision: u64) -> ServerStatus {
     ServerStatus::new(ServerStatusParts {
+        runtime: Default::default(),
         server,
         epoch: ServerEpoch::new(1),
         revision: NonZeroU64::new(revision).unwrap(),

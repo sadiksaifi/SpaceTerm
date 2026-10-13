@@ -30,9 +30,13 @@ use super::{
 use crate::domain::PinnedDirectory;
 
 mod local_source;
+pub(crate) mod pane_repair;
 mod remote_source;
-mod server_source;
+pub(crate) mod server_source;
 pub(crate) use server_source::ServerDirectorySource;
+
+#[cfg(test)]
+mod server_tests;
 
 pub(crate) use local_source::LocalDirectorySource;
 pub(crate) use remote_source::{
@@ -109,6 +113,20 @@ pub(crate) trait DirectorySource {
     /// Names the machine when it is not the local one.
     fn machine_name(&self) -> Option<&str>;
 
+    fn is_server_backed(&self) -> bool {
+        !self.can_create()
+    }
+
+    fn can_create(&self) -> bool {
+        true
+    }
+
+    /// Server selections are observations, never client-local filesystem authority.
+    fn select(&self, directory: PickerPath) -> SourceFuture<DirectorySelection> {
+        let future = self.pin(directory);
+        Box::pin(async move { future.await.map(DirectorySelection::Legacy) })
+    }
+
     /// Resolves the absolute home directory that `~/` names.
     fn discover_home(&self) -> SourceFuture<PickerPath>;
 
@@ -121,20 +139,6 @@ pub(crate) trait DirectorySource {
     /// Validates the directory's physical identity as a Pinned Directory.
     fn pin(&self, directory: PickerPath) -> SourceFuture<PinnedDirectory>;
 
-    /// Server-backed repair is read-only. It must not offer directory creation or local pinning.
-    fn can_create(&self) -> bool {
-        true
-    }
-
-    fn select(&self, directory: PickerPath) -> SourceFuture<DirectorySelection> {
-        let selected = self.pin(directory);
-        Box::pin(async move { selected.await.map(DirectorySelection::Pinned) })
-    }
-}
-
-pub(crate) enum DirectorySelection {
-    Pinned(PinnedDirectory),
-    Server(spaceterm_core::organization::ServerDirectory),
 }
 
 /// A directory path as spelled in the Directory Picker: absolute, or relative to the home
@@ -405,6 +409,14 @@ pub(crate) enum ExactPathState {
     Missing,
 }
 
+pub(crate) enum DirectorySelection {
+    Legacy(PinnedDirectory),
+    Server(spaceterm_core::organization::ServerDirectory),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ServerDirectorySelected(pub(crate) spaceterm_core::organization::ServerDirectory);
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum DirectoryPickerEvent {
     StateChanged,
@@ -426,6 +438,7 @@ enum DirectoryPickerStatus {
     ConnectionLost,
     SessionUnavailable,
     UnsupportedLoginShell,
+    StillUnavailable,
     Other,
     Invalid(PickerPathError),
 }
@@ -504,6 +517,7 @@ pub(super) struct DirectoryPicker {
 }
 
 impl EventEmitter<DirectoryPickerEvent> for DirectoryPicker {}
+impl EventEmitter<ServerDirectorySelected> for DirectoryPicker {}
 
 impl DirectoryPicker {
     /// Creates a closed picker for the machine `source` reaches, whose search line shows
@@ -558,7 +572,9 @@ impl DirectoryPicker {
     }
 
     pub(super) fn with_system_selection(mut self, label: SharedString) -> Self {
-        self.system_selection = Some(label);
+        if !self.source.is_server_backed() {
+            self.system_selection = Some(label);
+        }
         self
     }
 
@@ -670,6 +686,20 @@ impl DirectoryPicker {
         }
     }
 
+    fn repair_unavailable(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.open
+            && self.source.is_server_backed()
+            && self.busy == Some(DirectoryPickerBusy::AwaitingActivation)
+        {
+            self.busy = None;
+            self.status = DirectoryPickerStatus::StillUnavailable;
+            self.snapshot = None;
+            self.clear_rows();
+            self.publish(cx);
+            self.refocus_path(window, cx);
+        }
+    }
+
     fn reduce_palette_event(
         &mut self,
         event: &CommandPaletteEvent<DirectoryPickerItemId>,
@@ -719,7 +749,11 @@ impl DirectoryPicker {
 
     /// Closes the picker and hands the choice to System Directory Selection.
     fn request_system_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.open || self.busy.is_some() || self.system_selection.is_none() {
+        if !self.open
+            || self.busy.is_some()
+            || self.system_selection.is_none()
+            || self.source.is_server_backed()
+        {
             return;
         }
         self.end_session(Some(DirectoryPickerEvent::SystemSelectionRequested), cx);
@@ -812,10 +846,13 @@ impl DirectoryPicker {
                 return;
             }
         };
-        let listing_needed = !self
-            .snapshot
-            .as_ref()
-            .is_some_and(|snapshot| snapshot.directory == *parsed.enumeration_directory());
+        // A pathname cache is not an owning-server directory observation. Refresh
+        // server listings even when only the leaf filter changes.
+        let listing_needed = self.source.is_server_backed()
+            || !self
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.directory == *parsed.enumeration_directory());
         self.parsed = Some(parsed.clone());
         self.status = DirectoryPickerStatus::Loading;
         self.operation_generation = self.operation_generation.wrapping_add(1);
@@ -994,6 +1031,9 @@ impl DirectoryPicker {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.source.is_server_backed() {
+            return;
+        }
         self.busy = Some(DirectoryPickerBusy::CreationAlert);
         self.publish(cx);
         let directory = parsed.exact_directory().clone();
@@ -1077,6 +1117,9 @@ impl DirectoryPicker {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.source.is_server_backed() && kind == DirectoryValidationKind::Creation {
+            return;
+        }
         self.operation_generation = self.operation_generation.wrapping_add(1);
         let operation_generation = self.operation_generation;
         let lifecycle_generation = self.lifecycle_generation;
@@ -1131,12 +1174,15 @@ impl DirectoryPicker {
                 }
                 self.busy = Some(DirectoryPickerBusy::AwaitingActivation);
                 self.sync_palette(cx);
-                cx.emit(match pinned {
-                    DirectorySelection::Pinned(pinned) => DirectoryPickerEvent::Confirmed(pinned),
-                    DirectorySelection::Server(directory) => {
-                        DirectoryPickerEvent::ConfirmedServer(directory)
+                match pinned {
+                    DirectorySelection::Legacy(pinned) => {
+                        cx.emit(DirectoryPickerEvent::Confirmed(pinned))
                     }
-                });
+                    DirectorySelection::Server(directory) => {
+                        cx.emit(ServerDirectorySelected(directory.clone()));
+                        cx.emit(DirectoryPickerEvent::ConfirmedServer(directory));
+                    }
+                }
                 cx.notify();
             }
             Err(error) => {
@@ -1151,7 +1197,8 @@ impl DirectoryPicker {
     fn can_confirm(&self) -> bool {
         self.busy.is_none()
             && (self.status == DirectoryPickerStatus::Readable
-                || (self.status == DirectoryPickerStatus::Missing && self.source.can_create()))
+                || (self.status == DirectoryPickerStatus::Missing
+                    && !self.source.is_server_backed()))
             && self
                 .parsed
                 .as_ref()
@@ -1161,7 +1208,12 @@ impl DirectoryPicker {
     /// Returns the search line's action that opens the exact path, creating it when missing, with
     /// System Directory Selection in its menu when offered.
     fn confirm_action(&self, cx: &App) -> CommandPalettePrimaryAction {
-        let action = CommandPalettePrimaryAction::new(CONFIRM_ACTION, "Open");
+        let label = if self.source.is_server_backed() {
+            "Choose Directory"
+        } else {
+            "Open"
+        };
+        let action = CommandPalettePrimaryAction::new(CONFIRM_ACTION, label);
         let action = match crate::desktop_profile::DesktopPresentation::get(cx)
             .shortcut(&spaceterm_ui::CommandPaletteConfirm)
         {
@@ -1222,17 +1274,26 @@ impl DirectoryPicker {
     fn empty_notice(&self) -> EmptyNotice {
         match self.status {
             DirectoryPickerStatus::NotDirectory => {
-                return EmptyNotice::new(IconName::File, "Not a directory")
-                    .description("Only a directory can be a Pinned Directory.");
+                return EmptyNotice::new(IconName::File, "Not a directory").description(
+                    if self.source.is_server_backed() {
+                        "Choose an existing directory on this server."
+                    } else {
+                        "Only a directory can be a Pinned Directory."
+                    },
+                );
             }
             DirectoryPickerStatus::PermissionDenied => {
                 return EmptyNotice::new(IconName::Lock, "Permission denied")
                     .description("Your account can\u{2019}t open this directory.");
             }
-            DirectoryPickerStatus::ConnectionLost => return CONNECTION_LOST_NOTICE,
+            DirectoryPickerStatus::ConnectionLost => return self.connection_lost_notice(),
             DirectoryPickerStatus::SessionUnavailable => return SESSION_UNAVAILABLE_NOTICE,
             DirectoryPickerStatus::UnsupportedLoginShell => {
                 return UNSUPPORTED_LOGIN_SHELL_NOTICE;
+            }
+            DirectoryPickerStatus::StillUnavailable => {
+                return EmptyNotice::new(IconName::CircleAlert, "Still unavailable.")
+                    .description("Choose another existing directory on this server.");
             }
             DirectoryPickerStatus::Other => {
                 return EmptyNotice::new(IconName::CircleAlert, "Can\u{2019}t read this directory");
@@ -1242,13 +1303,12 @@ impl DirectoryPicker {
                     .description(error.message());
             }
             DirectoryPickerStatus::Missing => {
-                let notice =
-                    EmptyNotice::new(IconName::FolderPlus, "Directory doesn\u{2019}t exist");
-                return if self.source.can_create() {
-                    notice.description("Open creates it and pins this Workspace to it.")
-                } else {
-                    notice.description("Choose an existing directory on this server.")
-                };
+                return EmptyNotice::new(IconName::FolderPlus, "Directory doesn\u{2019}t exist")
+                    .description(if self.source.is_server_backed() {
+                        "Choose an existing directory on this server."
+                    } else {
+                        "Open creates it and pins this Workspace to it."
+                    });
             }
             DirectoryPickerStatus::DiscoveringAccount
             | DirectoryPickerStatus::Loading
@@ -1256,7 +1316,7 @@ impl DirectoryPicker {
         }
         match self.listing_error {
             None => EmptyNotice::new(IconName::Folder, NO_SUBDIRECTORIES),
-            Some(DirectorySourceError::ConnectionLost) => CONNECTION_LOST_NOTICE,
+            Some(DirectorySourceError::ConnectionLost) => self.connection_lost_notice(),
             Some(DirectorySourceError::SessionUnavailable) => SESSION_UNAVAILABLE_NOTICE,
             Some(DirectorySourceError::UnsupportedLoginShell) => UNSUPPORTED_LOGIN_SHELL_NOTICE,
             Some(DirectorySourceError::PermissionDenied) => {
@@ -1274,6 +1334,15 @@ impl DirectoryPicker {
             Some(DirectorySourceError::Other) => {
                 EmptyNotice::new(IconName::CircleAlert, "Can\u{2019}t list this directory")
             }
+        }
+    }
+
+    fn connection_lost_notice(&self) -> EmptyNotice {
+        if self.source.is_server_backed() {
+            EmptyNotice::new(IconName::TriangleAlert, "Server disconnected")
+                .description("Reconnect to this server, then choose the directory again.")
+        } else {
+            CONNECTION_LOST_NOTICE
         }
     }
 
@@ -1299,7 +1368,7 @@ impl DirectoryPicker {
             .map(|item| item.id().clone());
         let confirm_action = self.confirm_action(cx);
         let query_note = (self.status == DirectoryPickerStatus::Missing
-            && self.source.can_create())
+            && !self.source.is_server_backed())
         .then(|| SharedString::from(NEW_DIRECTORY_NOTE));
         self.palette.update(cx, |palette, cx| {
             // A stable selection survives republishing; otherwise Return descends into the first
@@ -1359,7 +1428,29 @@ fn block_parent_action<A: Action>(_: &A, _: &mut Window, cx: &mut App) {
 
 impl Render for DirectoryPicker {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let announcement = (self.source.is_server_backed()
+            && self.blocks_terminal_input()
+            && self.busy.is_none()
+            && !matches!(
+                self.status,
+                DirectoryPickerStatus::DiscoveringAccount
+                    | DirectoryPickerStatus::Loading
+                    | DirectoryPickerStatus::Readable
+            ))
+        .then(|| self.empty_notice().title);
         div()
+            .id("directory-picker")
+            .when_some(announcement, |picker, announcement| {
+                picker
+                    .role(gpui::accesskit::Role::Group)
+                    .aria_label("Directory selection status")
+                    .a11y_synthetic_children(move |builder| {
+                        let mut status = gpui::accesskit::Node::new(gpui::accesskit::Role::Status);
+                        status.set_label(announcement);
+                        status.set_live(gpui::accesskit::Live::Polite);
+                        builder.push_child(builder.synthetic_node_id("directory-status"), status);
+                    })
+            })
             .when(self.blocks_terminal_input(), |picker| {
                 picker
                     .capture_action(block_parent_action::<NewWorkspace>)
@@ -2658,7 +2749,7 @@ mod tests {
                         lifecycle_generation,
                         operation_generation,
                         directory,
-                        result: Ok(DirectorySelection::Pinned(PinnedDirectory::Remote {
+                        result: Ok(DirectorySelection::Legacy(PinnedDirectory::Remote {
                             directory: crate::domain::RemoteDirectory::new("~/".to_owned())
                                 .unwrap(),
                             identity: RemoteDirectoryIdentity::new("/home/tester".to_owned())
