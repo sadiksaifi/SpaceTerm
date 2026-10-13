@@ -3057,4 +3057,294 @@ mod account_installation {
         assert!(!installations.join("selection").exists());
         assert_eq!(registered.desired_state(), DesiredServerState::Stopped);
     }
+    #[test]
+    fn bootstrap_transfer_rejects_replacement_truncation_and_wrong_build() {
+        use spaceterm_host::bootstrap::artifact::{receive_artifact_with_key, write_artifact};
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        let build = artifact.feed().document().build_identity;
+        let platform = artifact.feed().document().platform;
+        let mut transfer = Vec::new();
+        write_artifact(&artifact, &mut transfer).unwrap();
+        let received = receive_artifact_with_key(
+            &mut transfer.as_slice(),
+            &key,
+            build,
+            platform,
+            artifact.artifact_sha256(),
+            1,
+        )
+        .unwrap();
+        assert_eq!(received.artifact_sha256(), artifact.artifact_sha256());
+        drop(received);
+        for cut in [0, 7, 24, transfer.len() - 1] {
+            assert!(
+                receive_artifact_with_key(
+                    &mut &transfer[..cut],
+                    &key,
+                    build,
+                    platform,
+                    artifact.artifact_sha256(),
+                    1
+                )
+                .is_err()
+            );
+        }
+        let mut replaced = transfer.clone();
+        *replaced.last_mut().unwrap() ^= 1;
+        assert!(
+            receive_artifact_with_key(
+                &mut replaced.as_slice(),
+                &key,
+                build,
+                platform,
+                artifact.artifact_sha256(),
+                1
+            )
+            .is_err()
+        );
+        assert!(
+            receive_artifact_with_key(
+                &mut transfer.as_slice(),
+                &key,
+                BuildChannel::Release,
+                platform,
+                artifact.artifact_sha256(),
+                1
+            )
+            .is_err()
+        );
+        let (_, replacement) = fixture("1.2.4", 7, native_machine());
+        let mut replacement_transfer = Vec::new();
+        write_artifact(&replacement, &mut replacement_transfer).unwrap();
+        assert!(
+            receive_artifact_with_key(
+                &mut replacement_transfer.as_slice(),
+                &key,
+                build,
+                platform,
+                artifact.artifact_sha256(),
+                1
+            )
+            .is_err()
+        );
+        let mut appended = transfer;
+        appended.push(0);
+        assert!(
+            receive_artifact_with_key(
+                &mut appended.as_slice(),
+                &key,
+                build,
+                platform,
+                artifact.artifact_sha256(),
+                1
+            )
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn bootstrap_remote_account_composition() {
+        use spaceterm_host::bootstrap::setup::{
+            AccountBootstrapSetup, BootstrapAccountRegistration,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        let digest = artifact.artifact_sha256();
+        let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
+        let setup = AccountBootstrapSetup::new(installer(&account, key, manager.clone()));
+        assert!(matches!(
+            setup.inspect().await.unwrap().registration,
+            BootstrapAccountRegistration::Missing
+        ));
+        assert!(!account.anchor().exists());
+        let request = setup.reserve_request().unwrap();
+        setup
+            .install(request, account.confirm_install(artifact))
+            .await
+            .unwrap();
+        let facts = setup.inspect().await.unwrap();
+        assert!(
+            matches!(facts.registration, BootstrapAccountRegistration::Running { artifact_identity, protocol_majors, .. } if artifact_identity == digest && protocol_majors == [1, 2])
+        );
+        assert_eq!(
+            manager.effects.lock().unwrap().as_slice(),
+            ["configure", "start"]
+        );
+    }
+
+    #[tokio::test]
+    async fn bootstrap_lost_remote_reply_resolves_original_request_after_restart() {
+        use spaceterm_host::bootstrap::setup::AccountBootstrapSetup;
+        let root = tempfile::tempdir().unwrap();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        let digest = artifact.artifact_sha256();
+        let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
+        let setup = AccountBootstrapSetup::new(installer(&account, key.clone(), manager.clone()));
+        let request = setup.reserve_request().unwrap();
+        setup
+            .install(request, account.confirm_install(artifact))
+            .await
+            .unwrap();
+        drop(setup);
+        let reopened = AccountBootstrapSetup::new(installer(&account, key, manager.clone()));
+        let first = reopened.resolve(request, digest).await.unwrap();
+        assert_eq!(reopened.resolve(request, digest).await.unwrap(), first);
+        assert!(reopened.resolve(request, [9; 32]).await.is_err());
+        assert_eq!(
+            manager.effects.lock().unwrap().as_slice(),
+            ["configure", "start"]
+        );
+        let reserved = reopened.reserve_request().unwrap();
+        assert!(reopened.resolve(reserved, digest).await.is_err());
+        assert_eq!(manager.effects.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_native_convergence_preserves_stopped() {
+        use spaceterm_host::bootstrap::setup::{
+            AccountBootstrapSetup, BootstrapAccountRegistration,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
+        let original = account
+            .initialize_with_installation(
+                DesiredServerState::Stopped,
+                Some(spaceterm_host::account_service::InstallationStatus {
+                    installation: spaceterm_host::startup::InstallationId(
+                        std::num::NonZeroU64::new(9).unwrap(),
+                    ),
+                    version: BuildVersion::parse("1.2.2").unwrap(),
+                    artifact_sha256: [3; 32],
+                }),
+            )
+            .unwrap();
+        let pin = original.server_pin();
+        let setup = AccountBootstrapSetup::new(installer(&account, key, manager.clone()));
+        assert!(
+            matches!(setup.inspect().await.unwrap().registration, BootstrapAccountRegistration::Stopped { pin: observed, .. } if observed == pin)
+        );
+        let request = setup.reserve_request().unwrap();
+        setup
+            .install(request, account.confirm_install(artifact))
+            .await
+            .unwrap();
+        assert_eq!(
+            account
+                .reopen()
+                .discover()
+                .unwrap()
+                .unwrap()
+                .desired_state(),
+            DesiredServerState::Stopped
+        );
+        assert!(manager.effects.lock().unwrap().is_empty());
+        assert!(matches!(
+            setup.inspect().await.unwrap().registration,
+            BootstrapAccountRegistration::Stopped { .. }
+        ));
+    }
+    #[tokio::test]
+    async fn bootstrap_lookup_of_interrupted_install_never_resumes_native_effects() {
+        use spaceterm_host::{
+            account_service::{ServiceFailure, ServicePhase},
+            bootstrap::setup::AccountBootstrapSetup,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        let digest = artifact.artifact_sha256();
+        let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
+        let setup = AccountBootstrapSetup::new(installer(&account, key.clone(), manager.clone()));
+        let request = setup.reserve_request().unwrap();
+        spaceterm_host::account_service::test_support::interrupt_after_phase(
+            ServicePhase::Accepted,
+        );
+        assert_eq!(
+            setup
+                .install(request, account.confirm_install(artifact))
+                .await,
+            Err(ServiceFailure::SupervisorUnavailable)
+        );
+        let reopened = AccountBootstrapSetup::new(installer(&account, key, manager.clone()));
+        assert_eq!(
+            reopened.resolve(request, digest).await,
+            Err(ServiceFailure::Pending)
+        );
+        assert!(account.reopen().discover().unwrap().is_none());
+        assert!(manager.effects.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn bootstrap_owner_lookup_retains_original_native_request_and_exact_claim() {
+        use spaceterm_core::{
+            identity::{DeviceId, ServerId},
+            pairing::{EnrollmentProposal, EnrollmentProposalParts, PairingKeys, PairingKeysParts},
+        };
+        use spaceterm_host::{
+            account_service::ServiceFailure, bootstrap::setup::AccountBootstrapSetup,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        let digest = artifact.artifact_sha256();
+        let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
+        let supervisor = installer(&account, key.clone(), manager.clone());
+        let setup = AccountBootstrapSetup::new(supervisor.clone());
+        let install = setup.reserve_request().unwrap();
+        setup
+            .install(install, account.confirm_install(artifact))
+            .await
+            .unwrap();
+        let expected = setup.inspect().await.unwrap().registration;
+        let pin = account.reopen().discover().unwrap().unwrap().server_pin();
+        let proposal = |nonce| {
+            EnrollmentProposal::new(EnrollmentProposalParts {
+                server: ServerId::new(pin.identity),
+                device: DeviceId::new([7; 16]),
+                keys: PairingKeys::new(PairingKeysParts {
+                    device_identity_public_key: [8; 32],
+                    pairing_authentication_public_key: [9; 32],
+                })
+                .unwrap(),
+                claim_nonce: [nonce; 32],
+            })
+            .unwrap()
+        };
+        let request = setup.reserve_request().unwrap();
+        let original = setup
+            .authorize_owner(request, &expected, &proposal(1))
+            .await
+            .unwrap();
+        assert_eq!(
+            setup
+                .authorize_owner(request, &expected, &proposal(1))
+                .await
+                .unwrap(),
+            original
+        );
+        assert_eq!(
+            setup
+                .authorize_owner(request, &expected, &proposal(2))
+                .await,
+            Err(ServiceFailure::RequestConflict)
+        );
+        supervisor.acknowledge_request(request).unwrap();
+        let reopened = AccountBootstrapSetup::new(installer(&account, key, manager.clone()));
+        assert_eq!(
+            reopened
+                .resolve(request, digest)
+                .await
+                .unwrap()
+                .registration,
+            expected
+        );
+        assert_eq!(
+            manager.effects.lock().unwrap().as_slice(),
+            ["configure", "start"]
+        );
+    }
 }
