@@ -6,6 +6,7 @@ mod controller;
 pub(crate) mod model;
 mod pairing_port;
 mod pairing_projection;
+mod persistence;
 pub use attachments::JournalAttachment;
 pub(crate) use controller::PaneJournalAdmission;
 pub use controller::{JournalController, JournalHealth};
@@ -385,7 +386,8 @@ impl std::fmt::Debug for JournalRevocation {
     }
 }
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
-struct GenerationHighWater {
+/// Comparison-only high-water mark for one Server's pairing lifetimes.
+pub struct GenerationHighWater {
     server: ServerId,
     generation: LocalPairingGeneration,
 }
@@ -461,6 +463,9 @@ impl RecoveredClientState {
     }
     pub fn streams(&self) -> &[JournalStream] {
         &self.streams
+    }
+    pub fn generations(&self) -> &[GenerationHighWater] {
+        &self.generations
     }
     pub fn detaches(&self) -> &[DetachTask] {
         &self.detaches

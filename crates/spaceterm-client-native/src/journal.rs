@@ -2,7 +2,8 @@
 //!
 //! The singleton projection has one versioned purpose and one full-width revision.
 //! Domain validation lives in the portable journal, rather than a second SQL truth.
-//! Every change replaces the checked aggregate in one compare-and-swap transaction.
+//! Metadata and changed comparison records commit in one revision-CAS transaction.
+//! A revision-checked cache avoids decoding unchanged history during live use.
 //! SQLite alone owns database and rollback-journal descriptors. Reopening is explicit.
 
 use spaceterm_client::{
@@ -27,10 +28,51 @@ const SCHEMA: &str = "CREATE TABLE client_journal(\
     revision BLOB NOT NULL CHECK(length(revision)=8),\
     payload BLOB NOT NULL CHECK(length(payload)>0 AND length(payload)<=33554432)\
 ) STRICT";
-const MIGRATIONS: &[Migration<'_>] = &[Migration { sql: SCHEMA }];
+const HISTORY_SCHEMA: &str = "UPDATE client_journal SET payload=CASE WHEN \
+    json_type(CAST(payload AS TEXT),'$.streams')='array' AND \
+    json_type(CAST(payload AS TEXT),'$.tombstones')='array' AND \
+    json_type(CAST(payload AS TEXT),'$.generations')='array' AND \
+    (json_type(CAST(payload AS TEXT),'$.pairing') IS NULL OR \
+     json_type(CAST(payload AS TEXT),'$.pairing.slots')='array') \
+    THEN payload ELSE NULL END;\
+CREATE TABLE client_journal_history(\
+    kind INTEGER NOT NULL CHECK(kind BETWEEN 0 AND 3),\
+    position INTEGER NOT NULL CHECK(position BETWEEN 0 AND 4095),\
+    payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB)) BETWEEN 1 AND 33554432 AND json_valid(payload)),\
+    PRIMARY KEY(kind,position)\
+) STRICT, WITHOUT ROWID;\
+INSERT INTO client_journal_history SELECT 0,CAST(j.key AS INTEGER),j.value \
+    FROM client_journal,json_each(CAST(payload AS TEXT),'$.streams') j;\
+INSERT INTO client_journal_history SELECT 1,CAST(j.key AS INTEGER),j.value \
+    FROM client_journal,json_each(CAST(payload AS TEXT),'$.tombstones') j;\
+INSERT INTO client_journal_history SELECT 2,CAST(j.key AS INTEGER),j.value \
+    FROM client_journal,json_each(CAST(payload AS TEXT),'$.pairing.slots') j;\
+INSERT INTO client_journal_history SELECT 3,CAST(j.key AS INTEGER),j.value \
+    FROM client_journal,json_each(CAST(payload AS TEXT),'$.generations') j;\
+UPDATE client_journal SET payload=CAST(json_insert(CAST(payload AS TEXT),'$.pairing',\
+    json('{\"generation_high_water\":[0,0,0,0,0,0,0,0],\"slots\":[],\"credential_preparations\":[],\"prepared\":[],\"acknowledgements\":[]}')) AS BLOB);\
+UPDATE client_journal SET payload=CAST(json_set(CAST(payload AS TEXT),\
+    '$.streams',json('[]'),'$.tombstones',json('[]'),'$.pairing.slots',json('[]'),'$.generations',json('[]')) AS BLOB)";
+const MIGRATIONS: &[Migration<'_>] = &[
+    Migration { sql: SCHEMA },
+    Migration {
+        sql: HISTORY_SCHEMA,
+    },
+];
+
+struct Cache {
+    state: RecoveredClientState,
+    lengths: [Vec<usize>; 4],
+}
+struct RecordUpdate {
+    kind: usize,
+    position: usize,
+    payload: Option<Vec<u8>>,
+}
 
 struct Owner {
     database: Database,
+    cache: Option<Cache>,
     codec: Arc<dyn LedgerCodec>,
     verifier: Arc<dyn ReceiptVerifier>,
     limits: JournalLimits,
@@ -88,8 +130,8 @@ impl NativeClientJournal {
                 match result { CommitDisposition::Durable(()) => {}, CommitDisposition::NotApplied(error) => return Err(classify(error)), CommitDisposition::Indeterminate => return Err(ClientFailure::new(ClientFailureClass::RecoveryRequired)) }
             }
             let closed = Arc::default();
-            let owner = Owner { database, codec, verifier, limits, closed: Arc::clone(&closed) };
-            read(&owner)?;
+            let mut owner = Owner { database, cache: None, codec, verifier, limits, closed: Arc::clone(&closed) };
+            read(&mut owner)?;
             Ok(Self { owner: Arc::new(Mutex::new(owner)), fence: Arc::default(), scheduler: Arc::default(), closed })
         }).await.map_err(|_| ClientFailure::new(ClientFailureClass::RecoveryRequired))?
     }
@@ -108,10 +150,10 @@ impl ClientJournal for NativeClientJournal {
         let owner = Arc::clone(&self.owner);
         Box::pin(async move {
             tokio::task::spawn_blocking(move || {
-                let owner = owner
+                let mut owner = owner
                     .lock()
                     .map_err(|_| ClientFailure::new(ClientFailureClass::RecoveryRequired))?;
-                read(&owner)
+                read(&mut owner).cloned()
             })
             .await
             .map_err(|_| ClientFailure::new(ClientFailureClass::RecoveryRequired))?
@@ -140,22 +182,50 @@ impl ClientJournal for NativeClientJournal {
             tokio::task::spawn_blocking(move || {
                 let mut owner = owner.lock().map_err(|_| ClientFailure::new(ClientFailureClass::RecoveryRequired))?;
                 if owner.closed.is_closed() { return Ok(JournalCommitDisposition::NotApplied(JournalFailure::RecoveryRequired)); }
-                let state = match read(&owner) { Ok(state) => state, Err(error) => return Ok(JournalCommitDisposition::NotApplied(journal_failure(error))) };
+                let state = match read(&mut owner) { Ok(state) => state.clone(), Err(error) => return Ok(JournalCommitDisposition::NotApplied(journal_failure(error))) };
                 if transaction.expected_revision != state.revision() { return Ok(JournalCommitDisposition::NotApplied(JournalFailure::Conflict)); }
                 let candidate = match state.apply(&transaction, owner.codec.as_ref(), owner.verifier.as_ref(), owner.limits) {
                     Ok(candidate) => candidate,
                     Err(_) => return Ok(JournalCommitDisposition::NotApplied(JournalFailure::InvalidState)),
                 };
-                let payload = match encode(&candidate, owner.limits) { Ok(payload) => payload, Err(error) => return Ok(JournalCommitDisposition::NotApplied(journal_failure(error))) };
+                let payload = match encode(&candidate.persistence_metadata(), owner.limits) { Ok(payload) => payload, Err(error) => return Ok(JournalCommitDisposition::NotApplied(journal_failure(error))) };
+                let Some(cache) = owner.cache.as_ref() else { return Err(ClientFailure::new(ClientFailureClass::RecoveryRequired)); };
+                let (updates, lengths) = match changed_records(&state, &candidate, &cache.lengths, owner.limits) {
+                    Ok(records) => records,
+                    Err(error) => return Ok(JournalCommitDisposition::NotApplied(journal_failure(error))),
+                };
+                let retained_bytes = lengths.iter().try_fold(payload.len(), |total, records| {
+                    records.iter().try_fold(total, |sum, length| sum.checked_add(*length))
+                        .and_then(|sum| sum.checked_add(records.len().saturating_sub(1)))
+                });
+                if retained_bytes.is_none_or(|size| size > owner.limits.retained_bytes) {
+                    return Ok(JournalCommitDisposition::NotApplied(JournalFailure::InvalidState));
+                }
                 let expected = state.revision().get().to_be_bytes();
                 let revision = candidate.revision().get().to_be_bytes();
                 let result = owner.database.transaction(|tx| {
                     let rows = tx.execute("UPDATE client_journal SET revision=?1,payload=?2 WHERE singleton=1 AND purpose='client-journal-v1' AND revision=?3", (revision.as_slice(), payload.as_slice(), expected.as_slice()))?;
-                    if rows != 1 { return Err(StorageFailure::InvalidState); }
-                    Ok(())
+                    if rows != 1 { return Ok(false); }
+                    for update in &updates {
+                        let kind = update.kind as i64;
+                        let position = update.position as i64;
+                        match &update.payload {
+                            Some(payload) => {
+                                let text = std::str::from_utf8(payload).map_err(|_| StorageFailure::InvalidState)?;
+                                tx.execute("INSERT INTO client_journal_history(kind,position,payload) VALUES(?1,?2,?3) ON CONFLICT(kind,position) DO UPDATE SET payload=excluded.payload", (kind, position, text))?;
+                            },
+                            None => { tx.execute("DELETE FROM client_journal_history WHERE kind=?1 AND position=?2", (kind, position))?; },
+                        }
+                    }
+                    Ok(true)
                 });
                 Ok(match result {
-                    CommitDisposition::Durable(()) => JournalCommitDisposition::Durable(JournalReceipt::new(candidate.revision())),
+                    CommitDisposition::Durable(true) => {
+                        let receipt = JournalReceipt::new(candidate.revision());
+                        owner.cache = Some(Cache { state: candidate, lengths });
+                        JournalCommitDisposition::Durable(receipt)
+                    },
+                    CommitDisposition::Durable(false) => JournalCommitDisposition::NotApplied(JournalFailure::Conflict),
                     CommitDisposition::NotApplied(error) => JournalCommitDisposition::NotApplied(journal_failure(classify(error))),
                     CommitDisposition::Indeterminate => {
                         owner.closed.close();
@@ -173,32 +243,150 @@ impl ClientJournal for NativeClientJournal {
     }
 }
 
-fn read(owner: &Owner) -> Result<RecoveredClientState, ClientFailure> {
+fn read(owner: &mut Owner) -> Result<&RecoveredClientState, ClientFailure> {
     if owner.closed.is_closed() {
         return Err(ClientFailure::new(ClientFailureClass::RecoveryRequired));
     }
-    let limit = i64::try_from(owner.limits.retained_bytes)
-        .map_err(|_| ClientFailure::new(ClientFailureClass::ResourceLimit))?;
-    // SQL reduces purpose to a scalar and checks both blob lengths BEFORE the
-    // row decoder allocates, including when a foreign table lacks our constraints.
-    let (purpose, revision, payload): (bool, Option<Vec<u8>>, Option<Vec<u8>>) = owner.database.query_row("SELECT purpose='client-journal-v1',CASE WHEN length(revision)=8 THEN revision ELSE NULL END,CASE WHEN length(payload)<=?1 THEN payload ELSE NULL END FROM client_journal WHERE singleton=1", [limit], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).map_err(classify)?;
+    // The native query still verifies held filesystem authority and observes other
+    // SQLite owners. A matching revision reuses only our last durable projection.
+    let (purpose, revision): (bool, Option<Vec<u8>>) = owner.database.query_row(
+        "SELECT purpose='client-journal-v1',CASE WHEN length(revision)=8 THEN revision ELSE NULL END FROM client_journal WHERE singleton=1", [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).map_err(classify)?;
     if !purpose {
         return Err(ClientFailure::new(ClientFailureClass::InvalidStorage));
     }
     let revision = ClientJournalRevision::new(u64::from_be_bytes(
         revision
-            .ok_or_else(|| ClientFailure::new(ClientFailureClass::InvalidStorage))?
+            .ok_or_else(invalid_storage)?
             .try_into()
-            .map_err(|_| ClientFailure::new(ClientFailureClass::InvalidStorage))?,
+            .map_err(|_| invalid_storage())?,
     ));
-    let payload = payload.ok_or_else(|| ClientFailure::new(ClientFailureClass::ResourceLimit))?;
-    let state: RecoveredClientState = serde_json::from_slice(&payload)
-        .map_err(|_| ClientFailure::new(ClientFailureClass::InvalidStorage))?;
+    if owner
+        .cache
+        .as_ref()
+        .is_none_or(|cache| cache.state.revision() != revision)
+    {
+        owner.cache = Some(read_snapshot(owner)?);
+    }
+    owner
+        .cache
+        .as_ref()
+        .map(|cache| &cache.state)
+        .ok_or_else(invalid_storage)
+}
+fn invalid_storage() -> ClientFailure {
+    ClientFailure::new(ClientFailureClass::InvalidStorage)
+}
+fn read_snapshot(owner: &mut Owner) -> Result<Cache, ClientFailure> {
+    let limit = i64::try_from(owner.limits.retained_bytes).map_err(|_| invalid_storage())?;
+    let (revision, payload, lengths) = owner.database.read_transaction(|tx| {
+        // Check counts, contiguity and total byte residency before assembling or
+        // allocating the retained document, even if foreign tables lack checks.
+        let valid: bool = tx.query_row(
+            "SELECT count(*)<=16384 AND coalesce(sum(length(CAST(payload AS BLOB))+1),0)-count(DISTINCT kind)+(SELECT length(payload) FROM client_journal WHERE singleton=1)<=?1 AND coalesce(min(kind),0)>=0 AND coalesce(max(kind),0)<=3 AND NOT EXISTS(SELECT 1 FROM client_journal_history GROUP BY kind HAVING min(position)!=0 OR max(position)!=count(*)-1 OR count(*)>4096) FROM client_journal_history", [limit], |row| row.get(0),
+        )?;
+        if !valid { return Err(StorageFailure::InvalidState); }
+        let (revision, payload): (Vec<u8>, Vec<u8>) = tx.query_row(
+            "SELECT revision,CAST(json_set(CAST(payload AS TEXT),'$.streams',json((SELECT json_group_array(json(payload)) FROM (SELECT payload FROM client_journal_history WHERE kind=0 ORDER BY position))),'$.tombstones',json((SELECT json_group_array(json(payload)) FROM (SELECT payload FROM client_journal_history WHERE kind=1 ORDER BY position))),'$.pairing.slots',json((SELECT json_group_array(json(payload)) FROM (SELECT payload FROM client_journal_history WHERE kind=2 ORDER BY position))),'$.generations',json((SELECT json_group_array(json(payload)) FROM (SELECT payload FROM client_journal_history WHERE kind=3 ORDER BY position)))) AS BLOB) FROM client_journal WHERE singleton=1 AND purpose='client-journal-v1' AND length(revision)=8 AND json_type(CAST(payload AS TEXT),'$.streams')='array' AND json_array_length(CAST(payload AS TEXT),'$.streams')=0 AND json_type(CAST(payload AS TEXT),'$.tombstones')='array' AND json_array_length(CAST(payload AS TEXT),'$.tombstones')=0 AND json_type(CAST(payload AS TEXT),'$.pairing.slots')='array' AND json_array_length(CAST(payload AS TEXT),'$.pairing.slots')=0 AND json_type(CAST(payload AS TEXT),'$.generations')='array' AND json_array_length(CAST(payload AS TEXT),'$.generations')=0", [], |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let mut lengths: [Vec<usize>; 4] = Default::default();
+        for (kind, values) in lengths.iter_mut().enumerate() {
+            let encoded: String = tx.query_row(
+                "SELECT json_group_array(length(CAST(payload AS BLOB))) FROM (SELECT payload FROM client_journal_history WHERE kind=?1 ORDER BY position)", [kind as i64], |row| row.get(0),
+            )?;
+            *values = serde_json::from_str(&encoded).map_err(|_| StorageFailure::InvalidState)?;
+        }
+        Ok((revision, payload, lengths))
+    }).map_err(classify)?;
+    if payload.len() > owner.limits.retained_bytes {
+        return Err(invalid_storage());
+    }
+    let state: RecoveredClientState =
+        serde_json::from_slice(&payload).map_err(|_| invalid_storage())?;
+    let revision = ClientJournalRevision::new(u64::from_be_bytes(
+        revision.try_into().map_err(|_| invalid_storage())?,
+    ));
     if state.revision() != revision {
-        return Err(ClientFailure::new(ClientFailureClass::InvalidStorage));
+        return Err(invalid_storage());
     }
     state.validate(owner.codec.as_ref(), owner.verifier.as_ref(), owner.limits)?;
-    Ok(state)
+    Ok(Cache { state, lengths })
+}
+fn changed_records(
+    old: &RecoveredClientState,
+    next: &RecoveredClientState,
+    previous_lengths: &[Vec<usize>; 4],
+    limits: JournalLimits,
+) -> Result<(Vec<RecordUpdate>, [Vec<usize>; 4]), ClientFailure> {
+    fn collect<T: serde::Serialize + PartialEq>(
+        old: &[T],
+        next: &[T],
+        kind: usize,
+        lengths: &mut Vec<usize>,
+        updates: &mut Vec<RecordUpdate>,
+        limits: JournalLimits,
+    ) -> Result<(), ClientFailure> {
+        for (position, record) in next.iter().enumerate() {
+            if old.get(position) != Some(record) {
+                let payload = encode(record, limits)?;
+                if position < lengths.len() {
+                    lengths[position] = payload.len();
+                } else {
+                    lengths.push(payload.len());
+                }
+                updates.push(RecordUpdate {
+                    kind,
+                    position,
+                    payload: Some(payload),
+                });
+            }
+        }
+        for position in next.len()..old.len() {
+            updates.push(RecordUpdate {
+                kind,
+                position,
+                payload: None,
+            });
+        }
+        lengths.truncate(next.len());
+        Ok(())
+    }
+    let mut lengths = previous_lengths.clone();
+    let mut updates = Vec::new();
+    collect(
+        old.streams(),
+        next.streams(),
+        0,
+        &mut lengths[0],
+        &mut updates,
+        limits,
+    )?;
+    collect(
+        old.tombstones(),
+        next.tombstones(),
+        1,
+        &mut lengths[1],
+        &mut updates,
+        limits,
+    )?;
+    collect(
+        old.pairing().slots(),
+        next.pairing().slots(),
+        2,
+        &mut lengths[2],
+        &mut updates,
+        limits,
+    )?;
+    collect(
+        old.generations(),
+        next.generations(),
+        3,
+        &mut lengths[3],
+        &mut updates,
+        limits,
+    )?;
+    Ok((updates, lengths))
 }
 struct BoundedWriter {
     bytes: Vec<u8>,
@@ -224,7 +412,7 @@ impl Write for BoundedWriter {
         Ok(())
     }
 }
-fn encode(state: &RecoveredClientState, limits: JournalLimits) -> Result<Vec<u8>, ClientFailure> {
+fn encode(state: &impl serde::Serialize, limits: JournalLimits) -> Result<Vec<u8>, ClientFailure> {
     let mut writer = BoundedWriter {
         bytes: vec![],
         limit: limits.retained_bytes,
@@ -388,6 +576,9 @@ mod tests {
                 Migration {
                     sql: "CREATE TABLE future_metadata(value INTEGER) STRICT",
                 },
+                Migration {
+                    sql: "CREATE TABLE future_projection(value INTEGER) STRICT",
+                },
             ],
         )
         .unwrap();
@@ -405,10 +596,14 @@ mod tests {
         );
         let database = Database::open_existing(
             &directory.0,
-            &[Migration { sql: "" }, Migration { sql: "" }],
+            &[
+                Migration { sql: "" },
+                Migration { sql: "" },
+                Migration { sql: "" },
+            ],
         )
         .unwrap();
-        assert_eq!(database.schema_version().unwrap(), 2);
+        assert_eq!(database.schema_version().unwrap(), 3);
     }
 
     #[tokio::test]
@@ -651,6 +846,129 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_journal_migrates_schema_one_without_losing_comparison_records() {
+        use spaceterm_client::journal::*;
+        let directory = Directory::new();
+        let state = RecoveredClientState::empty()
+            .apply(
+                &ClientJournalTransaction {
+                    expected_revision: ClientJournalRevision::new(0),
+                    changes: vec![ClientJournalChange::SaveBinding(Box::new(saved()))],
+                },
+                &Codec,
+                &Verifier,
+                JournalLimits::default(),
+            )
+            .unwrap();
+        for legacy_pairing in [false, true] {
+            let mut database = Database::open(&directory.0, &[Migration { sql: SCHEMA }]).unwrap();
+            let mut document = serde_json::to_value(&state).unwrap();
+            if legacy_pairing {
+                document.as_object_mut().unwrap().remove("pairing");
+            }
+            let expected: RecoveredClientState = serde_json::from_value(document.clone()).unwrap();
+            let payload = serde_json::to_vec(&document).unwrap();
+            let revision = state.revision().get().to_be_bytes();
+            assert_eq!(database.transaction(|tx| {
+                tx.execute("INSERT INTO client_journal(singleton,purpose,revision,payload) VALUES(1,'client-journal-v1',?1,?2)", (revision.as_slice(), payload.as_slice()))?;
+                Ok(())
+            }), CommitDisposition::Durable(()));
+            drop(database);
+            let journal = NativeClientJournal::open_existing(
+                directory.0.clone(),
+                Arc::new(Codec),
+                Arc::new(Verifier),
+                JournalLimits::default(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(journal.recover().await.unwrap(), expected);
+            drop(journal);
+            for entry in std::fs::read_dir(&directory.0).unwrap() {
+                std::fs::remove_file(entry.unwrap().path()).unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn native_journal_migration_does_not_repair_missing_history() {
+        for field in ["streams", "tombstones", "generations"] {
+            let directory = Directory::new();
+            let mut database = Database::open(&directory.0, &[Migration { sql: SCHEMA }]).unwrap();
+            let mut document = serde_json::to_value(RecoveredClientState::empty()).unwrap();
+            document.as_object_mut().unwrap().remove(field);
+            let payload = serde_json::to_vec(&document).unwrap();
+            assert_eq!(database.transaction(|tx| {
+                tx.execute("INSERT INTO client_journal(singleton,purpose,revision,payload) VALUES(1,'client-journal-v1',?1,?2)", ([0u8; 8].as_slice(), payload.as_slice()))?;
+                Ok(())
+            }), CommitDisposition::Durable(()));
+            drop(database);
+            let result = NativeClientJournal::open_existing(
+                directory.0.clone(),
+                Arc::new(Codec),
+                Arc::new(Verifier),
+                JournalLimits::default(),
+            )
+            .await;
+            assert_eq!(
+                result.err().unwrap().class(),
+                ClientFailureClass::InvalidStorage
+            );
+            let database =
+                Database::open_existing(&directory.0, &[Migration { sql: SCHEMA }]).unwrap();
+            assert_eq!(database.schema_version().unwrap(), 1);
+            let retained: Vec<u8> = database
+                .query_row("SELECT payload FROM client_journal", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(retained, payload);
+        }
+    }
+
+    #[tokio::test]
+    async fn native_journal_history_write_failure_rolls_back_metadata_and_cache() {
+        use spaceterm_client::journal::*;
+        let directory = Directory::new();
+        let journal = NativeClientJournal::create(
+            directory.0.clone(),
+            Arc::new(Codec),
+            Arc::new(Verifier),
+            JournalLimits::default(),
+        )
+        .await
+        .unwrap();
+        let mut database = Database::open_existing(&directory.0, MIGRATIONS).unwrap();
+        assert_eq!(database.transaction(|tx| tx.execute_batch(
+            "CREATE TRIGGER reject_second_stream BEFORE INSERT ON client_journal_history WHEN NEW.kind=0 AND NEW.position=1 BEGIN SELECT RAISE(ABORT,'fixture'); END"
+        )), CommitDisposition::Durable(()));
+        drop(database);
+        let tx = ClientJournalTransaction {
+            expected_revision: ClientJournalRevision::new(0),
+            changes: vec![ClientJournalChange::SaveBinding(Box::new(saved()))],
+        };
+        assert_eq!(
+            journal.commit(&tx).await.unwrap(),
+            JournalCommitDisposition::NotApplied(JournalFailure::InvalidState)
+        );
+        assert_eq!(
+            journal.recover().await.unwrap(),
+            RecoveredClientState::empty()
+        );
+        drop(journal);
+        let reopened = NativeClientJournal::open_existing(
+            directory.0.clone(),
+            Arc::new(Codec),
+            Arc::new(Verifier),
+            JournalLimits::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            reopened.recover().await.unwrap(),
+            RecoveredClientState::empty()
+        );
+    }
+
+    #[tokio::test]
     async fn native_journal_full_width_revision_survives_reopen() {
         let directory = Directory::new();
         let journal = NativeClientJournal::create(
@@ -686,6 +1004,158 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(reopened.recover().await.unwrap().revision().get(), u64::MAX);
+    }
+
+    #[tokio::test]
+    async fn native_journal_metadata_commit_does_not_rewrite_comparison_history() {
+        use spaceterm_client::journal::*;
+        let directory = Directory::new();
+        let journal = NativeClientJournal::create(
+            directory.0.clone(),
+            Arc::new(Codec),
+            Arc::new(Verifier),
+            JournalLimits::default(),
+        )
+        .await
+        .unwrap();
+        let binding = saved();
+        let tx = ClientJournalTransaction {
+            expected_revision: ClientJournalRevision::new(0),
+            changes: vec![ClientJournalChange::SaveBinding(Box::new(binding.clone()))],
+        };
+        assert!(matches!(
+            journal.commit(&tx).await.unwrap(),
+            JournalCommitDisposition::Durable(_)
+        ));
+        drop(journal);
+        let mut database = Database::open_existing(&directory.0, MIGRATIONS).unwrap();
+        assert_eq!(database.transaction(|tx| tx.execute_batch(
+            "CREATE TABLE observed_history_writes(value INTEGER NOT NULL) STRICT;             INSERT INTO observed_history_writes VALUES(0);             CREATE TRIGGER observe_history_insert AFTER INSERT ON client_journal_history BEGIN UPDATE observed_history_writes SET value=value+1; END;             CREATE TRIGGER observe_history_update AFTER UPDATE ON client_journal_history BEGIN UPDATE observed_history_writes SET value=value+1; END;             CREATE TRIGGER observe_history_delete AFTER DELETE ON client_journal_history BEGIN UPDATE observed_history_writes SET value=value+1; END"
+        )), CommitDisposition::Durable(()));
+        drop(database);
+        let journal = NativeClientJournal::open_existing(
+            directory.0.clone(),
+            Arc::new(Codec),
+            Arc::new(Verifier),
+            JournalLimits::default(),
+        )
+        .await
+        .unwrap();
+        let tx = ClientJournalTransaction {
+            expected_revision: ClientJournalRevision::new(1),
+            changes: vec![ClientJournalChange::ReconcileGrants {
+                local_pairing: binding.binding().unwrap().target().local_pairing().unwrap(),
+                epoch: spaceterm_core::authority::ServerEpoch::new(1),
+                revision: spaceterm_core::authority::OrganizationRevision::new(1),
+                grants: vec![],
+            }],
+        };
+        assert!(matches!(
+            journal.commit(&tx).await.unwrap(),
+            JournalCommitDisposition::Durable(_)
+        ));
+        assert_eq!(journal.recover().await.unwrap().streams().len(), 2);
+        drop(journal);
+        let database = Database::open_existing(&directory.0, MIGRATIONS).unwrap();
+        let writes: u64 = database
+            .query_row("SELECT value FROM observed_history_writes", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(writes, 0);
+    }
+
+    #[tokio::test]
+    async fn native_journal_unchanged_recovery_does_not_reverify_the_snapshot() {
+        struct CountingVerifier(std::sync::atomic::AtomicU64);
+        impl ReceiptVerifier for CountingVerifier {
+            fn verify(
+                &self,
+                pin: ServerPin,
+                receipt: &SignedPairingReceipt,
+            ) -> Result<(), ClientFailure> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Verifier.verify(pin, receipt)
+            }
+        }
+        let directory = Directory::new();
+        let verifier = Arc::new(CountingVerifier(0.into()));
+        let journal = NativeClientJournal::create(
+            directory.0.clone(),
+            Arc::new(Codec),
+            verifier.clone(),
+            JournalLimits::default(),
+        )
+        .await
+        .unwrap();
+        let tx = ClientJournalTransaction {
+            expected_revision: ClientJournalRevision::new(0),
+            changes: vec![spaceterm_client::journal::ClientJournalChange::SaveBinding(
+                Box::new(saved()),
+            )],
+        };
+        assert!(matches!(
+            journal.commit(&tx).await.unwrap(),
+            JournalCommitDisposition::Durable(_)
+        ));
+        verifier.0.store(0, Ordering::Relaxed);
+        for _ in 0..16 {
+            assert_eq!(journal.recover().await.unwrap().revision().get(), 1);
+        }
+        assert_eq!(verifier.0.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn native_journal_recovery_observes_another_owners_commit() {
+        use spaceterm_client::journal::*;
+        let directory = Directory::new();
+        let first = NativeClientJournal::create(
+            directory.0.clone(),
+            Arc::new(Codec),
+            Arc::new(Verifier),
+            JournalLimits::default(),
+        )
+        .await
+        .unwrap();
+        let second = NativeClientJournal::open_existing(
+            directory.0.clone(),
+            Arc::new(Codec),
+            Arc::new(Verifier),
+            JournalLimits::default(),
+        )
+        .await
+        .unwrap();
+        let binding = saved();
+        let tx = ClientJournalTransaction {
+            expected_revision: ClientJournalRevision::new(0),
+            changes: vec![ClientJournalChange::SaveBinding(Box::new(binding.clone()))],
+        };
+        assert!(matches!(
+            first.commit(&tx).await.unwrap(),
+            JournalCommitDisposition::Durable(_)
+        ));
+        assert_eq!(
+            second.recover().await.unwrap(),
+            first.recover().await.unwrap()
+        );
+        let tx = ClientJournalTransaction {
+            expected_revision: ClientJournalRevision::new(1),
+            changes: vec![ClientJournalChange::ReconcileGrants {
+                local_pairing: binding.binding().unwrap().target().local_pairing().unwrap(),
+                epoch: spaceterm_core::authority::ServerEpoch::new(1),
+                revision: spaceterm_core::authority::OrganizationRevision::new(1),
+                grants: vec![],
+            }],
+        };
+        assert!(matches!(
+            second.commit(&tx).await.unwrap(),
+            JournalCommitDisposition::Durable(_)
+        ));
+        assert_eq!(first.recover().await.unwrap().revision().get(), 2);
+        assert_eq!(
+            first.commit(&tx).await.unwrap(),
+            JournalCommitDisposition::NotApplied(JournalFailure::Conflict)
+        );
     }
 
     #[tokio::test]
@@ -893,12 +1363,37 @@ mod tests {
             ])
             .await
             .unwrap();
-        let mut payload = serde_json::to_value(journal.snapshot().unwrap()).unwrap();
+        let expected = journal.snapshot().unwrap();
+        let mut payload = serde_json::to_value(expected.persistence_metadata()).unwrap();
+        drop(journal);
+        drop(native);
+        // The unmodified fixture must recover before the digest-only corruption.
+        // Otherwise a physical-schema error can mask missing digest validation.
+        let mut database = Database::open_existing(&directory.0, MIGRATIONS).unwrap();
+        let valid_payload = serde_json::to_vec(&payload).unwrap();
+        assert_eq!(
+            database.transaction(|tx| tx
+                .execute(
+                    "UPDATE client_journal SET payload=?1",
+                    [valid_payload.as_slice()]
+                )
+                .map(|_| ())),
+            CommitDisposition::Durable(())
+        );
+        drop(database);
+        let reopened = NativeClientJournal::open_existing(
+            directory.0.clone(),
+            Arc::new(Codec),
+            Arc::new(Verifier),
+            JournalLimits::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(reopened.recover().await.unwrap(), expected);
+        drop(reopened);
         payload["revocations"][0]["task"]["request_digest"] =
             serde_json::to_value([99u8; 32]).unwrap();
         let payload = serde_json::to_vec(&payload).unwrap();
-        drop(journal);
-        drop(native);
         let mut database = Database::open_existing(&directory.0, MIGRATIONS).unwrap();
         assert_eq!(
             database.transaction(|tx| tx
@@ -918,6 +1413,52 @@ mod tests {
             result.err().unwrap().class(),
             ClientFailureClass::InvalidStorage
         );
+    }
+    #[tokio::test]
+    async fn native_journal_recovery_rejects_non_array_history_placeholders() {
+        let directory = Directory::new();
+        let native = NativeClientJournal::create(
+            directory.0.clone(),
+            Arc::new(Codec),
+            Arc::new(Verifier),
+            JournalLimits::default(),
+        )
+        .await
+        .unwrap();
+        let state = native.recover().await.unwrap();
+        let metadata = serde_json::to_value(state.persistence_metadata()).unwrap();
+        drop(native);
+        for pointer in ["/streams", "/tombstones", "/pairing/slots", "/generations"] {
+            for value in [
+                serde_json::json!({}),
+                serde_json::json!(1),
+                serde_json::Value::Null,
+            ] {
+                let mut corrupted = metadata.clone();
+                *corrupted.pointer_mut(pointer).unwrap() = value;
+                let payload = serde_json::to_vec(&corrupted).unwrap();
+                let mut database = Database::open_existing(&directory.0, MIGRATIONS).unwrap();
+                assert_eq!(
+                    database.transaction(|tx| tx
+                        .execute("UPDATE client_journal SET payload=?1", [payload.as_slice()])
+                        .map(|_| ())),
+                    CommitDisposition::Durable(())
+                );
+                drop(database);
+                let result = NativeClientJournal::open_existing(
+                    directory.0.clone(),
+                    Arc::new(Codec),
+                    Arc::new(Verifier),
+                    JournalLimits::default(),
+                )
+                .await;
+                assert_eq!(
+                    result.err().map(|error| error.class()),
+                    Some(ClientFailureClass::InvalidStorage),
+                    "accepted non-array history placeholder {pointer}"
+                );
+            }
+        }
     }
     #[tokio::test]
     async fn native_journal_restart_preserves_prepared_credentials_and_enrollment_ack_work() {
