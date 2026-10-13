@@ -36,7 +36,9 @@ impl Drop for RepairAdmission {
 impl Inner {
     /// Publications are delivered at application scope, even without an attached window.
     pub(super) fn sync_git(&self, server: ServerId, cx: &mut App) {
-        let source = &self.sources[&server];
+        let Some(source) = self.source(&server) else {
+            return;
+        };
         let current = match *source.state.borrow() {
             ConnectionState::Connected { info }
                 if self
@@ -124,8 +126,7 @@ pub(super) fn directory_connection(
     server: ServerId,
 ) -> Result<Arc<dyn spaceterm_client::directories::DirectoryConnectionPort>, DesktopClientError> {
     let source = inner
-        .sources
-        .get(&server)
+        .source(&server)
         .ok_or(DesktopClientError::TargetGone)?;
     let handle = source
         .handle
@@ -148,8 +149,7 @@ pub(super) fn retained_pane_repair(
     use spaceterm_client::journal::RetainedOperationState;
     use spaceterm_core::operation_ledger_contracts::CanonicalOperationRequest;
     let source = inner
-        .sources
-        .get(&pane.server())
+        .source(&pane.server())
         .ok_or(DesktopClientError::TargetGone)?;
     let journal = inner.tracker.journal();
     if !journal

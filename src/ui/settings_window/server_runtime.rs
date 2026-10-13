@@ -50,6 +50,7 @@ pub(crate) trait SettingsInventory: Send + Sync {
     ) -> ManagementFuture<'_, PairedDevices>;
 }
 
+#[derive(Clone)]
 pub(crate) struct SettingsConnection {
     pub(crate) binding: PairedServerBinding,
     pub(crate) name: DesktopServerInfo,
@@ -167,7 +168,7 @@ struct NativeRead {
 }
 
 pub(crate) struct SettingsRuntime {
-    connections: Vec<SettingsConnection>,
+    connections: RefCell<Vec<SettingsConnection>>,
     tracker: OperationTracker,
     operations: Arc<dyn OperationPeer>,
     pending: PendingTasks,
@@ -195,7 +196,7 @@ pub(crate) fn install(composition: SettingsComposition, cx: &mut App) -> Entity<
         return source;
     }
     let runtime = Rc::new(SettingsRuntime {
-        connections: composition.connections,
+        connections: RefCell::new(composition.connections),
         tracker: composition.tracker,
         operations: composition.operations,
         pending: composition.pending,
@@ -215,11 +216,51 @@ pub(crate) fn install(composition: SettingsComposition, cx: &mut App) -> Entity<
     source
 }
 
+/// Adds an already registered, durably active binding to the existing Settings owner.
+pub(crate) fn add_connection(
+    source: SettingsConnection,
+    cx: &mut App,
+) -> Result<(), ClientFailure> {
+    let runtime = cx
+        .try_global::<InstalledSettingsRuntime>()
+        .ok_or(ClientFailure::new(ClientFailureClass::Unavailable))?
+        .0
+        .clone();
+    check_ordinary(&runtime.tracker, &source.binding)
+        .map_err(|_| ClientFailure::new(ClientFailureClass::AuthorizationDenied))?;
+    let previous = runtime
+        .connections
+        .borrow()
+        .iter()
+        .position(|old| old.name.server == source.name.server);
+    if let Some(index) = previous {
+        let old = runtime.connections.borrow()[index].binding.clone();
+        if old == source.binding {
+            return Ok(());
+        }
+        if runtime.tracker.journal().ordinary_use_allowed(&old)? {
+            return Err(ClientFailure::new(ClientFailureClass::StaleAuthority));
+        }
+        runtime.state.borrow_mut().remove(&source.name.server);
+    }
+    runtime.follow_connections(std::slice::from_ref(&source), cx);
+    if let Some(index) = previous {
+        runtime.connections.borrow_mut()[index] = source;
+    } else {
+        runtime.connections.borrow_mut().push(source);
+    }
+    runtime.recover_edits();
+    runtime.publish(cx);
+    Ok(())
+}
+
 impl SettingsRuntime {
-    fn connection(&self, key: &ServerKey) -> Option<&SettingsConnection> {
+    fn connection(&self, key: &ServerKey) -> Option<SettingsConnection> {
         self.connections
+            .borrow()
             .iter()
             .find(|source| server_key(source.name.server) == *key)
+            .cloned()
     }
 
     fn snapshot(&self) -> ServersSnapshot {
@@ -232,7 +273,7 @@ impl SettingsRuntime {
         }
         let state = self.state.borrow();
         let mut servers = Vec::new();
-        for source in &self.connections {
+        for source in self.connections.borrow().iter() {
             if !self
                 .tracker
                 .journal()
@@ -418,6 +459,7 @@ impl SettingsRuntime {
                 let operation = parts.original.operation();
                 let name = self
                     .connections
+                    .borrow()
                     .iter()
                     .find(|source| {
                         source
@@ -462,8 +504,8 @@ impl SettingsRuntime {
         }
     }
 
-    fn follow(self: &Rc<Self>, cx: &mut App) {
-        for source in &self.connections {
+    fn follow_connections(self: &Rc<Self>, sources: &[SettingsConnection], cx: &mut App) {
+        for source in sources {
             let mut connection = source.state.clone();
             let mut replica = source.replica.clone();
             let weak = Rc::downgrade(self);
@@ -511,7 +553,7 @@ impl SettingsRuntime {
                 }));
             }
         }
-        for source in &self.connections {
+        for source in sources {
             let Some(native) = source.native.clone() else {
                 continue;
             };
@@ -577,6 +619,10 @@ impl SettingsRuntime {
                 }
             }));
         }
+    }
+
+    fn follow(self: &Rc<Self>, cx: &mut App) {
+        self.follow_connections(&self.connections.borrow(), cx);
         let mut revisions = self.tracker.journal().revisions();
         let mut health = self.tracker.journal().health();
         let weak = Rc::downgrade(self);
@@ -595,7 +641,7 @@ impl SettingsRuntime {
             return;
         };
         for operation in journal.operations() {
-            if !self.connections.iter().any(|source| {
+            if !self.connections.borrow().iter().any(|source| {
                 source.binding.target().server() == operation.binding.id.stream().server()
                     && source.binding.target().pairing() == operation.binding.id.stream().pairing()
                     && source.binding.target().client() == operation.binding.id.stream().client()

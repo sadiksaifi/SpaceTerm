@@ -304,9 +304,11 @@ fn desktop_native_git_publications_reach_unattached_interests_and_disconnect_ind
         cx.update(|cx| store.read(cx).status(statuses[1]).unwrap().freshness),
         spaceterm_client::git::replica::GitFreshness::Current
     );
-    let handle = provider.inner.sources[&bindings[0].target().server()]
+    let handle = provider
+        .inner
+        .source(&bindings[0].target().server())
+        .unwrap()
         .handle
-        .as_ref()
         .unwrap();
     executor.block_on(handle.connect()).unwrap();
     drive(&executor, cx);
