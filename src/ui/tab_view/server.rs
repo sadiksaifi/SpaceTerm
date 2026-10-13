@@ -46,17 +46,35 @@ pub(crate) trait ServerPaneFactory {
     ) -> Result<Entity<TerminalPane>, DesktopClientError>;
 }
 
-/// A Pane needs a server Pane channel to host a server Terminal Session. This build has none, so
-/// production composition fails closed instead of presenting a Pane it cannot enforce.
+/// A native presentation wraps only the runtime's authenticated Pane channel.
 impl ServerPaneFactory for PaneConstruction {
     fn create(
         &self,
-        _pane: ServerPaneId,
-        _runtime: &Entity<DesktopClientRuntime>,
-        _window: &mut Window,
-        _cx: &mut App,
+        pane: ServerPaneId,
+        runtime: &Entity<DesktopClientRuntime>,
+        window: &mut Window,
+        cx: &mut App,
     ) -> Result<Entity<TerminalPane>, DesktopClientError> {
-        Err(DesktopClientError::UnsupportedCapability)
+        use gpui::AppContext as _;
+        let channel = runtime.read(cx).pane_channel(pane)?;
+        let delivery = runtime.read(cx).pane_presentation(pane, None)?;
+        let presentation = crate::ui::pane_presentation::PanePresentation::from_portable(
+            delivery.decision.presentation,
+            delivery.device.clone(),
+            delivery.cause.clone(),
+        );
+        let session =
+            crate::ui::server_pane_session::ServerPaneSession::bind(channel, delivery.token)?;
+        let events = session
+            .channel()
+            .events()
+            .map_err(DesktopClientError::from)?;
+        let terminal = cx.new(|cx| {
+            let mut terminal = self.create_bound_server(session, events, presentation, window, cx);
+            terminal.bind_server_client(runtime.clone(), cx);
+            terminal
+        });
+        Ok(terminal)
     }
 }
 
