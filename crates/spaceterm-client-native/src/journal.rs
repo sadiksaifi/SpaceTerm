@@ -1552,6 +1552,7 @@ mod tests {
                     public_key: None,
                     route_reference: None,
                     route: None,
+                    ssh_capture: None,
                     generation: LocalPairingGeneration::new(1).unwrap(),
                 }),
                 ClientJournalChange::RecordCredentialPublicKey {
@@ -1565,6 +1566,7 @@ mod tests {
                     public_key: None,
                     route_reference: None,
                     route: None,
+                    ssh_capture: None,
                     generation: LocalPairingGeneration::new(2).unwrap(),
                 }),
                 ClientJournalChange::RecordCredentialPublicKey {

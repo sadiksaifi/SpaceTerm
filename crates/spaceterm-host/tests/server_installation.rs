@@ -266,6 +266,19 @@ mod account_installation {
         startup::{BuildIdentity, DesiredServerState},
     };
 
+    fn installation_root() -> tempfile::TempDir {
+        let home = spaceterm_host::account_service::TrustedAccountFacts::current().unwrap();
+        let root = if cfg!(target_os = "macos") {
+            std::path::Path::new("/private/tmp")
+        } else {
+            home.home()
+        };
+        tempfile::Builder::new()
+            .prefix("hn")
+            .tempdir_in(root)
+            .unwrap()
+    }
+
     fn fixture(
         version: &str,
         seed: u8,
@@ -415,6 +428,8 @@ mod account_installation {
         key: UpdateKey,
         running: std::sync::atomic::AtomicBool,
         effects: std::sync::Mutex<Vec<&'static str>>,
+        require_organization_store: std::sync::atomic::AtomicBool,
+        scope: std::sync::Mutex<Vec<u32>>,
     }
     impl InstallManager {
         fn new(key: UpdateKey) -> Self {
@@ -422,10 +437,18 @@ mod account_installation {
                 key,
                 running: std::sync::atomic::AtomicBool::new(false),
                 effects: std::sync::Mutex::new(Vec::new()),
+                require_organization_store: std::sync::atomic::AtomicBool::new(false),
+                scope: std::sync::Mutex::new(Vec::new()),
             }
         }
     }
     impl spaceterm_host::account_service::ServiceManager for InstallManager {
+        fn scoped_processes<'a>(
+            &'a self,
+            _: &'a spaceterm_host::account_service::RegisteredServer,
+        ) -> spaceterm_host::account_service::ServiceFuture<'a, Vec<u32>> {
+            Box::pin(async { Ok(self.scope.lock().unwrap().clone()) })
+        }
         fn status<'a>(
             &'a self,
             _: Option<&'a spaceterm_host::account_service::RegisteredServer>,
@@ -467,9 +490,28 @@ mod account_installation {
         }
         fn start<'a>(
             &'a self,
-            _: &'a spaceterm_host::account_service::RegisteredServer,
+            registration: &'a spaceterm_host::account_service::RegisteredServer,
         ) -> spaceterm_host::account_service::ServiceFuture<'a, ()> {
-            Box::pin(async {
+            Box::pin(async move {
+                if self
+                    .require_organization_store
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    use spaceterm_host::{
+                        organization_store::{migrations, schema},
+                        storage::Database,
+                    };
+                    let database = Database::open_existing_for_application(
+                        registration.organization_directory(),
+                        migrations(),
+                        schema::APPLICATION_ID,
+                    )
+                    .expect("the original install must seed storage before starting the service");
+                    let identity: Vec<u8> = database
+                        .query_row("SELECT server_id FROM store_metadata", [], |row| row.get(0))
+                        .unwrap();
+                    assert_eq!(identity, registration.server_pin().identity);
+                }
                 self.effects.lock().unwrap().push("start");
                 self.running
                     .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -532,7 +574,8 @@ mod account_installation {
         use spaceterm_host::account_service::{NativeServiceInstallations, NativeServiceProcesses};
         let processes = std::sync::Arc::new(
             NativeServiceProcesses::current(std::sync::Arc::new(NativeServiceInstallations))
-                .unwrap(),
+                .unwrap()
+                .with_manager(manager.clone()),
         );
         let supervisor =
             account.with_providers(manager, processes, std::sync::Arc::new(InstallClock), None);
@@ -544,7 +587,7 @@ mod account_installation {
         use spaceterm_host::account_service::{
             ServiceFailure, ServiceOutcome, ServiceRequestState,
         };
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let (key, artifact) = fixture("1.2.3", 7, native_machine());
         let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
@@ -581,12 +624,139 @@ mod account_installation {
             Err(ServiceFailure::RequestRetired)
         );
     }
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn unrelated_unobservable_process_does_not_block_native_absence() {
+        use spaceterm_core::authority::ServerEpoch;
+        use spaceterm_host::account_service::{
+            NativeServiceProcessTable, NativeServiceProcesses, ServiceFailure, ServiceProcesses,
+        };
+        use std::{
+            io::{BufRead as _, BufReader},
+            process::{Command, Stdio},
+        };
+        struct Child(std::process::Child);
+        impl Drop for Child {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let root = installation_root();
+        let source = root.path().join("unobservable.c");
+        let executable = root.path().join("unobservable");
+        std::fs::write(&source, b"#include <sys/prctl.h>\n#include <stdio.h>\n#include <unistd.h>\nint main(void) { if (prctl(PR_SET_DUMPABLE, 0) != 0) return 1; puts(\"ready\"); fflush(stdout); for (;;) pause(); }\n").unwrap();
+        let mut compiler = spaceterm_host::process::spawn(
+            Command::new("cc").arg(&source).arg("-o").arg(&executable),
+        )
+        .unwrap();
+        assert!(compiler.wait().unwrap().success());
+        let mut child = Child(
+            spaceterm_host::process::spawn(Command::new(&executable).stdout(Stdio::piped()))
+                .unwrap(),
+        );
+        let mut ready = String::new();
+        BufReader::new(child.0.stdout.take().unwrap())
+            .read_line(&mut ready)
+            .unwrap();
+        assert_eq!(ready, "ready\n");
+        assert_eq!(
+            NativeServiceProcessTable::current()
+                .unwrap()
+                .observe(child.0.id()),
+            Err(ServiceFailure::CleanupUnresolved)
+        );
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
+        let supervisor = installer(&account, key.clone(), manager.clone());
+        let request = supervisor.allocate_request().unwrap();
+        supervisor
+            .install(request, account.confirm_install(artifact))
+            .await
+            .unwrap();
+        let registration = supervisor.discover().unwrap().unwrap();
+        let native = NativeServiceProcesses::current(std::sync::Arc::new(SignedInstallations(key)))
+            .unwrap()
+            .with_manager(manager.clone());
+        assert_eq!(
+            native
+                .previous_instance_cleanup(&registration, ServerEpoch::new(0), &[])
+                .await,
+            Ok(Vec::new())
+        );
+        *manager.scope.lock().unwrap() = vec![child.0.id()];
+        assert_eq!(
+            native
+                .previous_instance_cleanup(&registration, ServerEpoch::new(0), &[])
+                .await,
+            Err(ServiceFailure::CleanupUnresolved)
+        );
+    }
+
+    #[tokio::test]
+    async fn initial_install_creates_organization_store_before_service_readiness() {
+        let root = installation_root();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
+        manager
+            .require_organization_store
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let supervisor = installer(&account, key, manager.clone());
+        let request = supervisor.allocate_request().unwrap();
+        supervisor
+            .install(request, account.confirm_install(artifact))
+            .await
+            .unwrap();
+        assert_eq!(
+            manager.effects.lock().unwrap().as_slice(),
+            &["configure", "start"]
+        );
+    }
+
+    #[tokio::test]
+    async fn initial_install_refuses_foreign_organization_storage_without_starting_service() {
+        use spaceterm_host::{account_service::ServiceFailure, storage::Database};
+        let root = installation_root();
+        let canonical = root.path().canonicalize().unwrap();
+        let data = canonical.join("new-data");
+        let runtime = canonical.join("new-runtime");
+        let organization = data.join("organization");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(&organization).unwrap();
+        for directory in [&data, &organization] {
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        drop(Database::open_for_application(&organization, &[], 1).unwrap());
+        let before = std::fs::read(organization.join("organization.sqlite3")).unwrap();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
+        let supervisor = installer(&account, key, manager.clone());
+        let request = supervisor.allocate_request().unwrap();
+        let confirmation = account
+            .assess_test_install(artifact)
+            .with_roots(data, runtime)
+            .unwrap()
+            .confirm();
+        assert_eq!(
+            supervisor.install(request, confirmation).await,
+            Err(ServiceFailure::InvalidRecord)
+        );
+        assert!(manager.effects.lock().unwrap().is_empty());
+        assert_eq!(
+            std::fs::read(organization.join("organization.sqlite3")).unwrap(),
+            before
+        );
+    }
+
     #[tokio::test]
     async fn concurrent_first_install_reuses_one_identity_and_first_approved_xdg_roots() {
         use spaceterm_host::account_service::{
             ServiceFailure, ServiceOutcome, ServiceRequestState,
         };
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let (key, first) = fixture("1.2.3", 7, native_machine());
         let (_, second) = fixture("1.2.3", 7, native_machine());
@@ -708,7 +878,7 @@ mod account_installation {
 
     #[test]
     fn test_support_trust_never_changes_production_artifact_assessment() {
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let (key, artifact) = fixture("1.2.3", 7, native_machine());
         let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
@@ -725,7 +895,7 @@ mod account_installation {
         use spaceterm_host::account_service::{
             InstallationStatus, ServiceOutcome, ServiceRequestState,
         };
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let original = InstallationStatus {
             installation: spaceterm_host::startup::InstallationId(
@@ -758,7 +928,7 @@ mod account_installation {
         use spaceterm_host::account_service::{
             ServiceFailure, ServiceOutcome, ServiceRequestState,
         };
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let (key, artifact) = fixture("1.2.3", 7, native_machine());
         let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
@@ -793,7 +963,7 @@ mod account_installation {
     #[tokio::test]
     async fn interrupted_first_install_keeps_approved_roots_before_identity_creation() {
         use spaceterm_host::account_service::{ServiceFailure, ServicePhase, ServiceRequestState};
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let canonical = root.path().canonicalize().unwrap();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let (key, artifact) = fixture("1.2.3", 7, native_machine());
@@ -868,7 +1038,7 @@ mod account_installation {
             ServiceFailure, ServiceOutcome, ServicePhase, ServiceRequestState,
         };
         for phase in [ServicePhase::Publishing, ServicePhase::Completed] {
-            let root = tempfile::tempdir().unwrap();
+            let root = installation_root();
             let account =
                 AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
             let (key, artifact) = fixture("1.2.3", 7, native_machine());
@@ -1017,18 +1187,11 @@ mod account_installation {
         use spaceterm_host::account_service::{
             NativeServiceProcesses, ServiceFailure, ServiceProcesses,
         };
-        let root = tempfile::Builder::new()
-            .prefix("hn")
-            .tempdir_in(if cfg!(target_os = "macos") {
-                "/private/tmp"
-            } else {
-                "/tmp"
-            })
-            .unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let (key, artifact) = fixture("1.2.3", 7, native_machine());
         let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
-        let supervisor = installer(&account, key.clone(), manager);
+        let supervisor = installer(&account, key.clone(), manager.clone());
         let request = supervisor.allocate_request().unwrap();
         supervisor
             .install(request, account.confirm_install(artifact))
@@ -1058,7 +1221,9 @@ mod account_installation {
             })
             .collect();
         let installations = std::sync::Arc::new(SignedInstallations(key));
-        let missing_runtime = NativeServiceProcesses::current(installations.clone()).unwrap();
+        let missing_runtime = NativeServiceProcesses::current(installations.clone())
+            .unwrap()
+            .with_manager(manager.clone());
         assert_eq!(
             missing_runtime
                 .previous_instance_cleanup(&registration, epoch, &sessions)
@@ -1102,6 +1267,7 @@ mod account_installation {
         ] {
             let native = NativeServiceProcesses::current(installations.clone())
                 .unwrap()
+                .with_manager(manager.clone())
                 .with_runtime(std::sync::Arc::new(PreviousRuntime {
                     expected: sessions.clone(),
                     observations: returned,
@@ -1115,6 +1281,7 @@ mod account_installation {
         }
         let native = NativeServiceProcesses::current(installations)
             .unwrap()
+            .with_manager(manager.clone())
             .with_runtime(std::sync::Arc::new(PreviousRuntime {
                 expected: sessions.clone(),
                 observations: observations.clone(),
@@ -1177,7 +1344,7 @@ mod account_installation {
                 Ok(())
             }
         }
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let registered = account.initialize(DesiredServerState::Stopped).unwrap();
         let pin = registered.server_pin();
@@ -1206,7 +1373,7 @@ mod account_installation {
     #[test]
     fn staging_does_not_activate_or_start_a_stopped_registration() {
         use std::os::unix::fs::PermissionsExt;
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let registered = account.initialize(DesiredServerState::Stopped).unwrap();
         let (key, artifact) = fixture("1.2.3", 7, native_machine());
@@ -1234,7 +1401,7 @@ mod account_installation {
     fn signed_staging_preserves_approved_code_resources_and_intent() {
         use std::os::unix::fs::MetadataExt as _;
         for desired in [DesiredServerState::Running, DesiredServerState::Stopped] {
-            let root = tempfile::tempdir().unwrap();
+            let root = installation_root();
             let account =
                 AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
             let registered = account.initialize(desired).unwrap();
@@ -1281,7 +1448,7 @@ mod account_installation {
 
     #[test]
     fn activation_and_rollback_select_exact_verified_versions_and_retain_the_previous() {
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let registered = account.initialize(DesiredServerState::Stopped).unwrap();
         let (key, first) = fixture("1.2.3", 7, native_machine());
@@ -1318,7 +1485,7 @@ mod account_installation {
     #[test]
     fn stale_selection_and_incompatible_storage_cannot_activate_a_candidate() {
         use spaceterm_host::account_service::ServiceFailure;
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let registered = account.initialize(DesiredServerState::Running).unwrap();
         let (key, artifact) = fixture("1.2.3", 7, native_machine());
@@ -1340,7 +1507,7 @@ mod account_installation {
     #[test]
     fn actual_wrong_architecture_is_rejected_and_the_original_preparation_can_be_discarded() {
         use spaceterm_host::account_service::ServiceFailure;
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let registered = account.initialize(DesiredServerState::Stopped).unwrap();
         let (key, artifact) = fixture("1.2.3", 7, 0);
@@ -1372,7 +1539,7 @@ mod account_installation {
     #[test]
     fn an_alternate_update_key_and_other_build_identity_cannot_publish_code() {
         use spaceterm_host::account_service::ServiceFailure;
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let registered = account.initialize(DesiredServerState::Stopped).unwrap();
         let (key, artifact) = fixture("1.2.3", 7, native_machine());
@@ -1416,7 +1583,7 @@ mod account_installation {
     #[test]
     fn startup_rejects_tampered_or_linked_installed_code() {
         use std::os::unix::fs::symlink;
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let registered = account.initialize(DesiredServerState::Stopped).unwrap();
         let (key, artifact) = fixture("1.2.3", 7, native_machine());
@@ -1439,7 +1606,7 @@ mod account_installation {
 
     #[test]
     fn cleanup_removes_only_the_superseded_version_and_preserves_private_account_data() {
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let registered = account.initialize(DesiredServerState::Stopped).unwrap();
         let (key, first) = fixture("1.2.3", 7, native_machine());
@@ -1480,7 +1647,7 @@ mod account_installation {
     #[test]
     fn activation_sync_failure_closes_the_failed_handle_and_recovers_exact_new_selection() {
         use spaceterm_host::account_service::ServiceFailure;
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let registered = account.initialize(DesiredServerState::Stopped).unwrap();
         let (key, artifact) = fixture("1.2.3", 7, native_machine());
@@ -1507,7 +1674,7 @@ mod account_installation {
     #[test]
     fn final_staging_publication_recovery_requires_directory_durability_before_acknowledgment() {
         use spaceterm_host::account_service::ServiceFailure;
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let registered = account.initialize(DesiredServerState::Stopped).unwrap();
         let (key, artifact) = fixture("1.2.3", 7, native_machine());
@@ -1542,7 +1709,7 @@ mod account_installation {
     #[test]
     fn final_staging_publication_recovers_process_exit_before_directory_sync() {
         use spaceterm_host::account_service::ServiceFailure;
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let registered = account.initialize(DesiredServerState::Stopped).unwrap();
         let (key, artifact) = fixture("1.2.3", 7, native_machine());
@@ -1572,7 +1739,7 @@ mod account_installation {
     #[test]
     fn activation_recovery_sync_failure_never_exposes_approved_code() {
         use spaceterm_host::account_service::ServiceFailure;
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let registered = account.initialize(DesiredServerState::Stopped).unwrap();
         let (key, artifact) = fixture("1.2.3", 7, native_machine());
@@ -1613,7 +1780,7 @@ mod account_installation {
     fn selection_publication_recovery_rejects_a_same_content_replacement_inode() {
         use spaceterm_host::account_service::ServiceFailure;
         use std::os::unix::fs::PermissionsExt;
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let registered = account.initialize(DesiredServerState::Stopped).unwrap();
         let (key, artifact) = fixture("1.2.3", 7, native_machine());
@@ -1670,7 +1837,7 @@ mod account_installation {
 
     #[test]
     fn process_exit_during_activation_recovers_the_original_selected_version() {
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let registered = account.initialize(DesiredServerState::Stopped).unwrap();
         let (key, artifact) = fixture("1.2.3", 7, native_machine());
@@ -1707,7 +1874,7 @@ mod account_installation {
     }
     #[test]
     fn unlisted_files_and_replaced_version_directories_never_become_startup_authority() {
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let registered = account.initialize(DesiredServerState::Stopped).unwrap();
         let (key, artifact) = fixture("1.2.3", 7, native_machine());
@@ -1740,7 +1907,7 @@ mod account_installation {
     }
     #[test]
     fn cleanup_never_deletes_substituted_payload_bytes() {
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let registered = account.initialize(DesiredServerState::Stopped).unwrap();
         let (key, first) = fixture("1.2.3", 7, native_machine());
@@ -1768,7 +1935,7 @@ mod account_installation {
     #[test]
     fn an_unsettled_preparation_blocks_new_selection_until_original_discard() {
         use spaceterm_host::account_service::ServiceFailure;
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let registered = account.initialize(DesiredServerState::Stopped).unwrap();
         let (key, first) = fixture("1.2.3", 7, native_machine());
@@ -1803,7 +1970,7 @@ mod account_installation {
             io::Write,
             os::{fd::AsRawFd, unix::net::UnixStream},
         };
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let registered = account.initialize(DesiredServerState::Stopped).unwrap();
         let (key, _) = fixture("1.2.3", 7, native_machine());
@@ -1849,7 +2016,7 @@ mod account_installation {
 
     fn partial_extraction_keeps_cleanup_closed(process_exit: bool) {
         use spaceterm_host::account_service::ServiceFailure;
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let registered = account.initialize(DesiredServerState::Stopped).unwrap();
         let (key, artifact) = fixture("1.2.3", 7, native_machine());
@@ -1945,7 +2112,7 @@ mod account_installation {
 
     fn preparation_is_retained_before_external_effect(phase: &str) {
         use spaceterm_host::account_service::ServiceFailure;
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let registered = account.initialize(DesiredServerState::Stopped).unwrap();
         let (key, artifact) = fixture("1.2.3", 7, native_machine());
@@ -2036,7 +2203,7 @@ mod account_installation {
     }
 
     fn cleanup_replacement_survives(directory: bool) {
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let registered = account.initialize(DesiredServerState::Stopped).unwrap();
         let (key, first) = fixture("1.2.3", 7, native_machine());
@@ -2112,7 +2279,7 @@ mod account_installation {
     }
 
     fn cleanup_preserves_replaced_metadata(version_already_removed: bool) {
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let registered = account.initialize(DesiredServerState::Stopped).unwrap();
         let (key, artifact) = fixture("1.2.3", 7, native_machine());
@@ -2199,7 +2366,7 @@ mod account_installation {
     }
 
     fn cleanup_recovery_probe(boundary: u8, sync_error: bool) {
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let registered = account.initialize(DesiredServerState::Stopped).unwrap();
         let (key, artifact) = fixture("1.2.3", 7, native_machine());
@@ -2241,7 +2408,7 @@ mod account_installation {
     ) {
         use spaceterm_host::account_service::ServiceFailure;
         use std::os::unix::fs::MetadataExt;
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let registered = account.initialize(DesiredServerState::Stopped).unwrap();
         let (key, artifact) = fixture("1.2.3", 7, native_machine());
@@ -2335,7 +2502,7 @@ mod account_installation {
     fn recovered_creation_log_is_durable_before_removal_authority_is_used() {
         use spaceterm_host::account_service::ServiceFailure;
         use std::os::unix::fs::MetadataExt;
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let registered = account.initialize(DesiredServerState::Stopped).unwrap();
         let (key, artifact) = fixture("1.2.3", 7, native_machine());
@@ -2387,7 +2554,7 @@ mod account_installation {
     }
 
     fn preparation_recovery_probe(phase: &str) {
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let registered = account.initialize(DesiredServerState::Stopped).unwrap();
         let (key, artifact) = fixture("1.2.3", 7, native_machine());
@@ -2427,7 +2594,7 @@ mod account_installation {
     }
     #[test]
     fn review_probe_partial_extraction_recovers_write_failure() {
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let registered = account.initialize(DesiredServerState::Stopped).unwrap();
         let (key, artifact) = fixture("1.2.3", 7, native_machine());
@@ -2449,7 +2616,7 @@ mod account_installation {
     }
 
     fn activation_recovery_probe(process_exit: bool) {
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let registered = account.initialize(DesiredServerState::Stopped).unwrap();
         let (key, artifact) = fixture("1.2.3", 7, native_machine());
@@ -2488,7 +2655,7 @@ mod account_installation {
 
     fn capture_replacement_probe(directory: bool) {
         use std::sync::{Arc, Mutex};
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let registered = account.initialize(DesiredServerState::Stopped).unwrap();
         let (key, artifact) = fixture("1.2.3", 7, native_machine());
@@ -2574,7 +2741,7 @@ mod account_installation {
                 }
             }
         }
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let registered = account.initialize(DesiredServerState::Stopped).unwrap();
         let (key, artifact) = fixture("1.2.3", 7, native_machine());
@@ -2617,7 +2784,7 @@ mod account_installation {
     }
 
     fn unexposed_creation_recovers_prior_selection(phase: &str) {
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let registered = account.initialize(DesiredServerState::Stopped).unwrap();
         let (key, artifact) = fixture("1.2.3", 7, native_machine());
@@ -2672,7 +2839,7 @@ mod account_installation {
     }
     #[test]
     fn activation_before_publication_recovers_the_exact_prior_selection() {
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let registered = account.initialize(DesiredServerState::Stopped).unwrap();
         let (key, first) = fixture("1.2.3", 7, native_machine());
@@ -2707,7 +2874,7 @@ mod account_installation {
 
     #[test]
     fn retained_complete_installations_without_creation_records_use_the_same_cleanup_journal() {
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let registered = account.initialize(DesiredServerState::Stopped).unwrap();
         let (key, artifact) = fixture("1.2.3", 7, native_machine());
@@ -2743,7 +2910,7 @@ mod account_installation {
     }
     fn legacy_inventory_recovery_probe(process_exit: bool, replace_file: bool) {
         use spaceterm_host::account_service::ServiceFailure;
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let registered = account.initialize(DesiredServerState::Stopped).unwrap();
         let (key, artifact) = fixture("1.2.3", 7, native_machine());
@@ -2834,7 +3001,7 @@ mod account_installation {
     #[test]
     fn missing_creation_evidence_never_reports_incomplete_cleanup_complete() {
         use spaceterm_host::account_service::ServiceFailure;
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let registered = account.initialize(DesiredServerState::Stopped).unwrap();
         let (key, artifact) = fixture("1.2.3", 7, native_machine());
@@ -2861,7 +3028,7 @@ mod account_installation {
     #[test]
     fn existing_code_storage_never_initializes_missing_installation_state() {
         use spaceterm_host::account_service::ServiceFailure;
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let registered = account.initialize(DesiredServerState::Stopped).unwrap();
         let (key, artifact) = fixture("1.2.3", 7, native_machine());

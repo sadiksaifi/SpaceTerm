@@ -193,6 +193,8 @@ fn status_value(status: &ServerStatus) -> Value {
         "storage_state": p.runtime.storage,
         "run_intent": p.runtime.intent,
         "revision": p.revision.get(),
+        "storage_state": p.runtime.storage,
+        "run_intent": p.runtime.intent,
         "running_version": p.running.as_ref().map(|v| v.as_str()),
         "approved_version": p.approved.as_ref().map(|v| v.as_str()),
         "staged_version": p.staged.as_ref().map(|v| v.as_str()),

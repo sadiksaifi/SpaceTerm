@@ -65,28 +65,6 @@ impl NativeServiceProcessTable {
         }
         native::observe(self.uid, pid)
     }
-    fn approved(&self, path: &Path) -> Result<Vec<ServiceProcessIdentity>, ServiceFailure> {
-        let mut found = Vec::new();
-        for pid in native::pids(self.uid)? {
-            if let Some(process) = self.observe(pid)?
-                && (process.executable == path
-                    || process
-                        .executable
-                        .as_os_str()
-                        .as_encoded_bytes()
-                        .strip_suffix(b" (deleted)")
-                        == Some(path.as_os_str().as_encoded_bytes()))
-            {
-                // A system agent with saved privileges says nothing about this code.
-                // Reject mixed credentials only when its executable actually matches.
-                if !process.fully_account_owned {
-                    return Err(ServiceFailure::CleanupUnresolved);
-                }
-                found.push(process);
-            }
-        }
-        Ok(found)
-    }
 }
 
 /// Native absence observations for account services.
@@ -95,16 +73,27 @@ impl NativeServiceProcessTable {
 pub struct NativeServiceProcesses {
     table: NativeServiceProcessTable,
     installations: Arc<dyn ServiceInstallations>,
+    manager: Arc<dyn super::ServiceManager>,
     runtime: Option<Arc<dyn ServiceProcesses>>,
 }
 impl NativeServiceProcesses {
     /// Composes actual-account native observations with signed executable selection.
     pub fn current(installations: Arc<dyn ServiceInstallations>) -> Result<Self, ServiceFailure> {
+        #[cfg(target_os = "linux")]
+        let manager = super::SystemdServiceManager::current(installations.clone())?;
+        #[cfg(target_os = "macos")]
+        let manager = super::LaunchdServiceManager::current(installations.clone())?;
         Ok(Self {
             table: NativeServiceProcessTable::current()?,
             installations,
+            manager: Arc::new(manager),
             runtime: None,
         })
+    }
+    /// Uses the same manager scope provider as the lifecycle supervisor.
+    pub fn with_manager(mut self, manager: Arc<dyn super::ServiceManager>) -> Self {
+        self.manager = manager;
+        self
     }
     /// Adds the owning actor's assessment, admission-barrier and descendant-custody port.
     /// An empty reconstructed registry must never supply previous-instance absence.
@@ -123,27 +112,51 @@ impl NativeServiceProcesses {
             .as_deref()
             .ok_or(ServiceFailure::CleanupUnresolved)
     }
-    fn absent(&self, registration: &RegisteredServer, startup: bool) -> Result<(), ServiceFailure> {
+    async fn absent(
+        &self,
+        registration: &RegisteredServer,
+        startup: bool,
+    ) -> Result<(), ServiceFailure> {
         if registration.key().account_uid != self.table.uid {
             return Err(ServiceFailure::IdentityMismatch);
         }
         let executable = self.installations.approved_executable(registration)?;
-        // Startup runs inside the approved executable. Its own PID is not a previous instance.
-        if self
-            .table
-            .approved(&executable)?
-            .iter()
-            .any(|process| !startup || process.pid != std::process::id())
-        {
+        let scope = self.manager.scoped_processes(registration).await?;
+        if scope.len() > 65536 {
+            return Err(ServiceFailure::LimitExceeded);
+        }
+        for pid in &scope {
+            if let Some(process) = self.table.observe(*pid)? {
+                // Every process retained in the service cgroup is in scope,
+                // including descendants whose executable is not the server.
+                // Startup exempts only this exact approved account-owned root.
+                if !startup
+                    || process.pid != std::process::id()
+                    || !process.fully_account_owned
+                    || process.executable != executable
+                {
+                    return Err(ServiceFailure::CleanupUnresolved);
+                }
+            } else {
+                // None also covers another account or a vanished executable.
+                // Only native process absence can discharge an in-scope PID.
+                // SAFETY: signal zero observes existence without delivering a signal.
+                if unsafe { libc::kill(*pid as i32, 0) } == 0
+                    || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+                {
+                    return Err(ServiceFailure::CleanupUnresolved);
+                }
+            }
+        }
+        if self.manager.scoped_processes(registration).await? != scope {
             return Err(ServiceFailure::CleanupUnresolved);
         }
         let endpoint = registration
             .endpoint()
             .map_err(|_| ServiceFailure::CleanupUnresolved)?;
-        match endpoint.prove_no_listener() {
-            Ok(()) => Ok(()),
-            Err(_) => Err(ServiceFailure::CleanupUnresolved),
-        }
+        endpoint
+            .prove_no_listener()
+            .map_err(|_| ServiceFailure::CleanupUnresolved)
     }
 }
 impl ServiceProcesses for NativeServiceProcesses {
@@ -209,7 +222,7 @@ impl ServiceProcesses for NativeServiceProcesses {
             // The runtime proves descendant custody; native observations prove
             // the approved root process and retained listener are also absent.
             self.runtime()?.verify_absent(registration).await?;
-            self.absent(registration, false)
+            self.absent(registration, false).await
         })
     }
     fn previous_instance_cleanup<'a>(
@@ -230,7 +243,7 @@ impl ServiceProcesses for NativeServiceProcesses {
                     .previous_instance_cleanup(registration, epoch, sessions)
                     .await?;
                 super::processes::cleanup_matches(sessions, &observations)?;
-                self.absent(registration, true)?;
+                self.absent(registration, true).await?;
                 return Ok(observations);
             }
             // Only a never-started store can use native root/listener absence alone.
@@ -238,7 +251,7 @@ impl ServiceProcesses for NativeServiceProcesses {
             if epoch.get() != 0 || !sessions.is_empty() {
                 return Err(ServiceFailure::CleanupUnresolved);
             }
-            self.absent(registration, true)?;
+            self.absent(registration, true).await?;
             Ok(Vec::new())
         })
     }
@@ -250,3 +263,8 @@ mod native;
 #[cfg(target_os = "macos")]
 #[path = "native_processes/macos.rs"]
 mod native;
+
+#[cfg(target_os = "linux")]
+pub(super) fn systemd_scope(main: u32, cgroup: &str) -> Result<Vec<u32>, ServiceFailure> {
+    native::unit_scope(main, cgroup)
+}

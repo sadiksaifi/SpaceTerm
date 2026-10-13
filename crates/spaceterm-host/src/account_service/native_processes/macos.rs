@@ -1,33 +1,6 @@
 use super::{ServiceFailure, ServiceProcessIdentity};
 use std::{ffi::OsString, os::unix::ffi::OsStringExt, path::PathBuf};
 
-pub(super) fn pids(account: u32) -> Result<Vec<u32>, ServiceFailure> {
-    let mut pids = vec![0_i32; 65536];
-    // PROC_UID_ONLY selects this account before querying protected system processes.
-    // proc_listpids returns bytes, unlike proc_listallpids' process count.
-    const PROC_UID_ONLY: u32 = 4;
-    // SAFETY: libproc writes only within the supplied live PID buffer.
-    let bytes = unsafe {
-        libc::proc_listpids(
-            PROC_UID_ONLY,
-            account,
-            pids.as_mut_ptr().cast(),
-            (pids.len() * std::mem::size_of::<i32>()) as i32,
-        )
-    };
-    let bytes = usize::try_from(bytes).map_err(|_| ServiceFailure::CleanupUnresolved)?;
-    let capacity = pids.len() * std::mem::size_of::<i32>();
-    if bytes == 0 || bytes >= capacity || !bytes.is_multiple_of(std::mem::size_of::<i32>()) {
-        return Err(ServiceFailure::CleanupUnresolved);
-    }
-    let count = bytes / std::mem::size_of::<i32>();
-    Ok(pids[..count]
-        .iter()
-        .copied()
-        .filter(|pid| *pid > 0)
-        .map(|pid| pid as u32)
-        .collect())
-}
 fn bsd(pid: u32) -> Result<Option<libc::proc_bsdinfo>, ServiceFailure> {
     let mut value = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
     let size = std::mem::size_of::<libc::proc_bsdinfo>();

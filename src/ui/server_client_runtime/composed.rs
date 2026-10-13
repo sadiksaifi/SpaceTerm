@@ -31,6 +31,10 @@ use std::{
 };
 use tokio::sync::watch;
 
+mod native_ports;
+mod server_ports;
+use server_ports::{GitPublication, RepairAdmission};
+
 /// Owners recovered on the client's Tokio executor before installing the desktop runtime.
 /// The tracker, pending tasks and Pane channels must use the registry's single journal.
 pub(crate) struct DesktopClientComposition<S: ViewStore> {
@@ -163,11 +167,14 @@ struct State {
     revalidated: HashMap<PaneId, (PaneViewToken, view::ViewRevision)>,
     outcomes: HashMap<OperationId, (Arc<Outcome>, OrganizationRevision)>,
     watching: std::collections::HashSet<OperationId>,
+    repair_admissions: std::collections::HashSet<PaneId>,
     detach_requests: HashMap<UiRequestId, view::WorkspaceAttachment>,
     blocked: HashMap<ServerId, (BlockedLocation, IntendedAction)>,
 }
 
 struct Inner {
+    git: gpui::Entity<crate::ui::server_git::ServerGitStore>,
+    git_publications: RefCell<BTreeMap<ServerId, GitPublication>>,
     sources: BTreeMap<ServerId, Source>,
     order: Vec<ServerId>,
     channels: Arc<PaneChannels>,
@@ -256,6 +263,8 @@ impl<S: ViewStore + 'static> ComposedDesktopClientProvider<S> {
             }
         }
         let inner = Rc::new(Inner {
+            git: crate::ui::server_git::InstalledServerGit::install(cx),
+            git_publications: RefCell::new(BTreeMap::new()),
             sources,
             order,
             channels,
@@ -341,6 +350,7 @@ impl Inner {
             .map_err(view_error)?;
         for (&server, source) in &self.sources {
             self.refresh(server)?;
+            self.sync_git(server, cx);
             let mut connection = source.state.clone();
             let mut replica = source.replica.clone();
             let weak = Rc::downgrade(self);
@@ -350,19 +360,25 @@ impl Inner {
                     if !alive { break; }
                     let Some(inner) = weak.upgrade() else { break; };
                     let _edit = inner.edits.lock().await;
-                    let effects = cx.update(|_| inner.refresh(server)).unwrap_or_default();
+                    let effects = cx.update(|cx| {
+                        inner.sync_git(server, cx);
+                        inner.refresh(server)
+                    }).unwrap_or_default();
                     drop(_edit);
                     let _ = inner.execute(effects, cx).await;
                 }
             }));
         }
         let weak = Rc::downgrade(self);
-        self.tasks.borrow_mut().push(cx.spawn(async move |_| {
+        self.tasks.borrow_mut().push(cx.spawn(async move |cx| {
             loop {
                 let alive = tokio::select! { changed = revisions.changed() => changed.is_ok(), changed = health.changed() => changed.is_ok() };
                 if !alive { break; }
                 let Some(inner) = weak.upgrade() else { break; };
                 let _edit = inner.edits.lock().await;
+                cx.update(|cx| {
+                    for server in &inner.order { inner.sync_git(*server, cx); }
+                });
                 let markers = inner.tracker.journal().snapshot();
                 let mut state = inner.state.borrow_mut();
                 if let Ok(markers) = markers {
@@ -1042,6 +1058,22 @@ impl Inner {
 }
 
 impl<S: ViewStore + 'static> DesktopClientProvider for ComposedDesktopClientProvider<S> {
+    fn directory_connection(
+        &self,
+        server: ServerId,
+    ) -> Result<Arc<dyn spaceterm_client::directories::DirectoryConnectionPort>, DesktopClientError>
+    {
+        server_ports::directory_connection(&self.inner, server)
+    }
+
+    fn retained_pane_repair(
+        &self,
+        pane: PaneId,
+        cx: &mut App,
+    ) -> Result<Option<(OperationId, Command)>, DesktopClientError> {
+        server_ports::retained_pane_repair(&self.inner, pane, cx)
+    }
+
     fn servers(&self) -> Vec<DesktopServerInfo> {
         self.inner
             .order
@@ -1250,7 +1282,22 @@ impl<S: ViewStore + 'static> DesktopClientProvider for ComposedDesktopClientProv
                     .ok_or(DesktopClientError::TargetGone)?
                     .binding
                     .clone();
+                let reservation = if let Command::RepairPaneDirectory { pane, .. } = &command {
+                    if self.retained_pane_repair(*pane, cx)?.is_some() {
+                        return Err(DesktopClientError::Reconciling);
+                    }
+                    if !inner.state.borrow_mut().repair_admissions.insert(*pane) {
+                        return Err(DesktopClientError::AdmissionFull);
+                    }
+                    Some(RepairAdmission {
+                        pane: *pane,
+                        owner: Rc::downgrade(&inner),
+                    })
+                } else {
+                    None
+                };
                 Ok(cx.spawn(async move |cx| {
+                    let _reservation = reservation;
                     let tracker = inner.tracker.clone();
                     let peer = inner.operations.clone();
                     let ticket = inner
@@ -1527,3 +1574,6 @@ fn offline_cause(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod native_git_tests;

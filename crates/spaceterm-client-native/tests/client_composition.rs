@@ -273,6 +273,7 @@ impl Fixture {
                 public_key: None,
                 route_reference: None,
                 route: None,
+                ssh_capture: None,
                 generation: self.binding.target().incarnation(),
             }),
             ClientJournalChange::RecordCredentialPublicKey {
@@ -1789,4 +1790,777 @@ async fn cancelled_native_attachment_reservation_retries_with_new_incarnation_in
     assert_eq!(lease.incarnation().get(), 2);
     assert!(lease.pane(snapshot.state().panes[0].id).is_ok());
     assert_eq!(view.attachments()[0].incarnation(), lease.incarnation());
+}
+
+fn fixture_on_route(route: RouteDescription) -> Fixture {
+    let mut fixture = Fixture::new(1);
+    let old = fixture.binding.target();
+    let target = ConnectionTarget::new(
+        old.pin(),
+        old.device(),
+        old.pairing(),
+        old.client(),
+        route,
+        old.credential(),
+        old.incarnation(),
+    )
+    .unwrap();
+    fixture.binding = PairedServerBinding::new(target);
+    fixture.saved = SavedBinding::verified(
+        fixture.binding.clone(),
+        fixture.saved.streams().clone(),
+        fixture.saved.proof().clone(),
+        &Verifier,
+    )
+    .unwrap();
+    fixture
+}
+
+#[tokio::test]
+async fn restricted_native_connector_uses_original_journal_task_after_reopen() {
+    use spaceterm_client::{
+        journal::JournalCommitDisposition, pairing::revocation::RestrictedConnector,
+    };
+    use spaceterm_client_native::{
+        restricted_routes::NativePairingConnector,
+        route::{LocalRouteAuthority, NativeRouteConnector},
+    };
+    use spaceterm_host::{
+        ipc::{IpcListener, PrivateIpcDirectory},
+        transport::{AdmissionLimits, MessageLimit, MessageTransport},
+    };
+    for major in [1, 2] {
+        let directory = Directory::new();
+        let sockets = tempfile::tempdir().unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(sockets.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let endpoint = PrivateIpcDirectory::open(&sockets.path().canonicalize().unwrap())
+            .unwrap()
+            .endpoint("server")
+            .unwrap();
+        let authority = LocalRouteAuthority::new(endpoint.clone()).unwrap();
+        let fixture = fixture_on_route(authority.description().clone());
+        let journal = directory.create().await;
+        fixture.seed(&journal).await;
+        let record = fixture.revocation();
+        let transaction = ClientJournalTransaction {
+            expected_revision: journal.recover().await.unwrap().revision(),
+            changes: vec![ClientJournalChange::BeginRevocation(Box::new(
+                record.clone(),
+            ))],
+        };
+        assert!(matches!(
+            journal.commit(&transaction).await.unwrap(),
+            JournalCommitDisposition::Durable(_)
+        ));
+        drop(journal);
+        let journal = NativeClientJournal::open_existing(
+            directory.0.clone(),
+            Arc::new(CanonicalCodec),
+            Arc::new(Verifier),
+            JournalLimits::default(),
+        )
+        .await
+        .unwrap();
+        assert!(journal.recover().await.unwrap().bindings().is_empty());
+        let listener = IpcListener::bind(
+            endpoint,
+            MessageLimit::envelope(),
+            AdmissionLimits::new(2, std::time::Duration::from_secs(20)).unwrap(),
+        )
+        .unwrap();
+        let receipt = fixture.receipt(&record.task);
+        let expected_receipt = receipt.clone();
+        let pin = fixture.binding.target().pin();
+        let task = record.task.clone();
+        let server_key: Arc<dyn SigningKey> = Arc::new(Key::new(1));
+        let worker = tokio::spawn(async move {
+            use spaceterm_protocol::{
+                authentication::{
+                    Established, HandshakeConfig, PairingLookup, PairingRecord, Principal,
+                    ServerHandshake,
+                },
+                pairing_adapter::{
+                    PairingRestrictedCodec, operation_to_wire, receipt_to_wire, target_to_wire,
+                },
+                wire::pairing,
+            };
+            struct Lookup;
+            impl PairingLookup for Lookup {
+                fn lookup(
+                    &self,
+                    server: [u8; 16],
+                    pairing: [u8; 16],
+                    client: [u8; 16],
+                ) -> Result<PairingRecord, ProtocolError> {
+                    Ok(PairingRecord {
+                        principal: Principal {
+                            server,
+                            device: [3; 16],
+                            pairing,
+                            client,
+                        },
+                        device_public_key: Key::new(2).public_key(),
+                        active: false,
+                    })
+                }
+            }
+            let pending = listener.accept().await.unwrap();
+            let hello = pending.recv().await.unwrap().unwrap();
+            let (handshake, reply) = ServerHandshake::accept(
+                pin.identity,
+                1,
+                HandshakeConfig {
+                    majors: vec![major],
+                    ..HandshakeConfig::default()
+                },
+                server_key,
+                &Lookup,
+                &hello,
+            )
+            .unwrap();
+            pending.send(&reply).await.unwrap();
+            let proof = pending.recv().await.unwrap().unwrap();
+            let (established, ready) = handshake.receive_device(&Lookup, &proof).unwrap();
+            let Established::Restricted(mut restricted) = established else {
+                panic!("restricted route gained ordinary authority")
+            };
+            assert_eq!(restricted.major(), major);
+            pending.send(&ready).await.unwrap();
+            let transport = pending.finish_authentication().unwrap();
+            let codec = PairingRestrictedCodec::new(pin);
+            let request = transport.recv().await.unwrap().unwrap();
+            let request = restricted
+                .decode_pairing_extension(&request, &codec)
+                .unwrap();
+            assert!(matches!(
+                request.kind,
+                Some(pairing::restricted_extension::Kind::Status(_))
+            ));
+            let original = &task.parts().original;
+            let target = PairingTarget::new(PairingTargetParts {
+                server: original.server(),
+                pairing: original.pairing(),
+                device: original.device(),
+            })
+            .unwrap();
+            let result = pairing::RestrictedExtension {
+                kind: Some(pairing::restricted_extension::Kind::Result(
+                    pairing::RestrictedResult {
+                        request_operation: Some(operation_to_wire(original.operation())),
+                        request_digest: task.parts().request_digest.bytes().to_vec(),
+                        target: Some(target_to_wire(&target)),
+                        disposition: 2,
+                        receipt: Some(receipt_to_wire(&receipt)),
+                    },
+                )),
+            };
+            transport
+                .send(
+                    &restricted
+                        .encode_pairing_extension(&result, &codec)
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            transport.close().await.unwrap();
+        });
+        let connector = NativePairingConnector::new(
+            Arc::new(journal),
+            NativeRouteConnector::new(vec![authority], None).unwrap(),
+        );
+        assert!(matches!(
+            spaceterm_client::pairing::enrollment::EnrollmentConnector::open(
+                &connector,
+                pin,
+                fixture.route
+            )
+            .await,
+            Err(PairingFailure::RouteChanged)
+        ));
+        let mut transport = RestrictedConnector::open(&connector, &record.task)
+            .await
+            .unwrap();
+        use spaceterm_protocol::{
+            authentication::{ClientHandshake, Established, HandshakeConfig, Principal, Purpose},
+            pairing_adapter::{PairingRestrictedCodec, operation_to_wire, target_to_wire},
+            wire::pairing,
+        };
+        let local = |value: u64| {
+            let mut bytes = [0; 16];
+            bytes[8..].copy_from_slice(&value.to_be_bytes());
+            bytes
+        };
+        let original = &record.task.parts().original;
+        let principal = Principal {
+            server: pin.identity,
+            device: original.device().bytes(),
+            pairing: local(original.pairing().local()),
+            client: local(original.client().local()),
+        };
+        let (handshake, hello) = ClientHandshake::begin(
+            pin,
+            principal,
+            Purpose::RevocationStatus,
+            HandshakeConfig {
+                majors: vec![major],
+                ..HandshakeConfig::default()
+            },
+            Arc::new(Key::new(2)),
+        )
+        .unwrap();
+        transport.send(&hello).await.unwrap();
+        let (ready, proof) = handshake
+            .receive_server(&transport.receive().await.unwrap())
+            .unwrap();
+        transport.send(&proof).await.unwrap();
+        let Established::Restricted(mut connection) = ready
+            .receive_ready(&transport.receive().await.unwrap())
+            .unwrap()
+        else {
+            panic!("ordinary connection")
+        };
+        let target = PairingTarget::new(PairingTargetParts {
+            server: original.server(),
+            pairing: original.pairing(),
+            device: original.device(),
+        })
+        .unwrap();
+        let request = pairing::RestrictedExtension {
+            kind: Some(pairing::restricted_extension::Kind::Status(
+                pairing::ReceiptStatus {
+                    operation: Some(operation_to_wire(original.operation())),
+                    request_digest: record.task.parts().request_digest.bytes().to_vec(),
+                    target: Some(target_to_wire(&target)),
+                },
+            )),
+        };
+        let codec = PairingRestrictedCodec::new(pin);
+        transport
+            .send(
+                &connection
+                    .encode_pairing_extension(&request, &codec)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let reply = connection
+            .decode_pairing_extension(&transport.receive().await.unwrap(), &codec)
+            .unwrap();
+        let Some(pairing::restricted_extension::Kind::Result(reply)) = reply.kind else {
+            panic!("missing receipt")
+        };
+        let receipt = ReceiptCodec::new(pin)
+            .from_wire(reply.receipt.as_ref().unwrap())
+            .unwrap();
+        assert_eq!(receipt, expected_receipt);
+        ReceiptCodec::new(pin).verify(&receipt).unwrap();
+        worker.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn old_uncaptured_ssh_journal_records_fail_closed_without_spawning() {
+    use spaceterm_client::pairing::{
+        enrollment::EnrollmentConnector, revocation::RestrictedConnector,
+    };
+    use spaceterm_client_native::{
+        restricted_routes::NativePairingConnector, route::NativeRouteConnector,
+    };
+    let directory = Directory::new();
+    let journal = directory.create().await;
+    let fixture = fixture_on_route(
+        RouteDescription::new(RouteParts::Ssh {
+            destination: "old-alias".into(),
+            remote_socket: "/server".into(),
+        })
+        .unwrap(),
+    );
+    fixture.seed(&journal).await;
+    let connector = NativePairingConnector::new(
+        Arc::new(journal.clone()),
+        NativeRouteConnector::new(vec![], None).unwrap(),
+    );
+    assert!(matches!(
+        EnrollmentConnector::open(&connector, fixture.binding.target().pin(), fixture.route).await,
+        Err(PairingFailure::RouteChanged)
+    ));
+    let record = fixture.revocation();
+    let transaction = ClientJournalTransaction {
+        expected_revision: journal.recover().await.unwrap().revision(),
+        changes: vec![ClientJournalChange::BeginRevocation(Box::new(
+            record.clone(),
+        ))],
+    };
+    assert!(matches!(
+        journal.commit(&transaction).await.unwrap(),
+        spaceterm_client::journal::JournalCommitDisposition::Durable(_)
+    ));
+    assert!(matches!(
+        RestrictedConnector::open(&connector, &record.task).await,
+        Err(PairingFailure::RouteChanged)
+    ));
+    assert!(matches!(
+        RestrictedConnector::open(&connector, &Fixture::new(2).revocation().task).await,
+        Err(PairingFailure::IdentityMismatch)
+    ));
+}
+
+#[tokio::test]
+async fn captured_ssh_binding_survives_journal_reopen_and_rejects_redirected_retry() {
+    use spaceterm_client::{
+        journal::JournalCommitDisposition, pairing::revocation::RestrictedConnector,
+    };
+    use spaceterm_client_native::{
+        restricted_routes::NativePairingConnector,
+        route::{NativeRouteConnector, SshRouteConfiguration, TunnelEndpoints},
+    };
+    use spaceterm_host::ipc::PrivateIpcDirectory;
+    use std::os::unix::fs::PermissionsExt;
+    let directory = Directory::new();
+    let runtime = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(runtime.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let runtime_path = runtime.path().canonicalize().unwrap();
+    let configuration = runtime_path.join("ssh-config");
+    let original = "Host original\n HostName 127.0.0.1\n User owner\n";
+    std::fs::write(&configuration, original).unwrap();
+    let ssh = || {
+        SshRouteConfiguration::new(
+            "/usr/bin/ssh".into(),
+            configuration.clone(),
+            runtime_path.clone(),
+            vec![("PATH".into(), "/usr/bin:/bin".into())],
+            TunnelEndpoints::new(PrivateIpcDirectory::open(&runtime_path).unwrap()).unwrap(),
+            None,
+        )
+        .unwrap()
+    };
+    let fixture = fixture_on_route(
+        RouteDescription::new(RouteParts::Ssh {
+            destination: "original".into(),
+            remote_socket: "/server".into(),
+        })
+        .unwrap(),
+    );
+    let journal = directory.create().await;
+    let mut preparation = fixture.seed_changes();
+    preparation.pop(); // Capture before the exact binding becomes ordinarily usable.
+    let tx = ClientJournalTransaction {
+        expected_revision: journal.recover().await.unwrap().revision(),
+        changes: preparation,
+    };
+    assert!(matches!(
+        journal.commit(&tx).await.unwrap(),
+        JournalCommitDisposition::Durable(_)
+    ));
+    let owner = controller(Arc::new(journal.clone())).await;
+    let connector = NativePairingConnector::new(
+        owner.clone(),
+        NativeRouteConnector::new(vec![], Some(ssh())).unwrap(),
+    );
+    connector
+        .capture_route(fixture.credential.scope.reference())
+        .await
+        .unwrap();
+    assert!(
+        owner
+            .snapshot()
+            .unwrap()
+            .pairing()
+            .slot(fixture.credential.scope.reference())
+            .unwrap()
+            .ssh_capture
+            .is_some()
+    );
+    owner
+        .transact(vec![ClientJournalChange::SaveBinding(Box::new(
+            fixture.saved.clone(),
+        ))])
+        .await
+        .unwrap();
+    drop(connector);
+    drop(owner);
+    drop(journal);
+    let journal = NativeClientJournal::open_existing(
+        directory.0.clone(),
+        Arc::new(CanonicalCodec),
+        Arc::new(Verifier),
+        JournalLimits::default(),
+    )
+    .await
+    .unwrap();
+    let state = journal.recover().await.unwrap();
+    let slot = state
+        .pairing()
+        .slot(fixture.credential.scope.reference())
+        .unwrap();
+    assert!(slot.route.is_none());
+    assert!(
+        slot.ssh_capture
+            .as_ref()
+            .unwrap()
+            .configuration()
+            .contains("hostname 127.0.0.1")
+    );
+    let record = fixture.revocation();
+    let tx = ClientJournalTransaction {
+        expected_revision: state.revision(),
+        changes: vec![ClientJournalChange::BeginRevocation(Box::new(
+            record.clone(),
+        ))],
+    };
+    assert!(matches!(
+        journal.commit(&tx).await.unwrap(),
+        JournalCommitDisposition::Durable(_)
+    ));
+    std::fs::write(&configuration, original.replace("127.0.0.1", "127.0.0.2")).unwrap();
+    let connector = NativePairingConnector::new(
+        Arc::new(journal.clone()),
+        NativeRouteConnector::new(vec![], Some(ssh())).unwrap(),
+    );
+    assert!(matches!(
+        RestrictedConnector::open(&connector, &record.task).await,
+        Err(PairingFailure::RouteChanged)
+    ));
+    assert!(matches!(
+        connector
+            .capture_route(fixture.credential.scope.reference())
+            .await,
+        Err(PairingFailure::RouteChanged)
+    ));
+    let state = journal.recover().await.unwrap();
+    assert_eq!(state.revocations().len(), 1);
+    assert!(state.bindings().is_empty());
+    let operation = record.task.parts().original.operation();
+    let tx = ClientJournalTransaction {
+        expected_revision: state.revision(),
+        changes: vec![
+            ClientJournalChange::ConfirmRevocation {
+                operation,
+                receipt: Box::new(fixture.receipt(&record.task)),
+            },
+            ClientJournalChange::ConfirmRevocationAcknowledgement(operation),
+            ClientJournalChange::FinishCredentialCleanup(operation),
+        ],
+    };
+    assert!(matches!(
+        journal.commit(&tx).await.unwrap(),
+        JournalCommitDisposition::Durable(_)
+    ));
+    let state = journal.recover().await.unwrap();
+    assert!(state.revocations().is_empty());
+    assert!(
+        state
+            .pairing()
+            .slot(fixture.credential.scope.reference())
+            .unwrap()
+            .ssh_capture
+            .is_none()
+    );
+    assert!(state.bindings().is_empty());
+}
+
+#[tokio::test]
+async fn restricted_ipc_rejects_impostor_pin_before_sending_pairing_proof() {
+    use spaceterm_client::{
+        journal::JournalCommitDisposition, pairing::revocation::RestrictedConnector,
+    };
+    use spaceterm_client_native::{
+        restricted_routes::NativePairingConnector,
+        route::{LocalRouteAuthority, NativeRouteConnector},
+    };
+    use spaceterm_host::{
+        ipc::{IpcListener, PrivateIpcDirectory},
+        transport::{AdmissionLimits, MessageLimit, MessageTransport},
+    };
+    use spaceterm_protocol::authentication::{
+        ClientHandshake, HandshakeConfig, PairingLookup, PairingRecord, Principal, Purpose,
+        ServerHandshake,
+    };
+    use std::{os::unix::fs::PermissionsExt, time::Duration};
+    for major in [1, 2] {
+        let directory = Directory::new();
+        let sockets = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(sockets.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let endpoint = PrivateIpcDirectory::open(&sockets.path().canonicalize().unwrap())
+            .unwrap()
+            .endpoint("server")
+            .unwrap();
+        let authority = LocalRouteAuthority::new(endpoint.clone()).unwrap();
+        let fixture = fixture_on_route(authority.description().clone());
+        let journal = directory.create().await;
+        fixture.seed(&journal).await;
+        let record = fixture.revocation();
+        let tx = ClientJournalTransaction {
+            expected_revision: journal.recover().await.unwrap().revision(),
+            changes: vec![ClientJournalChange::BeginRevocation(Box::new(
+                record.clone(),
+            ))],
+        };
+        assert!(matches!(
+            journal.commit(&tx).await.unwrap(),
+            JournalCommitDisposition::Durable(_)
+        ));
+        let original = &record.task.parts().original;
+        let local = |value: u64| {
+            let mut bytes = [0; 16];
+            bytes[8..].copy_from_slice(&value.to_be_bytes());
+            bytes
+        };
+        let pin = fixture.binding.target().pin();
+        let principal = Principal {
+            server: pin.identity,
+            device: original.device().bytes(),
+            pairing: local(original.pairing().local()),
+            client: local(original.client().local()),
+        };
+        struct Lookup(Principal);
+        impl PairingLookup for Lookup {
+            fn lookup(
+                &self,
+                server: [u8; 16],
+                pairing: [u8; 16],
+                client: [u8; 16],
+            ) -> Result<PairingRecord, ProtocolError> {
+                assert_eq!(
+                    (server, pairing, client),
+                    (self.0.server, self.0.pairing, self.0.client)
+                );
+                Ok(PairingRecord {
+                    principal: self.0,
+                    device_public_key: Key::new(2).public_key(),
+                    active: false,
+                })
+            }
+        }
+        let listener = IpcListener::bind(
+            endpoint,
+            MessageLimit::envelope(),
+            AdmissionLimits::new(2, Duration::from_secs(10)).unwrap(),
+        )
+        .unwrap();
+        let worker = tokio::spawn(async move {
+            let pending = listener.accept().await.unwrap();
+            let hello = pending.recv().await.unwrap().unwrap();
+            let (_, reply) = ServerHandshake::accept(
+                pin.identity,
+                1,
+                HandshakeConfig {
+                    majors: vec![major],
+                    ..HandshakeConfig::default()
+                },
+                Arc::new(Key::new(9)),
+                &Lookup(principal),
+                &hello,
+            )
+            .unwrap();
+            pending.send(&reply).await.unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_secs(5), pending.recv())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .is_none(),
+                "pairing proof reached an impostor"
+            );
+        });
+        let connector = NativePairingConnector::new(
+            Arc::new(journal.clone()),
+            NativeRouteConnector::new(vec![authority], None).unwrap(),
+        );
+        let mut transport = RestrictedConnector::open(&connector, &record.task)
+            .await
+            .unwrap();
+        let (handshake, hello) = ClientHandshake::begin(
+            pin,
+            principal,
+            Purpose::RevocationStatus,
+            HandshakeConfig {
+                majors: vec![major],
+                ..HandshakeConfig::default()
+            },
+            Arc::new(Key::new(2)),
+        )
+        .unwrap();
+        transport.send(&hello).await.unwrap();
+        assert!(matches!(
+            handshake.receive_server(&transport.receive().await.unwrap()),
+            Err(ProtocolError::Authentication)
+        ));
+        drop(transport);
+        worker.await.unwrap();
+        assert_eq!(journal.recover().await.unwrap().revocations().len(), 1);
+        assert!(journal.recover().await.unwrap().bindings().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn restricted_wss_pin_mismatch_preserves_pending_task_without_protocol_bytes() {
+    use spaceterm_client::{
+        journal::JournalCommitDisposition, pairing::revocation::RestrictedConnector,
+    };
+    use spaceterm_client_native::{
+        restricted_routes::NativePairingConnector, route::NativeRouteConnector,
+    };
+    use spaceterm_host::{
+        account_service::test_support::AccountServiceFixture,
+        server_keys::ServerKeyStore,
+        startup::{BuildIdentity, DesiredServerState},
+        transport::{AdmissionLimits, MessageLimit},
+        wss::{RemoteAccessEnablement, WssListener, server_tls_config},
+    };
+    use std::{
+        net::{Ipv4Addr, SocketAddr},
+        time::Duration,
+    };
+    let host_root = tempfile::tempdir().unwrap();
+    let host = AccountServiceFixture::new(host_root.path(), BuildIdentity::Development).unwrap();
+    let registration = host.initialize(DesiredServerState::Running).unwrap();
+    let identity = ServerKeyStore::open(&registration)
+        .unwrap()
+        .load_identity(registration.server_pin())
+        .unwrap();
+    let enabled = RemoteAccessEnablement::from_durable_setting(
+        registration.server_pin().identity,
+        vec![SocketAddr::from((Ipv4Addr::LOCALHOST, 0))],
+    )
+    .unwrap();
+    let listener = WssListener::bind(
+        Some(&enabled),
+        server_tls_config(identity).unwrap(),
+        MessageLimit::envelope(),
+        AdmissionLimits::new(2, Duration::from_secs(2)).unwrap(),
+    )
+    .await
+    .unwrap();
+    let address = listener.local_addresses().await.unwrap()[0];
+    // The saved journal deliberately pins a different key from this listener.
+    // All saved request identities still match their original journal capture.
+    let fixture = fixture_on_route(
+        RouteDescription::new(RouteParts::Wss {
+            address,
+            server_name: "localhost".into(),
+        })
+        .unwrap(),
+    );
+    let directory = Directory::new();
+    let journal = directory.create().await;
+    fixture.seed(&journal).await;
+    let record = fixture.revocation();
+    let tx = ClientJournalTransaction {
+        expected_revision: journal.recover().await.unwrap().revision(),
+        changes: vec![ClientJournalChange::BeginRevocation(Box::new(
+            record.clone(),
+        ))],
+    };
+    assert!(matches!(
+        journal.commit(&tx).await.unwrap(),
+        JournalCommitDisposition::Durable(_)
+    ));
+    let connector = NativePairingConnector::new(
+        Arc::new(journal.clone()),
+        NativeRouteConnector::new(vec![], None).unwrap(),
+    );
+    let (client, server) = tokio::join!(
+        RestrictedConnector::open(&connector, &record.task),
+        listener.accept()
+    );
+    assert!(matches!(client, Err(PairingFailure::AuthorizationDenied)));
+    assert!(
+        server.is_err(),
+        "an unpinned TLS peer received protocol reachability"
+    );
+    let state = journal.recover().await.unwrap();
+    assert!(state.bindings().is_empty());
+    assert_eq!(state.revocations()[0].task, record.task);
+    listener.disable().await;
+}
+
+#[tokio::test]
+async fn locked_pairing_credential_never_opens_a_native_restricted_route() {
+    use spaceterm_client_native::{
+        restricted_routes::NativePairingConnector,
+        route::{LocalRouteAuthority, NativeRouteConnector},
+    };
+    use spaceterm_host::{
+        ipc::{IpcListener, PrivateIpcDirectory},
+        transport::{AdmissionLimits, MessageLimit},
+    };
+    use std::{os::unix::fs::PermissionsExt, time::Duration};
+    struct Locked;
+    impl NativeDeviceCredentials for Locked {
+        fn create(
+            &self,
+            _: CredentialCreationReservation,
+        ) -> PairingFuture<'_, Result<PreparedCredential, CredentialFailure>> {
+            Box::pin(async { panic!("restricted retry cannot create credentials") })
+        }
+        fn recover_preparation<'a>(
+            &'a self,
+            _: &'a CredentialScope,
+        ) -> PairingFuture<'a, Result<Option<PreparedCredential>, CredentialFailure>> {
+            Box::pin(async { panic!("restricted retry cannot repair credentials") })
+        }
+        fn signing_key<'a>(
+            &'a self,
+            _: &'a PreparedCredential,
+            _: &'a CredentialUse,
+        ) -> PairingFuture<'a, Result<Arc<dyn SigningKey>, CredentialFailure>> {
+            Box::pin(async { Err(PairingFailure::CredentialUnavailable) })
+        }
+        fn delete_pairing_key<'a>(
+            &'a self,
+            _: &'a PreparedCredential,
+        ) -> PairingFuture<'a, Result<CredentialDeletion, CredentialFailure>> {
+            Box::pin(async { panic!("locked unconfirmed retry cannot delete credentials") })
+        }
+    }
+    let directory = Directory::new();
+    let sockets = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(sockets.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let endpoint = PrivateIpcDirectory::open(&sockets.path().canonicalize().unwrap())
+        .unwrap()
+        .endpoint("server")
+        .unwrap();
+    let authority = LocalRouteAuthority::new(endpoint.clone()).unwrap();
+    let fixture = fixture_on_route(authority.description().clone());
+    let journal = Arc::new(directory.create().await);
+    fixture.seed(journal.as_ref()).await;
+    let controller = controller(journal).await;
+    let store = JournalPairingStore::new(controller.clone());
+    let operation = fixture
+        .remove(JournalPairingStore::new(controller.clone()))
+        .await;
+    let connector = NativePairingConnector::new(
+        controller.clone(),
+        NativeRouteConnector::new(vec![authority], None).unwrap(),
+    );
+    let driver = spaceterm_client::pairing::revocation::RevocationDriver::new(
+        Locked,
+        connector,
+        Arc::new(CanonicalCodec),
+        spaceterm_protocol::authentication::HandshakeConfig::default(),
+    );
+    let listener = IpcListener::bind(
+        endpoint,
+        MessageLimit::envelope(),
+        AdmissionLimits::new(2, Duration::from_secs(10)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        driver.run_once(&store, operation).await,
+        Err(PairingFailure::CredentialUnavailable)
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), listener.accept())
+            .await
+            .is_err()
+    );
+    let state = controller.snapshot().unwrap();
+    assert!(state.bindings().is_empty());
+    assert_eq!(state.revocations().len(), 1);
+    assert!(matches!(
+        state.revocations()[0].phase,
+        spaceterm_client::journal::RevocationPhase::AwaitingConfirmation
+    ));
 }

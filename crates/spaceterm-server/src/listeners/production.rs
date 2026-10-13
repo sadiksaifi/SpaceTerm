@@ -51,26 +51,10 @@ pub struct ProductionListenerPorts {
     pub outcomes: Arc<ConnectionOutcomes>,
     revocations: Arc<ListenerRevocations>,
     status: Mutex<Option<watch::Receiver<ServerStatus>>>,
-    account_runtime: Mutex<Option<Arc<crate::account_runtime::AccountRuntimeProcesses>>>,
 }
 impl ProductionListenerPorts {
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
-    }
-    /// Binds the one recovered account runtime before the paired listener opens.
-    pub fn install_account_runtime(
-        &self,
-        runtime: Arc<crate::account_runtime::AccountRuntimeProcesses>,
-    ) -> Result<(), ServerFailure> {
-        let mut slot = self
-            .account_runtime
-            .lock()
-            .map_err(|_| failure(ServerFailureClass::RecoveryRequired))?;
-        if slot.is_some() {
-            return Err(failure(ServerFailureClass::StaleAuthority));
-        }
-        *slot = Some(runtime);
-        Ok(())
     }
     /// The same bounded feed used by authenticated clients, retained after close.
     /// Status is comparison data and grants no native-management authority.
@@ -156,15 +140,8 @@ pub fn production_listener_factories_with_dispatch<S: PairingSnapshotPort + 'sta
         handle.runtime_status(),
     )?;
     let (status_sender, status_receiver) = watch::channel(initial);
-    let account_runtime = config
-        .ports
-        .account_runtime
-        .lock()
-        .map_err(|_| failure(ServerFailureClass::RecoveryRequired))?
-        .clone();
     let authentication = Arc::new(ProductionAuthentication {
         uid: config.registration.key().account_uid,
-        account_runtime: account_runtime.is_some(),
         identity: config.identity.clone(),
         lookup,
         server: snapshot.state().server,
@@ -178,7 +155,6 @@ pub fn production_listener_factories_with_dispatch<S: PairingSnapshotPort + 'sta
         )),
         pairing: config.pairing,
         outcomes: config.ports.outcomes.clone(),
-        account_runtime,
     });
     let listeners = Arc::new(ServerListeners::new(ListenerConfig {
         ipc: config
@@ -219,7 +195,6 @@ pub fn production_listener_factories_with_dispatch<S: PairingSnapshotPort + 'sta
 }
 
 struct ProductionAuthentication<S> {
-    account_runtime: bool,
     uid: u32,
     identity: Arc<ServerIdentity>,
     lookup: Arc<PairingProtocolLookup<S>>,
@@ -238,20 +213,17 @@ impl<S: PairingSnapshotPort + 'static> AuthenticationFactoryPort for ProductionA
         {
             return Err(failure(ServerFailureClass::StaleAuthority));
         }
-        let mut capabilities = vec![
-            spaceterm_protocol::negotiation::CAPABILITY_NORMALIZED_CREATION_TOPOLOGY,
-            spaceterm_protocol::negotiation::CAPABILITY_CANONICAL_DOMAIN,
-            spaceterm_protocol::negotiation::CAPABILITY_ORGANIZATION_COMPARISONS,
-        ];
-        if self.account_runtime {
-            capabilities.push(spaceterm_protocol::negotiation::CAPABILITY_ACCOUNT_RUNTIME);
-        }
         Ok(AuthenticationConfig {
             server: self.server,
             epoch: self.epoch,
             owning_uid: self.uid,
             handshake: HandshakeConfig {
-                capabilities,
+                capabilities: vec![
+                    spaceterm_protocol::negotiation::CAPABILITY_NORMALIZED_CREATION_TOPOLOGY,
+                    spaceterm_protocol::negotiation::CAPABILITY_CANONICAL_DOMAIN,
+                    spaceterm_protocol::negotiation::CAPABILITY_ORGANIZATION_COMPARISONS,
+                    spaceterm_protocol::negotiation::CAPABILITY_TERMINAL_STREAMS,
+                ],
                 ..HandshakeConfig::default()
             },
             credentials: self.identity.clone(),
@@ -271,7 +243,6 @@ impl<S: PairingSnapshotPort + 'static> AuthenticationFactoryPort for ProductionA
     }
 }
 struct ProductionDispatch {
-    account_runtime: Option<Arc<crate::account_runtime::AccountRuntimeProcesses>>,
     status: watch::Receiver<ServerStatus>,
     ordinary: Arc<dyn crate::protocol_dispatch::OrdinaryDispatchPort>,
     pairing: PairingService,
@@ -282,18 +253,16 @@ impl ConnectionDispatchFactoryPort for ProductionDispatch {
         &self,
         authenticator: Authenticator,
     ) -> Result<Arc<dyn ConnectionDispatchPort>, ServerFailure> {
-        let mut dispatcher = ProtocolDispatcher::new(
-            authenticator,
-            self.status.clone(),
-            self.ordinary.clone(),
-            Arc::new(RejectRestrictedFallback),
-        )
-        .with_pairing(self.pairing.clone())
-        .with_outcomes(self.outcomes.clone());
-        if let Some(runtime) = &self.account_runtime {
-            dispatcher = dispatcher.with_account_runtime(runtime.clone());
-        }
-        Ok(Arc::new(dispatcher))
+        Ok(Arc::new(
+            ProtocolDispatcher::new(
+                authenticator,
+                self.status.clone(),
+                self.ordinary.clone(),
+                Arc::new(RejectRestrictedFallback),
+            )
+            .with_pairing(self.pairing.clone())
+            .with_outcomes(self.outcomes.clone()),
+        ))
     }
 }
 struct RejectRestrictedFallback;
@@ -370,6 +339,7 @@ impl ListenerLifecyclePort for StatusListeners {
                 let mut stop = self.stop.subscribe();
                 let sender = self.status.clone();
                 let running = self.running.clone();
+                let source = handle.clone();
                 *monitor = Some(tokio::spawn(async move {
                     loop {
                         tokio::select! { biased;
@@ -378,10 +348,10 @@ impl ListenerLifecyclePort for StatusListeners {
                             changed = listeners.changed() => { if changed.is_err() { return Ok(()); } },
                             changed = runtime.changed() => { if changed.is_err() { return Ok(()); } },
                         }
-                        let snapshot = organization.borrow_and_update().clone();
-                        let facts = listeners.borrow_and_update().clone();
-                        let runtime = *runtime.borrow_and_update();
-                        publish_status(&sender, &snapshot, &running, facts, runtime)?;
+                        organization.mark_unchanged();
+                        listeners.mark_unchanged();
+                        runtime.mark_unchanged();
+                        publish_status(&sender, &source, &running, &listeners)?;
                     }
                 }));
             }
@@ -425,30 +395,28 @@ impl StatusListeners {
     fn publish_current(&self) -> Result<(), ServerFailure> {
         publish_status(
             &self.status,
-            &self.handle.snapshot(),
+            &self.handle,
             &self.running,
-            self.listeners.subscribe_status().borrow().clone(),
-            self.handle.runtime_status(),
+            &self.listeners.subscribe_status(),
         )
     }
 }
 
 fn publish_status(
     sender: &watch::Sender<ServerStatus>,
-    snapshot: &OrganizationSnapshot,
+    handle: &ServerHandle,
     running: &spaceterm_distribution::BuildVersion,
-    listeners: Vec<spaceterm_core::management::ListenerStatus>,
-    runtime: ServerRuntimeStatus,
+    listeners: &watch::Receiver<Vec<spaceterm_core::management::ListenerStatus>>,
 ) -> Result<(), ServerFailure> {
     let mut result = Ok(());
     sender.send_if_modified(|current| {
         let replacement = (|| {
             let next = status(
-                snapshot,
+                &handle.snapshot(),
                 current.parts().revision,
                 running,
-                listeners,
-                runtime,
+                listeners.borrow().clone(),
+                handle.runtime_status(),
             )?;
             if next == *current {
                 return Ok(None);

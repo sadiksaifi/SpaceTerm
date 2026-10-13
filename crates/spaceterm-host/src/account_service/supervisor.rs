@@ -209,8 +209,7 @@ impl ServiceSupervisor {
             Arc::clone(&installations),
         )?);
         let processes = Arc::new(
-            super::NativeServiceProcesses::current(installations)?
-                .with_runtime(Arc::new(super::runtime_inventory::RetainedRuntimeProcesses)),
+            super::NativeServiceProcesses::current(installations)?.with_manager(manager.clone()),
         );
         Ok(Self {
             key: AccountBuildKey {
@@ -237,7 +236,14 @@ impl ServiceSupervisor {
         let installations: Arc<dyn super::ServiceInstallations> =
             Arc::new(super::NativeServiceInstallations);
         self.processes = Some(Arc::new(
-            super::NativeServiceProcesses::current(installations)?.with_runtime(runtime),
+            super::NativeServiceProcesses::current(installations)?
+                .with_manager(
+                    self.manager
+                        .as_ref()
+                        .ok_or(ServiceFailure::SupervisorUnavailable)?
+                        .clone(),
+                )
+                .with_runtime(runtime),
         ));
         Ok(self)
     }
@@ -575,9 +581,6 @@ pub(super) struct RequestRecord {
     // Durable ownership before runtime reservation, including pre-acceptance crashes.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     reserving: bool,
-    // Native-only durable non-admission. An ordinary wire token cannot issue it.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    aborting: bool,
 }
 impl RequestRecord {
     fn pending(&self) -> bool {
@@ -602,7 +605,6 @@ impl RequestRecord {
         // This upper bound is reserved at binding and remains unavailable to new IDs.
         largest.phase = ServicePhase::IntentCommitted;
         largest.reserving = matches!(self.binding, RequestBinding::Confirmed(_));
-        largest.aborting = largest.reserving;
         largest.state = ServiceRequestState::Completed(self.binding.outcome()?);
         let completed = encode(&largest, JOURNAL_LIMIT)?.len();
         largest.state = ServiceRequestState::NotApplied(ServiceFailure::AuthorizationUnavailable);
@@ -615,10 +617,9 @@ impl RequestRecord {
         request: NativeRequestId,
     ) -> Result<(), ServiceFailure> {
         self.binding.basis().validate()?;
-        if (self.aborting && (!self.reserving || self.phase != ServicePhase::Reserved))
-            || (self.reserving
-                && (self.phase != ServicePhase::Reserved
-                    || !matches!(self.binding, RequestBinding::Confirmed(_))))
+        if (self.reserving
+            && (self.phase != ServicePhase::Reserved
+                || !matches!(self.binding, RequestBinding::Confirmed(_))))
             || self.digest != self.binding.digest(key, request)?
             || (self.phase == ServicePhase::Completed)
                 == matches!(
@@ -939,7 +940,6 @@ impl ServiceSupervisor {
                 phase: ServicePhase::Reserved,
                 state: ServiceRequestState::Pending,
                 reserving: false,
-                aborting: false,
             };
             lease.verify()?;
             self.write_request(request, &record)?;
@@ -1145,7 +1145,6 @@ impl ServiceSupervisor {
                 phase: ServicePhase::Reserved,
                 state: ServiceRequestState::Pending,
                 reserving: false,
-                aborting: false,
             }
         };
         if record.phase == ServicePhase::Completed {
@@ -1156,7 +1155,6 @@ impl ServiceSupervisor {
                 self.abort_unaccepted_reservation(request, &record, &lease)
                     .await?;
                 record.reserving = false;
-                record.aborting = false;
                 self.write_request(request, &record)?;
             }
             if resolving {
@@ -1184,7 +1182,6 @@ impl ServiceSupervisor {
                 }
                 lease.verify()?;
                 record.reserving = false;
-                record.aborting = false;
                 self.phase(request, &mut record, ServicePhase::Accepted)
             }
             .await;
@@ -1199,7 +1196,6 @@ impl ServiceSupervisor {
                     self.abort_unaccepted_reservation(request, &original, &lease)
                         .await?;
                     original.reserving = false;
-                    original.aborting = false;
                     self.write_request(request, &original)?;
                 }
                 return Err(error);
@@ -1214,17 +1210,15 @@ impl ServiceSupervisor {
         lease: &Lease,
     ) -> Result<(), ServiceFailure> {
         lease.verify()?;
-        let mut original = self
+        let original = self
             .original(request)?
             .ok_or(ServiceFailure::InvalidRecord)?;
         if original != *record || original.phase != ServicePhase::Reserved || !original.reserving {
             return Err(ServiceFailure::Indeterminate);
         }
-        let RequestBinding::Confirmed(assessment) = original.binding.clone() else {
+        let RequestBinding::Confirmed(assessment) = &original.binding else {
             return Err(ServiceFailure::InvalidRecord);
         };
-        original.aborting = true;
-        self.write_request(request, &original)?;
         let registration = self.discover()?.ok_or(ServiceFailure::Missing)?;
         self.processes()?
             .abort_reservation(&registration, &assessment.runtime)
@@ -1695,38 +1689,6 @@ impl ServiceSupervisor {
         }
         Ok(())
     }
-    /// Verifies provider-owned durable non-admission before a paired local bridge
-    /// may release an original runtime reservation. Comparison fields grant none.
-    pub fn verify_runtime_abort(
-        &self,
-        assessment: &RuntimeAssessment,
-    ) -> Result<(), ServiceFailure> {
-        let registration = self.discover()?.ok_or(ServiceFailure::Missing)?;
-        assessment.validate(&registration)?;
-        let (_, _, journal) = self.read_journal()?;
-        if journal.reservations.iter().any(|reservation| reservation.service.as_ref().is_some_and(|record| {
-            record.phase == ServicePhase::Reserved && record.reserving && record.aborting
-                && matches!(&record.binding, RequestBinding::Confirmed(original) if original.runtime == *assessment)
-        })) { Ok(()) } else { Err(ServiceFailure::RequestConflict) }
-    }
-    /// Reads the original all-client scope for an already authorized retirement.
-    pub fn retirement_runtime_assessment(
-        &self,
-        server: ServerId,
-        epoch: ServerEpoch,
-    ) -> Result<RuntimeAssessment, ServiceFailure> {
-        let (request, _) = self.verify_retirement_request(server, epoch)?;
-        let original = self
-            .original(
-                NativeRequestId::new(request.id_bytes())
-                    .map_err(|_| ServiceFailure::InvalidRecord)?,
-            )?
-            .ok_or(ServiceFailure::UnknownRequest)?;
-        let RequestBinding::Confirmed(assessment) = original.binding else {
-            return Err(ServiceFailure::RequestConflict);
-        };
-        Ok(assessment.runtime)
-    }
     /// Validates action-specific durable intent and the exact original runtime epoch.
     /// No caller-supplied comparison value or wire field can issue this authority.
     pub fn verify_retirement_request(
@@ -1934,13 +1896,6 @@ impl ServiceSupervisor {
             installed: true,
         };
         registration.validate(self.key)?;
-        super::runtime_inventory::initialize(
-            &RegisteredServer {
-                directory: Directory::open(&registration.data)?.ok_or(ServiceFailure::Missing)?,
-                record: registration.clone(),
-            },
-            identity.as_ref(),
-        )?;
         lease.verify()?;
         match anchor.publish(
             "registration",

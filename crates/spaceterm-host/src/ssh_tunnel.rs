@@ -659,14 +659,20 @@ fn matches_bound_address(address: &socket2::SockAddr, path: &std::path::Path) ->
     {
         return false;
     }
-    // Darwin getpeername can omit the NUL from its length. socket2::as_pathname
-    // assumes a terminator and drops the last byte, so inspect the bounded bytes.
+    // Darwin getpeername can omit the NUL or return OpenSSH's full zero-padded
+    // sockaddr. socket2::as_pathname assumes a terminator and drops the last byte
+    // in the first case, so inspect the bounded name and validate all padding.
     // SAFETY: SockAddr initializes length bytes; the checked offset and length
     // keep this slice inside its live sockaddr storage.
     let bytes = unsafe {
         std::slice::from_raw_parts(address.as_ptr().cast::<u8>().add(offset), length - offset)
     };
-    bytes.strip_suffix(&[0]).unwrap_or(bytes) == path.as_os_str().as_bytes()
+    let name_length = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len());
+    bytes[name_length..].iter().all(|byte| *byte == 0)
+        && &bytes[..name_length] == path.as_os_str().as_bytes()
 }
 
 fn supervise(
