@@ -2,6 +2,22 @@
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::time::Duration;
+
+use spaceterm_client::git::rpc::{ClientGitFailure, GitOperationState, TrackedGitOperation};
+use spaceterm_core::{
+    authority::{FieldVersion, OrganizationRevision},
+    identity::{WorkspaceId as ServerWorkspaceId, WorktreeId as ServerWorktreeId},
+    operations::{OperationFailure, OperationId, RepositoryScope},
+    organization::{BranchName as ServerBranchName, ServerDirectory},
+    worktrees::{
+        BranchReference, GitCommand, GitFailure, GitMutationOutcomeParts, MAX_GIT_REPOSITORIES,
+        WorktreeBranchChoice, WorktreeCreateDraft, WorktreeLocationChoice,
+        queries::GitAssessmentPage,
+    },
+};
+
+use super::server_git::ServerGitRequests;
 
 use gpui::prelude::*;
 use gpui::{
@@ -57,10 +73,65 @@ pub(crate) struct WorktreeFormContext {
     pub(crate) default_base: Option<String>,
 }
 
+/// Immutable recipient captured before any server read. Paths from this form
+/// are display-only server values and never reach a client filesystem adapter.
+#[derive(Clone)]
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "Workspace consumer installs server forms")
+)]
+pub(crate) struct ServerWorktreeFormContext {
+    pub(crate) workspace: ServerWorkspaceId,
+    pub(crate) repository: RepositoryScope,
+    pub(crate) repository_name: String,
+    pub(crate) location_version: FieldVersion,
+    pub(crate) checked_out: Vec<(String, SharedString)>,
+    pub(crate) default_base: Option<String>,
+    pub(crate) online: bool,
+    /// Reopen the native journal's original operation, never a replacement add.
+    pub(crate) original_operation: Option<OperationId>,
+}
+
+struct ServerFormState {
+    requests: ServerGitRequests,
+    target: ServerWorktreeFormContext,
+    preview: Option<GitAssessmentPage>,
+    explicit_location: bool,
+    read_generation: u64,
+    read: Option<Task<()>>,
+    observer: Option<Task<()>>,
+    operation: Option<OperationId>,
+    submission_started: bool,
+    created: Option<(OperationId, ServerWorktreeId, OrganizationRevision)>,
+}
+
+enum FormBackend {
+    Local {
+        backend: Rc<dyn WorktreeFormBackend>,
+        probe: LocationProbe,
+    },
+    Server(Box<ServerFormState>),
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum WorktreeFormEvent {
     /// Git created the Worktree at this directory.
     Created(PathBuf),
+    /// Membership must reach this revision before the consumer opens anything.
+    /// This event grants no attachment, selection or Session-start authority.
+    ServerCreated {
+        workspace: ServerWorkspaceId,
+        repository: RepositoryScope,
+        operation: OperationId,
+        worktree: ServerWorktreeId,
+        revision: OrganizationRevision,
+    },
+    /// The native journal retains this original operation after dismissal.
+    ServerOperation {
+        workspace: ServerWorkspaceId,
+        operation: OperationId,
+        state: GitOperationState,
+    },
     Cancelled,
 }
 
@@ -116,9 +187,8 @@ impl FormErrors {
 }
 
 pub(crate) struct WorktreeForm {
-    backend: Rc<dyn WorktreeFormBackend>,
+    backend: FormBackend,
     context: WorktreeFormContext,
-    probe: LocationProbe,
     source: BranchSource,
     name: Entity<TextInput>,
     location: Entity<TextInput>,
@@ -151,6 +221,61 @@ impl WorktreeForm {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::build(FormBackend::Local { backend, probe }, context, window, cx)
+    }
+
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "Workspace consumer installs server forms")
+    )]
+    pub(crate) fn new_server(
+        requests: ServerGitRequests,
+        target: ServerWorktreeFormContext,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<Self, ClientGitFailure> {
+        if target.workspace.server() != requests.server()
+            || target.repository.server != requests.server()
+            || target.repository.validate().is_err()
+            || target
+                .original_operation
+                .is_some_and(|operation| operation.stream().server() != requests.server())
+        {
+            return Err(ClientGitFailure::WrongServer);
+        }
+        let context = WorktreeFormContext {
+            repository_name: sanitize_for_display(&target.repository_name, MAXIMUM_NAME_CHARS),
+            template: String::new(),
+            home: PathBuf::new(),
+            checked_out: target.checked_out.clone(),
+            default_base: target.default_base.clone(),
+        };
+        let operation = target.original_operation;
+        Ok(Self::build(
+            FormBackend::Server(Box::new(ServerFormState {
+                requests,
+                target,
+                preview: None,
+                explicit_location: false,
+                read_generation: 0,
+                read: None,
+                observer: None,
+                operation,
+                submission_started: operation.is_some(),
+                created: None,
+            })),
+            context,
+            window,
+            cx,
+        ))
+    }
+
+    fn build(
+        backend: FormBackend,
+        context: WorktreeFormContext,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let name = text_input("new-worktree-name", "Branch name", "Required", window, cx);
         let location = text_input(
             "new-worktree-location",
@@ -171,7 +296,6 @@ impl WorktreeForm {
         let mut form = Self {
             backend,
             context,
-            probe,
             source: BranchSource::New,
             name,
             location,
@@ -197,11 +321,71 @@ impl WorktreeForm {
     }
 
     pub(crate) fn present(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if self.open {
+        if self.open
+            || matches!(&self.backend, FormBackend::Server(server) if !server.target.online)
+        {
             return false;
         }
         self.generation = self.generation.wrapping_add(1);
-        let branches = self.backend.branches(cx);
+        let branches = match &self.backend {
+            FormBackend::Local { backend, .. } => backend.branches(cx),
+            FormBackend::Server(server) => {
+                let requests = server.requests.clone();
+                let repository = server.target.repository;
+                cx.spawn(async move |form, cx| {
+                    let mut branches = BranchList::default();
+                    let mut checked_out = Vec::new();
+                    let mut cursor = None;
+                    let mut pages = 0;
+                    loop {
+                        pages += 1;
+                        if pages > MAX_GIT_REPOSITORIES {
+                            return None;
+                        }
+                        let page = requests.branches(repository, cursor).await.ok()?;
+                        if branches.local.len() + branches.remote.len() + page.records.len()
+                            > MAX_GIT_REPOSITORIES
+                        {
+                            return None;
+                        }
+                        for record in page.records {
+                            if !record.remote && record.checked_out {
+                                checked_out.push(record.name.as_str().to_owned());
+                            }
+                            let names = if record.remote {
+                                &mut branches.remote
+                            } else {
+                                &mut branches.local
+                            };
+                            names.push(record.name.as_str().to_owned());
+                        }
+                        match page.next {
+                            Some(next) => cursor = Some(next),
+                            None => {
+                                let _ = form.update(cx, |form, _| {
+                                    form.context.checked_out = checked_out
+                                        .into_iter()
+                                        .map(|name| {
+                                            let label = form
+                                                .context
+                                                .checked_out
+                                                .iter()
+                                                .find(|(branch, _)| branch == &name)
+                                                .map_or_else(
+                                                    || SharedString::from("another Worktree"),
+                                                    |(_, label)| label.clone(),
+                                                );
+                                            (name, label)
+                                        })
+                                        .collect();
+                                });
+                                return Some(branches);
+                            }
+                        }
+                    }
+                })
+            }
+        };
         let generation = self.generation;
         self._branches = cx.spawn(async move |form, cx| {
             let branches = branches.await;
@@ -225,7 +409,10 @@ impl WorktreeForm {
                     ModalActionRole::Affirmative,
                     CREATE_ACTION_SELECTOR,
                 )
-                .default_action(true),
+                .default_action(true)
+                .enabled(
+                    !matches!(&self.backend, FormBackend::Server(server) if !server.target.online),
+                ),
                 ModalAction::new(
                     FormAction::Cancel,
                     "Cancel",
@@ -261,12 +448,531 @@ impl WorktreeForm {
             return false;
         };
         self.open = true;
+        self.set_editable(self.editing_enabled(), cx);
         cx.notify();
         true
     }
 
     pub(crate) const fn is_open(&self) -> bool {
         self.open
+    }
+
+    /// The caller supplies only the selected server's current setting version
+    /// and connection state. A different active Workspace cannot retarget this form.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "Workspace consumer forwards server setting changes"
+        )
+    )]
+    pub(crate) fn server_context_changed(
+        &mut self,
+        location_version: FieldVersion,
+        online: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let FormBackend::Server(server) = &mut self.backend else {
+            return;
+        };
+        let changed = server.target.location_version != location_version;
+        server.target.location_version = location_version;
+        server.target.online = online;
+        if changed || !online {
+            server.preview = None;
+            if !self.pending {
+                server.read = None;
+                server.read_generation = server.read_generation.wrapping_add(1);
+            }
+            self.backend_error = Some(if online {
+                "The server's location setting changed. Review the new location before creating."
+            } else {
+                "The server is offline. Worktree creation is unavailable."
+            });
+        }
+        if online && !self.pending && server.operation.is_none() {
+            self.request_server_preview(cx);
+        }
+        cx.notify();
+    }
+
+    fn server_draft(&self, cx: &App) -> Result<WorktreeCreateDraft, FormErrors> {
+        let FormBackend::Server(server) = &self.backend else {
+            return Err(FormErrors::default());
+        };
+        let (_, branch) = self.validate(cx)?;
+        let bounded = |name: String| {
+            ServerBranchName::new(name).map_err(|_| FormErrors {
+                name: Some("Git doesn't accept this name.".into()),
+                ..FormErrors::default()
+            })
+        };
+        let branch = match branch {
+            WorktreeBranch::New { name, base } => WorktreeBranchChoice::New {
+                name: bounded(name)?,
+                base: match base {
+                    BranchName::Local(name) => BranchReference::Local(bounded(name)?),
+                    BranchName::Remote(name) => BranchReference::Remote(bounded(name)?),
+                },
+            },
+            WorktreeBranch::Existing { name } => WorktreeBranchChoice::Existing {
+                name: bounded(name)?,
+            },
+            WorktreeBranch::Remote { remote, name } => WorktreeBranchChoice::Remote {
+                remote: bounded(remote)?,
+                name: bounded(name)?,
+            },
+        };
+        let location = if server.explicit_location {
+            WorktreeLocationChoice::Explicit(
+                ServerDirectory::new(
+                    server.target.repository.server,
+                    self.location.read(cx).value().trim().as_bytes().to_vec(),
+                )
+                .map_err(|_| FormErrors {
+                    location: Some("The server can't use this location.".into()),
+                    ..FormErrors::default()
+                })?,
+            )
+        } else {
+            WorktreeLocationChoice::ServerTemplate {
+                expected_version: server.target.location_version,
+            }
+        };
+        WorktreeCreateDraft::new(server.target.repository, branch, location).map_err(|_| {
+            FormErrors {
+                location: Some("The server can't use this location.".into()),
+                ..FormErrors::default()
+            }
+        })
+    }
+
+    fn request_server_preview(&mut self, cx: &mut Context<Self>) {
+        if self.pending || self.branches.is_none() {
+            return;
+        }
+        let draft = self.server_draft(cx);
+        let FormBackend::Server(server) = &mut self.backend else {
+            return;
+        };
+        server.read = None;
+        server.read_generation = server.read_generation.wrapping_add(1);
+        server.preview = None;
+        if !server.target.online || server.operation.is_some() || server.submission_started {
+            return;
+        }
+        let Ok(draft) = draft else {
+            return;
+        };
+        let requests = server.requests.clone();
+        let generation = server.read_generation;
+        server.read = Some(cx.spawn(async move |form, cx| {
+            let result = requests.preview(draft).await;
+            let _ = form.update(cx, |form, cx| {
+                let FormBackend::Server(server) = &form.backend else {
+                    return;
+                };
+                if server.read_generation != generation || !form.open || form.pending {
+                    return;
+                }
+                match result {
+                    Ok(page) => {
+                        form.install_server_preview(page, cx);
+                    }
+                    Err(error) => {
+                        form.server_read_failed(error, cx);
+                    }
+                }
+            });
+        }));
+    }
+
+    /// The preview is retained exactly, including opaque path bytes. Display text
+    /// is never converted back into authority unless the person edits Location.
+    fn install_server_preview(&mut self, page: GitAssessmentPage, cx: &mut Context<Self>) -> bool {
+        let FormBackend::Server(server) = &mut self.backend else {
+            return false;
+        };
+        let Some(preview) = &page.creation_preview else {
+            return false;
+        };
+        // Creation has no destructive affected scope. Refuse an unexpected one
+        // instead of silently reducing or truncating an all-client assessment.
+        if page.next.is_some()
+            || !page.tabs.is_empty()
+            || !page.panes.is_empty()
+            || !page.fallbacks.is_empty()
+        {
+            self.backend_error = Some("The server's creation assessment needs review.");
+            server.preview = None;
+            cx.notify();
+            return false;
+        }
+        if !server.explicit_location {
+            let display = sanitize_for_display(
+                &String::from_utf8_lossy(preview.parts().directory.bytes()),
+                4096,
+            );
+            self.proposed_location = display.clone();
+            self.location
+                .update(cx, |input, cx| input.set_value(display, cx));
+        }
+        server.preview = Some(page);
+        self.errors = FormErrors::default();
+        cx.notify();
+        true
+    }
+
+    fn server_read_failed(&mut self, error: ClientGitFailure, cx: &mut Context<Self>) {
+        self.backend_error = Some(match error {
+            ClientGitFailure::Offline | ClientGitFailure::Reconciling => {
+                "The server is offline. Worktree creation is unavailable."
+            }
+            ClientGitFailure::Remote(
+                GitFailure::StaleAssessment | GitFailure::ExpiredAssessment,
+            ) => "The server setting or repository changed. Review and assess again.",
+            ClientGitFailure::Remote(GitFailure::OccupiedTarget) => {
+                "This folder isn't empty. Choose a new or empty folder."
+            }
+            ClientGitFailure::Remote(GitFailure::BranchExists) => {
+                "A branch with this name already exists."
+            }
+            ClientGitFailure::Remote(GitFailure::BranchCheckedOut) => {
+                "Another Worktree has this branch checked out."
+            }
+            ClientGitFailure::Remote(
+                GitFailure::InvalidDirectory | GitFailure::InvalidTemplate,
+            ) => "The server can't use this location.",
+            _ => "The server couldn't assess this Worktree. Review and assess again.",
+        });
+        cx.notify();
+    }
+
+    fn handle_server_action(
+        &mut self,
+        action: FormAction,
+        completion: DialogPendingCompletion,
+        window_handle: AnyWindowHandle,
+        cx: &mut Context<Self>,
+    ) -> DialogCloseDecision {
+        if action == FormAction::Cancel {
+            // Before submission this cancels reads. After admission it ends only
+            // observation. Neither the journal nor the server write is cancelled.
+            return DialogCloseDecision::Allow;
+        }
+        if self.pending {
+            return DialogCloseDecision::Deny {
+                first_invalid: None,
+            };
+        }
+        let FormBackend::Server(server) = &self.backend else {
+            return DialogCloseDecision::Deny {
+                first_invalid: None,
+            };
+        };
+        if !server.target.online {
+            self.server_read_failed(ClientGitFailure::Offline, cx);
+            return DialogCloseDecision::Deny {
+                first_invalid: None,
+            };
+        }
+        if let Some(operation) = server.operation {
+            let requests = server.requests.clone();
+            if let FormBackend::Server(server) = &mut self.backend {
+                server.read = None;
+                server.read_generation = server.read_generation.wrapping_add(1);
+            }
+            self._branches = Task::ready(());
+            self.pending = true;
+            let generation = self.generation;
+            cx.spawn(
+                async move |form, cx| match requests.resume(operation).await {
+                    Ok(tracked) => Self::observe_server_operation(
+                        form,
+                        cx,
+                        generation,
+                        tracked,
+                        completion,
+                        window_handle,
+                    ),
+                    Err(error) => {
+                        if let Ok(Some(settlement)) = form.update(cx, |form, cx| {
+                            form.server_submission_failed(generation, error, completion, cx)
+                        }) {
+                            let _ = window_handle
+                                .update(cx, |_, window, cx| settlement.apply(window, cx));
+                        }
+                    }
+                },
+            )
+            .detach();
+            return DialogCloseDecision::Pending;
+        }
+        if server.submission_started {
+            self.backend_error = Some(
+                "The original creation is awaiting its journal outcome. SpaceTerm won't submit another creation.",
+            );
+            cx.notify();
+            return DialogCloseDecision::Deny {
+                first_invalid: None,
+            };
+        }
+        self.submit_attempted = true;
+        let draft = match self.server_draft(cx) {
+            Ok(draft) => draft,
+            Err(errors) => {
+                self.errors = errors;
+                cx.notify();
+                return DialogCloseDecision::Deny {
+                    first_invalid: self
+                        .errors
+                        .first(self.source)
+                        .and_then(|field| self.focus_for_field(field, cx)),
+                };
+            }
+        };
+        let FormBackend::Server(server) = &mut self.backend else {
+            return DialogCloseDecision::Deny {
+                first_invalid: None,
+            };
+        };
+        server.read = None;
+        server.read_generation = server.read_generation.wrapping_add(1);
+        self._branches = Task::ready(());
+        let shown = server
+            .preview
+            .as_ref()
+            .and_then(|page| page.creation_preview.clone());
+        let requests = server.requests.clone();
+        let generation = self.generation;
+        self.pending = true;
+        self.set_editable(false, cx);
+        self.backend_error = None;
+        // This task is a cancellable read until the exact assessment is checked.
+        let read = cx.spawn(async move |form, cx| {
+            let assessed = requests.preview(draft).await;
+            match assessed {
+                Ok(page) => {
+                    let decision = form.update(cx, |form, cx| {
+                        if !form.open || !form.pending || form.generation != generation { return None; }
+                        let current = form.server_draft(cx).ok();
+                        let eligible = matches!(&form.backend, FormBackend::Server(server) if server.target.online)
+                            && current.as_ref() == page.creation_preview.as_ref().map(|preview| &preview.parts().draft);
+                        if !eligible {
+                            form.pending = false;
+                            form.set_editable(true, cx);
+                            form.backend_error = Some("The server setting or connection changed. Review and assess again.");
+                            cx.notify();
+                            return Some(Err(Settlement::Failure { primary: completion.clone(), cancel: None, first_invalid: None }));
+                        }
+                        let same = shown.as_ref() == page.creation_preview.as_ref();
+                        let command = GitCommand::CreateConfirmed { assessment: page.token.clone() };
+                        if !form.install_server_preview(page, cx) || !same {
+                            form.pending = false;
+                            form.set_editable(true, cx);
+                            form.backend_error = Some("Review the server's proposed location, then choose Create again.");
+                            return Some(Err(Settlement::Failure { primary: completion.clone(), cancel: None, first_invalid: Some(form.location.read(cx).focus_handle()) }));
+                        }
+                        if let FormBackend::Server(server) = &mut form.backend { server.submission_started = true; }
+                        Some(Ok(command))
+                    });
+                    match decision {
+                        Ok(Some(Ok(command))) => {
+                            // Detached only at submission. Dismissal cannot cancel
+                            // admission or repeat a write after a lost response.
+                            cx.spawn(async move |cx| {
+                                match requests.submit(command).await {
+                                    Ok(tracked) => Self::observe_server_operation(form, cx, generation, tracked, completion, window_handle),
+                                    Err(error) => {
+                                        if let Ok(Some(settlement)) = form.update(cx, |form, cx| form.server_submission_failed(generation, error, completion, cx)) {
+                                            let _ = window_handle.update(cx, |_, window, cx| settlement.apply(window, cx));
+                                        }
+                                    }
+                                }
+                            }).detach();
+                        }
+                        Ok(Some(Err(settlement))) => { let _ = window_handle.update(cx, |_, window, cx| settlement.apply(window, cx)); }
+                        _ => {}
+                    }
+                }
+                Err(error) => {
+                    if let Ok(Some(settlement)) = form.update(cx, |form, cx| form.server_submission_failed(generation, error, completion, cx)) {
+                        let _ = window_handle.update(cx, |_, window, cx| settlement.apply(window, cx));
+                    }
+                }
+            }
+        });
+        if let FormBackend::Server(server) = &mut self.backend {
+            server.read = Some(read);
+        }
+        cx.notify();
+        DialogCloseDecision::Pending
+    }
+
+    fn observe_server_operation(
+        form: gpui::WeakEntity<Self>,
+        cx: &mut gpui::AsyncApp,
+        generation: u64,
+        tracked: TrackedGitOperation,
+        completion: DialogPendingCompletion,
+        window_handle: AnyWindowHandle,
+    ) {
+        let operation = tracked.id();
+        let _ = form.update(cx, |form, cx| {
+            let FormBackend::Server(server) = &mut form.backend else {
+                return;
+            };
+            server.operation = Some(operation);
+            if !form.open || form.generation != generation {
+                return;
+            }
+            cx.emit(WorktreeFormEvent::ServerOperation {
+                workspace: server.target.workspace,
+                operation,
+                state: GitOperationState::Pending,
+            });
+            // Admission has finished. The form now owns only this cancellable
+            // observer; its lifetime cannot affect the native operation tracker.
+            server.observer = Some(cx.spawn(async move |form, cx| {
+                loop {
+                    let state = tracked
+                        .state()
+                        .await
+                        .unwrap_or(GitOperationState::Unresolved);
+                    let pending = state == GitOperationState::Pending;
+                    let settlement = form.update(cx, |form, cx| {
+                        form.settle_server_operation(
+                            generation,
+                            operation,
+                            state,
+                            completion.clone(),
+                            cx,
+                        )
+                    });
+                    match settlement {
+                        Ok(Some(settlement)) => {
+                            let _ = window_handle
+                                .update(cx, |_, window, cx| settlement.apply(window, cx));
+                            return;
+                        }
+                        Ok(None) if pending => {
+                            let active = form
+                                .update(cx, |form, _| form.open && form.generation == generation)
+                                .unwrap_or(false);
+                            if !active {
+                                return;
+                            }
+                            cx.background_executor()
+                                .timer(Duration::from_millis(100))
+                                .await;
+                        }
+                        _ => return,
+                    }
+                }
+            }));
+        });
+    }
+
+    fn server_submission_failed(
+        &mut self,
+        generation: u64,
+        error: ClientGitFailure,
+        primary: DialogPendingCompletion,
+        cx: &mut Context<Self>,
+    ) -> Option<Settlement> {
+        if let FormBackend::Server(server) = &mut self.backend {
+            // Only typed pre-admission refusals establish that no write started.
+            // Provider/storage failures without a tracker must fail closed.
+            if server.operation.is_none()
+                && matches!(
+                    error,
+                    ClientGitFailure::Offline
+                        | ClientGitFailure::Reconciling
+                        | ClientGitFailure::WrongServer
+                        | ClientGitFailure::Unauthorized
+                        | ClientGitFailure::Remote(
+                            GitFailure::StaleAssessment | GitFailure::ExpiredAssessment
+                        )
+                )
+            {
+                server.submission_started = false;
+            }
+            server.preview = None;
+        }
+        if !self.open || self.generation != generation {
+            return None;
+        }
+        self.pending = false;
+        self.set_editable(self.editing_enabled(), cx);
+        self.server_read_failed(error, cx);
+        Some(Settlement::Failure {
+            primary,
+            cancel: None,
+            first_invalid: None,
+        })
+    }
+
+    fn settle_server_operation(
+        &mut self,
+        generation: u64,
+        operation: OperationId,
+        state: GitOperationState,
+        primary: DialogPendingCompletion,
+        cx: &mut Context<Self>,
+    ) -> Option<Settlement> {
+        if !self.open || self.generation != generation {
+            return None;
+        }
+        let FormBackend::Server(server) = &mut self.backend else {
+            return None;
+        };
+        cx.emit(WorktreeFormEvent::ServerOperation {
+            workspace: server.target.workspace,
+            operation,
+            state: state.clone(),
+        });
+        match state {
+            GitOperationState::Pending => return None,
+            GitOperationState::Completed(outcome) => {
+                if let GitMutationOutcomeParts::Created { worktree, revision } = outcome.parts() {
+                    server.created = Some((operation, *worktree, *revision));
+                    return Some(Settlement::Success { primary });
+                }
+                self.backend_error =
+                    Some("The original creation outcome needs review. SpaceTerm won't repeat it.");
+            }
+            GitOperationState::Rejected(failure) => {
+                server.operation = None;
+                server.submission_started = false;
+                server.preview = None;
+                self.backend_error = Some(match failure {
+                    OperationFailure::StaleAssessment
+                    | OperationFailure::AssessmentExpired
+                    | OperationFailure::StaleValidation => {
+                        "The server setting or repository changed. Review and assess again."
+                    }
+                    _ => "The server rejected creation. Review and assess again.",
+                });
+            }
+            GitOperationState::Unresolved | GitOperationState::Retired => {
+                self.backend_error = Some(
+                    "Creation is unresolved. Create checks the original operation; it won't create another Worktree.",
+                );
+            }
+        }
+        self.pending = false;
+        self.set_editable(false, cx);
+        if let FormBackend::Server(server) = &self.backend
+            && server.operation.is_none()
+        {
+            self.set_editable(true, cx);
+        }
+        cx.notify();
+        Some(Settlement::Failure {
+            primary,
+            cancel: None,
+            first_invalid: None,
+        })
     }
 
     fn branches_loaded(&mut self, branches: Option<BranchList>, cx: &mut Context<Self>) {
@@ -281,11 +987,14 @@ impl WorktreeForm {
             self.base = branches.local.first().cloned().map(BranchName::Local);
         }
         self.branches = Some(branches);
+        if matches!(self.backend, FormBackend::Server(_)) {
+            self.propose(cx);
+        }
         self.revalidate(cx);
     }
 
     fn set_source(&mut self, source: BranchSource, cx: &mut Context<Self>) {
-        if self.pending || self.source == source {
+        if !self.editing_enabled() || self.source == source {
             return;
         }
         self.source = source;
@@ -298,13 +1007,28 @@ impl WorktreeForm {
     }
 
     fn input_changed(&mut self, field: FormField, cx: &mut Context<Self>) {
-        if field == FormField::Name {
+        if matches!(self.backend, FormBackend::Server(_))
+            && field == FormField::Location
+            && self.location.read(cx).value() == self.proposed_location
+        {
+            return;
+        }
+        if let FormBackend::Server(server) = &mut self.backend
+            && field == FormField::Location
+            && self.location.read(cx).value() != self.proposed_location
+        {
+            server.explicit_location = true;
+        }
+        if field == FormField::Name || matches!(self.backend, FormBackend::Server(_)) {
             self.propose(cx);
         }
         self.revalidate(cx);
     }
 
     fn choose(&mut self, field: FormField, choice: Choice, cx: &mut Context<Self>) {
+        if !self.editing_enabled() {
+            return;
+        }
         match (field, choice) {
             (FormField::Branch, Choice::Base(base)) => self.base = Some(base),
             (FormField::Branch, Choice::Existing(name)) => self.existing = Some(name),
@@ -338,6 +1062,10 @@ impl WorktreeForm {
 
     /// Fills the location from the template until the person types one.
     fn propose(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.backend, FormBackend::Server(_)) {
+            self.request_server_preview(cx);
+            return;
+        }
         let typed = self.location.read(cx).value().to_owned();
         if typed != self.proposed_location {
             return;
@@ -431,15 +1159,29 @@ impl WorktreeForm {
             }
         };
         let location = self.location.read(cx).value().trim().to_owned();
-        let path = if location.is_empty() {
+        let path = if matches!(&self.backend, FormBackend::Server(server) if !server.explicit_location)
+        {
+            Some(PathBuf::new())
+        } else if location.is_empty() {
             errors.location = Some("Enter a location.".into());
             None
         } else {
-            let path = expand_home(&location, &self.context.home);
+            let path = if matches!(self.backend, FormBackend::Server(_)) {
+                PathBuf::from(&location)
+            } else {
+                expand_home(&location, &self.context.home)
+            };
             if path.is_absolute() {
                 Some(path)
             } else {
-                errors.location = Some("Enter a full path that starts with / or ~/.".into());
+                errors.location = Some(
+                    if matches!(self.backend, FormBackend::Server(_)) {
+                        "Enter a full path on this server that starts with /."
+                    } else {
+                        "Enter a full path that starts with / or ~/."
+                    }
+                    .into(),
+                );
                 None
             }
         };
@@ -456,6 +1198,9 @@ impl WorktreeForm {
         window_handle: AnyWindowHandle,
         cx: &mut Context<Self>,
     ) -> DialogCloseDecision {
+        if matches!(self.backend, FormBackend::Server(_)) {
+            return self.handle_server_action(action, completion, window_handle, cx);
+        }
         match action {
             FormAction::Cancel if self.pending => {
                 if self.pending_cancel.is_some() {
@@ -474,9 +1219,10 @@ impl WorktreeForm {
             FormAction::Create => {
                 self.submit_attempted = true;
                 self.backend_error = None;
-                let checked =
-                    self.validate(cx)
-                        .and_then(|(path, branch)| match (self.probe)(&path) {
+                let checked = self
+                    .validate(cx)
+                    .and_then(|(path, branch)| match &self.backend {
+                        FormBackend::Local { probe, .. } => match probe(&path) {
                             Ok(NewDirectoryTarget::Free) => Ok((path, branch)),
                             Ok(NewDirectoryTarget::Occupied) => Err(FormErrors {
                                 location: Some(
@@ -489,7 +1235,11 @@ impl WorktreeForm {
                                 location: Some("SpaceTerm can\u{2019}t use this location.".into()),
                                 ..FormErrors::default()
                             }),
-                        });
+                        },
+                        FormBackend::Server(_) => {
+                            unreachable!("server actions use exact assessments")
+                        }
+                    });
                 match checked {
                     Ok((path, branch)) => {
                         self.start_create(path, branch, completion, window_handle, cx);
@@ -520,7 +1270,10 @@ impl WorktreeForm {
         self.pending = true;
         self.set_editable(false, cx);
         let generation = self.generation;
-        let task = self.backend.create(path, branch, cx);
+        let FormBackend::Local { backend, .. } = &self.backend else {
+            return;
+        };
+        let task = backend.create(path, branch, cx);
         cx.notify();
         cx.spawn(async move |form, cx| {
             let result = task.await;
@@ -590,10 +1343,32 @@ impl WorktreeForm {
             return;
         }
         self.open = false;
+        self._branches = Task::ready(());
+        if let FormBackend::Server(server) = &mut self.backend {
+            server.read = None;
+            server.observer = None;
+            server.read_generation = server.read_generation.wrapping_add(1);
+            if matches!(
+                outcome,
+                DialogOutcome::Completed {
+                    action_id: FormAction::Create,
+                    ..
+                }
+            ) && let Some((operation, worktree, revision)) = server.created.take()
+            {
+                cx.emit(WorktreeFormEvent::ServerCreated {
+                    workspace: server.target.workspace,
+                    repository: server.target.repository,
+                    operation,
+                    worktree,
+                    revision,
+                });
+            }
+        }
         self.pending = false;
         self.pending_cancel = None;
         self.generation = self.generation.wrapping_add(1);
-        self.set_editable(true, cx);
+        self.set_editable(self.editing_enabled(), cx);
         match (outcome, self.pending_path.take()) {
             (
                 DialogOutcome::Completed {
@@ -602,6 +1377,13 @@ impl WorktreeForm {
                 },
                 Some(path),
             ) => cx.emit(WorktreeFormEvent::Created(path)),
+            (
+                DialogOutcome::Completed {
+                    action_id: FormAction::Create,
+                    ..
+                },
+                None,
+            ) if matches!(self.backend, FormBackend::Server(_)) => {}
             _ => cx.emit(WorktreeFormEvent::Cancelled),
         }
         cx.notify();
@@ -613,6 +1395,11 @@ impl WorktreeForm {
             FormField::Location => Some(self.location.read(cx).focus_handle()),
             FormField::Branch => None,
         }
+    }
+
+    fn editing_enabled(&self) -> bool {
+        !self.pending
+            && !matches!(&self.backend, FormBackend::Server(server) if server.operation.is_some() || server.submission_started)
     }
 
     fn set_editable(&self, editable: bool, cx: &mut Context<Self>) {
@@ -666,7 +1453,7 @@ impl Render for WorktreeForm {
         let appearance = super::appearance::shared_chrome(cx);
         let colors = appearance.host_colors(spaceterm_ui::ControlHost::Floating);
         let owner = cx.weak_entity();
-        let enabled = !self.pending;
+        let enabled = self.editing_enabled();
         let source = SegmentedControl::new(
             "new-worktree-source",
             "Branch",
@@ -895,7 +1682,7 @@ impl WorktreeForm {
                 ComboBox::new("new-worktree-branch", label, selected, prompt, items)
                     .full_width(true)
                     .busy(self.branches.is_none())
-                    .disabled(self.pending)
+                    .disabled(!self.editing_enabled())
                     .debug_selector("new-worktree-branch")
                     .on_accept(move |acceptance, _, cx| {
                         let choice = acceptance.item_id().clone();
@@ -1040,6 +1827,10 @@ fn input_field(
 }
 
 #[cfg(test)]
+#[path = "worktree_form/server_tests.rs"]
+mod server_tests;
+
+#[cfg(test)]
 mod tests {
     use std::cell::RefCell;
 
@@ -1139,7 +1930,7 @@ mod tests {
     }
 
     /// Types into a field as the person would, which marks the value as theirs.
-    fn type_into(
+    pub(super) fn type_into(
         form: &Entity<WorktreeForm>,
         field: FormField,
         value: &str,
@@ -1158,7 +1949,7 @@ mod tests {
         cx.run_until_parked();
     }
 
-    fn location(form: &Entity<WorktreeForm>, cx: &mut VisualTestContext) -> String {
+    pub(super) fn location(form: &Entity<WorktreeForm>, cx: &mut VisualTestContext) -> String {
         form.read_with(cx, |form, cx| form.location.read(cx).value().to_owned())
     }
 
@@ -1172,7 +1963,7 @@ mod tests {
         })
     }
 
-    fn create(cx: &mut VisualTestContext) {
+    pub(super) fn create(cx: &mut VisualTestContext) {
         let bounds = cx
             .debug_bounds("modal-action-new-worktree-create")
             .expect("the Create action");
