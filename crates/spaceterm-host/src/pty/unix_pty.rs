@@ -879,8 +879,12 @@ fn spawn_command_in_pty(
     size: PtySize,
     mut command: Command,
 ) -> Result<(SpawnedPty, PtyTerminator), PtyError> {
-    let pty_system = native_pty_system();
-    let pair = pty_system.openpty(size).map_err(PtyError::Open)?;
+    let pair = {
+        // openpty applies CLOEXEC separately; exclude spawn until both sides are ready.
+        let _guard =
+            crate::process::descriptor_guard().map_err(|error| PtyError::Open(error.into()))?;
+        native_pty_system().openpty(size).map_err(PtyError::Open)?
+    };
     initialize_pty(pair.master.as_ref(), size)?;
     let readiness = pair.master.as_raw_fd().ok_or(PtyError::MissingDescriptor)?;
     // SAFETY: pair.master owns this live descriptor throughout cloning.

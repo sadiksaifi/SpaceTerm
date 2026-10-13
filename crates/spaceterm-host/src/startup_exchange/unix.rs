@@ -158,8 +158,10 @@ impl PipeEndpoint {
 
 /// Creates a private anonymous pipe with CLOEXEC on both ends.
 pub fn anonymous_pipe() -> Result<(OwnedFd, OwnedFd), NativeFailure> {
+    let _guard = crate::process::descriptor_guard().map_err(|_| NativeFailure::IoUnavailable)?;
     let mut descriptors = [-1; 2];
-    // SAFETY: pipe initializes both entries on success. The launcher is single-threaded.
+    // SAFETY: pipe initializes both entries on success. The guard excludes concurrent spawn
+    // through CLOEXEC setup, including calls from the multithreaded native spawn client.
     #[cfg(target_os = "linux")]
     let result = unsafe { libc::pipe2(descriptors.as_mut_ptr(), libc::O_CLOEXEC) };
     #[cfg(target_os = "macos")]

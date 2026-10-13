@@ -92,14 +92,15 @@ pub(crate) fn dispatch_probe_from_environment() -> Option<i32> {
 pub(super) fn run_probe() -> Result<ProbeReport, PermissionAccessError> {
     let executable =
         std::env::current_exe().map_err(|_| PermissionAccessError::PlatformUnavailable)?;
-    let mut child = Command::new(executable)
-        .env_clear()
-        .env(PROBE_ENV, PROBE_ROLE)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|_| PermissionAccessError::PlatformUnavailable)?;
+    let mut child = spaceterm_host::process::spawn(
+        Command::new(executable)
+            .env_clear()
+            .env(PROBE_ENV, PROBE_ROLE)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .map_err(|_| PermissionAccessError::PlatformUnavailable)?;
     let status = wait_bounded(&mut child, PROBE_TIMEOUT)
         .ok_or(PermissionAccessError::PlatformUnavailable)?;
     let mut output = Vec::new();

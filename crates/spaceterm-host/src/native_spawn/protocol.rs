@@ -365,6 +365,9 @@ pub(super) fn receive_request(channel: &mut UnixStream) -> Result<Option<(Vec<u8
     message.msg_controllen = mem::size_of_val(&control) as _;
     #[cfg(target_os = "linux")]
     let flags = libc::MSG_CMSG_CLOEXEC;
+    // The exec-separated spawner receives and configures these descriptors on its
+    // single request thread before spawning. macOS has no MSG_CMSG_CLOEXEC, but no
+    // other thread can fork during this recvmsg-to-fcntl interval.
     #[cfg(target_os = "macos")]
     let flags = 0;
     let received = loop {

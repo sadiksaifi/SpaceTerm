@@ -51,9 +51,14 @@ impl NativePtyAdapterFactory for CredentialFreePtyAdapterFactory {
         if size.rows == 0 || size.columns == 0 {
             return Err(Construction::ResourceConfigurationFailed);
         }
-        let pair = portable_pty::native_pty_system()
-            .openpty(portable_size(size))
-            .map_err(|_| Construction::ResourceCreationFailed)?;
+        let pair = {
+            // openpty applies CLOEXEC separately; exclude spawn until both sides are ready.
+            let _guard = crate::process::descriptor_guard()
+                .map_err(|_| Construction::ResourceCreationFailed)?;
+            portable_pty::native_pty_system()
+                .openpty(portable_size(size))
+                .map_err(|_| Construction::ResourceCreationFailed)?
+        };
         let fd = pair
             .master
             .as_raw_fd()

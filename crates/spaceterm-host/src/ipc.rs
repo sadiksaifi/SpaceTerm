@@ -536,6 +536,7 @@ impl IpcListener {
         limit: MessageLimit,
         admission: AdmissionLimits,
     ) -> Result<Self, TransportError> {
+        let _guard = crate::process::descriptor_guard().map_err(|_| TransportError::Unavailable)?;
         let lease = endpoint.lease()?;
         endpoint.reclaim_dead(None)?;
         endpoint.ensure_absent()?;
@@ -554,6 +555,7 @@ impl IpcListener {
 
     /// Closes the listener before identity-checked removal. A replacement is preserved.
     pub fn close(mut self) -> Result<(), TransportError> {
+        let _guard = crate::process::descriptor_guard().map_err(|_| TransportError::Unavailable)?;
         self.close_native_listener();
         self.slots.close();
         self.socket.remove()
@@ -561,9 +563,9 @@ impl IpcListener {
 
     fn close_native_listener(&mut self) {
         if let Some(listener) = self.listener.take() {
-            // Shutdown also closes the listening side in a just-forked child
-            // before CLOEXEC runs. Descriptor close alone leaves that brief live
-            // duplicate visible to the dead-endpoint probe.
+            // Linux shuts down pre-exec duplicates too. macOS does not shut down
+            // listening sockets; the descriptor guard waits for concurrent exec instead.
+            #[cfg(target_os = "linux")]
             let _ = socket2::SockRef::from(&listener).shutdown(std::net::Shutdown::Both);
             drop(listener);
         }
@@ -576,13 +578,14 @@ impl IpcListener {
             .acquire_owned()
             .await
             .map_err(|_| TransportError::Closed)?;
-        let (stream, _) = self
-            .listener
-            .as_ref()
-            .ok_or(TransportError::Closed)?
-            .accept()
-            .await
-            .map_err(|_| TransportError::Unavailable)?;
+        let (stream, _) = crate::process::descriptor_io(
+            self.listener
+                .as_ref()
+                .ok_or(TransportError::Closed)?
+                .accept(),
+        )
+        .await
+        .map_err(|_| TransportError::Unavailable)?;
         let facts = same_account_peer(&stream)?;
         self.socket.endpoint.verify()?;
         Ok(PendingConnection::new(
@@ -595,6 +598,9 @@ impl IpcListener {
 
 impl Drop for IpcListener {
     fn drop(&mut self) {
+        let Ok(_guard) = crate::process::descriptor_guard() else {
+            return;
+        };
         self.close_native_listener();
         let _ = self.socket.remove();
     }
@@ -692,7 +698,7 @@ impl IpcTransport {
         endpoint
             .socket_identity()?
             .ok_or(TransportError::Unavailable)?;
-        let stream = UnixStream::connect(endpoint.path())
+        let stream = crate::process::descriptor_io(UnixStream::connect(endpoint.path()))
             .await
             .map_err(|_| TransportError::Unavailable)?;
         let facts = same_account_peer(&stream)?;

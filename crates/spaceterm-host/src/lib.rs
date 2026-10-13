@@ -27,6 +27,7 @@ pub mod session_capabilities;
 pub mod startup;
 pub mod storage;
 
+pub mod process;
 pub mod pty;
 pub mod shell_integration;
 pub mod shell_launch;
