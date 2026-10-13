@@ -155,10 +155,8 @@ async fn ipc_close_waits_for_a_concurrent_child_to_release_its_inherited_listene
     let endpoint = directory.endpoint("s").unwrap();
     let listener =
         IpcListener::bind(endpoint.clone(), MessageLimit::envelope(), admission()).unwrap();
-    let (ready_read, ready_write) =
-        spaceterm_host::startup_exchange::unix::anonymous_pipe().unwrap();
-    let (release_read, release_write) =
-        spaceterm_host::startup_exchange::unix::anonymous_pipe().unwrap();
+    let (ready_read, ready_write) = spaceterm_host::process::anonymous_pipe().unwrap();
+    let (release_read, release_write) = spaceterm_host::process::anonymous_pipe().unwrap();
     let spawn = std::thread::spawn(move || {
         let mut command = Command::new("/bin/cat");
         command

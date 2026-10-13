@@ -63,3 +63,10 @@ pub mod native_refusals;
 pub mod native_spawn;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod startup_exchange;
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod account_service;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod private_filesystem;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod server_keys;
