@@ -101,6 +101,7 @@ pub(crate) fn run() {
         super::macos_accessibility::tests::presented_pane_attaches_its_text_area_to_the_pane_node
     );
     gpui_test!(super::macos_accessibility::tests::text_area_focus_request_focuses_its_pane);
+    gpui_test!(super::macos_accessibility::tests::native_retained_terminal_value_and_ranges_reject_revoked_server_generations);
 
     gpui_test!(
         macos_appearance::tests::forcing_native_chrome_does_not_change_the_system_preference

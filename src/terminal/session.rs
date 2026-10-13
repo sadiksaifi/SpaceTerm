@@ -374,9 +374,21 @@ pub(crate) enum SelectionPreparationError {
         reason = "only a native accessibility Adapter requests accessibility work"
     )
 )]
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct AccessibilitySelectionSender {
-    commands: CommandSender<Command>,
+    target: AccessibilitySelectionTarget,
+}
+
+#[derive(Clone)]
+enum AccessibilitySelectionTarget {
+    Worker(CommandSender<Command>),
+    Callback(std::rc::Rc<dyn Fn(AccessibilitySelectionRequest)>),
+}
+
+impl fmt::Debug for AccessibilitySelectionSender {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AccessibilitySelectionSender")
+    }
 }
 
 #[cfg_attr(
@@ -391,20 +403,32 @@ impl AccessibilitySelectionSender {
     pub(crate) fn recording_channel() -> (Self, RecordingAccessibilitySelectionReceiver) {
         let (commands, receiver) = legacy_command_channel();
         (
-            Self { commands },
+            Self {
+                target: AccessibilitySelectionTarget::Worker(commands),
+            },
             RecordingAccessibilitySelectionReceiver(receiver),
         )
     }
 
+    pub(crate) fn callback(callback: impl Fn(AccessibilitySelectionRequest) + 'static) -> Self {
+        Self {
+            target: AccessibilitySelectionTarget::Callback(std::rc::Rc::new(callback)),
+        }
+    }
+
     pub(crate) fn request(&self, request: AccessibilitySelectionRequest) {
-        if self
-            .commands
-            .send(Command::AccessibilitySelection(request))
-            .is_err()
-        {
-            eprintln!(
-                "terminal accessibility selection was dropped because the worker has stopped"
-            );
+        match &self.target {
+            AccessibilitySelectionTarget::Callback(callback) => callback(request),
+            AccessibilitySelectionTarget::Worker(commands) => {
+                if commands
+                    .send(Command::AccessibilitySelection(request))
+                    .is_err()
+                {
+                    eprintln!(
+                        "terminal accessibility selection was dropped because the worker has stopped"
+                    );
+                }
+            }
         }
     }
 }
@@ -418,8 +442,16 @@ impl AccessibilitySelectionSender {
 )]
 #[derive(Clone)]
 pub(crate) struct AccessibilityDemandSender {
-    commands: CommandSender<Command>,
-    schedule_input: ScheduleInput,
+    target: AccessibilityDemandTarget,
+}
+
+#[derive(Clone)]
+enum AccessibilityDemandTarget {
+    Worker {
+        commands: CommandSender<Command>,
+        schedule_input: ScheduleInput,
+    },
+    Callback(std::rc::Rc<dyn Fn()>),
 }
 
 impl fmt::Debug for AccessibilityDemandSender {
@@ -436,17 +468,31 @@ impl fmt::Debug for AccessibilityDemandSender {
     )
 )]
 impl AccessibilityDemandSender {
+    pub(crate) fn callback(callback: impl Fn() + 'static) -> Self {
+        Self {
+            target: AccessibilityDemandTarget::Callback(std::rc::Rc::new(callback)),
+        }
+    }
+
     pub(crate) fn request(&self) {
         self.request_at(Instant::now());
     }
 
     fn request_at(&self, requested_at: Instant) {
-        if self
-            .schedule_input
-            .enqueue_accessibility_demand(requested_at)
-            && self.commands.send(Command::AccessibilityDemand).is_err()
-        {
-            eprintln!("terminal accessibility demand was dropped because the worker has stopped");
+        match &self.target {
+            AccessibilityDemandTarget::Callback(callback) => callback(),
+            AccessibilityDemandTarget::Worker {
+                commands,
+                schedule_input,
+            } => {
+                if schedule_input.enqueue_accessibility_demand(requested_at)
+                    && commands.send(Command::AccessibilityDemand).is_err()
+                {
+                    eprintln!(
+                        "terminal accessibility demand was dropped because the worker has stopped"
+                    );
+                }
+            }
         }
     }
 }
@@ -944,7 +990,7 @@ impl TerminalSessionHandle for TerminalSession {
         self.commands
             .as_ref()
             .map(|commands| AccessibilitySelectionSender {
-                commands: commands.clone(),
+                target: AccessibilitySelectionTarget::Worker(commands.clone()),
             })
     }
 
@@ -952,8 +998,10 @@ impl TerminalSessionHandle for TerminalSession {
         self.commands
             .as_ref()
             .map(|commands| AccessibilityDemandSender {
-                commands: commands.clone(),
-                schedule_input: self.schedule_input.clone(),
+                target: AccessibilityDemandTarget::Worker {
+                    commands: commands.clone(),
+                    schedule_input: self.schedule_input.clone(),
+                },
             })
     }
 

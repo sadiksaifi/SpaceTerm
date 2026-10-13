@@ -56,6 +56,7 @@ impl ScreenRect {
 #[cfg(any(not(test), feature = "native-tests"))]
 struct AccessibilityElementState {
     model: TerminalAccessibilityModel,
+    publication: Option<super::terminal_accessibility::AccessibilityPublication>,
     font: Option<AccessibilityFontMetadata>,
     #[cfg_attr(
         test,
@@ -124,6 +125,19 @@ impl AccessibilityElementState {
         self.font.as_ref().is_none_or(|font| {
             font.requested_family != family || font.requested_point_size != point_size
         })
+    }
+
+    fn read<T>(&self, read: impl FnOnce(&Self) -> Option<T>) -> Option<T> {
+        let current = || {
+            self.publication
+                .as_ref()
+                .is_none_or(|publication| publication.permits(&self.model))
+        };
+        if !current() {
+            return None;
+        }
+        let result = read(self)?;
+        current().then_some(result)
     }
 
     fn selected_range(&self) -> Range<usize> {
@@ -222,7 +236,7 @@ mod native {
         impl PaneAccessibilityElement {
             #[unsafe(method(isAccessibilityElement))]
             fn is_accessibility_element(&self) -> bool {
-                state(self).is_some_and(|state| state.visible)
+                state(self).is_some_and(|state| state.visible && state.publication.as_ref().is_none_or(|publication| publication.permits(&state.model)))
             }
 
             #[unsafe(method_id(accessibilityRole))]
@@ -237,7 +251,7 @@ mod native {
 
             #[unsafe(method_id(accessibilityValue))]
             fn accessibility_value(&self) -> Option<Retained<NSString>> {
-                semantic_state(self).map(|state| NSString::from_str(state.model.text()))
+                semantic_read(self, |state| Some(NSString::from_str(state.model.text())))
             }
 
             #[unsafe(method(accessibilityFrame))]
@@ -256,7 +270,7 @@ mod native {
             #[unsafe(method(setAccessibilityFocused:))]
             fn set_accessibility_focused(&self, focused: bool) {
                 if focused
-                    && let Some(sender) = state(self)
+                    && let Some(sender) = semantic_state(self)
                         .filter(|state| state.visible)
                         .and_then(|state| state.focus_sender.as_ref())
                 {
@@ -266,7 +280,7 @@ mod native {
 
             #[unsafe(method(isAccessibilityEnabled))]
             fn is_accessibility_enabled(&self) -> bool {
-                state(self).is_some_and(|state| state.presented)
+                state(self).is_some_and(|state| state.presented && state.publication.as_ref().is_none_or(|publication| publication.permits(&state.model)))
             }
 
             #[unsafe(method_id(accessibilityWindow))]
@@ -286,7 +300,7 @@ mod native {
             #[unsafe(method(isAccessibilitySelectorAllowed:))]
             fn is_accessibility_selector_allowed(&self, selector: Sel) -> bool {
                 if selector == sel!(setAccessibilityFocused:) {
-                    state(self).is_some_and(|state| state.visible && state.focus_sender.is_some())
+                    semantic_state(self).is_some_and(|state| state.visible && state.focus_sender.is_some())
                 } else {
                     // SAFETY: NSAccessibilityElement implements this NSAccessibility method.
                     unsafe { msg_send![super(self), isAccessibilitySelectorAllowed: selector] }
@@ -295,20 +309,19 @@ mod native {
 
             #[unsafe(method(accessibilityNumberOfCharacters))]
             fn accessibility_number_of_characters(&self) -> NSInteger {
-                semantic_state(self).map_or(0, |state| {
-                    NSInteger::try_from(state.model.len_utf16()).unwrap_or(NSInteger::MAX)
-                })
+                semantic_read(self, |state| {
+                    Some(NSInteger::try_from(state.model.len_utf16()).unwrap_or(NSInteger::MAX))
+                }).unwrap_or(0)
             }
 
             #[unsafe(method(accessibilityVisibleCharacterRange))]
             fn accessibility_visible_character_range(&self) -> NSRange {
-                semantic_state(self)
-                    .map_or_else(invalid_range, |state| ns_range(state.model.visible_range()))
+                semantic_read(self, |state| Some(ns_range(state.model.visible_range()))).unwrap_or_else(invalid_range)
             }
 
             #[unsafe(method(accessibilitySelectedTextRange))]
             fn accessibility_selected_text_range(&self) -> NSRange {
-                semantic_state(self).map_or_else(invalid_range, |state| ns_range(state.selected_range()))
+                semantic_read(self, |state| Some(ns_range(state.selected_range()))).unwrap_or_else(invalid_range)
             }
 
             #[unsafe(method(setAccessibilitySelectedTextRange:))]
@@ -329,16 +342,16 @@ mod native {
 
             #[unsafe(method_id(accessibilitySelectedText))]
             fn accessibility_selected_text(&self) -> Option<Retained<NSString>> {
-                semantic_state(self)
-                    .and_then(AccessibilityElementState::selected_text)
-                    .map(|text| NSString::from_str(&text))
+                semantic_read(self, |state| {
+                    state.selected_text().map(|text| NSString::from_str(&text))
+                })
             }
 
             #[unsafe(method_id(accessibilityStringForRange:))]
             fn accessibility_string_for_range(&self, range: NSRange) -> Option<Retained<NSString>> {
-                semantic_state(self)
-                    .and_then(|state| state.string_for_range(rust_range(range)?))
-                    .map(|text| NSString::from_str(&text))
+                semantic_read(self, |state| {
+                    state.string_for_range(rust_range(range)?).map(|text| NSString::from_str(&text))
+                })
             }
 
             #[unsafe(method_id(accessibilityAttributedStringForRange:))]
@@ -346,45 +359,37 @@ mod native {
                 &self,
                 range: NSRange,
             ) -> Option<Retained<NSAttributedString>> {
-                semantic_state(self)
-                    .and_then(|state| state.attributed_text_for_range(rust_range(range)?))
-                    .map(|text| ns_attributed_string(&text))
+                semantic_read(self, |state| {
+                    state.attributed_text_for_range(rust_range(range)?).map(|text| ns_attributed_string(&text))
+                })
             }
 
             #[unsafe(method(accessibilityRangeForLine:))]
             fn accessibility_range_for_line(&self, line: NSInteger) -> NSRange {
-                semantic_state(self)
-                    .and_then(|state| state.model.range_for_line(usize::try_from(line).ok()?))
-                    .map_or_else(invalid_range, ns_range)
+                semantic_read(self, |state| state.model.range_for_line(usize::try_from(line).ok()?).map(ns_range)).unwrap_or_else(invalid_range)
             }
 
             #[unsafe(method(accessibilityLineForIndex:))]
             fn accessibility_line_for_index(&self, index: NSInteger) -> NSInteger {
-                semantic_state(self)
-                    .and_then(|state| state.model.line_for_index(usize::try_from(index).ok()?))
-                    .and_then(|line| NSInteger::try_from(line).ok())
+                semantic_read(self, |state| {
+                    NSInteger::try_from(state.model.line_for_index(usize::try_from(index).ok()?)?).ok()
+                })
                     .unwrap_or(-1)
             }
 
             #[unsafe(method(accessibilityRangeForIndex:))]
             fn accessibility_range_for_index(&self, index: NSInteger) -> NSRange {
-                semantic_state(self)
-                    .and_then(|state| state.model.range_for_index(usize::try_from(index).ok()?))
-                    .map_or_else(invalid_range, ns_range)
+                semantic_read(self, |state| state.model.range_for_index(usize::try_from(index).ok()?).map(ns_range)).unwrap_or_else(invalid_range)
             }
 
             #[unsafe(method(accessibilityRangeForPosition:))]
             fn accessibility_range_for_position(&self, point: NSPoint) -> NSRange {
-                semantic_state(self)
-                    .and_then(|state| state.range_for_screen_point(point.x, point.y))
-                    .map_or_else(invalid_range, ns_range)
+                semantic_read(self, |state| state.range_for_screen_point(point.x, point.y).map(ns_range)).unwrap_or_else(invalid_range)
             }
 
             #[unsafe(method(accessibilityFrameForRange:))]
             fn accessibility_frame_for_range(&self, range: NSRange) -> NSRect {
-                semantic_state(self)
-                    .and_then(|state| state.screen_bounds_for_range(rust_range(range)?))
-                    .map_or_else(empty_rect, ns_rect)
+                semantic_read(self, |state| state.screen_bounds_for_range(rust_range(range)?).map(ns_rect)).unwrap_or_else(empty_rect)
             }
 
             #[unsafe(method_id(accessibilityHitTest:))]
@@ -431,6 +436,7 @@ mod native {
             let view = native_view(window);
             let mut state = Box::new(AccessibilityElementState {
                 model,
+                publication: None,
                 font: resolve_font_metadata(font, f32::from(font_size)),
                 frame: ScreenRect::default(),
                 grid: ScreenRect::default(),
@@ -461,6 +467,11 @@ mod native {
         pub(crate) fn set_hierarchy(&mut self, presented: bool) {
             self.state.presented = presented;
             if !presented {
+                if let Some(publication) = self.state.publication.take() {
+                    publication.revoke();
+                }
+                self.state.model =
+                    super::super::terminal_accessibility::empty_accessibility_model();
                 self.state.selection_sender = None;
                 self.state.demand_sender = None;
                 self.state.focus_sender = None;
@@ -512,6 +523,7 @@ mod native {
             let TerminalAccessibilityUpdate {
                 window,
                 model,
+                publication,
                 bounds,
                 cell_width,
                 line_height,
@@ -525,7 +537,17 @@ mod native {
             } = update;
             let was_focused = self.state.focused;
             self.state.view = native_view(window);
-            if !self.state.model.shares_snapshot(model) {
+            self.state.publication = publication;
+            if !self.state.presented
+                || self
+                    .state
+                    .publication
+                    .as_ref()
+                    .is_some_and(|publication| !publication.permits(model))
+            {
+                self.state.model =
+                    super::super::terminal_accessibility::empty_accessibility_model();
+            } else if !self.state.model.shares_snapshot(model) {
                 self.state.model = model.clone();
             }
             self.state.selection_sender = selection_sender.filter(|_| self.state.presented);
@@ -592,6 +614,9 @@ mod native {
     impl Drop for MacosAccessibilityElement {
         fn drop(&mut self) {
             let attached = self.state.visible;
+            if let Some(publication) = self.state.publication.take() {
+                publication.revoke();
+            }
             self.element.ivars().state.set(std::ptr::null_mut());
             if attached {
                 post_native_notification(&self.element, ELEMENT_DESTROYED);
@@ -666,13 +691,27 @@ mod native {
     }
 
     fn semantic_state(this: &PaneAccessibilityElement) -> Option<&AccessibilityElementState> {
-        let state = state(this)?;
+        let state = state(this).filter(|state| {
+            state.presented
+                && state.visible
+                && state
+                    .publication
+                    .as_ref()
+                    .is_none_or(|publication| publication.permits(&state.model))
+        })?;
         if state.visible
             && let Some(sender) = &state.demand_sender
         {
             sender.request();
         }
         Some(state)
+    }
+
+    fn semantic_read<T>(
+        this: &PaneAccessibilityElement,
+        read: impl FnOnce(&AccessibilityElementState) -> Option<T>,
+    ) -> Option<T> {
+        semantic_state(this)?.read(read)
     }
 
     fn ns_range(range: Range<usize>) -> NSRange {
@@ -850,6 +889,9 @@ impl TerminalAccessibilityAdapterFactory for MacosTerminalAccessibilityAdapterFa
 
 #[cfg(any(not(test), feature = "native-tests"))]
 impl TerminalAccessibilityAdapter for native::MacosAccessibilityElement {
+    fn supports_generation_bound_content(&self) -> bool {
+        true
+    }
     fn set_hierarchy(&mut self, presented: bool) {
         self.set_hierarchy(presented);
     }
@@ -939,6 +981,7 @@ pub(crate) mod tests {
                 0..1,
                 Some((0, 3)),
             ),
+            publication: None,
             font: Some(AccessibilityFontMetadata {
                 requested_descriptor: crate::terminal::test_terminal_appearance_update()
                     .appearance
@@ -1266,5 +1309,128 @@ pub(crate) mod tests {
         cx.run_until_parked();
         assert_eq!(*requests.borrow(), [1]);
         assert_eq!(focused(cx), [false, true]);
+    }
+    pub(crate) fn native_retained_terminal_value_and_ranges_reject_revoked_server_generations(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::platform::terminal_accessibility::TerminalAccessibilityUpdate;
+        use objc2::{msg_send, rc::Retained};
+        use objc2_foundation::{NSRange, NSString};
+        let cx = cx.add_empty_window();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        for transition in 0..4 {
+            let fixture =
+                runtime.block_on(crate::ui::server_pane_session::tests::Fixture::new(true));
+            fixture.frame();
+            let session = crate::ui::server_pane_session::ServerPaneSession::bind(
+                fixture.channel.clone(),
+                fixture.token,
+            )
+            .unwrap();
+            let appearance = crate::terminal::test_terminal_appearance_update();
+            let screen = session.snapshot(&appearance).unwrap();
+            let model = TerminalAccessibilityModel::from_screen(&screen);
+            let publication = session
+                .accessibility_publication(screen.generation)
+                .unwrap();
+            cx.update(|window, _| {
+                let mut adapter = native::MacosAccessibilityElement::new(
+                    window,
+                    model.clone(),
+                    &appearance.appearance.typography.regular,
+                    gpui::px(14.0),
+                );
+                adapter.assume_on_screen();
+                adapter.set_hierarchy(true);
+                adapter.update(TerminalAccessibilityUpdate {
+                    window,
+                    model: &model,
+                    publication: Some(publication.clone()),
+                    bounds: Some(gpui::Bounds::new(
+                        gpui::point(gpui::px(0.0), gpui::px(0.0)),
+                        gpui::size(gpui::px(50.0), gpui::px(20.0)),
+                    )),
+                    cell_width: gpui::px(10.0),
+                    line_height: gpui::px(20.0),
+                    font: &appearance.appearance.typography.regular,
+                    font_size: gpui::px(14.0),
+                    focused: true,
+                    notifications: AccessibilityNotifications::default(),
+                    selection_sender: None,
+                    demand_sender: None,
+                    focus_sender: None,
+                });
+                let retained = adapter.native_element();
+                // SAFETY: These selectors are part of NSAccessibility on a retained text area.
+                let value = unsafe { msg_send![&*retained, accessibilityValue] };
+                let value: Option<Retained<NSString>> = value;
+                assert_eq!(value.unwrap().to_string(), "priva");
+                if transition == 3 {
+                    drop(adapter);
+                    assert!(!publication.is_current());
+                    // SAFETY: The retained element outlives its owner, whose Drop clears state.
+                    let value: Option<Retained<NSString>> =
+                        unsafe { msg_send![&*retained, accessibilityValue] };
+                    assert!(value.is_none());
+                    return;
+                }
+                match transition {
+                    0 => fixture.take_over(),
+                    1 => fixture.publish_ended(),
+                    _ => {
+                        fixture.channel.update_context(Default::default()).unwrap();
+                    }
+                }
+                // The retained native element is queried before GPUI processes the publication.
+                // SAFETY: The owner and retained element remain live throughout these queries.
+                unsafe {
+                    let value: Option<Retained<NSString>> =
+                        msg_send![&*retained, accessibilityValue];
+                    let text: Option<Retained<NSString>> =
+                        msg_send![&*retained, accessibilityStringForRange: NSRange::new(0, 5)];
+                    let count: isize = msg_send![&*retained, accessibilityNumberOfCharacters];
+                    let range: NSRange = msg_send![&*retained, accessibilityRangeForLine: 0_isize];
+                    assert!(value.is_none());
+                    assert!(text.is_none());
+                    assert_eq!(count, 0);
+                    assert_eq!(range.length, 0);
+                }
+                adapter.set_hierarchy(false);
+                adapter.set_hierarchy(true);
+                // SAFETY: Reattaching without a current publication grants no old text authority.
+                let value: Option<Retained<NSString>> =
+                    unsafe { msg_send![&*retained, accessibilityValue] };
+                assert!(value.is_none());
+            });
+        }
+    }
+    #[tokio::test]
+    async fn native_terminal_read_rechecks_authority_after_constructing_the_result() {
+        let fixture = crate::ui::server_pane_session::tests::Fixture::new(true).await;
+        fixture.frame();
+        let session = crate::ui::server_pane_session::ServerPaneSession::bind(
+            fixture.channel.clone(),
+            fixture.token,
+        )
+        .unwrap();
+        let screen = session
+            .snapshot(&crate::terminal::test_terminal_appearance_update())
+            .unwrap();
+        let mut state = state();
+        state.model = TerminalAccessibilityModel::from_screen(&screen);
+        state.publication = session.accessibility_publication(screen.generation);
+        assert!(state.read(|state| state.string_for_range(0..5)).is_some());
+        assert!(
+            state
+                .read(|state| {
+                    let text = state.string_for_range(0..5)?;
+                    fixture.take_over();
+                    Some(text)
+                })
+                .is_none()
+        );
     }
 }

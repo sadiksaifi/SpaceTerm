@@ -644,6 +644,7 @@ pub(crate) struct TerminalPane {
     accessibility: Arc<TerminalAccessibilityModel>,
     pending_accessibility: Option<(u64, Arc<TerminalAccessibilityModel>)>,
     accessibility_element: Box<dyn TerminalAccessibilityAdapter>,
+    accessibility_hierarchy_presented: bool,
     accessibility_focus_sender: AccessibilityFocusSender,
     _accessibility_focus_task: Task<()>,
     pending_accessibility_notifications: AccessibilityNotifications,
@@ -897,9 +898,17 @@ impl TerminalPane {
         let (accessibility_focus_sender, accessibility_focus_receiver) =
             AccessibilityFocusSender::channel();
         let accessibility_focus_task = cx.spawn_in(window, async move |this, cx| {
-            while accessibility_focus_receiver.recv().await.is_ok() {
+            while let Ok(publication) = accessibility_focus_receiver.recv().await {
                 if this
-                    .update_in(cx, |pane, window, cx| pane.request_focus(window, cx))
+                    .update_in(cx, |pane, window, cx| {
+                        if publication
+                            .as_ref()
+                            .is_none_or(|publication| publication.is_current())
+                            && (pane.server_session.is_none() || publication.is_some())
+                        {
+                            pane.request_focus(window, cx);
+                        }
+                    })
                     .is_err()
                 {
                     break;
@@ -1007,6 +1016,7 @@ impl TerminalPane {
             accessibility,
             pending_accessibility: None,
             accessibility_element,
+            accessibility_hierarchy_presented: false,
             accessibility_focus_sender,
             _accessibility_focus_task: accessibility_focus_task,
             pending_accessibility_notifications: AccessibilityNotifications::default(),
@@ -1214,8 +1224,15 @@ impl TerminalPane {
     }
 
     pub(crate) fn set_accessibility_hierarchy(&mut self, presented: bool) {
-        self.accessibility_element
-            .set_hierarchy(presented && self.server_session.is_none());
+        self.accessibility_hierarchy_presented = presented;
+        self.accessibility_element.set_hierarchy(
+            presented
+                && self.server_session.as_ref().is_none_or(|server| {
+                    self.accessibility_element
+                        .supports_generation_bound_content()
+                        && server.native_permit().is_some()
+                }),
+        );
     }
 
     fn open_find(&mut self, _: &OpenTerminalFind, window: &mut Window, cx: &mut Context<Self>) {
@@ -2382,14 +2399,28 @@ impl TerminalPane {
     }
 
     fn sync_native_accessibility(&mut self, window: &Window, focused: bool) {
-        // The legacy adapter retains its own text model and has no final-read authority fence.
-        // Never give it server content, even while Live. A retained native element outlives
-        // hierarchy removal; server AX needs a generation-bound adapter before publication.
-        if self.server_session.is_some() {
+        if self.server_session.is_some()
+            && !self
+                .accessibility_element
+                .supports_generation_bound_content()
+        {
             self.accessibility_element.set_hierarchy(false);
             self.pending_accessibility_notifications.take();
             self.accessibility_needs_presentation = false;
             return;
+        }
+        let publication = self
+            .server_session
+            .as_ref()
+            .and_then(|server| server.accessibility_publication(self.accessibility.generation()));
+        if self.server_session.is_some() {
+            self.accessibility_element
+                .set_hierarchy(self.accessibility_hierarchy_presented && publication.is_some());
+            if publication.is_none() {
+                self.pending_accessibility_notifications.take();
+                self.accessibility_needs_presentation = false;
+                return;
+            }
         }
         let notifications = self.pending_accessibility_notifications.take();
         let cell = self.presented_cell_size();
@@ -2403,11 +2434,16 @@ impl TerminalPane {
             .session
             .as_ref()
             .and_then(|session| session.accessibility_demand_sender());
+        let focus_sender = publication.as_ref().map_or_else(
+            || self.accessibility_focus_sender.clone(),
+            |publication| self.accessibility_focus_sender.bound(publication.clone()),
+        );
         self.pending_accessibility_notifications =
             self.accessibility_element
                 .update(TerminalAccessibilityUpdate {
                     window,
                     model: self.accessibility.as_ref(),
+                    publication,
                     bounds: self.grid_bounds,
                     cell_width: px(cell.width),
                     line_height: px(cell.height),
@@ -2417,7 +2453,7 @@ impl TerminalPane {
                     notifications,
                     selection_sender,
                     demand_sender,
-                    focus_sender: Some(self.accessibility_focus_sender.clone()),
+                    focus_sender: Some(focus_sender),
                 });
         self.accessibility_needs_presentation = false;
     }
@@ -2466,6 +2502,11 @@ impl TerminalPane {
         &mut self,
         snapshot: Arc<crate::terminal::metadata::TerminalMetadataSnapshot>,
     ) -> bool {
+        // Legacy snapshots carry no Server/Session/connection/context binding. The client
+        // metadata port must supply that original authority before server Panes consume them.
+        if self.server_session.is_some() {
+            return false;
+        }
         let previous = self.terminal_session.metadata.as_deref();
         if previous.is_some_and(|previous| snapshot.revision < previous.revision) {
             return false;
@@ -4737,6 +4778,9 @@ impl TerminalPane {
                                 .text_clipboard
                                 .read(TextClipboardTarget::Clipboard, cx)))
                         }
+                        // The injected legacy PermissionSetup targets the desktop process,
+                        // not the owning server. A route or server-supplied path grants no
+                        // authority to apply that provider to a server Permission Request.
                         _ => Some(Ok(NativeCompletionKind::Denied)),
                     }
                 });
@@ -5207,9 +5251,11 @@ impl TerminalPane {
         let Some(screen) = server.snapshot(&update) else {
             return;
         };
-        self.accessibility = Arc::new(TerminalAccessibilityModel::from_screen(&screen));
-        self.accessibility_needs_presentation = false;
-        self.accessibility_element.set_hierarchy(false);
+        let Some(accessibility) = server.accessibility_model() else {
+            return;
+        };
+        self.accessibility = Arc::new(accessibility);
+        self.accessibility_needs_presentation = true;
         let _ = self.render_lifecycle.observe_snapshot(screen.generation);
         self.server_screen_frame = server.channel().current_frame();
         self.server_screen_session = self
@@ -5220,6 +5266,7 @@ impl TerminalPane {
         self.sync_secure_input();
         self.screen = screen;
         self.screen_session_epoch = self.terminal_session.session_epoch;
+        self.sync_scrollbar(cx);
         cx.notify();
     }
 
@@ -6056,16 +6103,8 @@ impl Render for TerminalPane {
             .when(active_hovered_link.is_some(), |root| root.cursor_pointer())
             .key_context(key_context)
             .track_focus(&self.focus_handle);
-        let pane_root = if self.server_session.is_none() {
-            self.accessibility_element.decorate(pane_root)
-        } else {
-            pane_root
-        };
-        let terminal_text = if self.server_session.is_none() {
-            self.accessibility_element.decorate_text(terminal_text)
-        } else {
-            terminal_text
-        };
+        let pane_root = self.accessibility_element.decorate(pane_root);
+        let terminal_text = self.accessibility_element.decorate_text(terminal_text);
         pane_root
             .on_action(cx.listener(Self::copy_selection))
             .on_action(cx.listener(Self::edit_copy))
