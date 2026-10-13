@@ -1,6 +1,12 @@
 //! Listener generations follow committed remote policy. IPC and SSH-forwarded
 //! IPC remain independent of WSS enablement. Native TLS keys are injected.
 
+pub mod outcomes;
+mod production;
+pub use production::{
+    ProductionListenerConfig, ProductionListenerPorts, production_listener_factories,
+};
+
 use crate::{
     adapters::transport::transport_failure,
     api::{ListenerLifecyclePort, ServerHandle, ServicePhase},
