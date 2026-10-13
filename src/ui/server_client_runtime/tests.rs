@@ -105,7 +105,11 @@ fn desktop_server_pending_request_bound_rejects_129_before_effects(cx: &mut Test
     assert_eq!(admitted.len(), 128, "each request has its own identity");
 
     assert_eq!(retry(cx, &harness), Err(DesktopClientError::AdmissionFull));
-    assert_eq!(harness.provider.begun().len(), 128, "the refusal had no effect");
+    assert_eq!(
+        harness.provider.begun().len(),
+        128,
+        "the refusal had no effect"
+    );
 
     harness.provider.finish(0, Ok(None));
     cx.run_until_parked();
@@ -120,7 +124,9 @@ fn desktop_server_request_results_are_reported_by_local_identity(cx: &mut TestAp
     let completed = retry(cx, &harness).unwrap();
     let failed = retry(cx, &harness).unwrap();
 
-    harness.provider.finish(1, Err(DesktopClientError::StaleContext));
+    harness
+        .provider
+        .finish(1, Err(DesktopClientError::StaleContext));
     harness.provider.finish(0, Ok(None));
     cx.run_until_parked();
 
@@ -270,9 +276,14 @@ fn desktop_server_quit_preparation_leaves_pending_requests_running(cx: &mut Test
     let quit = harness
         .runtime
         .update(cx, |runtime, cx| runtime.prepare_client_quit(cx));
-    assert_eq!(cx.foreground_executor().block_test(quit), Ok(()));
     cx.run_until_parked();
-    assert_eq!(harness.provider.quits(), 1);
+    assert_eq!(
+        harness.provider.quits(),
+        1,
+        "a network-dependent retry cannot block non-destructive quit"
+    );
+    assert_eq!(retry(cx, &harness), Err(DesktopClientError::Cancelled));
+    assert_eq!(harness.provider.begun().len(), 1);
     assert!(
         harness.events.borrow().is_empty(),
         "quitting finishes no request"
@@ -280,6 +291,8 @@ fn desktop_server_quit_preparation_leaves_pending_requests_running(cx: &mut Test
 
     harness.provider.finish(0, Ok(Some(operation(9))));
     cx.run_until_parked();
+    assert_eq!(cx.foreground_executor().block_test(quit), Ok(()));
+    assert_eq!(harness.provider.quits(), 1);
 
     assert_eq!(
         *harness.events.borrow(),
@@ -588,7 +601,10 @@ fn desktop_server_measurement_keeps_cells_whose_pty_width_overflows() {
     .unwrap();
     let measured = measurement(grid);
 
-    assert_eq!(measured.grid, grid, "the measurement keeps cells and metrics");
+    assert_eq!(
+        measured.grid, grid,
+        "the measurement keeps cells and metrics"
+    );
     assert_eq!((measured.grid.columns(), measured.grid.rows()), (1024, 24));
     assert_eq!(measured.grid.pty_pixels(), (0, 864));
     assert_eq!(

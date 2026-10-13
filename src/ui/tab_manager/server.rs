@@ -32,6 +32,16 @@ use crate::ui::tab_view::{
 };
 use crate::ui::{RemoteChildLaunchUnavailable, TabView};
 
+/// Validated presentation resources prepared before allocating a GPUI Tab Manager.
+pub(crate) struct PreparedServerTabManager {
+    record: WorkspaceRecord,
+    collection: ServerTabCollection<Entity<TabView>>,
+    parts: Vec<ServerTabParts>,
+    publication: ServerPublication,
+    runtime: Entity<DesktopClientRuntime>,
+    factory: Rc<dyn ServerPaneFactory>,
+}
+
 /// One server Workspace's Tabs and the state that keeps them consistent with the replica.
 pub(super) struct ServerTabs {
     record: WorkspaceRecord,
@@ -323,6 +333,25 @@ impl TabManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<Self, DesktopClientError> {
+        let prepared =
+            Self::prepare_server_workspace(publication, workspace, runtime, factory, window, cx)?;
+        Ok(Self::from_prepared_server(
+            prepared,
+            pane_construction,
+            window_drag,
+            window,
+            cx,
+        ))
+    }
+
+    pub(crate) fn prepare_server_workspace(
+        publication: &ServerPublication,
+        workspace: WorkspaceId,
+        runtime: Entity<DesktopClientRuntime>,
+        factory: Rc<dyn ServerPaneFactory>,
+        window: &mut Window,
+        cx: &mut gpui::App,
+    ) -> Result<PreparedServerTabManager, DesktopClientError> {
         if workspace.server() != publication.server {
             return Err(DesktopClientError::WrongServer);
         }
@@ -336,7 +365,7 @@ impl TabManager {
             .personal
             .workspace(workspace)
             .ok_or(DesktopClientError::TargetGone)?;
-        let mut collection = ServerTabCollection::new(record, &state.tabs, view)
+        let collection = ServerTabCollection::new(record, &state.tabs, view)
             .map_err(|_| DesktopClientError::StaleContext)?;
         // Every Pane is presented before any Tab View exists, so a failure presents nothing.
         let parts = collection
@@ -346,6 +375,31 @@ impl TabManager {
                 TabView::prepare_server(publication, tab, &runtime, factory.as_ref(), window, cx)
             })
             .collect::<Result<Vec<_>, _>>()?;
+        Ok(PreparedServerTabManager {
+            record: record.clone(),
+            collection,
+            parts,
+            publication: publication.clone(),
+            runtime,
+            factory,
+        })
+    }
+
+    pub(crate) fn from_prepared_server(
+        prepared: PreparedServerTabManager,
+        pane_construction: PaneConstruction,
+        window_drag: Rc<dyn OperatingSystemWindowDragPlatform>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let PreparedServerTabManager {
+            record,
+            mut collection,
+            parts,
+            publication,
+            runtime,
+            factory,
+        } = prepared;
         let active = collection.active_tab();
         for parts in parts {
             let (tab, view) = Self::create_server_tab_view(
@@ -358,15 +412,13 @@ impl TabManager {
             if Some(tab) != active {
                 view.update(cx, |view, cx| view.deactivate(cx));
             }
-            collection
-                .insert(tab, view)
-                .map_err(|_| DesktopClientError::StaleContext)?;
+            collection.insert(tab, view).ok();
         }
         let subscription = cx.subscribe(&runtime, |manager: &mut Self, _, event, cx| {
             manager.on_server_runtime_event(event, cx);
         });
         let tabs = Tabs::Server(Box::new(ServerTabs {
-            record: record.clone(),
+            record,
             collection,
             publication: publication.clone(),
             personal: Arc::clone(&publication.personal),
@@ -378,12 +430,7 @@ impl TabManager {
             materialize_scheduled: false,
             _runtime: subscription,
         }));
-        Ok(Self::with_tabs(
-            tabs,
-            pane_construction,
-            window_drag,
-            window,
-        ))
+        Self::with_tabs(tabs, pane_construction, window_drag, window)
     }
 
     /// Creates a server Tab's view and forwards what it reports.
@@ -560,6 +607,20 @@ impl TabManager {
                 .all_views()
                 .into_iter()
                 .any(|view| view.read(cx).has_waiting_personal_edits()),
+            Tabs::Local(_) => false,
+        }
+    }
+
+    /// Saving cannot discard an optimistic edit before its exact application receipt is presented.
+    pub(crate) fn has_unsettled_personal_edits(&self, cx: &gpui::App) -> bool {
+        match &self.tabs {
+            Tabs::Server(server) => {
+                !server.edits.is_empty()
+                    || server
+                        .all_views()
+                        .into_iter()
+                        .any(|view| view.read(cx).has_unsettled_personal_edits())
+            }
             Tabs::Local(_) => false,
         }
     }

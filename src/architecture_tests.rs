@@ -881,3 +881,29 @@ fn main_thread_runner_lists_every_native_platform_fixture() {
         "no native main-thread fixtures were found"
     );
 }
+
+#[test]
+fn preference_import_export_and_reset_have_no_view_store_calls() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut sources = vec![root.join("settings.rs")];
+    collect_rust_sources(&root.join("settings"), &mut sources);
+    for source in sources {
+        if is_test_source(&source) {
+            continue;
+        }
+        let content = std::fs::read_to_string(&source).unwrap();
+        for forbidden in [
+            "ViewStore",
+            "ClientViewState",
+            "client_view_store",
+            "DesktopClientRuntime",
+            "InstalledDesktopClient",
+        ] {
+            assert!(
+                !content.contains(forbidden),
+                "preferences depend on client view ownership in {}",
+                source.display()
+            );
+        }
+    }
+}

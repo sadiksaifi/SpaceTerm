@@ -1,4 +1,5 @@
 mod naming;
+pub(crate) mod server_view;
 
 use super::remote_workspace::{
     RemoteConnectionPhase, RemoteConnectionReduction, RemoteConnectionState,
@@ -231,6 +232,15 @@ pub(crate) struct WorkspaceCollection<T> {
 }
 
 impl<T> WorkspaceCollection<T> {
+    /// Empty compatibility storage in a server-backed manager. No legacy identity is allocated.
+    pub(crate) fn empty() -> Self {
+        Self {
+            workspaces: Vec::new(),
+            active_workspace_id: WorkspaceId::from_raw(0),
+            next_workspace_id: 1,
+        }
+    }
+
     pub(crate) fn new_local(
         directory: ValidatedLocalDirectory,
         create_initial_payload: impl FnOnce(WorkspaceId, &Path) -> T,

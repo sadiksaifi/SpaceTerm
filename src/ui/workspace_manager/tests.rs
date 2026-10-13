@@ -672,7 +672,7 @@ impl RemoteWorkspaceFlowBackendFactory for FailingTestRemoteWorkspaceFlowBackend
     }
 }
 
-fn test_remote_backend_factory() -> Arc<dyn RemoteWorkspaceFlowBackendFactory> {
+pub(super) fn test_remote_backend_factory() -> Arc<dyn RemoteWorkspaceFlowBackendFactory> {
     Arc::new(TestRemoteWorkspaceFlowBackendFactory {
         backend: Arc::new(TestRemoteWorkspaceFlowBackend::default()),
     })
@@ -1191,7 +1191,7 @@ fn accessibility_factory_reaches_initial_and_new_workspaces_tabs_and_split_panes
     );
 }
 
-fn workspace_adapters(
+pub(super) fn workspace_adapters(
     remote_workspace: Arc<dyn RemoteWorkspaceFlowBackendFactory>,
 ) -> WorkspaceManagerAdapters {
     WorkspaceManagerAdapters {
@@ -1598,10 +1598,10 @@ fn install_remote_completion_directly(
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
             let terminal_factory = WorkspaceTerminalSessionFactory::new_remote(
-                Rc::clone(&manager.session_factory),
+                Rc::clone(manager.session_factory.as_ref().unwrap()),
                 ValidatedLocalDirectory::new(
                     manager.local_home_directory_path.clone(),
-                    manager.local_home_identity.clone(),
+                    manager.local_home_identity.clone().unwrap(),
                 ),
                 RemoteTerminalMetadataContext::new(
                     completion.destination().clone(),
@@ -3358,10 +3358,10 @@ fn hierarchy_change_between_restart_prepare_and_commit_should_fail_with_typed_al
     let prepared_lifecycle = new_control_connection.take_lifecycle_observer().unwrap();
     let factory = manager.read_with(cx, |manager, _| {
         WorkspaceTerminalSessionFactory::new_remote(
-            Rc::clone(&manager.session_factory),
+            Rc::clone(manager.session_factory.as_ref().unwrap()),
             ValidatedLocalDirectory::new(
                 manager.local_home_directory_path.clone(),
-                manager.local_home_identity.clone(),
+                manager.local_home_identity.clone().unwrap(),
             ),
             RemoteTerminalMetadataContext::new(
                 crate::domain::SshDestination::new("work".into()).unwrap(),
@@ -5099,7 +5099,7 @@ fn sidebar_settings_button_should_request_the_application_settings_action(cx: &m
     assert_eq!(requests.get(), 1, "the cog should ask for Settings");
 }
 
-fn click(selector: &'static str, cx: &mut VisualTestContext) {
+pub(super) fn click(selector: &'static str, cx: &mut VisualTestContext) {
     let position = cx
         .debug_bounds(selector)
         .map(|bounds| bounds.center())

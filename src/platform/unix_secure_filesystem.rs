@@ -98,6 +98,15 @@ impl SecureFilesystem for UnixSecureFilesystem {
             .map_err(classify)
     }
 
+    fn ensure_durable_private_directory(
+        &self,
+        path: &Path,
+    ) -> Result<SecureDirectory, SecureFilesystemError> {
+        ensure_private_directory_with_sync(path, sync_directory)
+            .map(wrap_directory)
+            .map_err(classify)
+    }
+
     fn create_private_child(
         &self,
         parent: &SecureDirectory,
@@ -434,7 +443,7 @@ impl SecureFilesystem for UnixSecureFilesystem {
         }
         let published_identity = SecureEntryIdentity(Arc::new(prepared_file_identity));
         prepared.active = false;
-        let outcome = match prepared.directory.file.sync_all() {
+        let outcome = match sync_directory(&prepared.directory.file) {
             Ok(()) => SecureCommitOutcome::Committed,
             Err(_) => SecureCommitOutcome::CommittedButUnsynced,
         };
@@ -567,6 +576,13 @@ fn as_io_error(error: SecureFilesystemError) -> io::Error {
 }
 
 fn ensure_private_directory(path: &Path) -> io::Result<NativeDirectory> {
+    ensure_private_directory_with_sync(path, |_| Ok(()))
+}
+
+fn ensure_private_directory_with_sync(
+    path: &Path,
+    sync: impl Fn(&File) -> io::Result<()>,
+) -> io::Result<NativeDirectory> {
     if !path.is_absolute() {
         return Err(io::Error::from(io::ErrorKind::InvalidInput));
     }
@@ -622,6 +638,8 @@ fn ensure_private_directory(path: &Path) -> io::Result<NativeDirectory> {
                 set_file_mode(&directory, PRIVATE_DIRECTORY_MODE)?;
             }
             let identity = private_directory_identity(&directory)?;
+            sync(&directory)?;
+            sync(&parent)?;
             let parent_clone = parent.try_clone()?;
             rollback.disarm();
             return Ok(NativeDirectory {
@@ -631,6 +649,10 @@ fn ensure_private_directory(path: &Path) -> io::Result<NativeDirectory> {
                 identity,
             });
         }
+        // Sync existing edges too. A previous failed provision may have left a visible but
+        // undurable entry; existence alone cannot establish directory publication.
+        sync(&directory)?;
+        sync(&parent)?;
         parent = directory;
     }
     Err(io::Error::from(io::ErrorKind::InvalidInput))
@@ -749,8 +771,8 @@ std::thread_local! {
         std::cell::RefCell::new(None);
 }
 
-#[cfg(all(test, feature = "native-tests"))]
-fn install_before_private_file_publish_hook(hook: impl FnOnce() + 'static) {
+#[cfg(test)]
+pub(crate) fn install_before_private_file_publish_hook(hook: impl FnOnce() + 'static) {
     BEFORE_PRIVATE_FILE_PUBLISH_HOOK.with(|slot| {
         *slot.borrow_mut() = Some(Box::new(hook));
     });
@@ -2028,4 +2050,39 @@ mod tests {
         assert!(root.join("owned-backup").is_dir());
         let _ = fs::remove_dir_all(root);
     }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static DIRECTORY_SYNCS_BEFORE_FAILURE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn fail_directory_sync_after(successes: usize) {
+    DIRECTORY_SYNCS_BEFORE_FAILURE.with(|remaining| remaining.set(Some(successes)));
+}
+
+fn sync_directory(directory: &File) -> io::Result<()> {
+    #[cfg(test)]
+    let fail = DIRECTORY_SYNCS_BEFORE_FAILURE.with(|remaining| match remaining.get() {
+        Some(0) => {
+            remaining.set(None);
+            true
+        }
+        Some(count) => {
+            remaining.set(Some(count - 1));
+            false
+        }
+        None => false,
+    });
+    #[cfg(test)]
+    if fail {
+        return Err(io::Error::from(io::ErrorKind::Other));
+    }
+    directory.sync_all()
+}
+
+#[cfg(test)]
+pub(crate) fn install_after_private_file_publish_hook(hook: impl FnOnce() + 'static) {
+    AFTER_PRIVATE_FILE_PUBLISH_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
 }

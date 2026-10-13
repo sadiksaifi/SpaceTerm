@@ -7,15 +7,16 @@ mod worktree;
 pub(crate) use crate::close_confirmation::{
     ClosePaneOutcome, CloseTabOutcome, CloseWorkspaceOutcome, FinalTabCloseOutcome,
 };
+pub(crate) use tab::server_view::ServerTab;
 pub(crate) use tab::{
     FocusDirection, PaneEdge, PaneId, PaneNodeRef, PaneSize, PaneSizeError, PaneTreeRef, SplitAxis,
     SplitId, Tab, TabId, ZoomState,
 };
-pub(crate) use tab_collection::{TabCollection, TabError, TabStep};
-pub(crate) use tab::server_view::ServerTab;
 pub(crate) use tab_collection::server_view::ServerTabCollection;
 #[cfg(test)]
 pub(crate) use tab_collection::server_view::testing as server_view_testing;
+pub(crate) use tab_collection::{TabCollection, TabError, TabStep};
+pub(crate) use workspace_collection::server_view::ServerWorkspaceCollection;
 #[cfg(test)]
 pub(crate) use workspace_collection::tests::set_next_workspace_id;
 pub(crate) use workspace_collection::{

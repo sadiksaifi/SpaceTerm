@@ -11,7 +11,7 @@ use crate::ui::updates::{
     CHECK_FOR_UPDATES_TITLE, CheckForUpdates, OpenReleaseNotes, RELEASE_NOTES_TITLE,
 };
 use crate::ui::{
-    ClosePane, CloseTab, CloseWorkspace, CreateTab, DecreaseTerminalFontSize,
+    ClosePane, CloseTab, CloseWorkspace, CreateTab, DecreaseTerminalFontSize, DetachWorkspace,
     ExportTerminalDiagnostics, FindNext, FindPrevious, FocusPaneDown, FocusPaneLeft,
     FocusPaneRight, FocusPaneUp, IncreaseTerminalFontSize, MoveTabLeft, MoveTabRight, NewWorkspace,
     NextTab, NextWorktree, OpenTerminalFind, PreviousTab, PreviousWorktree, ResetTerminalFontSize,
@@ -79,6 +79,7 @@ pub(crate) fn file_menu() -> Menu {
             MenuItem::separator(),
             MenuItem::action("Close Pane", ClosePane),
             MenuItem::action("Close Tab", CloseTab),
+            MenuItem::action("Detach Workspace", DetachWorkspace),
             MenuItem::action("Kill Workspace", CloseWorkspace),
             MenuItem::separator(),
             MenuItem::action("Export Terminal Diagnostics…", ExportTerminalDiagnostics),
@@ -259,6 +260,7 @@ mod tests {
                 "|",
                 "Close Pane",
                 "Close Tab",
+                "Detach Workspace",
                 "Kill Workspace",
                 "|",
                 "Export Terminal Diagnostics…",
@@ -297,6 +299,33 @@ mod tests {
                 .all(|command| !command.action().partial_eq(action))
         );
         assert_eq!(Command::from_id("take_over_pane"), None);
+    }
+
+    #[test]
+    fn desktop_server_detach_workspace_menu_item_has_no_shortcut_or_retained_command() {
+        let profile = crate::desktop_profile::default_keymap::profile(
+            crate::platform::keyboard_layout::testing::us(),
+            Vec::new(),
+        )
+        .unwrap();
+        let keymap = Keymap::new(
+            profile
+                .resolve(&KeybindingPreferences::default())
+                .key_bindings(),
+        );
+        let menus = menus("SpaceTerm");
+        let action = menu_action(&menus, "File", "Detach Workspace");
+        assert!(action.as_any().is::<DetachWorkspace>());
+        assert_eq!(
+            crate::desktop_profile::installed_shortcut(&keymap, action),
+            None
+        );
+        assert!(
+            Command::ALL
+                .into_iter()
+                .all(|command| !command.action().partial_eq(action))
+        );
+        assert_eq!(Command::from_id("detach_workspace"), None);
     }
 
     #[gpui::test]

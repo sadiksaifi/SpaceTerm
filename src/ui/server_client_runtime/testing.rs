@@ -1,14 +1,15 @@
 //! A recording client provider. It exists only in test composition.
 
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use gpui::{App, Task};
 
 use super::DesktopClientProvider;
 use crate::ui::server_desktop_contracts::{
-    DesktopClientError, DesktopRequest, DesktopServerFrame, OperationId, PaneId, PaneViewToken,
-    ServerId,
+    DesktopClientError, DesktopRequest, DesktopServerFrame, DesktopServerInfo, OperationId,
+    Outcome, PaneId, PaneViewToken, ServerId,
 };
 
 type Completion = Result<Option<OperationId>, DesktopClientError>;
@@ -20,9 +21,43 @@ pub(crate) struct RecordingClientProvider {
     completions: RefCell<Vec<async_channel::Sender<Completion>>>,
     refusal: Cell<Option<DesktopClientError>>,
     quits: Cell<usize>,
+    frames: RefCell<BTreeMap<ServerId, Arc<DesktopServerFrame>>>,
+    servers: RefCell<Vec<DesktopServerInfo>>,
+    outcomes: RefCell<BTreeMap<OperationId, Arc<Outcome>>>,
+    saves: Cell<usize>,
+    outcome_revisions:
+        RefCell<BTreeMap<OperationId, spaceterm_core::authority::OrganizationRevision>>,
+    save_failure: Cell<Option<DesktopClientError>>,
 }
 
 impl RecordingClientProvider {
+    pub(crate) fn set_servers(&self, servers: Vec<DesktopServerInfo>) {
+        *self.servers.borrow_mut() = servers;
+    }
+    pub(crate) fn set_frame(&self, frame: Arc<DesktopServerFrame>) {
+        self.frames.borrow_mut().insert(frame.server, frame);
+    }
+    pub(crate) fn set_outcome(&self, operation: OperationId, outcome: Arc<Outcome>) {
+        self.outcomes.borrow_mut().insert(operation, outcome);
+    }
+    pub(crate) fn set_outcome_at(
+        &self,
+        operation: OperationId,
+        outcome: Arc<Outcome>,
+        revision: spaceterm_core::authority::OrganizationRevision,
+    ) {
+        self.set_outcome(operation, outcome);
+        self.outcome_revisions
+            .borrow_mut()
+            .insert(operation, revision);
+    }
+    pub(crate) fn fail_save(&self, error: DesktopClientError) {
+        self.save_failure.set(Some(error));
+    }
+    pub(crate) fn saves(&self) -> usize {
+        self.saves.get()
+    }
+
     pub(crate) fn begun(&self) -> Vec<DesktopRequest> {
         self.begun.borrow().clone()
     }
@@ -47,8 +82,24 @@ impl RecordingClientProvider {
 }
 
 impl DesktopClientProvider for RecordingClientProvider {
-    fn frame(&self, _server: ServerId) -> Option<Arc<DesktopServerFrame>> {
-        None
+    fn servers(&self) -> Vec<DesktopServerInfo> {
+        self.servers.borrow().clone()
+    }
+    fn frame(&self, server: ServerId) -> Option<Arc<DesktopServerFrame>> {
+        self.frames.borrow().get(&server).cloned()
+    }
+    fn outcome(&self, operation: OperationId) -> Option<Arc<Outcome>> {
+        self.outcomes.borrow().get(&operation).cloned()
+    }
+    fn outcome_revision(
+        &self,
+        operation: OperationId,
+    ) -> Option<spaceterm_core::authority::OrganizationRevision> {
+        self.outcome_revisions.borrow().get(&operation).copied()
+    }
+    fn save_view(&self, _cx: &mut App) -> Task<Result<(), DesktopClientError>> {
+        self.saves.set(self.saves.get() + 1);
+        Task::ready(self.save_failure.get().map_or(Ok(()), Err))
     }
 
     fn pane_view_token(&self, _pane: PaneId) -> Result<PaneViewToken, DesktopClientError> {
@@ -76,6 +127,6 @@ impl DesktopClientProvider for RecordingClientProvider {
 
     fn prepare_quit(&self, _cx: &mut App) -> Task<Result<(), DesktopClientError>> {
         self.quits.set(self.quits.get() + 1);
-        Task::ready(Ok(()))
+        Task::ready(self.save_failure.get().map_or(Ok(()), Err))
     }
 }

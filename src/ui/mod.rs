@@ -141,6 +141,7 @@ actions!(
         ClosePane,
         CloseTab,
         CloseWorkspace,
+        DetachWorkspace,
         SwitchWorkspace,
         NewWorkspace,
         NewRemoteWorkspace,

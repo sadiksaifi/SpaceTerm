@@ -106,6 +106,12 @@ impl SecureFilesystem for RecordingFilesystem {
         self.directories.lock().unwrap().insert(path.to_path_buf());
         Ok(Self::directory(path.to_path_buf()))
     }
+    fn ensure_durable_private_directory(
+        &self,
+        path: &Path,
+    ) -> Result<SecureDirectory, SecureFilesystemError> {
+        self.ensure_private_directory(path)
+    }
     fn create_private_child(
         &self,
         parent: &SecureDirectory,

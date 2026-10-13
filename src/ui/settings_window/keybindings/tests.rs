@@ -540,7 +540,7 @@ fn a_displaced_default_is_explained_and_its_reset_reclaims_it(cx: &mut TestAppCo
     assert_eq!(
         description(&window, Command::NewWorkspace, cx),
         Some(ShortcutDescription {
-            text: "Its default shortcut is assigned to Close Workspace.".into(),
+            text: "Its default shortcut is assigned to Kill Workspace.".into(),
             tone: CaptionTone::Warning,
         })
     );

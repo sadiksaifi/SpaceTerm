@@ -54,6 +54,7 @@ type ActionHandler = Rc<dyn Fn(EmptyWorkspaceAction, &mut Window, &mut App)>;
 pub(crate) struct EmptyWorkspaceContent {
     id: ElementId,
     attachable: bool,
+    creatable: bool,
     on_action: Option<ActionHandler>,
 }
 
@@ -62,8 +63,14 @@ impl EmptyWorkspaceContent {
         Self {
             id: id.into(),
             attachable,
+            creatable: true,
             on_action: None,
         }
+    }
+
+    pub(crate) fn creatable(mut self, creatable: bool) -> Self {
+        self.creatable = creatable;
+        self
     }
 
     pub(crate) fn on_action(
@@ -92,7 +99,9 @@ impl EmptyWorkspaceContent {
 
 impl RenderOnce for EmptyWorkspaceContent {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
-        let detail: SharedString = if self.attachable {
+        let detail: SharedString = if !self.creatable {
+            "No server is connected. Check your servers in Settings.".into()
+        } else if self.attachable {
             "Attach a Workspace from one of your servers, or create a new one.".into()
         } else {
             "Create a Workspace, or attach one when a server has one to share.".into()
@@ -109,6 +118,7 @@ impl RenderOnce for EmptyWorkspaceContent {
                 .variant(variant)
                 .size(ButtonSize::Large)
                 .tab_stop(true)
+                .disabled(action == EmptyWorkspaceAction::NewWorkspace && !self.creatable)
                 .debug_selector(action.selector())
                 .on_activate(move |_, window, cx| {
                     if let Some(on_action) = &on_action {
@@ -135,19 +145,35 @@ impl RenderOnce for EmptyWorkspaceContent {
 pub(crate) struct EmptyWorkspaceWindow {
     focus_handle: FocusHandle,
     attachable: bool,
+    creatable: bool,
 }
 
 impl EventEmitter<EmptyWorkspaceAction> for EmptyWorkspaceWindow {}
 
 impl EmptyWorkspaceWindow {
     /// `attachable` reports whether a connected server has a Workspace this Client could attach.
-    pub(crate) fn new(attachable: bool, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(attachable: bool, creatable: bool, cx: &mut Context<Self>) -> Self {
         Self {
             focus_handle: cx.focus_handle(),
             attachable,
+            creatable,
         }
     }
 
+    pub(crate) fn set_availability(
+        &mut self,
+        attachable: bool,
+        creatable: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.attachable != attachable || self.creatable != creatable {
+            self.attachable = attachable;
+            self.creatable = creatable;
+            cx.notify();
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn set_attachable(&mut self, attachable: bool, cx: &mut Context<Self>) {
         if self.attachable != attachable {
             self.attachable = attachable;
@@ -193,11 +219,11 @@ impl Render for EmptyWorkspaceWindow {
                 cx.stop_propagation();
             })
             .child(
-                EmptyWorkspaceContent::new("empty-workspace-content", self.attachable).on_action(
-                    move |action, _, cx| {
+                EmptyWorkspaceContent::new("empty-workspace-content", self.attachable)
+                    .creatable(self.creatable)
+                    .on_action(move |action, _, cx| {
                         let _ = owner.update(cx, |_, cx| cx.emit(action));
-                    },
-                ),
+                    }),
             )
     }
 }
@@ -222,7 +248,7 @@ mod tests {
     ) {
         cx.update(crate::ui::init).unwrap();
         let (view, cx) = cx.add_window_view(|window, cx| {
-            let view = EmptyWorkspaceWindow::new(attachable, cx);
+            let view = EmptyWorkspaceWindow::new(attachable, true, cx);
             view.focus_handle.focus(window, cx);
             view
         });

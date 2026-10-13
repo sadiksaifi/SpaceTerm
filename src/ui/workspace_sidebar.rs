@@ -1,6 +1,8 @@
 //! Workspace sidebar presentation and transient interaction lifecycle.
 //! Workspace policy stays with the application; the sidebar emits typed requests.
+mod server;
 pub(in crate::ui) mod server_group;
+pub(super) use server::{ServerSidebarEvent, ServerSidebarSection, ServerWorkspaceRow};
 mod text;
 mod view;
 
@@ -34,6 +36,7 @@ const SIDEBAR_FOOTER_HORIZONTAL_PADDING: f32 = 4.0;
 
 #[derive(Clone)]
 pub(super) enum SidebarEvent {
+    Server(ServerSidebarEvent),
     Activate {
         workspace_id: WorkspaceId,
         focus_pane: bool,
@@ -254,6 +257,7 @@ struct DraggedWorkspace {
 
 /// Owns sidebar layout, scrolling, menus, inline rename, reordering, and focus transitions.
 pub(super) struct WorkspaceSidebar {
+    server: Option<server::ServerSidebar>,
     rows: Vec<WorkspaceRowViewModel>,
     remote_unavailable: Option<String>,
     layout: SidebarLayout,
@@ -324,6 +328,7 @@ impl WorkspaceSidebar {
         })
         .detach();
         Self {
+            server: None,
             rows: Vec::new(),
             remote_unavailable: None,
             layout: SidebarLayout {
@@ -964,6 +969,10 @@ impl WorkspaceSidebar {
 
 impl WorkspaceSidebar {
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.server.is_some() {
+            self.server_key_down(event, window, cx);
+            return;
+        }
         if !self.focus.is_focused(window) || event.keystroke.modifiers.modified() {
             return;
         }
@@ -1157,7 +1166,12 @@ impl WorkspaceSidebar {
         self.rename.is_some()
     }
     pub(super) fn menu_open(&self) -> bool {
-        self.menu.is_some() || self.new_workspace_menu_open
+        self.menu.is_some()
+            || self
+                .server
+                .as_ref()
+                .is_some_and(|server| server.menu.is_some())
+            || self.new_workspace_menu_open
     }
     pub(super) fn cancel_rename(&mut self, cx: &mut Context<Self>) {
         if self.rename.take().is_some() {
@@ -1239,6 +1253,15 @@ impl WorkspaceSidebar {
         }
     }
     pub(super) fn toggle_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.server.is_some() {
+            if self.is_focused(window) {
+                cx.emit(SidebarEvent::FocusPane);
+            } else {
+                self.set_layout(true, self.layout.width, window, cx);
+                self.focus_server_sidebar(window, cx);
+            }
+            return;
+        }
         if self.is_focused(window) || self.rename_is_focused(window) {
             self.cancel_rename(cx);
             cx.emit(SidebarEvent::FocusPane);
