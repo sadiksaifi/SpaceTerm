@@ -1466,3 +1466,6 @@ async fn authenticated_publication_case(major: u32, case: PublicationCase) {
     drop(reservations);
     assert_eq!(budget.usage().bytes, 0);
 }
+
+#[path = "support/terminal_dispatch.rs"]
+mod terminal_dispatch;

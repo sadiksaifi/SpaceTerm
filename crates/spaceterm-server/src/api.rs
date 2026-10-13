@@ -562,13 +562,27 @@ impl ServerHandle {
         principal: VerifiedPrincipal,
         command: spaceterm_terminal::runtime_contracts::FencedRuntimeCommand,
     ) -> Result<spaceterm_core::runtime_authority::EffectDisposition, ServerFailure> {
+        self.try_runtime_command(principal, command)?.await
+    }
+    /// Admit in wire order without blocking the reader on paste approval or PTY writes.
+    pub fn try_runtime_command(
+        &self,
+        principal: VerifiedPrincipal,
+        command: spaceterm_terminal::runtime_contracts::FencedRuntimeCommand,
+    ) -> Result<
+        ServerFuture<
+            'static,
+            Result<spaceterm_core::runtime_authority::EffectDisposition, ServerFailure>,
+        >,
+        ServerFailure,
+    > {
         let (reply, result) = oneshot::channel();
         self.send(ActorRequest::RuntimeCommand {
             principal,
             command: Box::new(command),
             reply,
         })?;
-        receive(result).await
+        Ok(Box::pin(receive(result)))
     }
     /// Trusted notification of an already durable pairing revocation, not an
     /// ordinary wire command. The pairing owner supplies every retained Client.
