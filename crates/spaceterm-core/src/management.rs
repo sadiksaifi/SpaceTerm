@@ -105,8 +105,36 @@ pub struct ManagementProgress {
     pub completed_units: u32,
     pub total_units: u32,
 }
+/// The actor's storage observation. Unknown preserves older status records and
+/// never implies that initialization, replacement or recovery is permitted.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub enum StorageStatus {
+    #[default]
+    Unknown,
+    Ready,
+    Locked,
+    Unavailable,
+    RecoveryRequired,
+}
+/// Durable native intent, separate from instance liveness. A signal or crash
+/// does not imply deliberate Stop, and status never authorizes Start.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub enum ServerRunIntent {
+    #[default]
+    Unknown,
+    Running,
+    Stopped,
+}
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ServerRuntimeStatus {
+    pub storage: StorageStatus,
+    pub intent: ServerRunIntent,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ServerStatusParts {
+    #[serde(default)]
+    pub runtime: ServerRuntimeStatus,
     pub server: ServerId,
     pub epoch: ServerEpoch,
     pub revision: NonZeroU64,

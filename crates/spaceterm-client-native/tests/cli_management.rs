@@ -545,6 +545,10 @@ fn status_separates_committed_remote_policy_from_listener_failure() {
     let server = ServerId::new([1; 16]);
     let endpoint = "127.0.0.1:4000".parse().unwrap();
     let status = ServerStatus::new(ServerStatusParts {
+        runtime: ServerRuntimeStatus {
+            storage: StorageStatus::Unavailable,
+            intent: ServerRunIntent::Stopped,
+        },
         server,
         epoch: ServerEpoch::new(1),
         revision: std::num::NonZeroU64::new(1).unwrap(),
@@ -583,6 +587,15 @@ fn status_separates_committed_remote_policy_from_listener_failure() {
         value["result"]["authenticated"]["listeners"][0]["state"],
         "Unavailable"
     );
+    assert_eq!(value["result"]["authenticated"]["storage_state"], "Unavailable");
+    assert_eq!(value["result"]["authenticated"]["run_intent"], "Stopped");
+    let mut human = Io::default();
+    emit(&output, false, &mut human).unwrap();
+    let human = String::from_utf8(human.stdout).unwrap();
+    assert!(human.contains("Epoch: 1\n"));
+    assert!(human.contains("Storage state: Unavailable\n"));
+    assert!(human.contains("Run intent: Stopped\n"));
+
 }
 
 #[tokio::test]

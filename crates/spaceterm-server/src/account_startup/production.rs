@@ -1,0 +1,448 @@
+//! Account composition retains admission through the actor's final store close.
+
+use super::{AccountOwnerEnrollment, AccountStartup, StartupFailure};
+use crate::{
+    adapters::{
+        core::CorePorts,
+        terminal::{AccountLaunchFacts, AccountLaunchProvider, NativeRuntime, NativeRuntimeClock},
+    },
+    api::{
+        ListenerFactories, ServerConfig, ServerHandle, ServerHostContext, ServerLimits,
+        StartupAuthorityPort,
+    },
+    contracts::*,
+    extensions::ExtensionObserverPort,
+    failure::failure,
+    git::{
+        dispatch::GitOrdinaryDispatch,
+        host::NativeServerGitHost,
+        recovery::GitExternalWork,
+        writes::{GitLimits, GitService},
+    },
+    listeners::{
+        ProductionListenerConfig, ProductionListenerPorts,
+        production_listener_factories_with_dispatch,
+    },
+    pairing::{
+        protocol_lookup::{PairingProtocolLookup, PairingSnapshotPort},
+        service::PairingService,
+    },
+    service::RecoveredServer,
+    shutdown::{ShutdownReport, StoppedAuthorizationPort, TrustedShutdownRequest},
+};
+use spaceterm_core::{
+    authority::{ServerEpoch, SessionKey},
+    identity::ServerId,
+    native_management::{NativeManagementRequestRef, NativeRetirementAction},
+    observations::ConfirmedDirectoryObservation,
+    operation_ledger::canonical::CanonicalCodec,
+    operation_ledger_contracts::CanonicalOperationRequest,
+    organization::ServerDirectory,
+    pairing::{PairingWrites, policy::PairingSnapshot},
+    retirement::SessionCleanupObservation,
+    storage::CommitReceipt,
+};
+use spaceterm_host::{
+    account_service::{ServiceFailure, ServiceSupervisor, TrustedAccountFacts},
+    organization_store::StoreIdentity,
+    server_directories::native::NativeDirectoryProvider,
+    shell_integration::{ShellEnvironment, ShellIntegrationMode, ShellIntegrationPolicy},
+    shell_launch::{ShellLaunchPlanner, ShellTerminalIdentity, ShellTerminfoIdentity},
+};
+use spaceterm_protocol::ProtocolError;
+use spaceterm_terminal::{
+    appearance::{Appearance, AppearanceGeneration, TerminalColors},
+    metadata::LocalMachine,
+    runtime::budget::RuntimeLimits,
+    runtime_contracts::RuntimeAppearance,
+};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+
+struct AccountLaunch(AccountLaunchFacts);
+impl AccountLaunchProvider for AccountLaunch {
+    fn account(&self) -> Result<AccountLaunchFacts, ServerFailure> {
+        Ok(AccountLaunchFacts {
+            uid: self.0.uid,
+            home: self.0.home.clone(),
+            planner: self.0.planner.clone(),
+            machine: LocalMachine::new(
+                self.0.machine.user(),
+                self.0.machine.hostname(),
+                self.0.home.to_str(),
+            ),
+        })
+    }
+}
+
+struct Admission(Arc<spaceterm_host::account_service::AccountStartup>);
+impl StartupAuthorityPort for Admission {
+    fn validate_startup(&self) -> Result<ServerId, ServerFailure> {
+        self.0.revalidate().map_err(native_failure)?;
+        Ok(ServerId::new(self.0.registration().server_pin().identity))
+    }
+    fn validate_credentials(
+        &self,
+        credentials: &dyn ServerCredentialPort,
+        server: ServerId,
+    ) -> Result<(), ServerFailure> {
+        let expected = self.validate_startup()?;
+        if server != expected
+            || credentials.public_key() != self.0.registration().server_pin().public_key
+        {
+            return Err(failure(ServerFailureClass::Authentication));
+        }
+        Ok(())
+    }
+}
+
+struct NativeManagement(Arc<ServiceSupervisor>);
+impl HostManagementPort for NativeManagement {
+    fn previous_instance_cleanup<'a>(
+        &'a self,
+        server: ServerId,
+        epoch: ServerEpoch,
+        sessions: &'a [SessionKey],
+    ) -> ServerFuture<'a, Result<Vec<SessionCleanupObservation>, ServerFailure>> {
+        Box::pin(async move {
+            self.0
+                .previous_instance_cleanup(server, epoch, sessions)
+                .await
+                .map_err(native_failure)
+        })
+    }
+}
+impl StoppedAuthorizationPort for NativeManagement {
+    fn verify_stopped(
+        &self,
+        server: ServerId,
+        epoch: ServerEpoch,
+    ) -> Result<(NativeManagementRequestRef, NativeRetirementAction), ServerFailure> {
+        self.0
+            .verify_retirement_request(server, epoch)
+            .map_err(native_failure)
+    }
+}
+fn native_failure(failure_value: ServiceFailure) -> ServerFailure {
+    failure(match failure_value {
+        ServiceFailure::IdentityMismatch | ServiceFailure::RequestConflict => {
+            ServerFailureClass::ScopeMismatch
+        }
+        ServiceFailure::StorageLocked | ServiceFailure::StorageUnavailable => {
+            ServerFailureClass::StorageUnavailable
+        }
+        ServiceFailure::CleanupUnresolved => ServerFailureClass::CleanupIncomplete,
+        _ => ServerFailureClass::NativeUnavailable,
+    })
+}
+
+/// Recovery needs a lookup before its actor exists. This source remains denied
+/// until bound once to that recovered actor, before any listener is opened.
+#[derive(Default)]
+struct ActorPairing(Mutex<Option<ServerHandle>>);
+impl PairingSnapshotPort for Arc<ActorPairing> {
+    fn snapshot(&self) -> Result<PairingSnapshot, ProtocolError> {
+        let source = self.0.lock().map_err(|_| ProtocolError::PairingDenied)?;
+        PairingSnapshotPort::snapshot(source.as_ref().ok_or(ProtocolError::PairingDenied)?)
+    }
+}
+
+/// Pairing revocation is installed by the listener decorator. Git's dispatcher
+/// owns write scheduling. Neither requires a second store-backed projection.
+struct ActorExtensions;
+impl ExtensionObserverPort for ActorExtensions {
+    fn admitted(
+        &self,
+        _: CanonicalOperationRequest,
+        _: CommitReceipt,
+        _: ServerHandle,
+    ) -> Result<(), ServerFailure> {
+        Err(failure(ServerFailureClass::ScopeMismatch))
+    }
+    fn pairing_committed(&self, _: &PairingWrites, _: CommitReceipt) -> Result<(), ServerFailure> {
+        Ok(())
+    }
+    fn confirmed_directory_committed(&self, _: &ConfirmedDirectoryObservation, _: CommitReceipt) {}
+}
+
+/// One recovered actor, its real transports and its original native instance lease.
+/// Constructor injection supplies trusted host facts, never protocol path authority.
+pub struct RecoveredAccountServer {
+    server: RecoveredServer,
+    listeners: ListenerFactories,
+    pairing: PairingService,
+    management: Arc<NativeManagement>,
+    admission: Arc<spaceterm_host::account_service::AccountStartup>,
+}
+impl RecoveredAccountServer {
+    pub async fn recover(
+        supervisor: Arc<ServiceSupervisor>,
+        startup: AccountStartup,
+        launch: AccountLaunchFacts,
+    ) -> Result<Self, StartupFailure> {
+        if launch.uid != startup.registration().key().account_uid
+            || launch.uid == 0
+            || !launch.home.is_absolute()
+        {
+            return Err(StartupFailure::Account(ServiceFailure::IdentityMismatch));
+        }
+        let server_id = ServerId::new(startup.registration().server_pin().identity);
+        let home = ServerDirectory::new(
+            server_id,
+            launch.home.as_os_str().as_encoded_bytes().to_vec(),
+        )
+        .map_err(|_| StartupFailure::Account(ServiceFailure::InvalidRecord))?;
+        let account = startup.open_store(home.clone())?;
+        let admission = account.admission.ok_or(StartupFailure::Account(
+            ServiceFailure::ConfirmationRequired,
+        ))?;
+        admission.revalidate().map_err(StartupFailure::Account)?;
+        let identity = StoreIdentity {
+            server: server_id,
+            account: account.registration.key(),
+            server_public_key: account.credentials.pin().public_key,
+        };
+        let clock = Arc::new(NativeRuntimeClock::default());
+        let directories = Arc::new(
+            NativeDirectoryProvider::new(server_id, launch.home.clone()).map_err(|_| {
+                StartupFailure::Runtime(failure(ServerFailureClass::RuntimeUnavailable))
+            })?,
+        );
+        let git_host = Arc::new(NativeServerGitHost::for_account(
+            PathBuf::from("/usr/bin/git"),
+            launch.home.clone(),
+            spaceterm_host::git::MINIMUM_GIT_VERSION,
+            directories,
+        ));
+        let core = CorePorts::production_with_git_host(
+            identity,
+            home.clone(),
+            clock.clone(),
+            git_host.clone(),
+        )
+        .map_err(StartupFailure::Runtime)?;
+        let external = Arc::new(
+            GitExternalWork::new(identity, home, clock.clone(), git_host.clone())
+                .map_err(StartupFailure::Runtime)?,
+        );
+        let runtime = NativeRuntime::new(
+            server_id,
+            launch.uid,
+            Arc::new(AccountLaunch(launch)),
+            clock.clone(),
+            RuntimeLimits::default(),
+        )
+        .map_err(StartupFailure::Runtime)?;
+        let management = Arc::new(NativeManagement(supervisor.clone()));
+        let ports = ProductionListenerPorts::new();
+        let source = Arc::new(ActorPairing::default());
+        let lookup = Arc::new(PairingProtocolLookup::new(source.clone()));
+        let config = ServerConfig {
+            limits: ServerLimits::default(),
+            host: ServerHostContext {
+                authority: Arc::new(Admission(admission.clone())),
+            },
+            core,
+            launch: runtime.clone(),
+            cleanup: runtime.clone(),
+            extensions: ports.extensions(Arc::new(ActorExtensions)),
+            initial_appearance: appearance(),
+            outcomes: ports.outcomes.clone(),
+        };
+        let dependencies = ServerDependencies {
+            store: Box::new(account.store),
+            credentials: account.credentials.clone(),
+            pairing: lookup.clone(),
+            runtime,
+            external_work: external.clone(),
+            host_management: management.clone(),
+            clock,
+        };
+        let server = RecoveredServer::recover(config, dependencies)
+            .await
+            .map_err(StartupFailure::Runtime)?;
+        let handle = server.handle();
+        *source.0.lock().map_err(|_| {
+            StartupFailure::Runtime(failure(ServerFailureClass::RecoveryRequired))
+        })? = Some(handle.clone());
+        let git = GitService::new(
+            server_id,
+            handle.snapshot().epoch(),
+            git_host,
+            Arc::new(handle.clone()),
+            GitLimits::default(),
+        )
+        .map_err(|_| StartupFailure::Runtime(failure(ServerFailureClass::RuntimeUnavailable)))?;
+        git.recover(Vec::new())
+            .await
+            .map_err(|_| StartupFailure::Runtime(failure(ServerFailureClass::RecoveryRequired)))?;
+        external
+            .bind(git.clone())
+            .map_err(StartupFailure::Runtime)?;
+        let codec = Arc::new(CanonicalCodec);
+        let pairing = PairingService::new(
+            Arc::new(handle.clone()),
+            account.credentials.clone(),
+            codec.clone(),
+            Arc::new(AccountOwnerEnrollment::new(supervisor)),
+            account.registration.server_pin(),
+        )
+        .map_err(|_| StartupFailure::Runtime(failure(ServerFailureClass::Authentication)))?;
+        let listeners = production_listener_factories_with_dispatch(
+            handle,
+            ProductionListenerConfig {
+                registration: &account.registration,
+                identity: account.credentials,
+                running: crate::distribution_metadata::version()
+                    .map_err(StartupFailure::Distribution)?,
+                codec: codec.clone(),
+                pairing: pairing.clone(),
+                ports,
+            },
+            lookup,
+            Arc::new(GitOrdinaryDispatch::new(git, codec)),
+        )
+        .map_err(StartupFailure::Runtime)?;
+        Ok(Self {
+            server,
+            listeners,
+            pairing,
+            management,
+            admission,
+        })
+    }
+    pub fn handle(&self) -> ServerHandle {
+        self.server.handle()
+    }
+    pub fn pairing(&self) -> &PairingService {
+        &self.pairing
+    }
+
+    /// A durable native retirement is verified again by the actor. An OS signal
+    /// ends this instance gracefully without changing the retained Running intent.
+    pub async fn run_until(
+        self,
+        shutdown: impl std::future::Future<Output = ()> + Send,
+    ) -> Result<ShutdownReport, StartupFailure> {
+        let Self {
+            server,
+            listeners,
+            management,
+            admission,
+            ..
+        } = self;
+        admission.revalidate().map_err(StartupFailure::Account)?;
+        let handle = server.handle();
+        let monitor = async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(100));
+            loop {
+                interval.tick().await;
+                let snapshot = handle.snapshot();
+                if management
+                    .verify_stopped(snapshot.state().server, snapshot.epoch())
+                    .is_ok()
+                {
+                    let _ = handle
+                        .shutdown(TrustedShutdownRequest {
+                            authority: management.clone(),
+                        })
+                        .await;
+                    break;
+                }
+            }
+        };
+        let shutdown = async {
+            tokio::select! { () = shutdown => {}, () = monitor => {} }
+        };
+        let result = server
+            .run_until(listeners, shutdown)
+            .await
+            .map_err(StartupFailure::Runtime);
+        drop(admission);
+        result
+    }
+}
+fn appearance() -> RuntimeAppearance {
+    let colors = TerminalColors::default();
+    let rgb = |value: spaceterm_terminal::appearance::Color| spaceterm_core::content::Rgb {
+        r: value.r,
+        g: value.g,
+        b: value.b,
+    };
+    // Match the existing terminal snapshot's configured palette until the
+    // controlling client supplies its appearance. No server theme is introduced.
+    let mut palette = [rgb(colors.foreground); 256];
+    palette[..8].copy_from_slice(&colors.normal.map(rgb));
+    palette[8..16].copy_from_slice(&colors.bright.map(rgb));
+    RuntimeAppearance {
+        generation: AppearanceGeneration::INITIAL,
+        foreground: rgb(colors.foreground),
+        background: rgb(colors.background),
+        palette,
+        bold_as_bright: false,
+        appearance: Appearance::Dark,
+    }
+}
+
+/// Native account discovery supplies shell and home. Ambient HOME and SHELL do
+/// not select registration, runtime identity or local filesystem authority.
+pub async fn production_run() -> Result<ShutdownReport, StartupFailure> {
+    let facts = TrustedAccountFacts::current().map_err(StartupFailure::Account)?;
+    let supervisor = Arc::new(ServiceSupervisor::current(None).map_err(StartupFailure::Account)?);
+    let startup = AccountStartup::admit(&supervisor)?;
+    let executable = std::env::current_exe()
+        .map_err(|_| StartupFailure::Account(ServiceFailure::SupervisorUnavailable))?;
+    let parent = executable
+        .parent()
+        .ok_or(StartupFailure::Account(ServiceFailure::InvalidRecord))?;
+    #[cfg(target_os = "macos")]
+    let resources = parent.join("../Resources");
+    #[cfg(target_os = "linux")]
+    let resources = parent.join("../share/spaceterm-server");
+    let planner = ShellLaunchPlanner::new(
+        facts.login_shell().to_owned(),
+        resources.clone(),
+        ShellIntegrationMode::Automatic,
+        ShellEnvironment {
+            xdg_data_dirs: std::env::var_os("XDG_DATA_DIRS"),
+            zdotdir: std::env::var_os("ZDOTDIR"),
+            env: std::env::var_os("ENV"),
+        },
+        ShellIntegrationPolicy {
+            supported: true,
+            path_list_separator: ':',
+            fallback_xdg_data_dirs: "/usr/local/share:/usr/share".into(),
+        },
+        ShellTerminalIdentity {
+            fallback_term: "xterm-256color",
+            colorterm: "truecolor",
+            program_name: "SpaceTerm",
+            program_version: env!("SPACETERM_SERVER_VERSION"),
+            terminfo: Some(ShellTerminfoIdentity {
+                directory: resources.join("terminfo"),
+                terminal_name: "xterm-spaceterm",
+            }),
+        },
+    );
+    let launch = AccountLaunchFacts {
+        uid: facts.uid(),
+        home: facts.home().to_owned(),
+        planner,
+        machine: LocalMachine::new(None, None, facts.home().to_str()),
+    };
+    let mut terminate =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .map_err(|_| StartupFailure::Account(ServiceFailure::SupervisorUnavailable))?;
+    let mut interrupt =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+            .map_err(|_| StartupFailure::Account(ServiceFailure::SupervisorUnavailable))?;
+    RecoveredAccountServer::recover(supervisor, startup, launch)
+        .await?
+        .run_until(async move {
+            tokio::select! { _ = terminate.recv() => {}, _ = interrupt.recv() => {} }
+        })
+        .await
+}

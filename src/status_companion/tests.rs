@@ -89,6 +89,7 @@ fn status(
     staged: Option<&str>,
 ) -> ServerStatus {
     ServerStatus::new(ServerStatusParts {
+        runtime: Default::default(),
         server: SERVER,
         epoch: ServerEpoch::new(EPOCH),
         revision: NonZeroU64::new(revision).unwrap(),
