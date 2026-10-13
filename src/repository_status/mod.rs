@@ -18,6 +18,7 @@ pub(crate) mod pull_request_lookup;
 pub(crate) mod remote_read;
 pub(crate) mod remote_url;
 pub(crate) mod scheduler;
+pub(crate) mod server_pull_request;
 #[cfg(test)]
 pub(crate) mod testing;
 pub(crate) mod tool_check;
