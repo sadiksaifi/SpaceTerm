@@ -66,6 +66,23 @@ fn trusted_account_ignores_caller_home_and_shell() {
 #[cfg(target_os = "linux")]
 #[test]
 fn native_observation_preserves_a_deleted_child_executable_identity() {
+    // Keep executable creation out of concurrent tests' fork windows. A child
+    // temporarily inheriting the writable copy can otherwise make exec return ETXTBSY.
+    if std::env::var_os("SPACETERM_DELETED_EXECUTABLE_TEST_CHILD").is_none() {
+        let status = spaceterm_host::process::spawn(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "native_observation_preserves_a_deleted_child_executable_identity",
+                ])
+                .env("SPACETERM_DELETED_EXECUTABLE_TEST_CHILD", "1"),
+        )
+        .unwrap()
+        .wait()
+        .unwrap();
+        assert!(status.success());
+        return;
+    }
     use std::os::unix::fs::PermissionsExt as _;
     let root = tempfile::tempdir().unwrap();
     let executable = root.path().join("owned-sleep");
@@ -90,4 +107,35 @@ fn native_observation_preserves_a_deleted_child_executable_identity() {
             .as_encoded_bytes()
             .ends_with(b" (deleted)")
     );
+}
+
+#[cfg(feature = "test-support")]
+#[test]
+fn native_current_factory_honors_durable_stop_without_loading_keys() {
+    use spaceterm_host::{
+        account_service::{
+            AccountStartupAdmission, ServiceSupervisor, test_support::AccountServiceFixture,
+        },
+        startup::DesiredServerState,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let build = ServiceSupervisor::current(None)
+        .unwrap()
+        .key()
+        .build_identity;
+    let fixture = AccountServiceFixture::new(root.path(), build).unwrap();
+    let registration = fixture.initialize(DesiredServerState::Stopped).unwrap();
+    let pin = registration.server_pin();
+    std::fs::remove_file(registration.data_directory().join("identity")).unwrap();
+    std::fs::remove_dir(registration.organization_directory()).unwrap();
+    for _ in 0..2 {
+        let native = fixture.native_current().unwrap();
+        assert!(matches!(
+            native.admit_startup(),
+            Ok(AccountStartupAdmission::Stopped)
+        ));
+        assert_eq!(native.discover().unwrap().unwrap().server_pin(), pin);
+    }
+    assert!(!registration.data_directory().join("identity").exists());
+    assert!(!registration.organization_directory().exists());
 }

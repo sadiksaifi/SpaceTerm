@@ -20,7 +20,7 @@ fn read(path: &std::path::Path) -> Result<Vec<u8>, ServiceFailure> {
     }
     Ok(bytes)
 }
-pub(super) fn pids() -> Result<Vec<u32>, ServiceFailure> {
+pub(super) fn pids(_account: u32) -> Result<Vec<u32>, ServiceFailure> {
     let mut pids = Vec::new();
     for entry in std::fs::read_dir("/proc").map_err(classify)? {
         let entry = entry.map_err(classify)?;
@@ -87,9 +87,6 @@ pub(super) fn observe(
         if ids[1] != account {
             return Ok(None);
         }
-        if ids != [account; 4] {
-            return Err(ServiceFailure::CleanupUnresolved);
-        }
         let before = start(&read(&root.join("stat"))?, pid)?;
         let executable = std::fs::read_link(root.join("exe")).map_err(classify)?;
         if !executable.is_absolute() {
@@ -105,6 +102,7 @@ pub(super) fn observe(
         Ok(Some(ServiceProcessIdentity {
             pid,
             uid: account,
+            fully_account_owned: ids == [account; 4],
             start: before,
             executable,
         }))

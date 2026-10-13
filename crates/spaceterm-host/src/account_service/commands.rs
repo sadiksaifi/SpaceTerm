@@ -135,6 +135,7 @@ impl ServiceCommand {
 pub struct ServiceCommandOutput {
     pub(super) code: i32,
     pub(super) bytes: Vec<u8>,
+    pub(super) stderr: Vec<u8>,
 }
 impl ServiceCommandOutput {
     pub(super) fn success(&self) -> Result<(), ServiceFailure> {
@@ -209,7 +210,7 @@ fn execute(
             .map_err(|_| ServiceFailure::SupervisorUnavailable)?;
         let result = collect(&mut child, deadline, invocation.capture_stdout);
         match result {
-            Ok((status, bytes)) => {
+            Ok((status, bytes, stderr)) => {
                 use std::os::unix::process::ExitStatusExt as _;
                 if matches!(invocation.program, "/usr/bin/sudo" | "/usr/bin/pkexec")
                     && status.signal() == Some(libc::SIGINT)
@@ -219,6 +220,7 @@ fn execute(
                 Ok(ServiceCommandOutput {
                     code: status.code().ok_or(ServiceFailure::SupervisorUnavailable)?,
                     bytes,
+                    stderr,
                 })
             }
             Err(failure) => match retire(child) {
@@ -237,7 +239,7 @@ fn collect(
     child: &mut Child,
     deadline: Instant,
     capture_stdout: bool,
-) -> Result<(ExitStatus, Vec<u8>), ServiceFailure> {
+) -> Result<(ExitStatus, Vec<u8>, Vec<u8>), ServiceFailure> {
     let mut stdout = child.stdout.take();
     if capture_stdout && stdout.is_none() {
         return Err(ServiceFailure::SupervisorUnavailable);
@@ -258,6 +260,7 @@ fn collect(
         }
     }
     let mut bytes = Vec::new();
+    let mut error_bytes = Vec::new();
     let mut count = 0usize;
     let mut eof = [!capture_stdout, false];
     let mut status = None;
@@ -286,6 +289,8 @@ fn collect(
                     }
                     if index == 0 {
                         bytes.extend_from_slice(&buffer[..n]);
+                    } else {
+                        error_bytes.extend_from_slice(&buffer[..n]);
                     }
                 }
                 Err(error)
@@ -304,7 +309,7 @@ fn collect(
         if let Some(status) = status
             && eof == [true, true]
         {
-            return Ok((status, bytes));
+            return Ok((status, bytes, error_bytes));
         }
         std::thread::sleep(Duration::from_millis(2));
     }
@@ -595,15 +600,20 @@ pub mod test_support {
     pub struct CommandReply {
         code: i32,
         bytes: Vec<u8>,
+        stderr: Vec<u8>,
     }
     impl CommandReply {
         pub fn success(bytes: &[u8]) -> Self {
             Self::exit(0, bytes)
         }
         pub fn exit(code: i32, bytes: &[u8]) -> Self {
+            Self::exit_with_stderr(code, bytes, b"")
+        }
+        pub fn exit_with_stderr(code: i32, bytes: &[u8], stderr: &[u8]) -> Self {
             Self {
                 code,
                 bytes: bytes.to_vec(),
+                stderr: stderr.to_vec(),
             }
         }
     }
@@ -663,12 +673,13 @@ pub mod test_support {
                     .unwrap()
                     .pop_front()
                     .ok_or(ServiceFailure::SupervisorUnavailable)?;
-                if reply.bytes.len() > OUTPUT_LIMIT {
+                if reply.bytes.len().saturating_add(reply.stderr.len()) > OUTPUT_LIMIT {
                     return Err(ServiceFailure::LimitExceeded);
                 }
                 Ok(ServiceCommandOutput {
                     code: reply.code,
                     bytes: reply.bytes,
+                    stderr: reply.stderr,
                 })
             })
         }
