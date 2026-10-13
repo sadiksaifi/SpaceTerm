@@ -1,4 +1,5 @@
-//! Pointer drag and drop shared by the Tab bar, the Workspace sidebar, and Pane Layouts.
+//! Pointer drag and drop shared by the Tab bar, the Workspace sidebar, and Pane Layouts, and the
+//! motion curve their layout changes share.
 //! A [`DragSession`] ties owner state to the one GPUI drag it started, so an unseen release cannot
 //! strand it.
 
@@ -21,7 +22,7 @@ const SHIFT_DURATION: Duration = Duration::from_millis(310);
 /// How long a released item takes to settle into its slot, and the others to follow it.
 const SETTLE_DURATION: Duration = Duration::from_millis(440);
 /// How long a new item takes to grow into the strip, and the gap a removed item leaves to close.
-const PRESENCE_DURATION: Duration = Duration::from_millis(440);
+pub(super) const PRESENCE_DURATION: Duration = Duration::from_millis(440);
 /// How long the selection takes to move from one item to another.
 const SELECTION_DURATION: Duration = Duration::from_millis(310);
 /// How deep into either end of a strip the pointer starts scrolling it.
@@ -1273,7 +1274,7 @@ pub(crate) struct AnimatePresence;
 #[cfg(test)]
 impl gpui::Global for AnimatePresence {}
 
-fn presence_motion(cx: &App) -> spaceterm_ui::ControlMotion {
+pub(super) fn presence_motion(cx: &App) -> spaceterm_ui::ControlMotion {
     #[cfg(test)]
     if !cx.has_global::<AnimatePresence>() {
         return spaceterm_ui::ControlMotion::Reduced;
@@ -1283,7 +1284,7 @@ fn presence_motion(cx: &App) -> spaceterm_ui::ControlMotion {
 
 /// A progress from 0 to 1 that starts at `since`, fast at first and slowing to a stop.
 #[derive(Clone, Copy, Debug)]
-struct Ease {
+pub(super) struct Ease {
     since: Instant,
     duration: Duration,
 }
@@ -1305,7 +1306,11 @@ impl Ease {
     }
 
     /// An ease that starts at `now`, or ends at once when motion is reduced.
-    fn new(duration: Duration, now: Instant, motion: spaceterm_ui::ControlMotion) -> Self {
+    pub(super) fn new(
+        duration: Duration,
+        now: Instant,
+        motion: spaceterm_ui::ControlMotion,
+    ) -> Self {
         Self {
             since: now,
             duration: if motion == spaceterm_ui::ControlMotion::Reduced {
@@ -1324,11 +1329,11 @@ impl Ease {
             .min(1.0)
     }
 
-    fn finished(&self, now: Instant) -> bool {
+    pub(super) fn finished(&self, now: Instant) -> bool {
         self.progress(now) >= 1.0
     }
 
-    fn at(&self, now: Instant) -> f32 {
+    pub(super) fn at(&self, now: Instant) -> f32 {
         decay(self.progress(now))
     }
 }
@@ -1421,7 +1426,7 @@ fn undecay(eased: f32) -> f32 {
     (-(1.0 - eased * (1.0 - (-TIME_CONSTANTS).exp())).ln() / TIME_CONSTANTS).clamp(0.0, 1.0)
 }
 
-fn now(cx: &App) -> Instant {
+pub(super) fn now(cx: &App) -> Instant {
     cx.background_executor().now()
 }
 

@@ -7,6 +7,7 @@ use super::chrome_icons::{IconRole, InteractiveIconRole};
 use super::chrome_typography::{ChromeTextStyleExt as _, ChromeTypography, TextRole};
 use super::drag_and_drop::{DragPreview, DragSession, drag_release_observer, grab_point};
 use super::pane_lifecycle::{PaneConstruction, RemoteHierarchyLifecycle};
+use super::pane_motion::{PaneFrames, PaneMotion};
 use super::terminal_status::{
     StatusColors, StatusGlyph, TerminalProgress, reported_glyph_is_drawable, reported_title,
 };
@@ -59,7 +60,7 @@ use crate::terminal::{
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Bounds, Context, DefiniteLength, Entity, EventEmitter, FocusHandle,
-    MouseDownEvent, Pixels, Point, Render, Window, div, px, relative,
+    MouseDownEvent, Pixels, Point, Render, Window, div, point, px, relative,
 };
 use spaceterm_ui::{
     Alert, AlertIntent, ButtonSize, ButtonVariant, HoverFade, Icon, IconButton, IconName,
@@ -466,7 +467,10 @@ pub(crate) struct TabView {
     tab: Tab<Entity<TerminalPane>>,
     session_factory: WorkspaceTerminalSessionFactory,
     pane_construction: PaneConstruction,
+    /// Each Pane's laid-out place.
     pane_bounds: BTreeMap<PaneId, Bounds<Pixels>>,
+    /// Where each Pane's surface was drawn, which differs from its place while Panes move.
+    pane_surfaces: BTreeMap<PaneId, Bounds<Pixels>>,
     pane_layout_size: Option<PaneSize>,
     /// A Split that waits for the next Pane measurement, because the retained bounds are stale.
     pending_split: Option<(PaneId, SplitAxis)>,
@@ -476,6 +480,9 @@ pub(crate) struct TabView {
     pane_attention: BTreeMap<PaneId, u32>,
     resizing_split_id: Option<SplitId>,
     pane_drag: Option<PaneDrag>,
+    pane_motion: PaneMotion,
+    /// Where this frame draws each Pane, from `pane_motion`.
+    pane_frames: PaneFrames,
     active: bool,
     focus_branch_blocker: Option<TerminalFocusBlocker>,
     native_service_hierarchy_generation: u64,
@@ -554,6 +561,7 @@ impl TabView {
             session_factory,
             pane_construction,
             pane_bounds: BTreeMap::new(),
+            pane_surfaces: BTreeMap::new(),
             pane_layout_size: None,
             pending_split: None,
             split_bounds: BTreeMap::new(),
@@ -562,6 +570,8 @@ impl TabView {
             pane_attention: BTreeMap::from([(initial_pane_id, 0)]),
             resizing_split_id: None,
             pane_drag: None,
+            pane_motion: PaneMotion::default(),
+            pane_frames: PaneFrames::default(),
             active: true,
             focus_branch_blocker: None,
             native_service_hierarchy_generation: 0,
@@ -1275,7 +1285,7 @@ impl TabView {
         let pointer = window.mouse_position();
         self.drag_pane_to(pane_id, pointer, cx);
         cx.notify();
-        let Some(pane) = self.pane_bounds.get(&pane_id).copied() else {
+        let Some(pane) = self.pane_surfaces.get(&pane_id).copied() else {
             return DragPreview::empty();
         };
         let caption = Bounds::new(
@@ -1420,6 +1430,7 @@ impl TabView {
             Ok(true) => {
                 self.advance_native_service_hierarchy_generation(cx);
                 self.pane_layout_revision += 1;
+                self.pane_motion.expect_change();
                 self.split_bounds.clear();
                 self.sync_terminal_focus(cx);
                 cx.emit(TabViewEvent::PresentationChanged {
@@ -1446,9 +1457,13 @@ impl TabView {
         }
         let mut panes = Vec::new();
         collect_pane_order(self.tab.root(), &mut panes);
-        let (target_pane_id, bounds) = panes
+        // A raised Pane paints over the others, and later Panes paint over earlier ones where
+        // moving Panes overlap.
+        let raised = self.pane_frames.raised.map(|(pane_id, _)| pane_id);
+        let (target_pane_id, bounds) = raised
             .into_iter()
-            .filter_map(|candidate| Some((candidate, *self.pane_bounds.get(&candidate)?)))
+            .chain(panes.into_iter().rev())
+            .filter_map(|candidate| Some((candidate, *self.pane_surfaces.get(&candidate)?)))
             .find(|(_, bounds)| bounds.contains(&pointer))?;
         if target_pane_id == pane_id {
             return None;
@@ -1489,6 +1504,7 @@ impl TabView {
             Ok(pane_id) => {
                 self.advance_native_service_hierarchy_generation(cx);
                 self.pane_layout_revision += 1;
+                self.pane_motion.expect_change();
                 if let Some(terminal) = self.tab.pane(pane_id) {
                     self.pane_titles.insert(pane_id, terminal.read(cx).title());
                     self.pane_captions
@@ -1548,11 +1564,13 @@ impl TabView {
             }) => {
                 self.advance_native_service_hierarchy_generation(cx);
                 self.pane_layout_revision += 1;
+                self.pane_motion.expect_change();
                 closed_pane.update(cx, |terminal, _| {
                     terminal.set_accessibility_hierarchy(false);
                     terminal.close();
                 });
                 self.pane_bounds.remove(&pane_id);
+                self.pane_surfaces.remove(&pane_id);
                 self.split_bounds.clear();
                 self.pane_titles.remove(&pane_id);
                 self.pane_captions.remove(&pane_id);
@@ -1573,11 +1591,16 @@ impl TabView {
     }
 
     pub(crate) fn toggle_zoom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let zoomed = match self.tab.zoom_state() {
+            ZoomState::Restored => self.tab.focused_pane_id(),
+            ZoomState::Zoomed(pane_id) => pane_id,
+        };
         if self.tab.toggle_zoom().is_none() {
             return;
         }
         self.advance_native_service_hierarchy_generation(cx);
         self.pane_layout_revision += 1;
+        self.pane_motion.expect_raise(zoomed);
         self.sync_terminal_focus(cx);
         cx.emit(TabViewEvent::PresentationChanged {
             tab_id: self.tab.id(),
@@ -1623,7 +1646,10 @@ impl TabView {
         };
         let gap = pane_gap(cx);
         match self.tab.resize_split(split_id, available_size, gap, 0.5) {
-            Ok(_) => cx.notify(),
+            Ok(_) => {
+                self.pane_motion.expect_change();
+                cx.notify();
+            }
             Err(error) => eprintln!("failed to reset split: {error}"),
         }
     }
@@ -1841,6 +1867,15 @@ impl TabView {
         cx: &App,
     ) -> AnyElement {
         match tree.node() {
+            // The raised Pane draws above the layout, so its place in the layout stays empty.
+            PaneNodeRef::Leaf { pane_id }
+                if self
+                    .pane_frames
+                    .raised
+                    .is_some_and(|(raised, _)| raised == pane_id) =>
+            {
+                div().size_full().min_w_0().min_h_0().into_any_element()
+            }
             PaneNodeRef::Leaf { pane_id } => {
                 self.render_leaf(pane_id, hovers, view, appearance, cx)
             }
@@ -1960,31 +1995,43 @@ impl TabView {
             .into_any_element()
         };
 
-        div()
-            .on_children_prepainted(move |children, _, cx| {
-                let Some(first) = children.get(1) else {
-                    return;
-                };
-                let bounds = children
-                    .get(2)
-                    .map_or(*first, |terminal| first.union(terminal));
-                let _ = measure_view.update(cx, |view, _| {
-                    view.pane_bounds.insert(pane_id, bounds);
-                });
-            })
+        // The Pane is drawn inside its laid-out place, which it fills at rest. While the layout
+        // changes it moves on its own, and its Terminal keeps the size of the place, so the
+        // Terminal Session resizes once per change rather than once per frame.
+        let inset = self.pane_frames.inset(pane_id);
+        // A raised Pane casts no shadow: its surface is translucent, so a shadow beneath it would
+        // darken all of it.
+        let raised = self
+            .pane_frames
+            .raised
+            .is_some_and(|(raised, _)| raised == pane_id);
+        let surface = div()
             .id(("pane", pane_id.get()))
             .debug_selector(move || format!("pane-surface-{}", pane_id.get()))
-            .relative()
-            .size_full()
-            .min_w_0()
-            .min_h_0()
+            .absolute()
+            .top(inset.top)
+            .right(inset.right)
+            .bottom(inset.bottom)
+            .left(inset.left)
             .flex()
             .flex_col()
             .overflow_hidden()
-            .capture_any_mouse_down(move |_: &MouseDownEvent, _, cx| {
-                let _ = focus_view.update(cx, |view, cx| view.focus_pane(pane_id, cx));
+            // A moving Pane's surface reaches past its Terminal, so a press there also moves input
+            // focus, as a press on the caption does.
+            .capture_any_mouse_down(move |_: &MouseDownEvent, window, cx| {
+                let _ = focus_view.update(cx, |view, cx| {
+                    if view.tab.focused_pane_id() != pane_id {
+                        view.focus_pane(pane_id, cx);
+                        view.focus(window, cx);
+                    }
+                });
             })
             .rounded(frame.pane_radius())
+            // A moving Pane can overlap the Panes painted before it, which take no pointer input
+            // through it.
+            .when(raised || self.pane_frames.moving, |surface| {
+                surface.occlude()
+            })
             .child(
                 gpui::canvas(
                     |_, _, _| (),
@@ -2019,6 +2066,8 @@ impl TabView {
                     .flex_1()
                     .min_w_0()
                     .min_h_0()
+                    .mr(-(inset.left + inset.right))
+                    .mb(-(inset.top + inset.bottom))
                     .overflow_hidden()
                     .child(terminal),
             )
@@ -2028,7 +2077,24 @@ impl TabView {
             .when_some(drop_edge, |leaf, edge| {
                 leaf.child(render_pane_drop_target(pane_id, edge, radius, appearance))
             })
-            .when_some(hover, |leaf, (fade, _)| leaf.child(fade.tracker()))
+            .when_some(hover, |leaf, (fade, _)| leaf.child(fade.tracker()));
+
+        div()
+            .on_children_prepainted(move |children, _, cx| {
+                let [place, surface] = children.as_slice() else {
+                    return;
+                };
+                let _ = measure_view.update(cx, |view, _| {
+                    view.pane_bounds.insert(pane_id, *place);
+                    view.pane_surfaces.insert(pane_id, *surface);
+                });
+            })
+            .relative()
+            .size_full()
+            .min_w_0()
+            .min_h_0()
+            .child(div().absolute().inset_0())
+            .child(surface)
             .into_any_element()
     }
 
@@ -2110,6 +2176,7 @@ impl TabView {
                 axis,
                 current_offset,
                 offset_range,
+                !self.pane_frames.moving,
                 view,
             ));
         let (spacer, resize_target) = match axis {
@@ -2134,13 +2201,24 @@ impl TabView {
                     .mt(px(-ratio * gap)),
             ),
         };
+        // Moving Panes reach outside their laid-out places and across the gap between them. A
+        // raised Pane moves above the layout instead, which stays as it is.
+        let moving = self.pane_frames.moving && self.pane_frames.raised.is_none();
         split
-            .child(split_child("split-first", first, axis, ratio))
-            .child(spacer.bg(gpui_color(appearance.surface(
-                crate::appearance::SurfaceRole::Base,
-                super::workspace_frame::base_surface(&appearance.colors),
-            ))))
-            .child(split_child("split-second", second, axis, 1.0 - ratio))
+            .child(split_child("split-first", first, axis, ratio, !moving))
+            .child(spacer.when(!moving, |spacer| {
+                spacer.bg(gpui_color(appearance.surface(
+                    crate::appearance::SurfaceRole::Base,
+                    super::workspace_frame::base_surface(&appearance.colors),
+                )))
+            }))
+            .child(split_child(
+                "split-second",
+                second,
+                axis,
+                1.0 - ratio,
+                !moving,
+            ))
             .child(resize_target)
             .into_any_element()
     }
@@ -2193,11 +2271,81 @@ impl Render for TabView {
             },
         };
         let hovers = self.pane_hovers(appearance.active, window, cx);
-        let content = match zoom_state {
-            ZoomState::Restored => {
+        let places = self
+            .pane_layout_size
+            .map(|layout_size| {
+                let bounds = Bounds::new(
+                    Point::default(),
+                    gpui::size(px(layout_size.width()), px(layout_size.height())),
+                );
+                // The other Panes keep their places while a Pane is zoomed, so they can keep moving
+                // beneath it as it zooms.
+                let mut places = BTreeMap::new();
+                lay_out_panes(self.tab.root(), bounds, pane_gap(cx), &mut places);
+                if let ZoomState::Zoomed(pane_id) = zoom_state {
+                    places.insert(pane_id, bounds);
+                }
+                places
+            })
+            .unwrap_or_default();
+        self.pane_frames = self.pane_motion.present(&places, window.scale_factor(), cx);
+        if self.pane_frames.moving {
+            window.request_animation_frame();
+        }
+        // Removed Panes take the material of the Pane that keeps focus.
+        let terminal_background = self
+            .tab
+            .pane(self.tab.focused_pane_id())
+            .map_or(appearance.colors.background, |terminal| {
+                terminal.read(cx).surface_background()
+            });
+        let mut closing = self
+            .pane_frames
+            .closing
+            .iter()
+            .map(|place| render_closing_pane(*place, terminal_background, &appearance, cx))
+            .collect::<Vec<_>>();
+        let content = match (zoom_state, self.pane_frames.raised) {
+            // A zooming Pane moves above the restored layout, which stays where it is beneath it.
+            (_, Some((pane_id, _))) => {
+                let place = places.get(&pane_id).copied().unwrap_or_default();
+                div()
+                    .relative()
+                    .size_full()
+                    .child(
+                        div()
+                            .size_full()
+                            .opacity(self.pane_frames.beneath_opacity)
+                            .child(self.render_tree(
+                                self.tab.root(),
+                                &hovers,
+                                view.clone(),
+                                &appearance,
+                                cx,
+                            ))
+                            .children(std::mem::take(&mut closing)),
+                    )
+                    // The Panes a zoom fades out take no pointer input.
+                    .when(matches!(zoom_state, ZoomState::Zoomed(_)), |content| {
+                        content.child(div().absolute().top_0().left_0().size_full().occlude())
+                    })
+                    .child(
+                        div()
+                            .absolute()
+                            .left(place.left())
+                            .top(place.top())
+                            .w(place.size.width)
+                            .h(place.size.height)
+                            .child(self.render_leaf(pane_id, &hovers, view, &appearance, cx)),
+                    )
+                    .into_any_element()
+            }
+            (ZoomState::Restored, None) => {
                 self.render_tree(self.tab.root(), &hovers, view.clone(), &appearance, cx)
             }
-            ZoomState::Zoomed(pane_id) => self.render_leaf(pane_id, &hovers, view, &appearance, cx),
+            (ZoomState::Zoomed(pane_id), None) => {
+                self.render_leaf(pane_id, &hovers, view, &appearance, cx)
+            }
         };
 
         div()
@@ -2207,13 +2355,25 @@ impl Render for TabView {
                     let Some(bounds) = children.first() else {
                         return;
                     };
-                    let pending_split = view
+                    let (resized, pending_split) = view
                         .update(cx, |view, _| {
-                            view.pane_layout_size = pane_size(*bounds).ok();
-                            view.pending_split.take()
+                            let measured = pane_size(*bounds).ok();
+                            let resized = view.pane_layout_size != measured && measured.is_some();
+                            view.pane_layout_size = measured;
+                            if resized {
+                                view.pane_motion.restart_change();
+                            }
+                            (resized, view.pending_split.take())
                         })
-                        .ok()
-                        .flatten();
+                        .unwrap_or_default();
+                    // This frame laid out its Panes for the previous size. Pane motion starts from
+                    // where the next frame draws them at the measured size.
+                    if resized {
+                        let view = view.clone();
+                        window.defer(cx, move |_, cx| {
+                            let _ = view.update(cx, |_, cx| cx.notify());
+                        });
+                    }
                     if let Some((pane_id, axis)) = pending_split {
                         let view = view.clone();
                         window.defer(cx, move |window, cx| {
@@ -2259,6 +2419,7 @@ impl Render for TabView {
                 }
             })
             .child(content)
+            .children(closing)
             .child({
                 let view = cx.entity().downgrade();
                 drag_release_observer(move |window, cx| {
@@ -3135,11 +3296,13 @@ fn render_pane_drop_target(
     .into_any_element()
 }
 
+/// One side of a Split, which clips its Panes to their places when `clip` is set.
 fn split_child(
     id: &'static str,
     child: AnyElement,
     axis: SplitAxis,
     ratio: f32,
+    clip: bool,
 ) -> impl IntoElement {
     let child = div()
         .id(id)
@@ -3154,7 +3317,7 @@ fn split_child(
         .flex_basis(DefiniteLength::Fraction(ratio))
         .min_w_0()
         .min_h_0()
-        .overflow_hidden()
+        .when(clip, |child| child.overflow_hidden())
         .child(child);
 
     match axis {
@@ -3169,6 +3332,7 @@ fn render_split_resize_handle(
     axis: SplitAxis,
     current_offset: f32,
     offset_range: Option<RangeInclusive<f32>>,
+    pointer_input: bool,
     view: gpui::WeakEntity<TabView>,
 ) -> AnyElement {
     let handle = ResizeHandle::new(
@@ -3186,6 +3350,8 @@ fn render_split_resize_handle(
     }
     .tab_stop(true)
     .reset_on_double_click(true)
+    // Moving Panes cover the gap, so the pointer reaches them instead.
+    .pointer_input(pointer_input)
     .paint_divider(false)
     .debug_selector(format!("split-resize-{}", split_id.get()))
     .on_event_with_accepted_value(move |event, window, cx| {
@@ -3197,6 +3363,81 @@ fn render_split_resize_handle(
         .flatten()
     })
     .into_any_element()
+}
+
+/// The place a removed Pane leaves while it closes: a Pane's material over `terminal_background`,
+/// without contents.
+fn render_closing_pane(
+    place: Bounds<Pixels>,
+    terminal_background: crate::appearance::Color,
+    appearance: &super::appearance::ChromeAppearance,
+    cx: &App,
+) -> AnyElement {
+    let frame = super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
+    div()
+        .debug_selector(|| "closing-pane".to_owned())
+        .absolute()
+        .left(place.left())
+        .top(place.top())
+        .w(place.size.width)
+        .h(place.size.height)
+        .rounded(frame.pane_radius())
+        .bg(gpui_color(appearance.pane_surface(terminal_background)))
+        .border(frame.pane_rim_width())
+        .border_color(gpui_color(appearance.pane_rim_on(terminal_background)))
+        .into_any_element()
+}
+
+/// Inserts each Pane's place in `bounds` into `places`, as the Splits of `tree` divide it.
+fn lay_out_panes(
+    tree: PaneTreeRef<'_>,
+    bounds: Bounds<Pixels>,
+    gap: f32,
+    places: &mut BTreeMap<PaneId, Bounds<Pixels>>,
+) {
+    match tree.node() {
+        PaneNodeRef::Leaf { pane_id } => {
+            places.insert(pane_id, bounds);
+        }
+        PaneNodeRef::Split {
+            axis,
+            ratio,
+            first,
+            second,
+            ..
+        } => {
+            let (first_bounds, second_bounds) = match axis {
+                SplitAxis::Horizontal => {
+                    let extent = px((f32::from(bounds.size.width) - gap).max(0.0) * ratio);
+                    (
+                        Bounds::from_corners(
+                            bounds.origin,
+                            point(bounds.left() + extent, bounds.bottom()),
+                        ),
+                        Bounds::from_corners(
+                            point(bounds.left() + extent + px(gap), bounds.top()),
+                            bounds.bottom_right(),
+                        ),
+                    )
+                }
+                SplitAxis::Vertical => {
+                    let extent = px((f32::from(bounds.size.height) - gap).max(0.0) * ratio);
+                    (
+                        Bounds::from_corners(
+                            bounds.origin,
+                            point(bounds.right(), bounds.top() + extent),
+                        ),
+                        Bounds::from_corners(
+                            point(bounds.left(), bounds.top() + extent + px(gap)),
+                            bounds.bottom_right(),
+                        ),
+                    )
+                }
+            };
+            lay_out_panes(first, first_bounds, gap, places);
+            lay_out_panes(second, second_bounds, gap, places);
+        }
+    }
 }
 
 // Splitting restores the grid, so a zoomed Pane must use its allocation in that grid.
@@ -3826,6 +4067,638 @@ mod tests {
             cx.simulate_mouse_move(*position, Some(MouseButton::Left), Modifiers::none());
             cx.run_until_parked();
         }
+    }
+
+    #[gpui::test]
+    fn a_split_should_open_the_new_pane_while_each_terminal_resizes_only_once(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::ui::drag_and_drop::{AnimatePresence, finish_slides};
+
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
+        let records = TestTerminalSessionRecords::default();
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            Rc::new(
+                TestTerminalSessionFactory::new(records.clone())
+                    .with_selection_copy_response(Ok(None)),
+            ),
+            crate::terminal::testing::test_local_directory(test_home_directory()),
+        );
+        let (view, cx) = cx
+            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
+        cx.run_until_parked();
+        let whole = cx.debug_bounds("pane-surface-1").unwrap();
+        let before = records.commands().len();
+        // How many times each Terminal Session has resized since the split.
+        let resizes = || {
+            let mut resizes = BTreeMap::<usize, usize>::new();
+            for call in &records.commands()[before..] {
+                if matches!(call.command, RecordedCommand::Resize(_)) {
+                    *resizes.entry(call.session_id).or_default() += 1;
+                }
+            }
+            resizes
+        };
+
+        cx.update(|_, cx| cx.set_global(AnimatePresence));
+        split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(60));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        let moving = (
+            cx.debug_bounds("pane-surface-1").unwrap(),
+            cx.debug_bounds("pane-surface-2").unwrap(),
+        );
+        let resized_while_moving = resizes();
+        finish_slides(cx);
+        let rested = (
+            cx.debug_bounds("pane-surface-1").unwrap(),
+            cx.debug_bounds("pane-surface-2").unwrap(),
+        );
+
+        assert!(
+            moving.0.right() > rested.0.right() && moving.0.right() < whole.right(),
+            "the split Pane must still be making room: {moving:?} toward {rested:?}"
+        );
+        assert!(
+            moving.1.left() > rested.1.left() && moving.1.right() == whole.right(),
+            "the new Pane must open from its far edge: {moving:?} toward {rested:?}"
+        );
+        assert_eq!(
+            (rested.0.right() < rested.1.left(), &resized_while_moving),
+            (true, &resizes()),
+            "each Terminal must take its final size when the motion starts"
+        );
+        assert!(
+            resized_while_moving.get(&1) == Some(&1)
+                && resized_while_moving.values().all(|count| *count == 1),
+            "each Terminal must resize once: {resized_while_moving:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn a_closed_pane_should_close_its_place_as_its_neighbor_takes_it(cx: &mut TestAppContext) {
+        use crate::ui::drag_and_drop::{AnimatePresence, finish_slides};
+
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
+        let session_factory = test_session_factory();
+        let (view, cx) = cx
+            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
+        cx.run_until_parked();
+        let whole = cx.debug_bounds("pane-surface-1").unwrap();
+        split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
+        let split = cx.debug_bounds("pane-surface-1").unwrap();
+
+        cx.update(|_, cx| cx.set_global(AnimatePresence));
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| view.close_pane(PaneId::new(2), window, cx));
+        });
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(60));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        let moving = (
+            cx.debug_bounds("pane-surface-1").unwrap(),
+            cx.debug_bounds("closing-pane").unwrap(),
+        );
+        finish_slides(cx);
+
+        assert!(
+            moving.0.right() > split.right() && moving.0.right() < whole.right(),
+            "the remaining Pane must be taking the closed Pane's place: {moving:?}"
+        );
+        assert!(
+            moving.1.left() > moving.0.right() && moving.1.right() == whole.right(),
+            "the closed Pane's place must close toward its far edge: {moving:?}"
+        );
+        assert_eq!(
+            (
+                cx.debug_bounds("pane-surface-1"),
+                cx.debug_bounds("closing-pane")
+            ),
+            (Some(whole), None)
+        );
+    }
+
+    #[gpui::test]
+    fn a_zoom_at_a_fractional_size_should_resize_the_terminal_once_as_its_pane_grows(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::ui::drag_and_drop::AnimatePresence;
+
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
+        let records = TestTerminalSessionRecords::default();
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            Rc::new(
+                TestTerminalSessionFactory::new(records.clone())
+                    .with_selection_copy_response(Ok(None)),
+            ),
+            crate::terminal::testing::test_local_directory(test_home_directory()),
+        );
+        let (view, cx) = cx
+            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
+        cx.simulate_resize(gpui::size(px(1001.0), px(701.0)));
+        cx.run_until_parked();
+        split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
+        split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
+        let resizes = || {
+            records
+                .commands()
+                .iter()
+                .filter(|call| matches!(call.command, RecordedCommand::Resize(_)))
+                .count()
+        };
+        let before = resizes();
+
+        cx.update(|_, cx| cx.set_global(AnimatePresence));
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.focus_pane(PaneId::new(3), cx);
+                view.toggle_zoom(window, cx);
+            });
+        });
+        cx.run_until_parked();
+        let mut counts = vec![resizes() - before];
+        for _ in 0..30 {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(16));
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+            cx.run_until_parked();
+            counts.push(resizes() - before);
+        }
+
+        assert_eq!(
+            counts,
+            vec![1; 31],
+            "the zoomed Terminal must resize once, when the zoom starts"
+        );
+    }
+
+    #[gpui::test]
+    fn a_split_after_a_window_resize_should_start_from_where_the_pane_is_drawn(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::ui::drag_and_drop::AnimatePresence;
+
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
+        let session_factory = test_session_factory();
+        let (view, cx) = cx
+            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
+        cx.run_until_parked();
+        cx.simulate_resize(gpui::size(px(1001.0), px(701.0)));
+        cx.run_until_parked();
+        let whole = cx.debug_bounds("pane-surface-1").unwrap();
+
+        cx.update(|_, cx| cx.set_global(AnimatePresence));
+        split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(60));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        let moving = cx.debug_bounds("pane-surface-1").unwrap();
+
+        assert!(
+            moving.right() < whole.right() && moving.size.height == whole.size.height,
+            "the split Pane must make room from its resized place: {moving:?} in {whole:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn a_pane_dropped_while_panes_move_should_land_on_the_pane_drawn_under_the_pointer(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::ui::drag_and_drop::AnimatePresence;
+
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
+        let session_factory = test_session_factory();
+        let (view, cx) = cx
+            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
+        cx.run_until_parked();
+
+        cx.update(|_, cx| cx.set_global(AnimatePresence));
+        split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(60));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        let drawn = cx.debug_bounds("pane-surface-1").unwrap();
+        let place = view.read_with(cx, |view, _| view.pane_bounds[&PaneId::new(2)]);
+        let pointer = point((place.left() + drawn.right()) / 2.0, drawn.center().y);
+        assert!(drawn.contains(&pointer) && place.contains(&pointer));
+
+        let target = view.read_with(cx, |view, cx| {
+            view.drop_target(PaneId::new(2), pointer, pane_gap(cx))
+        });
+
+        assert_eq!(
+            target.map(|(pane_id, _)| pane_id),
+            Some(PaneId::new(1)),
+            "the pointer is over the drawn Pane 1, inside the place Pane 2 opens toward"
+        );
+    }
+
+    /// A Tab with Pane 1 at the top left, Pane 3 below it, and Pane 2 on the right, each surface at
+    /// rest, and the Tab's whole Pane Layout.
+    fn three_pane_zoom_view(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<TabView>,
+        [Bounds<Pixels>; 3],
+        Bounds<Pixels>,
+        &mut VisualTestContext,
+    ) {
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
+        let session_factory = test_session_factory();
+        let (view, cx) = cx
+            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
+        cx.run_until_parked();
+        let whole = cx.debug_bounds("pane-surface-1").unwrap();
+        split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
+        split_test_pane(&view, PaneId::new(1), SplitAxis::Vertical, cx);
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.focus_pane(PaneId::new(1), cx);
+                view.focus(window, cx);
+            });
+        });
+        cx.run_until_parked();
+        let rest = ["pane-surface-1", "pane-surface-2", "pane-surface-3"]
+            .map(|surface| cx.debug_bounds(surface).unwrap());
+        (view, rest, whole, cx)
+    }
+
+    /// Presses at `position` and reports the Focused Pane and how many times the press changed it.
+    fn press_counting_focus_changes(
+        view: &Entity<TabView>,
+        position: Point<Pixels>,
+        cx: &mut VisualTestContext,
+    ) -> (PaneId, usize) {
+        let changes = Rc::new(RefCell::new(0));
+        let counted = changes.clone();
+        view.update(cx, |_, cx| {
+            cx.subscribe(view, move |_, _, event: &TabViewEvent, _| {
+                if matches!(event, TabViewEvent::PresentationChanged { .. }) {
+                    *counted.borrow_mut() += 1;
+                }
+            })
+            .detach();
+        });
+        cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::none());
+        let changes = *changes.borrow();
+        (
+            view.read_with(cx, |view, _| view.focused_pane_id()),
+            changes,
+        )
+    }
+
+    /// Draws the frame 60ms into a Pane motion.
+    fn draw_motion_frame(cx: &mut VisualTestContext) {
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(60));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn a_zoom_should_grow_the_pane_over_the_others_as_they_stay_in_place(cx: &mut TestAppContext) {
+        use crate::ui::drag_and_drop::{AnimatePresence, finish_slides};
+
+        let (view, [first, second, third], whole, cx) = three_pane_zoom_view(cx);
+        cx.update(|_, cx| cx.set_global(AnimatePresence));
+        cx.update(|window, cx| view.update(cx, |view, cx| view.toggle_zoom(window, cx)));
+        draw_motion_frame(cx);
+        let growing = cx.debug_bounds("pane-surface-1").unwrap();
+        let others = (
+            cx.debug_bounds("pane-surface-2"),
+            cx.debug_bounds("pane-surface-3"),
+            cx.debug_bounds("closing-pane"),
+        );
+        let over_second = point(growing.right() - px(4.0), second.center().y);
+        let focused = press_counting_focus_changes(&view, over_second, cx);
+        finish_slides(cx);
+
+        assert!(
+            growing.right() > first.right()
+                && growing.right() < whole.right()
+                && growing.bottom() > first.bottom(),
+            "the zoomed Pane must be growing from its place: {growing:?}"
+        );
+        assert!(second.contains(&over_second));
+        assert_eq!(
+            (others, focused),
+            ((Some(second), Some(third), None), (PaneId::new(1), 0)),
+            "the other Panes must stay in place beneath the zoomed Pane, which takes the pointer"
+        );
+        assert_eq!(
+            (
+                cx.debug_bounds("pane-surface-1"),
+                cx.debug_bounds("pane-surface-2")
+            ),
+            (Some(whole), None)
+        );
+    }
+
+    #[gpui::test]
+    fn an_unzoom_should_return_the_pane_over_the_others_in_their_places(cx: &mut TestAppContext) {
+        use crate::ui::drag_and_drop::{AnimatePresence, finish_slides};
+
+        let (view, [first, second, third], whole, cx) = three_pane_zoom_view(cx);
+        cx.update(|window, cx| view.update(cx, |view, cx| view.toggle_zoom(window, cx)));
+        cx.run_until_parked();
+        cx.update(|_, cx| cx.set_global(AnimatePresence));
+        cx.update(|window, cx| view.update(cx, |view, cx| view.toggle_zoom(window, cx)));
+        draw_motion_frame(cx);
+        let shrinking = cx.debug_bounds("pane-surface-1").unwrap();
+        let others = (
+            cx.debug_bounds("pane-surface-2"),
+            cx.debug_bounds("pane-surface-3"),
+        );
+        let over_third = point(third.center().x, shrinking.bottom() - px(4.0));
+        let focused = press_counting_focus_changes(&view, over_third, cx);
+        finish_slides(cx);
+
+        assert!(
+            shrinking.right() > first.right() && shrinking.right() < whole.right(),
+            "the zoomed Pane must be returning to its place: {shrinking:?}"
+        );
+        assert!(third.contains(&over_third));
+        assert_eq!(
+            (others, focused),
+            ((Some(second), Some(third)), (PaneId::new(1), 0)),
+            "the other Panes must wait in place beneath the returning Pane, which takes the pointer"
+        );
+        assert_eq!(cx.debug_bounds("pane-surface-1"), Some(first));
+    }
+
+    #[gpui::test]
+    fn an_unzoom_that_widens_the_pane_layout_to_its_minimum_should_still_move_the_panes(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::ui::drag_and_drop::AnimatePresence;
+
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
+        let session_factory = test_session_factory();
+        let (view, cx) = cx
+            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
+        cx.run_until_parked();
+        for _ in 0..4 {
+            split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
+        }
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.focus_pane(PaneId::new(1), cx);
+                view.toggle_zoom(window, cx);
+            });
+        });
+        cx.run_until_parked();
+        let minimum = cx.update(|_, cx| {
+            let gap = pane_gap(cx);
+            view.read(cx).tab.minimum_size(gap).unwrap()
+        });
+        cx.simulate_resize(gpui::size(
+            px(minimum.width() - 30.0),
+            px(minimum.height() + 200.0),
+        ));
+        cx.run_until_parked();
+
+        cx.update(|_, cx| cx.set_global(AnimatePresence));
+        cx.update(|window, cx| view.update(cx, |view, cx| view.toggle_zoom(window, cx)));
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(60));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+
+        assert_eq!(
+            view.read_with(cx, |view, _| (
+                view.tab.pane_count(),
+                view.pane_frames.moving
+            )),
+            (5, true),
+            "the Panes must keep moving once the layout widens to its minimum"
+        );
+    }
+
+    #[gpui::test]
+    fn a_pane_dropped_where_moving_panes_overlap_should_land_on_the_one_drawn_on_top(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
+        let session_factory = test_session_factory();
+        let (view, cx) = cx
+            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
+        cx.run_until_parked();
+        split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
+        split_test_pane(&view, PaneId::new(2), SplitAxis::Horizontal, cx);
+        let first = cx.debug_bounds("pane-surface-1").unwrap();
+
+        // Pane 3 paints after Pane 2, so where their surfaces overlap mid-motion it is on top.
+        let target = cx.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.pane_surfaces.insert(PaneId::new(2), first);
+                view.pane_surfaces.insert(PaneId::new(3), first);
+                view.drop_target(PaneId::new(1), first.center(), pane_gap(cx))
+            })
+        });
+
+        assert_eq!(target.map(|(pane_id, _)| pane_id), Some(PaneId::new(3)));
+    }
+
+    #[gpui::test]
+    fn a_press_on_a_split_gap_that_moving_panes_cover_should_not_resize_the_split(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::ui::drag_and_drop::{AnimatePresence, finish_slides};
+
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
+        let session_factory = test_session_factory();
+        let (view, cx) = cx
+            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
+        cx.run_until_parked();
+
+        cx.update(|_, cx| cx.set_global(AnimatePresence));
+        split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
+        cx.update(|window, cx| {
+            window.activate_window();
+            view.update(cx, |view, cx| view.focus(window, cx));
+        });
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(60));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        let gap = cx.debug_bounds("split-gap-1").unwrap().center();
+        assert!(
+            cx.debug_bounds("pane-surface-1").unwrap().contains(&gap),
+            "Pane 1 must still cover the gap it moves toward"
+        );
+        cx.simulate_mouse_down(gap, MouseButton::Left, Modifiers::none());
+        let while_moving = cx.update(|window, cx| {
+            let view = view.read(cx);
+            (
+                view.resizing_split_id,
+                view.focused_terminal_has_input_focus(window, cx),
+            )
+        });
+        cx.simulate_mouse_up(gap, MouseButton::Left, Modifiers::none());
+        finish_slides(cx);
+        cx.simulate_mouse_down(gap, MouseButton::Left, Modifiers::none());
+        let at_rest = view.read_with(cx, |view, _| view.resizing_split_id);
+        cx.simulate_mouse_up(gap, MouseButton::Left, Modifiers::none());
+
+        assert_eq!(
+            (while_moving, at_rest),
+            ((None, true), Some(SplitId::new(1))),
+            "the split must take the press only once its gap shows"
+        );
+    }
+
+    #[gpui::test]
+    fn a_scroll_where_moving_panes_overlap_should_not_reach_the_one_beneath(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::ui::drag_and_drop::AnimatePresence;
+
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
+        let records = TestTerminalSessionRecords::default();
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            Rc::new(
+                TestTerminalSessionFactory::new(records.clone())
+                    .with_selection_copy_response(Ok(None)),
+            ),
+            crate::terminal::testing::test_local_directory(test_home_directory()),
+        );
+        let (view, cx) = cx
+            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
+        cx.run_until_parked();
+        split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
+        cx.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                let size = view.pane_layout_size.unwrap();
+                view.tab
+                    .resize_split(SplitId::new(1), size, pane_gap(cx), 0.7)
+                    .unwrap();
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+
+        // Pane 1 moves to the right of Pane 2 and paints after it.
+        cx.update(|_, cx| cx.set_global(AnimatePresence));
+        let second = cx.debug_bounds("pane-surface-2").unwrap();
+        let caption = cx
+            .debug_bounds("pane-caption-1-unfocused")
+            .or_else(|| cx.debug_bounds("pane-caption-1-focused"))
+            .unwrap();
+        let right_edge = point(second.right() - px(8.0), second.center().y);
+        drag_pane_caption(
+            caption,
+            &[right_edge, right_edge + point(px(-1.0), px(0.0))],
+            cx,
+        );
+        cx.simulate_mouse_up(right_edge, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(30));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        let top = cx.debug_bounds("pane-surface-1").unwrap();
+        let beneath = cx.debug_bounds("pane-surface-2").unwrap();
+        // Pane 1's Terminal keeps the size of its place, so only Pane 2's Terminal is under the
+        // right of Pane 1's surface.
+        let pointer = point(top.right() - px(8.0), beneath.top() + px(80.0));
+        assert!(top.contains(&pointer) && beneath.contains(&pointer));
+        cx.update(|window, cx| {
+            window.activate_window();
+            view.update(cx, |view, cx| view.focus(window, cx));
+        });
+        cx.run_until_parked();
+        let before = records.commands().len();
+        cx.simulate_event(ScrollWheelEvent {
+            position: pointer,
+            delta: ScrollDelta::Lines(point(0.0, -3.0)),
+            touch_phase: TouchPhase::Moved,
+            modifiers: Modifiers::none(),
+        });
+
+        let scrolled = records.commands()[before..]
+            .iter()
+            .filter(|call| matches!(call.command, RecordedCommand::Wheel(_)))
+            .map(|call| call.session_id)
+            .collect::<Vec<_>>();
+        assert!(
+            !scrolled.contains(&2),
+            "Pane 2's Terminal Session is beneath Pane 1: {scrolled:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn a_press_beside_a_zooming_pane_should_not_focus_a_faded_pane(cx: &mut TestAppContext) {
+        use crate::ui::drag_and_drop::AnimatePresence;
+
+        let (view, [_, second, _], _, cx) = three_pane_zoom_view(cx);
+        cx.update(|_, cx| cx.set_global(AnimatePresence));
+        cx.update(|window, cx| view.update(cx, |view, cx| view.toggle_zoom(window, cx)));
+        draw_motion_frame(cx);
+        let growing = cx.debug_bounds("pane-surface-1").unwrap();
+        let beside = point(second.right() - px(4.0), second.center().y);
+        let faded = view.read_with(cx, |view, _| view.pane_frames.beneath_opacity);
+        assert!(!growing.contains(&beside));
+
+        let focused = press_counting_focus_changes(&view, beside, cx);
+
+        assert_eq!(
+            (faded, focused),
+            (0.0, (PaneId::new(1), 0)),
+            "Pane 2 has faded out beneath the zoom and must not take the press"
+        );
+    }
+
+    #[gpui::test]
+    fn a_zoom_during_a_split_should_keep_the_other_panes_moving_beneath_it(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::ui::drag_and_drop::AnimatePresence;
+
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
+        let session_factory = test_session_factory();
+        let (view, cx) = cx
+            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
+        cx.run_until_parked();
+        cx.update(|_, cx| cx.set_global(AnimatePresence));
+        split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
+        draw_motion_frame(cx);
+        let drawn = cx.debug_bounds("pane-surface-1").unwrap();
+
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.focus_pane(PaneId::new(2), cx);
+                view.toggle_zoom(window, cx);
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        let zooming = cx.debug_bounds("pane-surface-1").unwrap();
+
+        assert!(
+            (zooming.right() - drawn.right()).abs() < px(1.0),
+            "Pane 1 must continue from where it was drawn: {zooming:?} after {drawn:?}"
+        );
     }
 
     #[gpui::test]
