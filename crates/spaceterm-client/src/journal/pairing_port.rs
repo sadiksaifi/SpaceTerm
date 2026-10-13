@@ -54,7 +54,7 @@ impl RecoveredClientState {
                 .ok_or(PairingFailure::CredentialIntegrity)?
                 .prepared()
         };
-        let saved = self
+        let saved: Vec<SavedPairing> = self
             .bindings
             .iter()
             .map(|saved| {
@@ -110,7 +110,20 @@ impl RecoveredClientState {
             };
             Ok(LocalRevocation { task: record.task.clone(), credential, phase, notice_dismissed: record.notice_dismissed })
         }).collect::<Result<_, PairingFailure>>()?;
+        let additional_client_acknowledgements = self
+            .bindings
+            .iter()
+            .filter(|binding| binding.additional_client_acknowledgement_pending())
+            .map(|pending| {
+                saved
+                    .iter()
+                    .find(|saved| saved.receipt() == pending.proof())
+                    .cloned()
+                    .ok_or(PairingFailure::InvalidDurableState)
+            })
+            .collect::<Result<_, _>>()?;
         let snapshot = PairingJournalSnapshot {
+            additional_client_acknowledgements,
             revision: self.revision.get(),
             generation_high_water: self.pairing.generation_high_water(),
             credential_preparations: preparations,
@@ -287,6 +300,7 @@ impl RecoveredClientState {
             target: SavedTarget::from_target(&target),
             streams: saved.client.clone(),
             proof: saved.receipt.clone(),
+            additional_client_acknowledgement_pending: false,
         })
     }
     fn pairing_transaction(
@@ -346,7 +360,8 @@ impl RecoveredClientState {
                     return Err(PairingFailure::AuthorizationRequired);
                 }
                 vec![ClientJournalChange::SaveBinding(Box::new(
-                    self.retain_binding(saved)?,
+                    self.retain_binding(saved)?
+                        .await_additional_client_acknowledgement(),
                 ))]
             }
             PairingJournalChange::SaveEnrollment {

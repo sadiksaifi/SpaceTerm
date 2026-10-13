@@ -12,7 +12,10 @@ use spaceterm_client::{
     },
     limits::HANDSHAKE_DEADLINE,
     pairing::{
-        credentials::PairingFuture,
+        credentials::{
+            CredentialPurpose, CredentialUse, CredentialUsePurpose, NativeCredentialAccess,
+            PairingFuture,
+        },
         enrollment::{EnrollmentConnector, PairingTransport},
         revocation::RestrictedConnector,
     },
@@ -71,6 +74,7 @@ impl NativePairingConnector {
         pin: ServerPin,
         reference: CredentialReference,
         route: &RouteDescription,
+        foreground: Option<&CredentialUse>,
     ) -> Result<Box<dyn PairingTransport>, PairingFailure> {
         let slot = state
             .pairing()
@@ -86,66 +90,118 @@ impl NativePairingConnector {
         }
         // Every native dial already owns its deadline and exact cleanup. Do not
         // drop that cleanup future merely because an outer deadline expired.
-        let route = self
-            .routes
-            .open_pairing_route(pin, route, slot.ssh_capture.as_ref())
-            .await
-            .map_err(failure)?;
+        let route = match foreground {
+            Some(authorization) => {
+                self.routes
+                    .open_foreground_pairing_route(
+                        pin,
+                        route,
+                        slot.ssh_capture.as_ref(),
+                        authorization,
+                    )
+                    .await
+            }
+            None => {
+                self.routes
+                    .open_pairing_route(pin, route, slot.ssh_capture.as_ref())
+                    .await
+            }
+        }
+        .map_err(failure)?;
         Ok(Box::new(NativePairingTransport { route }))
     }
 }
+impl NativePairingConnector {
+    async fn open_enrollment(
+        &self,
+        pin: ServerPin,
+        route: RevocationRouteReference,
+        foreground: Option<&CredentialUse>,
+    ) -> Result<Box<dyn PairingTransport>, PairingFailure> {
+        if let Some(authorization) = foreground {
+            authorization.validate(authorization.scope())?;
+            if authorization.purpose() != CredentialUsePurpose::Enrollment
+                || authorization.native_access() != NativeCredentialAccess::Foreground
+            {
+                return Err(PairingFailure::AuthorizationDenied);
+            }
+        }
+        let state = self.journal.recover().await.map_err(failure)?;
+        let mut slots = state
+            .pairing()
+            .slots()
+            .iter()
+            .filter(|slot| slot.route_reference == Some(route));
+        let slot = slots.next().ok_or(PairingFailure::RouteChanged)?;
+        if slots.next().is_some() {
+            return Err(PairingFailure::IdentityMismatch);
+        }
+        // Restricted acknowledgement can use its original saved/prepared
+        // route, but never a later ordinary connection to the same Server.
+        let targets = state
+            .pairing()
+            .prepared()
+            .iter()
+            .chain(
+                state
+                    .pairing()
+                    .acknowledgements()
+                    .iter()
+                    .map(|ack| &ack.prepared),
+            )
+            .map(|prepared| prepared.target.target())
+            .chain(
+                state
+                    .bindings()
+                    .iter()
+                    .map(|binding| binding.binding().map(|binding| binding.target().clone())),
+            )
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(failure)?;
+        let concrete = if let Some(target) = targets
+            .iter()
+            .find(|target| target.credential() == slot.reference)
+        {
+            if target.pin() != pin {
+                return Err(PairingFailure::IdentityMismatch);
+            }
+            target.route().clone()
+        } else {
+            slot.route.clone().ok_or(PairingFailure::RouteChanged)?
+        };
+        if let Some(authorization) = foreground {
+            authorization.validate(authorization.scope())?;
+            if authorization.purpose() != CredentialUsePurpose::Enrollment
+                || authorization.native_access() != NativeCredentialAccess::Foreground
+                || authorization.scope().reference() != slot.reference
+                || authorization.scope().parts().namespace.as_str() != slot.namespace
+                || authorization.scope().parts().purpose
+                    != (CredentialPurpose::PairingAuthentication {
+                        server: spaceterm_core::identity::ServerId::new(pin.identity),
+                    })
+            {
+                return Err(PairingFailure::AuthorizationDenied);
+            }
+        }
+        self.connect(&state, pin, slot.reference, &concrete, foreground)
+            .await
+    }
+}
 impl EnrollmentConnector for NativePairingConnector {
+    fn open_foreground<'a>(
+        &'a self,
+        pin: ServerPin,
+        route: RevocationRouteReference,
+        authorization: &'a CredentialUse,
+    ) -> PairingFuture<'a, Result<Box<dyn PairingTransport>, PairingFailure>> {
+        Box::pin(self.open_enrollment(pin, route, Some(authorization)))
+    }
     fn open<'a>(
         &'a self,
         pin: ServerPin,
         route: RevocationRouteReference,
     ) -> PairingFuture<'a, Result<Box<dyn PairingTransport>, PairingFailure>> {
-        Box::pin(async move {
-            let state = self.journal.recover().await.map_err(failure)?;
-            let mut slots = state
-                .pairing()
-                .slots()
-                .iter()
-                .filter(|slot| slot.route_reference == Some(route));
-            let slot = slots.next().ok_or(PairingFailure::RouteChanged)?;
-            if slots.next().is_some() {
-                return Err(PairingFailure::IdentityMismatch);
-            }
-            // Restricted acknowledgement can use its original saved/prepared
-            // route, but never a later ordinary connection to the same Server.
-            let targets = state
-                .pairing()
-                .prepared()
-                .iter()
-                .chain(
-                    state
-                        .pairing()
-                        .acknowledgements()
-                        .iter()
-                        .map(|ack| &ack.prepared),
-                )
-                .map(|prepared| prepared.target.target())
-                .chain(
-                    state
-                        .bindings()
-                        .iter()
-                        .map(|binding| binding.binding().map(|binding| binding.target().clone())),
-                )
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(failure)?;
-            let concrete = if let Some(target) = targets
-                .iter()
-                .find(|target| target.credential() == slot.reference)
-            {
-                if target.pin() != pin {
-                    return Err(PairingFailure::IdentityMismatch);
-                }
-                target.route().clone()
-            } else {
-                slot.route.clone().ok_or(PairingFailure::RouteChanged)?
-            };
-            self.connect(&state, pin, slot.reference, &concrete).await
-        })
+        Box::pin(self.open_enrollment(pin, route, None))
     }
 }
 impl RestrictedConnector for NativePairingConnector {
@@ -175,8 +231,14 @@ impl RestrictedConnector for NativePairingConnector {
             {
                 return Err(PairingFailure::IdentityMismatch);
             }
-            self.connect(&state, target.pin(), original.credential(), target.route())
-                .await
+            self.connect(
+                &state,
+                target.pin(),
+                original.credential(),
+                target.route(),
+                None,
+            )
+            .await
         })
     }
 }

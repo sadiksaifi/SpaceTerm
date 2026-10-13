@@ -75,7 +75,7 @@ use spaceterm_client::{
     },
     pairing::{
         credentials::*,
-        journal::{PreparedEnrollment, SavedPairing},
+        journal::{LocalPairingStore, PreparedEnrollment, SavedPairing},
     },
     pending::LocalUseInvalidator,
     ports::ClientFuture,
@@ -1482,8 +1482,7 @@ async fn acknowledged_cleanup_reopens_after_exact_key_deletion_and_preserves_new
 }
 
 #[tokio::test]
-async fn separate_consumers_retain_distinct_server_issued_clients_without_replacing_shared_native_key()
- {
+async fn additional_client_receipt_is_acknowledged_before_consumer_registration() {
     let credentials = Arc::new(Credentials::new());
     let original = Fixture::new(1);
     credentials
@@ -1493,6 +1492,12 @@ async fn separate_consumers_retain_distinct_server_issued_clients_without_replac
         .push(original.credential.clone());
     let server = original.binding.target().server();
     let pairing = original.binding.target().pairing();
+    let origin_directory = Directory::new();
+    let origin_native = Arc::new(origin_directory.create().await);
+    original.seed(origin_native.as_ref()).await;
+    let mut origin = controller(origin_native).await;
+    let unrelated_directory = Directory::new();
+    let unrelated = controller(Arc::new(unrelated_directory.create().await)).await;
     let mut consumers = vec![];
     for consumer in [7, 8] {
         let directory = Directory::new();
@@ -1526,15 +1531,29 @@ async fn separate_consumers_retain_distinct_server_issued_clients_without_replac
             self_revocation: stream(101 + consumer * 2),
         })
         .unwrap();
-        let (target, keys, operation) = match &original.saved.proof().parts().claims {
-            PairingReceiptBody::ClientBinding {
-                target,
-                keys,
-                operation,
-                ..
-            } => (target.clone(), keys.clone(), *operation),
+        let (target, keys) = match &original.saved.proof().parts().claims {
+            PairingReceiptBody::ClientBinding { target, keys, .. } => {
+                (target.clone(), keys.clone())
+            }
             _ => unreachable!(),
         };
+        use spaceterm_core::operation_ledger_contracts::{
+            CanonicalOperationRequest, CompactOutcome,
+        };
+        let request = CanonicalOperationRequest::new(
+            OperationId::new(
+                original.saved.streams().parts().ordinary,
+                OperationSequence::new(consumer - 6).unwrap(),
+            ),
+            Command::Pairing(PairingCommand::BindAdditionalClient {
+                target: target.clone(),
+                expected_authorization_version: spaceterm_core::authority::FieldVersion::new(1),
+                claim_digest: RequestDigest::from_bytes([1; 32]),
+            }),
+            &CanonicalCodec,
+        )
+        .unwrap();
+        let operation = request.binding();
         let proof = ReceiptCodec::new(original.binding.target().pin())
             .sign(
                 PairingReceiptBody::ClientBinding {
@@ -1546,6 +1565,28 @@ async fn separate_consumers_retain_distinct_server_issued_clients_without_replac
                 },
                 &original.server,
             )
+            .unwrap();
+        origin
+            .transact(vec![
+                ClientJournalChange::Prepare(spaceterm_client::journal::JournalOperation {
+                    binding: operation,
+                    request: request.encode(&CanonicalCodec).unwrap(),
+                    workspace: None,
+                    reserves_grant: false,
+                    cleanup: false,
+                    state: spaceterm_client::journal::RetainedOperationState::Pending,
+                }),
+                ClientJournalChange::Complete {
+                    binding: operation,
+                    outcome: CompactOutcome::new(
+                        &Outcome::Pairing(Box::new(PairingOutcome::ClientBound(proof.clone()))),
+                        &CanonicalCodec,
+                    )
+                    .unwrap(),
+                    publication_revision: spaceterm_core::authority::OrganizationRevision::new(2),
+                },
+            ])
+            .await
             .unwrap();
         let prepared = PreparedEnrollment {
             local_pairing: LocalPairingKey::new(LocalPairingKeyParts {
@@ -1571,6 +1612,109 @@ async fn separate_consumers_retain_distinct_server_issued_clients_without_replac
             .save_additional_client(&prepared, proof)
             .await
             .unwrap();
+        assert!(matches!(
+            composition.restore(saved.key(), client).await,
+            Err(PairingFailure::RecoveryRequired)
+        ));
+        assert!(
+            !composition
+                .journal()
+                .ordinary_use_allowed(
+                    &composition.journal().snapshot().unwrap().bindings()[0]
+                        .binding()
+                        .unwrap()
+                )
+                .unwrap()
+        );
+        assert!(matches!(
+            spaceterm_client::pairing::journal::JournalPairingStore::new(
+                composition.journal().clone()
+            )
+            .ordinary_authority(saved.key())
+            .await,
+            Err(PairingFailure::RecoveryRequired)
+        ));
+        assert_eq!(
+            composition
+                .confirm_additional_client_acknowledgement(saved.key(), client, &origin)
+                .await,
+            Err(PairingFailure::RecoveryRequired)
+        );
+        drop(composition);
+        let reopened = NativeClientJournal::open_existing(
+            directory.0.clone(),
+            Arc::new(CanonicalCodec),
+            Arc::new(Verifier),
+            JournalLimits::default(),
+        )
+        .await
+        .unwrap();
+        let composition = runtime_with(
+            controller(Arc::new(reopened)).await,
+            credentials.clone(),
+            Arc::new(Offline),
+        );
+        assert!(matches!(
+            composition.restore(saved.key(), client).await,
+            Err(PairingFailure::RecoveryRequired)
+        ));
+        origin
+            .transact(vec![
+                ClientJournalChange::ConfirmAcknowledgement {
+                    stream: operation.id.stream(),
+                    through: operation.id.sequence().get(),
+                },
+                ClientJournalChange::ConsumeResult(operation.id),
+            ])
+            .await
+            .unwrap();
+        assert!(origin.snapshot().unwrap().operation(operation.id).is_none());
+        drop(origin);
+        let origin_reopened = NativeClientJournal::open_existing(
+            origin_directory.0.clone(),
+            Arc::new(CanonicalCodec),
+            Arc::new(Verifier),
+            JournalLimits::default(),
+        )
+        .await
+        .unwrap();
+        origin = controller(Arc::new(origin_reopened)).await;
+        assert_eq!(
+            composition
+                .confirm_additional_client_acknowledgement(saved.key(), client, &unrelated)
+                .await,
+            Err(PairingFailure::RecoveryRequired)
+        );
+        composition
+            .confirm_additional_client_acknowledgement(saved.key(), client, &origin)
+            .await
+            .unwrap();
+        composition
+            .confirm_additional_client_acknowledgement(saved.key(), client, &origin)
+            .await
+            .unwrap();
+        assert!(
+            composition
+                .inventory()
+                .await
+                .unwrap()
+                .additional_client_acknowledgements
+                .is_empty()
+        );
+        drop(composition);
+        let reopened = NativeClientJournal::open_existing(
+            directory.0.clone(),
+            Arc::new(CanonicalCodec),
+            Arc::new(Verifier),
+            JournalLimits::default(),
+        )
+        .await
+        .unwrap();
+        let composition = runtime_with(
+            controller(Arc::new(reopened)).await,
+            credentials.clone(),
+            Arc::new(Offline),
+        );
         let restored = composition.restore(saved.key(), client).await.unwrap();
         assert_eq!(restored.binding().streams(), &streams);
         assert_eq!(
@@ -1590,7 +1734,7 @@ async fn separate_consumers_retain_distinct_server_issued_clients_without_replac
 }
 
 #[tokio::test]
-async fn owner_enrollment_requires_retained_exact_host_request_without_starting() {
+async fn cli_pair_enroll_records_exact_owner_request() {
     use spaceterm_client_native::pairing_runtime::OwnerEnrollmentRequest;
     use spaceterm_host::{
         account_service::test_support::AccountServiceFixture,
@@ -1953,4 +2097,288 @@ async fn native_ipc_pairing_runtime_saves_and_acknowledges_before_registration_i
             .unwrap()
             .unwrap();
     }
+}
+
+#[tokio::test]
+async fn enrollment_ssh_uses_foreground_askpass_without_granting_restricted_retry_prompt_authority()
+{
+    use spaceterm_client::pairing::revocation::RestrictedConnector;
+    use spaceterm_client_native::{
+        restricted_routes::NativePairingConnector,
+        route::{NativeRouteConnector, SshRouteConfiguration, TunnelEndpoints},
+    };
+    use spaceterm_host::{
+        ipc::PrivateIpcDirectory,
+        ssh_tunnel::{AskPassHandoff, TunnelAskPass},
+        transport::TransportError,
+    };
+    use std::os::unix::fs::PermissionsExt;
+    struct Prompt(AtomicU64);
+    impl TunnelAskPass for Prompt {
+        fn handoff(&self) -> Result<AskPassHandoff, TransportError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            AskPassHandoff::new(
+                PathBuf::from("/usr/bin/true"),
+                "00000000:/test-broker".into(),
+                zeroize::Zeroizing::new(vec![b'a'; 64]),
+            )
+        }
+    }
+    let directory = Directory::new();
+    let journal = controller(Arc::new(directory.create().await)).await;
+    let sockets = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(sockets.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let executable = sockets.path().join("ssh-fixture");
+    let config = sockets.path().join("config");
+    let observed = sockets.path().join("modes");
+    std::fs::write(
+        &config,
+        "Host target\n HostName owner.example\n User owner\n Port 22\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &executable,
+        format!(
+            r#"#!/usr/bin/python3 -I
+import os, socket, sys
+if '-G' in sys.argv:
+    if sys.argv[-1] == 'target':
+        print('host target\nhostname owner.example\nuser owner\nport 22\nbatchmode yes\nproxyjump gateway')
+    else:
+        print('host gateway\nhostname gateway.example\nuser owner\nport 22\nbatchmode yes')
+    sys.exit(0)
+foreground = 'BatchMode=no' in sys.argv
+has_prompt = 'SPACETERM_SSH_ASKPASS_CAPABILITY' in os.environ
+assert foreground == has_prompt
+if foreground:
+    assert os.environ['SSH_ASKPASS_REQUIRE'] == 'force'
+    assert os.environ['SPACETERM_SSH_ASKPASS_MODE'] == 'broker-v1'
+else:
+    assert 'BatchMode=yes' in sys.argv
+    assert 'SSH_ASKPASS' not in os.environ
+configuration = open(sys.argv[sys.argv.index('-F') + 1]).read()
+captured = 'Host st-route-0' in configuration
+if captured:
+    assert 'Host st-route-1' in configuration
+    expected_batch = 'no' if foreground else 'yes'
+    assert configuration.startswith('Host *\n BatchMode ' + expected_batch + '\n')
+with open({observed:?}, 'a') as output:
+    output.write('ordinary\n' if not captured else ('foreground\n' if foreground else 'restricted\n'))
+forward = sys.argv[sys.argv.index('-L') + 1]
+listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+listener.bind(forward.split(':', 1)[0])
+listener.listen(8)
+while True:
+    peer, _ = listener.accept()
+    while peer.recv(4096):
+        pass
+    peer.close()
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let prompt = Arc::new(Prompt(AtomicU64::new(0)));
+    let ssh = SshRouteConfiguration::new(
+        executable,
+        config,
+        sockets.path().canonicalize().unwrap(),
+        vec![("PATH".into(), "/usr/bin:/bin".into())],
+        TunnelEndpoints::new(
+            PrivateIpcDirectory::open(&sockets.path().canonicalize().unwrap()).unwrap(),
+        )
+        .unwrap(),
+        Some(prompt.clone()),
+    )
+    .unwrap();
+    let routes = NativeRouteConnector::new(vec![], Some(ssh)).unwrap();
+    let mut fixture = Fixture::new(1);
+    let target = fixture.binding.target();
+    let route = RouteDescription::new(RouteParts::Ssh {
+        destination: "target".into(),
+        remote_socket: "/server".into(),
+    })
+    .unwrap();
+    fixture.binding = PairedServerBinding::new(
+        ConnectionTarget::new(
+            target.pin(),
+            target.device(),
+            target.pairing(),
+            target.client(),
+            route,
+            target.credential(),
+            target.incarnation(),
+        )
+        .unwrap(),
+    );
+    fixture.saved = SavedBinding::verified(
+        fixture.binding.clone(),
+        fixture.saved.streams().clone(),
+        fixture.saved.proof().clone(),
+        &Verifier,
+    )
+    .unwrap();
+    let ordinary = spaceterm_client::ports::RouteConnector::open(
+        &routes,
+        fixture.binding.target(),
+        spaceterm_client::ports::ConnectionPurpose::Ordinary,
+    )
+    .await
+    .unwrap();
+    assert_eq!(prompt.0.load(Ordering::SeqCst), 0);
+    ordinary.sender.close().await.unwrap();
+    let connector = Arc::new(NativePairingConnector::new(journal.clone(), routes));
+    journal
+        .transact(fixture.seed_changes()[..3].to_vec())
+        .await
+        .unwrap();
+    connector
+        .capture_route(fixture.credential.scope.reference())
+        .await
+        .unwrap();
+    let attempt =
+        DirectEnrollmentAttempt::new(fixture.binding.target().pin(), fixture.route, 1).unwrap();
+    let verified = attempt
+        .confirm(
+            fixture.binding.target().pin(),
+            fixture.route,
+            1,
+            &attempt.fingerprint(),
+        )
+        .unwrap();
+    let lease = verified.credential_use(&fixture.credential).unwrap();
+    let foreground = connector
+        .open_foreground(fixture.binding.target().pin(), fixture.route, &lease)
+        .await
+        .unwrap();
+    assert_eq!(prompt.0.load(Ordering::SeqCst), 1);
+    drop(foreground);
+    let acknowledgement = EnrollmentConnector::open(
+        connector.as_ref(),
+        fixture.binding.target().pin(),
+        fixture.route,
+    )
+    .await
+    .unwrap();
+    assert_eq!(prompt.0.load(Ordering::SeqCst), 1);
+    drop(acknowledgement);
+    journal
+        .transact(vec![ClientJournalChange::SaveBinding(Box::new(
+            fixture.saved.clone(),
+        ))])
+        .await
+        .unwrap();
+    let composition = runtime(journal);
+    let key = fixture.binding.target().local_pairing().unwrap();
+    let assessment = composition
+        .assess_unpair(&key, fixture.binding.target().client())
+        .await
+        .unwrap();
+    let removed = composition.self_unpair(assessment).await.unwrap();
+    let task = composition
+        .inventory()
+        .await
+        .unwrap()
+        .task(removed.operation)
+        .unwrap()
+        .task
+        .clone();
+    let retry = RestrictedConnector::open(connector.as_ref(), &task)
+        .await
+        .unwrap();
+    assert_eq!(prompt.0.load(Ordering::SeqCst), 1);
+    drop(retry);
+    attempt.cancel();
+    assert!(matches!(
+        connector
+            .open_foreground(fixture.binding.target().pin(), fixture.route, &lease)
+            .await,
+        Err(PairingFailure::AuthorizationDenied)
+    ));
+    assert_eq!(prompt.0.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        std::fs::read_to_string(observed).unwrap(),
+        "ordinary\nforeground\nrestricted\nrestricted\n"
+    );
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        use std::os::unix::fs::FileTypeExt;
+        if !std::fs::read_dir(sockets.path())
+            .unwrap()
+            .any(|entry| entry.unwrap().file_type().unwrap().is_socket())
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "SSH fixture cleanup did not finish"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test]
+async fn cli_unpair_resolves_exact_saved_pairing() {
+    let directory = Directory::new();
+    let native = Arc::new(directory.create().await);
+    let first = Fixture::new(1);
+    let selected = Fixture::on_server(2, ServerId::new([9; 16]));
+    first.seed(native.as_ref()).await;
+    selected.seed(native.as_ref()).await;
+    let composition = runtime(controller(native).await);
+    let first_key = first.binding.target().local_pairing().unwrap();
+    let selected_key = selected.binding.target().local_pairing().unwrap();
+    let selected_client = selected.binding.target().client();
+    let first_ordinary = composition
+        .restore(&first_key, first.binding.target().client())
+        .await
+        .unwrap();
+    assert!(matches!(
+        composition
+            .assess_unpair(
+                &selected_key,
+                ClientId::new(selected_key.parts().server, 999).unwrap()
+            )
+            .await,
+        Err(PairingFailure::ClientNotBound)
+    ));
+    let assessment = composition
+        .assess_unpair(&selected_key, selected_client)
+        .await
+        .unwrap();
+    assert_eq!(assessment.pairing(), &selected_key);
+    assert_eq!(assessment.client(), selected_client);
+    let removed = composition.self_unpair(assessment).await.unwrap();
+    assert_eq!(
+        removed.operation.stream(),
+        selected.saved.streams().parts().self_revocation
+    );
+    let inventory = composition.inventory().await.unwrap();
+    assert!(inventory.is_suppressed(&selected_key));
+    assert!(!inventory.is_suppressed(&first_key));
+    let pending = inventory.task(removed.operation).unwrap();
+    assert_eq!(pending.task.parts().local_pairing, selected_key);
+    assert_eq!(pending.task.parts().original.client(), selected_client);
+    assert_eq!(
+        pending.task.parts().original.credential(),
+        selected.credential.scope.reference()
+    );
+    assert!(
+        first_ordinary
+            .authority()
+            .lease()
+            .validate(&first.credential.scope)
+            .is_ok()
+    );
+    assert!(
+        composition
+            .restore(&first_key, first.binding.target().client())
+            .await
+            .is_ok()
+    );
+    assert!(matches!(
+        composition.restore(&selected_key, selected_client).await,
+        Err(PairingFailure::PairingRevoked)
+    ));
+    assert_eq!(inventory.revocations.len(), 1);
 }
