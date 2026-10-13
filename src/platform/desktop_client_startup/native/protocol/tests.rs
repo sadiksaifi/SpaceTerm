@@ -6,8 +6,7 @@ use spaceterm_client::{
 };
 use spaceterm_protocol::convert::organization::{self, PublicationPart};
 
-#[path = "../../../../../crates/spaceterm-client/tests/support/mod.rs"]
-mod fixture;
+use crate::platform::desktop_client_startup::test_fixture as fixture;
 
 fn publication(request: &Payload, target: &ConnectionTarget) -> Option<Payload> {
     macro_rules! profile {
@@ -132,6 +131,7 @@ async fn authenticated_case(major: u32, cx: &mut TestAppContext) {
             tracker: Some(tracker),
             local_server: Some(server.server()),
             registry_binding: Some(protocol.clone()),
+            settings: Default::default(),
         },
         crate::platform::desktop_client_startup::tests::MemoryView {
             bytes: None,

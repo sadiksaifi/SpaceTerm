@@ -37,6 +37,7 @@ use spaceterm_core::{
 use spaceterm_host::account_service::ServiceAction;
 use tokio::sync::watch;
 
+pub(crate) use super::servers::model::ServerServiceLifecycle;
 use super::servers::model::{self, *};
 use crate::ui::server_desktop_contracts::DesktopServerInfo;
 
@@ -87,7 +88,7 @@ impl SettingsConnection {
 
 /// Recovered foreground native capabilities and authenticated inventory adapters, scoped to
 /// the exact original local pairing. Defaults refuse effects rather than inventing providers.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct SettingsServices {
     pub(crate) lifecycles: Vec<(
         spaceterm_core::pairing::LocalPairingKey,

@@ -33,7 +33,6 @@ mod local_source;
 pub(crate) mod pane_repair;
 mod remote_source;
 pub(crate) mod server_source;
-pub(crate) use server_source::ServerDirectorySource;
 
 #[cfg(test)]
 pub(in crate::ui) mod server_tests;
@@ -138,7 +137,6 @@ pub(crate) trait DirectorySource {
 
     /// Validates the directory's physical identity as a Pinned Directory.
     fn pin(&self, directory: PickerPath) -> SourceFuture<PinnedDirectory>;
-
 }
 
 /// A directory path as spelled in the Directory Picker: absolute, or relative to the home

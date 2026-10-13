@@ -99,11 +99,11 @@ impl LocalUseInvalidator for Invalidator {
         Box::pin(async { panic!("recovery removed a pairing") })
     }
 }
-struct MemoryView {
-    bytes: Option<Vec<u8>>,
-    failure: Option<ViewStoreFailureClass>,
-    writes: Arc<AtomicUsize>,
-    saved: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
+pub(super) struct MemoryView {
+    pub(super) bytes: Option<Vec<u8>>,
+    pub(super) failure: Option<ViewStoreFailureClass>,
+    pub(super) writes: Arc<AtomicUsize>,
+    pub(super) saved: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
 }
 impl ViewStore for MemoryView {
     type Version = u64;
@@ -206,6 +206,9 @@ impl Fixture {
             operations: self.server.clone(),
             invalidator: Arc::new(Invalidator(self.channels.clone())),
             local_server: Some(self.server.server()),
+            tracker: None,
+            registry_binding: None,
+            settings: Default::default(),
         }
     }
     fn store(&self) -> MemoryView {
@@ -517,3 +520,6 @@ fn desktop_application_composes_native_directory_ports_for_all_paired_servers(
     );
     assert_eq!(fixture.ports.opens.load(Ordering::SeqCst), 0);
 }
+
+#[path = "foreground_tests.rs"]
+mod foreground;

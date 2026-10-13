@@ -2,6 +2,11 @@
 //! Launch never creates a server identity, requests authorization, starts a deliberately
 //! stopped service, activates staged code, or enrolls a replacement client binding.
 
+mod enrollment;
+pub(crate) mod foreground;
+mod setup;
+pub(crate) use setup::offer as setup_offer;
+
 use spaceterm_client::{
     api::PairedServerBinding,
     failure::{ClientFailure, ClientFailureClass},
@@ -159,4 +164,4 @@ fn classify(failure: ServiceFailure) -> ClientFailure {
 #[cfg(test)]
 mod paired_tests;
 #[cfg(test)]
-mod tests;
+pub(in crate::platform) mod tests;

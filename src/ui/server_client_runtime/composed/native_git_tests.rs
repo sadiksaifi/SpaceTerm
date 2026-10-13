@@ -15,8 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 // Reuse the authenticated worker fixtures instead of simulating provider publications.
 #[path = "../../../../crates/spaceterm-client/tests/operation_recovery/support.rs"]
 mod durable;
-#[path = "../../../../crates/spaceterm-client/tests/support/mod.rs"]
-mod wire;
+use crate::platform::desktop_client_startup::test_fixture as wire;
 
 static REVISION: AtomicU64 = AtomicU64::new(1);
 

@@ -875,12 +875,10 @@ impl WorkspaceManager {
                         );
                         return;
                     }
-                    _ => {
-                        self.show_server_error(
-                            DesktopClientError::UnsupportedCapability,
-                            window,
-                            cx,
-                        );
+                    crate::ui::server_desktop_contracts::PaneActionRoute::ServerSettings(
+                        server,
+                    ) => {
+                        crate::ui::settings_window::open_for_server(server, cx);
                         return;
                     }
                 }
