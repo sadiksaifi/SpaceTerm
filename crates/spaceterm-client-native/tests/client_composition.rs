@@ -27,11 +27,16 @@ impl Directory {
     fn new() -> Self {
         use std::os::unix::fs::DirBuilderExt;
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        // Linux storage rejects the shared /tmp ancestor. Cargo's local build
-        // directory supplies an account-owned parent on both build machines.
-        let parent = std::env::var_os("CARGO_TARGET_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"));
+        // Linux /tmp can be tmpfs, which native storage rejects. Use persistent
+        // temporary storage outside the build tree to isolate journal syncs from
+        // compiler I/O. Native filesystem and durability checks remain unchanged.
+        let parent = if cfg!(target_os = "linux") {
+            PathBuf::from("/var/tmp")
+        } else {
+            std::env::var_os("CARGO_TARGET_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"))
+        };
         std::fs::create_dir_all(&parent).unwrap();
         let path = parent.canonicalize().unwrap().join(format!(
             "spaceterm-client-compose-{}-{}",
@@ -168,8 +173,10 @@ struct Fixture {
 }
 impl Fixture {
     fn new(lifetime: u64) -> Self {
+        Self::on_server(lifetime, ServerId::new([1; 16]))
+    }
+    fn on_server(lifetime: u64, id: ServerId) -> Self {
         let server = Key::new(1);
-        let id = ServerId::new([1; 16]);
         let pairing = PairingId::new(id, lifetime).unwrap();
         let client = ClientId::new(id, lifetime).unwrap();
         let stream = |local| {
@@ -257,30 +264,33 @@ impl Fixture {
             route: RevocationRouteReference::new([9; 16]),
         }
     }
+    fn seed_changes(&self) -> Vec<ClientJournalChange> {
+        vec![
+            ClientJournalChange::ReserveCredential(JournalCredentialSlot {
+                namespace: self.credential.scope.parts().namespace.as_str().to_owned(),
+                server: Some(self.binding.target().server()),
+                reference: self.credential.scope.reference(),
+                public_key: None,
+                route_reference: None,
+                route: None,
+                generation: self.binding.target().incarnation(),
+            }),
+            ClientJournalChange::RecordCredentialPublicKey {
+                reference: self.credential.scope.reference(),
+                public_key: self.credential.public_key,
+            },
+            ClientJournalChange::BindCredentialRoute {
+                reference: self.credential.scope.reference(),
+                route_reference: self.route,
+                route: self.binding.target().route().clone(),
+            },
+            ClientJournalChange::SaveBinding(Box::new(self.saved.clone())),
+        ]
+    }
     async fn seed(&self, journal: &dyn ClientJournal) {
         let tx = ClientJournalTransaction {
             expected_revision: journal.recover().await.unwrap().revision(),
-            changes: vec![
-                ClientJournalChange::ReserveCredential(JournalCredentialSlot {
-                    namespace: self.credential.scope.parts().namespace.as_str().to_owned(),
-                    server: Some(self.binding.target().server()),
-                    reference: self.credential.scope.reference(),
-                    public_key: None,
-                    route_reference: None,
-                    route: None,
-                    generation: self.binding.target().incarnation(),
-                }),
-                ClientJournalChange::RecordCredentialPublicKey {
-                    reference: self.credential.scope.reference(),
-                    public_key: self.credential.public_key,
-                },
-                ClientJournalChange::BindCredentialRoute {
-                    reference: self.credential.scope.reference(),
-                    route_reference: self.route,
-                    route: self.binding.target().route().clone(),
-                },
-                ClientJournalChange::SaveBinding(Box::new(self.saved.clone())),
-            ],
+            changes: self.seed_changes(),
         };
         assert!(matches!(
             journal.commit(&tx).await.unwrap(),
@@ -311,6 +321,52 @@ impl Fixture {
             .unwrap();
         assert!(authority.lease().validate(&self.credential.scope).is_err());
         operation
+    }
+    fn revocation(&self) -> JournalRevocation {
+        use spaceterm_client::journal::{RevocationPhase as CanonicalPhase, SavedTarget};
+        use spaceterm_core::operation_ledger_contracts::CanonicalOperationRequest;
+        let key = self.binding.target().local_pairing().unwrap();
+        let operation = OperationId::new(
+            self.saved.streams().parts().self_revocation,
+            OperationSequence::new(1).unwrap(),
+        );
+        let request = CanonicalOperationRequest::new(
+            operation,
+            Command::Pairing(PairingCommand::SelfRevoke {
+                target: PairingTarget::new(PairingTargetParts {
+                    server: key.parts().server,
+                    pairing: key.parts().pairing,
+                    device: self.binding.target().device(),
+                })
+                .unwrap(),
+            }),
+            &CanonicalCodec,
+        )
+        .unwrap();
+        let task = PendingRevocationTask::new(PendingRevocationTaskParts {
+            original: PendingSelfRevocation::new(PendingParts {
+                original_server: key.parts().server,
+                original_pairing: key.parts().pairing,
+                device: self.binding.target().device(),
+                client: self.binding.target().client(),
+                operation,
+                route: self.route,
+                credential: self.credential.scope.reference(),
+                notice_dismissed: false,
+            })
+            .unwrap(),
+            local_pairing: key,
+            pinned_server_public_key: self.binding.target().pin().public_key,
+            request_digest: request.binding().digest,
+        })
+        .unwrap();
+        JournalRevocation {
+            task,
+            target: SavedTarget::from_target(self.binding.target()),
+            phase: CanonicalPhase::AwaitingConfirmation,
+            notice_dismissed: false,
+            attempts: 0,
+        }
     }
     fn receipt(&self, task: &PendingRevocationTask) -> SignedPairingReceipt {
         ReceiptCodec::new(self.binding.target().pin())
@@ -530,61 +586,123 @@ async fn recovered_suppression_denies_delayed_first_authority_issuance_in_real_c
     assert!(worker.await.unwrap().is_err());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 5)]
 async fn authority_capacity_is_reclaimed_after_completed_pairing_lifetimes_in_real_client_journal()
 {
     let directory = Directory::new();
     let native = Arc::new(directory.create().await);
-    let journal = controller(native).await;
-    // One more lifetime than the live-authority ceiling. Historical stream and
-    // credential comparison records remain durable; live gates do not accumulate.
-    for lifetime in 1..=u64::try_from(MAX_PENDING_REVOCATIONS).unwrap() + 1 {
-        let fixture = Fixture::new(lifetime);
-        fixture.seed(journal.as_ref()).await;
-        let operation = fixture
-            .remove(JournalPairingStore::new(journal.clone()))
-            .await;
-        let store = JournalPairingStore::new(journal.clone());
-        let snapshot = store.recover().await.unwrap();
-        let task = &snapshot.revocations[0].task;
-        let verified = VerifiedRevocationReceipt::verify(
-            task,
-            &fixture.credential,
-            fixture.receipt(task),
-            false,
+    let journal = controller(native.clone()).await;
+    let store = JournalPairingStore::new(journal.clone());
+    let batch_size = JournalLimits::default().saved_servers;
+    let lifetimes = u64::try_from(MAX_PENDING_REVOCATIONS).unwrap() + 1;
+    let server = |lifetime: u64| {
+        ServerId::new(
+            u128::from((lifetime - 1) % u64::try_from(batch_size).unwrap() + 1).to_be_bytes(),
         )
-        .unwrap();
-        for change in [
-            PairingJournalChange::RecordReceipt {
-                operation,
-                receipt: Box::new(verified),
-            },
-            PairingJournalChange::RecordAcknowledgement { operation },
-            PairingJournalChange::FinishCleanup {
-                operation,
-                expected_credential: fixture.credential,
-            },
-        ] {
-            let tx = PairingJournalTransaction {
-                expected_revision: store.recover().await.unwrap().revision,
-                change,
-            };
-            require_durable(store.commit(&tx).await, tx.expected_revision).unwrap();
+    };
+    // Every lifetime issues a live gate after durable admission, then retires it
+    // durably. Independent Servers keep both batches within the existing
+    // 64-binding and 256-change limits.
+    for first in (1..=lifetimes).step_by(batch_size) {
+        let fixtures: Vec<_> = (first
+            ..=lifetimes.min(first + u64::try_from(batch_size).unwrap() - 1))
+            .map(|lifetime| Fixture::on_server(lifetime, server(lifetime)))
+            .collect();
+        journal
+            .transact(fixtures.iter().flat_map(Fixture::seed_changes).collect())
+            .await
+            .unwrap();
+        // Issuance performs real receipt verification. Independent reads run
+        // concurrently; every mutation still goes through one serial journal.
+        let issuances: Vec<_> = fixtures
+            .iter()
+            .map(|fixture| {
+                let journal = journal.clone();
+                let key = fixture.binding.target().local_pairing().unwrap();
+                let scope = fixture.credential.scope.clone();
+                tokio::spawn(async move {
+                    let authority = JournalPairingStore::new(journal)
+                        .ordinary_authority(&key)
+                        .await
+                        .unwrap();
+                    authority.lease().validate(&scope).unwrap();
+                    authority
+                })
+            })
+            .collect();
+        let mut authorities = Vec::new();
+        for issuance in issuances {
+            authorities.push(issuance.await.unwrap());
         }
+        // No wire acknowledgement or native deletion occurs in this capacity
+        // test. Revocation and its verified settlement bookkeeping can share a
+        // durable transaction. Driver tests cover barriers around those effects.
+        journal
+            .transact(
+                fixtures
+                    .iter()
+                    .flat_map(|fixture| {
+                        let record = fixture.revocation();
+                        let receipt = VerifiedRevocationReceipt::verify(
+                            &record.task,
+                            &fixture.credential,
+                            fixture.receipt(&record.task),
+                            false,
+                        )
+                        .unwrap();
+                        let operation = record.task.parts().original.operation();
+                        [
+                            ClientJournalChange::BeginRevocation(Box::new(record)),
+                            ClientJournalChange::ConfirmRevocation {
+                                operation,
+                                receipt: Box::new(receipt.proof().clone()),
+                            },
+                            ClientJournalChange::ConfirmRevocationAcknowledgement(operation),
+                            ClientJournalChange::FinishCredentialCleanup(operation),
+                        ]
+                    })
+                    .collect(),
+            )
+            .await
+            .unwrap();
+        for (authority, fixture) in authorities.iter().zip(&fixtures) {
+            assert!(
+                authority
+                    .lease()
+                    .validate(&fixture.credential.scope)
+                    .is_err()
+            );
+        }
+        let removed = store.recover().await.unwrap();
+        assert!(removed.saved.is_empty());
+        assert!(removed.revocations.is_empty());
     }
     assert_eq!(
         journal.snapshot().unwrap().tombstones().len(),
         MAX_PENDING_REVOCATIONS + 1
     );
-    let next = Fixture::new(u64::try_from(MAX_PENDING_REVOCATIONS).unwrap() + 2);
+    let next = Fixture::on_server(lifetimes + 1, server(lifetimes + 1));
     next.seed(journal.as_ref()).await;
-    JournalPairingStore::new(journal)
+    store
         .ordinary_authority(&next.binding.target().local_pairing().unwrap())
         .await
         .unwrap()
         .lease()
         .validate(&next.credential.scope)
         .unwrap();
+    let expected = journal.snapshot().unwrap();
+    drop(store);
+    drop(journal);
+    drop(native);
+    let reopened = NativeClientJournal::open_existing(
+        directory.0.clone(),
+        Arc::new(CanonicalCodec),
+        Arc::new(Verifier),
+        JournalLimits::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(reopened.recover().await.unwrap(), expected);
 }
 
 use spaceterm_client::view::*;
@@ -1325,8 +1443,6 @@ async fn native_pairing_facade_transfers_preparation_and_enrollment_ack_in_one_a
 
 #[tokio::test]
 async fn canonical_native_self_unpair_seals_pairing_facade_cached_authority() {
-    use spaceterm_client::journal::{RevocationPhase as CanonicalPhase, SavedTarget};
-    use spaceterm_core::operation_ledger_contracts::CanonicalOperationRequest;
     let directory = Directory::new();
     let native = Arc::new(directory.create().await);
     let fixture = Fixture::new(1);
@@ -1336,50 +1452,10 @@ async fn canonical_native_self_unpair_seals_pairing_facade_cached_authority() {
         .ordinary_authority(&key)
         .await
         .unwrap();
-    let operation = OperationId::new(
-        fixture.saved.streams().parts().self_revocation,
-        OperationSequence::new(1).unwrap(),
-    );
-    let request = CanonicalOperationRequest::new(
-        operation,
-        Command::Pairing(PairingCommand::SelfRevoke {
-            target: PairingTarget::new(PairingTargetParts {
-                server: key.parts().server,
-                pairing: key.parts().pairing,
-                device: fixture.binding.target().device(),
-            })
-            .unwrap(),
-        }),
-        &CanonicalCodec,
-    )
-    .unwrap();
-    let task = PendingRevocationTask::new(PendingRevocationTaskParts {
-        original: PendingSelfRevocation::new(PendingParts {
-            original_server: key.parts().server,
-            original_pairing: key.parts().pairing,
-            device: fixture.binding.target().device(),
-            client: fixture.binding.target().client(),
-            operation,
-            route: fixture.route,
-            credential: fixture.credential.scope.reference(),
-            notice_dismissed: false,
-        })
-        .unwrap(),
-        local_pairing: key,
-        pinned_server_public_key: fixture.binding.target().pin().public_key,
-        request_digest: request.binding().digest,
-    })
-    .unwrap();
     let tx = ClientJournalTransaction {
         expected_revision: native.recover().await.unwrap().revision(),
         changes: vec![ClientJournalChange::BeginRevocation(Box::new(
-            JournalRevocation {
-                task,
-                target: SavedTarget::from_target(fixture.binding.target()),
-                phase: CanonicalPhase::AwaitingConfirmation,
-                notice_dismissed: false,
-                attempts: 0,
-            },
+            fixture.revocation(),
         ))],
     };
     assert!(matches!(
@@ -1509,7 +1585,8 @@ async fn native_recorded_revocation_uses_real_pairing_driver_and_one_scheduler()
     let runtime = tasks.start_pairing_scheduler(driver.clone()).unwrap();
     assert!(tasks.start_pairing_scheduler(driver).is_err());
     assert!(tasks.start_scheduler(Arc::new(NoEffects)).is_err());
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    // This watchdog bounds a stalled test, not the native disk's commit latency.
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
         let mut revisions = journal.revisions();
         while !journal.snapshot().unwrap().revocations().is_empty() {
             revisions.changed().await.unwrap();

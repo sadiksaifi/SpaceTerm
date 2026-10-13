@@ -216,7 +216,24 @@ pub(super) fn validate(
     let mut release_requests = 0;
     let mut release_request_bytes = 0;
     for header in &state.streams {
-        if header.purpose == StreamPurpose::Ordinary {
+        // Retired, settled headers retain comparison facts, not future releases.
+        // A retired stream with unresolved operations or cleanup still reserves
+        // the exact codec width until that work settles.
+        if header.purpose == StreamPurpose::Ordinary
+            && (!header.retired
+                || state
+                    .operations
+                    .iter()
+                    .any(|entry| entry.binding.id.stream() == header.stream)
+                || state
+                    .grants
+                    .iter()
+                    .any(|grant| grant.local_pairing == header.local_pairing)
+                || state
+                    .detaches
+                    .iter()
+                    .any(|task| task.local_pairing == header.local_pairing))
+        {
             release_request_bytes =
                 release_request_bytes.max(release_request_reservation(header.stream, codec)?);
         }
