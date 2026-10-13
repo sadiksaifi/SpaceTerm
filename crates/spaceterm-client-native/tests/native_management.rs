@@ -257,6 +257,56 @@ async fn run(
         .await
 }
 
+struct DeniedArtifacts(AtomicU64);
+impl spaceterm_client_native::native::artifacts::ArtifactTransport for DeniedArtifacts {
+    fn get(&self, _: &str, _: usize) -> Result<Vec<u8>, ManagementFailure> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Err(ManagementFailure::AuthorizationDenied)
+    }
+}
+
+#[tokio::test]
+async fn cli_install_verifies_artifacts_before_allocating_request_or_service_effects() {
+    let fixture = Fixture::new(None);
+    let artifacts = Arc::new(DeniedArtifacts(AtomicU64::new(0)));
+    let provider = fixture
+        .provider()
+        .with_artifact_transport(artifacts.clone());
+    let mut io = Io::default();
+    assert!(matches!(
+        run(
+            &provider,
+            NativeCliCommand::Install { version: None },
+            ConfirmationMode::Interactive,
+            &mut io,
+        )
+        .await,
+        Err(ManagementFailure::AuthorizationDenied)
+    ));
+    assert_eq!(artifacts.0.load(Ordering::SeqCst), 1);
+    assert!(!fixture.account.anchor().exists());
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
+    assert!(io.stderr.is_empty());
+    assert!(io.stdout.is_empty());
+
+    let mut other = provider.key();
+    other.build_identity = BuildIdentity::Release;
+    assert!(matches!(
+        provider
+            .management()
+            .run(
+                other,
+                NativeCliCommand::Install { version: None },
+                ConfirmationMode::Interactive,
+                SudoMode::NonInteractive,
+                &mut io,
+            )
+            .await,
+        Err(ManagementFailure::AuthorizationDenied)
+    ));
+    assert_eq!(artifacts.0.load(Ordering::SeqCst), 1);
+}
+
 #[tokio::test]
 async fn missing_or_suppressed_service_is_not_stopped_and_discovery_creates_nothing() {
     let fixture = Fixture::new(None);
