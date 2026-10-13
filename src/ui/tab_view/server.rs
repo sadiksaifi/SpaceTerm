@@ -5,7 +5,7 @@
 //! never creates, closes or reorders a shared Pane itself: a split asks the server, and a Pane
 //! leaves only when a publication no longer holds it.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeSet, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -136,12 +136,10 @@ pub(super) struct ServerPanes {
     runtime: Entity<DesktopClientRuntime>,
     factory: Rc<dyn ServerPaneFactory>,
     window: AnyWindowHandle,
-    /// Admitted edits retained until completion and the receipted frame revision both arrive.
+    /// Local edits waiting for an allocation, or admitted edits awaiting completion and a receipted frame.
     edits: VecDeque<PendingArrangementEdit>,
     /// A resize applied here and sent when the interaction ends.
-    live: Option<ArrangementEdit>,
-    /// Split names in the provider and in the currently replayed presentation.
-    split_bindings: SplitBindings,
+    live: Option<TargetedArrangementEdit>,
     /// A split this Tab View asked for, focused once the server names it and publishes it.
     creation: Option<CreationIntent>,
     materialize_scheduled: bool,
@@ -151,7 +149,8 @@ pub(super) struct ServerPanes {
 /// Relative attention edits retain their accepted result so an already-reflected publication
 /// cannot apply a second toggle or keyboard step.
 struct PendingArrangementEdit {
-    request: UiRequestId,
+    /// Split-dependent edits wait here until preceding Moves have receipted allocations.
+    request: Option<UiRequestId>,
     admitted_after: DesktopViewRevision,
     replay: ArrangementReplay,
     /// Keep the admitted checkpoint even when an older publication requires a different replay.
@@ -239,90 +238,160 @@ fn arrangement_matches(expected: &PaneArrangement, published: &PaneArrangement) 
     before == after
 }
 
-/// Replaying a move after remote creation changes allocation order, not branch identity.
-/// Keep the resulting permutation in both directions for requests and live divider interactions.
-#[derive(Default)]
-struct SplitBindings(BTreeMap<SplitId, SplitId>);
+/// A provider-allocated Split, or its Pane partition while allocation is pending.
+/// Remote insertion can wrap either child; deletion of a whole child removes the pending target.
+/// Once bound, a deleted Split cannot be replaced by a later Move with the same partition.
+enum SplitTarget {
+    Allocated(SplitId),
+    Pending {
+        first: BTreeSet<ServerPaneId>,
+        second: BTreeSet<ServerPaneId>,
+    },
+}
 
-impl SplitBindings {
-    fn display(&self, provider: SplitId) -> SplitId {
-        self.0.get(&provider).copied().unwrap_or(provider)
+impl SplitTarget {
+    fn capture(arrangement: &PaneArrangement, split: SplitId) -> Option<Self> {
+        let record = arrangement.export();
+        let (first, second) = record.nodes.iter().find_map(|node| match node {
+            ArrangementNode::Split {
+                id, first, second, ..
+            } if *id == split => Some((*first, *second)),
+            _ => None,
+        })?;
+        let panes = |root| {
+            let mut panes = BTreeSet::new();
+            let mut stack = vec![root];
+            while let Some(index) = stack.pop() {
+                match record.nodes[index as usize] {
+                    ArrangementNode::Pane(pane) => {
+                        panes.insert(pane);
+                    }
+                    ArrangementNode::Split { first, second, .. } => {
+                        stack.extend([first, second]);
+                    }
+                }
+            }
+            panes
+        };
+        Some(Self::Pending {
+            first: panes(first),
+            second: panes(second),
+        })
     }
 
-    fn provider(&self, display: SplitId) -> SplitId {
-        self.0
-            .iter()
-            .find_map(|(provider, candidate)| (*candidate == display).then_some(*provider))
-            .unwrap_or(display)
+    fn resolve(&self, arrangement: &PaneArrangement) -> Option<SplitId> {
+        let record = arrangement.export();
+        let (first, second) = match self {
+            Self::Pending { first, second } => (first, second),
+            Self::Allocated(split) => {
+                return record
+                    .nodes
+                    .iter()
+                    .any(|node| matches!(node, ArrangementNode::Split { id, .. } if id == split))
+                    .then_some(*split);
+            }
+        };
+        let mut counts = vec![(0, 0); record.nodes.len()];
+        // The validated flat table is pre-order, so children are counted before parents.
+        for (index, node) in record.nodes.iter().enumerate().rev() {
+            counts[index] = match *node {
+                ArrangementNode::Pane(pane) => (
+                    usize::from(first.contains(&pane)),
+                    usize::from(second.contains(&pane)),
+                ),
+                ArrangementNode::Split { first, second, .. } => (
+                    counts[first as usize].0 + counts[second as usize].0,
+                    counts[first as usize].1 + counts[second as usize].1,
+                ),
+            };
+        }
+        let (first_count, second_count) = *counts.first()?;
+        if first_count == 0 || second_count == 0 {
+            return None;
+        }
+        record.nodes.iter().find_map(|node| match *node {
+            ArrangementNode::Split {
+                id, first, second, ..
+            } if counts[first as usize] == (first_count, 0)
+                && counts[second as usize] == (0, second_count) =>
+            {
+                Some(id)
+            }
+            _ => None,
+        })
+    }
+}
+
+struct TargetedArrangementEdit {
+    edit: ArrangementEdit,
+    split: Option<SplitTarget>,
+}
+
+impl TargetedArrangementEdit {
+    fn capture(
+        edit: ArrangementEdit,
+        arrangement: &PaneArrangement,
+        published: &PaneArrangement,
+    ) -> Self {
+        let split = match edit {
+            ArrangementEdit::Resize { split, .. } | ArrangementEdit::SetSplitAxis { split, .. } => {
+                let allocated = SplitTarget::Allocated(split);
+                if allocated.resolve(published).is_some() {
+                    Some(allocated)
+                } else {
+                    SplitTarget::capture(arrangement, split)
+                }
+            }
+            _ => None,
+        };
+        Self { edit, split }
     }
 
-    fn allocated(&mut self, provider: SplitId, display: SplitId) {
-        let previous = self.display(provider);
-        let displaced = self.provider(display);
-        // The displaced name belongs to a remote-created Split, or a later admitted move.
-        // Swapping keeps the binding bijective rather than aliasing the two branches.
-        self.0.insert(provider, display);
-        self.0.insert(displaced, previous);
-        self.0.retain(|provider, display| provider != display);
-    }
-
-    fn map_edit(edit: ArrangementEdit, split: impl FnOnce(SplitId) -> SplitId) -> ArrangementEdit {
-        match edit {
+    fn resolve(&self, arrangement: &PaneArrangement) -> Option<ArrangementEdit> {
+        let edit = match self.edit {
             ArrangementEdit::Resize {
-                split: id,
                 available,
                 metrics,
                 ratio,
+                ..
             } => ArrangementEdit::Resize {
-                split: split(id),
+                split: self.split.as_ref()?.resolve(arrangement)?,
                 available,
                 metrics,
                 ratio,
             },
             ArrangementEdit::SetSplitAxis {
-                split: id,
                 axis,
                 available,
                 metrics,
+                ..
             } => ArrangementEdit::SetSplitAxis {
-                split: split(id),
+                split: self.split.as_ref()?.resolve(arrangement)?,
                 axis,
                 available,
                 metrics,
             },
             edit => edit,
+        };
+        Some(edit)
+    }
+
+    fn bind_allocation(&mut self, edit: ArrangementEdit) {
+        if let ArrangementEdit::Resize { split, .. } | ArrangementEdit::SetSplitAxis { split, .. } =
+            edit
+        {
+            self.edit = edit;
+            self.split = Some(SplitTarget::Allocated(split));
         }
     }
 
-    fn display_edit(&self, edit: ArrangementEdit) -> ArrangementEdit {
-        Self::map_edit(edit, |split| self.display(split))
-    }
-
-    fn provider_edit(&self, edit: ArrangementEdit) -> ArrangementEdit {
-        Self::map_edit(edit, |split| self.provider(split))
-    }
-
-    fn provider_arrangement(
-        &self,
-        arrangement: &PaneArrangement,
-    ) -> Result<PaneArrangement, DesktopClientError> {
-        if self.0.is_empty() {
-            return Ok(arrangement.clone());
-        }
-        let mut record = arrangement.export();
-        for node in &mut record.nodes {
-            if let ArrangementNode::Split { id, .. } = node {
-                *id = self.provider(*id);
-            }
-        }
-        // A permutation of allocated IDs preserves every import invariant.
-        PaneArrangement::import(arrangement.tab(), &record)
-            .map_err(|_| DesktopClientError::StaleContext)
+    fn needs_allocation(&self) -> bool {
+        self.split.is_some() || matches!(self.edit, ArrangementEdit::Move { .. })
     }
 }
 
 enum ArrangementReplay {
-    Edit(ArrangementEdit),
+    Edit(TargetedArrangementEdit),
     CycleFocus(ServerPaneId),
     Zoom(spaceterm_client::view::ZoomState),
 }
@@ -363,7 +432,6 @@ impl ServerPanes {
                     .as_ref()
                     .is_some_and(|rebased| arrangement_matches(rebased, &self.published))
         });
-        let mut splits = SplitBindings::default();
         for (index, pending) in self.edits.iter_mut().enumerate() {
             if represented.is_some_and(|last| index <= last)
                 || pending
@@ -372,25 +440,18 @@ impl ServerPanes {
             {
                 continue;
             }
-            match pending.replay {
+            match &pending.replay {
                 ArrangementReplay::Edit(edit) => {
-                    let changed = self.tab.arrange(splits.display_edit(edit));
-                    if matches!(edit, ArrangementEdit::Move { .. })
-                        && matches!(changed, Ok(true))
-                        && let (Some(admitted), Some(replayed)) = (
-                            SplitId::new(pending.result.split_high_water()),
-                            SplitId::new(self.tab.arrangement().split_high_water()),
-                        )
-                    {
-                        splits.allocated(admitted, replayed);
+                    if let Some(edit) = edit.resolve(self.tab.arrangement()) {
+                        let _ = self.tab.arrange(edit);
                     }
                 }
                 ArrangementReplay::CycleFocus(pane) => {
-                    self.tab.focus_in_cycle(pane);
+                    self.tab.focus_in_cycle(*pane);
                 }
                 ArrangementReplay::Zoom(zoom) => {
                     if let spaceterm_client::view::ZoomState::Zoomed(pane) = zoom
-                        && !self.tab.arrangement().contains_pane(pane)
+                        && !self.tab.arrangement().contains_pane(*pane)
                     {
                         continue;
                     }
@@ -405,12 +466,80 @@ impl ServerPanes {
             }
             pending.rebased = Some(self.tab.arrangement().clone());
         }
-        if let Some(edit) = self.live
-            && self.tab.arrange(splits.display_edit(edit)).is_err()
+        if let Some(live) = &self.live
+            && live
+                .resolve(self.tab.arrangement())
+                .is_none_or(|edit| self.tab.arrange(edit).is_err())
         {
             self.live = None;
         }
-        self.split_bindings = splits;
+    }
+
+    fn has_unpublished_move(&self) -> bool {
+        self.edits.iter().any(|pending| {
+            matches!(&pending.replay, ArrangementReplay::Edit(edit) if matches!(edit.edit, ArrangementEdit::Move { .. }))
+                && pending.applied.is_none_or(|revision| revision > self.published_revision)
+        })
+    }
+
+    /// Observe a Move's actual allocation before submitting another Move or a Split edit.
+    /// A predicted counter is not a provider identity, even when an equal checkpoint is visible.
+    fn submit_waiting_edits(&mut self, cx: &mut Context<TabView>) {
+        let mut waiting_for_move = false;
+        let mut refused = Vec::new();
+        for pending in &mut self.edits {
+            let ArrangementReplay::Edit(targeted) = &mut pending.replay else {
+                continue;
+            };
+            let is_move = matches!(targeted.edit, ArrangementEdit::Move { .. });
+            if pending.request.is_some() {
+                waiting_for_move |= is_move
+                    && pending
+                        .applied
+                        .is_none_or(|revision| revision > self.published_revision);
+                continue;
+            }
+            if waiting_for_move {
+                continue;
+            }
+            let admission = targeted
+                .resolve(&self.published)
+                .ok_or(DesktopClientError::TargetGone)
+                .and_then(|edit| {
+                    targeted.bind_allocation(edit);
+                    self.runtime.update(cx, |runtime, cx| {
+                        runtime.request(
+                            DesktopRequest::PersonalEdit(ViewEdit::Arrange {
+                                workspace: self.workspace,
+                                tab: self.tab.id(),
+                                edit,
+                            }),
+                            cx,
+                        )
+                    })
+                });
+            match admission {
+                Ok(request) => {
+                    pending.request = Some(request);
+                    pending.admitted_after = self.published_revision;
+                    waiting_for_move |= is_move;
+                }
+                Err(error) => {
+                    refused.push(error);
+                    // This unsent edit never reached the provider and needs no receipt.
+                    pending.completed = true;
+                }
+            }
+        }
+        self.edits
+            .retain(|pending| pending.request.is_some() || !pending.completed);
+        self.retire_edits();
+        if !refused.is_empty() {
+            self.restore_published();
+            for error in refused {
+                cx.emit(ServerEditRefused(error));
+            }
+        }
     }
 
     fn restore_published(&mut self) {
@@ -667,7 +796,6 @@ impl TabView {
                 window: window.window_handle(),
                 edits: VecDeque::new(),
                 live: None,
-                split_bindings: SplitBindings::default(),
                 creation: None,
                 materialize_scheduled: false,
                 _runtime: subscription,
@@ -738,12 +866,13 @@ impl TabView {
             panes.creation = None;
         }
         let resizing = match self.resizing_split_id {
-            Some(super::SplitKey::Server(split)) => Some(panes.split_bindings.provider(split)),
+            Some(super::SplitKey::Server(split)) => {
+                SplitTarget::capture(panes.tab.arrangement(), split)
+            }
             _ => None,
         };
         let layout_before = panes.tab.arrangement().layout_revision();
         panes.published_revision = revision;
-        panes.retire_edits();
         let released = panes
             .tab
             .apply(record.clone(), arrangement.clone())
@@ -751,8 +880,10 @@ impl TabView {
         panes.published = arrangement.clone();
         panes.status = status;
         panes.reapply_edits();
-        self.resizing_split_id =
-            resizing.map(|split| super::SplitKey::Server(panes.split_bindings.display(split)));
+        panes.submit_waiting_edits(cx);
+        self.resizing_split_id = resizing
+            .and_then(|target| target.resolve(panes.tab.arrangement()))
+            .map(super::SplitKey::Server);
         let layout_changed = panes.tab.arrangement().layout_revision() != layout_before;
         let focus_moved = panes.tab.focused_pane() != focused_before;
 
@@ -817,7 +948,7 @@ impl TabView {
         let Some(pending) = panes
             .edits
             .iter_mut()
-            .find(|pending| pending.request == request)
+            .find(|pending| pending.request == Some(request))
         else {
             return;
         };
@@ -837,6 +968,15 @@ impl TabView {
             {
                 cx.emit(ServerEditRefused(error));
             }
+        }
+    }
+
+    /// Quit/save composition must wait for these local edits to reach the provider.
+    /// Request completion alone cannot flush an edit waiting for a Move allocation.
+    pub(crate) fn has_waiting_personal_edits(&self) -> bool {
+        match &self.panes {
+            Panes::Server(panes) => panes.edits.iter().any(|pending| pending.request.is_none()),
+            Panes::Local(_) => false,
         }
     }
 
@@ -904,11 +1044,12 @@ impl TabView {
             return false;
         };
         let focused_before = panes.tab.focused_pane();
-        let admitted = panes.split_bindings.provider_edit(edit);
         if !matches!(panes.tab.arrange(edit), Ok(true)) {
             return false;
         }
-        let accepted = self.send_arrangement(admitted, cx);
+        let targeted =
+            TargetedArrangementEdit::capture(edit, panes.tab.arrangement(), &panes.published);
+        let accepted = self.send_arrangement(targeted, cx);
         if accepted
             && let Panes::Server(panes) = &mut self.panes
             && panes.tab.focused_pane() != focused_before
@@ -925,7 +1066,11 @@ impl TabView {
             return;
         };
         if panes.tab.arrange(edit).is_ok() {
-            panes.live = Some(panes.split_bindings.provider_edit(edit));
+            panes.live = Some(TargetedArrangementEdit::capture(
+                edit,
+                panes.tab.arrangement(),
+                &panes.published,
+            ));
             cx.notify();
         }
     }
@@ -935,51 +1080,76 @@ impl TabView {
         let Panes::Server(panes) = &mut self.panes else {
             return;
         };
-        if let Some(edit) = panes.live.take() {
-            self.send_arrangement(edit, cx);
+        if let Some(mut live) = panes.live.take()
+            && let Some(edit) = live.resolve(panes.tab.arrangement())
+        {
+            live.edit = edit;
+            self.send_arrangement(live, cx);
         }
     }
 
-    fn send_arrangement(&mut self, edit: ArrangementEdit, cx: &mut Context<Self>) -> bool {
+    fn send_arrangement(
+        &mut self,
+        mut targeted: TargetedArrangementEdit,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let Panes::Server(panes) = &mut self.panes else {
             return false;
         };
+        let edit = targeted.edit;
+        let waits_for_allocation = targeted.needs_allocation() && panes.has_unpublished_move();
+        let submission = if waits_for_allocation {
+            Ok(None)
+        } else {
+            targeted
+                .resolve(&panes.published)
+                .ok_or(DesktopClientError::TargetGone)
+                .map(Some)
+        };
+        if let Ok(Some(edit)) = submission {
+            targeted.bind_allocation(edit);
+        }
         let replay = match edit {
             ArrangementEdit::FocusPrevious | ArrangementEdit::FocusNext => {
                 ArrangementReplay::CycleFocus(panes.tab.focused_pane())
             }
             ArrangementEdit::FocusDirection(_) => {
-                ArrangementReplay::Edit(ArrangementEdit::Focus(panes.tab.focused_pane()))
+                ArrangementReplay::Edit(TargetedArrangementEdit::capture(
+                    ArrangementEdit::Focus(panes.tab.focused_pane()),
+                    panes.tab.arrangement(),
+                    &panes.published,
+                ))
             }
             ArrangementEdit::ToggleZoom => ArrangementReplay::Zoom(panes.tab.zoom()),
-            _ => ArrangementReplay::Edit(edit),
+            _ => ArrangementReplay::Edit(targeted),
         };
         let focused_before = panes.tab.focused_pane();
-        let request = DesktopRequest::PersonalEdit(ViewEdit::Arrange {
-            workspace: panes.workspace,
-            tab: panes.tab.id(),
-            edit,
-        });
         let admission = if panes.edits.len() >= MAX_PENDING_UI_REQUESTS {
             Err(DesktopClientError::AdmissionFull)
         } else {
-            panes
-                .split_bindings
-                .provider_arrangement(panes.tab.arrangement())
-                .and_then(|result| {
-                    panes
-                        .runtime
-                        .update(cx, |runtime, cx| runtime.request(request, cx))
-                        .map(|request| (request, result))
+            submission.and_then(|edit| {
+                edit.map(|edit| {
+                    panes.runtime.update(cx, |runtime, cx| {
+                        runtime.request(
+                            DesktopRequest::PersonalEdit(ViewEdit::Arrange {
+                                workspace: panes.workspace,
+                                tab: panes.tab.id(),
+                                edit,
+                            }),
+                            cx,
+                        )
+                    })
                 })
+                .transpose()
+            })
         };
         match admission {
-            Ok((request, result)) => {
+            Ok(request) => {
                 panes.edits.push_back(PendingArrangementEdit {
                     request,
                     admitted_after: panes.published_revision,
                     replay,
-                    result,
+                    result: panes.tab.arrangement().clone(),
                     rebased: None,
                     completed: false,
                     applied: None,
@@ -1069,10 +1239,19 @@ impl TabView {
                 if panes
                     .edits
                     .iter()
-                    .any(|pending| pending.request == *request) =>
+                    .any(|pending| pending.request == Some(*request)) =>
             {
                 let focused_before = panes.tab.focused_pane();
-                panes.edits.retain(|pending| pending.request != *request);
+                let failed_move = panes.edits.iter().any(|pending| {
+                    pending.request == Some(*request)
+                        && matches!(&pending.replay, ArrangementReplay::Edit(edit) if matches!(edit.edit, ArrangementEdit::Move { .. }))
+                });
+                panes.edits.retain(|pending| {
+                    pending.request != Some(*request) && (!failed_move || pending.request.is_some())
+                });
+                if failed_move {
+                    panes.live = None;
+                }
                 panes.restore_published();
                 let focus_moved = panes.tab.focused_pane() != focused_before;
                 self.sync_terminal_focus(cx);
@@ -1088,7 +1267,7 @@ impl TabView {
                 if let Some(pending) = panes
                     .edits
                     .iter_mut()
-                    .find(|pending| pending.request == *request)
+                    .find(|pending| pending.request == Some(*request))
                 {
                     pending.completed = true;
                 }

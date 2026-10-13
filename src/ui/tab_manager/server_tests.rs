@@ -1533,6 +1533,63 @@ fn desktop_server_application_receipts_forward_to_panes_and_wait_for_their_frame
     assert!(harness.natively_focused(cx));
     assert!(harness.events().is_empty());
     assert!(harness.refused().is_empty());
+    assert!(
+        !harness
+            .manager
+            .read_with(cx, |manager, cx| manager.has_waiting_personal_edits(cx))
+    );
+}
+
+#[gpui::test]
+fn desktop_server_composed_moves_are_not_replayed_before_application_receipts(
+    cx: &mut TestAppContext,
+) {
+    let mut replica = three_tabs(A);
+    let (harness, cx) = server_manager(&replica, cx);
+    for (tab_local, position) in [(3, 1), (1, 2)] {
+        harness.manager.update(cx, |manager, cx| {
+            manager.drop_server_tab_at(tab(A, tab_local), position, cx)
+        });
+    }
+    let expected = vec![tab(A, 3), tab(A, 2), tab(A, 1)];
+    assert_eq!(harness.order(cx), expected);
+    let snapshot = replica.org.snapshot();
+    for request in harness.runtime.begun() {
+        let DesktopRequest::PersonalEdit(ViewEdit::MoveTab {
+            workspace,
+            tab,
+            position,
+        }) = request
+        else {
+            panic!("the admitted Tab move")
+        };
+        replica
+            .personal
+            .move_tab(workspace, tab, position, &snapshot)
+            .unwrap();
+    }
+    assert_eq!(replica.view(1).tab_order(), expected);
+    for _ in 0..2 {
+        harness.apply_at(&replica, 2, cx).unwrap();
+        assert_eq!(
+            harness.order(cx),
+            expected,
+            "the frame already represents the composed absolute moves"
+        );
+    }
+    for request in 0..2 {
+        harness.receipt(request, request + 1, cx);
+        harness.runtime.provider.finish(request, Ok(None));
+        cx.run_until_parked();
+    }
+    replica
+        .personal
+        .move_tab(ws(A, 1), tab(A, 3), 2, &snapshot)
+        .unwrap();
+    harness.apply_at(&replica, 3, cx).unwrap();
+    assert_eq!(harness.order(cx), vec![tab(A, 2), tab(A, 1), tab(A, 3)]);
+    assert_eq!(harness.runtime.begun().len(), 2);
+    assert!(harness.events().is_empty());
 }
 
 #[gpui::test]
