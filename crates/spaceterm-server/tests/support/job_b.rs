@@ -103,6 +103,7 @@ pub struct Authority {
     pub registered: AtomicUsize,
     pub disconnected: AtomicUsize,
     pub register_gate: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
+    pub register_entered: tokio::sync::Notify,
 }
 impl ConnectionAuthorityPort for Authority {
     fn register(
@@ -111,6 +112,7 @@ impl ConnectionAuthorityPort for Authority {
     ) -> ServerFuture<'_, Result<(), ServerFailure>> {
         Box::pin(async move {
             self.registered.fetch_add(1, Ordering::SeqCst);
+            self.register_entered.notify_one();
             self.clients
                 .lock()
                 .unwrap()

@@ -323,6 +323,21 @@ impl ServerHandle {
         })?;
         receive(result).await
     }
+    /// Preserve every ledger disposition for authenticated wire reconciliation.
+    /// Lookup never admits or executes an operation.
+    pub async fn lookup_state(
+        &self,
+        principal: VerifiedPrincipal,
+        binding: OperationBinding,
+    ) -> Result<OperationLookup, ServerFailure> {
+        let (reply, result) = oneshot::channel();
+        self.send(ActorRequest::LookupState {
+            principal,
+            binding,
+            reply,
+        })?;
+        receive(result).await
+    }
     pub async fn acknowledge(
         &self,
         principal: VerifiedPrincipal,

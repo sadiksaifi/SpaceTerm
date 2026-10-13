@@ -33,6 +33,159 @@ pub trait OrdinaryDispatchPort: Send + Sync {
         handle: ServerHandle,
     ) -> ServerFuture<'_, Result<Option<Payload>, ServerFailure>>;
 }
+/// Ordinary identified management requests share the actor's canonical codec.
+/// This adapter holds no reducer, ledger, store or runtime ownership.
+pub struct ActorOrdinaryDispatch {
+    codec: Arc<dyn spaceterm_core::operation_ledger_contracts::LedgerCodec>,
+}
+impl ActorOrdinaryDispatch {
+    pub fn new(codec: Arc<dyn spaceterm_core::operation_ledger_contracts::LedgerCodec>) -> Self {
+        Self { codec }
+    }
+}
+impl OrdinaryDispatchPort for ActorOrdinaryDispatch {
+    fn dispatch(
+        &self,
+        principal: VerifiedPrincipal,
+        payload: Payload,
+        handle: ServerHandle,
+    ) -> ServerFuture<'_, Result<Option<Payload>, ServerFailure>> {
+        Box::pin(async move {
+            use crate::api::OperationResponse;
+            use spaceterm_core::{authority::OrganizationRevision, operations::*};
+            use spaceterm_protocol::convert::{identity, operations};
+            macro_rules! profile {
+                ($message:expr, $p:ident, $major:ident) => {{
+                    let response = match $message
+                        .kind
+                        .ok_or_else(|| failure(ServerFailureClass::ScopeMismatch))?
+                    {
+                        $p::message::Kind::Operation(value) => {
+                            let request = operations::$p::decode_request(
+                                &value,
+                                principal.pairing(),
+                                principal.client(),
+                                self.codec.as_ref(),
+                            )
+                            .map_err(protocol_failure)?;
+                            let binding = request.binding();
+                            match handle.submit(principal, request).await? {
+                                OperationResponse::Completed {
+                                    binding: completed,
+                                    revision,
+                                    outcome,
+                                } => {
+                                    if completed != binding {
+                                        return Err(failure(ServerFailureClass::RecoveryRequired));
+                                    }
+                                    $p::message::Kind::Outcome(
+                                        operations::$p::encode_outcome(
+                                            binding.id, revision, &outcome,
+                                        )
+                                        .map_err(protocol_failure)?,
+                                    )
+                                }
+                                OperationResponse::Pending(pending) => {
+                                    if pending != binding {
+                                        return Err(failure(ServerFailureClass::RecoveryRequired));
+                                    }
+                                    $p::message::Kind::OperationLookupResult(
+                                        operations::$p::encode_lookup_result(
+                                            binding,
+                                            &OperationLookup::Pending,
+                                        )
+                                        .map_err(protocol_failure)?,
+                                    )
+                                }
+                                OperationResponse::Retired => {
+                                    $p::message::Kind::OperationLookupResult(
+                                        operations::$p::encode_lookup_result(
+                                            binding,
+                                            &OperationLookup::AcknowledgedRetired,
+                                        )
+                                        .map_err(protocol_failure)?,
+                                    )
+                                }
+                            }
+                        }
+                        $p::message::Kind::OperationLookupRequest(value) => {
+                            let binding = operations::$p::decode_lookup_request(
+                                &value,
+                                principal.pairing(),
+                                principal.client(),
+                            )
+                            .map_err(protocol_failure)?;
+                            let result = handle.lookup_state(principal, binding).await?;
+                            $p::message::Kind::OperationLookupResult(
+                                operations::$p::encode_lookup_result(binding, &result)
+                                    .map_err(protocol_failure)?,
+                            )
+                        }
+                        $p::message::Kind::Acknowledgement(value) => {
+                            let (stream, through) = operations::$p::decode_acknowledgement(
+                                &value,
+                                principal.pairing(),
+                                principal.client(),
+                            )
+                            .map_err(protocol_failure)?;
+                            handle.acknowledge(principal, stream, through).await?;
+                            $p::message::Kind::AcknowledgementConfirmation(
+                                $p::AcknowledgementConfirmation {
+                                    stream: Some(identity::encode_stream(stream)),
+                                    acknowledged_through: through.get(),
+                                },
+                            )
+                        }
+                        $p::message::Kind::Reconciliation(mut value) => {
+                            if value.request == 0
+                                || value.acknowledged
+                                || value.connection_generation != 0
+                                || value.grid_limits.is_some()
+                                || identity::decode_server(
+                                    value.server.as_ref().ok_or_else(|| {
+                                        failure(ServerFailureClass::ScopeMismatch)
+                                    })?,
+                                )
+                                .map_err(protocol_failure)?
+                                    != principal.server()
+                                || identity::decode_client(
+                                    value.client.as_ref().ok_or_else(|| {
+                                        failure(ServerFailureClass::ScopeMismatch)
+                                    })?,
+                                )
+                                .map_err(protocol_failure)?
+                                    != principal.client()
+                                || value.epoch != principal.epoch().get()
+                            {
+                                return Err(failure(ServerFailureClass::ScopeMismatch));
+                            }
+                            let access = handle
+                                .reconcile(
+                                    principal,
+                                    OrganizationRevision::new(value.organization_revision),
+                                )
+                                .await?;
+                            value.connection_generation = access.binding.generation.get();
+                            value.acknowledged = true;
+                            $p::message::Kind::Reconciliation(value)
+                        }
+                        // Standalone control/startup requests have no durable
+                        // operation identity. They cannot reach actor admission.
+                        _ => return Err(failure(ServerFailureClass::ScopeMismatch)),
+                    };
+                    Ok(Some(Payload::$major($p::Message {
+                        kind: Some(response),
+                    })))
+                }};
+            }
+            match payload {
+                Payload::Major1(message) => profile!(message, v1, Major1),
+                Payload::Major2(message) => profile!(message, v2, Major2),
+            }
+        })
+    }
+}
+
 /// Pairing owns this restricted policy. It receives no ServerHandle and cannot
 /// acquire an ordinary principal or dispatch terminal work through this port.
 pub trait RestrictedDispatchPort: Send + Sync {

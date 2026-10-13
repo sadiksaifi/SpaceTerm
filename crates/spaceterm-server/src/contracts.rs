@@ -16,7 +16,6 @@ use spaceterm_core::identity::{ClientId, DeviceId, PairingId, ServerId};
 use spaceterm_core::native_requests::{NativeCompletion, NativeRequest};
 use spaceterm_core::observations::{MonotonicTick, RuntimeObservationSource};
 use spaceterm_core::operations::{OperationBinding, Outcome};
-use spaceterm_core::organization::{OrganizationDelta, OrganizationSnapshot};
 use spaceterm_core::retirement::{RetirementRequest, SessionCleanupObservation};
 use spaceterm_core::runtime_authority::{
     AuthorityApplied, EffectDisposition, RuntimeAuthorityTransition, RuntimeLifecycle,
@@ -183,10 +182,9 @@ pub struct ConnectionAccessSnapshot {
 
 /// Unsigned typed egress. Queue policy cannot relabel arbitrary bytes as
 /// lifecycle traffic. Signing and envelope sequencing happen at final dequeue.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum OutboundMessage {
-    Snapshot(OrganizationSnapshot),
-    Delta(OrganizationDelta),
+    SnapshotPart(crate::publication::SnapshotPage),
     Outcome {
         binding: OperationBinding,
         revision: spaceterm_core::authority::OrganizationRevision,

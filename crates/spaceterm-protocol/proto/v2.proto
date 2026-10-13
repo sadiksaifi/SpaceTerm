@@ -96,6 +96,7 @@ message Tab {
   spaceterm.common.Entity root_pane = 3; spaceterm.common.Entity worktree = 4;
   uint64 creation_ordinal = 5;
   repeated spaceterm.common.Entity creation_replay_order = 6;
+  uint64 membership_version = 7;
 }
 enum Edge { EDGE_UNSPECIFIED = 0; LEFT = 1; RIGHT = 2; TOP = 3; BOTTOM = 4; }
 message Creation { spaceterm.common.Entity split_source = 1; Edge edge = 2; }
@@ -111,6 +112,7 @@ message Pane {
   uint64 control_generation = 13;
   ServerDirectoryValue starting_directory_value = 14;
   ServerDirectoryValue restoration_directory_value = 15;
+  optional RetainedRuntimeFailureClass runtime_failure_class = 16;
 }
 message Worktree { spaceterm.common.Entity id = 1; spaceterm.common.Entity repository = 2; string display_name = 3; Directory directory = 4; bool listed = 5; uint64 version = 6; ServerDirectoryValue directory_value = 7; bool main = 8; bool missing = 9; }
 message ServerSettings { uint64 version = 1; Directory worktree_location = 2; bool remote_access_enabled = 3; string bind_scope = 4; uint32 scrollback_rows = 5; RemoteAccessPolicy remote_access = 6; string worktree_location_template = 7; uint64 worktree_location_version = 8; }

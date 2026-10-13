@@ -305,16 +305,25 @@ impl<T: MessageTransport + 'static> PendingConnection<T> {
                 .status
                 .compare_exchange(0, 2, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
+                && timer_state.transport.close().await.is_ok()
             {
-                let _ = timer_state.transport.close().await;
                 timer_state.lease.release();
             }
+            // A failed close retains admission with native ownership. The
+            // final owner destroys the transport before the lease drops.
         });
         Self {
             state,
             deadline,
             timer,
         }
+    }
+
+    /// Constructs a native admission fixture. It is unavailable to production
+    /// composition and establishes no protocol authority.
+    #[cfg(feature = "test-support")]
+    pub fn test_fixture(transport: T, permit: OwnedSemaphorePermit, deadline: Instant) -> Self {
+        Self::new(transport, permit, deadline)
     }
 
     fn check_deadline(&self) -> Result<(), TransportError> {
@@ -325,17 +334,42 @@ impl<T: MessageTransport + 'static> PendingConnection<T> {
         }
     }
 
+    /// Joins native deadline ownership and destroys a rejected connection before
+    /// returning. A close failure remains a failure, not teardown evidence.
+    pub async fn close_joinable(mut self) -> Result<(), TransportError> {
+        self.state.lease.status.store(2, Ordering::Release);
+        self.timer.abort();
+        let _ = (&mut self.timer).await;
+        let result = self.state.transport.close().await;
+        // The timer no longer retains state. Field order drops native ownership
+        // before releasing its permit, including when close returned an error.
+        drop(self);
+        result
+    }
+
     /// Releases the admission slot after composition verifies the pinned Server and Paired Device.
     ///
     /// This operation does not verify proofs. Calling it before successful protocol
     /// authentication is a composition error; local account eligibility alone is insufficient.
     pub fn finish_authentication(self) -> Result<Arc<T>, TransportError> {
-        self.check_deadline()?;
-        self.state
-            .lease
-            .status
-            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| TransportError::HandshakeExpired)?;
+        self.finish_authentication_joinable()
+            .map_err(|_| TransportError::HandshakeExpired)
+    }
+
+    /// Finalizes readiness without losing failed connection ownership. On a
+    /// deadline race the caller must await `close` before releasing its own
+    /// admission. Native admission remains retained until transport teardown.
+    pub fn finish_authentication_joinable(self) -> Result<Arc<T>, Self> {
+        if self.check_deadline().is_err()
+            || self
+                .state
+                .lease
+                .status
+                .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+        {
+            return Err(self);
+        }
         self.state.lease.release();
         Ok(Arc::clone(&self.state.transport))
     }
@@ -374,8 +408,116 @@ impl<T: MessageTransport + 'static> MessageTransport for PendingConnection<T> {
         Box::pin(async move {
             self.state.lease.status.store(2, Ordering::Release);
             let result = self.state.transport.close().await;
-            self.state.lease.release();
+            if result.is_ok() {
+                self.state.lease.release();
+            }
             result
         })
+    }
+}
+
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+mod tests {
+    use super::*;
+    use crate::ipc::{IpcListener, IpcTransport, PrivateIpcDirectory};
+    use std::os::unix::fs::PermissionsExt;
+    use tokio::sync::Semaphore;
+
+    struct ClosingTransport {
+        native: Arc<IpcTransport>,
+        entered: Arc<Semaphore>,
+        close: Arc<Semaphore>,
+    }
+    impl MessageTransport for ClosingTransport {
+        fn peer_facts(&self) -> PeerFacts {
+            self.native.peer_facts()
+        }
+        fn send<'a>(&'a self, message: &'a [u8]) -> TransportFuture<'a, ()> {
+            self.native.send(message)
+        }
+        fn recv(&self) -> TransportFuture<'_, Option<Vec<u8>>> {
+            self.native.recv()
+        }
+        fn close(&self) -> TransportFuture<'_, ()> {
+            Box::pin(async {
+                self.entered.add_permits(1);
+                self.close.acquire().await.unwrap().forget();
+                self.native.close().await
+            })
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn readiness_deadline_race_never_releases_admission_before_native_close() {
+        let temporary = tempfile::Builder::new()
+            .prefix("st-race-")
+            .tempdir_in("/private/tmp")
+            .or_else(|_| {
+                tempfile::Builder::new()
+                    .prefix("st-race-")
+                    .tempdir_in("/tmp")
+            })
+            .unwrap();
+        std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let endpoint = PrivateIpcDirectory::open(temporary.path())
+            .unwrap()
+            .endpoint("s")
+            .unwrap();
+        let listener = IpcListener::bind(
+            endpoint.clone(),
+            MessageLimit::envelope(),
+            AdmissionLimits::new(1, Duration::from_secs(5)).unwrap(),
+        )
+        .unwrap();
+        let client = IpcTransport::connect(&endpoint, MessageLimit::envelope())
+            .await
+            .unwrap();
+        let native = listener
+            .accept()
+            .await
+            .unwrap()
+            .finish_authentication()
+            .unwrap();
+        let slots = Arc::new(Semaphore::new(1));
+        let entered = Arc::new(Semaphore::new(0));
+        let close = Arc::new(Semaphore::new(0));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let pending = PendingConnection::new(
+            ClosingTransport {
+                native,
+                entered: entered.clone(),
+                close: close.clone(),
+            },
+            slots.clone().acquire_owned().await.unwrap(),
+            deadline,
+        );
+        pending.send(&[1]).await.unwrap();
+        assert_eq!(client.recv().await.unwrap(), Some(vec![1]));
+        tokio::time::advance(Duration::from_secs(5)).await;
+        let pending = match pending.finish_authentication_joinable() {
+            Ok(_) => panic!("expired readiness must retain teardown ownership"),
+            Err(pending) => pending,
+        };
+        let task = tokio::spawn(async move { pending.close().await });
+        entered.acquire().await.unwrap().forget();
+        assert_eq!(slots.available_permits(), 0);
+        close.add_permits(2);
+        task.await.unwrap().unwrap();
+        assert_eq!(slots.available_permits(), 1);
+        assert!(client.recv().await.unwrap().is_none());
+        // One expired peer cannot permanently close either admission pool.
+        let client = IpcTransport::connect(&endpoint, MessageLimit::envelope())
+            .await
+            .unwrap();
+        let native = listener
+            .accept()
+            .await
+            .unwrap()
+            .finish_authentication()
+            .unwrap();
+        native.send(&[2]).await.unwrap();
+        assert_eq!(client.recv().await.unwrap(), Some(vec![2]));
+        native.close().await.unwrap();
+        listener.close().unwrap();
     }
 }

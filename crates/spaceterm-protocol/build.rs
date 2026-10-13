@@ -67,9 +67,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     config.compile_fds(descriptors.clone())?;
 
+    // Only startup compares a never-started Session (generation zero). Keep
+    // every running-Session descriptor strict, including fences and resources.
+    let mut admission_descriptors = descriptors.clone();
+    for file in &mut admission_descriptors.file {
+        if file.package.as_deref() == Some("spaceterm.common") {
+            let mut session = file
+                .message_type
+                .iter()
+                .find(|m| m.name() == "Session")
+                .ok_or("Session admission descriptor is absent")?
+                .clone();
+            session.name = Some("StartupSessionComparison".into());
+            let mut fence = file
+                .message_type
+                .iter()
+                .find(|m| m.name() == "EffectFence")
+                .ok_or("EffectFence admission descriptor is absent")?
+                .clone();
+            fence.name = Some("StartupFenceComparison".into());
+            fence
+                .field
+                .iter_mut()
+                .find(|f| f.name() == "session")
+                .ok_or("EffectFence Session field is absent")?
+                .type_name = Some(".spaceterm.common.StartupSessionComparison".into());
+            file.message_type.extend([session, fence]);
+        } else if matches!(
+            file.package.as_deref(),
+            Some("spaceterm.v1" | "spaceterm.v2")
+        ) {
+            let startup = file
+                .message_type
+                .iter_mut()
+                .find(|m| m.name() == "StartupIntent")
+                .ok_or("StartupIntent admission descriptor is absent")?;
+            startup
+                .field
+                .iter_mut()
+                .find(|f| f.name() == "fence")
+                .ok_or("StartupIntent fence field is absent")?
+                .type_name = Some(".spaceterm.common.StartupFenceComparison".into());
+        }
+    }
     let mut messages = BTreeMap::new();
     let mut enums = BTreeMap::new();
-    for file in &descriptors.file {
+    for file in &admission_descriptors.file {
         let package = file.package.as_deref().unwrap_or_default();
         for message in &file.message_type {
             collect_messages(&mut messages, &format!(".{package}"), message);
@@ -210,6 +253,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .filter(|field| !field.proto3_optional())
             .filter_map(|field| field.oneof_index)
             .fold(0u64, |mask, index| mask | (1 << index));
+        // Canonical directory and remote-policy values are additive alternatives
+        // to the frozen current_value oneof. Semantics validates that a value exists.
+        let required_oneofs = if message.name() == "FieldConflict" {
+            0
+        } else {
+            required_oneofs
+        };
         output.push_str(&format!("], required_oneofs: {required_oneofs} }},\n"));
     }
     output.push_str("];\n");
@@ -304,6 +354,8 @@ fn bytes_limit(message: &str, field: &str) -> usize {
 
 fn required(message: &str, field: &FieldDescriptorProto) -> bool {
     match message {
+        "StartupSessionComparison" => field.name() != "generation",
+        "StartupFenceComparison" => true,
         "Identity"
         | "Entity"
         | "Session"
@@ -415,10 +467,7 @@ fn required(message: &str, field: &FieldDescriptorProto) -> bool {
         "OperationLookupRequest" | "OperationLookupResult" => {
             matches!(field.name(), "operation" | "request_digest")
         }
-        "PublicationPart" => matches!(
-            field.name(),
-            "request" | "transfer" | "total" | "epoch" | "revision"
-        ),
+        "PublicationPart" => matches!(field.name(), "request" | "transfer" | "total" | "epoch"),
         _ => false,
     }
 }
