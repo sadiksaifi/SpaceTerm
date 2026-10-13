@@ -96,9 +96,13 @@ def build(release_tag=None):
         )
         if status.strip():
             raise TaskError("a release package requires a clean checkout")
-    environment["CARGO_BUILD_JOBS"] = "5"
+    environment["CARGO_BUILD_JOBS"] = "4"
     if os.uname().sysname == "Darwin":
         environment["MACOSX_DEPLOYMENT_TARGET"] = "26.0"
+    elif os.uname().sysname == "Linux":
+        environment["CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER"] = str(
+            ROOT / "packaging/server/linux/zig-linker.sh"
+        )
     return {
         "spaceterm-server": build_executable(
             "--release",

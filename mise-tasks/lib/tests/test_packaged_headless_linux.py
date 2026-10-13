@@ -100,7 +100,15 @@ if sys.platform == "linux":
             self.archive = self.directory / "server.tar.gz"
             self.document = metadata()
 
-        def archive_probe(self, *, document=None, check_environment=True, mutate=False):
+        def archive_probe(
+            self,
+            *,
+            document=None,
+            check_environment=True,
+            mutate=False,
+            version=None,
+            help_text="usage: spaceterm-server serve | --help",
+        ):
             document = self.document if document is None else document
             encoded = json.dumps(json.dumps(document))
             # No shell or Python enters the sandbox. The executable checks the
@@ -124,6 +132,11 @@ if sys.platform == "linux":
                 + ('fclose(fopen("/home/account/side-effect", "w"));\n' if mutate else "")
                 + 'if (argc == 2 && !strcmp(argv[1], "--distribution-metadata")) {\n'
                 + f"puts({encoded}); return 0; }}\n"
+                + 'if (argc == 2 && !strcmp(argv[1], "--help")) { '
+                + f"puts({json.dumps(help_text)}); return 0; }}\n"
+                + 'if (argc == 2 && !strcmp(argv[1], "--version")) { '
+                + f"puts({json.dumps('spaceterm-server ' + (version or document['version']))}); "
+                + "return 0; }\n"
                 + 'fputs("private native error /account/secret", stderr); return 2; }\n'
             )
             subprocess.run(
@@ -145,7 +158,7 @@ if sys.platform == "linux":
             ):
                 result = acceptance.run(self.archive, "2" * 40)
             self.assertEqual(result["classification"], "packaged-queries-passed")
-            self.assertEqual(result["queries"], 5)
+            self.assertEqual(result["queries"], 7)
             self.assertEqual(result["source_commit"], "2" * 40)
             self.assertEqual(result["metadata"], self.document)
             self.assertEqual(
@@ -154,6 +167,15 @@ if sys.platform == "linux":
             self.assertNotEqual(result["source_commit"], result["metadata"]["build_commit"])
             self.assertFalse(result["service_lifecycle_tested"])
             self.assertFalse(result["runtime_readiness_tested"])
+
+        def test_packaged_queries_must_match_version_and_usage(self):
+            for changes in ({"version": "9.9.9"}, {"help_text": "unrelated command usage"}):
+                with self.subTest(changes=changes):
+                    for path in (self.archive, self.root / "installation.json"):
+                        path.unlink(missing_ok=True)
+                    self.archive_probe(**changes)
+                    with self.assertRaisesRegex(TaskError, "packaged-query-mismatch"):
+                        acceptance.run(self.archive, "2" * 40)
 
         def test_packaged_metadata_mismatch_fails_without_relaying_native_output(self):
             changed = {**self.document, "build_commit": "3" * 40}
