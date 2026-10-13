@@ -6,7 +6,9 @@ use std::time::{Duration, Instant};
 
 use super::*;
 use crate::domain::{LocalDirectoryIdentity, RemoteDirectory, SshDestination};
-use crate::platform::native_pty::{NativePtyAdapter, NativePtyAdapterParts, NativePtyTermination};
+use crate::platform::native_pty::{
+    NativePtyAdapter, NativePtyAdapterParts, NativePtySettlement, NativePtyTermination,
+};
 use crate::ssh::command::{
     RemotePaneShellCommandBuilder, ValidatedRemoteLoginShell, ValidatedRemoteShellCommand,
 };
@@ -19,6 +21,7 @@ fn native_terminal_session_factory() -> NativeTerminalSessionFactory {
     NativeTerminalSessionFactory::new(
         Arc::new(RecordingSessionAdapterFactory {
             constructions: mpsc::channel().0,
+            settlement: NativePtySettlement::Unavailable,
         }),
         test_launch_planner(),
         LocalFilesystemAuthority::testing(),
@@ -521,6 +524,17 @@ struct RecordedPreparedShellLaunch {
 
 struct RecordingSessionAdapterFactory {
     constructions: mpsc::Sender<RecordedPreparedShellLaunch>,
+    settlement: NativePtySettlement,
+}
+
+struct ReceiptNativePtyTermination(NativePtySettlement);
+impl NativePtyTermination for ReceiptNativePtyTermination {
+    fn request_termination(&self) -> io::Result<()> {
+        Ok(())
+    }
+    fn settle(&self) -> NativePtySettlement {
+        self.0
+    }
 }
 
 impl NativePtyAdapterFactory for RecordingSessionAdapterFactory {
@@ -555,7 +569,7 @@ impl NativePtyAdapterFactory for RecordingSessionAdapterFactory {
                 wait_times_out: false,
                 exit_code: 0,
             }),
-            termination: Arc::new(NoopNativePtyTermination),
+            termination: Arc::new(ReceiptNativePtyTermination(self.settlement)),
         })
     }
 }
@@ -567,7 +581,10 @@ fn recording_native_terminal_session_factory() -> (
     let (constructions, observed) = mpsc::channel();
     (
         NativeTerminalSessionFactory::new(
-            Arc::new(RecordingSessionAdapterFactory { constructions }),
+            Arc::new(RecordingSessionAdapterFactory {
+                constructions,
+                settlement: NativePtySettlement::Unavailable,
+            }),
             test_launch_planner(),
             LocalFilesystemAuthority::testing(),
             crate::terminal::metadata::LocalMachine::new(None, Some("fixture.test"), None),
@@ -5230,11 +5247,162 @@ fn legacy_child_exit_does_not_confirm_process_session_cleanup() {
 }
 
 #[test]
+fn legacy_bridge_repeated_cleanup_releases_shared_factory_capacity() {
+    let runtime_factory = LegacyRuntimeFactory::new(RuntimeLimits::default()).unwrap();
+    let (constructions, observed) = mpsc::channel();
+    let adapter_factory = Arc::new(RecordingSessionAdapterFactory {
+        constructions,
+        settlement: NativePtySettlement::Settled,
+    });
+    for _ in 0..80 {
+        let adapter_factory = Arc::clone(&adapter_factory);
+        let (commands, _receiver) = runtime_factory.command_channel();
+        let owner = runtime_factory
+            .start(
+                runtime_bridge::runtime_size(pty_size(test_geometry())),
+                move |runtime| {
+                    let pty = CompatibilityPty::start(
+                        &runtime,
+                        adapter_factory.as_ref(),
+                        PreparedShellLaunch::for_test(std::env::temp_dir()),
+                        commands,
+                        Arc::new(ClipboardAuthority::default()),
+                    )?;
+                    drop(pty);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        let completion = owner.join().unwrap();
+        completion.result.unwrap();
+        assert_eq!(
+            completion.cleanup,
+            spaceterm_core::retirement::CleanupResult::Confirmed(
+                spaceterm_core::retirement::ConfirmedCleanupClass::ReapedAndReleased,
+            )
+        );
+        observed.recv_timeout(Duration::from_secs(1)).unwrap();
+    }
+}
+
+#[cfg(feature = "native-tests")]
+#[test]
+fn native_legacy_bridge_repeated_cleanup_releases_shared_factory_capacity() {
+    use spaceterm_host::pty::native_fixture::{NativePtyFixture, isolate};
+    if isolate(
+        "terminal::session::tests::native_legacy_bridge_repeated_cleanup_releases_shared_factory_capacity",
+    ) {
+        return;
+    }
+    let factory = LegacyRuntimeFactory::new(RuntimeLimits::default()).unwrap();
+    let fixture = NativePtyFixture::new();
+    let resources = crate::terminal::testing::ShellResourcesFixture::new();
+    for _ in 0..70 {
+        let adapter = fixture.factory();
+        let launch = fixture.shell_launch(resources.path());
+        let (commands, _receiver) = factory.command_channel();
+        let owner = factory
+            .start(
+                runtime_bridge::runtime_size(pty_size(test_geometry())),
+                move |runtime| {
+                    let pty = CompatibilityPty::start(
+                        &runtime,
+                        adapter.as_ref(),
+                        launch,
+                        commands,
+                        Arc::new(ClipboardAuthority::default()),
+                    )?;
+                    drop(pty);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        let completion = owner.join().unwrap();
+        completion.result.unwrap();
+        assert_eq!(
+            completion.cleanup,
+            spaceterm_core::retirement::CleanupResult::Confirmed(
+                spaceterm_core::retirement::ConfirmedCleanupClass::ReapedAndReleased,
+            )
+        );
+    }
+}
+
+#[cfg(feature = "native-tests")]
+#[test]
+fn native_legacy_bridge_exited_leader_hup_resistant_descendant_cleanup_failure() {
+    use spaceterm_host::pty::native_fixture::{NativePtyFixture, isolate};
+    if isolate(
+        "terminal::session::tests::native_legacy_bridge_exited_leader_hup_resistant_descendant_cleanup_failure",
+    ) {
+        return;
+    }
+    let factory = LegacyRuntimeFactory::new(RuntimeLimits {
+        owners: 1,
+        ..Default::default()
+    })
+    .unwrap();
+    let fixture = NativePtyFixture::new();
+    let adapter = fixture.factory();
+    let resources = crate::terminal::testing::ShellResourcesFixture::new();
+    let directory = resources.path().to_owned();
+    let launch = fixture.exited_leader_launch(&directory);
+    let (commands, _receiver) = factory.command_channel();
+    let (observed, observation) = mpsc::sync_channel(1);
+    let driver_fixture = fixture.clone();
+    let owner = factory
+        .start(
+            runtime_bridge::runtime_size(pty_size(test_geometry())),
+            move |runtime| {
+                let mut pty = CompatibilityPty::start(
+                    &runtime,
+                    adapter.as_ref(),
+                    launch,
+                    commands,
+                    Arc::new(ClipboardAuthority::default()),
+                )?;
+                assert_eq!(
+                    pty.wait_for_exit(Duration::from_secs(3)).unwrap(),
+                    NativePtyExit::Success
+                );
+                let child = driver_fixture.descendant(&directory);
+                assert!(driver_fixture.is_alive(child));
+                observed.send(child).unwrap();
+                driver_fixture.deny_settlement_inspection();
+                drop(pty);
+                Ok(())
+            },
+        )
+        .unwrap();
+    let child = observation.recv_timeout(Duration::from_secs(4)).unwrap();
+    let completion = owner.join().unwrap();
+    completion.result.unwrap();
+    assert_eq!(
+        completion.cleanup,
+        spaceterm_core::retirement::CleanupResult::Failed(
+            spaceterm_core::organization::FailureClass::RuntimeUnavailable,
+        )
+    );
+    assert!(
+        !fixture.is_alive(child),
+        "best-effort escalation must still stop the real descendant"
+    );
+    assert!(
+        matches!(factory.start(runtime_bridge::runtime_size(pty_size(test_geometry())), |_| {
+        panic!("unconfirmed settlement must reject before launch")
+    }), Err(error) if error.class == spaceterm_core::organization::FailureClass::ResourceLimit)
+    );
+}
+
+#[test]
 fn legacy_bridge_missing_cleanup_receipts_quarantine_shared_factory_capacity() {
     let runtime_factory = LegacyRuntimeFactory::new(RuntimeLimits::default()).unwrap();
     // Keep the observation receiver alive while each native boundary is exercised.
     let (constructions, observed) = mpsc::channel();
-    let adapter_factory = Arc::new(RecordingSessionAdapterFactory { constructions });
+    let adapter_factory = Arc::new(RecordingSessionAdapterFactory {
+        constructions,
+        settlement: NativePtySettlement::Unavailable,
+    });
     for _ in 0..64 {
         let adapter_factory = adapter_factory.clone();
         let (commands, _receiver) = runtime_factory.command_channel();

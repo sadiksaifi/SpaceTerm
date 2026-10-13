@@ -19,8 +19,8 @@ use thiserror::Error;
 
 use crate::pty::native_pty::{
     NativePtyAdapter, NativePtyAdapterConstructionFailure, NativePtyAdapterFactory,
-    NativePtyAdapterParts, NativePtyExit, NativePtyOperationFailure, NativePtySize,
-    NativePtyTermination, NativePtyWaitFailure,
+    NativePtyAdapterParts, NativePtyExit, NativePtyOperationFailure, NativePtySettlement,
+    NativePtySize, NativePtyTermination, NativePtyWaitFailure,
 };
 use crate::shell_launch::PreparedShellLaunch;
 #[cfg(all(test, feature = "native-tests"))]
@@ -28,6 +28,7 @@ use crate::shell_launch::ShellLaunchPlanner;
 
 const CHILD_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
+const TERM_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
 const FORCED_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
 // Real PTY cases fork nested test executables and login shells while asserting subsecond process-
 // group cleanup. Serial execution keeps those OS-backed cases independent of runner scheduling.
@@ -98,6 +99,29 @@ pub trait UnixPtyHost: Send + Sync + 'static {
     /// Observe one live process. Returns `None` for a missing, exited, or unstable process.
     fn observe_process(&self, process: i32) -> Option<ProcessObservation>;
 
+    /// Inspect a process for settlement. Missing processes are not inspection failures.
+    /// Unlike live observations, exited but unreaped members must remain visible.
+    fn inspect_process(&self, _process: i32) -> io::Result<Option<ProcessObservation>> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+
+    /// Capture an optional monotonic birth ordinal without changing native start identity.
+    fn process_birth(&self, _process: i32) -> io::Result<Option<u64>> {
+        Ok(None)
+    }
+
+    /// Inspect membership in the isolated session created by this leader.
+    fn inspect_session_member(
+        &self,
+        process: i32,
+        leader: ProcessIdentity,
+        _leader_birth: Option<u64>,
+    ) -> io::Result<Option<ProcessObservation>> {
+        self.inspect_process(process).map(|observation| {
+            observation.filter(|observation| observation.session == leader.process)
+        })
+    }
+
     /// Capture the identity of a child this owner just spawned and has not reaped. A child may
     /// already have exited before the parent runs again, while its process identity is retained.
     fn observe_spawned_child(&self, process: i32) -> Option<ProcessObservation> {
@@ -107,8 +131,40 @@ pub trait UnixPtyHost: Send + Sync + 'static {
     /// List every process identifier currently visible to this user.
     fn process_ids(&self) -> io::Result<Vec<i32>>;
 
+    /// Fence a settlement census with a global, monotonic process-creation observation.
+    /// Providers that cannot prove a fork-free census leave settlement unavailable.
+    fn process_creation_epoch(&self) -> io::Result<ProcessCreationEpoch> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+
+    /// Enumerate processes for an absence proof, including a check for unpublished births.
+    fn settlement_process_ids(&self) -> io::Result<Vec<i32>> {
+        self.process_ids()
+    }
+
     /// Classify an output read failure as hangup or failure.
     fn master_read_error(&self, error: &io::Error) -> MasterReadError;
+}
+
+/// Native evidence that no process was created during a complete settlement census.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcessCreationEpoch {
+    /// The kernel's cumulative count of published forks, including threads.
+    ForkCount(u64),
+    /// The permanent birth ordinal of a newly created and reaped fence process.
+    FenceBirth(u64),
+}
+
+impl ProcessCreationEpoch {
+    fn no_intervening_fork(self, after: Self) -> bool {
+        match (self, after) {
+            (Self::ForkCount(before), Self::ForkCount(after)) => before == after,
+            (Self::FenceBirth(before), Self::FenceBirth(after)) => {
+                before.checked_add(1) == Some(after)
+            }
+            _ => false,
+        }
+    }
 }
 
 /// How the shared PTY reader treats an Operating-System read failure on the PTY master.
@@ -142,6 +198,7 @@ pub struct ProcessIdentity {
 struct ProcessSessionIdentity {
     session: i32,
     leader: ProcessIdentity,
+    birth: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -222,6 +279,28 @@ struct ChildTermination {
     target: Mutex<Option<TerminationTarget>>,
     requested: AtomicBool,
     forced: AtomicBool,
+    child: Arc<Mutex<ChildState>>,
+    settlement: Mutex<Option<NativePtySettlement>>,
+}
+
+struct ChildState {
+    child: Option<Box<dyn Child + Send + Sync>>,
+    exit: Option<ExitStatus>,
+}
+
+impl ChildState {
+    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        if let Some(status) = &self.exit {
+            return Ok(Some(status.clone()));
+        }
+        let child = self.child.as_mut().ok_or_else(child_already_reaped_error)?;
+        let status = child.try_wait()?;
+        if let Some(status) = &status {
+            self.exit = Some(status.clone());
+            self.child.take();
+        }
+        Ok(status)
+    }
 }
 
 impl ChildTermination {
@@ -230,6 +309,7 @@ impl ChildTermination {
         host: Arc<dyn UnixPtyHost>,
         process_group: Option<i32>,
         fallback: Box<dyn ChildKiller + Send + Sync>,
+        child: Arc<Mutex<ChildState>>,
     ) -> Self {
         Self {
             target: Mutex::new(Some(TerminationTarget {
@@ -240,6 +320,8 @@ impl ChildTermination {
             })),
             requested: AtomicBool::new(false),
             forced: AtomicBool::new(false),
+            child,
+            settlement: Mutex::new(None),
         }
     }
 
@@ -248,6 +330,7 @@ impl ChildTermination {
         process_group: i32,
         session: ProcessSessionIdentity,
         fallback: Box<dyn ChildKiller + Send + Sync>,
+        child: Arc<Mutex<ChildState>>,
     ) -> Self {
         Self {
             target: Mutex::new(Some(TerminationTarget {
@@ -258,6 +341,8 @@ impl ChildTermination {
             })),
             requested: AtomicBool::new(false),
             forced: AtomicBool::new(false),
+            child,
+            settlement: Mutex::new(None),
         }
     }
 
@@ -345,6 +430,122 @@ impl ChildTermination {
         Ok(ShutdownDisposition::Forced)
     }
 
+    fn settle(&self) -> NativePtySettlement {
+        let Ok(mut receipt) = self.settlement.lock() else {
+            return NativePtySettlement::Unavailable;
+        };
+        if let Some(receipt) = *receipt {
+            return receipt;
+        }
+        let result = self.settle_once();
+
+        *receipt = Some(result);
+        result
+    }
+
+    fn settle_once(&self) -> NativePtySettlement {
+        let mut unavailable = self.signal().is_err();
+        let mut retained_groups = BTreeMap::<i32, Vec<ProcessIdentity>>::new();
+        // One caller owns escalation. Other callers join the same retained result.
+        for (signal, timeout) in [
+            (libc::SIGHUP, GRACEFUL_SHUTDOWN_TIMEOUT),
+            (libc::SIGTERM, TERM_SHUTDOWN_TIMEOUT),
+            (libc::SIGKILL, FORCED_SHUTDOWN_TIMEOUT),
+        ] {
+            if signal != libc::SIGHUP {
+                let Ok(mut target) = self.target.lock() else {
+                    return NativePtySettlement::Unavailable;
+                };
+                let Some(target) = target.as_mut() else {
+                    return NativePtySettlement::Unavailable;
+                };
+                unavailable |= target.signal_owned_process_groups(signal).is_err();
+                self.forced.store(true, Ordering::Release);
+            }
+            let deadline = Instant::now() + timeout;
+            loop {
+                let reaped = match self.child.lock() {
+                    Ok(mut child) => match child.try_wait() {
+                        Ok(status) => status.is_some(),
+                        Err(_) => {
+                            unavailable = true;
+                            false
+                        }
+                    },
+                    Err(_) => return NativePtySettlement::Unavailable,
+                };
+                let Ok(mut target_slot) = self.target.lock() else {
+                    return NativePtySettlement::Unavailable;
+                };
+                let Some(target) = target_slot.as_ref() else {
+                    return NativePtySettlement::Unavailable;
+                };
+                let Some(session) = target.session else {
+                    return NativePtySettlement::Unavailable;
+                };
+                match inspected_process_groups_in_session(target.host.as_ref(), &session) {
+                    Ok(groups) => {
+                        let census_empty = groups.is_empty();
+                        // Keep secondary groups across parent/child handoffs. A vanished
+                        // member is not proof that its group, or the session, is empty.
+                        retained_groups.extend(groups);
+                        let mut groups_absent = true;
+                        for (&group, members) in &retained_groups {
+                            match process_group_is_alive(group) {
+                                Ok(false) => {}
+                                Ok(true) => {
+                                    groups_absent = false;
+                                    unavailable |= signal_owned_process_group(
+                                        target.host.as_ref(),
+                                        group,
+                                        members,
+                                        &session,
+                                        signal,
+                                    )
+                                    .is_err();
+                                }
+                                Err(_) => {
+                                    groups_absent = false;
+                                    unavailable = true;
+                                }
+                            }
+                        }
+                        if reaped && census_empty && groups_absent {
+                            match target.process_group.map(process_group_is_alive).transpose() {
+                                Ok(Some(false)) => {
+                                    match confirmed_session_absence(target.host.as_ref(), &session)
+                                    {
+                                        Ok(true) => {
+                                            // Revoke authority only after the fork-fenced absence proof.
+                                            target_slot.take();
+                                            return NativePtySettlement::Settled;
+                                        }
+                                        Ok(false) => {}
+                                        Err(_) => unavailable = true,
+                                    }
+                                }
+                                Ok(_) => {}
+                                Err(_) => unavailable = true,
+                            }
+                        }
+                    }
+                    Err(_) => unavailable = true,
+                }
+                drop(target_slot);
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                thread::sleep(CHILD_EXIT_POLL_INTERVAL.min(remaining));
+            }
+        }
+        if unavailable {
+            NativePtySettlement::Unavailable
+        } else {
+            NativePtySettlement::StillRunning
+        }
+    }
+
     fn requested(&self) -> bool {
         self.requested.load(Ordering::Acquire)
     }
@@ -380,6 +581,13 @@ fn process_groups_in_session(
     host: &dyn UnixPtyHost,
     session: &ProcessSessionIdentity,
 ) -> io::Result<BTreeMap<i32, Vec<ProcessIdentity>>> {
+    if let Some(birth) = session.birth
+        && host
+            .process_birth(session.session)?
+            .is_some_and(|current| current != birth)
+    {
+        return Ok(BTreeMap::new());
+    }
     let leader = host.observe_process(session.session);
     if leader.is_some_and(|leader| {
         leader.identity != session.leader || leader.session != session.session
@@ -405,6 +613,74 @@ fn process_groups_in_session(
             .push(observation.identity);
     }
     Ok(process_groups)
+}
+
+fn inspected_process_groups_in_session(
+    host: &dyn UnixPtyHost,
+    session: &ProcessSessionIdentity,
+) -> io::Result<BTreeMap<i32, Vec<ProcessIdentity>>> {
+    if let Some(birth) = session.birth
+        && host
+            .process_birth(session.session)?
+            .is_some_and(|current| current != birth)
+    {
+        return Ok(BTreeMap::new());
+    }
+    if host
+        .inspect_process(session.session)?
+        .is_some_and(|leader| {
+            leader.identity != session.leader || leader.session != session.session
+        })
+    {
+        // A session identifier cannot be reused while the old session has members.
+        return Ok(BTreeMap::new());
+    }
+    let mut groups = BTreeMap::<_, Vec<_>>::new();
+    for process in host
+        .process_ids()?
+        .into_iter()
+        .filter(|process| *process > 0)
+    {
+        let Some(observation) =
+            host.inspect_session_member(process, session.leader, session.birth)?
+        else {
+            continue;
+        };
+        if observation.session == session.session {
+            groups
+                .entry(observation.process_group)
+                .or_default()
+                .push(observation.identity);
+        }
+    }
+    Ok(groups)
+}
+
+fn confirmed_session_absence(
+    host: &dyn UnixPtyHost,
+    session: &ProcessSessionIdentity,
+) -> io::Result<bool> {
+    let before = host.process_creation_epoch()?;
+    for process in host
+        .settlement_process_ids()?
+        .into_iter()
+        .filter(|pid| *pid > 0)
+    {
+        if host
+            .inspect_session_member(process, session.leader, session.birth)?
+            .is_some()
+        {
+            return Ok(false);
+        }
+    }
+    let after = host.process_creation_epoch()?;
+    // Existing processes cannot join an existing session. With a complete census
+    // and no intervening fork, an unseen replacement cannot inherit this session.
+    if before.no_intervening_fork(after) {
+        Ok(true)
+    } else {
+        Err(io::ErrorKind::WouldBlock.into())
+    }
 }
 
 fn signal_owned_process_group(
@@ -466,7 +742,7 @@ struct SpawnedPty {
     master: Box<dyn MasterPty + Send>,
     reader: Option<Box<dyn Read + Send>>,
     writer: Box<dyn Write + Send>,
-    child: Option<Box<dyn Child + Send + Sync>>,
+    child: Arc<Mutex<ChildState>>,
     termination: Arc<ChildTermination>,
 }
 
@@ -522,9 +798,26 @@ impl SpawnedPty {
         let deadline = Instant::now() + timeout;
         loop {
             if let Some(status) = self.try_wait_for_child()? {
-                let shutdown = self
+                let shutdown = if self
                     .termination
-                    .complete_process_group(Instant::now() + GRACEFUL_SHUTDOWN_TIMEOUT)?;
+                    .lock_target()
+                    .as_ref()
+                    .is_some_and(|target| target.session.is_some())
+                {
+                    if self.termination.requested() {
+                        let _ = self.termination.settle();
+                    }
+                    if !self.termination.requested() {
+                        ShutdownDisposition::NotRequested
+                    } else if self.termination.forced.load(Ordering::Acquire) {
+                        ShutdownDisposition::Forced
+                    } else {
+                        ShutdownDisposition::Graceful
+                    }
+                } else {
+                    self.termination
+                        .complete_process_group(Instant::now() + GRACEFUL_SHUTDOWN_TIMEOUT)?
+                };
                 return Ok(ShellExit { status, shutdown });
             }
 
@@ -543,18 +836,26 @@ impl SpawnedPty {
     }
 
     fn try_wait_for_child(&mut self) -> io::Result<Option<ExitStatus>> {
-        let Some(child) = self.child.as_mut() else {
-            return Err(child_already_reaped_error());
-        };
-        let status = child.try_wait()?;
-        if status.is_some() {
-            self.child.take();
-        }
-        Ok(status)
+        self.child
+            .lock()
+            .map_err(|_| io::ErrorKind::Other)?
+            .try_wait()
     }
 
     fn cleanup_child(&mut self) {
-        let child = self.child.take();
+        if self
+            .termination
+            .lock_target()
+            .as_ref()
+            .is_some_and(|target| target.session.is_some())
+        {
+            let _ = self.termination.settle();
+            return;
+        }
+        let child = match self.child.lock() {
+            Ok(mut child) => child.child.take(),
+            Err(_) => return,
+        };
         let Some(mut child) = child else {
             if self.termination.requested()
                 && let Err(error) = self
@@ -770,6 +1071,10 @@ impl NativePtyTermination for PtyTerminator {
     fn request_termination(&self) -> io::Result<()> {
         self.terminate()
     }
+
+    fn settle(&self) -> NativePtySettlement {
+        self.termination.settle()
+    }
 }
 
 impl Drop for SpawnedPty {
@@ -938,12 +1243,19 @@ fn spawn_command_in_pty(
     let session = ProcessSessionIdentity {
         session: observation.session,
         leader: observation.identity,
+        birth: host.process_birth(process_group).ok().flatten(),
     };
+    let fallback = child.clone_killer();
+    let child = Arc::new(Mutex::new(ChildState {
+        child: Some(child),
+        exit: None,
+    }));
     let termination = Arc::new(ChildTermination::new_with_session(
         host,
         process_group,
         session,
-        child.clone_killer(),
+        fallback,
+        Arc::clone(&child),
     ));
     let terminator = PtyTerminator::new(Arc::clone(&termination));
 
@@ -952,7 +1264,7 @@ fn spawn_command_in_pty(
             master: pair.master,
             reader: Some(Box::new(reader)),
             writer,
-            child: Some(child),
+            child,
             termination,
         },
         terminator,
@@ -1206,15 +1518,15 @@ mod tests {
         command.args(["-c", "stty raw -echo; printf 'READY'; exec sleep 30"]);
         let (mut pty, terminator) =
             spawn_command_in_pty(test_host(), PtySize::default(), command).unwrap();
-        // Unblock an accidentally blocking writer so this regression can fail without hanging.
+        let mut reader = pty.take_reader().unwrap();
+        read_output_marker(&mut reader, b"READY");
+        // Bound the write, not shell startup under a loaded native test runner.
         let (cancel, rescue) = mpsc::channel();
         let watchdog = thread::spawn(move || {
             if rescue.recv_timeout(Duration::from_secs(1)).is_err() {
                 terminator.terminate().unwrap();
             }
         });
-        let mut reader = pty.take_reader().unwrap();
-        read_output_marker(&mut reader, b"READY");
         let result = pty.write_all(&vec![b'x'; 1024 * 1024]);
         let _ = cancel.send(());
         watchdog.join().unwrap();
@@ -1419,6 +1731,344 @@ mod tests {
             ),
             (true, true, "first", "second")
         );
+    }
+
+    struct CensusHandoffHost {
+        native: Arc<dyn UnixPtyHost>,
+        inspecting: AtomicBool,
+        handoff: Mutex<Option<(i32, std::path::PathBuf, std::path::PathBuf)>>,
+    }
+
+    impl UnixPtyHost for CensusHandoffHost {
+        fn observe_process(&self, process: i32) -> Option<ProcessObservation> {
+            self.native.observe_process(process)
+        }
+        fn observe_spawned_child(&self, process: i32) -> Option<ProcessObservation> {
+            self.native.observe_spawned_child(process)
+        }
+        fn inspect_process(&self, process: i32) -> io::Result<Option<ProcessObservation>> {
+            self.inspecting.store(true, Ordering::Release);
+            self.native.inspect_process(process)
+        }
+        fn process_birth(&self, process: i32) -> io::Result<Option<u64>> {
+            self.native.process_birth(process)
+        }
+        fn inspect_session_member(
+            &self,
+            process: i32,
+            leader: ProcessIdentity,
+            birth: Option<u64>,
+        ) -> io::Result<Option<ProcessObservation>> {
+            self.native.inspect_session_member(process, leader, birth)
+        }
+        fn process_ids(&self) -> io::Result<Vec<i32>> {
+            let ids = self.native.process_ids()?;
+            if self.inspecting.load(Ordering::Acquire)
+                && let Some((parent, barrier, replacement)) = self.handoff.lock().unwrap().take()
+            {
+                assert!(ids.contains(&parent));
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(barrier)
+                    .unwrap()
+                    .write_all(b"fork\n")
+                    .unwrap();
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while self.native.inspect_process(parent)?.is_some() || !replacement.exists() {
+                    assert!(Instant::now() < deadline, "handoff did not finish");
+                    thread::sleep(Duration::from_millis(1));
+                }
+            }
+            Ok(ids)
+        }
+        fn process_creation_epoch(&self) -> io::Result<ProcessCreationEpoch> {
+            self.native.process_creation_epoch()
+        }
+        fn settlement_process_ids(&self) -> io::Result<Vec<i32>> {
+            self.native.settlement_process_ids()
+        }
+        fn master_read_error(&self, error: &io::Error) -> MasterReadError {
+            self.native.master_read_error(error)
+        }
+    }
+
+    #[test]
+    fn session_census_fork_after_enumeration_cannot_confirm_a_live_replacement() {
+        let _isolation = lock_real_pty_test();
+        if isolate_real_pty_test(
+            "pty::unix_pty::tests::session_census_fork_after_enumeration_cannot_confirm_a_live_replacement",
+        ) {
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let barrier = directory.path().join("barrier");
+        let ready = directory.path().join("ready");
+        let parent_file = directory.path().join("parent");
+        let replacement = directory.path().join("replacement");
+        let fifo = CString::new(barrier.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: fifo is a NUL-terminated path in this test's private directory.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        let secondary = directory.path().join("secondary");
+        std::fs::write(
+            &secondary,
+            format!(
+                "trap '' HUP TERM\nexec </dev/null >/dev/null 2>&1\necho ready > '{}'\nread token < '{}'\n/bin/sh -c 'trap \"\" HUP TERM; echo $$ > \"{}\"; exec sleep 30' &\nexit 0\n",
+                ready.display(), barrier.display(), replacement.display()
+            ),
+        )
+        .unwrap();
+        let native = test_host();
+        let host = Arc::new(CensusHandoffHost {
+            native: Arc::clone(&native),
+            inspecting: AtomicBool::new(false),
+            handoff: Mutex::new(None),
+        });
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            &format!(
+                "trap '' HUP\nset -m\n/bin/sh '{}' &\necho $! > '{}'\nwhile [ ! -f '{}' ]; do sleep 0.01; done\necho ready\nexit 0\n",
+                secondary.display(), parent_file.display(), ready.display()
+            ),
+        ]);
+        let (mut pty, terminator) =
+            spawn_command_in_pty(host.clone(), PtySize::default(), command).unwrap();
+        let leader = pty
+            .termination
+            .lock_target()
+            .as_ref()
+            .unwrap()
+            .session
+            .unwrap();
+        let mut reader = BufReader::new(pty.take_reader().unwrap());
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        assert_eq!(line.trim(), "ready");
+        // Reap through the shared child state before admitting the census handoff.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while pty.child.lock().unwrap().try_wait().unwrap().is_none() {
+            assert!(Instant::now() < deadline, "leader did not exit");
+            thread::sleep(Duration::from_millis(1));
+        }
+        let parent = std::fs::read_to_string(parent_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let member = native.observe_process(parent).unwrap();
+        assert_eq!(member.session, leader.session);
+        assert_ne!(
+            member.process_group, leader.session,
+            "the handoff must use a secondary group"
+        );
+        *host.handoff.lock().unwrap() = Some((parent, barrier, replacement.clone()));
+
+        let receipt = terminator.settle();
+        let replacement: i32 = std::fs::read_to_string(replacement)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let survivor = native.observe_process(replacement);
+        if let Some(survivor) = survivor {
+            assert_eq!(survivor.session, leader.session);
+            // Clean up this exact observed fixture before asserting, including on RED.
+            if native.observe_process(replacement) == Some(survivor) {
+                // SAFETY: the stable observed member belongs to this test's owned session.
+                unsafe { libc::kill(replacement, libc::SIGKILL) };
+            }
+        }
+        assert!(
+            receipt != NativePtySettlement::Settled || survivor.is_none(),
+            "a replacement born after enumeration survived a Settled receipt"
+        );
+    }
+
+    struct SettlementHost {
+        outcome: NativePtySettlement,
+        leader: ProcessIdentity,
+    }
+
+    impl UnixPtyHost for SettlementHost {
+        fn observe_process(&self, _process: i32) -> Option<ProcessObservation> {
+            None
+        }
+        fn inspect_process(&self, process: i32) -> io::Result<Option<ProcessObservation>> {
+            match self.outcome {
+                NativePtySettlement::Unavailable => Err(io::ErrorKind::PermissionDenied.into()),
+                NativePtySettlement::Settled => Ok(None),
+                NativePtySettlement::StillRunning => Ok(Some(ProcessObservation {
+                    identity: ProcessIdentity {
+                        process,
+                        start: self.leader.start,
+                    },
+                    process_group: self.leader.process,
+                    session: self.leader.process,
+                })),
+            }
+        }
+        fn process_ids(&self) -> io::Result<Vec<i32>> {
+            Ok(vec![self.leader.process])
+        }
+        fn process_creation_epoch(&self) -> io::Result<ProcessCreationEpoch> {
+            Ok(ProcessCreationEpoch::ForkCount(0))
+        }
+        fn master_read_error(&self, _error: &io::Error) -> MasterReadError {
+            MasterReadError::Failure
+        }
+    }
+
+    struct UnstableCensusHost {
+        epochs: [ProcessCreationEpoch; 2],
+        queries: AtomicUsize,
+        incomplete: bool,
+    }
+
+    impl UnixPtyHost for UnstableCensusHost {
+        fn observe_process(&self, _process: i32) -> Option<ProcessObservation> {
+            None
+        }
+        fn inspect_process(&self, _process: i32) -> io::Result<Option<ProcessObservation>> {
+            Ok(None)
+        }
+        fn process_ids(&self) -> io::Result<Vec<i32>> {
+            Ok(Vec::new())
+        }
+        fn settlement_process_ids(&self) -> io::Result<Vec<i32>> {
+            if self.incomplete {
+                Err(io::ErrorKind::WouldBlock.into())
+            } else {
+                self.process_ids()
+            }
+        }
+        fn process_creation_epoch(&self) -> io::Result<ProcessCreationEpoch> {
+            Ok(self.epochs[self.queries.fetch_add(1, Ordering::Relaxed) % 2])
+        }
+        fn master_read_error(&self, _error: &io::Error) -> MasterReadError {
+            MasterReadError::Failure
+        }
+    }
+
+    #[test]
+    fn settlement_rejects_empty_censuses_with_forks_or_unpublished_members() {
+        for (epochs, incomplete) in [
+            (
+                [
+                    ProcessCreationEpoch::ForkCount(1),
+                    ProcessCreationEpoch::ForkCount(2),
+                ],
+                false,
+            ),
+            (
+                [
+                    ProcessCreationEpoch::FenceBirth(1),
+                    ProcessCreationEpoch::FenceBirth(3),
+                ],
+                false,
+            ),
+            (
+                [
+                    ProcessCreationEpoch::FenceBirth(1),
+                    ProcessCreationEpoch::FenceBirth(2),
+                ],
+                true,
+            ),
+        ] {
+            let leader = ProcessIdentity {
+                process: i32::MAX,
+                start: ProcessStart { coarse: 1, fine: 0 },
+            };
+            let child: Box<dyn Child + Send + Sync> = Box::new(ExitedChild {
+                cleanup: CleanupCounts::default(),
+            });
+            let fallback = child.clone_killer();
+            let termination = ChildTermination::new_with_session(
+                Arc::new(UnstableCensusHost {
+                    epochs,
+                    queries: AtomicUsize::new(0),
+                    incomplete,
+                }),
+                leader.process,
+                ProcessSessionIdentity {
+                    session: leader.process,
+                    leader,
+                    birth: None,
+                },
+                fallback,
+                Arc::new(Mutex::new(ChildState {
+                    child: Some(child),
+                    exit: None,
+                })),
+            );
+            assert_eq!(
+                PtyTerminator::new(Arc::new(termination)).settle(),
+                NativePtySettlement::Unavailable
+            );
+        }
+    }
+
+    #[test]
+    fn settlement_receipts_retain_each_outcome_and_reap_the_leader_once() {
+        for outcome in [
+            NativePtySettlement::Settled,
+            NativePtySettlement::StillRunning,
+            NativePtySettlement::Unavailable,
+        ] {
+            let leader = ProcessIdentity {
+                process: i32::MAX,
+                start: ProcessStart { coarse: 1, fine: 0 },
+            };
+            let cleanup = CleanupCounts::default();
+            let child: Box<dyn Child + Send + Sync> = Box::new(ExitedChild {
+                cleanup: cleanup.clone(),
+            });
+            let fallback = child.clone_killer();
+            let child = Arc::new(Mutex::new(ChildState {
+                child: Some(child),
+                exit: None,
+            }));
+            let termination = Arc::new(PtyTerminator::new(Arc::new(
+                ChildTermination::new_with_session(
+                    Arc::new(SettlementHost { outcome, leader }),
+                    leader.process,
+                    ProcessSessionIdentity {
+                        session: leader.process,
+                        leader,
+                        birth: None,
+                    },
+                    fallback,
+                    child,
+                ),
+            )));
+            let joining = Arc::clone(&termination);
+            let join = thread::spawn(move || joining.settle());
+            assert_eq!(termination.settle(), outcome);
+            assert_eq!(join.join().unwrap(), outcome);
+            assert_eq!(termination.settle(), outcome);
+            assert_eq!(cleanup.try_wait.load(Ordering::Relaxed), 1);
+        }
+    }
+
+    #[test]
+    fn native_process_session_receipt_reaps_and_settles() {
+        let _isolation = lock_real_pty_test();
+        if isolate_real_pty_test(
+            "pty::unix_pty::tests::native_process_session_receipt_reaps_and_settles",
+        ) {
+            return;
+        }
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "echo ready; exec sleep 30"]);
+        let (mut pty, terminator) =
+            spawn_command_in_pty(test_host(), PtySize::default(), command).unwrap();
+        let mut reader = BufReader::new(pty.take_reader().unwrap());
+        let mut ready = String::new();
+        reader.read_line(&mut ready).unwrap();
+        assert_eq!(ready.trim(), "ready");
+
+        assert_eq!(terminator.settle(), NativePtySettlement::Settled);
+        assert_eq!(terminator.settle(), NativePtySettlement::Settled);
+        assert!(pty.wait_for_child(Duration::ZERO).is_ok());
     }
 
     #[test]
@@ -2371,10 +3021,16 @@ mod tests {
     }
 
     fn spawned_pty(child: Box<dyn Child + Send + Sync>) -> (SpawnedPty, PtyTerminator) {
+        let fallback = child.clone_killer();
+        let child = Arc::new(Mutex::new(ChildState {
+            child: Some(child),
+            exit: None,
+        }));
         let termination = Arc::new(ChildTermination::new(
             test_host(),
             None,
-            child.clone_killer(),
+            fallback,
+            Arc::clone(&child),
         ));
         let terminator = PtyTerminator::new(Arc::clone(&termination));
         (
@@ -2382,7 +3038,7 @@ mod tests {
                 master: Box::new(TestMasterPty),
                 reader: Some(Box::new(io::empty())),
                 writer: Box::new(io::sink()),
-                child: Some(child),
+                child,
                 termination,
             },
             terminator,

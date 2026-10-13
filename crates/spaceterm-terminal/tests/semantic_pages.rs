@@ -1645,6 +1645,19 @@ fn real_vt_slow_find_cancellation_releases_scratch_and_keeps_pty_input_progressi
     pty.until(|state| state.written == b"\x1b[0n");
     let handle = owner.handle();
     let stamp = runtime_stamp(&handle, authority, 1);
+    // The topology reply can arrive before its sender drops the scratch lease.
+    // A FIFO command acknowledgement joins that release before admitting both Finds.
+    assert_eq!(
+        handle
+            .try_submit(
+                fence(authority),
+                spaceterm_terminal::runtime_contracts::RuntimeCommand::FocusReport(true),
+            )
+            .unwrap()
+            .receive_blocking()
+            .unwrap(),
+        spaceterm_core::runtime_authority::EffectDisposition::Applied,
+    );
     let find = |id| {
         FindRequest::new(
             QueryStamp::new(

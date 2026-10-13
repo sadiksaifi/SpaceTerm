@@ -3,7 +3,8 @@
 use std::io;
 
 use crate::pty::unix_pty::{
-    MasterReadError, ProcessIdentity, ProcessObservation, ProcessStart, UnixPtyHost,
+    MasterReadError, ProcessCreationEpoch, ProcessIdentity, ProcessObservation, ProcessStart,
+    UnixPtyHost,
 };
 
 /// Linux process facts through procfs. Linux reports `EIO` from a PTY master read once every
@@ -15,6 +16,10 @@ impl UnixPtyHost for LinuxPtyHost {
     fn observe_process(&self, process: i32) -> Option<ProcessObservation> {
         let stat = read_process_stat(process)?;
         (!stat.exited).then_some(stat.observation)
+    }
+
+    fn inspect_process(&self, process: i32) -> io::Result<Option<ProcessObservation>> {
+        inspect_process_stat(process).map(|stat| stat.map(|stat| stat.observation))
     }
 
     fn observe_spawned_child(&self, process: i32) -> Option<ProcessObservation> {
@@ -32,6 +37,27 @@ impl UnixPtyHost for LinuxPtyHost {
         Ok(processes)
     }
 
+    fn settlement_process_ids(&self) -> io::Result<Vec<i32>> {
+        let mounts =
+            std::fs::read_to_string("/proc/self/mountinfo").map_err(|error| error.kind())?;
+        if !procfs_census_is_unfiltered(&mounts) {
+            return Err(io::ErrorKind::Unsupported.into());
+        }
+        self.process_ids()
+    }
+
+    fn process_creation_epoch(&self) -> io::Result<ProcessCreationEpoch> {
+        // Linux increments total_forks under tasklist_lock after publishing the
+        // process, before it can run. /proc/stat exposes that monotonic counter.
+        let stat = std::fs::read_to_string("/proc/stat").map_err(|error| error.kind())?;
+        let count = stat
+            .lines()
+            .find_map(|line| line.strip_prefix("processes "))
+            .and_then(|count| count.trim().parse().ok())
+            .ok_or(io::ErrorKind::InvalidData)?;
+        Ok(ProcessCreationEpoch::ForkCount(count))
+    }
+
     fn master_read_error(&self, error: &io::Error) -> MasterReadError {
         if error.raw_os_error() == Some(libc::EIO) {
             MasterReadError::Hangup
@@ -41,17 +67,78 @@ impl UnixPtyHost for LinuxPtyHost {
     }
 }
 
+fn procfs_census_is_unfiltered(mountinfo: &str) -> bool {
+    let mut found = false;
+    for line in mountinfo.lines() {
+        let Some((mount, filesystem)) = line.split_once(" - ") else {
+            continue;
+        };
+        let fields = mount.split_ascii_whitespace().collect::<Vec<_>>();
+        if fields.get(4) != Some(&"/proc") {
+            continue;
+        }
+        found = true;
+        let filesystem = filesystem.split_ascii_whitespace().collect::<Vec<_>>();
+        if fields.len() < 6
+            || filesystem.len() < 3
+            || fields.get(3) != Some(&"/")
+            || filesystem.first() != Some(&"proc")
+        {
+            return false;
+        }
+        // hidepid can omit privileged descendants from a PID walk altogether.
+        // A filtered or subtree-mounted procfs cannot certify session absence.
+        if fields
+            .get(5)
+            .into_iter()
+            .chain(filesystem.get(2))
+            .any(|options| {
+                options.split(',').any(|option| {
+                    option
+                        .strip_prefix("hidepid=")
+                        .is_some_and(|value| !matches!(value, "0" | "off"))
+                })
+            })
+        {
+            return false;
+        }
+    }
+    found
+}
+
 struct ProcessStat {
     observation: ProcessObservation,
     exited: bool,
 }
 
 fn read_process_stat(process: i32) -> Option<ProcessStat> {
+    inspect_process_stat(process).ok().flatten()
+}
+
+fn inspect_process_stat(process: i32) -> io::Result<Option<ProcessStat>> {
     if process < 1 {
-        return None;
+        return Ok(None);
     }
-    let stat = std::fs::read(format!("/proc/{process}/stat")).ok()?;
-    parse_process_stat(process, &stat)
+    let stat = match std::fs::read(format!("/proc/{process}/stat")) {
+        Ok(stat) => stat,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.kind().into()),
+    };
+    if let Some(parsed) = parse_process_stat(process, &stat) {
+        return Ok(Some(parsed));
+    }
+    let fields = stat
+        .iter()
+        .rposition(|byte| *byte == b')')
+        .and_then(|end| std::str::from_utf8(&stat[end + 1..]).ok())
+        .map(|fields| fields.split_ascii_whitespace().collect::<Vec<_>>());
+    if fields.as_ref().is_some_and(|fields| {
+        matches!(fields.first(), Some(&"X" | &"x"))
+            || (fields.get(2) == Some(&"0") && fields.get(3) == Some(&"0"))
+    }) {
+        return Ok(None);
+    }
+    Err(io::ErrorKind::InvalidData.into())
 }
 
 /// Parse `/proc/<pid>/stat`. The command name may contain spaces and parentheses, so fields are
@@ -96,6 +183,26 @@ mod tests {
             "4242 ({name}) {state} 1 {group} {session} 34816 4242 4194560 1 0 0 0 0 0 0 0 20 0 1 0 {start} 1 2 3\n"
         )
         .into_bytes()
+    }
+
+    #[test]
+    fn settlement_census_requires_a_complete_unfiltered_procfs_mount() {
+        for options in ["rw", "rw,hidepid=0", "rw,hidepid=off"] {
+            assert!(procfs_census_is_unfiltered(&format!(
+                "31 22 0:5 / /proc rw,nosuid,nodev,noexec - proc proc {options}\n"
+            )));
+        }
+        for mount in [
+            "31 22 0:5 / /proc rw - proc proc rw,hidepid=2\n",
+            "31 22 0:5 / /proc rw - proc proc rw,hidepid=ptraceable\n",
+            "31 22 0:5 / /proc rw,hidepid=1 - proc proc rw\n",
+            "31 22 0:5 /subtree /proc rw - proc proc rw\n",
+            "31 22 0:5 / /proc rw - tmpfs tmpfs rw\n",
+            "31 22 0:5 / /other rw - proc proc rw\n",
+            "invalid",
+        ] {
+            assert!(!procfs_census_is_unfiltered(mount));
+        }
     }
 
     #[test]

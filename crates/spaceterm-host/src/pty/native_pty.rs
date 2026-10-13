@@ -207,10 +207,27 @@ pub enum NativePtyAdapterConstructionFailure {
     InputOutputUnavailable,
 }
 
+/// Independent evidence of native process-session cleanup, not a shell exit result.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativePtySettlement {
+    /// The leader was reaped and no process-session members remain.
+    Settled,
+    /// Process-session members remain after bounded signal escalation.
+    StillRunning,
+    /// Ownership, process inspection, signalling, or reaping could not be confirmed.
+    Unavailable,
+}
+
 /// Idempotent native process retirement selected by composition.
 pub trait NativePtyTermination: Send + Sync {
-    /// Request and complete bounded native process shutdown.
+    /// Request bounded native process shutdown. Success alone is not settlement evidence.
     fn request_termination(&self) -> io::Result<()>;
+
+    /// Complete cleanup on a blocking thread and join the retained settlement result.
+    /// Providers without independent evidence must keep cleanup unconfirmed.
+    fn settle(&self) -> NativePtySettlement {
+        NativePtySettlement::Unavailable
+    }
 }
 
 /// Adapter and retirement authority retained by one owner.
