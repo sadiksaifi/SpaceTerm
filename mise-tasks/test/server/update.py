@@ -16,8 +16,11 @@ if __name__ == "__main__":
     if not sys.flags.isolated:
         print("isolated-python-required", file=sys.stderr)
         raise SystemExit(2)
+    if len(sys.argv) != 1:
+        print("unsupported-update-test-arguments", file=sys.stderr)
+        raise SystemExit(2)
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "lib"))
     from spaceterm_tasks import main
     from spaceterm_tasks.account_service_checks import run
 
-    main(lambda: run(["update", *sys.argv[1:]]))
+    main(lambda: run(["update"]))
