@@ -34,3 +34,11 @@ pub enum DistributionFailure {
     ArchiveRejected,
     ManifestRejected,
 }
+
+pub use manifest::{
+    AccountEntryPoints, AccountInstallationManifestV2, verify_account_installation_manifest,
+};
+pub use server_feed::{
+    AccountInstallationCompatibility, AccountServerFeedV2, VerifiedAccountServerArtifact,
+    VerifiedAccountServerFeed, verify_account_server_feed,
+};
