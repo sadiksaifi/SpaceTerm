@@ -2,7 +2,7 @@ use std::{io::Write as _, process::ExitCode};
 
 use spaceterm_server::{
     StartupFailure,
-    deployment::{ServerInvocation, distribution_metadata},
+    deployment::{ServerInvocation, USAGE, query_output},
     production_startup,
 };
 
@@ -10,20 +10,23 @@ fn main() -> ExitCode {
     let invocation = match ServerInvocation::parse(std::env::args_os().skip(1)) {
         Ok(invocation) => invocation,
         Err(_) => {
-            eprintln!("usage: spaceterm-server serve | --distribution-metadata");
+            eprintln!("{USAGE}");
             return ExitCode::FAILURE;
         }
     };
-    if invocation == ServerInvocation::DistributionMetadata {
-        return match distribution_metadata() {
-            Ok(metadata) if std::io::stdout().lock().write_all(&metadata).is_ok() => {
+    match query_output(invocation) {
+        Ok(Some(output)) => {
+            return if std::io::stdout().lock().write_all(&output).is_ok() {
                 ExitCode::SUCCESS
-            }
-            _ => {
-                eprintln!("server distribution metadata unavailable");
+            } else {
                 ExitCode::FAILURE
-            }
-        };
+            };
+        }
+        Ok(None) => {}
+        Err(failure) => {
+            eprintln!("{}", failure.classification());
+            return ExitCode::FAILURE;
+        }
     }
     let failure = match production_startup() {
         Err(failure) => failure,

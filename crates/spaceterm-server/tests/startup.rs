@@ -24,13 +24,33 @@ fn distribution_metadata_precedes_account_storage_and_credential_effects() {
 }
 
 #[test]
+fn help_and_version_use_the_metadata_version_without_account_effects() {
+    let output = server().arg("--distribution-metadata").output().unwrap();
+    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let version = metadata["version"].as_str().unwrap();
+    for argument in ["--help", "--version"] {
+        let output = server()
+            .arg(argument)
+            .env("HOME", "/unavailable/spaceterm-account")
+            .env("XDG_DATA_HOME", "/unavailable/spaceterm-data")
+            .env("SPACETERM_SERVER_VERSION", "untrusted-runtime-version")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{argument}");
+        assert!(output.stderr.is_empty());
+        assert!(output.stdout.len() <= 4096);
+        assert!(String::from_utf8(output.stdout).unwrap().contains(version));
+    }
+}
+
+#[test]
 fn empty_invocation_prints_usage_without_starting_the_account_service() {
     let output = server().output().unwrap();
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     assert_eq!(
         output.stderr,
-        b"usage: spaceterm-server serve | --distribution-metadata\n"
+        format!("{}\n", spaceterm_server::deployment::USAGE).into_bytes()
     );
 }
 
@@ -49,17 +69,29 @@ fn entry_point_rejects_every_unrecognized_or_extra_operand_before_startup() {
     for operands in [
         vec!["--distribution-metadata", "extra"],
         vec!["--distribution-metadata", "--distribution-metadata"],
+        vec!["--help", "serve"],
+        vec!["--version", "serve"],
         vec!["serve", "extra"],
         vec!["--server-key", "credential"],
         vec!["--native-receiver"],
         vec!["--"],
+        vec!["setup"],
+        vec!["install"],
+        vec!["--json", "--non-interactive", "setup"],
+        vec!["setup", "--server-key", "credential"],
+        vec!["setup", "--executable", "/untrusted/server"],
+        vec![
+            "owner-enrollment",
+            "--request",
+            "00000000000000000000000000000001",
+        ],
     ] {
         let output = server().args(operands).output().unwrap();
         assert!(!output.status.success());
         assert!(output.stdout.is_empty());
         assert_eq!(
             output.stderr,
-            b"usage: spaceterm-server serve | --distribution-metadata\n"
+            format!("{}\n", spaceterm_server::deployment::USAGE).into_bytes()
         );
     }
 }
