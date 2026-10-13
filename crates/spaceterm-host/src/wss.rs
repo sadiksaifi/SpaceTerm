@@ -1,5 +1,8 @@
 //! Explicitly enabled TLS WebSockets with enrolled-key verification and binary-only messages.
 
+mod server_tls;
+pub use server_tls::server_tls_config;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
