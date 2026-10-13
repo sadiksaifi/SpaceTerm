@@ -1,7 +1,7 @@
 //! Production native desktop owners. All routes use the pinned authenticated actor.
 //! This factory reads retained bindings. It cannot install, Start, enroll or replace keys.
 
-mod protocol;
+pub(super) mod protocol;
 
 use super::*;
 use crate::platform::{app_paths::AppPaths, client_view_store::NativeViewStore};

@@ -150,6 +150,19 @@ impl Enrollment {
         major: u32,
         seed: u8,
     ) -> (PairingClientStreams, authentication::Principal, Arc<Key>) {
+        let (streams, principal, auth, _) = self.enroll_with_receipt(major, seed).await;
+        (streams, principal, auth)
+    }
+    async fn enroll_with_receipt(
+        &self,
+        major: u32,
+        seed: u8,
+    ) -> (
+        PairingClientStreams,
+        authentication::Principal,
+        Arc<Key>,
+        SignedPairingReceipt,
+    ) {
         let device = Arc::new(Key::new(seed));
         let auth = Arc::new(Key::new(seed + 1));
         let proposal = EnrollmentProposal::new(EnrollmentProposalParts {
@@ -226,7 +239,7 @@ impl Enrollment {
             pairing: native::local(streams.parts().client.pairing.local()),
             client: native::local(streams.parts().client.id.local()),
         };
-        (streams, principal, auth)
+        (streams, principal, auth, receipt)
     }
 }
 pub(crate) struct Fixture {
@@ -238,11 +251,20 @@ pub(crate) struct Fixture {
         tokio::task::JoinHandle<Result<spaceterm_server::shutdown::ShutdownReport, ServerFailure>>,
     pub(crate) stop: Arc<native::Host>,
     pub(crate) streams: [OperationStreamId; 2],
+    pub(crate) enrollment: [PairingClientStreams; 2],
+    pub(crate) receipts: [SignedPairingReceipt; 2],
     pub(crate) principals: [authentication::Principal; 2],
     pub(crate) pin: authentication::ServerPin,
+    pub(crate) bootstrap: Option<(OperationStreamId, authentication::Principal)>,
 }
 impl Fixture {
     pub(crate) async fn new(major: u32) -> Self {
+        Self::build(major, false).await
+    }
+    pub(crate) async fn with_bootstrap_client(major: u32) -> Self {
+        Self::build(major, true).await
+    }
+    async fn build(major: u32, bootstrap: bool) -> Self {
         #[cfg(target_os = "macos")]
         let parent = PathBuf::from("/private/tmp");
         #[cfg(target_os = "linux")]
@@ -328,8 +350,16 @@ impl Fixture {
             service,
             identity: account.credentials.clone(),
         };
-        let (first, first_principal, _) = enrollment.enroll(major, 42).await;
-        let (second, second_principal, _) = enrollment.enroll(major, 44).await;
+        let (first, first_principal, _, first_receipt) =
+            enrollment.enroll_with_receipt(major, 42).await;
+        let (second, second_principal, _, second_receipt) =
+            enrollment.enroll_with_receipt(major, 44).await;
+        let bootstrap = if bootstrap {
+            let (streams, principal, _) = enrollment.enroll(major, 46).await;
+            Some((streams.parts().ordinary, principal))
+        } else {
+            None
+        };
         let endpoint = account.registration.endpoint().unwrap();
         let factories = production_listener_factories(
             handle.clone(),
@@ -360,8 +390,11 @@ impl Fixture {
             running,
             stop,
             streams: [first.parts().ordinary, second.parts().ordinary],
+            enrollment: [first, second],
+            receipts: [first_receipt, second_receipt],
             principals: [first_principal, second_principal],
             pin,
+            bootstrap,
         }
     }
     pub(crate) fn principal(&self, index: usize) -> authentication::Principal {
@@ -1052,7 +1085,7 @@ pub(crate) async fn handshake(
     )
     .await
 }
-async fn handshake_limits(
+pub(crate) async fn handshake_limits(
     route: &OpenRoute,
     pin: authentication::ServerPin,
     principal: authentication::Principal,

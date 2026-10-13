@@ -41,7 +41,7 @@ use std::{
 };
 use tokio::sync::oneshot;
 
-pub(super) struct Decoder;
+pub(crate) struct Decoder;
 impl OrganizationDecoder for Decoder {
     fn decode(&self, payload: Payload) -> Result<OrganizationPublication, ClientFailure> {
         organization::decode(payload)
@@ -53,7 +53,7 @@ struct QueuedEffect {
     bytes: usize,
 }
 
-pub(super) struct NativeProtocol {
+pub(crate) struct NativeProtocol {
     journal: Arc<JournalController>,
     tracker: OperationTracker,
     registry: Mutex<Option<ClientRegistry>>,
@@ -67,7 +67,7 @@ pub(super) struct NativeProtocol {
     owner: std::sync::OnceLock<std::sync::Weak<NativeProtocol>>,
 }
 impl NativeProtocol {
-    pub(super) fn new(journal: Arc<JournalController>, tracker: OperationTracker) -> Self {
+    pub(crate) fn new(journal: Arc<JournalController>, tracker: OperationTracker) -> Self {
         Self {
             journal,
             tracker,
@@ -82,7 +82,7 @@ impl NativeProtocol {
             owner: std::sync::OnceLock::new(),
         }
     }
-    pub(super) fn set_channels(
+    pub(crate) fn set_channels(
         self: &Arc<Self>,
         channels: Arc<PaneChannels>,
     ) -> Result<(), ClientFailure> {

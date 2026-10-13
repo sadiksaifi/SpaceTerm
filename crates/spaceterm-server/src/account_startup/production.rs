@@ -398,7 +398,10 @@ impl RecoveredAccountServer {
             .close()
             .await
             .map_err(|_| StartupFailure::Runtime(failure(ServerFailureClass::CleanupIncomplete)));
-        let retirements = cleanup.finish_retirements().await.map_err(StartupFailure::Account);
+        let retirements = cleanup
+            .finish_retirements()
+            .await
+            .map_err(StartupFailure::Account);
         drop(admission);
         owner_closed?;
         retirements?;
