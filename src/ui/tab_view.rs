@@ -1999,12 +1999,12 @@ impl TabView {
         // changes it moves on its own, and its Terminal keeps the size of the place, so the
         // Terminal Session resizes once per change rather than once per frame.
         let inset = self.pane_frames.inset(pane_id);
-        // A raised Pane lifts off the layout as it starts and settles as it arrives.
-        let lift = self
+        // A raised Pane casts no shadow: its surface is translucent, so a shadow beneath it would
+        // darken all of it.
+        let raised = self
             .pane_frames
             .raised
-            .filter(|(raised, _)| *raised == pane_id)
-            .map(|(_, progress)| 1.0 - (2.0 * progress - 1.0).abs());
+            .is_some_and(|(raised, _)| raised == pane_id);
         let surface = div()
             .id(("pane", pane_id.get()))
             .debug_selector(move || format!("pane-surface-{}", pane_id.get()))
@@ -2027,12 +2027,8 @@ impl TabView {
                 });
             })
             .rounded(frame.pane_radius())
-            .when_some(lift, |surface, lift| {
-                // The Panes beneath a raised Pane take no pointer input through it.
-                surface
-                    .occlude()
-                    .shadow(super::drag_and_drop::lift_shadow(appearance, lift))
-            })
+            // The Panes beneath a raised Pane take no pointer input through it.
+            .when(raised, |surface| surface.occlude())
             .child(
                 gpui::canvas(
                     |_, _, _| (),
