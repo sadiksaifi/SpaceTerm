@@ -289,8 +289,9 @@ fn initialized_account(
 ) -> (tempfile::TempDir, AccountServiceFixture, ServerDirectory) {
     #[cfg(target_os = "macos")]
     let parent = std::path::PathBuf::from("/private/tmp");
+    // Keep real SQLite synchronization off the shared Linux build filesystem.
     #[cfg(target_os = "linux")]
-    let parent = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+    let parent = std::path::PathBuf::from("/var/tmp");
     let root = tempfile::tempdir_in(parent).unwrap();
     let fixture = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
     let registration = fixture.initialize(desired).unwrap();

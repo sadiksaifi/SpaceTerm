@@ -248,8 +248,9 @@ impl Fixture {
     async fn new(major: u32) -> Self {
         #[cfg(target_os = "macos")]
         let parent = PathBuf::from("/private/tmp");
+        // Keep real SQLite synchronization off the shared Linux build filesystem.
         #[cfg(target_os = "linux")]
-        let parent = PathBuf::from(std::env::var_os("HOME").unwrap());
+        let parent = PathBuf::from("/var/tmp");
         let root = tempfile::tempdir_in(parent).unwrap();
         let native_account =
             AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
