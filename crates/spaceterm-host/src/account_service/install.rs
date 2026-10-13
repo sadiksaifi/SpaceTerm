@@ -221,6 +221,17 @@ impl ServiceSupervisor {
                 .map_err(|_| ServiceFailure::Indeterminate)?
         })
     }
+    /// Reads the original accepted install without resuming publication or startup.
+    /// A reserved ID without accepted contents remains unknown.
+    pub fn inspect_install_request(
+        &self,
+        request: NativeRequestId,
+    ) -> Result<(ServiceProgress, [u8; 32]), ServiceFailure> {
+        let original = self
+            .original_install(request)?
+            .ok_or(ServiceFailure::UnknownRequest)?;
+        Ok((original.progress(request), original.artifact_sha256))
+    }
     pub(super) fn original_install(
         &self,
         request: NativeRequestId,

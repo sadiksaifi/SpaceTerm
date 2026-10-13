@@ -47,6 +47,32 @@ impl ServiceSupervisor {
         }
         Ok(digest(self.key, request, server, claim_digest))
     }
+    /// Reads the original public owner claim binding without issuing replacement authority.
+    /// The tuple contains server, canonical native request digest and claim digest.
+    pub fn inspect_owner_request(
+        &self,
+        request: NativeRequestId,
+    ) -> Result<Option<(ServerId, RequestDigest, RequestDigest)>, ServiceFailure> {
+        let (directory, _, journal) = self.read_journal()?;
+        let original = match journal.reservation(request) {
+            Ok(index) => journal.reservations[index].owner.clone(),
+            Err(ServiceFailure::RequestRetired) => Some(
+                read_archived_owner(&directory, self.key, request)?
+                    .ok_or(ServiceFailure::RequestRetired)?,
+            ),
+            Err(failure) => return Err(failure),
+        };
+        original
+            .map(|original| {
+                original.validate(self.key, request)?;
+                Ok((
+                    original.server,
+                    original.request_digest,
+                    original.claim_digest,
+                ))
+            })
+            .transpose()
+    }
     /// Reads an original owner binding, including its acknowledged archive.
     /// Unlike admission digest calculation, this cannot readmit a retired request.
     /// None means an allocated request has not retained owner authority yet.
