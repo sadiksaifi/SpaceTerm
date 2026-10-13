@@ -96,18 +96,17 @@ def build(release_tag=None):
         )
         if status.strip():
             raise TaskError("a release package requires a clean checkout")
-    environment["CARGO_BUILD_JOBS"] = "3"
+    environment["CARGO_BUILD_JOBS"] = "5"
     if os.uname().sysname == "Darwin":
         environment["MACOSX_DEPLOYMENT_TARGET"] = "26.0"
     return {
-        binary: build_executable(
-            "--release", "--locked", "-p", package, binary=binary, env=environment
-        )
-        for binary, package in (
-            ("spaceterm-server", "spaceterm-server"),
-            ("spaceterm-server-launcher", "spaceterm-host"),
-            ("spaceterm-server-manager", "spaceterm-host"),
-            ("spaceterm-server-spawner", "spaceterm-host"),
+        "spaceterm-server": build_executable(
+            "--release",
+            "--locked",
+            "-p",
+            "spaceterm-server",
+            binary="spaceterm-server",
+            env=environment,
         )
     }
 
@@ -128,53 +127,29 @@ def copy_file(source, destination, mode=0o644):
 
 
 def copy_built_executables(binaries, root, metadata):
-    """Keep the reusable spawner in the authenticated closure without changing manifest schema."""
+    """Copy only the account server and verify its exact source bytes."""
     destinations = {
         "spaceterm-server": artifacts.entry_points(
             metadata["platform"], metadata["build_identity"]
-        )["server"],
-        **{
-            name: "libexec/" + name
-            for name in (
-                "spaceterm-server-launcher",
-                "spaceterm-server-manager",
-                "spaceterm-server-spawner",
-            )
-        },
+        )["server"]
     }
     if set(binaries) != set(destinations):
-        raise TaskError("server build must contain the server, launcher, manager, and spawner")
+        raise TaskError("server build must contain only the account server")
     pins = {name: artifacts.digest(source) for name, source in binaries.items()}
     copied = []
     for name, destination in destinations.items():
         target = root / destination
-        mode = (
-            0o501
-            if name == "spaceterm-server" and metadata["platform"] == "linux-x86_64"
-            else 0o555
-        )
-        copy_file(binaries[name], target, mode)
+        copy_file(binaries[name], target, 0o700)
         if artifacts.digest(target) != pins[name]:
             raise TaskError("copied server executable differs from its build output")
         copied.append(target)
     return copied
 
 
-def copy_resources(destination, *, additional_notices=b""):
-    if not isinstance(additional_notices, bytes) or len(additional_notices) > 1024 * 1024:
-        raise TaskError("credential-tool notices exceed their bound")
+def copy_resources(destination):
     notices = destination / NOTICES.name
-    notices_bytes = NOTICES.read_bytes()
-    if additional_notices:
-        if notices.is_symlink() or (notices.exists() and not notices.is_file()):
-            raise TaskError("server notices input is not a regular file")
-        notices.parent.mkdir(parents=True, exist_ok=True)
-        notices.unlink(missing_ok=True)
-        notices_bytes += b"\n\nBundled credential-tool notices\n" + additional_notices
-        notices.write_bytes(notices_bytes)
-        notices.chmod(0o644)
-    else:
-        copy_file(NOTICES, notices)
+    copy_file(NOTICES, notices)
+    notices_bytes = notices.read_bytes()
     for source in SHELL_INTEGRATION.rglob("*"):
         if source.is_symlink():
             raise TaskError("server shell integration contains a link")
@@ -199,8 +174,15 @@ def validate_manifest(document):
     if not isinstance(document, dict) or set(document) != artifacts.MANIFEST_FIELDS:
         raise TaskError("unsupported server installation manifest")
     artifacts.validate_metadata({key: document[key] for key in artifacts.METADATA_FIELDS})
-    if document["entry_points"] != artifacts.entry_points(
-        document["platform"], document["build_identity"]
+    points = document["entry_points"]
+    expected = artifacts.entry_points(document["platform"], document["build_identity"])
+    if (
+        not isinstance(points, dict)
+        or set(points) != set(expected)
+        or (
+            points["server"] != expected["server"]
+            or points["cli"] not in (None, "bin/spaceterm-cli")
+        )
     ):
         raise TaskError("server installation entry points do not match")
     files = document["files"]
@@ -249,8 +231,8 @@ def validate_manifest(document):
             name not in indexed or not indexed[name]["mode"] & 0o111 or indexed[name]["size"] == 0
         ):
             raise TaskError("server installation entry point is missing")
-    if document["platform"] == "linux-x86_64" and indexed["bin/spaceterm-server"]["mode"] != 0o501:
-        raise TaskError("Linux server main ELF must be unreadable to the final account")
+    if indexed[points["server"]]["mode"] != 0o700:
+        raise TaskError("account server executable must have owner-only read/write/execute mode")
     dependency_names = set()
     for dependency in dependencies:
         if not isinstance(dependency, dict) or set(dependency) != {

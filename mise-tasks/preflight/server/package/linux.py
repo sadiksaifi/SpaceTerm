@@ -6,8 +6,14 @@ import argparse
 
 from spaceterm_tasks import main
 from spaceterm_tasks.package_server_linux import package
+from spaceterm_tasks.release_server import create_account_assets
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     args = parser.parse_args()
-    main(package)
+
+    def build_and_sign():
+        package()
+        create_account_assets("linux-x86_64")
+
+    main(build_and_sign)

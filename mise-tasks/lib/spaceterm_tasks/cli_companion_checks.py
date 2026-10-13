@@ -3,8 +3,8 @@
 `no-display` runs spaceterm-cli with only a fixed PATH and a private, empty home and
 temporary directory. No display, Wayland, D-Bus session, XDG runtime, SSH agent, or terminal
 variable reaches it, and standard input is not a terminal. Help, version, and status must
-answer. Every operation that needs production authority this build cannot supply must fail
-closed with its typed result. A case also fails when the CLI writes into its private
+answer. Validation never submits Start, Stop, enrollment, or serve, even when a real
+account service is installed. Status may return existing read-only facts. A case also fails when the CLI writes into its private
 directories or leaves a process running, as a created listener would. The check installs
 nothing, starts no service, and never requests privilege.
 """
@@ -66,17 +66,25 @@ def version_record(stdout, stderr):
     )
 
 
-def unavailable_status(stdout, stderr):
-    """Status answers with the native capability unavailable and nothing authenticated."""
+def passive_status(stdout, stderr):
+    """Status may discover an established account service but must remain read-only."""
     value = record(stdout)
     result = value.get("result") if value is not None else None
+    if stderr or not isinstance(result, dict) or result.get("kind") != "status":
+        return False
+    native_failure = result.get("native_failure")
+    if native_failure is not None:
+        return (
+            native_failure
+            in ("native_unavailable", "missing", "storage_locked", "storage_unavailable")
+            and result.get("native") is None
+            and result.get("authenticated") is None
+            and result.get("negotiated_protocol_major") is None
+        )
     return (
-        not stderr
-        and isinstance(result, dict)
-        and result.get("kind") == "status"
-        and result.get("native_failure") == "native_unavailable"
-        and result.get("authenticated", False) is None
-        and result.get("negotiated_protocol_major", False) is None
+        isinstance(result.get("native"), dict)
+        and (result.get("authenticated") is None or isinstance(result.get("authenticated"), dict))
+        and result.get("negotiated_protocol_major") in (None, 1, 2)
     )
 
 
@@ -86,10 +94,6 @@ def failure(kind):
         return not stdout and value is not None and value.get("error") == kind
 
     return check
-
-
-def unavailable_serve(stdout, stderr):
-    return not stdout and stderr == b"native capability is unavailable\n"
 
 
 @dataclass(frozen=True)
@@ -105,13 +109,8 @@ CASES = (
     Case(("--json",), 0, usage_record),
     Case(("--json", "--help"), 0, usage_record),
     Case(("--json", "--version"), 0, version_record),
-    Case(("--json", "status"), 0, unavailable_status),
-    Case(("--json", "start"), 69, failure("authorization_unavailable")),
-    Case(("--json", "end-all-sessions", "--assess"), 77, failure("pairing_required")),
-    Case(("--json", "--non-interactive", "end-all-sessions"), 2, failure("confirmation_required")),
-    # The client-only executable never enters daemon composition.
-    Case(("--json", "serve"), 2, failure("usage")),
-    Case(("serve",), 69, unavailable_serve),
+    Case(("--json", "status"), 0, passive_status),
+    Case(("--json", "invalid-command"), 2, failure("usage")),
 )
 
 

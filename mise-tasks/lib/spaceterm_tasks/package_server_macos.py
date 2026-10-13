@@ -186,9 +186,6 @@ def package(release_tag=None):
         server_identifier = metadata["native_identifier"]
         sign_targets = [
             (app / "Contents/MacOS/spaceterm-server", server_identifier),
-            (root / "libexec/spaceterm-server-launcher", server_identifier + ".launcher"),
-            (root / "libexec/spaceterm-server-manager", server_identifier + ".manager"),
-            (root / "libexec/spaceterm-server-spawner", server_identifier + ".spawner"),
         ]
         known_code = {target for target, _ in sign_targets}
         verify_macho_closure(root, known_code)
@@ -215,7 +212,7 @@ def package(release_tag=None):
                     "server signing failed",
                     env=clean,
                 )
-            for path, native_identifier in [*sign_targets[1:], (app, server_identifier)]:
+            for path, native_identifier in [*sign_targets, (app, server_identifier)]:
                 verify_server_signature(path, native_identifier)
         verify_macho_closure(root, known_code)
         verify_info_plist(app, metadata)
@@ -226,4 +223,4 @@ def package(release_tag=None):
         package_server.verify_archive(output)
         destination = package_server.archive_path("darwin-arm64", build)
         shutil.copyfile(output, destination)
-    print("Signed headless server archive and native identities verified.")
+    print("Signed account server archive and sealed resources verified.")

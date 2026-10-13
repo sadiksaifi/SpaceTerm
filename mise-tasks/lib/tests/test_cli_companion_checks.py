@@ -27,15 +27,7 @@ ANSWERS = {
         """"kind":"status","native":null,"native_failure":"native_unavailable","""
         """"negotiated_protocol_major":null},"schema":1}\\n'"""
     ),
-    "--json start": """printf '{"error":"authorization_unavailable","schema":1}\\n' >&2; exit 69""",
-    "--json end-all-sessions --assess": (
-        """printf '{"error":"pairing_required","schema":1}\\n' >&2; exit 77"""
-    ),
-    "--json --non-interactive end-all-sessions": (
-        """printf '{"error":"confirmation_required","schema":1}\\n' >&2; exit 2"""
-    ),
-    "--json serve": """printf '{"error":"usage","schema":1}\\n' >&2; exit 2""",
-    "serve": "printf 'native capability is unavailable\\n' >&2; exit 69",
+    "--json invalid-command": """printf '{"error":"usage","schema":1}\n' >&2; exit 2""",
 }
 SESSION_VARIABLES = (
     "DISPLAY",
@@ -83,12 +75,17 @@ class NoDisplayTests(unittest.TestCase):
         self.assertNotIn(str(self.root), message)
         return message
 
-    def test_fail_closed_cli_passes_every_check(self):
+    def test_normal_validation_never_submits_a_mutating_or_serve_command(self):
+        for case in checks.CASES:
+            self.assertNotIn("start", case.arguments)
+            self.assertNotIn("serve", case.arguments)
+            self.assertNotIn("end-all-sessions", case.arguments)
+
+    def test_read_only_cli_passes_every_check(self):
         count, output = self.check(self.cli())
         self.assertEqual(count, len(checks.CASES))
         self.assertEqual(count, len(ANSWERS))
-        self.assertIn("no-display --json start: exit 69\n", output)
-        self.assertIn("no-display serve: exit 69\n", output)
+        self.assertIn("no-display --json invalid-command: exit 2\n", output)
         self.assertTrue(
             output.endswith(
                 f"{count} no-display checks passed without a display, session bus, or desktop\n"
@@ -104,9 +101,11 @@ class NoDisplayTests(unittest.TestCase):
         environment = checks.no_display_environment(Path("/home"), Path("/tmp"))
         self.assertEqual(environment, {"PATH": "/usr/bin:/bin", "HOME": "/home", "TMPDIR": "/tmp"})
 
-    def test_authority_that_does_not_fail_closed_is_rejected(self):
-        message = self.rejected(self.cli(**{"--json_start": "printf 'started private-detail\\n'"}))
-        self.assertIn("no-display --json start: exited 0, expected 69", message)
+    def test_a_successful_unknown_command_is_rejected(self):
+        message = self.rejected(
+            self.cli(**{"--json_invalid-command": "printf 'started private-detail\\n'"})
+        )
+        self.assertIn("no-display --json invalid-command: exited 0, expected 2", message)
         self.assertNotIn("private-detail", message)
 
     def test_unexpected_results_are_rejected_without_their_content(self):
@@ -115,16 +114,19 @@ class NoDisplayTests(unittest.TestCase):
                 "--json status",
                 """printf '{"result":{"kind":"status","native_failure":null},"schema":1}\\n'""",
             ),
-            ("--json start", """printf '{"error":"private-detail","schema":1}\\n' >&2; exit 69"""),
             (
-                "--json start",
-                """printf '{"error":"authorization_unavailable","schema":2}\\n' >&2; exit 69""",
+                "--json invalid-command",
+                """printf '{"error":"private-detail","schema":1}\\n' >&2; exit 2""",
             ),
             (
-                "--json start",
-                """printf 'private-detail\\n'; printf '{"error":"authorization_unavailable","schema":1}\\n' >&2; exit 69""",
+                "--json invalid-command",
+                """printf '{"error":"usage","schema":2}\\n' >&2; exit 2""",
             ),
-            ("serve", "printf 'native capability is unavailable private-detail\\n' >&2; exit 69"),
+            (
+                "--json invalid-command",
+                """printf 'private-detail\\n'; printf '{"error":"usage","schema":1}\\n' >&2; exit 2""",
+            ),
+            ("--json invalid-command", "printf 'private-detail\\n' >&2; exit 2"),
             ("--version", "printf 'spaceterm-cli 1.2.3\\n'; printf 'private-detail\\n' >&2"),
         ):
             with self.subTest(arguments=arguments, answer=answer):
@@ -139,14 +141,22 @@ class NoDisplayTests(unittest.TestCase):
             ": > listener",
         ):
             with self.subTest(answer=answer):
-                message = self.rejected(self.cli(serve=f"{answer}; {ANSWERS['serve']}"))
-                self.assertIn("no-display serve: wrote to its private", message)
+                message = self.rejected(
+                    self.cli(
+                        **{
+                            "--json_invalid-command": f"{answer}; {ANSWERS['--json invalid-command']}"
+                        }
+                    )
+                )
+                self.assertIn("no-display --json invalid-command: wrote to its private", message)
 
     def test_background_processes_are_rejected_and_stopped(self):
         marker = self.root / "background.pid"
-        answer = f"sleep 30 & echo $! > '{marker}'; {ANSWERS['serve']}"
-        message = self.rejected(self.cli(serve=answer))
-        self.assertIn("no-display serve: left a process running after it exited", message)
+        answer = f"sleep 30 & echo $! > '{marker}'; {ANSWERS['--json invalid-command']}"
+        message = self.rejected(self.cli(**{"--json_invalid-command": answer}))
+        self.assertIn(
+            "no-display --json invalid-command: left a process running after it exited", message
+        )
         pid = int(marker.read_text())
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
@@ -168,7 +178,9 @@ class NoDisplayTests(unittest.TestCase):
             f'time.sleep(60)" &'
         )
         wait = f"while [ ! -s '{marker}' ]; do sleep 0.05; done"
-        executable = self.cli(serve=f"{escape} {wait}; {ANSWERS['serve']}")
+        executable = self.cli(
+            **{"--json_invalid-command": f"{escape} {wait}; {ANSWERS['--json invalid-command']}"}
+        )
 
         def cleanup():
             # The check cannot stop a process outside the case's group, so the fixture does.
@@ -183,7 +195,9 @@ class NoDisplayTests(unittest.TestCase):
         with patch.object(checks, "CASE_TIMEOUT", 2):
             message = self.rejected(executable)
         self.assertLess(time.monotonic() - started, 30)
-        self.assertIn("no-display serve: left a process running after it exited", message)
+        self.assertIn(
+            "no-display --json invalid-command: left a process running after it exited", message
+        )
         self.assertTrue(marker.read_text())
 
     def test_runtime_and_output_are_bounded(self):

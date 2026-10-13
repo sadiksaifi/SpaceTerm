@@ -34,22 +34,36 @@ METADATA_FIELDS = {
     "protocol_majors",
     "storage",
     "native_identifier",
-    "launcher_abi",
 }
 MANIFEST_FIELDS = METADATA_FIELDS | {"entry_points", "files", "dependencies"}
 STABLE = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 
 
-def archive_name(version, platform):
-    if platform not in PLATFORMS or not STABLE.fullmatch(version):
-        raise TaskError("invalid server release target or version")
-    return f"SpaceTerm-Server-{version}-{platform}.tar.gz"
+def archive_name(version, platform, build="release"):
+    identifier(build)
+    if (
+        platform not in PLATFORMS
+        or not valid_version(version)
+        or (build == "release" and not STABLE.fullmatch(version))
+    ):
+        raise TaskError("invalid server artifact target or version")
+    channel = "" if build == "release" else f"-{build}"
+    return f"SpaceTerm-Server{channel}-{version}-{platform}.tar.gz"
 
 
-def feed_name(platform):
+def feed_name(platform, build="release"):
+    identifier(build)
     if platform not in PLATFORMS:
         raise TaskError("unsupported server platform")
-    return f"latest-server-{platform}.json"
+    channel = "" if build == "release" else f"-{build}"
+    return f"latest-server{channel}-{platform}.json"
+
+
+def valid_version(version):
+    return isinstance(version, str) and (
+        bool(STABLE.fullmatch(version))
+        or bool(re.fullmatch(r"dev\.[0-9a-f]{12}(\.dirty)?", version))
+    )
 
 
 def identifier(build):
@@ -146,7 +160,7 @@ def validate_metadata(metadata, platform=None, build=None, version=None):
     )
     if (
         type(metadata["schema_version"]) is not int
-        or metadata["schema_version"] != 1
+        or metadata["schema_version"] != 2
         or metadata["component"] != "server"
         or identity not in BUILDS
         or metadata["platform"] not in PLATFORMS
@@ -155,8 +169,6 @@ def validate_metadata(metadata, platform=None, build=None, version=None):
         or not re.fullmatch(r"[0-9a-f]{40}", commit)
         or commit == "0" * 40
         or metadata["native_identifier"] != identifier(identity)
-        or type(metadata["launcher_abi"]) is not int
-        or metadata["launcher_abi"] != 2
         or not sorted_numbers(metadata["protocol_majors"], 8)
         or any(v > 65535 for v in metadata["protocol_majors"])
         or not isinstance(storage, dict)
@@ -191,11 +203,7 @@ def entry_points(platform, build):
         "server": "bin/spaceterm-server"
         if platform == "linux-x86_64"
         else f"{bundle_name(build)}/Contents/MacOS/spaceterm-server",
-        "launcher": "libexec/spaceterm-server-launcher",
-        "manager": "libexec/spaceterm-server-manager",
-        "credential_tool": "libexec/credential-tools/systemd-creds"
-        if platform == "linux-x86_64"
-        else None,
+        "cli": None,
     }
 
 
@@ -205,18 +213,32 @@ def validate_headless_name(name):
     parts = PurePosixPath(name).parts
     if any(
         part.lower() in ("fonts", "icons", "sparkle.framework", "spaceterm.app")
-        or part.lower().startswith("spaceterm-native-evidence-")
+        or any(
+            term in part.lower()
+            for term in (
+                "spaceterm-server-launcher",
+                "spaceterm-server-manager",
+                "spaceterm-server-spawner",
+                "spaceterm-native-",
+                "systemd-creds",
+                "credential-tools",
+                "custody",
+                "native-evidence",
+                "native_evidence",
+                "launchdaemon",
+                "managementhelper",
+                "authorizationrights",
+            )
+        )
         or part.lower().endswith((".desktop", ".icns", ".ttf", ".otf", ".dmg"))
         for part in parts
     ):
-        raise TaskError("server package contains desktop resources")
+        raise TaskError("server package contains forbidden resources")
 
 
 def validate_entitlements(entitlements):
     if entitlements != {}:
-        raise TaskError(
-            "server runtime exception entitlements require native evidence and approval"
-        )
+        raise TaskError("server runtime exception entitlements are not permitted")
 
 
 def valid_sha256(value):
