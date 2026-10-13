@@ -165,7 +165,7 @@ impl DesktopViewRevision {
 /// `TargetGone`, `WrongServer`, `StaleContext`, `InvalidGeometry` and `Cancelled` show no Alert,
 /// because the replica or the closing window already shows the current state. Every other class
 /// names a condition a person can act on.
-#[derive(Clone, Copy, Debug, Eq, Error, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub(crate) enum DesktopClientError {
     #[error("the server is offline")]
     Offline,
@@ -177,6 +177,9 @@ pub(crate) enum DesktopClientError {
     Reconciling,
     #[error("the target no longer exists")]
     TargetGone,
+    /// The canonical server outcome, containing only a bounded typed failure class.
+    #[error("the server rejected the shared operation")]
+    SharedOperationRejected(spaceterm_core::operations::OperationFailure),
     #[error("the target belongs to another server")]
     WrongServer,
     #[error("the request context is stale")]
@@ -207,6 +210,20 @@ pub(crate) enum DesktopClientError {
     /// The server or this device's retained pairing state does not allow this device's use.
     #[error("this device is not allowed to use the server")]
     AccessDenied,
+}
+
+impl std::hash::Hash for DesktopClientError {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::hash::Hash::hash(&std::mem::discriminant(self), state);
+        if let Self::SharedOperationRejected(failure) = self {
+            // Core failures are bounded classifications but do not implement Hash.
+            // Hash their enum cases without formatting or allocating diagnostic text.
+            std::hash::Hash::hash(&std::mem::discriminant(failure), state);
+            if let spaceterm_core::operations::OperationFailure::Runtime(class) = failure {
+                std::hash::Hash::hash(&std::mem::discriminant(class), state);
+            }
+        }
+    }
 }
 
 impl From<ClientFailure> for DesktopClientError {

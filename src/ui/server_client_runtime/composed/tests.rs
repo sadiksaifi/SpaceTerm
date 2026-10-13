@@ -882,3 +882,305 @@ fn composed_personal_transaction_is_reserved_before_any_task_is_polled(cx: &mut 
     let next = cx.update(|cx| harness.provider.begin(request, cx)).unwrap();
     finish(next, &harness.tokio, cx).unwrap();
 }
+
+#[gpui::test]
+fn desktop_composed_detach_releases_original_grants_after_reconnect(cx: &mut TestAppContext) {
+    use spaceterm_client::api::RetryState;
+    use spaceterm_core::organization::ControlRecord;
+    let harness = Harness::new(cx);
+    harness.request(
+        DesktopRequest::StartSession {
+            pane: harness.pane,
+            source: SelectionSource::Pointer,
+        },
+        cx,
+    );
+    harness.publish(cx);
+    let measured = harness.provider.pane_measurement(harness.pane).unwrap();
+    harness.request(
+        DesktopRequest::Measured(PaneMeasurement {
+            token: measured.token,
+            ticket: measured.ticket,
+            layout: measured.layout,
+            grid: grid(),
+        }),
+        cx,
+    );
+    harness.publish(cx);
+    let original = harness.server.snapshot().unwrap().runtime()[0];
+    assert!(matches!(original.control, ControlRecord::Held { .. }));
+    harness.connection.send_replace(ConnectionState::Offline {
+        failure: ClientFailure::new(ClientFailureClass::Unavailable),
+        retry: RetryState {
+            failures: 1,
+            delay: None,
+        },
+    });
+    cx.run_until_parked();
+    harness.request(DesktopRequest::DetachWorkspace(harness.workspace), cx);
+    let retained = harness.peer.journal().snapshot().unwrap();
+    assert_eq!(retained.detaches().len(), 1);
+    assert_eq!(retained.detaches()[0].grants.len(), 1);
+    assert_eq!(
+        harness.server.snapshot().unwrap().runtime()[0].control,
+        original.control
+    );
+    harness.publish(cx);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !harness
+        .peer
+        .journal()
+        .snapshot()
+        .unwrap()
+        .detaches()
+        .is_empty()
+    {
+        cx.run_until_parked();
+        harness.tokio.block_on(tokio::task::yield_now());
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the original deferred grant was not released"
+        );
+    }
+    let after = harness.server.snapshot().unwrap().runtime()[0];
+    assert_eq!(after.control, ControlRecord::Unclaimed);
+    assert_eq!(after.session_generation, original.session_generation);
+    assert_eq!(after.phase, original.phase);
+}
+
+#[gpui::test]
+fn desktop_composed_retry_detach_resumes_only_the_original_durable_attachment(
+    cx: &mut TestAppContext,
+) {
+    let harness = Harness::new(cx);
+    let attachment = harness
+        .provider
+        .frame(harness.server.server())
+        .unwrap()
+        .personal
+        .workspace(harness.workspace)
+        .unwrap()
+        .attachment();
+    let original = UiRequestId::FIRST;
+    harness
+        .provider
+        .inner
+        .state
+        .borrow_mut()
+        .detach_requests
+        .insert(original, attachment);
+    let binding = harness.server.binding(1).unwrap();
+    harness
+        .tokio
+        .block_on(
+            harness
+                .provider
+                .inner
+                .pending
+                .detach_attachment(&binding, attachment),
+        )
+        .unwrap();
+    let task = cx
+        .update(|cx| {
+            harness.provider.begin_ui_request(
+                original,
+                DesktopRequest::RetryDetachWorkspace {
+                    workspace: harness.workspace,
+                    original_request: original,
+                },
+                cx,
+            )
+        })
+        .expect("the original durable detach must resume");
+    finish(task, &harness.tokio, cx).unwrap();
+    assert!(
+        harness
+            .provider
+            .frame(harness.server.server())
+            .unwrap()
+            .personal
+            .workspace(harness.workspace)
+            .is_none()
+    );
+    assert!(
+        harness
+            .provider
+            .inner
+            .state
+            .borrow()
+            .detach_requests
+            .is_empty()
+    );
+}
+
+#[gpui::test]
+fn desktop_composed_retry_detach_refuses_to_capture_an_uncommitted_or_unknown_attachment(
+    cx: &mut TestAppContext,
+) {
+    let harness = Harness::new(cx);
+    let attachment = harness
+        .provider
+        .frame(harness.server.server())
+        .unwrap()
+        .personal
+        .workspace(harness.workspace)
+        .unwrap()
+        .attachment();
+    let original = UiRequestId::FIRST;
+    assert!(matches!(
+        cx.update(|cx| harness.provider.begin_ui_request(
+            original,
+            DesktopRequest::RetryDetachWorkspace {
+                workspace: harness.workspace,
+                original_request: original,
+            },
+            cx
+        )),
+        Err(DesktopClientError::StaleContext)
+    ));
+    harness
+        .provider
+        .inner
+        .state
+        .borrow_mut()
+        .detach_requests
+        .insert(original, attachment);
+    assert!(matches!(
+        cx.update(|cx| harness.provider.begin_ui_request(
+            original,
+            DesktopRequest::RetryDetachWorkspace {
+                workspace: harness.workspace,
+                original_request: original,
+            },
+            cx
+        )),
+        Err(DesktopClientError::LocalStorageUnavailable)
+    ));
+    assert!(
+        harness
+            .peer
+            .journal()
+            .snapshot()
+            .unwrap()
+            .detaches()
+            .is_empty()
+    );
+    assert!(
+        harness
+            .provider
+            .frame(harness.server.server())
+            .unwrap()
+            .personal
+            .workspace(harness.workspace)
+            .is_some()
+    );
+}
+
+#[gpui::test]
+fn desktop_composed_shared_admission_rechecks_connection_before_the_cached_frame_updates(
+    cx: &mut TestAppContext,
+) {
+    let harness = Harness::new(cx);
+    let admitted_before = harness
+        .peer
+        .journal()
+        .snapshot()
+        .unwrap()
+        .operations()
+        .len();
+    let snapshot = harness.server.snapshot().unwrap();
+    let record = &snapshot.state().panes[0];
+    harness.connection.send_replace(ConnectionState::Offline {
+        failure: ClientFailure::new(ClientFailureClass::Unavailable),
+        retry: spaceterm_client::api::RetryState {
+            failures: 1,
+            delay: None,
+        },
+    });
+    let result = cx.update(|cx| {
+        harness.provider.begin(
+            DesktopRequest::Shared {
+                server: harness.server.server(),
+                command: Command::RepairPaneDirectory {
+                    pane: record.id,
+                    expected_version: record.confirmed_restoration_directory.version,
+                    value: record.starting_directory.clone(),
+                },
+            },
+            cx,
+        )
+    });
+    assert!(matches!(result, Err(DesktopClientError::Offline)));
+    assert_eq!(
+        harness
+            .peer
+            .journal()
+            .snapshot()
+            .unwrap()
+            .operations()
+            .len(),
+        admitted_before
+    );
+}
+
+#[gpui::test]
+fn desktop_composed_retry_detach_preserves_a_deliberately_reattached_workspace(
+    cx: &mut TestAppContext,
+) {
+    let harness = Harness::new(cx);
+    let original = harness
+        .provider
+        .frame(harness.server.server())
+        .unwrap()
+        .personal
+        .workspace(harness.workspace)
+        .unwrap()
+        .attachment();
+    harness.request(DesktopRequest::DetachWorkspace(harness.workspace), cx);
+    harness.request(DesktopRequest::AttachWorkspace(harness.workspace), cx);
+    let current = harness
+        .provider
+        .frame(harness.server.server())
+        .unwrap()
+        .personal
+        .workspace(harness.workspace)
+        .unwrap()
+        .attachment();
+    assert_ne!(current, original);
+    let id = UiRequestId::FIRST;
+    harness
+        .provider
+        .inner
+        .state
+        .borrow_mut()
+        .detach_requests
+        .insert(id, original);
+    let task = cx
+        .update(|cx| {
+            harness.provider.begin_ui_request(
+                id,
+                DesktopRequest::RetryDetachWorkspace {
+                    workspace: harness.workspace,
+                    original_request: id,
+                },
+                cx,
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        finish(task, &harness.tokio, cx),
+        Err(DesktopClientError::StaleContext)
+    );
+    assert_eq!(
+        harness
+            .provider
+            .frame(harness.server.server())
+            .unwrap()
+            .personal
+            .workspace(harness.workspace)
+            .unwrap()
+            .attachment(),
+        current
+    );
+    assert!(harness.provider.pane_channel(harness.pane).is_ok());
+}

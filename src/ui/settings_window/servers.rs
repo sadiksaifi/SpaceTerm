@@ -34,6 +34,7 @@ use crate::ui::appearance::{ChromeAppearance, gpui_color};
 use crate::ui::chrome_geometry::{HAIRLINE, RadiusRole};
 use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
+use crate::ui::sidebar_window::SidebarOwner as _;
 use crate::ui::sidebar_window::form::{CaptionTone, action_button, badge, row_horizontal_inset};
 use crate::worktrees::path_template::validate;
 use copy::{Confirmation, StatusTone};
@@ -86,6 +87,7 @@ pub(super) struct ServersSection {
     _installation: Subscription,
     /// The server the person chose. The first listed server stands in until they choose one.
     selected: Option<ServerKey>,
+    requested: Option<spaceterm_core::identity::ServerId>,
     list_focus: FocusHandle,
     worktree: WorktreeField,
     devices: paired_devices::DeviceInventoryView,
@@ -239,6 +241,7 @@ impl ServersSection {
             _source_changes: None,
             _installation: installation,
             selected: None,
+            requested: None,
             list_focus,
             worktree: WorktreeField {
                 input,
@@ -336,6 +339,13 @@ impl ServersSection {
 
     /// The server the rows below the list present.
     pub(super) fn selected_server(&self) -> Option<&ServerSummary> {
+        if let Some(server) = self.requested {
+            return self
+                .snapshot
+                .servers
+                .iter()
+                .find(|value| value.pairing.parts().server == server);
+        }
         self.selected
             .as_ref()
             .and_then(|key| self.find(key))
@@ -562,8 +572,22 @@ impl SettingsWindow {
         requests.send(request, cx);
     }
 
+    pub(super) fn select_server_id(
+        &mut self,
+        server: spaceterm_core::identity::ServerId,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_section(super::SettingsSectionId::Servers, cx);
+        self.servers.devices.selection_changed();
+        self.servers.requested = Some(server);
+        self.servers.selected = None;
+        self.synchronize_search_results();
+        cx.notify();
+    }
+
     fn select_server(&mut self, key: ServerKey, cx: &mut Context<Self>) {
-        if self.servers.selected.as_ref() != Some(&key) {
+        let requested = self.servers.requested.take().is_some();
+        if requested || self.servers.selected.as_ref() != Some(&key) {
             self.servers.devices.selection_changed();
             self.servers.selected = Some(key);
             cx.notify();

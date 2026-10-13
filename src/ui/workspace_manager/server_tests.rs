@@ -1103,3 +1103,249 @@ fn desktop_server_old_detach_recovery_cannot_target_a_new_attachment(cx: &mut Te
     );
     assert!(cx.debug_bounds("unavailable-workspace").is_none());
 }
+
+#[test]
+fn desktop_server_directory_repair_uses_the_captured_pane_version_without_repinning() {
+    let replica = replica(A);
+    let publication = frame(&replica, ReplicaStatus::Ready);
+    let pane = publication.organization.state().panes[0].id;
+    let target = PaneDirectoryRepair::capture(&publication, pane).unwrap();
+    let directory = spaceterm_core::organization::ServerDirectory::new(
+        server(A),
+        b"/server/replacement".to_vec(),
+    )
+    .unwrap();
+    assert_eq!(
+        target.command(&publication, directory.clone()).unwrap(),
+        Command::RepairPaneDirectory {
+            pane,
+            expected_version: publication.organization.state().panes[0]
+                .confirmed_restoration_directory
+                .version,
+            value: directory,
+        }
+    );
+    let foreign =
+        spaceterm_core::organization::ServerDirectory::new(server(B), b"/same/path".to_vec())
+            .unwrap();
+    assert_eq!(
+        target.command(&publication, foreign),
+        Err(DesktopClientError::WrongServer)
+    );
+}
+
+#[test]
+fn desktop_server_directory_repair_rejects_late_selection_after_detach_or_offline() {
+    let mut replica = replica(A);
+    let publication = frame(&replica, ReplicaStatus::Ready);
+    let pane = publication.organization.state().panes[0].id;
+    let target = PaneDirectoryRepair::capture(&publication, pane).unwrap();
+    let directory = spaceterm_core::organization::ServerDirectory::new(
+        server(A),
+        b"/server/replacement".to_vec(),
+    )
+    .unwrap();
+    let offline = frame(&replica, ReplicaStatus::RetainedOffline);
+    assert_eq!(
+        target.command(&offline, directory.clone()),
+        Err(DesktopClientError::StaleContext)
+    );
+    let plan = replica
+        .personal
+        .prepare_detach(target.attachment.workspace())
+        .unwrap();
+    replica.personal.apply_detach(plan).unwrap();
+    let detached = frame(&replica, ReplicaStatus::Ready);
+    assert_eq!(
+        target.command(&detached, directory),
+        Err(DesktopClientError::StaleContext)
+    );
+}
+
+struct RepairDirectorySource {
+    selection: async_channel::Receiver<spaceterm_core::organization::ServerDirectory>,
+}
+impl crate::ui::directory_picker::DirectorySource for RepairDirectorySource {
+    fn machine_name(&self) -> Option<&str> {
+        Some("Owning server")
+    }
+    fn can_create(&self) -> bool {
+        false
+    }
+    fn discover_home(
+        &self,
+    ) -> crate::ui::directory_picker::SourceFuture<crate::ui::directory_picker::PickerPath> {
+        Box::pin(async {
+            Ok(crate::ui::directory_picker::PickerPath::new("/server/home".into()).unwrap())
+        })
+    }
+    fn list_directories(
+        &self,
+        _: crate::ui::directory_picker::PickerPath,
+    ) -> crate::ui::directory_picker::SourceFuture<crate::ui::directory_picker::DirectoryListing>
+    {
+        Box::pin(async {
+            Ok(crate::ui::directory_picker::DirectoryListing::new(
+                Vec::new(),
+            ))
+        })
+    }
+    fn probe_exact_path(
+        &self,
+        _: crate::ui::directory_picker::PickerPath,
+    ) -> crate::ui::directory_picker::SourceFuture<crate::ui::directory_picker::ExactPathState>
+    {
+        Box::pin(async { Ok(crate::ui::directory_picker::ExactPathState::ReadableDirectory) })
+    }
+    fn create_directory_recursively(
+        &self,
+        _: crate::ui::directory_picker::PickerPath,
+    ) -> crate::ui::directory_picker::SourceFuture<()> {
+        panic!("server repair cannot create a directory")
+    }
+    fn pin(
+        &self,
+        _: crate::ui::directory_picker::PickerPath,
+    ) -> crate::ui::directory_picker::SourceFuture<crate::domain::PinnedDirectory> {
+        panic!("server repair cannot manufacture a local or SSH pin")
+    }
+    fn select(
+        &self,
+        _: crate::ui::directory_picker::PickerPath,
+    ) -> crate::ui::directory_picker::SourceFuture<crate::ui::directory_picker::DirectorySelection>
+    {
+        let receiver = self.selection.clone();
+        Box::pin(async move {
+            receiver
+                .recv()
+                .await
+                .map(crate::ui::directory_picker::DirectorySelection::Server)
+                .map_err(|_| crate::ui::directory_picker::DirectorySourceError::ConnectionLost)
+        })
+    }
+}
+
+fn open_repair_picker(
+    manager: &Entity<WorkspaceManager>,
+    runtime: &TestRuntime,
+    cx: &mut VisualTestContext,
+) -> async_channel::Sender<spaceterm_core::organization::ServerDirectory> {
+    let (sender, receiver) = async_channel::bounded(1);
+    runtime.provider.set_directory_source(
+        server(A),
+        Rc::new(RepairDirectorySource {
+            selection: receiver,
+        }),
+    );
+    manager.update_in(cx, |manager, window, cx| {
+        manager.server_tab_event(
+            ServerTabManagerEvent::PaneAction {
+                pane: crate::domain::server_view_testing::pane(A, 1),
+                action: crate::ui::server_desktop_contracts::PaneAction::ChooseDirectory,
+            },
+            window,
+            cx,
+        )
+    });
+    cx.run_until_parked();
+    let position = cx
+        .debug_bounds("directory-picker-confirm")
+        .expect("the existing picker must present its confirm action")
+        .center();
+    cx.simulate_click(position, gpui::Modifiers::none());
+    cx.run_until_parked();
+    sender
+}
+
+#[gpui::test]
+fn desktop_server_directory_action_delivers_only_the_captured_repair_through_the_runtime(
+    cx: &mut TestAppContext,
+) {
+    let (manager, runtime, cx) = harness(cx);
+    servers(&runtime, &[A]);
+    let replica = replica(A);
+    publish(&replica, 1, &runtime, cx);
+    let sender = open_repair_picker(&manager, &runtime, cx);
+    let directory = spaceterm_core::organization::ServerDirectory::new(
+        server(A),
+        b"/server/replacement".to_vec(),
+    )
+    .unwrap();
+    sender.try_send(directory.clone()).unwrap();
+    cx.run_until_parked();
+    assert_eq!(
+        runtime.begun(),
+        vec![DesktopRequest::Shared {
+            server: server(A),
+            command: Command::RepairPaneDirectory {
+                pane: crate::domain::server_view_testing::pane(A, 1),
+                expected_version: frame(&replica, ReplicaStatus::Ready)
+                    .organization
+                    .state()
+                    .panes[0]
+                    .confirmed_restoration_directory
+                    .version,
+                value: directory,
+            },
+        }]
+    );
+    assert!(manager.read_with(cx, |manager, _| manager.pin_picker.is_none()));
+}
+
+#[gpui::test]
+fn desktop_server_directory_action_discards_validation_after_the_attachment_is_detached(
+    cx: &mut TestAppContext,
+) {
+    let (manager, runtime, cx) = harness(cx);
+    servers(&runtime, &[A]);
+    let mut replica = replica(A);
+    publish(&replica, 1, &runtime, cx);
+    let sender = open_repair_picker(&manager, &runtime, cx);
+    let plan = replica.personal.prepare_detach(ws(A, 1)).unwrap();
+    replica.personal.apply_detach(plan).unwrap();
+    publish(&replica, 2, &runtime, cx);
+    let directory = spaceterm_core::organization::ServerDirectory::new(
+        server(A),
+        b"/server/replacement".to_vec(),
+    )
+    .unwrap();
+    let _ = sender.try_send(directory);
+    cx.run_until_parked();
+    assert!(runtime.begun().is_empty());
+    assert!(manager.read_with(cx, |manager, _| manager.pin_picker.is_none()));
+}
+
+#[gpui::test]
+fn desktop_server_directory_repair_reports_the_owning_server_rejection_without_startup(
+    cx: &mut TestAppContext,
+) {
+    let (manager, runtime, cx) = harness(cx);
+    servers(&runtime, &[A]);
+    let replica = replica(A);
+    publish(&replica, 1, &runtime, cx);
+    let sender = open_repair_picker(&manager, &runtime, cx);
+    sender
+        .try_send(
+            spaceterm_core::organization::ServerDirectory::new(
+                server(A),
+                b"/server/replacement".to_vec(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    cx.run_until_parked();
+    let op = operation(server(A), 1);
+    runtime.provider.set_outcome_at(
+        op,
+        Arc::new(Outcome::Failed(OperationFailure::DirectoryUnavailable)),
+        replica.org.snapshot().state().revision,
+    );
+    runtime.provider.finish(0, Ok(Some(op)));
+    cx.run_until_parked();
+    let tree = spaceterm_ui::a11y_testing::A11yTree::read(cx);
+    assert!(tree.find_text("That directory is unavailable on the server. Choose an existing directory and try again.").is_some());
+    assert_eq!(runtime.begun().len(), 1);
+    assert!(manager.read_with(cx, |manager, _| {
+        manager.server.as_ref().unwrap().requests.is_empty()
+    }));
+}

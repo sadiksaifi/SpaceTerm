@@ -65,6 +65,13 @@ pub(crate) trait DesktopClientProvider {
     /// The latest coherent publication for `server`.
     fn frame(&self, server: ServerId) -> Option<Arc<DesktopServerFrame>>;
 
+    fn directory_source(
+        &self,
+        _server: ServerId,
+    ) -> Result<Rc<dyn crate::ui::directory_picker::DirectorySource>, DesktopClientError> {
+        Err(DesktopClientError::UnsupportedCapability)
+    }
+
     /// The comparison token of `pane`'s current presentation.
     fn pane_view_token(&self, pane: PaneId) -> Result<PaneViewToken, DesktopClientError>;
 
@@ -406,6 +413,13 @@ impl DesktopClientRuntime {
         pane: PaneId,
     ) -> Result<PaneViewToken, DesktopClientError> {
         self.provider.pane_view_token(pane)
+    }
+
+    pub(crate) fn directory_source(
+        &self,
+        server: ServerId,
+    ) -> Result<Rc<dyn crate::ui::directory_picker::DirectorySource>, DesktopClientError> {
+        self.provider.directory_source(server)
     }
 
     pub(crate) fn pane_channel(

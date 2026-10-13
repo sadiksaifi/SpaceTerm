@@ -2,6 +2,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{App, Task};
@@ -28,9 +29,17 @@ pub(crate) struct RecordingClientProvider {
     outcome_revisions:
         RefCell<BTreeMap<OperationId, spaceterm_core::authority::OrganizationRevision>>,
     save_failure: Cell<Option<DesktopClientError>>,
+    directories: RefCell<BTreeMap<ServerId, Rc<dyn crate::ui::directory_picker::DirectorySource>>>,
 }
 
 impl RecordingClientProvider {
+    pub(crate) fn set_directory_source(
+        &self,
+        server: ServerId,
+        source: Rc<dyn crate::ui::directory_picker::DirectorySource>,
+    ) {
+        self.directories.borrow_mut().insert(server, source);
+    }
     pub(crate) fn set_servers(&self, servers: Vec<DesktopServerInfo>) {
         *self.servers.borrow_mut() = servers;
     }
@@ -84,6 +93,16 @@ impl RecordingClientProvider {
 impl DesktopClientProvider for RecordingClientProvider {
     fn servers(&self) -> Vec<DesktopServerInfo> {
         self.servers.borrow().clone()
+    }
+    fn directory_source(
+        &self,
+        server: ServerId,
+    ) -> Result<Rc<dyn crate::ui::directory_picker::DirectorySource>, DesktopClientError> {
+        self.directories
+            .borrow()
+            .get(&server)
+            .cloned()
+            .ok_or(DesktopClientError::UnsupportedCapability)
     }
     fn frame(&self, server: ServerId) -> Option<Arc<DesktopServerFrame>> {
         self.frames.borrow().get(&server).cloned()

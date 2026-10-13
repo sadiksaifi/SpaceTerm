@@ -31,6 +31,8 @@ use crate::domain::PinnedDirectory;
 
 mod local_source;
 mod remote_source;
+mod server_source;
+pub(crate) use server_source::ServerDirectorySource;
 
 pub(crate) use local_source::LocalDirectorySource;
 pub(crate) use remote_source::{
@@ -118,6 +120,21 @@ pub(crate) trait DirectorySource {
 
     /// Validates the directory's physical identity as a Pinned Directory.
     fn pin(&self, directory: PickerPath) -> SourceFuture<PinnedDirectory>;
+
+    /// Server-backed repair is read-only. It must not offer directory creation or local pinning.
+    fn can_create(&self) -> bool {
+        true
+    }
+
+    fn select(&self, directory: PickerPath) -> SourceFuture<DirectorySelection> {
+        let selected = self.pin(directory);
+        Box::pin(async move { selected.await.map(DirectorySelection::Pinned) })
+    }
+}
+
+pub(crate) enum DirectorySelection {
+    Pinned(PinnedDirectory),
+    Server(spaceterm_core::organization::ServerDirectory),
 }
 
 /// A directory path as spelled in the Directory Picker: absolute, or relative to the home
@@ -393,6 +410,7 @@ pub(super) enum DirectoryPickerEvent {
     StateChanged,
     Dismissed,
     Confirmed(PinnedDirectory),
+    ConfirmedServer(spaceterm_core::organization::ServerDirectory),
     /// The picker closed so System Directory Selection can choose the directory instead.
     SystemSelectionRequested,
 }
@@ -457,7 +475,7 @@ struct ValidationCompletion {
     lifecycle_generation: u64,
     operation_generation: u64,
     directory: PickerPath,
-    result: Result<PinnedDirectory, DirectorySourceError>,
+    result: Result<DirectorySelection, DirectorySourceError>,
 }
 
 /// One machine's directory chooser built on the reusable Command Palette.
@@ -1073,11 +1091,11 @@ impl DirectoryPicker {
             let result = match kind {
                 DirectoryValidationKind::Creation => {
                     match source.create_directory_recursively(request.clone()).await {
-                        Ok(()) => source.pin(request).await,
+                        Ok(()) => source.select(request).await,
                         Err(error) => Err(error),
                     }
                 }
-                DirectoryValidationKind::Existing => source.pin(request).await,
+                DirectoryValidationKind::Existing => source.select(request).await,
             };
             let completion = ValidationCompletion {
                 lifecycle_generation,
@@ -1113,7 +1131,12 @@ impl DirectoryPicker {
                 }
                 self.busy = Some(DirectoryPickerBusy::AwaitingActivation);
                 self.sync_palette(cx);
-                cx.emit(DirectoryPickerEvent::Confirmed(pinned));
+                cx.emit(match pinned {
+                    DirectorySelection::Pinned(pinned) => DirectoryPickerEvent::Confirmed(pinned),
+                    DirectorySelection::Server(directory) => {
+                        DirectoryPickerEvent::ConfirmedServer(directory)
+                    }
+                });
                 cx.notify();
             }
             Err(error) => {
@@ -1127,10 +1150,8 @@ impl DirectoryPicker {
 
     fn can_confirm(&self) -> bool {
         self.busy.is_none()
-            && matches!(
-                self.status,
-                DirectoryPickerStatus::Readable | DirectoryPickerStatus::Missing
-            )
+            && (self.status == DirectoryPickerStatus::Readable
+                || (self.status == DirectoryPickerStatus::Missing && self.source.can_create()))
             && self
                 .parsed
                 .as_ref()
@@ -1221,8 +1242,13 @@ impl DirectoryPicker {
                     .description(error.message());
             }
             DirectoryPickerStatus::Missing => {
-                return EmptyNotice::new(IconName::FolderPlus, "Directory doesn\u{2019}t exist")
-                    .description("Open creates it and pins this Workspace to it.");
+                let notice =
+                    EmptyNotice::new(IconName::FolderPlus, "Directory doesn\u{2019}t exist");
+                return if self.source.can_create() {
+                    notice.description("Open creates it and pins this Workspace to it.")
+                } else {
+                    notice.description("Choose an existing directory on this server.")
+                };
             }
             DirectoryPickerStatus::DiscoveringAccount
             | DirectoryPickerStatus::Loading
@@ -1272,8 +1298,9 @@ impl DirectoryPicker {
             .find(|item| matches!(item.id(), DirectoryPickerItemId::Child { .. }))
             .map(|item| item.id().clone());
         let confirm_action = self.confirm_action(cx);
-        let query_note = (self.status == DirectoryPickerStatus::Missing)
-            .then(|| SharedString::from(NEW_DIRECTORY_NOTE));
+        let query_note = (self.status == DirectoryPickerStatus::Missing
+            && self.source.can_create())
+        .then(|| SharedString::from(NEW_DIRECTORY_NOTE));
         self.palette.update(cx, |palette, cx| {
             // A stable selection survives republishing; otherwise Return descends into the first
             // child rather than leaving, and the confirm key pins regardless of selection.
@@ -2631,12 +2658,12 @@ mod tests {
                         lifecycle_generation,
                         operation_generation,
                         directory,
-                        result: Ok(PinnedDirectory::Remote {
+                        result: Ok(DirectorySelection::Pinned(PinnedDirectory::Remote {
                             directory: crate::domain::RemoteDirectory::new("~/".to_owned())
                                 .unwrap(),
                             identity: RemoteDirectoryIdentity::new("/home/tester".to_owned())
                                 .unwrap(),
-                        }),
+                        })),
                     },
                     window,
                     cx,
