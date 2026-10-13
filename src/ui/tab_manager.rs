@@ -17,6 +17,11 @@ use super::drag_and_drop::{
     insertion_marker, painted_item_size,
 };
 use super::selection_chip::{ChipPaint, ChipShape, SelectionChip};
+use super::server_client_runtime::DesktopClientRuntime;
+use super::server_desktop_contracts::{
+    DesktopClientError, DesktopServerFrame, PaneAction, PaneId as ServerPaneId, SelectionSource,
+    TabId as ServerTabId, WorkspaceId as ServerWorkspaceId, WorkspaceRecord, WorkspaceView,
+};
 use super::terminal_focus::{TabFocusOwners, TerminalFocusBlocker, TerminalFocusCoordinator};
 use super::terminal_status::{StatusColors, StatusGlyph};
 use super::{
@@ -2436,6 +2441,82 @@ impl Render for TabManager {
 
 impl EventEmitter<TabManagerEvent> for TabManager {}
 impl EventEmitter<RemoteChildLaunchUnavailable> for TabManager {}
+
+/// What a server-backed Tab Manager asks its Workspace Manager to do. Every target is
+/// server-qualified. The Workspace Manager binds the containing server and requests the explicit
+/// use, the Pane's action, or the close assessment.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(
+    dead_code,
+    reason = "only a server-backed Tab Manager reports these, once its Tabs apply server records"
+)]
+pub(crate) enum ServerTabManagerEvent {
+    /// A person explicitly selected a Pane. Focus restoration never sends this.
+    SelectPane {
+        pane: ServerPaneId,
+        source: SelectionSource,
+    },
+    /// A person explicitly opened a Tab. Applying a publication never sends this.
+    OpenTab {
+        tab: ServerTabId,
+        source: SelectionSource,
+    },
+    /// A person chose an action on a Pane's presentation. The Workspace Manager sends it where
+    /// [`PaneAction::route`] says.
+    PaneAction {
+        pane: ServerPaneId,
+        action: PaneAction,
+    },
+    /// A person asked to close a Pane. The Workspace Manager assesses the close first.
+    ClosePane {
+        pane: ServerPaneId,
+    },
+    /// A person asked to close a Tab. The Workspace Manager assesses the close first.
+    CloseTab {
+        tab: ServerTabId,
+    },
+}
+
+impl EventEmitter<ServerTabManagerEvent> for TabManager {}
+
+/// Server-backed Workspaces. Applying a publication or restoring focus never acquires control or
+/// starts a Session.
+#[allow(
+    dead_code,
+    reason = "the Workspace Manager presents server Workspaces once Panes host server sessions"
+)]
+impl TabManager {
+    /// Presents `workspace` from `frame`. Its Panes need server Pane channels, which this build
+    /// does not have, so construction fails closed.
+    pub(crate) fn new_server(
+        _frame: &DesktopServerFrame,
+        _workspace: ServerWorkspaceId,
+        _runtime: Entity<DesktopClientRuntime>,
+        _panes: PaneConstruction,
+        _window_drag: Rc<dyn OperatingSystemWindowDragPlatform>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Result<Self, DesktopClientError> {
+        Err(DesktopClientError::UnsupportedCapability)
+    }
+
+    /// Applies one coherent publication of this Workspace. A Tab Manager presenting a local or SSH
+    /// Workspace refuses every server publication.
+    pub(crate) fn apply_workspace(
+        &mut self,
+        _frame: &DesktopServerFrame,
+        _record: &WorkspaceRecord,
+        _view: &WorkspaceView,
+        _cx: &mut Context<Self>,
+    ) -> Result<(), DesktopClientError> {
+        Err(DesktopClientError::WrongServer)
+    }
+
+    /// Returns native focus to the active Tab's focused Pane. This is not a selection.
+    pub(crate) fn restore_focus(&self, window: &mut Window, cx: &mut App) {
+        self.focus(window, cx);
+    }
+}
 
 /// A boundary of the Tab strip that a quiet mark can separate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -7046,5 +7127,75 @@ mod tests {
             })
             .collect();
         assert_eq!(directories, ["/srv/first", "/srv/second", "/srv/changed"]);
+    }
+
+    #[gpui::test]
+    fn desktop_server_restore_focus_returns_native_focus_without_selecting(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::ui::TerminalPaneEvent;
+
+        let (manager, _records, cx) = tab_manager(cx);
+        let focused = cx.update(|window, cx| {
+            let origin = manager
+                .update(cx, |manager, cx| {
+                    manager.native_service_status(WorkspaceId::new(1), window, cx)
+                })
+                .origin
+                .expect("the focused Pane hosts a Terminal Session");
+            manager
+                .read(cx)
+                .native_service_target(origin, cx)
+                .expect("the focused Pane is the active Tab's Pane")
+        });
+        let server_events = Rc::new(Cell::new(0));
+        let manager_events = Rc::new(RefCell::new(Vec::new()));
+        let requests = Rc::new(Cell::new(0));
+        cx.update(|_, cx| {
+            let recorded = Rc::clone(&server_events);
+            cx.subscribe(&manager, move |_, _: &ServerTabManagerEvent, _| {
+                recorded.set(recorded.get() + 1);
+            })
+            .detach();
+            let recorded = Rc::clone(&manager_events);
+            cx.subscribe(&manager, move |_, event: &TabManagerEvent, _| {
+                recorded.borrow_mut().push(format!("{event:?}"));
+            })
+            .detach();
+            let recorded = Rc::clone(&requests);
+            cx.subscribe(&focused, move |_, event: &TerminalPaneEvent, _| {
+                if matches!(
+                    event,
+                    TerminalPaneEvent::SelectionRequested(_) | TerminalPaneEvent::ActionRequested(_)
+                ) {
+                    recorded.set(recorded.get() + 1);
+                }
+            })
+            .detach();
+        });
+
+        cx.update(|window, cx| {
+            window.blur(cx);
+            assert!(!manager.read(cx).focused_terminal_is_focused(window, cx));
+            manager.update(cx, |manager, cx| manager.restore_focus(window, cx));
+            assert!(manager.read(cx).focused_terminal_is_focused(window, cx));
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            server_events.get(),
+            0,
+            "restoration selects and acts on no server Pane"
+        );
+        assert_eq!(
+            *manager_events.borrow(),
+            Vec::<String>::new(),
+            "restoration requests no close and changes no presentation"
+        );
+        assert_eq!(
+            requests.get(),
+            0,
+            "the Pane reports no explicit selection and no action"
+        );
     }
 }

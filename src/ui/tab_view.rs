@@ -619,6 +619,10 @@ impl TabView {
                     cx.notify();
                 }
                 TerminalPaneEvent::Exited => view.close_pane(pane_id, window, cx),
+                // Only a Pane created for a server Terminal Session reports these.
+                TerminalPaneEvent::Measured(_)
+                | TerminalPaneEvent::SelectionRequested(_)
+                | TerminalPaneEvent::ActionRequested(_) => {}
             },
         )
         .detach();
