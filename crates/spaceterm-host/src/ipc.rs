@@ -165,6 +165,13 @@ impl std::fmt::Debug for IpcEndpoint {
     }
 }
 
+// Keep the Linux kernel socket object pinned through the reclaiming unlink.
+// A read-only absence observer drops this guard without removing anything.
+struct DeadSocket {
+    #[cfg(target_os = "linux")]
+    _pin: PinnedSocket,
+}
+
 impl IpcEndpoint {
     /// Supplies the route to native socket/SSH adapters. Do not include it in diagnostics.
     pub fn path(&self) -> &Path {
@@ -290,10 +297,18 @@ impl IpcEndpoint {
         }))
     }
 
-    // Called only by the listener while its native and local endpoint leases live.
-    fn reclaim_dead(&self, required: Option<Identity>) -> Result<(), TransportError> {
+    /// Probes a retained endpoint without unlinking it or acquiring startup authority.
+    /// A refused connection to the unchanged safe socket is absence of a listener.
+    pub(crate) fn prove_no_listener(&self) -> Result<(), TransportError> {
+        self.dead_socket(None).map(|_| ())
+    }
+
+    fn dead_socket(
+        &self,
+        required: Option<Identity>,
+    ) -> Result<Option<DeadSocket>, TransportError> {
         let Some(identity) = self.socket_identity()? else {
-            return Ok(());
+            return Ok(None);
         };
         if required.is_some_and(|required| required != identity) {
             return Err(TransportError::UnsafeEndpoint);
@@ -322,6 +337,17 @@ impl IpcEndpoint {
         if self.socket_identity()? != Some(identity) {
             return Err(TransportError::UnsafeEndpoint);
         }
+        Ok(Some(DeadSocket {
+            #[cfg(target_os = "linux")]
+            _pin: pin,
+        }))
+    }
+
+    // Called only by the listener while its native and local endpoint leases live.
+    fn reclaim_dead(&self, required: Option<Identity>) -> Result<(), TransportError> {
+        let Some(_socket) = self.dead_socket(required)? else {
+            return Ok(());
+        };
         // SAFETY: the verified retained directory and literal name remain live.
         // The accepted same-account check/unlink race is documented above.
         if unsafe { libc::unlinkat(self.directory.file.as_raw_fd(), self.name.as_ptr(), 0) } != 0 {
