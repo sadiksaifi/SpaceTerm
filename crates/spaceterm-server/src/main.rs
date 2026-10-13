@@ -17,6 +17,29 @@ async fn main() -> ExitCode {
             .await,
         );
     }
+    #[cfg(feature = "test-support")]
+    if arguments.len() == 3
+        && arguments[0] == "--test-account-root"
+        && arguments[2] == "owner-enrollment"
+    {
+        let supervisor = match spaceterm_server::account_startup::test_support::supervisor(
+            std::path::Path::new(&arguments[1]),
+            std::sync::Arc::new(spaceterm_server::account_startup::test_support::StartupAbsence),
+        ) {
+            Ok(supervisor) => supervisor,
+            Err(failure) => {
+                eprintln!("{}", failure.classification());
+                return ExitCode::FAILURE;
+            }
+        };
+        return exit_native(
+            spaceterm_server::deployment::run_native_with_supervisor(
+                ServerInvocation::OwnerEnrollment,
+                supervisor,
+            )
+            .await,
+        );
+    }
     let invocation = match ServerInvocation::parse(arguments) {
         Ok(invocation) => invocation,
         Err(_) => {
@@ -38,7 +61,22 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
+    if let Some(result) = spaceterm_server::deployment::run_native(invocation).await {
+        return exit_native(result);
+    }
     exit_result(production_run().await)
+}
+
+fn exit_native(
+    result: Result<(), spaceterm_server::deployment::owner::OwnerEndpointFailure>,
+) -> ExitCode {
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(failure) => {
+            eprintln!("{}", failure.classification());
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn exit_result(
