@@ -1,6 +1,9 @@
 //! Connection-owned presentation demand. Dropping demand never retires a Session.
 
+mod graphics;
+
 use super::*;
+use crate::egress::EgressFailure;
 use spaceterm_core::{authority::*, content::ContentBase, content_queries::*, identity::PaneId};
 use spaceterm_protocol::convert::{content, identity, native_requests};
 use std::collections::BTreeMap;
@@ -34,8 +37,10 @@ pub(super) struct EffectReply {
 pub(super) enum Wake {
     Presentation(Box<Event>),
     Effect(Box<EffectReply>),
+    Graphics(Box<graphics::GraphicsEvent>),
 }
 pub(super) struct TerminalConnection {
+    graphics: graphics::GraphicsConnection,
     subscriptions: BTreeMap<PaneId, Subscription>,
     native: BTreeMap<(SessionKey, u64), spaceterm_core::native_requests::NativeRequest>,
     sender: mpsc::Sender<Event>,
@@ -56,10 +61,14 @@ impl Drop for TerminalConnection {
     }
 }
 impl TerminalConnection {
-    pub(super) fn new(clock: Option<Arc<dyn crate::contracts::ServerClock>>) -> Self {
+    pub(super) fn new(
+        clock: Option<Arc<dyn crate::contracts::ServerClock>>,
+        limits: spaceterm_protocol::limits::NegotiatedLimits,
+    ) -> Self {
         let (sender, receiver) = mpsc::channel(16);
         let (effect_sender, effect_receiver) = mpsc::channel(4);
         Self {
+            graphics: graphics::GraphicsConnection::new(limits),
             effect_sender,
             effect_receiver,
             effect_sequence: 0,
@@ -76,6 +85,7 @@ impl TerminalConnection {
         self.effects.len()
     }
     pub(super) fn reset(&mut self) {
+        self.graphics.reset();
         for (_, subscription) in std::mem::take(&mut self.subscriptions) {
             subscription.task.abort();
         }
@@ -83,6 +93,7 @@ impl TerminalConnection {
     }
     pub(super) async fn next(&mut self) -> Option<Wake> {
         tokio::select! {
+            event = self.graphics.next() => event.map(|event| Wake::Graphics(Box::new(event))),
             event = self.receiver.recv() => event.map(|event| Wake::Presentation(Box::new(event))),
             reply = self.effect_receiver.recv() => reply.map(|reply| { self.effects.remove(&reply.id); Wake::Effect(Box::new(reply)) }),
         }
@@ -226,6 +237,27 @@ impl TerminalConnection {
         self.native.retain(|(session, _), _| session.pane != pane);
         Ok(true)
     }
+    pub(super) async fn graphics_request(
+        &mut self,
+        payload: &Payload,
+        principal: VerifiedPrincipal,
+        handle: &ServerHandle,
+    ) -> Result<bool, ServerFailure> {
+        self.graphics.admit(payload, principal, handle).await
+    }
+    pub(super) async fn publish_graphics(
+        &mut self,
+        event: graphics::GraphicsEvent,
+        dispatcher: &ProtocolDispatcher,
+        session: &mut AuthenticatedSession,
+        transport: &Arc<dyn spaceterm_host::transport::MessageTransport>,
+        handle: &ServerHandle,
+        egress: &mut ConnectionEgress,
+    ) -> Result<(), ServerFailure> {
+        self.graphics
+            .publish(event, dispatcher, session, transport, handle, egress)
+            .await
+    }
     pub(super) fn admit_effect(
         &mut self,
         payload: &Payload,
@@ -247,8 +279,13 @@ impl TerminalConnection {
             ($value:expr, $p:ident) => {{
                 let value = $value;
                 let fence = identity::decode_fence(value.fence.as_ref().ok_or_else(|| failure(ServerFailureClass::ScopeMismatch))?, None).map_err(protocol_failure)?;
-                let request = self.native.remove(&(fence.session(), value.request)).ok_or_else(|| failure(ServerFailureClass::StaleAuthority))?;
-                let completion = native_requests::$p::decode_completion(value, &request).map_err(protocol_failure)?;
+                if value.request == 0 || fence.session().pane.server() != principal.server() || fence.connection().client != principal.client() {
+                    return Err(failure(ServerFailureClass::ScopeMismatch));
+                }
+                let Some(request) = self.native.get(&(fence.session(), value.request)) else {
+                    return self.stale_completion(value.request, fence, payload.major(), egress);
+                };
+                let completion = native_requests::$p::decode_completion(value, request).map_err(protocol_failure)?;
                 (value.request, spaceterm_terminal::runtime_contracts::FencedRuntimeCommand { fence, command: spaceterm_terminal::runtime_contracts::RuntimeCommand::CompleteNativeRequest(completion) })
             }};
         }
@@ -273,7 +310,14 @@ impl TerminalConnection {
         }
         let reservation = egress.reserve_operation_reply().map_err(egress_failure)?;
         let fence = command.fence;
+        let native_completion = matches!(
+            command.command,
+            spaceterm_terminal::runtime_contracts::RuntimeCommand::CompleteNativeRequest(_)
+        );
         let result = handle.try_runtime_command(principal, command)?;
+        if native_completion {
+            self.native.remove(&(fence.session(), request));
+        }
         let major = payload.major();
         self.effect_sequence = self
             .effect_sequence
@@ -312,6 +356,57 @@ impl TerminalConnection {
         self.effects.insert(id, task);
         Ok(true)
     }
+    fn stale_completion(
+        &mut self,
+        request: u64,
+        fence: EffectFence,
+        major: u32,
+        egress: &mut ConnectionEgress,
+    ) -> Result<bool, ServerFailure> {
+        if self.effects.len() >= 4 {
+            return Err(failure(ServerFailureClass::Capacity));
+        }
+        let reservation = egress.reserve_operation_reply().map_err(egress_failure)?;
+        let failure = Some(common::Failure {
+            classification: common::FailureClass::Stale as i32,
+            retry_after_ms: 0,
+        });
+        let response = match major {
+            1 => Payload::Major1(v1::Message {
+                kind: Some(v1::message::Kind::RuntimeOutcome(v1::RuntimeOutcome {
+                    request,
+                    fence: Some(identity::encode_fence(fence)),
+                    failure,
+                })),
+            }),
+            2 => Payload::Major2(v2::Message {
+                kind: Some(v2::message::Kind::RuntimeOutcome(v2::RuntimeOutcome {
+                    request,
+                    fence: Some(identity::encode_fence(fence)),
+                    failure,
+                })),
+            }),
+            _ => return Err(crate::failure::failure(ServerFailureClass::ScopeMismatch)),
+        };
+        self.effect_sequence = self
+            .effect_sequence
+            .checked_add(1)
+            .ok_or_else(|| crate::failure::failure(ServerFailureClass::Exhausted))?;
+        let id = self.effect_sequence;
+        let sender = self.effect_sender.clone();
+        let task = tokio::spawn(async move {
+            let _ = sender
+                .send(EffectReply {
+                    response: Ok(response),
+                    reservation,
+                    id,
+                })
+                .await;
+        })
+        .abort_handle();
+        self.effects.insert(id, task);
+        Ok(true)
+    }
     pub(super) async fn publish(
         &mut self,
         event: Event,
@@ -333,11 +428,20 @@ impl TerminalConnection {
             self.remove(pane);
             return Ok(());
         }
+        let expected_fence = event.token.fence;
         let Some(event) = event.event else {
             self.remove(pane);
             return Ok(());
         };
-        match event? {
+        let event = match event {
+            Ok(event) => event,
+            Err(error) if error.class == ServerFailureClass::StaleAuthority => {
+                self.remove(pane);
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+        match event {
             RuntimePresentationEvent::ContentInvalidated(base) => {
                 let subscription = self
                     .subscriptions
@@ -453,22 +557,46 @@ impl TerminalConnection {
                     let _ = handle.runtime_command(session.principal, spaceterm_terminal::runtime_contracts::FencedRuntimeCommand { fence: request.fence(), command: spaceterm_terminal::runtime_contracts::RuntimeCommand::CompleteNativeRequest(completion) }).await;
                     return Ok(());
                 };
+                if matches!(
+                    request.kind(),
+                    spaceterm_core::native_requests::NativeRequestKind::Notification(_)
+                ) && !session
+                    .codec
+                    .capabilities()
+                    .contains(&spaceterm_protocol::negotiation::CAPABILITY_NATIVE_NOTIFICATIONS)
+                {
+                    deny_native(handle, session.principal, &request).await;
+                    return Ok(());
+                }
                 let now = clock.now()?;
                 self.native
                     .retain(|_, request| request.deadline().is_none_or(|deadline| deadline > now));
                 if request.deadline().is_some_and(|deadline| deadline <= now) {
                     return Ok(());
                 }
-                if request.fence()
-                    != event_token_fence(
-                        self.subscriptions
-                            .get(&pane)
-                            .ok_or_else(|| failure(ServerFailureClass::StaleAuthority))?,
-                    )
+                if request.fence() != expected_fence
                     || self.native.len() >= MAX_PENDING_NATIVE
+                    || !native_current(handle, session.principal, request.fence()).await?
                 {
-                    return Err(failure(ServerFailureClass::Capacity));
+                    deny_native(handle, session.principal, &request).await;
+                    return Ok(());
                 }
+                let text_bytes = match request.kind() {
+                    spaceterm_core::native_requests::NativeRequestKind::ClipboardWrite(text)
+                    | spaceterm_core::native_requests::NativeRequestKind::UnsafePaste {
+                        text,
+                        ..
+                    } => text.as_str().len(),
+                    _ => 0,
+                };
+                let reservation = match egress.reserve_content_reply((text_bytes + 4096) as u32) {
+                    Ok(reservation) => reservation,
+                    Err(EgressFailure::Capacity) => {
+                        deny_native(handle, session.principal, &request).await;
+                        return Ok(());
+                    }
+                    Err(error) => return Err(egress_failure(error)),
+                };
                 let payload = match session.codec.major() {
                     1 => Payload::Major1(v1::Message {
                         kind: Some(v1::message::Kind::NativeRequest(
@@ -484,10 +612,17 @@ impl TerminalConnection {
                     }),
                     _ => return Err(failure(ServerFailureClass::ScopeMismatch)),
                 };
+                let now = clock.now()?;
+                if !native_current(handle, session.principal, request.fence()).await?
+                    || request.deadline().is_some_and(|deadline| deadline <= now)
+                {
+                    deny_native(handle, session.principal, &request).await;
+                    return Ok(());
+                }
                 self.native
                     .insert((request.fence().session(), request.id().get()), request);
                 dispatcher
-                    .send(session, transport, &payload, egress, None)
+                    .send(session, transport, &payload, egress, Some(reservation))
                     .await?;
             }
             _ => {}
@@ -495,6 +630,7 @@ impl TerminalConnection {
         Ok(())
     }
     fn remove(&mut self, pane: PaneId) {
+        self.graphics.remove_pane(pane);
         if let Some(subscription) = self.subscriptions.remove(&pane) {
             subscription.task.abort();
         }
@@ -531,6 +667,38 @@ async fn current(
         }
         Err(error) if error.class == ServerFailureClass::StaleAuthority => Ok(false),
         Err(error) => Err(error),
+    }
+}
+
+async fn native_current(
+    handle: &ServerHandle,
+    principal: VerifiedPrincipal,
+    fence: EffectFence,
+) -> Result<bool, ServerFailure> {
+    match handle.runtime_access(principal, fence.session()).await {
+        Ok(access) => {
+            let parts = access.authority.parts();
+            Ok(parts.connection == Some(fence.connection())
+                && parts.grant == Some(fence.grant())
+                && parts.context == fence.context()
+                && parts.native_effects_eligible
+                && parts.terminal_input_focus)
+        }
+        Err(error) if error.class == ServerFailureClass::StaleAuthority => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+async fn deny_native(
+    handle: &ServerHandle,
+    principal: VerifiedPrincipal,
+    request: &spaceterm_core::native_requests::NativeRequest,
+) {
+    if let Ok(completion) = spaceterm_core::native_requests::NativeCompletion::new(
+        request,
+        spaceterm_core::native_requests::NativeCompletionKind::Denied,
+    ) {
+        let _ = handle.runtime_command(principal, spaceterm_terminal::runtime_contracts::FencedRuntimeCommand { fence: request.fence(), command: spaceterm_terminal::runtime_contracts::RuntimeCommand::CompleteNativeRequest(completion) }).await;
     }
 }
 

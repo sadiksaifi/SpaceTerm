@@ -299,9 +299,11 @@ enum PermissionKind { PERMISSION_UNSPECIFIED = 0; MICROPHONE = 1; SCREEN_RECORDI
 message PermissionRequest { PermissionKind kind = 1;
   bool screen_recording = 2; bool accessibility = 3;
 }
+// Content-free attention. Clients compose notification text and apply their own notification policy.
+message NotificationRequest { uint32 kind = 1; optional sint32 exit_status = 2; uint64 duration_millis = 3; }
 message NativeRequest {
   spaceterm.common.EffectFence fence = 1; uint64 request = 2;
-  oneof action { ClipboardRequest clipboard = 3; UnsafePasteRequest unsafe_paste = 4; PermissionRequest permission = 5; }
+  oneof action { ClipboardRequest clipboard = 3; UnsafePasteRequest unsafe_paste = 4; PermissionRequest permission = 5; NotificationRequest notification = 8; }
 
   uint32 not_before_delay_ms = 6; optional uint32 remaining_ms = 7;
 }

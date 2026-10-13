@@ -341,7 +341,11 @@ impl ProtocolDispatcher {
         handle: ServerHandle,
     ) -> Result<(), ServerFailure> {
         let mut egress = ConnectionEgress::new(self.egress.clone());
-        let mut terminal = terminal::TerminalConnection::new(self.clock.clone());
+        let limits = match &peer.connection {
+            PeerConnection::Ordinary(session) => session.codec.limits(),
+            _ => Default::default(),
+        };
+        let mut terminal = terminal::TerminalConnection::new(self.clock.clone(), limits);
         let mut status = self.status.clone();
         let mut organization = handle.subscribe_snapshot();
         let mut organization_query: Option<organization::OrganizationQuery> = None;
@@ -377,6 +381,18 @@ impl ProtocolDispatcher {
                         terminal::Wake::Presentation(event) => {
                             terminal
                                 .publish(
+                                    *event,
+                                    self,
+                                    session,
+                                    &peer.transport,
+                                    &handle,
+                                    &mut egress,
+                                )
+                                .await?
+                        }
+                        terminal::Wake::Graphics(event) => {
+                            terminal
+                                .publish_graphics(
                                     *event,
                                     self,
                                     session,
@@ -513,6 +529,12 @@ impl ProtocolDispatcher {
                             }
                             if terminal
                                 .subscription(&payload, session.principal, &handle)
+                                .await?
+                            {
+                                continue;
+                            }
+                            if terminal
+                                .graphics_request(&payload, session.principal, &handle)
                                 .await?
                             {
                                 continue;
