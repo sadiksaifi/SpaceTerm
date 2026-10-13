@@ -16,7 +16,6 @@ pub struct ServerBuildMetadata {
     pub protocol_majors: Vec<u16>,
     pub storage: StorageCompatibility,
     pub native_identifier: &'static str,
-    pub launcher_abi: u16,
 }
 
 /// Owning protocol and store modules supply their implemented compatibility values.
@@ -60,7 +59,7 @@ pub fn encode(
         return Err(DistributionFailure::InvalidRecord);
     }
     let metadata = ServerBuildMetadata {
-        schema_version: 1,
+        schema_version: 2,
         component: ServerComponent::Server,
         build_identity,
         platform,
@@ -69,7 +68,6 @@ pub fn encode(
         protocol_majors,
         storage,
         native_identifier: build_identity.native_identifier(),
-        launcher_abi: 2,
     };
     let bytes = serde_json::to_vec(&metadata).map_err(|_| DistributionFailure::InvalidRecord)?;
     if bytes.len() > 4096 {
