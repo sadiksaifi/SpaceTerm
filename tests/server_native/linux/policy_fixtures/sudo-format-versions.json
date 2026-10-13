@@ -1,0 +1,41 @@
+{
+  "origin": "upstream-formatter-transcription",
+  "native_capture": false,
+  "environment": {"LC_ALL": "C", "stdout": "pipe"},
+  "password_rule": "account ALL=(ALL:ALL) PASSWD: ALL",
+  "passwordless_rule": "account ALL=(root) NOPASSWD: /usr/bin/systemctl restart nginx",
+  "cases": [
+    {
+      "distribution": "Ubuntu 22.04",
+      "version": "1.9.9",
+      "dialect": "V1_9",
+      "source": "https://raw.githubusercontent.com/sudo-project/sudo/SUDO_1_9_9/plugins/sudoers/parse.c",
+      "password_listing": "sudo-1.9.9-ubuntu-22.04-password.listing",
+      "passwordless_listing": "sudo-1.9.9-ubuntu-22.04-nopasswd.listing"
+    },
+    {
+      "distribution": "Debian 12",
+      "version": "1.9.13p3",
+      "dialect": "V1_9",
+      "source": "https://raw.githubusercontent.com/sudo-project/sudo/SUDO_1_9_13p3/plugins/sudoers/parse.c",
+      "password_listing": "sudo-1.9.9-ubuntu-22.04-password.listing",
+      "passwordless_listing": "sudo-1.9.9-ubuntu-22.04-nopasswd.listing"
+    },
+    {
+      "distribution": "Ubuntu 24.04",
+      "version": "1.9.15p5",
+      "dialect": "V1_9Recent",
+      "source": "https://raw.githubusercontent.com/sudo-project/sudo/SUDO_1_9_15p5/plugins/sudoers/display.c",
+      "password_listing": "sudo-1.9.9-ubuntu-22.04-password.listing",
+      "passwordless_listing": "sudo-1.9.9-ubuntu-22.04-nopasswd.listing"
+    },
+    {
+      "distribution": "Debian 13",
+      "version": "1.9.16p2",
+      "dialect": "V1_9Recent",
+      "source": "https://raw.githubusercontent.com/sudo-project/sudo/SUDO_1_9_16p2/plugins/sudoers/display.c",
+      "password_listing": "sudo-1.9.9-ubuntu-22.04-password.listing",
+      "passwordless_listing": "sudo-1.9.9-ubuntu-22.04-nopasswd.listing"
+    }
+  ]
+}
