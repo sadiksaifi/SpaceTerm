@@ -38,6 +38,10 @@ use spaceterm_host::account_service::ServiceAction;
 use tokio::sync::watch;
 
 use super::servers::model::{self, *};
+pub(crate) use super::servers::model::{
+    BindScope, ServerPermission, ServerPermissionKind, ServerPermissionState, ServerPermissions,
+    ServerServiceLifecycle,
+};
 use crate::ui::server_desktop_contracts::DesktopServerInfo;
 
 /// The inventory wire adapter must share this connection's worker. No default or test provider
@@ -60,6 +64,7 @@ pub(crate) struct SettingsConnection {
     pub(crate) native: Option<Arc<NativeServiceManagement>>,
     pub(crate) lifecycle: Option<ServerServiceLifecycle>,
     pub(crate) inventory: Option<Arc<dyn SettingsInventory>>,
+    pub(crate) machine: Option<SettingsMachineFacts>,
 }
 
 impl SettingsConnection {
@@ -81,6 +86,7 @@ impl SettingsConnection {
             native: None,
             lifecycle: None,
             inventory: None,
+            machine: None,
         })
     }
 }
@@ -97,12 +103,114 @@ pub(crate) struct SettingsServices {
         spaceterm_core::pairing::LocalPairingKey,
         Arc<NativeServiceManagement>,
     )>,
+    pub(crate) machines: Vec<(
+        spaceterm_core::pairing::LocalPairingKey,
+        SettingsMachineFacts,
+    )>,
     pub(crate) inventories: Vec<(
         spaceterm_core::pairing::LocalPairingKey,
         Arc<dyn SettingsInventory>,
     )>,
 }
+/// Native host facts are admitted only by an exact local registration/pin match.
+#[derive(Clone)]
+pub(crate) struct SettingsMachineFacts {
+    pub(crate) permissions: Option<ServerPermissions>,
+    pub(crate) scopes: Vec<BindScope>,
+}
+
+struct AuthenticatedInventory(ServerQueries);
+impl SettingsInventory for AuthenticatedInventory {
+    fn page(
+        &self,
+        after: Option<PairingId>,
+        version: Option<FieldVersion>,
+    ) -> ManagementFuture<'_, PairedDevices> {
+        Box::pin(async move {
+            let page = self.0.paired_devices(after, version).await?;
+            Ok(PairedDevices {
+                version: page.version,
+                this_device: page.this_device,
+                total: page.total,
+                devices: page
+                    .devices
+                    .into_iter()
+                    .map(|target| PairedDevice {
+                        name: format!("Device {}", target.parts().pairing.local()).into(),
+                        target,
+                    })
+                    .collect(),
+                next: page.next,
+            })
+        })
+    }
+}
+
 impl SettingsServices {
+    /// Recovers capabilities from the canonical journal without enrolling, installing or starting.
+    /// Remote routes get authenticated inventory only, never this computer's native host authority.
+    pub(crate) fn recover(
+        registry: &spaceterm_client::registry::ClientRegistry,
+        journal: &Arc<spaceterm_client::journal::JournalController>,
+        native: Option<&spaceterm_client_native::NativeClientProvider>,
+    ) -> Result<Self, ClientFailure> {
+        let mut result = Self::default();
+        let registration = native
+            .map(|provider| provider.management().supervisor().discover())
+            .transpose()
+            .map_err(|_| ClientFailure::new(ClientFailureClass::Unavailable))?
+            .flatten();
+        for saved in journal.snapshot()?.bindings() {
+            let binding = saved.binding()?;
+            if !journal.ordinary_use_allowed(&binding)? {
+                continue;
+            }
+            let key = binding.target().local_pairing()?;
+            if let Some(handle) = registry.server(binding.target().server()) {
+                result.inventories.push((
+                    key.clone(),
+                    Arc::new(AuthenticatedInventory(handle.queries(journal.clone())?)),
+                ));
+            }
+            if let (Some(provider), Some(registration)) = (native, registration.as_ref()) {
+                result.admit_native(provider, registration, &binding)?;
+            }
+        }
+        Ok(result)
+    }
+    fn admit_native(
+        &mut self,
+        provider: &spaceterm_client_native::NativeClientProvider,
+        registration: &spaceterm_host::account_service::RegisteredServer,
+        binding: &PairedServerBinding,
+    ) -> Result<(), ClientFailure> {
+        if registration.key() != provider.key()
+            || registration.server_pin() != binding.target().pin()
+            || !matches!(binding.target().route().parts(), RouteParts::Ipc { .. })
+        {
+            return Ok(());
+        }
+        let route = spaceterm_client_native::route::LocalRouteAuthority::new(
+            registration
+                .endpoint()
+                .map_err(|_| ClientFailure::new(ClientFailureClass::Unavailable))?,
+        )?;
+        if route.description() != binding.target().route() {
+            return Err(ClientFailure::new(ClientFailureClass::StaleAuthority));
+        }
+        let key = binding.target().local_pairing()?;
+        self.hosts.push((key.clone(), provider.management()));
+        self.lifecycles.push((
+            key.clone(),
+            crate::platform::server_settings_services::lifecycle(),
+        ));
+        self.machines.push((
+            key,
+            crate::platform::server_settings_services::machine_facts(provider.key().build_identity),
+        ));
+        Ok(())
+    }
+
     pub(crate) fn bind(&self, source: &mut SettingsConnection) -> Result<(), ClientFailure> {
         let key = source.binding.target().local_pairing()?;
         source.lifecycle = self
@@ -120,6 +228,11 @@ impl SettingsServices {
             .iter()
             .find(|(pairing, _)| pairing == &key)
             .map(|(_, provider)| provider.clone());
+        source.machine = self
+            .machines
+            .iter()
+            .find(|(pairing, _)| pairing == &key)
+            .map(|(_, facts)| facts.clone());
         Ok(())
     }
 }
@@ -164,6 +277,7 @@ struct NativeRead {
     desired: spaceterm_host::startup::DesiredServerState,
     status: spaceterm_host::account_service::ServiceStatus,
     generation: std::num::NonZeroU64,
+    recovered: Option<ResultPublication>,
 }
 
 pub(crate) struct SettingsRuntime {
@@ -339,8 +453,17 @@ impl SettingsRuntime {
                     version: current.version,
                     enabled: current.value.is_enabled(),
                     // A policy is not an inventory of selectable machine scopes.
-                    scope: None,
-                    scopes: vec![],
+                    scope: source.machine.as_ref().and_then(|machine| {
+                        machine
+                            .scopes
+                            .iter()
+                            .find(|scope| scope.endpoints == current.value.endpoints())
+                            .map(|scope| scope.id.clone())
+                    }),
+                    scopes: source
+                        .machine
+                        .as_ref()
+                        .map_or_else(Vec::new, |machine| machine.scopes.clone()),
                     pending: personal.is_some_and(|state| state.busy)
                         || edit
                             .as_ref()
@@ -404,7 +527,10 @@ impl SettingsRuntime {
                         .map(|value| value.as_str().into())
                 }),
                 worktree_location,
-                permissions: None,
+                permissions: source
+                    .machine
+                    .as_ref()
+                    .and_then(|machine| machine.permissions.clone()),
                 remote_access,
             });
         }
@@ -531,7 +657,7 @@ impl SettingsRuntime {
                     let provider = native.clone();
                     let target = binding.clone();
                     let observation = executor
-                        .spawn(async move { check_native(&provider, &target).await })
+                        .spawn(async move { recover_native(&provider, &target).await })
                         .await;
                     let Some(runtime) = weak.upgrade() else {
                         return;
@@ -544,13 +670,26 @@ impl SettingsRuntime {
                         let state = states.entry(server).or_default();
                         match observation {
                             Ok(Ok(read)) => {
+                                let previous_pending =
+                                    state.native.as_ref().and_then(|native| native.pending);
                                 state.native = Some(NativePresentation {
                                     generation: read.generation,
                                     desired: read.desired,
                                     approved: read.status.approved.as_ref().map(installation),
                                     staged: read.status.staged.as_ref().map(installation),
                                     pending: read.status.pending,
-                                })
+                                });
+                                if let Some(ResultPublication::Native {
+                                    request,
+                                    unresolved: _,
+                                    failure,
+                                }) = read.recovered
+                                    && (state.management.native_request != Some(request)
+                                        || previous_pending == Some(request))
+                                {
+                                    state.management.native_request = Some(request);
+                                    state.management.failure = failure;
+                                }
                             }
                             Ok(Err(failure)) => {
                                 state.native = None;
@@ -1357,7 +1496,29 @@ async fn check_native(
         desired: registration.desired_state(),
         status,
         generation,
+        recovered: None,
     })
+}
+
+async fn recover_native(
+    native: &NativeServiceManagement,
+    binding: &PairedServerBinding,
+) -> Result<NativeRead, ManagementFailure> {
+    let mut read = check_native(native, binding).await?;
+    let originals = native
+        .supervisor()
+        .retained_service_requests()
+        .map_err(classify_native)?;
+    let request = read
+        .status
+        .pending
+        .or_else(|| originals.last().map(|progress| progress.request));
+    if let Some(request) = request {
+        let progress = native.resolve(request).await;
+        read = check_native(native, binding).await?;
+        read.recovered = Some(native_result(request, progress));
+    }
+    Ok(read)
 }
 
 fn installation(
@@ -1455,7 +1616,15 @@ fn native_result(
         Ok(progress) if progress.request == request => ResultPublication::Native {
             request,
             unresolved: progress.phase != spaceterm_host::account_service::ServicePhase::Completed,
-            failure: None,
+            failure: match progress.state {
+                spaceterm_host::account_service::ServiceRequestState::NotApplied(failure) => {
+                    Some(classify_native(failure))
+                }
+                spaceterm_host::account_service::ServiceRequestState::Indeterminate => {
+                    Some(ManagementFailure::Indeterminate)
+                }
+                _ => None,
+            },
         },
         Ok(_) => ResultPublication::Native {
             request,
@@ -1695,3 +1864,7 @@ fn classify(failure: ClientFailure) -> ManagementFailure {
 #[cfg(test)]
 #[path = "server_runtime_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../../platform/server_settings_services_tests.rs"]
+mod native_tests;

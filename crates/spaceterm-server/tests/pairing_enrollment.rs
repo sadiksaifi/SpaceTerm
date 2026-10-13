@@ -1153,6 +1153,7 @@ fn paired_issue_from_wire(
                             action: Some($profile::pairing_request::Action::IssueAuthorization(
                                 request,
                             )),
+                            ..Default::default()
                         },
                     )),
                 })),

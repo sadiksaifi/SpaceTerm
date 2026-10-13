@@ -13,6 +13,7 @@ mod ledger;
 pub mod limits;
 mod organization;
 pub mod pairing;
+pub mod receipts;
 mod recovery;
 pub mod schema;
 #[cfg(feature = "test-support")]

@@ -256,6 +256,13 @@ mod fresh_publication;
     any(target_os = "macos", target_os = "linux")
 ))]
 mod account_installation {
+    fn private_root() -> tempfile::TempDir {
+        #[cfg(target_os = "macos")]
+        let parent = std::path::PathBuf::from("/private/tmp");
+        #[cfg(not(target_os = "macos"))]
+        let parent = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+        tempfile::tempdir_in(parent).unwrap()
+    }
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     use ring::signature::{Ed25519KeyPair, KeyPair as _};
     use sha2::{Digest as _, Sha256};
@@ -581,6 +588,211 @@ mod account_installation {
             account.with_providers(manager, processes, std::sync::Arc::new(InstallClock), None);
         account.with_installation_trust(supervisor, key)
     }
+    fn read_template(registration: &spaceterm_host::account_service::RegisteredServer) -> String {
+        use spaceterm_host::{
+            organization_store::{
+                SqliteOrganizationStore, StoreIdentity, StoreLimits, StoreServices, migrations,
+                receipts::SignedReceiptReader, schema,
+            },
+            storage::Database,
+        };
+        let server = spaceterm_core::identity::ServerId::new(registration.server_pin().identity);
+        let home = spaceterm_core::organization::ServerDirectory::new(
+            server,
+            spaceterm_host::account_service::TrustedAccountFacts::current()
+                .unwrap()
+                .home()
+                .as_os_str()
+                .as_encoded_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        let database = Database::open_existing_for_application(
+            registration.organization_directory(),
+            migrations(),
+            schema::APPLICATION_ID,
+        )
+        .unwrap();
+        let mut store = SqliteOrganizationStore::open_existing(
+            database,
+            StoreIdentity {
+                server,
+                account: registration.key(),
+                server_public_key: registration.server_pin().public_key,
+            },
+            StoreLimits::production(),
+            StoreServices::production(
+                home,
+                std::sync::Arc::new(SignedReceiptReader::new(registration.server_pin()).unwrap()),
+            ),
+        )
+        .unwrap();
+        store
+            .recover_bundle()
+            .unwrap()
+            .core
+            .organization
+            .settings
+            .worktree_location
+            .value
+            .as_str()
+            .to_owned()
+    }
+
+    #[tokio::test]
+    async fn first_install_initializes_the_real_organization_store_before_starting() {
+        let root = private_root();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
+        let supervisor = installer(&account, key, manager);
+        let request = supervisor.allocate_request().unwrap();
+        supervisor
+            .install(request, account.confirm_install(artifact))
+            .await
+            .unwrap();
+        assert_eq!(
+            read_template(&supervisor.discover().unwrap().unwrap()),
+            spaceterm_host::git::path_template::DEFAULT_WORKTREE_PATH_TEMPLATE
+        );
+    }
+
+    #[tokio::test]
+    async fn new_local_server_seeds_legacy_worktree_template_once() {
+        use spaceterm_host::organization_store::bootstrap::LegacyWorktreeLocation;
+        let root = private_root();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
+        let supervisor = installer(&account, key, manager.clone());
+        let request = supervisor.allocate_request().unwrap();
+        let confirmation = account
+            .assess_test_install(artifact)
+            .with_local_desktop_seed(Some(
+                LegacyWorktreeLocation::parse("~/old/{repository}/{branch}".into()).unwrap(),
+            ))
+            .confirm();
+        let original = supervisor.install(request, confirmation).await.unwrap();
+        let registration = supervisor.discover().unwrap().unwrap();
+        let pin = registration.server_pin();
+        assert_eq!(read_template(&registration), "~/old/{repository}/{branch}");
+        assert_eq!(
+            installer(&account, manager.key.clone(), manager.clone())
+                .resolve(request)
+                .await
+                .unwrap(),
+            original
+        );
+        assert_eq!(supervisor.discover().unwrap().unwrap().server_pin(), pin);
+        assert_eq!(read_template(&registration), "~/old/{repository}/{branch}");
+        assert_eq!(
+            manager.effects.lock().unwrap().as_slice(),
+            &["configure", "start"]
+        );
+    }
+
+    #[tokio::test]
+    async fn existing_headless_server_is_not_reseeded_from_client_settings() {
+        use spaceterm_host::organization_store::bootstrap::LegacyWorktreeLocation;
+        let root = private_root();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
+        let supervisor = installer(&account, key, manager.clone());
+        supervisor
+            .install(
+                supervisor.allocate_request().unwrap(),
+                account.confirm_install(artifact),
+            )
+            .await
+            .unwrap();
+        let registration = supervisor.discover().unwrap().unwrap();
+        let original = read_template(&registration);
+        let (_, artifact) = fixture("1.2.3", 7, native_machine());
+        let confirmation = account
+            .assess_test_install(artifact)
+            .with_local_desktop_seed(Some(
+                LegacyWorktreeLocation::parse("~/desktop/{branch}".into()).unwrap(),
+            ))
+            .confirm();
+        supervisor
+            .install(supervisor.allocate_request().unwrap(), confirmation)
+            .await
+            .unwrap();
+        assert_eq!(read_template(&registration), original);
+        assert_eq!(
+            supervisor.discover().unwrap().unwrap().server_pin(),
+            registration.server_pin()
+        );
+        assert_eq!(
+            manager.effects.lock().unwrap().as_slice(),
+            &["configure", "start"]
+        );
+    }
+
+    #[tokio::test]
+    async fn locked_server_storage_is_never_treated_as_a_new_server() {
+        use spaceterm_host::{
+            organization_store::{bootstrap::LegacyWorktreeLocation, migrations, schema},
+            storage::Database,
+        };
+        let root = private_root();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
+        let supervisor = installer(&account, key, manager.clone());
+        supervisor
+            .install(
+                supervisor.allocate_request().unwrap(),
+                account.confirm_install(artifact),
+            )
+            .await
+            .unwrap();
+        let registration = supervisor.discover().unwrap().unwrap();
+        let original = read_template(&registration);
+        let mut database = Database::open_existing_for_application(
+            registration.organization_directory(),
+            migrations(),
+            schema::APPLICATION_ID,
+        )
+        .unwrap();
+        let (ready, entered) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let lock = std::thread::spawn(move || {
+            database.transaction(|_| {
+                ready.send(()).unwrap();
+                released.recv().unwrap();
+                Ok(())
+            })
+        });
+        entered.recv().unwrap();
+        let (_, artifact) = fixture("1.2.3", 7, native_machine());
+        let confirmation = account
+            .assess_test_install(artifact)
+            .with_local_desktop_seed(Some(
+                LegacyWorktreeLocation::parse("~/replacement/{branch}".into()).unwrap(),
+            ))
+            .confirm();
+        let outcome = supervisor
+            .install(supervisor.allocate_request().unwrap(), confirmation)
+            .await;
+        release.send(()).unwrap();
+        assert!(matches!(
+            lock.join().unwrap(),
+            spaceterm_host::storage::CommitDisposition::Durable { .. }
+        ));
+        assert!(outcome.is_ok());
+        assert_eq!(
+            supervisor.discover().unwrap().unwrap().server_pin(),
+            registration.server_pin()
+        );
+        assert_eq!(read_template(&registration), original);
+        assert_eq!(
+            manager.effects.lock().unwrap().as_slice(),
+            &["configure", "start"]
+        );
+    }
+
     #[tokio::test]
     async fn confirmed_install_initializes_one_identity_and_replays_original_result_without_starting_again()
      {

@@ -615,6 +615,7 @@ async fn paired_issuance_to_enrollment_uses_real_dispatch_and_ledger_in_both_maj
                                         proposal: Some(proposal_to_wire(claim.proposal())),
                                     },
                                 )),
+                                ..Default::default()
                             },
                         )),
                     })),
@@ -2325,6 +2326,7 @@ fn pairing_wire_request(
                             request: 0,
                             operation: Some(operation_to_wire(binding.id)),
                             action: Some(action),
+                            ..Default::default()
                         },
                     )),
                 })),
