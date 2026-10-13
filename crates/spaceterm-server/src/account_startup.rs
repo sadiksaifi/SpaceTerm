@@ -47,6 +47,14 @@ impl AccountOwnerEnrollment {
             .supervisor
             .owner_enrollment_digest(request, server, claim)
             .map_err(owner_failure)?;
+        match self
+            .supervisor
+            .validate_owner_enrollment(&request, digest, server, claim)
+        {
+            Ok(()) => return Ok(digest),
+            Err(ServiceFailure::Missing) => {}
+            Err(failure) => return Err(owner_failure(failure)),
+        }
         self.supervisor
             .record_owner_enrollment(request, digest, server, claim)
             .map_err(owner_failure)?;
@@ -81,7 +89,7 @@ impl AccountOwnerEnrollmentPort for AccountOwnerEnrollment {
         self.revalidate_owner_issuance(request, digest, server, claim)
     }
 }
-fn owner_failure(failure: ServiceFailure) -> PairingFailure {
+pub(crate) fn owner_failure(failure: ServiceFailure) -> PairingFailure {
     match failure {
         ServiceFailure::Missing
         | ServiceFailure::UnknownRequest
