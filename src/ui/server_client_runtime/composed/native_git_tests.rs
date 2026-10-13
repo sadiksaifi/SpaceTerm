@@ -15,8 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 // Reuse the authenticated worker fixtures instead of simulating provider publications.
 #[path = "../../../../crates/spaceterm-client/tests/operation_recovery/support.rs"]
 mod durable;
-#[path = "../../../../crates/spaceterm-client/tests/support/mod.rs"]
-mod wire;
+use crate::ui::server_client_runtime::testing::wire;
 
 static REVISION: AtomicU64 = AtomicU64::new(1);
 
@@ -91,12 +90,23 @@ fn reply(payload: &Payload, target: &spaceterm_client::api::ConnectionTarget) ->
     )
 }
 
-fn drive(runtime: &tokio::runtime::Runtime, cx: &mut TestAppContext) {
-    for _ in 0..20 {
+fn drive_until(
+    runtime: &tokio::runtime::Runtime,
+    cx: &mut TestAppContext,
+    ready: impl Fn(&mut TestAppContext) -> bool,
+) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
         cx.run_until_parked();
         runtime.block_on(wire::settle());
+        if ready(cx) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the authenticated publication did not reach the desktop"
+        );
     }
-    cx.run_until_parked();
 }
 
 #[gpui::test]
@@ -220,7 +230,15 @@ fn desktop_native_git_publications_reach_unattached_interests_and_disconnect_ind
         })
         .collect::<Vec<_>>();
     assert!(provider.inner.state.borrow().view.attachments().is_empty());
-    drive(&executor, cx);
+    drive_until(&executor, cx, |cx| {
+        interests.iter().all(|interest| {
+            cx.update(|cx| {
+                let view = store.read(cx).inventory(*interest).unwrap();
+                view.freshness == spaceterm_client::git::replica::GitFreshness::Current
+                    && view.version == Some(OrganizationRevision::new(1))
+            })
+        })
+    });
     for interest in &interests {
         let view = cx.update(|cx| store.read(cx).inventory(*interest).unwrap());
         assert_eq!(view.version, Some(OrganizationRevision::new(1)));
@@ -241,7 +259,15 @@ fn desktop_native_git_publications_reach_unattached_interests_and_disconnect_ind
             })
         })
         .collect::<Vec<_>>();
-    drive(&executor, cx);
+    drive_until(&executor, cx, |cx| {
+        statuses.iter().all(|interest| {
+            cx.update(|cx| {
+                let view = store.read(cx).status(*interest).unwrap();
+                view.freshness == spaceterm_client::git::replica::GitFreshness::Current
+                    && view.facts.is_some()
+            })
+        })
+    });
     for interest in &statuses {
         let view = cx.update(|cx| store.read(cx).status(*interest).unwrap());
         assert_eq!(
@@ -253,18 +279,15 @@ fn desktop_native_git_publications_reach_unattached_interests_and_disconnect_ind
 
     // Execute a native directory query from GPUI, without a thread-local Tokio context.
     for binding in &bindings {
-        let port = provider
-            .directory_connection(binding.target().server())
+        let source = provider
+            .directory_source(binding.target().server())
             .unwrap();
-        let directory =
-            spaceterm_client::directories::DirectoryClient::new(binding.target().server(), port)
-                .unwrap();
-        let task = cx
-            .foreground_executor()
-            .spawn(async move { directory.home().await });
+        assert!(source.is_server_backed());
+        assert!(!source.can_create());
+        let query = source.discover_home();
+        let task = cx.foreground_executor().spawn(query);
         let home = super::tests::finish(task, &executor, cx).unwrap();
-        assert_eq!(home.bytes(), b"/server/home");
-        assert_eq!(home.server(), binding.target().server());
+        assert_eq!(home.as_str(), "/server/home");
     }
 
     REVISION.store(2, Ordering::SeqCst);
@@ -274,13 +297,30 @@ fn desktop_native_git_publications_reach_unattached_interests_and_disconnect_ind
             revision: 2,
         }),
     );
-    drive(&executor, cx);
+    drive_until(&executor, cx, |cx| {
+        interests[..2].iter().all(|interest| {
+            cx.update(|cx| {
+                store.read(cx).inventory(*interest).unwrap().version
+                    == Some(OrganizationRevision::new(2))
+            })
+        })
+    });
     for interest in &interests[..2] {
         let view = cx.update(|cx| store.read(cx).inventory(*interest).unwrap());
         assert_eq!(view.version, Some(OrganizationRevision::new(2)));
     }
     executor.block_on(plans[&bindings[0].target().server()].control(PeerControl::Disconnect));
-    drive(&executor, cx);
+    drive_until(&executor, cx, |cx| {
+        interests[..2].iter().all(|interest| {
+            cx.update(|cx| {
+                store.read(cx).inventory(*interest).unwrap().freshness
+                    != spaceterm_client::git::replica::GitFreshness::Current
+            })
+        }) && cx.update(|cx| {
+            store.read(cx).status(statuses[0]).unwrap().freshness
+                == spaceterm_client::git::replica::GitFreshness::LastKnown
+        })
+    });
     for interest in &interests[..2] {
         let view = cx.update(|cx| store.read(cx).inventory(*interest).unwrap());
         assert_ne!(
@@ -309,7 +349,18 @@ fn desktop_native_git_publications_reach_unattached_interests_and_disconnect_ind
         .as_ref()
         .unwrap();
     executor.block_on(handle.connect()).unwrap();
-    drive(&executor, cx);
+    drive_until(&executor, cx, |cx| {
+        interests[..2].iter().all(|interest| {
+            cx.update(|cx| {
+                let view = store.read(cx).inventory(*interest).unwrap();
+                view.freshness == spaceterm_client::git::replica::GitFreshness::Current
+                    && view.version == Some(OrganizationRevision::new(2))
+            })
+        }) && cx.update(|cx| {
+            store.read(cx).status(statuses[0]).unwrap().freshness
+                == spaceterm_client::git::replica::GitFreshness::Current
+        })
+    });
     for interest in &interests[..2] {
         let view = cx.update(|cx| store.read(cx).inventory(*interest).unwrap());
         assert_eq!(
@@ -340,7 +391,14 @@ fn desktop_native_git_publications_reach_unattached_interests_and_disconnect_ind
         )
         .unwrap();
     // Drain the connection-lost publications before tearing down the native executor.
-    drive(&executor, cx);
+    drive_until(&executor, cx, |cx| {
+        statuses.iter().all(|interest| {
+            cx.update(|cx| {
+                store.read(cx).status(*interest).unwrap().freshness
+                    == spaceterm_client::git::replica::GitFreshness::LastKnown
+            })
+        })
+    });
     for interest in &statuses {
         assert_eq!(
             cx.update(|cx| store.read(cx).status(*interest).unwrap().freshness),

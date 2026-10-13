@@ -6,8 +6,7 @@ use spaceterm_client::{
 };
 use spaceterm_protocol::convert::organization::{self, PublicationPart};
 
-#[path = "../../../../../crates/spaceterm-client/tests/support/mod.rs"]
-mod fixture;
+use crate::ui::server_client_runtime::testing::wire as fixture;
 
 fn publication(request: &Payload, target: &ConnectionTarget) -> Option<Payload> {
     macro_rules! profile {

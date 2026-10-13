@@ -1229,3 +1229,185 @@ fn desktop_directory_repair_uses_server_picker_and_routes_only_the_confirmed_sta
     cx.run_until_parked();
     assert_eq!(runtime.begun().len(), 2);
 }
+
+#[gpui::test]
+fn desktop_workspace_starting_directory_browses_its_server_and_submits_a_versioned_pin(
+    cx: &mut TestAppContext,
+) {
+    let (manager, runtime, cx) = harness(cx);
+    servers(&runtime, &[7]);
+    let replica = replica(7);
+    runtime.provider.set_directory_connection(
+        server(7),
+        crate::ui::directory_picker::server_tests::Peer::new(),
+    );
+    publish(&replica, 1, &runtime, cx);
+    let version = replica.org.snapshot().state().workspaces[0]
+        .pinned_directory
+        .version;
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.handle_server_sidebar_event(
+                ServerSidebarEvent::StartingDirectory(ws(7, 1)),
+                window,
+                cx,
+            )
+        })
+    });
+    cx.run_until_parked();
+    assert!(manager.read_with(cx, |manager, cx| {
+        manager
+            .pin_picker
+            .as_ref()
+            .is_some_and(|picker| picker.read(cx).blocks_terminal_input())
+    }));
+    assert!(
+        runtime.begun().is_empty(),
+        "browsing cannot mutate or start a Session"
+    );
+    cx.simulate_keystrokes("cmd-enter");
+    cx.run_until_parked();
+    assert_eq!(
+        runtime.begun(),
+        vec![DesktopRequest::Shared {
+            server: server(7),
+            command: Command::SetPinnedDirectory {
+                workspace: ws(7, 1),
+                expected_version: version,
+                value: Some(
+                    spaceterm_core::organization::ServerDirectory::new(
+                        server(7),
+                        b"/server/home".to_vec(),
+                    )
+                    .unwrap()
+                ),
+            },
+        }]
+    );
+}
+
+#[gpui::test]
+fn desktop_workspace_starting_directory_refuses_stopped_server_without_local_fallback(
+    cx: &mut TestAppContext,
+) {
+    let (manager, runtime, cx) = harness(cx);
+    servers(&runtime, &[7]);
+    let replica = replica(7);
+    publish(&replica, 1, &runtime, cx);
+    let mut unavailable = frame(&replica, ReplicaStatus::Ready);
+    unavailable.connection = ConnectionState::Stopped;
+    runtime.provider.set_frame(Arc::new(unavailable));
+    runtime.notifier.frame_changed(server(7));
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.handle_server_sidebar_event(
+                ServerSidebarEvent::StartingDirectory(ws(7, 1)),
+                window,
+                cx,
+            )
+        })
+    });
+    cx.run_until_parked();
+    assert!(manager.read_with(cx, |manager, _| manager.pin_picker.is_none()));
+    assert!(runtime.begun().is_empty());
+}
+
+#[gpui::test]
+fn desktop_workspace_starting_directory_rejects_a_changed_field_before_submission(
+    cx: &mut TestAppContext,
+) {
+    let (manager, runtime, cx) = harness(cx);
+    servers(&runtime, &[7]);
+    let replica = replica(7);
+    runtime.provider.set_directory_connection(
+        server(7),
+        crate::ui::directory_picker::server_tests::Peer::new(),
+    );
+    publish(&replica, 1, &runtime, cx);
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.handle_server_sidebar_event(
+                ServerSidebarEvent::StartingDirectory(ws(7, 1)),
+                window,
+                cx,
+            )
+        })
+    });
+    cx.run_until_parked();
+    let original = runtime.provider.frame(server(7)).unwrap();
+    let mut changed = DesktopServerFrame {
+        server: original.server,
+        connection: original.connection.clone(),
+        replica_status: original.replica_status,
+        organization: original.organization.clone(),
+        personal: original.personal.clone(),
+        view_revision: view_revision(2),
+    };
+    let mut state = changed.organization.state().clone();
+    state.revision = spaceterm_core::authority::OrganizationRevision::new(2);
+    state.workspaces[0].pinned_directory.version = spaceterm_core::authority::FieldVersion::new(2);
+    changed.organization = Arc::new(
+        spaceterm_core::organization::OrganizationSnapshot::new(
+            changed.organization.epoch(),
+            state,
+            changed.organization.runtime().to_vec(),
+        )
+        .unwrap(),
+    );
+    runtime.provider.set_frame(Arc::new(changed));
+    runtime.notifier.frame_changed(server(7));
+    cx.run_until_parked();
+    cx.simulate_keystrokes("cmd-enter");
+    cx.run_until_parked();
+    assert!(
+        runtime.begun().is_empty(),
+        "a replaced directory field needs a fresh chooser"
+    );
+}
+
+#[gpui::test]
+fn desktop_workspace_starting_directory_reports_a_server_field_conflict(cx: &mut TestAppContext) {
+    let (manager, runtime, cx) = harness(cx);
+    servers(&runtime, &[7]);
+    let replica = replica(7);
+    runtime.provider.set_directory_connection(
+        server(7),
+        crate::ui::directory_picker::server_tests::Peer::new(),
+    );
+    publish(&replica, 1, &runtime, cx);
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.handle_server_sidebar_event(
+                ServerSidebarEvent::StartingDirectory(ws(7, 1)),
+                window,
+                cx,
+            )
+        })
+    });
+    cx.run_until_parked();
+    cx.simulate_keystrokes("cmd-enter");
+    cx.run_until_parked();
+    let operation = operation(server(7), 1);
+    runtime.provider.set_outcome(
+        operation,
+        Arc::new(Outcome::Conflict(
+            spaceterm_core::operations::FieldConflict::PinnedDirectory {
+                workspace: ws(7, 1),
+                current_value: None,
+                current_version: spaceterm_core::authority::FieldVersion::new(2),
+            },
+        )),
+    );
+    runtime.provider.finish(0, Ok(Some(operation)));
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("modal-action-server-request-failed-ok")
+            .is_some()
+    );
+    assert_eq!(
+        runtime.begun().len(),
+        1,
+        "a conflict never repeats the write"
+    );
+}
