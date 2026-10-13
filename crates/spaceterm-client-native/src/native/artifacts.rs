@@ -1,4 +1,4 @@
-//! Bounded signed account-server downloads using reqwest with WebPKI roots.
+//! Bounded signed account-server bytes from HTTPS or explicit local files.
 //! The distribution crate owns feed, archive and layout verification.
 
 use crate::cli::arguments::StableVersion;
@@ -17,6 +17,93 @@ use std::{
 
 const RELEASES: &str = "https://github.com/sadiksaifi/SpaceTerm/releases";
 
+/// Explicit local authority supplied by this machine's invoking user. The feed's
+/// detached signature is read from the feed path with `.sig` appended. Neither
+/// feed fields nor archive metadata can choose a local path.
+#[derive(Clone, Eq, PartialEq)]
+pub struct LocalArtifactSource {
+    feed: std::path::PathBuf,
+    archive: std::path::PathBuf,
+}
+impl std::fmt::Debug for LocalArtifactSource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("LocalArtifactSource(..)")
+    }
+}
+impl LocalArtifactSource {
+    pub fn new(
+        feed: std::path::PathBuf,
+        archive: std::path::PathBuf,
+    ) -> Result<Self, ManagementFailure> {
+        for path in [&feed, &archive] {
+            let value = path.to_str().ok_or(ManagementFailure::Usage)?;
+            // URL, file-URL and SCP-style values are not local file authority.
+            if value.is_empty()
+                || value.contains(':')
+                || value.starts_with("//")
+                || value.contains('\0')
+            {
+                return Err(ManagementFailure::Usage);
+            }
+        }
+        Ok(Self { feed, archive })
+    }
+}
+impl ArtifactTransport for LocalArtifactSource {
+    fn get(&self, url: &str, limit: usize) -> Result<Vec<u8>, ManagementFailure> {
+        // URLs are constructed by ServerArtifacts, never received from the feed.
+        // Replacing only this byte boundary keeps all HTTPS admission checks.
+        if url.ends_with(".json.sig") {
+            let mut signature = self.feed.as_os_str().to_owned();
+            signature.push(".sig");
+            read_local_file(
+                std::path::Path::new(&signature),
+                limit.min(MAX_FEED_SIGNATURE_BYTES),
+            )
+        } else if url.ends_with(".json") {
+            read_local_file(&self.feed, limit.min(MAX_FEED_BYTES))
+        } else if url.ends_with(".tar.gz") {
+            let maximum =
+                usize::try_from(MAX_ARCHIVE_BYTES).map_err(|_| ManagementFailure::LimitExceeded)?;
+            read_local_file(&self.archive, limit.min(maximum))
+        } else {
+            Err(ManagementFailure::UnsafeNativeState)
+        }
+    }
+}
+
+#[cfg(unix)]
+fn read_local_file(path: &std::path::Path, limit: usize) -> Result<Vec<u8>, ManagementFailure> {
+    use std::os::unix::fs::OpenOptionsExt;
+    // Use the same standard-library no-follow/nonblocking open as native secure
+    // file adapters. Artifact files need not have private credential-file modes.
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|error| {
+            if error.raw_os_error() == Some(libc::ELOOP) {
+                ManagementFailure::UnsafeNativeState
+            } else {
+                ManagementFailure::NativeUnavailable
+            }
+        })?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| ManagementFailure::NativeUnavailable)?;
+    if !metadata.is_file() {
+        return Err(ManagementFailure::UnsafeNativeState);
+    }
+    if metadata.len() > limit as u64 {
+        return Err(ManagementFailure::LimitExceeded);
+    }
+    read_bounded(file, limit)
+}
+#[cfg(not(unix))]
+fn read_local_file(_: &std::path::Path, _: usize) -> Result<Vec<u8>, ManagementFailure> {
+    Err(ManagementFailure::UnsupportedHost)
+}
+
 /// External download boundary. The source chooses every URL and enforces bounds
 /// again, so an adapter cannot turn response metadata into installation authority.
 pub trait ArtifactTransport: Send + Sync {
@@ -31,7 +118,6 @@ pub struct HttpsArtifactTransport {
 }
 impl ArtifactTransport for HttpsArtifactTransport {
     fn get(&self, url: &str, limit: usize) -> Result<Vec<u8>, ManagementFailure> {
-        use std::io::Read;
         let client = self
             .client
             .get_or_init(|| {
@@ -57,24 +143,30 @@ impl ArtifactTransport for HttpsArtifactTransport {
         {
             return Err(ManagementFailure::LimitExceeded);
         }
-        let maximum = (limit as u64)
-            .checked_add(1)
-            .ok_or(ManagementFailure::LimitExceeded)?;
-        let mut bytes = Vec::new();
-        response
-            .take(maximum)
-            .read_to_end(&mut bytes)
-            .map_err(|_| ManagementFailure::NativeUnavailable)?;
-        if bytes.len() > limit {
-            return Err(ManagementFailure::LimitExceeded);
-        }
-        Ok(bytes)
+        read_bounded(response, limit)
     }
+}
+
+// Shared with HTTPS so local reads have the same bound-plus-one admission.
+fn read_bounded(reader: impl std::io::Read, limit: usize) -> Result<Vec<u8>, ManagementFailure> {
+    use std::io::Read;
+    let maximum = (limit as u64)
+        .checked_add(1)
+        .ok_or(ManagementFailure::LimitExceeded)?;
+    let mut bytes = Vec::new();
+    reader
+        .take(maximum)
+        .read_to_end(&mut bytes)
+        .map_err(|_| ManagementFailure::NativeUnavailable)?;
+    if bytes.len() > limit {
+        return Err(ManagementFailure::LimitExceeded);
+    }
+    Ok(bytes)
 }
 
 pub struct ServerArtifacts {
     transport: Arc<dyn ArtifactTransport>,
-    verifier: ServerArchiveVerifier,
+    verifier: Arc<ServerArchiveVerifier>,
 }
 impl Default for ServerArtifacts {
     fn default() -> Self {
@@ -87,7 +179,16 @@ impl ServerArtifacts {
     pub fn new(transport: Arc<dyn ArtifactTransport>) -> Self {
         Self {
             transport,
-            verifier: ServerArchiveVerifier::new(),
+            verifier: Arc::new(ServerArchiveVerifier::new()),
+        }
+    }
+
+    /// Replaces only the byte source while retaining this controller's single
+    /// archive budget and the embedded release-key verification policy.
+    pub fn with_local_source(&self, source: LocalArtifactSource) -> Self {
+        Self {
+            transport: Arc::new(source),
+            verifier: Arc::clone(&self.verifier),
         }
     }
 
@@ -265,6 +366,14 @@ mod tests {
             "archive":{"name":target.account_archive_name(BuildChannel::Release,"1.2.3"),"size":1,"sha256":"11".repeat(32),"signature":STANDARD.encode([1;64]),"manifest_sha256":"22".repeat(32)}
         })).unwrap();
         let signature = STANDARD.encode(pair.sign(&bytes).as_ref()).into_bytes();
+        let root = tempfile::tempdir().unwrap();
+        let feed_path = root.path().join("feed.json");
+        let archive_path = root.path().join("archive.tar.gz");
+        std::fs::write(&feed_path, &bytes).unwrap();
+        std::fs::write(root.path().join("feed.json.sig"), &signature).unwrap();
+        let local = ServerArtifacts::new(Arc::new(
+            LocalArtifactSource::new(feed_path, archive_path).unwrap(),
+        ));
         let transport = replies_transport(vec![
             bytes.clone(),
             signature.clone(),
@@ -274,29 +383,31 @@ mod tests {
             signature,
         ]);
         let source = ServerArtifacts::new(transport.clone());
-        assert_eq!(
-            source
-                .check_with_key(&key, BuildIdentity::Release, None)
-                .unwrap()
-                .document()
-                .version
-                .as_str(),
-            "1.2.3"
-        );
-        assert!(matches!(
-            source.check_with_key(&key, BuildIdentity::Development, None),
-            Err(ManagementFailure::UnsafeNativeState)
-        ));
         let invocation =
             crate::cli::arguments::parse(["install", "--version", "1.2.4"].map(Into::into))
                 .unwrap();
-        let crate::cli::arguments::CliCommand::Install { version } = invocation.command else {
+        let crate::cli::arguments::CliCommand::Install { version, .. } = invocation.command else {
             panic!("missing version")
         };
-        assert!(matches!(
-            source.check_with_key(&key, BuildIdentity::Release, version.as_ref()),
-            Err(ManagementFailure::UnsafeNativeState)
-        ));
+        for source in [&source, &local] {
+            assert_eq!(
+                source
+                    .check_with_key(&key, BuildIdentity::Release, None)
+                    .unwrap()
+                    .document()
+                    .version
+                    .as_str(),
+                "1.2.3"
+            );
+            assert!(matches!(
+                source.check_with_key(&key, BuildIdentity::Development, None),
+                Err(ManagementFailure::UnsafeNativeState)
+            ));
+            assert!(matches!(
+                source.check_with_key(&key, BuildIdentity::Release, version.as_ref()),
+                Err(ManagementFailure::UnsafeNativeState)
+            ));
+        }
         assert!(
             transport.calls.lock().unwrap()[4]
                 .0

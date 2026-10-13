@@ -38,6 +38,9 @@ tempfile = "=3.27.0"
 tokio = { version = "=1.53.1", default-features = false, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 
 [dev-dependencies]
+flate2 = "=1.1.10"
+sha2 = "=0.10.9"
+tar = { version = "=0.4.46", default-features = false }
 spaceterm-host = { path = "../spaceterm-host", features = ["test-support"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]

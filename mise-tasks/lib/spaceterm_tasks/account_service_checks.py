@@ -1,8 +1,8 @@
-"""Nonempty account/provider gates and explicit owner-only lifecycle commands.
+"""Nonempty account/provider gates without installed-service effects.
 
 Normal validation never installs, starts, stops, or uninstalls a service, enables
-linger, or invokes an administrator tool. The lifecycle entry point requires a
-separate mutation flag and delegates the fixed action to the account CLI.
+linger, or invokes an administrator tool. Real lifecycle checks use spaceterm-cli
+explicitly, as documented in the coordinator's real-host runbook.
 """
 
 import argparse
@@ -54,7 +54,6 @@ GATES = {
         "spaceterm-server": ("git_shutdown",),
     },
 }
-MUTATIONS = {"install", "start", "stop", "uninstall"}
 
 
 def require_nonempty(output):
@@ -139,57 +138,19 @@ def check_startup(executable, platform, build):
     return metadata
 
 
-def lifecycle(executable, operation, platform, build, *, allow_mutation=False):
-    if operation not in MUTATIONS | {"status"}:
-        raise TaskError("unsupported account lifecycle operation")
-    if operation in MUTATIONS and allow_mutation is not True:
-        raise TaskError("explicit account-service mutation approval is required")
-    if os.getuid() == 0:
-        raise TaskError("SpaceTerm account commands cannot run as root")
-    # The compiled build chooses the registration. No runtime identity or
-    # executable path is sent to the provider as an installation authority.
-    package_server.executable_metadata(executable, platform, build)
-    output = native.run_tool(
-        [executable, "--json", "--non-interactive", operation],
-        timeout=60,
-        maximum=64 * 1024,
-        reject_stderr=True,
-    )
-    document = server_artifacts.strict_json(output, 64 * 1024)
-    if (
-        not isinstance(document, dict)
-        or type(document.get("schema")) is not int
-        or document["schema"] != 1
-        or not isinstance(document.get("result"), dict)
-    ):
-        raise TaskError("account CLI returned an unsupported result")
-    # Exit zero is the CLI's completion contract. This task does not manufacture
-    # cleanup evidence or substitute for the coordinator's host observations.
-    return document
-
-
 def run(arguments):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=(*GATES, "lifecycle"))
+    parser.add_argument("mode", choices=tuple(GATES))
     parser.add_argument("--executable", type=Path)
     parser.add_argument("--build", choices=server_artifacts.BUILDS, default="preflight")
-    parser.add_argument("--operation", choices=sorted(MUTATIONS | {"status"}), default="status")
-    parser.add_argument("--allow-mutation", action="store_true")
     args = parser.parse_args(arguments)
     if args.mode in GATES and args.mode != "startup":
         test_gate(args.mode)
     else:
-        if args.mode == "lifecycle" and args.executable is None:
-            raise TaskError("account lifecycle requires an explicit installed executable")
         executable = args.executable or package_server.build()["spaceterm-server"]
         platform = "darwin-arm64" if sys.platform == "darwin" else "linux-x86_64"
-        if args.mode == "startup":
-            check_startup(executable, platform, args.build)
-            test_gate("startup")
-        else:
-            lifecycle(
-                executable, args.operation, platform, args.build, allow_mutation=args.allow_mutation
-            )
+        check_startup(executable, platform, args.build)
+        test_gate("startup")
         print(f"phase={args.mode} classification=cli-succeeded")
     return 0
 

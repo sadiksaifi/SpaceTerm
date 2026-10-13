@@ -34,6 +34,7 @@ pub enum CliCommand {
     },
     Install {
         version: Option<StableVersion>,
+        source: Option<crate::native::artifacts::LocalArtifactSource>,
     },
     Start,
     Restart {
@@ -169,9 +170,27 @@ pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<CliInvocat
             }).transpose()? }
         }
         ["install", rest @ ..] => {
-            let options = Options::new(rest, &[("--version", Flag::Value)])?;
+            let options = Options::new(
+                rest,
+                &[
+                    ("--version", Flag::Value),
+                    ("--feed", Flag::Value),
+                    ("--archive", Flag::Value),
+                ],
+            )?;
+            let source = match (options.value("--feed"), options.value("--archive")) {
+                (None, None) => None,
+                (Some(feed), Some(archive)) => {
+                    Some(crate::native::artifacts::LocalArtifactSource::new(
+                        feed.into(),
+                        archive.into(),
+                    )?)
+                }
+                _ => return Err(CliFailure::Usage),
+            };
             CliCommand::Install {
                 version: options.value("--version").map(parse_version).transpose()?,
+                source,
             }
         }
         ["start"] => CliCommand::Start,

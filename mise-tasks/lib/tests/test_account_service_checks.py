@@ -30,44 +30,11 @@ class AccountCheckTests(unittest.TestCase):
         self.assertNotIn(marker.encode(), result.stderr)
         self.assertEqual(result.stderr, b"unsupported-update-test-arguments\n")
 
-    def test_lifecycle_mutations_require_approval_before_any_provider_call(self):
-        for operation in checks.MUTATIONS:
-            with (
-                self.subTest(operation=operation),
-                patch.object(checks.package_server, "executable_metadata") as query,
-            ):
-                with self.assertRaises(TaskError):
-                    checks.lifecycle(Path("/unused"), operation, "linux-x86_64", "preflight")
-                query.assert_not_called()
-
-    def test_lifecycle_uses_the_compiled_identity_and_never_wraps_spaceterm_in_sudo(self):
-        with (
-            patch.object(checks.os, "getuid", return_value=501),
-            patch.object(checks.package_server, "executable_metadata") as query,
-            patch.object(
-                checks.native,
-                "run_tool",
-                return_value=b'{"schema":1,"result":{"kind":"native_operation","state":"Complete"}}',
-            ) as run,
-        ):
-            checks.lifecycle(
-                Path("/approved/server"), "stop", "linux-x86_64", "preflight", allow_mutation=True
-            )
-        query.assert_called_once_with(Path("/approved/server"), "linux-x86_64", "preflight")
-        self.assertEqual(
-            run.call_args.args[0], [Path("/approved/server"), "--json", "--non-interactive", "stop"]
-        )
-
-    def test_root_is_refused_before_queries_or_mutation(self):
-        with (
-            patch.object(checks.os, "getuid", return_value=0),
-            patch.object(checks.package_server, "executable_metadata") as query,
-        ):
-            with self.assertRaises(TaskError):
-                checks.lifecycle(
-                    Path("/unused"), "start", "linux-x86_64", "preflight", allow_mutation=True
-                )
-            query.assert_not_called()
+    def test_lifecycle_wrapper_is_removed_in_favor_of_explicit_cli_commands(self):
+        self.assertFalse((ROOT / "mise-tasks/server/deployment/lifecycle.py").exists())
+        with self.assertRaises(SystemExit), patch.object(checks, "test_gate") as gate:
+            checks.run(["lifecycle"])
+        gate.assert_not_called()
 
     def test_nonempty_gate_counts_only_the_selected_targets_completed_tests(self):
         output = (
