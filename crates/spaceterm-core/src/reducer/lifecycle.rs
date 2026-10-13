@@ -1248,3 +1248,249 @@ impl super::OrganizationReducer {
         self.prepare_patch(patch, None)
     }
 }
+
+impl super::OrganizationReducer {
+    /// Retire the exact hierarchy of a durable Started Git intent without deleting
+    /// membership. The actor has already compared runtime work behind its barrier.
+    pub fn prepare_started_git_retirement(
+        &self,
+        intent: &crate::worktrees::GitWriteIntent,
+        context: &ReductionContext,
+    ) -> Result<super::PreparedReduction, ReducerFailure> {
+        use crate::worktrees::{GitIntentPhase, RetainedGitAction};
+        self.state.check_admission()?;
+        if intent.phase() != GitIntentPhase::Started
+            || intent.binding() != context.binding()
+            || !self
+                .state
+                .git_allocations
+                .contains_key(&intent.binding().id)
+        {
+            return Err(ReducerFailure::InvalidFacts);
+        }
+        let RetainedGitAction::Remove { worktree, .. } = intent.parts().action else {
+            return Err(ReducerFailure::InvalidFacts);
+        };
+        let scope = intent.parts().affected.parts();
+        let org = self.state.organization();
+        if scope
+            .tabs
+            .iter()
+            .any(|tab| org.tabs.iter().find(|v| v.id == tab.id) != Some(tab))
+            || scope.membership_versions.iter().any(|version| {
+                !org.retained
+                    .as_ref()
+                    .is_some_and(|facts| facts.tab_membership_versions().contains(version))
+            })
+        {
+            return Err(ReducerFailure::InvalidFacts);
+        }
+        let (previous_panes, previous_sessions) = retiring_basis(&self.state)?;
+        let mut fresh = BTreeSet::new();
+        for pane in &scope.panes {
+            let current = self.state.runtime(pane.hierarchy.pane)?;
+            // Started already fenced input and bound this Session. Revocation may
+            // release its grant before retirement without replacing the owner.
+            let same = current.session_generation == pane.hierarchy.session_generation;
+            let transferred = pane.session.is_some_and(|session| {
+                previous_sessions.iter().any(|v| v.session() == session)
+                    && current.session_generation > session.generation
+                    && matches!(current.phase, SessionPhase::Ended { .. })
+            });
+            if !same && !transferred {
+                return Err(ReducerFailure::InvalidFacts);
+            }
+            if same {
+                fresh.insert(pane.hierarchy.pane);
+            }
+        }
+        let FencedRetirement {
+            mut patch,
+            mut panes,
+            mut sessions,
+            fresh: effects,
+        } = fence_retirement(
+            &self.state,
+            &fresh,
+            RetirementReason::WorktreeRemoval,
+            false,
+        )?;
+        // End All or Stop may have invalidated an original Session after Started.
+        // Transfer its first cleanup reason without replacing the later ended phase.
+        for pane in &scope.panes {
+            if fresh.contains(&pane.hierarchy.pane) {
+                continue;
+            }
+            let previous = previous_panes
+                .iter()
+                .find(|v| v.pane() == pane.hierarchy.pane)
+                .ok_or(ReducerFailure::InvalidFacts)?;
+            panes.push(*previous);
+            if let Some(session) = pane.session {
+                sessions.push(
+                    *previous_sessions
+                        .iter()
+                        .find(|v| v.session() == session)
+                        .ok_or(ReducerFailure::InvalidFacts)?,
+                );
+            }
+        }
+        panes.sort_by_key(|v| v.pane());
+        sessions.sort_by_key(|v| v.session());
+        let descriptor = RetirementDescriptor::new(RetirementDescriptorParts {
+            batch: self.state.next_retirement_batch()?,
+            binding: intent.binding(),
+            assessment: AssessmentRef {
+                operation: intent.binding().id,
+                digest: intent.binding().digest,
+            },
+            acceptance_revision: acceptance_revision(&self.state, &patch)?,
+            target: AssessmentTarget::RemoveWorktree {
+                scope: intent.parts().repository.scope(),
+                worktree,
+            },
+            panes,
+            sessions,
+            completion: RetirementCompletion::ContinueGitSettlement,
+            eventual_result: context
+                .facts
+                .retirement_outcome
+                .as_ref()
+                .ok_or(ReducerFailure::InvalidFacts)?
+                .compact()
+                .clone(),
+        })
+        .map_err(retirement_error)?;
+        super::close::check_retirement_capacity(&self.state, &descriptor)?;
+        for session in effects {
+            patch.effects.push(OrganizationEffect::RetireSession {
+                batch: descriptor.batch(),
+                session,
+                reason: RetirementReason::WorktreeRemoval,
+            });
+        }
+        patch.candidate.retirement_sequence = descriptor.batch().sequence();
+        patch
+            .candidate
+            .retirements
+            .insert(descriptor.batch(), descriptor.clone());
+        patch.resolution = Resolution::AwaitingRetirement(Box::new(RetirementPlan { descriptor }));
+        self.prepare_patch(patch, Some(intent.binding()))
+    }
+
+    /// Consume the original allocation and release Git retirement in the same
+    /// candidate as final membership. This grants no startup authority.
+    pub fn prepare_git_settlement(
+        &self,
+        intent: &crate::worktrees::GitWriteIntent,
+        result: &crate::worktrees::RetainedExternalResult,
+        creator_still_authorized: bool,
+    ) -> Result<super::PreparedReduction, ReducerFailure> {
+        use crate::worktrees::{
+            ExternalDisposition, GitAllocationMutation, GitIntentPhase, RetainedGitAction,
+        };
+        self.state.check_admission()?;
+        let binding = intent.binding();
+        let allocation = self
+            .state
+            .git_allocations
+            .get(&binding.id)
+            .filter(|value| value.binding() == binding)
+            .ok_or(ReducerFailure::InvalidFacts)?;
+        if self
+            .state
+            .retirements
+            .values()
+            .any(|v| v.binding() == binding && !v.cleanup_confirmed())
+        {
+            return Err(ReducerFailure::InvalidFacts);
+        }
+        let success = result.disposition == ExternalDisposition::DesiredStateObserved
+            && result.failure.is_none();
+        let mut patch = if success {
+            if !matches!(
+                intent.phase(),
+                GitIntentPhase::Started | GitIntentPhase::ExternalFinished
+            ) {
+                return Err(ReducerFailure::InvalidFacts);
+            }
+            let org = self.state.organization();
+            let (record, remove_tabs) = match &intent.parts().action {
+                RetainedGitAction::Create {
+                    worktree,
+                    directory,
+                    ..
+                } => (
+                    WorktreeRecord {
+                        id: *worktree,
+                        repository: intent.parts().repository.scope().repository,
+                        directory: directory.clone(),
+                        main: false,
+                        missing: false,
+                    },
+                    vec![],
+                ),
+                RetainedGitAction::Remove {
+                    worktree,
+                    directory,
+                    ..
+                } => (
+                    WorktreeRecord {
+                        id: *worktree,
+                        repository: intent.parts().repository.scope().repository,
+                        directory: directory.clone(),
+                        main: false,
+                        missing: true,
+                    },
+                    intent.parts().affected.parts().tabs.clone(),
+                ),
+            };
+            let version = org
+                .retained
+                .as_ref()
+                .ok_or(ReducerFailure::InvalidFacts)?
+                .repository_inventory_versions()
+                .iter()
+                .find(|v| v.id() == record.repository)
+                .map(|v| v.version());
+            super::creation::plan_worktree_patch(
+                &self.state,
+                &WorktreeOrganizationPatch {
+                    binding,
+                    scope: intent.parts().repository.scope(),
+                    expected_inventory_version: version,
+                    repositories: vec![],
+                    worktrees: vec![(
+                        record,
+                        matches!(intent.parts().action, RetainedGitAction::Create { .. }),
+                    )],
+                    memberships: vec![],
+                    settlement: Some(GitOrganizationSettlement {
+                        reservation: allocation.clone(),
+                        phase: intent.phase(),
+                        remove_tabs,
+                        creator_still_authorized,
+                    }),
+                },
+            )?
+        } else {
+            let mut patch = ReductionPatch::unchanged(&self.state, Outcome::Applied);
+            patch
+                .candidate
+                .retirements
+                .retain(|_, value| value.binding() != binding);
+            patch.candidate.git_allocations.remove(&binding.id);
+            patch
+                .operations
+                .push(crate::storage::OperationWrite::GitAllocation(
+                    GitAllocationMutation::Abandon { binding },
+                ));
+            patch
+        };
+        if matches!(patch.resolution, Resolution::Completed(Outcome::Failed(_))) {
+            return self.prepare_patch(patch, Some(binding));
+        }
+        patch.resolution = Resolution::Completed(Outcome::Applied);
+        self.prepare_patch(patch, Some(binding))
+    }
+}

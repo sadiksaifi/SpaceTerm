@@ -19,6 +19,14 @@ pub struct AuthenticatedGitPrincipal {
     client: ClientId,
 }
 impl AuthenticatedGitPrincipal {
+    pub(crate) fn from_verified(principal: crate::api::VerifiedPrincipal) -> Self {
+        Self {
+            server: principal.server(),
+            epoch: principal.epoch(),
+            pairing: principal.pairing(),
+            client: principal.client(),
+        }
+    }
     pub fn from_connection_access(access: &ConnectionAccessSnapshot) -> Result<Self, GitFailure> {
         if !access.effects_enabled || access.epoch.get() == 0 {
             return Err(GitFailure::Unauthorized);
@@ -326,4 +334,298 @@ pub trait GitOrganizationPort: Send + Sync {
         intent: &'a GitWriteIntent,
     ) -> GitFuture<'a, Result<GitReservation, GitFailure>>;
     fn close_mutation_admission(&self) -> GitFuture<'_, ()>;
+}
+
+use crate::api::{GitAllocationNeeds, ServerHandle};
+use crate::contracts::{ServerFailure, ServerFailureClass};
+use crate::service::{ActorRequest, GitRequest};
+use tokio::sync::oneshot;
+
+impl ServerHandle {
+    async fn git_call<T>(
+        &self,
+        make: impl FnOnce(oneshot::Sender<Result<T, ServerFailure>>) -> GitRequest,
+    ) -> Result<T, ServerFailure> {
+        let (reply, result) = oneshot::channel();
+        self.send(ActorRequest::Git(Box::new(make(reply))))?;
+        crate::api::receive(result).await
+    }
+    /// Read the single installed hierarchy and retained runtime source stamps.
+    pub async fn git_authority_snapshot(&self) -> Result<GitAuthoritySnapshot, ServerFailure> {
+        self.git_call(GitRequest::Snapshot).await
+    }
+    /// Canonical historical lookup precedes assessment shape or expiry checks.
+    pub async fn lookup_git_operation(
+        &self,
+        principal: AuthenticatedGitPrincipal,
+        operation: OperationId,
+        command: GitCommand,
+    ) -> Result<GitOperationLookup, ServerFailure> {
+        self.git_call(|reply| GitRequest::Lookup(principal, operation, command, reply))
+            .await
+    }
+    /// One durable admission, followed by reducer-owned durable allocation. The
+    /// final reservation compares the assessment again before installing its gates.
+    pub async fn reserve_confirmed_git(
+        &self,
+        request: ConfirmedGitAdmission,
+    ) -> Result<GitReservation, ServerFailure> {
+        let binding = self
+            .git_call(|reply| GitRequest::Admit(request.clone(), reply))
+            .await?;
+        let fallbacks = match &request.plan.action {
+            ConfirmedGitAction::Remove(scope) => scope.retained().parts().fallbacks.clone(),
+            ConfirmedGitAction::Create { .. } => vec![],
+        };
+        let result = async {
+            let allocation = self
+                .git_call(|reply| {
+                    GitRequest::Allocate(
+                        binding,
+                        GitAllocationNeeds {
+                            repository: false,
+                            worktree: matches!(
+                                request.plan.action,
+                                ConfirmedGitAction::Create { .. }
+                            ),
+                            fallbacks,
+                        },
+                        reply,
+                    )
+                })
+                .await?;
+            self.git_call(|reply| GitRequest::Reserve(request, allocation.reservation, reply))
+                .await
+        }
+        .await;
+        match result {
+            Ok(reservation) => Ok(reservation),
+            Err(error) if error.class != ServerFailureClass::RecoveryRequired => {
+                self.git_call(|reply| {
+                    GitRequest::Cancel(binding, classify_server_failure(error), reply)
+                })
+                .await?;
+                Err(error)
+            }
+            Err(error) => Err(error),
+        }
+    }
+    pub async fn persist_prepared_git(
+        &self,
+        reservation: &GitReservation,
+    ) -> Result<CommitReceipt, ServerFailure> {
+        let copy = GitReservation::new(
+            reservation.intent().clone(),
+            reservation.allocation().clone(),
+        )
+        .map_err(|_| crate::failure::failure(ServerFailureClass::StaleAuthority))?;
+        self.git_call(|reply| GitRequest::Prepared(copy, reply))
+            .await
+    }
+    /// Pause exact workers, await final-effect barriers, capture their retained
+    /// observations, then revalidate inside the same serialized candidate window.
+    pub async fn barrier_and_revalidate_git(
+        &self,
+        reservation: &GitReservation,
+    ) -> Result<(), ServerFailure> {
+        self.git_call(|reply| GitRequest::Barrier(reservation.intent().clone(), reply))
+            .await
+    }
+    pub async fn persist_started_git(
+        &self,
+        reservation: &GitReservation,
+    ) -> Result<CommitReceipt, ServerFailure> {
+        self.git_call(|reply| GitRequest::Started(reservation.intent().clone(), reply))
+            .await
+    }
+    /// A durable Started intent owns retirement even during Stop, End All or
+    /// initiating-pairing revocation. Cleanup joins each first-reason owner once.
+    pub async fn retire_started_git(
+        &self,
+        reservation: &GitReservation,
+    ) -> Result<GitRetirementReport, ServerFailure> {
+        let mut intent = reservation.intent().parts().clone();
+        intent.phase = GitIntentPhase::Started;
+        let intent = GitWriteIntent::new(intent)
+            .map_err(|_| crate::failure::failure(ServerFailureClass::StaleAuthority))?;
+        self.git_call(|reply| GitRequest::Retire(intent, reply))
+            .await?;
+        let cleaned = self.await_git_cleanup(reservation.binding()).await?;
+        Ok(GitRetirementReport {
+            cleaned: cleaned.iter().map(|v| v.session()).collect(),
+        })
+    }
+    /// Final membership, reservation consumption, intent removal and original
+    /// outcome share one physical transaction after retained external progress.
+    pub async fn complete_git(
+        &self,
+        completion: GitCompletionPlan,
+    ) -> Result<GitCompletionCommit, ServerFailure> {
+        self.git_call(|reply| GitRequest::Complete(completion, reply))
+            .await
+    }
+}
+impl GitOrganizationPort for ServerHandle {
+    fn reconcile_inventory(
+        &self,
+        principal: AuthenticatedGitPrincipal,
+        request: GitInventoryReconciliation,
+    ) -> GitFuture<'_, Result<GitAuthoritySnapshot, GitFailure>> {
+        Box::pin(async move {
+            self.git_call(|reply| GitRequest::Inventory(Some(principal), request, reply))
+                .await
+                .map_err(classify_server_failure)
+        })
+    }
+    fn reconcile_outside_source(
+        &self,
+        principal: AuthenticatedGitPrincipal,
+        request: GitOutsideSourceReconciliation,
+    ) -> GitFuture<'_, Result<GitAuthoritySnapshot, GitFailure>> {
+        Box::pin(async move {
+            self.git_call(|reply| GitRequest::Outside(principal, request, reply))
+                .await
+                .map_err(classify_server_failure)
+        })
+    }
+    fn snapshot(&self) -> GitFuture<'_, Result<GitAuthoritySnapshot, GitFailure>> {
+        Box::pin(async {
+            self.git_authority_snapshot()
+                .await
+                .map_err(classify_server_failure)
+        })
+    }
+    fn authorize(
+        &self,
+        principal: AuthenticatedGitPrincipal,
+    ) -> GitFuture<'_, Result<(), GitFailure>> {
+        Box::pin(async move {
+            self.git_call(|reply| GitRequest::Authorize(principal, reply))
+                .await
+                .map_err(classify_server_failure)
+        })
+    }
+    fn lookup<'a>(
+        &'a self,
+        principal: AuthenticatedGitPrincipal,
+        operation: OperationId,
+        command: &'a GitCommand,
+    ) -> GitFuture<'a, Result<GitOperationLookup, GitFailure>> {
+        Box::pin(async move {
+            self.lookup_git_operation(principal, operation, command.clone())
+                .await
+                .map_err(classify_server_failure)
+        })
+    }
+    fn reserve_confirmed(
+        &self,
+        request: ConfirmedGitAdmission,
+    ) -> GitFuture<'_, Result<GitReservation, GitFailure>> {
+        Box::pin(async move {
+            self.reserve_confirmed_git(request)
+                .await
+                .map_err(classify_server_failure)
+        })
+    }
+    fn persist_prepared<'a>(
+        &'a self,
+        reservation: &'a GitReservation,
+    ) -> GitFuture<'a, CommitDisposition> {
+        Box::pin(async move { disposition(self.persist_prepared_git(reservation).await) })
+    }
+    fn barrier_and_revalidate<'a>(
+        &'a self,
+        reservation: &'a GitReservation,
+    ) -> GitFuture<'a, Result<(), GitFailure>> {
+        Box::pin(async move {
+            self.barrier_and_revalidate_git(reservation)
+                .await
+                .map_err(classify_server_failure)
+        })
+    }
+    fn persist_started<'a>(
+        &'a self,
+        reservation: &'a GitReservation,
+    ) -> GitFuture<'a, CommitDisposition> {
+        Box::pin(async move { disposition(self.persist_started_git(reservation).await) })
+    }
+    fn retire_affected<'a>(
+        &'a self,
+        reservation: &'a GitReservation,
+    ) -> GitFuture<'a, Result<GitRetirementReport, GitFailure>> {
+        Box::pin(async move {
+            self.retire_started_git(reservation)
+                .await
+                .map_err(classify_server_failure)
+        })
+    }
+    fn complete<'a>(
+        &'a self,
+        _reservation: &'a GitReservation,
+        completion: &'a GitCompletionPlan,
+    ) -> GitFuture<'a, GitCompletionCommit> {
+        Box::pin(async move {
+            match self.complete_git(completion.clone()).await {
+                Ok(completion) => completion,
+                Err(error) => GitCompletionCommit {
+                    disposition: disposition(Err(error)),
+                    outcome: None,
+                },
+            }
+        })
+    }
+    fn release(&self, reservation: GitReservation) -> GitFuture<'_, ()> {
+        Box::pin(async move {
+            let _ = self
+                .git_call(|reply| GitRequest::Release(reservation.binding(), reply))
+                .await;
+        })
+    }
+    fn recover_reservation<'a>(
+        &'a self,
+        intent: &'a GitWriteIntent,
+    ) -> GitFuture<'a, Result<GitReservation, GitFailure>> {
+        Box::pin(async move {
+            self.git_call(|reply| GitRequest::Recover(intent.clone(), reply))
+                .await
+                .map_err(classify_server_failure)
+        })
+    }
+    fn close_mutation_admission(&self) -> GitFuture<'_, ()> {
+        Box::pin(async {
+            let _ = self.git_call(GitRequest::Close).await;
+        })
+    }
+}
+fn disposition(result: Result<CommitReceipt, ServerFailure>) -> CommitDisposition {
+    use spaceterm_core::storage::StoreFailure;
+    match result {
+        Ok(receipt) => CommitDisposition::Durable(receipt),
+        Err(error) => match error.class {
+            ServerFailureClass::RecoveryRequired => CommitDisposition::Indeterminate,
+            ServerFailureClass::StorageUnavailable => {
+                CommitDisposition::NotApplied(StoreFailure::Unavailable)
+            }
+            ServerFailureClass::Capacity => {
+                CommitDisposition::NotApplied(StoreFailure::RevisionConflict)
+            }
+            ServerFailureClass::StaleAuthority
+            | ServerFailureClass::Authentication
+            | ServerFailureClass::ScopeMismatch => {
+                CommitDisposition::NotApplied(StoreFailure::InvalidTransaction)
+            }
+            _ => CommitDisposition::NotApplied(StoreFailure::Unavailable),
+        },
+    }
+}
+fn classify_server_failure(error: ServerFailure) -> GitFailure {
+    match error.class {
+        ServerFailureClass::Authentication => GitFailure::Unauthorized,
+        ServerFailureClass::ScopeMismatch => GitFailure::WrongServer,
+        ServerFailureClass::StaleAuthority => GitFailure::StaleAssessment,
+        ServerFailureClass::Capacity => GitFailure::Busy,
+        ServerFailureClass::RecoveryRequired => GitFailure::IndeterminateDurability,
+        ServerFailureClass::StorageUnavailable => GitFailure::StorageUnavailable,
+        _ => GitFailure::StorageFailure,
+    }
 }

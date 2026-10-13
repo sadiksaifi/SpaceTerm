@@ -193,6 +193,54 @@ pub enum ReductionRequest<'a> {
 }
 
 pub trait ReducerPort: Send {
+    fn prepare_git_cleanup(
+        &mut self,
+        _cleanup: &[SessionCleanupObservation],
+        _cursor: CommitCursor,
+    ) -> Result<Option<PreparedReduction>, ServerFailure> {
+        Ok(None)
+    }
+    fn prepare_git_cancellation(
+        &mut self,
+        _binding: OperationBinding,
+        _failure: spaceterm_core::worktrees::GitFailure,
+        _reserved: bool,
+        _cursor: CommitCursor,
+    ) -> Result<PreparedReduction, ServerFailure> {
+        Err(recovery_failure())
+    }
+    fn prepare_git_inventory(
+        &mut self,
+        _request: &crate::git::authority::GitInventoryReconciliation,
+        _cursor: CommitCursor,
+    ) -> Result<PreparedReduction, ServerFailure> {
+        Err(recovery_failure())
+    }
+    fn prepare_git_outside_source(
+        &mut self,
+        _request: &crate::git::authority::GitOutsideSourceReconciliation,
+        _cursor: CommitCursor,
+    ) -> Result<PreparedReduction, ServerFailure> {
+        Err(recovery_failure())
+    }
+
+    /// Generate the exact descriptor from the real installed reducer. Supplied
+    /// descriptor comparison remains the existing generic extension contract.
+    fn prepare_git_retirement(
+        &mut self,
+        _intent: &GitWriteIntent,
+        _cursor: CommitCursor,
+    ) -> Result<PreparedReduction, ServerFailure> {
+        Err(crate::failure::failure(
+            crate::contracts::ServerFailureClass::NativeUnavailable,
+        ))
+    }
+    fn git_host(&self) -> Option<Arc<dyn crate::git::host::ServerGitHost>> {
+        None
+    }
+    fn git_home(&self) -> Option<ServerDirectory> {
+        None
+    }
     /// Native directory observations run outside the serialized actor. The exact
     /// basis is compared again by the real reducer before the candidate commits.
     fn prepare_directories(
@@ -247,6 +295,13 @@ pub trait ReducerPort: Send {
 }
 
 pub trait LedgerPort: Send {
+    fn completion_receipt(
+        &self,
+        _binding: OperationBinding,
+    ) -> Result<Option<CommitReceipt>, ServerFailure> {
+        Ok(None)
+    }
+
     fn recover(&mut self, recovered: &RecoveredState) -> Result<(), ServerFailure>;
     /// Interrupt unexecuted starts and reconcile accepted retirement using only
     /// exact trusted old-instance cleanup. Atomic requests remain retriable.
@@ -487,6 +542,204 @@ impl OrganizationReducerAdapter {
     }
 }
 impl ReducerPort for OrganizationReducerAdapter {
+    fn prepare_git_cleanup(
+        &mut self,
+        cleanup: &[SessionCleanupObservation],
+        cursor: CommitCursor,
+    ) -> Result<Option<PreparedReduction>, ServerFailure> {
+        if self.staged.is_some() || self.reducer()?.store_revision() != cursor.store {
+            return Err(recovery_failure());
+        }
+        let candidate = self
+            .reducer()?
+            .prepare_completed_retirements(&[], cleanup)
+            .map_err(reducer_failure)?;
+        self.stage(candidate).map(Some)
+    }
+    fn prepare_git_cancellation(
+        &mut self,
+        binding: OperationBinding,
+        failure: spaceterm_core::worktrees::GitFailure,
+        reserved: bool,
+        cursor: CommitCursor,
+    ) -> Result<PreparedReduction, ServerFailure> {
+        use spaceterm_core::worktrees::{
+            ExternalDisposition, GitMutationOutcome, GitMutationOutcomeParts,
+        };
+        if self.staged.is_some() || self.reducer()?.store_revision() != cursor.store {
+            return Err(recovery_failure());
+        }
+        let outcome = Outcome::Git(
+            GitMutationOutcome::new(GitMutationOutcomeParts::Failed {
+                server: cursor.server,
+                failure,
+                ended_sessions: 0,
+                external: ExternalDisposition::NoEffectEstablished,
+            })
+            .map_err(|_| recovery_failure())?,
+        );
+        let candidate = if reserved {
+            self.reducer()?.prepare_abandon_git_allocation(binding)
+        } else {
+            self.reducer()?
+                .prepare_outcome(Some(binding), outcome.clone())
+        }
+        .map_err(reducer_failure)?;
+        let mut projection = self.stage(candidate)?;
+        projection.outcome = outcome;
+        Ok(projection)
+    }
+    fn git_host(&self) -> Option<Arc<dyn crate::git::host::ServerGitHost>> {
+        self.git.clone()
+    }
+
+    fn prepare_git_inventory(
+        &mut self,
+        request: &crate::git::authority::GitInventoryReconciliation,
+        cursor: CommitCursor,
+    ) -> Result<PreparedReduction, ServerFailure> {
+        use spaceterm_core::reducer::{GitInventoryPatch, GitInventoryWorktree};
+        if self.staged.is_some() || self.reducer()?.store_revision() != cursor.store {
+            return Err(recovery_failure());
+        }
+        let inventory = &request.inventory;
+        let version = request
+            .basis
+            .organization
+            .state()
+            .retained
+            .as_ref()
+            .ok_or_else(recovery_failure)?
+            .repository_inventory_versions()
+            .iter()
+            .find(|v| Some(v.id()) == inventory.repository)
+            .map(|v| v.version());
+        let mut worktrees: Vec<_> = inventory
+            .records
+            .iter()
+            .map(|v| GitInventoryWorktree {
+                id: v.retained,
+                directory: v.directory.clone(),
+                main: v.main,
+                missing: v.missing,
+                listed: true,
+            })
+            .collect();
+        // A successful list may omit an administratively removed Worktree. Keep
+        // its identity and every reference, marking it unlisted and missing.
+        for old in request
+            .basis
+            .organization
+            .state()
+            .worktrees
+            .iter()
+            .filter(|v| Some(v.repository) == inventory.repository)
+        {
+            if !inventory.records.iter().any(|v| v.retained == Some(old.id)) {
+                worktrees.push(GitInventoryWorktree {
+                    id: Some(old.id),
+                    directory: old.directory.clone(),
+                    main: old.main,
+                    missing: true,
+                    listed: false,
+                });
+            }
+        }
+        let candidate = self
+            .reducer()?
+            .prepare_server_git_inventory(
+                &GitInventoryPatch {
+                    repository: inventory.repository,
+                    directory: inventory.main_root.clone(),
+                    expected_inventory_version: version,
+                    worktrees,
+                },
+                &request.memberships,
+            )
+            .map_err(reducer_failure)?;
+        let mut projection = self.stage(candidate)?;
+        if projection.outcome != Outcome::Applied {
+            self.staged = None;
+            return Err(crate::failure::failure(
+                crate::contracts::ServerFailureClass::StaleAuthority,
+            ));
+        }
+        let repository = projection
+            .snapshot
+            .state()
+            .repositories
+            .iter()
+            .find(|v| v.directory == inventory.main_root)
+            .ok_or_else(recovery_failure)?
+            .id;
+        let locator = RepositoryLocator::new(RepositoryLocatorParts {
+            scope: RepositoryScope {
+                server: cursor.server,
+                repository,
+            },
+            main_root: inventory.main_root.clone(),
+            common_directory: inventory.common_directory.clone(),
+        })
+        .map_err(|_| recovery_failure())?;
+        projection
+            .auxiliary_writes
+            .push(OperationWrite::GitRepository(GitRepositoryMutation::Put(
+                locator,
+            )));
+        Ok(projection)
+    }
+    fn prepare_git_outside_source(
+        &mut self,
+        request: &crate::git::authority::GitOutsideSourceReconciliation,
+        cursor: CommitCursor,
+    ) -> Result<PreparedReduction, ServerFailure> {
+        if self.staged.is_some() || self.reducer()?.store_revision() != cursor.store {
+            return Err(recovery_failure());
+        }
+        let state = request.basis.organization.state();
+        let repository = request
+            .memberships
+            .iter()
+            .find_map(|edit| {
+                state
+                    .tabs
+                    .iter()
+                    .find(|v| v.id == edit.tab)
+                    .and_then(|v| v.worktree)
+                    .and_then(|id| state.worktrees.iter().find(|v| v.id == id))
+                    .map(|v| v.repository)
+            })
+            .ok_or_else(recovery_failure)?;
+        let candidate = self
+            .reducer()?
+            .prepare_server_worktree_memberships(
+                RepositoryScope {
+                    server: cursor.server,
+                    repository,
+                },
+                &request.memberships,
+            )
+            .map_err(reducer_failure)?;
+        self.stage(candidate)
+    }
+
+    fn prepare_git_retirement(
+        &mut self,
+        intent: &GitWriteIntent,
+        cursor: CommitCursor,
+    ) -> Result<PreparedReduction, ServerFailure> {
+        if self.staged.is_some() || self.reducer()?.store_revision() != cursor.store {
+            return Err(recovery_failure());
+        }
+        let candidate = self
+            .reducer()?
+            .prepare_started_git_retirement(intent, &self.context(intent.binding())?)
+            .map_err(reducer_failure)?;
+        self.stage(candidate)
+    }
+    fn git_home(&self) -> Option<ServerDirectory> {
+        Some(self.home.clone())
+    }
     fn prepare_directories(
         &self,
         request: &CanonicalOperationRequest,
@@ -851,15 +1104,76 @@ impl ReducerPort for OrganizationReducerAdapter {
                 },
                 &self.context(binding)?,
             ),
-            ReductionRequest::StartedGitRetirement { .. }
-            | ReductionRequest::SettleStartedGit { .. } => {
-                return Err(crate::failure::failure(
-                    crate::contracts::ServerFailureClass::RuntimeUnavailable,
-                ));
+            ReductionRequest::StartedGitRetirement { intent, descriptor } => {
+                let candidate = self.reducer()?.prepare_started_git_retirement(intent, &self.context(intent.binding())?)
+                    .map_err(reducer_failure)?;
+                if !matches!(candidate.resolution(), spaceterm_core::reducer::Resolution::AwaitingRetirement(plan)
+                    if &plan.descriptor == descriptor)
+                {
+                    return Err(crate::failure::failure(crate::contracts::ServerFailureClass::StaleAuthority));
+                }
+                Ok(candidate)
+            }
+            ReductionRequest::SettleStartedGit { intent, result, revoked_clients } => {
+                self.reducer()?.prepare_git_settlement(intent, result,
+                    !revoked_clients.contains(&intent.binding().id.stream().client()))
             }
         }
         .map_err(reducer_failure)?;
-        self.stage(candidate)
+        let settlement = match request {
+            ReductionRequest::SettleStartedGit { intent, result, .. } => Some((intent, result)),
+            _ => None,
+        };
+        let mut projection = self.stage(candidate)?;
+        if let Some((intent, result)) = settlement {
+            use spaceterm_core::worktrees::{
+                ExternalDisposition, GitFailure, GitMutationOutcome, GitMutationOutcomeParts,
+            };
+            // A conflicting destructive reservation is retried, never acknowledged
+            // as successful external settlement or allowed to resurrect hierarchy.
+            if let Outcome::Failed(failure) = projection.outcome {
+                self.staged = None;
+                return Err(crate::failure::failure(match failure {
+                    OperationFailure::BusyRetiring => {
+                        crate::contracts::ServerFailureClass::Capacity
+                    }
+                    _ => crate::contracts::ServerFailureClass::StaleAuthority,
+                }));
+            }
+            let revision = projection.snapshot.state().revision;
+            let success = result.disposition == ExternalDisposition::DesiredStateObserved
+                && result.failure.is_none();
+            let outcome = if success {
+                match intent.parts().action {
+                    RetainedGitAction::Create { worktree, .. } => {
+                        GitMutationOutcomeParts::Created { worktree, revision }
+                    }
+                    RetainedGitAction::Remove { worktree, .. } => {
+                        GitMutationOutcomeParts::Removed {
+                            worktree,
+                            closed_tabs: intent.parts().affected.parts().tabs.len() as u32,
+                            ended_sessions: result.ended_sessions,
+                            revision,
+                        }
+                    }
+                }
+            } else {
+                GitMutationOutcomeParts::Failed {
+                    server: intent.binding().id.stream().server(),
+                    failure: result.failure.unwrap_or(GitFailure::ExternalStateUncertain),
+                    ended_sessions: result.ended_sessions,
+                    external: result.disposition,
+                }
+            };
+            projection.outcome =
+                Outcome::Git(GitMutationOutcome::new(outcome).map_err(|_| recovery_failure())?);
+            projection.auxiliary_writes.push(OperationWrite::GitIntent(
+                GitIntentMutation::Complete {
+                    binding: intent.binding(),
+                },
+            ));
+        }
+        Ok(projection)
     }
     fn prepare_pairing_mutation(
         &mut self,
@@ -920,6 +1234,25 @@ impl OperationLedgerAdapter {
     }
 }
 impl LedgerPort for OperationLedgerAdapter {
+    fn completion_receipt(
+        &self,
+        binding: OperationBinding,
+    ) -> Result<Option<CommitReceipt>, ServerFailure> {
+        match self
+            .ledger()?
+            .operation(&StreamBinding::from_stream(binding.id.stream()), binding.id)
+            .map_err(crate::failure::ledger_failure)?
+        {
+            Some(RecoveredOperationRecord::Completed(record)) if record.binding == binding => {
+                Ok(Some(CommitReceipt {
+                    store_revision: record.completed_at,
+                    organization_revision: record.outcome_revision,
+                }))
+            }
+            _ => Ok(None),
+        }
+    }
+
     fn recover(&mut self, recovered: &RecoveredState) -> Result<(), ServerFailure> {
         self.installed = Some(
             DomainLedger::recover(

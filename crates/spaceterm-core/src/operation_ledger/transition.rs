@@ -301,7 +301,9 @@ pub(super) fn validate_progress_transition(
     // work whose prerequisite committed before the barrier.
     let starts_work = matches!(old_progress.state(), ExternalProgressState::AwaitingIntent)
         || (progress_retirement(old_progress).is_none()
-            && progress_retirement(new_progress).is_some())
+            && progress_retirement(new_progress).is_some()
+            && !matches!(old_progress.state(), ExternalProgressState::RecordedIntent { reference, .. }
+                if reference.phase() == ExternalIntentPhase::Started))
         || matches!(
             (old_progress.state(), new_progress.state()),
             (
@@ -517,10 +519,11 @@ fn is_unstarted_cancellation(outcome: &Outcome) -> bool {
         Outcome::Failed(_) => true,
         Outcome::Git(v) => matches!(
             v.parts(),
-            crate::worktrees::types::GitMutationOutcomeParts::Failed {
-                external: crate::worktrees::types::ExternalDisposition::NoEffectEstablished,
-                ..
-            }
+            crate::worktrees::types::GitMutationOutcomeParts::Recovered { .. }
+                | crate::worktrees::types::GitMutationOutcomeParts::Failed {
+                    external: crate::worktrees::types::ExternalDisposition::NoEffectEstablished,
+                    ..
+                }
         ),
         _ => false,
     }

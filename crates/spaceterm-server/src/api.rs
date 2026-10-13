@@ -29,10 +29,14 @@
 //! reducer and canonical ledger candidates and installs only checked physical
 //! store receipts. Native key delivery and runtime providers remain injected.
 //! Purpose-bound pairing entry points are documented in `pairing::bridge`.
-//! Started Git retirement, settlement and pre-Started
-//! revalidation remain unavailable through the production reducer composition.
-//! The Git bridge still needs those providers. Ordinary entry points cannot be
-//! reused with fabricated principals or streams.
+//! Git's production provider is the `GitOrganizationPort` implementation for
+//! `ServerHandle`. `git_authority_snapshot`, `lookup_git_operation` and
+//! `reserve_confirmed_git` use the installed actor, canonical codec and ledger.
+//! `persist_prepared_git`, `barrier_and_revalidate_git` and `persist_started_git`
+//! establish the durable external prerequisite. `retire_started_git` joins exact
+//! cleanup. `complete_git` retains external progress and atomically commits final
+//! membership, allocation consumption, intent removal and the original outcome.
+//! These settlement requests remain available during quiescence, not new admission.
 
 use crate::adapters::{
     core::CorePorts,

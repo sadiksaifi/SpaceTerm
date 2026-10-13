@@ -4,6 +4,8 @@
 
 #[path = "pairing/actor.rs"]
 pub(crate) mod pairing_actor;
+mod git_actor;
+pub(crate) use git_actor::{GitRequest, git_failure as classify_git_failure};
 
 use crate::{
     adapters::{
@@ -96,6 +98,7 @@ pub(crate) enum ActorRequest {
         maximum_payload_bytes: usize,
         reply: Reply<crate::publication::SnapshotTransfer>,
     },
+    Git(Box<GitRequest>),
     Register {
         principal: VerifiedPrincipal,
         reply: Reply<ConnectionAccessSnapshot>,
@@ -197,6 +200,11 @@ enum RetirementReply {
     Native,
 }
 enum Event {
+    GitBarrier {
+        intent: GitWriteIntent,
+        reply: Reply<()>,
+        result: Result<Vec<AuthorityApplied>, ServerFailure>,
+    },
     DirectoriesPrepared {
         request: CanonicalOperationRequest,
         reply: OperationReply,
@@ -302,6 +310,7 @@ enum CommitAction {
         continuation: Option<pairing_actor::PairingActorMessage>,
         reply: Option<Reply<CommitReceipt>>,
     },
+    Git(git_actor::GitCommit),
     Admission {
         principal: VerifiedPrincipal,
         request: CanonicalOperationRequest,
@@ -460,6 +469,32 @@ impl RecoveredServer {
             terminal_barrier: false,
             retirements: BTreeMap::new(),
             git_cleanup_waiters: BTreeMap::new(),
+            git: git_actor::GitActorState::default(),
+            git_repositories: recovered.recovered.git_repositories.clone(),
+            git_allocations: recovered
+                .recovered
+                .git_allocations
+                .iter()
+                .map(|v| (v.binding().id, v.clone()))
+                .collect(),
+            git_references: recovered
+                .recovered
+                .ledger
+                .as_ref()
+                .into_iter()
+                .flat_map(|v| v.operations())
+                .filter_map(|entry| {
+                    if let RecoveredOperationRecord::Pending(record) = entry
+                        && let Some(progress) = &record.external_progress
+                        && let ExternalProgressState::RecordedIntent { reference, .. } =
+                            progress.state()
+                    {
+                        Some((record.binding.id, *reference))
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
             native_retirement: None,
             git_intents: recovered
                 .recovered
@@ -583,6 +618,10 @@ struct Actor {
     git_cleanup_waiters: BTreeMap<OperationId, Vec<Reply<Vec<SessionCleanupObservation>>>>,
     native_retirement: Option<Arc<NativeRetirementDescriptor>>,
     git_intents: BTreeMap<OperationId, GitWriteIntent>,
+    git: git_actor::GitActorState,
+    git_repositories: Vec<RepositoryLocator>,
+    git_allocations: BTreeMap<OperationId, GitAllocationReservation>,
+    git_references: BTreeMap<OperationId, ExternalIntentReference>,
     confirmed_sequences: BTreeMap<SessionKey, RuntimeObservationSequence>,
     terminal_results: BTreeMap<SessionKey, Option<CleanupResult>>,
     starting: BTreeMap<SessionKey, (ConnectionBinding, Arc<LaunchGate>)>,
@@ -624,6 +663,12 @@ impl Actor {
                 } else {
                     self.begin_pairing_commit(parts, action);
                 }
+            }
+            if self.pending.is_none()
+                && !self.busy
+                && let Some(request) = self.git.waiting.pop_front()
+            {
+                self.git_request(request);
             }
             if self.pending.is_none() && !self.busy && self.advance().is_err() {
                 self.enter_recovery();
@@ -795,6 +840,7 @@ impl Actor {
                 });
                 let _ = reply.send(result);
             }
+            ActorRequest::Git(request) => self.git_request(*request),
             ActorRequest::Register { principal, reply } => {
                 let result = self.register(principal);
                 let _ = reply.send(result);
@@ -892,6 +938,16 @@ impl Actor {
                                     == RetirementCompletion::ContinueGitSettlement
                         })
                         .ok_or_else(|| failure(ServerFailureClass::StaleAuthority))?;
+                    if descriptor
+                        .sessions()
+                        .iter()
+                        .any(|v| matches!(v.cleanup(), RetirementCleanupState::Failed(_)))
+                    {
+                        return Err(failure(ServerFailureClass::CleanupIncomplete));
+                    }
+                    if !descriptor.cleanup_confirmed() {
+                        return Ok(None);
+                    }
                     self.registry
                         .as_ref()
                         .ok_or_else(|| failure(ServerFailureClass::RecoveryRequired))?
@@ -1388,6 +1444,10 @@ impl Actor {
             self.reject_admitted(request.binding(), OperationFailure::StaleAuthority, reply);
             return;
         }
+        if self.git_conflicts(request.command()) {
+            self.reject_admitted(request.binding(), OperationFailure::BusyRetiring, reply);
+            return;
+        }
         match request.command() {
             Command::CompareAcquire(_) | Command::TakeOver(_) | Command::ReleaseControl(_) => {
                 let transition = ControlRegistry::prepare(
@@ -1534,6 +1594,7 @@ impl Actor {
     fn prepare_command(&mut self, request: CanonicalOperationRequest, reply: OperationReply) {
         match self.config.core.reducer.prepare_directories(&request) {
             Ok(Some(task)) => {
+                let task = self.git_directory_task(task, request.command());
                 let events = self.events.clone();
                 tokio::spawn(async move {
                     let _ = events
@@ -1596,11 +1657,20 @@ impl Actor {
                         }
                         let mut parts = self.cursor.parts().map_err(store_failure)?;
                         reduction.append_to(&mut parts)?;
+                        let basis = OperationReductionBasis::new(OperationReductionBasisParts {
+                            binding: request.binding(),
+                            base: self.cursor.organization,
+                            resulting: parts.resulting_organization_revision,
+                        })
+                        .map_err(ledger_failure)?;
+                        parts
+                            .operation_writes
+                            .push(OperationWrite::ReductionBasis(basis));
                         let context = TransactionContext::new(
                             self.cursor.store,
                             self.cursor.organization,
                             parts.resulting_organization_revision,
-                            None,
+                            Some(basis),
                         )
                         .map_err(ledger_failure)?;
                         let progress = PendingExternalProgress::new(PendingExternalProgressParts {
@@ -2001,11 +2071,27 @@ impl Actor {
                 None
             };
             parts.operation_writes.extend(writes.iter().cloned());
+            let basis = retirement
+                .as_ref()
+                .map(|_| {
+                    OperationReductionBasis::new(OperationReductionBasisParts {
+                        binding,
+                        base: self.cursor.organization,
+                        resulting: parts.resulting_organization_revision,
+                    })
+                })
+                .transpose()
+                .map_err(ledger_failure)?;
+            if let Some(basis) = basis {
+                parts
+                    .operation_writes
+                    .push(OperationWrite::ReductionBasis(basis));
+            }
             let context = TransactionContext::new(
                 self.cursor.store,
                 self.cursor.organization,
                 parts.resulting_organization_revision,
-                None,
+                basis,
             )
             .map_err(ledger_failure)?;
             ledger_prepared = true;
@@ -2317,6 +2403,11 @@ impl Actor {
     }
     fn event(&mut self, event: Event) {
         match event {
+            Event::GitBarrier {
+                intent,
+                reply,
+                result,
+            } => self.git_barrier_finished(intent, reply, result),
             Event::DirectoriesPrepared {
                 request,
                 reply,
@@ -2325,9 +2416,13 @@ impl Actor {
                 Ok(directories) => {
                     self.prepare_validated_command(request, reply, Some(directories))
                 }
-                Err(_) => self.reject_admitted(
+                Err(error) => self.reject_admitted(
                     request.binding(),
-                    OperationFailure::DirectoryUnavailable,
+                    if error.class == ServerFailureClass::Capacity {
+                        OperationFailure::BusyRetiring
+                    } else {
+                        OperationFailure::DirectoryUnavailable
+                    },
                     reply,
                 ),
             },
@@ -2864,6 +2959,18 @@ impl Actor {
                     self.enter_recovery();
                     return;
                 }
+                self.git_observe_writes(&pending.transaction.parts().operation_writes);
+                if let CommitAction::Git(git_actor::GitCommit::Inventory(Some(lease), _)) =
+                    &pending.action
+                    && lease.retain_committed().is_err()
+                {
+                    reject_action(
+                        pending.action,
+                        failure(ServerFailureClass::RecoveryRequired),
+                    );
+                    self.enter_recovery();
+                    return;
+                }
                 let delta = match &pending.action {
                     CommitAction::Completed { reduction, .. }
                     | CommitAction::Startup { reduction, .. }
@@ -2913,6 +3020,11 @@ impl Actor {
                             self.pairing_request(message);
                         }
                     }
+                    CommitAction::Git(action) => self.git_committed(
+                        action,
+                        &pending.transaction.parts().operation_writes,
+                        receipt,
+                    ),
                     CommitAction::Admission {
                         principal,
                         request,
@@ -3752,6 +3864,18 @@ impl Actor {
                 .retirements
                 .values()
                 .any(|v| v.sessions().iter().any(|v| v.session() == session))
+            || self.git_intents.values().any(|intent| {
+                matches!(
+                    intent.phase(),
+                    GitIntentPhase::Started | GitIntentPhase::ExternalFinished
+                ) && intent
+                    .parts()
+                    .affected
+                    .parts()
+                    .panes
+                    .iter()
+                    .any(|pane| pane.session == Some(session))
+            })
             || (!self.native_completed
                 && self
                     .native_retirement
@@ -4005,17 +4129,8 @@ impl Actor {
         if *self.phase.borrow() != ServicePhase::RecoveryRequired {
             for descriptor in self.retirements.values().cloned().collect::<Vec<_>>() {
                 if descriptor.parts().completion == RetirementCompletion::ContinueGitSettlement {
-                    if let Some(cleanup) = self
-                        .registry
-                        .as_ref()
-                        .ok_or_else(|| failure(ServerFailureClass::RecoveryRequired))?
-                        .cleanup_for(RetirementRequest::Operation(&descriptor))?
-                        && let Some(waiters) =
-                            self.git_cleanup_waiters.remove(&descriptor.binding().id)
-                    {
-                        for reply in waiters {
-                            let _ = reply.send(Ok(cleanup.clone()));
-                        }
+                    if self.advance_git_cleanup(descriptor)? {
+                        return Ok(());
                     }
                     continue;
                 }
@@ -4467,6 +4582,7 @@ fn classify(command: &Command) -> PendingKind {
 
 fn reject_action(action: CommitAction, error: ServerFailure) {
     match action {
+        CommitAction::Git(action) => git_actor::reject_commit(action, error),
         CommitAction::Admission { reply, .. }
         | CommitAction::Completed { reply, .. }
         | CommitAction::Startup { reply, .. }

@@ -312,7 +312,10 @@ pub fn assess_removal(
             SessionPhase::Starting { .. } => (None, true),
             _ => (None, false),
         };
-        if stamp.session != session || stamp.startup_reserved != starting {
+        if stamp.session != session
+            || (starting && !stamp.startup_reserved)
+            || (session.is_some() && stamp.startup_reserved)
+        {
             return Err(GitFailure::StaleAssessment);
         }
         let directory = match &stamp.confirmed_directory {

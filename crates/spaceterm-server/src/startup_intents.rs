@@ -102,6 +102,9 @@ impl StartupIntents {
         self.intents
             .retain(|_, v| v.fence().connection() != binding);
     }
+    pub fn contains_pane(&self, pane: PaneId) -> bool {
+        self.intents.contains_key(&pane)
+    }
     pub fn cancel_pane(&mut self, pane: PaneId) {
         self.intents.remove(&pane);
     }
