@@ -560,7 +560,7 @@ unsafe extern "C" {
     pub fn ghostty_accessibility_state_free(state: *mut AccessibilityState);
 }
 unsafe extern "C" {
-    #[doc = " Retain dirty row identities and topology before visual rendering.\n\n Call this before Ghostty render-state update clears page/row dirty bits\n when semantic extraction is deferred. It does not extract text, invoke\n callbacks, or decode compressed pages. Later state_update calls retain\n their bounded topology and row extraction behavior."]
+    #[doc = " Retain dirty row identities and topology before rendering or compression.\n\n Call this before Ghostty render-state update clears page/row dirty bits\n when semantic extraction is deferred. It does not extract text, invoke\n callbacks, or decode compressed pages. Later state_update calls retain\n their bounded topology and row extraction behavior. Capture before and\n after resizing so rows exposed from history retain mutation coverage."]
     pub fn ghostty_accessibility_state_capture(
         state: *mut AccessibilityState,
         terminal: Terminal,
@@ -587,6 +587,639 @@ unsafe extern "C" {
         start: *const AccessibilityCellRef,
         end: *const AccessibilityCellRef,
         out_changed: *mut bool,
+    ) -> Result::Type;
+}
+#[doc = " RGB color value.\n"]
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct ColorRgb {
+    #[doc = "< Red component (0-255)"]
+    pub r: u8,
+    #[doc = "< Green component (0-255)"]
+    pub g: u8,
+    #[doc = "< Blue component (0-255)"]
+    pub b: u8,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of ColorRgb"][::std::mem::size_of::<ColorRgb>() - 3usize];
+    ["Alignment of ColorRgb"][::std::mem::align_of::<ColorRgb>() - 1usize];
+    ["Offset of field: ColorRgb::r"][::std::mem::offset_of!(ColorRgb, r) - 0usize];
+    ["Offset of field: ColorRgb::g"][::std::mem::offset_of!(ColorRgb, g) - 1usize];
+    ["Offset of field: ColorRgb::b"][::std::mem::offset_of!(ColorRgb, b) - 2usize];
+};
+#[doc = " Palette color index (0-255).\n"]
+pub type ColorPaletteIndex = u8;
+#[doc = " A 256-bit mask of palette indices.\n\n Index i is set iff `(bits[i >> 6] >> (i & 63)) & 1` is 1.\n The mask is typically initialized to zero and then populated with\n GHOSTTY_COLOR_PALETTE_MASK_SET().\n\n GhosttyColorPaletteMask mask = {0};\n GHOSTTY_COLOR_PALETTE_MASK_SET(&mask, 20);\n if (GHOSTTY_COLOR_PALETTE_MASK_IS_SET(&mask, 20)) {\n   // Index 20 will be preserved.\n }\n"]
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct ColorPaletteMask {
+    pub bits: [u64; 4usize],
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of ColorPaletteMask"][::std::mem::size_of::<ColorPaletteMask>() - 32usize];
+    ["Alignment of ColorPaletteMask"][::std::mem::align_of::<ColorPaletteMask>() - 8usize];
+    ["Offset of field: ColorPaletteMask::bits"]
+        [::std::mem::offset_of!(ColorPaletteMask, bits) - 0usize];
+};
+#[doc = " An entry in Ghostty's X11 color name table.\n"]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct ColorX11Entry {
+    #[doc = " Null-terminated color name. NULL marks the end of the table."]
+    pub name: *const ::std::os::raw::c_char,
+    #[doc = " The RGB value of the color."]
+    pub color: ColorRgb,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of ColorX11Entry"][::std::mem::size_of::<ColorX11Entry>() - 16usize];
+    ["Alignment of ColorX11Entry"][::std::mem::align_of::<ColorX11Entry>() - 8usize];
+    ["Offset of field: ColorX11Entry::name"][::std::mem::offset_of!(ColorX11Entry, name) - 0usize];
+    ["Offset of field: ColorX11Entry::color"]
+        [::std::mem::offset_of!(ColorX11Entry, color) - 8usize];
+};
+impl Default for ColorX11Entry {
+    fn default() -> Self {
+        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
+        unsafe {
+            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
+            s.assume_init()
+        }
+    }
+}
+unsafe extern "C" {
+    #[doc = " Get the RGB color components.\n\n This function extracts the individual red, green, and blue components\n from a GhosttyColorRgb value. Primarily useful in WebAssembly environments\n where accessing struct fields directly is difficult.\n\n"]
+    pub fn ghostty_color_rgb_get(color: *const ColorRgb, r: *mut u8, g: *mut u8, b: *mut u8);
+}
+unsafe extern "C" {
+    #[doc = " Parse an X11 color name.\n\n The color name is resolved from Ghostty's embedded rgb.txt table.\n Leading and trailing spaces and tabs are trimmed, and matching is\n ASCII case-insensitive. Hex values are not accepted by this function.\n\n matches or @p name is NULL\n"]
+    pub fn ghostty_color_parse_x11(
+        name: *const ::std::os::raw::c_char,
+        len: usize,
+        out: *mut ColorRgb,
+    ) -> Result::Type;
+}
+unsafe extern "C" {
+    #[doc = " Parse a flexible Ghostty color value.\n\n Accepts Ghostty's terminal color syntax: X11 color names, hex colors\n in 3-, 6-, 9-, or 12-digit form (the leading # is optional for 3- and\n 6-digit values), and rgb:<red>/<green>/<blue> or\n rgbi:<red>/<green>/<blue> specifications. Leading and trailing spaces\n and tabs are trimmed.\n\n fails or @p value is NULL\n"]
+    pub fn ghostty_color_parse(
+        value: *const ::std::os::raw::c_char,
+        len: usize,
+        out: *mut ColorRgb,
+    ) -> Result::Type;
+}
+unsafe extern "C" {
+    #[doc = " Parse a Ghostty palette entry.\n\n Accepts Ghostty palette config syntax: N=COLOR. N is a palette index\n from 0 to 255 in decimal or in 0x, 0o, or 0b-prefixed form. Spaces and\n tabs around N and COLOR are ignored. COLOR accepts the same syntax as\n ghostty_color_parse().\n\n failure, including index overflow\n"]
+    pub fn ghostty_color_parse_palette_entry(
+        value: *const ::std::os::raw::c_char,
+        len: usize,
+        out_index: *mut u8,
+        out_rgb: *mut ColorRgb,
+    ) -> Result::Type;
+}
+unsafe extern "C" {
+    #[doc = " Get Ghostty's built-in default 256-color palette.\n\n Writes exactly 256 entries: Ghostty's base16 defaults, the xterm\n 6x6x6 color cube, and the grayscale ramp.\n\n GhosttyColorRgb values\n"]
+    pub fn ghostty_color_palette_default(out: *mut ColorRgb);
+}
+unsafe extern "C" {
+    #[doc = " Generate a 256-color palette from base colors.\n\n The base palette supplies indices 0-15, which are always preserved.\n If @p base is NULL, Ghostty's default palette is used. If @p skip is\n NULL, no extra indices are skipped. Set bits in @p skip preserve those\n indices from @p base. The 216-color cube at indices 16-231 is generated\n with trilinear CIELAB interpolation, and the grayscale ramp at indices\n 232-255 is interpolated from the background to the foreground.\n\n For light themes, @p harmonious controls whether the generated palette\n keeps the background-to-foreground orientation. When false, Ghostty\n swaps the light background and dark foreground so the cube and ramp run\n dark-to-light. The output palette may be the same pointer as @p base.\n\n values, or NULL to use Ghostty's default palette\n an empty mask\n orientation\n GhosttyColorRgb values\n"]
+    pub fn ghostty_color_palette_generate(
+        base: *const ColorRgb,
+        skip: *const ColorPaletteMask,
+        bg: *const ColorRgb,
+        fg: *const ColorRgb,
+        harmonious: bool,
+        out: *mut ColorRgb,
+    );
+}
+unsafe extern "C" {
+    #[doc = " Calculate W3C relative luminance for an RGB color.\n\n Returns a normalized value from 0.0 for black to 1.0 for white.\n See https://www.w3.org/TR/WCAG20/#relativeluminancedef.\n\n"]
+    pub fn ghostty_color_luminance(color: *const ColorRgb) -> f64;
+}
+unsafe extern "C" {
+    #[doc = " Calculate perceived luminance for an RGB color.\n\n Returns a normalized value from 0.0 for black to 1.0 for white.\n Ghostty treats a background color as light when this exceeds 0.5.\n This is not the metric used internally by\n ghostty_color_palette_generate(), which uses CIELAB lightness.\n\n"]
+    pub fn ghostty_color_perceived_luminance(color: *const ColorRgb) -> f64;
+}
+unsafe extern "C" {
+    #[doc = " Calculate the WCAG contrast ratio between two RGB colors.\n\n The contrast ratio is symmetric and ranges from 1.0 for identical\n colors to 21.0 for black and white.\n\n"]
+    pub fn ghostty_color_contrast(a: *const ColorRgb, b: *const ColorRgb) -> f64;
+}
+unsafe extern "C" {
+    #[doc = " Get Ghostty's X11 color name table.\n\n The returned pointer references static memory valid for the program\n lifetime and is never NULL. Entries are in rgb.txt order and are\n terminated by an entry with name == NULL. Aliases are separate entries,\n such as \"medium spring green\" and \"MediumSpringGreen\". Names are the\n exact supported spellings from rgb.txt; ghostty_color_parse_x11() also\n matches them case-insensitively.\n\n for (const GhosttyColorX11Entry* e = ghostty_color_x11_names();\n      e->name != NULL;\n      e++) {\n   // e->name and e->color are valid here.\n }\n\n"]
+    pub fn ghostty_color_x11_names() -> *const ColorX11Entry;
+}
+unsafe extern "C" {
+    #[doc = " Get the number of X11 color name entries.\n\n The returned count excludes the NULL terminator and is provided so\n bindings can preallocate storage before reading ghostty_color_x11_names().\n\n"]
+    pub fn ghostty_color_x11_name_count() -> usize;
+}
+#[doc = " Style identifier type.\n\n Used to look up the full style from a grid reference.\n Obtain this from a cell via GHOSTTY_CELL_DATA_STYLE_ID.\n"]
+pub type StyleId = u16;
+pub mod StyleColorTag {
+    #[doc = " Style color tags.\n\n These values identify the type of color in a style color.\n Use the tag to determine which field in the color value union to access.\n"]
+    pub type Type = ::std::os::raw::c_int;
+    pub const NONE: Type = 0;
+    pub const PALETTE: Type = 1;
+    pub const RGB: Type = 2;
+    pub const TAG_MAX_VALUE: Type = 2147483647;
+}
+#[doc = " Style color value union.\n\n Use the tag to determine which field is active.\n"]
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub union StyleColorValue {
+    pub palette: ColorPaletteIndex,
+    pub rgb: ColorRgb,
+    pub _padding: u64,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of StyleColorValue"][::std::mem::size_of::<StyleColorValue>() - 8usize];
+    ["Alignment of StyleColorValue"][::std::mem::align_of::<StyleColorValue>() - 8usize];
+    ["Offset of field: StyleColorValue::palette"]
+        [::std::mem::offset_of!(StyleColorValue, palette) - 0usize];
+    ["Offset of field: StyleColorValue::rgb"]
+        [::std::mem::offset_of!(StyleColorValue, rgb) - 0usize];
+    ["Offset of field: StyleColorValue::_padding"]
+        [::std::mem::offset_of!(StyleColorValue, _padding) - 0usize];
+};
+impl Default for StyleColorValue {
+    fn default() -> Self {
+        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
+        unsafe {
+            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
+            s.assume_init()
+        }
+    }
+}
+#[doc = " Style color (tagged union).\n\n A color used in a style attribute. Can be unset (none), a palette\n index, or a direct RGB value.\n"]
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct StyleColor {
+    pub tag: StyleColorTag::Type,
+    pub value: StyleColorValue,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of StyleColor"][::std::mem::size_of::<StyleColor>() - 16usize];
+    ["Alignment of StyleColor"][::std::mem::align_of::<StyleColor>() - 8usize];
+    ["Offset of field: StyleColor::tag"][::std::mem::offset_of!(StyleColor, tag) - 0usize];
+    ["Offset of field: StyleColor::value"][::std::mem::offset_of!(StyleColor, value) - 8usize];
+};
+impl Default for StyleColor {
+    fn default() -> Self {
+        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
+        unsafe {
+            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
+            s.assume_init()
+        }
+    }
+}
+#[doc = " Terminal cell style.\n\n Describes the complete visual style for a terminal cell, including\n foreground, background, and underline colors, as well as text\n decoration flags. The underline field uses the same values as\n GhosttySgrUnderline.\n\n This is a sized struct. Use GHOSTTY_INIT_SIZED() to initialize it.\n"]
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct Style {
+    pub size: usize,
+    pub fg_color: StyleColor,
+    pub bg_color: StyleColor,
+    pub underline_color: StyleColor,
+    pub bold: bool,
+    pub italic: bool,
+    pub faint: bool,
+    pub blink: bool,
+    pub inverse: bool,
+    pub invisible: bool,
+    pub strikethrough: bool,
+    pub overline: bool,
+    #[doc = "< One of GHOSTTY_SGR_UNDERLINE_* values"]
+    pub underline: ::std::os::raw::c_int,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of Style"][::std::mem::size_of::<Style>() - 72usize];
+    ["Alignment of Style"][::std::mem::align_of::<Style>() - 8usize];
+    ["Offset of field: Style::size"][::std::mem::offset_of!(Style, size) - 0usize];
+    ["Offset of field: Style::fg_color"][::std::mem::offset_of!(Style, fg_color) - 8usize];
+    ["Offset of field: Style::bg_color"][::std::mem::offset_of!(Style, bg_color) - 24usize];
+    ["Offset of field: Style::underline_color"]
+        [::std::mem::offset_of!(Style, underline_color) - 40usize];
+    ["Offset of field: Style::bold"][::std::mem::offset_of!(Style, bold) - 56usize];
+    ["Offset of field: Style::italic"][::std::mem::offset_of!(Style, italic) - 57usize];
+    ["Offset of field: Style::faint"][::std::mem::offset_of!(Style, faint) - 58usize];
+    ["Offset of field: Style::blink"][::std::mem::offset_of!(Style, blink) - 59usize];
+    ["Offset of field: Style::inverse"][::std::mem::offset_of!(Style, inverse) - 60usize];
+    ["Offset of field: Style::invisible"][::std::mem::offset_of!(Style, invisible) - 61usize];
+    ["Offset of field: Style::strikethrough"]
+        [::std::mem::offset_of!(Style, strikethrough) - 62usize];
+    ["Offset of field: Style::overline"][::std::mem::offset_of!(Style, overline) - 63usize];
+    ["Offset of field: Style::underline"][::std::mem::offset_of!(Style, underline) - 64usize];
+};
+impl Default for Style {
+    fn default() -> Self {
+        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
+        unsafe {
+            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
+            s.assume_init()
+        }
+    }
+}
+unsafe extern "C" {
+    #[doc = " Get the default style.\n\n Initializes the style to the default values (no colors, no flags).\n\n"]
+    pub fn ghostty_style_default(style: *mut Style);
+}
+unsafe extern "C" {
+    #[doc = " Check if a style is the default style.\n\n Returns true if all colors are unset and all flags are off.\n\n"]
+    pub fn ghostty_style_is_default(style: *const Style) -> bool;
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct ContentState {
+    _unused: [u8; 0],
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct ContentScan {
+    _unused: [u8; 0],
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct ContentSnapshot {
+    pub size: usize,
+    pub source_revision: u64,
+    pub topology_revision: u64,
+    pub screen: AccessibilityScreen::Type,
+    pub screen_generation: u64,
+    pub total_rows: u32,
+    pub active_start: u32,
+    pub columns: u16,
+    pub synchronized: bool,
+    pub cursor: AccessibilityRowId,
+    pub cursor_column: u16,
+    pub cursor_shape: ::std::os::raw::c_int,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of ContentSnapshot"][::std::mem::size_of::<ContentSnapshot>() - 96usize];
+    ["Alignment of ContentSnapshot"][::std::mem::align_of::<ContentSnapshot>() - 8usize];
+    ["Offset of field: ContentSnapshot::size"]
+        [::std::mem::offset_of!(ContentSnapshot, size) - 0usize];
+    ["Offset of field: ContentSnapshot::source_revision"]
+        [::std::mem::offset_of!(ContentSnapshot, source_revision) - 8usize];
+    ["Offset of field: ContentSnapshot::topology_revision"]
+        [::std::mem::offset_of!(ContentSnapshot, topology_revision) - 16usize];
+    ["Offset of field: ContentSnapshot::screen"]
+        [::std::mem::offset_of!(ContentSnapshot, screen) - 24usize];
+    ["Offset of field: ContentSnapshot::screen_generation"]
+        [::std::mem::offset_of!(ContentSnapshot, screen_generation) - 32usize];
+    ["Offset of field: ContentSnapshot::total_rows"]
+        [::std::mem::offset_of!(ContentSnapshot, total_rows) - 40usize];
+    ["Offset of field: ContentSnapshot::active_start"]
+        [::std::mem::offset_of!(ContentSnapshot, active_start) - 44usize];
+    ["Offset of field: ContentSnapshot::columns"]
+        [::std::mem::offset_of!(ContentSnapshot, columns) - 48usize];
+    ["Offset of field: ContentSnapshot::synchronized"]
+        [::std::mem::offset_of!(ContentSnapshot, synchronized) - 50usize];
+    ["Offset of field: ContentSnapshot::cursor"]
+        [::std::mem::offset_of!(ContentSnapshot, cursor) - 56usize];
+    ["Offset of field: ContentSnapshot::cursor_column"]
+        [::std::mem::offset_of!(ContentSnapshot, cursor_column) - 88usize];
+    ["Offset of field: ContentSnapshot::cursor_shape"]
+        [::std::mem::offset_of!(ContentSnapshot, cursor_shape) - 92usize];
+};
+impl Default for ContentSnapshot {
+    fn default() -> Self {
+        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
+        unsafe {
+            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
+            s.assume_init()
+        }
+    }
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct ContentOptions {
+    pub size: usize,
+    pub row: u32,
+    pub column: u16,
+    pub end_row: u32,
+    pub max_rows: u16,
+    pub max_cells: u32,
+    pub max_bytes: usize,
+    pub seek: bool,
+    pub seek_after: bool,
+    pub seek_row: AccessibilityRowId,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of ContentOptions"][::std::mem::size_of::<ContentOptions>() - 80usize];
+    ["Alignment of ContentOptions"][::std::mem::align_of::<ContentOptions>() - 8usize];
+    ["Offset of field: ContentOptions::size"]
+        [::std::mem::offset_of!(ContentOptions, size) - 0usize];
+    ["Offset of field: ContentOptions::row"][::std::mem::offset_of!(ContentOptions, row) - 8usize];
+    ["Offset of field: ContentOptions::column"]
+        [::std::mem::offset_of!(ContentOptions, column) - 12usize];
+    ["Offset of field: ContentOptions::end_row"]
+        [::std::mem::offset_of!(ContentOptions, end_row) - 16usize];
+    ["Offset of field: ContentOptions::max_rows"]
+        [::std::mem::offset_of!(ContentOptions, max_rows) - 20usize];
+    ["Offset of field: ContentOptions::max_cells"]
+        [::std::mem::offset_of!(ContentOptions, max_cells) - 24usize];
+    ["Offset of field: ContentOptions::max_bytes"]
+        [::std::mem::offset_of!(ContentOptions, max_bytes) - 32usize];
+    ["Offset of field: ContentOptions::seek"]
+        [::std::mem::offset_of!(ContentOptions, seek) - 40usize];
+    ["Offset of field: ContentOptions::seek_after"]
+        [::std::mem::offset_of!(ContentOptions, seek_after) - 41usize];
+    ["Offset of field: ContentOptions::seek_row"]
+        [::std::mem::offset_of!(ContentOptions, seek_row) - 48usize];
+};
+impl Default for ContentOptions {
+    fn default() -> Self {
+        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
+        unsafe {
+            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
+            s.assume_init()
+        }
+    }
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct ContentRow {
+    pub size: usize,
+    pub id: AccessibilityRowId,
+    pub revision: u64,
+    pub document_row: u32,
+    pub columns: u16,
+    pub start_column: u16,
+    pub emitted_columns: u16,
+    pub soft_wrapped: bool,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of ContentRow"][::std::mem::size_of::<ContentRow>() - 64usize];
+    ["Alignment of ContentRow"][::std::mem::align_of::<ContentRow>() - 8usize];
+    ["Offset of field: ContentRow::size"][::std::mem::offset_of!(ContentRow, size) - 0usize];
+    ["Offset of field: ContentRow::id"][::std::mem::offset_of!(ContentRow, id) - 8usize];
+    ["Offset of field: ContentRow::revision"]
+        [::std::mem::offset_of!(ContentRow, revision) - 40usize];
+    ["Offset of field: ContentRow::document_row"]
+        [::std::mem::offset_of!(ContentRow, document_row) - 48usize];
+    ["Offset of field: ContentRow::columns"][::std::mem::offset_of!(ContentRow, columns) - 52usize];
+    ["Offset of field: ContentRow::start_column"]
+        [::std::mem::offset_of!(ContentRow, start_column) - 54usize];
+    ["Offset of field: ContentRow::emitted_columns"]
+        [::std::mem::offset_of!(ContentRow, emitted_columns) - 56usize];
+    ["Offset of field: ContentRow::soft_wrapped"]
+        [::std::mem::offset_of!(ContentRow, soft_wrapped) - 58usize];
+};
+impl Default for ContentRow {
+    fn default() -> Self {
+        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
+        unsafe {
+            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
+            s.assume_init()
+        }
+    }
+}
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct ContentCell {
+    pub size: usize,
+    pub codepoint: u32,
+    pub extra_codepoints: *const u32,
+    pub extra_codepoints_len: usize,
+    pub wide: AccessibilityCellWide::Type,
+    pub semantic: ::std::os::raw::c_int,
+    pub has_text: bool,
+    pub style: Style,
+    pub hyperlink: *const u8,
+    pub hyperlink_len: usize,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of ContentCell"][::std::mem::size_of::<ContentCell>() - 136usize];
+    ["Alignment of ContentCell"][::std::mem::align_of::<ContentCell>() - 8usize];
+    ["Offset of field: ContentCell::size"][::std::mem::offset_of!(ContentCell, size) - 0usize];
+    ["Offset of field: ContentCell::codepoint"]
+        [::std::mem::offset_of!(ContentCell, codepoint) - 8usize];
+    ["Offset of field: ContentCell::extra_codepoints"]
+        [::std::mem::offset_of!(ContentCell, extra_codepoints) - 16usize];
+    ["Offset of field: ContentCell::extra_codepoints_len"]
+        [::std::mem::offset_of!(ContentCell, extra_codepoints_len) - 24usize];
+    ["Offset of field: ContentCell::wide"][::std::mem::offset_of!(ContentCell, wide) - 32usize];
+    ["Offset of field: ContentCell::semantic"]
+        [::std::mem::offset_of!(ContentCell, semantic) - 36usize];
+    ["Offset of field: ContentCell::has_text"]
+        [::std::mem::offset_of!(ContentCell, has_text) - 40usize];
+    ["Offset of field: ContentCell::style"][::std::mem::offset_of!(ContentCell, style) - 48usize];
+    ["Offset of field: ContentCell::hyperlink"]
+        [::std::mem::offset_of!(ContentCell, hyperlink) - 120usize];
+    ["Offset of field: ContentCell::hyperlink_len"]
+        [::std::mem::offset_of!(ContentCell, hyperlink_len) - 128usize];
+};
+impl Default for ContentCell {
+    fn default() -> Self {
+        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
+        unsafe {
+            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
+            s.assume_init()
+        }
+    }
+}
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct ContentProgress {
+    pub size: usize,
+    pub next_row: u32,
+    pub next_column: u16,
+    pub inspected_cells: u32,
+    pub emitted_cells: u32,
+    pub emitted_rows: u16,
+    pub accounted_bytes: usize,
+    pub complete: bool,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of ContentProgress"][::std::mem::size_of::<ContentProgress>() - 48usize];
+    ["Alignment of ContentProgress"][::std::mem::align_of::<ContentProgress>() - 8usize];
+    ["Offset of field: ContentProgress::size"]
+        [::std::mem::offset_of!(ContentProgress, size) - 0usize];
+    ["Offset of field: ContentProgress::next_row"]
+        [::std::mem::offset_of!(ContentProgress, next_row) - 8usize];
+    ["Offset of field: ContentProgress::next_column"]
+        [::std::mem::offset_of!(ContentProgress, next_column) - 12usize];
+    ["Offset of field: ContentProgress::inspected_cells"]
+        [::std::mem::offset_of!(ContentProgress, inspected_cells) - 16usize];
+    ["Offset of field: ContentProgress::emitted_cells"]
+        [::std::mem::offset_of!(ContentProgress, emitted_cells) - 20usize];
+    ["Offset of field: ContentProgress::emitted_rows"]
+        [::std::mem::offset_of!(ContentProgress, emitted_rows) - 24usize];
+    ["Offset of field: ContentProgress::accounted_bytes"]
+        [::std::mem::offset_of!(ContentProgress, accounted_bytes) - 32usize];
+    ["Offset of field: ContentProgress::complete"]
+        [::std::mem::offset_of!(ContentProgress, complete) - 40usize];
+};
+pub type ContentRowCallback = ::std::option::Option<
+    unsafe extern "C" fn(arg1: *mut ::std::os::raw::c_void, arg2: *const ContentRow) -> bool,
+>;
+pub type ContentCellCallback = ::std::option::Option<
+    unsafe extern "C" fn(arg1: *mut ::std::os::raw::c_void, arg2: *const ContentCell) -> bool,
+>;
+unsafe extern "C" {
+    pub fn ghostty_content_state_new(arg1: *mut *mut ContentState) -> Result::Type;
+}
+unsafe extern "C" {
+    pub fn ghostty_content_state_free(arg1: *mut ContentState);
+}
+unsafe extern "C" {
+    pub fn ghostty_content_state_capture(
+        arg1: *mut ContentState,
+        arg2: Terminal,
+        arg3: *mut ContentSnapshot,
+    ) -> Result::Type;
+}
+unsafe extern "C" {
+    pub fn ghostty_content_read_page(
+        arg1: *mut ContentState,
+        arg2: Terminal,
+        arg3: *const ContentOptions,
+        arg4: *mut ::std::os::raw::c_void,
+        arg5: ContentRowCallback,
+        arg6: ContentCellCallback,
+        arg7: *mut ContentProgress,
+    ) -> Result::Type;
+}
+unsafe extern "C" {
+    pub fn ghostty_content_read_topology(
+        arg1: *mut ContentState,
+        arg2: Terminal,
+        arg3: *const ContentOptions,
+        arg4: *mut ::std::os::raw::c_void,
+        arg5: ContentRowCallback,
+        arg6: *mut ContentProgress,
+    ) -> Result::Type;
+}
+unsafe extern "C" {
+    pub fn ghostty_content_copy_begin(
+        arg1: *mut ContentState,
+        arg2: Terminal,
+        arg3: *const ContentOptions,
+        arg4: *mut *mut ContentScan,
+    ) -> Result::Type;
+}
+unsafe extern "C" {
+    pub fn ghostty_content_find_begin(
+        arg1: *mut ContentState,
+        arg2: Terminal,
+        arg3: *const ContentOptions,
+        arg4: *mut *mut ContentScan,
+    ) -> Result::Type;
+}
+unsafe extern "C" {
+    pub fn ghostty_content_copy_step(
+        arg1: *mut ContentState,
+        arg2: Terminal,
+        arg3: *mut ContentScan,
+        arg4: *const ContentOptions,
+        arg5: *mut ::std::os::raw::c_void,
+        arg6: ContentRowCallback,
+        arg7: ContentCellCallback,
+        arg8: *mut ContentProgress,
+    ) -> Result::Type;
+}
+unsafe extern "C" {
+    pub fn ghostty_content_find_step(
+        arg1: *mut ContentState,
+        arg2: Terminal,
+        arg3: *mut ContentScan,
+        arg4: *const ContentOptions,
+        arg5: *mut ::std::os::raw::c_void,
+        arg6: ContentRowCallback,
+        arg7: ContentCellCallback,
+        arg8: *mut ContentProgress,
+    ) -> Result::Type;
+}
+unsafe extern "C" {
+    pub fn ghostty_content_copy_free(arg1: *mut ContentState, arg2: *mut ContentScan);
+}
+unsafe extern "C" {
+    pub fn ghostty_content_find_free(arg1: *mut ContentState, arg2: *mut ContentScan);
+}
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct ContentPlacement {
+    pub size: usize,
+    pub image_id: u32,
+    pub placement_id: u64,
+    pub document_row: u32,
+    pub column: i32,
+    pub columns: u32,
+    pub rows: u32,
+    pub offset_x: u32,
+    pub offset_y: u32,
+    pub source_x: u32,
+    pub source_y: u32,
+    pub source_width: u32,
+    pub source_height: u32,
+    pub dest_width: u32,
+    pub dest_height: u32,
+    pub is_virtual: bool,
+    pub z: i32,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of ContentPlacement"][::std::mem::size_of::<ContentPlacement>() - 80usize];
+    ["Alignment of ContentPlacement"][::std::mem::align_of::<ContentPlacement>() - 8usize];
+    ["Offset of field: ContentPlacement::size"]
+        [::std::mem::offset_of!(ContentPlacement, size) - 0usize];
+    ["Offset of field: ContentPlacement::image_id"]
+        [::std::mem::offset_of!(ContentPlacement, image_id) - 8usize];
+    ["Offset of field: ContentPlacement::placement_id"]
+        [::std::mem::offset_of!(ContentPlacement, placement_id) - 16usize];
+    ["Offset of field: ContentPlacement::document_row"]
+        [::std::mem::offset_of!(ContentPlacement, document_row) - 24usize];
+    ["Offset of field: ContentPlacement::column"]
+        [::std::mem::offset_of!(ContentPlacement, column) - 28usize];
+    ["Offset of field: ContentPlacement::columns"]
+        [::std::mem::offset_of!(ContentPlacement, columns) - 32usize];
+    ["Offset of field: ContentPlacement::rows"]
+        [::std::mem::offset_of!(ContentPlacement, rows) - 36usize];
+    ["Offset of field: ContentPlacement::offset_x"]
+        [::std::mem::offset_of!(ContentPlacement, offset_x) - 40usize];
+    ["Offset of field: ContentPlacement::offset_y"]
+        [::std::mem::offset_of!(ContentPlacement, offset_y) - 44usize];
+    ["Offset of field: ContentPlacement::source_x"]
+        [::std::mem::offset_of!(ContentPlacement, source_x) - 48usize];
+    ["Offset of field: ContentPlacement::source_y"]
+        [::std::mem::offset_of!(ContentPlacement, source_y) - 52usize];
+    ["Offset of field: ContentPlacement::source_width"]
+        [::std::mem::offset_of!(ContentPlacement, source_width) - 56usize];
+    ["Offset of field: ContentPlacement::source_height"]
+        [::std::mem::offset_of!(ContentPlacement, source_height) - 60usize];
+    ["Offset of field: ContentPlacement::dest_width"]
+        [::std::mem::offset_of!(ContentPlacement, dest_width) - 64usize];
+    ["Offset of field: ContentPlacement::dest_height"]
+        [::std::mem::offset_of!(ContentPlacement, dest_height) - 68usize];
+    ["Offset of field: ContentPlacement::is_virtual"]
+        [::std::mem::offset_of!(ContentPlacement, is_virtual) - 72usize];
+    ["Offset of field: ContentPlacement::z"][::std::mem::offset_of!(ContentPlacement, z) - 76usize];
+};
+pub type ContentPlacementCallback = ::std::option::Option<
+    unsafe extern "C" fn(arg1: *mut ::std::os::raw::c_void, arg2: *const ContentPlacement) -> bool,
+>;
+unsafe extern "C" {
+    pub fn ghostty_content_prepare_placements(
+        arg1: *mut ContentState,
+        arg2: Terminal,
+        arg3: *mut ContentProgress,
+    ) -> Result::Type;
+}
+unsafe extern "C" {
+    pub fn ghostty_content_read_placements(
+        arg1: *mut ContentState,
+        arg2: Terminal,
+        arg3: *const ContentOptions,
+        arg4: *mut ::std::os::raw::c_void,
+        arg5: ContentPlacementCallback,
     ) -> Result::Type;
 }
 #[doc = " Function table for custom memory allocator operations.\n\n This vtable defines the interface for a custom memory allocator. All\n function pointers must be valid and non-NULL.\n\n\n If you're not going to use a custom allocator, you can ignore all of\n this. All functions that take an allocator pointer allow NULL to use a\n default allocator. Native freestanding builds must provide an allocator\n for operations that allocate memory.\n\n The interface is based on the Zig allocator interface. I'll say up front\n that it is easy to look at this interface and think \"wow, this is really\n overcomplicated\". The reason for this complexity is well thought out by\n the Zig folks, and it enables a diverse set of allocation strategies\n as shown by the Zig ecosystem. As a consolation, please note that many\n of the arguments are only needed for advanced use cases and can be\n safely ignored in simple implementations. For example, if you look at\n the Zig implementation of the libc allocator in `lib/std/heap.zig`\n (search for CAllocator), you'll see it is very simple.\n\n We chose to align with the Zig allocator interface because:\n\n   1. It is a proven interface that serves a wide variety of use cases\n      in the real world via the Zig ecosystem. It's shown to work.\n\n   2. Our core implementation itself is Zig, and this lets us very\n      cheaply and easily convert between C and Zig allocators.\n\n NOTE(mitchellh): In the future, we can have default implementations of\n resize/remap and allow those to be null."]
@@ -724,130 +1357,6 @@ unsafe extern "C" {
         data: BuildInfo::Type,
         out: *mut ::std::os::raw::c_void,
     ) -> Result::Type;
-}
-#[doc = " RGB color value.\n"]
-#[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
-pub struct ColorRgb {
-    #[doc = "< Red component (0-255)"]
-    pub r: u8,
-    #[doc = "< Green component (0-255)"]
-    pub g: u8,
-    #[doc = "< Blue component (0-255)"]
-    pub b: u8,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of ColorRgb"][::std::mem::size_of::<ColorRgb>() - 3usize];
-    ["Alignment of ColorRgb"][::std::mem::align_of::<ColorRgb>() - 1usize];
-    ["Offset of field: ColorRgb::r"][::std::mem::offset_of!(ColorRgb, r) - 0usize];
-    ["Offset of field: ColorRgb::g"][::std::mem::offset_of!(ColorRgb, g) - 1usize];
-    ["Offset of field: ColorRgb::b"][::std::mem::offset_of!(ColorRgb, b) - 2usize];
-};
-#[doc = " Palette color index (0-255).\n"]
-pub type ColorPaletteIndex = u8;
-#[doc = " A 256-bit mask of palette indices.\n\n Index i is set iff `(bits[i >> 6] >> (i & 63)) & 1` is 1.\n The mask is typically initialized to zero and then populated with\n GHOSTTY_COLOR_PALETTE_MASK_SET().\n\n GhosttyColorPaletteMask mask = {0};\n GHOSTTY_COLOR_PALETTE_MASK_SET(&mask, 20);\n if (GHOSTTY_COLOR_PALETTE_MASK_IS_SET(&mask, 20)) {\n   // Index 20 will be preserved.\n }\n"]
-#[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
-pub struct ColorPaletteMask {
-    pub bits: [u64; 4usize],
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of ColorPaletteMask"][::std::mem::size_of::<ColorPaletteMask>() - 32usize];
-    ["Alignment of ColorPaletteMask"][::std::mem::align_of::<ColorPaletteMask>() - 8usize];
-    ["Offset of field: ColorPaletteMask::bits"]
-        [::std::mem::offset_of!(ColorPaletteMask, bits) - 0usize];
-};
-#[doc = " An entry in Ghostty's X11 color name table.\n"]
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct ColorX11Entry {
-    #[doc = " Null-terminated color name. NULL marks the end of the table."]
-    pub name: *const ::std::os::raw::c_char,
-    #[doc = " The RGB value of the color."]
-    pub color: ColorRgb,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of ColorX11Entry"][::std::mem::size_of::<ColorX11Entry>() - 16usize];
-    ["Alignment of ColorX11Entry"][::std::mem::align_of::<ColorX11Entry>() - 8usize];
-    ["Offset of field: ColorX11Entry::name"][::std::mem::offset_of!(ColorX11Entry, name) - 0usize];
-    ["Offset of field: ColorX11Entry::color"]
-        [::std::mem::offset_of!(ColorX11Entry, color) - 8usize];
-};
-impl Default for ColorX11Entry {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
-unsafe extern "C" {
-    #[doc = " Get the RGB color components.\n\n This function extracts the individual red, green, and blue components\n from a GhosttyColorRgb value. Primarily useful in WebAssembly environments\n where accessing struct fields directly is difficult.\n\n"]
-    pub fn ghostty_color_rgb_get(color: *const ColorRgb, r: *mut u8, g: *mut u8, b: *mut u8);
-}
-unsafe extern "C" {
-    #[doc = " Parse an X11 color name.\n\n The color name is resolved from Ghostty's embedded rgb.txt table.\n Leading and trailing spaces and tabs are trimmed, and matching is\n ASCII case-insensitive. Hex values are not accepted by this function.\n\n matches or @p name is NULL\n"]
-    pub fn ghostty_color_parse_x11(
-        name: *const ::std::os::raw::c_char,
-        len: usize,
-        out: *mut ColorRgb,
-    ) -> Result::Type;
-}
-unsafe extern "C" {
-    #[doc = " Parse a flexible Ghostty color value.\n\n Accepts Ghostty's terminal color syntax: X11 color names, hex colors\n in 3-, 6-, 9-, or 12-digit form (the leading # is optional for 3- and\n 6-digit values), and rgb:<red>/<green>/<blue> or\n rgbi:<red>/<green>/<blue> specifications. Leading and trailing spaces\n and tabs are trimmed.\n\n fails or @p value is NULL\n"]
-    pub fn ghostty_color_parse(
-        value: *const ::std::os::raw::c_char,
-        len: usize,
-        out: *mut ColorRgb,
-    ) -> Result::Type;
-}
-unsafe extern "C" {
-    #[doc = " Parse a Ghostty palette entry.\n\n Accepts Ghostty palette config syntax: N=COLOR. N is a palette index\n from 0 to 255 in decimal or in 0x, 0o, or 0b-prefixed form. Spaces and\n tabs around N and COLOR are ignored. COLOR accepts the same syntax as\n ghostty_color_parse().\n\n failure, including index overflow\n"]
-    pub fn ghostty_color_parse_palette_entry(
-        value: *const ::std::os::raw::c_char,
-        len: usize,
-        out_index: *mut u8,
-        out_rgb: *mut ColorRgb,
-    ) -> Result::Type;
-}
-unsafe extern "C" {
-    #[doc = " Get Ghostty's built-in default 256-color palette.\n\n Writes exactly 256 entries: Ghostty's base16 defaults, the xterm\n 6x6x6 color cube, and the grayscale ramp.\n\n GhosttyColorRgb values\n"]
-    pub fn ghostty_color_palette_default(out: *mut ColorRgb);
-}
-unsafe extern "C" {
-    #[doc = " Generate a 256-color palette from base colors.\n\n The base palette supplies indices 0-15, which are always preserved.\n If @p base is NULL, Ghostty's default palette is used. If @p skip is\n NULL, no extra indices are skipped. Set bits in @p skip preserve those\n indices from @p base. The 216-color cube at indices 16-231 is generated\n with trilinear CIELAB interpolation, and the grayscale ramp at indices\n 232-255 is interpolated from the background to the foreground.\n\n For light themes, @p harmonious controls whether the generated palette\n keeps the background-to-foreground orientation. When false, Ghostty\n swaps the light background and dark foreground so the cube and ramp run\n dark-to-light. The output palette may be the same pointer as @p base.\n\n values, or NULL to use Ghostty's default palette\n an empty mask\n orientation\n GhosttyColorRgb values\n"]
-    pub fn ghostty_color_palette_generate(
-        base: *const ColorRgb,
-        skip: *const ColorPaletteMask,
-        bg: *const ColorRgb,
-        fg: *const ColorRgb,
-        harmonious: bool,
-        out: *mut ColorRgb,
-    );
-}
-unsafe extern "C" {
-    #[doc = " Calculate W3C relative luminance for an RGB color.\n\n Returns a normalized value from 0.0 for black to 1.0 for white.\n See https://www.w3.org/TR/WCAG20/#relativeluminancedef.\n\n"]
-    pub fn ghostty_color_luminance(color: *const ColorRgb) -> f64;
-}
-unsafe extern "C" {
-    #[doc = " Calculate perceived luminance for an RGB color.\n\n Returns a normalized value from 0.0 for black to 1.0 for white.\n Ghostty treats a background color as light when this exceeds 0.5.\n This is not the metric used internally by\n ghostty_color_palette_generate(), which uses CIELAB lightness.\n\n"]
-    pub fn ghostty_color_perceived_luminance(color: *const ColorRgb) -> f64;
-}
-unsafe extern "C" {
-    #[doc = " Calculate the WCAG contrast ratio between two RGB colors.\n\n The contrast ratio is symmetric and ranges from 1.0 for identical\n colors to 21.0 for black and white.\n\n"]
-    pub fn ghostty_color_contrast(a: *const ColorRgb, b: *const ColorRgb) -> f64;
-}
-unsafe extern "C" {
-    #[doc = " Get Ghostty's X11 color name table.\n\n The returned pointer references static memory valid for the program\n lifetime and is never NULL. Entries are in rgb.txt order and are\n terminated by an entry with name == NULL. Aliases are separate entries,\n such as \"medium spring green\" and \"MediumSpringGreen\". Names are the\n exact supported spellings from rgb.txt; ghostty_color_parse_x11() also\n matches them case-insensitively.\n\n for (const GhosttyColorX11Entry* e = ghostty_color_x11_names();\n      e->name != NULL;\n      e++) {\n   // e->name and e->color are valid here.\n }\n\n"]
-    pub fn ghostty_color_x11_names() -> *const ColorX11Entry;
-}
-unsafe extern "C" {
-    #[doc = " Get the number of X11 color name entries.\n\n The returned count excludes the NULL terminator and is provided so\n bindings can preallocate storage before reading ghostty_color_x11_names().\n\n"]
-    pub fn ghostty_color_x11_name_count() -> usize;
 }
 pub mod ColorScheme {
     #[doc = " Color scheme reported in response to a CSI ? 996 n query.\n"]
@@ -1250,123 +1759,6 @@ unsafe extern "C" {
         values: *mut *mut ::std::os::raw::c_void,
         out_written: *mut usize,
     ) -> Result::Type;
-}
-#[doc = " Style identifier type.\n\n Used to look up the full style from a grid reference.\n Obtain this from a cell via GHOSTTY_CELL_DATA_STYLE_ID.\n"]
-pub type StyleId = u16;
-pub mod StyleColorTag {
-    #[doc = " Style color tags.\n\n These values identify the type of color in a style color.\n Use the tag to determine which field in the color value union to access.\n"]
-    pub type Type = ::std::os::raw::c_int;
-    pub const NONE: Type = 0;
-    pub const PALETTE: Type = 1;
-    pub const RGB: Type = 2;
-    pub const TAG_MAX_VALUE: Type = 2147483647;
-}
-#[doc = " Style color value union.\n\n Use the tag to determine which field is active.\n"]
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub union StyleColorValue {
-    pub palette: ColorPaletteIndex,
-    pub rgb: ColorRgb,
-    pub _padding: u64,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of StyleColorValue"][::std::mem::size_of::<StyleColorValue>() - 8usize];
-    ["Alignment of StyleColorValue"][::std::mem::align_of::<StyleColorValue>() - 8usize];
-    ["Offset of field: StyleColorValue::palette"]
-        [::std::mem::offset_of!(StyleColorValue, palette) - 0usize];
-    ["Offset of field: StyleColorValue::rgb"]
-        [::std::mem::offset_of!(StyleColorValue, rgb) - 0usize];
-    ["Offset of field: StyleColorValue::_padding"]
-        [::std::mem::offset_of!(StyleColorValue, _padding) - 0usize];
-};
-impl Default for StyleColorValue {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
-#[doc = " Style color (tagged union).\n\n A color used in a style attribute. Can be unset (none), a palette\n index, or a direct RGB value.\n"]
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub struct StyleColor {
-    pub tag: StyleColorTag::Type,
-    pub value: StyleColorValue,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of StyleColor"][::std::mem::size_of::<StyleColor>() - 16usize];
-    ["Alignment of StyleColor"][::std::mem::align_of::<StyleColor>() - 8usize];
-    ["Offset of field: StyleColor::tag"][::std::mem::offset_of!(StyleColor, tag) - 0usize];
-    ["Offset of field: StyleColor::value"][::std::mem::offset_of!(StyleColor, value) - 8usize];
-};
-impl Default for StyleColor {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
-#[doc = " Terminal cell style.\n\n Describes the complete visual style for a terminal cell, including\n foreground, background, and underline colors, as well as text\n decoration flags. The underline field uses the same values as\n GhosttySgrUnderline.\n\n This is a sized struct. Use GHOSTTY_INIT_SIZED() to initialize it.\n"]
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub struct Style {
-    pub size: usize,
-    pub fg_color: StyleColor,
-    pub bg_color: StyleColor,
-    pub underline_color: StyleColor,
-    pub bold: bool,
-    pub italic: bool,
-    pub faint: bool,
-    pub blink: bool,
-    pub inverse: bool,
-    pub invisible: bool,
-    pub strikethrough: bool,
-    pub overline: bool,
-    #[doc = "< One of GHOSTTY_SGR_UNDERLINE_* values"]
-    pub underline: ::std::os::raw::c_int,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of Style"][::std::mem::size_of::<Style>() - 72usize];
-    ["Alignment of Style"][::std::mem::align_of::<Style>() - 8usize];
-    ["Offset of field: Style::size"][::std::mem::offset_of!(Style, size) - 0usize];
-    ["Offset of field: Style::fg_color"][::std::mem::offset_of!(Style, fg_color) - 8usize];
-    ["Offset of field: Style::bg_color"][::std::mem::offset_of!(Style, bg_color) - 24usize];
-    ["Offset of field: Style::underline_color"]
-        [::std::mem::offset_of!(Style, underline_color) - 40usize];
-    ["Offset of field: Style::bold"][::std::mem::offset_of!(Style, bold) - 56usize];
-    ["Offset of field: Style::italic"][::std::mem::offset_of!(Style, italic) - 57usize];
-    ["Offset of field: Style::faint"][::std::mem::offset_of!(Style, faint) - 58usize];
-    ["Offset of field: Style::blink"][::std::mem::offset_of!(Style, blink) - 59usize];
-    ["Offset of field: Style::inverse"][::std::mem::offset_of!(Style, inverse) - 60usize];
-    ["Offset of field: Style::invisible"][::std::mem::offset_of!(Style, invisible) - 61usize];
-    ["Offset of field: Style::strikethrough"]
-        [::std::mem::offset_of!(Style, strikethrough) - 62usize];
-    ["Offset of field: Style::overline"][::std::mem::offset_of!(Style, overline) - 63usize];
-    ["Offset of field: Style::underline"][::std::mem::offset_of!(Style, underline) - 64usize];
-};
-impl Default for Style {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
-unsafe extern "C" {
-    #[doc = " Get the default style.\n\n Initializes the style to the default values (no colors, no flags).\n\n"]
-    pub fn ghostty_style_default(style: *mut Style);
-}
-unsafe extern "C" {
-    #[doc = " Check if a style is the default style.\n\n Returns true if all colors are unset and all flags are off.\n\n"]
-    pub fn ghostty_style_is_default(style: *const Style) -> bool;
 }
 #[doc = " A resolved reference to a terminal cell position.\n\n This is a sized struct. Use GHOSTTY_INIT_SIZED() to initialize it.\n"]
 #[repr(C)]
@@ -3470,15 +3862,15 @@ pub mod TerminalData {
     pub const CURSOR_AT_PROMPT: Type = 39;
     #[doc = " The configured maximum decoded bytes per Kitty clipboard protocol\n (OSC 5522) write transaction. See\n GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE_MAX_BYTES.\n\n Output type: size_t *"]
     pub const CLIPBOARD_WRITE_MAX_BYTES: Type = 40;
-    #[doc = " Whether the effective foreground is an OSC override.\n\n Output type: bool *"]
+    #[doc = " Whether the effective foreground is an OSC override.\n Output type: bool *"]
     pub const COLOR_FOREGROUND_OVERRIDDEN: Type = 41;
-    #[doc = " Whether the effective background is an OSC override.\n\n Output type: bool *"]
+    #[doc = " Whether the effective background is an OSC override.\n Output type: bool *"]
     pub const COLOR_BACKGROUND_OVERRIDDEN: Type = 42;
-    #[doc = " Whether the effective cursor color is an OSC override.\n\n Output type: bool *"]
+    #[doc = " Whether the effective cursor color is an OSC override.\n Output type: bool *"]
     pub const COLOR_CURSOR_OVERRIDDEN: Type = 43;
-    #[doc = " Palette indices whose effective values are OSC overrides.\n\n Output type: GhosttyColorPaletteMask *"]
+    #[doc = " Palette indices whose effective values are OSC overrides.\n Output type: GhosttyColorPaletteMask *"]
     pub const COLOR_PALETTE_OVERRIDES: Type = 44;
-    #[doc = " The configured maximum decoded bytes per Kitty clipboard protocol\n (OSC 5522) write transaction. See\n GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE_MAX_BYTES.\n\n Output type: size_t *"]
+    #[doc = " Palette indices whose effective values are OSC overrides.\n Output type: GhosttyColorPaletteMask *"]
     pub const MAX_VALUE: Type = 2147483647;
 }
 unsafe extern "C" {

@@ -73,7 +73,8 @@ const SELECTION_AUTOSCROLL_INTERVAL: Duration = Duration::from_millis(15);
 
 pub struct TerminalEmulator {
     local_file_emissions: Rc<RefCell<LocalFileEmissionRegistry>>,
-    terminal: Terminal<'static, 'static>,
+    pub(crate) terminal: Terminal<'static, 'static>,
+    pub(crate) semantic_content: crate::content::pages::SemanticState,
     ghostty_accessibility: ghostty_accessibility::State,
     accessibility_capture_needed: bool,
     accessibility: TerminalAccessibilityState,
@@ -523,6 +524,7 @@ impl TerminalEmulator {
         Ok(Self {
             local_file_emissions,
             terminal,
+            semantic_content: crate::content::pages::SemanticState::new()?,
             ghostty_accessibility: ghostty_accessibility::State::new()?,
             accessibility_capture_needed: true,
             accessibility: TerminalAccessibilityState::default(),
@@ -586,6 +588,9 @@ impl TerminalEmulator {
     }
 
     pub fn feed_at(&mut self, bytes: &[u8], now: Instant) {
+        if !bytes.is_empty() && self.semantic_content.advance().is_err() {
+            return;
+        }
         if !bytes.is_empty() {
             self.accessibility_capture_needed = true;
         }
@@ -613,7 +618,8 @@ impl TerminalEmulator {
         } else {
             self.terminal.vt_write(bytes);
         }
-        for event in self.pending_metadata.borrow_mut().drain(..) {
+        let mut metadata_events = mem::take(&mut *self.pending_metadata.borrow_mut());
+        for event in metadata_events.drain(..) {
             match event {
                 MetadataEvent::Title(title) => {
                     self.metadata.set_reported_title(&title, now);
@@ -631,6 +637,9 @@ impl TerminalEmulator {
                                 command.state == crate::metadata::CommandState::Running
                             });
                     self.metadata.apply_semantic_prompt(&value, now);
+                    if let Some(directory) = self.metadata.take_owner_confirmed_directory() {
+                        self.capture_confirmed_directory(&directory);
+                    }
                     // One read may contain several commands, or a completion followed by a new
                     // command. Publish each accepted transition before the next event replaces it.
                     if was_running
@@ -653,6 +662,7 @@ impl TerminalEmulator {
                 }
             }
         }
+        *self.pending_metadata.borrow_mut() = metadata_events;
         if !bytes.is_empty() {
             self.find.invalidate();
         }
@@ -673,6 +683,9 @@ impl TerminalEmulator {
     }
 
     pub fn clear_screen_and_scrollback(&mut self) -> EmulatorAction {
+        if self.semantic_content.advance().is_err() {
+            return EmulatorAction::none();
+        }
         self.accessibility_capture_needed = true;
         let redraw_prompt = self.terminal.clear_screen(true);
         EmulatorAction {
@@ -684,6 +697,22 @@ impl TerminalEmulator {
             screen_changed: true,
             selection_completed: false,
         }
+    }
+
+    /// Advance semantic timers without constructing a renderer snapshot or
+    /// touching client viewport, selection or Find navigation.
+    pub fn advance_content_timers(
+        &mut self,
+        now: Instant,
+    ) -> Result<bool, spaceterm_core::content_queries::ContentReadFailure> {
+        let revision = self.content_revision();
+        self.advance_graphics_animations(now)
+            .map_err(crate::content::pages::native_failure)?;
+        self.expire_synchronized_output(now)
+            .map_err(crate::content::pages::native_failure)?;
+        let metadata_changed = self.advance_metadata_status(now);
+        let resource_prepared = self.prepare_graphics_quantum()?;
+        Ok(self.content_revision() != revision || metadata_changed || resource_prepared)
     }
 
     pub fn graphics_animation_deadline(&self) -> Option<Instant> {
@@ -714,10 +743,18 @@ impl TerminalEmulator {
                 .as_millis(),
         )
         .unwrap_or(u64::MAX);
+        let before = self.terminal.kitty_graphics()?.generation()?;
         self.graphics_animation_deadline = self
             .terminal
             .tick_kitty_animations(now_ms)?
             .and_then(|delay| now.checked_add(Duration::from_millis(delay.max(1))));
+        if self.terminal.kitty_graphics()?.generation()? != before {
+            // Animation mutates immutable resource generations without PTY output.
+            // Readers must invalidate the same exact base as an output mutation.
+            self.semantic_content
+                .advance()
+                .map_err(|_| Error::InvalidValue)?;
+        }
         Ok(())
     }
 
@@ -750,6 +787,9 @@ impl TerminalEmulator {
         if !self.terminal.mode(Mode::SYNC_OUTPUT)? {
             return Ok(false);
         }
+        self.semantic_content
+            .advance()
+            .map_err(|_| Error::InvalidValue)?;
         self.terminal.set_mode(Mode::SYNC_OUTPUT, false)?;
         Ok(true)
     }
@@ -757,6 +797,27 @@ impl TerminalEmulator {
     #[cfg(any(test, feature = "test-support"))]
     pub fn resize(&mut self, geometry: TerminalGeometry) -> Result<(), Error> {
         self.resize_for_pty(geometry, true)
+    }
+
+    /// Authoritative geometry without constructing legacy accessibility,
+    /// selection or Find projections. The runtime has already reserved grids.
+    #[cfg(feature = "runtime")]
+    pub(crate) fn resize_content(&mut self, geometry: TerminalGeometry) -> Result<(), Error> {
+        self.end_synchronized_output()?;
+        if geometry.grid() != self.geometry.grid()
+            || geometry.backing_cell_size() != self.geometry.backing_cell_size()
+        {
+            self.semantic_content
+                .advance()
+                .map_err(|_| Error::InvalidValue)?;
+            let grid = geometry.grid();
+            let cell = geometry.backing_cell_size();
+            self.terminal
+                .resize(grid.cols, grid.rows, cell.width, cell.height)?;
+            self.accessibility_capture_needed = true;
+        }
+        self.geometry = geometry;
+        Ok(())
     }
 
     pub fn geometry(&self) -> TerminalGeometry {
@@ -776,6 +837,9 @@ impl TerminalEmulator {
         let grid = geometry.grid();
         let cell = geometry.backing_cell_size();
         if winsize_changed {
+            self.semantic_content
+                .advance()
+                .map_err(|_| Error::InvalidValue)?;
             self.capture_accessibility_if_needed()?;
             self.accessibility_capture_needed = true;
             self.terminal
@@ -813,6 +877,9 @@ impl TerminalEmulator {
             None
         };
 
+        self.semantic_content
+            .advance()
+            .map_err(|_| Error::InvalidValue)?;
         apply_terminal_appearance_defaults_transactional(&mut self.terminal, &update.appearance)?;
         self.reported_appearance.set(update.appearance.appearance);
         self.applied_appearance = update;
@@ -2121,6 +2188,11 @@ impl TerminalEmulator {
 
     pub fn metadata(&self) -> Arc<TerminalMetadataSnapshot> {
         self.metadata.snapshot()
+    }
+
+    #[cfg(feature = "runtime")]
+    pub(crate) fn metadata_observation_sequences(&self) -> Option<(u64, u64)> {
+        self.metadata.observation_sequences()
     }
 }
 

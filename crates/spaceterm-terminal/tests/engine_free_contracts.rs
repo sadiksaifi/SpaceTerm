@@ -66,3 +66,14 @@ fn metadata_snapshot_checks_bounds_without_the_terminal_engine() {
     );
     assert!(RuntimeMetadataIdentity::new("x".repeat(1025)).is_err());
 }
+
+#[test]
+fn runtime_command_debug_redacts_key_text_and_logical_key() {
+    let mut key = spaceterm_terminal::KeyInput::text_input("terminal-input-sensitive-sentinel");
+    key.logical_key = "logical-key-sensitive-sentinel".into();
+    key.unshifted_codepoint = Some('密');
+    let debug = format!("{:?}", RuntimeCommand::Key(key));
+    assert!(!debug.contains("terminal-input-sensitive-sentinel"));
+    assert!(!debug.contains("logical-key-sensitive-sentinel"));
+    assert!(!debug.contains('密'));
+}

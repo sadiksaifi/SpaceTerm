@@ -12,13 +12,6 @@ struct SpaceTermPatch {
     compiled_source: &'static [u8],
 }
 
-// The content owner supplies the patch and matching generated ABI before this
-// declaration joins the active patch/export checks. H0 must not require exports
-// absent from the pinned Wave 1 engine or install an empty replacement patch.
-#[expect(
-    dead_code,
-    reason = "terminal-runtime Job B activates this frozen ABI registration with its real patch"
-)]
 const SEMANTIC_CONTENT_PATCH_DECLARATION: (&str, &str, &[&str]) = (
     "patches/spaceterm-semantic-content.patch",
     "content.h",
@@ -28,6 +21,8 @@ const SEMANTIC_CONTENT_PATCH_DECLARATION: (&str, &str, &[&str]) = (
         "ghostty_content_state_capture",
         "ghostty_content_read_page",
         "ghostty_content_read_topology",
+        "ghostty_content_read_placements",
+        "ghostty_content_prepare_placements",
         "ghostty_content_copy_begin",
         "ghostty_content_copy_step",
         "ghostty_content_copy_free",
@@ -61,6 +56,10 @@ const SPACETERM_PATCHES: &[SpaceTermPatch] = &[
     SpaceTermPatch {
         relative_path: "patches/spaceterm-prompt-resize.patch",
         compiled_source: include_bytes!("patches/spaceterm-prompt-resize.patch"),
+    },
+    SpaceTermPatch {
+        relative_path: SEMANTIC_CONTENT_PATCH_DECLARATION.0,
+        compiled_source: include_bytes!("patches/spaceterm-semantic-content.patch"),
     },
 ];
 
@@ -303,6 +302,10 @@ fn build_vendored(link_mode: LinkMode) {
 fn verify_required_source_exports(ghostty_dir: &Path) {
     for (header, symbols) in [
         (
+            SEMANTIC_CONTENT_PATCH_DECLARATION.1,
+            SEMANTIC_CONTENT_PATCH_DECLARATION.2,
+        ),
+        (
             "grid_ref.h",
             &["ghostty_grid_ref_hyperlink_userdata"] as &[_],
         ),
@@ -360,7 +363,10 @@ fn verify_required_library_exports(
             String::from_utf8_lossy(&output.stderr)
         );
         let symbols = String::from_utf8_lossy(&output.stdout);
-        for required_symbol in REQUIRED_SYMBOLS {
+        for required_symbol in REQUIRED_SYMBOLS
+            .iter()
+            .chain(SEMANTIC_CONTENT_PATCH_DECLARATION.2)
+        {
             let defines_required_symbol = symbols
                 .lines()
                 .filter_map(|line| line.split_whitespace().last())

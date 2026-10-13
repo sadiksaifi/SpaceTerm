@@ -471,6 +471,11 @@ pub struct MetadataTracker {
     /// reports its directory just before each prompt marker, so that marker commits it, and a
     /// nested session's reports are replaced before then.
     owner_reported_directory: Option<Arc<str>>,
+    owner_confirmed_directory: Option<Arc<str>>,
+    // Source reports, not presentation revisions. Repeated valid reports are
+    // new evidence even when their displayed value does not change.
+    directory_observation_sequence: Option<u64>,
+    work_observation_sequence: Option<u64>,
     progress_expiry: Option<Instant>,
     title_animation: TitleActivity,
 }
@@ -523,6 +528,9 @@ impl MetadataTracker {
             deferred_repository_directory: None,
             prompt_owner_seen: false,
             owner_reported_directory: None,
+            owner_confirmed_directory: None,
+            directory_observation_sequence: Some(0),
+            work_observation_sequence: Some(0),
             progress_expiry: None,
             title_animation: TitleActivity::default(),
         }
@@ -530,6 +538,14 @@ impl MetadataTracker {
 
     pub fn snapshot(&self) -> Arc<TerminalMetadataSnapshot> {
         Arc::clone(&self.snapshot)
+    }
+
+    #[cfg(feature = "runtime")]
+    pub(crate) fn observation_sequences(&self) -> Option<(u64, u64)> {
+        Some((
+            self.directory_observation_sequence?,
+            self.work_observation_sequence?,
+        ))
     }
 
     pub fn set_reported_title(&mut self, title: &str, now: Instant) -> bool {
@@ -567,8 +583,11 @@ impl MetadataTracker {
         let Some(directory) = parse_osc7_directory(value, &self.snapshot.context) else {
             return false;
         };
+        self.directory_observation_sequence = self
+            .directory_observation_sequence
+            .and_then(|sequence| sequence.checked_add(1));
+        self.owner_reported_directory = Some(Arc::clone(&directory.path));
         let command_running = if self.prompt_owner_seen {
-            self.owner_reported_directory = Some(Arc::clone(&directory.path));
             true
         } else {
             let running = self
@@ -600,6 +619,11 @@ impl MetadataTracker {
     }
 
     pub fn mark_stale(&mut self) -> bool {
+        if self.snapshot.freshness != MetadataFreshness::Stale {
+            self.work_observation_sequence = self
+                .work_observation_sequence
+                .and_then(|sequence| sequence.checked_add(1));
+        }
         self.command_started = None;
         self.retire_command_reports(|snapshot| {
             snapshot.freshness = MetadataFreshness::Stale;
@@ -667,9 +691,25 @@ impl MetadataTracker {
         self.prompt_owner_seen = true;
         self.deferred_repository_directory = None;
         match action {
-            "A" | "P" => self.owner_reported_directory.take(),
+            "A" | "P" => {
+                let directory = self.owner_reported_directory.take();
+                self.owner_confirmed_directory = directory.clone();
+                directory
+            }
             _ => None,
         }
+    }
+
+    /// This lane excludes pre-owner fallback and nested-shell prompt reports.
+    #[cfg_attr(
+        not(feature = "engine"),
+        expect(
+            dead_code,
+            reason = "only the VT producer consumes confirmed observations"
+        )
+    )]
+    pub(crate) fn take_owner_confirmed_directory(&mut self) -> Option<Arc<str>> {
+        self.owner_confirmed_directory.take()
     }
 
     pub fn apply_semantic_prompt(&mut self, value: &str, now: Instant) -> bool {
@@ -677,6 +717,11 @@ impl MetadataTracker {
         let Some(action) = fields.next() else {
             return false;
         };
+        if matches!(action, "A" | "P" | "B" | "I" | "C" | "D") {
+            self.work_observation_sequence = self
+                .work_observation_sequence
+                .and_then(|sequence| sequence.checked_add(1));
+        }
         let fields = fields.collect::<Vec<_>>();
         let committed = self.observe_prompt_owner(action, &fields);
         match action {
