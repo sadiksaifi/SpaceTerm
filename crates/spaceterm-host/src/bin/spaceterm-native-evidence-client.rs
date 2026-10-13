@@ -1,10 +1,8 @@
-//! Unavailable entry shell, owned by native-evidence E4.
+//! Evidence-only shell entry and a single existing synthetic target attempt.
 
-use spaceterm_host::native_deployment::contracts::NativeFailure;
-use std::process::ExitCode;
+#[path = "../../../../tests/server_native/macos/evidence_client/client.rs"]
+mod client;
 
-fn main() -> ExitCode {
-    let failure = NativeFailure::NativeUnavailable;
-    eprintln!("{failure}");
-    ExitCode::from(failure as u8)
+fn main() -> std::process::ExitCode {
+    client::entry()
 }

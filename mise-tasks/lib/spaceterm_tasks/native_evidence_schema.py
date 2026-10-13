@@ -10,7 +10,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, BinaryIO, NoReturn, cast
+from typing import Any, BinaryIO, NoReturn
 
 from spaceterm_tasks import TaskError
 
@@ -42,7 +42,14 @@ FAILURES = frozenset(
     authorization-unavailable installation-unavailable artifact-rejected credential-unavailable
     credential-policy-rejected interaction-required supervisor-unavailable background-items-suppressed
     process-identity-mismatch privilege-drop-unproven execution-binding-unproven timed-out
-    limit-exceeded outcome-pending indeterminate cleanup-unresolved io-unavailable""".split()
+    limit-exceeded outcome-pending indeterminate cleanup-unresolved io-unavailable
+    linux-passwordless-sudo linux-docker-membership linux-lxd-membership
+    linux-container-broker-access linux-raw-disk-access linux-delegated-dac-authority
+    linux-delegated-tracing linux-delegated-profiling linux-system-wide-profiling
+    linux-unsupported-authorization-policy linux-unsupported-privileged-broker
+    linux-policy-check-unavailable linux-prior-bypass-history-unproven
+    linux-publication-unavailable linux-mount-witness-unavailable
+    linux-unsafe-dumpable-transition bootstrap-trust-unavailable""".split()
 )
 CAPABILITIES = (
     "protected-folders",
@@ -152,14 +159,14 @@ FACT_FIELDS = {
     "lifecycle": "desired_state credential_calls installation_retention_calls process_absent endpoint_absent",
     "credential": "policy interaction retrieved secret_wiped release_rechecked retriever_absent",
     "credential-denial": "reason attempt_observed release_denied retrieved secret_wiped retriever_absent",
-    "privilege": "real_ids_verified effective_ids_verified saved_ids_verified supplementary_groups_cleared execution_bound hardened_runtime_verified descriptor_scope_verified secret_channels_closed custody_descriptors_absent retriever_absent root_process_absent root_listener_absent",
+    "privilege": "real_ids_verified effective_ids_verified saved_ids_verified supplementary_groups_verified primary_gid supplementary_groups execution_bound hardened_runtime_verified descriptor_scope_verified secret_channels_closed custody_descriptors_absent retriever_absent root_process_absent root_listener_absent",
     "startup": "desired_state selection trigger readiness_authenticated original_process_retired endpoint_bound",
     "drain": "desired_state started_writes settled_writes phase_order retriever_absent",
     "update": "fresh_version_authenticated approval_durable candidate_running identity_retained pairings_retained organization_retained roots_retained remote_access_retained previous_process_absent sessions_retired started_writes_settled",
     "publication": "fresh_copy destination_authenticated closure_authenticated durability approved_selected",
     "authorization": "operation attempt_observed granted caller_bound helper_absent",
     "capability": "capability preflight effect responsible_process cleanup",
-    "environment-comparison": "differences login interactive startup_order_verified",
+    "environment-comparison": "reference path_difference locale_difference login interactive startup_order_verified",
     "package-verification": "manifest_matches signatures_verified runtime_verified entitlements_verified dependencies_verified",
     "bootstrap": "candidate_manifest_verified candidate_signatures_verified protected_admin_digest_verified protected_admin_signature_verified protected_admin_policy_verified verified_before_root_exec receipt_durable_before_effects root_execution_observed fresh_copy collision_check_complete",
     "cleanup": "receipt_retained scope_verified process_absent retriever_absent sessions_absent endpoint_absent remaining_objects",
@@ -288,6 +295,13 @@ def validate_facts(facts: Any):
             choice(facts["interaction"], ("disabled", "required", "unchecked"))
         case "credential-denial":
             choice(facts["reason"], CREDENTIAL_DENIALS)
+        case "privilege":
+            integer(facts["primary_gid"], 0, 2**32 - 2)
+            groups = facts["supplementary_groups"]
+            if type(groups) is not list or len(groups) > 256:
+                reject()
+            for group in groups:
+                integer(group, 0, 2**32 - 2)
         case "startup":
             choice(facts["desired_state"], ("running", "stopped", "unknown"))
             choice(facts["selection"], ("approved", "staged", "unknown"))
@@ -317,29 +331,14 @@ def validate_facts(facts: Any):
             )
             choice(facts["cleanup"], ("complete", "unresolved", "not-needed"))
         case "environment-comparison":
-            differences = facts["differences"]
-            if (
-                type(differences) is not list
-                or len(differences) > 13
-                or any(type(item) is not str for item in differences)
-                or differences != sorted(set(cast(list[str], differences)))
-            ):
-                reject()
-            for difference in differences:
-                choice(
-                    difference,
-                    (
-                        "path",
-                        "locale",
-                        "login-shell",
-                        "startup-order",
-                        "gui-session",
-                        "ssh-agent",
-                        "gpg-agent",
-                        "dbus",
-                        "graphical-tools",
-                    ),
-                )
+            # Each context compares only its own private values to the same public
+            # baseline. Equal classifications do not prove equality between peers.
+            choice(facts["reference"], ("sanitized-launch-v1",))
+            choice(
+                facts["path_difference"],
+                ("equal", "presence-changed", "components-changed", "order-changed"),
+            )
+            choice(facts["locale_difference"], ("equal", "presence-changed", "values-changed"))
         case "cleanup":
             integer(facts["remaining_objects"])
     non_boolean = {
@@ -356,7 +355,9 @@ def validate_facts(facts: Any):
         "effect",
         "responsible_process",
         "cleanup",
-        "differences",
+        "reference",
+        "path_difference",
+        "locale_difference",
         "remaining_objects",
         "reason",
         "selection",
@@ -364,6 +365,8 @@ def validate_facts(facts: Any):
         "started_writes",
         "settled_writes",
         "phase_order",
+        "primary_gid",
+        "supplementary_groups",
     }
     for key in facts.keys() - non_boolean:
         boolean(facts[key])
@@ -454,6 +457,7 @@ def validate_record(record: Any):
                     not all(
                         facts[key]
                         for key in (
+                            "receipt_retained",
                             "scope_verified",
                             "process_absent",
                             "retriever_absent",
@@ -529,6 +533,14 @@ def validate_case_observation(record):
         return
     if facts["kind"] != expected:
         reject()
+    if result in ("denied", "cancelled") and expected not in (
+        "credential-denial",
+        "authorization",
+        "capability",
+    ):
+        # Other cases have no denial/cancellation observation contract. Report
+        # failed or pending facts instead of crediting an unobserved negative effect.
+        reject()
     # Missing observations remain reportable, but cannot satisfy successful cases.
     if expected == "credential-denial":
         if facts["reason"] != record["case"]:
@@ -568,15 +580,19 @@ def validate_case_observation(record):
                 reject()
             if result == "passed" and not facts["caller_bound"]:
                 reject()
-    elif expected == "capability" and result in (
-        "passed",
-        "denied",
-        "cancelled",
-        "unavailable",
-        "timed-out",
-        "unrun",
-    ):
-        if facts["effect"] != result or facts["cleanup"] == "unresolved":
+    elif expected == "capability":
+        if (facts["cleanup"] == "unresolved") != (result == "cleanup-unresolved"):
+            reject()
+        if result in ("passed", "denied") and facts["effect"] != result:
+            reject()
+        if (
+            result in ("denied", "cancelled", "unavailable", "unrun")
+            and facts["effect"] == "passed"
+        ):
+            reject()
+        if result == "unrun" and facts["effect"] != "unrun":
+            reject()
+        if result == "passed" and facts["preflight"] != "passed":
             reject()
         if (
             result in ("passed", "denied", "cancelled")
@@ -599,8 +615,17 @@ def validate_case_observation(record):
         case "privilege":
             # Linux also needs filesystem IDs, capabilities and continuous
             # nondumpability. This macOS observation record cannot credit it.
-            if record["host"]["platform"] != "macos" or not all(
-                value for key, value in facts.items() if key != "kind"
+            if (
+                record["host"]["platform"] != "macos"
+                or not all(
+                    facts[key]
+                    for key in FACT_FIELDS["privilege"].split()
+                    if key not in ("primary_gid", "supplementary_groups")
+                )
+                or facts["primary_gid"] == 0
+                or 0 in facts["supplementary_groups"]
+                or not facts["supplementary_groups"]
+                or facts["supplementary_groups"][0] != facts["primary_gid"]
             ):
                 reject()
         case "update" | "bootstrap":
@@ -769,6 +794,22 @@ class Collector:
             reject(self._failure)
         if not self.records:
             reject("invalid-record")
+        # Generic capability facts omit the normalized PATH, locale and shell
+        # observations. A passed shell comparison needs those native observations
+        # from the same parenting context. An unavailable probe needs no invented
+        # comparison, and matching classifications do not compare private peers.
+        for (job, case, context, proof), result in self._seen.items():
+            if (job, case, proof, result) == (
+                "macos-capabilities",
+                "shell-environment",
+                "native",
+                "passed",
+            ):
+                comparison = (job, "normalized-shell-comparison", context, "native")
+                if comparison not in self._seen:
+                    reject("invalid-record")
+                if self._seen[comparison] != "passed":
+                    reject("outcome-pending")
         for case in required:
             if type(case) is not RequiredCase:
                 reject()
@@ -803,6 +844,7 @@ class EvidenceOutput:
         self._file: BinaryIO | None = None
         self._collector = Collector()
         self._finished = False
+        self._failed = False
 
     def __enter__(self):
         try:
@@ -824,18 +866,19 @@ class EvidenceOutput:
                 reject("io-unavailable")
 
     def append(self, line: bytes):
-        if self._file is None or self._file.closed or self._finished:
+        if self._file is None or self._file.closed or self._finished or self._failed:
             reject("io-unavailable")
         self._collector.append(line, self._file)
 
     def finish(self, required: list[RequiredCase]) -> Collection:
-        if self._file is None or self._file.closed:
+        if self._file is None or self._file.closed or self._failed:
             reject("io-unavailable")
         summary = self._collector.finish(required)
         try:
             self._file.flush()
             os.fsync(self._file.fileno())
         except OSError:
+            self._failed = True
             reject("io-unavailable")
         self._finished = True
         return summary
@@ -843,6 +886,9 @@ class EvidenceOutput:
 
 def collect(source: BinaryIO, required: list[RequiredCase]) -> Collection:
     collector = Collector()
-    while line := source.readline(RECORD_BYTES + 1):
-        collector.append(line)
+    try:
+        while line := source.readline(RECORD_BYTES + 1):
+            collector.append(line)
+    except (OSError, ValueError):
+        reject("io-unavailable")
     return collector.finish(required)

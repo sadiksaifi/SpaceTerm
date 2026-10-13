@@ -4,6 +4,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <signal.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,7 +19,7 @@ static st_capability_observation emitted;
 static unsigned emit_count;
 static pid_t last_child;
 static int escaped_control[2], escaped_status[2];
-static unsigned finish_count;
+static unsigned finish_count, spawn_count, native_count;
 
 static void emit(void *context, const st_capability_observation *observation) {
     assert(context == &emitted);
@@ -31,6 +32,7 @@ static void emit(void *context, const st_capability_observation *observation) {
 st_native_result st_capability_spawn(st_capability_case capability, st_probe_context context,
     uint64_t deadline, pid_t *owned_child, int *owned_output) {
     (void)deadline;
+    ++spawn_count;
     if (mode == 7) return ST_PROBE_UNAVAILABLE;
     int descriptors[2];
     assert(pipe(descriptors) == 0);
@@ -113,9 +115,18 @@ st_native_result st_capability_spawn(st_capability_case capability, st_probe_con
     return ST_PROBE_OK;
 }
 
-st_native_result st_capability_finish_spawn(pid_t child, int retired) {
-    assert(child == last_child && retired);
+st_native_result st_capability_finish_spawn(pid_t child, int retired, int root_reaped) {
+    assert(child == last_child && retired && root_reaped);
     ++finish_count;
+    return mode == 10 ? ST_PROBE_CLEANUP_UNRESOLVED : ST_PROBE_OK;
+}
+
+st_native_result st_capability_native_worker(st_capability_case capability, st_probe_context context,
+    uint64_t deadline, st_capability_observation *out) {
+    (void)deadline; ++native_count;
+    if (mode == 7) return ST_PROBE_UNAVAILABLE;
+    *out = (st_capability_observation){1, capability, context, ST_OUTCOME_PASSED,
+        ST_RESPONSIBLE_UNKNOWN, ST_PREFLIGHT_ALLOWED, ST_EFFECT_VERIFIED, ST_CLEANUP_NOT_NEEDED};
     return ST_PROBE_OK;
 }
 
@@ -125,7 +136,7 @@ static st_native_result run(unsigned selected_mode, uint32_t capability, uint32_
     st_native_result result = st_capability_run(capability, context,
         st_capability_monotonic_ns() + budget, emit, &emitted);
     assert(emit_count == 1);
-    if (mode != 7) {
+    if (mode != 7 && capability != ST_CAP_LOGIN_SHELL) {
         int status;
         assert(waitpid(last_child, &status, WNOHANG) == -1 && errno == ECHILD);
     }
@@ -166,11 +177,6 @@ TEST(missing_volume_and_agent_are_unrun_or_unavailable) {
         assert(emitted.outcome == ST_OUTCOME_UNAVAILABLE);
     }
 }
-TEST(clipboard_restore_does_not_overwrite_newer_user_change) {
-    assert(st_capability_clipboard_restore_eligible(8, 8));
-    assert(!st_capability_clipboard_restore_eligible(8, 9));
-    assert(!st_capability_clipboard_restore_eligible(8, 7));
-}
 TEST(capture_pixels_and_microphone_samples_are_discarded) {
     uint8_t pixels[17], samples[13];
     memset(pixels, 0xab, sizeof(pixels));
@@ -183,9 +189,12 @@ TEST(capture_pixels_and_microphone_samples_are_discarded) {
 TEST(touch_id_case_executes_only_usr_bin_true) {
     const char *const *arguments = st_capability_sudo_argv();
     assert(strcmp(arguments[0], "/usr/bin/sudo") == 0);
-    assert(strcmp(arguments[1], "--") == 0);
-    assert(strcmp(arguments[2], "/usr/bin/true") == 0);
-    assert(arguments[3] == NULL);
+    assert(strcmp(arguments[1], "/usr/bin/true") == 0);
+    assert(arguments[2] == NULL);
+}
+TEST(completed_fixed_tree_is_not_unconditionally_cleanup_unresolved) {
+    assert(run(0, ST_CAP_TOUCH_ID_SUDO, ST_CONTEXT_GUI, UINT64_C(1000000000)) == ST_PROBE_OK);
+    assert(emitted.outcome == ST_OUTCOME_PASSED);
 }
 TEST(short_and_extra_output_reject_before_success) {
     assert(run(3, ST_CAP_MICROPHONE, ST_CONTEXT_GUI, UINT64_C(1000000000)) == ST_PROBE_INVALID);
@@ -217,6 +226,10 @@ TEST(owned_worker_cancellation_is_not_denial_or_success) {
     assert(run(9, ST_CAP_MICROPHONE, ST_CONTEXT_GUI, UINT64_C(1000000000)) == ST_PROBE_OK);
     assert(emitted.outcome == ST_OUTCOME_CANCELLED);
     assert(emitted.effect_class == ST_EFFECT_UNOBSERVED);
+    assert(run(9, ST_CAP_CLIPBOARD, ST_CONTEXT_GUI, UINT64_C(1000000000)) == ST_PROBE_OK);
+    assert(emitted.outcome == ST_OUTCOME_CANCELLED && emitted.cleanup_class == ST_CLEANUP_NOT_NEEDED);
+    assert(run(9, ST_CAP_TOUCH_ID_SUDO, ST_CONTEXT_GUI, UINT64_C(1000000000)) == ST_PROBE_OK);
+    assert(emitted.outcome == ST_OUTCOME_CANCELLED && emitted.cleanup_class == ST_CLEANUP_VERIFIED);
 }
 
 TEST(normalized_environment_discloses_counts_not_values) {
@@ -269,57 +282,50 @@ TEST(closed_configuration_reader_emits_failure_and_retires_worker) {
     assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
 }
 
-TEST(environment_comparison_detects_values_and_order_with_equal_counts) {
-    const char *gui_locale[ST_CAPABILITY_LOCALE_COUNT] = {"en_US.UTF-8", NULL, NULL};
-    const char *daemon_locale[ST_CAPABILITY_LOCALE_COUNT] = {"C", NULL, NULL};
-    st_capability_retained_environment *gui = NULL, *daemon = NULL, *reordered = NULL;
-    assert(st_capability_environment_retain(ST_CONTEXT_GUI, "/synthetic/a:/synthetic/b", gui_locale, &gui) == 0);
-    assert(st_capability_environment_retain(ST_CONTEXT_DAEMON, "/synthetic/a:/synthetic/c", daemon_locale, &daemon) == 0);
-    assert(st_capability_environment_retain(ST_CONTEXT_DAEMON, "/synthetic/b:/synthetic/a", gui_locale, &reordered) == 0);
-    st_capability_environment_difference changed, order;
-    assert(st_capability_environment_compare(gui, daemon, &changed) == 0);
-    assert(st_capability_environment_compare(gui, reordered, &order) == 0);
-    st_capability_environment_release(&gui); st_capability_environment_release(&daemon);
-    st_capability_environment_release(&reordered);
-    assert(changed.path_difference == ST_PATH_COMPONENTS_CHANGED && changed.locale_difference == ST_LOCALE_VALUES_CHANGED);
-    assert(order.path_difference == ST_PATH_ORDER_CHANGED && order.locale_difference == ST_LOCALE_EQUAL);
-    uint8_t record[20]; assert(st_capability_environment_difference_encode(&changed, record) == 0);
-    for (size_t i = 0; i < sizeof(record); ++i) assert(record[i] <= 4);
+TEST(login_shell_values_never_cross_a_worker_process) {
+    mode = 0; emit_count = spawn_count = native_count = 0;
+    assert(st_capability_run(ST_CAP_LOGIN_SHELL, ST_CONTEXT_GUI,
+        st_capability_monotonic_ns() + UINT64_C(1000000000), emit, &emitted) == ST_PROBE_OK);
+    assert(emit_count == 1 && spawn_count == 0 && native_count == 1 && emitted.outcome == ST_OUTCOME_PASSED);
 }
 
-TEST(actual_shell_observation_does_not_accept_controlled_command_or_missing_pty) {
-    const char *actual[] = {"/bin/zsh", "-l", "-i"};
-    const char *controlled[] = {"/bin/zsh", "-l", "-i", "-c", ":"};
-    const char *script[] = {"/bin/zsh", "-il", "/synthetic/script"};
-    assert(st_capability_shell_invocation(actual, 3, 1));
-    assert(!st_capability_shell_invocation(actual, 3, 0));
-    assert(!st_capability_shell_invocation(controlled, 5, 1));
-    assert(!st_capability_shell_invocation(script, 3, 1));
-}
-
-TEST(private_environment_transport_preserves_context_and_emits_only_differences) {
-    int channels[2]; assert(socketpair(AF_UNIX, SOCK_STREAM, 0, channels) == 0);
+TEST(local_environment_comparison_detects_values_and_order_without_export) {
     const char *locale[ST_CAPABILITY_LOCALE_COUNT] = {"C"};
-    st_capability_retained_environment *sent = NULL, *received = NULL, *daemon = NULL;
-    assert(st_capability_environment_retain(ST_CONTEXT_GUI, "/synthetic/a:/synthetic/b", locale, &sent) == 0);
-    assert(st_capability_environment_send_private(channels[0], sent, st_capability_monotonic_ns() + UINT64_C(1000000000)) == 0);
-    assert(st_capability_environment_receive_private(channels[1], ST_CONTEXT_GUI,
-        st_capability_monotonic_ns() + UINT64_C(1000000000), &received) == 0);
-    close(channels[0]); close(channels[1]);
-    assert(st_capability_environment_retain(ST_CONTEXT_DAEMON, "/synthetic/b:/synthetic/a", locale, &daemon) == 0);
-    st_capability_environment_difference difference;
-    assert(st_capability_environment_compare(received, daemon, &difference) == 0);
-    assert(difference.path_difference == ST_PATH_ORDER_CHANGED && difference.locale_difference == ST_LOCALE_EQUAL);
-    st_capability_environment_release(&sent); st_capability_environment_release(&received);
-    st_capability_environment_release(&daemon);
-    assert(!sent && !received && !daemon);
-    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, channels) == 0);
-    assert(st_capability_environment_retain(ST_CONTEXT_GUI, NULL, locale, &sent) == 0);
-    assert(st_capability_environment_send_private(channels[0], sent, st_capability_monotonic_ns() + UINT64_C(1000000000)) == 0);
-    assert(st_capability_environment_receive_private(channels[1], ST_CONTEXT_DAEMON,
-        st_capability_monotonic_ns() + UINT64_C(1000000000), &received) == ST_PROBE_INVALID);
-    assert(!received); close(channels[0]); close(channels[1]); st_capability_environment_release(&sent);
+    st_capability_environment_difference original, order, changed;
+    assert(st_capability_environment_compare_local(ST_CONTEXT_GUI, "/usr/bin:/bin:/usr/sbin:/sbin", locale, &original) == 0);
+    assert(original.path_difference == ST_PATH_EQUAL && original.locale_difference == ST_LOCALE_EQUAL);
+    assert(st_capability_environment_compare_local(ST_CONTEXT_DAEMON, "/bin:/usr/bin:/usr/sbin:/sbin", locale, &order) == 0);
+    assert(order.path_difference == ST_PATH_ORDER_CHANGED && order.context == ST_CONTEXT_DAEMON);
+    locale[0] = "en_US.UTF-8";
+    assert(st_capability_environment_compare_local(ST_CONTEXT_GUI, "/usr/bin:/bin:/usr/sbin:/synthetic", locale, &changed) == 0);
+    assert(changed.path_difference == ST_PATH_COMPONENTS_CHANGED && changed.locale_difference == ST_LOCALE_VALUES_CHANGED);
+    uint8_t bytes[20]; assert(st_capability_environment_difference_encode(&changed, bytes) == 0);
+    for (size_t i = 0; i < sizeof(bytes); ++i) assert(bytes[i] <= 4);
+    assert(bytes[3] == 2 && bytes[7] == ST_CONTEXT_GUI && bytes[11] == 1);
+    locale[1] = "C";
+    assert(st_capability_environment_compare_local(ST_CONTEXT_GUI, NULL, locale, &changed) == 0);
+    assert(changed.path_difference == ST_PATH_PRESENCE_CHANGED && changed.locale_difference == ST_LOCALE_PRESENCE_CHANGED);
+    char oversized[4098]; memset(oversized, 'x', sizeof(oversized)); oversized[4097] = 0;
+    assert(st_capability_environment_compare_local(ST_CONTEXT_GUI, oversized, locale, &changed) == ST_PROBE_LIMIT);
+    locale[0] = oversized;
+    assert(st_capability_environment_compare_local(ST_CONTEXT_GUI, NULL, locale, &changed) == ST_PROBE_LIMIT);
 }
+
+TEST(public_shell_mode_metadata_is_bounded_and_never_contains_argv) {
+    const char *inputs[] = {"11", "00", "10", "01", "111", "1x", "-l -i", "1"};
+    for (size_t i = 0; i < sizeof(inputs) / sizeof(inputs[0]); ++i) {
+        int descriptors[2]; assert(pipe(descriptors) == 0);
+        assert(write(descriptors[1], inputs[i], strlen(inputs[i])) == (ssize_t)strlen(inputs[i]));
+        close(descriptors[1]);
+        uint32_t mode = UINT32_MAX;
+        st_native_result result = st_capability_read_shell_mode(descriptors[0],
+            st_capability_monotonic_ns() + UINT64_C(1000000000), &mode);
+        close(descriptors[0]);
+        if (i < 4) { assert(result == ST_PROBE_OK); assert((mode == 3) == (i == 0)); }
+        else assert(result != ST_PROBE_OK);
+    }
+}
+
 TEST(sigpipe_suppression_handles_sockets_and_preserves_existing_pending_signal) {
     sigset_t blocked, original, pending;
     sigemptyset(&blocked); sigaddset(&blocked, SIGPIPE);
@@ -336,37 +342,68 @@ TEST(sigpipe_suppression_handles_sockets_and_preserves_existing_pending_signal) 
     close(channels[0]);
 }
 
-TEST(private_environment_transport_rejects_oversize_nul_trailing_and_timeout) {
-    for (unsigned mode = 0; mode < 4; ++mode) {
-        int channels[2]; assert(socketpair(AF_UNIX, SOCK_STREAM, 0, channels) == 0);
-        uint8_t header[8 + (ST_CAPABILITY_LOCALE_COUNT + 1) * 4];
-        memset(header, 0xff, sizeof(header)); memcpy(header, "SCE1", 4);
-        header[4] = header[5] = header[6] = 0; header[7] = ST_CONTEXT_GUI;
-        if (mode == 0) { header[8] = header[9] = 0; header[10] = 0x10; header[11] = 1; }
-        if (mode == 1) { header[8] = header[9] = header[10] = 0; header[11] = 1; }
-        assert(write(channels[0], header, mode == 3 ? 1 : sizeof(header)) > 0);
-        if (mode == 1) { uint8_t zero = 0; assert(write(channels[0], &zero, 1) == 1); }
-        if (mode == 2) assert(write(channels[0], "x", 1) == 1);
-        if (mode != 3) assert(shutdown(channels[0], SHUT_WR) == 0);
-        st_capability_retained_environment *received = NULL;
-        uint64_t before = st_capability_monotonic_ns();
-        st_native_result result = st_capability_environment_receive_private(channels[1], ST_CONTEXT_GUI,
-            before + UINT64_C(100000000), &received);
-        assert(result == (mode == 0 ? ST_PROBE_LIMIT : ST_PROBE_INVALID));
-        assert(!received && st_capability_monotonic_ns() - before < UINT64_C(400000000));
-        close(channels[0]); close(channels[1]);
-    }
+#ifdef __APPLE__
+static pthread_mutex_t mask_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t mask_condition = PTHREAD_COND_INITIALIZER;
+static int mask_phase;
+static void *distinct_mask(void *unused) {
+    (void)unused;
+    sigset_t blocked, pending;
+    sigemptyset(&blocked); sigaddset(&blocked, SIGUSR1);
+    assert(pthread_sigmask(SIG_BLOCK, &blocked, NULL) == 0);
+    assert(pthread_kill(pthread_self(), SIGUSR1) == 0);
+    assert(pthread_mutex_lock(&mask_mutex) == 0);
+    mask_phase = 1; assert(pthread_cond_signal(&mask_condition) == 0);
+    while (mask_phase != 2) assert(pthread_cond_wait(&mask_condition, &mask_mutex) == 0);
+    assert(pthread_mutex_unlock(&mask_mutex) == 0);
+    assert(pthread_sigmask(SIG_SETMASK, NULL, &blocked) == 0);
+    assert(sigismember(&blocked, SIGUSR1));
+    assert(sigpending(&pending) == 0 && sigismember(&pending, SIGUSR1));
+    int signal_number; assert(sigwait(&blocked, &signal_number) == 0 && signal_number == SIGUSR1);
+    return NULL;
 }
+TEST(descriptor_sigpipe_preserves_other_thread_mask_and_pending_signal) {
+    pid_t owner = fork(); assert(owner >= 0);
+    if (!owner) {
+        assert(signal(SIGPIPE, SIG_DFL) != SIG_ERR);
+        assert(signal(SIGUSR1, SIG_DFL) != SIG_ERR);
+        sigset_t empty; sigemptyset(&empty); assert(pthread_sigmask(SIG_SETMASK, &empty, NULL) == 0);
+        pthread_t worker; assert(pthread_create(&worker, NULL, distinct_mask, NULL) == 0);
+        assert(pthread_mutex_lock(&mask_mutex) == 0);
+        while (mask_phase != 1) assert(pthread_cond_wait(&mask_condition, &mask_mutex) == 0);
+        assert(pthread_mutex_unlock(&mask_mutex) == 0);
+        for (int socket = 0; socket < 2; ++socket) {
+            int fds[2]; assert((socket ? socketpair(AF_UNIX, SOCK_STREAM, 0, fds) : pipe(fds)) == 0);
+            int writing = socket ? fds[0] : fds[1], reading = socket ? fds[1] : fds[0];
+            close(reading); char byte = 0;
+            assert(!st_capability_transfer(writing, &byte, 1, 1,
+                st_capability_monotonic_ns() + UINT64_C(1000000000)));
+            close(writing);
+        }
+        assert(pthread_mutex_lock(&mask_mutex) == 0);
+        mask_phase = 2; assert(pthread_cond_signal(&mask_condition) == 0);
+        assert(pthread_mutex_unlock(&mask_mutex) == 0);
+        assert(pthread_join(worker, NULL) == 0);
+        assert(pthread_sigmask(SIG_SETMASK, NULL, &empty) == 0 && !sigismember(&empty, SIGUSR1));
+        _exit(0);
+    }
+    int status; assert(waitpid(owner, &status, 0) == owner);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+}
+#endif
 
 int main(void) {
+#ifdef __APPLE__
+    RUN(descriptor_sigpipe_preserves_other_thread_mask_and_pending_signal);
+#endif
     RUN(probe_timeout_does_not_reset_after_partial_output);
     RUN(probe_output_rejects_paths_environment_values_and_native_errors);
     RUN(preflight_success_without_effect_is_not_passed);
     RUN(gui_and_daemon_results_are_never_coalesced);
     RUN(missing_volume_and_agent_are_unrun_or_unavailable);
-    RUN(clipboard_restore_does_not_overwrite_newer_user_change);
     RUN(capture_pixels_and_microphone_samples_are_discarded);
     RUN(touch_id_case_executes_only_usr_bin_true);
+    RUN(completed_fixed_tree_is_not_unconditionally_cleanup_unresolved);
     RUN(short_and_extra_output_reject_before_success);
     RUN(cleanup_uncertainty_overrides_effect_success);
     RUN(resource_worker_timeout_does_not_claim_cleanup);
@@ -375,11 +412,14 @@ int main(void) {
     RUN(owned_worker_cancellation_is_not_denial_or_success);
     RUN(escaped_descendant_never_counts_as_complete_cleanup);
     RUN(closed_configuration_reader_emits_failure_and_retires_worker);
-    RUN(environment_comparison_detects_values_and_order_with_equal_counts);
-    RUN(actual_shell_observation_does_not_accept_controlled_command_or_missing_pty);
-    RUN(private_environment_transport_preserves_context_and_emits_only_differences);
+    RUN(login_shell_values_never_cross_a_worker_process);
+    RUN(local_environment_comparison_detects_values_and_order_without_export);
+    RUN(public_shell_mode_metadata_is_bounded_and_never_contains_argv);
     RUN(sigpipe_suppression_handles_sockets_and_preserves_existing_pending_signal);
-    RUN(private_environment_transport_rejects_oversize_nul_trailing_and_timeout);
     printf("executed=%u proof=synthetic native-effects=0\n", test_count);
+    #ifdef __APPLE__
     return test_count == 21 ? 0 : 1;
+#else
+    return test_count == 20 ? 0 : 1;
+#endif
 }

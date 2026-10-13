@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 from spaceterm_tasks import TaskError
 from spaceterm_tasks import server_native_macos as native
-from spaceterm_tasks.native_evidence_schema import Collector
+from spaceterm_tasks.native_evidence_schema import Collector, collect
 
 from tests.test_native_evidence_schema import encoded, record
 
@@ -187,6 +187,87 @@ def receipt():
 
 
 class NativeMacOSEvidenceTests(unittest.TestCase):
+    def test_local_shell_pass_requires_normalized_observation_in_each_context(self):
+        required = [
+            case for case in native.required_cases("local") if case.case == "shell-environment"
+        ]
+        observations = []
+        for context in ("gui-parented", "daemon-parented"):
+            capability = record()
+            capability.update(
+                job="macos-capabilities",
+                case="shell-environment",
+                context=context,
+                facts={
+                    "kind": "capability",
+                    "capability": 13,
+                    "preflight": "passed",
+                    "effect": "passed",
+                    "responsible_process": "probe",
+                    "cleanup": "not-needed",
+                },
+            )
+            comparison = record()
+            comparison.update(
+                job="macos-capabilities",
+                case="normalized-shell-comparison",
+                context=context,
+                facts={
+                    "kind": "environment-comparison",
+                    "reference": "sanitized-launch-v1",
+                    "path_difference": "components-changed",
+                    "locale_difference": "values-changed",
+                    "login": True,
+                    "interactive": True,
+                    "startup_order_verified": True,
+                },
+            )
+            observations.extend((capability, comparison))
+
+        def collected(values):
+            payload = b"".join(
+                encoded(dict(value, sequence=sequence)) for sequence, value in enumerate(values, 1)
+            )
+            return collect(io.BytesIO(payload), required)
+
+        self.assertEqual(collected(observations).passed, 4)
+        for context in ("gui-parented", "daemon-parented"):
+            missing = [
+                value
+                for value in observations
+                if (value["case"], value["context"]) != ("normalized-shell-comparison", context)
+            ]
+            with (
+                self.subTest(context=context),
+                self.assertRaisesRegex(TaskError, "^invalid-record$"),
+            ):
+                collected(missing)
+            unavailable = copy.deepcopy(observations)
+            comparison = next(
+                value
+                for value in unavailable
+                if value["case"] == "normalized-shell-comparison" and value["context"] == context
+            )
+            comparison.update(result="unavailable", failure="native-unavailable")
+            comparison["facts"]["startup_order_verified"] = False
+            with (
+                self.subTest(unavailable_context=context),
+                self.assertRaisesRegex(TaskError, "^outcome-pending$"),
+            ):
+                collected(unavailable)
+
+        # The probe can honestly report that no comparison could run. No missing
+        # normalized observation may be credited as a passed shell comparison.
+        unavailable = [
+            copy.deepcopy(value) for value in observations if value["case"] == "shell-environment"
+        ]
+        for capability in unavailable:
+            capability.update(result="unavailable", failure="native-unavailable")
+            capability["facts"].update(
+                preflight="unavailable", effect="unavailable", responsible_process="unknown"
+            )
+        self.assertEqual(collected(unavailable).passed, 0)
+
     def test_invalid_manifest_never_produces_runnable_runbook(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -687,6 +768,60 @@ if verify_admin fixture; then exit 0; else exit 1; fi
             self.assertEqual(operations.effects, [])
             with self.assertRaisesRegex(TaskError, "^indeterminate$"):
                 store.publish(receipt())
+
+    def test_recreated_store_cannot_clean_an_uncertain_identity_publication(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = native.ReceiptStore(root)
+            operations = FixtureOperations()
+            operations.store = store
+            store.publish(receipt())
+            changed = receipt()
+            changed["state"] = "installing"
+            changed["objects"]["fixtures"]["state"] = "pending"
+            # The rename happened, but its directory synchronization failed.
+            real_sync = os.fsync
+
+            def fail_directory_sync(descriptor):
+                import stat
+
+                if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                    raise OSError("private native detail")
+                real_sync(descriptor)
+
+            with patch("os.fsync", side_effect=fail_directory_sync):
+                with self.assertRaisesRegex(TaskError, "^indeterminate$"):
+                    store.publish(changed)
+            recreated = native.ReceiptStore(root)
+            with self.assertRaisesRegex(TaskError, "^indeterminate$"):
+                native.cleanup_receipt(recreated, operations)
+            self.assertEqual(operations.removed, [])
+
+    def test_unrecorded_pending_process_scope_never_reaches_automatic_retirement(self):
+        for state, service_only in (("pending", False), ("pending", True), ("installed", True)):
+            with (
+                self.subTest(state=state, service_only=service_only),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                store = native.ReceiptStore(Path(directory))
+                value = receipt()
+                value["state"] = "installing"
+                value["objects"]["service"]["state"] = state
+                if service_only:
+                    value["objects"]["service"]["bindings"] = [
+                        {
+                            "state": "pending" if state == "pending" else "completed",
+                            "identity": effect_identities("service", value)[0],
+                        }
+                    ]
+                store.publish(value)
+                operations = FixtureOperations()
+                operations.store = store
+                with patch.object(operations, "retire", wraps=operations.retire) as retire:
+                    with self.assertRaisesRegex(TaskError, "^cleanup-unresolved$"):
+                        native.cleanup_receipt(store, operations)
+                    retire.assert_not_called()
+                self.assertEqual(store.read()["state"], "cleanup-unresolved")
 
     def test_repeated_signal_during_cleanup_cannot_replace_first_signal(self):
         previous = {
