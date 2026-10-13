@@ -11,6 +11,7 @@ test-support = ["spaceterm-host/test-support"]
 
 [dependencies]
 spaceterm-host = { path = "../spaceterm-host" }
+libc = "=0.2.189"
 spaceterm-distribution = { path = "../spaceterm-distribution" }
 spaceterm-core = { path = "../spaceterm-core" }
 spaceterm-protocol = { path = "../spaceterm-protocol" }

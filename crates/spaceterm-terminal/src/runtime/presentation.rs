@@ -17,6 +17,15 @@ pub struct PresentationSubscription {
     receiver: Receiver<PresentationUpdate>,
 }
 impl PresentationSubscription {
+    /// Recheck a buffered presentation event immediately before delivery.
+    pub fn check_current(&self) -> Result<(), RuntimeFailure> {
+        let authority = self.shared.authority.read()?;
+        if authority.sealed || authority.version != self.version {
+            return Err(RuntimeFailure::stale());
+        }
+        Ok(())
+    }
+
     pub async fn next(&mut self) -> Result<Option<PresentationUpdate>, RuntimeFailure> {
         match self.receiver.recv().await {
             Ok(update) => self.validate(update).map(Some),
