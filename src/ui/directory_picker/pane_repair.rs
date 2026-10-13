@@ -186,6 +186,15 @@ pub(crate) struct ServerPaneRepair {
 }
 impl EventEmitter<PaneRepairEvent> for ServerPaneRepair {}
 
+struct PreparedRepair {
+    target: Target,
+    original: Option<(OperationId, Command)>,
+    directory_client: DirectoryClient,
+    directory_port: Arc<dyn DirectoryConnectionPort>,
+    directory_context: GitConnectionState,
+    source: ServerDirectorySource,
+}
+
 impl ServerPaneRepair {
     /// Uses the existing runtime and authenticated port. It owns neither a journal nor a connection.
     pub(crate) fn new(
@@ -197,7 +206,32 @@ impl ServerPaneRepair {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<Self, DesktopClientError> {
+        let prepared = Self::prepare(&runtime, pane, name, directory, cx)?;
+        Ok(Self::build(runtime, source, prepared, window, cx))
+    }
+
+    pub(crate) fn install(
+        runtime: Entity<DesktopClientRuntime>,
+        pane: PaneId,
+        source: SelectionSource,
+        name: &str,
+        directory: Arc<dyn DirectoryConnectionPort>,
+        window: &mut Window,
+        cx: &mut gpui::App,
+    ) -> Result<Entity<Self>, DesktopClientError> {
+        let prepared = Self::prepare(&runtime, pane, name, directory, cx)?;
+        Ok(cx.new(|cx| Self::build(runtime, source, prepared, window, cx)))
+    }
+
+    fn prepare(
+        runtime: &Entity<DesktopClientRuntime>,
+        pane: PaneId,
+        name: &str,
+        directory: Arc<dyn DirectoryConnectionPort>,
+        cx: &mut gpui::App,
+    ) -> Result<PreparedRepair, DesktopClientError> {
         let target = Target::capture(runtime.read(cx), pane)?;
+        let original = runtime.update(cx, |runtime, cx| runtime.retained_pane_repair(pane, cx))?;
         let state = directory.state().map_err(|_| DesktopClientError::Offline)?;
         let context = state.context.parts();
         if context.server != pane.server()
@@ -211,13 +245,38 @@ impl ServerPaneRepair {
         let directory_client = DirectoryClient::new(pane.server(), directory.clone())
             .map_err(|_| DesktopClientError::Offline)?;
         let directory_port = directory.clone();
-        let directory = ServerDirectorySource::new(
+        let directory_source = ServerDirectorySource::new(
             pane.server(),
             name,
             directory,
             DirectoryPurpose::PaneRepair,
         )
         .map_err(|_| DesktopClientError::Offline)?;
+        Ok(PreparedRepair {
+            target,
+            original,
+            directory_client,
+            directory_port,
+            directory_context: state,
+            source: directory_source,
+        })
+    }
+
+    fn build(
+        runtime: Entity<DesktopClientRuntime>,
+        source: SelectionSource,
+        prepared: PreparedRepair,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let PreparedRepair {
+            target,
+            original,
+            directory_client,
+            directory_port,
+            directory_context,
+            source: directory,
+        } = prepared;
         let picker =
             cx.new(|cx| DirectoryPicker::new(Rc::new(directory), "Choose Directory", window, cx));
         cx.subscribe_in(
@@ -248,25 +307,32 @@ impl ServerPaneRepair {
             },
         )
         .detach();
-        Ok(Self {
+        Self {
             runtime,
             picker,
             target,
             source,
-            status: PaneRepairStatus::Choosing,
+            status: if original.is_some() {
+                PaneRepairStatus::Unresolved
+            } else {
+                PaneRepairStatus::Choosing
+            },
             request: None,
-            operation: None,
-            command: None,
+            operation: original.as_ref().map(|(operation, _)| *operation),
+            command: original.map(|(_, command)| command),
             cancelled: false,
             directory: directory_client,
             directory_port,
-            directory_context: state,
+            directory_context,
             retry_task: None,
-        })
+        }
     }
 
     pub(in crate::ui) fn picker(&self) -> Entity<DirectoryPicker> {
         self.picker.clone()
+    }
+    pub(crate) fn pane(&self) -> PaneId {
+        self.target.token.pane
     }
     pub(crate) fn status(&self) -> PaneRepairStatus {
         self.status
@@ -275,7 +341,11 @@ impl ServerPaneRepair {
         self.operation
     }
     pub(crate) fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if self.cancelled || self.command.is_some() || self.retry_task.is_some() {
+        if self.cancelled || self.retry_task.is_some() {
+            return false;
+        }
+        if self.command.is_some() {
+            self.advance(window, cx);
             return false;
         }
         self.picker.update(cx, |picker, cx| picker.open(window, cx))
@@ -284,8 +354,14 @@ impl ServerPaneRepair {
     /// Retry observes the exact retained target without repairing any metadata.
     /// The existing Retry request still owns measured startup and final validation.
     pub(crate) fn retry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.cancelled {
+            return;
+        }
+        if self.command.is_some() {
+            self.advance(window, cx);
+            return;
+        }
         if self.cancelled
-            || self.command.is_some()
             || self.retry_task.is_some()
             || self.picker.read(cx).blocks_terminal_input()
         {
@@ -361,6 +437,24 @@ impl ServerPaneRepair {
             self.cancel(window, cx);
             return;
         }
+        // Another window may have admitted a repair since this chooser opened.
+        match self.runtime.update(cx, |runtime, cx| {
+            runtime.retained_pane_repair(self.target.token.pane, cx)
+        }) {
+            Ok(Some((operation, original))) => {
+                self.operation = Some(operation);
+                self.command = Some(original);
+                self.status = PaneRepairStatus::Unresolved;
+                self.advance(window, cx);
+                return;
+            }
+            Err(_) => {
+                self.status = PaneRepairStatus::Unresolved;
+                cx.emit(PaneRepairEvent::StateChanged);
+                return;
+            }
+            Ok(None) => {}
+        }
         let result = self.runtime.update(cx, |runtime, cx| {
             runtime.request(
                 DesktopRequest::Shared {
@@ -414,6 +508,12 @@ impl ServerPaneRepair {
             DesktopClientEvent::RequestFailed { request, .. } if Some(*request) == self.request => {
                 self.request = None;
                 // The journal may already contain the operation. Do not replace it.
+                if let Ok(Some((operation, command))) = self.runtime.update(cx, |runtime, cx| {
+                    runtime.retained_pane_repair(self.target.token.pane, cx)
+                }) {
+                    self.operation = Some(operation);
+                    self.command = Some(command);
+                }
                 self.status = PaneRepairStatus::Unresolved;
             }
             DesktopClientEvent::FrameChanged(server)
@@ -427,6 +527,9 @@ impl ServerPaneRepair {
     }
 
     fn advance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.cancelled {
+            return;
+        }
         let current = Target::capture(self.runtime.read(cx), self.target.token.pane);
         let Ok(current) = current else {
             self.cancel(window, cx);

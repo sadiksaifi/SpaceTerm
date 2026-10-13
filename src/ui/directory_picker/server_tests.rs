@@ -14,7 +14,7 @@ use std::sync::{
 };
 use std::{collections::VecDeque, num::NonZeroU64};
 
-pub(super) struct Peer {
+pub(in crate::ui) struct Peer {
     pub(super) state: Mutex<GitConnectionState>,
     pub(super) queries: Mutex<Vec<DirectoryQuery>>,
     pages: Mutex<VecDeque<Result<DirectoryPage, ClientDirectoryFailure>>>,
@@ -29,7 +29,7 @@ impl Drop for ReadGuard {
     }
 }
 impl Peer {
-    pub(super) fn new() -> Arc<Self> {
+    pub(in crate::ui) fn new() -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(GitConnectionState {
                 context: DirectoryContext::new(DirectoryContextParts {
