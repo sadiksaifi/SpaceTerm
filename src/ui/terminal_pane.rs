@@ -951,6 +951,7 @@ impl TerminalPane {
             // The system reports no Screen Recording change, so a waiting Permission Request reads
             // again when the person returns, for example from granting it in System Settings.
             if window.is_window_active() {
+                pane.server_repository_window_activated(cx);
                 pane.refresh_permission_offer(cx);
             }
             cx.notify();
@@ -5234,10 +5235,14 @@ impl TerminalPane {
 
     fn sync_server_state(&mut self, cx: &mut Context<Self>) {
         self.sync_server_presentation(cx);
+        self.sync_repository_status(cx);
         let Some(server) = self.server_session.clone() else {
             return;
         };
-        if self.pending_paste.is_some_and(|paste| !server.paste_confirmation_is_current(paste.id)) {
+        if self
+            .pending_paste
+            .is_some_and(|paste| !server.paste_confirmation_is_current(paste.id))
+        {
             self.cancel_pending_paste();
         }
         if self.server_presentation.accepts_input() {

@@ -234,6 +234,24 @@ impl WorktreeForm {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<Self, ClientGitFailure> {
+        Self::validate_server_target(&requests, &target)?;
+        Ok(Self::build_server(requests, target, window, cx))
+    }
+
+    pub(crate) fn new_server_entity(
+        requests: ServerGitRequests,
+        target: ServerWorktreeFormContext,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<Entity<Self>, ClientGitFailure> {
+        Self::validate_server_target(&requests, &target)?;
+        Ok(cx.new(|cx| Self::build_server(requests, target, window, cx)))
+    }
+
+    fn validate_server_target(
+        requests: &ServerGitRequests,
+        target: &ServerWorktreeFormContext,
+    ) -> Result<(), ClientGitFailure> {
         if target.workspace.server() != requests.server()
             || target.repository.server != requests.server()
             || target.repository.validate().is_err()
@@ -243,6 +261,15 @@ impl WorktreeForm {
         {
             return Err(ClientGitFailure::WrongServer);
         }
+        Ok(())
+    }
+
+    fn build_server(
+        requests: ServerGitRequests,
+        target: ServerWorktreeFormContext,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let context = WorktreeFormContext {
             repository_name: sanitize_for_display(&target.repository_name, MAXIMUM_NAME_CHARS),
             template: String::new(),
@@ -251,7 +278,7 @@ impl WorktreeForm {
             default_base: target.default_base.clone(),
         };
         let operation = target.original_operation;
-        Ok(Self::build(
+        Self::build(
             FormBackend::Server(Box::new(ServerFormState {
                 requests,
                 target,
@@ -267,7 +294,7 @@ impl WorktreeForm {
             context,
             window,
             cx,
-        ))
+        )
     }
 
     fn build(
