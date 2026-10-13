@@ -12,7 +12,12 @@ use std::{
 
 pub const MAX_GLOBAL_EGRESS_BYTES: usize = 64 * 1024 * 1024;
 pub const GLOBAL_LIFECYCLE_RESERVE: usize = 8 * 1024 * 1024;
-const SEND_RESIDENCY_MULTIPLIER: usize = 3;
+// Retained DTO, unsigned payload, envelope body, signed envelope, transport
+// framing/copy and one native buffered write remain charged together.
+const SEND_RESIDENCY_MULTIPLIER: usize = 6;
+const AUTHENTICATED_FRAMING_BYTES: usize = 512;
+const MANAGEMENT_REPLY_BYTES: usize =
+    spaceterm_protocol::limits::MAX_MANAGEMENT_BYTES + AUTHENTICATED_FRAMING_BYTES;
 const NO_PROGRESS_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 use tokio::time::Instant;
 
@@ -203,12 +208,12 @@ impl ConnectionEgress {
             || bytes > MAX_GLOBAL_EGRESS_BYTES.saturating_sub(global.bytes)
             || !reliable
                 && (bytes
-                    > (MAX_EGRESS_BYTES - RESERVED_LIFECYCLE_BYTES)
+                    > (MAX_EGRESS_BYTES - local_lifecycle_residency())
                         .saturating_sub(local.normal_bytes)
                     || local.normal_envelopes
                         >= MAX_EGRESS_ENVELOPES - RESERVED_LIFECYCLE_ENVELOPES
                     || bytes
-                        > (MAX_GLOBAL_EGRESS_BYTES - GLOBAL_LIFECYCLE_RESERVE)
+                        > (MAX_GLOBAL_EGRESS_BYTES - global_lifecycle_residency())
                             .saturating_sub(global.normal_bytes))
         {
             return Err(EgressFailure::Capacity);
@@ -231,6 +236,31 @@ impl ConnectionEgress {
             }),
             maximum,
         })
+    }
+    /// Reserve before ordinary operation admission, including the authenticated
+    /// envelope and native framing rather than only the management payload.
+    pub fn reserve_operation_reply(&mut self) -> Result<EgressReservation, EgressFailure> {
+        self.reserve(MANAGEMENT_REPLY_BYTES, true)
+    }
+    pub fn reserve_reply(
+        &self,
+        payload: &spaceterm_protocol::codec::Payload,
+    ) -> Result<EgressReservation, EgressFailure> {
+        let reliable = reply_policy(payload)?;
+        self.reserve(reply_bytes(payload)?, reliable)
+    }
+    pub fn validate_reply_reservation(
+        &self,
+        payload: &spaceterm_protocol::codec::Payload,
+        reservation: &EgressReservation,
+    ) -> Result<(), EgressFailure> {
+        if !Arc::ptr_eq(&reservation.charge.budget, &self.budget)
+            || reservation.charge.reliable != reply_policy(payload)?
+            || reservation.maximum < reply_bytes(payload)?
+        {
+            return Err(EgressFailure::ReservationMismatch);
+        }
+        Ok(())
     }
     pub fn reserve_reliable(
         &mut self,
@@ -367,9 +397,60 @@ impl ConnectionEgress {
         self.last_progress = None;
     }
 }
+// The frozen reserve is a minimum. A maximum operation reply retains six
+// copies; normal admission must leave room for that actual residency.
+fn local_lifecycle_residency() -> usize {
+    RESERVED_LIFECYCLE_BYTES.max(MANAGEMENT_REPLY_BYTES * SEND_RESIDENCY_MULTIPLIER)
+}
+fn global_lifecycle_residency() -> usize {
+    GLOBAL_LIFECYCLE_RESERVE
+        .max(crate::connection::MAX_AUTHENTICATED_CONNECTIONS * local_lifecycle_residency())
+}
+fn reply_bytes(payload: &spaceterm_protocol::codec::Payload) -> Result<usize, EgressFailure> {
+    payload
+        .encoded_len()
+        .checked_add(AUTHENTICATED_FRAMING_BYTES)
+        .ok_or(EgressFailure::Capacity)
+}
+fn reply_policy(payload: &spaceterm_protocol::codec::Payload) -> Result<bool, EgressFailure> {
+    macro_rules! profile {
+        ($message:expr, $p:ident) => {{
+            use spaceterm_protocol::wire::$p::message::Kind;
+            match &$message.kind {
+                Some(
+                    Kind::Outcome(_)
+                    | Kind::OperationLookupResult(_)
+                    | Kind::AcknowledgementConfirmation(_)
+                    | Kind::Reconciliation(_)
+                    | Kind::OrganizationResync(_)
+                    | Kind::RuntimeOutcome(_)
+                    | Kind::PairingOutcome(_),
+                ) => Ok(true),
+                Some(
+                    Kind::OrganizationSnapshot(_)
+                    | Kind::OrganizationDelta(_)
+                    | Kind::ManagementStatus(_)
+                    | Kind::StatusPublication(_)
+                    | Kind::GitQueryResult(_)
+                    | Kind::ServerDirectoryResult(_),
+                ) => Ok(false),
+                // A caller cannot promote arbitrary terminal or resource bytes
+                // into the reserved lifecycle lane.
+                _ => Err(EgressFailure::ReservationMismatch),
+            }
+        }};
+    }
+    match payload {
+        spaceterm_protocol::codec::Payload::Major1(value) => profile!(value, v1),
+        spaceterm_protocol::codec::Payload::Major2(value) => profile!(value, v2),
+    }
+}
 fn policy(message: &OutboundMessage) -> (bool, usize) {
     match message {
-        OutboundMessage::SnapshotPart(page) => (false, page.maximum_encoded_bytes()),
+        OutboundMessage::SnapshotPart(page) => (
+            false,
+            page.maximum_encoded_bytes() + AUTHENTICATED_FRAMING_BYTES,
+        ),
         OutboundMessage::Outcome { .. } => (true, spaceterm_protocol::limits::MAX_MANAGEMENT_BYTES),
         OutboundMessage::PendingRetirement { .. } | OutboundMessage::ResyncRequired { .. } => {
             (true, 512)
@@ -521,8 +602,15 @@ mod tests {
             reservations.push(queue.reserve_reliable(maximum).unwrap());
         }
         let mut last = ConnectionEgress::new(global.clone());
-        reservations.push(last.reserve_reliable(5).unwrap());
-        assert_eq!(global.usage().bytes, MAX_GLOBAL_EGRESS_BYTES - 1);
+        let remaining = MAX_GLOBAL_EGRESS_BYTES - global.usage().bytes;
+        reservations.push(
+            last.reserve_reliable(remaining / SEND_RESIDENCY_MULTIPLIER)
+                .unwrap(),
+        );
+        assert_eq!(
+            global.usage().bytes,
+            MAX_GLOBAL_EGRESS_BYTES - MAX_GLOBAL_EGRESS_BYTES % SEND_RESIDENCY_MULTIPLIER
+        );
         assert_eq!(
             last.reserve_reliable(1).err(),
             Some(EgressFailure::Capacity)
@@ -531,20 +619,115 @@ mod tests {
         assert_eq!(global.usage().bytes, 0);
     }
     #[test]
+    fn live_operation_and_small_replies_fit_at_the_normal_byte_ceiling() {
+        for major in [1, 2] {
+            let global = EgressBudget::new();
+            let mut queue = ConnectionEgress::new(global.clone());
+            let normal = queue
+                .reserve(
+                    (MAX_EGRESS_BYTES - local_lifecycle_residency()) / SEND_RESIDENCY_MULTIPLIER,
+                    false,
+                )
+                .unwrap();
+            assert_eq!(queue.reserve(1, false).err(), Some(EgressFailure::Capacity));
+            let operation = queue
+                .reserve_operation_reply()
+                .expect("operation response capacity");
+            drop(operation);
+            let access = access();
+            let stream = spaceterm_protocol::convert::identity::encode_stream(
+                OperationStreamId::new(
+                    OperationStreamKey::new(access.server, 1).unwrap(),
+                    access.pairing,
+                    access.client,
+                )
+                .unwrap(),
+            );
+            let payload = match major {
+                1 => spaceterm_protocol::codec::Payload::Major1(spaceterm_protocol::wire::v1::Message {
+                    kind: Some(spaceterm_protocol::wire::v1::message::Kind::AcknowledgementConfirmation(
+                        spaceterm_protocol::wire::v1::AcknowledgementConfirmation {
+                            stream: Some(stream),
+                            acknowledged_through: 1,
+                        },
+                    )),
+                }),
+                _ => spaceterm_protocol::codec::Payload::Major2(spaceterm_protocol::wire::v2::Message {
+                    kind: Some(spaceterm_protocol::wire::v2::message::Kind::AcknowledgementConfirmation(
+                        spaceterm_protocol::wire::v2::AcknowledgementConfirmation {
+                            stream: Some(stream),
+                            acknowledged_through: 1,
+                        },
+                    )),
+                }),
+            };
+            payload.encode().unwrap();
+            let before = queue.usage().bytes;
+            let reply = queue
+                .reserve_reply(&payload)
+                .expect("small reliable reply capacity");
+            assert!(
+                queue.usage().bytes - before < 4096,
+                "small replies must not reserve a maximum page"
+            );
+            queue.validate_reply_reservation(&payload, &reply).unwrap();
+            drop(reply);
+            drop(normal);
+            assert_eq!(global.usage().bytes, 0);
+        }
+    }
+    #[test]
+    fn live_operation_reply_fits_at_the_global_normal_byte_ceiling() {
+        let global = EgressBudget::new();
+        let mut normal = Vec::new();
+        loop {
+            let queue = ConnectionEgress::new(global.clone());
+            let remaining =
+                MAX_GLOBAL_EGRESS_BYTES - global_lifecycle_residency() - global.usage().bytes;
+            let bytes = remaining.min(MAX_EGRESS_BYTES - local_lifecycle_residency())
+                / SEND_RESIDENCY_MULTIPLIER;
+            if bytes == 0 {
+                break;
+            }
+            normal.push(queue.reserve(bytes, false).unwrap());
+        }
+        let mut queues = Vec::new();
+        for _ in 0..crate::connection::MAX_AUTHENTICATED_CONNECTIONS {
+            let mut queue = ConnectionEgress::new(global.clone());
+            queues.push(
+                queue
+                    .reserve_operation_reply()
+                    .expect("each supported connection needs lifecycle capacity"),
+            );
+        }
+        drop(queues);
+        drop(normal);
+        assert_eq!(global.usage().bytes, 0);
+    }
+    #[test]
     fn global_lifecycle_reserve_survives_normal_byte_saturation() {
         let global = EgressBudget::new();
         let mut reservations = Vec::new();
-        let normal = MAX_EGRESS_BYTES - RESERVED_LIFECYCLE_BYTES;
+        let normal = MAX_EGRESS_BYTES - local_lifecycle_residency();
         for _ in 0..14 {
             let queue = ConnectionEgress::new(global.clone());
-            reservations.push(queue.reserve(normal / 3, false).unwrap());
+            reservations.push(
+                queue
+                    .reserve(normal / SEND_RESIDENCY_MULTIPLIER, false)
+                    .unwrap(),
+            );
         }
         let mut queue = ConnectionEgress::new(global.clone());
-        let remaining = MAX_GLOBAL_EGRESS_BYTES - GLOBAL_LIFECYCLE_RESERVE - global.usage().bytes;
-        reservations.push(queue.reserve(remaining / 3, false).unwrap());
+        let remaining =
+            MAX_GLOBAL_EGRESS_BYTES - global_lifecycle_residency() - global.usage().bytes;
+        reservations.push(
+            queue
+                .reserve(remaining / SEND_RESIDENCY_MULTIPLIER, false)
+                .unwrap(),
+        );
         assert_eq!(queue.reserve(1, false).err(), Some(EgressFailure::Capacity));
         let reliable = queue.reserve_reliable(64 * 1024).unwrap();
-        assert!(global.usage().bytes > MAX_GLOBAL_EGRESS_BYTES - GLOBAL_LIFECYCLE_RESERVE);
+        assert!(global.usage().bytes > MAX_GLOBAL_EGRESS_BYTES - global_lifecycle_residency());
         drop(reliable);
         drop(reservations);
         assert_eq!(global.usage().bytes, 0);

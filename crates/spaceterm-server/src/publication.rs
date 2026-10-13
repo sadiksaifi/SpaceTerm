@@ -224,7 +224,8 @@ impl PublicationHub {
             base: OrganizationRevision::new(0),
             revision,
         };
-        let header = organization::snapshot_header_bound(&self.snapshot);
+        let header = organization::snapshot_header_bound(&self.snapshot, major, part)
+            .map_err(|_| failure(ServerFailureClass::RecoveryRequired))?;
         if header > maximum {
             return Err(failure(ServerFailureClass::Capacity));
         }

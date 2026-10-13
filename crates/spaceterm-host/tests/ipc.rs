@@ -253,11 +253,17 @@ async fn ipc_round_trip_preserves_whole_messages_and_only_admits_the_local_accou
         Some(unsafe { libc::geteuid() })
     );
     let server = pending.finish_authentication().unwrap();
+    let mut client_progress = client.write_progress().expect("native IPC progress");
+    client_progress.borrow_and_update();
     client.send(b"one").await.unwrap();
+    assert!(client_progress.has_changed().unwrap());
     client.send(b"two").await.unwrap();
     assert_eq!(server.recv().await.unwrap(), Some(b"one".to_vec()));
     assert_eq!(server.recv().await.unwrap(), Some(b"two".to_vec()));
+    let mut server_progress = server.write_progress().expect("native IPC progress");
+    server_progress.borrow_and_update();
     server.send(b"reply").await.unwrap();
+    assert!(server_progress.has_changed().unwrap());
     assert_eq!(client.recv().await.unwrap(), Some(b"reply".to_vec()));
     client.close().await.unwrap();
     assert_eq!(server.recv().await.unwrap(), None);

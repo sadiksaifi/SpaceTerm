@@ -24,6 +24,14 @@ impl Payload {
         }
     }
 
+    /// Computes serialized payload length without allocating an encoded buffer.
+    pub fn encoded_len(&self) -> usize {
+        match self {
+            Self::Major1(value) => value.encoded_len(),
+            Self::Major2(value) => value.encoded_len(),
+        }
+    }
+
     /// Encodes after length admission, then applies the same structural checks as receive.
     pub fn encode(&self) -> Result<Vec<u8>, ProtocolError> {
         self.encode_with_limits(NegotiatedLimits::default())
@@ -32,10 +40,7 @@ impl Payload {
     /// Encodes under a connection's negotiated ceilings.
     pub fn encode_with_limits(&self, limits: NegotiatedLimits) -> Result<Vec<u8>, ProtocolError> {
         limits.validate()?;
-        let length = match self {
-            Self::Major1(value) => value.encoded_len(),
-            Self::Major2(value) => value.encoded_len(),
-        };
+        let length = self.encoded_len();
         if length > limits.frame_bytes {
             return Err(ProtocolError::LimitExceeded);
         }

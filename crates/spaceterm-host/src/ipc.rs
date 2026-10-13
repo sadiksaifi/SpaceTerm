@@ -659,7 +659,8 @@ impl Reader {
 /// A full-duplex bounded length-framed byte connection with native same-account peer facts.
 pub struct IpcTransport {
     reader: Mutex<Option<Reader>>,
-    writer: Mutex<Option<OwnedWriteHalf>>,
+    writer: Mutex<Option<crate::transport::ProgressIo<OwnedWriteHalf>>>,
+    write_progress: tokio::sync::watch::Receiver<Instant>,
     state: ConnectionState,
     facts: PeerFacts,
     limit: MessageLimit,
@@ -675,6 +676,8 @@ impl IpcTransport {
             .try_clone()
             .map_err(|_| TransportError::Unavailable)?;
         let (reader, writer) = stream.into_split();
+        let writer = crate::transport::ProgressIo::new(writer);
+        let write_progress = writer.progress();
         Ok(Self {
             reader: Mutex::new(Some(Reader {
                 stream: reader,
@@ -684,6 +687,7 @@ impl IpcTransport {
                 body_read: 0,
             })),
             writer: Mutex::new(Some(writer)),
+            write_progress,
             state: ConnectionState::with_socket(socket),
             facts,
             limit,
@@ -708,6 +712,9 @@ impl IpcTransport {
 }
 
 impl MessageTransport for IpcTransport {
+    fn write_progress(&self) -> Option<tokio::sync::watch::Receiver<Instant>> {
+        Some(self.write_progress.clone())
+    }
     fn peer_facts(&self) -> PeerFacts {
         self.facts
     }

@@ -32,6 +32,14 @@ impl PublicationPart {
         Ok(self)
     }
 }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OrganizationQuery {
+    pub request: std::num::NonZeroU64,
+    pub generation: u64,
+    pub known_epoch: Option<ServerEpoch>,
+    pub known_revision: Option<OrganizationRevision>,
+}
+
 /// A partial graph. Only complete multipart assembly can construct a Snapshot.
 pub struct SnapshotPart {
     pub part: PublicationPart,
@@ -103,15 +111,19 @@ pub fn snapshot_record_bounds(
     Ok(())
 }
 
-/// Includes the worst-case multipart header and the repeated settings record.
-pub fn snapshot_header_bound(value: &OrganizationSnapshot) -> usize {
-    1024 + value
-        .state()
-        .settings
-        .worktree_location
-        .value
-        .as_str()
-        .len()
+/// Sizes only the header and bounded settings, never organization records.
+/// The planner supplies the largest multipart index and completion marker.
+pub fn snapshot_header_bound(
+    value: &OrganizationSnapshot,
+    major: u32,
+    part: PublicationPart,
+) -> Result<usize, ProtocolError> {
+    let header = match major {
+        1 => v1::snapshot_payload(value, 0..0, part)?,
+        2 => v2::snapshot_payload(value, 0..0, part)?,
+        _ => return Err(ProtocolError::Incompatible),
+    };
+    Ok(header.encoded_len())
 }
 
 fn version(value: u64) -> Result<FieldVersion, ProtocolError> {
@@ -183,6 +195,23 @@ macro_rules! profile {
         pub mod $p {
             use super::*;
             use crate::wire::$p as wire;
+            /// A new query replaces this connection's previous organization
+            /// transfer. Opaque legacy continuations cannot establish a cursor.
+            pub fn decode_query(
+                v: &wire::OrganizationQuery,
+            ) -> Result<OrganizationQuery, ProtocolError> {
+                if !v.continuation.is_empty() || v.part.is_some() {
+                    return Err(ProtocolError::Malformed);
+                }
+                Ok(OrganizationQuery {
+                    request: std::num::NonZeroU64::new(v.request)
+                        .ok_or(ProtocolError::Malformed)?,
+                    generation: v.request_generation,
+                    known_epoch: (v.known_epoch != 0).then_some(ServerEpoch::new(v.known_epoch)),
+                    known_revision: (v.known_epoch != 0)
+                        .then_some(OrganizationRevision::new(v.known_revision)),
+                })
+            }
             pub fn encode_directory(v: &ServerDirectory) -> wire::ServerDirectoryValue {
                 wire::ServerDirectoryValue {
                     server: Some(encode_global(v.server().bytes())),
@@ -737,6 +766,43 @@ profile!(v2, Major2);
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn organization_queries_without_an_epoch_require_an_authoritative_base() {
+        macro_rules! profile {
+            ($p:ident) => {{
+                let mut query = crate::wire::$p::OrganizationQuery {
+                    request: 1,
+                    request_generation: 7,
+                    known_revision: 19,
+                    ..Default::default()
+                };
+                let decoded = $p::decode_query(&query).unwrap();
+                assert_eq!(decoded.request.get(), 1);
+                assert_eq!(decoded.generation, 7);
+                assert_eq!((decoded.known_epoch, decoded.known_revision), (None, None));
+                query.known_epoch = 3;
+                let decoded = $p::decode_query(&query).unwrap();
+                assert_eq!(
+                    (decoded.known_epoch, decoded.known_revision),
+                    (
+                        Some(ServerEpoch::new(3)),
+                        Some(OrganizationRevision::new(19))
+                    )
+                );
+                query.request = 0;
+                assert_eq!($p::decode_query(&query), Err(ProtocolError::Malformed));
+                query.request = 1;
+                query.continuation.push(1);
+                assert_eq!($p::decode_query(&query), Err(ProtocolError::Malformed));
+                query.continuation.clear();
+                query.part = Some(crate::wire::$p::PublicationPart::default());
+                assert_eq!($p::decode_query(&query), Err(ProtocolError::Malformed));
+            }};
+        }
+        profile!(v1);
+        profile!(v2);
+    }
 
     struct TestKey(ring::signature::Ed25519KeyPair);
     impl crate::authentication::SigningKey for TestKey {
