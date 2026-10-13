@@ -155,6 +155,11 @@ enum RetirementReply {
     Native,
 }
 enum Event {
+    DirectoriesPrepared {
+        request: CanonicalOperationRequest,
+        reply: OperationReply,
+        result: Result<Box<spaceterm_core::reducer::DirectoryValidation>, ServerFailure>,
+    },
     Commit(CommitDisposition),
     RetirementFenced {
         request: OwnedRetirement,
@@ -263,12 +268,16 @@ enum CommitAction {
         descriptor: Arc<RetirementDescriptor>,
         reply: OperationReply,
     },
+    RetirementObserved {
+        descriptor: Arc<RetirementDescriptor>,
+    },
     RetirementCompleted {
         descriptor: Arc<RetirementDescriptor>,
     },
     Observed {
         directory: Option<ConfirmedDirectoryObservation>,
         terminal: Option<SessionTerminalResult>,
+        cleanup: Option<SessionCleanupObservation>,
     },
     Auxiliary {
         writes: Vec<OperationWrite>,
@@ -292,6 +301,7 @@ enum CommitAction {
         reply: Reply<CommitReceipt>,
     },
     NativeAccepted(Arc<NativeRetirementDescriptor>),
+    NativeObserved(Arc<NativeRetirementDescriptor>),
     NativeCompleted,
 }
 impl CommitAction {
@@ -377,7 +387,7 @@ impl RecoveredServer {
                 .map(|v| (v.binding().id, v))
                 .collect(),
             confirmed_sequences: BTreeMap::new(),
-            terminal_results: BTreeSet::new(),
+            terminal_results: BTreeMap::new(),
             starting: BTreeMap::new(),
             uninstalled: BTreeSet::new(),
             startup_failures: BTreeMap::new(),
@@ -488,10 +498,10 @@ struct Actor {
     native_retirement: Option<Arc<NativeRetirementDescriptor>>,
     git_intents: BTreeMap<OperationId, GitWriteIntent>,
     confirmed_sequences: BTreeMap<SessionKey, RuntimeObservationSequence>,
-    terminal_results: BTreeSet<SessionKey>,
+    terminal_results: BTreeMap<SessionKey, Option<CleanupResult>>,
     starting: BTreeMap<SessionKey, (ConnectionBinding, Arc<LaunchGate>)>,
     uninstalled: BTreeSet<SessionKey>,
-    startup_failures: BTreeMap<SessionKey, SessionTerminalResult>,
+    startup_failures: BTreeMap<SessionKey, (SessionTerminalResult, SessionCleanupObservation)>,
     events: mpsc::Sender<Event>,
     phase: watch::Sender<ServicePhase>,
     snapshot: watch::Sender<Arc<OrganizationSnapshot>>,
@@ -1415,11 +1425,58 @@ impl Actor {
         }
     }
     fn prepare_command(&mut self, request: CanonicalOperationRequest, reply: OperationReply) {
+        match self.config.core.reducer.prepare_directories(&request) {
+            Ok(Some(task)) => {
+                let events = self.events.clone();
+                tokio::spawn(async move {
+                    let _ = events
+                        .send(Event::DirectoriesPrepared {
+                            request,
+                            reply,
+                            result: task.await.map(Box::new),
+                        })
+                        .await;
+                });
+                return;
+            }
+            Err(_) => {
+                self.reject_admitted(
+                    request.binding(),
+                    OperationFailure::DirectoryUnavailable,
+                    reply,
+                );
+                return;
+            }
+            Ok(None) => {}
+        }
+        self.prepare_validated_command(request, reply, None);
+    }
+    fn prepare_validated_command(
+        &mut self,
+        request: CanonicalOperationRequest,
+        reply: OperationReply,
+        directories: Option<Box<spaceterm_core::reducer::DirectoryValidation>>,
+    ) {
+        if !self.ordinary_open()
+            || self
+                .revoked
+                .contains(&request.binding().id.stream().client())
+        {
+            self.reject_admitted(request.binding(), OperationFailure::StaleAuthority, reply);
+            return;
+        }
+        let reduction_request = match directories.as_deref() {
+            Some(directories) => ReductionRequest::ValidatedCommand {
+                request: &request,
+                directories,
+            },
+            None => ReductionRequest::Command(&request),
+        };
         match self
             .config
             .core
             .reducer
-            .prepare(ReductionRequest::Command(&request), self.cursor)
+            .prepare(reduction_request, self.cursor)
         {
             Ok(reduction) => {
                 if let Some(descriptor) = reduction.retirement.clone() {
@@ -2153,6 +2210,20 @@ impl Actor {
     }
     fn event(&mut self, event: Event) {
         match event {
+            Event::DirectoriesPrepared {
+                request,
+                reply,
+                result,
+            } => match result {
+                Ok(directories) => {
+                    self.prepare_validated_command(request, reply, Some(directories))
+                }
+                Err(_) => self.reject_admitted(
+                    request.binding(),
+                    OperationFailure::DirectoryUnavailable,
+                    reply,
+                ),
+            },
             Event::Commit(disposition) => self.committed(disposition),
             Event::RetirementFenced {
                 request,
@@ -2450,16 +2521,58 @@ impl Actor {
                     Ok((launch, reduction, parts))
                 })();
                 match check {
-                    Ok((launch, reduction, parts)) => self.commit(
-                        parts,
-                        CommitAction::Startup {
-                            binding: request.binding(),
-                            reduction,
-                            start,
-                            launch,
-                            reply,
-                        },
-                    ),
+                    Ok((launch, reduction, parts)) => {
+                        let session = reservation.session();
+                        if matches!(reduction.outcome, Outcome::Failed(_)) {
+                            self.commit(
+                                parts,
+                                CommitAction::Completed {
+                                    binding: request.binding(),
+                                    reduction,
+                                    reply,
+                                    control: None,
+                                },
+                            );
+                            return;
+                        }
+                        let accepted = reduction.outcome == Outcome::SessionStarted(session)
+                            && reduction.snapshot.epoch() == session.epoch
+                            && reduction.snapshot.runtime().iter().any(|record| {
+                                record.pane == session.pane
+                                    && record.session_generation == session.generation
+                                    && record.phase
+                                        == (SessionPhase::Starting {
+                                            generation: session.generation,
+                                        })
+                                    && record.control
+                                        == (ControlRecord::Held {
+                                            client: reservation.intent().fence().grant().client(),
+                                            generation: reservation
+                                                .intent()
+                                                .fence()
+                                                .grant()
+                                                .generation(),
+                                        })
+                                    && record.control_generation
+                                        == reservation.intent().fence().grant().generation()
+                            });
+                        if !accepted {
+                            self.abort_preparation();
+                            reply.send(Err(failure(ServerFailureClass::RecoveryRequired)));
+                            self.enter_recovery();
+                            return;
+                        }
+                        self.commit(
+                            parts,
+                            CommitAction::Startup {
+                                binding: request.binding(),
+                                reduction,
+                                start,
+                                launch,
+                                reply,
+                            },
+                        );
+                    }
                     Err(_) => self.reject_admitted(
                         request.binding(),
                         OperationFailure::StaleAuthority,
@@ -2509,7 +2622,10 @@ impl Actor {
                     }
                     Err(error) => {
                         if let Some(descriptor) = retirement {
-                            if start.is_some_and(|(_, gate)| !gate.process_admitted()) {
+                            if start
+                                .as_ref()
+                                .is_some_and(|(_, gate)| !gate.process_admitted())
+                            {
                                 let reason = descriptor
                                     .sessions()
                                     .iter()
@@ -2526,7 +2642,10 @@ impl Actor {
                             }
                             return;
                         }
-                        if start.is_some_and(|(_, gate)| gate.process_admitted()) {
+                        if start
+                            .as_ref()
+                            .is_some_and(|(_, gate)| gate.process_admitted())
+                        {
                             // The frozen factory error carries no cleanup proof.
                             // A failed-but-cleaned launch must return a retained
                             // terminal owner, not an optimistic absence of handles.
@@ -2542,7 +2661,24 @@ impl Actor {
                             session,
                             RuntimeTerminalStatus::StartupFailed { class },
                         ) {
-                            self.startup_failures.insert(session, terminal);
+                            // The retained gate, not missing handles, proves no
+                            // process was admitted for this exact reservation.
+                            if start.is_none() {
+                                self.enter_recovery();
+                                return;
+                            }
+                            match SessionCleanupObservation::new(
+                                session,
+                                RetirementReason::RuntimeFailure,
+                                CleanupResult::Confirmed(
+                                    ConfirmedCleanupClass::AlreadyAbsentWithConfirmedOwnership,
+                                ),
+                            ) {
+                                Ok(cleanup) => {
+                                    self.startup_failures.insert(session, (terminal, cleanup));
+                                }
+                                Err(_) => self.enter_recovery(),
+                            }
                         }
                     }
                 }
@@ -2750,9 +2886,13 @@ impl Actor {
                             RetirementReply::Operation(reply),
                         );
                     }
+                    CommitAction::RetirementObserved { descriptor } => {
+                        self.retirements.insert(descriptor.binding().id, descriptor);
+                    }
                     CommitAction::RetirementCompleted { descriptor } => {
                         self.retirements.remove(&descriptor.binding().id);
                         for session in descriptor.sessions() {
+                            self.terminal_results.remove(&session.session());
                             self.release_unreferenced(session.session());
                         }
                         self.terminal_barrier = self.shutdown.is_some()
@@ -2761,6 +2901,7 @@ impl Actor {
                     CommitAction::Observed {
                         directory,
                         terminal,
+                        cleanup,
                     } => {
                         if let Some(observation) = directory {
                             self.confirmed_sequences
@@ -2769,13 +2910,29 @@ impl Actor {
                                 .extensions
                                 .confirmed_directory_committed(&observation, receipt);
                         }
-                        if let Some(terminal) = terminal {
-                            if self.registry.as_ref().is_some_and(|registry| {
+                        if let Some(terminal) = terminal
+                            && self.registry.as_ref().is_some_and(|registry| {
                                 registry.authority(terminal.session()).is_some()
+                            })
+                        {
+                            self.terminal_results.insert(terminal.session(), None);
+                        }
+                        if let Some(cleanup) = cleanup {
+                            if terminal.is_some_and(|terminal| {
+                                self.startup_failures.get(&cleanup.session())
+                                    == Some(&(terminal, cleanup))
                             }) {
-                                self.terminal_results.insert(terminal.session());
+                                self.startup_failures.remove(&cleanup.session());
                             }
-                            self.release_unreferenced(terminal.session());
+                            if self.registry.as_ref().is_some_and(|registry| {
+                                registry.authority(cleanup.session()).is_some()
+                            }) {
+                                self.terminal_results
+                                    .insert(cleanup.session(), Some(cleanup.result()));
+                            } else {
+                                self.terminal_results.remove(&cleanup.session());
+                            }
+                            self.release_unreferenced(cleanup.session());
                         }
                     }
                     CommitAction::Auxiliary {
@@ -2844,10 +3001,14 @@ impl Actor {
                             RetirementReply::Native,
                         );
                     }
+                    CommitAction::NativeObserved(descriptor) => {
+                        self.native_retirement = Some(descriptor);
+                    }
                     CommitAction::NativeCompleted => {
                         self.native_completed = true;
                         if let Some(descriptor) = self.native_retirement.clone() {
                             for session in descriptor.sessions() {
+                                self.terminal_results.remove(&session.session());
                                 self.release_unreferenced(session.session());
                             }
                         }
@@ -2862,7 +3023,7 @@ impl Actor {
                     .flat_map(|request| {
                         request.sessions().iter().map(|retained| retained.session())
                     })
-                    .filter(|session| self.terminal_results.contains(session))
+                    .filter(|session| self.terminal_results.contains_key(session))
                     .collect();
                 self.abort_preparation();
                 let error = store_failure(error);
@@ -3411,6 +3572,7 @@ impl Actor {
         // A staged acceptance owns the same evidence as an installed batch.
         // Joining its owner here would erase evidence before Durable installs it.
         if *self.phase.borrow() == ServicePhase::RecoveryRequired
+            || self.terminal_results.get(&session) == Some(&None)
             || self
                 .pending
                 .as_ref()
@@ -3511,8 +3673,20 @@ impl Actor {
             if matches!(cleanup.result(), CleanupResult::Failed(_)) {
                 self.shutdown_error = Some(failure(ServerFailureClass::CleanupIncomplete));
             }
-            if self.terminal_results.contains(&session) {
-                self.release_unreferenced(session);
+            if self.terminal_results.get(&session) == Some(&None)
+                && self.pending.is_none()
+                && !self.busy
+                && !self
+                    .retirements
+                    .values()
+                    .any(|v| v.sessions().iter().any(|v| v.session() == session))
+                && !self
+                    .native_retirement
+                    .as_ref()
+                    .is_some_and(|v| v.sessions().iter().any(|v| v.session() == session))
+            {
+                self.observe_reduction(ReductionRequest::RuntimeCleanup(cleanup), None, None);
+                return;
             }
         }
         if self
@@ -3552,11 +3726,13 @@ impl Actor {
             return;
         }
         if let Some(terminal) = observations.lifecycle.terminal_result() {
-            self.observe_terminal(terminal);
+            self.observe_terminal(terminal, None);
             return;
         }
         if let Some(observation) = observations.close_work
             && observation.session() == session
+            && self.pending.is_none()
+            && !self.busy
         {
             match self.clock.now().and_then(|now| {
                 self.config
@@ -3569,7 +3745,11 @@ impl Actor {
             }
         }
     }
-    fn observe_terminal(&mut self, terminal: SessionTerminalResult) {
+    fn observe_terminal(
+        &mut self,
+        terminal: SessionTerminalResult,
+        cleanup: Option<SessionCleanupObservation>,
+    ) {
         let snapshot = self.config.core.reducer.snapshot();
         if !snapshot.runtime().iter().any(|v| {
             v.pane == terminal.session().pane
@@ -3581,7 +3761,7 @@ impl Actor {
         }) {
             return;
         }
-        if self.terminal_results.contains(&terminal.session())
+        if self.terminal_results.contains_key(&terminal.session())
             || self.pending.is_some()
             || self.busy
             || matches!(terminal.status(), RuntimeTerminalStatus::Retired { .. })
@@ -3589,7 +3769,9 @@ impl Actor {
             return;
         }
         self.observe_reduction(
-            ReductionRequest::RuntimeFinished(terminal),
+            cleanup.map_or(ReductionRequest::RuntimeFinished(terminal), |cleanup| {
+                ReductionRequest::UnstartedLaunchFailed { terminal, cleanup }
+            }),
             None,
             Some(terminal),
         );
@@ -3603,6 +3785,11 @@ impl Actor {
         if *self.phase.borrow() == ServicePhase::RecoveryRequired {
             return;
         }
+        let cleanup = match request {
+            ReductionRequest::RuntimeCleanup(observation) => Some(observation),
+            ReductionRequest::UnstartedLaunchFailed { cleanup, .. } => Some(cleanup),
+            _ => None,
+        };
         match self.config.core.reducer.prepare(request, self.cursor) {
             Ok(reduction) => {
                 let result = self
@@ -3619,6 +3806,7 @@ impl Actor {
                         CommitAction::Observed {
                             directory,
                             terminal,
+                            cleanup,
                         },
                     ),
                     Err(_) => self.enter_recovery(),
@@ -3635,9 +3823,13 @@ impl Actor {
             let next = self.current_authority(session)?;
             self.authority_task(session, next, None, None);
         }
-        if let Some((&session, &terminal)) = self.startup_failures.iter().next() {
-            self.startup_failures.remove(&session);
-            self.observe_terminal(terminal);
+        if self.pending.is_some() || self.busy {
+            return Ok(());
+        }
+        if let Some(&(terminal, cleanup)) = self.startup_failures.values().next() {
+            // Keep the gate's no-process proof through preparation and definite
+            // rollback. Only the matching durable observation releases it.
+            self.observe_terminal(terminal, Some(cleanup));
             if self.pending.is_some() {
                 return Ok(());
             }
@@ -3669,6 +3861,36 @@ impl Actor {
                     .cleanup_for(RetirementRequest::Operation(&descriptor))
                 {
                     Ok(Some(cleanup)) => {
+                        let observed = observed_retirement(&descriptor, &cleanup)?;
+                        if observed != *descriptor {
+                            let progress =
+                                PendingExternalProgress::new(PendingExternalProgressParts {
+                                    binding: descriptor.binding(),
+                                    effect: ExternalEffectKind::SessionLifecycle,
+                                    state: ExternalProgressState::AcceptedRetirement(Box::new(
+                                        observed.clone(),
+                                    )),
+                                })
+                                .map_err(ledger_failure)?;
+                            let mut parts = self.cursor.parts().map_err(store_failure)?;
+                            self.config
+                                .core
+                                .ledger
+                                .prepare_external_progress(
+                                    descriptor.binding(),
+                                    progress,
+                                    self.cursor.context().map_err(ledger_failure)?,
+                                )?
+                                .append_to(&mut parts)
+                                .map_err(ledger_failure)?;
+                            self.commit(
+                                parts,
+                                CommitAction::RetirementObserved {
+                                    descriptor: Arc::new(observed),
+                                },
+                            );
+                            return Ok(());
+                        }
                         let reduction = self.config.core.reducer.prepare(
                             ReductionRequest::RetirementCompleted {
                                 descriptor: &descriptor,
@@ -3719,6 +3941,20 @@ impl Actor {
                         .ok_or_else(|| failure(ServerFailureClass::RecoveryRequired))?
                         .cleanup_for(RetirementRequest::Native(&descriptor))?
                 {
+                    let observed = observed_native_retirement(&descriptor, &cleanup)?;
+                    if observed != *descriptor {
+                        let reduction = self.config.core.reducer.prepare(
+                            ReductionRequest::NativeRetirementObserved {
+                                descriptor: &descriptor,
+                                cleanup: &cleanup,
+                            },
+                            self.cursor,
+                        )?;
+                        let mut parts = self.cursor.parts().map_err(store_failure)?;
+                        reduction.append_to(&mut parts)?;
+                        self.commit(parts, CommitAction::NativeObserved(Arc::new(observed)));
+                        return Ok(());
+                    }
                     let reduction = self.config.core.reducer.prepare(
                         ReductionRequest::NativeRetirementCompleted {
                             descriptor: &descriptor,
@@ -4027,6 +4263,7 @@ fn validate_pairing_completion(
             for client in &value.parts().clients {
                 released.insert(client.parts().client.id);
                 retired_streams.push(StreamBinding::from_stream(client.parts().ordinary));
+                retired_streams.push(StreamBinding::from_stream(client.parts().self_revocation));
             }
         }
     }
@@ -4055,23 +4292,9 @@ fn deletes_membership(write: &OrganizationWrite) -> bool {
     )
 }
 fn classify(command: &Command) -> PendingKind {
-    match command {
-        Command::CloseConfirmed { .. }
-        | Command::KillWorkspaceConfirmed { .. }
-        | Command::EndAllSessions { .. } => PendingKind::External {
-            effect: ExternalEffectKind::SessionLifecycle,
-        },
-        Command::Worktree(_)
-        | Command::CreateWorktree { .. }
-        | Command::RemoveWorktreeConfirmed { .. } => PendingKind::External {
-            effect: ExternalEffectKind::GitWrite,
-        },
-        Command::Pairing(_) | Command::RevokePairing { .. } => PendingKind::External {
-            effect: ExternalEffectKind::ServerManagement,
-        },
-        _ => PendingKind::AtomicMutation,
-    }
+    spaceterm_core::operation_ledger::admission::command_pending_kind(command)
 }
+
 fn reject_action(action: CommitAction, error: ServerFailure) {
     match action {
         CommitAction::Admission { reply, .. }

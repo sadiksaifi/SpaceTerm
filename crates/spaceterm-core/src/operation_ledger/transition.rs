@@ -11,6 +11,24 @@ use crate::retirement::{RetirementCleanupState, RetirementDescriptor};
 use crate::storage::CommitDisposition;
 
 impl OperationLedger {
+    /// Notify the ledger of the actor's checked non-ledger commit. No operation
+    /// ownership, reservation or historical result changes in this transition.
+    pub fn observe_store_commit(
+        &mut self,
+        receipt: crate::storage::CommitReceipt,
+    ) -> Result<(), LedgerFailure> {
+        if self.prepared.is_some()
+            || self.recovery_required
+            || receipt.store_revision <= self.known_store
+            || receipt.organization_revision < self.known_organization
+        {
+            return Err(failure(LedgerFailureClass::InvalidTransition));
+        }
+        self.known_store = receipt.store_revision;
+        self.known_organization = receipt.organization_revision;
+        Ok(())
+    }
+
     pub fn prepare_external_progress(
         &mut self,
         binding: &StreamBinding,

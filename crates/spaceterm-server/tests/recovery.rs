@@ -247,7 +247,15 @@ async fn cleanup_evidence_alone_cannot_leave_retained_native_retirement_unsettle
         result.err().map(|error| error.class),
         Some(ServerFailureClass::RecoveryRequired)
     );
-    assert!(db.lock().unwrap().transactions.is_empty());
+    let db = db.lock().unwrap();
+    assert_eq!(db.transactions.len(), 1);
+    let progress = &db.transactions[0];
+    assert!(progress.organization_writes.is_empty());
+    assert_eq!(progress.expected_epoch, progress.resulting_epoch);
+    assert!(
+        matches!(progress.operation_writes.as_slice(), [spaceterm_core::storage::OperationWrite::NativeRetirement(NativeRetirementMutation::Progress { next, .. })] if next.cleanup_confirmed())
+    );
+    assert_eq!(db.recovered.native_retirements.len(), 1);
 }
 
 #[tokio::test]

@@ -290,6 +290,247 @@ impl OrganizationReducer {
         Ok(())
     }
 
+    /// Inspect a staged candidate without installing or publishing it.
+    pub fn preview_publication(
+        &self,
+        prepared: &PreparedReduction,
+    ) -> Result<Option<OrganizationDelta>, ReducerFailure> {
+        publication::delta(&self.state, prepared)
+    }
+
+    /// Actor-owned store-only completion, including rejected admitted requests.
+    pub fn prepare_outcome(
+        &self,
+        binding: Option<OperationBinding>,
+        outcome: Outcome,
+    ) -> Result<PreparedReduction, ReducerFailure> {
+        self.state.check_admission()?;
+        self.prepare_patch(ReductionPatch::unchanged(&self.state, outcome), binding)
+    }
+
+    /// Compose trusted events in one candidate and one publication revision.
+    /// Intermediate candidates grant no authority and receive no commit receipts.
+    pub fn prepare_events(
+        &self,
+        events: &[OrganizationEvent],
+        binding: Option<OperationBinding>,
+        outcome: Outcome,
+    ) -> Result<PreparedReduction, ReducerFailure> {
+        self.state.check_admission()?;
+        if events.len() > crate::retirement::MAX_RETIREMENT_PANES {
+            return Err(ReducerFailure::QuotaExceeded);
+        }
+        let mut combined = ReductionPatch::unchanged(&self.state, outcome.clone());
+        for event in events {
+            let patch = lifecycle::plan_lifecycle_event(&combined.candidate, event)?;
+            if matches!(&patch.resolution, Resolution::Completed(Outcome::Failed(_))) {
+                return self.prepare_patch(patch, binding);
+            }
+            combined.candidate = patch.candidate;
+            combined.effects.extend(patch.effects);
+            combined.operations.extend(patch.operations);
+        }
+        combined.resolution = Resolution::Completed(outcome);
+        self.prepare_patch(combined, binding)
+    }
+
+    /// Principal allocation and revocation never allocate organization identities.
+    /// Every released grant advances its original control high-water exactly once.
+    pub fn prepare_principal_change(
+        &self,
+        binding: Option<OperationBinding>,
+        high_water: IdentityHighWater,
+        clients: &[ClientId],
+    ) -> Result<PreparedReduction, ReducerFailure> {
+        let old = self.state.high_water;
+        if !high_water.dominates(old)
+            || high_water.workspace != old.workspace
+            || high_water.tab != old.tab
+            || high_water.pane != old.pane
+            || high_water.repository != old.repository
+            || high_water.worktree != old.worktree
+            || high_water.creation_ordinal != old.creation_ordinal
+            || clients
+                .iter()
+                .any(|client| client.server() != self.state.organization().server)
+        {
+            return Err(ReducerFailure::InvalidFacts);
+        }
+        let events = self
+            .state
+            .snapshot
+            .runtime()
+            .iter()
+            .filter_map(|record| match record.control {
+                ControlRecord::Held { client, .. } if clients.contains(&client) => {
+                    Some(OrganizationEvent::ControlChanged {
+                        pane: record.pane,
+                        expected: record.control,
+                        replacement: ControlRecord::Unclaimed,
+                    })
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut prepared = self.prepare_events(&events, binding, Outcome::Applied)?;
+        prepared.candidate.high_water = high_water;
+        prepared.writes.resulting_marks = high_water;
+        Ok(prepared)
+    }
+
+    /// Volatile assessment observations retain the producer's original tick.
+    /// They do not install organization metadata or consume a store revision.
+    pub fn observe_close_work(
+        &mut self,
+        observation: CloseWorkObservation,
+        now: ReducerTick,
+    ) -> Result<(), ReducerFailure> {
+        if observation.observed_at() > now {
+            return Err(ReducerFailure::InvalidFacts);
+        }
+        self.state.check_admission()?;
+        if self.close_work_observation(observation.session().pane) == Some(observation) {
+            return Ok(());
+        }
+        let patch = lifecycle::plan_lifecycle_event(
+            &self.state,
+            &OrganizationEvent::CloseWorkObserved(observation),
+        )?;
+        self.state = patch.candidate;
+        self.state.transition = self
+            .state
+            .transition
+            .checked_add(1)
+            .ok_or(ReducerFailure::CounterExhausted)?;
+        Ok(())
+    }
+
+    /// Combine exact trusted cleanup with store-only retirement completion.
+    /// A restart, EOF or absent runtime handle is not accepted as evidence.
+    pub fn prepare_completed_retirements(
+        &self,
+        batches: &[crate::retirement::RetirementBatchId],
+        cleanup: &[crate::retirement::SessionCleanupObservation],
+    ) -> Result<PreparedReduction, ReducerFailure> {
+        self.state.check_admission()?;
+        if cleanup.len() > crate::retirement::MAX_RETIREMENT_SESSIONS
+            || batches.len() > self.state.limits.retirement_batches
+        {
+            return Err(ReducerFailure::QuotaExceeded);
+        }
+        let mut combined = ReductionPatch::unchanged(&self.state, Outcome::Applied);
+        for observation in cleanup {
+            let owner = Self {
+                state: combined.candidate.clone(),
+            };
+            let next = owner.prepare_runtime_cleanup(*observation)?;
+            combined.candidate = next.candidate;
+            combined
+                .operations
+                .extend(next.writes.operations.into_iter().filter(|write| {
+                    !matches!(
+                        write,
+                        crate::storage::OperationWrite::NativeRetirement(
+                            crate::retirement::NativeRetirementMutation::Progress { .. }
+                        )
+                    )
+                }));
+        }
+        // Native SQL compares every mutation to the same durable basis. Merge
+        // all observations for one request into one progress mutation.
+        for (batch, old) in &self.state.native_retirements {
+            if let Some(next) = combined.candidate.native_retirements.get(batch)
+                && next != old
+            {
+                // Completion compares already durable cleanup. It cannot share
+                // a transaction with this request's first cleanup progress.
+                if batches.contains(batch) {
+                    return Err(ReducerFailure::InvalidFacts);
+                }
+                combined
+                    .operations
+                    .push(crate::storage::OperationWrite::NativeRetirement(
+                        crate::retirement::NativeRetirementMutation::Progress {
+                            expected: Box::new(old.clone()),
+                            next: Box::new(next.clone()),
+                        },
+                    ));
+            }
+        }
+        for batch in batches {
+            let owner = Self {
+                state: combined.candidate.clone(),
+            };
+            let next = owner.prepare_retirement_completion(*batch)?;
+            combined.candidate = next.candidate;
+            combined.operations.extend(next.writes.operations);
+        }
+        self.prepare_patch(combined, None)
+    }
+
+    /// Resolve a reserved launch whose gate proves process creation never began.
+    /// The failed phase and exact absence proof install in one checked receipt.
+    pub fn prepare_unstarted_failure(
+        &self,
+        terminal: crate::runtime_authority::SessionTerminalResult,
+        cleanup: crate::retirement::SessionCleanupObservation,
+    ) -> Result<PreparedReduction, ReducerFailure> {
+        use crate::{
+            retirement::{CleanupResult, ConfirmedCleanupClass},
+            runtime_authority::RuntimeTerminalStatus,
+        };
+        if terminal.session() != cleanup.session()
+            || !matches!(
+                terminal.status(),
+                RuntimeTerminalStatus::StartupFailed { .. }
+            )
+            || cleanup.first_reason() != RetirementReason::RuntimeFailure
+            || cleanup.result()
+                != CleanupResult::Confirmed(
+                    ConfirmedCleanupClass::AlreadyAbsentWithConfirmedOwnership,
+                )
+            || !self
+                .state
+                .startup_reservations
+                .get(&terminal.session().pane)
+                .is_some_and(|reservation| reservation.session() == terminal.session())
+        {
+            return Err(ReducerFailure::InvalidFacts);
+        }
+        let finished = self.prepare_terminal_result(terminal)?;
+        let owner = Self {
+            state: finished.candidate,
+        };
+        let cleaned = owner.prepare_runtime_cleanup(cleanup)?;
+        let mut patch = ReductionPatch::unchanged(&self.state, Outcome::Applied);
+        patch.candidate = cleaned.candidate;
+        patch.effects = finished.effects;
+        patch.effects.extend(cleaned.effects);
+        patch.operations = finished.writes.operations;
+        patch.operations.extend(cleaned.writes.operations);
+        patch.resolution = finished.resolution;
+        self.prepare_patch(patch, None)
+    }
+
+    /// Settle old-process batches without carrying its Stop barrier into the
+    /// newly authorized epoch. Live native completion still stops its own epoch.
+    pub fn prepare_recovered_retirements(
+        &self,
+        batches: &[crate::retirement::RetirementBatchId],
+        cleanup: &[crate::retirement::SessionCleanupObservation],
+    ) -> Result<PreparedReduction, ReducerFailure> {
+        if self.state.stopped
+            || batches
+                .iter()
+                .any(|batch| batch.epoch() >= self.state.epoch())
+        {
+            return Err(ReducerFailure::InvalidFacts);
+        }
+        let mut prepared = self.prepare_completed_retirements(batches, cleanup)?;
+        prepared.candidate.stopped = false;
+        Ok(prepared)
+    }
+
     pub fn suspend_for_recovery(&mut self) {
         self.state.suspended = true;
     }
@@ -304,6 +545,9 @@ impl OrganizationReducer {
 }
 
 impl PreparedReduction {
+    pub fn snapshot(&self) -> &OrganizationSnapshot {
+        &self.candidate.snapshot
+    }
     pub fn writes(&self) -> &OrganizationWriteSet {
         &self.writes
     }

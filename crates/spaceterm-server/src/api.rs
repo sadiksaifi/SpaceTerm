@@ -1,4 +1,38 @@
-//! Bounded actor API. Handles own neither terminal workers nor store authority.
+//! Bounded actor entry points. Handles own neither runtimes nor store authority.
+//!
+//! Ordinary admission is [`ServerHandle::submit`]. Its privately constructed
+//! [`VerifiedPrincipal`] binds server, pairing, Client, connection and epoch.
+//! [`ServerHandle::lookup_state`] never admits work; [`ServerHandle::acknowledge`]
+//! compacts only the authenticated stream's durable completed prefix.
+//!
+//! Pairing uses [`ServerHandle::complete_pairing`] after durable canonical
+//! admission. Its move-only `PairingCompletionPort::prepare` runs synchronously
+//! inside the actor's exclusive candidate window. Additional-Client allocation,
+//! purpose-bound stream registration, target-pairing retirement, grant release
+//! and compact outcome share that one physical commit. Revocation completion
+//! waits for the original workers' authority barriers and pending launches.
+//! Enrollment authentication is a separate `Authenticator::new_with_enrollment`
+//! route. `EnrollmentConnection::receive_request` consumes a verified Submit,
+//! Lookup or Acknowledgement once and never constructs a VerifiedPrincipal.
+//!
+//! Git retains the original canonical admission. [`ServerHandle::reserve_git_allocation`]
+//! reserves reducer-issued identities durably. [`ServerHandle::record_external_progress`]
+//! records Prepared and Started intent with the ledger prerequisite; Started
+//! must commit before retirement or native execution. [`ServerHandle::await_git_cleanup`]
+//! observes exact retained cleanup without repeating a process effect.
+//! [`ServerHandle::settle_started_git`] checks the original retained Started
+//! intent and remains available during Stop, End All and revocation quiescence.
+//! New admission and allocation remain closed during those barriers.
+//!
+//! The production core adapter is `CorePorts::production`. It owns the actual
+//! reducer and canonical ledger candidates and installs only checked physical
+//! store receipts. Native key delivery and runtime providers remain injected.
+//! The S1a handoff is not complete. Purpose-bound pairing admission, serialized
+//! `PairingMutation` planning, restricted history and ticket invalidation remain
+//! missing actor primitives. Started Git retirement, settlement and pre-Started
+//! revalidation remain unavailable through the production reducer composition.
+//! Bridges cannot compose those paths yet. Ordinary entry points cannot be
+//! reused with fabricated principals or streams.
 
 use crate::adapters::{
     core::CorePorts,

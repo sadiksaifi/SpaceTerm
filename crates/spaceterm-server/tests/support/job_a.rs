@@ -121,7 +121,7 @@ impl StoreGate {
         *self.release.lock().unwrap() = true;
         self.condition.notify_one();
     }
-    fn wait(&self) {
+    pub fn block(&self) {
         self.entered.notify_one();
         let mut release = self.release.lock().unwrap();
         while !*release {
@@ -333,7 +333,7 @@ impl OrganizationStore for Store {
             db.gate.take()
         };
         if let Some(gate) = gate {
-            gate.wait();
+            gate.block();
         }
         let mut db = self.0.lock().unwrap();
         if let Some(disposition) = db.next.take() {
@@ -417,11 +417,20 @@ impl OrganizationStore for Store {
                     NativeRetirementMutation::Accept(value) => {
                         db.recovered.native_retirements.push(*value.clone())
                     }
+                    NativeRetirementMutation::Progress { expected, next } => {
+                        let old = db
+                            .recovered
+                            .native_retirements
+                            .iter_mut()
+                            .find(|value| value.request() == expected.request())
+                            .unwrap();
+                        assert_eq!(old, expected.as_ref());
+                        *old = next.as_ref().clone();
+                    }
                     NativeRetirementMutation::Complete { request, .. } => db
                         .recovered
                         .native_retirements
                         .retain(|v| v.request() != *request),
-                    _ => {}
                 }
             }
         }
@@ -562,7 +571,8 @@ impl ReducerPort for Reducer {
                     .map_or(Outcome::Applied, Outcome::ControlGranted);
             }
             ReductionRequest::Rejected { failure, .. } => outcome = Outcome::Failed(failure),
-            ReductionRequest::Command(request) => match request.command() {
+            ReductionRequest::Command(request)
+            | ReductionRequest::ValidatedCommand { request, .. } => match request.command() {
                 Command::RenameWorkspace {
                     draft: NameDraft::Custom(name),
                     ..
@@ -720,7 +730,9 @@ impl ReducerPort for Reducer {
                 };
                 state.revision = state.revision.checked_successor().unwrap();
             }
-            ReductionRequest::RuntimeFinished(terminal) => {
+            ReductionRequest::RuntimeCleanup(_) => {}
+            ReductionRequest::RuntimeFinished(terminal)
+            | ReductionRequest::UnstartedLaunchFailed { terminal, .. } => {
                 let record = runtime
                     .iter_mut()
                     .find(|v| {
@@ -777,13 +789,30 @@ impl ReducerPort for Reducer {
                         reason: EndReason::Stop,
                     };
                 }
-                let panes = runtime
+                let mut panes: Vec<_> = runtime
                     .iter()
                     .map(|v| {
                         RetirementPane::new(workspace(), tab(), v.pane, None, v.session_generation)
                             .unwrap()
                     })
                     .collect();
+                for retained in sessions {
+                    if !panes
+                        .iter()
+                        .any(|pane| pane.pane() == retained.session().pane)
+                    {
+                        panes.push(
+                            RetirementPane::new(
+                                workspace(),
+                                tab(),
+                                retained.session().pane,
+                                None,
+                                retained.session().generation.checked_successor().unwrap(),
+                            )
+                            .unwrap(),
+                        );
+                    }
+                }
                 let sessions = sessions.to_vec();
                 let descriptor = NativeRetirementDescriptor::new(NativeRetirementDescriptorParts {
                     request,
@@ -798,6 +827,32 @@ impl ReducerPort for Reducer {
                     NativeRetirementMutation::Accept(Box::new(descriptor.clone())),
                 ));
                 native_retirement = Some(descriptor);
+            }
+            ReductionRequest::NativeRetirementObserved {
+                descriptor,
+                cleanup,
+            } => {
+                let mut parts = descriptor.parts().clone();
+                for session in &mut parts.sessions {
+                    let result = cleanup
+                        .iter()
+                        .find(|value| value.session() == session.session())
+                        .unwrap()
+                        .result();
+                    let state = match result {
+                        CleanupResult::Confirmed(value) => RetirementCleanupState::Confirmed(value),
+                        CleanupResult::Failed(value) => RetirementCleanupState::Failed(value),
+                    };
+                    *session =
+                        RetiredSession::new(session.session(), session.first_reason(), state)
+                            .unwrap();
+                }
+                auxiliary.push(OperationWrite::NativeRetirement(
+                    NativeRetirementMutation::Progress {
+                        expected: Box::new(descriptor.clone()),
+                        next: Box::new(NativeRetirementDescriptor::new(parts).unwrap()),
+                    },
+                ));
             }
             ReductionRequest::NativeRetirementCompleted { descriptor, .. } => auxiliary.push(
                 OperationWrite::NativeRetirement(NativeRetirementMutation::Complete {
@@ -985,6 +1040,11 @@ impl Ledger {
 impl LedgerPort for Ledger {
     fn recover(&mut self, recovered: &RecoveredState) -> Result<(), ServerFailure> {
         if let Some(ledger) = &recovered.ledger {
+            self.streams = ledger
+                .streams
+                .iter()
+                .map(|header| (header.binding.stream(), header.clone()))
+                .collect();
             for record in ledger.operations() {
                 if let RecoveredOperationRecord::Pending(v) = record {
                     self.entries.insert(

@@ -2726,7 +2726,8 @@ async fn late_cleanup_releases_completed_runtime(failed: bool) {
     .await
     .expect("confirmed late cleanup must release the completed owner before shutdown");
     assert_eq!(handle.snapshot(), reduction);
-    assert_eq!(db.lock().unwrap().transactions.len(), commits);
+    // Exact cleanup reaches the reducer through a checked store-only receipt.
+    assert_eq!(db.lock().unwrap().transactions.len(), commits + 1);
     assert_eq!(factory.abandoned.load(Ordering::SeqCst), 0);
     assert_eq!(state.lock().unwrap().retire_calls, 0);
     if failed {
@@ -2946,7 +2947,7 @@ async fn pairing_completion_releases_controls_and_retires_streams_before_final_w
         );
         let retired = transaction.operation_writes.iter().filter(|write| matches!(write, OperationWrite::Ledger(value)
             if matches!(value.as_ref(), LedgerWrite::RetireStream { reason: StreamRetirementReason::PairingRevoked, .. }))).count();
-        assert_eq!(retired, 2);
+        assert_eq!(retired, 4);
         assert!(transaction.operation_writes.iter().any(|write| matches!(write, OperationWrite::Ledger(value)
             if matches!(value.as_ref(), LedgerWrite::CompleteOperation { record, .. } if record.binding == binding))));
     }
@@ -3022,6 +3023,35 @@ fn revocation_fixture() -> (Fixture, spaceterm_core::pairing::PairingAuthorizati
     {
         let mut db = db.lock().unwrap();
         db.recovered.high_water.operation_stream = 4;
+        let mut ledger = spaceterm_core::operation_ledger_contracts::LedgerRecovery::empty(
+            spaceterm_core::operation_ledger_contracts::LedgerLimits::production_v1(),
+        );
+        for client in &authorization.parts().clients {
+            use spaceterm_core::operation_ledger_contracts::*;
+            for (stream, purpose, reservation) in [
+                (client.parts().ordinary, StreamPurpose::Ordinary, None),
+                (
+                    client.parts().self_revocation,
+                    StreamPurpose::SelfRevocation,
+                    Some(OutcomeReservation::full(
+                        ReservationClass::DedicatedSelfRevocation,
+                    )),
+                ),
+            ] {
+                ledger.streams.push(
+                    StreamRecord::new(
+                        StreamBinding::from_stream(stream),
+                        purpose,
+                        StreamStatus::Active,
+                        0,
+                        0,
+                        reservation,
+                    )
+                    .unwrap(),
+                );
+            }
+        }
+        db.recovered.ledger = Some(ledger);
         db.recovered.pairing = Some(
             PairingRecovery::new(PairingRecoveryParts {
                 authorizations: vec![authorization.clone()],

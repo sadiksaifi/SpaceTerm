@@ -37,6 +37,18 @@ pub trait AuthenticationFactoryPort: Send + Sync {
         handle: ServerHandle,
         snapshot: &OrganizationSnapshot,
     ) -> Result<AuthenticationConfig, ServerFailure>;
+    /// Enrollment is a separate verified purpose. Native/extension composition
+    /// supplies its retained reservation lookup, never an ordinary principal.
+    fn enrollment_lookup(
+        &self,
+        _handle: ServerHandle,
+        _snapshot: &OrganizationSnapshot,
+    ) -> Result<
+        Option<Arc<dyn spaceterm_protocol::pairing_adapter::EnrollmentLookup + Send + Sync>>,
+        ServerFailure,
+    > {
+        Ok(None)
+    }
 }
 /// The connection/publication owner supplies ordinary and restricted dispatch.
 /// RestrictedConnection is never converted to an ordinary principal by this port.
@@ -163,7 +175,14 @@ impl ServerListeners {
         if config.server != snapshot.state().server || config.epoch != snapshot.epoch() {
             return Err(failure(ServerFailureClass::Authentication));
         }
-        let authenticator = Authenticator::new(config)?;
+        let enrollment = self
+            .config
+            .authentication
+            .enrollment_lookup(handle.clone(), &snapshot)?;
+        let authenticator = match enrollment {
+            Some(lookup) => Authenticator::new_with_enrollment(config, lookup)?,
+            None => Authenticator::new(config)?,
+        };
         let driver = self.config.dispatch.create(authenticator.clone())?;
         let _effect = self
             .policy_effect
