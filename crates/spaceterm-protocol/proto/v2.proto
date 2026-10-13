@@ -316,6 +316,7 @@ message PairingRequest { uint64 request = 1; oneof action { bool list = 2; Enrol
     spaceterm.pairing.UnpairConfirmed unpair_confirmed = 9;
   }
   spaceterm.common.OperationId operation = 5;
+  uint64 inventory_after = 10; uint64 inventory_version = 11; uint64 request_generation = 12;
 }
 message PairingOutcome { uint64 request = 1; repeated PairedDevice devices = 2; spaceterm.common.RevocationReceipt receipt = 3; spaceterm.common.Failure failure = 4;
   spaceterm.common.OperationId operation = 5;
@@ -327,6 +328,8 @@ message PairingOutcome { uint64 request = 1; repeated PairedDevice devices = 2; 
   spaceterm.pairing.SignedReceipt revocation_proof = 11;
 
   uint32 disposition = 12; spaceterm.pairing.PairingFailure classified_failure = 13;
+  uint64 inventory_version = 14; uint64 inventory_total = 15; uint64 inventory_next = 16;
+  uint64 request_generation = 17; spaceterm.common.Identity this_device = 18;
 }
 enum ManagementAction { MANAGEMENT_UNSPECIFIED = 0; STATUS = 1; START = 2; STOP = 3; REPAIR = 4; STAGE_UPDATE = 5; ACTIVATE_UPDATE = 6; ASSESS_END_ALL = 7; }
 // Authorization and assessment are opaque references to host/server-owned decisions,

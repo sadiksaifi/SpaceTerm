@@ -324,6 +324,36 @@ impl ServiceSupervisor {
         }
         Err(ServiceFailure::Pending)
     }
+    /// Reads this registered server's accepted requests and unacknowledged immutable outcomes.
+    /// An unconfirmed assessment is not recovery work and is never submitted here.
+    pub fn retained_service_requests(&self) -> Result<Vec<ServiceProgress>, ServiceFailure> {
+        let pin = self
+            .discover()?
+            .ok_or(ServiceFailure::Missing)?
+            .server_pin();
+        let journal = match self.read_journal() {
+            Ok((_, _, journal)) => journal,
+            Err(ServiceFailure::Missing) => return Ok(Vec::new()),
+            Err(failure) => return Err(failure),
+        };
+        journal
+            .reservations
+            .iter()
+            .filter_map(|reservation| {
+                let record = reservation.service.as_ref()?;
+                let basis = record.binding.basis();
+                if basis.server != pin.identity || basis.public_key != pin.public_key {
+                    return None;
+                }
+                (record.phase != ServicePhase::Reserved || record.reserving).then(|| {
+                    journal
+                        .request(reservation.sequence)
+                        .map(|request| record.progress(request))
+                })
+            })
+            .collect()
+    }
+
     /// Retires a completed owner result after synchronizing its separate authority record.
     /// The namespace/high-water record permanently prevents readmission of the ID.
     /// Pairing can still revalidate the original issuance without consuming an active slot.

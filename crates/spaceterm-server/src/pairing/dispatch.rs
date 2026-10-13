@@ -87,6 +87,94 @@ impl OrdinaryDispatchPort for PairingOrdinaryDispatch {
         handle: ServerHandle,
     ) -> ServerFuture<'_, Result<Option<Payload>, ServerFailure>> {
         Box::pin(async move {
+            macro_rules! inventory {
+                ($p:ident, $request:expr, $variant:ident) => {{
+                    let request = $request;
+                    if matches!(
+                        request.action,
+                        Some($p::pairing_request::Action::List(true))
+                    ) && request.operation.is_none()
+                    {
+                        if request.request == 0
+                            || request.request_generation == 0
+                            || (request.inventory_after == 0) != (request.inventory_version == 0)
+                        {
+                            return Err(server_failure(PairingFailure::InvalidRequest));
+                        }
+                        let snapshot = handle.pairing_snapshot().map_err(server_failure)?;
+                        let own = snapshot
+                            .authorization(principal.pairing())
+                            .map_err(server_failure)?
+                            .parts();
+                        if snapshot.server() != principal.server()
+                            || snapshot.epoch() != principal.epoch()
+                            || own.record.state != PairingState::Authorized
+                            || own.record.device != principal.device()
+                            || !own
+                                .clients
+                                .iter()
+                                .any(|client| client.parts().client.id == principal.client())
+                        {
+                            return Err(server_failure(PairingFailure::AuthorizationDenied));
+                        }
+                        let mut result = $p::PairingOutcome {
+                            request: request.request,
+                            request_generation: request.request_generation,
+                            this_device: Some(identity::encode_global(principal.device().bytes())),
+                            ..Default::default()
+                        };
+                        if request.inventory_version != 0
+                            && request.inventory_version != snapshot.revision().get()
+                        {
+                            result.classified_failure =
+                                pairing::PairingFailure::PairingStaleAssessment as i32;
+                        } else {
+                            let mut active: Vec<_> = snapshot
+                                .recovery()
+                                .parts()
+                                .authorizations
+                                .iter()
+                                .filter(|value| {
+                                    value.parts().record.state == PairingState::Authorized
+                                })
+                                .collect();
+                            active.sort_by_key(|value| value.parts().record.id);
+                            result.inventory_version = snapshot.revision().get();
+                            result.inventory_total = active.len() as u64;
+                            let mut remaining = active.into_iter().filter(|value| {
+                                value.parts().record.id.local() > request.inventory_after
+                            });
+                            let mut last = 0;
+                            for value in remaining.by_ref().take(128) {
+                                let record = value.parts().record;
+                                last = record.id.local();
+                                let mut local = [0; 16];
+                                local[8..].copy_from_slice(&record.id.local().to_be_bytes());
+                                result.devices.push($p::PairedDevice {
+                                    device: Some(identity::encode_global(record.device.bytes())),
+                                    pairing: Some(identity::encode_global(local)),
+                                    ..Default::default()
+                                });
+                            }
+                            if remaining.next().is_some() {
+                                result.inventory_next = last;
+                            }
+                        }
+                        return Ok(Some(Payload::$variant($p::Message {
+                            kind: Some($p::message::Kind::PairingOutcome(result)),
+                        })));
+                    }
+                }};
+            }
+            match &payload {
+                Payload::Major1(v1::Message {
+                    kind: Some(v1::message::Kind::PairingRequest(request)),
+                }) => inventory!(v1, request, Major1),
+                Payload::Major2(v2::Message {
+                    kind: Some(v2::message::Kind::PairingRequest(request)),
+                }) => inventory!(v2, request, Major2),
+                _ => {}
+            }
             macro_rules! outcome {
                 ($p:ident, $id:expr, $revision:expr, $execution:expr) => {{
                     let id = $id;

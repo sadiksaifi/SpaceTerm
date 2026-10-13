@@ -22,6 +22,7 @@ use crate::{
 pub struct ServiceInstallAssessment {
     artifact: VerifiedServerArtifact,
     roots: InstallRoots,
+    desktop_seed: Option<DesktopSeed>,
 }
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -39,7 +40,38 @@ impl InstallRoots {
         Ok(())
     }
 }
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DesktopSeed {
+    legacy_worktree_location: Option<String>,
+}
+impl DesktopSeed {
+    fn origin(
+        &self,
+    ) -> Result<crate::organization_store::bootstrap::NewServerOrigin, ServiceFailure> {
+        use crate::organization_store::bootstrap::{LegacyWorktreeLocation, NewServerOrigin};
+        Ok(NewServerOrigin::LocalDesktop {
+            legacy_worktree_location: self
+                .legacy_worktree_location
+                .as_ref()
+                .map(|template| LegacyWorktreeLocation::parse(template.clone()))
+                .transpose()
+                .map_err(|_| ServiceFailure::InvalidRecord)?,
+        })
+    }
+}
 impl ServiceInstallAssessment {
+    /// Captures the legacy client preference only for explicitly confirmed local first creation.
+    /// Established organization is always opened unchanged, including a headless installation.
+    pub fn with_local_desktop_seed(
+        mut self,
+        legacy: Option<crate::organization_store::bootstrap::LegacyWorktreeLocation>,
+    ) -> Self {
+        self.desktop_seed = Some(DesktopSeed {
+            legacy_worktree_location: legacy.map(|value| value.template().as_str().to_owned()),
+        });
+        self
+    }
     /// Selects explicit local first-install roots. Confirmation covers these exact paths.
     /// Existing registration always keeps its previously approved roots.
     pub fn with_roots(mut self, data: PathBuf, runtime: PathBuf) -> Result<Self, ServiceFailure> {
@@ -53,6 +85,7 @@ impl ServiceInstallAssessment {
         ConfirmedServiceInstall {
             artifact: self.artifact,
             roots: self.roots,
+            desktop_seed: self.desktop_seed,
         }
     }
 }
@@ -60,6 +93,7 @@ impl ServiceInstallAssessment {
 pub struct ConfirmedServiceInstall {
     artifact: VerifiedServerArtifact,
     roots: InstallRoots,
+    desktop_seed: Option<DesktopSeed>,
 }
 
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -74,6 +108,10 @@ pub(super) struct InstallRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     roots: Option<InstallRoots>,
     pub(super) installation: Option<InstallationStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    desktop_seed: Option<DesktopSeed>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    new_organization: bool,
 }
 impl InstallRecord {
     pub(super) fn pending(&self) -> bool {
@@ -87,6 +125,9 @@ impl InstallRecord {
         if let Some(roots) = &self.roots {
             roots.validate()?;
         }
+        if let Some(seed) = &self.desktop_seed {
+            seed.origin()?;
+        }
         if self.artifact_sha256 == [0; 32]
             || self.digest
                 != install_digest(
@@ -95,6 +136,8 @@ impl InstallRecord {
                     self.artifact_sha256,
                     &self.version,
                     self.roots.as_ref(),
+                    self.desktop_seed.as_ref(),
+                    self.new_organization,
                 )?
             || !matches!(
                 self.phase,
@@ -150,6 +193,8 @@ fn install_digest(
     digest: [u8; 32],
     version: &spaceterm_distribution::BuildVersion,
     roots: Option<&InstallRoots>,
+    desktop_seed: Option<&DesktopSeed>,
+    new_organization: bool,
 ) -> Result<RequestDigest, ServiceFailure> {
     let mut hash = Sha256::new();
     hash.update(b"spaceterm-account-install-v1\0");
@@ -160,6 +205,13 @@ fn install_digest(
     if let Some(roots) = roots {
         hash.update(b"first-approved-roots-v1\0");
         hash.update(serde_json::to_vec(roots).map_err(|_| ServiceFailure::InvalidRecord)?);
+    }
+    if let Some(seed) = desktop_seed {
+        hash.update(b"first-desktop-settings-v1\0");
+        hash.update(serde_json::to_vec(seed).map_err(|_| ServiceFailure::InvalidRecord)?);
+    }
+    if new_organization {
+        hash.update(b"new-organization-v1\0");
     }
     Ok(RequestDigest::from_bytes(hash.finalize().into()))
 }
@@ -189,7 +241,11 @@ impl ServiceSupervisor {
             runtime: self.anchor.join("runtime"),
         };
         roots.validate()?;
-        Ok(ServiceInstallAssessment { artifact, roots })
+        Ok(ServiceInstallAssessment {
+            artifact,
+            roots,
+            desktop_seed: None,
+        })
     }
     /// Installs the original confirmed artifact, or reuses an established service without starting it.
     /// The retained request owns effects even if its observer is dropped.
@@ -266,6 +322,86 @@ impl ServiceSupervisor {
         record.phase = phase;
         self.write_install(request, record)
     }
+    fn initialize_organization(
+        &self,
+        registration: &RegisteredServer,
+        record: &InstallRecord,
+    ) -> Result<(), ServiceFailure> {
+        use crate::organization_store::{
+            SqliteOrganizationStore, StoreIdentity, StoreLimits, StoreServices, bootstrap::*,
+            migrations, receipts::SignedReceiptReader, schema,
+        };
+        let account = super::TrustedAccountFacts::current()?;
+        if account.uid() != self.key.account_uid {
+            return Err(ServiceFailure::IdentityMismatch);
+        }
+        let server = spaceterm_core::identity::ServerId::new(registration.server_pin().identity);
+        let identity = StoreIdentity {
+            server,
+            account: self.key,
+            server_public_key: registration.server_pin().public_key,
+        };
+        let home = spaceterm_core::organization::ServerDirectory::new(
+            server,
+            account.home().as_os_str().as_encoded_bytes().to_vec(),
+        )
+        .map_err(|_| ServiceFailure::InvalidRecord)?;
+        let services = StoreServices::production(
+            home,
+            std::sync::Arc::new(
+                SignedReceiptReader::new(registration.server_pin()).map_err(classify_store)?,
+            ),
+        );
+        let database = if record.new_organization {
+            crate::storage::Database::open_for_application(
+                registration.organization_directory(),
+                migrations(),
+                schema::APPLICATION_ID,
+            )
+        } else {
+            crate::storage::Database::open_existing_for_application(
+                registration.organization_directory(),
+                migrations(),
+                schema::APPLICATION_ID,
+            )
+        }
+        .map_err(classify_storage)?;
+        if database.is_new_storage().map_err(classify_storage)? {
+            if !record.new_organization {
+                return Err(ServiceFailure::ConfirmationRequired);
+            }
+            let origin = record
+                .desktop_seed
+                .as_ref()
+                .map(DesktopSeed::origin)
+                .transpose()?
+                .unwrap_or(NewServerOrigin::LocalHeadless);
+            match SqliteOrganizationStore::initialize_new(
+                database,
+                NewStoreSeed { identity, origin },
+                StoreLimits::production(),
+                services,
+            ) {
+                InitializationDisposition::Durable { store, .. } => {
+                    drop(store);
+                    Ok(())
+                }
+                InitializationDisposition::NotApplied(failure) => Err(classify_store(failure)),
+                InitializationDisposition::Indeterminate => Err(ServiceFailure::Indeterminate),
+            }
+        } else {
+            // An existing empty, damaged or locked database never grants first-creation authority.
+            SqliteOrganizationStore::open_existing(
+                database,
+                identity,
+                StoreLimits::production(),
+                services,
+            )
+            .map(drop)
+            .map_err(classify_store)
+        }
+    }
+
     fn install_store(
         &self,
         scope: &InstallationScope<'_>,
@@ -283,6 +419,9 @@ impl ServiceSupervisor {
     ) -> Result<ServiceProgress, ServiceFailure> {
         let artifact = confirmation.as_ref().map(|value| &value.artifact);
         let proposed_roots = confirmation.as_ref().map(|value| &value.roots);
+        let proposed_seed = confirmation
+            .as_ref()
+            .and_then(|value| value.desktop_seed.as_ref());
         self.reconcile_storage(request)?;
         if let Some(original) = self.original_install(request)?
             && original.phase == ServicePhase::Completed
@@ -290,6 +429,7 @@ impl ServiceSupervisor {
             if let Some(artifact) = artifact
                 && (original.artifact_sha256 != artifact.artifact_sha256()
                     || original.version != artifact.manifest().version
+                    || original.desktop_seed.as_ref() != proposed_seed
                     || original
                         .roots
                         .as_ref()
@@ -306,6 +446,7 @@ impl ServiceSupervisor {
                 if let Some(artifact) = artifact
                     && (record.artifact_sha256 != artifact.artifact_sha256()
                         || record.version != artifact.manifest().version
+                        || record.desktop_seed.as_ref() != proposed_seed
                         || record
                             .roots
                             .as_ref()
@@ -317,7 +458,10 @@ impl ServiceSupervisor {
             }
             None => {
                 let artifact = artifact.ok_or(ServiceFailure::UnknownRequest)?;
+                let new_organization = self.discover()?.is_none();
                 let record = InstallRecord {
+                    desktop_seed: proposed_seed.cloned(),
+                    new_organization,
                     artifact_sha256: artifact.artifact_sha256(),
                     version: artifact.manifest().version.clone(),
                     digest: install_digest(
@@ -326,6 +470,8 @@ impl ServiceSupervisor {
                         artifact.artifact_sha256(),
                         &artifact.manifest().version,
                         proposed_roots,
+                        proposed_seed,
+                        new_organization,
                     )?,
                     phase: ServicePhase::Accepted,
                     state: ServiceRequestState::Pending,
@@ -378,11 +524,13 @@ impl ServiceSupervisor {
             if registered.approved_installation().is_some() {
                 return Err(ServiceFailure::RequestConflict);
             }
+            self.initialize_organization(&registered, &record)?;
             self.install_phase(request, &mut record, ServicePhase::IntentCommitted)?;
         }
         if record.phase == ServicePhase::IntentCommitted || record.phase == ServicePhase::Publishing
         {
             let registered = self.discover()?.ok_or(ServiceFailure::Missing)?;
+            self.initialize_organization(&registered, &record)?;
             let admission = InstallAdmission {
                 supervisor: self,
                 request,
@@ -596,5 +744,29 @@ pub(super) fn test_assessment(
     ServiceInstallAssessment {
         artifact,
         roots: InstallRoots { data, runtime },
+        desktop_seed: None,
+    }
+}
+
+fn classify_storage(failure: crate::storage::StorageFailure) -> ServiceFailure {
+    use crate::storage::StorageFailure;
+    match failure {
+        StorageFailure::Unavailable | StorageFailure::Io => ServiceFailure::StorageUnavailable,
+        StorageFailure::UnsafeStorage => ServiceFailure::UnsafeStorage,
+        StorageFailure::UnknownSchema { .. } => ServiceFailure::UnsupportedSchema,
+        StorageFailure::InvalidState => ServiceFailure::InvalidRecord,
+        StorageFailure::RecoveryRequired => ServiceFailure::Indeterminate,
+    }
+}
+fn classify_store(failure: spaceterm_core::storage::StoreFailure) -> ServiceFailure {
+    use spaceterm_core::storage::StoreFailure;
+    match failure {
+        StoreFailure::Locked => ServiceFailure::StorageLocked,
+        StoreFailure::Unavailable | StoreFailure::Io => ServiceFailure::StorageUnavailable,
+        StoreFailure::UnsafeStorage => ServiceFailure::UnsafeStorage,
+        StoreFailure::UnknownSchema => ServiceFailure::UnsupportedSchema,
+        StoreFailure::IdentityMismatch => ServiceFailure::IdentityMismatch,
+        StoreFailure::RecoveryRequired => ServiceFailure::Indeterminate,
+        _ => ServiceFailure::InvalidRecord,
     }
 }

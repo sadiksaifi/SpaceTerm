@@ -186,6 +186,13 @@ pub(crate) async fn recover<S: ViewStore + 'static>(
             local: local_server == Some(summary.server),
         })
         .collect();
+    let provider = spaceterm_client_native::NativeClientProvider::current().ok();
+    let settings = crate::ui::settings_window::server_runtime::SettingsServices::recover(
+        &registry,
+        &journal,
+        provider.as_ref(),
+    )
+    .map_err(DesktopClientError::from)?;
     Ok(DesktopClientComposition {
         registry,
         runtime,
@@ -197,7 +204,7 @@ pub(crate) async fn recover<S: ViewStore + 'static>(
         view,
         executor: tokio::runtime::Handle::current(),
         servers,
-        settings: crate::ui::settings_window::server_runtime::SettingsServices::default(),
+        settings,
     })
 }
 
