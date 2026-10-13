@@ -44,6 +44,7 @@ pub(crate) struct DesktopClientComposition<S: ViewStore> {
     pub(crate) view: ClientViewState,
     pub(crate) executor: tokio::runtime::Handle,
     pub(crate) servers: Vec<DesktopServerInfo>,
+    pub(crate) settings: crate::ui::settings_window::server_runtime::SettingsServices,
 }
 
 pub(crate) struct ComposedDesktopClientProvider<S: ViewStore> {
@@ -58,12 +59,67 @@ pub(crate) struct ComposedDesktopClientProvider<S: ViewStore> {
     reason = "native enrollment supplies these recovered owners at startup"
 )]
 pub(crate) fn install<S: ViewStore + 'static>(
-    composition: DesktopClientComposition<S>,
+    mut composition: DesktopClientComposition<S>,
     cx: &mut App,
 ) -> Result<gpui::Entity<super::DesktopClientRuntime>, DesktopClientError> {
     if let Some(installed) = cx.try_global::<super::InstalledDesktopClient>() {
         return Ok(installed.0.clone());
     }
+    let saved = composition
+        .tracker
+        .journal()
+        .snapshot()
+        .map_err(DesktopClientError::from)?;
+    composition.servers.retain(|name| {
+        saved
+            .bindings()
+            .iter()
+            .filter_map(|saved| saved.binding().ok())
+            .any(|binding| {
+                binding.target().server() == name.server
+                    && composition
+                        .tracker
+                        .journal()
+                        .ordinary_use_allowed(&binding)
+                        .unwrap_or(false)
+            })
+    });
+    let connections = composition
+        .servers
+        .iter()
+        .map(|name| {
+            let binding = saved
+                .bindings()
+                .iter()
+                .filter_map(|saved| saved.binding().ok())
+                .find(|binding| binding.target().server() == name.server)
+                .ok_or(DesktopClientError::AccessDenied)?;
+            let handle = composition
+                .registry
+                .server(name.server)
+                .ok_or(DesktopClientError::TargetGone)?;
+            let mut source =
+                crate::ui::settings_window::server_runtime::SettingsConnection::from_handle(
+                    binding,
+                    name.clone(),
+                    &handle,
+                    &composition.tracker,
+                )
+                .map_err(DesktopClientError::from)?;
+            composition
+                .settings
+                .bind(&mut source)
+                .map_err(DesktopClientError::from)?;
+            Ok(source)
+        })
+        .collect::<Result<Vec<_>, DesktopClientError>>()?;
+    let settings = crate::ui::settings_window::server_runtime::SettingsComposition {
+        connections,
+        tracker: composition.tracker.clone(),
+        operations: composition.operations.clone(),
+        pending: composition.pending.clone(),
+        executor: composition.executor.clone(),
+    };
     let (notifier, notifications) = super::notification_channel();
     let provider = Rc::new(ComposedDesktopClientProvider::new(
         composition,
@@ -80,6 +136,7 @@ pub(crate) fn install<S: ViewStore + 'static>(
         )
     });
     cx.set_global(super::InstalledDesktopClient(runtime.clone()));
+    crate::ui::settings_window::server_runtime::install(settings, cx);
     Ok(runtime)
 }
 
@@ -142,6 +199,7 @@ impl<S: ViewStore + 'static> ComposedDesktopClientProvider<S> {
             view,
             executor,
             servers,
+            settings: _,
         } = composition;
         if !Arc::ptr_eq(tracker.journal(), pending.journal()) {
             return Err(DesktopClientError::LocalStorageUnavailable);
