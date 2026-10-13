@@ -408,6 +408,9 @@ pub(crate) fn validate_archive(
 #[serde(deny_unknown_fields)]
 pub struct AccountEntryPoints {
     pub server: String,
+    /// Optional product CLI. Omission keeps reading earlier account manifests.
+    #[serde(default)]
+    pub cli: Option<String>,
 }
 
 /// Schema 2 installs into account-private storage, independently of client assets.
@@ -431,9 +434,12 @@ pub struct AccountInstallationManifestV2 {
 }
 
 impl AccountInstallationManifestV2 {
+    /// Account artifact schema emitted by the server packager. It has no launcher ABI.
+    pub const SCHEMA_VERSION: u16 = 2;
+
     /// Checks schema and layout, not signature authority.
     pub fn validate(&self) -> Result<(), DistributionFailure> {
-        if self.schema_version != 2 {
+        if self.schema_version != Self::SCHEMA_VERSION {
             return Err(DistributionFailure::UnsupportedSchema);
         }
         let rejected = DistributionFailure::ManifestRejected;
@@ -517,6 +523,15 @@ impl AccountInstallationManifestV2 {
             .find(|f| f.name == server)
             .ok_or(rejected)?;
         if executable.size == 0 || executable.mode & 0o100 == 0 {
+            return Err(rejected);
+        }
+        if let Some(cli) = &self.entry_points.cli
+            && (cli != "bin/spaceterm-cli"
+                || !self
+                    .files
+                    .iter()
+                    .any(|file| file.name == *cli && file.size != 0 && file.mode & 0o100 != 0))
+        {
             return Err(rejected);
         }
         // The runtime owns these resources independently of any desktop install.

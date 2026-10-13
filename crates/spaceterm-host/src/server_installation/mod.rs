@@ -1,23 +1,29 @@
 //! Signed account-private server code, independent of desktop installation.
 //!
-//! Selection is one atomic private-file publication. This module never starts or
+//! Selection uses atomic publication with durable original-transition recovery. This module never starts or
 //! stops a process and never changes deliberate lifecycle intent. The account
 //! service must quiesce the old runtime before selecting another installation.
 
+mod admission;
 mod archive;
+mod journal;
 #[cfg(target_os = "macos")]
 mod macos;
+mod records;
 
 use crate::{
     account_service::{RegisteredServer, ServiceFailure},
-    private_filesystem::{Directory, Failure, Snapshot},
+    approved_installation::{AccountInstallationManifestV2, verify_account_installation_manifest},
+    private_filesystem::Directory,
     startup::{AccountBuildKey, BuildIdentity, InstallationId},
 };
+pub use admission::{InstallationAdmission, InstallationOperation, InstallationScope};
 use archive::Tree;
+use journal::Journal;
+use records::Record;
 use serde::{Deserialize, Serialize};
 use spaceterm_distribution::{
-    AccountInstallationManifestV2, BuildChannel, ServerPlatform, UpdateKey,
-    VerifiedAccountServerArtifact, verify_account_installation_manifest,
+    BuildChannel, ServerPlatform, UpdateKey, VerifiedAccountServerArtifact,
     verify_account_server_feed,
 };
 use std::{
@@ -76,8 +82,10 @@ struct Version {
     inode: u64,
     #[serde(default)]
     cleanup_nonce: [u8; 16],
+    #[serde(default)]
+    incomplete: bool,
 }
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Candidate {
     id: InstallationId,
@@ -162,14 +170,30 @@ pub struct ServerInstallationStore {
 impl ServerInstallationStore {
     /// Opens or creates code storage in the registration's private data directory.
     /// Production always uses the existing release Ed25519 public key for every build.
-    pub fn open(registered: &RegisteredServer) -> Result<Self, ServiceFailure> {
+    pub fn open(scope: &InstallationScope<'_>) -> Result<Self, ServiceFailure> {
         let trust = UpdateKey::release().ok_or(ServiceFailure::ArtifactRejected)?;
-        Self::open_with_trust(registered, trust, false)
+        Self::open_with_trust(scope, trust, false)
     }
     fn open_with_trust(
+        scope: &InstallationScope<'_>,
+        trust: UpdateKey,
+        _test_signature: bool,
+    ) -> Result<Self, ServiceFailure> {
+        scope.verify(scope.registered.key(), InstallationOperation::Open)?;
+        Self::open_storage(scope.registered, trust, _test_signature, true)
+    }
+    /// Opens established selection, reconciling only an interrupted original publication.
+    /// This never creates code storage, replaces missing selection, or activates staged code.
+    /// Startup calls this only after the account provider's instance and desired-state admission.
+    pub fn open_existing(registered: &RegisteredServer) -> Result<Self, ServiceFailure> {
+        let trust = UpdateKey::release().ok_or(ServiceFailure::ArtifactRejected)?;
+        Self::open_storage(registered, trust, false, false)
+    }
+    fn open_storage(
         registered: &RegisteredServer,
         trust: UpdateKey,
         _test_signature: bool,
+        initialize: bool,
     ) -> Result<Self, ServiceFailure> {
         let key = registered.key();
         // SAFETY: geteuid is a side-effect-free credential query.
@@ -186,12 +210,20 @@ impl ServerInstallationStore {
             .ok_or(ServiceFailure::Missing)?
             .verify_established()?;
         let path = registered.data_directory().join("installations");
-        let directory = Directory::create(&path)?;
+        let directory = if initialize {
+            Directory::create(&path)?
+        } else {
+            Directory::open(&path)?.ok_or(ServiceFailure::Missing)?
+        };
         let tree = Tree::open(&path, &directory)?;
-        if directory.read("lock", 1)?.is_none() {
-            match directory.publish("lock", b"", None) {
-                Ok(()) | Err(Failure::Conflict) => (),
-                Err(error) => return Err(error.into()),
+        if tree.record("lock", 1)?.is_none() {
+            if !initialize {
+                return Err(ServiceFailure::Missing);
+            }
+            match tree.publish_record("lock", b"", None) {
+                Ok(())
+                | Err(ServiceFailure::RequestConflict | ServiceFailure::CleanupUnresolved) => (),
+                Err(error) => return Err(error),
             }
         }
         let store = Self {
@@ -205,7 +237,11 @@ impl ServerInstallationStore {
             skip_native_signature: _test_signature,
         };
         let _lock = store.tree.lock()?;
-        if store.directory.read("selection", STATE_LIMIT)?.is_none() {
+        store.tree.reconcile_selection()?;
+        if store.tree.record("selection", STATE_LIMIT)?.is_none() {
+            if !initialize {
+                return Err(ServiceFailure::Missing);
+            }
             let selection = Selection {
                 schema: 1,
                 key,
@@ -222,6 +258,111 @@ impl ServerInstallationStore {
         store.load()?;
         Ok(store)
     }
+    fn mutation<T>(
+        &self,
+        scope: &InstallationScope<'_>,
+        operation: InstallationOperation,
+        effect: impl FnOnce() -> Result<T, ServiceFailure>,
+    ) -> Result<T, ServiceFailure> {
+        scope.verify(self.key, operation)?;
+        if self.uncertain.load(Ordering::Acquire) {
+            return Err(ServiceFailure::Indeterminate);
+        }
+        if scope.registered.data_directory().join("installations") != self.path {
+            return Err(ServiceFailure::IdentityMismatch);
+        }
+        let result = effect();
+        if result.as_ref().err() == Some(&ServiceFailure::Indeterminate) {
+            self.uncertain.store(true, Ordering::Release);
+        }
+        result
+    }
+    /// Stages only the artifact bound to the account service's original admission.
+    pub fn stage(
+        &self,
+        scope: &InstallationScope<'_>,
+        artifact: &VerifiedServerArtifact,
+    ) -> Result<InstallationId, ServiceFailure> {
+        self.mutation(
+            scope,
+            InstallationOperation::Stage {
+                artifact_sha256: artifact.artifact_sha256(),
+            },
+            || self.stage_inner(artifact),
+        )
+    }
+    /// Selects staged code only after the lifecycle provider confirms quiescence.
+    pub fn activate(
+        &self,
+        scope: &InstallationScope<'_>,
+        id: InstallationId,
+        generation: u64,
+        storage_schema: u32,
+    ) -> Result<(), ServiceFailure> {
+        self.mutation(
+            scope,
+            InstallationOperation::Activate {
+                installation: id,
+                generation,
+                storage_schema,
+            },
+            || self.activate_inner(id, generation, storage_schema),
+        )
+    }
+    /// Selects retained rollback code under the original lifecycle admission.
+    pub fn rollback(
+        &self,
+        scope: &InstallationScope<'_>,
+        generation: u64,
+        storage_schema: u32,
+    ) -> Result<(), ServiceFailure> {
+        self.mutation(
+            scope,
+            InstallationOperation::Rollback {
+                generation,
+                storage_schema,
+            },
+            || self.rollback_inner(generation, storage_schema),
+        )
+    }
+    /// Abandons only the account service's admitted staged candidate.
+    pub fn discard_staged(
+        &self,
+        scope: &InstallationScope<'_>,
+        id: InstallationId,
+        generation: u64,
+    ) -> Result<(), ServiceFailure> {
+        self.mutation(
+            scope,
+            InstallationOperation::Discard {
+                installation: id,
+                generation,
+            },
+            || self.discard_staged_inner(id, generation),
+        )
+    }
+    /// Abandons only the original interrupted preparation without repeating extraction.
+    pub fn discard_preparing(
+        &self,
+        scope: &InstallationScope<'_>,
+        id: InstallationId,
+        generation: u64,
+    ) -> Result<(), ServiceFailure> {
+        self.mutation(
+            scope,
+            InstallationOperation::Discard {
+                installation: id,
+                generation,
+            },
+            || self.discard_preparing_inner(id, generation),
+        )
+    }
+    /// Finishes already-journaled cleanup under account-service admission.
+    pub fn cleanup(&self, scope: &InstallationScope<'_>) -> Result<(), ServiceFailure> {
+        self.mutation(scope, InstallationOperation::Cleanup, || {
+            self.cleanup_inner()
+        })
+    }
     /// Reads retained selection without inferring approval from directory contents.
     pub fn snapshot(&self) -> Result<InstallationSnapshot, ServiceFailure> {
         let _lock = self.tree.lock()?;
@@ -237,7 +378,7 @@ impl ServerInstallationStore {
     }
     /// Stages exact authenticated bytes without activating code or altering service intent.
     /// A second candidate requires explicit discard or activation of the first.
-    pub fn stage(
+    fn stage_inner(
         &self,
         artifact: &VerifiedAccountServerArtifact,
     ) -> Result<InstallationId, ServiceFailure> {
@@ -302,30 +443,31 @@ impl ServerInstallationStore {
         self.advance(&mut selection)?;
         self.publish(&selection, Some(&expected))?;
         let (_, reserved) = self.load()?;
-        let tree = self.tree.create_child(&version_name(id))?;
-        #[cfg(feature = "test-support")]
-        test_support::created_version();
-        let (device, inode) = tree.identity()?;
-        let version = Version {
+        let candidate = Candidate {
             id,
             digest: feed.document().archive.sha256,
-            device,
-            inode,
             cleanup_nonce,
         };
-        self.directory.publish(&metadata_name(id), &bytes, None)?;
-        #[cfg(feature = "test-support")]
-        test_support::published_metadata();
+        let (mut journal, tree) = Journal::create(&self.tree, candidate)?;
+        let version = journal.version();
         selection.preparing = Some(Preparation::Created(version));
         self.advance(&mut selection)?;
         self.publish(&selection, Some(&reserved))?;
+        #[cfg(feature = "test-support")]
+        test_support::created_version();
+        self.tree.publish_record(&metadata_name(id), &bytes, None)?;
+        #[cfg(feature = "test-support")]
+        test_support::published_metadata();
         let (_, prepared) = self.load()?;
         // A crash during extraction retains this original candidate, never executable approval.
-        tree.extract(artifact)?;
+        tree.extract(artifact, &self.tree, &mut journal)?;
         self.check_native_signature(id, artifact.manifest())?;
         self.tree.sync()?;
         selection.preparing = None;
-        selection.staged = Some(version);
+        selection.staged = Some(Version {
+            incomplete: false,
+            ..version
+        });
         self.advance(&mut selection)?;
         self.publish(&selection, Some(&prepared))?;
         Ok(id)
@@ -333,7 +475,7 @@ impl ServerInstallationStore {
     /// Atomically selects the exact staged code and retains the previous approved version.
     /// The lifecycle owner must first obtain quiescence. Schema changes require its separate migration path.
     /// This operation supports only code that reads and writes the existing storage schema.
-    pub fn activate(
+    fn activate_inner(
         &self,
         id: InstallationId,
         generation: u64,
@@ -363,7 +505,7 @@ impl ServerInstallationStore {
         self.publish(&selection, Some(&expected))
     }
     /// Explicitly selects the retained previous version after lifecycle quiescence and schema validation.
-    pub fn rollback(&self, generation: u64, storage_schema: u32) -> Result<(), ServiceFailure> {
+    fn rollback_inner(&self, generation: u64, storage_schema: u32) -> Result<(), ServiceFailure> {
         let _lock = self.tree.lock()?;
         let (mut selection, expected) = self.load()?;
         if selection.generation != generation {
@@ -383,7 +525,7 @@ impl ServerInstallationStore {
         self.publish(&selection, Some(&expected))
     }
     /// Moves only the selected staged candidate into exact cleanup, leaving approval unchanged.
-    pub fn discard_staged(
+    fn discard_staged_inner(
         &self,
         id: InstallationId,
         generation: u64,
@@ -401,7 +543,7 @@ impl ServerInstallationStore {
         self.publish(&selection, Some(&expected))
     }
     /// Explicitly abandons the retained interrupted preparation without retrying extraction.
-    pub fn discard_preparing(
+    fn discard_preparing_inner(
         &self,
         id: InstallationId,
         generation: u64,
@@ -414,12 +556,33 @@ impl ServerInstallationStore {
         if selection.cleanup.is_some() {
             return Err(ServiceFailure::CleanupUnresolved);
         }
-        // The reservation does not authenticate a post-crash directory inode.
-        // Original-phase creation reconciliation belongs to private_filesystem.
-        let version = selection
-            .preparing
-            .and_then(Preparation::created)
-            .ok_or(ServiceFailure::CleanupUnresolved)?;
+        let preparation = selection.preparing.ok_or(ServiceFailure::RequestConflict)?;
+        let version = match preparation {
+            Preparation::Created(version) => version,
+            Preparation::Reserved(candidate) => {
+                let Some(journal) = Journal::read(&self.tree, candidate)? else {
+                    // No version was exposed before its creation identity became durable.
+                    // Unrecorded private temporaries grant no removal authority.
+                    if self.tree.entry_identity(&version_name(id))?.is_some() {
+                        return Err(ServiceFailure::CleanupUnresolved);
+                    }
+                    selection.preparing = None;
+                    self.advance(&mut selection)?;
+                    return self.publish(&selection, Some(&expected));
+                };
+                journal.version()
+            }
+        };
+        if let Some(journal) = Journal::read(&self.tree, candidate(version))? {
+            if journal.version().device != version.device
+                || journal.version().inode != version.inode
+            {
+                return Err(ServiceFailure::CleanupUnresolved);
+            }
+            journal.tree(&self.tree)?;
+        } else {
+            self.version_tree(version)?;
+        }
         selection.preparing = None;
         selection.cleanup = Some(version);
         self.advance(&mut selection)?;
@@ -427,23 +590,51 @@ impl ServerInstallationStore {
     }
     /// Removes only the journaled superseded tree and its signed metadata.
     /// Unlisted entries, replacement objects, links or unsafe ownership stop cleanup.
-    pub fn cleanup(&self) -> Result<(), ServiceFailure> {
+    fn cleanup_inner(&self) -> Result<(), ServiceFailure> {
         let _lock = self.tree.lock()?;
         let (mut selection, expected) = self.load()?;
         let Some(version) = selection.cleanup else {
             return Ok(());
         };
-        // A captured root from an interrupted removal is still the original
-        // cleanup phase, not evidence that the version has been removed.
-        if self.tree.child(&cleanup_name(version))?.is_some() {
+        let journal = Journal::read(&self.tree, candidate(version))?;
+        let root_absent = match &journal {
+            Some(journal) => journal.tree(&self.tree)?.is_none(),
+            None => {
+                self.version_tree(version)?.is_none()
+                    && self.tree.entry_identity(&cleanup_name(version))?.is_none()
+            }
+        };
+        if version.incomplete && journal.is_none() && !root_absent {
             return Err(ServiceFailure::CleanupUnresolved);
         }
-        match self.metadata(version) {
-            Ok((manifest, record)) => self.remove_version(version, &manifest, &record)?,
-            // Absence is completion evidence only when both original entries are gone.
-            Err(ServiceFailure::Missing)
-                if self.tree.child(&version_name(version.id))?.is_none() => {}
+        let metadata = match self.metadata(version) {
+            Ok(value) => Some(value),
+            Err(ServiceFailure::Missing) if version.incomplete => None,
+            Err(ServiceFailure::Missing) if root_absent => None,
             Err(error) => return Err(error),
+        };
+        if let Some(mut journal) = journal {
+            if journal.version().device != version.device
+                || journal.version().inode != version.inode
+            {
+                return Err(ServiceFailure::CleanupUnresolved);
+            }
+            journal.cleanup(
+                &self.tree,
+                metadata.as_ref().map(|(manifest, _)| manifest),
+                version.incomplete,
+            )?;
+            if let Some((_, record)) = &metadata {
+                self.tree
+                    .remove_record(&metadata_name(version.id), record)?;
+                #[cfg(feature = "test-support")]
+                test_support::cleanup_boundary(7);
+            }
+            journal.remove(&self.tree)?;
+            #[cfg(feature = "test-support")]
+            test_support::cleanup_boundary(8);
+        } else if let Some((manifest, record)) = metadata {
+            self.remove_version(version, &manifest, &record)?;
         }
         self.tree.sync()?;
         selection.cleanup = None;
@@ -502,10 +693,10 @@ impl ServerInstallationStore {
     fn metadata(
         &self,
         version: Version,
-    ) -> Result<(AccountInstallationManifestV2, Snapshot), ServiceFailure> {
+    ) -> Result<(AccountInstallationManifestV2, Record), ServiceFailure> {
         let record = self
-            .directory
-            .read(&metadata_name(version.id), METADATA_LIMIT)?
+            .tree
+            .record(&metadata_name(version.id), METADATA_LIMIT)?
             .ok_or(ServiceFailure::Missing)?;
         let metadata: Metadata =
             serde_json::from_slice(&record.bytes).map_err(|_| ServiceFailure::InvalidRecord)?;
@@ -539,19 +730,29 @@ impl ServerInstallationStore {
         &self,
         version: Version,
         manifest: &AccountInstallationManifestV2,
-        metadata: &Snapshot,
+        metadata: &Record,
     ) -> Result<(), ServiceFailure> {
         if let Some(tree) = self.version_tree(version)? {
-            tree.remove_contents(manifest)?;
-            #[cfg(feature = "test-support")]
-            test_support::removing_version();
+            let mut journal = Journal::retain_legacy(&self.tree, version, &tree, manifest)?;
+            journal.cleanup(&self.tree, Some(manifest), version.incomplete)?;
             self.tree
-                .remove_child(&version_name(version.id), &cleanup_name(version), &tree)?;
-            #[cfg(feature = "test-support")]
-            test_support::removed_version();
+                .remove_record(&metadata_name(version.id), metadata)?;
+            return journal.remove(&self.tree);
         }
-        self.directory
-            .remove(&metadata_name(version.id), metadata)?;
+        // The old root capture has a durable, deterministic name and recorded
+        // identity. Unknown old child capture names never grant removal authority.
+        let captured = cleanup_name(version);
+        if let Some(tree) = self.tree.child(&captured)? {
+            if tree.identity()? != (version.device, version.inode) {
+                return Err(ServiceFailure::CleanupUnresolved);
+            }
+            tree.require_empty()?;
+            self.tree
+                .unlink_expected(&captured, true, (version.device, version.inode))?;
+            self.tree.sync()?;
+        }
+        self.tree
+            .remove_record(&metadata_name(version.id), metadata)?;
         Ok(())
     }
     fn check_native_signature(
@@ -573,14 +774,20 @@ impl ServerInstallationStore {
         )?;
         Ok(())
     }
-    fn load(&self) -> Result<(Selection, Snapshot), ServiceFailure> {
+    fn load(&self) -> Result<(Selection, Record), ServiceFailure> {
         if self.uncertain.load(Ordering::Acquire) {
             return Err(ServiceFailure::Indeterminate);
         }
         self.directory.verify()?;
+        if let Err(error) = self.tree.reconcile_selection() {
+            if error == ServiceFailure::Indeterminate {
+                self.uncertain.store(true, Ordering::Release);
+            }
+            return Err(error);
+        }
         let record = self
-            .directory
-            .read("selection", STATE_LIMIT)?
+            .tree
+            .record("selection", STATE_LIMIT)?
             .ok_or(ServiceFailure::Missing)?;
         let selection: Selection =
             serde_json::from_slice(&record.bytes).map_err(|_| ServiceFailure::InvalidRecord)?;
@@ -636,18 +843,18 @@ impl ServerInstallationStore {
     fn publish(
         &self,
         selection: &Selection,
-        expected: Option<&Snapshot>,
+        expected: Option<&Record>,
     ) -> Result<(), ServiceFailure> {
         let bytes = serde_json::to_vec(selection).map_err(|_| ServiceFailure::InvalidRecord)?;
         if bytes.len() > STATE_LIMIT {
             return Err(ServiceFailure::LimitExceeded);
         }
-        match self.directory.publish("selection", &bytes, expected) {
-            Err(Failure::Indeterminate) => {
+        match self.tree.publish_selection(&bytes, expected) {
+            Err(ServiceFailure::Indeterminate) => {
                 self.uncertain.store(true, Ordering::Release);
                 Err(ServiceFailure::Indeterminate)
             }
-            result => result.map_err(Into::into),
+            result => result,
         }
     }
 }
@@ -701,6 +908,13 @@ fn platform() -> Result<ServerPlatform, ServiceFailure> {
 fn version_name(id: InstallationId) -> String {
     format!("version-{}", id.0.get())
 }
+fn candidate(version: Version) -> Candidate {
+    Candidate {
+        id: version.id,
+        digest: version.digest,
+        cleanup_nonce: version.cleanup_nonce,
+    }
+}
 fn metadata_name(id: InstallationId) -> String {
     format!("metadata-{}", id.0.get())
 }
@@ -722,6 +936,66 @@ pub mod test_support {
         static AFTER_VERSION_CREATION: RefCell<Option<Box<dyn FnOnce()>>> = RefCell::new(None);
         static AFTER_METADATA_PUBLICATION: RefCell<Option<Box<dyn FnOnce()>>> = RefCell::new(None);
         static PARTIAL_COPY: RefCell<Option<CopyInterruption>> = const { RefCell::new(None) };
+        static AFTER_SELECTION_PUBLICATION: RefCell<Option<Box<dyn FnOnce()>>> = RefCell::new(None);
+        static FAIL_PUBLICATION_SYNC: RefCell<bool> = const { RefCell::new(false) };
+    }
+    thread_local! {
+        static CLEANUP_PROBE: RefCell<Option<CleanupProbe>> = const { RefCell::new(None) };
+        static FAIL_TREE_SYNC: RefCell<bool> = const { RefCell::new(false) };
+        static FAIL_FILE_SYNC: RefCell<Option<(u64, u64)>> = const { RefCell::new(None) };
+    }
+    struct CleanupProbe {
+        boundary: u8,
+        operation: Box<dyn FnOnce()>,
+    }
+    pub fn at_cleanup_boundary(boundary: u8, operation: impl FnOnce() + 'static) {
+        CLEANUP_PROBE.with(|slot| {
+            *slot.borrow_mut() = Some(CleanupProbe {
+                boundary,
+                operation: Box::new(operation),
+            })
+        });
+    }
+    pub(super) fn cleanup_boundary(boundary: u8) {
+        let operation = CLEANUP_PROBE.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if slot
+                .as_ref()
+                .is_some_and(|probe| probe.boundary == boundary)
+            {
+                slot.take()
+            } else {
+                None
+            }
+        });
+        if let Some(probe) = operation {
+            (probe.operation)();
+        }
+    }
+    pub fn fail_next_tree_sync() {
+        FAIL_TREE_SYNC.with(|slot| *slot.borrow_mut() = true);
+    }
+    pub(super) fn tree_sync() -> Result<(), ServiceFailure> {
+        if FAIL_TREE_SYNC.with(|slot| slot.replace(false)) {
+            Err(ServiceFailure::Indeterminate)
+        } else {
+            Ok(())
+        }
+    }
+    /// Reports uncertainty at the next native regular-file sync of this exact inode.
+    pub fn fail_next_file_sync_for(device: u64, inode: u64) {
+        FAIL_FILE_SYNC.with(|slot| *slot.borrow_mut() = Some((device, inode)));
+    }
+    pub(super) fn file_sync(file: &std::fs::File) -> Result<(), ServiceFailure> {
+        FAIL_FILE_SYNC.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if slot.is_some() && *slot == Some(records::Identity::of(file)?.tuple()) {
+                slot.take();
+                Err(ServiceFailure::Indeterminate)
+            } else {
+                Ok(())
+            }
+        })
     }
     struct CopyInterruption {
         bytes: u64,
@@ -820,14 +1094,105 @@ pub mod test_support {
     }
     /// Runs a controlled process-interruption hook after the next private publication.
     pub fn after_next_publication(operation: impl FnOnce() + 'static) {
-        crate::private_filesystem::test_support::after_next_publication(operation);
+        AFTER_SELECTION_PUBLICATION.with(|slot| *slot.borrow_mut() = Some(Box::new(operation)));
+    }
+    /// Reports uncertainty after atomic selection publication, before parent synchronization.
+    pub fn fail_next_publication_durability() {
+        FAIL_PUBLICATION_SYNC.with(|slot| *slot.borrow_mut() = true);
+    }
+    pub(super) fn published_selection() {
+        let operation = AFTER_SELECTION_PUBLICATION.with(|slot| slot.borrow_mut().take());
+        if let Some(operation) = operation {
+            operation();
+        }
+    }
+    pub(super) fn publication_sync() -> Result<(), ServiceFailure> {
+        if FAIL_PUBLICATION_SYNC.with(|slot| slot.replace(false)) {
+            Err(ServiceFailure::Indeterminate)
+        } else {
+            Ok(())
+        }
     }
     /// Uses an already-created test registration and an injected Ed25519 test public key.
     /// Archive signatures, layout, architecture and native filesystem checks remain real.
     pub fn store(
         registered: &RegisteredServer,
         key: UpdateKey,
+    ) -> Result<TestInstallationStore<'_>, ServiceFailure> {
+        let scope = InstallationScope::new(registered, &TEST_ADMISSION)?;
+        let inner = ServerInstallationStore::open_with_trust(&scope, key, true)?;
+        Ok(TestInstallationStore { inner, scope })
+    }
+    /// Opens the real store with an independently supplied lifecycle gate.
+    pub fn store_with_scope(
+        scope: &InstallationScope<'_>,
+        key: UpdateKey,
     ) -> Result<ServerInstallationStore, ServiceFailure> {
-        ServerInstallationStore::open_with_trust(registered, key, true)
+        ServerInstallationStore::open_with_trust(scope, key, true)
+    }
+    /// Opens established code storage without test lifecycle permission or publication.
+    pub fn existing_store(
+        registered: &RegisteredServer,
+        key: UpdateKey,
+    ) -> Result<ServerInstallationStore, ServiceFailure> {
+        ServerInstallationStore::open_storage(registered, key, true, false)
+    }
+    struct TestAdmission;
+    static TEST_ADMISSION: TestAdmission = TestAdmission;
+    impl InstallationAdmission for TestAdmission {
+        fn verify(
+            &self,
+            _: &RegisteredServer,
+            _: InstallationOperation,
+        ) -> Result<(), ServiceFailure> {
+            Ok(())
+        }
+    }
+    /// Test-only lifecycle composition. No permissive admission is linked in production.
+    pub struct TestInstallationStore<'a> {
+        inner: ServerInstallationStore,
+        scope: InstallationScope<'a>,
+    }
+    impl std::ops::Deref for TestInstallationStore<'_> {
+        type Target = ServerInstallationStore;
+        fn deref(&self) -> &Self::Target {
+            &self.inner
+        }
+    }
+    impl TestInstallationStore<'_> {
+        pub fn stage(
+            &self,
+            artifact: &VerifiedServerArtifact,
+        ) -> Result<InstallationId, ServiceFailure> {
+            self.inner.stage(&self.scope, artifact)
+        }
+        pub fn activate(
+            &self,
+            id: InstallationId,
+            generation: u64,
+            schema: u32,
+        ) -> Result<(), ServiceFailure> {
+            self.inner.activate(&self.scope, id, generation, schema)
+        }
+        pub fn rollback(&self, generation: u64, schema: u32) -> Result<(), ServiceFailure> {
+            self.inner.rollback(&self.scope, generation, schema)
+        }
+        pub fn discard_staged(
+            &self,
+            id: InstallationId,
+            generation: u64,
+        ) -> Result<(), ServiceFailure> {
+            self.inner.discard_staged(&self.scope, id, generation)
+        }
+        pub fn discard_preparing(
+            &self,
+            id: InstallationId,
+            generation: u64,
+        ) -> Result<(), ServiceFailure> {
+            self.inner.discard_preparing(&self.scope, id, generation)
+        }
+        pub fn cleanup(&self) -> Result<(), ServiceFailure> {
+            self.inner.cleanup(&self.scope)
+        }
     }
 }

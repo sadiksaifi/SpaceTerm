@@ -1,7 +1,12 @@
-//! Strict installation descriptor facts and full, domain-separated handoff binding.
+//! Approved account installation metadata uses schema 2 without a launcher ABI.
 //!
-//! Hashes authenticate bytes only after a protected publisher establishes fresh custody.
-//! No decoder or constructor here approves a caller-selected executable.
+//! The historical privileged descriptor below remains a compatibility reader for
+//! its existing consumers. Account installation never uses it for new artifacts.
+
+// Keep the authenticated account representation owned by distribution.
+pub use spaceterm_distribution::{
+    AccountInstallationManifestV2, verify_account_installation_manifest,
+};
 
 use crate::native_deployment::{
     bindings::{self, digest, identity},

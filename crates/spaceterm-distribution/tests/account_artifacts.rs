@@ -143,6 +143,7 @@ fn artifact_fixture(
         native_identifier: build.native_identifier().into(),
         entry_points: AccountEntryPoints {
             server: name.clone(),
+            cli: None,
         },
         files: files
             .iter()
@@ -195,7 +196,7 @@ fn artifact_fixture(
             journal_schema: 1,
         },
         archive: ServerArchiveV1 {
-            name: platform.archive_name(version),
+            name: platform.account_archive_name(build, version),
             size: archive.len() as u64,
             sha256: Sha256::digest(&archive).into(),
             signature: signer.sign(&archive).as_ref().try_into().unwrap(),
@@ -439,4 +440,222 @@ fn a_signed_archive_cannot_substitute_payload_bytes_or_traversal_paths() {
             Some(DistributionFailure::ArchiveRejected)
         );
     }
+}
+
+#[test]
+fn account_metadata_requires_schema_two_and_rejects_the_removed_launcher_abi() {
+    use std::io::Read as _;
+    let signer = Ed25519KeyPair::from_seed_unchecked(&[7; 32]).unwrap();
+    let (key, bytes, signature, archive) =
+        artifact_fixture(BuildChannel::Release, ServerPlatform::LinuxX86_64);
+    let document: AccountServerFeedV2 = serde_json::from_slice(&bytes).unwrap();
+    let feed = verify_account_server_feed(
+        &key,
+        BuildChannel::Release,
+        ServerPlatform::LinuxX86_64,
+        &bytes,
+        &signature,
+        NOW,
+    )
+    .unwrap();
+    let decoder = flate2::read::GzDecoder::new(archive.as_slice());
+    let mut archive = tar::Archive::new(decoder);
+    let mut manifest_bytes = Vec::new();
+    archive
+        .entries()
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .read_to_end(&mut manifest_bytes)
+        .unwrap();
+    let manifest = verify_account_installation_manifest(&feed, &manifest_bytes).unwrap();
+    assert_eq!(manifest.schema_version, 2);
+    assert!(
+        !String::from_utf8(bytes.clone())
+            .unwrap()
+            .contains("launcher_abi")
+    );
+    assert!(
+        !String::from_utf8(manifest_bytes.clone())
+            .unwrap()
+            .contains("launcher_abi")
+    );
+    for schema in [1, 3] {
+        let mut wrong = document.clone();
+        wrong.schema_version = schema;
+        let bytes = serde_json::to_vec(&wrong).unwrap();
+        let signature = STANDARD.encode(signer.sign(&bytes).as_ref());
+        assert_eq!(
+            verify_account_server_feed(
+                &key,
+                BuildChannel::Release,
+                ServerPlatform::LinuxX86_64,
+                &bytes,
+                signature.as_bytes(),
+                NOW
+            )
+            .err(),
+            Some(DistributionFailure::UnsupportedSchema)
+        );
+    }
+    for schema in [1, 2, 3] {
+        let mut value: serde_json::Value = serde_json::from_slice(&manifest_bytes).unwrap();
+        value["schema_version"] = schema.into();
+        if schema == 2 {
+            value["launcher_abi"] = 2.into();
+        }
+        let wrong_manifest = serde_json::to_vec(&value).unwrap();
+        let mut wrong = document.clone();
+        wrong.archive.manifest_sha256 = Sha256::digest(&wrong_manifest).into();
+        let bytes = serde_json::to_vec(&wrong).unwrap();
+        let signature = STANDARD.encode(signer.sign(&bytes).as_ref());
+        let feed = verify_account_server_feed(
+            &key,
+            BuildChannel::Release,
+            ServerPlatform::LinuxX86_64,
+            &bytes,
+            signature.as_bytes(),
+            NOW,
+        )
+        .unwrap();
+        assert!(verify_account_installation_manifest(&feed, &wrong_manifest).is_err());
+    }
+    let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    value["installation"]["launcher_abi"] = 2.into();
+    let bytes = serde_json::to_vec(&value).unwrap();
+    let signature = STANDARD.encode(signer.sign(&bytes).as_ref());
+    assert_eq!(
+        verify_account_server_feed(
+            &key,
+            BuildChannel::Release,
+            ServerPlatform::LinuxX86_64,
+            &bytes,
+            signature.as_bytes(),
+            NOW
+        )
+        .err(),
+        Some(DistributionFailure::InvalidRecord)
+    );
+}
+
+#[test]
+fn python_account_packaging_metadata_is_accepted_by_rust_verification() {
+    use std::io::Read as _;
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../mise-tasks/lib");
+    let output = std::process::Command::new("python3").args(["-I", "-c", r#"
+import json, sys
+sys.path.insert(0, sys.argv[1])
+from spaceterm_tasks.server_artifacts import archive_name, entry_points
+print(json.dumps([
+    {"build": build, "platform": platform, "entry_points": entry_points(platform, build),
+     "archive_name": archive_name("1.2.3" if build == "release" else "dev.010101010101", platform, build)}
+    for build in ("release", "preflight", "development")
+    for platform in ("darwin-arm64", "linux-x86_64")
+]))
+"#]).arg(root).output().unwrap();
+    assert!(output.status.success(), "Python packager fixture failed");
+    let documents: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    let signer = Ed25519KeyPair::from_seed_unchecked(&[7; 32]).unwrap();
+    for document in documents {
+        let build: BuildChannel = serde_json::from_value(document["build"].clone()).unwrap();
+        let platform: ServerPlatform =
+            serde_json::from_value(document["platform"].clone()).unwrap();
+        let (key, bytes, _, archive) = artifact_fixture(build, platform);
+        let decoder = flate2::read::GzDecoder::new(archive.as_slice());
+        let mut archive = tar::Archive::new(decoder);
+        let mut manifest_bytes = Vec::new();
+        archive
+            .entries()
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .read_to_end(&mut manifest_bytes)
+            .unwrap();
+        let mut manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes).unwrap();
+        manifest["entry_points"] = document["entry_points"].clone();
+        let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+        let mut feed: AccountServerFeedV2 = serde_json::from_slice(&bytes).unwrap();
+        feed.archive.name = document["archive_name"].as_str().unwrap().into();
+        feed.archive.manifest_sha256 = Sha256::digest(&manifest_bytes).into();
+        let bytes = serde_json::to_vec(&feed).unwrap();
+        let signature = STANDARD.encode(signer.sign(&bytes).as_ref());
+        let feed =
+            verify_account_server_feed(&key, build, platform, &bytes, signature.as_bytes(), NOW)
+                .unwrap();
+        let manifest = verify_account_installation_manifest(&feed, &manifest_bytes).unwrap();
+        assert_eq!(manifest.schema_version, 2);
+    }
+}
+
+#[test]
+fn optional_product_cli_is_bounded_and_earlier_account_manifests_keep_reading() {
+    let (key, bytes, signature, archive) =
+        artifact_fixture(BuildChannel::Development, ServerPlatform::LinuxX86_64);
+    let feed = verify_account_server_feed(
+        &key,
+        BuildChannel::Development,
+        ServerPlatform::LinuxX86_64,
+        &bytes,
+        &signature,
+        NOW,
+    )
+    .unwrap();
+    let artifact = ServerArchiveVerifier::new()
+        .verify_account_owned(&key, feed, archive)
+        .unwrap();
+    let mut manifest = artifact.manifest().clone();
+    let mut earlier = serde_json::to_value(&manifest).unwrap();
+    earlier["entry_points"]
+        .as_object_mut()
+        .unwrap()
+        .remove("cli");
+    let earlier: AccountInstallationManifestV2 = serde_json::from_value(earlier).unwrap();
+    earlier.validate().unwrap();
+    assert!(earlier.entry_points.cli.is_none());
+    manifest.entry_points.cli = Some("bin/spaceterm-cli".into());
+    assert!(manifest.validate().is_err());
+    manifest.files.push(InstallationFile {
+        name: "bin/spaceterm-cli".into(),
+        mode: 0o700,
+        size: 1,
+        sha256: Sha256::digest(b"x").into(),
+    });
+    manifest.files.sort_by(|a, b| a.name.cmp(&b.name));
+    manifest.validate().unwrap();
+    manifest.entry_points.cli = Some("bin/other".into());
+    assert!(manifest.validate().is_err());
+}
+
+#[test]
+fn retained_nonrelease_feed_names_remain_bound_to_the_exact_signed_build() {
+    let signer = Ed25519KeyPair::from_seed_unchecked(&[7; 32]).unwrap();
+    let (key, bytes, _, _) =
+        artifact_fixture(BuildChannel::Development, ServerPlatform::LinuxX86_64);
+    let mut document: AccountServerFeedV2 = serde_json::from_slice(&bytes).unwrap();
+    document.archive.name = ServerPlatform::LinuxX86_64.archive_name(document.version.as_str());
+    let bytes = serde_json::to_vec(&document).unwrap();
+    let signature = STANDARD.encode(signer.sign(&bytes).as_ref());
+    verify_account_server_feed(
+        &key,
+        BuildChannel::Development,
+        ServerPlatform::LinuxX86_64,
+        &bytes,
+        signature.as_bytes(),
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(
+        verify_account_server_feed(
+            &key,
+            BuildChannel::Preflight,
+            ServerPlatform::LinuxX86_64,
+            &bytes,
+            signature.as_bytes(),
+            NOW
+        )
+        .err(),
+        Some(DistributionFailure::IdentityMismatch)
+    );
 }
