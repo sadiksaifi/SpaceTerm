@@ -276,7 +276,10 @@ async fn cli_install_verifies_artifacts_before_allocating_request_or_service_eff
     assert!(matches!(
         run(
             &provider,
-            NativeCliCommand::Install { version: None },
+            NativeCliCommand::Install {
+                version: None,
+                source: None
+            },
             ConfirmationMode::Interactive,
             &mut io,
         )
@@ -296,7 +299,10 @@ async fn cli_install_verifies_artifacts_before_allocating_request_or_service_eff
             .management()
             .run(
                 other,
-                NativeCliCommand::Install { version: None },
+                NativeCliCommand::Install {
+                    version: None,
+                    source: None
+                },
                 ConfirmationMode::Interactive,
                 SudoMode::NonInteractive,
                 &mut io,
@@ -882,4 +888,65 @@ async fn cli_activates_only_the_assessed_staged_installation_and_preserves_stopp
     let result: serde_json::Value = serde_json::from_slice(&replay.stdout).unwrap();
     assert_eq!(result["result"]["outcome"], "activated");
     assert_eq!(fixture.manager.effects.lock().unwrap().as_slice(), effects);
+}
+
+#[tokio::test]
+async fn cli_local_install_rejects_unsigned_inputs_before_request_or_service_effects() {
+    let fixture = Fixture::new(None);
+    let artifacts = Arc::new(DeniedArtifacts(AtomicU64::new(0)));
+    let provider = fixture
+        .provider()
+        .with_artifact_transport(artifacts.clone());
+    let local = tempfile::tempdir().unwrap();
+    let feed = local.path().join("private-path-marker.json");
+    let archive = local.path().join("private-path-marker.tar.gz");
+    std::fs::write(&feed, b"private-content-marker").unwrap();
+    std::fs::write(
+        local.path().join("private-path-marker.json.sig"),
+        b"unsigned",
+    )
+    .unwrap();
+    std::fs::write(&archive, b"private-content-marker").unwrap();
+    let invocation = spaceterm_client_native::cli::parse(
+        [
+            "--json",
+            "--non-interactive",
+            "install",
+            "--feed",
+            feed.to_str().unwrap(),
+            "--archive",
+            archive.to_str().unwrap(),
+        ]
+        .map(Into::into),
+    )
+    .unwrap();
+    let dependencies = CliDependencies::new(
+        Ok(provider.key()),
+        Arc::new(UnavailableProtocolManagement),
+        provider.management(),
+        Arc::new(UnavailablePairingBindings),
+    );
+    let mut io = Io::default();
+    let Dispatch::Exit(exit) = dispatch(invocation, &dependencies, &mut io).await else {
+        panic!("local install cannot serve");
+    };
+    assert_eq!(
+        exit.code(),
+        ManagementFailure::UnsafeNativeState.exit_code()
+    );
+    assert_eq!(
+        artifacts.0.load(Ordering::SeqCst),
+        0,
+        "local install must never download"
+    );
+    assert!(!fixture.account.anchor().exists());
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
+    let diagnostic = format!(
+        "{}{}",
+        String::from_utf8_lossy(&io.stdout),
+        String::from_utf8_lossy(&io.stderr)
+    );
+    assert!(!diagnostic.contains("private-path-marker"));
+    assert!(!diagnostic.contains("private-content-marker"));
+    assert!(!diagnostic.contains("native_request"));
 }

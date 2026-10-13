@@ -310,7 +310,19 @@ impl NativeServiceManagement {
         &self,
         version: Option<crate::cli::arguments::StableVersion>,
     ) -> ManagementFuture<'_, spaceterm_distribution::VerifiedAccountServerArtifact> {
-        let artifacts = Arc::clone(&self.artifacts);
+        self.download_installation_from(version, None)
+    }
+
+    /// Uses explicit local file authority without changing signed-artifact admission.
+    pub fn download_installation_from(
+        &self,
+        version: Option<crate::cli::arguments::StableVersion>,
+        source: Option<artifacts::LocalArtifactSource>,
+    ) -> ManagementFuture<'_, spaceterm_distribution::VerifiedAccountServerArtifact> {
+        let artifacts = source.map_or_else(
+            || Arc::clone(&self.artifacts),
+            |source| Arc::new(self.artifacts.with_local_source(source)),
+        );
         let build = self.key().build_identity;
         Box::pin(async move {
             tokio::task::spawn_blocking(move || {
@@ -492,11 +504,11 @@ impl NativeCommandBindings for NativeServiceManagement {
                     .map(CliOutput::ServiceProgress)
                     .map_err(classify_service);
             }
-            if let NativeCliCommand::Install { version } = command {
+            if let NativeCliCommand::Install { version, source } = command {
                 // The command itself is deliberate installation consent. Signed
                 // download and native admission precede request allocation and all
                 // identity/service effects. Only the host may authorize lingering.
-                let artifact = self.download_installation(version).await?;
+                let artifact = self.download_installation_from(version, source).await?;
                 let assessment = self
                     .supervisor
                     .assess_install(artifact)

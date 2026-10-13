@@ -58,6 +58,7 @@ pub enum NativeCliCommand {
     },
     Install {
         version: Option<StableVersion>,
+        source: Option<crate::native::artifacts::LocalArtifactSource>,
     },
     Start,
     Stop,

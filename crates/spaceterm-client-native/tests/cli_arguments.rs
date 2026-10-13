@@ -205,3 +205,38 @@ fn account_install_is_explicit_and_restart_and_uninstall_require_exact_confirmat
         assert_eq!(invocation(&args), Err(CliFailure::Usage));
     }
 }
+
+#[test]
+fn install_accepts_only_a_complete_explicit_local_artifact_source() {
+    assert!(
+        invocation(&[
+            "install",
+            "--feed",
+            "/local/candidate.json",
+            "--archive",
+            "/local/candidate.tar.gz",
+        ])
+        .is_ok()
+    );
+    for args in [
+        vec!["install", "--feed", "/local/candidate.json"],
+        vec!["install", "--archive", "/local/candidate.tar.gz"],
+        vec![
+            "install",
+            "--feed",
+            "https://example.com/feed.json",
+            "--archive",
+            "/local/archive",
+        ],
+        vec![
+            "install",
+            "--feed",
+            "/local/feed",
+            "--archive",
+            "file:///local/archive",
+        ],
+        vec!["install", "--feed", "", "--archive", "/local/archive"],
+    ] {
+        assert_eq!(invocation(&args), Err(CliFailure::Usage));
+    }
+}
