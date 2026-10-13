@@ -80,9 +80,103 @@ pub(super) struct ScheduleInput {
     find_queries: FindQueryMailbox,
     accessibility_demand: AccessibilityDemandMailbox,
     terminal_appearance: TerminalAppearanceMailbox,
+    focus: Arc<Mutex<FocusMailbox>>,
 }
 
+// Each ingress boundary retains at most three transitions outside command capacity.
+// The worker drains eligible boundaries before the next command, except for one
+// bounded reader batch. Those two capacities also bound the number of boundaries.
+#[derive(Default)]
+struct FocusMailbox {
+    pending: std::collections::VecDeque<(u64, FocusTransitions)>,
+}
+impl FocusMailbox {
+    fn replace(&mut self, after: u64, target: TerminalFocusTarget) {
+        if let Some((position, transitions)) = self.pending.back_mut()
+            && *position == after
+        {
+            transitions.replace(target);
+        } else {
+            let mut transitions = FocusTransitions::default();
+            transitions.replace(target);
+            self.pending.push_back((after, transitions));
+        }
+    }
+    fn take(&mut self, received: u64) -> Option<TerminalFocusTarget> {
+        let (after, transitions) = self.pending.front_mut()?;
+        if *after > received {
+            return None;
+        }
+        let target = transitions.take();
+        if transitions.is_empty() {
+            self.pending.pop_front();
+        }
+        target
+    }
+}
+
+// Coalesce only between commands. Preserve the first transition, any invalidation
+// and the final target so a loss/refocus pulse cannot disappear.
+#[derive(Default)]
+struct FocusTransitions {
+    first: Option<TerminalFocusTarget>,
+    invalidation: Option<TerminalFocusTarget>,
+    latest: Option<TerminalFocusTarget>,
+}
+impl FocusTransitions {
+    fn is_empty(&self) -> bool {
+        self.first.is_none() && self.invalidation.is_none() && self.latest.is_none()
+    }
+    fn replace(&mut self, target: TerminalFocusTarget) {
+        if self.is_empty() {
+            self.first = Some(target);
+        }
+        let leaving_dialog = self.latest.is_some_and(|previous| {
+            matches!(previous, TerminalFocusTarget::PasteConfirmation(_)) && previous != target
+        });
+        if !matches!(target, TerminalFocusTarget::Terminal) || leaving_dialog {
+            if let Some(previous) = &mut self.invalidation {
+                if *previous != target || leaving_dialog {
+                    *previous = TerminalFocusTarget::Unfocused;
+                }
+            } else {
+                self.invalidation = Some(if leaving_dialog {
+                    TerminalFocusTarget::Unfocused
+                } else {
+                    target
+                });
+            }
+        }
+        self.latest = Some(target);
+    }
+    fn take(&mut self) -> Option<TerminalFocusTarget> {
+        if let Some(first) = self.first.take() {
+            if self.invalidation == Some(first) {
+                self.invalidation = None;
+            }
+            // Equal endpoints still need a refocus after an intervening invalidation.
+            if self.invalidation.is_none() && self.latest == Some(first) {
+                self.latest = None;
+            }
+            Some(first)
+        } else if let Some(invalidation) = self.invalidation.take() {
+            if self.latest == Some(invalidation) {
+                self.latest = None;
+            }
+            Some(invalidation)
+        } else {
+            self.latest.take()
+        }
+    }
+}
 impl ScheduleInput {
+    pub(super) fn enqueue_focus(&self, after: u64, target: TerminalFocusTarget) {
+        self.focus
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .replace(after, target);
+    }
+
     pub(super) fn enqueue_resize(&self, geometry: TerminalGeometry) -> bool {
         self.resizes.replace(geometry)
     }
@@ -133,6 +227,7 @@ pub(super) struct WorkerSchedules {
     selection_autoscroll: SelectionAutoscrollSchedule,
     paste_confirmations: PasteConfirmationSchedule,
     paste_confirmation_owner: Option<(PasteConfirmationId, PasteConfirmationOwner)>,
+    paste_input: Option<spaceterm_terminal::runtime::legacy::LegacyInputReservation>,
     hidden_input: HiddenInputSchedule,
     presentation: PresentationSchedule,
     metadata_presentation_pending: bool,
@@ -142,6 +237,19 @@ pub(super) struct WorkerSchedules {
 }
 
 impl WorkerSchedules {
+    pub(super) fn take_focus(&self, received: u64) -> Option<Command> {
+        self.input
+            .focus
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take(received)
+            .map(|target| match target {
+                TerminalFocusTarget::Terminal => Command::Focus(true),
+                TerminalFocusTarget::Unfocused => Command::Focus(false),
+                TerminalFocusTarget::PasteConfirmation(id) => Command::FocusPasteConfirmation(id),
+            })
+    }
+
     pub(super) fn prime_compression(&mut self, activity: CompressionActivity) {
         self.compression.prime(activity);
     }
@@ -333,13 +441,31 @@ impl WorkerSchedules {
         Some(confirmation)
     }
 
+    pub(super) fn retain_paste_input(
+        &mut self,
+        reservation: Option<spaceterm_terminal::runtime::legacy::LegacyInputReservation>,
+    ) {
+        self.paste_input = reservation;
+    }
+    pub(super) fn take_paste_input(
+        &mut self,
+    ) -> Option<spaceterm_terminal::runtime::legacy::LegacyInputReservation> {
+        self.paste_input.take()
+    }
+
     pub(super) fn resolve_paste_confirmation(
         &mut self,
         id: PasteConfirmationId,
         now: Instant,
     ) -> Option<PreparedPaste> {
-        self.paste_confirmation_owner = None;
-        self.paste_confirmations.take(id, now)
+        let payload = self.paste_confirmations.take(id, now);
+        if payload.is_some() || self.paste_confirmations.deadline().is_none() {
+            self.paste_confirmation_owner = None;
+            if payload.is_none() {
+                self.paste_input = None;
+            }
+        }
+        payload
     }
 
     pub(super) fn focus_paste_confirmation(&mut self, id: PasteConfirmationId) -> bool {
@@ -361,6 +487,7 @@ impl WorkerSchedules {
     pub(super) fn cancel_paste_confirmation(&mut self) {
         self.paste_confirmation_owner = None;
         self.paste_confirmations.cancel();
+        self.paste_input = None;
     }
 
     pub(super) fn new(now: Instant, input: ScheduleInput) -> Self {
@@ -371,6 +498,7 @@ impl WorkerSchedules {
             selection_autoscroll: SelectionAutoscrollSchedule::default(),
             paste_confirmations: PasteConfirmationSchedule::default(),
             paste_confirmation_owner: None,
+            paste_input: None,
             hidden_input: HiddenInputSchedule::new(now),
             presentation: PresentationSchedule::new(now),
             metadata_presentation_pending: false,
@@ -402,6 +530,7 @@ impl WorkerSchedules {
         }
         if self.paste_confirmations.expire(now) {
             self.paste_confirmation_owner = None;
+            self.paste_input = None;
             return Some(Command::PasteConfirmationExpired);
         }
         if self.presentation.take_due(now) {

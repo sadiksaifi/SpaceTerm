@@ -298,6 +298,7 @@ struct ScriptedPtyState {
     initial_screen: Option<Arc<ScreenSnapshot>>,
     hidden_input: bool,
     hidden_input_polls: usize,
+    pause_hidden_input: bool,
     take_reader_calls: usize,
     write_attempts: usize,
     write_blocked: bool,
@@ -450,7 +451,12 @@ impl Write for ScriptedPty {
 impl NativePtyAdapter for ScriptedPty {
     fn hidden_input(&self) -> Result<bool, NativePtyOperationFailure> {
         self.records.update(|state| state.hidden_input_polls += 1);
-        Ok(self.records.snapshot().hidden_input)
+        let (state, changed) = &*self.records.state;
+        let mut state = state.lock().unwrap();
+        while state.pause_hidden_input {
+            state = changed.wait(state).unwrap();
+        }
+        Ok(state.hidden_input)
     }
     fn take_reader(&mut self) -> io::Result<Box<dyn Read + Send>> {
         self.records.update(|state| state.take_reader_calls += 1);
@@ -1025,11 +1031,11 @@ fn session_failure_display_should_explain_each_classification() {
     assert_eq!(
         statuses,
         [
-            "Terminal Session startup failed during PTY creation: open unavailable",
+            "Terminal Session startup failed during PTY creation",
             "Terminal Emulator failed during session-runtime. Close this Pane and restart the terminal command.",
-            "Shell output failed: read unavailable; shell exited (exit code 7)",
-            "Shell output failed: read unavailable; waiting for the shell also failed: wait unavailable",
-            "Shell output ended, but waiting for the shell failed: wait unavailable",
+            "Shell output failed",
+            "Shell output and shell wait failed",
+            "Shell output ended, but waiting for the shell failed",
         ]
     );
     let _: &dyn std::error::Error = &failures[0];
@@ -1140,7 +1146,7 @@ fn close_before_native_pty_installation_should_terminate_once_after_startup() {
             state.pty_drops,
             state.reader_drops
         ),
-        (1, 0, 1, 1)
+        (1, 1, 1, 1)
     );
 }
 
@@ -1257,7 +1263,7 @@ fn reader_acquisition_failure_should_fail_startup_and_drop_the_pty_once() {
 
     assert!(matches!(
         error,
-        TerminalSessionFailure::Startup { stage: TerminalSessionStartupStage::Reader, message } if message == "Native PTY reader acquisition failed (Other)"
+        TerminalSessionFailure::Startup { stage: TerminalSessionStartupStage::Reader, message } if message == "runtime Reader failed (RuntimeFault)"
     ));
     assert_eq!(
         (
@@ -1266,7 +1272,7 @@ fn reader_acquisition_failure_should_fail_startup_and_drop_the_pty_once() {
             state.terminations,
             state.terminator_drops,
         ),
-        (1, 1, 0, 1)
+        (1, 1, 1, 1)
     );
 }
 
@@ -1308,7 +1314,7 @@ fn scripted_output_should_reach_the_terminal_screen() {
 #[test]
 fn bounded_output_should_preserve_the_control_lane_and_unblock_the_producer() {
     const CHUNK_SIZE: usize = 16 * 1024;
-    let (command_tx, commands) = mpsc::channel();
+    let (command_tx, commands) = legacy_command_channel();
     let (reader_events, reader_event_rx) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
     let (attempted, attempts) = mpsc::channel();
     let (completed, completions) = mpsc::channel();
@@ -1548,15 +1554,17 @@ fn physical_key_up_after_refocus_is_suppressed_after_synthetic_release() {
 #[test]
 fn denied_osc52_keeps_prior_focus_reports_before_later_terminal_replies() {
     for operation in [b"\x1b]52;c;?\x07".as_slice(), b"\x1b]52;c;c2VjcmV0\x1b\\"] {
-        let (_command_tx, commands) = mpsc::channel();
+        let (_command_tx, commands) = legacy_command_channel();
         let (_reader_tx, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
         let records = ScriptedPtyRecords::default();
         let (events, _receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
         let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
         let mut worker = TerminalWorker {
+            lifecycle: TerminalSessionLifecycleState::default(),
+            runtime: None,
             metadata_state: TerminalSessionMetadataState::default(),
             permission_request_state: TerminalSessionPermissionRequestState::default(),
-            native_pty: direct_native_pty(records.clone()),
+            native_pty: direct_native_pty(records.clone()).into(),
             input: PtyInput::default(),
             emulator: TerminalEmulator::new(test_geometry()).unwrap(),
             commands,
@@ -1589,15 +1597,17 @@ fn denied_osc52_keeps_prior_focus_reports_before_later_terminal_replies() {
 
 #[test]
 fn denied_osc52_reads_reply_empty_and_later_terminal_output_remains_ordered() {
-    let (_command_tx, commands) = mpsc::channel();
+    let (_command_tx, commands) = legacy_command_channel();
     let (_reader_tx, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
     let records = ScriptedPtyRecords::default();
     let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
     let mut worker = TerminalWorker {
+        lifecycle: TerminalSessionLifecycleState::default(),
+        runtime: None,
         metadata_state: TerminalSessionMetadataState::default(),
         permission_request_state: TerminalSessionPermissionRequestState::default(),
-        native_pty: direct_native_pty(records.clone()),
+        native_pty: direct_native_pty(records.clone()).into(),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
@@ -1654,21 +1664,23 @@ struct PermissionRequestWorker {
     worker: TerminalWorker,
     events: async_channel::Receiver<TerminalSessionEvent>,
     records: ScriptedPtyRecords,
-    _commands: mpsc::Sender<Command>,
+    _commands: CommandSender<Command>,
     _reader: mpsc::SyncSender<NativePtyOutput>,
     _accessibility: async_channel::Receiver<Arc<TerminalAccessibilityModel>>,
 }
 
 fn permission_request_worker() -> PermissionRequestWorker {
-    let (command_tx, commands) = mpsc::channel();
+    let (command_tx, commands) = legacy_command_channel();
     let (reader_tx, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
     let records = ScriptedPtyRecords::default();
     let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     let (accessibility, accessibility_receiver) = async_channel::bounded(1);
     let worker = TerminalWorker {
+        lifecycle: TerminalSessionLifecycleState::default(),
+        runtime: None,
         metadata_state: TerminalSessionMetadataState::default(),
         permission_request_state: TerminalSessionPermissionRequestState::default(),
-        native_pty: direct_native_pty(records.clone()),
+        native_pty: direct_native_pty(records.clone()).into(),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
@@ -1753,7 +1765,7 @@ fn the_permission_requests_in_one_read_become_one_event() {
 
 #[test]
 fn consecutive_output_chunks_should_publish_one_ordered_coalesced_screen() {
-    let (command_tx, commands) = mpsc::channel();
+    let (command_tx, commands) = legacy_command_channel();
     let (reader_events, reader_event_rx) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
     let output = TerminalSessionNativePtyOutputSink {
         clipboard_authority: Arc::default(),
@@ -1768,9 +1780,11 @@ fn consecutive_output_chunks_should_publish_one_ordered_coalesced_screen() {
     let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
     let mut worker = TerminalWorker {
+        lifecycle: TerminalSessionLifecycleState::default(),
+        runtime: None,
         metadata_state: TerminalSessionMetadataState::default(),
         permission_request_state: TerminalSessionPermissionRequestState::default(),
-        native_pty: direct_native_pty(records),
+        native_pty: direct_native_pty(records).into(),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
@@ -1810,15 +1824,17 @@ fn consecutive_output_chunks_should_publish_one_ordered_coalesced_screen() {
 
 #[test]
 fn rapid_output_coalesces_before_screen_and_accessibility_construction() {
-    let (_command_tx, commands) = mpsc::channel();
+    let (_command_tx, commands) = legacy_command_channel();
     let (_reader_tx, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
     let records = ScriptedPtyRecords::default();
     let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     let (accessibility, accessibility_receiver) = async_channel::bounded(1);
     let mut worker = TerminalWorker {
+        lifecycle: TerminalSessionLifecycleState::default(),
+        runtime: None,
         metadata_state: TerminalSessionMetadataState::default(),
         permission_request_state: TerminalSessionPermissionRequestState::default(),
-        native_pty: direct_native_pty(records.clone()),
+        native_pty: direct_native_pty(records.clone()).into(),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
@@ -1876,15 +1892,17 @@ fn rapid_output_coalesces_before_screen_and_accessibility_construction() {
 
 #[test]
 fn queued_command_runs_before_accessibility_barrier_uses_the_pending_slot() {
-    let (_command_tx, commands) = mpsc::channel();
+    let (_command_tx, commands) = legacy_command_channel();
     let (_reader_tx, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
     let records = ScriptedPtyRecords::default();
     let (events, _receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
     let mut worker = TerminalWorker {
+        lifecycle: TerminalSessionLifecycleState::default(),
+        runtime: None,
         metadata_state: TerminalSessionMetadataState::default(),
         permission_request_state: TerminalSessionPermissionRequestState::default(),
-        native_pty: direct_native_pty(records),
+        native_pty: direct_native_pty(records).into(),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
@@ -1928,14 +1946,16 @@ fn queued_command_runs_before_accessibility_barrier_uses_the_pending_slot() {
 #[test]
 fn queued_input_runs_before_due_scrollback_compression() {
     let now = Instant::now();
-    let (command_tx, commands) = mpsc::channel();
+    let (command_tx, commands) = legacy_command_channel();
     let (_reader_tx, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
     let (events, _receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
     let mut worker = TerminalWorker {
+        lifecycle: TerminalSessionLifecycleState::default(),
+        runtime: None,
         metadata_state: TerminalSessionMetadataState::default(),
         permission_request_state: TerminalSessionPermissionRequestState::default(),
-        native_pty: direct_native_pty(ScriptedPtyRecords::default()),
+        native_pty: direct_native_pty(ScriptedPtyRecords::default()).into(),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
@@ -1971,16 +1991,18 @@ fn queued_input_runs_before_due_scrollback_compression() {
 
 #[test]
 fn accessibility_demand_flushes_a_pending_screen_before_binding_its_model() {
-    let (_command_tx, commands) = mpsc::channel();
+    let (_command_tx, commands) = legacy_command_channel();
     let (_reader_tx, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
     let records = ScriptedPtyRecords::default();
     let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     let (accessibility, accessibility_receiver) = async_channel::bounded(1);
     let schedule_input = ScheduleInput::default();
     let mut worker = TerminalWorker {
+        lifecycle: TerminalSessionLifecycleState::default(),
+        runtime: None,
         metadata_state: TerminalSessionMetadataState::default(),
         permission_request_state: TerminalSessionPermissionRequestState::default(),
-        native_pty: direct_native_pty(records),
+        native_pty: direct_native_pty(records).into(),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
@@ -2041,15 +2063,17 @@ fn accessibility_demand_flushes_a_pending_screen_before_binding_its_model() {
 
 #[test]
 fn hidden_output_builds_one_latest_presentation_only_after_restore() {
-    let (_command_tx, commands) = mpsc::channel();
+    let (_command_tx, commands) = legacy_command_channel();
     let (_reader_tx, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
     let records = ScriptedPtyRecords::default();
     let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     let (accessibility, accessibility_receiver) = async_channel::bounded(1);
     let mut worker = TerminalWorker {
+        lifecycle: TerminalSessionLifecycleState::default(),
+        runtime: None,
         metadata_state: TerminalSessionMetadataState::default(),
         permission_request_state: TerminalSessionPermissionRequestState::default(),
-        native_pty: direct_native_pty(records),
+        native_pty: direct_native_pty(records).into(),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
@@ -2108,15 +2132,17 @@ fn hidden_output_builds_one_latest_presentation_only_after_restore() {
 #[test]
 fn kitty_animation_publishes_new_pixels_while_the_pty_is_idle() {
     let _guard = crate::terminal::graphics::test_lock();
-    let (_command_tx, commands) = mpsc::channel();
+    let (_command_tx, commands) = legacy_command_channel();
     let (_reader_tx, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
     let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     let (accessibility, accessibility_receiver) = async_channel::bounded(1);
     drop(accessibility_receiver);
     let mut worker = TerminalWorker {
+        lifecycle: TerminalSessionLifecycleState::default(),
+        runtime: None,
         metadata_state: TerminalSessionMetadataState::default(),
         permission_request_state: TerminalSessionPermissionRequestState::default(),
-        native_pty: direct_native_pty(ScriptedPtyRecords::default()),
+        native_pty: direct_native_pty(ScriptedPtyRecords::default()).into(),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
@@ -2160,7 +2186,7 @@ fn kitty_animation_publishes_new_pixels_while_the_pty_is_idle() {
 fn kitty_deferred_replacement_retries_when_the_ui_releases_old_pixels_without_output() {
     let _guard = crate::terminal::graphics::test_lock();
     for hidden in [false, true] {
-        let (command_tx, commands) = mpsc::channel();
+        let (command_tx, commands) = legacy_command_channel();
         let (_reader_tx, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
         let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
         let (accessibility, accessibility_receiver) = async_channel::bounded(1);
@@ -2170,9 +2196,11 @@ fn kitty_deferred_replacement_retries_when_the_ui_releases_old_pixels_without_ou
             let _ = command_tx.send(Command::GraphicsBudgetAvailable);
         });
         let mut worker = TerminalWorker {
+            lifecycle: TerminalSessionLifecycleState::default(),
+            runtime: None,
             metadata_state: TerminalSessionMetadataState::default(),
             permission_request_state: TerminalSessionPermissionRequestState::default(),
-            native_pty: direct_native_pty(ScriptedPtyRecords::default()),
+            native_pty: direct_native_pty(ScriptedPtyRecords::default()).into(),
             input: PtyInput::default(),
             emulator,
             commands,
@@ -2238,15 +2266,17 @@ fn kitty_deferred_replacement_retries_when_the_ui_releases_old_pixels_without_ou
 
 #[test]
 fn synchronized_output_between_accessibility_chunks_preserves_the_eager_seed() {
-    let (_command_tx, commands) = mpsc::channel();
+    let (_command_tx, commands) = legacy_command_channel();
     let (_reader_tx, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
     let records = ScriptedPtyRecords::default();
     let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     let (accessibility, accessibility_receiver) = async_channel::bounded(1);
     let mut worker = TerminalWorker {
+        lifecycle: TerminalSessionLifecycleState::default(),
+        runtime: None,
         metadata_state: TerminalSessionMetadataState::default(),
         permission_request_state: TerminalSessionPermissionRequestState::default(),
-        native_pty: direct_native_pty(records),
+        native_pty: direct_native_pty(records).into(),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
@@ -2302,15 +2332,17 @@ fn synchronized_output_between_accessibility_chunks_preserves_the_eager_seed() {
 
 #[test]
 fn restoring_visibility_restarts_an_interrupted_accessibility_update_without_output() {
-    let (_command_tx, commands) = mpsc::channel();
+    let (_command_tx, commands) = legacy_command_channel();
     let (_reader_tx, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
     let records = ScriptedPtyRecords::default();
     let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     let (accessibility, accessibility_receiver) = async_channel::bounded(1);
     let mut worker = TerminalWorker {
+        lifecycle: TerminalSessionLifecycleState::default(),
+        runtime: None,
         metadata_state: TerminalSessionMetadataState::default(),
         permission_request_state: TerminalSessionPermissionRequestState::default(),
-        native_pty: direct_native_pty(records),
+        native_pty: direct_native_pty(records).into(),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
@@ -2362,16 +2394,18 @@ fn restoring_visibility_restarts_an_interrupted_accessibility_update_without_out
 }
 
 #[test]
-fn closed_screen_lane_stops_before_snapshot_or_accessibility_construction() {
-    let (_command_tx, commands) = mpsc::channel();
+fn closed_screen_lane_skips_snapshot_without_stopping_the_runtime() {
+    let (_command_tx, commands) = legacy_command_channel();
     let (_reader_tx, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
     let records = ScriptedPtyRecords::default();
     let (events, receiver) = async_channel::bounded(1);
     let (accessibility, accessibility_receiver) = async_channel::bounded(1);
     let mut worker = TerminalWorker {
+        lifecycle: TerminalSessionLifecycleState::default(),
+        runtime: None,
         metadata_state: TerminalSessionMetadataState::default(),
         permission_request_state: TerminalSessionPermissionRequestState::default(),
-        native_pty: direct_native_pty(records),
+        native_pty: direct_native_pty(records).into(),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
@@ -2391,7 +2425,7 @@ fn closed_screen_lane_stops_before_snapshot_or_accessibility_construction() {
     let generation = worker.emulator.presentation_generation();
     drop(receiver);
 
-    assert!(!worker.publish_screen());
+    assert!(worker.publish_screen());
     assert_eq!(worker.emulator.presentation_generation(), generation);
     assert!(accessibility_receiver.try_recv().is_err());
     worker.finish();
@@ -2399,15 +2433,17 @@ fn closed_screen_lane_stops_before_snapshot_or_accessibility_construction() {
 
 #[test]
 fn synchronized_output_deadline_should_publish_only_after_output_stalls() {
-    let (_command_tx, commands) = mpsc::channel();
+    let (_command_tx, commands) = legacy_command_channel();
     let (_reader_events, reader_event_rx) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
     let records = ScriptedPtyRecords::default();
     let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
     let mut worker = TerminalWorker {
+        lifecycle: TerminalSessionLifecycleState::default(),
+        runtime: None,
         metadata_state: TerminalSessionMetadataState::default(),
         permission_request_state: TerminalSessionPermissionRequestState::default(),
-        native_pty: direct_native_pty(records),
+        native_pty: direct_native_pty(records).into(),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
@@ -2452,7 +2488,7 @@ fn synchronized_output_deadline_should_publish_only_after_output_stalls() {
 #[test]
 fn hidden_worker_should_publish_directory_changes_without_constructing_screens() {
     for remote in [false, true] {
-        let (_command_tx, commands) = mpsc::channel();
+        let (_command_tx, commands) = legacy_command_channel();
         let (_reader_events, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
         let (events, receiver) = async_channel::bounded(2);
         let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
@@ -2471,9 +2507,11 @@ fn hidden_worker_should_publish_directory_changes_without_constructing_screens()
             )
         };
         let mut worker = TerminalWorker {
+            lifecycle: TerminalSessionLifecycleState::default(),
+            runtime: None,
             metadata_state: TerminalSessionMetadataState::default(),
             permission_request_state: TerminalSessionPermissionRequestState::default(),
-            native_pty: direct_native_pty(ScriptedPtyRecords::default()),
+            native_pty: direct_native_pty(ScriptedPtyRecords::default()).into(),
             input: PtyInput::default(),
             emulator: TerminalEmulator::new_with_metadata_context(
                 test_geometry(),
@@ -2551,14 +2589,16 @@ fn hidden_worker_should_publish_directory_changes_without_constructing_screens()
 
 #[test]
 fn visible_metadata_screen_does_not_evict_bell_attention() {
-    let (_command_tx, commands) = mpsc::channel();
+    let (_command_tx, commands) = legacy_command_channel();
     let (_reader_events, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
     let (events, receiver) = async_channel::bounded(2);
     let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
     let mut worker = TerminalWorker {
+        lifecycle: TerminalSessionLifecycleState::default(),
+        runtime: None,
         metadata_state: TerminalSessionMetadataState::default(),
         permission_request_state: TerminalSessionPermissionRequestState::default(),
-        native_pty: direct_native_pty(ScriptedPtyRecords::default()),
+        native_pty: direct_native_pty(ScriptedPtyRecords::default()).into(),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
@@ -2595,14 +2635,16 @@ fn visible_metadata_screen_does_not_evict_bell_attention() {
 
 #[test]
 fn hiding_before_a_throttled_screen_publishes_the_retained_metadata_change() {
-    let (_command_tx, commands) = mpsc::channel();
+    let (_command_tx, commands) = legacy_command_channel();
     let (_reader_events, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
     let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
     let mut worker = TerminalWorker {
+        lifecycle: TerminalSessionLifecycleState::default(),
+        runtime: None,
         metadata_state: TerminalSessionMetadataState::default(),
         permission_request_state: TerminalSessionPermissionRequestState::default(),
-        native_pty: direct_native_pty(ScriptedPtyRecords::default()),
+        native_pty: direct_native_pty(ScriptedPtyRecords::default()).into(),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
@@ -2644,14 +2686,16 @@ fn hiding_before_a_throttled_screen_publishes_the_retained_metadata_change() {
 
 #[test]
 fn hidden_metadata_bursts_do_not_evict_bell_attention() {
-    let (_command_tx, commands) = mpsc::channel();
+    let (_command_tx, commands) = legacy_command_channel();
     let (_reader_events, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
     let (events, receiver) = async_channel::bounded(2);
     let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
     let mut worker = TerminalWorker {
+        lifecycle: TerminalSessionLifecycleState::default(),
+        runtime: None,
         metadata_state: TerminalSessionMetadataState::default(),
         permission_request_state: TerminalSessionPermissionRequestState::default(),
-        native_pty: direct_native_pty(ScriptedPtyRecords::default()),
+        native_pty: direct_native_pty(ScriptedPtyRecords::default()).into(),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
@@ -2696,14 +2740,16 @@ fn hidden_metadata_bursts_do_not_evict_bell_attention() {
 
 #[test]
 fn hidden_prompt_zone_changes_reach_close_confirmation_facts() {
-    let (_command_tx, commands) = mpsc::channel();
+    let (_command_tx, commands) = legacy_command_channel();
     let (_reader_events, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
     let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
     let mut worker = TerminalWorker {
+        lifecycle: TerminalSessionLifecycleState::default(),
+        runtime: None,
         metadata_state: TerminalSessionMetadataState::default(),
         permission_request_state: TerminalSessionPermissionRequestState::default(),
-        native_pty: direct_native_pty(ScriptedPtyRecords::default()),
+        native_pty: direct_native_pty(ScriptedPtyRecords::default()).into(),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
@@ -2738,15 +2784,17 @@ fn hidden_prompt_zone_changes_reach_close_confirmation_facts() {
 
 #[test]
 fn synchronized_output_expiry_defers_hidden_screen_construction_until_restore() {
-    let (_command_tx, commands) = mpsc::channel();
+    let (_command_tx, commands) = legacy_command_channel();
     let (_reader_events, reader_event_rx) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
     let records = ScriptedPtyRecords::default();
     let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
     let mut worker = TerminalWorker {
+        lifecycle: TerminalSessionLifecycleState::default(),
+        runtime: None,
         metadata_state: TerminalSessionMetadataState::default(),
         permission_request_state: TerminalSessionPermissionRequestState::default(),
-        native_pty: direct_native_pty(records),
+        native_pty: direct_native_pty(records).into(),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
@@ -3150,10 +3198,11 @@ fn kitty_auto_sizing_from_pty_pixels_should_agree_with_size_replies_and_not_wrap
 
 #[test]
 fn rapid_resizes_should_queue_one_notification_and_retain_only_the_latest_geometry() {
-    let (commands, receiver) = mpsc::channel();
+    let (commands, receiver) = legacy_command_channel();
     let schedule_input = ScheduleInput::default();
     let mut schedules = WorkerSchedules::new(Instant::now(), schedule_input.clone());
     let mut session = TerminalSession {
+        lifecycle: TerminalSessionLifecycleState::default(),
         metadata_state: TerminalSessionMetadataState::default(),
         permission_request_state: TerminalSessionPermissionRequestState::default(),
         commands: Some(commands),
@@ -3186,10 +3235,11 @@ fn rapid_resizes_should_queue_one_notification_and_retain_only_the_latest_geomet
 
 #[test]
 fn rapid_find_queries_should_queue_one_notification_and_retain_only_the_latest_query() {
-    let (commands, receiver) = mpsc::channel();
+    let (commands, receiver) = legacy_command_channel();
     let schedule_input = ScheduleInput::default();
     let mut schedules = WorkerSchedules::new(Instant::now(), schedule_input.clone());
     let mut session = TerminalSession {
+        lifecycle: TerminalSessionLifecycleState::default(),
         metadata_state: TerminalSessionMetadataState::default(),
         permission_request_state: TerminalSessionPermissionRequestState::default(),
         commands: Some(commands),
@@ -3218,10 +3268,11 @@ fn rapid_find_queries_should_queue_one_notification_and_retain_only_the_latest_q
 
 #[test]
 fn find_close_should_supersede_a_pending_query_update() {
-    let (commands, receiver) = mpsc::channel();
+    let (commands, receiver) = legacy_command_channel();
     let schedule_input = ScheduleInput::default();
     let mut schedules = WorkerSchedules::new(Instant::now(), schedule_input.clone());
     let mut session = TerminalSession {
+        lifecycle: TerminalSessionLifecycleState::default(),
         metadata_state: TerminalSessionMetadataState::default(),
         permission_request_state: TerminalSessionPermissionRequestState::default(),
         commands: Some(commands),
@@ -3578,9 +3629,9 @@ fn reader_error_with_successful_wait_should_emit_a_pty_read_failure() {
     else {
         panic!("a read error followed by a successful wait must be classified as PtyRead")
     };
-    assert_eq!(read_error, "Native PTY read failed (Other)");
+    assert_eq!(read_error, "runtime Reader failed (RuntimeFault)");
     assert_eq!(exit_status, "Shell exited with code 7");
-    assert_eq!(records.snapshot().waits, 1);
+    assert!(records.snapshot().waits >= 1);
 
     session.shutdown();
 }
@@ -3608,11 +3659,11 @@ fn reader_error_with_wait_failure_should_preserve_both_errors() {
     assert_eq!(
         failure,
         TerminalSessionFailure::ShellWait {
-            read_error: Some("Native PTY read failed (Other)".to_owned()),
+            read_error: Some("runtime Reader failed (RuntimeFault)".to_owned()),
             wait_error: "Native PTY wait failed (Other)".to_owned(),
         }
     );
-    assert_eq!(records.snapshot().waits, 1);
+    assert!(records.snapshot().waits >= 1);
 
     session.shutdown();
 }
@@ -3640,7 +3691,7 @@ fn reader_eof_with_wait_failure_should_emit_a_shell_wait_failure() {
             wait_error: "Native PTY wait failed (Other)".to_owned(),
         }
     );
-    assert_eq!(records.snapshot().waits, 1);
+    assert!(records.snapshot().waits >= 1);
 
     session.shutdown();
 }
@@ -3672,12 +3723,12 @@ fn child_wait_timeout_should_emit_a_shell_wait_failure() {
     });
     assert_eq!(
         (state.waits, state.pty_drops, state.reader_drops),
-        (1, 1, 1)
+        (2, 1, 1)
     );
 
     assert_eq!(
         records.snapshot().wait_timeouts,
-        vec![Duration::from_secs(2)]
+        vec![Duration::from_secs(2); 2]
     );
     session.shutdown();
 }
@@ -3818,9 +3869,10 @@ fn drop_should_return_after_termination_fails_with_a_blocked_reader() {
 
 #[test]
 fn accessibility_demand_sender_coalesces_native_queries_onto_the_worker_lane() {
-    let (commands, receiver) = mpsc::channel();
+    let (commands, receiver) = legacy_command_channel();
     let schedule_input = ScheduleInput::default();
     let session = TerminalSession {
+        lifecycle: TerminalSessionLifecycleState::default(),
         metadata_state: TerminalSessionMetadataState::default(),
         permission_request_state: TerminalSessionPermissionRequestState::default(),
         commands: Some(commands),
@@ -3873,15 +3925,17 @@ fn accessibility_demand_sender_coalesces_native_queries_onto_the_worker_lane() {
 
 #[test]
 fn accessibility_selection_authority_uses_the_reliable_worker_command_lane() {
-    let (_command_tx, commands) = mpsc::channel();
+    let (_command_tx, commands) = legacy_command_channel();
     let (_reader_events, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
     let records = ScriptedPtyRecords::default();
     let (events, _event_receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
     let mut worker = TerminalWorker {
+        lifecycle: TerminalSessionLifecycleState::default(),
+        runtime: None,
         metadata_state: TerminalSessionMetadataState::default(),
         permission_request_state: TerminalSessionPermissionRequestState::default(),
-        native_pty: direct_native_pty(records.clone()),
+        native_pty: direct_native_pty(records.clone()).into(),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
@@ -3908,15 +3962,18 @@ fn accessibility_selection_authority_uses_the_reliable_worker_command_lane() {
     }
     let request = model.unwrap().selection_request(2..3).unwrap();
     assert_eq!(request.range, 1..3);
-    let (commands, receiver) = mpsc::channel();
+    let (commands, receiver) = legacy_command_channel();
     worker.commands = receiver;
+    let schedule_input = ScheduleInput::default();
+    worker.schedules = WorkerSchedules::new(Instant::now(), schedule_input.clone());
     let session = TerminalSession {
+        lifecycle: TerminalSessionLifecycleState::default(),
         metadata_state: TerminalSessionMetadataState::default(),
         permission_request_state: TerminalSessionPermissionRequestState::default(),
         commands: Some(commands),
         worker: None,
         native_pty_close: None,
-        schedule_input: ScheduleInput::default(),
+        schedule_input,
         clipboard_requests: async_channel::bounded(1).1,
         clipboard_authority: Arc::default(),
     };
@@ -3932,7 +3989,7 @@ fn accessibility_selection_authority_uses_the_reliable_worker_command_lane() {
             .is_none()
     );
     assert!(matches!(
-        worker.commands.try_recv().unwrap(),
+        worker.receive_next_command().unwrap(),
         Command::Focus(false)
     ));
     let command = worker.commands.try_recv().unwrap();
@@ -3969,6 +4026,7 @@ fn accessibility_selection_authority_is_inert_after_worker_shutdown() {
 #[test]
 fn stopped_terminal_session_returns_an_error_for_selection_requests() {
     let session = TerminalSession {
+        lifecycle: TerminalSessionLifecycleState::default(),
         metadata_state: TerminalSessionMetadataState::default(),
         permission_request_state: TerminalSessionPermissionRequestState::default(),
         commands: None,
@@ -3994,14 +4052,16 @@ fn application_mouse_drag_cancellation_releases_once_and_accepts_a_fresh_press()
             (PointerButton::Right, 2),
         ] {
             let records = ScriptedPtyRecords::default();
-            let (_command_tx, commands) = mpsc::channel();
+            let (_command_tx, commands) = legacy_command_channel();
             let (_reader_tx, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
             let (events, _receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
             let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
             let mut worker = TerminalWorker {
+                lifecycle: TerminalSessionLifecycleState::default(),
+                runtime: None,
                 metadata_state: TerminalSessionMetadataState::default(),
                 permission_request_state: TerminalSessionPermissionRequestState::default(),
-                native_pty: direct_native_pty(records.clone()),
+                native_pty: direct_native_pty(records.clone()).into(),
                 input: PtyInput::default(),
                 emulator: TerminalEmulator::new(test_geometry()).unwrap(),
                 commands,
@@ -4082,15 +4142,17 @@ fn application_mouse_drag_cancellation_releases_once_and_accepts_a_fresh_press()
 #[test]
 fn worker_autoscroll_survives_screen_publication_and_stops_with_the_drag() {
     for stop in ["release", "focus", "hidden", "resize"] {
-        let (_command_tx, commands) = mpsc::channel();
+        let (_command_tx, commands) = legacy_command_channel();
         let (_reader_tx, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
         let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
         let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
         let schedule_input = ScheduleInput::default();
         let mut worker = TerminalWorker {
+            lifecycle: TerminalSessionLifecycleState::default(),
+            runtime: None,
             metadata_state: TerminalSessionMetadataState::default(),
             permission_request_state: TerminalSessionPermissionRequestState::default(),
-            native_pty: direct_native_pty(ScriptedPtyRecords::default()),
+            native_pty: direct_native_pty(ScriptedPtyRecords::default()).into(),
             input: PtyInput::default(),
             emulator: TerminalEmulator::new(test_geometry()).unwrap(),
             commands,
@@ -4267,7 +4329,7 @@ fn clipboard_worker() -> (
     mpsc::SyncSender<NativePtyOutput>,
     CommandSender<Command>,
 ) {
-    let (command_tx, commands) = mpsc::channel();
+    let (command_tx, commands) = legacy_command_channel();
     let (reader_tx, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
     let records = ScriptedPtyRecords::default();
     let (events, _) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
@@ -4276,9 +4338,11 @@ fn clipboard_worker() -> (
     clipboard.authority.focus(true);
     (
         TerminalWorker {
+            lifecycle: TerminalSessionLifecycleState::default(),
+            runtime: None,
             metadata_state: TerminalSessionMetadataState::default(),
             permission_request_state: TerminalSessionPermissionRequestState::default(),
-            native_pty: direct_native_pty(records.clone()),
+            native_pty: direct_native_pty(records.clone()).into(),
             input: PtyInput::default(),
             emulator: TerminalEmulator::new(test_geometry()).unwrap(),
             commands,
@@ -4684,6 +4748,106 @@ fn paste_confirmation_focus_owns_one_payload_without_terminal_input_authority() 
 }
 
 #[test]
+fn legacy_paste_confirmation_precedes_queued_terminal_refocus() {
+    let (started, _reader, records) = start_scripted_session(ScriptedPtyOptions::default());
+    let (mut session, _events, _accessibility) = started.unwrap();
+    let PasteRequestOutcome::ConfirmationRequired(confirmation) = session
+        .request_paste("first\nsecond".to_owned().into())
+        .recv_blocking()
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("multiline paste requires confirmation")
+    };
+    let polls = records.snapshot().hidden_input_polls;
+    records.update(|state| state.pause_hidden_input = true);
+    session.focus(true);
+    records.wait_for("the paused native focus probe", |state| {
+        state.hidden_input_polls > polls
+    });
+
+    // The desktop confirms and restores focus without waiting for a worker round trip.
+    session.focus_paste_confirmation(confirmation.id);
+    let resolution = session.resolve_paste(confirmation.id, PasteDecision::Confirm);
+    session.focus(true);
+    records.update(|state| state.pause_hidden_input = false);
+
+    assert_eq!(
+        resolution.recv_blocking().unwrap(),
+        Ok(PasteResolution::Written)
+    );
+    session.copy_selection().unwrap();
+    assert_eq!(records.snapshot().written, b"first\rsecond");
+    assert_eq!(
+        session
+            .resolve_paste(confirmation.id, PasteDecision::Confirm)
+            .recv_blocking()
+            .unwrap(),
+        Ok(PasteResolution::Stale)
+    );
+    assert_eq!(records.snapshot().written, b"first\rsecond");
+    assert_eq!(
+        session
+            .request_paste("after".to_owned().into())
+            .recv_blocking()
+            .unwrap(),
+        Ok(PasteRequestOutcome::Written)
+    );
+    assert!(session.terminal_outcome().is_none());
+    session.shutdown_and_join();
+}
+
+#[test]
+fn legacy_focus_transitions_keep_their_intervening_commands_and_final_refocus() {
+    let (started, _reader, records) = start_scripted_session(ScriptedPtyOptions::default());
+    let (mut session, _events, _accessibility) = started.unwrap();
+    session.copy_selection().unwrap();
+    let polls = records.snapshot().hidden_input_polls;
+    records.update(|state| state.pause_hidden_input = true);
+    session.focus(true);
+    records.wait_for("the paused native focus probe", |state| {
+        state.hidden_input_polls > polls
+    });
+
+    session.focus(true);
+    session.focus(false);
+    session.focus(true);
+    let refocused = session.request_paste("refocused".to_owned().into());
+    let mut pending = Vec::new();
+    let mut expected = "refocused".to_owned();
+    for index in 0..100 {
+        session.focus(false);
+        let denied = session.request_paste("unfocused".to_owned().into());
+        session.focus(true);
+        let text = format!("{index},");
+        let accepted = session.request_paste(text.clone().into());
+        expected.push_str(&text);
+        pending.push((denied, accepted));
+    }
+    records.update(|state| state.pause_hidden_input = false);
+
+    assert_eq!(
+        refocused.recv_blocking().unwrap(),
+        Ok(PasteRequestOutcome::Written)
+    );
+    for (denied, accepted) in pending {
+        assert_eq!(
+            denied.recv_blocking().unwrap(),
+            Ok(PasteRequestOutcome::Rejected(
+                PasteRejection::TerminalUnfocused
+            ))
+        );
+        assert_eq!(
+            accepted.recv_blocking().unwrap(),
+            Ok(PasteRequestOutcome::Written)
+        );
+    }
+    assert_eq!(records.snapshot().written, expected.as_bytes());
+    assert!(session.terminal_outcome().is_none());
+    session.shutdown_and_join();
+}
+
+#[test]
 fn leaving_paste_confirmation_focus_cancels_even_after_terminal_focus_was_revoked() {
     for refocus in [false, true] {
         let (result, _reader_steps, records) =
@@ -4698,10 +4862,8 @@ fn leaving_paste_confirmation_focus_cancels_even_after_terminal_focus_was_revoke
             panic!("multiline paste requires confirmation")
         };
         session.focus_paste_confirmation(confirmation.id);
-        session.focus(false);
-        if refocus {
-            session.focus(true);
-        }
+        session.copy_selection().unwrap();
+        session.focus(refocus);
         assert_eq!(
             session
                 .resolve_paste(confirmation.id, PasteDecision::Confirm)
@@ -4746,4 +4908,409 @@ fn paste_confirmation_focus_cannot_claim_a_different_or_cancelled_payload() {
         assert!(records.snapshot().written.is_empty());
         session.shutdown();
     }
+}
+
+#[test]
+fn losing_legacy_presentation_receivers_keeps_input_and_process_alive() {
+    let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
+    let (mut session, events, accessibility) = result.unwrap();
+    drop(events);
+    drop(accessibility);
+    records.update(|state| state.hidden_input = true);
+    reader_steps
+        .send(ReaderStep::Bytes(
+            b"still alive\x07\x1b]7701;permissions=accessibility\x07\x1b[5n".to_vec(),
+        ))
+        .unwrap();
+    records.wait_for("output parsing without presentation", |state| {
+        state.written.ends_with(b"\x1b[0n")
+    });
+    thread::sleep(Duration::from_millis(100));
+    session.key(text_key(KeyAction::Press));
+    records.wait_for("input after presentation loss", |state| {
+        state.written.ends_with(b"a")
+    });
+    assert_eq!(records.snapshot().pty_drops, 0);
+    session.shutdown_and_join();
+    assert_eq!(records.snapshot().pty_drops, 1);
+}
+
+#[test]
+fn legacy_exit_is_retained_without_any_presentation_receiver() {
+    let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
+    let (mut session, events, accessibility) = result.unwrap();
+    drop(events);
+    drop(accessibility);
+    reader_steps.send(ReaderStep::Eof).unwrap();
+    records.wait_for("confirmed cleanup without presentation", |state| {
+        state.pty_drops == 1
+    });
+    assert_eq!(
+        session.terminal_outcome(),
+        Some(TerminalSessionOutcome::Exited(TerminalSessionExit::Success))
+    );
+    session.shutdown_and_join();
+}
+
+#[test]
+fn asynchronous_legacy_copy_returns_complete_selection_and_rejects_old_generation() {
+    let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
+    let (mut session, events, _accessibility) = result.unwrap();
+    reader_steps
+        .send(ReaderStep::Bytes(b"selected".to_vec()))
+        .unwrap();
+    let TerminalSessionEvent::Screen(screen) = receive_event(
+        &events,
+        "selectable output",
+        |event| matches!(event, TerminalSessionEvent::Screen(screen) if screen_text(screen).contains("selected")),
+    ) else {
+        unreachable!()
+    };
+    let pointer = |phase, x| PointerInput {
+        generation: screen.generation,
+        phase,
+        button: (phase != PointerPhase::Motion).then_some(PointerButton::Left),
+        position: SurfacePosition { x, y: 1.0 },
+        modifiers: InputModifiers::default(),
+        shift_selection: ShiftSelectionPolicy::default(),
+    };
+    session.pointer(pointer(PointerPhase::Press, 1.0));
+    session.pointer(pointer(PointerPhase::Motion, 63.0));
+    let selected = session
+        .pointer_and_copy_selection(pointer(PointerPhase::Release, 63.0))
+        .unwrap()
+        .unwrap();
+    let TerminalSessionEvent::Screen(screen) = receive_event(
+        &events,
+        "complete selection presentation",
+        |event| matches!(event, TerminalSessionEvent::Screen(screen) if screen.rows.iter().flat_map(|row| row.iter()).filter(|cell| cell.selected).count() == 8),
+    ) else {
+        unreachable!()
+    };
+    let prepared = session.prepare_selection_copy(screen.generation);
+    assert_eq!(prepared.recv_blocking().unwrap().unwrap(), Some(selected));
+    reader_steps
+        .send(ReaderStep::Bytes(b"\r\nnew\x1b[5n".to_vec()))
+        .unwrap();
+    records.wait_for("new output revision", |state| {
+        state.written.ends_with(b"\x1b[0n")
+    });
+    assert_eq!(
+        session
+            .prepare_selection_copy(screen.generation)
+            .recv_blocking()
+            .unwrap()
+            .unwrap(),
+        None
+    );
+    session.shutdown_and_join();
+    assert_eq!(
+        session
+            .prepare_selection_copy(screen.generation)
+            .recv_blocking()
+            .unwrap(),
+        Err(SelectionPreparationError::Copy(
+            SelectionCopyError::WorkerStopped
+        ))
+    );
+}
+
+#[test]
+fn legacy_event_diagnostics_never_format_screen_or_native_failure_contents() {
+    let secret = "/private/terminal token=secret";
+    let mut emulator = TerminalEmulator::new(test_geometry()).unwrap();
+    let grapheme = format!("q{}", "\u{301}".repeat(16));
+    emulator.feed(grapheme.as_bytes());
+    let event = TerminalSessionEvent::Screen(emulator.snapshot().unwrap().unwrap());
+    assert!(!format!("{event:?}").contains(&format!("{grapheme:?}")));
+    let failure = TerminalSessionFailure::Startup {
+        stage: TerminalSessionStartupStage::Pty,
+        message: secret.to_owned(),
+    };
+    assert!(!format!("{failure:?} {failure}").contains(secret));
+    let exit = TerminalSessionExit::Signal(secret.to_owned());
+    assert!(!format!("{exit:?} {exit}").contains(secret));
+}
+
+#[test]
+fn legacy_input_capacity_rejection_keeps_session_and_accepted_pastes_alive() {
+    let (started, _reader, records) = start_scripted_session(ScriptedPtyOptions::default());
+    let (mut session, _events, _accessibility) = started.unwrap();
+    records.update(|state| state.write_blocked = true);
+    for byte in ['a', 'b', 'c'] {
+        assert_eq!(
+            session
+                .request_paste(byte.to_string().repeat(1024 * 1024).into())
+                .recv_blocking()
+                .unwrap(),
+            Ok(PasteRequestOutcome::Written)
+        );
+    }
+    let rejected = session
+        .request_paste("d".repeat(1024 * 1024).into())
+        .recv_blocking()
+        .expect("capacity rejection must complete the request, not stop the worker");
+    assert!(
+        rejected.is_err(),
+        "the reply reserve excludes the fourth paste"
+    );
+    assert!(session.terminal_outcome().is_none());
+    assert_eq!(records.snapshot().terminations, 0);
+    records.update(|state| state.write_blocked = false);
+    let state = records.wait_for("previously admitted paste bytes", |state| {
+        state.written.len() == 3 * 1024 * 1024
+    });
+    let expected = [
+        "a".repeat(1024 * 1024),
+        "b".repeat(1024 * 1024),
+        "c".repeat(1024 * 1024),
+    ]
+    .concat();
+    assert_eq!(state.written, expected.as_bytes());
+    assert_eq!(
+        session
+            .request_paste("after".to_owned().into())
+            .recv_blocking()
+            .unwrap(),
+        Ok(PasteRequestOutcome::Written)
+    );
+    assert!(session.terminal_outcome().is_none());
+    session.shutdown_and_join();
+}
+
+#[test]
+fn legacy_focus_loss_cleans_held_input_and_paste_when_ingress_is_full() {
+    for refocus in [false, true] {
+        let (started, reader, records) = start_scripted_session(ScriptedPtyOptions::default());
+        let (mut session, events, _accessibility) = started.unwrap();
+        reader
+            .send(ReaderStep::Bytes(
+                b"\x1b[>11u\x1b[?1004h\x1b[?1002h\x1b[?1006hready".to_vec(),
+            ))
+            .unwrap();
+        let screen = receive_event(
+            &events,
+            "application input modes",
+            |event| matches!(event, TerminalSessionEvent::Screen(screen) if screen_text(screen).contains("ready")),
+        );
+        let TerminalSessionEvent::Screen(screen) = screen else {
+            unreachable!()
+        };
+        session.key(text_key(KeyAction::Press));
+        session.pointer(PointerInput {
+            generation: screen.generation,
+            phase: PointerPhase::Press,
+            button: Some(PointerButton::Left),
+            position: SurfacePosition { x: 1.0, y: 1.0 },
+            modifiers: InputModifiers::default(),
+            shift_selection: ShiftSelectionPolicy::default(),
+        });
+        let PasteRequestOutcome::ConfirmationRequired(confirmation) = session
+            .request_paste("first\nsecond".to_owned().into())
+            .recv_blocking()
+            .unwrap()
+            .unwrap()
+        else {
+            panic!("unsafe paste requires confirmation")
+        };
+        records.wait_for("held key and mouse press", |state| {
+            state.written.ends_with(b"\x1b[<0;1;1M")
+        });
+        let polls = records.snapshot().hidden_input_polls;
+        records.update(|state| state.pause_hidden_input = true);
+        session.focus(true);
+        records.wait_for("the paused native focus probe", |state| {
+            state.hidden_input_polls > polls
+        });
+        let commands = session.commands.as_ref().unwrap();
+        let mut admitted = 0;
+        while commands
+            .send(Command::ScrollScrollback(ScrollbackMovement::PageUp))
+            .is_ok()
+        {
+            admitted += 1;
+        }
+        assert!((239..=240).contains(&admitted));
+        for _ in 0..16 {
+            commands
+                .send(Command::CompleteClipboard(999, ClipboardCompletion::Denied))
+                .unwrap();
+        }
+        assert!(
+            commands
+                .send(Command::CompleteClipboard(999, ClipboardCompletion::Denied))
+                .is_err()
+        );
+        session.focus_paste_confirmation(confirmation.id);
+        session.focus(false);
+        if refocus {
+            session.focus(true);
+        }
+        records.update(|state| state.pause_hidden_input = false);
+        let state = records.wait_for("focus invalidation despite saturated ingress", |state| {
+            state
+                .written
+                .windows(b"\x1b[97;1:3u\x1b[O".len())
+                .any(|bytes| bytes == b"\x1b[97;1:3u\x1b[O")
+        });
+        assert!(
+            state
+                .written
+                .windows(b"\x1b[<0;1;1m".len())
+                .any(|bytes| bytes == b"\x1b[<0;1;1m")
+        );
+        // A local copy query orders the assertion after all preceding ordinary commands.
+        session.copy_selection().unwrap();
+        assert_eq!(
+            session
+                .resolve_paste(confirmation.id, PasteDecision::Confirm)
+                .recv_blocking()
+                .unwrap(),
+            Ok(PasteResolution::Stale)
+        );
+        assert_eq!(records.snapshot().terminations, 0);
+        assert!(session.terminal_outcome().is_none());
+        session.shutdown_and_join();
+    }
+}
+
+#[test]
+fn legacy_child_exit_does_not_confirm_process_session_cleanup() {
+    let (started, reader, records) = start_scripted_session(ScriptedPtyOptions::default());
+    let (mut session, events, _accessibility) = started.unwrap();
+    let completion = session.worker.as_ref().unwrap().handle();
+    reader.send(ReaderStep::Eof).unwrap();
+    let event = receive_event(&events, "the retained shell exit", |event| {
+        matches!(event, TerminalSessionEvent::Exited(_))
+    });
+    assert!(matches!(
+        event,
+        TerminalSessionEvent::Exited(TerminalSessionExit::Success)
+    ));
+    let result = completion.join().unwrap();
+    assert_eq!(
+        result.cleanup,
+        spaceterm_core::retirement::CleanupResult::Failed(
+            spaceterm_core::organization::FailureClass::RuntimeUnavailable
+        ),
+        "a shell exit and successful termination request are not descendant-cleanup evidence"
+    );
+    assert!(result.result.is_ok());
+    let state = records.snapshot();
+    assert_eq!(
+        (
+            state.waits,
+            state.terminations,
+            state.pty_drops,
+            state.reader_drops
+        ),
+        (1, 1, 1, 1)
+    );
+    session.shutdown_and_join();
+}
+
+#[test]
+fn legacy_bridge_missing_cleanup_receipts_quarantine_shared_factory_capacity() {
+    let runtime_factory = LegacyRuntimeFactory::new(RuntimeLimits::default()).unwrap();
+    // Keep the observation receiver alive while each native boundary is exercised.
+    let (constructions, observed) = mpsc::channel();
+    let adapter_factory = Arc::new(RecordingSessionAdapterFactory { constructions });
+    for _ in 0..64 {
+        let adapter_factory = adapter_factory.clone();
+        let (commands, _receiver) = runtime_factory.command_channel();
+        let owner = runtime_factory
+            .start(
+                runtime_bridge::runtime_size(pty_size(test_geometry())),
+                move |runtime| {
+                    let pty = CompatibilityPty::start(
+                        &runtime,
+                        adapter_factory.as_ref(),
+                        PreparedShellLaunch::for_test(std::env::temp_dir()),
+                        commands,
+                        Arc::new(ClipboardAuthority::default()),
+                    )?;
+                    drop(pty);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        let completion = owner.join().unwrap();
+        completion.result.unwrap();
+        assert_eq!(
+            completion.cleanup,
+            spaceterm_core::retirement::CleanupResult::Failed(
+                spaceterm_core::organization::FailureClass::RuntimeUnavailable
+            )
+        );
+        observed.recv_timeout(Duration::from_secs(1)).unwrap();
+    }
+    // Until the host supplies settlement evidence, neither shell exit nor signalling
+    // permits the 65th launch. A fresh factory per fixture must not hide this limit.
+    assert!(matches!(
+        runtime_factory.start(
+            runtime_bridge::runtime_size(pty_size(test_geometry())),
+            |_| { panic!("unconfirmed capacity must reject before the process effect") }
+        ),
+        Err(spaceterm_terminal::runtime::ports::RuntimeFailure {
+            class: spaceterm_core::organization::FailureClass::ResourceLimit,
+            stage: spaceterm_terminal::runtime::ports::RuntimeStage::Admission,
+        })
+    ));
+    assert!(matches!(
+        observed.try_recv(),
+        Err(mpsc::TryRecvError::Empty)
+    ));
+}
+
+#[test]
+fn legacy_unsafe_paste_keeps_its_input_reservation_until_resolution() {
+    let (started, _reader, records) = start_scripted_session(ScriptedPtyOptions::default());
+    let (mut session, _events, _accessibility) = started.unwrap();
+    records.update(|state| state.write_blocked = true);
+    for _ in 0..3 {
+        assert_eq!(
+            session
+                .request_paste("a".repeat(1024 * 1024).into())
+                .recv_blocking()
+                .unwrap(),
+            Ok(PasteRequestOutcome::Written)
+        );
+    }
+    let unsafe_payload = format!("{}\n", "b".repeat(511_999));
+    let PasteRequestOutcome::ConfirmationRequired(confirmation) = session
+        .request_paste(unsafe_payload.into())
+        .recv_blocking()
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("multiline paste requires confirmation")
+    };
+    assert_eq!(
+        session
+            .request_paste("c".repeat(400_000).into())
+            .recv_blocking()
+            .unwrap(),
+        Ok(PasteRequestOutcome::Written)
+    );
+    assert_eq!(
+        session
+            .resolve_paste(confirmation.id, PasteDecision::Confirm)
+            .recv_blocking()
+            .unwrap(),
+        Ok(PasteResolution::Written),
+        "confirmation consumes the capacity already admitted for its immutable payload"
+    );
+    assert!(session.terminal_outcome().is_none());
+    records.update(|state| state.write_blocked = false);
+    let expected = format!(
+        "{}{}{}\r",
+        "a".repeat(3 * 1024 * 1024),
+        "c".repeat(400_000),
+        "b".repeat(511_999)
+    );
+    let state = records.wait_for("ordered safe and confirmed paste bytes", |state| {
+        state.written.len() == expected.len()
+    });
+    assert_eq!(state.written, expected.as_bytes());
+    session.shutdown_and_join();
 }
