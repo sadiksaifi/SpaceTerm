@@ -108,7 +108,7 @@ class StorageAcceptanceTests(unittest.TestCase):
         def tool(command, **_kwargs):
             if command[:2] == ["git", "rev-parse"]:
                 return ("2" * 40 + "\n").encode()
-            if command[:3] == ["git", "status", "--porcelain"]:
+            if command[0] == "git" and "status" in command:
                 return b" M /private/sensitive-file\n"
             if (
                 "storage::tests::native_filesystem_and_rollback_journal_policy_are_observed_without_reopening_database"
@@ -127,6 +127,30 @@ class StorageAcceptanceTests(unittest.TestCase):
         self.assertEqual(document["declared_source_commit"], "1" * 40)
         self.assertEqual(document["checkout_commit"], "2" * 40)
         self.assertTrue(document["checkout_modified"])
+        self.assertEqual(document["checkout_status_scope"], "tracked-files-excluding-submodules")
+        self.assertTrue(document["declared_copy"])
+        status = [
+            call.args[0]
+            for call in tools.call_args_list
+            if call.args[0][0] == "git" and "status" in call.args[0]
+        ]
+        self.assertEqual(
+            status,
+            [
+                [
+                    "git",
+                    "-c",
+                    "core.fsmonitor=false",
+                    "-c",
+                    "core.untrackedCache=false",
+                    "--no-optional-locks",
+                    "status",
+                    "--porcelain",
+                    "--untracked-files=no",
+                    "--ignore-submodules=all",
+                ]
+            ],
+        )
         self.assertEqual(document["native_storage"], PROBE)
         self.assertEqual(document["abrupt_power_loss"], "not-run")
         self.assertEqual(document["installed_service"], "not-run")

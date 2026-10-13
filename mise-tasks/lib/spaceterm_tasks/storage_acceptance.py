@@ -107,9 +107,23 @@ def run(source_commit):
     )
     if re.fullmatch(rb"[0-9a-f]{40}\n", checkout) is None:
         raise TaskError("invalid-storage-checkout-commit")
+    # Copied build trees can contain large untracked/submodule caches. Observe
+    # tracked source changes without scanning those caches or waiting on a host
+    # filesystem monitor. State this narrower scope in the evidence explicitly.
     modified = bool(
         native.run_tool(
-            ["git", "status", "--porcelain", "--untracked-files=normal"],
+            [
+                "git",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.untrackedCache=false",
+                "--no-optional-locks",
+                "status",
+                "--porcelain",
+                "--untracked-files=no",
+                "--ignore-submodules=all",
+            ],
             cwd=ROOT,
             environment=environment,
         )
@@ -167,6 +181,8 @@ def run(source_commit):
                 "declared_source_commit": source_commit,
                 "checkout_commit": checkout.decode("ascii").strip(),
                 "checkout_modified": modified,
+                "checkout_status_scope": "tracked-files-excluding-submodules",
+                "declared_copy": checkout.decode("ascii").strip() != source_commit,
                 "platform": sys.platform,
                 "native_storage": native_storage,
                 "checks": checks,
