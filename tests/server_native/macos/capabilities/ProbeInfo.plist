@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>io.github.sadiksaifi.spaceterm-development.server.native-evidence.capability-probe</string>
+    <string>io.github.sadiksaifi.spaceterm-development.server.native-evidence.probe</string>
     <key>CFBundleName</key>
     <string>SpaceTerm Native Capability Probe</string>
     <key>CFBundleVersion</key>

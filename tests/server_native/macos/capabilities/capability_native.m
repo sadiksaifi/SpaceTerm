@@ -2,6 +2,9 @@
 #include "capability_environment.h"
 #include "capability_process.h"
 #include "capability_agents.h"
+#include "capability_clipboard.h"
+#include "capability_targets.h"
+#include "capability_terminal.h"
 #import <OpenDirectory/OpenDirectory.h>
 #include <SystemConfiguration/SystemConfiguration.h>
 #include <CommonCrypto/CommonDigest.h>
@@ -35,9 +38,12 @@
 
 static st_capability_targets bound_targets;
 static int targets_bound;
+static int shell_mode_bound;
+static uint32_t shell_mode;
 static int owned_tty = -1;
 static pid_t foreground_child = -1;
 static pid_t previous_foreground = -1;
+static struct termios previous_modes;
 static pid_t tree_child = -1;
 static uint64_t tree_root;
 
@@ -54,7 +60,7 @@ int st_capability_begin_foreground(pid_t child) {
     owned_tty = open("/dev/tty", O_RDWR | O_CLOEXEC | O_NOCTTY);
     foreground_child = child;
     previous_foreground = owned_tty >= 0 ? tcgetpgrp(owned_tty) : -1;
-    return previous_foreground == getpgrp() && foreground(owned_tty, child);
+    return previous_foreground == getpgrp() && tcgetattr(owned_tty, &previous_modes) == 0 && foreground(owned_tty, child);
 }
 st_native_result st_capability_finish_spawn(pid_t child, int retired, int root_reaped) {
     (void)retired;
@@ -66,7 +72,7 @@ st_native_result st_capability_finish_spawn(pid_t child, int retired, int root_r
     }
     if (owned_tty < 0) return tree_retired ? ST_PROBE_OK : ST_PROBE_CLEANUP_UNRESOLVED;
     int okay = child == foreground_child && tcgetpgrp(owned_tty) == child &&
-        foreground(owned_tty, previous_foreground);
+        foreground(owned_tty, previous_foreground) && st_capability_terminal_restore_owner(owned_tty, &previous_modes);
     /* Never replace a newer foreground-group change. */
     close(owned_tty); owned_tty = -1; foreground_child = -1; previous_foreground = -1;
     return okay && tree_retired ? ST_PROBE_OK : ST_PROBE_CLEANUP_UNRESOLVED;
@@ -86,19 +92,22 @@ static void verified(st_capability_observation *out) {
     out->outcome = ST_OUTCOME_PASSED;
 }
 
-static NSString *run_hex(void) {
+static NSString *id_hex(const uint8_t bytes[16]) {
     char text[33];
     static const char hex[] = "0123456789abcdef";
     for (size_t i = 0; i < 16; ++i) {
-        text[i * 2] = hex[bound_targets.run_id[i] >> 4];
-        text[i * 2 + 1] = hex[bound_targets.run_id[i] & 15];
+        text[i * 2] = hex[bytes[i] >> 4];
+        text[i * 2 + 1] = hex[bytes[i] & 15];
     }
     text[32] = 0;
     return [NSString stringWithUTF8String:text];
 }
 
+static NSString *run_hex(void) { return id_hex(bound_targets.run_id); }
+static NSString *target_hex(void) { return id_hex(bound_targets.target_nonce); }
+
 st_native_result st_capability_bind_targets(const st_capability_targets *targets) {
-    if (!targets || targets->schema != 1 || targets->reserved != 0 ||
+    if (!targets || targets->schema != 2 || targets->controller_pid > INT32_MAX ||
         targets->companion_pid > INT32_MAX || targets->selected_volume[4095] != 0 ||
         (!targets->companion_pid && targets->companion_window)) return ST_PROBE_INVALID;
     int terminated = 0;
@@ -108,6 +117,9 @@ st_native_result st_capability_bind_targets(const st_capability_targets *targets
     }
     int nonzero = 0;
     for (size_t i = 0; i < 16; ++i) nonzero |= targets->run_id[i];
+    if (!nonzero) return ST_PROBE_INVALID;
+    nonzero = 0;
+    for (size_t i = 0; i < 16; ++i) nonzero |= targets->target_nonce[i];
     if (!nonzero) return ST_PROBE_INVALID;
     if (targets->selected_volume[0]) {
         if (targets->selected_volume[0] != '/') return ST_PROBE_INVALID;
@@ -262,25 +274,17 @@ static int observed_context(uint32_t requested) {
 }
 
 static char **worker_environment(st_capability_case capability) {
-    /* Import only the probed PATH/locale or agent binding, never the complete
-     * GUI environment. A bound violation fails instead of dropping a value and
-     * turning different actual shell environments into equal observations. */
-    const char *names[ST_CAPABILITY_LOCALE_COUNT + 2] = {"PATH"};
-    for (size_t i = 0; i < ST_CAPABILITY_LOCALE_COUNT; ++i) names[i + 1] = st_capability_locale_names[i];
-    names[ST_CAPABILITY_LOCALE_COUNT + 1] = "SSH_AUTH_SOCK";
-    char **result = calloc(ST_CAPABILITY_LOCALE_COUNT + 5, sizeof(char *));
+    /* Only SSH needs its inherited socket selector. The local shell comparison
+     * never re-execs and never puts PATH or locale values in a child environment. */
+    char **result = calloc(3, sizeof(char *));
     if (!result) return NULL;
     size_t used = 0;
-    for (size_t i = 0; i < ST_CAPABILITY_LOCALE_COUNT + 2; ++i) {
-        if ((i <= ST_CAPABILITY_LOCALE_COUNT && capability != ST_CAP_LOGIN_SHELL) ||
-            (i == ST_CAPABILITY_LOCALE_COUNT + 1 && capability != ST_CAP_SSH_AGENT)) continue;
-        const char *value = getenv(names[i]);
-        if (!value) continue;
-        if (strlen(value) > 4096 || asprintf(&result[used], "%s=%s", names[i], value) < 0) {
-            for (size_t j = 0; j < used; ++j) { st_capability_discard_owned(result[j], strlen(result[j])); free(result[j]); }
+    if (capability == ST_CAP_SSH_AGENT) {
+        const char *value = getenv("SSH_AUTH_SOCK");
+        if (value && (strlen(value) > 4096 || asprintf(&result[used], "SSH_AUTH_SOCK=%s", value) < 0)) {
             free(result); return NULL;
         }
-        ++used;
+        if (value) ++used;
     }
     if (asprintf(&result[used], "TMPDIR=/private/tmp") < 0) {
         for (size_t j = 0; j < used; ++j) { st_capability_discard_owned(result[j], strlen(result[j])); free(result[j]); }
@@ -449,7 +453,7 @@ static void screen(st_capability_observation *out, uint64_t deadline) {
     if (!CGPreflightScreenCaptureAccess()) { out->preflight_class = ST_PREFLIGHT_DENIED; out->outcome = ST_OUTCOME_DENIED; return; }
     out->preflight_class = ST_PREFLIGHT_ALLOWED;
     STScreenObservation *state = [[STScreenObservation alloc] init];
-    NSString *title = [@"SpaceTerm Native Evidence 520 " stringByAppendingString:run_hex()];
+    NSString *title = @"SpaceTerm Evidence Targets";
     [SCShareableContent getShareableContentExcludingDesktopWindows:YES onScreenWindowsOnly:YES completionHandler:^(SCShareableContent *content, NSError *error) {
         (void)error;
         for (SCWindow *window in content.windows) {
@@ -483,11 +487,9 @@ static int synthetic_control(AXUIElementRef element, NSString *identifier, NSStr
         int matches = CFGetTypeID(found) == CFStringGetTypeID() && [(__bridge NSString *)found isEqualToString:identifier];
         CFRelease(found);
         if (matches) {
-            CFTypeRef content = NULL;
-            int valid_value = AXUIElementCopyAttributeValue(element, kAXValueAttribute, &content) == kAXErrorSuccess &&
-                content && CFGetTypeID(content) == CFStringGetTypeID() && [(__bridge NSString *)content isEqualToString:value];
-            if (content) CFRelease(content);
-            return valid_value;
+            /* The retained target deliberately never stores or echoes its value.
+             * Observe the set operation, then require its nonce-bound receipt. */
+            return AXUIElementSetAttributeValue(element, kAXValueAttribute, (__bridge CFStringRef)value) == kAXErrorSuccess;
         }
     }
     CFTypeRef children = NULL;
@@ -502,29 +504,36 @@ static int synthetic_control(AXUIElementRef element, NSString *identifier, NSStr
     CFRelease(children);
     return result;
 }
-static void accessibility(st_capability_observation *out) {
+static st_native_result target_receipt(uint32_t capability, uint64_t deadline);
+static void accessibility(st_capability_observation *out, uint64_t deadline) {
     if (!companion()) { unavailable(out, 1); return; }
     if (!AXIsProcessTrusted()) { out->preflight_class = ST_PREFLIGHT_DENIED; out->outcome = ST_OUTCOME_DENIED; return; }
     out->preflight_class = ST_PREFLIGHT_ALLOWED;
     AXUIElementRef application = AXUIElementCreateApplication((pid_t)bound_targets.companion_pid);
     AXUIElementSetMessagingTimeout(application, 0.1f);
-    NSString *identifier = [@"spaceterm-native-520-control-" stringByAppendingString:run_hex()];
-    NSString *value = [@"SpaceTerm520 " stringByAppendingString:run_hex()];
+    NSString *identifier = @ST_COMPANION_ACCESSIBILITY_IDENTIFIER;
+    char marker[ST_COMPANION_MARKER_LENGTH + 1];
+    if (st_capability_target_marker(bound_targets.target_nonce, marker) != ST_PROBE_OK) { unavailable(out, 1); return; }
+    NSString *value = [NSString stringWithUTF8String:marker];
     unsigned visited = 0;
-    if (synthetic_control(application, identifier, value, 0, &visited)) verified(out);
+    if (synthetic_control(application, identifier, value, 0, &visited) &&
+        target_receipt(ST_CAP_ACCESSIBILITY, deadline) == ST_PROBE_OK) verified(out);
     else out->outcome = ST_OUTCOME_FAILED;
     CFRelease(application);
 }
 
-static OSStatus event_receipt(AEEventID event_id, uint64_t deadline) {
+static OSStatus event_receipt(uint64_t deadline) {
     pid_t pid = (pid_t)bound_targets.companion_pid;
     AEAddressDesc address = {typeNull, NULL};
     AppleEvent event = {typeNull, NULL}, reply = {typeNull, NULL};
     OSStatus status = AECreateDesc(typeKernelProcessID, &pid, sizeof(pid), &address);
-    if (status == noErr) status = AEDeterminePermissionToAutomateTarget(&address, 'ST52', event_id, false);
-    if (status == noErr) status = AECreateAppleEvent('ST52', event_id, &address, kAutoGenerateReturnID, kAnyTransactionID, &event);
-    const char *run = run_hex().UTF8String;
-    if (status == noErr) status = AEPutParamPtr(&event, keyDirectObject, typeUTF8Text, run, 32);
+    if (status == noErr) status = AEDeterminePermissionToAutomateTarget(&address,
+        ST_COMPANION_EVENT_CLASS, ST_COMPANION_EVENT_ID, false);
+    if (status == noErr) status = AECreateAppleEvent(ST_COMPANION_EVENT_CLASS, ST_COMPANION_EVENT_ID,
+        &address, kAutoGenerateReturnID, kAnyTransactionID, &event);
+    const char *run = run_hex().UTF8String, *nonce = target_hex().UTF8String;
+    if (status == noErr) status = AEPutParamPtr(&event, ST_COMPANION_EVENT_RUN, typeUTF8Text, run, 32);
+    if (status == noErr) status = AEPutParamPtr(&event, ST_COMPANION_EVENT_NONCE, typeUTF8Text, nonce, 32);
     if (status == noErr && !expired(deadline)) {
         uint64_t remaining = deadline - st_capability_monotonic_ns();
         SInt32 ticks = (SInt32)(remaining / UINT64_C(16666667));
@@ -532,8 +541,15 @@ static OSStatus event_receipt(AEEventID event_id, uint64_t deadline) {
     }
     if (status == noErr) {
         char response[33] = {0}; DescType type = typeNull; Size size = 0;
-        status = AEGetParamPtr(&reply, keyDirectObject, typeUTF8Text, &type, response, 33, &size);
+        status = AEGetParamPtr(&reply, keyDirectObject, typeUTF8Text, &type, response, sizeof(response), &size);
+        if (status == noErr && (type != typeUTF8Text || size != 8 || memcmp(response, "accepted", 8)))
+            status = errAEEventNotHandled;
+        if (status == noErr) status = AEGetParamPtr(&reply, ST_COMPANION_EVENT_RUN, typeUTF8Text,
+            &type, response, sizeof(response), &size);
         if (status == noErr && (type != typeUTF8Text || size != 32 || memcmp(response, run, 32))) status = errAEEventNotHandled;
+        if (status == noErr) status = AEGetParamPtr(&reply, ST_COMPANION_EVENT_NONCE, typeUTF8Text,
+            &type, response, sizeof(response), &size);
+        if (status == noErr && (type != typeUTF8Text || size != 32 || memcmp(response, nonce, 32))) status = errAEEventNotHandled;
         st_capability_discard_owned(response, sizeof(response));
     }
     AEDisposeDesc(&reply); AEDisposeDesc(&event); AEDisposeDesc(&address);
@@ -548,7 +564,9 @@ static OSStatus event_receipt(AEEventID event_id, uint64_t deadline) {
 
 st_native_result st_capability_open_url(uint64_t deadline) {
     if (!companion()) return ST_PROBE_UNAVAILABLE;
-    NSURL *url = [NSURL URLWithString:[@"spaceterm-native-520://probe/" stringByAppendingString:run_hex()]];
+    char url_text[ST_COMPANION_URL_LENGTH + 1];
+    if (st_capability_target_url(bound_targets.run_id, bound_targets.target_nonce, url_text) != ST_PROBE_OK) return ST_PROBE_INVALID;
+    NSURL *url = [NSURL URLWithString:[NSString stringWithUTF8String:url_text]];
     NSURL *application_url = [[NSWorkspace sharedWorkspace] URLForApplicationToOpenURL:url];
     NSBundle *application = application_url ? [NSBundle bundleWithURL:application_url] : nil;
     if (![application.bundleIdentifier isEqualToString:@ST_CAPABILITY_COMPANION_IDENTIFIER] ||
@@ -576,7 +594,7 @@ st_native_result st_capability_open_url(uint64_t deadline) {
 }
 st_native_result st_capability_apple_event_receipt(uint64_t deadline) {
     if (!companion()) return ST_PROBE_UNAVAILABLE;
-    OSStatus status = event_receipt('ping', deadline);
+    OSStatus status = event_receipt(deadline);
     if (status == noErr) return ST_PROBE_OK;
     if (status == errAEEventNotPermitted) return ST_PROBE_AUTHORIZATION_DENIED;
     if (status == errAETimeout || expired(deadline)) return ST_PROBE_TIMED_OUT;
@@ -663,30 +681,41 @@ static int agent_socket(const char *path, uint64_t deadline) {
     if (getpeereid(fd, &uid, &gid) != 0 || uid != getuid()) { close(fd); return -1; }
     return fd;
 }
-st_native_result st_capability_url_receipt(uint64_t deadline) {
-    if (!companion()) return ST_PROBE_UNAVAILABLE;
-    struct proc_bsdinfo before, after;
-    pid_t pid = (pid_t)bound_targets.companion_pid;
-    if (proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &before, sizeof(before)) != sizeof(before))
-        return ST_PROBE_UNAVAILABLE;
+/* Only the fixed signed evidence controller can supply a target receipt. Its
+ * producer must consume the retained companion's accepted run/nonce record, not
+ * synthesize an acknowledgement from dispatch or preflight. No private values
+ * travel on this fixed metadata-only port. */
+static st_native_result target_receipt(uint32_t capability, uint64_t deadline) {
+    if (!companion() || (capability != ST_CAP_URL && capability != ST_CAP_ACCESSIBILITY)) return ST_PROBE_UNAVAILABLE;
+    pid_t pid = (pid_t)bound_targets.controller_pid;
+    st_capability_process_identity before, after;
+    if (pid <= 0 || pid == getpid() || pid == (pid_t)bound_targets.companion_pid ||
+        !signed_process(pid, @ST_CAPABILITY_CONTROLLER_IDENTIFIER) ||
+        !st_capability_process_observe(pid, &before)) return ST_PROBE_UNAVAILABLE;
     char path[sizeof(((struct sockaddr_un *)0)->sun_path)];
-    snprintf(path, sizeof(path), "/private/tmp/spaceterm-native-520-%s.url.sock", run_hex().UTF8String);
+    int length = snprintf(path, sizeof(path), "/private/tmp/spaceterm-native-520-%s.%u.receipt.sock", run_hex().UTF8String, capability);
+    if (length < 0 || (size_t)length >= sizeof(path)) return ST_PROBE_UNAVAILABLE;
     int fd = agent_socket(path, deadline);
     if (fd < 0) return expired(deadline) ? ST_PROBE_TIMED_OUT : ST_PROBE_UNAVAILABLE;
     pid_t peer = -1; socklen_t size = sizeof(peer);
-    int authenticated = getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &peer, &size) == 0 &&
-        size == sizeof(peer) && peer == pid && companion();
-    uint8_t reply[17] = {0};
-    int matched = authenticated && st_capability_transfer(fd, bound_targets.run_id, 16, 1, deadline) &&
-        shutdown(fd, SHUT_WR) == 0 && st_capability_transfer(fd, reply, 16, 0, deadline) &&
-        memcmp(reply, bound_targets.run_id, 16) == 0 && st_capability_wait_fd(fd, POLLIN, deadline) &&
-        read(fd, reply + 16, 1) == 0 &&
-        proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &after, sizeof(after)) == sizeof(after) &&
-        before.pbi_start_tvsec == after.pbi_start_tvsec && before.pbi_start_tvusec == after.pbi_start_tvusec;
+    uint8_t request[44] = {'S', 'C', 'T', 'R', 0, 0, 0, 1}, reply[45] = {0};
+    request[11] = (uint8_t)capability;
+    memcpy(request + 12, bound_targets.run_id, 16); memcpy(request + 28, bound_targets.target_nonce, 16);
+    int matched = getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &peer, &size) == 0 &&
+        size == sizeof(peer) && peer == pid && st_capability_transfer(fd, request, sizeof(request), 1, deadline) &&
+        shutdown(fd, SHUT_WR) == 0 && st_capability_transfer(fd, reply, sizeof(request), 0, deadline) &&
+        memcmp(reply, request, sizeof(request)) == 0 && st_capability_wait_fd(fd, POLLIN, deadline) &&
+        read(fd, reply + sizeof(request), 1) == 0 &&
+        st_capability_process_observe(pid, &after) &&
+        before.uniqueid == after.uniqueid && before.pidversion == after.pidversion &&
+        signed_process(pid, @ST_CAPABILITY_CONTROLLER_IDENTIFIER);
+    size = sizeof(peer);
+    matched = matched && getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &peer, &size) == 0 && size == sizeof(peer) && peer == pid;
     st_capability_discard_owned(reply, sizeof(reply)); close(fd);
     if (matched && !expired(deadline)) return ST_PROBE_OK;
     return expired(deadline) ? ST_PROBE_TIMED_OUT : ST_PROBE_UNAVAILABLE;
 }
+st_native_result st_capability_url_receipt(uint64_t deadline) { return target_receipt(ST_CAP_URL, deadline); }
 
 static void ssh_agent(st_capability_observation *out, uint64_t deadline) {
     int fd = agent_socket(getenv("SSH_AUTH_SOCK"), deadline);
@@ -785,6 +814,35 @@ static void gpg_agent(st_capability_observation *out, uint64_t deadline) {
     (void)st_capability_gpg_agent(&peer, deadline, out);
 }
 
+static int clipboard_count(void *context, uint64_t *out) {
+    NSPasteboard *board = (__bridge NSPasteboard *)context;
+    NSInteger count = board.changeCount;
+    if (count < 0) return 0;
+    *out = (uint64_t)count; return 1;
+}
+int st_capability_clipboard_text(void *context, uint8_t *out, size_t capacity, size_t *length) {
+    (void)context; (void)out; (void)capacity; (void)length;
+    /* Darwin's RLIMIT_AS rejects mmap but does not bound Mach out-of-line copyout.
+     * AppKit exposes no size-before-acquisition or bounded pasteboard read. A
+     * 64-MiB native IPC regression crosses the proposed 16-MiB cap, so neither that
+     * cap nor a post-acquisition NSData length check can authorize this request.
+     * Refuse before dataForType. The case emits Unavailable, never read evidence.
+     * The injected bounded clipboard peer remains read-only and content-free. */
+    return 0;
+}
+static uint64_t clipboard_now(void *unused) { (void)unused; return st_capability_monotonic_ns(); }
+static void clipboard(st_capability_observation *out, uint64_t deadline) {
+    st_capability_agent_session before = {0}, after = {0};
+    if (!native_agent_session(NULL, &before)) { unavailable(out, 1); return; }
+    NSPasteboard *board = [NSPasteboard generalPasteboard];
+    st_capability_clipboard_peer peer = {(__bridge void *)board, clipboard_count, st_capability_clipboard_text, clipboard_now};
+    st_capability_clipboard_read(&peer, bound_targets.target_nonce, deadline, out);
+    if (!native_agent_session(NULL, &after) || memcmp(&before, &after, sizeof(before))) {
+        unavailable(out, 0); out->effect_class = ST_EFFECT_UNOBSERVED;
+    }
+    st_capability_discard_owned(&before, sizeof(before)); st_capability_discard_owned(&after, sizeof(after));
+}
+
 static int owned_wait(pid_t child, uint64_t deadline, int *status) {
     while (!expired(deadline)) {
         pid_t result = waitpid(child, status, WNOHANG);
@@ -808,8 +866,10 @@ static int owned_wait(pid_t child, uint64_t deadline, int *status) {
  * Each sudo root gets its own session/group. The outer worker scope additionally
  * catches interruption before the inner scope's sentinel or final scan. */
 static int fixed_sudo(int tty, int invalidate, uint64_t deadline, int *status, int *clean) {
+    st_capability_terminal terminal;
+    if (!st_capability_terminal_prepare(tty, &terminal)) return 0;
     int gate[2];
-    if (pipe(gate) != 0) return 0;
+    if (pipe(gate) != 0) { st_capability_terminal_finish(&terminal); return 0; }
     fcntl(gate[0], F_SETFD, FD_CLOEXEC); fcntl(gate[1], F_SETFD, FD_CLOEXEC);
     char *reset[] = {"/usr/bin/sudo", "-k", NULL};
     char *environment[] = {"PATH=/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL=C", NULL};
@@ -820,19 +880,19 @@ static int fixed_sudo(int tty, int invalidate, uint64_t deadline, int *status, i
         char byte = 0; ssize_t received;
         do { received = read(gate[0], &byte, 1); } while (received < 0 && errno == EINTR);
         close(gate[0]);
-        if (received != 1 || byte != 'g' || setsid() < 0 ||
-            dup2(tty, STDIN_FILENO) < 0 || dup2(tty, STDOUT_FILENO) < 0 || dup2(tty, STDERR_FILENO) < 0) _exit(125);
+        if (received != 1 || byte != 'g' || !st_capability_terminal_child_setup(&terminal)) _exit(125);
         execve("/usr/bin/sudo", arguments, environment); _exit(126);
     }
     close(gate[0]);
-    if (child < 0) { close(gate[1]); return 0; }
+    if (child < 0) { close(gate[1]); st_capability_terminal_finish(&terminal); return 0; }
     st_capability_process_identity root;
     int observed = st_capability_process_observe(child, &root);
     char byte = 'g';
     int started = observed && st_capability_transfer(gate[1], &byte, 1, 1, deadline);
     close(gate[1]);
-    int completed = owned_wait(child, deadline, status);
-    *clean = completed && observed && st_capability_tree_retire_native(root.uniqueid) == ST_PROBE_OK;
+    int completed = st_capability_terminal_wait(&terminal, child, deadline, status);
+    int restored = st_capability_terminal_finish(&terminal);
+    *clean = completed && observed && restored && st_capability_tree_retire_native(root.uniqueid) == ST_PROBE_OK;
     return started && completed;
 }
 static void touch_id(st_capability_observation *out, uint64_t deadline) {
@@ -899,23 +959,30 @@ void st_capability_controlled_shell_order(st_capability_observation *out, uint64
     out->outcome = ST_OUTCOME_CLEANUP_UNRESOLVED;
 }
 
+st_native_result st_capability_bind_shell_mode(int fd, uint64_t deadline) {
+    if (shell_mode_bound) return ST_PROBE_INVALID;
+    st_native_result result = st_capability_read_shell_mode(fd, deadline, &shell_mode);
+    if (result == ST_PROBE_OK) shell_mode_bound = 1;
+    return result;
+}
+
 st_native_result st_capability_observe_environment(st_probe_context context,
-    st_capability_retained_environment **out) {
-    if (!out || *out || getuid() == 0 || geteuid() != getuid() ||
+    st_capability_environment_difference *out) {
+    if (!out || getuid() == 0 || geteuid() != getuid() ||
         !signed_process(getpid(), @ST_CAPABILITY_IDENTIFIER) || !observed_context(context))
         return ST_PROBE_UNAVAILABLE;
+    pid_t shell = getppid();
+    return st_capability_observe_shell_environment(shell, context, out);
+}
+st_native_result st_capability_observe_shell_environment(pid_t shell, st_probe_context context,
+    st_capability_environment_difference *out) {
+    /* Mode is normalized by the originating shell. KERN_PROCARGS2 includes that
+     * process's private initial environment even after it unsets a value. Never
+     * request another process's argv/environment block to recover two flags. */
+    if (!out || context < 1 || context > 2 || !shell_mode_bound || shell_mode != 3) return ST_PROBE_UNAVAILABLE;
     struct passwd *account = getpwuid(getuid());
     if (!account || !account->pw_shell || (strcmp(account->pw_shell, "/bin/zsh") && strcmp(account->pw_shell, "/bin/bash")))
         return ST_PROBE_UNAVAILABLE;
-    pid_t shell = getppid();
-    /* Worker re-exec adds exactly one signed probe parent. Never search past an
-     * unrelated intermediary to claim its ancestor's shell environment. */
-    if (signed_process(shell, @ST_CAPABILITY_IDENTIFIER)) {
-        struct proc_bsdinfo parent;
-        if (proc_pidinfo(shell, PROC_PIDTBSDINFO, 0, &parent, sizeof(parent)) != sizeof(parent))
-            return ST_PROBE_UNAVAILABLE;
-        shell = (pid_t)parent.pbi_ppid;
-    }
     char shell_path[PROC_PIDPATHINFO_MAXSIZE];
     struct proc_bsdinfo before, after, current;
     int tty = open("/dev/tty", O_RDONLY | O_CLOEXEC | O_NOCTTY);
@@ -928,37 +995,12 @@ st_native_result st_capability_observe_environment(st_probe_context context,
     if (tty >= 0) close(tty);
     st_capability_discard_owned(shell_path, sizeof(shell_path));
     if (!matches) return ST_PROBE_UNAVAILABLE;
-    /* Native argv inspection remains memory-only. The buffer can also contain
-     * unrelated process data; bound and wipe the entire allocation on all exits. */
-    size_t length = 128 * 1024;
-    uint8_t *bytes = calloc(1, length);
-    if (!bytes) return ST_PROBE_IO_UNAVAILABLE;
-    int query[] = {CTL_KERN, KERN_PROCARGS2, shell};
-    size_t received = length;
-    int recognized = 0;
-    if (sysctl(query, 3, bytes, &received, NULL, 0) == 0 && received > sizeof(int)) {
-        int count; memcpy(&count, bytes, sizeof(count));
-        size_t offset = sizeof(count);
-        while (offset < received && bytes[offset]) ++offset;
-        while (offset < received && !bytes[offset]) ++offset;
-        const char *arguments[32]; size_t used = 0;
-        if (count > 0 && count <= 32) {
-            while (used < (size_t)count && offset < received) {
-                arguments[used] = (const char *)bytes + offset;
-                while (offset < received && bytes[offset]) ++offset;
-                if (offset == received) break;
-                ++offset; ++used;
-            }
-            recognized = used == (size_t)count && st_capability_shell_invocation(arguments, used, 1);
-        }
-    }
-    st_capability_discard_owned(bytes, length); free(bytes);
-    if (!recognized || proc_pidinfo(shell, PROC_PIDTBSDINFO, 0, &after, sizeof(after)) != sizeof(after) ||
+    if (proc_pidinfo(shell, PROC_PIDTBSDINFO, 0, &after, sizeof(after)) != sizeof(after) ||
         before.pbi_start_tvsec != after.pbi_start_tvsec || before.pbi_start_tvusec != after.pbi_start_tvusec)
         return ST_PROBE_UNAVAILABLE;
     const char *locales[ST_CAPABILITY_LOCALE_COUNT];
     for (size_t i = 0; i < ST_CAPABILITY_LOCALE_COUNT; ++i) locales[i] = getenv(st_capability_locale_names[i]);
-    return st_capability_environment_retain(context, getenv("PATH"), locales, out);
+    return st_capability_environment_compare_local(context, getenv("PATH"), locales, out);
 }
 
 st_native_result st_capability_native_worker(st_capability_case capability, st_probe_context context,
@@ -977,12 +1019,8 @@ st_native_result st_capability_native_worker(st_capability_case capability, st_p
             case ST_CAP_SELECTED_VOLUME: volume(out); break;
             case ST_CAP_MICROPHONE: microphone(out, deadline); break;
             case ST_CAP_SCREEN_RECORDING: screen(out, deadline); break;
-            case ST_CAP_ACCESSIBILITY: accessibility(out); break;
-            case ST_CAP_CLIPBOARD:
-                /* NSPasteboard has no atomic change-count-conditioned replacement.
-                 * A check followed by clearContents can destroy a newer user change.
-                 * Do not modify the general pasteboard or claim pbcopy/pbpaste proof. */
-                unavailable(out, 0); break;
+            case ST_CAP_ACCESSIBILITY: accessibility(out, deadline); break;
+            case ST_CAP_CLIPBOARD: clipboard(out, deadline); break;
             case ST_CAP_URL: st_capability_events(out, deadline, 1); break;
             case ST_CAP_APPLE_EVENTS: st_capability_events(out, deadline, 0); break;
             case ST_CAP_LOGIN_KEYCHAIN: login_keychain(out); break;
@@ -990,10 +1028,9 @@ st_native_result st_capability_native_worker(st_capability_case capability, st_p
             case ST_CAP_GPG_AGENT: gpg_agent(out, deadline); break;
             case ST_CAP_TOUCH_ID_SUDO: touch_id(out, deadline); break;
             case ST_CAP_LOGIN_SHELL: {
-                st_capability_retained_environment *environment = NULL;
+                st_capability_environment_difference environment;
                 if (st_capability_observe_environment(context, &environment) == ST_PROBE_OK) verified(out);
                 else unavailable(out, 1);
-                st_capability_environment_release(&environment);
                 break;
             }
         }

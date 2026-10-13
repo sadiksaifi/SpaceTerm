@@ -58,7 +58,7 @@ int main(void) {
     assert(retire(&f) == ST_PROBE_CLEANUP_UNRESOLVED && f.scans == 20);
     puts("passed retirement_has_one_absolute_deadline");
     f = member(); f.live[0].uniqueid = 220; f.live[0].parent_uniqueid = 210;
-    assert(retire(&f) == ST_PROBE_CLEANUP_UNRESOLVED && f.signals == 0);
-    puts("passed post_sentinel_unknown_ancestry_is_not_inferred_foreign");
+    assert(retire(&f) == ST_PROBE_OK && f.signals == 0);
+    puts("passed post_sentinel_foreign_activity_is_outside_the_fixed_command_window");
     puts("executed=8 proof=synthetic native-effects=0");
 }

@@ -25,5 +25,6 @@ st_native_result st_capability_tree_retire(const st_capability_tree_peer *,
     uint64_t root_uniqueid, uint64_t sentinel_uniqueid, uint64_t deadline_ns);
 int st_capability_process_observe(pid_t, st_capability_process_identity *);
 int st_capability_process_sentinel(uint64_t *uniqueid);
+int st_capability_process_signal(const st_capability_process_identity *);
 st_native_result st_capability_tree_retire_native(uint64_t root_uniqueid);
 #endif

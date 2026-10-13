@@ -14,16 +14,17 @@ static const st_capability_process_identity *find(const st_capability_process_id
     st_capability_process_identity key = {.uniqueid = uniqueid};
     return bsearch(&key, history, count, sizeof(*history), order);
 }
-/* Return member, foreign, or uncertain. Historical fork-parent IDs survive
- * reparenting. An unknown ID above the root is never inferred to be foreign,
- * including a descendant born after the sentinel. */
+/* The root has been reaped before the sentinel brackets the fixed command.
+ * Historical fork-parent IDs survive reparenting. Missing intermediate parents
+ * inside that window are uncertainty, never evidence of absence. */
 static int membership(const st_capability_process_identity *history, size_t count,
-    uint64_t uniqueid, uint64_t root) {
+    uint64_t uniqueid, uint64_t root, uint64_t hi) {
     for (unsigned depth = 0; depth < 128; ++depth) {
         if (uniqueid == root) return 1;
         if (uniqueid < root) return 0;
         const st_capability_process_identity *node = find(history, count, uniqueid);
-        if (!node || node->parent_uniqueid == uniqueid) return -1;
+        if (!node) return uniqueid < hi ? -1 : 0;
+        if (node->parent_uniqueid == uniqueid) return -1;
         uniqueid = node->parent_uniqueid;
     }
     return -1;
@@ -61,7 +62,7 @@ st_native_result st_capability_tree_retire(const st_capability_tree_peer *peer,
         }
         if (uncertain) break;
         for (size_t i = 0; i < count; ++i) {
-            int classification = membership(history, retained, live[i].uniqueid, root);
+            int classification = membership(history, retained, live[i].uniqueid, root, hi);
             if (classification < 0) uncertain = 1;
             else if (classification == 1) {
                 members = 1;

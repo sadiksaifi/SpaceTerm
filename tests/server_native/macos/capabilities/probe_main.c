@@ -16,21 +16,6 @@ static int decimal(const char *text, uint64_t *out) {
     }
     *out = value; return 1;
 }
-static int run_identity(const char *text, uint8_t out[16]) {
-    if (!text || strlen(text) != 32) return 0;
-    unsigned nonzero = 0;
-    for (size_t i = 0; i < 16; ++i) {
-        unsigned value = 0;
-        for (size_t j = 0; j < 2; ++j) {
-            char c = text[i * 2 + j];
-            if (c >= '0' && c <= '9') value = value * 16 + (unsigned)(c - '0');
-            else if (c >= 'a' && c <= 'f') value = value * 16 + (unsigned)(c - 'a' + 10);
-            else return 0;
-        }
-        out[i] = (uint8_t)value; nonzero |= value;
-    }
-    return nonzero != 0;
-}
 static void emit(void *context, const st_capability_observation *observation) {
     int *failed = context;
     uint8_t bytes[32];
@@ -56,37 +41,31 @@ int main(int argc, char **argv) {
     /* The default has no effect and emits no host data. --worker is an internal
      * re-exec entry, not a bypass: it independently checks code and ancestry. */
     if (argc == 5 && strcmp(argv[1], "--worker") == 0) return st_capability_worker_entry(argc, argv);
-    if (argc == 2 && strcmp(argv[1], "--environment") == 0) {
-        st_capability_environment observation;
-        int locale = getenv("LC_ALL") != NULL || getenv("LC_CTYPE") != NULL || getenv("LANG") != NULL;
-        uint8_t bytes[16];
-        if (st_capability_normalize_environment(getenv("PATH"), locale, &observation) ||
-            st_capability_environment_encode(&observation, bytes)) return 1;
-        return fwrite(bytes, 1, sizeof(bytes), stdout) == sizeof(bytes) && fflush(stdout) == 0 ? 0 : 1;
-    }
-    if (argc == 6 && strcmp(argv[1], "--environment-channel") == 0) {
-        uint64_t context, deadline, fd; uint8_t run[16];
-        if (!run_identity(argv[5], run) || !decimal(argv[2], &context) || context < 1 || context > 2 || !decimal(argv[3], &deadline) ||
-            !decimal(argv[4], &fd) || fd < 3 || fd > INT32_MAX) return 1;
-        st_native_result result = st_capability_environment_send_current((int)fd, (uint32_t)context, deadline, run);
-        close((int)fd);
-        return result == ST_PROBE_OK ? 0 : 1;
-    }
-    if (argc == 6 && strcmp(argv[1], "--environment-pair") == 0) {
-        uint64_t deadline, gui, daemon; uint8_t run[16];
-        if (!run_identity(argv[5], run) || !decimal(argv[2], &deadline) || !decimal(argv[3], &gui) || !decimal(argv[4], &daemon) ||
-            gui < 3 || daemon < 3 || gui > INT32_MAX || daemon > INT32_MAX || gui == daemon) return 1;
+    if (argc == 4 && strcmp(argv[1], "--environment") == 0) {
+        uint64_t context, fd;
         st_capability_environment_difference difference;
-        st_native_result result = st_capability_environment_compare_channels((int)gui, (int)daemon, deadline, run, &difference);
-        close((int)gui); close((int)daemon);
         uint8_t bytes[20];
-        if (result != ST_PROBE_OK || st_capability_environment_difference_encode(&difference, bytes)) return 1;
+        if (!decimal(argv[2], &context) || context < 1 || context > 2 ||
+            !decimal(argv[3], &fd) || fd > INT32_MAX) return 1;
+        st_native_result mode = st_capability_bind_shell_mode((int)fd,
+            st_capability_monotonic_ns() + UINT64_C(5000000000));
+        close((int)fd);
+        if (mode != ST_PROBE_OK || st_capability_observe_environment((uint32_t)context, &difference) != ST_PROBE_OK ||
+            st_capability_environment_difference_encode(&difference, bytes) != ST_PROBE_OK) return 1;
         return fwrite(bytes, 1, sizeof(bytes), stdout) == sizeof(bytes) && fflush(stdout) == 0 ? 0 : 1;
     }
     uint64_t capability, context, deadline, fd;
-    if (argc != 6 || strcmp(argv[1], "--run") || !decimal(argv[2], &capability) ||
+    if ((argc != 6 && argc != 7) || strcmp(argv[1], "--run") || !decimal(argv[2], &capability) ||
         !decimal(argv[3], &context) || !decimal(argv[4], &deadline) || !decimal(argv[5], &fd) ||
-        capability == 0 || capability > 13 || context == 0 || context > 2 || fd < 3 || fd > INT32_MAX) return 1;
+        capability == 0 || capability > 13 || context == 0 || context > 2 || fd < 3 || fd > INT32_MAX ||
+        ((capability == ST_CAP_LOGIN_SHELL) != (argc == 7))) return 1;
+    if (argc == 7) {
+        uint64_t mode_fd;
+        if (!decimal(argv[6], &mode_fd) || mode_fd > INT32_MAX || mode_fd == fd) return 1;
+        st_native_result mode = st_capability_bind_shell_mode((int)mode_fd, deadline);
+        close((int)mode_fd);
+        if (mode != ST_PROBE_OK) return 1;
+    }
     st_capability_targets targets;
     int okay = read_targets((int)fd, deadline, &targets);
     close((int)fd);

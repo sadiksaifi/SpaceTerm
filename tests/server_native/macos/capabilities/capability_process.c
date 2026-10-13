@@ -91,8 +91,8 @@ static int list(void *unused, st_capability_process_identity *out, size_t capaci
     }
     free(pids); return okay;
 }
-static int signal_member(void *unused, const st_capability_process_identity *identity) {
-    (void)unused;
+int st_capability_process_signal(const st_capability_process_identity *identity) {
+    if (!identity) return 0;
     st_capability_process_identity current;
     if (!st_capability_process_observe(identity->pid, &current))
         return kill(identity->pid, 0) != 0 && errno == ESRCH;
@@ -105,6 +105,9 @@ static int signal_member(void *unused, const st_capability_process_identity *ide
      * uniqueid check alone would leave a read/kill PID-reuse race. */
     int result = proc_signal_with_audittoken(&token, SIGTERM);
     return result == 0 || result == ESRCH;
+}
+static int signal_member(void *unused, const st_capability_process_identity *identity) {
+    (void)unused; return st_capability_process_signal(identity);
 }
 static uint64_t now(void *unused) { (void)unused; return st_capability_monotonic_ns(); }
 static void pause_scan(void *unused) {

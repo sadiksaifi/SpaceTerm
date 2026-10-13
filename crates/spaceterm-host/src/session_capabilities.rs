@@ -1,8 +1,8 @@
 //! Content-free capability facts and GUI-session-scoped adapters.
 //!
 //! These records grant no execution, credential, filesystem, or GUI authority.
-//! AppKit probes belong to the evidence fixture, not to the server. A production
-//! session broker needs an independent native session observation provider.
+//! AppKit probes belong to the evidence fixture, not to the server. Native
+//! adapters use independent session observation without GUI dependencies.
 
 use std::{fmt, time::Duration};
 
@@ -57,7 +57,7 @@ codes! {
         ScreenRecording = 4,
         /// A synthetic companion control.
         Accessibility = 5,
-        /// A synthetic clipboard round trip with safe restoration.
+        /// A read of explicitly prepared synthetic general-clipboard text.
         Clipboard = 6,
         /// Receipt of a companion-owned URL.
         UrlOpening = 7,
@@ -457,15 +457,6 @@ impl<T: GuiSessionObserver> SessionAdapterBroker<T> {
     }
 }
 
-/// Fail-closed placeholder until platform session-incarnation proof is integrated.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct UnavailableGuiSessionObserver;
-impl GuiSessionObserver for UnavailableGuiSessionObserver {
-    fn observe(&self) -> Result<Option<GuiSessionFacts>, CapabilityFailure> {
-        Err(CapabilityFailure::NativeUnavailable)
-    }
-}
-
 /// Observed ordering of controlled login and interactive shell startup files.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ShellStartupPhase {
@@ -540,11 +531,11 @@ pub struct NormalizedShellDifference {
 }
 
 codes! {
-    /// Difference observed by internally comparing retained PATH values.
+    /// Difference observed by comparing private PATH values to a public local baseline.
     PathDifference {
-        /// Exact values, including component order and duplicates, match.
+        /// The exact PATH value matches the public baseline.
         Equal = 1,
-        /// One shell has no PATH value.
+        /// This process has no PATH value.
         PresenceChanged = 2,
         /// Component contents or multiplicities differ.
         ComponentsChanged = 3,
@@ -555,7 +546,7 @@ codes! {
 codes! {
     /// Difference observed across the fixed locale-variable allowlist.
     LocaleDifference {
-        /// Every variable's presence and value match.
+        /// Every variable matches the public baseline's presence and value.
         Equal = 1,
         /// At least one variable's presence differs.
         PresenceChanged = 2,
@@ -564,18 +555,19 @@ codes! {
     }
 }
 
-/// Content-free exact environment comparison from the evidence-only native adapter.
+/// A local environment comparison, never exact GUI-versus-daemon equality.
 ///
-/// The adapter compares private values before encoding these classifications.
-/// Counts, presence alone, and controlled startup files cannot construct equality.
-/// This is an observation record, not GUI-session authority.
+/// Reference 1 is PATH `/usr/bin:/bin:/usr/sbin:/sbin`, LANG `C`, and absent LC_*
+/// values. Each process compares its own private values and emits only these facts.
+/// Matching facts from two contexts do not prove their private values match.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct NormalizedEnvironmentDifference {
+pub struct LocalEnvironmentComparison {
+    context: ProbeContext,
     path: PathDifference,
     locale: LocaleDifference,
 }
-impl NormalizedEnvironmentDifference {
-    /// Recognize the exact schema-1, GUI-versus-daemon, twenty-byte record.
+impl LocalEnvironmentComparison {
+    /// Recognize the exact schema-2, context-bound, twenty-byte local record.
     pub fn decode(bytes: &[u8]) -> Result<Self, CapabilityFailure> {
         let bytes: &[u8; 20] = bytes
             .try_into()
@@ -584,22 +576,24 @@ impl NormalizedEnvironmentDifference {
         for (field, chunk) in fields.iter_mut().zip(bytes.as_chunks::<4>().0) {
             *field = u32::from_be_bytes(*chunk);
         }
-        if fields[0] != 1
-            || fields[1] != ProbeContext::GuiParented as u32
-            || fields[2] != ProbeContext::DaemonParented as u32
-        {
+        if fields[0] != 2 || fields[2] != 1 {
             return Err(CapabilityFailure::InvalidRecord);
         }
         Ok(Self {
+            context: ProbeContext::try_from(fields[1])?,
             path: PathDifference::try_from(fields[3])?,
             locale: LocaleDifference::try_from(fields[4])?,
         })
     }
-    /// The comparison of PATH contents and ordering, without values or hashes.
+    /// The independently observed parenting context.
+    pub fn context(self) -> ProbeContext {
+        self.context
+    }
+    /// PATH contents and ordering relative to the public baseline.
     pub fn path(self) -> PathDifference {
         self.path
     }
-    /// The comparison of locale values, without values or hashes.
+    /// Locale presence and values relative to the public baseline.
     pub fn locale(self) -> LocaleDifference {
         self.locale
     }

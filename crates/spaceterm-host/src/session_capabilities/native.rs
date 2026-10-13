@@ -6,7 +6,9 @@ use crate::native_deployment::{account::NativeAccountProvider, contracts::Accoun
 #[cfg(unix)]
 mod endpoints;
 #[cfg(unix)]
-pub use endpoints::{NativeSessionLocations, SystemSessionConnector, SystemSessionLocations};
+pub use endpoints::{
+    NativeSessionLocations, SessionConnection, SystemSessionConnector, SystemSessionLocations,
+};
 
 #[cfg(target_os = "linux")]
 mod linux;

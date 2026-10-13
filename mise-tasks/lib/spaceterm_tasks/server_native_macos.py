@@ -867,6 +867,8 @@ class ReceiptStore:
         return os.path.lexists(self.directory / "receipt.json")
 
     def read(self) -> dict[str, Any]:
+        if self._uncertain or os.path.lexists(self.directory / "receipt.pending"):
+            reject("indeterminate")
         value = decode_json(read_regular(self.directory, "receipt.json", 65536), 65536)
         validate_receipt(value)
         return value
@@ -895,8 +897,15 @@ class ReceiptStore:
             os.fsync(descriptor)
             if platform.system() == "Darwin":
                 fcntl.fcntl(descriptor, 51)  # F_FULLFSYNC: no durability fallback.
-            os.rename(temporary, "receipt.json", src_dir_fd=directory, dst_dir_fd=directory)
+            # Keep the exact pending inode until the new receipt and its name are
+            # durable. A recreated consumer refuses it instead of guessing which
+            # identity publications survived. Operator reconciliation is required.
+            os.link(temporary, "receipt.next", src_dir_fd=directory, dst_dir_fd=directory)
+            os.rename("receipt.next", "receipt.json", src_dir_fd=directory, dst_dir_fd=directory)
             os.fsync(directory)
+            os.unlink(temporary, dir_fd=directory)
+            # The receipt is already durable. A stale pending name after a crash
+            # is a conservative refusal, not authority to repeat a cleanup effect.
         except OSError:
             self._uncertain = True
             reject("indeterminate")
@@ -992,6 +1001,13 @@ def _cleanup_receipt(store: ReceiptStorage, native: FixtureNativeOperations) -> 
     receipt["state"] = "cleaning"
     store.publish(receipt)
     try:
+        service = receipt["objects"]["service"]
+        if service["state"] in ("pending", "installed") and not any(
+            binding["identity"]["kind"] == "process" for binding in service["bindings"]
+        ):
+            # A service label or configuration is not prior process scope. Even
+            # a legitimately stopped service needs operator reconciliation here.
+            reject("cleanup-unresolved")
         observation = native.retire(copy.deepcopy(receipt))
         if type(observation) is not CleanupObservation or not observation.complete:
             reject("cleanup-unresolved")

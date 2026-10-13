@@ -68,11 +68,6 @@ st_native_result st_capability_encode(const st_capability_observation *, uint8_t
 st_native_result st_capability_decode(const uint8_t *, size_t, st_capability_observation *);
 uint64_t st_capability_monotonic_ns(void);
 
-/* Only compare retained change counters; this is NOT a native atomic restore
- * primitive. The general pasteboard probe remains unavailable until such a
- * primitive or equivalent exclusion exists. */
-int st_capability_clipboard_restore_eligible(uint64_t written_change, uint64_t current_change);
-
 /* Discard owned captured data. Never log, retain, or emit sample/pixel bytes. */
 void st_capability_discard_owned(void *bytes, size_t length);
 

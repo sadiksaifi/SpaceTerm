@@ -51,6 +51,68 @@ def encoded(value):
 
 
 class EvidenceSchemaTests(unittest.TestCase):
+    def test_local_environment_comparison_jsonl_preserves_reference_and_context(self):
+        observations = []
+        for sequence, context in enumerate(("gui-parented", "daemon-parented"), 1):
+            value = record(sequence)
+            value.update(
+                job="macos-capabilities",
+                case="normalized-shell-comparison",
+                context=context,
+                facts={
+                    "kind": "environment-comparison",
+                    "reference": "sanitized-launch-v1",
+                    "path_difference": "components-changed",
+                    "locale_difference": "values-changed",
+                    "login": True,
+                    "interactive": True,
+                    "startup_order_verified": True,
+                },
+            )
+            observations.append(value)
+        required = [
+            schema.RequiredCase(value["job"], value["case"], value["context"])
+            for value in observations
+        ]
+        sink = io.BytesIO()
+        collector = schema.Collector()
+        for value in observations:
+            collector.append(encoded(value), sink)
+        self.assertEqual(collector.finish(required).passed, 2)
+        retained = [json.loads(line) for line in sink.getvalue().splitlines()]
+        self.assertEqual(retained, observations)
+        for reference in (None, "gui-equals-daemon", "private-value"):
+            invalid = copy.deepcopy(observations[0])
+            invalid["facts"]["reference"] = reference
+            with self.subTest(reference=reference), self.assertRaises(TaskError):
+                schema.validate_record(invalid)
+
+    def test_denied_without_case_specific_denial_observation_is_not_native_proof(self):
+        value = record()
+        value.update(result="denied", failure="authorization-denied")
+        value["facts"].update(process_absent=False, endpoint_absent=False)
+        with self.assertRaisesRegex(TaskError, "^invalid-record$"):
+            schema.validate_record(value)
+
+    def test_capability_denial_requires_attempt_not_only_denied_preflight(self):
+        value = record()
+        value.update(
+            job="macos-capabilities",
+            case="microphone",
+            result="denied",
+            failure="authorization-denied",
+            facts={
+                "kind": "capability",
+                "capability": 3,
+                "preflight": "denied",
+                "effect": "unrun",
+                "responsible_process": "probe",
+                "cleanup": "not-needed",
+            },
+        )
+        with self.assertRaisesRegex(TaskError, "^invalid-record$"):
+            schema.validate_record(value)
+
     def test_invalid_or_missing_records_cannot_become_passed(self):
         required = [schema.RequiredCase("native-installation", record()["case"], "daemon-parented")]
         self.assertEqual(schema.collect(io.BytesIO(encoded(record())), required).records, 1)
@@ -156,7 +218,7 @@ class EvidenceSchemaTests(unittest.TestCase):
     def test_privilege_observations_cannot_omit_any_native_proof(self):
         value = record()
         fields = (
-            "real_ids_verified effective_ids_verified saved_ids_verified supplementary_groups_cleared "
+            "real_ids_verified effective_ids_verified saved_ids_verified supplementary_groups_verified "
             "execution_bound hardened_runtime_verified descriptor_scope_verified secret_channels_closed "
             "custody_descriptors_absent retriever_absent root_process_absent root_listener_absent"
         ).split()
@@ -165,6 +227,8 @@ class EvidenceSchemaTests(unittest.TestCase):
             case="privilege-and-inheritance-proof",
             facts={
                 "kind": "privilege",
+                "primary_gid": 20,
+                "supplementary_groups": [20, *range(21, 40)],
                 **dict.fromkeys(fields, True),
             },
         )
@@ -175,6 +239,13 @@ class EvidenceSchemaTests(unittest.TestCase):
             incomplete["facts"][field] = False
             with self.subTest(field=field), self.assertRaises(TaskError):
                 schema.collect(io.BytesIO(encoded(incomplete)), required)
+        for groups in ([20, 0], [20, *range(21, 40), 0]):
+            root_group = copy.deepcopy(value)
+            root_group["facts"]["supplementary_groups"] = groups
+            with self.subTest(groups=groups), self.assertRaisesRegex(TaskError, "^invalid-record$"):
+                schema.collect(io.BytesIO(encoded(root_group)), required)
+            root_group.update(result="failed", failure="privilege-drop-unproven")
+            schema.validate_record(root_group)
 
     def test_required_profiles_have_closed_case_specific_observation_contracts(self):
         from spaceterm_tasks.server_native_macos import required_cases
@@ -433,6 +504,18 @@ class EvidenceSchemaTests(unittest.TestCase):
                 with schema.EvidenceOutput(alias):
                     self.fail("followed output symlink")
             self.assertEqual(json.loads(path.read_bytes()), record())
+
+    def test_output_sync_loss_cannot_be_retried_as_a_completed_collection(self):
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as directory:
+            with schema.EvidenceOutput(Path(directory) / "evidence.jsonl") as output:
+                output.append(encoded(record()))
+                with patch("os.fsync", side_effect=OSError("private native detail")):
+                    with self.assertRaisesRegex(TaskError, "^io-unavailable$"):
+                        output.finish([])
+                with self.assertRaisesRegex(TaskError, "^io-unavailable$"):
+                    output.finish([])
 
     def test_output_failure_is_typed_and_never_claims_completion(self):
         with tempfile.TemporaryDirectory() as directory:

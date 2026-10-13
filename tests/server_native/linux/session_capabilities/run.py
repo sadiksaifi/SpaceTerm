@@ -71,7 +71,62 @@ def run():
         tree = checked([str(binary)])
         if not tree.endswith(b"executed=8 proof=synthetic native-effects=0\n"):
             raise RuntimeError("session-capability-executed-count-invalid")
-    print(f"executed-rust={int(result.group(1))} executed-c=8 native-effects=0")
+        count = 8
+        for name, files, expected in (
+            (
+                "target-contracts",
+                (
+                    "capability_targets.c",
+                    "target_contract_tests.c",
+                    "../gui/companion_receipts.c",
+                    "../gui/companion_model.c",
+                ),
+                3,
+            ),
+            (
+                "clipboard",
+                (
+                    "capability_clipboard.c",
+                    "capability_targets.c",
+                    "capability_probe.c",
+                    "clipboard_tests.c",
+                ),
+                4,
+            ),
+            (
+                "capabilities",
+                (
+                    "capability_probe.c",
+                    "capability_io.c",
+                    "capability_environment.c",
+                    "capability_tests.c",
+                ),
+                20,
+            ),
+        ):
+            binary = Path(temporary) / name
+            checked(
+                [
+                    "cc",
+                    "-std=c11",
+                    "-Wall",
+                    "-Wextra",
+                    "-Werror",
+                    "-pthread",
+                    "-ffunction-sections",
+                    "-Wl,--gc-sections",
+                    *(str(sources / file) for file in files),
+                    "-o",
+                    str(binary),
+                ]
+            )
+            output = checked([str(binary)])
+            if not output.endswith(
+                f"executed={expected} proof=synthetic native-effects=0\n".encode()
+            ):
+                raise RuntimeError("session-capability-executed-count-invalid")
+            count += expected
+    print(f"executed-rust={int(result.group(1))} executed-c={count} native-effects=0")
 
 
 if __name__ == "__main__":

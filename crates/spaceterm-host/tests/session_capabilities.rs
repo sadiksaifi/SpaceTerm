@@ -1,7 +1,7 @@
 use spaceterm_host::session_capabilities::{
     Capability, CapabilityFailure, CapabilityMatrix, CapabilityObservation, GuiSessionFacts,
     GuiSessionObserver, NormalizedShellObservation, ProbeContext, ProbeDeadline, ProbeOutcome,
-    SessionAdapterBroker, SessionPurpose, ShellStartupPhase, UnavailableGuiSessionObserver,
+    SessionAdapterBroker, SessionPurpose, ShellStartupPhase,
 };
 use std::{
     sync::{Arc, Mutex},
@@ -217,17 +217,6 @@ fn native_unprivileged_session_observation_can_issue_an_expiring_lease() {
 }
 
 #[test]
-fn production_session_observer_remains_unavailable() {
-    let broker = SessionAdapterBroker::new(UnavailableGuiSessionObserver);
-    assert_eq!(
-        broker
-            .bind(SessionPurpose::SshAgent, 0, Duration::from_secs(1))
-            .unwrap_err(),
-        CapabilityFailure::NativeUnavailable
-    );
-}
-
-#[test]
 fn normalized_shell_comparison_preserves_login_interactive_order() {
     use ShellStartupPhase::*;
     let order = [Environment, LoginProfile, InteractiveRc, LoginCompletion];
@@ -260,31 +249,32 @@ fn cleanup_uncertainty_overrides_success_and_sudo_exit_is_not_touch_id_proof() {
 }
 
 #[test]
-fn exact_environment_difference_is_separate_from_counts_and_rejects_coalesced_contexts() {
+fn local_environment_facts_bind_context_and_reference_without_claiming_cross_process_equality() {
     use spaceterm_host::session_capabilities::{
-        LocaleDifference, NormalizedEnvironmentDifference, PathDifference,
+        LocalEnvironmentComparison, LocaleDifference, PathDifference,
     };
-    let values =
-        NormalizedEnvironmentDifference::decode(&record([1, 1, 2, 3, 3, 0, 0, 0])[..20]).unwrap();
-    assert_eq!(values.path(), PathDifference::ComponentsChanged);
-    assert_eq!(values.locale(), LocaleDifference::ValuesChanged);
-    let order =
-        NormalizedEnvironmentDifference::decode(&record([1, 1, 2, 4, 1, 0, 0, 0])[..20]).unwrap();
-    assert_eq!(order.path(), PathDifference::OrderChanged);
-    assert_eq!(order.locale(), LocaleDifference::Equal);
+    for context in [ProbeContext::GuiParented, ProbeContext::DaemonParented] {
+        let values = LocalEnvironmentComparison::decode(
+            &record([2, context as u32, 1, 3, 3, 0, 0, 0])[..20],
+        )
+        .unwrap();
+        assert_eq!(values.context(), context);
+        assert_eq!(values.path(), PathDifference::ComponentsChanged);
+        assert_eq!(values.locale(), LocaleDifference::ValuesChanged);
+    }
     for fields in [
-        [1, 1, 1, 1, 1, 0, 0, 0],
-        [1, 2, 1, 1, 1, 0, 0, 0],
-        [1, 1, 2, 0, 1, 0, 0, 0],
-        [1, 1, 2, 1, 4, 0, 0, 0],
+        [1, 1, 2, 1, 1, 0, 0, 0], // Retired cross-process format.
+        [2, 0, 1, 1, 1, 0, 0, 0],
+        [2, 1, 2, 1, 1, 0, 0, 0], // Unknown local reference.
+        [2, 1, 1, 0, 1, 0, 0, 0],
+        [2, 1, 1, 1, 4, 0, 0, 0],
     ] {
         assert_eq!(
-            NormalizedEnvironmentDifference::decode(&record(fields)[..20]),
+            LocalEnvironmentComparison::decode(&record(fields)[..20]),
             Err(CapabilityFailure::InvalidRecord)
         );
     }
-    assert!(NormalizedEnvironmentDifference::decode(b"PATH=/synthetic/bin").is_err());
-    assert!(NormalizedEnvironmentDifference::decode(&record([1, 1, 2, 1, 1, 0, 0, 0])).is_err());
+    assert!(LocalEnvironmentComparison::decode(b"PATH=/synthetic/bin").is_err());
 }
 
 use spaceterm_host::{
@@ -494,4 +484,318 @@ fn native_linux_session_observation_can_issue_an_expiring_lease() {
         broker.revalidate(&lease, SessionPurpose::GraphicalPortal, 1_000_100),
         Err(CapabilityFailure::StaleAssessment)
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn replaced_agent_socket_cannot_complete_the_original_session_operation() {
+    use spaceterm_host::session_capabilities::{
+        SystemGuiSessionObserver, native::SystemSessionConnector,
+    };
+    use std::os::unix::{fs::PermissionsExt, net::UnixListener};
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().join(".gnupg");
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let path = directory.join("S.gpg-agent");
+    let original = UnixListener::bind(&path).unwrap();
+    let account = fixture_account(unsafe { libc::getuid() });
+    let broker = SessionAdapterBroker::new(SystemGuiSessionObserver::with_native_peer(
+        AccountPeer(account.clone()),
+        account.key(),
+        NativeSessionPeer(Arc::new(Mutex::new(Some([1; 16])))),
+    ));
+    let lease = broker
+        .bind(SessionPurpose::GpgAgent, 100, Duration::from_secs(1))
+        .unwrap();
+    let connector =
+        SystemSessionConnector::with_locations(&account, Locations(temporary.path().into()));
+    let result = connector.with_connection(
+        &broker,
+        &lease,
+        SessionPurpose::GpgAgent,
+        || 101,
+        |_| {
+            original.accept().unwrap();
+            std::fs::remove_file(&path).unwrap();
+            let replacement = UnixListener::bind(&path).unwrap();
+            assert!(replacement.local_addr().is_ok());
+            Ok(())
+        },
+    );
+    assert_eq!(result, Err(CapabilityFailure::StaleAssessment));
+}
+
+#[cfg(all(target_os = "linux", feature = "native-tests"))]
+#[test]
+fn native_linux_user_bus_authentication_uses_only_the_bound_account_session() {
+    use spaceterm_host::session_capabilities::{
+        SystemGuiSessionObserver, native::SystemSessionConnector,
+    };
+    let account = fixture_account(unsafe { libc::getuid() });
+    let broker = SessionAdapterBroker::new(SystemGuiSessionObserver::new(
+        AccountPeer(account.clone()),
+        account.key(),
+    ));
+    let now = || {
+        let mut value = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        assert_eq!(
+            unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut value) },
+            0
+        );
+        value.tv_sec as u64 * 1_000_000_000 + value.tv_nsec as u64
+    };
+    let lease = broker
+        .bind(SessionPurpose::UserBus, now(), Duration::from_secs(1))
+        .unwrap();
+    SystemSessionConnector::new(&account)
+        .with_connection(&broker, &lease, SessionPurpose::UserBus, now, |stream| {
+            let identity: String = account
+                .key()
+                .account_uid
+                .to_string()
+                .bytes()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            stream
+                .write_all(format!("\0AUTH EXTERNAL {identity}\r\n").as_bytes())
+                .map_err(|_| CapabilityFailure::NativeUnavailable)?;
+            let mut response = [0_u8; 128];
+            let mut used = 0;
+            loop {
+                if used == response.len() {
+                    return Err(CapabilityFailure::LimitExceeded);
+                }
+                stream
+                    .read_exact(&mut response[used..used + 1])
+                    .map_err(|_| CapabilityFailure::NativeUnavailable)?;
+                used += 1;
+                if response[..used].ends_with(b"\r\n") {
+                    break;
+                }
+            }
+            let authenticated = response[..used].starts_with(b"OK ");
+            response.fill(0);
+            if authenticated {
+                Ok(())
+            } else {
+                Err(CapabilityFailure::NativeUnavailable)
+            }
+        })
+        .unwrap();
+}
+
+#[test]
+fn native_session_issuance_rejects_account_change_during_observation() {
+    use spaceterm_host::session_capabilities::SystemGuiSessionObserver;
+    use std::sync::atomic::{AtomicU8, Ordering};
+    struct ChangingAccount(AtomicU8);
+    impl NativeAccountProvider for ChangingAccount {
+        fn observe(&self, key: AccountBuildKey) -> Result<AccountBinding, NativeFailure> {
+            let generation = self.0.fetch_add(1, Ordering::Relaxed);
+            AccountBinding::new(key, 20, NativeAccountId::macos([generation; 16])?)
+        }
+    }
+    let key = fixture_account(501).key();
+    let observer = SystemGuiSessionObserver::with_native_peer(
+        ChangingAccount(AtomicU8::new(1)),
+        key,
+        NativeSessionPeer(Arc::new(Mutex::new(Some([1; 16])))),
+    );
+    assert_eq!(observer.observe(), Err(CapabilityFailure::StaleAssessment));
+}
+
+#[test]
+fn native_session_issuance_rejects_session_change_during_observation() {
+    use spaceterm_host::session_capabilities::{NativeGuiSessionPeer, SystemGuiSessionObserver};
+    use std::sync::atomic::{AtomicU8, Ordering};
+    struct ChangingSession(AtomicU8);
+    impl NativeGuiSessionPeer for ChangingSession {
+        fn observe(&self, _: u32) -> Result<Option<[u8; 16]>, CapabilityFailure> {
+            Ok(Some([self.0.fetch_add(1, Ordering::Relaxed); 16]))
+        }
+    }
+    let account = fixture_account(501);
+    let observer = SystemGuiSessionObserver::with_native_peer(
+        AccountPeer(account.clone()),
+        account.key(),
+        ChangingSession(AtomicU8::new(1)),
+    );
+    assert_eq!(observer.observe(), Err(CapabilityFailure::StaleAssessment));
+}
+
+#[cfg(unix)]
+struct SessionIoFixture {
+    _directory: tempfile::TempDir,
+    listener: std::os::unix::net::UnixListener,
+    connector: spaceterm_host::session_capabilities::native::SystemSessionConnector<Locations>,
+    broker: SessionAdapterBroker<SessionObserver>,
+    current: Arc<Mutex<Option<GuiSessionFacts>>>,
+}
+#[cfg(unix)]
+fn session_io_fixture() -> SessionIoFixture {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let socket_directory = directory.path().join(".gnupg");
+    std::fs::create_dir(&socket_directory).unwrap();
+    std::fs::set_permissions(&socket_directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let listener =
+        std::os::unix::net::UnixListener::bind(socket_directory.join("S.gpg-agent")).unwrap();
+    let account = fixture_account(unsafe { libc::getuid() });
+    let current = Arc::new(Mutex::new(Some(
+        GuiSessionFacts::new(account.sha256(), [1; 16]).unwrap(),
+    )));
+    let broker = SessionAdapterBroker::new(SessionObserver(current.clone()));
+    let connector =
+        spaceterm_host::session_capabilities::native::SystemSessionConnector::with_locations(
+            &account,
+            Locations(directory.path().into()),
+        );
+    SessionIoFixture {
+        _directory: directory,
+        listener,
+        connector,
+        broker,
+        current,
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn slow_drip_response_cannot_extend_the_original_session_lease() {
+    use std::io::Write;
+    let SessionIoFixture {
+        _directory,
+        listener,
+        connector,
+        broker,
+        ..
+    } = session_io_fixture();
+    let started = std::time::Instant::now();
+    let now = || started.elapsed().as_nanos() as u64;
+    let lease = broker
+        .bind(SessionPurpose::GpgAgent, now(), Duration::from_millis(250))
+        .unwrap();
+    let peer = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        for _ in 0..8 {
+            std::thread::sleep(Duration::from_millis(60));
+            if socket.write_all(b"x").is_err() {
+                break;
+            }
+        }
+    });
+    let result =
+        connector.with_connection(&broker, &lease, SessionPurpose::GpgAgent, now, |socket| {
+            let mut reply = [0; 8];
+            socket.read_exact(&mut reply)
+        });
+    let elapsed = started.elapsed();
+    peer.join().unwrap();
+    assert_eq!(result, Err(CapabilityFailure::StaleAssessment));
+    assert!(
+        elapsed < Duration::from_millis(400),
+        "session operation outlived its lease"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn expired_session_sends_no_request_after_the_operation_starts() {
+    use std::io::Read;
+    let SessionIoFixture {
+        _directory,
+        listener,
+        connector,
+        broker,
+        ..
+    } = session_io_fixture();
+    let started = std::time::Instant::now();
+    let now = || started.elapsed().as_nanos() as u64;
+    let lease = broker
+        .bind(SessionPurpose::GpgAgent, now(), Duration::from_millis(150))
+        .unwrap();
+    let peer = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut request = [0; 16];
+        socket.read(&mut request).unwrap()
+    });
+    let result =
+        connector.with_connection(&broker, &lease, SessionPurpose::GpgAgent, now, |socket| {
+            std::thread::sleep(Duration::from_millis(200));
+            socket.write_all(b"GETINFO version\n")
+        });
+    let sent = peer.join().unwrap();
+    assert_eq!(result, Err(CapabilityFailure::StaleAssessment));
+    assert_eq!(sent, 0, "expired session sent a request");
+}
+
+#[cfg(unix)]
+#[test]
+fn logout_during_read_rejects_the_next_request() {
+    use std::io::{ErrorKind, Read, Write};
+    let SessionIoFixture {
+        _directory,
+        listener,
+        connector,
+        broker,
+        current,
+    } = session_io_fixture();
+    let started = std::time::Instant::now();
+    let now = || started.elapsed().as_nanos() as u64;
+    let lease = broker
+        .bind(SessionPurpose::GpgAgent, now(), Duration::from_secs(1))
+        .unwrap();
+    let (reading, read_started) = std::sync::mpsc::channel();
+    let peer = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        // Darwin can reject socket options once logout closes the peer. Bound
+        // the fixture read before allowing that close, not after its greeting.
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        read_started.recv_timeout(Duration::from_secs(1)).unwrap();
+        *current.lock().unwrap() = None;
+        if let Err(error) = socket.write_all(b"OK\n") {
+            assert!(
+                matches!(
+                    error.kind(),
+                    ErrorKind::BrokenPipe | ErrorKind::ConnectionReset | ErrorKind::NotConnected
+                ),
+                "unexpected greeting failure kind={:?}",
+                error.kind()
+            );
+        }
+        let mut request = [0; 16];
+        match socket.read(&mut request) {
+            Ok(count) => count,
+            // Closed peers can reset (Linux) or disconnect (Darwin). Neither
+            // error credits a request; any successful bytes still fail.
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::ConnectionReset | ErrorKind::NotConnected
+                ) =>
+            {
+                0
+            }
+            Err(_) => panic!("unexpected fixture read failure"),
+        }
+    });
+    let result =
+        connector.with_connection(&broker, &lease, SessionPurpose::GpgAgent, now, |socket| {
+            let mut greeting = [0; 3];
+            reading.send(()).unwrap();
+            socket.read_exact(&mut greeting)?;
+            socket.write_all(b"GETINFO version\n")
+        });
+    let sent = peer.join().unwrap();
+    assert_eq!(result, Err(CapabilityFailure::StaleAssessment));
+    assert_eq!(sent, 0, "logged-out session sent a request");
 }
