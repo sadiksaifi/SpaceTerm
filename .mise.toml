@@ -756,7 +756,7 @@ run = [
   "cargo test --package spaceterm-host --test git_operations --test git_server_identity --test server_directories --features native-tests --locked",
   "cargo test --package spaceterm-protocol --test git_conformance --test directory_conformance --locked",
   "cargo test --package spaceterm-client --test git --test directories --locked",
-  "cargo test --package spaceterm-server --test git_assessments --test git_durability --test git_shutdown --test git_protocol --test server_directories --locked",
+  "cargo test --package spaceterm-server --test git_assessments --test git_durability --test shutdown --test git_protocol --test server_directories --locked",
 ]
 
 [tasks."fmt:cli-companion:check"]
