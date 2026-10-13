@@ -14,6 +14,11 @@ pub(crate) fn validate(value: &Payload) -> Result<(), ProtocolError> {
         ($message:expr, $profile:ident) => {{
             use $profile::message::Kind;
             match &$message.kind {
+                Some(Kind::AccountRuntimeRequest(value) | Kind::AccountRuntimeReply(value)) => {
+                    if value.request == 0 || value.body.is_empty() || value.body.len() > 32768 {
+                        return Err(ProtocolError::Malformed);
+                    }
+                }
                 Some(Kind::Outcome(outcome)) => {
                     if let Some($profile::outcome::Result::Conflict(conflict)) = &outcome.result {
                         conflict_value!($profile, conflict)?;

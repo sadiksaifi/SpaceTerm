@@ -51,10 +51,26 @@ pub struct ProductionListenerPorts {
     pub outcomes: Arc<ConnectionOutcomes>,
     revocations: Arc<ListenerRevocations>,
     status: Mutex<Option<watch::Receiver<ServerStatus>>>,
+    account_runtime: Mutex<Option<Arc<crate::account_runtime::AccountRuntimeProcesses>>>,
 }
 impl ProductionListenerPorts {
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
+    }
+    /// Binds the one recovered account runtime before the paired listener opens.
+    pub fn install_account_runtime(
+        &self,
+        runtime: Arc<crate::account_runtime::AccountRuntimeProcesses>,
+    ) -> Result<(), ServerFailure> {
+        let mut slot = self
+            .account_runtime
+            .lock()
+            .map_err(|_| failure(ServerFailureClass::RecoveryRequired))?;
+        if slot.is_some() {
+            return Err(failure(ServerFailureClass::StaleAuthority));
+        }
+        *slot = Some(runtime);
+        Ok(())
     }
     /// The same bounded feed used by authenticated clients, retained after close.
     /// Status is comparison data and grants no native-management authority.
@@ -140,8 +156,15 @@ pub fn production_listener_factories_with_dispatch<S: PairingSnapshotPort + 'sta
         handle.runtime_status(),
     )?;
     let (status_sender, status_receiver) = watch::channel(initial);
+    let account_runtime = config
+        .ports
+        .account_runtime
+        .lock()
+        .map_err(|_| failure(ServerFailureClass::RecoveryRequired))?
+        .clone();
     let authentication = Arc::new(ProductionAuthentication {
         uid: config.registration.key().account_uid,
+        account_runtime: account_runtime.is_some(),
         identity: config.identity.clone(),
         lookup,
         server: snapshot.state().server,
@@ -155,6 +178,7 @@ pub fn production_listener_factories_with_dispatch<S: PairingSnapshotPort + 'sta
         )),
         pairing: config.pairing,
         outcomes: config.ports.outcomes.clone(),
+        account_runtime,
     });
     let listeners = Arc::new(ServerListeners::new(ListenerConfig {
         ipc: config
@@ -195,6 +219,7 @@ pub fn production_listener_factories_with_dispatch<S: PairingSnapshotPort + 'sta
 }
 
 struct ProductionAuthentication<S> {
+    account_runtime: bool,
     uid: u32,
     identity: Arc<ServerIdentity>,
     lookup: Arc<PairingProtocolLookup<S>>,
@@ -213,16 +238,20 @@ impl<S: PairingSnapshotPort + 'static> AuthenticationFactoryPort for ProductionA
         {
             return Err(failure(ServerFailureClass::StaleAuthority));
         }
+        let mut capabilities = vec![
+            spaceterm_protocol::negotiation::CAPABILITY_NORMALIZED_CREATION_TOPOLOGY,
+            spaceterm_protocol::negotiation::CAPABILITY_CANONICAL_DOMAIN,
+            spaceterm_protocol::negotiation::CAPABILITY_ORGANIZATION_COMPARISONS,
+        ];
+        if self.account_runtime {
+            capabilities.push(spaceterm_protocol::negotiation::CAPABILITY_ACCOUNT_RUNTIME);
+        }
         Ok(AuthenticationConfig {
             server: self.server,
             epoch: self.epoch,
             owning_uid: self.uid,
             handshake: HandshakeConfig {
-                capabilities: vec![
-                    spaceterm_protocol::negotiation::CAPABILITY_NORMALIZED_CREATION_TOPOLOGY,
-                    spaceterm_protocol::negotiation::CAPABILITY_CANONICAL_DOMAIN,
-                    spaceterm_protocol::negotiation::CAPABILITY_ORGANIZATION_COMPARISONS,
-                ],
+                capabilities,
                 ..HandshakeConfig::default()
             },
             credentials: self.identity.clone(),
@@ -242,6 +271,7 @@ impl<S: PairingSnapshotPort + 'static> AuthenticationFactoryPort for ProductionA
     }
 }
 struct ProductionDispatch {
+    account_runtime: Option<Arc<crate::account_runtime::AccountRuntimeProcesses>>,
     status: watch::Receiver<ServerStatus>,
     ordinary: Arc<dyn crate::protocol_dispatch::OrdinaryDispatchPort>,
     pairing: PairingService,
@@ -252,16 +282,18 @@ impl ConnectionDispatchFactoryPort for ProductionDispatch {
         &self,
         authenticator: Authenticator,
     ) -> Result<Arc<dyn ConnectionDispatchPort>, ServerFailure> {
-        Ok(Arc::new(
-            ProtocolDispatcher::new(
-                authenticator,
-                self.status.clone(),
-                self.ordinary.clone(),
-                Arc::new(RejectRestrictedFallback),
-            )
-            .with_pairing(self.pairing.clone())
-            .with_outcomes(self.outcomes.clone()),
-        ))
+        let mut dispatcher = ProtocolDispatcher::new(
+            authenticator,
+            self.status.clone(),
+            self.ordinary.clone(),
+            Arc::new(RejectRestrictedFallback),
+        )
+        .with_pairing(self.pairing.clone())
+        .with_outcomes(self.outcomes.clone());
+        if let Some(runtime) = &self.account_runtime {
+            dispatcher = dispatcher.with_account_runtime(runtime.clone());
+        }
+        Ok(Arc::new(dispatcher))
     }
 }
 struct RejectRestrictedFallback;

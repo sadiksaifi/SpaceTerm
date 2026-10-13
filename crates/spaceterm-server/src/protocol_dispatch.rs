@@ -272,6 +272,7 @@ pub struct ProtocolDispatcher {
     restricted: Arc<dyn RestrictedDispatchPort>,
     pairing: Option<crate::pairing::service::PairingService>,
     outcomes: Option<Arc<crate::listeners::outcomes::ConnectionOutcomes>>,
+    account_runtime: Option<Arc<crate::account_runtime::AccountRuntimeProcesses>>,
     messages: Arc<Semaphore>,
     bytes: Arc<Semaphore>,
     egress: Arc<EgressBudget>,
@@ -293,11 +294,20 @@ impl ProtocolDispatcher {
             restricted,
             pairing: None,
             outcomes: None,
+            account_runtime: None,
             messages: Arc::new(Semaphore::new(MAX_DECODED_DISPATCH_MESSAGES)),
             bytes: Arc::new(Semaphore::new(MAX_DECODED_DISPATCH_BYTES)),
             egress: EgressBudget::new(),
             clock: None,
         }
+    }
+    /// Installs the native lifecycle bridge on the paired local protocol route.
+    pub fn with_account_runtime(
+        mut self,
+        runtime: Arc<crate::account_runtime::AccountRuntimeProcesses>,
+    ) -> Self {
+        self.account_runtime = Some(runtime);
+        self
     }
     /// Shares the connection's reliable reply charge with actor admission.
     pub fn with_outcomes(
@@ -523,6 +533,15 @@ impl ProtocolDispatcher {
                                 &handle,
                                 &mut egress,
                             )? {
+                                continue;
+                            }
+                            if let Some(runtime) = &self.account_runtime
+                                && let Some(reply) = runtime
+                                    .dispatch(&payload, peer.transport.peer_facts().local_uid)
+                                    .await?
+                            {
+                                self.send(session, &peer.transport, &reply, &mut egress, None)
+                                    .await?;
                                 continue;
                             }
                             let action = status_action(&payload, session.principal)?;

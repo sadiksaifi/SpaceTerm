@@ -2,6 +2,7 @@
 //! The host owns registration, original request IDs, assessments and supervision.
 
 pub mod artifacts;
+pub mod runtime;
 
 use artifacts::{ArtifactTransport, ServerArtifacts};
 use std::sync::Arc;
@@ -51,6 +52,10 @@ impl NativeClientProvider {
         authorization: Option<Arc<dyn LingerAuthorization>>,
     ) -> Result<Self, ManagementFailure> {
         ServiceSupervisor::current(authorization)
+            .and_then(|supervisor| {
+                supervisor
+                    .with_runtime_processes(Arc::new(runtime::RuntimeServiceProcesses::default()))
+            })
             .map(Self::from_supervisor)
             .map_err(classify_service)
     }
@@ -66,6 +71,24 @@ impl NativeClientProvider {
         }
     }
 
+    /// Composes this native lifecycle owner with the caller's recovered paired
+    /// Client journal and native credential provider. No enrollment is performed.
+    pub fn with_runtime_identity(
+        mut self,
+        identity: Arc<dyn runtime::RuntimeClientIdentity>,
+    ) -> Result<Self, ManagementFailure> {
+        let supervisor = self
+            .management
+            .supervisor
+            .clone()
+            .with_runtime_processes(Arc::new(runtime::RuntimeServiceProcesses::new(identity)))
+            .map_err(classify_service)?;
+        self.management = Arc::new(NativeServiceManagement {
+            supervisor,
+            artifacts: Arc::clone(&self.management.artifacts),
+        });
+        Ok(self)
+    }
     /// Replaces only external downloads. Installation still requires the host's
     /// compiled trust root and explicit verified-artifact admission.
     pub fn with_artifact_transport(mut self, transport: Arc<dyn ArtifactTransport>) -> Self {

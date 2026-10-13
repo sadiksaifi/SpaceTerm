@@ -190,6 +190,8 @@ fn status_value(status: &ServerStatus) -> Value {
     json!({
         "server": hex(&p.server.bytes()),
         "epoch": p.epoch.get(),
+        "storage_state": p.runtime.storage,
+        "run_intent": p.runtime.intent,
         "revision": p.revision.get(),
         "running_version": p.running.as_ref().map(|v| v.as_str()),
         "approved_version": p.approved.as_ref().map(|v| v.as_str()),
@@ -388,6 +390,12 @@ fn human_output(output: &CliOutput) -> String {
                     })
                     .count();
                 text.push_str(&format!("Authenticated server: {}\nRunning version: {}\nApproved version: {}\nStaged version: {}\nNative facts in server status: {:?}\nRemote-access policy: {}\nListening endpoints: {}\n", hex(&p.server.bytes()), p.running.as_ref().map_or("unavailable", |v| v.as_str()), p.approved.as_ref().map_or("unavailable", |v| v.as_str()), p.staged.as_ref().map_or("none", |v| v.as_str()), p.native_verification, if p.remote_access.value.is_enabled() { "enabled" } else { "disabled" }, active));
+                text.push_str(&format!(
+                    "Epoch: {}\nStorage state: {:?}\nRun intent: {:?}\n",
+                    p.epoch.get(),
+                    p.runtime.storage,
+                    p.runtime.intent
+                ));
                 for listener in &p.listeners {
                     text.push_str(&format!(
                         "Listener {}: {:?}\n",

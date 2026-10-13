@@ -60,6 +60,8 @@ message Message {
     ClientContext client_context = 48;
     PaneSubscription pane_subscription = 49;
     ContentPublication content_publication = 50;
+    spaceterm.common.AccountRuntimeMessage account_runtime_request = 51;
+    spaceterm.common.AccountRuntimeMessage account_runtime_reply = 52;
   }
 }
 message OrganizationQuery { uint64 known_revision = 1; bytes continuation = 2; uint64 known_epoch = 3; uint64 request = 4; uint64 request_generation = 5; PublicationPart part = 6; }
