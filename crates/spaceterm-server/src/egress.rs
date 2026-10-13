@@ -459,6 +459,8 @@ fn reply_policy(payload: &spaceterm_protocol::codec::Payload) -> Result<bool, Eg
                     | Kind::ContentReadResponse(_)
                     | Kind::ContentPublication(_)
                     | Kind::ContentInvalidation(_)
+                    | Kind::ResourceChunk(_)
+                    | Kind::ResourceCancel(_)
                     | Kind::NativeRequest(_),
                 ) => Ok(false),
                 // A caller cannot promote arbitrary terminal or resource bytes

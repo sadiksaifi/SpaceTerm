@@ -6,6 +6,9 @@ use spaceterm_protocol::convert::{content, identity, native_requests};
 use std::collections::BTreeMap;
 use tokio::{sync::mpsc, task::AbortHandle};
 
+mod resources;
+use resources::{ResourceEvent, ResourceTransfers};
+
 const MAX_SUBSCRIPTIONS: usize = 64;
 const MAX_PENDING_NATIVE: usize = 128;
 const PAGE_BYTES: u32 = 128 * 1024;
@@ -34,8 +37,10 @@ pub(super) struct EffectReply {
 pub(super) enum Wake {
     Presentation(Box<Event>),
     Effect(Box<EffectReply>),
+    Resource(Box<Result<ResourceEvent, ServerFailure>>),
 }
 pub(super) struct TerminalConnection {
+    pub(super) resources: ResourceTransfers,
     subscriptions: BTreeMap<PaneId, Subscription>,
     native: BTreeMap<(SessionKey, u64), spaceterm_core::native_requests::NativeRequest>,
     sender: mpsc::Sender<Event>,
@@ -60,6 +65,7 @@ impl TerminalConnection {
         let (sender, receiver) = mpsc::channel(16);
         let (effect_sender, effect_receiver) = mpsc::channel(4);
         Self {
+            resources: ResourceTransfers::new(),
             effect_sender,
             effect_receiver,
             effect_sequence: 0,
@@ -80,11 +86,13 @@ impl TerminalConnection {
             subscription.task.abort();
         }
         self.native.clear();
+        self.resources.reset();
     }
-    pub(super) async fn next(&mut self) -> Option<Wake> {
+    pub(super) async fn next(&mut self, egress: &ConnectionEgress) -> Option<Wake> {
         tokio::select! {
             event = self.receiver.recv() => event.map(|event| Wake::Presentation(Box::new(event))),
             reply = self.effect_receiver.recv() => reply.map(|reply| { self.effects.remove(&reply.id); Wake::Effect(Box::new(reply)) }),
+            resource = self.resources.next(egress) => Some(Wake::Resource(Box::new(resource))),
         }
     }
     pub(super) fn effect_request(&mut self, payload: &Payload) -> Result<(), ServerFailure> {

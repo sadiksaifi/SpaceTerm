@@ -72,7 +72,22 @@ impl OrdinaryDispatchPort for ActorOrdinaryDispatch {
                             )
                             .map_err(protocol_failure)?;
                             let binding = request.binding();
-                            match handle.submit(principal, request).await? {
+                            let response = match handle.submit(principal, request).await {
+                                Ok(response) => response,
+                                Err(error) if error.class == ServerFailureClass::Capacity => {
+                                    // Actor contention is not a broken connection. Only an
+                                    // authoritative NeverAdmitted permits resubmission.
+                                    let result = handle.lookup_state(principal, binding).await?;
+                                    return Ok(Some(Payload::$major($p::Message {
+                                        kind: Some($p::message::Kind::OperationLookupResult(
+                                            operations::$p::encode_lookup_result(binding, &result)
+                                                .map_err(protocol_failure)?,
+                                        )),
+                                    })));
+                                }
+                                Err(error) => return Err(error),
+                            };
+                            match response {
                                 OperationResponse::Completed {
                                     binding: completed,
                                     revision,
@@ -198,6 +213,12 @@ impl OrdinaryDispatchPort for ActorOrdinaryDispatch {
                             };
                             match handle.update_client_focus(principal, update).await {
                                 Ok(_) => value.acknowledged = true,
+                                Err(error) if error.class == ServerFailureClass::Capacity => {
+                                    value.failure = Some(common::Failure {
+                                        classification: common::FailureClass::Busy as i32,
+                                        retry_after_ms: 10,
+                                    })
+                                }
                                 Err(error) if error.class == ServerFailureClass::StaleAuthority => {
                                     value.failure = Some(common::Failure {
                                         classification: common::FailureClass::Stale as i32,
@@ -361,7 +382,7 @@ impl ProtocolDispatcher {
             }
             let wake = tokio::select! {
                 _ = peer.closing.wait_for(|value| *value) => return Ok(()),
-                event = terminal.next() => Wake::Terminal(event),
+                event = terminal.next(&egress) => Wake::Terminal(event),
                 result = peer.transport.recv() => Wake::Message(result.map_err(transport_failure)?),
                 changed = status.changed(), if subscription.is_some() => { changed.map_err(|_| failure(ServerFailureClass::RuntimeUnavailable))?; Wake::Status },
                 changed = organization.changed(), if organization_query.is_some() && !awaiting_organization_resync => { changed.map_err(|_| failure(ServerFailureClass::RuntimeUnavailable))?; Wake::Organization },
@@ -378,6 +399,19 @@ impl ProtocolDispatcher {
                             terminal
                                 .publish(
                                     *event,
+                                    self,
+                                    session,
+                                    &peer.transport,
+                                    &handle,
+                                    &mut egress,
+                                )
+                                .await?
+                        }
+                        terminal::Wake::Resource(event) => {
+                            terminal
+                                .resources
+                                .publish(
+                                    (*event)?,
                                     self,
                                     session,
                                     &peer.transport,
@@ -513,6 +547,13 @@ impl ProtocolDispatcher {
                             }
                             if terminal
                                 .subscription(&payload, session.principal, &handle)
+                                .await?
+                            {
+                                continue;
+                            }
+                            if terminal
+                                .resources
+                                .admit(&payload, session.principal, &handle, session.codec.limits())
                                 .await?
                             {
                                 continue;
