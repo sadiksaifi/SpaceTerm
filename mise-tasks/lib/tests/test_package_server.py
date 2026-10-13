@@ -235,7 +235,7 @@ class ImplementedServerCompatibilityTests(unittest.TestCase):
             Path(__file__).with_name("implemented_server_compatibility.rs"), project / "main.rs"
         )
         environment = signing_environment(os.environ)
-        environment["CARGO_BUILD_JOBS"] = "5"
+        environment["CARGO_BUILD_JOBS"] = "4"
         environment["CARGO_TARGET_DIR"] = os.environ.get("CARGO_TARGET_DIR", str(ROOT / "target"))
         cls.probe = build_executable(
             "--offline",
@@ -265,7 +265,7 @@ class ImplementedServerCompatibilityTests(unittest.TestCase):
         from spaceterm_tasks.packaging import packaged_environment
 
         environment = signing_environment(packaged_environment(None))
-        environment["CARGO_BUILD_JOBS"] = "5"
+        environment["CARGO_BUILD_JOBS"] = "4"
         executable = build_executable(
             "--locked", "-p", "spaceterm-server", binary="spaceterm-server", env=environment
         )

@@ -807,8 +807,12 @@ description = "Require nonempty SSH Bootstrap tests without installing a service
 run = "python -m spaceterm_tasks.account_service_checks bootstrap"
 
 [tasks."test:server:startup"]
-description = "Check actual server metadata, help and argument admission without serve"
-run = "python -m spaceterm_tasks.account_service_checks startup"
+description = "Check server queries and isolated account runtime startup without service installation"
+usage = '''
+flag "--executable <path>" help="Query an already built server instead of rebuilding the packaged candidate"
+flag "--build <identity>" help="Expected compiled identity" default="preflight" choices "release" "preflight" "development"
+'''
+run = "python -m spaceterm_tasks.account_service_checks startup --build {{usage.build | quote}}{% if usage.executable %} --executable {{usage.executable | quote}}{% endif %}"
 
 [tasks."test:server:artifacts"]
 description = "Test account server packaging, signed channels and guarded task composition"
