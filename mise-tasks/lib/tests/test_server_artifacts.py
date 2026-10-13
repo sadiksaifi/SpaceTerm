@@ -61,3 +61,17 @@ class ServerArtifactTests(unittest.TestCase):
         for data in (b'{"name":"\\ud800"}', b"[" * 1100 + b"0" + b"]" * 1100):
             with self.subTest(), self.assertRaises(TaskError):
                 artifacts.strict_json(data, 4096)
+
+    def test_account_archive_rejects_replaced_deployment_material(self):
+        for name in (
+            "libexec/spaceterm-server-launcher",
+            "bin/spaceterm-server-manager",
+            "libexec/spaceterm-server-spawner",
+            "share/credential-tools/LICENSE",
+            "libexec/systemd-creds",
+            "share/linux_custody.py",
+            "share/native-evidence/run.py",
+            "share/LaunchDaemon.plist.in",
+        ):
+            with self.subTest(name=name), self.assertRaises(TaskError):
+                artifacts.validate_headless_name(name)

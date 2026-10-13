@@ -257,54 +257,6 @@ description = "Test headless server host adapters"
 usage = 'arg "[filter]" help="Run only server host tests whose names contain this text"'
 run = "cargo test --package spaceterm-host --all-targets --locked --no-fail-fast {{usage.filter | quote}}"
 
-[tasks."test:server:native:tools"]
-description = "Test native server verification tooling"
-run = "python -m unittest tests.test_server_native"
-
-[tasks."test:server:native:acl:macos"]
-description = "Test in-memory macOS credential ACL construction without Keychain changes"
-run = "python -I mise-tasks/server/native/macos/acl_tests.py"
-
-[tasks."test:server:native:acl:asan:macos"]
-description = "Check native credential policy memory safety and allocation failures"
-run = "python -I mise-tasks/server/native/macos/acl_tests.py --sanitizers"
-
-[tasks."test:server:native:companion:macos"]
-description = "Test the temporary GUI evidence companion's model, interactions, and app build"
-run = "python -I mise-tasks/server/native/macos/companion_tests.py"
-
-[tasks."test:server:native:companion:asan:macos"]
-description = "Check the GUI evidence companion's model and interactions with ASan and UBSan"
-run = "python -I mise-tasks/server/native/macos/companion_tests.py --sanitizers"
-
-[tasks."test:server:native:companion:tools"]
-description = "Test GUI evidence companion source policy and bundle metadata on any platform"
-run = "python -I mise-tasks/server/native/macos/companion_tests.py --portable"
-
-[tasks."test:server:native:handoff:tools"]
-description = "Test startup-pipe tooling; native fault cases require the explicit macOS fault task"
-run = "python -m unittest tests.test_server_handoff"
-
-[tasks."check:server:native:handoff:macos"]
-description = "Compile the nonauthorizing native startup-pipe prototype"
-run = "python -I mise-tasks/server/native/macos/handoff_tests.py"
-
-[tasks."test:server:native:handoff:macos"]
-description = "Test bounded native startup-pipe frame recognition"
-run = "python -I mise-tasks/server/native/macos/handoff_tests.py --run"
-
-[tasks."test:server:native:handoff:asan:macos"]
-description = "Check native startup-pipe frame memory safety"
-run = "python -I mise-tasks/server/native/macos/handoff_tests.py --run --sanitizers"
-
-[tasks."test:server:native:handoff:faults:macos"]
-description = "Build the private native fault fixture and require all 29 handoff regressions without skips"
-run = "python -I mise-tasks/server/native/macos/handoff_tests.py --faults"
-
-[tasks."test:server:native:handoff:faults:asan:macos"]
-description = "Build the sanitized private native fault fixture and require all 29 handoff regressions"
-run = "python -I mise-tasks/server/native/macos/handoff_tests.py --faults --sanitizers"
-
 [tasks."test:server:vm:tools"]
 description = "Test disposable server verification VM tooling"
 run = "python -m unittest tests.test_server_vm"
@@ -313,62 +265,9 @@ run = "python -m unittest tests.test_server_vm"
 description = "Test disposable VM preparation and startup execution"
 run = "python -m unittest tests.test_server_vm_executor"
 
-[tasks."test:server:vm:authentication"]
+[tasks."test:server:vm:image-trust"]
 description = "Test VM artifact authentication and bounded native processes"
 run = "python -m unittest tests.test_server_vm_linux"
-
-[tasks."test:server:vm:linux:prototype"]
-description = "Test the bounded Linux prototype registration and build its native fixtures"
-run = "bash mise-tasks/server/vm/linux/test.sh"
-
-[tasks."test:server:vm:linux:prototype:asan"]
-description = "Test the Linux prototype registration with address and undefined behavior sanitizers"
-run = "bash mise-tasks/server/vm/linux/test.sh --sanitizers"
-
-[tasks."test:server:vm:linux:selinux:cleanup"]
-description = "Test SELinux fixture cleanup and enforcement restoration inside the disposable guest"
-run = "sudo -n bash tests/server_native/linux/selinux_verify_tests.sh"
-
-[tasks."lint:server:vm:linux"]
-description = "Check disposable Linux evidence shell scripts"
-run = "shellcheck mise-tasks/server/vm/linux/*.sh tests/server_native/linux/*.sh"
-
-[tasks."server:vm:linux:prepare"]
-description = "Install the pinned build tools inside the disposable Jammy guest"
-run = "bash mise-tasks/server/vm/linux/prepare.sh --disposable-jammy"
-
-[tasks."server:vm:linux:install"]
-description = "Install the credential-free system service prototype inside the disposable guest"
-run = "sudo -n bash mise-tasks/server/vm/linux/install.sh --disposable-jammy"
-
-[tasks."server:vm:linux:verify"]
-description = "Observe final account credentials, nondumpability, and listener absence"
-run = "sudo -n bash mise-tasks/server/vm/linux/verify.sh"
-
-[tasks."server:vm:linux:lifecycle"]
-description = "Test crash restart and durable Stop and Start in the disposable guest"
-run = "sudo -n bash mise-tasks/server/vm/linux/lifecycle.sh"
-
-[tasks."server:vm:linux:boot-check"]
-description = "Observe the registered desired state after a guest reboot"
-usage = 'arg "state" help="Expected running or stopped registration state"'
-run = "sudo -n bash mise-tasks/server/vm/linux/boot-check.sh {{usage.state | quote}}"
-
-[tasks."server:vm:linux:reboot"]
-description = "Reboot only the explicitly selected disposable Jammy guest"
-run = "sudo -n bash mise-tasks/server/vm/linux/reboot.sh --disposable-jammy"
-
-[tasks."server:vm:linux:selinux:prepare"]
-description = "Install permissive SELinux in the disposable Jammy guest for the next boot"
-run = "sudo -n bash mise-tasks/server/vm/linux/selinux-prepare.sh --disposable-jammy"
-
-[tasks."server:vm:linux:selinux:policy"]
-description = "Install the confined-domain SELinux mechanism experiment"
-run = "sudo -n bash mise-tasks/server/vm/linux/selinux-policy.sh --disposable-jammy"
-
-[tasks."server:vm:linux:selinux:verify"]
-description = "Test confined inode write denials without claiming full account custody"
-run = "sudo -n bash mise-tasks/server/vm/linux/selinux-verify.sh"
 
 [tasks."check:server:host"]
 description = "Check headless server host adapters"
@@ -402,6 +301,18 @@ run = [
   { task = "test:package:macos" },
   { task = "test:install:macos" },
   { task = "test:updater:macos" },
+  { task = "check:headless" },
+  { task = "test:server:account" },
+  { task = "test:server:distribution" },
+  { task = "test:server:composition" },
+  { task = "test:server:cli" },
+  { task = "test:server:bootstrap" },
+  { task = "test:server:vertical" },
+  { task = "test:server:startup" },
+  { task = "test:server:cli:no-display" },
+  { task = "test:server:artifacts" },
+  { task = "test:server:package:macos" },
+  { task = "preflight:server:package:macos" },
 ]
 
 [tasks."validate:linux"]
@@ -421,6 +332,18 @@ run = [
   { task = "test:package:linux" },
   { task = "test:install:linux" },
   { task = "test:updater:linux" },
+  { task = "check:headless" },
+  { task = "test:server:account" },
+  { task = "test:server:distribution" },
+  { task = "test:server:composition" },
+  { task = "test:server:cli" },
+  { task = "test:server:bootstrap" },
+  { task = "test:server:vertical" },
+  { task = "test:server:startup" },
+  { task = "test:server:cli:no-display" },
+  { task = "test:server:artifacts" },
+  { task = "test:server:package:linux" },
+  { task = "preflight:server:package:linux" },
 ]
 
 [tasks."validate:portable"]
@@ -438,6 +361,15 @@ run = [
   { task = "check:server:client" },
   { task = "lint:server:client" },
   { task = "test:server:client" },
+  { task = "test:server:account" },
+  { task = "test:server:distribution" },
+  { task = "test:server:composition" },
+  { task = "test:server:cli" },
+  { task = "test:server:bootstrap" },
+  { task = "test:server:vertical" },
+  { task = "test:server:startup" },
+  { task = "test:server:cli:no-display" },
+  { task = "test:server:artifacts" },
 ]
 
 [tasks."engine:build"]
@@ -534,14 +466,6 @@ run = "cargo test --package spaceterm-protocol --locked"
 [tasks."protocol:check-schema"]
 description = "Generate and check both protocol profiles with pinned Rust schema compilers"
 run = "cargo check --package spaceterm-protocol --locked"
-
-[tasks."test:server:native:installation"]
-description = "Test bounded native registration, installation and journal policy without privilege"
-run = "python -I mise-tasks/server/native/installation_tests.py"
-
-[tasks."test:server:native:linux-credentials"]
-description = "Test bounded Linux credential output without credential-tool execution"
-run = "python -I mise-tasks/server/native/installation_tests.py --linux-credentials"
 
 [tasks."check:server:distribution"]
 description = "Check headless release metadata and archive authentication"
@@ -767,7 +691,7 @@ run = "cargo fmt -p spaceterm-host -p spaceterm-client -p spaceterm-server -p sp
 [tasks."test:server:cli"]
 description = "Test CLI parsing, management and both protocol majors"
 env = { CARGO_BUILD_JOBS = "3" }
-run = "cargo test --locked -p spaceterm-client-native --test cli_arguments --test cli_management --test cli_protocol"
+run = "python -m spaceterm_tasks.account_service_checks cli"
 
 [tasks."test:client:management"]
 description = "Test the portable client management facade"
@@ -871,169 +795,20 @@ run = "cargo clippy --package spaceterm-server --all-targets --locked --no-deps 
 
 [tasks."test:server:vertical"]
 description = "Test both-major authenticated server verticals"
-run = "cargo test --package spaceterm-server --test authenticated_local_vertical --test two_client_control --test terminal_resources_wss --locked"
+run = "python -m spaceterm_tasks.account_service_checks vertical"
 
-# Native phase 2 registrations. Producer tracks replace unavailable modules and supply new task bodies.
+[tasks."test:server:account"]
+description = "Test account registration, private keys, artifacts, IPC and PTY ownership"
+run = "python -m spaceterm_tasks.account_service_checks account"
 
-[tasks."test:server:native:launcher:macos"]
-description = "Test native launcher mechanics without privileged host effects"
-run = "python -I mise-tasks/server/native/macos/launcher_tests.py --run"
+[tasks."test:server:bootstrap"]
+description = "Require nonempty SSH Bootstrap tests without installing a service"
+run = "python -m spaceterm_tasks.account_service_checks bootstrap"
 
-[tasks."test:server:native:launcher:asan:macos"]
-description = "Test native launcher mechanics with address and undefined behavior sanitizers"
-run = "python -I mise-tasks/server/native/macos/launcher_tests.py --run --sanitizers"
+[tasks."test:server:startup"]
+description = "Check actual server metadata, help and argument admission without serve"
+run = "python -m spaceterm_tasks.account_service_checks startup"
 
-[tasks."test:server:native:keychain:macos"]
-description = "Test injected Keychain item mechanics without privileged host effects"
-run = "python -I mise-tasks/server/native/macos/keychain_items_tests.py"
-
-[tasks."test:server:native:keychain:asan:macos"]
-description = "Test injected Keychain item mechanics with address and undefined behavior sanitizers"
-run = "python -I mise-tasks/server/native/macos/keychain_items_tests.py --sanitizers"
-
-[tasks."test:server:native:management:macos"]
-description = "Test native management mechanics without privileged host effects"
-run = "python -I mise-tasks/server/native/macos/management_tests.py"
-
-[tasks."test:server:native:management:asan:macos"]
-description = "Test native management mechanics with address and undefined behavior sanitizers"
-run = "python -I mise-tasks/server/native/macos/management_tests.py --sanitizers"
-
-[tasks."test:server:native:capabilities:macos"]
-description = "Test native capability mechanics without privileged host effects"
-run = "python -I mise-tasks/server/native/macos/capability_tests.py"
-
-[tasks."test:server:native:capabilities:asan:macos"]
-description = "Test native capability mechanics with address and undefined behavior sanitizers"
-run = "python -I mise-tasks/server/native/macos/capability_tests.py --sanitizers"
-
-[tasks."test:server:native:keychain-items:tools"]
-description = "Test bounded Keychain fixture result validation"
-run = "python -I mise-tasks/server/native/macos/keychain_items_tests.py --self-test"
-
-[tasks."test:server:native:management:linux"]
-description = "Test fixed Linux management policy without host mutation"
-run = "python -I mise-tasks/server/native/linux/management_tests.py"
-
-[tasks."test:server:native:management:tools"]
-description = "Test portable management boundaries without authorization"
-run = "python -I mise-tasks/server/native/macos/management_tests.py --tools"
-
-[tasks."test:server:native:capabilities:tools"]
-description = "Test portable capability observation tooling"
-run = "python -I mise-tasks/server/native/macos/capability_tests.py --python-tests"
-
-[tasks."test:server:native:authority"]
-description = "Test actual host native authority interfaces with injected native peers"
-run = "python -I mise-tasks/server/native/authority_tests.py"
-
-[tasks."test:server:native:handoff:composition"]
-description = "Test actual host launcher and receiver composition interfaces with injected native peers"
-run = "python -I mise-tasks/server/native/handoff_composition_tests.py"
-
-[tasks."test:server:native:management:composition"]
-description = "Test actual host native management composition interfaces with injected native peers"
-run = "python -I mise-tasks/server/native/management_composition_tests.py"
-
-[tasks."test:server:native:evidence:composition"]
-description = "Test actual host native evidence composition interfaces with injected native peers"
-run = "python -I mise-tasks/server/native/evidence_composition_tests.py"
-
-[tasks."test:server:native:evidence:tools"]
-description = "Test native evidence assembly and receipt recovery without host mutation"
-run = "python -m unittest tests.test_server_native_macos"
-
-[tasks."test:server:native:evidence:schema"]
-description = "Test strict bounded native evidence records and collection"
-run = "python -m unittest tests.test_native_evidence_schema"
-
-[tasks."server:native:macos:prepare-evidence"]
-description = "Assemble existing signed fixtures without changing host integration"
-usage = '''
-flag "--fixtures <path>" help="Existing signed fixture directory"
-'''
-run = "python -I mise-tasks/server/native/macos/prepare_evidence.py {% if usage.fixtures %}--fixtures {{usage.fixtures | quote}}{% endif %}"
-
-[tasks."server:native:macos:collect-evidence"]
-description = "Validate native evidence without inventing missing observations"
-usage = '''
-flag "--input <path>" required=#true help="Bounded native JSONL input"
-flag "--profile <profile>" default="local" { choices "local" "disposable" }
-'''
-run = "python -I mise-tasks/server/native/macos/collect_evidence.py --input {{usage.input | quote}} --profile {{usage.profile | quote}}"
-
-[tasks."server:native:macos:build-evidence"]
-description = "Build exact evidence fixtures using Cargo artifact paths"
-run = "python -I mise-tasks/server/native/macos/build_evidence.py"
-
-[tasks."server:native:macos:run-evidence"]
-description = "Run the reviewed receipt-bound native evidence sequence"
-usage = '''
-flag "--profile <profile>" default="local" { choices "local" "disposable" }
-'''
-run = "python -I mise-tasks/server/native/macos/run_evidence.py --profile {{usage.profile | quote}}"
-
-[tasks."test:server:custody:portable"]
-description = "Test native Linux custody policy and Stop release serialization"
-run = "cargo test --package spaceterm-host --locked --test linux_support_policy --test linux_custody_authority --test linux_release_fence"
-
-[tasks."test:server:custody:tools"]
-description = "Test bounded custody packaging and evidence tooling"
-run = "python -I mise-tasks/server/native/custody_tools_tests.py"
-
-[tasks."test:server:custody:linux"]
-description = "Test unprivileged Linux custody and handoff fixture mechanics"
-run = "python -I mise-tasks/server/native/linux/custody/tests.py"
-
-[tasks."test:server:custody:asan:linux"]
-description = "Test Linux custody fixture memory safety without privileged suites"
-run = "python -I mise-tasks/server/native/linux/custody/tests.py --sanitizers"
-
-[tasks."server:vm:custody:install:linux"]
-description = "Install only authenticated custody artifacts inside the owned Jammy guest"
-usage = '''
-flag "--disposable-jammy" required=#true
-flag "--artifact <path>" required=#true
-flag "--signature <path>" required=#true
-flag "--trust-receipt <path>" required=#true
-'''
-run = "python -I mise-tasks/server/vm/linux/custody_install.py --disposable-jammy --artifact {{usage.artifact | quote}} --signature {{usage.signature | quote}} --trust-receipt {{usage.trust_receipt | quote}}"
-
-[tasks."server:vm:custody:verify:linux"]
-description = "Run one fixed custody suite inside the owned Jammy guest"
-usage = '''
-arg "suite" { choices "handoff" "memory" "aliases" "publication" "mount-evidence" "support-policy" "packaged-execution" "durability" }
-'''
-run = "python -I mise-tasks/server/vm/linux/custody_verify.py {{usage.suite | quote}}"
-
-[tasks."server:vm:custody:lifecycle:linux"]
-description = "Verify supervised custody lifecycle inside the owned Jammy guest"
-run = "python -I mise-tasks/server/vm/linux/custody_lifecycle.py"
-
-[tasks."server:vm:custody:boot-check:linux"]
-description = "Verify exact desired state after reboot of the same owned Jammy guest"
-usage = '''
-arg "state" { choices "running" "stopped" }
-'''
-run = "python -I mise-tasks/server/vm/linux/custody_boot_check.py {{usage.state | quote}}"
-
-[tasks."server:vm:custody:manage:linux"]
-description = "Start or stop only the fixed evidence registration inside the owned Jammy guest"
-usage = '''
-arg "operation" { choices "start" "stop" }
-'''
-run = "python -I mise-tasks/server/vm/linux/custody_manage.py {{usage.operation | quote}}"
-
-[tasks."server:vm:custody:reboot:linux"]
-description = "Reboot only the receipt-bound disposable Jammy guest"
-usage = '''
-flag "--disposable-jammy" required=#true
-'''
-run = "python -I mise-tasks/server/vm/linux/custody_reboot.py --disposable-jammy"
-
-[tasks."server:vm:custody:cleanup:linux"]
-description = "Cleanup only the receipt-bound disposable Jammy guest"
-usage = '''
-flag "--disposable-jammy" required=#true
-'''
-run = "python -I mise-tasks/server/vm/linux/custody_cleanup.py --disposable-jammy"
+[tasks."test:server:artifacts"]
+description = "Test account server packaging, signed channels and guarded task composition"
+run = "python -m unittest tests.test_server_artifacts tests.test_package_server tests.test_release_server tests.test_account_service_checks"

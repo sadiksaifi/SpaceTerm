@@ -13,16 +13,15 @@ from spaceterm_tasks.server_artifacts import entry_points, identifier
 
 def metadata(platform="linux-x86_64", build="release"):
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "component": "server",
         "build_identity": build,
         "platform": platform,
         "version": "1.2.3",
         "build_commit": "1" * 40,
         "protocol_majors": [1, 2],
-        "storage": {"read": [1], "write": 1, "migrate_from": [1]},
+        "storage": {"read": [1], "write": 1, "migrate_from": []},
         "native_identifier": identifier(build),
-        "launcher_abi": 2,
     }
 
 
@@ -39,7 +38,7 @@ class ServerPackageTests(unittest.TestCase):
                 path = self.root / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(name.encode())
-                path.chmod(0o501 if name == "bin/spaceterm-server" else 0o555)
+                path.chmod(0o700 if name == "bin/spaceterm-server" else 0o555)
 
     def test_manifest_matches_packaged_executable_metadata(self):
         manifest = package_server.write_manifest(self.root, self.metadata)
@@ -75,19 +74,34 @@ class ServerPackageTests(unittest.TestCase):
                     package_server.verify_archive(bad)
         self.assertEqual(manifest["entry_points"]["server"], "bin/spaceterm-server")
 
-    def test_build_requires_the_credential_free_spawner(self):
-        binaries = {
-            name: self.root / path
-            for name, path in (
-                ("spaceterm-server", "bin/spaceterm-server"),
-                ("spaceterm-server-launcher", "libexec/spaceterm-server-launcher"),
-                ("spaceterm-server-manager", "libexec/spaceterm-server-manager"),
-            )
-        }
-        with self.assertRaisesRegex(TaskError, "spawner"):
-            package_server.copy_built_executables(
-                binaries, self.root / "destination", self.metadata
-            )
+    def test_server_only_build_is_copied_with_owner_execution(self):
+        destination = self.root / "destination"
+        copied = package_server.copy_built_executables(
+            {"spaceterm-server": self.root / "bin/spaceterm-server"},
+            destination,
+            self.metadata,
+        )
+        self.assertEqual(
+            [p.relative_to(destination).as_posix() for p in copied], ["bin/spaceterm-server"]
+        )
+        self.assertEqual(copied[0].stat().st_mode & 0o777, 0o700)
+        self.assertEqual(copied[0].read_bytes(), b"bin/spaceterm-server")
+
+    def test_privileged_helpers_are_rejected_before_copy(self):
+        for name in (
+            "spaceterm-server-launcher",
+            "spaceterm-server-manager",
+            "spaceterm-server-spawner",
+        ):
+            with self.subTest(name=name), self.assertRaises(TaskError):
+                package_server.copy_built_executables(
+                    {
+                        "spaceterm-server": self.root / "bin/spaceterm-server",
+                        name: self.root / "bin/spaceterm-server",
+                    },
+                    self.root / "destination",
+                    self.metadata,
+                )
 
     def test_production_manifest_refuses_evidence_only_executables(self):
         evidence = self.root / "libexec/spaceterm-native-evidence-client"
@@ -100,7 +114,7 @@ class ServerPackageTests(unittest.TestCase):
         package_server.write_manifest(self.root, self.metadata)
         (self.root / "bin/spaceterm-server").unlink()
         (self.root / "bin/spaceterm-server").write_bytes(b"substitution")
-        (self.root / "bin/spaceterm-server").chmod(0o501)
+        (self.root / "bin/spaceterm-server").chmod(0o700)
         package_server.write_archive(self.root, self.archive)
         with self.assertRaises(TaskError):
             package_server.verify_archive(self.archive)
@@ -126,586 +140,6 @@ class ServerPackageTests(unittest.TestCase):
         malformed["storage"] = {"read": [], "write": 1, "migrate_from": [1]}
         with self.assertRaises(TaskError):
             package_server.write_manifest(self.root, malformed)
-
-
-class CredentialClosureStagingTests(unittest.TestCase):
-    def fixture(self, temporary):
-        import copy
-        import hashlib
-        import json
-
-        from spaceterm_tasks import package_server_linux
-
-        root = Path(temporary)
-        closure = root / "credential-closure"
-        closure.mkdir()
-        credential_notice = b"systemd LGPL-2.1-or-later and dependency attribution\n"
-        inputs = {
-            "libexec/credential-tools/systemd-creds": b"authenticated credential-tool bytes",
-            "lib/credential-tools/libfixture.so": b"authenticated private library bytes",
-            "share/sources/systemd.tar.gz": b"exact corresponding source fixture",
-            "share/spaceterm-server/THIRD-PARTY-NOTICES.txt": credential_notice,
-        }
-        for patch in package_server_linux.PATCHES:
-            inputs["share/sources/build-material/" + patch["name"]] = (
-                ROOT / "packaging/server/linux/credential-tools" / patch["name"]
-            ).read_bytes()
-        pin = copy.deepcopy(package_server_linux.credential_tool_pin())
-        pin["build"].update(
-            complete=True,
-            build_id="a" * 64,
-            compiler="test-compiler",
-            compiler_version="test-version",
-            build_image="test-image",
-            build_image_sha256="1" * 64,
-            meson_version="test-version",
-            ninja_version="test-version",
-            files=[],
-            dependencies=[
-                {
-                    "name": "systemd",
-                    "version": "260.5",
-                    "source_identity": package_server_linux.SOURCE_COMMIT,
-                    "source_sha256": hashlib.sha256(
-                        inputs["share/sources/systemd.tar.gz"]
-                    ).hexdigest(),
-                    "build_options": [],
-                    "license": "LGPL-2.1-or-later",
-                    "notice_file": "share/spaceterm-server/THIRD-PARTY-NOTICES.txt",
-                    "corresponding_source": "share/sources/systemd.tar.gz",
-                }
-            ],
-        )
-        inputs["share/sources/build-material/build-info.json"] = json.dumps(
-            {key: value for key, value in pin["build"].items() if key != "files"}
-        ).encode()
-        for name, data in inputs.items():
-            path = closure / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(data)
-            path.chmod(0o755 if name.startswith("libexec/") else 0o644)
-        pin["build"]["files"] = [
-            {"name": name, "sha256": hashlib.sha256(data).hexdigest()}
-            for name, data in sorted(inputs.items())
-        ]
-        binding = package_server_linux.credential_closure_binding(pin)
-        pin["runtime"].update(
-            closure_sha256=binding,
-            jammy_result="passed",
-            host_key_result="passed",
-            tpm_result="passed",
-            evidence={
-                gate: {
-                    "closure_sha256": binding,
-                    "tests_run": 1,
-                    "tests_passed": 1,
-                    "tests_skipped": 0,
-                }
-                for gate in ("jammy", "host-key", "tpm")
-            },
-        )
-        receipt = copy.deepcopy(pin)
-        receipt["runtime"].update(
-            jammy_result="unrun", host_key_result="unrun", tpm_result="unrun", evidence={}
-        )
-        closure.with_name(closure.name + ".json").write_text(json.dumps(receipt))
-        binaries = {}
-        for name in (
-            "spaceterm-server",
-            "spaceterm-server-launcher",
-            "spaceterm-server-manager",
-            "spaceterm-server-spawner",
-        ):
-            path = root / name
-            path.write_bytes(name.encode())
-            binaries[name] = path
-        return closure, pin, binaries, credential_notice
-
-    def package(self, temporary, mutate=False):
-        from unittest.mock import patch
-
-        from spaceterm_tasks import package_server_linux
-
-        root = Path(temporary)
-        closure, pin, binaries, notice = self.fixture(temporary)
-        validate = package_server_linux.validate_credential_closure
-        original_resources = package_server.copy_resources
-
-        def resources(destination, **kwargs):
-            result = original_resources(destination, **kwargs)
-            if mutate == "resources":
-                tool = destination.parents[1] / "libexec/credential-tools/systemd-creds"
-                tool.chmod(0o755)
-                tool.write_bytes(b"late replacement")
-            return result
-
-        def build(_release_tag):
-            if mutate is True:
-                (closure / "libexec/credential-tools/systemd-creds").write_bytes(b"replacement")
-            return binaries
-
-        with (
-            patch.object(package_server_linux.sys, "platform", "linux"),
-            patch.object(package_server_linux, "DIST", root),
-            patch.object(package_server_linux, "CLOSURE", closure),
-            patch.object(package_server_linux, "credential_tool_pin", return_value=pin),
-            patch.object(
-                package_server_linux,
-                "validate_credential_closure",
-                side_effect=lambda *args: validate(closure),
-            ),
-            patch.object(package_server_linux, "verify_elf_closure"),
-            patch.object(package_server, "DIST", root),
-            patch.object(package_server, "build", side_effect=build),
-            patch.object(package_server, "copy_resources", side_effect=resources),
-            patch.object(
-                package_server, "executable_metadata", return_value=metadata(build="preflight")
-            ),
-        ):
-            package_server_linux.package()
-        return root / "spaceterm-server-preflight-linux-x86_64.tar.gz", notice
-
-    def test_evidence_candidate_authenticates_unrun_closure_without_production_approval(self):
-        import copy
-        import json
-        from unittest.mock import patch
-
-        from spaceterm_tasks import package_server_linux
-
-        with tempfile.TemporaryDirectory() as temporary:
-            closure, approved, _, _ = self.fixture(temporary)
-            with (
-                patch.object(package_server_linux, "credential_tool_pin", return_value=approved),
-                self.assertRaises(TaskError),
-            ):
-                package_server_linux.validate_evidence_credential_closure(closure)
-            fresh = copy.deepcopy(approved)
-            fresh["runtime"].update(
-                jammy_result="unrun", host_key_result="unrun", tpm_result="unrun", evidence={}
-            )
-            with patch.object(package_server_linux, "credential_tool_pin", return_value=fresh):
-                self.assertEqual(
-                    package_server_linux.validate_evidence_credential_closure(closure), fresh
-                )
-                with self.assertRaisesRegex(TaskError, "Jammy evidence are unavailable"):
-                    package_server_linux.validate_credential_closure(closure)
-                (closure / "lib/credential-tools/libfixture.so").write_bytes(b"replacement")
-                with self.assertRaises(TaskError):
-                    package_server_linux.validate_evidence_credential_closure(closure)
-            # Replaying a previous construction's receipt cannot authorize a new candidate.
-            receipt_path = closure.with_name(closure.name + ".json")
-            receipt = json.loads(receipt_path.read_bytes())
-            receipt["build"]["build_id"] = "b" * 64
-            receipt_path.write_text(json.dumps(receipt))
-            with (
-                patch.object(package_server_linux, "credential_tool_pin", return_value=fresh),
-                self.assertRaises(TaskError),
-            ):
-                package_server_linux.validate_evidence_credential_closure(closure)
-
-    def test_credential_tool_patch_and_corresponding_source_are_in_manifest(self):
-        from unittest.mock import patch
-
-        from spaceterm_tasks import package_server_linux
-
-        with tempfile.TemporaryDirectory() as temporary:
-            closure, pin, _, _ = self.fixture(temporary)
-            name = "share/sources/build-material/" + package_server_linux.PATCHES[0]["name"]
-            (closure / name).unlink()
-            files = [file for file in pin["build"]["files"] if file["name"] != name]
-            with self.assertRaises(TaskError):
-                package_server_linux.verify_credential_files(closure, files)
-            (closure / name).write_bytes(b"unrecorded downstream patch")
-            from spaceterm_tasks import server_artifacts
-
-            files.append({"name": name, "sha256": server_artifacts.digest(closure / name)})
-            with self.assertRaises(TaskError):
-                package_server_linux.verify_credential_files(closure, files)
-            with patch.object(package_server_linux, "credential_tool_pin", return_value=pin):
-                with self.assertRaises(TaskError):
-                    package_server_linux.validate_credential_closure(closure)
-
-    def test_rebuilt_byte_identical_tools_cannot_reuse_previous_build_evidence(self):
-        import json
-        from unittest.mock import patch
-
-        from spaceterm_tasks import package_server_linux
-
-        with tempfile.TemporaryDirectory() as temporary:
-            closure, approved, _, _ = self.fixture(temporary)
-            receipt_path = closure.with_name(closure.name + ".json")
-            rebuilt = (
-                CredentialToolBuildTests()
-                .builder()
-                .build_receipt(
-                    approved,
-                    {**approved["build"], "build_id": "b" * 64},
-                    approved["build"]["files"],
-                )
-            )
-            self.assertNotEqual(rebuilt["build"]["build_id"], approved["build"]["build_id"])
-            self.assertEqual(rebuilt["build"]["files"], approved["build"]["files"])
-            self.assertEqual(rebuilt["runtime"]["evidence"], {})
-            with patch.object(package_server_linux, "credential_tool_pin", return_value=approved):
-                package_server_linux.validate_credential_closure(closure)
-                # Select B's fresh unrun receipt without changing any executable,
-                # library, or metadata bytes. A's evidence must not authorize B.
-                receipt_path.write_text(json.dumps(rebuilt))
-                with self.assertRaises(TaskError):
-                    package_server_linux.validate_credential_closure(closure)
-
-    def test_authenticated_metadata_must_contain_the_selected_build_identity(self):
-        import copy
-        import json
-        from unittest.mock import patch
-
-        from spaceterm_tasks import package_server_linux, server_artifacts
-
-        for change in ("missing-file", "missing-id", "wrong-id"):
-            with self.subTest(change=change), tempfile.TemporaryDirectory() as temporary:
-                closure, approved, _, _ = self.fixture(temporary)
-                name = "share/sources/build-material/build-info.json"
-                path = closure / name
-                if change == "missing-file":
-                    path.unlink()
-                    approved["build"]["files"] = [
-                        file for file in approved["build"]["files"] if file["name"] != name
-                    ]
-                else:
-                    document = json.loads(path.read_bytes())
-                    if change == "missing-id":
-                        del document["build_id"]
-                    else:
-                        document["build_id"] = "b" * 64
-                    path.write_text(json.dumps(document))
-                    for file in approved["build"]["files"]:
-                        if file["name"] == name:
-                            file["sha256"] = server_artifacts.digest(path)
-                binding = package_server_linux.credential_closure_binding(approved)
-                approved["runtime"]["closure_sha256"] = binding
-                for record in approved["runtime"]["evidence"].values():
-                    record["closure_sha256"] = binding
-                receipt = copy.deepcopy(approved)
-                receipt["runtime"].update(
-                    jammy_result="unrun", host_key_result="unrun", tpm_result="unrun", evidence={}
-                )
-                closure.with_name(closure.name + ".json").write_text(json.dumps(receipt))
-                with (
-                    patch.object(
-                        package_server_linux, "credential_tool_pin", return_value=approved
-                    ),
-                    self.assertRaises(TaskError),
-                ):
-                    package_server_linux.validate_credential_closure(closure)
-
-    def test_selected_build_receipt_is_bounded_and_required(self):
-        import json
-        from unittest.mock import patch
-
-        from spaceterm_tasks import package_server_linux, server_artifacts
-
-        for change in ("missing", "invalid-json", "duplicate", "non-object", "oversized"):
-            with self.subTest(change=change), tempfile.TemporaryDirectory() as temporary:
-                closure, approved, _, _ = self.fixture(temporary)
-                path = closure.with_name(closure.name + ".json")
-                if change == "missing":
-                    path.unlink()
-                elif change == "invalid-json":
-                    path.write_bytes(b"{")
-                elif change == "duplicate":
-                    document = path.read_text()
-                    path.write_text('{"schema_version": 1,' + document[1:])
-                elif change == "non-object":
-                    path.write_text(json.dumps([]))
-                else:
-                    path.write_bytes(b" " * (server_artifacts.MAX_MANIFEST_BYTES + 1))
-                with (
-                    patch.object(
-                        package_server_linux, "credential_tool_pin", return_value=approved
-                    ),
-                    self.assertRaises(TaskError),
-                ):
-                    package_server_linux.validate_credential_closure(closure)
-
-    def test_runtime_evidence_must_bind_every_gate_to_the_exact_construction(self):
-        import copy
-        from unittest.mock import patch
-
-        from spaceterm_tasks import package_server_linux
-
-        with tempfile.TemporaryDirectory() as temporary:
-            closure, approved, _, _ = self.fixture(temporary)
-            with patch.object(package_server_linux, "credential_tool_pin", return_value=approved):
-                package_server_linux.validate_credential_closure(closure)
-            for change in (
-                "binary",
-                "build",
-                "source",
-                "patch",
-                "compiler",
-                "policy",
-                "licensing",
-                "count",
-                "skip",
-                "tpm",
-            ):
-                pin = copy.deepcopy(approved)
-                if change == "binary":
-                    pin["build"]["files"][0]["sha256"] = "1" * 64
-                elif change == "build":
-                    pin["build"]["build_id"] = "1" * 64
-                elif change == "source":
-                    pin["source"]["archive_sha256"] = "1" * 64
-                elif change == "patch":
-                    pin["source"]["patches"][0]["sha256"] = "1" * 64
-                elif change == "compiler":
-                    pin["build"]["compiler_version"] = "changed"
-                elif change == "policy":
-                    pin["runtime"]["openssl_configuration"] = "unapproved"
-                elif change == "licensing":
-                    pin["licensing"]["relinking"] = "changed"
-                elif change == "count":
-                    pin["runtime"]["evidence"]["jammy"].update(tests_run=0, tests_passed=0)
-                elif change == "skip":
-                    pin["runtime"]["evidence"]["host-key"]["tests_skipped"] = 1
-                else:
-                    pin["runtime"]["tpm_result"] = "unrun"
-                    del pin["runtime"]["evidence"]["tpm"]
-                # A caller cannot carry old results forward even by updating the
-                # current binding after replacing a construction input.
-                pin["runtime"]["closure_sha256"] = package_server_linux.credential_closure_binding(
-                    pin
-                )
-                with (
-                    self.subTest(change=change),
-                    patch.object(package_server_linux, "credential_tool_pin", return_value=pin),
-                    self.assertRaises(TaskError),
-                ):
-                    package_server_linux.validate_credential_closure(closure)
-
-    def test_copied_credential_tool_must_still_match_the_retained_binary_pin(self):
-        with tempfile.TemporaryDirectory() as temporary, self.assertRaises(TaskError):
-            self.package(temporary, mutate=True)
-
-    def test_credential_binary_substitution_during_resource_compilation_is_rejected(self):
-        with tempfile.TemporaryDirectory() as temporary, self.assertRaises(TaskError):
-            self.package(temporary, mutate="resources")
-
-    def test_archive_preserves_credential_tool_and_desktop_notices(self):
-        import os
-
-        from spaceterm_tasks.packaging import NOTICES
-
-        with tempfile.TemporaryDirectory() as temporary:
-            previous = os.umask(0o002)
-            try:
-                archive, credential_notice = self.package(temporary)
-            finally:
-                os.umask(previous)
-            with tarfile.open(archive) as packaged:
-                notices = packaged.extractfile(
-                    "spaceterm-server/share/spaceterm-server/THIRD-PARTY-NOTICES.txt"
-                )
-                assert notices is not None
-                actual = notices.read()
-            self.assertIn(credential_notice, actual)
-            self.assertIn(NOTICES.read_bytes(), actual)
-
-
-class CredentialToolBuildTests(unittest.TestCase):
-    def builder(self):
-        import importlib.util
-
-        script = ROOT / "packaging/server/linux/credential-tools/build.py"
-        spec = importlib.util.spec_from_file_location("credential_tool_builder", script)
-        assert spec is not None and spec.loader is not None
-        builder = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(builder)
-        return builder
-
-    def test_build_receipt_preserves_the_identity_in_authenticated_metadata(self):
-        from spaceterm_tasks import package_server_linux
-
-        recipe = package_server_linux.credential_tool_pin()
-        build_info = {**recipe["build"], "build_id": "a" * 64}
-        receipt = self.builder().build_receipt(recipe, build_info, recipe["build"]["files"])
-        self.assertEqual(receipt["build"]["build_id"], build_info["build_id"])
-
-    def test_every_build_invalidates_previous_runtime_results_and_receipts(self):
-        import copy
-
-        from spaceterm_tasks import package_server_linux
-
-        recipe = copy.deepcopy(package_server_linux.credential_tool_pin())
-        recipe["runtime"].update(
-            jammy_result="passed",
-            host_key_result="passed",
-            tpm_result="passed",
-            evidence={"jammy": {"closure_sha256": "1" * 64}},
-        )
-        builder = self.builder()
-        first = builder.build_receipt(
-            recipe, {**recipe["build"], "build_id": "1" * 64}, recipe["build"]["files"]
-        )
-        second = builder.build_receipt(
-            recipe, {**recipe["build"], "build_id": "2" * 64}, recipe["build"]["files"]
-        )
-        for receipt in (first, second):
-            self.assertEqual(
-                [receipt["runtime"][field] for field in package_server_linux.RUNTIME_RESULTS],
-                ["unrun"] * 3,
-            )
-            self.assertEqual(receipt["runtime"]["evidence"], {})
-            self.assertEqual(
-                receipt["runtime"]["closure_sha256"],
-                package_server_linux.credential_closure_binding(receipt),
-            )
-            package_server_linux.validate_build_receipt(
-                receipt, recipe, receipt["build"]["build_image"]
-            )
-        self.assertNotEqual(first["runtime"]["closure_sha256"], second["runtime"]["closure_sha256"])
-        self.assertEqual(recipe["runtime"]["jammy_result"], "passed")
-        with self.assertRaises(TaskError):
-            package_server_linux.validate_build_receipt(first, first, first["build"]["build_image"])
-
-    def test_build_consumer_rejects_copied_or_rebound_runtime_evidence(self):
-        import copy
-
-        from spaceterm_tasks import package_server_linux
-
-        recipe = package_server_linux.credential_tool_pin()
-        receipt = self.builder().build_receipt(
-            recipe, {**recipe["build"], "build_id": "1" * 64}, recipe["build"]["files"]
-        )
-        for change in ("passed", "evidence", "binding", "policy", "files"):
-            rejected = copy.deepcopy(receipt)
-            if change == "passed":
-                rejected["runtime"]["host_key_result"] = "passed"
-            elif change == "evidence":
-                rejected["runtime"]["evidence"] = {"jammy": {"closure_sha256": "1" * 64}}
-            elif change == "binding":
-                rejected["runtime"]["closure_sha256"] = "1" * 64
-            elif change == "policy":
-                rejected["runtime"]["minimum_glibc"] = [2, 36]
-            else:
-                rejected["build"]["files"][0]["sha256"] = "1" * 64
-            with self.subTest(change=change), self.assertRaises(TaskError):
-                package_server_linux.validate_build_receipt(
-                    rejected, recipe, receipt["build"]["build_image"]
-                )
-
-    def test_source_authentication_precedes_extraction_and_build_commands(self):
-        import importlib.util
-        from argparse import Namespace
-        from unittest.mock import patch
-
-        script = ROOT / "packaging/server/linux/credential-tools/build.py"
-        spec = importlib.util.spec_from_file_location("credential_tool_builder", script)
-        assert spec is not None and spec.loader is not None
-        builder = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(builder)
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            source = root / "source.tar.gz"
-            source.write_bytes(b"unauthenticated source")
-            arguments = Namespace(scratch=root / "scratch", source=source)
-            with patch.object(builder, "run", return_value="glibc 2.35") as commands:
-                with self.assertRaisesRegex(
-                    builder.BuildFailure, "credential-tool-source-rejected"
-                ):
-                    builder.build(arguments)
-            self.assertEqual(commands.call_count, 1)
-            self.assertEqual(list((root / "scratch").iterdir()), [])
-
-    def test_build_attempts_only_the_owned_pinned_image_without_signing_inputs(self):
-        import os
-        from unittest.mock import patch
-
-        from spaceterm_tasks import package_server_linux
-        from spaceterm_tasks.macos_signing import SIGNING_INPUTS
-
-        calls = []
-
-        def docker(arguments, _failure, **keywords):
-            calls.append(arguments)
-            self.assertEqual(arguments[:2], ["docker", "build"])
-            self.assertFalse(set(SIGNING_INPUTS) & set(keywords["env"]))
-            self.assertIn("linux/amd64", arguments)
-            self.assertIn(
-                package_server_linux.ROOT
-                / "packaging/server/linux/credential-tools/Jammy.Dockerfile",
-                arguments,
-            )
-            raise TaskError("test docker boundary")
-
-        with tempfile.TemporaryDirectory() as temporary:
-            with (
-                patch.object(package_server_linux.sys, "platform", "linux"),
-                patch.object(package_server_linux, "DIST", Path(temporary)),
-                patch.object(package_server_linux, "checked", side_effect=docker),
-                patch.dict(os.environ, {key: "sentinel-signing-input" for key in SIGNING_INPUTS}),
-                self.assertRaisesRegex(TaskError, "test docker boundary"),
-            ):
-                package_server_linux.build_credential_tool()
-            self.assertEqual(len(calls), 1)
-            self.assertEqual(list(Path(temporary).iterdir()), [])
-
-
-class CredentialToolPinTests(unittest.TestCase):
-    def test_credential_tool_and_dependencies_require_exact_source_pin(self):
-        from spaceterm_tasks.package_server_linux import (
-            SOURCE_COMMIT,
-            SOURCE_SHA256,
-            SOURCE_TAG,
-            credential_tool_pin,
-        )
-
-        pin = credential_tool_pin()
-        self.assertEqual(pin["source"]["commit"], SOURCE_COMMIT)
-        self.assertEqual(pin["source"]["annotated_tag"], SOURCE_TAG)
-        self.assertEqual(pin["source"]["archive_sha256"], SOURCE_SHA256)
-        self.assertIn("-Dauto_features=disabled", pin["build"]["options"])
-        self.assertIn("-Dtpm2=enabled", pin["build"]["options"])
-
-    def test_completed_build_does_not_replace_native_baseline_and_credential_evidence(self):
-        from spaceterm_tasks.package_server_linux import validate_credential_closure
-
-        with self.assertRaisesRegex(TaskError, "Jammy evidence are unavailable"):
-            validate_credential_closure()
-
-    def test_lgpl_material_covers_the_recorded_build_without_claiming_native_evidence(self):
-        from spaceterm_tasks.package_server_linux import credential_tool_pin
-
-        pin = credential_tool_pin()
-        self.assertEqual(pin["licensing"]["linking"], "private-shared-libraries")
-        self.assertEqual(pin["runtime"]["jammy_result"], "unrun")
-        self.assertTrue(pin["build"]["complete"])
-        self.assertEqual(pin["build"]["compiler_version"], "11.4.0")
-        self.assertEqual(len(pin["build"]["dependencies"]), 7)
-        self.assertTrue(pin["build"]["files"])
-        self.assertTrue(all(d["source_sha256"] for d in pin["build"]["dependencies"]))
-        self.assertEqual(pin["runtime"]["host_key_result"], "unrun")
-        self.assertEqual(pin["runtime"]["tpm_result"], "unrun")
-        licenses = ROOT / "packaging/server/linux/credential-tools"
-        self.assertTrue((licenses / "LGPL-2.1-or-later.txt").is_file())
-        self.assertIn(
-            "exact systemd source archive", (licenses / "THIRD-PARTY-NOTICES.txt").read_text()
-        )
-
-    def test_credential_tool_cannot_override_required_features_with_duplicate_options(self):
-        from unittest.mock import patch
-
-        from spaceterm_tasks import package_server_linux
-
-        with tempfile.TemporaryDirectory() as temporary:
-            pin = Path(temporary) / "pin.toml"
-            pin.write_text(
-                package_server_linux.PIN.read_text().replace(
-                    '"-Dopenssl=enabled",', '"-Dopenssl=enabled", "-Dopenssl=disabled",'
-                )
-            )
-            with patch.object(package_server_linux, "PIN", pin), self.assertRaises(TaskError):
-                package_server_linux.credential_tool_pin()
 
 
 class ExecutableMetadataTests(unittest.TestCase):
@@ -767,11 +201,95 @@ class ExecutableMetadataTests(unittest.TestCase):
         (root / "bin").mkdir()
         copied = root / "bin/spaceterm-server"
         copied.write_bytes(executable.read_bytes())
-        copied.chmod(0o501)
+        copied.chmod(0o700)
         package_server.verify_executable_metadata(root, record)
         record["protocol_majors"] = [1]
         with self.assertRaises(TaskError):
             package_server.verify_executable_metadata(root, record)
+
+
+class ImplementedServerCompatibilityTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import json
+        import os
+        import shutil
+
+        from spaceterm_tasks.cargo import build_executable
+        from spaceterm_tasks.macos_signing import signing_environment
+
+        temporary = tempfile.TemporaryDirectory(prefix="spaceterm-compatibility-")
+        cls.addClassCleanup(temporary.cleanup)
+        project = Path(temporary.name)
+        dependencies = "\n".join(
+            f"{name} = {{ path = {json.dumps(str(ROOT / 'crates' / name))} }}"
+            for name in ("spaceterm-host", "spaceterm-protocol")
+        )
+        (project / "Cargo.toml").write_text(
+            '[package]\nname = "spaceterm-implemented-compatibility"\n'
+            'version = "0.0.0"\nedition = "2024"\n'
+            '[[bin]]\nname = "compatibility"\npath = "main.rs"\n'
+            f'[dependencies]\n{dependencies}\nserde_json = "1.0"\n'
+        )
+        shutil.copyfile(
+            Path(__file__).with_name("implemented_server_compatibility.rs"), project / "main.rs"
+        )
+        environment = signing_environment(os.environ)
+        environment["CARGO_BUILD_JOBS"] = "5"
+        environment["CARGO_TARGET_DIR"] = os.environ.get("CARGO_TARGET_DIR", str(ROOT / "target"))
+        cls.probe = build_executable(
+            "--offline",
+            "--manifest-path",
+            project / "Cargo.toml",
+            binary="compatibility",
+            env=environment,
+        )
+
+    def compare(self, document):
+        import json
+        import subprocess
+
+        return subprocess.run(
+            [self.probe],
+            input=json.dumps(document, separators=(",", ":")).encode(),
+            env={},
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        ).returncode
+
+    def test_actual_server_metadata_matches_implemented_protocol_and_store(self):
+        from spaceterm_tasks.cargo import build_executable
+        from spaceterm_tasks.macos_signing import signing_environment
+        from spaceterm_tasks.packaging import packaged_environment
+
+        environment = signing_environment(packaged_environment(None))
+        environment["CARGO_BUILD_JOBS"] = "5"
+        executable = build_executable(
+            "--locked", "-p", "spaceterm-server", binary="spaceterm-server", env=environment
+        )
+        platform = "darwin-arm64" if sys.platform == "darwin" else "linux-x86_64"
+        document = package_server.executable_metadata(executable, platform, "preflight")
+        self.assertEqual(self.compare(document), 0, "server advertises unimplemented compatibility")
+
+    def test_unimplemented_protocol_and_store_claims_are_rejected(self):
+        import copy
+
+        document = metadata()
+        self.assertEqual(self.compare(document), 0, "implemented compatibility was rejected")
+        for field, claim in (
+            ("protocol_majors", [1, 2, 3]),
+            ("storage", {"read": [1, 2], "write": 1, "migrate_from": []}),
+            ("storage", {"read": [1, 2], "write": 2, "migrate_from": [1]}),
+            ("storage", {"read": [1], "write": 1, "migrate_from": [1]}),
+        ):
+            altered = copy.deepcopy(document)
+            altered[field] = claim
+            with self.subTest(field=field, claim=claim):
+                self.assertNotEqual(
+                    self.compare(altered), 0, "unimplemented compatibility was accepted"
+                )
 
 
 class CargoServerArtifactTests(unittest.TestCase):
@@ -826,7 +344,8 @@ class CargoServerArtifactTests(unittest.TestCase):
                 patch.object(cargo, "ROOT", root),
             ):
                 self.assertEqual(
-                    package_server.build(), {name: (target / name).resolve() for name in names}
+                    package_server.build(),
+                    {"spaceterm-server": (target / "spaceterm-server").resolve()},
                 )
 
 
@@ -893,12 +412,7 @@ class MacosDependencyClosureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             binaries = {}
-            for name in (
-                "spaceterm-server",
-                "spaceterm-server-launcher",
-                "spaceterm-server-manager",
-                "spaceterm-server-spawner",
-            ):
+            for name in ("spaceterm-server",):
                 binary = root / name
                 binary.write_bytes(bytes.fromhex("cffaedfe") + b"fixture")
                 binaries[name] = binary
@@ -1020,109 +534,44 @@ if sys.platform == "darwin":
 if sys.platform == "linux":
 
     class LinuxElfClosureTests(unittest.TestCase):
-        def fixture(self):
-            import shutil
+        def fixture(self, rpath=False):
             import subprocess
 
-            temporary_directory = tempfile.TemporaryDirectory()
-            self.addCleanup(temporary_directory.cleanup)
-            temporary = temporary_directory.name
-            root = Path(temporary) / "package"
-            build = Path(temporary) / "build"
-            libraries = root / "lib/credential-tools"
-            tool = root / "libexec/credential-tools/systemd-creds"
-            build.mkdir()
-            libraries.mkdir(parents=True)
-            tool.parent.mkdir(parents=True)
-            # This is a credential-free ELF fixture, not the pinned upstream tool.
+            temporary = tempfile.TemporaryDirectory()
+            self.addCleanup(temporary.cleanup)
+            root = Path(temporary.name) / "package"
+            binary = root / "bin/spaceterm-server"
+            binary.parent.mkdir(parents=True)
+            command = ["cc", "-x", "c", "-", "-o", binary]
+            if rpath:
+                command.append("-Wl,-rpath,$ORIGIN/../lib")
             subprocess.run(
-                [
-                    "gcc",
-                    "-x",
-                    "c",
-                    "-",
-                    "-shared",
-                    "-fPIC",
-                    "-Wall",
-                    "-Wextra",
-                    "-Werror",
-                    "-Wl,-rpath,$ORIGIN",
-                    "-o",
-                    str(build / "libfixture.so"),
-                ],
-                input=b"int fixture(void) { return 7; }\n",
+                command,
+                input=b"int main(void) { return 0; }\n",
                 check=True,
                 capture_output=True,
+                timeout=30,
             )
-            subprocess.run(
-                [
-                    "gcc",
-                    "-x",
-                    "c",
-                    "-",
-                    "-Wall",
-                    "-Wextra",
-                    "-Werror",
-                    "-L" + str(build),
-                    "-lfixture",
-                    "-Wl,-rpath,$ORIGIN/../../lib/credential-tools",
-                    "-o",
-                    str(tool),
-                ],
-                input=b'#include <stdio.h>\nextern int fixture(void);\nint main(void) { printf("%d\\n", fixture()); return 0; }\n',
-                check=True,
-                capture_output=True,
-            )
-            shutil.copyfile(build / "libfixture.so", libraries / "libfixture.so")
-            shutil.rmtree(build)
-            return root, tool, libraries / "libfixture.so"
+            binary.chmod(0o700)
+            return root, binary
 
-        def test_private_elf_fixture_runs_without_build_host_libraries(self):
-            import subprocess
-
+        def test_actual_account_elf_links_only_baseline_system_libraries(self):
             from spaceterm_tasks.package_server_linux import verify_elf_closure
 
-            root, tool, _ = self.fixture()
+            root, _ = self.fixture()
             verify_elf_closure(root)
-            result = subprocess.run([tool], env={}, check=True, capture_output=True, timeout=5)
-            self.assertEqual(result.stdout, b"7\n")
 
-        def test_complete_package_requires_native_helpers_and_rejects_unrecorded_code(self):
+        def test_extra_native_code_and_loader_search_paths_are_rejected(self):
             import shutil
 
             from spaceterm_tasks.package_server_linux import verify_elf_closure
 
-            root, tool, _ = self.fixture()
-            extra = root / "share/unrecorded-executable"
+            root, binary = self.fixture()
+            extra = root / "share/extra-executable"
             extra.parent.mkdir()
-            shutil.copyfile(tool, extra)
+            shutil.copyfile(binary, extra)
             with self.assertRaises(TaskError):
                 verify_elf_closure(root)
-            extra.unlink()
-            server = root / "bin/spaceterm-server"
-            server.parent.mkdir()
-            server.write_bytes(b"#!/bin/sh\nexit 0\n")
+            root, _ = self.fixture(rpath=True)
             with self.assertRaises(TaskError):
                 verify_elf_closure(root)
-
-        def test_actual_elf_search_paths_reject_nested_missing_duplicate_and_non_elf_libraries(
-            self,
-        ):
-            import shutil
-
-            from spaceterm_tasks.package_server_linux import verify_elf_closure
-
-            for case in ("nested", "missing", "duplicate", "non-elf"):
-                root, _, library = self.fixture()
-                nested = library.parent / "nested" / library.name
-                nested.parent.mkdir()
-                if case == "nested":
-                    library.rename(nested)
-                elif case == "missing":
-                    library.unlink()
-                elif case == "duplicate":
-                    shutil.copyfile(library, nested)
-                else:
-                    library.write_bytes(b"not an ELF dependency")
-                with self.subTest(case=case), self.assertRaises(TaskError):
-                    verify_elf_closure(root)
