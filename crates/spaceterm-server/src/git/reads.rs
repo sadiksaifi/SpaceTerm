@@ -84,11 +84,26 @@ pub(crate) struct ReadState {
     interests: Vec<StatusInterest>,
     pending_statuses: VecDeque<(AuthenticatedGitPrincipal, GitStatusTarget)>,
     poller: Option<JoinHandle<()>>,
-    maintenance: Option<(AuthenticatedGitPrincipal, JoinHandle<()>)>,
+    maintenance: Option<InventoryMaintenance>,
     inventory_offset: usize,
     principals: Vec<AuthenticatedGitPrincipal>,
     revision: u64,
     observation: u64,
+}
+struct InventoryMaintenance {
+    handle: JoinHandle<()>,
+    pending: Option<AuthenticatedGitPrincipal>,
+    pending_reserved: bool,
+    active: Option<AuthenticatedGitPrincipal>,
+}
+impl InventoryMaintenance {
+    fn owner(&self) -> Option<AuthenticatedGitPrincipal> {
+        self.active
+            .or(self.pending.filter(|_| self.pending_reserved))
+    }
+    fn attributed_to(&self, principal: AuthenticatedGitPrincipal) -> bool {
+        self.active == Some(principal) || (self.pending_reserved && self.pending == Some(principal))
+    }
 }
 struct ReadJob {
     principal: AuthenticatedGitPrincipal,
@@ -377,6 +392,7 @@ impl GitService {
             return Err(GitFailure::CancelledRead);
         }
         reads.jobs.retain(|job| !job.handle.is_finished());
+        self.schedule_pending_inventory(reads);
         if let Some(job) = reads
             .jobs
             .iter_mut()
@@ -388,7 +404,7 @@ impl GitService {
         let maintenance = reads
             .maintenance
             .as_ref()
-            .filter(|(_, handle)| !handle.is_finished());
+            .filter(|maintenance| maintenance.owner().is_some());
         if reads.jobs.iter().filter(|job| job.active).count() + usize::from(maintenance.is_some())
             >= MAX_READ_JOBS
             || reads
@@ -396,7 +412,7 @@ impl GitService {
                 .iter()
                 .filter(|job| job.active && job.principal == principal)
                 .count()
-                + usize::from(maintenance.is_some_and(|(owner, _)| *owner == principal))
+                + usize::from(maintenance.is_some_and(|job| job.attributed_to(principal)))
                 >= MAX_CLIENT_READS
         {
             return Err(GitFailure::Capacity);
@@ -1245,6 +1261,7 @@ impl GitService {
     /// of subscriptions, attachments and active views. The authenticated identity
     /// remains stable across disconnect; the actor rechecks revocation each pass.
     /// Server-core calls this after committed directory or Worktree changes too.
+    /// Capacity retains one dirty request for retry when a read slot becomes available.
     pub fn refresh_inventory(
         &self,
         principal: AuthenticatedGitPrincipal,
@@ -1259,29 +1276,90 @@ impl GitService {
         if self.inner.cancellation.is_cancelled() {
             return Err(GitFailure::CancelledRead);
         }
-        if reads
-            .maintenance
-            .as_ref()
-            .is_some_and(|(_, handle)| !handle.is_finished())
-        {
-            return Ok(());
+        if reads.maintenance.is_none() {
+            let service = self.clone();
+            let handle = tokio::spawn(async move {
+                loop {
+                    service.inner.inventory_wake.notified().await;
+                    if service.inner.cancellation.is_cancelled() {
+                        break;
+                    }
+                    let principal = {
+                        let Ok(mut reads) = service.inner.reads.lock() else {
+                            break;
+                        };
+                        let Some(maintenance) = &mut reads.maintenance else {
+                            break;
+                        };
+                        if !maintenance.pending_reserved {
+                            continue;
+                        }
+                        let principal = maintenance.pending.take();
+                        maintenance.pending_reserved = false;
+                        maintenance.active = principal;
+                        principal
+                    };
+                    let Some(principal) = principal else {
+                        continue;
+                    };
+                    let _ = service.refresh_inventory_batch(principal).await;
+                    let Ok(mut reads) = service.inner.reads.lock() else {
+                        break;
+                    };
+                    if let Some(maintenance) = &mut reads.maintenance {
+                        maintenance.active = None;
+                    }
+                    let _ = service.schedule_pending_statuses(&mut reads);
+                }
+            });
+            reads.maintenance = Some(InventoryMaintenance {
+                handle,
+                pending: None,
+                pending_reserved: false,
+                active: None,
+            });
         }
-        if reads
-            .jobs
-            .iter()
-            .filter(|job| job.active && job.principal == principal)
-            .count()
-            >= MAX_CLIENT_READS
-            || reads.jobs.iter().filter(|job| job.active).count() >= MAX_READ_JOBS
-        {
-            return Err(GitFailure::Capacity);
+        if let Some(maintenance) = &mut reads.maintenance {
+            maintenance.pending = Some(principal);
+            maintenance.pending_reserved = false;
         }
-        let service = self.clone();
-        let handle = tokio::spawn(async move {
-            let _ = service.refresh_inventory_batch(principal).await;
-        });
-        reads.maintenance = Some((principal, handle));
-        Ok(())
+        if self.schedule_pending_inventory(&mut reads) {
+            Ok(())
+        } else {
+            Err(GitFailure::Capacity)
+        }
+    }
+
+    fn schedule_pending_inventory(&self, reads: &mut ReadState) -> bool {
+        if self.inner.cancellation.is_cancelled() {
+            return false;
+        }
+        let Some(maintenance) = &mut reads.maintenance else {
+            return false;
+        };
+        let Some(principal) = maintenance.pending else {
+            return false;
+        };
+        if !maintenance.pending_reserved {
+            // A full quota retains the dirty request without charging an unadmitted read.
+            if (maintenance.active.is_none()
+                && reads.jobs.iter().filter(|job| job.active).count() >= MAX_READ_JOBS)
+                || (maintenance.active != Some(principal)
+                    && reads
+                        .jobs
+                        .iter()
+                        .filter(|job| job.active && job.principal == principal)
+                        .count()
+                        >= MAX_CLIENT_READS)
+            {
+                return false;
+            }
+            maintenance.pending_reserved = true;
+        }
+        if maintenance.active.is_none() {
+            self.inner.inventory_wake.notify_one();
+        }
+        true
     }
 
     async fn refresh_inventory_batch(
@@ -1389,6 +1467,8 @@ impl GitService {
     }
 
     fn schedule_pending_statuses(&self, reads: &mut ReadState) -> Result<(), GitFailure> {
+        // Authoritative inventory takes freed capacity before replaceable status follow-ups.
+        self.schedule_pending_inventory(reads);
         reads.pending_statuses.retain(|(principal, target)| {
             reads.interests.iter().any(|i| {
                 i.principal == *principal && i.target == *target && i.sender.receiver_count() != 0
@@ -1440,8 +1520,8 @@ impl GitService {
         if let Some(poller) = poller {
             failed |= poller.await.is_err();
         }
-        if let Some((_, maintenance)) = maintenance {
-            failed |= maintenance.await.is_err();
+        if let Some(maintenance) = maintenance {
+            failed |= maintenance.handle.await.is_err();
         }
         for job in jobs {
             failed |= job.handle.await.is_err();

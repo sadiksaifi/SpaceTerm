@@ -66,6 +66,7 @@ pub(crate) struct Inner {
     pub reads: Mutex<super::reads::ReadState>,
     pub read_slots: Arc<Semaphore>,
     pub read_wake: tokio::sync::Notify,
+    pub inventory_wake: tokio::sync::Notify,
     writes: Arc<Semaphore>,
     pub(crate) shutdown: tokio::sync::Mutex<()>,
 }
@@ -133,6 +134,7 @@ impl GitService {
                 reads: Mutex::new(super::reads::ReadState::default()),
                 read_slots: Arc::new(Semaphore::new(8)),
                 read_wake: tokio::sync::Notify::new(),
+                inventory_wake: tokio::sync::Notify::new(),
                 writes: Arc::new(Semaphore::new(limits.active_writes)),
                 shutdown: tokio::sync::Mutex::new(()),
             }),
@@ -717,6 +719,7 @@ impl GitService {
         state.assessments.clear();
         self.inner.cancellation.cancel();
         self.inner.read_wake.notify_waiters();
+        self.inner.inventory_wake.notify_one();
         Ok(())
     }
     pub async fn shutdown(&self) -> Result<GitShutdownReport, GitFailure> {
