@@ -241,9 +241,14 @@ fn build_vendored(link_mode: LinkMode) {
             .arg(&zig_global_cache_dir);
     }
 
-    // Only pass -Dtarget when cross-compiling. For native builds, let zig
-    // auto-detect the host (matches how ghostty's own CMakeLists.txt works).
-    if target != host {
+    // GNU builds must select the glibc 2.35 baseline even on newer hosts.
+    // Otherwise Ghostty selects arc4random_buf, which first appeared in 2.36.
+    if target != host
+        || matches!(
+            target.as_str(),
+            "x86_64-unknown-linux-gnu" | "aarch64-unknown-linux-gnu"
+        )
+    {
         let zig_target = zig_target(&target);
         build.arg(format!("-Dtarget={zig_target}"));
     }
@@ -515,7 +520,7 @@ fn apply_spaceterm_patch(src_dir: &Path) {
 fn apply_patch(src_dir: &Path, patch: &Path) {
     let already_applied = Command::new("git")
         .args(["apply", "--reverse", "--check"])
-        .arg(&patch)
+        .arg(patch)
         .current_dir(src_dir)
         .output()
         .unwrap_or_else(|error| panic!("failed to verify SpaceTerm Ghostty patch: {error}"));
@@ -525,13 +530,13 @@ fn apply_patch(src_dir: &Path, patch: &Path) {
 
     let applies_cleanly = Command::new("git")
         .args(["apply", "--check"])
-        .arg(&patch)
+        .arg(patch)
         .current_dir(src_dir)
         .output()
         .unwrap_or_else(|error| panic!("failed to check SpaceTerm Ghostty patch: {error}"));
     if applies_cleanly.status.success() {
         let mut apply = Command::new("git");
-        apply.arg("apply").arg(&patch).current_dir(src_dir);
+        apply.arg("apply").arg(patch).current_dir(src_dir);
         run(apply, "apply SpaceTerm Ghostty patch");
         return;
     }
@@ -565,9 +570,9 @@ fn library_search_dirs(target: &str, install_prefix: &Path) -> Vec<PathBuf> {
 
 fn zig_target(target: &str) -> String {
     let value = match target {
-        "x86_64-unknown-linux-gnu" => "x86_64-linux-gnu",
+        "x86_64-unknown-linux-gnu" => "x86_64-linux-gnu.2.35",
         "x86_64-unknown-linux-musl" => "x86_64-linux-musl",
-        "aarch64-unknown-linux-gnu" => "aarch64-linux-gnu",
+        "aarch64-unknown-linux-gnu" => "aarch64-linux-gnu.2.35",
         "aarch64-unknown-linux-musl" => "aarch64-linux-musl",
         "aarch64-apple-darwin" => "aarch64-macos-none",
         "x86_64-pc-windows-gnu" => "x86_64-windows-gnu",
