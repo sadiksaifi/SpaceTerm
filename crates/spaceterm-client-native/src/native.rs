@@ -2,7 +2,9 @@
 //! The host owns registration, original request IDs, assessments and supervision.
 
 pub mod artifacts;
+pub mod consumer;
 pub mod runtime;
+mod tracked;
 
 use artifacts::{ArtifactTransport, ServerArtifacts};
 use std::sync::Arc;
@@ -56,7 +58,14 @@ impl NativeClientProvider {
                 supervisor
                     .with_runtime_processes(Arc::new(runtime::RuntimeServiceProcesses::default()))
             })
-            .map(Self::from_supervisor)
+            .map(|supervisor| {
+                let mut provider = Self::from_supervisor(supervisor);
+                provider.companion = Some(Arc::new(consumer::NativeConsumer::new(
+                    provider.management(),
+                    consumer::NativeConsumerKind::StatusCompanion,
+                )));
+                provider
+            })
             .map_err(classify_service)
     }
 
@@ -105,6 +114,14 @@ impl NativeClientProvider {
 
     pub fn management(&self) -> Arc<NativeServiceManagement> {
         Arc::clone(&self.management)
+    }
+
+    /// Restores only the CLI's dedicated additional Client journal on first use.
+    pub fn cli_consumer(&self) -> Arc<consumer::NativeConsumer> {
+        Arc::new(consumer::NativeConsumer::new(
+            self.management(),
+            consumer::NativeConsumerKind::Cli,
+        ))
     }
 
     pub fn inspect(&self, key: AccountBuildKey) -> ManagementFuture<'_, NativeObservation> {

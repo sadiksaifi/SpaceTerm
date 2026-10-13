@@ -5,7 +5,6 @@ use std::{ffi::OsString, process::ExitCode, sync::Arc};
 use spaceterm_client_native::NativeClientProvider;
 use spaceterm_client_native::cli::{
     arguments::{CliCommand, MAX_ARGUMENTS, parse},
-    bindings::{UnavailablePairingBindings, UnavailableProtocolManagement},
     output::{emit_failure, emit_text},
     runner::{CliDependencies, Dispatch, dispatch},
     tty::TerminalIo,
@@ -78,11 +77,12 @@ async fn run() -> ExitCode {
             return ExitCode::from(failure.exit_code());
         }
     };
+    let consumer = provider.cli_consumer();
     let dependencies = CliDependencies::new(
         Ok(provider.key()),
-        Arc::new(UnavailableProtocolManagement),
+        consumer.clone(),
         provider.management(),
-        Arc::new(UnavailablePairingBindings),
+        consumer,
     );
     // The signal task also runs while a controlling-terminal read blocks the
     // dispatch thread. Exiting never acknowledges or reissues admitted work.

@@ -98,12 +98,13 @@ pub struct ClientRuntime {
 impl ClientRegistry {
     pub async fn recover(services: ClientServices) -> Result<(Self, ClientRuntime), ClientFailure> {
         let limits = services.limits.validate()?;
-        if services.additional_capabilities.len() > 2
+        if services.additional_capabilities.len() > 3
             || services.additional_capabilities.iter().any(|capability| {
                 !matches!(
                     *capability,
                     spaceterm_protocol::negotiation::CAPABILITY_SERVER_GIT
                         | spaceterm_protocol::negotiation::CAPABILITY_SERVER_DIRECTORIES
+                        | spaceterm_protocol::negotiation::CAPABILITY_ORGANIZATION_COMPARISONS
                 )
             })
         {
