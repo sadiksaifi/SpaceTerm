@@ -1,6 +1,8 @@
 //! Purpose-separated, bounded dispatch. Status subscriptions replace complete
 //! bounded facts and never establish terminal-effect reconciliation.
 
+mod terminal;
+
 use crate::{
     adapters::transport::{protocol_failure, transport_failure},
     api::{AuthenticatedSession, ServerHandle, VerifiedPrincipal},
@@ -170,6 +172,72 @@ impl OrdinaryDispatchPort for ActorOrdinaryDispatch {
                             value.acknowledged = true;
                             $p::message::Kind::Reconciliation(value)
                         }
+                        $p::message::Kind::ClientContext(mut value) => {
+                            if value.request == 0
+                                || value.acknowledged
+                                || value.failure.is_some()
+                                || value.epoch != principal.epoch().get()
+                                || value.connection_generation
+                                    != principal.binding().generation.get()
+                                || value.context_generation == 0
+                            {
+                                return Err(failure(ServerFailureClass::ScopeMismatch));
+                            }
+                            let update = crate::api::ClientFocusUpdate {
+                                context: spaceterm_core::authority::ContextGeneration::new(
+                                    value.context_generation,
+                                ),
+                                focused_pane: value
+                                    .focused_pane
+                                    .as_ref()
+                                    .map(identity::decode_pane)
+                                    .transpose()
+                                    .map_err(protocol_failure)?,
+                                terminal_input_focus: value.terminal_input_focus,
+                                native_effects_eligible: value.native_effects_eligible,
+                            };
+                            match handle.update_client_focus(principal, update).await {
+                                Ok(_) => value.acknowledged = true,
+                                Err(error) if error.class == ServerFailureClass::StaleAuthority => {
+                                    value.failure = Some(common::Failure {
+                                        classification: common::FailureClass::Stale as i32,
+                                        retry_after_ms: 0,
+                                    })
+                                }
+                                Err(error) => return Err(error),
+                            }
+                            $p::message::Kind::ClientContext(value)
+                        }
+                        $p::message::Kind::RuntimeCommand(value) => {
+                            let command =
+                                spaceterm_protocol::convert::runtime::$p::decode_command(&value)
+                                    .map_err(protocol_failure)?;
+                            let fence = command.fence;
+                            let result = handle.runtime_command(principal, command).await;
+                            $p::message::Kind::RuntimeOutcome($p::RuntimeOutcome {
+                                request: value.request,
+                                fence: Some(identity::encode_fence(fence)),
+                                failure: runtime_failure(result)?,
+                            })
+                        }
+                        $p::message::Kind::ContentQuery(value) => {
+                            let request =
+                                spaceterm_protocol::convert::content::$p::decode_page_request(
+                                    &value,
+                                )
+                                .map_err(protocol_failure)?;
+                            let request = terminal::bounded_page_request(request)?;
+                            let access = handle
+                                .runtime_access(principal, request.stamp().fence().session())
+                                .await?;
+                            let result = access.handle.read_page(request)?.await?;
+                            $p::message::Kind::ContentReadResponse(Box::new(
+                                spaceterm_protocol::convert::content::$p::encode_page_result(
+                                    &result,
+                                )
+                                .map_err(protocol_failure)?,
+                            ))
+                        }
                         // Standalone control/startup requests have no durable
                         // operation identity. They cannot reach actor admission.
                         _ => return Err(failure(ServerFailureClass::ScopeMismatch)),
@@ -206,6 +274,7 @@ pub struct ProtocolDispatcher {
     messages: Arc<Semaphore>,
     bytes: Arc<Semaphore>,
     egress: Arc<EgressBudget>,
+    clock: Option<Arc<dyn crate::contracts::ServerClock>>,
 }
 impl ProtocolDispatcher {
     /// The native/actor status producer supplies this validated bounded feed.
@@ -225,7 +294,13 @@ impl ProtocolDispatcher {
             messages: Arc::new(Semaphore::new(MAX_DECODED_DISPATCH_MESSAGES)),
             bytes: Arc::new(Semaphore::new(MAX_DECODED_DISPATCH_BYTES)),
             egress: EgressBudget::new(),
+            clock: None,
         }
+    }
+    /// Share the runtime epoch clock for native-request deadline translation.
+    pub fn with_clock(mut self, clock: Arc<dyn crate::contracts::ServerClock>) -> Self {
+        self.clock = Some(clock);
+        self
     }
     pub fn with_egress_budget(mut self, budget: Arc<EgressBudget>) -> Self {
         self.egress = budget;
@@ -256,6 +331,7 @@ impl ProtocolDispatcher {
         handle: ServerHandle,
     ) -> Result<(), ServerFailure> {
         let mut egress = ConnectionEgress::new(self.egress.clone());
+        let mut terminal = terminal::TerminalConnection::new(self.clock.clone());
         let mut status = self.status.clone();
         let mut organization = handle.subscribe_snapshot();
         let mut organization_query: Option<organization::OrganizationQuery> = None;
@@ -268,17 +344,50 @@ impl ProtocolDispatcher {
                 Message(Option<Vec<u8>>),
                 Status,
                 Organization,
+                Terminal(Option<terminal::Wake>),
             }
             if *peer.closing.borrow() {
                 return Ok(());
             }
             let wake = tokio::select! {
                 _ = peer.closing.wait_for(|value| *value) => return Ok(()),
+                event = terminal.next() => Wake::Terminal(event),
                 result = peer.transport.recv() => Wake::Message(result.map_err(transport_failure)?),
                 changed = status.changed(), if subscription.is_some() => { changed.map_err(|_| failure(ServerFailureClass::RuntimeUnavailable))?; Wake::Status },
                 changed = organization.changed(), if organization_query.is_some() && !awaiting_organization_resync => { changed.map_err(|_| failure(ServerFailureClass::RuntimeUnavailable))?; Wake::Organization },
             };
             match wake {
+                Wake::Terminal(event) => {
+                    let PeerConnection::Ordinary(session) = &mut peer.connection else {
+                        return Err(failure(ServerFailureClass::Authentication));
+                    };
+                    let event =
+                        event.ok_or_else(|| failure(ServerFailureClass::RuntimeUnavailable))?;
+                    match event {
+                        terminal::Wake::Presentation(event) => {
+                            terminal
+                                .publish(
+                                    *event,
+                                    self,
+                                    session,
+                                    &peer.transport,
+                                    &handle,
+                                    &mut egress,
+                                )
+                                .await?
+                        }
+                        terminal::Wake::Effect(reply) => {
+                            self.send(
+                                session,
+                                &peer.transport,
+                                &reply.response?,
+                                &mut egress,
+                                Some(reply.reservation),
+                            )
+                            .await?
+                        }
+                    }
+                }
                 Wake::Organization => {
                     let query = organization_query
                         .ok_or_else(|| failure(ServerFailureClass::ScopeMismatch))?;
@@ -392,6 +501,20 @@ impl ProtocolDispatcher {
                                 organization_query = Some(query);
                                 continue;
                             }
+                            if terminal
+                                .subscription(&payload, session.principal, &handle)
+                                .await?
+                            {
+                                continue;
+                            }
+                            if terminal.admit_effect(
+                                &payload,
+                                session.principal,
+                                &handle,
+                                &mut egress,
+                            )? {
+                                continue;
+                            }
                             let action = status_action(&payload, session.principal)?;
                             match action {
                                 Some(StatusAction::Cancel {
@@ -450,17 +573,35 @@ impl ProtocolDispatcher {
                                     }
                                 }
                                 None => {
-                                    // One sequential request is stricter than the
-                                    // four-effectful-request per-connection ceiling.
-                                    let reserved = effectful_reply(&payload)
-                                        .then(|| egress.reserve_operation_reply())
-                                        .transpose()
-                                        .map_err(egress_failure)?;
+                                    // Identified mutations share the four-request ceiling with pending runtime effects.
+                                    if effectful_reply(&payload) && terminal.pending_effects() >= 4
+                                    {
+                                        return Err(failure(ServerFailureClass::Capacity));
+                                    }
+                                    let reserved = if let Some(bytes) =
+                                        terminal::page_reply_budget(&payload)?
+                                    {
+                                        Some(
+                                            egress
+                                                .reserve_content_reply(bytes)
+                                                .map_err(egress_failure)?,
+                                        )
+                                    } else {
+                                        effectful_reply(&payload)
+                                            .then(|| egress.reserve_operation_reply())
+                                            .transpose()
+                                            .map_err(egress_failure)?
+                                    };
                                     if let Some(response) = self
                                         .ordinary
                                         .dispatch(session.principal, payload, handle.clone())
                                         .await?
                                     {
+                                        if terminal::TerminalConnection::context_acknowledged(
+                                            &response,
+                                        ) {
+                                            terminal.reset();
+                                        }
                                         self.send(
                                             session,
                                             &peer.transport,
@@ -827,4 +968,29 @@ fn egress_failure(error: crate::egress::EgressFailure) -> ServerFailure {
         EgressFailure::Closed => ServerFailureClass::StaleAuthority,
         EgressFailure::Exhausted => ServerFailureClass::Exhausted,
     })
+}
+
+fn runtime_failure(
+    result: Result<spaceterm_core::runtime_authority::EffectDisposition, ServerFailure>,
+) -> Result<Option<common::Failure>, ServerFailure> {
+    use spaceterm_core::runtime_authority::EffectDisposition;
+    let class = match result {
+        Ok(EffectDisposition::Applied) => return Ok(None),
+        Ok(EffectDisposition::StaleAuthority | EffectDisposition::Cancelled) => {
+            common::FailureClass::Stale
+        }
+        Ok(EffectDisposition::Retired) => common::FailureClass::Retired,
+        Err(error) => match error.class {
+            ServerFailureClass::StaleAuthority => common::FailureClass::Stale,
+            ServerFailureClass::Capacity => common::FailureClass::Limit,
+            ServerFailureClass::RuntimeUnavailable | ServerFailureClass::NativeUnavailable => {
+                common::FailureClass::Unavailable
+            }
+            _ => return Err(error),
+        },
+    };
+    Ok(Some(common::Failure {
+        classification: class as i32,
+        retry_after_ms: 0,
+    }))
 }

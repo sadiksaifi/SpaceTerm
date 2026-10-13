@@ -95,7 +95,7 @@ fn admit(major: u32, bytes: &[u8], limits: NegotiatedLimits) -> Result<(), Proto
     let tag = preflight::payload_tag(bytes)?;
     let maximum = match tag {
         14 => limits.frame_bytes,
-        46 | 47 => limits.frame_bytes.min(1024 * 1024),
+        46 | 47 | 50 => limits.frame_bytes.min(1024 * 1024),
         16 | 43 => limits.resource_chunk_bytes.saturating_add(2048),
         18 | 19 => limits
             .clipboard_bytes

@@ -57,6 +57,9 @@ message Message {
     TopologyPage topology_page = 45;
     CanonicalSemanticPage canonical_semantic_page = 46;
     ContentReadResponse content_read_response = 47;
+    ClientContext client_context = 48;
+    PaneSubscription pane_subscription = 49;
+    ContentPublication content_publication = 50;
   }
 }
 message OrganizationQuery { uint64 known_revision = 1; bytes continuation = 2; uint64 known_epoch = 3; uint64 request = 4; uint64 request_generation = 5; PublicationPart part = 6; }
@@ -235,7 +238,7 @@ message SemanticRow { uint64 id = 1; uint64 revision = 2; bool soft_wrap = 3; re
 message Cursor { uint64 row_id = 1; uint32 column = 2; uint32 shape = 3; bool visible = 4; bool blinking = 5;
   PhysicalRowId physical_row = 6;
 }
-message Modes { bool alternate_screen = 1; bool bracketed_paste = 2; bool focus_events = 3; uint32 mouse_protocol = 4; uint32 keyboard_protocol = 5; bool synchronized_output = 6; }
+message Modes { bool alternate_screen = 1; bool bracketed_paste = 2; bool focus_events = 3; uint32 mouse_protocol = 4; uint32 keyboard_protocol = 5; bool synchronized_output = 6; bool application_cursor = 7; bool application_keypad = 8; bool origin = 9; bool insert = 10; bool wraparound = 11; bool hidden_input = 12; uint32 mouse_tracking = 13; uint32 mouse_encoding = 14; }
 // Palette overrides only (OSC 4/104); default and cursor overrides are separate.
 message ColorOverride { uint32 slot = 1; uint32 rgb = 2; }
 // Program state, not resolved client theme colors. RGB values are 24-bit 0xRRGGBB;
@@ -405,6 +408,8 @@ message CanonicalSemanticPage {
   repeated GraphicPlacement graphics = 9; PageContinuation continuation = 10;
   bool complete = 11; TerminalMetadata metadata = 12;
   repeated GraphicsResourceReference resources = 13;
+  // Semantic width, without inventing client cell-pixel measurements.
+  uint32 columns = 14;
 }
 
 // These additive DTOs require CANONICAL_DOMAIN; legacy grammar is unchanged.
@@ -441,3 +446,10 @@ message ContentReadResponse {
 // Clear affects terminal content only. It never retires or replaces the Session.
 message ClearScreenAndScrollback {}
 message CellPixelMetrics { uint32 width = 1; uint32 height = 2; }
+
+// TERMINAL_STREAMS keeps attachment demand separate from lifecycle ownership.
+message ClientContext { uint64 request = 1; uint64 epoch = 2; uint64 connection_generation = 3; uint64 context_generation = 4; spaceterm.common.Entity focused_pane = 5; bool terminal_input_focus = 6; bool native_effects_eligible = 7; bool acknowledged = 8; spaceterm.common.Failure failure = 9; }
+message PaneSubscription { spaceterm.common.EffectFence fence = 1; uint64 request = 2; uint64 request_generation = 3; bool cancel = 4; PageLimits limits = 5; }
+// Each transfer replaces the active grid atomically, including a shorter suffix.
+// Complete settles its cursor and suffix. A resync response discards staged parts.
+message ContentPublication { uint64 request = 1; uint64 request_generation = 2; uint64 transfer = 3; uint32 index = 4; uint64 base_revision = 5; ContentReadResponse response = 6; bool complete = 7; }
