@@ -540,6 +540,7 @@ async fn production_ipc_and_wss_use_real_identity_pairing_and_reliable_actor_out
             let (streams, principal, device) = fixture.enroll(major).await;
             let (remote_streams, remote_principal, remote_device) =
                 fixture.enroll_with_seed(major, 81).await;
+            let (_, ipv6_principal, ipv6_device) = fixture.enroll_with_seed(major, 91).await;
             let handle = fixture.server.handle();
             let pin = fixture.identity.pin();
             let endpoint = fixture.registration.endpoint().unwrap();
@@ -683,7 +684,7 @@ async fn production_ipc_and_wss_use_real_identity_pairing_and_reliable_actor_out
             assert_eq!(first, replay);
             assert_eq!(handle.snapshot().state().workspaces.len(), 1);
             // Both IP families carry the same pinned authenticated protocol.
-            if let Some(ipv6) = addresses.get(1) {
+            let ipv6_transport = if let Some(ipv6) = addresses.get(1) {
                 let transport = WssTransport::connect(
                     *ipv6,
                     "localhost",
@@ -694,7 +695,7 @@ async fn production_ipc_and_wss_use_real_identity_pairing_and_reliable_actor_out
                 .await
                 .unwrap();
                 let mut ipv6_codec =
-                    handshake(&transport, pin, remote_principal, DeviceKey::new(82), major).await;
+                    handshake(&transport, pin, ipv6_principal, ipv6_device, major).await;
                 assert_eq!(
                     query_status(&transport, &mut ipv6_codec)
                         .await
@@ -702,8 +703,10 @@ async fn production_ipc_and_wss_use_real_identity_pairing_and_reliable_actor_out
                         .server,
                     ServerId::new(pin.identity)
                 );
-                transport.close().await.unwrap();
-            }
+                Some(transport)
+            } else {
+                None
+            };
             let disable = CanonicalOperationRequest::new(
                 OperationId::new(streams.parts().ordinary, OperationSequence::new(2).unwrap()),
                 Command::SetRemoteAccess {
@@ -719,6 +722,9 @@ async fn production_ipc_and_wss_use_real_identity_pairing_and_reliable_actor_out
                 disable.binding().id,
             );
             assert_eq!(wss.recv().await.unwrap(), None);
+            if let Some(ipv6) = ipv6_transport {
+                assert_eq!(ipv6.recv().await.unwrap(), None);
+            }
             for address in &addresses {
                 assert!(tokio::net::TcpStream::connect(address).await.is_err());
             }
@@ -923,4 +929,118 @@ async fn indeterminate_storage_status_requires_recovery_without_claiming_deliber
             intent: ServerRunIntent::Running,
         }
     );
+}
+
+#[tokio::test]
+async fn forwarded_private_ipc_authenticates_and_reconnects_without_network_enablement() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        for major in [1, 2] {
+            let fixture = Fixture::new_registered(true).await;
+            let (_, principal, device) = fixture.enroll(major).await;
+            let handle = fixture.server.handle();
+            let endpoint = fixture.registration.endpoint().unwrap();
+            let listeners = production_listener_factories(
+                handle.clone(),
+                ProductionListenerConfig {
+                    registration: &fixture.registration,
+                    identity: fixture.identity.clone(),
+                    running: spaceterm_distribution::BuildVersion::parse("1.2.3").unwrap(),
+                    codec: Arc::new(CanonicalCodec),
+                    pairing: fixture.service,
+                    ports: fixture.ports,
+                },
+                Arc::new(PairingProtocolLookup::new(handle.clone())),
+            )
+            .unwrap();
+            let run = tokio::spawn(fixture.server.run(listeners));
+            while !endpoint.path().exists() {
+                tokio::task::yield_now().await;
+            }
+            let retained = handle
+                .snapshot()
+                .state()
+                .retained
+                .as_ref()
+                .unwrap()
+                .remote_access()
+                .clone();
+            assert!(!retained.value.is_enabled());
+            let private = fixture._root.path().join("forwarding");
+            fs::create_dir(&private).unwrap();
+            fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+            let directory = spaceterm_host::ipc::PrivateIpcDirectory::open(&private).unwrap();
+            for attempt in 0..2 {
+                // This injected stream-local proxy carries the same bytes as
+                // OpenSSH -L. It adds no pairing or remote-listener authority.
+                let forwarding = directory.endpoint(&format!("forward-{attempt}")).unwrap();
+                let proxy = tokio::net::UnixListener::bind(forwarding.path()).unwrap();
+                fs::set_permissions(forwarding.path(), fs::Permissions::from_mode(0o600)).unwrap();
+                let remote = endpoint.clone();
+                let proxy = tokio::spawn(async move {
+                    let (mut client, _) = proxy.accept().await.unwrap();
+                    let mut server = tokio::net::UnixStream::connect(remote.path())
+                        .await
+                        .unwrap();
+                    if let Err(error) =
+                        tokio::io::copy_bidirectional(&mut client, &mut server).await
+                    {
+                        // Closing authenticated IPC may close both halves before
+                        // the proxy's final shutdown syscall, especially on Darwin.
+                        assert!(matches!(
+                            error.raw_os_error(),
+                            Some(libc::ENOTCONN | libc::ECONNRESET | libc::EPIPE)
+                        ));
+                    }
+                });
+                let transport = IpcTransport::connect(&forwarding, MessageLimit::envelope())
+                    .await
+                    .unwrap();
+                let mut codec = handshake(
+                    &transport,
+                    fixture.identity.pin(),
+                    principal,
+                    device.clone(),
+                    major,
+                )
+                .await;
+                let status = query_status(&transport, &mut codec).await;
+                assert_eq!(status.parts().remote_access, retained);
+                assert!(status.parts().listeners.is_empty());
+                // Native discovery neither opens a listener nor changes policy.
+                assert_eq!(
+                    fixture
+                        .owner
+                        .as_ref()
+                        .unwrap()
+                        .discover()
+                        .unwrap()
+                        .unwrap()
+                        .server_pin(),
+                    fixture.identity.pin()
+                );
+                assert_eq!(
+                    handle
+                        .snapshot()
+                        .state()
+                        .retained
+                        .as_ref()
+                        .unwrap()
+                        .remote_access(),
+                    &retained
+                );
+                transport.close().await.unwrap();
+                proxy.await.unwrap();
+                fs::remove_file(forwarding.path()).unwrap();
+            }
+            handle
+                .shutdown(TrustedShutdownRequest {
+                    authority: fixture.stop,
+                })
+                .await
+                .unwrap();
+            assert!(run.await.unwrap().unwrap().listeners_closed);
+        }
+    })
+    .await
+    .unwrap();
 }

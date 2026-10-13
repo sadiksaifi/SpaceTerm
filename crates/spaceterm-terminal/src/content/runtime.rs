@@ -476,13 +476,15 @@ impl RuntimeEngine for SemanticRuntimeEngine {
         if self.emulator.graphics_failure().is_some() {
             return Err(RuntimeFailure::capacity(RuntimeStage::Engine));
         }
-        self.emulator.take_attention_events();
         self.update_base()?;
         Ok(EngineUpdate {
             replies: self.emulator.take_pty_responses(),
             changed: !bytes.is_empty(),
             observations: self.observations(tick, false)?,
         })
+    }
+    fn take_attention(&mut self) -> Vec<crate::attention::AttentionEvent> {
+        self.emulator.take_attention_events()
     }
     fn apply(&mut self, command: &RuntimeCommand) -> Result<EngineEffect, RuntimeFailure> {
         let before = self.base;

@@ -150,6 +150,25 @@ pub trait PairingTransport: Send {
     fn receive(&mut self) -> PairingFuture<'_, Result<Zeroizing<Vec<u8>>, PairingFailure>>;
 }
 pub trait EnrollmentConnector: Send + Sync {
+    /// A live foreground verification lease permits native SSH Authentication
+    /// Prompts for this enrollment only. Restricted acknowledgement uses open.
+    fn open_foreground<'a>(
+        &'a self,
+        pin: ServerPin,
+        route: RevocationRouteReference,
+        authorization: &'a CredentialUse,
+    ) -> PairingFuture<'a, Result<Box<dyn PairingTransport>, PairingFailure>> {
+        Box::pin(async move {
+            authorization.validate(authorization.scope())?;
+            if authorization.purpose() != CredentialUsePurpose::Enrollment
+                || authorization.native_access()
+                    != super::credentials::NativeCredentialAccess::Foreground
+            {
+                return Err(PairingFailure::AuthorizationDenied);
+            }
+            self.open(pin, route).await
+        })
+    }
     fn open<'a>(
         &'a self,
         pin: ServerPin,
@@ -388,8 +407,8 @@ impl<S: LocalPairingStore, N: NativeDeviceCredentials, R: EnrollmentConnector>
             self.exchange(
                 verified,
                 reservation,
-                device_signer,
-                auth_signer,
+                (device_signer, auth_signer),
+                &auth_lease,
                 authorization,
                 majors,
             ),
@@ -433,8 +452,8 @@ impl<S: LocalPairingStore, N: NativeDeviceCredentials, R: EnrollmentConnector>
         &self,
         verified: &VerifiedServer,
         reservation: PublicEnrollmentReservation,
-        device: Arc<dyn SigningKey>,
-        auth: Arc<dyn SigningKey>,
+        signers: (Arc<dyn SigningKey>, Arc<dyn SigningKey>),
+        transport_authorization: &CredentialUse,
         authorization: Option<&EnrollmentAuthorization>,
         majors: Vec<u32>,
     ) -> Result<
@@ -445,7 +464,11 @@ impl<S: LocalPairingStore, N: NativeDeviceCredentials, R: EnrollmentConnector>
         ),
         PairingFailure,
     > {
-        let mut transport = self.connector.open(verified.pin, verified.route).await?;
+        let (device, auth) = signers;
+        let mut transport = self
+            .connector
+            .open_foreground(verified.pin, verified.route, transport_authorization)
+            .await?;
         let (client, hello) =
             EnrollmentClient::begin(verified.pin, reservation, majors, device.clone(), auth)
                 .map_err(protocol_failure)?;

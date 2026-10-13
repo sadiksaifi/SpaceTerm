@@ -33,9 +33,10 @@ mod local_source;
 pub(crate) mod pane_repair;
 mod remote_source;
 pub(crate) mod server_source;
+pub(crate) use server_source::ServerDirectorySource;
 
 #[cfg(test)]
-mod server_tests;
+pub(in crate::ui) mod server_tests;
 
 pub(crate) use local_source::LocalDirectorySource;
 pub(crate) use remote_source::{
@@ -113,7 +114,11 @@ pub(crate) trait DirectorySource {
     fn machine_name(&self) -> Option<&str>;
 
     fn is_server_backed(&self) -> bool {
-        false
+        !self.can_create()
+    }
+
+    fn can_create(&self) -> bool {
+        true
     }
 
     /// Server selections are observations, never client-local filesystem authority.
@@ -133,6 +138,7 @@ pub(crate) trait DirectorySource {
 
     /// Validates the directory's physical identity as a Pinned Directory.
     fn pin(&self, directory: PickerPath) -> SourceFuture<PinnedDirectory>;
+
 }
 
 /// A directory path as spelled in the Directory Picker: absolute, or relative to the home
@@ -416,6 +422,7 @@ pub(super) enum DirectoryPickerEvent {
     StateChanged,
     Dismissed,
     Confirmed(PinnedDirectory),
+    ConfirmedServer(spaceterm_core::organization::ServerDirectory),
     /// The picker closed so System Directory Selection can choose the directory instead.
     SystemSelectionRequested,
 }
@@ -1172,7 +1179,8 @@ impl DirectoryPicker {
                         cx.emit(DirectoryPickerEvent::Confirmed(pinned))
                     }
                     DirectorySelection::Server(directory) => {
-                        cx.emit(ServerDirectorySelected(directory))
+                        cx.emit(ServerDirectorySelected(directory.clone()));
+                        cx.emit(DirectoryPickerEvent::ConfirmedServer(directory));
                     }
                 }
                 cx.notify();

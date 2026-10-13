@@ -754,6 +754,7 @@ impl ServerInstallationStore {
                 version: manifest.version,
                 artifact_sha256: version.digest,
             },
+            protocol_majors: manifest.protocol_majors,
         })
     }
     /// Verifies that approved code implements the retained organization schema.
@@ -963,6 +964,7 @@ pub struct InstalledServerExecutable {
     _file: std::fs::File,
     path: PathBuf,
     status: InstallationStatus,
+    protocol_majors: Vec<u16>,
 }
 impl InstalledServerExecutable {
     /// Returns the exact selected installation identity.
@@ -972,6 +974,10 @@ impl InstalledServerExecutable {
     /// Returns the original signed artifact facts.
     pub fn status(&self) -> InstallationStatus {
         self.status.clone()
+    }
+    /// Returns compatibility from this exact selected artifact's authenticated manifest.
+    pub fn protocol_majors(&self) -> &[u16] {
+        &self.protocol_majors
     }
     /// Returns a locally admitted path for account service registration, not remote file authority.
     pub fn path(&self) -> &Path {

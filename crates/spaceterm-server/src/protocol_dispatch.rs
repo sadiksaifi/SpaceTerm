@@ -362,7 +362,11 @@ impl ProtocolDispatcher {
         handle: ServerHandle,
     ) -> Result<(), ServerFailure> {
         let mut egress = ConnectionEgress::new(self.egress.clone());
-        let mut terminal = terminal::TerminalConnection::new(self.clock.clone());
+        let limits = match &peer.connection {
+            PeerConnection::Ordinary(session) => session.codec.limits(),
+            _ => Default::default(),
+        };
+        let mut terminal = terminal::TerminalConnection::new(self.clock.clone(), limits);
         let mut status = self.status.clone();
         let mut organization = handle.subscribe_snapshot();
         let mut organization_query: Option<organization::OrganizationQuery> = None;
@@ -382,7 +386,7 @@ impl ProtocolDispatcher {
             }
             let wake = tokio::select! {
                 _ = peer.closing.wait_for(|value| *value) => return Ok(()),
-                event = terminal.next(&egress) => Wake::Terminal(event),
+                event = terminal.next() => Wake::Terminal(event),
                 result = peer.transport.recv() => Wake::Message(result.map_err(transport_failure)?),
                 changed = status.changed(), if subscription.is_some() => { changed.map_err(|_| failure(ServerFailureClass::RuntimeUnavailable))?; Wake::Status },
                 changed = organization.changed(), if organization_query.is_some() && !awaiting_organization_resync => { changed.map_err(|_| failure(ServerFailureClass::RuntimeUnavailable))?; Wake::Organization },
@@ -407,11 +411,10 @@ impl ProtocolDispatcher {
                                 )
                                 .await?
                         }
-                        terminal::Wake::Resource(event) => {
+                        terminal::Wake::Graphics(event) => {
                             terminal
-                                .resources
-                                .publish(
-                                    (*event)?,
+                                .publish_graphics(
+                                    *event,
                                     self,
                                     session,
                                     &peer.transport,
@@ -552,8 +555,7 @@ impl ProtocolDispatcher {
                                 continue;
                             }
                             if terminal
-                                .resources
-                                .admit(&payload, session.principal, &handle, session.codec.limits())
+                                .graphics_request(&payload, session.principal, &handle)
                                 .await?
                             {
                                 continue;

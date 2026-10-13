@@ -38,6 +38,7 @@ pub(super) struct ServerWorkspaces {
     paused_detaches: BTreeMap<QualifiedWorkspaceId, PausedDetach>,
     presentation_errors: BTreeMap<QualifiedWorkspaceId, DesktopClientError>,
     pub(super) navigation: u64,
+    pub(super) repair: Option<Entity<crate::ui::directory_picker::pane_repair::ServerPaneRepair>>,
 }
 
 struct WorkspaceRequest {
@@ -190,6 +191,7 @@ impl WorkspaceManager {
             paused_detaches: BTreeMap::new(),
             presentation_errors: BTreeMap::new(),
             navigation: 0,
+            repair: None,
         });
         let frames: Vec<_> = runtime
             .read(cx)
@@ -849,15 +851,156 @@ impl WorkspaceManager {
                 );
                 return;
             }
-            ServerTabManagerEvent::PaneAction { pane, action } => match action.route(pane) {
-                crate::ui::server_desktop_contracts::PaneActionRoute::Request(request) => request,
-                _ => {
-                    self.show_server_error(DesktopClientError::UnsupportedCapability, window, cx);
+            ServerTabManagerEvent::PaneAction { pane, action } => {
+                if let crate::ui::server_desktop_contracts::PaneAction::Retry(source) = action
+                    && self.server.as_ref().and_then(|server| server.frames.get(&pane.server()))
+                        .is_some_and(|frame| frame.organization.runtime().iter().any(|runtime| {
+                            runtime.pane == pane && runtime.phase == spaceterm_core::organization::SessionPhase::DirectoryUnavailable
+                        }))
+                {
+                    self.begin_server_pane_repair(pane, source, false, window, cx);
                     return;
                 }
-            },
+                match action.route(pane) {
+                    crate::ui::server_desktop_contracts::PaneActionRoute::Request(request) => {
+                        request
+                    }
+                    crate::ui::server_desktop_contracts::PaneActionRoute::ChooseDirectory(pane) => {
+                        self.begin_server_pane_repair(
+                            pane,
+                            crate::ui::server_desktop_contracts::SelectionSource::Command,
+                            true,
+                            window,
+                            cx,
+                        );
+                        return;
+                    }
+                    _ => {
+                        self.show_server_error(
+                            DesktopClientError::UnsupportedCapability,
+                            window,
+                            cx,
+                        );
+                        return;
+                    }
+                }
+            }
         };
         self.submit_server(request, window, cx);
+    }
+
+    fn begin_server_pane_repair(
+        &mut self,
+        pane: crate::ui::server_desktop_contracts::PaneId,
+        source: crate::ui::server_desktop_contracts::SelectionSource,
+        choose: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::ui::directory_picker::pane_repair::{PaneRepairEvent, ServerPaneRepair};
+        let Some(server) = &self.server else { return };
+        if window_modal_is_open(window, cx) {
+            return;
+        }
+        if let Some(repair) =
+            server
+                .repair
+                .as_ref()
+                .filter(|repair| {
+                    repair.read(cx).pane() == pane
+                        && !matches!(repair.read(cx).status(),
+                crate::ui::directory_picker::pane_repair::PaneRepairStatus::Cancelled
+                | crate::ui::directory_picker::pane_repair::PaneRepairStatus::Completed)
+                })
+                .cloned()
+        {
+            repair.update(cx, |repair, cx| {
+                if choose {
+                    repair.open(window, cx);
+                } else {
+                    repair.retry(window, cx);
+                }
+            });
+            return;
+        }
+        let runtime = server.runtime.clone();
+        let port = match runtime.read(cx).directory_connection(pane.server()) {
+            Ok(port) => port,
+            Err(error) => {
+                self.show_server_error(error, window, cx);
+                return;
+            }
+        };
+        let name = runtime
+            .read(cx)
+            .servers()
+            .into_iter()
+            .find(|info| info.server == pane.server())
+            .and_then(|info| info.name.get().cloned())
+            .map_or_else(|| "Unnamed Server".to_owned(), |name| name.to_string());
+        if let Some(previous) = self.server.as_mut().and_then(|server| server.repair.take()) {
+            previous.update(cx, |repair, cx| repair.cancel(window, cx));
+        }
+        let repair =
+            match ServerPaneRepair::install(runtime.clone(), pane, source, &name, port, window, cx)
+            {
+                Ok(repair) => repair,
+                Err(error) => {
+                    self.show_server_error(error, window, cx);
+                    return;
+                }
+            };
+        cx.subscribe_in(
+            &repair,
+            window,
+            |manager, repair, event: &PaneRepairEvent, window, cx| {
+                if manager
+                    .server
+                    .as_ref()
+                    .and_then(|server| server.repair.as_ref())
+                    != Some(repair)
+                {
+                    return;
+                }
+                if let PaneRepairEvent::StartRequested { token, request } = event {
+                    let Some(runtime) =
+                        manager.server.as_ref().map(|server| server.runtime.clone())
+                    else {
+                        return;
+                    };
+                    let current = runtime.read(cx).pane_view_token(token.pane);
+                    let focused = runtime
+                        .read(cx)
+                        .frame(token.pane.server())
+                        .and_then(|frame| {
+                            spaceterm_client::view::SelectionTarget::focused(
+                                &frame.personal,
+                                frame.personal.active_workspace()?,
+                            )
+                        })
+                        .is_some_and(|target| target.pane == token.pane);
+                    if current.as_ref().ok() == Some(token) && focused {
+                        // StartSession enters the same measured-use runtime as the normal Pane action.
+                        manager.submit_server(request.as_ref().clone(), window, cx);
+                    }
+                }
+                manager.sync_terminal_focus_blocker(window, cx);
+                cx.notify();
+            },
+        )
+        .detach();
+        if let Some(server) = &mut self.server {
+            server.repair = Some(repair.clone());
+        }
+        repair.update(cx, |repair, cx| {
+            if choose {
+                repair.open(window, cx);
+            } else {
+                repair.retry(window, cx);
+            }
+        });
+        self.sync_terminal_focus_blocker(window, cx);
+        cx.notify();
     }
 
     pub(super) fn open_server_workspace_switcher(
@@ -1607,6 +1750,7 @@ impl WorkspaceManager {
             .on_action(cx.listener(Self::on_activate_workspace_9))
             .child(Self::render_top_left_chrome_surface(chrome, window, cx))
             .child(div().relative().size_full().child(content))
+            .children(server.repair.iter().map(|repair| repair.read(cx).picker()))
             .when(sidebar_visible, |root| root.child(self.sidebar.clone()))
             .child(self.sidebar.read(cx).render_resize_handle(
                 self.sidebar.downgrade(),

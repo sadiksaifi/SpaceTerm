@@ -2079,6 +2079,25 @@ fn importing_and_resetting_client_settings_never_reseed_an_existing_server(
 }
 
 #[gpui::test]
+fn desktop_server_settings_from_pane_keeps_the_owning_machine_through_late_publication(
+    cx: &mut TestAppContext,
+) {
+    let wanted = ssh();
+    let mut fixture = open(Appearance::Dark, snapshot(vec![local()]), cx);
+    let window = fixture.window.clone();
+    fixture.cx.update(|_, cx| {
+        window.update(cx, |settings, cx| {
+            settings.select_server_id(wanted.pairing.parts().server, cx)
+        })
+    });
+    assert_eq!(fixture.selected(), None);
+    fixture.publish(snapshot(vec![local(), wanted.clone()]));
+    assert_eq!(fixture.selected(), Some(wanted.key));
+    fixture.click("settings-server-option-local");
+    assert_eq!(fixture.selected(), Some(local().key));
+}
+
+#[gpui::test]
 fn management_reads_an_assessment_before_opening_a_destructive_confirmation(
     cx: &mut TestAppContext,
 ) {

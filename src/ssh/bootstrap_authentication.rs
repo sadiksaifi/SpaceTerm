@@ -18,9 +18,8 @@ use super::{
 use spaceterm_client::pairing::{bootstrap::*, credentials::PairingFuture};
 use spaceterm_core::pairing::PairingFailure;
 use spaceterm_host::bootstrap::{
-    probe::ReadOnlyHostProbe,
     process::{
-        BootstrapProbeFailure, BootstrapProbeLease, BootstrapProbeTransport, read_only_preflight,
+        BootstrapProbeFailure, BootstrapProbeLease, BootstrapProbeTransport,
     },
 };
 
@@ -273,126 +272,14 @@ impl ScopedAuthenticationPrompt for BootstrapAuthenticationPrompt {
     }
 }
 
-/// The account service supplies the registration, installation and storage observations.
-/// Absence or failed inspection is never interpreted as a missing registration.
-pub(crate) trait BootstrapNativePreflight: BootstrapAuthorizationBoundary {
-    /// Reads exact account registration and prerequisite facts.
-    fn inspect<'a>(
-        &'a self,
-        route: BootstrapRoute,
-        host: &'a ReadOnlyHostProbe,
-    ) -> PairingFuture<'a, Result<BootstrapHostFacts, BootstrapFailure>>;
-    /// Looks up an original journal request without new effects.
-    fn resolve(
-        &self,
-        request: [u8; 16],
-        artifact_identity: [u8; 32],
-    ) -> PairingFuture<'_, Result<BootstrapServer, BootstrapFailure>>;
-}
-/// Authentication through the existing managed OpenSSH owner.
-pub(crate) trait BootstrapOpenSsh: BootstrapProbeTransport + 'static {
-    /// Retains the verified host/account and owned process scope.
-    fn authenticate<'a>(
-        &'a self,
-        route: &'a BootstrapRoute,
-        attempt: &'a BootstrapAttempt,
-    ) -> PairingFuture<'a, Result<OpenSshAuthenticated, BootstrapFailure>>;
-}
-/// Composes unprivileged SSH probes with account service setup.
-pub(crate) struct SshNativeServerSetup<T, N> {
-    ssh: T,
-    native: N,
-}
-impl<T, N> SshNativeServerSetup<T, N> {
-    /// Injects the existing SSH machinery and native owner.
-    pub(crate) fn new(ssh: T, native: N) -> Self {
-        Self { ssh, native }
-    }
-}
-impl<T: BootstrapOpenSsh, N: BootstrapNativePreflight + 'static> NativeServerSetup
-    for SshNativeServerSetup<T, N>
-{
-    fn authenticate<'a>(
-        &'a self,
-        route: &'a BootstrapRoute,
-        attempt: &'a BootstrapAttempt,
-    ) -> PairingFuture<'a, Result<OpenSshAuthenticated, BootstrapFailure>> {
-        self.ssh.authenticate(route, attempt)
-    }
-    fn discover<'a>(
-        &'a self,
-        ssh: &'a OpenSshAuthenticated,
-    ) -> PairingFuture<'a, Result<BootstrapHostFacts, BootstrapFailure>> {
-        Box::pin(async move {
-            let lease = ProbeLease(ssh);
-            let host = read_only_preflight(&self.ssh, &lease)
-                .await
-                .map_err(probe_failure)?;
-            let facts = self.native.inspect(ssh.route(), &host).await?;
-            ssh.revalidate()?;
-            if facts.route != ssh.route()
-                || facts.account_uid != host.account_uid
-                || facts.os != host.os
-                || facts.architecture != host.architecture
-                || facts.os_version != host.os_version
-                || facts.libc != host.libc
-                || facts.kernel != host.kernel
-                || facts.supervision != host.supervision
-                || facts.linger != host.linger
-            {
-                return Err(BootstrapFailure::new(
-                    PairingFailure::RouteChanged,
-                    BootstrapPhase::ReadOnlyPreflight,
-                ));
-            }
-            Ok(facts)
-        })
-    }
-    fn authorize<'a>(
-        &'a self,
-        plan: &'a BootstrapPlan,
-        prompt: &'a dyn ScopedAuthenticationPrompt,
-    ) -> PairingFuture<'a, Result<AuthorizedBootstrap, BootstrapFailure>> {
-        Box::pin(async move { plan.authorize(&self.native, prompt).await })
-    }
-    fn resolve(
-        &self,
-        request: [u8; 16],
-        artifact_identity: [u8; 32],
-    ) -> PairingFuture<'_, Result<BootstrapServer, BootstrapFailure>> {
-        self.native.resolve(request, artifact_identity)
-    }
-}
-struct ProbeLease<'a>(&'a OpenSshAuthenticated);
-impl BootstrapProbeLease for ProbeLease<'_> {
-    fn revalidate(&self) -> Result<(), BootstrapProbeFailure> {
-        self.0
-            .revalidate()
-            .map_err(|_| BootstrapProbeFailure::RouteChanged)
-    }
-    fn account_uid(&self) -> u32 {
-        self.0.route().account_uid()
-    }
-}
-fn probe_failure(failure: BootstrapProbeFailure) -> BootstrapFailure {
-    let class = match failure {
-        BootstrapProbeFailure::InvalidProbe => {
-            return BootstrapFailure {
-                class: BootstrapFailureClass::InvalidProbe,
-                phase: BootstrapPhase::ReadOnlyPreflight,
-            };
-        }
-        BootstrapProbeFailure::LimitExceeded => PairingFailure::LimitExceeded,
-        BootstrapProbeFailure::RouteChanged => PairingFailure::RouteChanged,
-        BootstrapProbeFailure::Cancelled => PairingFailure::Cancelled,
-        BootstrapProbeFailure::Offline => PairingFailure::Offline,
-        BootstrapProbeFailure::TimedOut => PairingFailure::TimedOut,
-    };
-    BootstrapFailure::new(class, BootstrapPhase::ReadOnlyPreflight)
-}
+// The portable setup composition is shared with headless native clients.
+use spaceterm_client_native::bootstrap::BootstrapOpenSsh;
+#[cfg(test)]
+use spaceterm_client_native::bootstrap::{BootstrapNativePreflight, SshNativeServerSetup};
 
 #[cfg(test)]
 mod tests {
+    use spaceterm_host::bootstrap::probe::ReadOnlyHostProbe;
     use super::*;
     use std::sync::atomic::AtomicUsize;
 

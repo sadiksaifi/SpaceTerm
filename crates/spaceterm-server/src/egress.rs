@@ -445,6 +445,7 @@ fn reply_policy(payload: &spaceterm_protocol::codec::Payload) -> Result<bool, Eg
                     | Kind::AcknowledgementConfirmation(_)
                     | Kind::Reconciliation(_)
                     | Kind::OrganizationResync(_)
+                    | Kind::ResourceCancel(_)
                     | Kind::RuntimeOutcome(_)
                     | Kind::PairingOutcome(_)
                     | Kind::ClientContext(_),
@@ -459,9 +460,8 @@ fn reply_policy(payload: &spaceterm_protocol::codec::Payload) -> Result<bool, Eg
                     | Kind::ContentReadResponse(_)
                     | Kind::ContentPublication(_)
                     | Kind::ContentInvalidation(_)
-                    | Kind::ResourceChunk(_)
-                    | Kind::ResourceCancel(_)
-                    | Kind::NativeRequest(_),
+                    | Kind::NativeRequest(_)
+                    | Kind::ResourceChunk(_),
                 ) => Ok(false),
                 // A caller cannot promote arbitrary terminal or resource bytes
                 // into the reserved lifecycle lane.

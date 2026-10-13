@@ -12,7 +12,7 @@ pub(crate) use controller::PaneJournalAdmission;
 pub use controller::{JournalController, JournalHealth};
 pub use pairing_projection::{
     JournalCredentialSlot, JournalEnrollment, JournalEnrollmentAcknowledgement,
-    JournalEnrollmentReservation, PairingJournalProjection,
+    JournalEnrollmentReservation, JournalSshCapture, PairingJournalProjection,
 };
 
 use crate::pairing::{
@@ -250,6 +250,8 @@ pub struct SavedBinding {
     target: SavedTarget,
     streams: PairingClientStreams,
     proof: SignedPairingReceipt,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    additional_client_acknowledgement_pending: bool,
 }
 impl SavedBinding {
     pub fn verified(
@@ -262,6 +264,7 @@ impl SavedBinding {
             target: SavedTarget::from_target(binding.target()),
             streams,
             proof,
+            additional_client_acknowledgement_pending: false,
         };
         value.validate(verifier)?;
         Ok(value)
@@ -275,8 +278,23 @@ impl SavedBinding {
     pub fn proof(&self) -> &SignedPairingReceipt {
         &self.proof
     }
+    pub fn additional_client_acknowledgement_pending(&self) -> bool {
+        self.additional_client_acknowledgement_pending
+    }
+    pub(crate) fn await_additional_client_acknowledgement(mut self) -> Self {
+        self.additional_client_acknowledgement_pending = true;
+        self
+    }
     pub fn validate(&self, verifier: &dyn ReceiptVerifier) -> Result<(), ClientFailure> {
         let target = self.target.target()?;
+        if self.additional_client_acknowledgement_pending
+            && !matches!(
+                self.proof.parts().claims,
+                PairingReceiptBody::ClientBinding { .. }
+            )
+        {
+            return Err(invalid());
+        }
         self.streams.validate().map_err(|_| invalid())?;
         self.proof.validate().map_err(|_| invalid())?;
         let (claim, client) = match &self.proof.parts().claims {
@@ -485,10 +503,10 @@ impl RecoveredClientState {
                 marker.parts().server == key.parts().server
                     && marker.parts().pairing == key.parts().pairing
             })
-        }) && self
-            .bindings
-            .iter()
-            .any(|saved| saved.binding().is_ok_and(|saved| &saved == binding))
+        }) && self.bindings.iter().any(|saved| {
+            !saved.additional_client_acknowledgement_pending
+                && saved.binding().is_ok_and(|saved| &saved == binding)
+        })
     }
     pub fn workspace_barrier(&self, key: &LocalPairingKey, workspace: WorkspaceId) -> bool {
         self.detaches
@@ -539,6 +557,10 @@ pub enum ClientJournalChange {
         route_reference: spaceterm_core::pairing::RevocationRouteReference,
         route: RouteDescription,
     },
+    CaptureRestrictedSsh {
+        reference: CredentialReference,
+        capture: JournalSshCapture,
+    },
     RecordCredentialPublicKey {
         reference: CredentialReference,
         public_key: [u8; 32],
@@ -550,6 +572,13 @@ pub enum ClientJournalChange {
     },
     FinishEnrollmentAcknowledgement(OperationId),
     SaveBinding(Box<SavedBinding>),
+    /// Settles only the exact receiving binding after the originating journal
+    /// confirms the server's acknowledgement of its original operation.
+    FinishAdditionalClientAcknowledgement {
+        pairing: LocalPairingKey,
+        client: ClientId,
+        operation: OperationBinding,
+    },
     Prepare(JournalOperation),
     Complete {
         binding: OperationBinding,

@@ -160,6 +160,7 @@ pub struct PairingJournalSnapshot {
     pub suppressed: Vec<LocalPairingKey>,
     pub revocations: Vec<LocalRevocation>,
     pub enrollment_acknowledgements: Vec<EnrollmentAcknowledgementWork>,
+    pub additional_client_acknowledgements: Vec<SavedPairing>,
 }
 impl PairingJournalSnapshot {
     pub fn empty(revision: u64) -> Self {
@@ -172,10 +173,16 @@ impl PairingJournalSnapshot {
             suppressed: Vec::new(),
             revocations: Vec::new(),
             enrollment_acknowledgements: Vec::new(),
+            additional_client_acknowledgements: Vec::new(),
         }
     }
     pub fn active(&self, key: &LocalPairingKey) -> Option<&SavedPairing> {
-        if self.is_suppressed(key) {
+        if self.is_suppressed(key)
+            || self
+                .additional_client_acknowledgements
+                .iter()
+                .any(|saved| saved.key() == key)
+        {
             return None;
         }
         self.saved.iter().find(|saved| &saved.key == key)
@@ -316,6 +323,7 @@ impl PairingJournalSnapshot {
             + self.prepared.len()
             + self.revocations.len()
             + self.enrollment_acknowledgements.len()
+            + self.additional_client_acknowledgements.len()
             + self.credential_preparations.len())
         .checked_mul(4096);
         let decoded_bytes = record_bytes.and_then(|bytes| {
@@ -352,6 +360,20 @@ impl PairingJournalSnapshot {
         }
         if self.enrollment_acknowledgements.len() > MAX_PENDING_REVOCATIONS {
             return Err(PairingFailure::LimitExceeded);
+        }
+        if self.additional_client_acknowledgements.len() > MAX_PENDING_REVOCATIONS {
+            return Err(PairingFailure::LimitExceeded);
+        }
+        for (index, pending) in self.additional_client_acknowledgements.iter().enumerate() {
+            if !self.saved.contains(pending)
+                || !matches!(
+                    pending.receipt().parts().claims,
+                    spaceterm_core::pairing::PairingReceiptBody::ClientBinding { .. }
+                )
+                || self.additional_client_acknowledgements[..index].contains(pending)
+            {
+                return Err(PairingFailure::InvalidDurableState);
+            }
         }
         for (index, work) in self.enrollment_acknowledgements.iter().enumerate() {
             work.validate()?;
@@ -513,6 +535,13 @@ impl<J: PairingClientJournal + ?Sized> LocalPairingStore for JournalPairingStore
     ) -> PairingFuture<'a, Result<OrdinaryCredentialAuthority, PairingFailure>> {
         Box::pin(async move {
             let recovered = self.recover().await?;
+            if recovered
+                .additional_client_acknowledgements
+                .iter()
+                .any(|saved| saved.key() == key)
+            {
+                return Err(PairingFailure::RecoveryRequired);
+            }
             let saved = recovered
                 .active(key)
                 .ok_or(PairingFailure::PairingRevoked)?;

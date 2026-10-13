@@ -8,13 +8,6 @@ use std::sync::Arc;
 
 /// C3 supplies native-discovery endpoint authority and its existing per-process
 /// runtime/AskPass facilities. Saved route strings are not local file authority.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "desktop C3 installs the connection services after its native-provider handoff"
-    )
-)]
 pub(crate) fn connector(
     local: Vec<LocalRouteAuthority>,
     ssh: Option<SshRouteConfiguration>,

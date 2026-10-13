@@ -28,9 +28,23 @@ pub(crate) struct RecordingClientProvider {
     outcome_revisions:
         RefCell<BTreeMap<OperationId, spaceterm_core::authority::OrganizationRevision>>,
     save_failure: Cell<Option<DesktopClientError>>,
+    directories: RefCell<
+        BTreeMap<ServerId, Arc<dyn spaceterm_client::directories::DirectoryConnectionPort>>,
+    >,
+    pane_tokens: RefCell<BTreeMap<PaneId, PaneViewToken>>,
 }
 
 impl RecordingClientProvider {
+    pub(crate) fn set_directory_connection(
+        &self,
+        server: ServerId,
+        port: Arc<dyn spaceterm_client::directories::DirectoryConnectionPort>,
+    ) {
+        self.directories.borrow_mut().insert(server, port);
+    }
+    pub(crate) fn set_pane_token(&self, token: PaneViewToken) {
+        self.pane_tokens.borrow_mut().insert(token.pane, token);
+    }
     pub(crate) fn set_servers(&self, servers: Vec<DesktopServerInfo>) {
         *self.servers.borrow_mut() = servers;
     }
@@ -102,8 +116,23 @@ impl DesktopClientProvider for RecordingClientProvider {
         Task::ready(self.save_failure.get().map_or(Ok(()), Err))
     }
 
-    fn pane_view_token(&self, _pane: PaneId) -> Result<PaneViewToken, DesktopClientError> {
-        Err(DesktopClientError::TargetGone)
+    fn directory_connection(
+        &self,
+        server: ServerId,
+    ) -> Result<Arc<dyn spaceterm_client::directories::DirectoryConnectionPort>, DesktopClientError>
+    {
+        self.directories
+            .borrow()
+            .get(&server)
+            .cloned()
+            .ok_or(DesktopClientError::UnsupportedCapability)
+    }
+    fn pane_view_token(&self, pane: PaneId) -> Result<PaneViewToken, DesktopClientError> {
+        self.pane_tokens
+            .borrow()
+            .get(&pane)
+            .copied()
+            .ok_or(DesktopClientError::TargetGone)
     }
 
     fn begin(

@@ -132,24 +132,12 @@ impl WorkspaceManager {
                 },
             ));
         }
+        // The application provider delivers organization changes, including unattached
+        // Workspaces. Window reconciliation only updates its local read model.
         for frame in &frames {
-            let previous = consumers
+            consumers
                 .organizations
                 .insert(frame.server, frame.organization.clone());
-            if let Some(previous) = previous
-                && (previous.epoch() != frame.organization.epoch()
-                    || previous.state().revision != frame.organization.state().revision)
-            {
-                store.update(cx, |store, cx| {
-                    store.organization_changed(
-                        frame.server,
-                        frame.organization.epoch(),
-                        previous.state().revision,
-                        frame.organization.state().revision,
-                        cx,
-                    )
-                });
-            }
         }
         consumers
             .organizations

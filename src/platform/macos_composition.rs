@@ -106,6 +106,7 @@ fn compose(
     startup: StartupDependencies<super::unix_ssh_process::UnixSshProcessAdapter>,
     identity: ApplicationIdentity,
 ) -> Result<HostComposition, DesktopProfileError> {
+    let desktop_client_startup = super::desktop_client_startup::production(startup.paths())?;
     let settings_storage = startup.settings_storage();
     let settings_file = startup.settings_file();
     let background_images =
@@ -220,7 +221,9 @@ fn compose(
         })),
     })
     .map(|host| {
-        host.with_modal_prompts(false).with_appearance(
+        host.with_desktop_client_startup(desktop_client_startup)
+            .with_modal_prompts(false)
+            .with_appearance(
             settings_storage,
             Rc::new(super::macos_appearance::MacosAppearancePlatform),
         )

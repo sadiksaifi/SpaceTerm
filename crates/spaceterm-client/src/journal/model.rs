@@ -89,7 +89,9 @@ pub(super) fn validate(
         let binding = saved.binding()?;
         let target = binding.target();
         if !servers.insert(target.server())
-            || !state.ordinary_use_allowed(&binding)
+            || state.tombstones.iter().any(|key| {
+                key.parts().server == target.server() && key.parts().pairing == target.pairing()
+            })
             || !generation_retained(state, &target.local_pairing()?)
             || !reserved_streams.insert(saved.streams.parts().self_revocation.key())
             || state
@@ -547,6 +549,7 @@ fn apply_change(
         }
         ClientJournalChange::ReserveCredential(_)
         | ClientJournalChange::BindCredentialRoute { .. }
+        | ClientJournalChange::CaptureRestrictedSsh { .. }
         | ClientJournalChange::RecordCredentialPublicKey { .. }
         | ClientJournalChange::PrepareEnrollment(_)
         | ClientJournalChange::SaveEnrollment { .. }
@@ -616,6 +619,29 @@ fn apply_change(
                     .retain(|reference| *reference != target.credential());
             }
             state.bindings.push(*saved.clone());
+        }
+        ClientJournalChange::FinishAdditionalClientAcknowledgement {
+            pairing,
+            client,
+            operation,
+        } => {
+            let saved = state
+                .bindings
+                .iter_mut()
+                .find(|saved| {
+                    saved.target.client == *client
+                        && saved
+                            .target
+                            .target()
+                            .is_ok_and(|target| target.local_pairing().as_ref() == Ok(pairing))
+                })
+                .ok_or_else(invalid)?;
+            if !matches!(&saved.proof.parts().claims,
+                PairingReceiptBody::ClientBinding { operation: original, .. } if original == operation)
+            {
+                return Err(invalid());
+            }
+            saved.additional_client_acknowledgement_pending = false;
         }
         ClientJournalChange::Prepare(record) => {
             if !matches!(record.state, RetainedOperationState::Pending) {
@@ -1025,6 +1051,16 @@ fn apply_change(
                 header.purpose != StreamPurpose::SelfRevocation || header.confirmed_prefix != 1
             }) {
                 return Err(invalid());
+            }
+            // Release only the original credential slot's public route capture.
+            // The reference and generation cannot identify a later pairing.
+            let record = &state.revocations[index];
+            if let Some(slot) = state.pairing.slots.iter_mut().find(|slot| {
+                slot.reference == record.task.parts().original.credential()
+                    && slot.generation == record.task.parts().local_pairing.parts().generation
+                    && slot.server == Some(record.task.parts().original.server())
+            }) {
+                slot.ssh_capture = None;
             }
             // Never consult/remove the current saved binding or any shared key.
             state.revocations.remove(index);

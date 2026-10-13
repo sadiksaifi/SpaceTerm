@@ -206,6 +206,20 @@ pub(crate) fn open_or_activate(section: Option<SettingsSectionId>, cx: &mut App)
     }
 }
 
+/// Opens the owning server's section without selecting another machine while its live
+/// publication is still arriving. Opening Settings grants no server-management authority.
+pub(crate) fn open_for_server(server: spaceterm_core::identity::ServerId, cx: &mut App) {
+    open_or_activate(Some(SettingsSectionId::Servers), cx);
+    if let Some(window) = open_settings_window(cx) {
+        cx.defer(move |cx| {
+            let _ = window.update(cx, |settings, window, cx| {
+                settings.select_server_id(server, cx);
+                window.activate_window();
+            });
+        });
+    }
+}
+
 /// Retains Settings until its latest edit is saved, then completes an authorized application quit.
 pub(crate) fn quit_when_saved(cx: &mut App, completion: crate::app::ApplicationQuitAfterSave) {
     if let Some(settings) = cx

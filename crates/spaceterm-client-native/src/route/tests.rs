@@ -392,7 +392,12 @@ impl RouteConnector for GatedRoutes {
         Box::pin(async {
             let (transport, tunnel) = self
                 .ssh
-                .open("fixture-host", "/private/server", MessageLimit::envelope())
+                .open(
+                    "fixture-host",
+                    "/private/server",
+                    MessageLimit::envelope(),
+                    None,
+                )
                 .await?;
             *self.tunnel.lock().unwrap() =
                 Some((tunnel.process_id().unwrap(), tunnel.completion()));
@@ -403,6 +408,7 @@ impl RouteConnector for GatedRoutes {
                     finish: self.finish.clone(),
                 }),
                 tunnel: Some(tunnel),
+                _configuration: None,
                 aborted: AtomicBool::new(false),
                 cleanup: tokio::sync::OnceCell::new(),
                 cleanup_scheduled: AtomicBool::new(false),
@@ -802,4 +808,267 @@ while True:
             .unwrap()
             .success()
     );
+}
+
+#[tokio::test]
+async fn ordinary_route_connector_cannot_supply_restricted_revocation_authority() {
+    use spaceterm_core::{
+        identity::OperationStreamId,
+        operations::{OperationId, OperationSequence},
+    };
+    let directory = Directory::new();
+    let endpoint = directory.authority().endpoint("restricted").unwrap();
+    let _listener = UnixListener::bind(endpoint.path()).unwrap();
+    let local = LocalRouteAuthority::new(endpoint).unwrap();
+    let target = target(local.description().clone());
+    let operation = OperationId::new(
+        OperationStreamId::new(
+            spaceterm_core::identity::OperationStreamKey::new(target.server(), 1).unwrap(),
+            target.pairing(),
+            target.client(),
+        )
+        .unwrap(),
+        OperationSequence::new(1).unwrap(),
+    );
+    let connector = NativeRouteConnector::new(vec![local], None).unwrap();
+    let result = connector
+        .open(
+            &target,
+            ConnectionPurpose::RestrictedRevocation { operation },
+        )
+        .await;
+    assert!(
+        matches!(result, Err(error) if error.class() == ClientFailureClass::AuthorizationDenied)
+    );
+}
+
+#[tokio::test]
+async fn captured_ssh_rejects_changed_effective_host_account_and_jump() {
+    let directory = Directory::new();
+    let configuration = directory.0.join("effective-config");
+    let original = "Host target\n HostName 127.0.0.1\n User owner\n ProxyJump jump\nHost jump\n HostName 127.0.0.2\n User gateway\n";
+    fs::write(&configuration, original).unwrap();
+    let ssh = SshRouteConfiguration::new(
+        PathBuf::from("/usr/bin/ssh"),
+        configuration.clone(),
+        directory.0.clone(),
+        vec![("PATH".into(), "/usr/bin:/bin".into())],
+        TunnelEndpoints::new(directory.authority()).unwrap(),
+        None,
+    )
+    .unwrap();
+    let capture = ssh.capture("target").await.unwrap();
+    assert!(capture.configuration().contains("hostname 127.0.0.1"));
+    assert!(capture.configuration().contains("hostname 127.0.0.2"));
+    assert!(capture.configuration().contains("ProxyJump st-route-1"));
+    for changed in [
+        original.replace("127.0.0.1", "127.0.0.3"),
+        original.replace("User owner", "User other"),
+        original.replace("127.0.0.2", "127.0.0.4"),
+        original.replace("User gateway", "User other"),
+    ] {
+        fs::write(&configuration, changed).unwrap();
+        let result = ssh
+            .open_captured(
+                "target",
+                "/server",
+                MessageLimit::envelope(),
+                &capture,
+                None,
+            )
+            .await;
+        assert!(
+            matches!(result, Err(error) if error.class() == ClientFailureClass::StaleAuthority)
+        );
+    }
+    // OpenSSH itself must read the generated configuration, including the jump
+    // host's pinned account and endpoint, without re-reading the original file.
+    let snapshot = directory.0.join("snapshot");
+    fs::write(&snapshot, capture.configuration()).unwrap();
+    for (alias, expected) in [
+        ("st-route-0", "hostname 127.0.0.1"),
+        ("st-route-1", "hostname 127.0.0.2"),
+    ] {
+        let output = std::process::Command::new("/usr/bin/ssh")
+            .args(["-G", "-F"])
+            .arg(&snapshot)
+            .arg(alias)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8(output.stdout).unwrap().contains(expected));
+    }
+}
+
+#[tokio::test]
+async fn captured_ssh_spawn_uses_snapshot_after_original_configuration_changes() {
+    let directory = Directory::new();
+    let executable = directory.0.join("ssh-fixture");
+    let configuration = directory.0.join("ssh-config");
+    let observed = directory.0.join("observed");
+    fs::write(
+        &configuration,
+        "host original\nhostname original.example\nuser owner\nport 22\n",
+    )
+    .unwrap();
+    let script = format!(
+        r#"#!/usr/bin/python3 -I
+import socket, sys
+configuration = sys.argv[sys.argv.index('-F') + 1]
+if '-G' in sys.argv:
+    print(open(configuration).read(), end='')
+    sys.exit(0)
+open({original:?}, 'w').write('host original\nhostname redirected.example\nuser attacker\nport 22\n')
+captured = open(configuration).read()
+open({observed:?}, 'w').write(captured)
+assert 'hostname original.example' in captured
+assert 'redirected.example' not in captured
+forward = sys.argv[sys.argv.index('-L') + 1]
+listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+listener.bind(forward.split(':', 1)[0])
+listener.listen(8)
+while True:
+    peer, _ = listener.accept()
+    while peer.recv(4096):
+        pass
+    peer.close()
+"#,
+        original = configuration,
+        observed = observed
+    );
+    fs::write(&executable, script).unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    let ssh = SshRouteConfiguration::new(
+        executable,
+        configuration.clone(),
+        directory.0.clone(),
+        vec![("PATH".into(), "/usr/bin:/bin".into())],
+        TunnelEndpoints::new(directory.authority()).unwrap(),
+        None,
+    )
+    .unwrap();
+    let capture = ssh.capture("original").await.unwrap();
+    let connector = NativeRouteConnector::new(vec![], Some(ssh)).unwrap();
+    let route = RouteDescription::new(RouteParts::Ssh {
+        destination: "original".into(),
+        remote_socket: "/server".into(),
+    })
+    .unwrap();
+    let connected = connector
+        .open_pairing_route(target(route.clone()).pin(), &route, Some(&capture))
+        .await
+        .unwrap();
+    assert!(
+        fs::read_to_string(&configuration)
+            .unwrap()
+            .contains("redirected.example")
+    );
+    assert_eq!(
+        fs::read_to_string(observed).unwrap(),
+        format!("Host *\n BatchMode yes\n{}", capture.configuration())
+    );
+    connected
+        .sender
+        .send(b"bounded-restricted-frame")
+        .await
+        .unwrap();
+    connected.sender.close().await.unwrap();
+    assert!(!fs::read_dir(&directory.0).unwrap().any(|entry| {
+        use std::os::unix::fs::FileTypeExt;
+        entry.unwrap().file_type().unwrap().is_socket()
+    }));
+}
+
+#[tokio::test]
+async fn captured_ssh_keeps_the_root_destination_literal_instead_of_parsing_jump_syntax() {
+    let directory = Directory::new();
+    let configuration = directory.0.join("ssh-config");
+    fs::write(
+        &configuration,
+        "Host literal:2222\n HostName 127.0.0.1\n User owner\n Port 8022\n",
+    )
+    .unwrap();
+    let ssh = SshRouteConfiguration::new(
+        "/usr/bin/ssh".into(),
+        configuration,
+        directory.0.clone(),
+        vec![("PATH".into(), "/usr/bin:/bin".into())],
+        TunnelEndpoints::new(directory.authority()).unwrap(),
+        None,
+    )
+    .unwrap();
+    let capture = ssh.capture("literal:2222").await.unwrap();
+    assert!(capture.configuration().contains("hostname 127.0.0.1"));
+    assert!(capture.configuration().contains("port 8022"));
+}
+
+#[tokio::test]
+async fn restricted_ssh_capture_refuses_match_exec_before_running_local_commands() {
+    let directory = Directory::new();
+    let configuration = directory.0.join("ssh-config");
+    let marker = directory.0.join("unexpected-effect");
+    let included = directory.0.join("included-config");
+    fs::write(&configuration, format!("Host target\n HostName 127.0.0.1\n User owner\nMatch exec \"touch {}\"\n Compression yes\n", marker.display())).unwrap();
+    let ssh = SshRouteConfiguration::new(
+        "/usr/bin/ssh".into(),
+        configuration,
+        directory.0.clone(),
+        vec![("PATH".into(), "/usr/bin:/bin".into())],
+        TunnelEndpoints::new(directory.authority()).unwrap(),
+        None,
+    )
+    .unwrap();
+    assert!(ssh.capture("target").await.is_err());
+    assert!(
+        !marker.exists(),
+        "restricted validation executed a local command"
+    );
+    fs::copy(&ssh.managed_config, &included).unwrap();
+    fs::write(
+        &ssh.managed_config,
+        format!("Include \"{}\"\n", included.display()),
+    )
+    .unwrap();
+    assert!(ssh.capture("target").await.is_err());
+    assert!(
+        !marker.exists(),
+        "included Match exec ran during restricted validation"
+    );
+}
+
+#[tokio::test]
+async fn restricted_ssh_capture_binds_literal_and_glob_includes_before_execution() {
+    let directory = Directory::new();
+    let includes = directory.0.join("config fragments");
+    fs::create_dir(&includes).unwrap();
+    let included = includes.join("target.conf");
+    fs::write(&included, "Host target\n HostName 127.0.0.1\n User owner\n").unwrap();
+    let configuration = directory.0.join("ssh-config");
+    fs::write(
+        &configuration,
+        format!("Include = \"{}/*.conf\"\n", includes.display()),
+    )
+    .unwrap();
+    let ssh = SshRouteConfiguration::new(
+        "/usr/bin/ssh".into(),
+        configuration,
+        directory.0.clone(),
+        vec![("PATH".into(), "/usr/bin:/bin".into())],
+        TunnelEndpoints::new(directory.authority()).unwrap(),
+        None,
+    )
+    .unwrap();
+    let capture = ssh.capture("target").await.unwrap();
+    assert!(capture.configuration().contains("hostname 127.0.0.1"));
+    fs::write(included, "Host target\n HostName 127.0.0.2\n User other\n").unwrap();
+    let result = ssh
+        .open_captured(
+            "target",
+            "/server",
+            MessageLimit::envelope(),
+            &capture,
+            None,
+        )
+        .await;
+    assert!(matches!(result, Err(error) if error.class() == ClientFailureClass::StaleAuthority));
 }

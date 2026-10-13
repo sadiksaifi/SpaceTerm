@@ -99,11 +99,11 @@ impl LocalUseInvalidator for Invalidator {
         Box::pin(async { panic!("recovery removed a pairing") })
     }
 }
-struct MemoryView {
-    bytes: Option<Vec<u8>>,
-    failure: Option<ViewStoreFailureClass>,
-    writes: Arc<AtomicUsize>,
-    saved: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
+pub(super) struct MemoryView {
+    pub(super) bytes: Option<Vec<u8>>,
+    pub(super) failure: Option<ViewStoreFailureClass>,
+    pub(super) writes: Arc<AtomicUsize>,
+    pub(super) saved: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
 }
 impl ViewStore for MemoryView {
     type Version = u64;
@@ -206,6 +206,8 @@ impl Fixture {
             operations: self.server.clone(),
             invalidator: Arc::new(Invalidator(self.channels.clone())),
             local_server: Some(self.server.server()),
+            tracker: None,
+            registry_binding: None,
         }
     }
     fn store(&self) -> MemoryView {
@@ -467,4 +469,53 @@ fn desktop_recovery_keeps_two_saved_servers_and_their_attachments_independent() 
         assert_eq!(fixture.ports.opens.load(Ordering::SeqCst), 0);
         composition.runtime.shutdown().await.unwrap();
     });
+}
+
+#[gpui::test]
+fn desktop_application_composes_native_directory_ports_for_all_paired_servers(
+    cx: &mut gpui::TestAppContext,
+) {
+    use crate::ui::server_client_runtime::DesktopClientProvider as _;
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let fixture = executor.block_on(Fixture::new());
+    let other = FakeServer::new(9, vec![2, 1]).unwrap();
+    let peer = executor
+        .block_on(FakePaneConnection::new(other.clone(), 1, 2))
+        .unwrap();
+    let saved = peer.journal().snapshot().unwrap().bindings()[0].clone();
+    executor
+        .block_on(
+            fixture
+                .journal
+                .transact(vec![ClientJournalChange::SaveBinding(Box::new(saved))]),
+        )
+        .unwrap();
+    let composition = executor
+        .block_on(recover(fixture.owners(), fixture.store()))
+        .unwrap();
+    let provider = cx.update(|cx| {
+        let (notifier, _) = crate::ui::server_client_runtime::notification_channel();
+        crate::ui::server_client_runtime::composed::ComposedDesktopClientProvider::new(
+            composition,
+            notifier,
+            cx,
+        )
+        .unwrap()
+    });
+    for server in [fixture.server.server(), other.server()] {
+        let port = provider
+            .directory_connection(server)
+            .expect("paired server directory port");
+        // Ports exist while offline, but never manufacture authenticated authority.
+        assert!(port.state().is_err());
+    }
+    assert!(
+        provider
+            .directory_connection(spaceterm_core::identity::ServerId::new([99; 16]))
+            .is_err()
+    );
+    assert_eq!(fixture.ports.opens.load(Ordering::SeqCst), 0);
 }

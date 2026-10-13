@@ -1544,7 +1544,8 @@ impl RemoteWorkspaceFlow {
             }
             DirectoryPickerEvent::Dismissed => self.cancel_flow(window, cx),
             // A remote Directory Picker offers no System Directory Selection.
-            DirectoryPickerEvent::SystemSelectionRequested => {}
+            DirectoryPickerEvent::SystemSelectionRequested
+            | DirectoryPickerEvent::ConfirmedServer(_) => {}
             DirectoryPickerEvent::StateChanged => cx.notify(),
         }
     }

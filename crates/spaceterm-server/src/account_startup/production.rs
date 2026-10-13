@@ -176,6 +176,7 @@ pub struct RecoveredAccountServer {
     pairing: PairingService,
     management: Arc<NativeManagement>,
     admission: Arc<spaceterm_host::account_service::AccountStartup>,
+    owner_supervisor: Arc<ServiceSupervisor>,
 }
 impl RecoveredAccountServer {
     pub async fn recover(
@@ -287,7 +288,7 @@ impl RecoveredAccountServer {
             Arc::new(handle.clone()),
             account.credentials.clone(),
             codec.clone(),
-            Arc::new(AccountOwnerEnrollment::new(supervisor)),
+            Arc::new(AccountOwnerEnrollment::new(supervisor.clone())),
             account.registration.server_pin(),
         )
         .map_err(|_| StartupFailure::Runtime(failure(ServerFailureClass::Authentication)))?;
@@ -312,6 +313,7 @@ impl RecoveredAccountServer {
             pairing,
             management,
             admission,
+            owner_supervisor: supervisor,
         })
     }
     pub fn handle(&self) -> ServerHandle {
@@ -332,9 +334,24 @@ impl RecoveredAccountServer {
             listeners,
             management,
             admission,
+            owner_supervisor,
             ..
         } = self;
         admission.revalidate().map_err(StartupFailure::Account)?;
+        let owner_endpoint =
+            match crate::deployment::owner::OwnerEndpoint::start(owner_supervisor, server.handle())
+            {
+                Ok(endpoint) => endpoint,
+                Err(_) => {
+                    server
+                        .close_owner_enrollment()
+                        .await
+                        .map_err(StartupFailure::Runtime)?;
+                    return Err(StartupFailure::Runtime(failure(
+                        ServerFailureClass::NativeUnavailable,
+                    )));
+                }
+            };
         let handle = server.handle();
         let monitor = async move {
             let mut interval = tokio::time::interval(Duration::from_millis(100));
@@ -361,7 +378,12 @@ impl RecoveredAccountServer {
             .run_until(listeners, shutdown)
             .await
             .map_err(StartupFailure::Runtime);
+        let owner_closed = owner_endpoint
+            .close()
+            .await
+            .map_err(|_| StartupFailure::Runtime(failure(ServerFailureClass::CleanupIncomplete)));
         drop(admission);
+        owner_closed?;
         result
     }
 }
@@ -389,10 +411,10 @@ fn appearance() -> RuntimeAppearance {
 
 /// Native account discovery supplies shell and home. Ambient HOME and SHELL do
 /// not select registration, runtime identity or local filesystem authority.
-pub async fn production_run() -> Result<ShutdownReport, StartupFailure> {
-    let facts = TrustedAccountFacts::current().map_err(StartupFailure::Account)?;
-    let supervisor = Arc::new(ServiceSupervisor::current(None).map_err(StartupFailure::Account)?);
-    let startup = AccountStartup::admit(&supervisor)?;
+fn native_launch(
+    facts: &TrustedAccountFacts,
+    home: PathBuf,
+) -> Result<AccountLaunchFacts, StartupFailure> {
     let executable = std::env::current_exe()
         .map_err(|_| StartupFailure::Account(ServiceFailure::SupervisorUnavailable))?;
     let parent = executable
@@ -427,12 +449,19 @@ pub async fn production_run() -> Result<ShutdownReport, StartupFailure> {
             }),
         },
     );
-    let launch = AccountLaunchFacts {
+    Ok(AccountLaunchFacts {
         uid: facts.uid(),
-        home: facts.home().to_owned(),
+        machine: LocalMachine::new(None, None, home.to_str()),
+        home,
         planner,
-        machine: LocalMachine::new(None, None, facts.home().to_str()),
-    };
+    })
+}
+
+pub async fn production_run() -> Result<ShutdownReport, StartupFailure> {
+    let facts = TrustedAccountFacts::current().map_err(StartupFailure::Account)?;
+    let supervisor = Arc::new(ServiceSupervisor::current(None).map_err(StartupFailure::Account)?);
+    let startup = AccountStartup::admit(&supervisor)?;
+    let launch = native_launch(&facts, facts.home().to_owned())?;
     let mut terminate =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             .map_err(|_| StartupFailure::Account(ServiceFailure::SupervisorUnavailable))?;
@@ -445,4 +474,126 @@ pub async fn production_run() -> Result<ShutdownReport, StartupFailure> {
             tokio::select! { _ = terminate.recv() => {}, _ = interrupt.recv() => {} }
         })
         .await
+}
+
+struct UnadmittedOwner;
+impl StartupAuthorityPort for UnadmittedOwner {
+    fn validate_startup(&self) -> Result<ServerId, ServerFailure> {
+        Err(failure(ServerFailureClass::Authentication))
+    }
+    fn validate_credentials(
+        &self,
+        _: &dyn ServerCredentialPort,
+        _: ServerId,
+    ) -> Result<(), ServerFailure> {
+        Err(failure(ServerFailureClass::Authentication))
+    }
+}
+
+/// Reuses production recovery providers while the existing stopped executor owns
+/// the one database and instance lease. No service Start or listener is opened.
+pub async fn production_stopped_owner(
+    supervisor: Arc<ServiceSupervisor>,
+    home: PathBuf,
+    request: spaceterm_host::native_deployment::contracts::NativeRequestId,
+    claim: &spaceterm_protocol::pairing_adapter::VerifiedDeviceClaim,
+) -> Result<
+    crate::account_owner_enrollment::AccountOwnerRequestExecutor,
+    spaceterm_core::pairing::PairingFailure,
+> {
+    use crate::account_owner_enrollment::{AccountOwnerRequestExecutor, StoppedOwnerProviders};
+    use spaceterm_core::pairing::PairingFailure;
+    let map = |_: StartupFailure| PairingFailure::AuthorizationUnavailable;
+    let registration = supervisor
+        .discover()
+        .map_err(super::owner_failure)?
+        .ok_or(PairingFailure::AuthorizationRequired)?;
+    let server = ServerId::new(registration.server_pin().identity);
+    let directory = ServerDirectory::new(server, home.as_os_str().as_encoded_bytes().to_vec())
+        .map_err(|_| PairingFailure::InvalidRequest)?;
+    let identity = StoreIdentity {
+        server,
+        account: registration.key(),
+        server_public_key: registration.server_pin().public_key,
+    };
+    let facts = TrustedAccountFacts::current().map_err(super::owner_failure)?;
+    if facts.uid() != identity.account.account_uid {
+        return Err(PairingFailure::IdentityMismatch);
+    }
+    let launch = native_launch(&facts, home.clone()).map_err(map)?;
+    let clock = Arc::new(NativeRuntimeClock::default());
+    let directories = Arc::new(
+        NativeDirectoryProvider::new(server, home.clone())
+            .map_err(|_| PairingFailure::AuthorizationUnavailable)?,
+    );
+    let git_host = Arc::new(NativeServerGitHost::for_account(
+        PathBuf::from("/usr/bin/git"),
+        home,
+        spaceterm_host::git::MINIMUM_GIT_VERSION,
+        directories,
+    ));
+    let external = Arc::new(
+        GitExternalWork::new(identity, directory.clone(), clock.clone(), git_host.clone())
+            .map_err(|_| PairingFailure::RecoveryRequired)?,
+    );
+    let runtime = NativeRuntime::new(
+        server,
+        facts.uid(),
+        Arc::new(AccountLaunch(launch)),
+        clock.clone(),
+        RuntimeLimits::default(),
+    )
+    .map_err(|_| PairingFailure::AuthorizationUnavailable)?;
+    let ports = ProductionListenerPorts::new();
+    let config = ServerConfig {
+        limits: ServerLimits::default(),
+        // The stopped constructor replaces this denied authority only after its
+        // retained native request and exclusive stopped admission are validated.
+        host: ServerHostContext {
+            authority: Arc::new(UnadmittedOwner),
+        },
+        core: CorePorts::production(identity, directory.clone(), clock.clone())
+            .map_err(|_| PairingFailure::RecoveryRequired)?,
+        launch: runtime.clone(),
+        cleanup: runtime,
+        extensions: Arc::new(ActorExtensions),
+        initial_appearance: appearance(),
+        outcomes: ports.outcomes.clone(),
+    };
+    let executor = AccountOwnerRequestExecutor::stopped(
+        supervisor.clone(),
+        directory,
+        request,
+        claim,
+        StoppedOwnerProviders {
+            config,
+            host_management: Arc::new(NativeManagement(supervisor)),
+            external_work: external.clone(),
+            clock,
+        },
+    )
+    .await?;
+    let handle = executor.handle();
+    let composed = async {
+        let git = GitService::new(
+            server,
+            handle.snapshot().epoch(),
+            git_host,
+            Arc::new(handle),
+            GitLimits::default(),
+        )
+        .map_err(|_| PairingFailure::RecoveryRequired)?;
+        git.recover(Vec::new())
+            .await
+            .map_err(|_| PairingFailure::RecoveryRequired)?;
+        external
+            .bind(git)
+            .map_err(|_| PairingFailure::RecoveryRequired)
+    }
+    .await;
+    if let Err(error) = composed {
+        let _ = executor.close().await;
+        return Err(error);
+    }
+    Ok(executor)
 }

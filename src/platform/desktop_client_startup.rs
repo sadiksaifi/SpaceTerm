@@ -4,6 +4,9 @@
 
 use std::{rc::Rc, sync::Arc};
 
+mod native;
+pub(crate) use native::production;
+
 use gpui::{App, Entity, Task};
 use spaceterm_client::{
     journal::JournalController,
@@ -37,6 +40,42 @@ pub(crate) struct NativeDesktopOwners {
     pub(crate) operations: Arc<dyn OperationPeer>,
     pub(crate) invalidator: Arc<dyn LocalUseInvalidator>,
     pub(crate) local_server: Option<ServerId>,
+    pub(crate) tracker: Option<OperationTracker>,
+    pub(crate) registry_binding: Option<Arc<dyn NativeRegistryBinding>>,
+}
+
+impl Clone for NativeDesktopOwners {
+    fn clone(&self) -> Self {
+        Self {
+            services: ClientServices {
+                routes: self.services.routes.clone(),
+                credentials: self.services.credentials.clone(),
+                journal: self.services.journal.clone(),
+                organization: self.services.organization.clone(),
+                delegate: self.services.delegate.clone(),
+                discovery: self.services.discovery.clone(),
+                limits: self.services.limits,
+                additional_capabilities: self.services.additional_capabilities.clone(),
+            },
+            journal: self.journal.clone(),
+            channels: self.channels.clone(),
+            operations: self.operations.clone(),
+            invalidator: self.invalidator.clone(),
+            local_server: self.local_server,
+            tracker: self.tracker.clone(),
+            registry_binding: self.registry_binding.clone(),
+        }
+    }
+}
+
+pub(crate) trait NativeRegistryBinding: Send + Sync {
+    fn bind(
+        &self,
+        registry: ClientRegistry,
+    ) -> Result<(), spaceterm_client::failure::ClientFailure>;
+}
+trait NativeOwnerFactory: Send + Sync {
+    fn recover(&self) -> spaceterm_client::ports::ClientFuture<'_, NativeDesktopOwners>;
 }
 
 /// A recovered value crosses from the native executor to GPUI exactly once.
@@ -92,22 +131,67 @@ pub(crate) trait DesktopClientStartup {
     reason = "native client provider supplies authenticated connection ports"
 )]
 pub(crate) struct NativeDesktopStartup<S: ViewStore> {
-    owners: std::cell::RefCell<Option<(NativeDesktopOwners, S)>>,
+    owners: Arc<tokio::sync::Mutex<Option<NativeDesktopOwners>>>,
+    factory: Option<Arc<dyn NativeOwnerFactory>>,
+    store: SharedViewStore<S>,
+    consumed: Arc<std::sync::atomic::AtomicBool>,
     executor: Arc<tokio::runtime::Runtime>,
 }
 
+struct SharedViewStore<S: ViewStore>(Arc<std::sync::Mutex<S>>);
+impl<S: ViewStore> Clone for SharedViewStore<S> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl<S: ViewStore> ViewStore for SharedViewStore<S> {
+    type Version = S::Version;
+    fn load(
+        &mut self,
+        maximum: usize,
+    ) -> Result<
+        Option<spaceterm_client::view::StoredView<S::Version>>,
+        spaceterm_client::view::ViewStoreFailure,
+    > {
+        self.0
+            .lock()
+            .map_err(|_| storage_failure(spaceterm_client::view::ViewStoreStage::Load))?
+            .load(maximum)
+    }
+    fn replace(
+        &mut self,
+        expected: Option<&S::Version>,
+        document: &spaceterm_client::view::EncodedView,
+    ) -> spaceterm_client::view::ViewCommit<S::Version> {
+        match self.0.lock() {
+            Ok(mut store) => store.replace(expected, document),
+            Err(_) => spaceterm_client::view::ViewCommit::NotApplied(storage_failure(
+                spaceterm_client::view::ViewStoreStage::Write,
+            )),
+        }
+    }
+}
+fn storage_failure(
+    stage: spaceterm_client::view::ViewStoreStage,
+) -> spaceterm_client::view::ViewStoreFailure {
+    spaceterm_client::view::ViewStoreFailure {
+        class: spaceterm_client::view::ViewStoreFailureClass::Unavailable,
+        stage,
+    }
+}
+
 impl<S: ViewStore + 'static> NativeDesktopStartup<S> {
-    #[allow(
-        dead_code,
-        reason = "native client provider supplies authenticated connection ports"
-    )]
+    #[cfg(test)]
     pub(crate) fn new(
         owners: NativeDesktopOwners,
         store: S,
         executor: Arc<tokio::runtime::Runtime>,
     ) -> Self {
         Self {
-            owners: std::cell::RefCell::new(Some((owners, store))),
+            owners: Arc::new(tokio::sync::Mutex::new(Some(owners))),
+            factory: None,
+            store: SharedViewStore(Arc::new(std::sync::Mutex::new(store))),
+            consumed: Arc::default(),
             executor,
         }
     }
@@ -118,14 +202,42 @@ impl<S: ViewStore + 'static> DesktopClientStartup for NativeDesktopStartup<S> {
         &self,
         cx: &mut App,
     ) -> Task<Result<Box<dyn RecoveredDesktopClient>, DesktopClientError>> {
-        let Some((owners, store)) = self.owners.borrow_mut().take() else {
+        use std::sync::atomic::Ordering;
+        if self
+            .consumed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
             return Task::ready(Err(DesktopClientError::Cancelled));
-        };
+        }
+        let owners = self.owners.clone();
+        let store = self.store.clone();
+        let consumed = self.consumed.clone();
         let executor = self.executor.clone();
+        let factory = self.factory.clone();
         let recovery = executor.spawn(async move {
-            recover(owners, store)
-                .await
-                .map(|composition| Box::new(composition) as Box<dyn RecoveredDesktopClient>)
+            let result = async {
+                let mut retained = owners.lock().await;
+                if retained.is_none() {
+                    let factory = factory.ok_or(DesktopClientError::LocalStorageUnavailable)?;
+                    *retained = Some(factory.recover().await.map_err(DesktopClientError::from)?);
+                }
+                let original = retained
+                    .as_ref()
+                    .ok_or(DesktopClientError::LocalStorageUnavailable)?
+                    .clone();
+                drop(retained);
+                recover(original, store)
+                    .await
+                    .map(|composition| Box::new(composition) as Box<dyn RecoveredDesktopClient>)
+            }
+            .await;
+            // Retry retains the original recovered owners and store. A failed load never
+            // grants enrollment, fresh credentials or replacement state.
+            if result.is_err() {
+                consumed.store(false, Ordering::Release);
+            }
+            result
         });
         cx.spawn(async move |_| {
             let _executor = executor;
@@ -154,6 +266,8 @@ pub(crate) async fn recover<S: ViewStore + 'static>(
         operations,
         invalidator,
         local_server,
+        tracker,
+        registry_binding,
     } = owners;
     journal.ensure_healthy().map_err(DesktopClientError::from)?;
     let view_journal = journal.clone();
@@ -173,6 +287,11 @@ pub(crate) async fn recover<S: ViewStore + 'static>(
     let (registry, runtime) = ClientRegistry::recover(services)
         .await
         .map_err(DesktopClientError::from)?;
+    if let Some(binding) = registry_binding {
+        binding
+            .bind(registry.clone())
+            .map_err(DesktopClientError::from)?;
+    }
     let servers = registry
         .servers()
         .into_iter()
@@ -190,7 +309,7 @@ pub(crate) async fn recover<S: ViewStore + 'static>(
         registry,
         runtime,
         channels,
-        tracker: OperationTracker::new(journal.clone()),
+        tracker: tracker.unwrap_or_else(|| OperationTracker::new(journal.clone())),
         operations,
         pending: PendingTasks::new(journal, invalidator),
         persistence,
@@ -221,7 +340,11 @@ pub(crate) fn begin(
         completed(Ok(()), cx);
         return;
     }
-    if cx.try_global::<DesktopStartupState>().is_some() {
+    if cx.try_global::<DesktopStartupState>().is_some_and(|state| {
+        state.pending
+            || state.cancelled
+            || state.failure != Some(DesktopClientError::LocalStorageUnavailable)
+    }) {
         return;
     }
     let recovered = provider.recover(cx);

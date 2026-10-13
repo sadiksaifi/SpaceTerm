@@ -7,6 +7,7 @@ use spaceterm_client::{
     api::{ConnectionTarget, RouteDescription, RouteParts},
     failure::{ClientFailure, ClientFailureClass},
     limits::DIAL_DEADLINE,
+    pairing::credentials::{CredentialUse, CredentialUsePurpose, NativeCredentialAccess},
     ports::{
         ClientFuture, ConnectedRoute, ConnectionPurpose, MessageReceiver, MessageSender, PeerFacts,
         RouteConnector, RouteKind,
@@ -133,7 +134,9 @@ impl SshRouteConfiguration {
         destination: &str,
         remote_socket: &str,
         limit: MessageLimit,
+        foreground: Option<&CredentialUse>,
     ) -> Result<(Arc<dyn MessageTransport>, Arc<SshTunnel>), ClientFailure> {
+        let askpass = self.foreground_askpass(foreground)?;
         let deadline = tokio::time::Instant::now() + DIAL_DEADLINE;
         let endpoint = self.endpoints.allocate()?;
         let command = SshTunnelCommand::new(
@@ -142,7 +145,7 @@ impl SshRouteConfiguration {
             SshDestination::new(destination).map_err(classify)?,
             endpoint,
             RemoteSocketPath::new(remote_socket).map_err(classify)?,
-            if self.askpass.is_some() {
+            if askpass.is_some() {
                 AuthenticationMode::AskPass
             } else {
                 AuthenticationMode::BatchMode
@@ -152,7 +155,7 @@ impl SshRouteConfiguration {
         let environment =
             SshEnvironment::new(self.home.clone(), self.environment.clone()).map_err(classify)?;
         let tunnel = Arc::new(
-            SshTunnel::start(command, environment, self.askpass.clone(), DIAL_DEADLINE)
+            SshTunnel::start(command, environment, askpass, DIAL_DEADLINE)
                 .await
                 .map_err(classify)?,
         );
@@ -173,9 +176,48 @@ impl SshRouteConfiguration {
     }
 }
 
+/// Reuses the existing zeroized native broker and revalidates the foreground
+/// lease at the host's final spawn handoff, after asynchronous route capture.
+struct ForegroundAskPass {
+    broker: Arc<dyn TunnelAskPass>,
+    authorization: CredentialUse,
+}
+impl TunnelAskPass for ForegroundAskPass {
+    fn handoff(&self) -> Result<spaceterm_host::ssh_tunnel::AskPassHandoff, TransportError> {
+        self.authorization
+            .validate(self.authorization.scope())
+            .map_err(|_| TransportError::PeerAccountRejected)?;
+        self.broker.handoff()
+    }
+}
+impl SshRouteConfiguration {
+    fn foreground_askpass(
+        &self,
+        foreground: Option<&CredentialUse>,
+    ) -> Result<Option<Arc<dyn TunnelAskPass>>, ClientFailure> {
+        let Some(authorization) = foreground else {
+            return Ok(None);
+        };
+        authorization
+            .validate(authorization.scope())
+            .map_err(|_| ClientFailure::new(ClientFailureClass::AuthorizationDenied))?;
+        if authorization.purpose() != CredentialUsePurpose::Enrollment
+            || authorization.native_access() != NativeCredentialAccess::Foreground
+        {
+            return Err(ClientFailure::new(ClientFailureClass::AuthorizationDenied));
+        }
+        Ok(self.askpass.as_ref().map(|broker| {
+            Arc::new(ForegroundAskPass {
+                broker: broker.clone(),
+                authorization: authorization.clone(),
+            }) as Arc<dyn TunnelAskPass>
+        }))
+    }
+}
+
 pub struct NativeRouteConnector {
     local: Vec<LocalRouteAuthority>,
-    ssh: Option<SshRouteConfiguration>,
+    pub(crate) ssh: Option<SshRouteConfiguration>,
 }
 impl NativeRouteConnector {
     pub fn new(
@@ -195,85 +237,121 @@ impl RouteConnector for NativeRouteConnector {
         purpose: ConnectionPurpose,
     ) -> ClientFuture<'a, ConnectedRoute> {
         Box::pin(async move {
-            if let ConnectionPurpose::RestrictedRevocation { operation } = purpose
-                && (operation.stream().server() != target.server()
-                    || operation.stream().pairing() != target.pairing()
-                    || operation.stream().client() != target.client())
-            {
+            if !matches!(purpose, ConnectionPurpose::Ordinary) {
                 return Err(ClientFailure::new(ClientFailureClass::AuthorizationDenied));
             }
-            let limit =
-                MessageLimit::new(spaceterm_protocol::limits::MAX_FRAME_BYTES).map_err(classify)?;
-            let (transport, tunnel): (Arc<dyn MessageTransport>, Option<Arc<SshTunnel>>) =
-                match target.route().parts() {
-                    RouteParts::Ipc { .. } => {
-                        let authority = self
-                            .local
-                            .iter()
-                            .find(|a| &a.route == target.route())
-                            .ok_or_else(invalid_route)?;
-                        (
-                            Arc::new(
-                                tokio::time::timeout(
-                                    DIAL_DEADLINE,
-                                    IpcTransport::connect(&authority.endpoint, limit),
-                                )
-                                .await
-                                .map_err(|_| unavailable())?
-                                .map_err(classify)?,
-                            ),
-                            None,
-                        )
-                    }
-                    RouteParts::Wss {
-                        address,
-                        server_name,
-                    } => (
+            self.open_pairing_route(target.pin(), target.route(), None)
+                .await
+        })
+    }
+}
+impl NativeRouteConnector {
+    pub(crate) async fn open_pairing_route(
+        &self,
+        pin: spaceterm_protocol::authentication::ServerPin,
+        route: &RouteDescription,
+        capture: Option<&spaceterm_client::journal::JournalSshCapture>,
+    ) -> Result<ConnectedRoute, ClientFailure> {
+        self.open_native_route(pin, route, capture, None).await
+    }
+    pub(crate) async fn open_foreground_pairing_route(
+        &self,
+        pin: spaceterm_protocol::authentication::ServerPin,
+        route: &RouteDescription,
+        capture: Option<&spaceterm_client::journal::JournalSshCapture>,
+        authorization: &CredentialUse,
+    ) -> Result<ConnectedRoute, ClientFailure> {
+        self.open_native_route(pin, route, capture, Some(authorization))
+            .await
+    }
+    async fn open_native_route(
+        &self,
+        pin: spaceterm_protocol::authentication::ServerPin,
+        route: &RouteDescription,
+        capture: Option<&spaceterm_client::journal::JournalSshCapture>,
+        foreground: Option<&CredentialUse>,
+    ) -> Result<ConnectedRoute, ClientFailure> {
+        let limit =
+            MessageLimit::new(spaceterm_protocol::limits::MAX_FRAME_BYTES).map_err(classify)?;
+        let mut configuration_lease = None;
+        let (transport, tunnel): (Arc<dyn MessageTransport>, Option<Arc<SshTunnel>>) =
+            match route.parts() {
+                RouteParts::Ipc { .. } => {
+                    let authority = self
+                        .local
+                        .iter()
+                        .find(|a| &a.route == route)
+                        .ok_or_else(invalid_route)?;
+                    (
                         Arc::new(
-                            WssTransport::connect(
-                                *address,
-                                server_name,
-                                EnrolledServerKey(target.pin().public_key),
-                                limit,
+                            tokio::time::timeout(
                                 DIAL_DEADLINE,
+                                IpcTransport::connect(&authority.endpoint, limit),
                             )
                             .await
+                            .map_err(|_| unavailable())?
                             .map_err(classify)?,
                         ),
                         None,
+                    )
+                }
+                RouteParts::Wss {
+                    address,
+                    server_name,
+                } => (
+                    Arc::new(
+                        WssTransport::connect(
+                            *address,
+                            server_name,
+                            EnrolledServerKey(pin.public_key),
+                            limit,
+                            DIAL_DEADLINE,
+                        )
+                        .await
+                        .map_err(classify)?,
                     ),
-                    RouteParts::Ssh {
-                        destination,
-                        remote_socket,
-                    } => {
-                        let configuration = self.ssh.as_ref().ok_or_else(invalid_route)?;
-                        let (transport, tunnel) = configuration
-                            .open(destination, remote_socket, limit)
+                    None,
+                ),
+                RouteParts::Ssh {
+                    destination,
+                    remote_socket,
+                } => {
+                    let configuration = self.ssh.as_ref().ok_or_else(invalid_route)?;
+                    let (transport, tunnel) = if let Some(capture) = capture {
+                        let (transport, tunnel, lease) = configuration
+                            .open_captured(destination, remote_socket, limit, capture, foreground)
                             .await?;
-                        (transport, Some(tunnel))
-                    }
-                };
-            let facts = transport.peer_facts();
-            let peer = PeerFacts {
-                route: match facts.route {
-                    TransportRoute::PrivateIpc => RouteKind::PrivateIpc,
-                    TransportRoute::SecureWebSocket => RouteKind::SecureWebSocket,
-                },
-                local_account_verified: facts.local_uid.is_some(),
-                pinned_server_key: facts.pinned_server_key.map(|key| key.0),
+                        configuration_lease = Some(lease);
+                        (transport, tunnel)
+                    } else {
+                        configuration
+                            .open(destination, remote_socket, limit, foreground)
+                            .await?
+                    };
+                    (transport, Some(tunnel))
+                }
             };
-            let owner = Arc::new(RouteOwner {
-                transport,
-                tunnel,
-                aborted: AtomicBool::new(false),
-                cleanup: tokio::sync::OnceCell::new(),
-                cleanup_scheduled: AtomicBool::new(false),
-            });
-            Ok(ConnectedRoute {
-                sender: Arc::new(Sender(Arc::clone(&owner))),
-                receiver: Box::new(Receiver(owner)),
-                peer,
-            })
+        let facts = transport.peer_facts();
+        let peer = PeerFacts {
+            route: match facts.route {
+                TransportRoute::PrivateIpc => RouteKind::PrivateIpc,
+                TransportRoute::SecureWebSocket => RouteKind::SecureWebSocket,
+            },
+            local_account_verified: facts.local_uid.is_some(),
+            pinned_server_key: facts.pinned_server_key.map(|key| key.0),
+        };
+        let owner = Arc::new(RouteOwner {
+            transport,
+            tunnel,
+            _configuration: configuration_lease,
+            aborted: AtomicBool::new(false),
+            cleanup: tokio::sync::OnceCell::new(),
+            cleanup_scheduled: AtomicBool::new(false),
+        });
+        Ok(ConnectedRoute {
+            sender: Arc::new(Sender(Arc::clone(&owner))),
+            receiver: Box::new(Receiver(owner)),
+            peer,
         })
     }
 }
@@ -281,6 +359,7 @@ impl RouteConnector for NativeRouteConnector {
 struct RouteOwner {
     transport: Arc<dyn MessageTransport>,
     tunnel: Option<Arc<SshTunnel>>,
+    _configuration: Option<Arc<tempfile::NamedTempFile>>,
     aborted: AtomicBool,
     cleanup: tokio::sync::OnceCell<Result<(), ClientFailure>>,
     cleanup_scheduled: AtomicBool,
@@ -372,6 +451,8 @@ fn unavailable() -> ClientFailure {
 fn invalid_route() -> ClientFailure {
     ClientFailure::new(ClientFailureClass::UnsafeEndpoint)
 }
+
+mod captured_ssh;
 
 #[cfg(test)]
 mod tests;

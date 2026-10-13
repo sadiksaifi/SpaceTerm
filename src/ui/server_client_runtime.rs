@@ -65,6 +65,13 @@ pub(crate) trait DesktopClientProvider {
     /// The latest coherent publication for `server`.
     fn frame(&self, server: ServerId) -> Option<Arc<DesktopServerFrame>>;
 
+    fn directory_source(
+        &self,
+        _server: ServerId,
+    ) -> Result<Rc<dyn crate::ui::directory_picker::DirectorySource>, DesktopClientError> {
+        Err(DesktopClientError::UnsupportedCapability)
+    }
+
     /// The comparison token of `pane`'s current presentation.
     fn pane_view_token(&self, pane: PaneId) -> Result<PaneViewToken, DesktopClientError>;
 
@@ -74,6 +81,25 @@ pub(crate) trait DesktopClientProvider {
         _pane: PaneId,
     ) -> Result<spaceterm_client::pane_channel::PaneChannel, DesktopClientError> {
         Err(DesktopClientError::UnsupportedCapability)
+    }
+
+    /// Borrowed authenticated reads from the paired server's existing connection.
+    fn directory_connection(
+        &self,
+        _server: ServerId,
+    ) -> Result<Arc<dyn spaceterm_client::directories::DirectoryConnectionPort>, DesktopClientError>
+    {
+        Err(DesktopClientError::UnsupportedCapability)
+    }
+
+    /// Restores a retained repair before a window may submit a replacement operation.
+    fn retained_pane_repair(
+        &self,
+        _pane: PaneId,
+        _cx: &mut App,
+    ) -> Result<Option<(OperationId, spaceterm_core::operations::Command)>, DesktopClientError>
+    {
+        Ok(None)
     }
 
     /// A portable decision and the exact channel observation that produced its facts.
@@ -408,11 +434,35 @@ impl DesktopClientRuntime {
         self.provider.pane_view_token(pane)
     }
 
+    pub(crate) fn directory_source(
+        &self,
+        server: ServerId,
+    ) -> Result<Rc<dyn crate::ui::directory_picker::DirectorySource>, DesktopClientError> {
+        self.provider.directory_source(server)
+    }
+
     pub(crate) fn pane_channel(
         &self,
         pane: PaneId,
     ) -> Result<spaceterm_client::pane_channel::PaneChannel, DesktopClientError> {
         self.provider.pane_channel(pane)
+    }
+
+    pub(crate) fn directory_connection(
+        &self,
+        server: ServerId,
+    ) -> Result<Arc<dyn spaceterm_client::directories::DirectoryConnectionPort>, DesktopClientError>
+    {
+        self.provider.directory_connection(server)
+    }
+
+    pub(crate) fn retained_pane_repair(
+        &self,
+        pane: PaneId,
+        cx: &mut App,
+    ) -> Result<Option<(OperationId, spaceterm_core::operations::Command)>, DesktopClientError>
+    {
+        self.provider.retained_pane_repair(pane, cx)
     }
 
     pub(crate) fn pane_presentation(

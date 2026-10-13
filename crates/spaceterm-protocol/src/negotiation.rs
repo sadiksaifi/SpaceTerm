@@ -56,6 +56,9 @@ pub const CAPABILITY_ORGANIZATION_COMPARISONS: u32 = 520_004;
 /// Fenced Pane presentation subscriptions and explicit connection context.
 pub const CAPABILITY_TERMINAL_STREAMS: u32 = 520_005;
 
+/// Content-free native bell and command-completion notices.
+pub const CAPABILITY_NATIVE_NOTIFICATIONS: u32 = 520_006;
+
 /// Additive envelope registration: tag, authenticated capability, permitted directions.
 pub const EXTENSION_ENVELOPES: &[(u32, u32, bool, bool)] = &[
     (32, CAPABILITY_SERVER_GIT, true, false),

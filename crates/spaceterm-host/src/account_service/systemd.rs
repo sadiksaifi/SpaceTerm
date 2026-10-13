@@ -60,6 +60,7 @@ pub(super) enum Operation {
     Stop,
     Show,
     UnitPath,
+    ProcessScope,
 }
 
 /// systemd user-service manager with account-resolved bus reachability.
@@ -99,6 +100,12 @@ impl SystemdServiceManager {
             Operation::Show => vec![
                 "show",
                 "--property=LoadState,ActiveState,SubState,UnitFileState",
+                "--",
+                name,
+            ],
+            Operation::ProcessScope => vec![
+                "show",
+                "--property=LoadState,ActiveState,MainPID,ControlGroup",
                 "--",
                 name,
             ],
@@ -229,6 +236,35 @@ impl ServiceManager for SystemdServiceManager {
             self.check_runtime()?;
             let output = self.call(Operation::Show).await?;
             state(output.code, &output.bytes)
+        })
+    }
+    fn scoped_processes<'a>(
+        &'a self,
+        registration: &'a RegisteredServer,
+    ) -> ServiceFuture<'a, Vec<u32>> {
+        Box::pin(async move {
+            self.account.check(registration)?;
+            self.check_runtime()?;
+            let output = self.call(Operation::ProcessScope).await?;
+            let (main, cgroup) = process_scope(&output.bytes)?;
+            // systemctl show uses exit 4 for a confirmed nonexistent unit.
+            // Other failures, including loss of the user bus, prove no absence.
+            if output.code != 0
+                && !(output.code == 4
+                    && std::str::from_utf8(&output.bytes)
+                        .is_ok_and(|text| text.lines().any(|line| line == "LoadState=not-found")))
+            {
+                return Err(ServiceFailure::SupervisorUnavailable);
+            }
+            #[cfg(target_os = "linux")]
+            {
+                super::native_processes::systemd_scope(main, cgroup)
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = (main, cgroup);
+                Err(ServiceFailure::UnsupportedHost)
+            }
         })
     }
     fn linger(&self) -> ServiceFuture<'_, Option<LingerState>> {
@@ -418,4 +454,50 @@ fn unit_paths(text: &str) -> Result<Vec<String>, ServiceFailure> {
             .map_err(|_| ServiceFailure::SupervisorUnavailable)?;
         result.push(path);
     }
+}
+
+fn process_scope(bytes: &[u8]) -> Result<(u32, &str), ServiceFailure> {
+    if bytes.len() > 16 * 1024 {
+        return Err(ServiceFailure::LimitExceeded);
+    }
+    let text = std::str::from_utf8(bytes).map_err(|_| ServiceFailure::CleanupUnresolved)?;
+    let mut load = None;
+    let mut active = None;
+    let mut main = None;
+    let mut group = None;
+    for line in text.lines() {
+        let (key, value) = line
+            .split_once('=')
+            .ok_or(ServiceFailure::CleanupUnresolved)?;
+        let slot = match key {
+            "LoadState" => &mut load,
+            "ActiveState" => &mut active,
+            "MainPID" => &mut main,
+            "ControlGroup" => &mut group,
+            _ => return Err(ServiceFailure::CleanupUnresolved),
+        };
+        if slot.replace(value).is_some() {
+            return Err(ServiceFailure::CleanupUnresolved);
+        }
+    }
+    let load = load.ok_or(ServiceFailure::CleanupUnresolved)?;
+    let active = active.ok_or(ServiceFailure::CleanupUnresolved)?;
+    let main = main
+        .and_then(|pid| pid.parse::<u32>().ok())
+        .filter(|pid| *pid <= i32::MAX as u32)
+        .ok_or(ServiceFailure::CleanupUnresolved)?;
+    let group = group.ok_or(ServiceFailure::CleanupUnresolved)?;
+    if !matches!(load, "loaded" | "not-found")
+        || !matches!(
+            active,
+            "active" | "inactive" | "failed" | "activating" | "deactivating"
+        )
+        || (load == "not-found" && (main != 0 || !group.is_empty() || active != "inactive"))
+        || (matches!(active, "active" | "activating" | "deactivating")
+            && main == 0
+            && group.is_empty())
+    {
+        return Err(ServiceFailure::CleanupUnresolved);
+    }
+    Ok((main, group))
 }

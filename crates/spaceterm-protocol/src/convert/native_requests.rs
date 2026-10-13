@@ -91,6 +91,20 @@ macro_rules! profile {
                             approval: approval.get(),
                         })
                     }
+                    NativeRequestKind::Notification(notice) => {
+                        let (kind, exit_status, duration_millis) = match notice {
+                            NotificationNotice::Bell => (1, None, 0),
+                            NotificationNotice::CommandFinished {
+                                exit_status,
+                                duration_millis,
+                            } => (2, *exit_status, *duration_millis),
+                        };
+                        wire::native_request::Action::Notification(wire::NotificationRequest {
+                            kind,
+                            exit_status,
+                            duration_millis,
+                        })
+                    }
                     NativeRequestKind::Permission(notice) => {
                         wire::native_request::Action::Permission(wire::PermissionRequest {
                             kind: 0,
@@ -138,6 +152,18 @@ macro_rules! profile {
                                 .map_err(|_| ProtocolError::Malformed)?,
                             text: text(&paste.text)?,
                         }
+                    }
+                    wire::native_request::Action::Notification(notice) => {
+                        NativeRequestKind::Notification(match notice.kind {
+                            1 if notice.exit_status.is_none() && notice.duration_millis == 0 => {
+                                NotificationNotice::Bell
+                            }
+                            2 => NotificationNotice::CommandFinished {
+                                exit_status: notice.exit_status,
+                                duration_millis: notice.duration_millis,
+                            },
+                            _ => return Err(ProtocolError::Malformed),
+                        })
                     }
                     wire::native_request::Action::Permission(permission) => {
                         if permission.kind != 0 {
@@ -194,8 +220,9 @@ macro_rules! profile {
                         6
                     }
                     NativeCompletionKind::PermissionAcknowledged => 7,
+                    NativeCompletionKind::NotificationAcknowledged => 8,
                 };
-                value.allowed = matches!(value.disposition, 4 | 5 | 7)
+                value.allowed = matches!(value.disposition, 4 | 5 | 7 | 8)
                     || value.disposition == 6 && value.paste_decision == 1;
                 Ok(value)
             }
@@ -209,7 +236,7 @@ macro_rules! profile {
                     || decode_fence(required(&value.fence)?, None)? != request.fence()
                     || value.failure.is_some()
                     || value.allowed
-                        != (matches!(value.disposition, 4 | 5 | 7)
+                        != (matches!(value.disposition, 4 | 5 | 7 | 8)
                             || value.disposition == 6 && value.paste_decision == 1)
                     || (value.disposition != 4 && !value.clipboard_text.is_empty())
                     || (value.disposition != 6
@@ -233,6 +260,7 @@ macro_rules! profile {
                         },
                     },
                     7 => NativeCompletionKind::PermissionAcknowledged,
+                    8 => NativeCompletionKind::NotificationAcknowledged,
                     _ => return Err(ProtocolError::Malformed),
                 };
                 NativeCompletion::new(request, kind).map_err(|_| ProtocolError::Malformed)
@@ -292,6 +320,11 @@ mod tests {
                         text: NativeText::new("paste\n".into()).unwrap(),
                     },
                     NativeRequestKind::Permission(PermissionNotice::new(true, true).unwrap()),
+                    NativeRequestKind::Notification(NotificationNotice::Bell),
+                    NativeRequestKind::Notification(NotificationNotice::CommandFinished {
+                        exit_status: Some(1),
+                        duration_millis: 5000,
+                    }),
                 ] {
                     let original = request(kind);
                     let encoded = $p::encode_request(&original, MonotonicTick::new(350)).unwrap();
@@ -330,6 +363,9 @@ mod tests {
                                 approval: *approval,
                                 decision: PasteDecision::Confirm,
                             }
+                        }
+                        NativeRequestKind::Notification(_) => {
+                            NativeCompletionKind::NotificationAcknowledged
                         }
                         NativeRequestKind::Permission(_) => {
                             NativeCompletionKind::PermissionAcknowledged
