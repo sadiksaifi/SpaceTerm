@@ -12649,3 +12649,42 @@ fn desktop_server_accessibility_selection_prepares_complete_copy_for_services(
             .is_none()
     );
 }
+
+
+#[gpui::test]
+fn desktop_server_native_paste_acknowledgement_and_approval_round_trip(cx: &mut TestAppContext) {
+    use spaceterm_client::pane_channel::{NativeTiming, RuntimeEffect};
+    use spaceterm_core::{native_requests::*, observations::MonotonicTick};
+    let (fixture, content, pane, cx) = server_pane_with_content(cx);
+    let session = pane.read_with(cx, |pane, _| pane.server_session_handle().unwrap());
+    let written = session.request_paste("safe".to_owned().into());
+    assert!(written.try_recv().is_err(), "queue admission is not write completion");
+    let (correlation, _) = content.effects.lock().unwrap().last().cloned().unwrap();
+    fixture.channel.receive_runtime_outcome(correlation, Ok(())).unwrap();
+    cx.run_until_parked();
+    assert_eq!(written.try_recv().unwrap(), Ok(PasteRequestOutcome::Written));
+
+    let approval = PasteApprovalId::new(77).unwrap();
+    let request_id = NativeRequestId::new(91).unwrap();
+    let pending = session.request_paste("unsafe\npaste".to_owned().into());
+    let (correlation, _) = content.effects.lock().unwrap().last().cloned().unwrap();
+    fixture.channel.receive_paste_approval(correlation, NativeRequest::new(
+        correlation.fence(), request_id, MonotonicTick::new(0), MonotonicTick::new(0),
+        Some(MonotonicTick::new(30_000)),
+        NativeRequestKind::UnsafePaste { approval, text: NativeText::new("unsafe\npaste".into()).unwrap() },
+    ).unwrap(), NativeTiming { not_before: Duration::ZERO, expires_after: Some(Duration::from_secs(30)) }).unwrap();
+    cx.run_until_parked();
+    let Ok(PasteRequestOutcome::ConfirmationRequired(confirmation)) = pending.try_recv().unwrap() else { panic!("unsafe paste needs approval"); };
+    assert_eq!(confirmation.byte_len, 12);
+    assert_eq!(confirmation.line_count, 2);
+    assert!(confirmation.risk.multiline);
+    assert_eq!(session.request_paste("second".to_owned().into()).try_recv().unwrap(),
+        Ok(PasteRequestOutcome::Rejected(crate::terminal::paste::PasteRejection::ConfirmationPending)));
+    let resolved = session.resolve_paste(confirmation.id, crate::terminal::PasteDecision::Confirm);
+    assert!(resolved.try_recv().is_err());
+    let (correlation, command) = content.effects.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(command, RuntimeEffect::ResolvePaste(approval, spaceterm_core::native_requests::PasteDecision::Confirm));
+    fixture.channel.receive_runtime_outcome(correlation, Ok(())).unwrap();
+    cx.run_until_parked();
+    assert_eq!(resolved.try_recv().unwrap(), Ok(PasteResolution::Written));
+}

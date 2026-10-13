@@ -1,13 +1,15 @@
 //! Disposable Pane presentation handles. Neither drop nor connection loss releases control.
 
+mod effects;
 mod events;
+pub use effects::{EffectAdmission, EffectCorrelation, PaneRuntimeEffect};
 mod reads;
 pub use crate::projection::FrameLease;
 pub use events::{NativeRequestLease, NativeTiming, PaneEvent, PaneEvents};
 pub use reads::{PaneReadItem, PaneReadRequest, PaneReadSource, PaneReadStream};
 pub use spaceterm_core::control::StartupSource as ExplicitUseSource;
 pub use spaceterm_terminal::runtime_contracts::{
-    FencedRuntimeCommand, RuntimeCommand as RuntimeEffect,
+    FencedRuntimeCommand, RuntimeCommand as RuntimeEffect, RuntimeMetadataSnapshot,
 };
 
 use crate::{
@@ -41,6 +43,8 @@ use tokio::sync::{Semaphore, watch};
 /// The authenticated worker owns codecs, operation tracking and final dequeue.
 /// No native or production fallback is provided here. It must retain the exact
 /// permit with queued effects, rechecking it immediately before transmission.
+/// Correlated request numbers are nonzero and monotonic per connection. Reply
+/// delivery must not call back synchronously from an admission method.
 pub trait PaneConnectionPort: Send + Sync {
     fn grid_limits(
         &self,
@@ -63,6 +67,15 @@ pub trait PaneConnectionPort: Send + Sync {
         permit: EffectPermit,
         command: FencedRuntimeCommand,
     ) -> Result<EffectAdmission, ClientFailure>;
+    /// No ordinary key fallback is permitted. The provider must preserve the
+    /// enhanced-only condition until the owning runtime encodes the chord.
+    fn try_copy(
+        &self,
+        _permit: EffectPermit,
+        _modifiers: spaceterm_terminal::InputModifiers,
+    ) -> Result<EffectAdmission, ClientFailure> {
+        Err(ClientFailure::new(ClientFailureClass::MissingCapability))
+    }
     fn read(
         &self,
         permit: EffectPermit,
@@ -95,10 +108,6 @@ pub struct PaneUseRequest {
     pub info: ConnectedInfo,
     pub context: ContextGeneration,
     pub source: ExplicitUseSource,
-}
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum EffectAdmission {
-    Queued,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EffectKind {
@@ -146,6 +155,8 @@ struct ChannelInner {
     state: Mutex<ChannelState>,
     published: watch::Sender<PaneChannelState>,
     projection: Arc<Mutex<TerminalProjection>>,
+    effect_admission: Mutex<()>,
+    effect_slots: Arc<Semaphore>,
     _slot: tokio::sync::OwnedSemaphorePermit,
 }
 struct ChannelState {
@@ -157,6 +168,9 @@ struct ChannelState {
     native_high_water: u64,
     native_session: Option<SessionKey>,
     native: BTreeMap<u64, events::PendingNative>,
+    metadata: Option<Arc<RuntimeMetadataSnapshot>>,
+    effects: BTreeMap<u64, effects::PendingEffect>,
+    effect_high_water: u64,
 }
 struct LeaseInner {
     workspace: WorkspaceId,
@@ -395,6 +409,7 @@ impl PaneChannels {
             state.intent = None;
             state.intent_pending = None;
             state.native.clear();
+            state.effects.clear();
             state.facts.connection = None;
             state.content_confirmed = false;
             let freeze = matches!(
@@ -413,6 +428,7 @@ impl PaneChannels {
                     state.facts.readiness = PaneReadiness::Reconciling;
                 }
                 state.facts.content = None;
+                state.metadata = None;
             }
             drop(projection);
             events::publish(&mut state, PaneEvent::Invalidated, true);
@@ -532,9 +548,16 @@ impl WorkspaceLease {
                 native_high_water: 0,
                 native_session: None,
                 native: BTreeMap::new(),
+                metadata: None,
+                effects: BTreeMap::new(),
+                effect_high_water: 0,
             }),
             published: watch::channel(facts).0,
             projection: Arc::new(Mutex::new(projection)),
+            effect_admission: Mutex::new(()),
+            effect_slots: Arc::new(Semaphore::new(
+                spaceterm_protocol::limits::MAX_EGRESS_ENVELOPES,
+            )),
             _slot: Arc::clone(&self.0.shared.slots)
                 .try_acquire_owned()
                 .map_err(|_| resource_limit())?,
@@ -564,6 +587,8 @@ impl WorkspaceLease {
             state.intent = None;
             state.intent_pending = None;
             state.native.clear();
+            state.effects.clear();
+            state.metadata = None;
             events::publish(&mut state, PaneEvent::Invalidated, true);
             channel.published.send_replace(state.facts);
         }
@@ -589,6 +614,49 @@ impl PaneChannel {
     pub fn current_frame(&self) -> Option<FrameLease> {
         self.inner.projection.lock().ok()?.current_frame()
     }
+    /// Metadata is retained independently of semantic pages and subscriptions.
+    /// It is presentation data, never native or restoration-directory authority.
+    pub fn metadata_snapshot(&self) -> Option<Arc<RuntimeMetadataSnapshot>> {
+        if !self.inner.admitted() || !self.lease.active.load(Ordering::Acquire) {
+            return None;
+        }
+        self.inner
+            .state
+            .lock()
+            .ok()?
+            .metadata
+            .as_ref()
+            .map(Arc::clone)
+    }
+    pub fn publish_metadata(
+        &self,
+        fence: EffectFence,
+        snapshot: RuntimeMetadataSnapshot,
+    ) -> Result<(), ClientFailure> {
+        if !self.inner.admitted() || !self.lease.active.load(Ordering::Acquire) {
+            return Err(stale());
+        }
+        let mut state = self.inner.state.lock().map_err(|_| stale())?;
+        let current = bound_fence(&state.facts, self.inner.pane, fence.content().is_some())?;
+        if !matches!(
+            state.facts.readiness,
+            PaneReadiness::Live | PaneReadiness::Reconciling
+        ) || !matches!(
+            state.facts.runtime.map(|runtime| runtime.phase),
+            Some(SessionPhase::Running { .. })
+        ) || !fence.is_current(&current)
+            || snapshot.session() != fence.session()
+            || state.metadata.as_ref().is_some_and(|old| {
+                old.parts().sequence >= snapshot.parts().sequence
+                    || old.parts().observed_at > snapshot.parts().observed_at
+            })
+        {
+            return Err(stale());
+        }
+        state.metadata = Some(Arc::new(snapshot));
+        events::refresh_metadata(&mut state);
+        Ok(())
+    }
     pub fn update_context(
         &self,
         facts: PaneContextFacts,
@@ -606,7 +674,9 @@ impl PaneChannel {
             state.intent = None;
             state.intent_pending = None;
             state.native.clear();
+            state.effects.clear();
             self.inner.update_projection(&state)?;
+            events::refresh_metadata(&mut state);
             self.inner.published.send_replace(state.facts);
         }
         Ok(state.facts.context)
@@ -678,14 +748,27 @@ impl PaneChannel {
     pub fn try_effect(
         &self,
         permit: &EffectPermit,
-        effect: RuntimeEffect,
+        effect: impl Into<PaneRuntimeEffect>,
     ) -> Result<EffectAdmission, ClientFailure> {
+        let effect = effect.into();
+        let kind = match &effect {
+            PaneRuntimeEffect::Command(command) => effect_kind(command),
+            PaneRuntimeEffect::Copy(_) => EffectKind::Key,
+        };
         if !Weak::ptr_eq(&permit.channel, &Arc::downgrade(&self.inner))
-            || permit.kind != effect_kind(&effect)
+            || permit.kind != kind
             || !permit.is_current()
         {
             return Err(stale());
         }
+        let effect = match effect {
+            PaneRuntimeEffect::Command(command) => command,
+            PaneRuntimeEffect::Copy(modifiers) => {
+                let _admission = self.inner.effect_admission.lock().map_err(|_| stale())?;
+                let admission = self.inner.shared.peer.try_copy(permit.clone(), modifiers)?;
+                return self.track_effect(permit, admission, None);
+            }
+        };
         if let RuntimeEffect::Resize(grid) = &effect {
             let info = self
                 .inner
@@ -716,13 +799,40 @@ impl PaneChannel {
             }
             _ => {}
         }
-        self.inner.shared.peer.try_effect(
+        if let RuntimeEffect::ResolvePaste(approval, decision) = &effect {
+            let request = self.inner.state.lock().map_err(|_| stale())?.native.values()
+                .find(|pending| matches!(pending.request.kind(), spaceterm_core::native_requests::NativeRequestKind::UnsafePaste { approval: pending, .. } if pending == approval))
+                .map(|pending| pending.request.clone()).ok_or_else(stale)?;
+            let completion = NativeCompletion::new(
+                &request,
+                spaceterm_core::native_requests::NativeCompletionKind::Paste {
+                    approval: *approval,
+                    decision: *decision,
+                },
+            )
+            .map_err(|_| stale())?;
+            // Keep ResolvePaste's cancellation disposition. Reuse native request
+            // validation and its captured deadline, not a different runtime command.
+            return self.complete_native_command(
+                &self.permit(EffectKind::NativeCompletion)?,
+                completion,
+                |_| effect,
+            );
+        }
+        let _admission = self.inner.effect_admission.lock().map_err(|_| stale())?;
+        let pending = if matches!(effect, RuntimeEffect::RequestPaste(_)) {
+            Some((effects::PendingEffectKind::PasteWrite, self.effect_slot()?))
+        } else {
+            None
+        };
+        let admission = self.inner.shared.peer.try_effect(
             permit.clone(),
             FencedRuntimeCommand {
                 fence: permit.fence,
                 command: effect,
             },
-        )
+        )?;
+        self.track_effect(permit, admission, pending)
     }
     /// Reject a delayed view action before it can rebuild current authority.
     pub fn validate_use_context(
@@ -1102,6 +1212,7 @@ impl ChannelInner {
         if changed {
             state.intent = None;
             state.native.clear();
+            state.effects.clear();
             let session = runtime.map(|runtime| SessionKey {
                 pane: self.pane,
                 epoch: info.epoch,
@@ -1114,6 +1225,7 @@ impl ChannelInner {
                     old.control == new.control && matches!(new.phase, SessionPhase::Running { .. })
                 });
             if !keep_content {
+                state.metadata = None;
                 state.facts.content = None;
                 self.projection.lock().map_err(|_| stale())?.revoke()?;
             }
@@ -1124,6 +1236,13 @@ impl ChannelInner {
                     .is_none_or(|old| !same_attempt(old, info))
             {
                 state.content_confirmed = false;
+            }
+            if state
+                .facts
+                .connection
+                .is_none_or(|old| !same_attempt(old, info))
+            {
+                state.effect_high_water = 0;
             }
             if !same_session {
                 state.native_high_water = 0;
@@ -1152,6 +1271,7 @@ impl ChannelInner {
         self.update_projection(&state)?;
         if changed {
             events::publish(&mut state, PaneEvent::Invalidated, true);
+            events::refresh_metadata(&mut state);
         }
         self.published.send_replace(state.facts);
         Ok(())
