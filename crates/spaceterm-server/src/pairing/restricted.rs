@@ -129,3 +129,108 @@ impl PairingService {
         }
     }
 }
+
+/// Dispatches only the additive restricted grammar through the established type
+/// state. The caller never decodes it as an ordinary or legacy management request.
+pub async fn dispatch_frame(
+    service: &PairingService,
+    connection: &mut RestrictedConnection,
+    bytes: &[u8],
+) -> Result<Vec<u8>, crate::contracts::ServerFailure> {
+    use crate::adapters::transport::protocol_failure;
+    use spaceterm_protocol::pairing_adapter::{PairingRestrictedCodec, receipt_to_wire};
+    let codec = PairingRestrictedCodec::new(service.pin());
+    let request = connection
+        .decode_pairing_extension(bytes, &codec)
+        .map_err(protocol_failure)?;
+    let (operation, digest, target) = match &request.kind {
+        Some(pairing::restricted_extension::Kind::Revoke(v)) => (
+            v.operation.clone(),
+            v.request_digest.clone(),
+            v.target.clone(),
+        ),
+        Some(pairing::restricted_extension::Kind::Status(v)) => (
+            v.operation.clone(),
+            v.request_digest.clone(),
+            v.target.clone(),
+        ),
+        Some(pairing::restricted_extension::Kind::Acknowledgement(v)) => (
+            v.operation.clone(),
+            v.request_digest.clone(),
+            v.target.clone(),
+        ),
+        _ => {
+            return Err(super::service::server_failure(
+                PairingFailure::InvalidRequest,
+            ));
+        }
+    };
+    let mut result = service
+        .restricted_exchange(connection, request)
+        .await
+        .map_err(super::service::server_failure)?;
+    if result == RestrictedRevocationResult::Acknowledged {
+        // The wire grammar has no acknowledgement-result arm. Return the retained
+        // receipt, which remains available after its ledger result is compacted.
+        let binding =
+            OperationBinding {
+                id: operation_from_wire(operation.as_ref().ok_or_else(|| {
+                    super::service::server_failure(PairingFailure::InvalidRequest)
+                })?)
+                .map_err(protocol_failure)?,
+                digest: RequestDigest::from_bytes(
+                    digest.as_slice().try_into().map_err(|_| {
+                        super::service::server_failure(PairingFailure::InvalidRequest)
+                    })?,
+                ),
+            };
+        let target = target_from_wire(
+            target
+                .as_ref()
+                .ok_or_else(|| super::service::server_failure(PairingFailure::InvalidRequest))?,
+        )
+        .map_err(protocol_failure)?;
+        result = match service
+            .actor()
+            .restricted_status(binding, target)
+            .await
+            .map_err(super::service::server_failure)?
+        {
+            Some(proof) if matches!(&proof.parts().claims, PairingReceiptBody::Revocation { receipt, .. } if receipt.operation == binding.id) => {
+                RestrictedRevocationResult::Executed(proof)
+            }
+            Some(proof) => RestrictedRevocationResult::AlreadyRevoked(proof),
+            None => {
+                return Err(super::service::server_failure(
+                    PairingFailure::RevocationUnconfirmed,
+                ));
+            }
+        };
+    }
+    let (disposition, receipt) = match result {
+        RestrictedRevocationResult::Executed(proof) => (1, Some(receipt_to_wire(&proof))),
+        RestrictedRevocationResult::AlreadyRevoked(proof) => (2, Some(receipt_to_wire(&proof))),
+        RestrictedRevocationResult::Pending => (3, None),
+        RestrictedRevocationResult::Acknowledged => {
+            return Err(super::service::server_failure(
+                PairingFailure::InvalidDurableState,
+            ));
+        }
+    };
+    connection
+        .encode_pairing_extension(
+            &pairing::RestrictedExtension {
+                kind: Some(pairing::restricted_extension::Kind::Result(
+                    pairing::RestrictedResult {
+                        request_operation: operation,
+                        request_digest: digest,
+                        target,
+                        disposition,
+                        receipt,
+                    },
+                )),
+            },
+            &codec,
+        )
+        .map_err(protocol_failure)
+}
