@@ -235,7 +235,9 @@ pub(crate) enum TerminalPaneEvent {
     TitleChanged(SharedString),
     CaptionChanged,
     SurfaceBackgroundChanged,
-    AttentionChanged { unread_count: u32 },
+    AttentionChanged {
+        unread_count: u32,
+    },
     Exited,
     /// The Pane's admitted grid for one measurement request of a server-backed Pane.
     #[allow(
@@ -1593,6 +1595,16 @@ impl TerminalPane {
         if self.native_attention_pane.is_none() {
             return;
         }
+        self.close_presentation();
+        self.terminal_session.close();
+    }
+
+    /// Releases native presentation resources without closing, releasing or retiring server work.
+    /// Server-backed callers use this path instead of the legacy Session-close operation.
+    pub(crate) fn close_presentation(&mut self) {
+        if self.native_attention_pane.is_none() {
+            return;
+        }
         self.end_find_state();
         self.paste_confirmation_owner.take();
         if let Some(confirmation) = self.pending_paste.take()
@@ -1615,7 +1627,6 @@ impl TerminalPane {
         self.context_menu = None;
         self.file_preview.dismiss();
         self.accessibility_element.set_hierarchy(false);
-        self.terminal_session.close();
     }
 
     fn validate_remote_generation(&self, generation: u64) -> Result<(), RemotePaneLifecycleError> {

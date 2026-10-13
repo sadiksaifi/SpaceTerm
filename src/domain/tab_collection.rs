@@ -3,6 +3,8 @@ use thiserror::Error;
 
 use super::{TabId, WorktreeId};
 
+pub(crate) mod server_view;
+
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
 pub(crate) enum TabError {
     #[error("Tab {0} does not belong to this collection")]

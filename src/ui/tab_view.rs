@@ -20,12 +20,40 @@ use std::ops::RangeInclusive;
 
 use thiserror::Error;
 
+use super::server_desktop_contracts::{
+    ArrangementEdit, DesktopClientError, PaneId as ServerPaneId, SelectionSource,
+    TabId as ServerTabId,
+};
+use super::tab_manager::{ServerEditRefused, ServerTabManagerEvent};
 use super::terminal_focus::{TerminalFocusBlocker, TerminalFocusCoordinator, TerminalProductFocus};
+use spaceterm_client::view::{
+    PaneEdge as ViewPaneEdge, PaneNodeRef as ViewPaneNodeRef, PaneSize as ViewPaneSize,
+    PaneTreeRef as ViewPaneTreeRef, SplitId as ViewSplitId, ZoomState as ViewZoomState,
+};
+use spaceterm_core::organization::SplitAxis as ServerSplitAxis;
+
+mod server;
+#[cfg(test)]
+mod server_tests;
+
 use super::{
     ClosePane, FocusNextPane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
     FocusPreviousPane, PaneOrigin, PreparedRemotePaneRestart, RemoteChildLaunchUnavailable,
     RemotePaneLifecycleError, ShowRepositoryStatus, SplitDown, SplitRight, TERMINAL_KEY_CONTEXT,
     TerminalPane, TerminalPaneEvent, TogglePaneZoom,
+};
+#[cfg(test)]
+pub(crate) use server::testing as server_testing;
+#[cfg_attr(
+    not(test),
+    allow(
+        unused_imports,
+        reason = "the Workspace Manager names these once it presents server Workspaces"
+    )
+)]
+pub(crate) use server::{
+    CreationIntent, IntentProgress, ServerPaneFactory, ServerPublication, ServerTabParts,
+    ServerTabPresentationChanged, shared_unavailable,
 };
 
 #[derive(Debug, Error)]
@@ -41,6 +69,8 @@ pub(crate) enum RemoteTabViewLifecycleError {
     TabChanged { prepared: TabId, current: TabId },
     #[error("Pane {0} changed after remote restart preparation")]
     PaneChanged(PaneId),
+    #[error("a server Tab's Terminal Sessions belong to their server")]
+    NotLocal,
 }
 
 /// Move-only restart reservations for every Pane in one unchanged Tab hierarchy.
@@ -50,7 +80,7 @@ pub(crate) struct PreparedTabViewRemoteRestart {
 }
 use crate::domain::{
     ClosePaneOutcome, FocusDirection, PaneEdge, PaneId, PaneNodeRef, PaneSize, PaneTreeRef,
-    SplitAxis, SplitId, Tab, TabId, WorkspaceId, ZoomState,
+    SplitAxis, SplitId, Tab, TabId, TabStep, WorkspaceId, ZoomState,
 };
 use crate::terminal::{
     NativeServiceOrigin, NativeServiceStatus, PreparedWorkspaceTerminalLaunch,
@@ -443,7 +473,7 @@ impl std::fmt::Debug for TabViewEvent {
 
 /// The value a Pane drag carries, scoped to the Pane Layout that owns the Pane.
 struct DraggedPane {
-    pane_id: PaneId,
+    pane_id: PaneKey,
     owner: gpui::EntityId,
 }
 
@@ -452,34 +482,326 @@ const LIFTED_CAPTION_MAXIMUM_WIDTH: f32 = 320.0;
 
 /// Each Pane's hover and how far its caption controls have eased into view, as read at the start
 /// of a frame.
-type PaneHovers = BTreeMap<PaneId, (HoverFade, f32)>;
+type PaneHovers = BTreeMap<PaneKey, (HoverFade, f32)>;
 
 /// A Pane lifted by its caption, the edge of another Pane it takes if released now, and the drag
 /// that carries it.
 struct PaneDrag {
-    pane_id: PaneId,
-    drop_target: Option<(PaneId, PaneEdge)>,
+    pane_id: PaneKey,
+    drop_target: Option<(PaneKey, PaneEdge)>,
     session: DragSession,
 }
 
-pub(crate) struct TabView {
+/// One Pane's identity within a Tab View.
+///
+/// A local or SSH Tab names its Panes by the Tab's own numbers. A server Tab names them by their
+/// server-qualified identity, which is never mapped onto a local number.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) enum PaneKey {
+    Local(PaneId),
+    Server(ServerPaneId),
+}
+
+impl PaneKey {
+    /// The number element identities and debug selectors carry. A Tab View presents one Tab of
+    /// one server, so two Panes of one Tab View never share it.
+    const fn get(self) -> u64 {
+        match self {
+            Self::Local(pane) => pane.get(),
+            Self::Server(pane) => pane.local(),
+        }
+    }
+}
+
+impl From<PaneId> for PaneKey {
+    fn from(pane: PaneId) -> Self {
+        Self::Local(pane)
+    }
+}
+
+impl std::fmt::Display for PaneKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.get().fmt(formatter)
+    }
+}
+
+/// One Split's identity within a Tab View. A server Tab's Splits are this client's personal ones.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+enum SplitKey {
+    Local(SplitId),
+    Server(ViewSplitId),
+}
+
+impl SplitKey {
+    const fn get(self) -> u64 {
+        match self {
+            Self::Local(split) => split.get(),
+            Self::Server(split) => split.get(),
+        }
+    }
+}
+
+/// A read-only view of the Pane Layout a Tab View renders: a local Tab's tree or a server Tab's
+/// personal arrangement.
+#[derive(Clone, Copy)]
+enum LayoutRef<'a> {
+    Local(PaneTreeRef<'a>),
+    Server(ViewPaneTreeRef<'a>),
+}
+
+enum LayoutNode<'a> {
+    Leaf(PaneKey),
+    Split {
+        split_id: SplitKey,
+        axis: SplitAxis,
+        ratio: f32,
+        first: LayoutRef<'a>,
+        second: LayoutRef<'a>,
+    },
+}
+
+impl<'a> LayoutRef<'a> {
+    fn node(self) -> LayoutNode<'a> {
+        match self {
+            Self::Local(tree) => match tree.node() {
+                PaneNodeRef::Leaf { pane_id } => LayoutNode::Leaf(PaneKey::Local(pane_id)),
+                PaneNodeRef::Split {
+                    split_id,
+                    axis,
+                    ratio,
+                    first,
+                    second,
+                } => LayoutNode::Split {
+                    split_id: SplitKey::Local(split_id),
+                    axis,
+                    ratio,
+                    first: Self::Local(first),
+                    second: Self::Local(second),
+                },
+            },
+            Self::Server(tree) => match tree.node() {
+                ViewPaneNodeRef::Pane(pane) => LayoutNode::Leaf(PaneKey::Server(pane)),
+                ViewPaneNodeRef::Split {
+                    id,
+                    axis,
+                    ratio,
+                    first,
+                    second,
+                } => LayoutNode::Split {
+                    split_id: SplitKey::Server(id),
+                    axis: match axis {
+                        ServerSplitAxis::Horizontal => SplitAxis::Horizontal,
+                        ServerSplitAxis::Vertical => SplitAxis::Vertical,
+                    },
+                    ratio,
+                    first: Self::Server(first),
+                    second: Self::Server(second),
+                },
+            },
+        }
+    }
+}
+
+/// A local or SSH Tab's Panes, which this Tab View creates, splits and closes itself.
+struct LocalPanes {
     tab: Tab<Entity<TerminalPane>>,
     session_factory: WorkspaceTerminalSessionFactory,
     pane_construction: PaneConstruction,
-    pane_bounds: BTreeMap<PaneId, Bounds<Pixels>>,
+}
+
+/// Where a Tab View's Panes come from.
+enum Panes {
+    Local(Box<LocalPanes>),
+    /// A server Tab: membership from the replica, layout from the personal arrangement.
+    Server(Box<server::ServerPanes>),
+}
+
+impl Panes {
+    fn focused(&self) -> PaneKey {
+        match self {
+            Self::Local(local) => PaneKey::Local(local.tab.focused_pane_id()),
+            Self::Server(server) => PaneKey::Server(server.tab.focused_pane()),
+        }
+    }
+
+    fn root(&self) -> PaneKey {
+        match self {
+            Self::Local(local) => PaneKey::Local(local.tab.root_pane_id()),
+            Self::Server(server) => PaneKey::Server(server.tab.root_pane()),
+        }
+    }
+
+    fn zoomed(&self) -> Option<PaneKey> {
+        match self {
+            Self::Local(local) => match local.tab.zoom_state() {
+                ZoomState::Zoomed(pane) => Some(PaneKey::Local(pane)),
+                ZoomState::Restored => None,
+            },
+            Self::Server(server) => match server.tab.zoom() {
+                ViewZoomState::Zoomed(pane) => Some(PaneKey::Server(pane)),
+                ViewZoomState::Restored => None,
+            },
+        }
+    }
+
+    fn pane(&self, key: PaneKey) -> Option<&Entity<TerminalPane>> {
+        match (self, key) {
+            (Self::Local(local), PaneKey::Local(pane)) => local.tab.pane(pane),
+            (Self::Server(server), PaneKey::Server(pane)) => server.tab.pane(pane),
+            _ => None,
+        }
+    }
+
+    /// Whether the layout holds `key`, presented or not.
+    fn contains(&self, key: PaneKey) -> bool {
+        match (self, key) {
+            (Self::Local(local), PaneKey::Local(pane)) => local.tab.pane(pane).is_some(),
+            (Self::Server(server), PaneKey::Server(pane)) => {
+                server.tab.arrangement().contains_pane(pane)
+            }
+            _ => false,
+        }
+    }
+
+    /// Every Pane the layout holds, including a server Pane still waiting for its presentation.
+    fn pane_count(&self) -> usize {
+        match self {
+            Self::Local(local) => local.tab.pane_count(),
+            Self::Server(server) => server.tab.arrangement().pane_count(),
+        }
+    }
+
+    /// Presented Panes and their Terminals.
+    fn panes(&self) -> Vec<(PaneKey, &Entity<TerminalPane>)> {
+        match self {
+            Self::Local(local) => local
+                .tab
+                .panes_with_ids()
+                .map(|(pane, terminal)| (PaneKey::Local(pane), terminal))
+                .collect(),
+            Self::Server(server) => server
+                .tab
+                .panes()
+                .map(|(pane, terminal)| (PaneKey::Server(pane), terminal))
+                .collect(),
+        }
+    }
+
+    fn layout(&self) -> LayoutRef<'_> {
+        match self {
+            Self::Local(local) => LayoutRef::Local(local.tab.root()),
+            Self::Server(server) => LayoutRef::Server(server.tab.arrangement().tree()),
+        }
+    }
+
+    fn minimum_pane_size(&self) -> PaneSize {
+        match self {
+            Self::Local(local) => local.tab.minimum_pane_size(),
+            Self::Server(server) => server.minimum_pane_size,
+        }
+    }
+
+    fn set_minimum_pane_size(&mut self, size: PaneSize) {
+        match self {
+            Self::Local(local) => local.tab.set_minimum_pane_size(size),
+            Self::Server(server) => server.minimum_pane_size = size,
+        }
+    }
+
+    /// The smallest size that holds the full, unzoomed layout.
+    fn minimum_size(&self, gap: f32) -> Option<PaneSize> {
+        match self {
+            Self::Local(local) => match local.tab.minimum_size(gap) {
+                Ok(size) => Some(size),
+                Err(error) => {
+                    eprintln!("failed to calculate minimum Pane layout size: {error}");
+                    None
+                }
+            },
+            Self::Server(server) => server
+                .tab
+                .arrangement()
+                .minimum_size(server.metrics(gap)?)
+                .ok()
+                .and_then(|size| PaneSize::new(size.width(), size.height()).ok()),
+        }
+    }
+
+    fn split_ratio_range(
+        &self,
+        split: SplitKey,
+        available: PaneSize,
+        gap: f32,
+    ) -> Option<RangeInclusive<f32>> {
+        match (self, split) {
+            (Self::Local(local), SplitKey::Local(split)) => {
+                local.tab.split_ratio_range(split, available, gap).ok()
+            }
+            (Self::Server(server), SplitKey::Server(split)) => server
+                .tab
+                .arrangement()
+                .split_ratio_range(split, view_size(available)?, server.metrics(gap)?)
+                .ok(),
+            _ => None,
+        }
+    }
+
+    fn can_receive_pane(
+        &self,
+        target: PaneKey,
+        edge: PaneEdge,
+        target_size: PaneSize,
+        gap: f32,
+    ) -> bool {
+        match (self, target) {
+            (Self::Local(local), PaneKey::Local(target)) => {
+                local.tab.can_receive_pane(target, edge, target_size, gap)
+            }
+            (Self::Server(server), PaneKey::Server(target)) => {
+                let (Some(size), Some(metrics)) = (view_size(target_size), server.metrics(gap))
+                else {
+                    return false;
+                };
+                server
+                    .tab
+                    .arrangement()
+                    .can_receive_pane(target, view_edge(edge), size, metrics)
+            }
+            _ => false,
+        }
+    }
+}
+
+/// The client-view extent of a measured Pane extent.
+fn view_size(size: PaneSize) -> Option<ViewPaneSize> {
+    ViewPaneSize::new(size.width(), size.height()).ok()
+}
+
+const fn view_edge(edge: PaneEdge) -> ViewPaneEdge {
+    match edge {
+        PaneEdge::Left => ViewPaneEdge::Left,
+        PaneEdge::Right => ViewPaneEdge::Right,
+        PaneEdge::Top => ViewPaneEdge::Top,
+        PaneEdge::Bottom => ViewPaneEdge::Bottom,
+    }
+}
+
+pub(crate) struct TabView {
+    panes: Panes,
+    pane_bounds: BTreeMap<PaneKey, Bounds<Pixels>>,
     pane_layout_size: Option<PaneSize>,
     /// A Split that waits for the next Pane measurement, because the retained bounds are stale.
-    pending_split: Option<(PaneId, SplitAxis)>,
-    split_bounds: BTreeMap<SplitId, Bounds<Pixels>>,
-    pane_titles: BTreeMap<PaneId, gpui::SharedString>,
-    pane_captions: BTreeMap<PaneId, PaneCaptionText>,
-    pane_attention: BTreeMap<PaneId, u32>,
-    resizing_split_id: Option<SplitId>,
+    pending_split: Option<(PaneKey, SplitAxis)>,
+    split_bounds: BTreeMap<SplitKey, Bounds<Pixels>>,
+    pane_titles: BTreeMap<PaneKey, gpui::SharedString>,
+    pane_captions: BTreeMap<PaneKey, PaneCaptionText>,
+    pane_attention: BTreeMap<PaneKey, u32>,
+    resizing_split_id: Option<SplitKey>,
     pane_drag: Option<PaneDrag>,
     active: bool,
     focus_branch_blocker: Option<TerminalFocusBlocker>,
     native_service_hierarchy_generation: u64,
-    native_service_focus_signature: Option<(bool, PaneId, Option<TerminalFocusBlocker>)>,
+    native_service_focus_signature: Option<(bool, PaneKey, Option<TerminalFocusBlocker>)>,
     /// Advances when a split, close, move, or zoom changes the Pane layout.
     pane_layout_revision: u64,
     /// The layout revision the caption controls last rendered for.
@@ -520,18 +842,7 @@ impl TabView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let appearance = super::appearance::shared_chrome(cx);
-        let radius =
-            super::workspace_frame::WorkspaceFrame::for_appearance(&appearance, cx).pane_radius();
-        let minimum_pane_size = match PaneSize::new(
-            minimum_pane_width(&appearance),
-            f32::from(appearance.caption_height() + radius) + 4.0,
-        ) {
-            Ok(size) => size,
-            Err(error) => {
-                unreachable!("fixed minimum Pane dimensions must be valid: {error}")
-            }
-        };
+        let minimum_pane_size = Self::initial_minimum_pane_size(cx);
         let tab = Tab::new(tab_id, minimum_pane_size, |pane_id| {
             Self::create_terminal(
                 pane_id,
@@ -542,17 +853,19 @@ impl TabView {
                 cx,
             )
         });
-        let initial_pane_id = tab.focused_pane_id();
-        let Some(initial_terminal) = tab.pane(initial_pane_id) else {
+        let initial_pane_id = PaneKey::Local(tab.focused_pane_id());
+        let Some(initial_terminal) = tab.pane(tab.focused_pane_id()) else {
             unreachable!("a new Tab must own its initial Pane terminal")
         };
         let initial_title = initial_terminal.read(cx).title();
         let initial_caption = PaneCaptionText::from_terminal(initial_terminal.read(cx));
 
         Self {
-            tab,
-            session_factory,
-            pane_construction,
+            panes: Panes::Local(Box::new(LocalPanes {
+                tab,
+                session_factory,
+                pane_construction,
+            })),
             pane_bounds: BTreeMap::new(),
             pane_layout_size: None,
             pending_split: None,
@@ -574,6 +887,22 @@ impl TabView {
         }
     }
 
+    /// The smallest Pane the current chrome can hold: its caption controls and the Pane radius.
+    fn initial_minimum_pane_size(cx: &App) -> PaneSize {
+        let appearance = super::appearance::shared_chrome(cx);
+        let radius =
+            super::workspace_frame::WorkspaceFrame::for_appearance(&appearance, cx).pane_radius();
+        match PaneSize::new(
+            minimum_pane_width(&appearance),
+            f32::from(appearance.caption_height() + radius) + 4.0,
+        ) {
+            Ok(size) => size,
+            Err(error) => {
+                unreachable!("fixed minimum Pane dimensions must be valid: {error}")
+            }
+        }
+    }
+
     fn create_terminal(
         pane_id: PaneId,
         session_factory: WorkspaceTerminalSessionFactory,
@@ -584,53 +913,97 @@ impl TabView {
     ) -> Entity<TerminalPane> {
         let terminal =
             cx.new(|cx| pane_construction.create(session_factory, prepared_launch, window, cx));
+        let key = PaneKey::Local(pane_id);
         cx.subscribe_in(
             &terminal,
             window,
             move |view, terminal, event: &TerminalPaneEvent, window, cx| match event {
-                TerminalPaneEvent::FocusRequested => view.focus_pane(pane_id, cx),
-                TerminalPaneEvent::SurfaceBackgroundChanged => cx.notify(),
-                TerminalPaneEvent::TitleChanged(title) => {
-                    view.pane_titles.insert(pane_id, title.clone());
-                    cx.emit(TabViewEvent::PresentationChanged {
-                        tab_id: view.tab.id(),
-                    });
-                    cx.notify();
-                }
-                TerminalPaneEvent::CaptionChanged => {
-                    let caption = PaneCaptionText::from_terminal(terminal.read(cx));
-                    if view.pane_captions.get(&pane_id) != Some(&caption) {
-                        view.pane_captions.insert(pane_id, caption);
-                        if pane_id == view.tab.root_pane_id()
-                            || pane_id == view.tab.focused_pane_id()
-                        {
-                            cx.emit(TabViewEvent::PresentationChanged {
-                                tab_id: view.tab.id(),
-                            });
-                        }
-                        cx.notify();
-                    }
-                }
-                TerminalPaneEvent::AttentionChanged { unread_count } => {
-                    view.pane_attention.insert(pane_id, *unread_count);
-                    cx.emit(TabViewEvent::PresentationChanged {
-                        tab_id: view.tab.id(),
-                    });
-                    cx.notify();
-                }
+                TerminalPaneEvent::FocusRequested => view.focus_pane(key, cx),
                 TerminalPaneEvent::Exited => view.close_pane(pane_id, window, cx),
                 // Only a Pane created for a server Terminal Session reports these.
                 TerminalPaneEvent::Measured(_)
                 | TerminalPaneEvent::SelectionRequested(_)
                 | TerminalPaneEvent::ActionRequested(_) => {}
+                event => view.present_terminal_event(key, terminal, event, cx),
             },
         )
         .detach();
         terminal
     }
 
+    /// Records what one Pane's Terminal reported about its own presentation.
+    fn present_terminal_event(
+        &mut self,
+        key: PaneKey,
+        terminal: &Entity<TerminalPane>,
+        event: &TerminalPaneEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            TerminalPaneEvent::SurfaceBackgroundChanged => cx.notify(),
+            TerminalPaneEvent::TitleChanged(title) => {
+                self.pane_titles.insert(key, title.clone());
+                self.presentation_changed(cx);
+                cx.notify();
+            }
+            TerminalPaneEvent::CaptionChanged => {
+                let caption = PaneCaptionText::from_terminal(terminal.read(cx));
+                if self.pane_captions.get(&key) != Some(&caption) {
+                    self.pane_captions.insert(key, caption);
+                    if key == self.panes.root() || key == self.panes.focused() {
+                        self.presentation_changed(cx);
+                    }
+                    cx.notify();
+                }
+            }
+            TerminalPaneEvent::AttentionChanged { unread_count } => {
+                self.pane_attention.insert(key, *unread_count);
+                self.presentation_changed(cx);
+                cx.notify();
+            }
+            TerminalPaneEvent::FocusRequested
+            | TerminalPaneEvent::Exited
+            | TerminalPaneEvent::Measured(_)
+            | TerminalPaneEvent::SelectionRequested(_)
+            | TerminalPaneEvent::ActionRequested(_) => {}
+        }
+    }
+
+    /// Tells the Tab Manager that this Tab's identity, attention or layout changed.
+    fn presentation_changed(&self, cx: &mut Context<Self>) {
+        match &self.panes {
+            Panes::Local(local) => cx.emit(TabViewEvent::PresentationChanged {
+                tab_id: local.tab.id(),
+            }),
+            Panes::Server(_) => cx.emit(ServerTabPresentationChanged),
+        }
+    }
+
+    fn local(&self) -> Option<&LocalPanes> {
+        match &self.panes {
+            Panes::Local(local) => Some(local),
+            Panes::Server(_) => None,
+        }
+    }
+
+    fn local_mut(&mut self) -> Option<&mut LocalPanes> {
+        match &mut self.panes {
+            Panes::Local(local) => Some(local),
+            Panes::Server(_) => None,
+        }
+    }
+
+    /// A local Tab's hierarchy, for tests that inspect it directly.
+    #[cfg(test)]
+    pub(crate) fn local_tab(&self) -> &Tab<Entity<TerminalPane>> {
+        match &self.panes {
+            Panes::Local(local) => &local.tab,
+            Panes::Server(_) => panic!("a server Tab View has no local Tab"),
+        }
+    }
+
     pub(crate) fn focus(&self, window: &mut Window, cx: &mut App) {
-        let Some(terminal) = self.tab.pane(self.tab.focused_pane_id()) else {
+        let Some(terminal) = self.panes.pane(self.panes.focused()) else {
             return;
         };
         terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
@@ -650,10 +1023,14 @@ impl TabView {
         cx: &mut Context<Self>,
     ) -> NativeServiceStatus {
         self.sync_terminal_focus(cx);
-        let pane_id = self.tab.focused_pane_id();
-        let tab_id = self.tab.id();
+        // Services act on local text and files. A server Pane's values grant no local authority.
+        let Some(local) = self.local() else {
+            return NativeServiceStatus::default();
+        };
+        let pane_id = local.tab.focused_pane_id();
+        let tab_id = local.tab.id();
         let hierarchy_generation = self.native_service_hierarchy_generation;
-        let Some(terminal) = self.tab.pane(pane_id) else {
+        let Some(terminal) = local.tab.pane(pane_id) else {
             return NativeServiceStatus::default();
         };
         terminal.update(cx, |terminal, cx| {
@@ -679,24 +1056,43 @@ impl TabView {
         &self,
         origin: NativeServiceOrigin,
     ) -> Option<Entity<TerminalPane>> {
-        if self.tab.id() != origin.tab_id()
-            || self.tab.focused_pane_id() != origin.pane_id()
+        let local = self.local()?;
+        if local.tab.id() != origin.tab_id()
+            || local.tab.focused_pane_id() != origin.pane_id()
             || self.native_service_hierarchy_generation != origin.hierarchy_generation()
         {
             return None;
         }
-        self.tab.pane(origin.pane_id()).cloned()
+        local.tab.pane(origin.pane_id()).cloned()
     }
 
-    pub(crate) const fn tab_id(&self) -> TabId {
-        self.tab.id()
+    /// A local Tab's number. A server Tab has none.
+    pub(crate) fn local_tab_id(&self) -> Option<TabId> {
+        self.local().map(|local| local.tab.id())
+    }
+
+    /// The server Tab this Tab View presents, if it presents one.
+    pub(crate) fn server_tab_id(&self) -> Option<ServerTabId> {
+        match &self.panes {
+            Panes::Local(_) => None,
+            Panes::Server(server) => Some(server.tab.id()),
+        }
+    }
+
+    /// The number the Tab's element identity carries.
+    fn tab_number(&self) -> u64 {
+        match &self.panes {
+            Panes::Local(local) => local.tab.id().get(),
+            Panes::Server(server) => server.tab.id().local(),
+        }
     }
 
     pub(crate) fn pane_count(&self) -> usize {
-        self.tab.pane_count()
+        self.panes.pane_count()
     }
 
-    /// The Root Pane's machine and Repository Source Directory.
+    /// The Root Pane's machine and Repository Source Directory. A server Tab reports none, because
+    /// a remote value grants no local authority.
     pub(crate) fn repository_source(
         &self,
         cx: &App,
@@ -704,7 +1100,7 @@ impl TabView {
         crate::repository_status::RepositoryMachine,
         crate::repository_status::scheduler::SourceDirectory,
     )> {
-        self.pane_repository_source(self.tab.root_pane_id(), cx)
+        self.pane_repository_source(self.local()?.tab.root_pane_id(), cx)
     }
 
     pub(crate) fn pane_repository_source(
@@ -715,37 +1111,48 @@ impl TabView {
         crate::repository_status::RepositoryMachine,
         crate::repository_status::scheduler::SourceDirectory,
     )> {
-        self.tab
+        self.local()?
+            .tab
             .pane(pane_id)
             .and_then(|terminal| terminal.read(cx).repository_source())
     }
 
     pub(crate) fn automatic_directory(&self, cx: &App) -> Option<CurrentDirectory> {
-        self.current_directory(self.tab.root_pane_id(), cx)
+        self.current_directory(self.local()?.tab.root_pane_id(), cx)
     }
 
+    /// A local Pane's Current Directory. A server Pane's directory is a remote value and grants
+    /// no local authority, so it is never reported here.
     pub(crate) fn current_directory(&self, pane_id: PaneId, cx: &App) -> Option<CurrentDirectory> {
-        self.tab
+        self.local()?
+            .tab
             .pane(pane_id)
             .and_then(|terminal| terminal.read(cx).current_directory())
     }
 
+    /// A local Tab's Panes. A server Tab's Panes stay with their server, so close confirmation and
+    /// local hierarchy work never see them.
     pub(crate) fn terminal_panes<'a>(
         &'a self,
         cx: &'a App,
     ) -> impl Iterator<Item = (PaneId, &'a TerminalPane)> {
-        self.tab
-            .panes_with_ids()
+        self.local()
+            .into_iter()
+            .flat_map(|local| local.tab.panes_with_ids())
             .map(|(id, terminal)| (id, terminal.read(cx)))
     }
 
     pub(crate) fn set_pinned_directory(&mut self, directory: Option<PinnedDirectory>) {
-        self.session_factory.set_pinned_directory(directory);
+        if let Some(local) = self.local_mut() {
+            local.session_factory.set_pinned_directory(directory);
+        }
     }
 
     /// Scopes this Tab's later Panes to a Worktree's root, or to the Workspace with `None`.
     pub(crate) fn set_worktree_root(&mut self, root: Option<std::path::PathBuf>) {
-        self.session_factory.set_worktree_root(root);
+        if let Some(local) = self.local_mut() {
+            local.session_factory.set_worktree_root(root);
+        }
     }
 
     pub(crate) fn tab_focus(&self) -> &FocusHandle {
@@ -755,14 +1162,15 @@ impl TabView {
     /// What this Tab presents about the Terminal Session its Focused Pane runs, read from that
     /// Pane's caption facts.
     pub(crate) fn tab_identity(&self) -> TabIdentity {
+        let focused = self.panes.focused();
         let caption = self
             .pane_captions
-            .get(&self.tab.focused_pane_id())
+            .get(&focused)
             .cloned()
             .unwrap_or_default();
         let title = self
             .pane_titles
-            .get(&self.tab.focused_pane_id())
+            .get(&focused)
             .map(|title| gpui::SharedString::from(reported_title(title).words.to_owned()))
             .unwrap_or_else(|| "Terminal".into());
         TabIdentity::resolve(
@@ -775,7 +1183,7 @@ impl TabView {
     #[cfg(test)]
     pub(crate) fn cached_focused_progress(&self) -> TerminalProgress {
         self.pane_captions
-            .get(&self.tab.focused_pane_id())
+            .get(&self.panes.focused())
             .map_or(TerminalProgress::None, |caption| caption.progress)
     }
 
@@ -783,14 +1191,12 @@ impl TabView {
     #[cfg(test)]
     pub(crate) fn set_test_attention(
         &mut self,
-        pane_id: PaneId,
+        pane_id: impl Into<PaneKey>,
         unread_count: u32,
         cx: &mut Context<Self>,
     ) {
-        self.pane_attention.insert(pane_id, unread_count);
-        cx.emit(TabViewEvent::PresentationChanged {
-            tab_id: self.tab.id(),
-        });
+        self.pane_attention.insert(pane_id.into(), unread_count);
+        self.presentation_changed(cx);
         cx.notify();
     }
 
@@ -800,8 +1206,8 @@ impl TabView {
     }
 
     #[cfg(test)]
-    pub(crate) const fn zoom_state(&self) -> ZoomState {
-        self.tab.zoom_state()
+    pub(crate) fn zoom_state(&self) -> ZoomState {
+        self.local_tab().zoom_state()
     }
 
     pub(crate) fn activate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -827,6 +1233,9 @@ impl TabView {
         cx: &mut Context<Self>,
     ) {
         self.active = active;
+        if !active && let Panes::Server(panes) = &mut self.panes {
+            panes.cancel_creation();
+        }
         self.focus_branch_blocker = blocker;
         self.sync_terminal_focus(cx);
     }
@@ -834,8 +1243,15 @@ impl TabView {
     pub(crate) fn close_all(&mut self, cx: &mut Context<Self>) {
         self.active = false;
         self.sync_terminal_focus(cx);
-        for terminal in self.tab.panes() {
-            terminal.update(cx, |terminal, _| terminal.close());
+        let server_backed = matches!(&self.panes, Panes::Server(_));
+        for (_, terminal) in self.panes.panes() {
+            terminal.update(cx, |terminal, _| {
+                if server_backed {
+                    terminal.close_presentation();
+                } else {
+                    terminal.close();
+                }
+            });
         }
     }
 
@@ -847,7 +1263,10 @@ impl TabView {
         cx: &mut Context<Self>,
     ) -> Result<(), RemoteTabViewLifecycleError> {
         self.can_disconnect_remote(generation, cx)?;
-        for (_, terminal) in self.tab.panes_with_ids() {
+        let Some(local) = self.local() else {
+            return Ok(());
+        };
+        for (_, terminal) in local.tab.panes_with_ids() {
             terminal.update(cx, |terminal, cx| {
                 terminal
                     .disconnect_remote(generation, cx)
@@ -865,7 +1284,10 @@ impl TabView {
         generation: u64,
         cx: &App,
     ) -> Result<(), RemoteTabViewLifecycleError> {
-        for (pane_id, terminal) in self.tab.panes_with_ids() {
+        let Some(local) = self.local() else {
+            return Ok(());
+        };
+        for (pane_id, terminal) in local.tab.panes_with_ids() {
             terminal
                 .read(cx)
                 .can_disconnect_remote(generation)
@@ -883,15 +1305,14 @@ impl TabView {
         prepared_launches: Vec<PreparedWorkspaceTerminalLaunch>,
         cx: &App,
     ) -> Result<PreparedTabViewRemoteRestart, RemoteTabViewLifecycleError> {
-        if self.tab.pane_count() != prepared_launches.len() {
+        let tab = self.remote_lifecycle_tab()?;
+        if tab.pane_count() != prepared_launches.len() {
             return Err(RemoteTabViewLifecycleError::PaneChanged(
-                self.tab.focused_pane_id(),
+                tab.focused_pane_id(),
             ));
         }
-        let mut panes = Vec::with_capacity(self.tab.pane_count());
-        for ((pane_id, terminal), prepared_launch) in
-            self.tab.panes_with_ids().zip(prepared_launches)
-        {
+        let mut panes = Vec::with_capacity(tab.pane_count());
+        for ((pane_id, terminal), prepared_launch) in tab.panes_with_ids().zip(prepared_launches) {
             let prepared = terminal
                 .read(cx)
                 .prepare_remote_restart(session_factory.clone(), generation, prepared_launch)
@@ -899,9 +1320,20 @@ impl TabView {
             panes.push((pane_id, terminal.clone(), prepared));
         }
         Ok(PreparedTabViewRemoteRestart {
-            tab_id: self.tab.id(),
+            tab_id: tab.id(),
             panes: RemoteRestartBatch::new(panes),
         })
+    }
+
+    /// The local Tab a Remote lifecycle change applies to. A server Tab's Sessions belong to their
+    /// server, so an SSH restart never reaches them.
+    fn remote_lifecycle_tab(
+        &self,
+    ) -> Result<&Tab<Entity<TerminalPane>>, RemoteTabViewLifecycleError> {
+        match &self.panes {
+            Panes::Local(local) => Ok(&local.tab),
+            Panes::Server(_) => Err(RemoteTabViewLifecycleError::NotLocal),
+        }
     }
 
     /// Revalidates every prepared Pane restart against the current Tab hierarchy.
@@ -910,15 +1342,16 @@ impl TabView {
         prepared: &PreparedTabViewRemoteRestart,
         cx: &App,
     ) -> Result<(), RemoteTabViewLifecycleError> {
-        if self.tab.id() != prepared.tab_id {
+        let tab = self.remote_lifecycle_tab()?;
+        if tab.id() != prepared.tab_id {
             return Err(RemoteTabViewLifecycleError::TabChanged {
                 prepared: prepared.tab_id,
-                current: self.tab.id(),
+                current: tab.id(),
             });
         }
         prepared.panes.validate(
-            self.tab.pane_count(),
-            || RemoteTabViewLifecycleError::PaneChanged(self.tab.focused_pane_id()),
+            tab.pane_count(),
+            || RemoteTabViewLifecycleError::PaneChanged(tab.focused_pane_id()),
             |(pane_id, terminal, pane_restart)| {
                 self.validate_restart_pane(*pane_id, terminal, pane_restart, cx)
             },
@@ -932,7 +1365,7 @@ impl TabView {
         pane_restart: &PreparedRemotePaneRestart,
         cx: &App,
     ) -> Result<(), RemoteTabViewLifecycleError> {
-        let Some(current) = self.tab.pane(pane_id) else {
+        let Some(current) = self.remote_lifecycle_tab()?.pane(pane_id) else {
             return Err(RemoteTabViewLifecycleError::PaneChanged(pane_id));
         };
         if current.entity_id() != terminal.entity_id() {
@@ -954,15 +1387,17 @@ impl TabView {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Result<(), RemoteTabViewLifecycleError> {
-        if self.tab.id() != prepared.tab_id {
+        let tab = self.remote_lifecycle_tab()?;
+        let (tab_id, pane_count, focused) = (tab.id(), tab.pane_count(), tab.focused_pane_id());
+        if tab_id != prepared.tab_id {
             return Err(RemoteTabViewLifecycleError::TabChanged {
                 prepared: prepared.tab_id,
-                current: self.tab.id(),
+                current: tab_id,
             });
         }
         prepared.panes.commit(
-            self.tab.pane_count(),
-            || RemoteTabViewLifecycleError::PaneChanged(self.tab.focused_pane_id()),
+            pane_count,
+            || RemoteTabViewLifecycleError::PaneChanged(focused),
             cx,
             |(pane_id, terminal, pane_restart), cx| {
                 self.validate_restart_pane(*pane_id, terminal, pane_restart, cx)
@@ -977,23 +1412,30 @@ impl TabView {
                 });
             },
         )?;
-        self.session_factory = session_factory;
+        if let Some(local) = self.local_mut() {
+            local.session_factory = session_factory;
+        }
         self.remote_lifecycle.restarted();
         self.sync_terminal_focus(cx);
-        cx.emit(TabViewEvent::PresentationChanged {
-            tab_id: self.tab.id(),
-        });
+        self.presentation_changed(cx);
         cx.notify();
         Ok(())
     }
 
-    pub(crate) const fn focused_pane_id(&self) -> PaneId {
-        self.tab.focused_pane_id()
+    /// A local Tab's Focused Pane. A server Tab's Panes have no local number.
+    pub(crate) fn focused_local_pane(&self) -> Option<PaneId> {
+        self.local().map(|local| local.tab.focused_pane_id())
+    }
+
+    /// A local Tab's Focused Pane, for tests that address local Panes directly.
+    #[cfg(test)]
+    pub(crate) fn focused_pane_id(&self) -> PaneId {
+        self.local_tab().focused_pane_id()
     }
 
     #[cfg(test)]
     pub(crate) fn pane_entity_ids(&self) -> Vec<(PaneId, gpui::EntityId)> {
-        self.tab
+        self.local_tab()
             .panes_with_ids()
             .map(|(pane_id, terminal)| (pane_id, terminal.entity_id()))
             .collect()
@@ -1023,7 +1465,7 @@ impl TabView {
         }
 
         let mut signature = String::new();
-        encode(self.tab.root(), &mut signature);
+        encode(self.local_tab().root(), &mut signature);
         signature
     }
 
@@ -1034,8 +1476,8 @@ impl TabView {
 
     #[cfg(test)]
     pub(crate) fn focused_terminal_remote_state(&self, cx: &App) -> (bool, bool) {
-        self.tab
-            .pane(self.tab.focused_pane_id())
+        self.panes
+            .pane(self.panes.focused())
             .map(|terminal| {
                 let terminal = terminal.read(cx);
                 terminal.remote_session_state()
@@ -1048,7 +1490,7 @@ impl TabView {
         &self,
         cx: &App,
     ) -> Vec<(PaneId, bool, Option<&'static str>)> {
-        self.tab
+        self.local_tab()
             .panes_with_ids()
             .map(|(pane_id, terminal)| {
                 let terminal = terminal.read(cx);
@@ -1060,15 +1502,15 @@ impl TabView {
 
     #[cfg(test)]
     pub(crate) fn focused_terminal_is_focused(&self, window: &Window, cx: &App) -> bool {
-        self.tab
-            .pane(self.tab.focused_pane_id())
+        self.panes
+            .pane(self.panes.focused())
             .is_some_and(|terminal| terminal.read(cx).is_focused(window))
     }
 
     #[cfg(test)]
     pub(crate) fn focused_terminal_has_input_focus(&self, window: &Window, cx: &App) -> bool {
-        self.tab
-            .pane(self.tab.focused_pane_id())
+        self.panes
+            .pane(self.panes.focused())
             .is_some_and(|terminal| terminal.read(cx).terminal_input_focused(window, cx))
     }
 
@@ -1077,18 +1519,28 @@ impl TabView {
         self.active
     }
 
-    fn focus_pane(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
-        if self.tab.focused_pane_id() == pane_id {
+    /// Makes `key` the Focused Pane. A server Pane's focus is a personal edit, which never selects
+    /// the Pane for explicit use.
+    fn focus_pane(&mut self, key: PaneKey, cx: &mut Context<Self>) {
+        if self.panes.focused() == key {
             return;
         }
-        if let Err(error) = self.tab.focus_pane(pane_id) {
-            eprintln!("failed to focus Pane: {error}");
-            return;
+        match (&mut self.panes, key) {
+            (Panes::Local(local), PaneKey::Local(pane_id)) => {
+                if let Err(error) = local.tab.focus_pane(pane_id) {
+                    eprintln!("failed to focus Pane: {error}");
+                    return;
+                }
+            }
+            (Panes::Server(_), PaneKey::Server(pane)) => {
+                if !self.arrange(ArrangementEdit::Focus(pane), cx) {
+                    return;
+                }
+            }
+            _ => return,
         }
         self.sync_terminal_focus(cx);
-        cx.emit(TabViewEvent::PresentationChanged {
-            tab_id: self.tab.id(),
-        });
+        self.presentation_changed(cx);
         cx.notify();
     }
 
@@ -1098,24 +1550,41 @@ impl TabView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(pane_id) = self.tab.focus_pane_in_direction(direction) else {
-            return;
+        let key = match &mut self.panes {
+            Panes::Local(local) => match local.tab.focus_pane_in_direction(direction) {
+                Some(pane_id) => PaneKey::Local(pane_id),
+                None => return,
+            },
+            Panes::Server(_) => {
+                let before = self.panes.focused();
+                if !self.arrange(
+                    ArrangementEdit::FocusDirection(server::view_direction(direction)),
+                    cx,
+                ) || self.panes.focused() == before
+                {
+                    return;
+                }
+                self.panes.focused()
+            }
         };
-        self.finish_keyboard_focus_change(pane_id, window, cx);
+        self.finish_keyboard_focus_change(key, window, cx);
     }
 
+    /// Moves native focus to a Pane a keyboard command focused. A server Pane reached by a
+    /// navigation command is selected for explicit use.
     fn finish_keyboard_focus_change(
         &mut self,
-        pane_id: PaneId,
+        key: PaneKey,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.sync_terminal_focus(cx);
-        cx.emit(TabViewEvent::PresentationChanged {
-            tab_id: self.tab.id(),
-        });
+        self.presentation_changed(cx);
         cx.notify();
-        if let Some(terminal) = self.tab.pane(pane_id) {
+        if let PaneKey::Server(pane) = key {
+            self.select_server_pane(pane, SelectionSource::Command, cx);
+        }
+        if let Some(terminal) = self.panes.pane(key) {
             terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
         }
     }
@@ -1126,32 +1595,42 @@ impl TabView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let focused_pane_id = self.tab.focused_pane_id();
-        self.split_pane(focused_pane_id, axis, window, cx);
+        let focused = self.panes.focused();
+        self.split_pane(focused, axis, window, cx);
     }
 
     /// Splits the Focused Pane after this Tab next measures its Panes, unless that Pane closes first.
     pub(crate) fn split_focused_after_layout(&mut self, axis: SplitAxis, cx: &mut Context<Self>) {
-        self.pending_split = Some((self.tab.focused_pane_id(), axis));
+        self.pending_split = Some((self.panes.focused(), axis));
         cx.notify();
     }
 
     fn split_pane(
         &mut self,
-        target_pane_id: PaneId,
+        target: PaneKey,
         axis: SplitAxis,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let target_pane_id = match target {
+            PaneKey::Local(pane_id) => pane_id,
+            PaneKey::Server(pane) => {
+                self.split_server_pane(pane, axis, cx);
+                return;
+            }
+        };
+        let Some(local) = self.local() else {
+            return;
+        };
         if self.remote_lifecycle.disconnected_generation().is_some() {
             cx.emit(RemoteChildLaunchUnavailable::ConnectionUnavailable);
             return;
         }
-        let Some(target_size) = self.split_target_size(target_pane_id, pane_gap(cx)) else {
+        let Some(target_size) = self.split_target_size(target, pane_gap(cx)) else {
             eprintln!("cannot split Pane {target_pane_id} without valid measured bounds");
             return;
         };
-        let session_factory = match self
+        let session_factory = match local
             .session_factory
             .for_source_directory(self.current_directory(target_pane_id, cx))
         {
@@ -1210,8 +1689,7 @@ impl TabView {
                             return;
                         }
                     };
-                    let Some(current_size) = view.split_target_size(target_pane_id, pane_gap(cx))
-                    else {
+                    let Some(current_size) = view.split_target_size(target, pane_gap(cx)) else {
                         return;
                     };
                     if current_size != target_size {
@@ -1247,14 +1725,14 @@ impl TabView {
         );
     }
 
-    fn split_target_size(&self, pane_id: PaneId, gap: f32) -> Option<PaneSize> {
-        match self.tab.zoom_state() {
-            ZoomState::Restored => self
+    fn split_target_size(&self, pane_id: PaneKey, gap: f32) -> Option<PaneSize> {
+        match self.panes.zoomed() {
+            None => self
                 .pane_bounds
                 .get(&pane_id)
                 .and_then(|bounds| pane_size(*bounds).ok()),
-            ZoomState::Zoomed(_) => {
-                restored_leaf_size(self.tab.root(), pane_id, self.pane_layout_size?, gap)
+            Some(_) => {
+                restored_leaf_size(self.panes.layout(), pane_id, self.pane_layout_size?, gap)
             }
         }
     }
@@ -1262,7 +1740,7 @@ impl TabView {
     /// Lifts a Pane by its caption so it can split another Pane in this Tab.
     fn begin_pane_drag(
         &mut self,
-        pane_id: PaneId,
+        pane_id: PaneKey,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> DragPreview {
@@ -1306,13 +1784,13 @@ impl TabView {
     /// coordinates.
     fn render_lifted_caption(
         &self,
-        pane_id: PaneId,
+        pane_id: PaneKey,
         caption: Bounds<Pixels>,
         grab: Point<Pixels>,
         window: &Window,
         cx: &App,
     ) -> AnyElement {
-        let Some(terminal) = self.tab.pane(pane_id).cloned() else {
+        let Some(terminal) = self.panes.pane(pane_id).cloned() else {
             return div().into_any_element();
         };
         let appearance = super::appearance::chrome(cx);
@@ -1325,7 +1803,7 @@ impl TabView {
             let caption_style = appearance.typography.style(TextRole::Body);
             reported_glyph_is_drawable(glyph, &caption_style.font, caption_style.size, window)
         });
-        let focused = self.tab.focused_pane_id() == pane_id;
+        let focused = self.panes.focused() == pane_id;
         let attention = self.pane_attention.get(&pane_id).copied().unwrap_or(0) > 0;
         let background = terminal.read(cx).surface_background();
         let paint = appearance.colors.caption(background, focused);
@@ -1344,6 +1822,7 @@ impl TabView {
                 zoomed: false,
                 attention,
                 has_multiple_panes: true,
+                shared_actions_available: self.shared_action_refusal().is_none(),
             },
             card_width,
             1.0,
@@ -1381,7 +1860,7 @@ impl TabView {
             .into_any_element()
     }
 
-    fn drag_pane_to(&mut self, pane_id: PaneId, pointer: Point<Pixels>, cx: &mut Context<Self>) {
+    fn drag_pane_to(&mut self, pane_id: PaneKey, pointer: Point<Pixels>, cx: &mut Context<Self>) {
         let drop_target = self.drop_target(pane_id, pointer, pane_gap(cx));
         let Some(drag) = self
             .pane_drag
@@ -1417,39 +1896,59 @@ impl TabView {
         let Some(target_size) = self.split_target_size(target_pane_id, gap) else {
             return;
         };
-        match self
-            .tab
-            .move_pane(drag.pane_id, target_pane_id, edge, target_size, gap)
-        {
-            Ok(true) => {
-                self.advance_native_service_hierarchy_generation(cx);
-                self.pane_layout_revision += 1;
-                self.split_bounds.clear();
-                self.sync_terminal_focus(cx);
-                cx.emit(TabViewEvent::PresentationChanged {
-                    tab_id: self.tab.id(),
-                });
-                if let Some(terminal) = self.tab.pane(drag.pane_id) {
-                    terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
+        let moved = match (&mut self.panes, drag.pane_id, target_pane_id) {
+            (Panes::Local(local), PaneKey::Local(pane), PaneKey::Local(target)) => {
+                match local.tab.move_pane(pane, target, edge, target_size, gap) {
+                    Ok(moved) => moved,
+                    Err(error) => {
+                        eprintln!("failed to move Pane: {error}");
+                        false
+                    }
                 }
             }
-            Ok(false) => {}
-            Err(error) => eprintln!("failed to move Pane: {error}"),
+            (Panes::Server(server), PaneKey::Server(pane), PaneKey::Server(target)) => {
+                let (Some(target_size), Some(metrics)) =
+                    (view_size(target_size), server.metrics(gap))
+                else {
+                    return;
+                };
+                self.arrange(
+                    ArrangementEdit::Move {
+                        pane,
+                        target,
+                        edge: view_edge(edge),
+                        target_size,
+                        metrics,
+                    },
+                    cx,
+                )
+            }
+            _ => false,
+        };
+        if moved {
+            self.advance_native_service_hierarchy_generation(cx);
+            self.pane_layout_revision += 1;
+            self.split_bounds.clear();
+            self.sync_terminal_focus(cx);
+            self.presentation_changed(cx);
+            if let Some(terminal) = self.panes.pane(drag.pane_id) {
+                terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
+            }
         }
     }
 
     /// The Pane under `pointer` that can take the dragged Pane, and the edge it would take.
     fn drop_target(
         &self,
-        pane_id: PaneId,
+        pane_id: PaneKey,
         pointer: Point<Pixels>,
         gap: f32,
-    ) -> Option<(PaneId, PaneEdge)> {
-        if matches!(self.tab.zoom_state(), ZoomState::Zoomed(_)) {
+    ) -> Option<(PaneKey, PaneEdge)> {
+        if self.panes.zoomed().is_some() {
             return None;
         }
         let mut panes = Vec::new();
-        collect_pane_order(self.tab.root(), &mut panes);
+        collect_pane_order(self.panes.layout(), &mut panes);
         let (target_pane_id, bounds) = panes
             .into_iter()
             .filter_map(|candidate| Some((candidate, *self.pane_bounds.get(&candidate)?)))
@@ -1459,7 +1958,7 @@ impl TabView {
         }
         let edge = drop_edge(bounds, pointer);
         let target_size = self.split_target_size(target_pane_id, gap)?;
-        self.tab
+        self.panes
             .can_receive_pane(target_pane_id, edge, target_size, gap)
             .then_some((target_pane_id, edge))
     }
@@ -1473,10 +1972,13 @@ impl TabView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let session_factory = self.session_factory.clone();
-        let pane_construction = self.pane_construction.clone();
+        let Some(local) = self.local_mut() else {
+            return;
+        };
+        let session_factory = local.session_factory.clone();
+        let pane_construction = local.pane_construction.clone();
         let gap = pane_gap(cx);
-        let result = self
+        let result = local
             .tab
             .split_pane(target_pane_id, axis, target_size, gap, |new_pane_id| {
                 Self::create_terminal(
@@ -1491,21 +1993,20 @@ impl TabView {
 
         match result {
             Ok(pane_id) => {
+                let key = PaneKey::Local(pane_id);
                 self.advance_native_service_hierarchy_generation(cx);
                 self.pane_layout_revision += 1;
-                if let Some(terminal) = self.tab.pane(pane_id) {
-                    self.pane_titles.insert(pane_id, terminal.read(cx).title());
+                if let Some(terminal) = self.panes.pane(key) {
+                    self.pane_titles.insert(key, terminal.read(cx).title());
                     self.pane_captions
-                        .insert(pane_id, PaneCaptionText::from_terminal(terminal.read(cx)));
+                        .insert(key, PaneCaptionText::from_terminal(terminal.read(cx)));
                 }
-                self.pane_attention.insert(pane_id, 0);
+                self.pane_attention.insert(key, 0);
                 self.split_bounds.clear();
                 self.sync_terminal_focus(cx);
-                cx.emit(TabViewEvent::PresentationChanged {
-                    tab_id: self.tab.id(),
-                });
+                self.presentation_changed(cx);
                 cx.notify();
-                if let Some(terminal) = self.tab.pane(pane_id) {
+                if let Some(terminal) = self.panes.pane(key) {
                     terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
                 }
             }
@@ -1513,14 +2014,35 @@ impl TabView {
         }
     }
 
-    fn request_close_pane(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
-        if self.close_tab_requested || self.tab.pane(pane_id).is_none() {
+    fn shared_action_refusal(&self) -> Option<DesktopClientError> {
+        match &self.panes {
+            Panes::Server(panes) => panes.shared_action_refusal(),
+            Panes::Local(_) => None,
+        }
+    }
+
+    /// Asks the owner to close a Pane. A server Pane closes only after its server assesses the
+    /// close and publishes the deletion.
+    fn request_close_pane(&mut self, pane_id: PaneKey, cx: &mut Context<Self>) {
+        if self.close_tab_requested || self.panes.pane(pane_id).is_none() {
             return;
         }
-        cx.emit(TabViewEvent::UserClosePaneRequested {
-            tab_id: self.tab.id(),
-            pane_id,
-        });
+        match (&self.panes, pane_id) {
+            (Panes::Local(local), PaneKey::Local(pane_id)) => {
+                cx.emit(TabViewEvent::UserClosePaneRequested {
+                    tab_id: local.tab.id(),
+                    pane_id,
+                });
+            }
+            (Panes::Server(_), PaneKey::Server(pane)) => {
+                if let Some(error) = self.shared_action_refusal() {
+                    cx.emit(ServerEditRefused(error));
+                } else {
+                    cx.emit(ServerTabManagerEvent::ClosePane { pane });
+                }
+            }
+            _ => {}
+        }
     }
 
     pub(crate) fn close_pane_authorized(
@@ -1536,8 +2058,11 @@ impl TabView {
         if self.close_tab_requested {
             return;
         }
+        let Some(local) = self.local_mut() else {
+            return;
+        };
 
-        match self.tab.close_pane(pane_id) {
+        match local.tab.close_pane(pane_id) {
             Ok(ClosePaneOutcome::CloseTab { tab_id }) => {
                 self.advance_native_service_hierarchy_generation(cx);
                 self.close_tab_requested = true;
@@ -1550,24 +2075,23 @@ impl TabView {
                 closed_pane,
                 ..
             }) => {
+                let key = PaneKey::Local(pane_id);
                 self.advance_native_service_hierarchy_generation(cx);
                 self.pane_layout_revision += 1;
                 closed_pane.update(cx, |terminal, _| {
                     terminal.set_accessibility_hierarchy(false);
                     terminal.close();
                 });
-                self.pane_bounds.remove(&pane_id);
+                self.pane_bounds.remove(&key);
                 self.split_bounds.clear();
-                self.pane_titles.remove(&pane_id);
-                self.pane_captions.remove(&pane_id);
-                self.pane_attention.remove(&pane_id);
+                self.pane_titles.remove(&key);
+                self.pane_captions.remove(&key);
+                self.pane_attention.remove(&key);
                 self.sync_terminal_focus(cx);
-                cx.emit(TabViewEvent::PresentationChanged {
-                    tab_id: self.tab.id(),
-                });
+                self.presentation_changed(cx);
                 cx.notify();
                 if self.active
-                    && let Some(terminal) = self.tab.pane(focused_pane_id)
+                    && let Some(terminal) = self.panes.pane(PaneKey::Local(focused_pane_id))
                 {
                     terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
                 }
@@ -1577,22 +2101,64 @@ impl TabView {
     }
 
     pub(crate) fn toggle_zoom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.tab.toggle_zoom().is_none() {
+        let toggled = match &mut self.panes {
+            Panes::Local(local) => local.tab.toggle_zoom().is_some(),
+            Panes::Server(_) => self.arrange(ArrangementEdit::ToggleZoom, cx),
+        };
+        if !toggled {
             return;
         }
         self.advance_native_service_hierarchy_generation(cx);
         self.pane_layout_revision += 1;
         self.sync_terminal_focus(cx);
-        cx.emit(TabViewEvent::PresentationChanged {
-            tab_id: self.tab.id(),
-        });
+        self.presentation_changed(cx);
         cx.notify();
         self.focus(window, cx);
     }
 
+    /// Sets a Split's ratio and returns the accepted ratio. A server Split changes this client's
+    /// arrangement only. `commit` sends the personal edit now; otherwise it waits for the end of
+    /// the interaction.
+    fn set_split_ratio(
+        &mut self,
+        split_id: SplitKey,
+        available: PaneSize,
+        ratio: f32,
+        commit: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<f32> {
+        let gap = pane_gap(cx);
+        match (&mut self.panes, split_id) {
+            (Panes::Local(local), SplitKey::Local(split)) => {
+                match local.tab.resize_split(split, available, gap, ratio) {
+                    Ok(accepted) => Some(accepted),
+                    Err(error) => {
+                        eprintln!("failed to resize split: {error}");
+                        None
+                    }
+                }
+            }
+            (Panes::Server(server), SplitKey::Server(split)) => {
+                let edit = ArrangementEdit::Resize {
+                    split,
+                    available: view_size(available)?,
+                    metrics: server.metrics(gap)?,
+                    ratio,
+                };
+                if commit {
+                    self.arrange(edit, cx);
+                } else {
+                    self.arrange_live(edit, cx);
+                }
+                self.server_split_ratio(split)
+            }
+            _ => None,
+        }
+    }
+
     fn resize_split(
         &mut self,
-        split_id: SplitId,
+        split_id: SplitKey,
         axis: SplitAxis,
         requested_offset: f32,
         cx: &mut Context<Self>,
@@ -1603,38 +2169,30 @@ impl TabView {
         let Ok(available_size) = pane_size(bounds) else {
             return None;
         };
-        match self
-            .tab
-            .resize_split(split_id, available_size, gap, requested_ratio)
-        {
-            Ok(accepted_ratio) => {
-                cx.notify();
-                split_content_extent(axis, bounds, gap).map(|extent| extent * accepted_ratio)
-            }
-            Err(error) => {
-                eprintln!("failed to resize split: {error}");
-                None
-            }
-        }
+        let accepted_ratio =
+            self.set_split_ratio(split_id, available_size, requested_ratio, false, cx)?;
+        cx.notify();
+        split_content_extent(axis, bounds, gap).map(|extent| extent * accepted_ratio)
     }
 
-    fn reset_split(&mut self, split_id: SplitId, cx: &mut Context<Self>) {
+    fn reset_split(&mut self, split_id: SplitKey, cx: &mut Context<Self>) {
         let Some(bounds) = self.split_bounds.get(&split_id).copied() else {
             return;
         };
         let Ok(available_size) = pane_size(bounds) else {
             return;
         };
-        let gap = pane_gap(cx);
-        match self.tab.resize_split(split_id, available_size, gap, 0.5) {
-            Ok(_) => cx.notify(),
-            Err(error) => eprintln!("failed to reset split: {error}"),
+        if self
+            .set_split_ratio(split_id, available_size, 0.5, true, cx)
+            .is_some()
+        {
+            cx.notify();
         }
     }
 
     fn handle_resize_event(
         &mut self,
-        split_id: SplitId,
+        split_id: SplitKey,
         axis: SplitAxis,
         event: ResizeHandleEvent,
         window: &mut Window,
@@ -1662,6 +2220,7 @@ impl TabView {
                     return None;
                 }
                 self.resizing_split_id = None;
+                self.commit_live_edit(cx);
                 self.sync_terminal_focus(cx);
                 cx.notify();
                 if source == ResizeInputSource::Pointer && self.active {
@@ -1673,32 +2232,30 @@ impl TabView {
     }
 
     fn sync_terminal_focus(&mut self, cx: &mut Context<Self>) {
-        let focused_terminal_id = self
-            .tab
-            .pane(self.tab.focused_pane_id())
+        let focused = self.panes.focused();
+        let focused_terminal_id = self.panes.pane(focused).map(Entity::entity_id);
+        let zoomed = self.panes.zoomed();
+        let visible_terminal_id = zoomed
+            .and_then(|pane_id| self.panes.pane(pane_id))
             .map(Entity::entity_id);
-        let visible_terminal_id = match self.tab.zoom_state() {
-            ZoomState::Restored => None,
-            ZoomState::Zoomed(pane_id) => self.tab.pane(pane_id).map(Entity::entity_id),
-        };
         let blocker = TerminalFocusCoordinator::pane_layout_blocker(
             self.focus_branch_blocker,
             self.resizing_split_id.is_some(),
         );
-        let signature = (self.active, self.tab.focused_pane_id(), blocker);
+        let signature = (self.active, focused, blocker);
         if self.native_service_focus_signature != Some(signature) {
             self.advance_native_service_hierarchy_generation(cx);
             self.native_service_focus_signature = Some(signature);
         }
         let hierarchy_generation = self.native_service_hierarchy_generation;
-        let mut panes = Vec::with_capacity(self.tab.pane_count());
-        collect_pane_order(self.tab.root(), &mut panes);
-        let presented_panes = match self.tab.zoom_state() {
-            ZoomState::Zoomed(pane_id) => vec![pane_id],
-            ZoomState::Restored => panes.clone(),
+        let mut panes = Vec::with_capacity(self.panes.pane_count());
+        collect_pane_order(self.panes.layout(), &mut panes);
+        let presented_panes = match zoomed {
+            Some(pane_id) => vec![pane_id],
+            None => panes.clone(),
         };
         for pane_id in panes {
-            let Some(terminal) = self.tab.pane(pane_id) else {
+            let Some(terminal) = self.panes.pane(pane_id) else {
                 continue;
             };
             let product_focus = TerminalProductFocus {
@@ -1725,7 +2282,7 @@ impl TabView {
         self.native_service_hierarchy_generation =
             self.native_service_hierarchy_generation.wrapping_add(1);
         let hierarchy_generation = self.native_service_hierarchy_generation;
-        for terminal in self.tab.panes() {
+        for (_, terminal) in self.panes.panes() {
             terminal.update(cx, |terminal, _| {
                 terminal.synchronize_native_service_hierarchy_generation(hierarchy_generation);
             });
@@ -1735,11 +2292,11 @@ impl TabView {
     fn perform_caption_action(
         &mut self,
         action: PaneCaptionAction,
-        pane_id: PaneId,
+        pane_id: PaneKey,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.tab.pane(pane_id).is_none() {
+        if self.panes.pane(pane_id).is_none() {
             return;
         }
         self.focus_pane(pane_id, cx);
@@ -1810,7 +2367,7 @@ impl TabView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(pane_id) = self.tab.focus_previous_pane() else {
+        let Some(pane_id) = self.focus_in_history(TabStep::Previous, cx) else {
             return;
         };
         self.finish_keyboard_focus_change(pane_id, window, cx);
@@ -1822,10 +2379,30 @@ impl TabView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(pane_id) = self.tab.focus_next_pane() else {
+        let Some(pane_id) = self.focus_in_history(TabStep::Next, cx) else {
             return;
         };
         self.finish_keyboard_focus_change(pane_id, window, cx);
+    }
+
+    /// Steps through the focus cycle and returns the newly Focused Pane.
+    fn focus_in_history(&mut self, step: TabStep, cx: &mut Context<Self>) -> Option<PaneKey> {
+        match &mut self.panes {
+            Panes::Local(local) => match step {
+                TabStep::Previous => local.tab.focus_previous_pane(),
+                TabStep::Next => local.tab.focus_next_pane(),
+            }
+            .map(PaneKey::Local),
+            Panes::Server(_) => {
+                let before = self.panes.focused();
+                let edit = match step {
+                    TabStep::Previous => ArrangementEdit::FocusPrevious,
+                    TabStep::Next => ArrangementEdit::FocusNext,
+                };
+                (self.arrange(edit, cx) && self.panes.focused() != before)
+                    .then(|| self.panes.focused())
+            }
+        }
     }
 
     fn on_toggle_zoom(&mut self, _: &TogglePaneZoom, window: &mut Window, cx: &mut Context<Self>) {
@@ -1833,22 +2410,20 @@ impl TabView {
     }
 
     fn on_close_pane(&mut self, _: &ClosePane, _: &mut Window, cx: &mut Context<Self>) {
-        self.request_close_pane(self.tab.focused_pane_id(), cx);
+        self.request_close_pane(self.panes.focused(), cx);
     }
 
     fn render_tree(
         &self,
-        tree: PaneTreeRef<'_>,
+        tree: LayoutRef<'_>,
         hovers: &PaneHovers,
         view: gpui::WeakEntity<Self>,
         appearance: &std::sync::Arc<super::appearance::ChromeAppearance>,
         cx: &App,
     ) -> AnyElement {
         match tree.node() {
-            PaneNodeRef::Leaf { pane_id } => {
-                self.render_leaf(pane_id, hovers, view, appearance, cx)
-            }
-            PaneNodeRef::Split {
+            LayoutNode::Leaf(pane_id) => self.render_leaf(pane_id, hovers, view, appearance, cx),
+            LayoutNode::Split {
                 split_id,
                 axis,
                 ratio,
@@ -1879,12 +2454,13 @@ impl TabView {
         window: &mut Window,
         cx: &mut App,
     ) -> PaneHovers {
-        let focused_pane_id = self.tab.focused_pane_id();
+        let focused_pane_id = self.panes.focused();
         let animate = self.revealed_layout_revision == self.pane_layout_revision;
         self.revealed_layout_revision = self.pane_layout_revision;
-        self.tab
-            .panes_with_ids()
-            .map(|(pane_id, _)| {
+        let panes: Vec<PaneKey> = self.panes.panes().into_iter().map(|(key, _)| key).collect();
+        panes
+            .into_iter()
+            .map(|pane_id| {
                 let fade = HoverFade::new(("pane-hover", pane_id.get()), window, cx);
                 let revealed = pane_id == focused_pane_id || (window_active && fade.is_hovered(cx));
                 let reveal = spaceterm_ui::eased_flag(
@@ -1901,13 +2477,13 @@ impl TabView {
 
     fn render_leaf(
         &self,
-        pane_id: PaneId,
+        pane_id: PaneKey,
         hovers: &PaneHovers,
         view: gpui::WeakEntity<Self>,
         appearance: &std::sync::Arc<super::appearance::ChromeAppearance>,
         cx: &App,
     ) -> AnyElement {
-        let Some(terminal) = self.tab.pane(pane_id).cloned() else {
+        let Some(terminal) = self.panes.pane(pane_id).cloned() else {
             // A Pane without its Terminal Session still occupies a Pane's place, so it keeps a
             // Pane's material rather than punching an opaque block through a translucent window.
             return div()
@@ -1918,9 +2494,9 @@ impl TabView {
                 )))
                 .into_any_element();
         };
-        let focused = self.tab.focused_pane_id() == pane_id;
-        let has_multiple_panes = self.tab.pane_count() > 1;
-        let zoomed = matches!(self.tab.zoom_state(), ZoomState::Zoomed(_));
+        let focused = self.panes.focused() == pane_id;
+        let has_multiple_panes = self.panes.pane_count() > 1;
+        let zoomed = self.panes.zoomed().is_some();
         let text = self
             .pane_captions
             .get(&pane_id)
@@ -2013,6 +2589,7 @@ impl TabView {
                     zoomed,
                     attention,
                     has_multiple_panes,
+                    shared_actions_available: self.shared_action_refusal().is_none(),
                 },
                 controls_reveal,
                 view.clone(),
@@ -2042,10 +2619,10 @@ impl TabView {
     )]
     fn render_split(
         &self,
-        split_id: SplitId,
+        split_id: SplitKey,
         axis: SplitAxis,
         ratio: f32,
-        children: (PaneTreeRef<'_>, PaneTreeRef<'_>),
+        children: (LayoutRef<'_>, LayoutRef<'_>),
         hovers: &PaneHovers,
         view: gpui::WeakEntity<Self>,
         appearance: &std::sync::Arc<super::appearance::ChromeAppearance>,
@@ -2095,9 +2672,8 @@ impl TabView {
         // A ratio left outside the bounds by a smaller window stays inside the published range.
         let offset_range = bounds.zip(extent).and_then(|(bounds, extent)| {
             let range = self
-                .tab
-                .split_ratio_range(split_id, pane_size(bounds).ok()?, gap)
-                .ok()?;
+                .panes
+                .split_ratio_range(split_id, pane_size(bounds).ok()?, gap)?;
             Some(extent * range.start().min(ratio)..=extent * range.end().max(ratio))
         });
 
@@ -2152,11 +2728,14 @@ impl TabView {
 
 impl EventEmitter<TabViewEvent> for TabView {}
 impl EventEmitter<RemoteChildLaunchUnavailable> for TabView {}
+impl EventEmitter<ServerTabManagerEvent> for TabView {}
+impl EventEmitter<ServerTabPresentationChanged> for TabView {}
+impl EventEmitter<ServerEditRefused> for TabView {}
 
-fn collect_pane_order(tree: PaneTreeRef<'_>, panes: &mut Vec<PaneId>) {
+fn collect_pane_order(tree: LayoutRef<'_>, panes: &mut Vec<PaneKey>) {
     match tree.node() {
-        PaneNodeRef::Leaf { pane_id } => panes.push(pane_id),
-        PaneNodeRef::Split { first, second, .. } => {
+        LayoutNode::Leaf(pane_id) => panes.push(pane_id),
+        LayoutNode::Split { first, second, .. } => {
             collect_pane_order(first, panes);
             collect_pane_order(second, panes);
         }
@@ -2181,27 +2760,22 @@ impl Render for TabView {
             minimum_pane_width(&appearance),
             f32::from(appearance.caption_height() + radius) + 4.0,
         ) {
-            self.tab.set_minimum_pane_size(minimum);
+            self.panes.set_minimum_pane_size(minimum);
         }
         self.sync_terminal_focus(cx);
         let view = cx.entity().downgrade();
-        let zoom_state = self.tab.zoom_state();
-        let minimum_size = match zoom_state {
-            ZoomState::Zoomed(_) => self.tab.minimum_pane_size(),
-            ZoomState::Restored => match self.tab.minimum_size(pane_gap(cx)) {
-                Ok(size) => size,
-                Err(error) => {
-                    eprintln!("failed to calculate minimum Pane layout size: {error}");
-                    self.tab.minimum_pane_size()
-                }
-            },
+        let zoomed = self.panes.zoomed();
+        let minimum_size = match zoomed {
+            Some(_) => self.panes.minimum_pane_size(),
+            None => self
+                .panes
+                .minimum_size(pane_gap(cx))
+                .unwrap_or_else(|| self.panes.minimum_pane_size()),
         };
         let hovers = self.pane_hovers(appearance.active, window, cx);
-        let content = match zoom_state {
-            ZoomState::Restored => {
-                self.render_tree(self.tab.root(), &hovers, view.clone(), &appearance, cx)
-            }
-            ZoomState::Zoomed(pane_id) => self.render_leaf(pane_id, &hovers, view, &appearance, cx),
+        let content = match zoomed {
+            None => self.render_tree(self.panes.layout(), &hovers, view.clone(), &appearance, cx),
+            Some(pane_id) => self.render_leaf(pane_id, &hovers, view, &appearance, cx),
         };
 
         div()
@@ -2222,7 +2796,7 @@ impl Render for TabView {
                         let view = view.clone();
                         window.defer(cx, move |window, cx| {
                             let _ = view.update(cx, |view, cx| {
-                                if view.tab.pane(pane_id).is_some() {
+                                if view.panes.pane(pane_id).is_some() {
                                     view.split_pane(pane_id, axis, window, cx);
                                 }
                             });
@@ -2230,7 +2804,7 @@ impl Render for TabView {
                     }
                 }
             })
-            .id(("tab-view", self.tab.id().get()))
+            .id(("tab-view", self.tab_number()))
             .key_context(TERMINAL_KEY_CONTEXT)
             .relative()
             .size_full()
@@ -2406,13 +2980,14 @@ fn split_directory_leaf(directory: &str) -> (gpui::SharedString, gpui::SharedStr
 }
 
 struct PaneCaption {
-    pane_id: PaneId,
+    pane_id: PaneKey,
     terminal: Entity<TerminalPane>,
     text: PaneCaptionText,
     focused: bool,
     zoomed: bool,
     attention: bool,
     has_multiple_panes: bool,
+    shared_actions_available: bool,
 }
 
 fn render_pane_caption(
@@ -2534,6 +3109,7 @@ fn render_pane_caption_content(
         zoomed,
         attention,
         has_multiple_panes,
+        shared_actions_available,
     } = caption;
     let color = paint.foreground;
     let button_paint = |value: crate::appearance::SemanticPaint| {
@@ -2663,6 +3239,8 @@ fn render_pane_caption_content(
             continue;
         }
         let view = view.clone();
+        let action_available = caption_action_available
+            && (matches!(action, PaneCaptionAction::ToggleZoom) || shared_actions_available);
         let id = format!("pane-{selector}-{}", pane_id.get());
         let icon_size = appearance.icons.metrics(IconRole::Control).glyph_size;
         let button = IconButton::new(
@@ -2671,7 +3249,7 @@ fn render_pane_caption_content(
             move |foreground| Icon::new(icon, icon_size, foreground).into_any_element(),
         )
         .variant(ButtonVariant::Bare)
-        .disabled(!caption_action_available)
+        .disabled(!action_available)
         .contextual_style(control_style, gpui_color(paint.focus))
         .size(ButtonSize::Compact)
         .preserve_ancestor_hover()
@@ -2681,7 +3259,7 @@ fn render_pane_caption_content(
                 .shortcut(shortcut.unwrap_or_default()),
         )
         .on_activate(move |_, window, cx| {
-            if !caption_action_available {
+            if !action_available {
                 return;
             }
             let _ = view.update(cx, |view, cx| {
@@ -2708,14 +3286,24 @@ fn render_pane_caption_content(
             view.focus(window, cx);
         });
     };
-    let accessibility_focus = focus_pane.clone();
+    let selection_view = view.clone();
+    let select_pane = move |source, window: &mut Window, cx: &mut App| {
+        let _ = selection_view.update(cx, |view, cx| {
+            view.focus_pane(pane_id, cx);
+            view.focus(window, cx);
+            if let PaneKey::Server(pane) = pane_id {
+                view.select_server_pane(pane, source, cx);
+            }
+        });
+    };
+    let accessibility_select = select_pane.clone();
     caption_row(appearance, color)
         .id(("pane-caption", pane_id.get()))
         .role(gpui::accesskit::Role::Group)
         .aria_label(caption_name)
         .when(zoomed, |row| row.aria_description("Zoomed Pane"))
         .on_a11y_action(gpui::accesskit::Action::Click, move |_, window, cx| {
-            accessibility_focus(window, cx);
+            accessibility_select(SelectionSource::AccessibilityPress, window, cx);
         })
         .debug_selector(move || {
             format!(
@@ -2728,6 +3316,10 @@ fn render_pane_caption_content(
         .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
             focus_pane(window, cx);
             cx.stop_propagation();
+        })
+        // Only the committed click selects for use. GPUI does not click after starting a drag.
+        .on_click(move |_, window, cx| {
+            select_pane(SelectionSource::Pointer, window, cx);
         })
         // The caption carries its Pane to another Pane's edge whenever another Pane is visible.
         .when(has_multiple_panes && !zoomed, |row| {
@@ -2788,7 +3380,7 @@ pub(super) fn head_glyph_width(
 /// The Pane's Repository Status: glyph, branch, one mark, the detail, and the divergence.
 /// Color is never the only signal; the glyph, words, and the spoken label carry every state.
 fn render_repository_segment(
-    pane_id: PaneId,
+    pane_id: PaneKey,
     repository: &RepositoryCaption,
     (terminal, view): (gpui::WeakEntity<TerminalPane>, gpui::WeakEntity<TabView>),
     layout: RepositoryCaptionLayout,
@@ -2888,7 +3480,7 @@ fn render_repository_segment(
 
 /// The Pane's identity as its caption shows it: origin, directory, name, status, and label.
 fn render_caption_identity(
-    pane_id: PaneId,
+    pane_id: PaneKey,
     text: PaneCaptionText,
     attention: bool,
     layout: CaptionLayout,
@@ -3004,7 +3596,7 @@ fn caption_row(
 
 /// Renders the account and machine a Pane runs on, ahead of the directory it sits in.
 fn render_pane_origin(
-    pane_id: PaneId,
+    pane_id: PaneKey,
     origin: &PaneOrigin,
     layout: CaptionLayout,
     color: crate::appearance::Color,
@@ -3044,7 +3636,7 @@ fn render_pane_origin(
 
 /// Renders the status after the Pane's directory and before its activity.
 fn render_pane_status(
-    pane_id: PaneId,
+    pane_id: PaneKey,
     (progress, reported, attention): (TerminalProgress, Option<gpui::SharedString>, bool),
     paint: &crate::appearance::CaptionPaint,
     appearance: &super::appearance::ChromeAppearance,
@@ -3080,7 +3672,7 @@ fn render_pane_status(
 
 /// Masks the Pane's corner fillets with Chrome while leaving its rounded interior visible.
 fn render_pane_corner_surface(
-    pane_id: PaneId,
+    pane_id: PaneKey,
     frame: super::workspace_frame::WorkspaceFrame,
     appearance: &super::appearance::ChromeAppearance,
 ) -> AnyElement {
@@ -3113,7 +3705,7 @@ fn render_pane_corner_surface(
 
 /// Shows the half of a target Pane that a dragged Pane takes when it is released.
 fn render_pane_drop_target(
-    pane_id: PaneId,
+    pane_id: PaneKey,
     edge: PaneEdge,
     radius: Pixels,
     appearance: &super::appearance::ChromeAppearance,
@@ -3169,7 +3761,7 @@ fn split_child(
 
 /// The Split's resize interaction, owned by the empty gap between its Panes.
 fn render_split_resize_handle(
-    split_id: SplitId,
+    split_id: SplitKey,
     axis: SplitAxis,
     current_offset: f32,
     offset_range: Option<RangeInclusive<f32>>,
@@ -3205,14 +3797,14 @@ fn render_split_resize_handle(
 
 // Splitting restores the grid, so a zoomed Pane must use its allocation in that grid.
 fn restored_leaf_size(
-    tree: PaneTreeRef<'_>,
-    target: PaneId,
+    tree: LayoutRef<'_>,
+    target: PaneKey,
     available: PaneSize,
     gap: f32,
 ) -> Option<PaneSize> {
     match tree.node() {
-        PaneNodeRef::Leaf { pane_id } => (pane_id == target).then_some(available),
-        PaneNodeRef::Split {
+        LayoutNode::Leaf(pane_id) => (pane_id == target).then_some(available),
+        LayoutNode::Split {
             axis,
             ratio,
             first,
@@ -3542,7 +4134,7 @@ mod tests {
     ) {
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
-                view.split_pane(pane_id, axis, window, cx);
+                view.split_pane(PaneKey::from(pane_id), axis, window, cx);
             });
         });
         cx.run_until_parked();
@@ -3656,7 +4248,7 @@ mod tests {
 
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
-                view.split_pane(before.1, SplitAxis::Horizontal, window, cx);
+                view.split_pane(PaneKey::from(before.1), SplitAxis::Horizontal, window, cx);
                 view.remote_lifecycle.begin_child_launch();
             });
         });
@@ -3664,7 +4256,7 @@ mod tests {
 
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
-                view.split_pane(before.1, SplitAxis::Horizontal, window, cx);
+                view.split_pane(PaneKey::from(before.1), SplitAxis::Horizontal, window, cx);
                 view.disconnect_remote(1, cx).unwrap();
             });
         });
@@ -3808,7 +4400,7 @@ mod tests {
         split_test_pane(&view, PaneId::new(2), SplitAxis::Vertical, cx);
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
-                view.focus_pane(PaneId::new(1), cx);
+                view.focus_pane(PaneKey::from(PaneId::new(1)), cx);
                 view.focus(window, cx);
             });
         });
@@ -4054,7 +4646,7 @@ mod tests {
         });
 
         view.update(cx, |view, _| {
-            view.pane_attention.insert(PaneId::new(1), 2);
+            view.pane_attention.insert(PaneKey::from(PaneId::new(1)), 2);
         });
 
         assert_eq!(
@@ -4063,7 +4655,7 @@ mod tests {
         );
         assert_eq!(
             view.read_with(cx, |view, _| view.pane_attention.clone()),
-            BTreeMap::from([(PaneId::new(1), 2)])
+            BTreeMap::from([(PaneKey::from(PaneId::new(1)), 2)])
         );
     }
 
@@ -4150,7 +4742,7 @@ mod tests {
     ) -> [PaneId; N] {
         shortcuts.map(|shortcut| {
             cx.simulate_keystrokes(shortcut);
-            view.read_with(cx, |view, _| view.tab.focused_pane_id())
+            view.read_with(cx, |view, _| view.local_tab().focused_pane_id())
         })
     }
 
@@ -4245,7 +4837,10 @@ mod tests {
 
         let (_, view, records, cx) = caption_view(cx);
         view.update(cx, |view, cx| {
-            view.pane_captions.get_mut(&PaneId::new(1)).unwrap().name = "Primary shell".into();
+            view.pane_captions
+                .get_mut(&PaneKey::from(PaneId::new(1)))
+                .unwrap()
+                .name = "Primary shell".into();
             cx.notify();
         });
         let closes = Rc::new(RefCell::new(Vec::new()));
@@ -4267,7 +4862,10 @@ mod tests {
         assert_eq!(view.read_with(cx, |view, _| view.pane_count()), 2);
 
         view.update(cx, |view, cx| {
-            view.pane_captions.get_mut(&PaneId::new(2)).unwrap().name = "Second shell".into();
+            view.pane_captions
+                .get_mut(&PaneKey::from(PaneId::new(2)))
+                .unwrap()
+                .name = "Second shell".into();
             cx.notify();
         });
         let tree = A11yTree::read(cx);
@@ -4371,7 +4969,10 @@ mod tests {
 
         view.update(cx, |view, cx| {
             for (pane, title) in [(1, "Left upper"), (2, "Right"), (3, "Left lower")] {
-                view.pane_captions.get_mut(&PaneId::new(pane)).unwrap().name = title.into();
+                view.pane_captions
+                    .get_mut(&PaneKey::from(PaneId::new(pane)))
+                    .unwrap()
+                    .name = title.into();
             }
             cx.notify();
         });
@@ -4443,7 +5044,10 @@ mod tests {
         cx.update(|window, cx| view.update(cx, |view, cx| view.toggle_zoom(window, cx)));
         assert_eq!(A11yTree::read(cx).with_role("Terminal").len(), 3);
         let removed_caption = view.read_with(cx, |view, _| {
-            format!("Pane Caption, {}", view.pane_captions[&focused].name)
+            format!(
+                "Pane Caption, {}",
+                view.pane_captions[&PaneKey::from(focused)].name
+            )
         });
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
@@ -4577,7 +5181,7 @@ mod tests {
             cx.notify();
         });
         view.update(cx, |view, cx| {
-            view.pane_attention.insert(PaneId::new(1), 1);
+            view.pane_attention.insert(PaneKey::from(PaneId::new(1)), 1);
             cx.notify();
         });
         cx.run_until_parked();
@@ -4612,7 +5216,7 @@ mod tests {
             cx.notify();
         });
         view.update(cx, |view, cx| {
-            view.pane_attention.insert(PaneId::new(2), 1);
+            view.pane_attention.insert(PaneKey::from(PaneId::new(2)), 1);
             cx.notify();
         });
         cx.run_until_parked();
@@ -4667,7 +5271,10 @@ mod tests {
             .unwrap();
         cx.run_until_parked();
         let caption = view.read_with(cx, |view, _| {
-            let caption = view.pane_captions.get(&PaneId::new(1)).unwrap();
+            let caption = view
+                .pane_captions
+                .get(&PaneKey::from(PaneId::new(1)))
+                .unwrap();
             (
                 caption.directory.clone(),
                 caption.name.clone(),
@@ -4693,7 +5300,10 @@ mod tests {
             .unwrap();
         cx.run_until_parked();
         let caption = view.read_with(cx, |view, _| {
-            let caption = view.pane_captions.get(&PaneId::new(1)).unwrap();
+            let caption = view
+                .pane_captions
+                .get(&PaneKey::from(PaneId::new(1)))
+                .unwrap();
             (
                 caption.directory.clone(),
                 caption.name.clone(),
@@ -4774,7 +5384,10 @@ mod tests {
             cx.run_until_parked();
 
             let caption = view.read_with(cx, |view, _| {
-                let caption = view.pane_captions.get(&PaneId::new(1)).unwrap();
+                let caption = view
+                    .pane_captions
+                    .get(&PaneKey::from(PaneId::new(1)))
+                    .unwrap();
                 (
                     caption.origin.user.clone(),
                     caption.origin.host.clone(),
@@ -4879,7 +5492,7 @@ mod tests {
         cx.run_until_parked();
         view.update(cx, |view, cx| {
             view.pane_captions
-                .entry(PaneId::new(1))
+                .entry(PaneKey::from(PaneId::new(1)))
                 .or_default()
                 .repository = Some(RepositoryCaption {
                 glyph: HeadGlyph::Branch,
@@ -5055,7 +5668,10 @@ mod tests {
             (
                 super::super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx),
                 super::super::workspace_frame::base_surface(&appearance.colors),
-                view.read(cx).pane_bounds.get(&PaneId::new(1)).copied(),
+                view.read(cx)
+                    .pane_bounds
+                    .get(&PaneKey::from(PaneId::new(1)))
+                    .copied(),
             )
         });
         assert_eq!(
@@ -5251,7 +5867,7 @@ mod tests {
         cx.run_until_parked();
         view.update(cx, |view, cx| {
             view.pane_captions
-                .entry(PaneId::new(1))
+                .entry(PaneKey::from(PaneId::new(1)))
                 .or_default()
                 .repository = Some(RepositoryCaption {
                 glyph: HeadGlyph::Branch,
@@ -5268,7 +5884,9 @@ mod tests {
             cx.notify();
         });
         cx.run_until_parked();
-        view.update(cx, |view, cx| view.focus_pane(PaneId::new(1), cx));
+        view.update(cx, |view, cx| {
+            view.focus_pane(PaneKey::from(PaneId::new(1)), cx)
+        });
         crate::ui::settle_hover(cx);
         let mut branches = 0;
         let mut segments = 0;
@@ -5283,7 +5901,9 @@ mod tests {
             cx.run_until_parked();
             let other_pane = cx.debug_bounds("pane-surface-2").unwrap();
             cx.simulate_mouse_move(other_pane.center(), None, gpui::Modifiers::none());
-            view.update(cx, |view, cx| view.focus_pane(PaneId::new(2), cx));
+            view.update(cx, |view, cx| {
+                view.focus_pane(PaneKey::from(PaneId::new(2)), cx)
+            });
             crate::ui::settle_hover(cx);
             if let Some(segment) = cx.debug_bounds("pane-repository-1") {
                 let caption = cx.debug_bounds("pane-caption-1-unfocused").unwrap();
@@ -5293,7 +5913,9 @@ mod tests {
                     ));
                 }
             }
-            view.update(cx, |view, cx| view.focus_pane(PaneId::new(1), cx));
+            view.update(cx, |view, cx| {
+                view.focus_pane(PaneKey::from(PaneId::new(1)), cx)
+            });
             cx.run_until_parked();
             for _ in 0..12 {
                 cx.executor()
@@ -5355,7 +5977,7 @@ mod tests {
             view.update(cx, |view, cx| {
                 view.split_focused(SplitAxis::Horizontal, window, cx);
                 view.pane_captions
-                    .entry(PaneId::new(1))
+                    .entry(PaneKey::from(PaneId::new(1)))
                     .or_default()
                     .repository = Some(RepositoryCaption {
                     glyph: HeadGlyph::Branch,
@@ -5396,7 +6018,9 @@ mod tests {
         );
         assert_eq!(exposed_closes(cx), 1);
 
-        view.update(cx, |view, cx| view.focus_pane(PaneId::new(1), cx));
+        view.update(cx, |view, cx| {
+            view.focus_pane(PaneKey::from(PaneId::new(1)), cx)
+        });
         crate::ui::settle_hover(cx);
         let controls = cx.debug_bounds("pane-controls-1-full").unwrap();
         assert!(
@@ -5404,7 +6028,9 @@ mod tests {
             "the Focused Pane's controls push the Repository Status before them",
         );
 
-        view.update(cx, |view, cx| view.focus_pane(PaneId::new(2), cx));
+        view.update(cx, |view, cx| {
+            view.focus_pane(PaneKey::from(PaneId::new(2)), cx)
+        });
         crate::ui::settle_hover(cx);
         assert!((segment_right(cx) - trailing).abs() < px(0.5));
     }
@@ -5420,7 +6046,7 @@ mod tests {
             view.update(cx, |view, cx| {
                 view.split_focused(SplitAxis::Horizontal, window, cx);
                 view.pane_captions
-                    .entry(PaneId::new(1))
+                    .entry(PaneKey::from(PaneId::new(1)))
                     .or_default()
                     .repository = Some(RepositoryCaption {
                     glyph: HeadGlyph::Branch,
@@ -5439,7 +6065,9 @@ mod tests {
         cx.simulate_mouse_move(focused_pane.center(), None, gpui::Modifiers::none());
         crate::ui::settle_hover(cx);
 
-        view.update(cx, |view, cx| view.focus_pane(PaneId::new(1), cx));
+        view.update(cx, |view, cx| {
+            view.focus_pane(PaneKey::from(PaneId::new(1)), cx)
+        });
         cx.run_until_parked();
         let mut partly_revealed = false;
         for _ in 0..12 {
@@ -5484,7 +6112,7 @@ mod tests {
         let (_, view, _, cx) = caption_view(cx);
         view.update(cx, |view, cx| {
             view.pane_captions
-                .entry(PaneId::new(1))
+                .entry(PaneKey::from(PaneId::new(1)))
                 .or_default()
                 .repository = Some(RepositoryCaption {
                 glyph: HeadGlyph::Branch,
@@ -5528,7 +6156,7 @@ mod tests {
         let (_, view, _, cx) = caption_view(cx);
         view.update(cx, |view, cx| {
             view.pane_captions
-                .entry(PaneId::new(1))
+                .entry(PaneKey::from(PaneId::new(1)))
                 .or_default()
                 .repository = Some(RepositoryCaption {
                 glyph: HeadGlyph::Branch,
@@ -5859,7 +6487,7 @@ mod tests {
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
                 view.split_focused(SplitAxis::Horizontal, window, cx);
-                view.focus_pane(PaneId::new(1), cx);
+                view.focus_pane(PaneKey::from(PaneId::new(1)), cx);
             });
         });
         cx.run_until_parked();
@@ -5889,7 +6517,7 @@ mod tests {
             view.update(cx, |view, cx| {
                 view.focus(window, cx);
                 view.split_focused(SplitAxis::Horizontal, window, cx);
-                view.focus_pane(PaneId::new(1), cx);
+                view.focus_pane(PaneKey::from(PaneId::new(1)), cx);
                 view.focus(window, cx);
             });
         });
@@ -5904,8 +6532,8 @@ mod tests {
         });
         let accepted = cx.update(|window, cx| {
             view.update(cx, |view, cx| {
-                view.focus_pane(PaneId::new(2), cx);
-                view.focus_pane(PaneId::new(1), cx);
+                view.focus_pane(PaneKey::from(PaneId::new(2)), cx);
+                view.focus_pane(PaneKey::from(PaneId::new(1)), cx);
                 view.focus(window, cx);
                 view.native_service_target(origin).is_some_and(|terminal| {
                     terminal.update(cx, |terminal, cx| {
@@ -5947,7 +6575,7 @@ mod tests {
             view.update(cx, |view, cx| {
                 view.focus(window, cx);
                 view.split_focused(SplitAxis::Horizontal, window, cx);
-                view.focus_pane(PaneId::new(1), cx);
+                view.focus_pane(PaneKey::from(PaneId::new(1)), cx);
                 view.focus(window, cx);
             });
         });
@@ -6007,7 +6635,7 @@ mod tests {
         });
         cx.run_until_parked();
         let _first_pane = view.read_with(cx, |view, _| {
-            view.tab
+            view.local_tab()
                 .pane(PaneId::new(1))
                 .cloned()
                 .expect("the original Pane should still exist")
@@ -6015,7 +6643,7 @@ mod tests {
 
         let position = view.read_with(cx, |view, _| {
             view.pane_bounds
-                .get(&PaneId::new(1))
+                .get(&PaneKey::from(PaneId::new(1)))
                 .expect("the target Pane has measured bounds")
                 .center()
         });
@@ -6086,7 +6714,7 @@ mod tests {
 
         let first_pane = view.read_with(cx, |view, _| {
             view.pane_bounds
-                .get(&PaneId::new(1))
+                .get(&PaneKey::from(PaneId::new(1)))
                 .copied()
                 .expect("the first Pane bounds were not measured")
         });
@@ -6223,7 +6851,11 @@ mod tests {
             .unwrap();
         cx.run_until_parked();
 
-        let title = view.read_with(cx, |view, _| view.pane_titles.get(&PaneId::new(2)).cloned());
+        let title = view.read_with(cx, |view, _| {
+            view.pane_titles
+                .get(&PaneKey::from(PaneId::new(2)))
+                .cloned()
+        });
         assert_eq!(
             title.as_ref().map(|title| title.as_ref()),
             Some("Claude Code")
@@ -6262,8 +6894,8 @@ mod tests {
 
         let state = view.read_with(cx, |view, _| {
             (
-                view.tab.pane_count(),
-                view.tab.focused_pane_id(),
+                view.local_tab().pane_count(),
+                view.local_tab().focused_pane_id(),
                 records.dropped_session_ids(),
             )
         });
@@ -6407,7 +7039,7 @@ mod tests {
         cx.run_until_parked();
 
         let state = view.read_with(cx, |view, _| {
-            (view.tab.zoom_state(), records.pointer_count())
+            (view.local_tab().zoom_state(), records.pointer_count())
         });
         assert_eq!(state, (ZoomState::Restored, 0));
     }
@@ -6448,7 +7080,7 @@ mod tests {
 
         let state = cx.update(|window, cx| {
             let view = view.read(cx);
-            let ratio = match view.tab.root().node() {
+            let ratio = match view.local_tab().root().node() {
                 PaneNodeRef::Split { ratio, .. } => ratio,
                 PaneNodeRef::Leaf { .. } => 0.0,
             };
@@ -6599,7 +7231,7 @@ mod tests {
             cx.simulate_mouse_down(edge, MouseButton::Left, Modifiers::none());
             assert_eq!(
                 view.read_with(cx, |view, _| view.resizing_split_id),
-                Some(SplitId::new(1)),
+                Some(SplitKey::Local(SplitId::new(1))),
                 "the split handle did not own outer hitbox edge {edge:?}"
             );
             cx.simulate_mouse_up(edge, MouseButton::Left, Modifiers::none());
@@ -6680,7 +7312,7 @@ mod tests {
     }
 
     fn split_ratio(view: &Entity<TabView>, cx: &mut VisualTestContext) -> f32 {
-        view.read_with(cx, |view, _| match view.tab.root().node() {
+        view.read_with(cx, |view, _| match view.local_tab().root().node() {
             PaneNodeRef::Split { ratio, .. } => ratio,
             PaneNodeRef::Leaf { .. } => f32::NAN,
         })
@@ -6695,13 +7327,23 @@ mod tests {
         let (view, cx) = split_gap_view(cx);
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
-                view.split_pane(PaneId::new(1), SplitAxis::Horizontal, window, cx);
+                view.split_pane(
+                    PaneKey::from(PaneId::new(1)),
+                    SplitAxis::Horizontal,
+                    window,
+                    cx,
+                );
             });
         });
         cx.run_until_parked();
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
-                view.split_pane(PaneId::new(2), SplitAxis::Vertical, window, cx);
+                view.split_pane(
+                    PaneKey::from(PaneId::new(2)),
+                    SplitAxis::Vertical,
+                    window,
+                    cx,
+                );
             });
         });
         cx.run_until_parked();
@@ -6774,9 +7416,9 @@ mod tests {
             }
 
             let (minimum, expected) = view.read_with(cx, |view, _| {
-                let leaf = view.tab.minimum_pane_size();
+                let leaf = view.local_tab().minimum_pane_size();
                 (
-                    view.tab.minimum_size(gap).unwrap(),
+                    view.local_tab().minimum_size(gap).unwrap(),
                     (leaf.width() * 2.0 + gap, leaf.height() * 2.0 + gap),
                 )
             });
@@ -6880,7 +7522,7 @@ mod tests {
         cx.run_until_parked();
 
         assert_eq!(
-            view.read_with(cx, |view, _| view.tab.zoom_state()),
+            view.read_with(cx, |view, _| view.local_tab().zoom_state()),
             ZoomState::Zoomed(PaneId::new(2)),
             "the focused Pane should be zoomed before its rendered geometry is inspected"
         );
@@ -6910,7 +7552,8 @@ mod tests {
 
         let target = cx.update(|_, cx| {
             let gap = pane_gap(cx);
-            view.read(cx).split_target_size(PaneId::new(2), gap)
+            view.read(cx)
+                .split_target_size(PaneKey::from(PaneId::new(2)), gap)
         });
         let target = target.expect("a Zoomed Pane keeps its restored allocation");
         assert!(
@@ -6970,7 +7613,12 @@ mod tests {
         cx.run_until_parked();
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
-                view.split_pane(PaneId::new(1), SplitAxis::Vertical, window, cx)
+                view.split_pane(
+                    PaneKey::from(PaneId::new(1)),
+                    SplitAxis::Vertical,
+                    window,
+                    cx,
+                )
             })
         });
         report_current_directory(&records, 1, 2, "/srv/later", true);
@@ -7062,7 +7710,12 @@ mod tests {
         let (view, cx) = split_gap_view(cx);
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
-                view.split_pane(PaneId::new(1), SplitAxis::Horizontal, window, cx);
+                view.split_pane(
+                    PaneKey::from(PaneId::new(1)),
+                    SplitAxis::Horizontal,
+                    window,
+                    cx,
+                );
             });
         });
         cx.run_until_parked();
@@ -7121,14 +7774,14 @@ mod tests {
         view.read_with(cx, |view, cx| {
             let gap = pane_gap(cx);
             let mut splits = Vec::new();
-            collect(view.tab.root(), &mut splits);
+            collect(view.local_tab().root(), &mut splits);
             splits
                 .into_iter()
                 .map(|(split_id, axis, ratio)| {
-                    let bounds = view.split_bounds[&split_id];
+                    let bounds = view.split_bounds[&SplitKey::Local(split_id)];
                     let extent = split_content_extent(axis, bounds, gap).unwrap();
                     let range = view
-                        .tab
+                        .local_tab()
                         .split_ratio_range(split_id, pane_size(bounds).unwrap(), gap)
                         .unwrap();
                     let orientation = match axis {
@@ -7182,13 +7835,23 @@ mod tests {
         let (view, cx) = split_gap_view(cx);
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
-                view.split_pane(PaneId::new(1), SplitAxis::Horizontal, window, cx);
+                view.split_pane(
+                    PaneKey::from(PaneId::new(1)),
+                    SplitAxis::Horizontal,
+                    window,
+                    cx,
+                );
             });
         });
         cx.run_until_parked();
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
-                view.split_pane(PaneId::new(2), SplitAxis::Vertical, window, cx);
+                view.split_pane(
+                    PaneKey::from(PaneId::new(2)),
+                    SplitAxis::Vertical,
+                    window,
+                    cx,
+                );
             });
         });
         cx.run_until_parked();
