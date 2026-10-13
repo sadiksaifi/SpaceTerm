@@ -151,24 +151,8 @@ impl ActionIngress {
     }
 }
 
-/// Where the companion reads status. Whether a Client binding exists is a fact of the
-/// composition, not of any read, so an unbound companion never reads or polls.
-pub(crate) enum StatusSource {
-    /// The status-only facade over a backend bound to the companion's own Client.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "production has no companion Client binding until pairing supplies it"
-        )
-    )]
-    Bound(Arc<dyn StatusManagement>),
-    /// No companion Client binding is composed into this build. Pairing supplies it (C23).
-    Unbound,
-}
-
 pub(crate) struct CompanionDependencies {
-    pub(crate) status: StatusSource,
+    pub(crate) status: Arc<dyn StatusManagement>,
     pub(crate) native: Arc<dyn NativeStatus>,
     pub(crate) desktop: Arc<dyn DesktopActivation>,
     pub(crate) area: Box<dyn StatusArea + Send>,
@@ -193,7 +177,7 @@ enum Waited {
 }
 
 pub(crate) struct CompanionController {
-    source: StatusSource,
+    status: Arc<dyn StatusManagement>,
     native: Arc<dyn NativeStatus>,
     desktop: Arc<dyn DesktopActivation>,
     area: Box<dyn StatusArea + Send>,
@@ -208,7 +192,7 @@ pub(crate) struct CompanionController {
 impl CompanionController {
     pub(crate) fn new(dependencies: CompanionDependencies) -> Self {
         Self {
-            source: dependencies.status,
+            status: dependencies.status,
             native: dependencies.native,
             desktop: dependencies.desktop,
             area: dependencies.area,
@@ -223,18 +207,7 @@ impl CompanionController {
     /// Runs until the user quits or the status area is lost. Quitting drops this
     /// companion's own client handle and nothing else.
     pub(crate) async fn run(mut self) -> Result<(), CompanionFailure> {
-        let status = match &self.source {
-            StatusSource::Bound(status) => status.clone(),
-            StatusSource::Unbound => {
-                self.show(CompanionModel::unsupported())?;
-                // Unsupported has no timer and offers no Retry, so only Quit ends the wait.
-                loop {
-                    if let Waited::Quit = self.wait(0).await? {
-                        return Ok(());
-                    }
-                }
-            }
-        };
+        let status = self.status.clone();
         self.show(CompanionModel::connecting())?;
         let mut attempt = 0;
         loop {
@@ -317,8 +290,9 @@ impl CompanionController {
         }
     }
 
-    /// Shows a failure. Only an unreachable server consults the native observation, to
-    /// tell a deliberately stopped server from a lost one. Returns `None` on Quit.
+    /// Shows a failure. Only an unreachable server consults native discovery, which
+    /// distinguishes unavailable setup, a deliberate Stop and a lost connection.
+    /// Authentication failures keep their classification. Returns `None` on Quit.
     async fn disconnected(
         &mut self,
         failure: ManagementFailure,
@@ -331,6 +305,18 @@ impl CompanionController {
             match self.race(inspection).await? {
                 Raced::Quit => return Ok(None),
                 Raced::Done(Ok(Ok(observation))) => Some(observation),
+                Raced::Done(Ok(Err(native_failure)))
+                    if matches!(
+                        native_failure,
+                        ManagementFailure::NativeUnavailable
+                            | ManagementFailure::UnsupportedHost
+                            | ManagementFailure::StorageLocked
+                            | ManagementFailure::UnsafeNativeState
+                    ) =>
+                {
+                    self.show(CompanionModel::disconnected(native_failure, None))?;
+                    return Ok(Some(()));
+                }
                 Raced::Done(_) => None,
             }
         } else {
