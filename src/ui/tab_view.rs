@@ -483,6 +483,8 @@ pub(crate) struct TabView {
     pane_motion: PaneMotion,
     /// Where this frame draws each Pane, from `pane_motion`.
     pane_frames: PaneFrames,
+    /// How much wider than the Pane Layout this frame's stage is while it moves with the sidebar.
+    stage_stretch: Pixels,
     active: bool,
     focus_branch_blocker: Option<TerminalFocusBlocker>,
     native_service_hierarchy_generation: u64,
@@ -572,6 +574,7 @@ impl TabView {
             pane_drag: None,
             pane_motion: PaneMotion::default(),
             pane_frames: PaneFrames::default(),
+            stage_stretch: px(0.0),
             active: true,
             focus_branch_blocker: None,
             native_service_hierarchy_generation: 0,
@@ -633,6 +636,15 @@ impl TabView {
         )
         .detach();
         terminal
+    }
+
+    /// Draws the Panes across a stage `stretch` wider than the Pane Layout, which keeps its size
+    /// while the stage moves with the sidebar.
+    pub(crate) fn present_stage_stretch(&mut self, stretch: Pixels, cx: &mut Context<Self>) {
+        if self.stage_stretch != stretch {
+            self.stage_stretch = stretch;
+            cx.notify();
+        }
     }
 
     pub(crate) fn focus(&self, window: &mut Window, cx: &mut App) {
@@ -2202,8 +2214,10 @@ impl TabView {
             ),
         };
         // Moving Panes reach outside their laid-out places and across the gap between them. A
-        // raised Pane moves above the layout instead, which stays as it is.
-        let moving = self.pane_frames.moving && self.pane_frames.raised.is_none();
+        // raised Pane moves above the layout instead, which stays as it is unless the stage
+        // stretches it.
+        let moving = self.stage_stretch != px(0.0)
+            || (self.pane_frames.moving && self.pane_frames.raised.is_none());
         split
             .child(split_child("split-first", first, axis, ratio, !moving))
             .child(spacer.when(!moving, |spacer| {
@@ -2291,6 +2305,10 @@ impl Render for TabView {
         self.pane_frames = self.pane_motion.present(&places, window.scale_factor(), cx);
         if self.pane_frames.moving {
             window.request_animation_frame();
+        }
+        if let Some(layout_size) = self.pane_layout_size {
+            self.pane_frames
+                .stretch(px(layout_size.width()), self.stage_stretch);
         }
         // Removed Panes take the material of the Pane that keeps focus.
         let terminal_background = self
@@ -2392,7 +2410,8 @@ impl Render for TabView {
             .size_full()
             .min_w(px(minimum_size.width()))
             .min_h(px(minimum_size.height()))
-            .overflow_hidden()
+            // A stretched stage draws the Panes past the Pane Layout, and clips them itself.
+            .when(self.stage_stretch == px(0.0), |view| view.overflow_hidden())
             .font(appearance.typography.style(TextRole::Body).font.clone())
             // Leaves, corner fillets and Split spacers each own their single surface fill.
             .on_action(cx.listener(Self::on_split_right))

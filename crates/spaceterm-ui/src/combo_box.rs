@@ -932,6 +932,11 @@ impl ComboBoxTheme {
         }
     }
 
+    /// The side of an icon trigger's square target.
+    pub fn icon_trigger_size(self) -> Pixels {
+        self.metrics.icon_trigger_size
+    }
+
     /// Measures a custom trigger's outer width, including its themed borders.
     /// The caller's content width must include any caller-owned padding.
     pub fn custom_trigger_width(self, content_width: Pixels, window: &Window) -> Pixels {

@@ -104,6 +104,30 @@ impl Default for PaneFrames {
 }
 
 impl PaneFrames {
+    /// Draws the Panes of a Pane Layout `width` wide across a stage `by` wider, as when the stage
+    /// moves with the sidebar while the layout keeps its final size. Each Pane keeps its place, so
+    /// its Terminal keeps its size, and only its drawn surface stretches. The Panes reach past
+    /// their places, so they are moving.
+    pub(crate) fn stretch(&mut self, width: Pixels, by: Pixels) {
+        if by == Pixels::ZERO || width <= Pixels::ZERO {
+            return;
+        }
+        let scale = (width + by) / width;
+        let stretch = |bounds: Bounds<Pixels>| {
+            Bounds::from_corners(
+                point(bounds.left() * scale, bounds.top()),
+                point(bounds.right() * scale, bounds.bottom()),
+            )
+        };
+        for (_, frame) in self.frames.values_mut() {
+            *frame = stretch(*frame);
+        }
+        for place in &mut self.closing {
+            *place = stretch(*place);
+        }
+        self.moving = true;
+    }
+
     /// How far the Pane `pane_id` is drawn inside each edge of its laid-out place, in whole device
     /// pixels so that offsetting by one edge and back again by the sum of two keeps a size exact.
     /// Outward distances are negative.

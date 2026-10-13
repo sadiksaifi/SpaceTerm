@@ -6240,6 +6240,423 @@ fn workspace_popup_name_should_fit_at_fractional_scales(cx: &mut TestAppContext)
     );
 }
 
+/// Draws the frame 30ms into a sidebar motion and reports the sidebar, the stage, the Pane, and
+/// whether the collapsed Workspace identity shows.
+fn sidebar_motion_frame(
+    cx: &mut VisualTestContext,
+) -> (
+    Option<gpui::Bounds<Pixels>>,
+    gpui::Bounds<Pixels>,
+    gpui::Bounds<Pixels>,
+    bool,
+) {
+    cx.run_until_parked();
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(30));
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+    sidebar_presentation(cx)
+}
+
+fn sidebar_presentation(
+    cx: &mut VisualTestContext,
+) -> (
+    Option<gpui::Bounds<Pixels>>,
+    gpui::Bounds<Pixels>,
+    gpui::Bounds<Pixels>,
+    bool,
+) {
+    (
+        cx.debug_bounds("workspace-sidebar"),
+        // A moving stage is laid out where it rests and drawn where the sidebar leaves it.
+        cx.debug_bounds("tab-manager-moving-stage")
+            .or_else(|| cx.debug_bounds("tab-manager-content"))
+            .unwrap(),
+        cx.debug_bounds("pane-surface-1").unwrap(),
+        cx.debug_bounds("workspace-chip-label").is_some(),
+    )
+}
+
+#[gpui::test]
+fn toggling_the_sidebar_should_slide_it_while_the_terminal_resizes_once(cx: &mut TestAppContext) {
+    use crate::ui::drag_and_drop::AnimatePresence;
+
+    let (manager, records, cx) = workspace_manager(cx);
+    let resizes = || {
+        records
+            .commands()
+            .iter()
+            .filter(|call| matches!(call.command, RecordedCommand::Resize(_)))
+            .count()
+    };
+    let (Some(sidebar), stage, pane, false) = sidebar_presentation(cx) else {
+        panic!("the sidebar must start shown");
+    };
+    let before = resizes();
+    cx.update(|_, cx| cx.set_global(AnimatePresence));
+
+    cx.update(|window, cx| manager.update(cx, |manager, cx| manager.toggle_sidebar(window, cx)));
+    let hiding = sidebar_motion_frame(cx);
+    let hiding_resizes = resizes();
+    finish_slides(cx);
+    let hidden = sidebar_presentation(cx);
+    let hidden_resizes = resizes();
+    cx.update(|window, cx| manager.update(cx, |manager, cx| manager.toggle_sidebar(window, cx)));
+    let showing = sidebar_motion_frame(cx);
+    finish_slides(cx);
+    let shown = sidebar_presentation(cx);
+
+    // The collapsed Workspace name eases in as the sidebar slides out, and out as it slides in.
+    let (Some(hiding_sidebar), hiding_stage, hiding_pane, true) = hiding else {
+        panic!("the sidebar must still show beside the easing Workspace name: {hiding:?}");
+    };
+    assert!(
+        hiding_sidebar.left() < sidebar.left() && hiding_sidebar.right() > px(0.0),
+        "the sidebar must be sliding out: {hiding_sidebar:?} from {sidebar:?}"
+    );
+    assert!(
+        hiding_stage.left() < stage.left() && hiding_stage.left() > hidden.1.left(),
+        "the stage must follow the sidebar: {hiding_stage:?} between {stage:?} and {:?}",
+        hidden.1
+    );
+    assert_eq!(
+        (hiding_pane.right(), hiding_resizes),
+        (hidden.2.right(), hidden_resizes),
+        "the Pane must keep its trailing edge while the Terminal takes its final size when the \
+         motion starts"
+    );
+    assert_eq!((hidden.0, hidden.3), (None, true));
+    assert_eq!(hidden_resizes, before + 1, "the Terminal must resize once");
+
+    let (Some(showing_sidebar), showing_stage, showing_pane, true) = showing else {
+        panic!("the sidebar must slide in beside the easing Workspace name: {showing:?}");
+    };
+    assert!(
+        showing_sidebar.left() < sidebar.left() && showing_stage.left() < stage.left(),
+        "the sidebar and stage must be sliding in: {showing:?}"
+    );
+    assert_eq!(
+        showing_pane.right(),
+        pane.right(),
+        "the Pane must keep its trailing edge while the sidebar slides in"
+    );
+    assert_eq!(shown, (Some(sidebar), stage, pane, false));
+    assert_eq!(resizes(), before + 2);
+}
+
+#[gpui::test]
+fn every_frame_of_a_sidebar_toggle_should_keep_the_terminal_size(cx: &mut TestAppContext) {
+    toggle_the_sidebar_frame_by_frame(None, None, false, cx);
+}
+
+#[gpui::test]
+fn every_frame_of_a_sidebar_toggle_should_keep_the_terminal_size_beside_a_fractional_width(
+    cx: &mut TestAppContext,
+) {
+    toggle_the_sidebar_frame_by_frame(None, Some(px(251.3)), false, cx);
+}
+
+#[gpui::test]
+fn every_frame_of_a_sidebar_toggle_should_keep_the_terminal_size_at_a_fractional_scale(
+    cx: &mut TestAppContext,
+) {
+    toggle_the_sidebar_frame_by_frame(Some(1.25), Some(px(251.3)), false, cx);
+}
+
+#[gpui::test]
+fn every_frame_of_a_sidebar_toggle_should_keep_split_terminal_sizes_at_a_fractional_scale(
+    cx: &mut TestAppContext,
+) {
+    toggle_the_sidebar_frame_by_frame(Some(1.75), Some(px(251.3)), true, cx);
+}
+
+/// Toggles the sidebar twice, drawing every frame, and asserts each Terminal resizes once per
+/// toggle.
+fn toggle_the_sidebar_frame_by_frame(
+    scale: Option<f32>,
+    sidebar_width: Option<Pixels>,
+    split: bool,
+    cx: &mut TestAppContext,
+) {
+    use crate::ui::drag_and_drop::AnimatePresence;
+
+    let (manager, records, cx) = workspace_manager(cx);
+    if let Some(scale) = scale {
+        cx.simulate_scale_factor_change(scale);
+    }
+    // A width where the stage's fractional edges round across a Terminal cell boundary.
+    cx.simulate_resize(gpui::size(px(804.0), px(600.0)));
+    if let Some(width) = sidebar_width {
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.sidebar.update(cx, |sidebar, cx| {
+                    sidebar.set_layout(true, width, window, cx)
+                })
+            })
+        });
+    }
+    if split {
+        cx.simulate_keystrokes("cmd-d");
+    }
+    cx.run_until_parked();
+    let resizes = || {
+        records
+            .commands()
+            .into_iter()
+            .filter_map(|call| match call.command {
+                RecordedCommand::Resize(geometry) => Some(geometry),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let before = resizes().len();
+    cx.update(|_, cx| cx.set_global(AnimatePresence));
+
+    for _ in 0..2 {
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| manager.toggle_sidebar(window, cx))
+        });
+        cx.run_until_parked();
+        for _ in 0..60 {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(8));
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+            cx.run_until_parked();
+        }
+    }
+
+    let after = resizes();
+    let terminals = if split { 2 } else { 1 };
+    assert_eq!(
+        after.len(),
+        before + 2 * terminals,
+        "each Terminal must resize once per toggle at scale {scale:?} beside a {sidebar_width:?} \
+         sidebar: {:?}",
+        &after[before..]
+    );
+}
+
+#[gpui::test]
+fn a_closing_sidebar_should_not_take_input(cx: &mut TestAppContext) {
+    use crate::ui::drag_and_drop::AnimatePresence;
+
+    let (manager, _records, cx) = workspace_manager(cx);
+    cx.update(|_, cx| cx.set_global(AnimatePresence));
+    cx.update(|window, cx| manager.update(cx, |manager, cx| manager.toggle_sidebar(window, cx)));
+    sidebar_motion_frame(cx);
+    let row = cx
+        .debug_bounds("workspace-row-1-active")
+        .expect("the closing sidebar still draws its rows");
+    let position = point(row.right() - px(12.0), row.center().y);
+    assert!(
+        position.x > px(0.0),
+        "the row must still be on screen: {row:?}"
+    );
+
+    cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_down(position, MouseButton::Right, Modifiers::none());
+    cx.simulate_mouse_up(position, MouseButton::Right, Modifiers::none());
+    cx.run_until_parked();
+    let menu = cx.debug_bounds("workspace-menu-row-rename");
+    finish_slides(cx);
+
+    let focus = cx.update(|window, cx| {
+        let manager = manager.read(cx);
+        (
+            manager.sidebar.read(cx).is_focused(window),
+            manager
+                .workspaces
+                .active_workspace()
+                .payload()
+                .read(cx)
+                .focused_terminal_is_focused(window, cx),
+        )
+    });
+    assert_eq!(
+        (menu, focus),
+        (None, (false, true)),
+        "a press on a closing sidebar must reach neither its rows nor its menu"
+    );
+}
+
+#[gpui::test]
+fn a_toggle_during_a_resize_drag_should_end_the_drag(cx: &mut TestAppContext) {
+    use crate::ui::drag_and_drop::AnimatePresence;
+
+    let (manager, _records, cx) = workspace_manager(cx);
+    cx.update(|_, cx| cx.set_global(AnimatePresence));
+    let start = cx
+        .debug_bounds("workspace-sidebar-resize-handle-hitbox")
+        .expect("the shown sidebar has a resize handle")
+        .center();
+    cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+    cx.update(|window, cx| manager.update(cx, |manager, cx| manager.toggle_sidebar(window, cx)));
+    sidebar_motion_frame(cx);
+
+    cx.simulate_mouse_move(
+        point(start.x + px(30.0), start.y),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    finish_slides(cx);
+    let during = manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).layout().visible);
+    cx.simulate_mouse_up(
+        point(start.x + px(30.0), start.y),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    cx.run_until_parked();
+    let after = manager.read_with(cx, |manager, cx| {
+        let sidebar = manager.sidebar.read(cx);
+        (sidebar.layout().visible, sidebar.is_resizing())
+    });
+
+    assert_eq!(
+        (during, after),
+        (false, (false, false)),
+        "moving the held pointer must not undo the toggle"
+    );
+}
+
+#[gpui::test]
+fn split_panes_should_stretch_across_the_stage_while_the_sidebar_slides(cx: &mut TestAppContext) {
+    use crate::ui::drag_and_drop::AnimatePresence;
+
+    let (manager, records, cx) = workspace_manager(cx);
+    cx.simulate_keystrokes("cmd-d");
+    cx.run_until_parked();
+    let resizes = || {
+        records
+            .commands()
+            .iter()
+            .filter(|call| matches!(call.command, RecordedCommand::Resize(_)))
+            .count()
+    };
+    let panes = |cx: &mut VisualTestContext| {
+        ["pane-surface-1", "pane-surface-2"].map(|selector| cx.debug_bounds(selector).unwrap())
+    };
+    let shown = panes(cx);
+    let before = resizes();
+    cx.update(|_, cx| cx.set_global(AnimatePresence));
+
+    cx.update(|window, cx| manager.update(cx, |manager, cx| manager.toggle_sidebar(window, cx)));
+    let (_, hiding_stage, _, _) = sidebar_motion_frame(cx);
+    let hiding = panes(cx);
+    finish_slides(cx);
+    let hidden = panes(cx);
+
+    assert!(
+        hiding[0].left() < shown[0].left() && hiding[0].left() > hidden[0].left(),
+        "the leading Pane must move with the stage {hiding_stage:?}: {hiding:?}"
+    );
+    assert!(
+        hiding[0].size.width > shown[0].size.width && hiding[0].size.width < hidden[0].size.width,
+        "the leading Pane must widen toward its final width: {hiding:?} from {shown:?} to \
+         {hidden:?}"
+    );
+    assert_eq!(
+        hiding[1].right(),
+        hidden[1].right(),
+        "the trailing Pane must keep its trailing edge"
+    );
+    assert_eq!(resizes(), before + 2, "each Terminal must resize once");
+}
+
+#[gpui::test]
+fn an_unzoom_while_the_sidebar_slides_should_not_clip_the_stretched_panes(cx: &mut TestAppContext) {
+    use crate::ui::drag_and_drop::AnimatePresence;
+
+    let (manager, _records, cx) = workspace_manager(cx);
+    cx.update(|window, cx| manager.update(cx, |manager, cx| manager.toggle_sidebar(window, cx)));
+    cx.simulate_keystrokes("cmd-d cmd-shift-enter");
+    cx.run_until_parked();
+    cx.update(|_, cx| cx.set_global(AnimatePresence));
+
+    let frame = |cx: &mut VisualTestContext| {
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(30));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+    };
+    cx.update(|window, cx| manager.update(cx, |manager, cx| manager.toggle_sidebar(window, cx)));
+    frame(cx);
+    cx.simulate_keystrokes("cmd-shift-enter");
+    frame(cx);
+
+    for selector in ["pane-surface-1", "pane-surface-2"] {
+        let surface = cx.debug_bounds(selector).unwrap();
+        cx.update(|window, _| {
+            let surface = surface.scale(window.scale_factor());
+            // The surface's fill and rim are quads at its bounds, each clipped to the part it
+            // draws. Together they reach both sides unless something else clips them.
+            let shown = window
+                .painted_quads()
+                .into_iter()
+                .filter(|quad| quad.bounds == surface)
+                .map(|quad| quad.bounds.intersect(&quad.content_mask.bounds))
+                .filter(|shown| shown.size.width.0 > 0.0 && shown.size.height.0 > 0.0)
+                .map(|shown| (shown.left(), shown.right()))
+                .reduce(|(left, right), (l, r)| (left.min(l), right.max(r)))
+                .expect("the Pane surface should be painted");
+            assert_eq!(
+                shown,
+                (surface.left(), surface.right()),
+                "{selector} must not be clipped to its place while the stage stretches"
+            );
+        });
+    }
+}
+
+#[gpui::test]
+fn the_workspace_glyph_should_glide_while_the_sidebar_slides(cx: &mut TestAppContext) {
+    use crate::ui::drag_and_drop::AnimatePresence;
+
+    let (manager, _records, cx) = workspace_manager(cx);
+    let glyph = |cx: &mut VisualTestContext| {
+        cx.debug_bounds("workspace-switcher-icon")
+            .expect("the Workspace glyph shows in every frame")
+            .left()
+    };
+    let expanded = glyph(cx);
+    cx.update(|_, cx| cx.set_global(AnimatePresence));
+
+    for hidden in [true, false] {
+        let from = glyph(cx);
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| manager.toggle_sidebar(window, cx))
+        });
+        cx.run_until_parked();
+        let mut frames = vec![from];
+        let mut labelled = Vec::new();
+        for _ in 0..60 {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(8));
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+            cx.run_until_parked();
+            frames.push(glyph(cx));
+            labelled.push(cx.debug_bounds("workspace-chip-label").is_some());
+        }
+        let to = *frames.last().unwrap();
+        let travel = (to - from).abs();
+        let largest_step = frames
+            .windows(2)
+            .map(|pair| (pair[1] - pair[0]).abs())
+            .fold(px(0.0), Pixels::max);
+        assert!(
+            travel > px(0.0) && largest_step < travel / 4.0,
+            "the glyph must glide from {from:?} to {to:?}, not jump: {frames:?}"
+        );
+        assert_eq!(
+            (labelled[0], *labelled.last().unwrap()),
+            (true, hidden),
+            "the Workspace name must ease in or out as the sidebar moves: {labelled:?}"
+        );
+    }
+    assert_eq!(glyph(cx), expanded);
+}
+
 /// The Workspace identity keeps its glyph in both sidebar states.
 #[gpui::test]
 fn workspace_identity_should_keep_its_icon_when_the_sidebar_is_hidden(cx: &mut TestAppContext) {
@@ -12433,6 +12850,39 @@ fn sidebar_splitter_range(cx: &mut VisualTestContext) -> (f64, f64, f64) {
         number("min_numeric_value"),
         number("max_numeric_value"),
     )
+}
+
+#[gpui::test]
+fn an_opening_sidebar_should_publish_its_resting_width(cx: &mut TestAppContext) {
+    use crate::ui::drag_and_drop::AnimatePresence;
+
+    let (manager, _records, cx) = workspace_manager(cx);
+    let width = |cx: &mut VisualTestContext| {
+        manager.read_with(cx, |manager, cx| {
+            f64::from(f32::from(manager.sidebar.read(cx).layout().width))
+        })
+    };
+    cx.simulate_keystrokes("cmd-b");
+    cx.run_until_parked();
+    cx.update(|_, cx| cx.set_global(AnimatePresence));
+    cx.update(|window, cx| manager.update(cx, |manager, cx| manager.toggle_sidebar(window, cx)));
+    sidebar_motion_frame(cx);
+    let rest = width(cx);
+
+    let published = sidebar_splitter_range(cx).0;
+    let tree = spaceterm_ui::a11y_testing::A11yTree::read(cx);
+    spaceterm_ui::a11y_testing::perform(
+        cx,
+        tree.node("Resize Workspace sidebar"),
+        gpui::accesskit::Action::Increment,
+    );
+    cx.run_until_parked();
+
+    assert_eq!(
+        published, rest,
+        "the splitter must publish the sidebar's model width"
+    );
+    assert!(width(cx) > rest, "Increment must widen the sidebar");
 }
 
 #[gpui::test]
