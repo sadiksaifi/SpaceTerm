@@ -38,6 +38,7 @@ pub(crate) enum Failure {
     Unsafe,
     Unavailable,
     Indeterminate,
+    Busy,
 }
 
 impl From<SecureFilesystemError> for Failure {
@@ -59,6 +60,13 @@ pub(crate) struct Directory(
     std::sync::Arc<unix_secure_filesystem::InitializationAuthority>,
 );
 
+pub(crate) struct Lease(unix_secure_filesystem::PrivateLease);
+impl Lease {
+    pub(crate) fn verify(&self) -> Result<(), Failure> {
+        self.0.verify()
+    }
+}
+
 pub(crate) struct Snapshot {
     pub(crate) bytes: Zeroizing<Vec<u8>>,
     pub(crate) identity: SecureEntryIdentity,
@@ -75,6 +83,25 @@ impl Directory {
                 Ok(directory)
             })
             .transpose()
+    }
+
+    // This authority remains closed to ordinary reads and writes. Only the
+    // explicit original-phase recovery operations may use its retained descriptor.
+    pub(crate) fn open_for_recovery(path: &Path) -> Result<Option<Self>, Failure> {
+        unix_secure_filesystem::admit_existing(path)?
+            .map(|(handle, authority)| Self(handle, std::sync::Arc::new(authority)))
+            .map_or(Ok(None), |directory| {
+                directory.1.verify()?;
+                Ok(Some(directory))
+            })
+    }
+    pub(crate) fn read_for_recovery(
+        &self,
+        name: &str,
+        maximum: usize,
+    ) -> Result<Option<Snapshot>, Failure> {
+        self.1.verify()?;
+        unix_secure_filesystem::read_for_recovery(&self.0, OsStr::new(name), maximum)
     }
 
     pub(crate) fn create(path: &Path) -> Result<Self, Failure> {
@@ -129,8 +156,14 @@ impl Directory {
         self.verify()?;
         let mut nonce = [0; 16];
         getrandom::fill(&mut nonce).map_err(|_| Failure::Unavailable)?;
-        let mut mutation =
-            unix_secure_filesystem::begin_publication(&self.0, OsStr::new(name), bytes)?;
+        let mut mutation = unix_secure_filesystem::begin_publication(
+            &self.0,
+            OsStr::new(name),
+            bytes,
+            expected.map(|snapshot| &snapshot.identity),
+        )?;
+        #[cfg(feature = "test-support")]
+        test_support::publication_before_effect()?;
         let prepared =
             UnixSecureFilesystem.prepare_private_file(&self.0, OsStr::new(name), bytes, nonce)?;
         unix_secure_filesystem::verify_prepared_acl(&prepared)?;
@@ -160,12 +193,57 @@ impl Directory {
                 })
             }
             SecureCommitOutcome::Conflict => {
-                // The shared commit proved that no public entry changed.
-                unix_secure_filesystem::finish_mutation(&mut mutation)?;
+                // Record the proven no-effect result before checkpoint completion.
+                unix_secure_filesystem::abort_publication(&mut mutation)?;
                 Err(Failure::Conflict)
             }
             SecureCommitOutcome::CommittedButUnsynced => Err(Failure::Indeterminate),
         }
+    }
+
+    pub(crate) fn lease(&self, name: &str) -> Result<Lease, Failure> {
+        self.verify()?;
+        unix_secure_filesystem::private_lease(&self.0, OsStr::new(name)).map(Lease)
+    }
+
+    // Explicit recovery is never invoked by read admission. The validator checks
+    // original application bindings before a fresh publication establishes durability.
+    pub(crate) fn reconcile_publication(
+        path: &Path,
+        name: &str,
+        maximum: usize,
+        validate: impl FnOnce(&[u8]) -> Result<(), Failure>,
+    ) -> Result<(), Failure> {
+        unix_secure_filesystem::reconcile_publication(path, OsStr::new(name), maximum, validate)
+    }
+
+    pub(crate) fn reconcile_retained_publication(
+        &self,
+        name: &str,
+        maximum: usize,
+        validate: impl FnOnce(&[u8]) -> Result<(), Failure>,
+    ) -> Result<(), Failure> {
+        self.1.verify()?;
+        unix_secure_filesystem::reconcile_retained_publication(
+            &self.0,
+            OsStr::new(name),
+            maximum,
+            validate,
+        )?;
+        self.1.verify()
+    }
+
+    pub(crate) fn reconcile_initialization(path: &Path) -> Result<(), Failure> {
+        unix_secure_filesystem::reconcile_initialization(path)
+    }
+    pub(crate) fn reconcile_removal(
+        &self,
+        name: &str,
+        maximum: usize,
+        validate: impl FnOnce(&[u8]) -> Result<(), Failure>,
+    ) -> Result<(), Failure> {
+        self.1.verify()?;
+        unix_secure_filesystem::reconcile_removal(&self.0, OsStr::new(name), maximum, validate)
     }
 
     pub(crate) fn remove(&self, name: &str, expected: &Snapshot) -> Result<(), Failure> {
@@ -187,8 +265,10 @@ pub(crate) mod test_support {
 
     thread_local! {
         static AFTER_PUBLICATION: RefCell<Option<Box<dyn FnOnce()>>> = RefCell::new(None);
+        static FAIL_PUBLICATION_BEFORE_EFFECT: RefCell<bool> = const { RefCell::new(false) };
         static FAIL_REMOVAL_SYNC: RefCell<bool> = const { RefCell::new(false) };
         static FAIL_PUBLICATION_DURABILITY: RefCell<bool> = const { RefCell::new(false) };
+        static FAIL_CREATION_BEFORE_EFFECT: RefCell<bool> = const { RefCell::new(false) };
         static FAIL_CREATION_PARENT_SYNC: RefCell<bool> = const { RefCell::new(false) };
         static FAIL_MUTATION_COMPLETION_SYNC: RefCell<bool> = const { RefCell::new(false) };
         static FAIL_COMPLETION_AFTER_SYNC: RefCell<bool> = const { RefCell::new(false) };
@@ -264,6 +344,16 @@ pub(crate) mod test_support {
         }
     }
 
+    pub(crate) fn fail_next_publication_before_effect() {
+        FAIL_PUBLICATION_BEFORE_EFFECT.with(|slot| *slot.borrow_mut() = true);
+    }
+    pub(super) fn publication_before_effect() -> Result<(), super::Failure> {
+        if FAIL_PUBLICATION_BEFORE_EFFECT.with(|slot| slot.replace(false)) {
+            Err(super::Failure::Indeterminate)
+        } else {
+            Ok(())
+        }
+    }
     pub(crate) fn fail_next_removal_sync() {
         FAIL_REMOVAL_SYNC.with(|slot| *slot.borrow_mut() = true);
     }
@@ -274,6 +364,17 @@ pub(crate) mod test_support {
 
     pub(super) fn publication_unsynced() -> bool {
         FAIL_PUBLICATION_DURABILITY.with(|slot| slot.replace(false))
+    }
+
+    pub(crate) fn fail_next_creation_before_effect() {
+        FAIL_CREATION_BEFORE_EFFECT.with(|slot| *slot.borrow_mut() = true);
+    }
+    pub(super) fn creation_before_effect() -> Result<(), super::Failure> {
+        if FAIL_CREATION_BEFORE_EFFECT.with(|slot| slot.replace(false)) {
+            Err(super::Failure::Indeterminate)
+        } else {
+            Ok(())
+        }
     }
 
     pub(crate) fn fail_next_creation_parent_sync() {

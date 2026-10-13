@@ -624,3 +624,190 @@ fn retained_key_store_revalidates_ancestor_initialization_fences() {
         ServiceFailure::Indeterminate
     );
 }
+
+#[test]
+fn explicit_original_secret_removal_reconciliation_confirms_absence_after_reconstruction() {
+    let (_root, fixture) = fixture();
+    let registration = fixture.initialize(DesiredServerState::Stopped).unwrap();
+    let store = ServerKeyStore::open(&registration).unwrap();
+    let id = ticket(registration.server_pin().identity, 51);
+    let version = store.create_pairing_secret(id.clone(), secret()).unwrap();
+    spaceterm_host::server_keys::test_support::fail_next_removal_sync();
+    assert_eq!(
+        store.remove_pairing_secret(id.clone(), version),
+        Err(KeyStoreFailure::Indeterminate)
+    );
+    let reopened = ServerKeyStore::open(&registration).unwrap_err();
+    assert_eq!(reopened, KeyStoreFailure::Indeterminate);
+    drop(store);
+    drop(registration);
+    fixture
+        .reopen()
+        .resolve_pairing_secret_removal(id.clone())
+        .unwrap();
+    let registration = fixture.reopen().discover().unwrap().unwrap();
+    let reopened = ServerKeyStore::open(&registration).unwrap();
+    assert!(reopened.load_pairing_secret(id.clone()).unwrap().is_none());
+    let new = PairingSecret::new(Zeroizing::new(b"new secret".to_vec())).unwrap();
+    reopened.create_pairing_secret(id.clone(), new).unwrap();
+    assert_eq!(
+        fixture.reopen().resolve_pairing_secret_removal(id.clone()),
+        Err(ServiceFailure::RequestConflict)
+    );
+    assert_eq!(
+        reopened
+            .load_pairing_secret(id)
+            .unwrap()
+            .unwrap()
+            .0
+            .with_bytes(|bytes| bytes.to_vec()),
+        b"new secret"
+    );
+}
+
+#[test]
+fn wrong_ticket_cannot_reconcile_another_original_pending_removal() {
+    let (_root, fixture) = fixture();
+    let registration = fixture.initialize(DesiredServerState::Stopped).unwrap();
+    let store = ServerKeyStore::open(&registration).unwrap();
+    let id = ticket(registration.server_pin().identity, 52);
+    let version = store.create_pairing_secret(id.clone(), secret()).unwrap();
+    spaceterm_host::server_keys::test_support::fail_next_removal_sync();
+    assert_eq!(
+        store.remove_pairing_secret(id.clone(), version),
+        Err(KeyStoreFailure::Indeterminate)
+    );
+    let wrong = ticket(registration.server_pin().identity, 53);
+    assert_eq!(
+        store.resolve_pairing_secret_removal(wrong),
+        Err(KeyStoreFailure::Conflict)
+    );
+    assert!(matches!(
+        store.load_pairing_secret(id.clone()),
+        Err(KeyStoreFailure::Indeterminate)
+    ));
+    store.resolve_pairing_secret_removal(id.clone()).unwrap();
+    assert!(store.load_pairing_secret(id).unwrap().is_none());
+}
+
+#[test]
+fn initial_install_reconciles_original_identity_publication_without_replacement_material() {
+    for before_effect in [false, true] {
+        let (_root, fixture) = fixture();
+        let (store, permit) = fixture.identity_scope().unwrap();
+        if before_effect {
+            spaceterm_host::account_service::test_support::fail_next_publication_before_effect();
+        } else {
+            spaceterm_host::account_service::test_support::fail_next_mutation_completion_sync();
+        }
+        assert_eq!(
+            store.create_identity(permit).unwrap_err(),
+            KeyStoreFailure::Indeterminate
+        );
+        drop(store);
+        let proposal_or_identity = fs::read(fixture.data_directory().join(if before_effect {
+            ".account-proposal"
+        } else {
+            "identity"
+        }))
+        .unwrap();
+        let original = &proposal_or_identity[proposal_or_identity.len() - 60..];
+        let registration = fixture.initialize(DesiredServerState::Stopped).unwrap();
+        assert_eq!(
+            fs::read(fixture.data_directory().join("identity")).unwrap(),
+            original
+        );
+        assert_eq!(
+            ServerKeyStore::open(&registration)
+                .unwrap()
+                .load_identity(registration.server_pin())
+                .unwrap()
+                .pin(),
+            registration.server_pin()
+        );
+    }
+}
+
+#[test]
+fn original_secret_publication_recovers_exact_ticket_after_provider_reconstruction() {
+    for fault in 0..3 {
+        let (_root, fixture) = fixture();
+        let registration = fixture.initialize(DesiredServerState::Stopped).unwrap();
+        let pin = registration.server_pin();
+        let store = ServerKeyStore::open(&registration).unwrap();
+        let id = ticket(pin.identity, 61);
+        match fault {
+            0 => {
+                spaceterm_host::account_service::test_support::fail_next_publication_before_effect()
+            }
+            1 => {
+                spaceterm_host::account_service::test_support::fail_next_mutation_completion_sync()
+            }
+            _ => spaceterm_host::server_keys::test_support::fail_next_publication_durability(),
+        }
+        assert_eq!(
+            store
+                .create_pairing_secret(id.clone(), secret())
+                .unwrap_err(),
+            KeyStoreFailure::Indeterminate
+        );
+        drop(store);
+        drop(registration);
+        assert_eq!(
+            fixture.reopen().discover().unwrap_err(),
+            ServiceFailure::Indeterminate
+        );
+        assert!(
+            fixture
+                .reopen()
+                .resolve_pairing_secret_publication(ticket(pin.identity, 62))
+                .is_err()
+        );
+        assert_eq!(
+            fixture.reopen().discover().unwrap_err(),
+            ServiceFailure::Indeterminate
+        );
+        fixture
+            .reopen()
+            .resolve_pairing_secret_publication(id.clone())
+            .unwrap();
+        let registration = fixture.reopen().discover().unwrap().unwrap();
+        let store = ServerKeyStore::open(&registration).unwrap();
+        let (body, version) = store.load_pairing_secret(id.clone()).unwrap().unwrap();
+        assert_eq!(
+            body.with_bytes(|bytes| bytes.to_vec()),
+            secret().with_bytes(|bytes| bytes.to_vec())
+        );
+        assert_eq!(
+            fixture
+                .reopen()
+                .resolve_pairing_secret_publication(id.clone()),
+            Err(ServiceFailure::RequestConflict)
+        );
+        store.remove_pairing_secret(id, version).unwrap();
+    }
+}
+
+#[test]
+fn retained_key_provider_recovers_only_its_original_secret_publication() {
+    let (_root, fixture) = fixture();
+    let registration = fixture.initialize(DesiredServerState::Stopped).unwrap();
+    let store = ServerKeyStore::open(&registration).unwrap();
+    let id = ticket(registration.server_pin().identity, 63);
+    spaceterm_host::server_keys::test_support::fail_next_publication_durability();
+    assert_eq!(
+        store
+            .create_pairing_secret(id.clone(), secret())
+            .unwrap_err(),
+        KeyStoreFailure::Indeterminate
+    );
+    assert!(
+        store
+            .resolve_identity_publication(registration.server_pin())
+            .is_err()
+    );
+    store
+        .resolve_pairing_secret_publication(id.clone())
+        .unwrap();
+    assert!(store.load_pairing_secret(id).unwrap().is_some());
+}

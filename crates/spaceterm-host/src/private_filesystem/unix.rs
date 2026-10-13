@@ -33,14 +33,22 @@ pub(super) fn read_zeroizing(
     let _transaction = lock_private_directory(&directory)?;
     verify_directory_entry(&directory)?;
     verify_acl(&directory.file)?;
+    if admission.is_none() && file_version_at(&directory.file, name)?.is_some() {
+        return Err(super::Failure::Indeterminate);
+    }
+    read_unfenced(&directory, name, maximum)
+}
+
+fn read_unfenced(
+    directory: &NativeDirectory,
+    name: &OsStr,
+    maximum: usize,
+) -> Result<Option<super::Snapshot>, super::Failure> {
     let file = match open_file_at(&directory.file, name, libc::O_RDONLY | libc::O_NONBLOCK, 0) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(classify(error).into()),
     };
-    if admission.is_none() {
-        return Err(super::Failure::Indeterminate);
-    }
     let version = private_file_version(&file.metadata().map_err(classify)?)?;
     verify_acl(&file)?;
     let mut bytes = zeroize::Zeroizing::new(Vec::new());
@@ -52,7 +60,7 @@ pub(super) fn read_zeroizing(
     if version != after {
         return Err(super::Failure::Unsafe);
     }
-    verify_directory_entry(&directory)?;
+    verify_directory_entry(directory)?;
     verify_acl(&file)?;
     if file_version_at(&directory.file, name)? != Some(version) {
         return Err(super::Failure::Unsafe);
@@ -136,6 +144,8 @@ pub(super) fn create_without_repair(path: &Path) -> Result<SecureDirectory, supe
                     &initialization_name(name),
                     mutation_record(3, name, [0; 32])?,
                 )?;
+                #[cfg(feature = "test-support")]
+                super::test_support::creation_before_effect()?;
                 match create_directory_at(&parent, name) {
                     Ok(()) => {
                         let file = open_directory_at(&parent, name)
@@ -259,6 +269,9 @@ impl MutationGuard {
         if record[5] != 1 {
             return Err(super::Failure::Indeterminate);
         }
+        if record[4] == 2 {
+            remove_proposal(&self.parent, &record)?;
+        }
         // Pending remains unchanged. Prepare and synchronize a separate checkpoint
         // before making it visible. Completion I/O failure cannot expose Clean in
         // the original fence, and needs no best-effort rollback of that fence.
@@ -340,10 +353,12 @@ fn read_phase(file: &File) -> Result<[u8; MUTATION_BYTES], super::Failure> {
     let mut record = [0; MUTATION_BYTES];
     if file.metadata().map_err(classify)?.len() != MUTATION_BYTES as u64
         || file.read_exact_at(&mut record, 0).is_err()
-        || record[..5] != *b"STMF\x01"
+        || record[..4] != *b"STMF"
+        || !(1..=2).contains(&record[4])
         || record[5] > 1
         || !(1..=3).contains(&record[6])
-        || record[7] != 0
+        || (record[4] == 1 && record[7] != 0)
+        || (record[4] == 2 && (record[6] != 1 || record[7] > 2))
         || record[8..24] == [0; 16]
     {
         return Err(super::Failure::Indeterminate);
@@ -503,14 +518,108 @@ pub(super) fn begin_publication(
     handle: &SecureDirectory,
     name: &OsStr,
     bytes: &[u8],
+    expected: Option<&SecureEntryIdentity>,
 ) -> Result<MutationGuard, super::Failure> {
+    if bytes.len() > 256 * 1024 || name.as_bytes().len() > 255 {
+        return Err(super::Failure::LimitExceeded);
+    }
     let directory = directory(handle)?;
     verify_directory_entry(&directory)?;
-    begin_mutation(
-        &directory.file,
-        OsStr::new(MUTATION_NAME),
-        mutation_record(1, name, Sha256::digest(bytes).into())?,
-    )
+    let mut phase = mutation_record(1, name, Sha256::digest(bytes).into())?;
+    phase[4] = 2;
+    let guard = begin_mutation(&directory.file, OsStr::new(MUTATION_NAME), phase)?;
+    let mut payload = zeroize::Zeroizing::new(Vec::new());
+    payload.extend_from_slice(b"STPR\x01");
+    payload.extend_from_slice(&phase[8..24]);
+    payload.extend_from_slice(&(name.as_bytes().len() as u16).to_be_bytes());
+    payload.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+    payload.push(u8::from(expected.is_some()));
+    payload.extend_from_slice(
+        &expected
+            .map(file_snapshot_identity)
+            .transpose()?
+            .map(snapshot_digest)
+            .unwrap_or([0; 32]),
+    );
+    payload.extend_from_slice(name.as_bytes());
+    payload.extend_from_slice(bytes);
+    let old = read_unfenced(&directory, OsStr::new(PROPOSAL_NAME), PROPOSAL_LIMIT)?;
+    let mut nonce = [0; 16];
+    getrandom::fill(&mut nonce).map_err(|_| super::Failure::Unavailable)?;
+    let prepared = UnixSecureFilesystem.prepare_private_file(
+        handle,
+        OsStr::new(PROPOSAL_NAME),
+        &payload,
+        nonce,
+    )?;
+    verify_prepared_acl(&prepared)?;
+    let committed = UnixSecureFilesystem
+        .commit_private_file(prepared, old.as_ref().map(|snapshot| &snapshot.identity))?;
+    if committed.outcome != SecureCommitOutcome::Committed {
+        return Err(super::Failure::Indeterminate);
+    }
+    // Flag 0 proves effects have not begun. Flag 1 is durable only after the
+    // complete original payload and exact pre-effect version are synchronized.
+    guard
+        .file
+        .write_all_at(&[1], 7)
+        .and_then(|()| guard.file.sync_all())
+        .map_err(|_| super::Failure::Indeterminate)?;
+    guard.check()?;
+    Ok(guard)
+}
+
+const PROPOSAL_NAME: &str = ".account-proposal";
+const PROPOSAL_HEADER: usize = 60;
+const PROPOSAL_LIMIT: usize = 256 * 1024 + PROPOSAL_HEADER + 255;
+
+fn snapshot_digest(snapshot: &NativeFileIdentity) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(snapshot.fingerprint);
+    digest.update(snapshot.fingerprint_bytes.to_be_bytes());
+    digest.update(snapshot.version.entry.device.to_be_bytes());
+    digest.update(snapshot.version.entry.inode.to_be_bytes());
+    digest.update(snapshot.version.size.to_be_bytes());
+    digest.update(snapshot.version.modified_seconds.to_be_bytes());
+    digest.update(snapshot.version.modified_nanoseconds.to_be_bytes());
+    digest.finalize().into()
+}
+fn remove_proposal(parent: &File, phase: &[u8; MUTATION_BYTES]) -> Result<(), super::Failure> {
+    let file = match open_file_at(
+        parent,
+        OsStr::new(PROPOSAL_NAME),
+        libc::O_RDONLY | libc::O_NONBLOCK,
+        0,
+    ) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(classify(error).into()),
+    };
+    let version = private_file_version(&file.metadata().map_err(classify)?)?;
+    verify_acl(&file)?;
+    if version.size > PROPOSAL_LIMIT as u64 || version.size < PROPOSAL_HEADER as u64 {
+        return Err(super::Failure::Unsafe);
+    }
+    let mut header = [0; PROPOSAL_HEADER];
+    file.read_exact_at(&mut header, 0).map_err(classify)?;
+    if header[..5] != *b"STPR\x01" || header[5..21] != phase[8..24] {
+        return Err(super::Failure::Indeterminate);
+    }
+    if file_version_at(parent, OsStr::new(PROPOSAL_NAME))? != Some(version) {
+        return Err(super::Failure::Unsafe);
+    }
+    quarantine_and_remove_retained_file(parent, OsStr::new(PROPOSAL_NAME), version.entry)
+        .map_err(|_| super::Failure::Indeterminate)?;
+    parent.sync_all().map_err(|_| super::Failure::Indeterminate)
+}
+pub(super) fn abort_publication(guard: &mut MutationGuard) -> Result<(), super::Failure> {
+    guard.check()?;
+    guard
+        .file
+        .write_all_at(&[2], 7)
+        .and_then(|()| guard.file.sync_all())
+        .map_err(|_| super::Failure::Indeterminate)?;
+    guard.finish()
 }
 
 pub(super) fn begin_removal(
@@ -521,17 +630,12 @@ pub(super) fn begin_removal(
     let directory = directory(handle)?;
     verify_directory_entry(&directory)?;
     let expected = file_snapshot_identity(identity)?;
-    let mut digest = Sha256::new();
-    digest.update(expected.fingerprint);
-    digest.update(expected.version.entry.device.to_be_bytes());
-    digest.update(expected.version.entry.inode.to_be_bytes());
-    digest.update(expected.version.size.to_be_bytes());
-    digest.update(expected.version.modified_seconds.to_be_bytes());
-    digest.update(expected.version.modified_nanoseconds.to_be_bytes());
+    let digest = removal_digest(expected);
+
     begin_mutation(
         &directory.file,
         OsStr::new(MUTATION_NAME),
-        mutation_record(2, name, digest.finalize().into())?,
+        mutation_record(2, name, digest)?,
     )
 }
 
@@ -641,4 +745,378 @@ pub(super) fn verify_same_directory(
     } else {
         Err(super::Failure::Unsafe)
     }
+}
+
+pub(super) struct PrivateLease {
+    directory: SecureDirectory,
+    file: File,
+    name: OsString,
+    identity: NativeIdentity,
+}
+impl PrivateLease {
+    pub(super) fn verify(&self) -> Result<(), super::Failure> {
+        let directory = directory(&self.directory)?;
+        verify_directory_entry(&directory)?;
+        verify_acl(&directory.file)?;
+        if private_file_identity(&self.file.metadata().map_err(classify)?)? != self.identity
+            || file_identity_at(&directory.file, &self.name)? != Some(self.identity)
+        {
+            return Err(super::Failure::Unsafe);
+        }
+        verify_acl(&self.file).map_err(Into::into)
+    }
+}
+pub(super) fn private_lease(
+    handle: &SecureDirectory,
+    name: &OsStr,
+) -> Result<PrivateLease, super::Failure> {
+    let directory = directory(handle)?;
+    verify_directory_entry(&directory)?;
+    let file = match open_file_at(&directory.file, name, libc::O_RDWR | libc::O_NONBLOCK, 0) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            match open_file_at(
+                &directory.file,
+                name,
+                libc::O_RDWR | libc::O_NONBLOCK | libc::O_CREAT | libc::O_EXCL,
+                PRIVATE_FILE_MODE,
+            ) {
+                Ok(file) => {
+                    set_file_mode(&file, PRIVATE_FILE_MODE).map_err(classify)?;
+                    file.sync_all()
+                        .and_then(|()| directory.file.sync_all())
+                        .map_err(|_| super::Failure::Indeterminate)?;
+                    file
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    open_file_at(&directory.file, name, libc::O_RDWR | libc::O_NONBLOCK, 0)
+                        .map_err(classify)?
+                }
+                Err(error) => return Err(classify(error).into()),
+            }
+        }
+        Err(error) => return Err(classify(error).into()),
+    };
+    let identity = private_file_identity(&file.metadata().map_err(classify)?)?;
+    verify_acl(&file)?;
+    file.try_lock().map_err(|error| match error {
+        std::fs::TryLockError::WouldBlock => super::Failure::Busy,
+        std::fs::TryLockError::Error(_) => super::Failure::Unavailable,
+    })?;
+    let lease = PrivateLease {
+        directory: handle.clone(),
+        file,
+        name: name.to_owned(),
+        identity,
+    };
+    lease.verify()?;
+    Ok(lease)
+}
+
+// Recover only the original admitted publication. Never treat a repeated fsync as
+// proof of its old durability. Copy validated exact bytes into a new synchronized
+// inode and publish a new checkpoint for the retained original nonce.
+pub(super) fn reconcile_publication(
+    path: &Path,
+    name: &OsStr,
+    maximum: usize,
+    validate: impl FnOnce(&[u8]) -> Result<(), super::Failure>,
+) -> Result<(), super::Failure> {
+    let (handle, authority) = admit_existing(path)?.ok_or(super::Failure::Missing)?;
+    authority.verify()?;
+    reconcile_retained_publication(&handle, name, maximum, validate)?;
+    authority.verify()
+}
+
+pub(super) fn reconcile_retained_publication(
+    handle: &SecureDirectory,
+    name: &OsStr,
+    maximum: usize,
+    validate: impl FnOnce(&[u8]) -> Result<(), super::Failure>,
+) -> Result<(), super::Failure> {
+    let directory = directory(handle)?;
+    match open_mutation(&directory.file, OsStr::new(MUTATION_NAME), false) {
+        Ok(_) => return Err(super::Failure::Conflict),
+        Err(super::Failure::Indeterminate) => {}
+        Err(error) => return Err(error),
+    }
+    verify_directory_entry(&directory)?;
+    verify_acl(&directory.file)?;
+    let mut guard = original_phase(&directory.file, OsStr::new(MUTATION_NAME))?;
+    let phase = read_phase(&guard.file)?;
+    if phase[5] != 1 || phase[6] != 1 || phase[24..56] != Sha256::digest(name.as_bytes())[..] {
+        return Err(super::Failure::Indeterminate);
+    }
+    if phase[4] == 2 && phase[7] != 1 {
+        // A durable pre-effect or proven-CAS-conflict phase has no publication
+        // to replay. Closing that original phase cannot issue a new action.
+        guard.finish()?;
+        return Ok(());
+    }
+    let current = read_unfenced(&directory, name, maximum)?;
+    if current
+        .as_ref()
+        .is_some_and(|snapshot| snapshot.bytes.len() > maximum)
+    {
+        return Err(super::Failure::LimitExceeded);
+    }
+    let proposal = if phase[4] == 2 {
+        read_unfenced(&directory, OsStr::new(PROPOSAL_NAME), PROPOSAL_LIMIT)?
+    } else {
+        None
+    };
+    let mut candidate = None;
+    if let Some(proposal) = &proposal {
+        let payload = &proposal.bytes;
+        if payload.len() < PROPOSAL_HEADER
+            || payload.len() > PROPOSAL_LIMIT
+            || payload[..5] != *b"STPR\x01"
+            || payload[5..21] != phase[8..24]
+            || payload[27] > 1
+        {
+            return Err(super::Failure::Indeterminate);
+        }
+        let name_bytes = u16::from_be_bytes(
+            payload[21..23]
+                .try_into()
+                .map_err(|_| super::Failure::Unsafe)?,
+        ) as usize;
+        let body_bytes = u32::from_be_bytes(
+            payload[23..27]
+                .try_into()
+                .map_err(|_| super::Failure::Unsafe)?,
+        ) as usize;
+        if name_bytes > 255
+            || body_bytes > maximum
+            || payload.len() != PROPOSAL_HEADER + name_bytes + body_bytes
+            || payload[PROPOSAL_HEADER..PROPOSAL_HEADER + name_bytes] != *name.as_bytes()
+        {
+            return Err(super::Failure::Indeterminate);
+        }
+        let bytes = &payload[PROPOSAL_HEADER + name_bytes..];
+        if phase[56..88] != Sha256::digest(bytes)[..] {
+            return Err(super::Failure::Indeterminate);
+        }
+        let already_published = current
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.bytes.as_slice() == bytes);
+        let original_base = match &current {
+            None => payload[27] == 0 && payload[28..60] == [0; 32],
+            Some(snapshot) => {
+                payload[27] == 1
+                    && payload[28..60]
+                        == snapshot_digest(file_snapshot_identity(&snapshot.identity)?)
+            }
+        };
+        if !already_published && !original_base {
+            return Err(super::Failure::Indeterminate);
+        }
+        candidate = Some(bytes);
+    }
+    let bytes = match candidate {
+        Some(bytes) => bytes,
+        None => {
+            let current = current.as_ref().ok_or(super::Failure::Indeterminate)?;
+            if phase[56..88] != Sha256::digest(&current.bytes)[..] {
+                return Err(super::Failure::Indeterminate);
+            }
+            current.bytes.as_slice()
+        }
+    };
+    validate(bytes)?;
+    let mut nonce = [0; 16];
+    getrandom::fill(&mut nonce).map_err(|_| super::Failure::Unavailable)?;
+    let prepared = UnixSecureFilesystem.prepare_private_file(handle, name, bytes, nonce)?;
+    verify_prepared_acl(&prepared)?;
+    let committed = UnixSecureFilesystem.commit_private_file(
+        prepared,
+        current.as_ref().map(|snapshot| &snapshot.identity),
+    )?;
+    if committed.outcome != SecureCommitOutcome::Committed {
+        return Err(super::Failure::Indeterminate);
+    }
+    guard.finish()?;
+    verify_directory_entry(&directory).map_err(Into::into)
+}
+
+fn removal_digest(expected: &NativeFileIdentity) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(expected.fingerprint);
+    digest.update(expected.version.entry.device.to_be_bytes());
+    digest.update(expected.version.entry.inode.to_be_bytes());
+    digest.update(expected.version.size.to_be_bytes());
+    digest.update(expected.version.modified_seconds.to_be_bytes());
+    digest.update(expected.version.modified_nanoseconds.to_be_bytes());
+    digest.finalize().into()
+}
+fn original_phase(parent: &File, name: &OsStr) -> Result<MutationGuard, super::Failure> {
+    let file = open_file_at(parent, name, libc::O_RDWR | libc::O_NONBLOCK, 0).map_err(classify)?;
+    let identity = private_file_identity(&file.metadata().map_err(classify)?)?;
+    file.lock().map_err(classify)?;
+    let guard = MutationGuard {
+        file,
+        parent: parent.try_clone().map_err(classify)?,
+        name: name.to_owned(),
+        identity,
+    };
+    guard.check()?;
+    Ok(guard)
+}
+
+// This is explicit current-directory admission, not proof that old file writes
+// survived. Missing children are never created by recovery. Each existing child
+// is checked under the same parent descriptor that owns its original fence.
+fn validate_initialization_phase(
+    guard: &MutationGuard,
+    parent: &File,
+    name: &OsStr,
+) -> Result<(), super::Failure> {
+    let phase = read_phase(&guard.file)?;
+    if phase[4] != 1
+        || phase[5] != 1
+        || phase[6] != 3
+        || phase[24..56] != Sha256::digest(name.as_bytes())[..]
+        || phase[56..88] != [0; 32]
+    {
+        return Err(super::Failure::Indeterminate);
+    }
+    if parent.metadata().map_err(classify)?.uid() != effective_user_id() {
+        return Err(super::Failure::Unsafe);
+    }
+    Ok(())
+}
+
+pub(super) fn reconcile_initialization(path: &Path) -> Result<(), super::Failure> {
+    if !path.is_absolute() {
+        return Err(super::Failure::Unsafe);
+    }
+    let mut parent = File::open("/").map_err(classify)?;
+    for component in path.components() {
+        let Component::Normal(name) = component else {
+            if matches!(component, Component::RootDir) {
+                continue;
+            }
+            return Err(super::Failure::Unsafe);
+        };
+        let file = match open_directory_at(&parent, name) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                match open_mutation(&parent, &initialization_name(name), false) {
+                    Ok(_) => {}
+                    Err(super::Failure::Indeterminate) => {
+                        let mut guard = original_phase(&parent, &initialization_name(name))?;
+                        validate_initialization_phase(&guard, &parent, name)?;
+                        // An original pre-mkdir interruption has no child to admit.
+                        // Publish fresh no-effect completion, without creating one.
+                        if file_identity_at(&parent, name)?.is_some() {
+                            return Err(super::Failure::Unsafe);
+                        }
+                        parent
+                            .sync_all()
+                            .map_err(|_| super::Failure::Indeterminate)?;
+                        guard.finish()?;
+                        if file_identity_at(&parent, name)?.is_some() {
+                            return Err(super::Failure::Unsafe);
+                        }
+                    }
+                    Err(error) => return Err(error),
+                }
+                return Ok(());
+            }
+            Err(error) => return Err(classify(error).into()),
+        };
+        match open_mutation(&parent, &initialization_name(name), false) {
+            Ok(_) => {}
+            Err(super::Failure::Indeterminate) => {
+                let mut guard = original_phase(&parent, &initialization_name(name))?;
+                validate_initialization_phase(&guard, &parent, name)?;
+                let identity = private_directory_identity(&file).map_err(classify)?;
+                verify_acl(&file)?;
+                if metadata_identity(
+                    &open_directory_at(&parent, name)
+                        .map_err(classify)?
+                        .metadata()
+                        .map_err(classify)?,
+                ) != identity
+                {
+                    return Err(super::Failure::Unsafe);
+                }
+                file.sync_all()
+                    .and_then(|()| parent.sync_all())
+                    .map_err(|_| super::Failure::Indeterminate)?;
+                guard.finish()?;
+                if metadata_identity(
+                    &open_directory_at(&parent, name)
+                        .map_err(classify)?
+                        .metadata()
+                        .map_err(classify)?,
+                ) != identity
+                {
+                    return Err(super::Failure::Unsafe);
+                }
+            }
+            Err(error) => return Err(error),
+        }
+        parent = file;
+    }
+    Ok(())
+}
+
+pub(super) fn reconcile_removal(
+    handle: &SecureDirectory,
+    name: &OsStr,
+    maximum: usize,
+    validate: impl FnOnce(&[u8]) -> Result<(), super::Failure>,
+) -> Result<(), super::Failure> {
+    let directory = directory(handle)?;
+    verify_directory_entry(&directory)?;
+    verify_acl(&directory.file)?;
+    let mut guard = original_phase(&directory.file, OsStr::new(MUTATION_NAME))?;
+    let phase = read_phase(&guard.file)?;
+    if phase[5] != 1
+        || phase[6] != 2
+        || phase[24..56] != Sha256::digest(name.as_bytes())[..]
+        || phase[56..88] == [0; 32]
+    {
+        return Err(super::Failure::Conflict);
+    }
+    let current = read_unfenced(&directory, name, maximum)?;
+    if let Some(current) = current {
+        if current.bytes.len() > maximum {
+            return Err(super::Failure::LimitExceeded);
+        }
+        if phase[56..88] != removal_digest(file_snapshot_identity(&current.identity)?) {
+            return Err(super::Failure::Conflict);
+        }
+        validate(&current.bytes)?;
+        remove_and_sync(handle, name, &current.identity)?;
+    }
+    // A new synchronized checkpoint records validated current absence. It does
+    // not infer success merely from the old uncertain directory synchronization.
+    if file_version_at(&directory.file, name)?.is_some() {
+        return Err(super::Failure::Conflict);
+    }
+    guard.finish()?;
+    verify_directory_entry(&directory).map_err(Into::into)
+}
+
+pub(super) fn read_for_recovery(
+    handle: &SecureDirectory,
+    name: &OsStr,
+    maximum: usize,
+) -> Result<Option<super::Snapshot>, super::Failure> {
+    let directory = directory(handle)?;
+    let guard = original_phase(&directory.file, OsStr::new(MUTATION_NAME))?;
+    read_phase(&guard.file)?;
+    verify_directory_entry(&directory)?;
+    verify_acl(&directory.file)?;
+    let value = read_unfenced(&directory, name, maximum)?;
+    if value
+        .as_ref()
+        .is_some_and(|snapshot| snapshot.bytes.len() > maximum)
+    {
+        return Err(super::Failure::LimitExceeded);
+    }
+    guard.check()?;
+    Ok(value)
 }
