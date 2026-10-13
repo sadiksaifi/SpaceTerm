@@ -333,6 +333,7 @@ mod account_installation {
             native_identifier: build.native_identifier().into(),
             entry_points: AccountEntryPoints {
                 server: name.clone(),
+                cli: None,
             },
             files: files
                 .iter()
@@ -385,7 +386,7 @@ mod account_installation {
                 journal_schema: 1,
             },
             archive: ServerArchiveV1 {
-                name: platform.archive_name(version),
+                name: platform.account_archive_name(build, version),
                 size: archive.len() as u64,
                 sha256: Sha256::digest(&archive).into(),
                 signature: signer.sign(&archive).as_ref().try_into().unwrap(),
@@ -538,9 +539,26 @@ mod account_installation {
         let store = test_support::store(&registered, key.clone()).unwrap();
         assert_eq!(store.stage(&other), Err(ServiceFailure::ArtifactRejected));
         assert_eq!(
-            spaceterm_host::server_installation::ServerInstallationStore::open(&registered)
-                .unwrap()
-                .stage(&artifact),
+            {
+                struct Admission;
+                impl spaceterm_host::server_installation::InstallationAdmission for Admission {
+                    fn verify(
+                        &self,
+                        _: &spaceterm_host::account_service::RegisteredServer,
+                        _: spaceterm_host::server_installation::InstallationOperation,
+                    ) -> Result<(), ServiceFailure> {
+                        Ok(())
+                    }
+                }
+                let scope = spaceterm_host::server_installation::InstallationScope::new(
+                    &registered,
+                    &Admission,
+                )
+                .unwrap();
+                spaceterm_host::server_installation::ServerInstallationStore::open(&scope)
+                    .unwrap()
+                    .stage(&scope, &artifact)
+            },
             Err(ServiceFailure::ArtifactRejected)
         );
         for build in [BuildIdentity::Release, BuildIdentity::Preflight] {
@@ -619,10 +637,8 @@ mod account_installation {
     }
 
     #[test]
-    fn activation_sync_failure_closes_retained_and_reopened_authority_without_rollback_guessing() {
-        use spaceterm_host::account_service::{
-            ServiceFailure, test_support::fail_next_publication_durability,
-        };
+    fn activation_sync_failure_closes_the_failed_handle_and_recovers_exact_new_selection() {
+        use spaceterm_host::account_service::ServiceFailure;
         let root = tempfile::tempdir().unwrap();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let registered = account.initialize(DesiredServerState::Stopped).unwrap();
@@ -630,13 +646,14 @@ mod account_installation {
         let store = test_support::store(&registered, key.clone()).unwrap();
         let id = store.stage(&artifact).unwrap();
         let generation = store.snapshot().unwrap().generation;
-        fail_next_publication_durability();
+        test_support::fail_next_publication_durability();
         assert_eq!(
             store.activate(id, generation, 1),
             Err(ServiceFailure::Indeterminate)
         );
         assert_eq!(store.snapshot(), Err(ServiceFailure::Indeterminate));
-        assert!(test_support::store(&registered, key).is_err());
+        let reopened = test_support::store(&registered, key).unwrap();
+        assert_eq!(reopened.snapshot().unwrap().approved, Some(id));
         assert!(
             registered
                 .data_directory()
@@ -644,6 +661,147 @@ mod account_installation {
                 .join(format!("version-{}", id.0.get()))
                 .exists()
         );
+    }
+
+    #[test]
+    fn final_staging_publication_recovery_requires_directory_durability_before_acknowledgment() {
+        use spaceterm_host::account_service::ServiceFailure;
+        let root = tempfile::tempdir().unwrap();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let registered = account.initialize(DesiredServerState::Stopped).unwrap();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        let store = test_support::store(&registered, key.clone()).unwrap();
+        test_support::after_next_metadata_publication(
+            test_support::fail_next_publication_durability,
+        );
+        assert_eq!(store.stage(&artifact), Err(ServiceFailure::Indeterminate));
+        assert_eq!(store.stage(&artifact), Err(ServiceFailure::Indeterminate));
+        drop(store);
+        let publication = registered
+            .data_directory()
+            .join("installations/selection-publication");
+        let original_intent = std::fs::read(&publication).unwrap();
+
+        test_support::fail_next_tree_sync();
+        assert!(matches!(
+            test_support::store(&registered, key.clone()),
+            Err(ServiceFailure::Indeterminate)
+        ));
+        assert_eq!(std::fs::read(&publication).unwrap(), original_intent);
+        let reopened = test_support::store(&registered, key).unwrap();
+        assert!(!publication.exists());
+        let id = reopened.stage(&artifact).unwrap();
+        assert_eq!(id.0.get(), 1);
+        let snapshot = reopened.snapshot().unwrap();
+        assert_eq!(snapshot.staged, Some(id));
+        assert_eq!(snapshot.preparing, None);
+        assert_eq!(snapshot.approved, None);
+    }
+
+    #[test]
+    fn final_staging_publication_recovers_process_exit_before_directory_sync() {
+        use spaceterm_host::account_service::ServiceFailure;
+        let root = tempfile::tempdir().unwrap();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let registered = account.initialize(DesiredServerState::Stopped).unwrap();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        drop(test_support::store(&registered, key.clone()).unwrap());
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "account_installation::preparation_process_fixture",
+            ])
+            .env("SPACETERM_PREPARATION_CRASH_ROOT", root.path())
+            .env("SPACETERM_PREPARATION_CRASH_PHASE", "staged");
+        let mut child = spaceterm_host::process::spawn(&mut command).unwrap();
+        assert_eq!(child.wait().unwrap().code(), Some(86));
+        test_support::fail_next_tree_sync();
+        assert!(matches!(
+            test_support::store(&registered, key.clone()),
+            Err(ServiceFailure::Indeterminate)
+        ));
+        let reopened = test_support::store(&registered, key).unwrap();
+        let id = reopened.stage(&artifact).unwrap();
+        assert_eq!(id.0.get(), 1);
+        assert_eq!(reopened.snapshot().unwrap().staged, Some(id));
+        assert_eq!(reopened.snapshot().unwrap().approved, None);
+    }
+
+    #[test]
+    fn activation_recovery_sync_failure_never_exposes_approved_code() {
+        use spaceterm_host::account_service::ServiceFailure;
+        let root = tempfile::tempdir().unwrap();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let registered = account.initialize(DesiredServerState::Stopped).unwrap();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        let store = test_support::store(&registered, key.clone()).unwrap();
+        let id = store.stage(&artifact).unwrap();
+        test_support::fail_next_publication_durability();
+        assert_eq!(
+            store.activate(id, store.snapshot().unwrap().generation, 1),
+            Err(ServiceFailure::Indeterminate)
+        );
+        assert!(matches!(
+            store.retain_approved(),
+            Err(ServiceFailure::Indeterminate)
+        ));
+        drop(store);
+        let publication = registered
+            .data_directory()
+            .join("installations/selection-publication");
+        let original_intent = std::fs::read(&publication).unwrap();
+
+        // Startup must establish the original publication's durability before
+        // returning a handle that can expose newly approved executable code.
+        for _ in 0..2 {
+            test_support::fail_next_tree_sync();
+            assert!(matches!(
+                test_support::existing_store(&registered, key.clone()),
+                Err(ServiceFailure::Indeterminate)
+            ));
+            assert_eq!(std::fs::read(&publication).unwrap(), original_intent);
+        }
+        let reopened = test_support::existing_store(&registered, key).unwrap();
+        assert!(!publication.exists());
+        assert_eq!(reopened.retain_approved().unwrap().installation(), id);
+        assert_eq!(reopened.snapshot().unwrap().approved, Some(id));
+    }
+
+    #[test]
+    fn selection_publication_recovery_rejects_a_same_content_replacement_inode() {
+        use spaceterm_host::account_service::ServiceFailure;
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let registered = account.initialize(DesiredServerState::Stopped).unwrap();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        let store = test_support::store(&registered, key.clone()).unwrap();
+        let id = store.stage(&artifact).unwrap();
+        test_support::fail_next_publication_durability();
+        assert_eq!(
+            store.activate(id, store.snapshot().unwrap().generation, 1),
+            Err(ServiceFailure::Indeterminate)
+        );
+        drop(store);
+        let installations = registered.data_directory().join("installations");
+        let selection = installations.join("selection");
+        let displaced = installations.join("original-selection");
+        let bytes = std::fs::read(&selection).unwrap();
+        std::fs::rename(&selection, &displaced).unwrap();
+        std::fs::write(&selection, &bytes).unwrap();
+        std::fs::set_permissions(&selection, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(matches!(
+            test_support::existing_store(&registered, key.clone()),
+            Err(ServiceFailure::CleanupUnresolved)
+        ));
+        assert_eq!(std::fs::read(&selection).unwrap(), bytes);
+        assert!(displaced.exists());
+        assert!(installations.join("selection-publication").exists());
+        std::fs::remove_file(&selection).unwrap();
+        std::fs::rename(displaced, &selection).unwrap();
+        let reopened = test_support::existing_store(&registered, key).unwrap();
+        assert_eq!(reopened.retain_approved().unwrap().installation(), id);
     }
 
     #[test]
@@ -658,7 +816,11 @@ mod account_installation {
         let (key, _) = fixture("1.2.3", 7, native_machine());
         let store = test_support::store(&registered, key).unwrap();
         let snapshot = store.snapshot().unwrap();
-        test_support::after_next_publication(|| std::process::exit(86));
+        if std::env::var_os("SPACETERM_SELECTION_PREPUBLICATION").is_some() {
+            test_support::at_cleanup_boundary(15, || std::process::exit(86));
+        } else {
+            test_support::after_next_publication(|| std::process::exit(86));
+        }
         store
             .activate(snapshot.staged.unwrap(), snapshot.generation, 1)
             .unwrap();
@@ -666,7 +828,7 @@ mod account_installation {
     }
 
     #[test]
-    fn process_exit_during_activation_keeps_every_version_and_blocks_uncheckpointed_selection() {
+    fn process_exit_during_activation_recovers_the_original_selected_version() {
         let root = tempfile::tempdir().unwrap();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let registered = account.initialize(DesiredServerState::Stopped).unwrap();
@@ -683,8 +845,17 @@ mod account_installation {
             .env("SPACETERM_INSTALLATION_CRASH_ROOT", root.path());
         let mut child = spaceterm_host::process::spawn(&mut command).unwrap();
         assert_eq!(child.wait().unwrap().code(), Some(86));
-        assert!(store.snapshot().is_err());
-        assert!(test_support::store(&registered, key).is_err());
+        test_support::fail_next_tree_sync();
+        assert_eq!(
+            store.snapshot(),
+            Err(spaceterm_host::account_service::ServiceFailure::Indeterminate)
+        );
+        assert!(matches!(
+            store.retain_approved(),
+            Err(spaceterm_host::account_service::ServiceFailure::Indeterminate)
+        ));
+        let reopened = test_support::store(&registered, key).unwrap();
+        assert_eq!(reopened.snapshot().unwrap().approved, Some(id));
         assert!(
             registered
                 .data_directory()
@@ -871,13 +1042,17 @@ mod account_installation {
             .join(&artifact.manifest().entry_points.server);
         assert_eq!(std::fs::metadata(&payload).unwrap().len(), 1);
         store.discard_preparing(id, snapshot.generation).unwrap();
-        // No original-phase file-creation capability exists on this base. The
-        // complete manifest must not be weakened to authorize partial copies.
-        assert_eq!(store.cleanup(), Err(ServiceFailure::ArtifactRejected));
-        assert_eq!(std::fs::metadata(&payload).unwrap().len(), 1);
-        std::fs::write(&payload, b"unverified replacement").unwrap();
-        assert_eq!(store.cleanup(), Err(ServiceFailure::ArtifactRejected));
-        assert_eq!(std::fs::read(payload).unwrap(), b"unverified replacement");
+        // A creation record authorizes this original incomplete inode, not a
+        // replacement at the same manifest pathname.
+        replace_from_other_process(&payload, false);
+        assert_eq!(store.cleanup(), Err(ServiceFailure::CleanupUnresolved));
+        assert_eq!(
+            std::fs::metadata(payload.with_extension("displaced"))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(std::fs::read(&payload).unwrap(), b"unrelated replacement");
         assert_eq!(
             store.stage(&artifact),
             Err(ServiceFailure::CleanupUnresolved)
@@ -887,12 +1062,12 @@ mod account_installation {
     }
 
     #[test]
-    fn a_failed_partial_copy_never_authorizes_deleting_unverified_contents() {
+    fn a_failed_partial_copy_never_authorizes_deleting_a_replacement_inode() {
         partial_extraction_keeps_cleanup_closed(false);
     }
 
     #[test]
-    fn a_terminated_partial_copy_never_authorizes_deleting_unverified_contents() {
+    fn a_terminated_partial_copy_never_authorizes_deleting_a_replacement_inode() {
         partial_extraction_keeps_cleanup_closed(true);
     }
 
@@ -913,7 +1088,14 @@ mod account_installation {
         {
             "mkdir" => test_support::after_next_version_creation(|| std::process::exit(86)),
             "metadata" => test_support::after_next_metadata_publication(|| std::process::exit(86)),
+            "staged" => test_support::after_next_metadata_publication(|| {
+                test_support::after_next_publication(|| std::process::exit(86));
+            }),
             "copy" => test_support::after_next_partial_copy(1, || std::process::exit(86)),
+            "root-created" => test_support::at_cleanup_boundary(12, || std::process::exit(86)),
+            "root-journaled" => test_support::at_cleanup_boundary(9, || std::process::exit(86)),
+            "file-created" => test_support::at_cleanup_boundary(13, || std::process::exit(86)),
+            "file-journaled" => test_support::at_cleanup_boundary(11, || std::process::exit(86)),
             _ => panic!("unknown preparation interruption"),
         }
         store.stage(&artifact).unwrap();
@@ -1153,5 +1335,718 @@ mod account_installation {
     #[test]
     fn cleanup_preserves_a_version_replaced_after_the_final_identity_check() {
         cleanup_replacement_survives(true);
+    }
+
+    #[test]
+    fn review_probe_cleanup_process_fixture() {
+        let Ok(root) = std::env::var("SPACETERM_REVIEW_CLEANUP_ROOT") else {
+            return;
+        };
+        let account =
+            AccountServiceFixture::new(std::path::Path::new(&root), BuildIdentity::Development)
+                .unwrap();
+        let registered = account.reopen().discover().unwrap().unwrap();
+        let (key, _) = fixture("1.2.3", 7, native_machine());
+        let store = test_support::store(&registered, key).unwrap();
+        let boundary = std::env::var("SPACETERM_REVIEW_CLEANUP_BOUNDARY")
+            .unwrap()
+            .parse()
+            .unwrap();
+        test_support::at_cleanup_boundary(boundary, || std::process::exit(86));
+        store.cleanup().unwrap();
+        panic!("cleanup interruption did not fire");
+    }
+
+    fn cleanup_recovery_probe(boundary: u8, sync_error: bool) {
+        let root = tempfile::tempdir().unwrap();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let registered = account.initialize(DesiredServerState::Stopped).unwrap();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        let store = test_support::store(&registered, key.clone()).unwrap();
+        let id = store.stage(&artifact).unwrap();
+        store
+            .discard_staged(id, store.snapshot().unwrap().generation)
+            .unwrap();
+        if sync_error {
+            test_support::at_cleanup_boundary(2, test_support::fail_next_tree_sync);
+            assert_eq!(
+                store.cleanup(),
+                Err(spaceterm_host::account_service::ServiceFailure::Indeterminate)
+            );
+        } else {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "account_installation::review_probe_cleanup_process_fixture",
+                ])
+                .env("SPACETERM_REVIEW_CLEANUP_ROOT", root.path())
+                .env("SPACETERM_REVIEW_CLEANUP_BOUNDARY", boundary.to_string());
+            let mut child = spaceterm_host::process::spawn(&mut command).unwrap();
+            assert_eq!(child.wait().unwrap().code(), Some(86));
+        }
+        drop(store);
+        let reopened = test_support::store(&registered, key).unwrap();
+        assert_eq!(reopened.snapshot().unwrap().cleanup_pending, Some(id));
+        reopened
+            .cleanup()
+            .expect("original quarantine must be recoverable");
+        assert!(reopened.stage(&artifact).unwrap().0.get() > id.0.get());
+    }
+
+    fn recovered_removal_publication_requires_durability(
+        process_exit: bool,
+        sync_fault: impl FnOnce(&std::path::Path),
+    ) {
+        use spaceterm_host::account_service::ServiceFailure;
+        use std::os::unix::fs::MetadataExt;
+        let root = tempfile::tempdir().unwrap();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let registered = account.initialize(DesiredServerState::Stopped).unwrap();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        let store = test_support::store(&registered, key.clone()).unwrap();
+        let id = store.stage(&artifact).unwrap();
+        store
+            .discard_staged(id, store.snapshot().unwrap().generation)
+            .unwrap();
+        let installations = registered.data_directory().join("installations");
+        let version = installations.join(format!("version-{}", id.0.get()));
+        let payload = version.join(&artifact.manifest().files[0].name);
+        let original_bytes = std::fs::read(&payload).unwrap();
+        let original = std::fs::metadata(&payload).unwrap();
+        let objects = installations.join(format!("objects-{}", id.0.get()));
+        let original_inventory = std::fs::read(&objects).unwrap();
+
+        // This is a nonlegacy installation. Boundary 16 interrupts publication
+        // of its first removal intent, not acquisition of a legacy inventory.
+        if process_exit {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "account_installation::review_probe_cleanup_process_fixture",
+                ])
+                .env("SPACETERM_REVIEW_CLEANUP_ROOT", root.path())
+                .env("SPACETERM_REVIEW_CLEANUP_BOUNDARY", "16");
+            let mut child = spaceterm_host::process::spawn(&mut command).unwrap();
+            assert_eq!(child.wait().unwrap().code(), Some(86));
+        } else {
+            test_support::at_cleanup_boundary(16, test_support::fail_next_tree_sync);
+            assert_eq!(store.cleanup(), Err(ServiceFailure::Indeterminate));
+        }
+        drop(store);
+        let removal = installations.join(format!("removal-{}", id.0.get()));
+        let original_intent = std::fs::read(&removal).unwrap();
+        assert_eq!(std::fs::read(&payload).unwrap(), original_bytes);
+        assert_eq!(std::fs::read(&objects).unwrap(), original_inventory);
+        let reopened = test_support::store(&registered, key.clone()).unwrap();
+        let before = reopened.snapshot().unwrap();
+        sync_fault(&removal);
+        assert_eq!(reopened.cleanup(), Err(ServiceFailure::Indeterminate));
+        assert_eq!(
+            std::fs::read(&payload).expect("recovery must persist its intent before capture"),
+            original_bytes
+        );
+        let unchanged = std::fs::metadata(&payload).unwrap();
+        assert_eq!(
+            (unchanged.dev(), unchanged.ino()),
+            (original.dev(), original.ino())
+        );
+        assert_eq!(std::fs::read(&objects).unwrap(), original_inventory);
+        assert_eq!(std::fs::read(&removal).unwrap(), original_intent);
+        assert_eq!(
+            reopened.stage(&artifact),
+            Err(ServiceFailure::Indeterminate)
+        );
+        drop(reopened);
+        let recovered = test_support::store(&registered, key).unwrap();
+        assert_eq!(recovered.snapshot().unwrap(), before);
+        recovered.cleanup().unwrap();
+        assert!(!version.exists());
+        assert_eq!(recovered.snapshot().unwrap().cleanup_pending, None);
+        assert!(recovered.stage(&artifact).unwrap().0.get() > id.0.get());
+    }
+
+    #[test]
+    fn recovered_removal_intent_is_durable_before_capture_after_process_exit() {
+        recovered_removal_publication_requires_durability(true, |_| {
+            test_support::fail_next_tree_sync();
+        });
+    }
+
+    #[test]
+    fn recovered_removal_intent_is_durable_before_capture_after_sync_failure() {
+        recovered_removal_publication_requires_durability(false, |_| {
+            test_support::fail_next_tree_sync();
+        });
+    }
+
+    #[test]
+    fn recovered_removal_record_bytes_are_durable_before_capture() {
+        use std::os::unix::fs::MetadataExt;
+        recovered_removal_publication_requires_durability(true, |removal| {
+            let record = std::fs::metadata(removal).unwrap();
+            test_support::fail_next_file_sync_for(record.dev(), record.ino());
+        });
+    }
+
+    #[test]
+    fn recovered_creation_log_is_durable_before_removal_authority_is_used() {
+        use spaceterm_host::account_service::ServiceFailure;
+        use std::os::unix::fs::MetadataExt;
+        let root = tempfile::tempdir().unwrap();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let registered = account.initialize(DesiredServerState::Stopped).unwrap();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        let store = test_support::store(&registered, key.clone()).unwrap();
+        let id = store.stage(&artifact).unwrap();
+        store
+            .discard_staged(id, store.snapshot().unwrap().generation)
+            .unwrap();
+        drop(store);
+        let installations = registered.data_directory().join("installations");
+        let objects = installations.join(format!("objects-{}", id.0.get()));
+        let inventory = std::fs::metadata(&objects).unwrap();
+        let original_inventory = std::fs::read(&objects).unwrap();
+        let version = installations.join(format!("version-{}", id.0.get()));
+        let payload = version.join(&artifact.manifest().files[0].name);
+        let original_bytes = std::fs::read(&payload).unwrap();
+        let reopened = test_support::store(&registered, key.clone()).unwrap();
+        test_support::fail_next_file_sync_for(inventory.dev(), inventory.ino());
+        assert_eq!(reopened.cleanup(), Err(ServiceFailure::Indeterminate));
+        assert_eq!(std::fs::read(&payload).unwrap(), original_bytes);
+        assert_eq!(std::fs::read(&objects).unwrap(), original_inventory);
+        assert!(
+            !installations
+                .join(format!("removal-{}", id.0.get()))
+                .exists()
+        );
+        drop(reopened);
+        let recovered = test_support::store(&registered, key).unwrap();
+        recovered.cleanup().unwrap();
+        assert!(!version.exists());
+        assert_eq!(recovered.snapshot().unwrap().cleanup_pending, None);
+    }
+
+    #[test]
+    fn review_probe_cleanup_recovers_after_capture() {
+        cleanup_recovery_probe(1, false);
+    }
+    #[test]
+    fn review_probe_cleanup_recovers_after_capture_sync() {
+        cleanup_recovery_probe(3, false);
+    }
+    #[test]
+    fn review_probe_cleanup_recovers_after_unlink() {
+        cleanup_recovery_probe(4, false);
+    }
+    #[test]
+    fn review_probe_cleanup_recovers_after_capture_sync_error() {
+        cleanup_recovery_probe(2, true);
+    }
+
+    fn preparation_recovery_probe(phase: &str) {
+        let root = tempfile::tempdir().unwrap();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let registered = account.initialize(DesiredServerState::Stopped).unwrap();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        drop(test_support::store(&registered, key.clone()).unwrap());
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "account_installation::preparation_process_fixture",
+            ])
+            .env("SPACETERM_PREPARATION_CRASH_ROOT", root.path())
+            .env("SPACETERM_PREPARATION_CRASH_PHASE", phase);
+        let mut child = spaceterm_host::process::spawn(&mut command).unwrap();
+        assert_eq!(child.wait().unwrap().code(), Some(86));
+        let reopened = test_support::store(&registered, key).unwrap();
+        let snapshot = reopened.snapshot().unwrap();
+        let id = snapshot.preparing.unwrap();
+        reopened
+            .discard_preparing(id, snapshot.generation)
+            .expect("original preparation must be recoverable");
+        reopened
+            .cleanup()
+            .expect("original incomplete extraction must be cleanable");
+        assert!(reopened.stage(&artifact).unwrap().0.get() > id.0.get());
+    }
+    #[test]
+    fn review_probe_preparation_recovers_mkdir() {
+        preparation_recovery_probe("mkdir");
+    }
+    #[test]
+    fn review_probe_preparation_recovers_metadata() {
+        preparation_recovery_probe("metadata");
+    }
+    #[test]
+    fn review_probe_partial_extraction_recovers_process_exit() {
+        preparation_recovery_probe("copy");
+    }
+    #[test]
+    fn review_probe_partial_extraction_recovers_write_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let registered = account.initialize(DesiredServerState::Stopped).unwrap();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        let store = test_support::store(&registered, key.clone()).unwrap();
+        test_support::after_next_partial_copy(1, || {});
+        assert_eq!(
+            store.stage(&artifact),
+            Err(spaceterm_host::account_service::ServiceFailure::StorageUnavailable)
+        );
+        drop(store);
+        let reopened = test_support::store(&registered, key).unwrap();
+        let snapshot = reopened.snapshot().unwrap();
+        let id = snapshot.preparing.unwrap();
+        reopened.discard_preparing(id, snapshot.generation).unwrap();
+        reopened
+            .cleanup()
+            .expect("original incomplete extraction must be cleanable");
+        assert!(reopened.stage(&artifact).unwrap().0.get() > id.0.get());
+    }
+
+    fn activation_recovery_probe(process_exit: bool) {
+        let root = tempfile::tempdir().unwrap();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let registered = account.initialize(DesiredServerState::Stopped).unwrap();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        let store = test_support::store(&registered, key.clone()).unwrap();
+        let id = store.stage(&artifact).unwrap();
+        if process_exit {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "account_installation::activation_process_fixture",
+                ])
+                .env("SPACETERM_INSTALLATION_CRASH_ROOT", root.path());
+            let mut child = spaceterm_host::process::spawn(&mut command).unwrap();
+            assert_eq!(child.wait().unwrap().code(), Some(86));
+        } else {
+            test_support::fail_next_publication_durability();
+            assert_eq!(
+                store.activate(id, store.snapshot().unwrap().generation, 1),
+                Err(spaceterm_host::account_service::ServiceFailure::Indeterminate)
+            );
+        }
+        drop(store);
+        let reopened =
+            test_support::store(&registered, key).expect("original activation must admit recovery");
+        assert_eq!(reopened.snapshot().unwrap().approved, Some(id));
+    }
+    #[test]
+    fn review_probe_activation_recovers_sync_failure() {
+        activation_recovery_probe(false);
+    }
+    #[test]
+    fn review_probe_activation_recovers_process_exit() {
+        activation_recovery_probe(true);
+    }
+
+    fn capture_replacement_probe(directory: bool) {
+        use std::sync::{Arc, Mutex};
+        let root = tempfile::tempdir().unwrap();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let registered = account.initialize(DesiredServerState::Stopped).unwrap();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        let store = test_support::store(&registered, key).unwrap();
+        let id = store.stage(&artifact).unwrap();
+        store
+            .discard_staged(id, store.snapshot().unwrap().generation)
+            .unwrap();
+        let installations = registered.data_directory().join("installations");
+        let parent = if directory {
+            installations
+        } else {
+            installations
+                .join(format!("version-{}", id.0.get()))
+                .join(&artifact.manifest().files[0].name)
+                .parent()
+                .unwrap()
+                .to_owned()
+        };
+        let captured = Arc::new(Mutex::new(None));
+        let captured_hook = captured.clone();
+        test_support::at_cleanup_boundary(if directory { 5 } else { 2 }, move || {
+            let mut paths = std::fs::read_dir(&parent)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| {
+                    path.file_name()
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .starts_with(".cleanup-")
+                });
+            let path = paths.next().expect("original entry was not captured");
+            assert!(paths.next().is_none());
+            replace_from_other_process(&path, directory);
+            *captured_hook.lock().unwrap() = Some(path);
+        });
+        let result = store.cleanup();
+        let captured = captured
+            .lock()
+            .unwrap()
+            .take()
+            .expect("final authentication hook did not run");
+        assert!(captured.with_extension("displaced").exists());
+        assert!(
+            captured.exists(),
+            "cleanup deleted the replacement at its authenticated capture name"
+        );
+        if !directory {
+            assert_eq!(std::fs::read(captured).unwrap(), b"unrelated replacement");
+        }
+        assert!(result.is_err());
+        assert_eq!(store.snapshot().unwrap().cleanup_pending, Some(id));
+    }
+    #[test]
+    fn review_probe_cleanup_preserves_replaced_captured_file() {
+        capture_replacement_probe(false);
+    }
+    #[test]
+    fn review_probe_cleanup_preserves_replaced_captured_version() {
+        capture_replacement_probe(true);
+    }
+    #[test]
+    fn revoked_lifecycle_admission_cannot_stage_or_activate_code() {
+        use spaceterm_host::{
+            account_service::{RegisteredServer, ServiceFailure},
+            server_installation::{
+                InstallationAdmission, InstallationOperation, InstallationScope,
+            },
+        };
+        use std::cell::Cell;
+        struct Gate(Cell<bool>);
+        impl InstallationAdmission for Gate {
+            fn verify(
+                &self,
+                _: &RegisteredServer,
+                operation: InstallationOperation,
+            ) -> Result<(), ServiceFailure> {
+                if self.0.get() && operation != InstallationOperation::Open {
+                    Err(ServiceFailure::StaleAssessment)
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let registered = account.initialize(DesiredServerState::Stopped).unwrap();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        let gate = Gate(Cell::new(false));
+        let scope = InstallationScope::new(&registered, &gate).unwrap();
+        let store = test_support::store_with_scope(&scope, key).unwrap();
+        let before = store.snapshot().unwrap();
+        gate.0.set(true);
+        assert_eq!(
+            store.stage(&scope, &artifact),
+            Err(ServiceFailure::StaleAssessment)
+        );
+        assert_eq!(store.snapshot().unwrap(), before);
+        gate.0.set(false);
+        let id = store.stage(&scope, &artifact).unwrap();
+        let staged = store.snapshot().unwrap();
+        gate.0.set(true);
+        assert_eq!(
+            store.activate(&scope, id, staged.generation, 1),
+            Err(ServiceFailure::StaleAssessment)
+        );
+        assert_eq!(store.snapshot().unwrap(), staged);
+        assert_eq!(registered.desired_state(), DesiredServerState::Stopped);
+    }
+    #[test]
+    fn cleanup_recovers_after_metadata_removal() {
+        cleanup_recovery_probe(7, false);
+    }
+    #[test]
+    fn cleanup_recovers_after_creation_evidence_removal() {
+        cleanup_recovery_probe(8, false);
+    }
+    #[test]
+    fn preparation_recovers_a_journaled_root_before_namespace_publication() {
+        preparation_recovery_probe("root-journaled");
+    }
+    #[test]
+    fn preparation_recovers_a_journaled_file_before_namespace_publication() {
+        preparation_recovery_probe("file-journaled");
+    }
+
+    fn unexposed_creation_recovers_prior_selection(phase: &str) {
+        let root = tempfile::tempdir().unwrap();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let registered = account.initialize(DesiredServerState::Stopped).unwrap();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        drop(test_support::store(&registered, key.clone()).unwrap());
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "account_installation::preparation_process_fixture",
+            ])
+            .env("SPACETERM_PREPARATION_CRASH_ROOT", root.path())
+            .env("SPACETERM_PREPARATION_CRASH_PHASE", phase);
+        let mut child = spaceterm_host::process::spawn(&mut command).unwrap();
+        assert_eq!(child.wait().unwrap().code(), Some(86));
+        let installations = registered.data_directory().join("installations");
+        let unrecorded: Vec<_> = std::fs::read_dir(&installations)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .starts_with(".cleanup-")
+            })
+            .collect();
+        assert_eq!(unrecorded.len(), 1);
+        let store = test_support::store(&registered, key).unwrap();
+        let snapshot = store.snapshot().unwrap();
+        let id = snapshot.preparing.unwrap();
+        store.discard_preparing(id, snapshot.generation).unwrap();
+        store.cleanup().unwrap();
+        assert!(
+            unrecorded[0].exists(),
+            "no durable creation identity authorizes removing this private temporary"
+        );
+        assert!(
+            !installations
+                .join(format!("version-{}", id.0.get()))
+                .exists()
+        );
+        assert!(store.snapshot().unwrap().approved.is_none());
+        assert!(store.stage(&artifact).unwrap().0.get() > id.0.get());
+    }
+    #[test]
+    fn interrupted_unexposed_root_does_not_grant_removal_authority() {
+        unexposed_creation_recovers_prior_selection("root-created");
+    }
+    #[test]
+    fn interrupted_unexposed_file_does_not_grant_removal_authority() {
+        unexposed_creation_recovers_prior_selection("file-created");
+    }
+    #[test]
+    fn activation_before_publication_recovers_the_exact_prior_selection() {
+        let root = tempfile::tempdir().unwrap();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let registered = account.initialize(DesiredServerState::Stopped).unwrap();
+        let (key, first) = fixture("1.2.3", 7, native_machine());
+        let (_, second) = fixture("1.2.4", 7, native_machine());
+        let store = test_support::store(&registered, key.clone()).unwrap();
+        let id = store.stage(&first).unwrap();
+        store
+            .activate(id, store.snapshot().unwrap().generation, 1)
+            .unwrap();
+        store.stage(&second).unwrap();
+        let before = store.snapshot().unwrap();
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "account_installation::activation_process_fixture",
+            ])
+            .env("SPACETERM_INSTALLATION_CRASH_ROOT", root.path())
+            .env("SPACETERM_SELECTION_PREPUBLICATION", "1");
+        let mut child = spaceterm_host::process::spawn(&mut command).unwrap();
+        assert_eq!(child.wait().unwrap().code(), Some(86));
+        drop(store);
+        test_support::fail_next_tree_sync();
+        assert!(matches!(
+            test_support::existing_store(&registered, key.clone()),
+            Err(spaceterm_host::account_service::ServiceFailure::Indeterminate)
+        ));
+        let reopened = test_support::store(&registered, key).unwrap();
+        assert_eq!(reopened.snapshot().unwrap(), before);
+        assert_eq!(reopened.retain_approved().unwrap().installation(), id);
+    }
+
+    #[test]
+    fn retained_complete_installations_without_creation_records_use_the_same_cleanup_journal() {
+        let root = tempfile::tempdir().unwrap();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let registered = account.initialize(DesiredServerState::Stopped).unwrap();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        let store = test_support::store(&registered, key.clone()).unwrap();
+        let id = store.stage(&artifact).unwrap();
+        store
+            .discard_staged(id, store.snapshot().unwrap().generation)
+            .unwrap();
+        drop(store);
+        let installations = registered.data_directory().join("installations");
+        std::fs::remove_file(installations.join(format!("objects-{}", id.0.get()))).unwrap();
+        let selection = installations.join("selection");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&selection).unwrap()).unwrap();
+        value["cleanup"]
+            .as_object_mut()
+            .unwrap()
+            .remove("incomplete");
+        std::fs::write(selection, serde_json::to_vec(&value).unwrap()).unwrap();
+        let store = test_support::store(&registered, key).unwrap();
+        store.cleanup().unwrap();
+        assert!(store.snapshot().unwrap().cleanup_pending.is_none());
+        assert!(
+            !installations
+                .join(format!("version-{}", id.0.get()))
+                .exists()
+        );
+        assert!(
+            !installations
+                .join(format!("metadata-{}", id.0.get()))
+                .exists()
+        );
+    }
+    fn legacy_inventory_recovery_probe(process_exit: bool, replace_file: bool) {
+        use spaceterm_host::account_service::ServiceFailure;
+        let root = tempfile::tempdir().unwrap();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let registered = account.initialize(DesiredServerState::Stopped).unwrap();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        let store = test_support::store(&registered, key.clone()).unwrap();
+        let id = store.stage(&artifact).unwrap();
+        store
+            .discard_staged(id, store.snapshot().unwrap().generation)
+            .unwrap();
+        drop(store);
+        let installations = registered.data_directory().join("installations");
+        std::fs::remove_file(installations.join(format!("objects-{}", id.0.get()))).unwrap();
+        let selection = installations.join("selection");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&selection).unwrap()).unwrap();
+        value["cleanup"]
+            .as_object_mut()
+            .unwrap()
+            .remove("incomplete");
+        std::fs::write(selection, serde_json::to_vec(&value).unwrap()).unwrap();
+        let store = test_support::store(&registered, key.clone()).unwrap();
+
+        // Interrupt the first atomic inventory publication, after its rename
+        // but before directory synchronization or any payload removal.
+        if process_exit {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "account_installation::review_probe_cleanup_process_fixture",
+                ])
+                .env("SPACETERM_REVIEW_CLEANUP_ROOT", root.path())
+                .env("SPACETERM_REVIEW_CLEANUP_BOUNDARY", "16");
+            let mut child = spaceterm_host::process::spawn(&mut command).unwrap();
+            assert_eq!(child.wait().unwrap().code(), Some(86));
+        } else {
+            test_support::at_cleanup_boundary(16, test_support::fail_next_tree_sync);
+            assert_eq!(store.cleanup(), Err(ServiceFailure::Indeterminate));
+        }
+        drop(store);
+        let version = installations.join(format!("version-{}", id.0.get()));
+        let executable = version.join(&artifact.manifest().entry_points.server);
+        let original_bytes = std::fs::read(&executable).unwrap();
+        let reopened = test_support::store(&registered, key.clone()).unwrap();
+        assert_eq!(reopened.snapshot().unwrap().cleanup_pending, Some(id));
+        if replace_file {
+            // The complete inventory predates this same-content replacement.
+            // Content authentication alone must not grant removal authority.
+            let displaced = installations.join("retained-original-executable");
+            std::fs::rename(&executable, &displaced).unwrap();
+            std::fs::write(&executable, &original_bytes).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+            assert_eq!(reopened.cleanup(), Err(ServiceFailure::CleanupUnresolved));
+            assert_eq!(std::fs::read(&executable).unwrap(), original_bytes);
+            assert!(displaced.exists());
+            assert_eq!(reopened.snapshot().unwrap().cleanup_pending, Some(id));
+            std::fs::remove_file(&executable).unwrap();
+            std::fs::rename(displaced, &executable).unwrap();
+        }
+        reopened
+            .cleanup()
+            .expect("the original complete inventory must permit recovery");
+        assert_eq!(reopened.snapshot().unwrap().cleanup_pending, None);
+        assert!(!version.exists());
+        assert!(
+            !installations
+                .join(format!("metadata-{}", id.0.get()))
+                .exists()
+        );
+        assert!(reopened.stage(&artifact).unwrap().0.get() > id.0.get());
+    }
+
+    #[test]
+    fn legacy_inventory_publication_recovers_after_process_exit() {
+        legacy_inventory_recovery_probe(true, false);
+    }
+
+    #[test]
+    fn legacy_inventory_publication_recovers_after_directory_sync_failure() {
+        legacy_inventory_recovery_probe(false, false);
+    }
+
+    #[test]
+    fn legacy_inventory_publication_recovery_preserves_replacement_entries() {
+        legacy_inventory_recovery_probe(true, true);
+    }
+
+    #[test]
+    fn missing_creation_evidence_never_reports_incomplete_cleanup_complete() {
+        use spaceterm_host::account_service::ServiceFailure;
+        let root = tempfile::tempdir().unwrap();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let registered = account.initialize(DesiredServerState::Stopped).unwrap();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        let store = test_support::store(&registered, key).unwrap();
+        test_support::after_next_partial_copy(1, || {});
+        assert_eq!(
+            store.stage(&artifact),
+            Err(ServiceFailure::StorageUnavailable)
+        );
+        let snapshot = store.snapshot().unwrap();
+        let id = snapshot.preparing.unwrap();
+        store.discard_preparing(id, snapshot.generation).unwrap();
+        let installations = registered.data_directory().join("installations");
+        std::fs::remove_file(installations.join(format!("objects-{}", id.0.get()))).unwrap();
+        std::fs::remove_file(installations.join(format!("metadata-{}", id.0.get()))).unwrap();
+        assert_eq!(store.cleanup(), Err(ServiceFailure::CleanupUnresolved));
+        assert_eq!(store.snapshot().unwrap().cleanup_pending, Some(id));
+        assert!(
+            installations
+                .join(format!("version-{}", id.0.get()))
+                .exists()
+        );
+    }
+    #[test]
+    fn existing_code_storage_never_initializes_missing_installation_state() {
+        use spaceterm_host::account_service::ServiceFailure;
+        let root = tempfile::tempdir().unwrap();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let registered = account.initialize(DesiredServerState::Stopped).unwrap();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        let installations = registered.data_directory().join("installations");
+        assert_eq!(
+            test_support::existing_store(&registered, key.clone()).unwrap_err(),
+            ServiceFailure::Missing
+        );
+        assert!(!installations.exists());
+        let store = test_support::store(&registered, key.clone()).unwrap();
+        let id = store.stage(&artifact).unwrap();
+        store
+            .activate(id, store.snapshot().unwrap().generation, 1)
+            .unwrap();
+        let before = store.snapshot().unwrap();
+        drop(store);
+        let existing = test_support::existing_store(&registered, key.clone()).unwrap();
+        assert_eq!(existing.snapshot().unwrap(), before);
+        assert_eq!(existing.retain_approved().unwrap().installation(), id);
+        drop(existing);
+        std::fs::remove_file(installations.join("selection")).unwrap();
+        assert_eq!(
+            test_support::existing_store(&registered, key).unwrap_err(),
+            ServiceFailure::Missing
+        );
+        assert!(!installations.join("selection").exists());
+        assert_eq!(registered.desired_state(), DesiredServerState::Stopped);
     }
 }

@@ -47,6 +47,19 @@ impl ServerPlatform {
     pub fn archive_name(self, version: &str) -> String {
         format!("SpaceTerm-Server-{version}-{}.tar.gz", self.as_str())
     }
+    /// Channel-isolated account artifact name, matching the server packager.
+    /// Release names retain their existing canonical spelling.
+    pub fn account_archive_name(self, build: BuildChannel, version: &str) -> String {
+        let channel = match build {
+            BuildChannel::Release => "",
+            BuildChannel::Preflight => "-preflight",
+            BuildChannel::Development => "-development",
+        };
+        format!(
+            "SpaceTerm-Server{channel}-{version}-{}.tar.gz",
+            self.as_str()
+        )
+    }
     pub fn feed_url(self) -> String {
         format!(
             "{RELEASES}/latest/download/latest-server-{}.json",
@@ -350,7 +363,7 @@ pub fn verify_account_server_feed(
     if document.schema_version != 2
         || document.installation
             != (AccountInstallationCompatibility {
-                manifest_schema: 2,
+                manifest_schema: crate::manifest::AccountInstallationManifestV2::SCHEMA_VERSION,
                 registration_schema: 1,
                 journal_schema: 1,
             })
@@ -359,7 +372,10 @@ pub fn verify_account_server_feed(
     }
     if document.build_identity != build
         || document.platform != platform
-        || document.archive.name != platform.archive_name(document.version.as_str())
+        || (document.archive.name != platform.account_archive_name(build, document.version.as_str())
+            // Earlier account feeds used the release-style name for nonrelease
+            // builds. Their exact signed build and target remain mandatory.
+            && document.archive.name != platform.archive_name(document.version.as_str()))
     {
         return Err(DistributionFailure::IdentityMismatch);
     }

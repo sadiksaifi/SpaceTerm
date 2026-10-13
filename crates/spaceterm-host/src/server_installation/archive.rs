@@ -96,7 +96,7 @@ impl Tree {
         }
         Ok((directory, leaf.to_owned()))
     }
-    fn create_file(&self, name: &str, mode: u32) -> Result<File, ServiceFailure> {
+    pub(super) fn create_file(&self, name: &str, mode: u32) -> Result<File, ServiceFailure> {
         let name = component(name)?;
         // SAFETY: exclusive descriptor-relative creation cannot follow or overwrite any entry.
         let fd = unsafe {
@@ -112,6 +112,42 @@ impl Tree {
         }
         // SAFETY: successful openat returned a uniquely owned descriptor.
         Ok(unsafe { File::from_raw_fd(fd) })
+    }
+    pub(super) fn append_record(
+        &self,
+        name: &str,
+        expected: super::records::Identity,
+        length: u64,
+        bytes: &[u8],
+    ) -> Result<(), ServiceFailure> {
+        let name_component = component(name)?;
+        // SAFETY: this component and descriptor cannot follow links or create an entry.
+        let fd = unsafe {
+            libc::openat(
+                self.0.as_raw_fd(),
+                name_component.as_ptr(),
+                libc::O_WRONLY
+                    | libc::O_APPEND
+                    | libc::O_NOFOLLOW
+                    | libc::O_CLOEXEC
+                    | libc::O_NONBLOCK,
+            )
+        };
+        if fd < 0 {
+            return Err(classify(std::io::Error::last_os_error()));
+        }
+        // SAFETY: openat returned a uniquely owned descriptor.
+        let mut file = unsafe { File::from_raw_fd(fd) };
+        verify_file(&file, false)?;
+        if super::records::Identity::of(&file)? != expected
+            || file.metadata().map_err(classify)?.len() != length
+            || self.entry_identity(name)? != Some(expected)
+        {
+            return Err(ServiceFailure::RequestConflict);
+        }
+        file.write_all(bytes)
+            .map_err(|_| ServiceFailure::Indeterminate)?;
+        sync(&file)
     }
     pub(super) fn read_file(&self, name: &str, mode: u32) -> Result<File, ServiceFailure> {
         let (parent, name) = self.parent(name, false)?;
@@ -138,6 +174,8 @@ impl Tree {
     pub(super) fn extract(
         &self,
         artifact: &VerifiedAccountServerArtifact,
+        installations: &Tree,
+        journal: &mut super::journal::Journal,
     ) -> Result<(), ServiceFailure> {
         let decoder = flate2::read::MultiGzDecoder::new(artifact.bytes());
         let mut archive = tar::Archive::new(decoder);
@@ -164,8 +202,9 @@ impl Tree {
                 .iter()
                 .find(|f| f.name == name)
                 .ok_or(ServiceFailure::ArtifactRejected)?;
-            let (parent, leaf) = self.parent(name, true)?;
-            let mut file = parent.create_file(&leaf, installed_mode(expected.mode))?;
+            let (parent, _) = journal.parent(installations, self, name)?;
+            let mut file =
+                journal.file(installations, &parent, name, installed_mode(expected.mode))?;
             #[cfg(feature = "test-support")]
             super::test_support::copying(&mut entry, &mut file)?;
             let copied = std::io::copy(&mut entry, &mut file).map_err(classify)?;
@@ -309,92 +348,7 @@ impl Tree {
             }
         }
     }
-    /// Remove only manifest-named files and their parents. Never traverse unknown entries or links.
-    pub(super) fn remove_contents(
-        &self,
-        manifest: &AccountInstallationManifestV2,
-    ) -> Result<(), ServiceFailure> {
-        for file in &manifest.files {
-            let (parent, leaf) = match self.parent(&file.name, false) {
-                Ok(value) => value,
-                Err(ServiceFailure::Missing) => continue,
-                Err(error) => return Err(error),
-            };
-            match parent.read_file(&leaf, installed_mode(file.mode)) {
-                Ok(retained) => {
-                    let identity = retained.metadata().map_err(classify)?;
-                    verify_contents(retained, file)?;
-                    #[cfg(feature = "test-support")]
-                    super::test_support::removing_file();
-                    let captured = quarantine_name()?;
-                    parent.rename_exclusive(&leaf, &captured)?;
-                    let validation = (|| {
-                        let retained = parent.read_file(&captured, installed_mode(file.mode))?;
-                        let found = retained.metadata().map_err(classify)?;
-                        if found.dev() != identity.dev() || found.ino() != identity.ino() {
-                            return Err(ServiceFailure::CleanupUnresolved);
-                        }
-                        // Authenticate the captured bytes, not the pathname inspected before rename.
-                        verify_contents(retained, file)
-                    })();
-                    if let Err(error) = validation {
-                        parent.restore(&captured, &leaf)?;
-                        return Err(error);
-                    }
-                    parent.sync()?;
-                    parent.unlink(&captured, false)?;
-                    parent.sync()?;
-                }
-                Err(ServiceFailure::Missing) => (),
-                Err(error) => return Err(error),
-            }
-        }
-        for name in directories(manifest).iter().rev() {
-            let (parent, leaf) = match self.parent(name, false) {
-                Ok(value) => value,
-                Err(ServiceFailure::Missing) => continue,
-                Err(error) => return Err(error),
-            };
-            if let Some(retained) = parent.child(&leaf)? {
-                parent.remove_child(&leaf, &quarantine_name()?, &retained)?;
-            }
-        }
-        self.sync()
-    }
-    /// Capture before checking identity. Concurrent renames at the original name
-    /// cannot turn an inspected entry into a different unlink target.
-    pub(super) fn remove_child(
-        &self,
-        name: &str,
-        captured: &str,
-        retained: &Self,
-    ) -> Result<(), ServiceFailure> {
-        self.rename_exclusive(name, captured)?;
-        let validation = self.child(captured).and_then(|found| {
-            let found = found.ok_or(ServiceFailure::CleanupUnresolved)?;
-            if found.identity()? != retained.identity()? {
-                return Err(ServiceFailure::CleanupUnresolved);
-            }
-            Ok(())
-        });
-        if let Err(error) = validation {
-            self.restore(captured, name)?;
-            return Err(error);
-        }
-        self.sync()?;
-        if let Err(error) = self.unlink(captured, true) {
-            self.restore(captured, name)?;
-            return Err(error);
-        }
-        self.sync()
-    }
-    fn restore(&self, captured: &str, original: &str) -> Result<(), ServiceFailure> {
-        // Never overwrite an entry created after capture. A failed restore keeps
-        // both objects and leaves the original cleanup pending.
-        self.rename_exclusive(captured, original)?;
-        self.sync()
-    }
-    fn rename_exclusive(&self, from: &str, to: &str) -> Result<(), ServiceFailure> {
+    pub(super) fn rename_exclusive(&self, from: &str, to: &str) -> Result<(), ServiceFailure> {
         let from = component(from)?;
         let to = component(to)?;
         #[cfg(target_os = "macos")]
@@ -424,6 +378,157 @@ impl Tree {
         }
         Ok(())
     }
+    pub(super) fn require_empty(&self) -> Result<(), ServiceFailure> {
+        // SAFETY: an independent cursor cannot change the retained directory handle.
+        let fd = unsafe {
+            libc::openat(
+                self.0.as_raw_fd(),
+                c".".as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(ServiceFailure::StorageUnavailable);
+        }
+        // SAFETY: fdopendir consumes this descriptor on success.
+        let stream = unsafe { libc::fdopendir(fd) };
+        if stream.is_null() {
+            // SAFETY: fdopendir failed, so this descriptor is still owned here.
+            unsafe { libc::close(fd) };
+            return Err(ServiceFailure::StorageUnavailable);
+        }
+        let result = loop {
+            // SAFETY: this thread owns the native cursor and its errno slot.
+            unsafe {
+                *errno() = 0;
+            }
+            // SAFETY: this live stream belongs to the current thread.
+            let entry = unsafe { libc::readdir(stream) };
+            if entry.is_null() {
+                // SAFETY: readdir failure sets this thread's errno slot.
+                break if unsafe { *errno() } == 0 {
+                    Ok(())
+                } else {
+                    Err(ServiceFailure::StorageUnavailable)
+                };
+            }
+            // SAFETY: the returned name is terminated and valid until the next cursor advance.
+            let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) };
+            if name != c"." && name != c".." {
+                break Err(ServiceFailure::CleanupUnresolved);
+            }
+        };
+        // SAFETY: this function owns the cursor and its consumed descriptor.
+        unsafe {
+            libc::closedir(stream);
+        }
+        result
+    }
+    pub(super) fn entry_identity(
+        &self,
+        name: &str,
+    ) -> Result<Option<super::records::Identity>, ServiceFailure> {
+        let name = component(name)?;
+        let mut facts = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: the retained parent and one component cannot follow a symlink.
+        if unsafe {
+            libc::fstatat(
+                self.0.as_raw_fd(),
+                name.as_ptr(),
+                facts.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        } != 0
+        {
+            let error = std::io::Error::last_os_error();
+            return if error.kind() == std::io::ErrorKind::NotFound {
+                Ok(None)
+            } else {
+                Err(classify(error))
+            };
+        }
+        // SAFETY: successful fstatat initialized facts.
+        let facts = unsafe { facts.assume_init() };
+        Ok(Some(super::records::Identity {
+            #[cfg(target_os = "macos")]
+            device: facts.st_dev as u64,
+            #[cfg(target_os = "linux")]
+            device: facts.st_dev,
+            inode: facts.st_ino,
+        }))
+    }
+    pub(super) fn move_exclusive(
+        &self,
+        from: &str,
+        destination: &Self,
+        to: &str,
+    ) -> Result<(), ServiceFailure> {
+        let from = component(from)?;
+        let to = component(to)?;
+        #[cfg(target_os = "macos")]
+        // SAFETY: both components are below retained directory descriptors.
+        let result = unsafe {
+            libc::renameatx_np(
+                self.0.as_raw_fd(),
+                from.as_ptr(),
+                destination.0.as_raw_fd(),
+                to.as_ptr(),
+                libc::RENAME_EXCL,
+            )
+        };
+        #[cfg(target_os = "linux")]
+        // SAFETY: both components are below retained directory descriptors.
+        let result = unsafe {
+            libc::renameat2(
+                self.0.as_raw_fd(),
+                from.as_ptr(),
+                destination.0.as_raw_fd(),
+                to.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        if result != 0 {
+            return Err(ServiceFailure::CleanupUnresolved);
+        }
+        Ok(())
+    }
+    pub(super) fn rename(&self, from: &str, to: &str) -> Result<(), ServiceFailure> {
+        let from = component(from)?;
+        let to = component(to)?;
+        // SAFETY: both single components remain below this retained directory.
+        if unsafe {
+            libc::renameat(
+                self.0.as_raw_fd(),
+                from.as_ptr(),
+                self.0.as_raw_fd(),
+                to.as_ptr(),
+            )
+        } != 0
+        {
+            return Err(classify(std::io::Error::last_os_error()));
+        }
+        Ok(())
+    }
+    pub(super) fn retained(&self) -> Result<Self, ServiceFailure> {
+        Ok(Self(self.0.try_clone().map_err(classify)?))
+    }
+    pub(super) fn unlink_expected(
+        &self,
+        name: &str,
+        directory: bool,
+        expected: (u64, u64),
+    ) -> Result<(), ServiceFailure> {
+        if self
+            .entry_identity(name)?
+            .map(super::records::Identity::tuple)
+            != Some(expected)
+        {
+            return Err(ServiceFailure::CleanupUnresolved);
+        }
+        // Owner decision 7 excludes same-account replacement after this check.
+        // Keep the check next to unlinkat, under the installation mutation lock.
+        self.unlink(name, directory)
+    }
     pub(super) fn unlink(&self, name: &str, directory: bool) -> Result<(), ServiceFailure> {
         let name = component(name)?;
         // SAFETY: retained parent and one component. rmdir fails if any unlisted entry remains.
@@ -448,6 +553,8 @@ impl Tree {
         Ok(MutationLock(file))
     }
     pub(super) fn sync(&self) -> Result<(), ServiceFailure> {
+        #[cfg(feature = "test-support")]
+        super::test_support::tree_sync()?;
         self.0.sync_all().map_err(|_| ServiceFailure::Indeterminate)
     }
 }
@@ -455,7 +562,7 @@ impl Tree {
 pub(super) fn installed_mode(mode: u32) -> u32 {
     if mode & 0o100 != 0 { 0o700 } else { 0o600 }
 }
-fn verify_contents(
+pub(super) fn verify_contents(
     file: File,
     expected: &spaceterm_distribution::InstallationFile,
 ) -> Result<(), ServiceFailure> {
@@ -478,7 +585,7 @@ fn verify_contents(
     Ok(())
 }
 
-fn directories(manifest: &AccountInstallationManifestV2) -> BTreeSet<String> {
+pub(super) fn directories(manifest: &AccountInstallationManifestV2) -> BTreeSet<String> {
     let mut result = BTreeSet::new();
     for file in &manifest.files {
         let mut name = file.name.as_str();
@@ -489,7 +596,7 @@ fn directories(manifest: &AccountInstallationManifestV2) -> BTreeSet<String> {
     }
     result
 }
-fn quarantine_name() -> Result<String, ServiceFailure> {
+pub(super) fn quarantine_name() -> Result<String, ServiceFailure> {
     let mut nonce = [0; 16];
     getrandom::fill(&mut nonce).map_err(|_| ServiceFailure::StorageUnavailable)?;
     let mut name = String::from(".cleanup-");
@@ -528,7 +635,9 @@ unsafe fn errno() -> *mut libc::c_int {
     // SAFETY: libc provides the current thread's errno slot.
     unsafe { libc::__errno_location() }
 }
-fn sync(file: &File) -> Result<(), ServiceFailure> {
+pub(super) fn sync(file: &File) -> Result<(), ServiceFailure> {
+    #[cfg(feature = "test-support")]
+    super::test_support::file_sync(file)?;
     file.sync_all().map_err(|_| ServiceFailure::Indeterminate)?;
     #[cfg(target_os = "macos")]
     // SAFETY: F_FULLFSYNC synchronizes this retained regular file's storage.
@@ -537,7 +646,7 @@ fn sync(file: &File) -> Result<(), ServiceFailure> {
     }
     Ok(())
 }
-fn classify(error: std::io::Error) -> ServiceFailure {
+pub(super) fn classify(error: std::io::Error) -> ServiceFailure {
     match error.kind() {
         std::io::ErrorKind::NotFound => ServiceFailure::Missing,
         std::io::ErrorKind::AlreadyExists => ServiceFailure::CleanupUnresolved,
