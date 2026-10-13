@@ -1391,6 +1391,34 @@ fn admit_moves_and_resize(
     split
 }
 
+/// Applies each recorded edit through client-view, publishing its exact receipt and frame.
+/// Later structural edits are submitted only after the preceding Move's allocation is visible.
+fn apply_admitted_arrangements(
+    harness: &Harness,
+    replica: &mut Replica,
+    mut revision: usize,
+    cx: &mut VisualTestContext,
+) {
+    let mut index = 0;
+    while let Some(request) = harness.runtime.begun().get(index) {
+        let DesktopRequest::PersonalEdit(ViewEdit::Arrange {
+            workspace,
+            tab,
+            edit,
+        }) = *request
+        else {
+            panic!("an arrangement edit")
+        };
+        replica.personal.arrange(workspace, tab, edit).unwrap();
+        revision += 1;
+        harness.receipt(index, revision, cx);
+        harness
+            .apply_at(replica, ReplicaStatus::Ready, 1, revision, cx)
+            .unwrap();
+        index += 1;
+    }
+}
+
 #[gpui::test]
 fn desktop_server_published_moves_and_resize_keep_split_ids_and_ratios(cx: &mut TestAppContext) {
     let mut replica = two_panes(A);
@@ -1407,20 +1435,12 @@ fn desktop_server_published_moves_and_resize_keep_split_ids_and_ratios(cx: &mut 
     let entities = harness
         .view
         .read_with(cx, |view, _| view.presented_server_panes());
-    for request in harness.runtime.begun() {
-        let DesktopRequest::PersonalEdit(ViewEdit::Arrange {
-            workspace,
-            tab,
-            edit,
-        }) = request
-        else {
-            panic!("an arrangement edit")
-        };
-        replica.personal.arrange(workspace, tab, edit).unwrap();
-    }
-    harness
-        .apply(&replica, ReplicaStatus::Ready, 1, cx)
-        .unwrap();
+    assert_eq!(
+        harness.runtime.begun().len(),
+        1,
+        "only the first Move has an allocation request"
+    );
+    apply_admitted_arrangements(&harness, &mut replica, 0, cx);
     assert_eq!(
         harness
             .view
@@ -1502,25 +1522,14 @@ fn desktop_server_structural_edit_publication_watermark_survives_remote_interlea
     let entities = harness
         .view
         .read_with(cx, |view, _| view.presented_server_panes());
-    let mut older = replica.clone();
-    for request in harness.runtime.begun() {
-        let DesktopRequest::PersonalEdit(ViewEdit::Arrange {
-            workspace,
-            tab,
-            edit,
-        }) = request
-        else {
-            panic!("an arrangement edit")
-        };
-        replica.personal.arrange(workspace, tab, edit).unwrap();
-    }
     replica
         .org
         .split(1, 4, 2, CoreAxis::Vertical, SplitEdge::After)
         .publish();
-    older.org = replica.org.clone();
-    older.reconcile_ready(&[]);
-    harness.apply(&older, ReplicaStatus::Ready, 1, cx).unwrap();
+    replica.reconcile_ready(&[]);
+    harness
+        .apply_at(&replica, ReplicaStatus::Ready, 1, 1, cx)
+        .unwrap();
     harness.view.read_with(cx, |view, _| {
         let rebased = SplitId::new(view.server_arrangement().split_high_water()).unwrap();
         assert_eq!(
@@ -1546,25 +1555,14 @@ fn desktop_server_structural_edit_publication_watermark_survives_remote_interlea
         },
         cx
     )));
-    let DesktopRequest::PersonalEdit(ViewEdit::Arrange {
-        workspace,
-        tab,
-        edit,
-    }) = harness.runtime.begun()[3]
-    else {
-        panic!("the newly admitted resize")
-    };
-    replica.personal.arrange(workspace, tab, edit).unwrap();
-    let provider_branch_ratio = split_facts(replica.arrangement(1, 1).tree(), split)
+    apply_admitted_arrangements(&harness, &mut replica, 1, cx);
+    let provider_branch_ratio = split_facts(replica.arrangement(1, 1).tree(), displayed)
         .unwrap()
         .1;
     assert_eq!(
         provider_branch_ratio, 0.4,
         "resize the branch the person chose"
     );
-    harness
-        .apply(&replica, ReplicaStatus::Ready, 1, cx)
-        .unwrap();
     assert_eq!(
         harness
             .view
@@ -1574,7 +1572,7 @@ fn desktop_server_structural_edit_publication_watermark_survives_remote_interlea
     assert_eq!(
         harness
             .view
-            .read_with(cx, |view, _| view.server_split_ratio(split)),
+            .read_with(cx, |view, _| view.server_split_ratio(displayed)),
         Some(0.4)
     );
     let survivors: Vec<_> = harness
@@ -1714,32 +1712,20 @@ fn desktop_server_rebased_split_axis_and_remote_branch_resize_target_the_provide
         .publish();
     replica.reconcile_ready(&[]);
     let (harness, cx) = server_view(&replica, ReplicaStatus::Ready, cx);
-    let moved = admit_moves_and_resize(&harness, cx);
-    let mut older = replica.clone();
-    for request in harness.runtime.begun() {
-        let DesktopRequest::PersonalEdit(ViewEdit::Arrange {
-            workspace,
-            tab,
-            edit,
-        }) = request
-        else {
-            panic!("an arrangement edit")
-        };
-        replica.personal.arrange(workspace, tab, edit).unwrap();
-    }
+    admit_moves_and_resize(&harness, cx);
     replica
         .org
         .split(1, 4, 2, CoreAxis::Vertical, SplitEdge::After)
         .publish();
-    older.org = replica.org.clone();
-    older.reconcile_ready(&[]);
     replica.reconcile_ready(&[]);
     let remote = SplitId::new(replica.arrangement(1, 1).split_high_water()).unwrap();
-    harness.apply(&older, ReplicaStatus::Ready, 1, cx).unwrap();
+    harness
+        .apply_at(&replica, ReplicaStatus::Ready, 1, 1, cx)
+        .unwrap();
     let displayed_moved = harness.view.read_with(cx, |view, _| {
         SplitId::new(view.server_arrangement().split_high_water()).unwrap()
     });
-    let displayed_remote = SplitId::new(older.arrangement(1, 1).split_high_water()).unwrap();
+    let displayed_remote = remote;
     let metrics = ArrangementMetrics {
         minimum_leaf: ViewSize::new(100.0, 100.0).unwrap(),
         divider: 6.0,
@@ -1759,18 +1745,10 @@ fn desktop_server_rebased_split_axis_and_remote_branch_resize_target_the_provide
         },
     ] {
         assert!(harness.view.update(cx, |view, cx| view.arrange(edit, cx)));
-        let DesktopRequest::PersonalEdit(ViewEdit::Arrange {
-            workspace,
-            tab,
-            edit,
-        }) = *harness.runtime.begun().last().unwrap()
-        else {
-            panic!("a newly admitted edit")
-        };
-        replica.personal.arrange(workspace, tab, edit).unwrap();
     }
+    apply_admitted_arrangements(&harness, &mut replica, 1, cx);
     assert_eq!(
-        split_facts(replica.arrangement(1, 1).tree(), moved)
+        split_facts(replica.arrangement(1, 1).tree(), displayed_moved)
             .unwrap()
             .0,
         CoreAxis::Horizontal
@@ -1781,9 +1759,6 @@ fn desktop_server_rebased_split_axis_and_remote_branch_resize_target_the_provide
             .1,
         0.65
     );
-    harness
-        .apply(&replica, ReplicaStatus::Ready, 1, cx)
-        .unwrap();
     assert_eq!(
         harness
             .view
@@ -1804,18 +1779,6 @@ fn desktop_server_live_divider_rebases_its_binding_before_commit(cx: &mut TestAp
     replica.reconcile_ready(&[]);
     let (harness, cx) = server_view(&replica, ReplicaStatus::Ready, cx);
     let split = admit_moves_and_resize(&harness, cx);
-    let mut older = replica.clone();
-    for request in harness.runtime.begun() {
-        let DesktopRequest::PersonalEdit(ViewEdit::Arrange {
-            workspace,
-            tab,
-            edit,
-        }) = request
-        else {
-            panic!("an arrangement edit")
-        };
-        replica.personal.arrange(workspace, tab, edit).unwrap();
-    }
     harness.view.update(cx, |view, cx| {
         view.resizing_split_id = Some(SplitKey::Server(split));
         view.set_split_ratio(
@@ -1830,10 +1793,10 @@ fn desktop_server_live_divider_rebases_its_binding_before_commit(cx: &mut TestAp
         .org
         .split(1, 4, 2, CoreAxis::Vertical, SplitEdge::After)
         .publish();
-    older.org = replica.org.clone();
-    older.reconcile_ready(&[]);
     replica.reconcile_ready(&[]);
-    harness.apply(&older, ReplicaStatus::Ready, 1, cx).unwrap();
+    harness
+        .apply_at(&replica, ReplicaStatus::Ready, 1, 1, cx)
+        .unwrap();
     let displayed = harness.view.read_with(cx, |view, _| {
         SplitId::new(view.server_arrangement().split_high_water()).unwrap()
     });
@@ -1851,27 +1814,16 @@ fn desktop_server_live_divider_rebases_its_binding_before_commit(cx: &mut TestAp
         );
         view.commit_live_edit(cx);
     });
-    let DesktopRequest::PersonalEdit(ViewEdit::Arrange {
-        workspace,
-        tab,
-        edit,
-    }) = harness.runtime.begun()[3]
-    else {
-        panic!("the committed divider edit")
-    };
-    replica.personal.arrange(workspace, tab, edit).unwrap();
+    apply_admitted_arrangements(&harness, &mut replica, 1, cx);
     assert_eq!(
-        split_facts(replica.arrangement(1, 1).tree(), split)
+        split_facts(replica.arrangement(1, 1).tree(), displayed)
             .unwrap()
             .1,
         0.45
     );
-    harness
-        .apply(&replica, ReplicaStatus::Ready, 1, cx)
-        .unwrap();
     assert_eq!(
         harness.view.read_with(cx, |view, _| view.resizing_split_id),
-        Some(SplitKey::Server(split))
+        Some(SplitKey::Server(displayed))
     );
     assert_eq!(
         harness
@@ -1880,6 +1832,370 @@ fn desktop_server_live_divider_rebases_its_binding_before_commit(cx: &mut TestAp
         replica.arrangement(1, 1).export()
     );
     assert!(harness.events().is_empty());
+}
+
+fn resize_moved_branch_with_remote_allocation(move_first: bool, cx: &mut TestAppContext) {
+    use spaceterm_client::view::{
+        ArrangementMetrics, PaneEdge, PaneNodeRef, PaneSize as ViewSize, SplitId,
+    };
+    let mut replica = two_panes(A);
+    replica
+        .org
+        .split(1, 3, 2, CoreAxis::Horizontal, SplitEdge::After)
+        .publish();
+    replica.reconcile_ready(&[]);
+    let (harness, cx) = server_view(&replica, ReplicaStatus::Ready, cx);
+    let available = ViewSize::new(1200.0, 800.0).unwrap();
+    let metrics = ArrangementMetrics {
+        minimum_leaf: ViewSize::new(100.0, 100.0).unwrap(),
+        divider: 6.0,
+    };
+    assert!(harness.view.update(cx, |view, cx| view.arrange(
+        ArrangementEdit::Move {
+            pane: pane(A, 1),
+            target: pane(A, 3),
+            edge: PaneEdge::Bottom,
+            target_size: available,
+            metrics,
+        },
+        cx
+    )));
+    let DesktopRequest::PersonalEdit(ViewEdit::Arrange {
+        workspace,
+        tab,
+        edit,
+    }) = harness.runtime.begun()[0]
+    else {
+        panic!("the admitted Move")
+    };
+    if move_first {
+        replica.personal.arrange(workspace, tab, edit).unwrap();
+    }
+    replica
+        .org
+        .split(1, 4, 2, CoreAxis::Vertical, SplitEdge::After)
+        .publish();
+    replica.reconcile_ready(&[]);
+    let remote = SplitId::new(replica.arrangement(1, 1).split_high_water()).unwrap();
+    harness
+        .apply_at(&replica, ReplicaStatus::Ready, 1, 1, cx)
+        .unwrap();
+    if !move_first {
+        // The provider applies the delayed Move after publishing the remote split.
+        replica.personal.arrange(workspace, tab, edit).unwrap();
+    }
+    fn moved_split(tree: spaceterm_client::view::PaneTreeRef<'_>) -> Option<SplitId> {
+        match tree.node() {
+            PaneNodeRef::Pane(_) => None,
+            PaneNodeRef::Split {
+                id, first, second, ..
+            } => {
+                if matches!(first.node(), PaneNodeRef::Pane(id) if id == pane(A, 3))
+                    && matches!(second.node(), PaneNodeRef::Pane(id) if id == pane(A, 1))
+                {
+                    Some(id)
+                } else {
+                    moved_split(first).or_else(|| moved_split(second))
+                }
+            }
+        }
+    }
+    let provider_split = moved_split(replica.arrangement(1, 1).tree()).unwrap();
+    assert_eq!(provider_split.get(), if move_first { 3 } else { 4 });
+    let displayed_split = harness.view.read_with(cx, |view, _| {
+        moved_split(view.server_arrangement().tree()).unwrap()
+    });
+    assert!(harness.view.update(cx, |view, cx| view.arrange(
+        ArrangementEdit::Resize {
+            split: displayed_split,
+            available,
+            metrics,
+            ratio: 0.3,
+        },
+        cx
+    )));
+    assert_eq!(
+        harness.runtime.begun().len(),
+        1,
+        "an optimistic Split has no provider allocation until its Move receipt and frame arrive"
+    );
+    assert!(
+        harness
+            .view
+            .read_with(cx, |view, _| view.has_waiting_personal_edits())
+    );
+    harness.receipt(0, if move_first { 1 } else { 2 }, cx);
+    harness
+        .apply_at(&replica, ReplicaStatus::Ready, 1, 2, cx)
+        .unwrap();
+    let DesktopRequest::PersonalEdit(ViewEdit::Arrange {
+        workspace,
+        tab,
+        edit,
+    }) = harness.runtime.begun()[1]
+    else {
+        panic!("the admitted Resize")
+    };
+    assert!(
+        !harness
+            .view
+            .read_with(cx, |view, _| view.has_waiting_personal_edits())
+    );
+    replica.personal.arrange(workspace, tab, edit).unwrap();
+    assert_eq!(
+        split_facts(replica.arrangement(1, 1).tree(), provider_split)
+            .unwrap()
+            .1,
+        0.3,
+        "the provider must resize the displayed moved branch"
+    );
+    assert_eq!(
+        split_facts(replica.arrangement(1, 1).tree(), remote)
+            .unwrap()
+            .1,
+        0.5,
+        "the remote-created branch must keep its ratio"
+    );
+    harness
+        .apply_at(&replica, ReplicaStatus::Ready, 1, 3, cx)
+        .unwrap();
+    assert_eq!(
+        harness
+            .view
+            .read_with(cx, |view, _| view.server_arrangement().export()),
+        replica.arrangement(1, 1).export()
+    );
+    assert!(harness.events().is_empty());
+}
+
+#[gpui::test]
+fn desktop_server_resize_binds_move_before_remote_split_allocation(cx: &mut TestAppContext) {
+    resize_moved_branch_with_remote_allocation(true, cx);
+}
+
+#[gpui::test]
+fn desktop_server_resize_binds_remote_split_before_delayed_move_allocation(
+    cx: &mut TestAppContext,
+) {
+    resize_moved_branch_with_remote_allocation(false, cx);
+}
+
+fn allocated_split_edit_with_later_move(live: bool, cx: &mut TestAppContext) {
+    use spaceterm_client::view::{ArrangementMetrics, PaneEdge, PaneSize as ViewSize, SplitId};
+    let mut replica = two_panes(A);
+    replica
+        .org
+        .split(1, 3, 2, CoreAxis::Horizontal, SplitEdge::After)
+        .publish();
+    replica.reconcile_ready(&[]);
+    let (harness, cx) = server_view(&replica, ReplicaStatus::Ready, cx);
+    let available = ViewSize::new(1200.0, 800.0).unwrap();
+    let metrics = ArrangementMetrics {
+        minimum_leaf: ViewSize::new(100.0, 100.0).unwrap(),
+        divider: 6.0,
+    };
+    assert!(harness.view.update(cx, |view, cx| view.arrange(
+        ArrangementEdit::Move {
+            pane: pane(A, 1),
+            target: pane(A, 3),
+            edge: PaneEdge::Bottom,
+            target_size: available,
+            metrics
+        },
+        cx
+    )));
+    apply_admitted_arrangements(&harness, &mut replica, 0, cx);
+    let original = SplitId::new(3).unwrap();
+    for edit in [
+        ArrangementEdit::Resize {
+            split: original,
+            available,
+            metrics,
+            ratio: 0.3,
+        },
+        ArrangementEdit::Move {
+            pane: pane(A, 1),
+            target: pane(A, 3),
+            edge: PaneEdge::Right,
+            target_size: available,
+            metrics,
+        },
+    ] {
+        if live && matches!(edit, ArrangementEdit::Resize { .. }) {
+            harness.view.update(cx, |view, cx| {
+                view.resizing_split_id = Some(SplitKey::Server(original));
+                view.set_split_ratio(
+                    SplitKey::Server(original),
+                    PaneSize::new(1200.0, 800.0).unwrap(),
+                    0.3,
+                    false,
+                    cx,
+                );
+            });
+        } else {
+            assert!(harness.view.update(cx, |view, cx| view.arrange(edit, cx)));
+        }
+    }
+    for (index, request) in harness.runtime.begun()[1..].iter().enumerate() {
+        if index == usize::from(!live) {
+            // Coalesce this publication with the later Move. The UI never sees its allocation first.
+            replica
+                .org
+                .split(1, 4, 2, CoreAxis::Vertical, SplitEdge::After)
+                .publish();
+            replica.reconcile_ready(&[]);
+        }
+        let DesktopRequest::PersonalEdit(ViewEdit::Arrange {
+            workspace,
+            tab,
+            edit,
+        }) = *request
+        else {
+            panic!("an arrangement edit")
+        };
+        replica.personal.arrange(workspace, tab, edit).unwrap();
+    }
+    let replacement = SplitId::new(5).unwrap();
+    assert_eq!(
+        split_facts(replica.arrangement(1, 1).tree(), original),
+        None
+    );
+    assert_eq!(
+        split_facts(replica.arrangement(1, 1).tree(), replacement),
+        Some((CoreAxis::Horizontal, 0.5))
+    );
+    // The later Move has no receipt. Its matching Pane partition is not Split identity.
+    harness
+        .apply_at(
+            &replica,
+            ReplicaStatus::Ready,
+            1,
+            if live { 3 } else { 4 },
+            cx,
+        )
+        .unwrap();
+    assert_eq!(
+        harness
+            .view
+            .read_with(cx, |view, _| view.server_split_ratio(replacement)),
+        Some(0.5)
+    );
+    if live {
+        assert_eq!(
+            harness.view.read_with(cx, |view, _| view.resizing_split_id),
+            None
+        );
+        harness
+            .view
+            .update(cx, |view, cx| view.commit_live_edit(cx));
+        assert!(
+            !harness
+                .view
+                .read_with(cx, |view, _| view.has_waiting_personal_edits())
+        );
+    }
+    assert_eq!(harness.runtime.begun().len(), if live { 2 } else { 3 });
+}
+
+#[gpui::test]
+fn desktop_server_allocated_split_edit_cannot_rebind_to_a_later_move(cx: &mut TestAppContext) {
+    allocated_split_edit_with_later_move(false, cx);
+}
+
+#[gpui::test]
+fn desktop_server_live_divider_cancels_when_a_move_replaces_its_allocated_split(
+    cx: &mut TestAppContext,
+) {
+    allocated_split_edit_with_later_move(true, cx);
+}
+
+#[gpui::test]
+fn desktop_server_failed_move_cancels_unsent_split_edits(cx: &mut TestAppContext) {
+    let mut replica = two_panes(A);
+    replica
+        .org
+        .split(1, 3, 2, CoreAxis::Horizontal, SplitEdge::After)
+        .publish();
+    replica.reconcile_ready(&[]);
+    let (harness, cx) = server_view(&replica, ReplicaStatus::Ready, cx);
+    let original = harness
+        .view
+        .read_with(cx, |view, _| view.server_arrangement().export());
+    admit_moves_and_resize(&harness, cx);
+    assert_eq!(harness.runtime.begun().len(), 1);
+    harness
+        .runtime
+        .provider
+        .finish(0, Err(DesktopClientError::StaleContext));
+    cx.run_until_parked();
+    assert_eq!(
+        harness
+            .view
+            .read_with(cx, |view, _| view.server_arrangement().export()),
+        original
+    );
+    replica
+        .org
+        .split(1, 4, 2, CoreAxis::Vertical, SplitEdge::After)
+        .publish();
+    replica.reconcile_ready(&[]);
+    harness
+        .apply_at(&replica, ReplicaStatus::Ready, 1, 1, cx)
+        .unwrap();
+    assert_eq!(
+        harness.runtime.begun().len(),
+        1,
+        "a later frame cannot revive cancelled local edits"
+    );
+    assert_eq!(harness.refused(), vec![DesktopClientError::StaleContext]);
+}
+
+#[gpui::test]
+fn desktop_server_unsent_split_edits_share_the_retained_request_bound(cx: &mut TestAppContext) {
+    use spaceterm_client::view::{ArrangementMetrics, PaneSize as ViewSize};
+    let mut replica = two_panes(A);
+    replica
+        .org
+        .split(1, 3, 2, CoreAxis::Horizontal, SplitEdge::After)
+        .publish();
+    replica.reconcile_ready(&[]);
+    let (harness, cx) = server_view(&replica, ReplicaStatus::Ready, cx);
+    let split = admit_moves_and_resize(&harness, cx);
+    let edit = |ratio| ArrangementEdit::Resize {
+        split,
+        available: ViewSize::new(1200.0, 800.0).unwrap(),
+        metrics: ArrangementMetrics {
+            minimum_leaf: ViewSize::new(100.0, 100.0).unwrap(),
+            divider: 6.0,
+        },
+        ratio,
+    };
+    for index in 0..crate::ui::server_client_runtime::MAX_PENDING_UI_REQUESTS - 3 {
+        assert!(harness.view.update(cx, |view, cx| {
+            view.arrange(edit(if index % 2 == 0 { 0.4 } else { 0.3 }), cx)
+        }));
+    }
+    let accepted = harness
+        .view
+        .read_with(cx, |view, _| view.server_arrangement().export());
+    assert!(
+        !harness
+            .view
+            .update(cx, |view, cx| view.arrange(edit(0.45), cx))
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        harness.runtime.begun().len(),
+        1,
+        "unsent edits cannot evade admission bounds"
+    );
+    assert_eq!(harness.refused(), vec![DesktopClientError::AdmissionFull]);
+    assert_eq!(
+        harness
+            .view
+            .read_with(cx, |view, _| view.server_arrangement().export()),
+        accepted
+    );
 }
 
 #[gpui::test]

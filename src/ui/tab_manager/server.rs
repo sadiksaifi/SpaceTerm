@@ -6,7 +6,7 @@
 //! a shared Tab itself: Create Tab asks the server, and a Tab leaves only when a publication no
 //! longer represents it.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -57,6 +57,10 @@ struct PendingTabEdit {
     request: UiRequestId,
     admitted_after: DesktopViewRevision,
     replay: ViewEdit,
+    /// Cumulative order checkpoints avoid replaying a represented composition of absolute moves.
+    /// They are presentation optimizations, never application receipts or retirement evidence.
+    order: Option<Vec<TabId>>,
+    rebased_order: Option<Vec<TabId>>,
     completed: bool,
     applied: Option<DesktopViewRevision>,
 }
@@ -164,16 +168,38 @@ impl ServerTabs {
         });
     }
 
-    fn replay_edits(&self, publication: &ServerPublication) -> Arc<ClientViewState> {
+    fn replay_edits(&mut self, publication: &ServerPublication) -> Arc<ClientViewState> {
+        let workspace = self.workspace();
         let mut personal = ClientViewState::clone(&publication.personal);
-        for pending in &self.edits {
+        let represented_order = personal.workspace(workspace).and_then(|view| {
+            let published = view.tab_order();
+            let published_tabs: BTreeSet<_> = published.iter().copied().collect();
+            let matches_order = |expected: &[TabId]| {
+                let known: BTreeSet<_> = expected.iter().copied().collect();
+                expected
+                    .iter()
+                    .filter(|tab| published_tabs.contains(*tab))
+                    .eq(published.iter().filter(|tab| known.contains(*tab)))
+            };
+            self.edits.iter().rposition(|pending| {
+                pending.order.as_deref().is_some_and(matches_order)
+                    || pending.rebased_order.as_deref().is_some_and(matches_order)
+            })
+        });
+        for (index, pending) in self.edits.iter_mut().enumerate() {
             if pending
                 .applied
                 .is_some_and(|applied| applied <= publication.view_revision)
+                || (pending.order.is_some() && represented_order.is_some_and(|last| index <= last))
             {
                 continue;
             }
             let _ = apply_view_edit(&mut personal, pending.replay, &publication.organization);
+            if pending.order.is_some() {
+                pending.rebased_order = personal
+                    .workspace(workspace)
+                    .map(|view| view.tab_order().to_vec());
+            }
         }
         Arc::new(personal)
     }
@@ -527,6 +553,17 @@ impl TabManager {
         }
     }
 
+    /// Quit/save composition must flush local Split edits before saving the provider's view.
+    pub(crate) fn has_waiting_personal_edits(&self, cx: &gpui::App) -> bool {
+        match &self.tabs {
+            Tabs::Server(server) => server
+                .all_views()
+                .into_iter()
+                .any(|view| view.read(cx).has_waiting_personal_edits()),
+            Tabs::Local(_) => false,
+        }
+    }
+
     /// Returns native focus to the active Tab's Focused Pane. This is not a selection.
     pub(crate) fn restore_focus(&self, window: &mut Window, cx: &mut gpui::App) {
         self.focus(window, cx);
@@ -835,6 +872,13 @@ impl TabManager {
             request,
             admitted_after: server.publication.view_revision,
             replay,
+            order: if matches!(replay, ViewEdit::MoveTab { .. }) {
+                next.workspace(server.workspace())
+                    .map(|view| view.tab_order().to_vec())
+            } else {
+                None
+            },
+            rebased_order: None,
             completed: false,
             applied: None,
         });
