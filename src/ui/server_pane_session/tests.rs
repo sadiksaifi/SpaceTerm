@@ -156,6 +156,12 @@ impl Fixture {
 
 impl Fixture {
     pub(crate) fn frame(&self) -> spaceterm_core::content_queries::QueryStamp {
+        self.frame_with_text(["p", "r", "i", "v", "a"])
+    }
+    pub(crate) fn frame_with_text(
+        &self,
+        text: [&str; 5],
+    ) -> spaceterm_core::content_queries::QueryStamp {
         let permit = self.channel.permit(EffectKind::Read).unwrap();
         let stamp = self
             .channel
@@ -171,7 +177,7 @@ impl Fixture {
             node_serial: 1,
             page_row: 0,
         };
-        let cells = ["p", "r", "i", "v", "a"]
+        let cells = text
             .iter()
             .map(|text| {
                 StyledCell::new(
