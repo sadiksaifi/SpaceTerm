@@ -58,9 +58,7 @@ impl std::fmt::Debug for AccessibilityPublication {
 }
 
 pub(crate) fn empty_accessibility_model() -> TerminalAccessibilityModel {
-    TerminalAccessibilityModel::from_screen(&crate::terminal::ScreenSnapshot::empty(
-        spaceterm_terminal::local_path::LocalPathSemantics::Posix,
-    ))
+    TerminalAccessibilityModel::empty()
 }
 
 /// Owns one Pane's native accessibility resources. Dropping it retires those resources.

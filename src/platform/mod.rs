@@ -352,6 +352,8 @@ mod linux_ssh_executable;
 mod linux_updates;
 
 pub(crate) mod client_journal;
+pub(crate) mod desktop_client_startup;
+pub(crate) mod local_server_client;
 
 pub(crate) mod server_client_route;
 

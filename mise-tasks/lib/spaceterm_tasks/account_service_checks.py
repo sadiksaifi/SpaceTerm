@@ -39,6 +39,17 @@ GATES = {
         "spaceterm-client": ("pairing_bootstrap",),
         "spaceterm-host": ("bootstrap_probe", "bootstrap_process", "bootstrap_linger"),
     },
+    # Signed archive fixtures and injected service managers remain distinct from
+    # the real Git subprocess, native PTY and authenticated replacement client.
+    # This gate never supplies installed-service or release-signing evidence.
+    "update": {
+        "spaceterm-host": (
+            "server_installation",
+            "account_service_lifecycle",
+            "account_service_managers",
+        ),
+        "spaceterm-server": ("git_shutdown",),
+    },
 }
 MUTATIONS = {"install", "start", "stop", "uninstall"}
 
@@ -54,8 +65,16 @@ def require_nonempty(output):
         rb"finished in [0-9.]+s\s*\Z",
         output,
     )
-    if not announced or len(summaries) != len(announced) or completed is None:
+    if not announced or completed is None:
         raise TaskError("the scoped test gate did not execute its target")
+    if len(summaries) != len(announced):
+        # Power-loss/process-kill suites intentionally terminate one-test child
+        # harnesses without a summary. Accept only an unambiguous larger parent
+        # target whose final completed count still matches its own announcement.
+        if len(summaries) > len(announced) or int(announced[0]) <= max(
+            (int(count) for count in announced[1:]), default=0
+        ):
+            raise TaskError("the scoped test gate did not execute its target")
     passed, failed, ignored, measured = (int(count) for count in completed.groups())
     if failed or passed == 0 or passed + ignored + measured != int(announced[0]):
         raise TaskError("the scoped test gate did not execute its target")
@@ -64,7 +83,7 @@ def require_nonempty(output):
 
 def test_gate(name):
     environment = signing_environment(os.environ)
-    environment["CARGO_BUILD_JOBS"] = "5"
+    environment["CARGO_BUILD_JOBS"] = "4"
     total = 0
     target_count = 0
     for package, targets in GATES[name].items():
@@ -72,7 +91,7 @@ def test_gate(name):
             if name == "account" and target == "pty_inheritance" and sys.platform != "darwin":
                 continue
             command = ["cargo", "test", "--quiet", "--locked", "-p", package, "--test", target]
-            if name == "account":
+            if name in {"account", "update"}:
                 command.extend(("--features", "test-support"))
             output = native.run_tool(
                 command, cwd=ROOT, environment=environment, timeout=300, maximum=1024 * 1024

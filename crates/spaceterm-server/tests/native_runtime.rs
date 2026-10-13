@@ -126,21 +126,35 @@ async fn input(
     text: &str,
 ) {
     let access = handle.runtime_access(principal, session).await.unwrap();
-    assert_eq!(
-        handle
-            .runtime_command(
-                principal,
-                FencedRuntimeCommand {
-                    fence: fence(access.authority, None),
-                    command: RuntimeCommand::InputMethodCommit(
-                        BoundedInputMethodText::new(text.trim_end_matches('\n').into()).unwrap()
-                    ),
-                }
-            )
-            .await
-            .unwrap(),
-        EffectDisposition::Applied
-    );
+    use spaceterm_protocol::{codec::Payload, convert::identity, wire::v2};
+    use spaceterm_server::protocol_dispatch::{ActorOrdinaryDispatch, OrdinaryDispatchPort};
+    let dispatch = ActorOrdinaryDispatch::new(Arc::new(
+        spaceterm_core::operation_ledger::canonical::CanonicalCodec,
+    ));
+    let reply = dispatch
+        .dispatch(
+            principal,
+            Payload::Major2(v2::Message {
+                kind: Some(v2::message::Kind::RuntimeCommand(v2::RuntimeCommand {
+                    fence: Some(identity::encode_fence(fence(access.authority, None))),
+                    request: 1,
+                    action: Some(v2::runtime_command::Action::InputMethodText(
+                        text.trim_end_matches('\n').into(),
+                    )),
+                })),
+            }),
+            handle.clone(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let Payload::Major2(v2::Message {
+        kind: Some(v2::message::Kind::RuntimeOutcome(reply)),
+    }) = reply
+    else {
+        panic!("runtime outcome");
+    };
+    assert!(reply.failure.is_none());
     if text.ends_with('\n') {
         let mut enter = spaceterm_terminal::KeyInput::text_input("");
         enter.physical_key = spaceterm_terminal::PhysicalKey::Enter;

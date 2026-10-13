@@ -6274,13 +6274,17 @@ dependencies = [
 name = "spaceterm-client"
 version = "0.0.0"
 dependencies = [
+ "flate2",
  "prost",
  "ring",
  "serde",
+ "serde_json",
  "sha2",
  "spaceterm-core",
+ "spaceterm-distribution",
  "spaceterm-protocol",
  "spaceterm-terminal",
+ "tar",
  "thiserror 2.0.19",
  "tokio",
  "zeroize",

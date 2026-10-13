@@ -2505,7 +2505,8 @@ mod tests {
     #[test]
     fn settlement_receipts_cache_conclusive_outcomes_and_reap_the_leader_once() {
         let _isolation = lock_real_pty_test();
-        for outcome in [NativePtySettlement::Settled] {
+        {
+            let outcome = NativePtySettlement::Settled;
             let leader = ProcessIdentity {
                 process: i32::MAX,
                 start: ProcessStart { coarse: 1, fine: 0 },

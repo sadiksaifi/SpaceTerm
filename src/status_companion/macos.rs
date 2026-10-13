@@ -17,10 +17,10 @@ use objc2_foundation::{NSBundle, NSObject, NSObjectProtocol, NSOperationQueue, N
 
 use super::controller::{
     ActionIngress, CompanionAction, CompanionController, CompanionDependencies, CompanionFailure,
-    DesktopActivation, StatusArea, StatusSource,
+    DesktopActivation, StatusArea,
 };
 use super::model::{CompanionModel, MenuEntry};
-use super::native::{ModelSlot, TokioTimer, UnavailableNativeStatus, enclosing_desktop_bundle};
+use super::native::{ModelSlot, NativeCompanion, TokioTimer, enclosing_desktop_bundle};
 use super::{CompanionIdentity, report};
 
 struct MenuTargetIvars {
@@ -296,9 +296,10 @@ pub(super) fn run(identity: CompanionIdentity) -> Result<(), CompanionFailure> {
     application.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
     let actions = Arc::new(ActionIngress::new());
     MenuBar::install(mtm, identity, actions.clone())?;
+    let client = Arc::new(NativeCompanion::current());
     let dependencies = CompanionDependencies {
-        status: StatusSource::Unbound,
-        native: Arc::new(UnavailableNativeStatus),
+        status: client.clone(),
+        native: client,
         desktop: Arc::new(WorkspaceDesktop { identity }),
         area: Box::new(MenuBarArea {
             slot: Arc::new(ModelSlot::new()),

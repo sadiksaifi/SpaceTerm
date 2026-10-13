@@ -29,6 +29,7 @@ pub(crate) enum AskPassRequestError {
 pub(crate) struct AskPassRequest {
     prompt: String,
     kind: AskPassPromptKind,
+    scoped_sudo: bool,
 }
 
 impl AskPassRequest {
@@ -46,7 +47,27 @@ impl AskPassRequest {
         if prompt.chars().any(is_unsafe_prompt_character) {
             return Err(AskPassRequestError::ContainsUnsafeCharacter);
         }
-        Ok(Self { prompt, kind })
+        Ok(Self {
+            prompt,
+            kind,
+            scoped_sudo: false,
+        })
+    }
+
+    /// Fixed foreground sudo wording. Remote prompt text cannot select this presentation.
+    pub(crate) fn scoped_sudo(route: spaceterm_client::pairing::bootstrap::BootstrapRoute) -> Self {
+        let host: String = route.host_binding()[..8]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        Self {
+            prompt: format!(
+                "Operation: Enable account lingering\nAccount UID: {}\nSSH host binding: {host}\n\nEnter the remote account's sudo password to let its server survive logout and start at boot. SpaceTerm sends the response only to this SSH authorization exchange and does not store it.",
+                route.account_uid()
+            ),
+            kind: AskPassPromptKind::Secret,
+            scoped_sudo: true,
+        }
     }
 
     pub(crate) fn prompt(&self) -> &str {
@@ -97,6 +118,16 @@ impl AskPassRequest {
     }
 
     fn presentation(&self) -> AskPassPresentation {
+        if self.scoped_sudo {
+            return AskPassPresentation {
+                kind: AskPassPresentationKind::Password,
+                title: "Enable server after logout",
+                detail: self.prompt.clone(),
+                affirmative: "Authorize",
+                negative: "Cancel",
+                field_label: Some("Sudo password"),
+            };
+        }
         match self.classification() {
             AskPassPromptClassification::FirstContact(first_contact) => {
                 AskPassPresentation::first_contact(first_contact)
@@ -565,6 +596,14 @@ impl AskPassSecret {
     pub(crate) fn as_bytes(&self) -> &[u8] {
         self.bytes.as_slice()
     }
+
+    #[expect(
+        dead_code,
+        reason = "The foreground bootstrap consumer is composed by desktop C3."
+    )]
+    pub(crate) fn into_zeroizing(self) -> Zeroizing<Vec<u8>> {
+        self.bytes
+    }
 }
 
 /// Exactly-once result of one AskPass presentation.
@@ -723,5 +762,24 @@ mod tests {
 
         assert!(accepted.is_ok());
         assert_eq!(rejected.err(), Some(AskPassResponseError::SecretTooLong));
+    }
+}
+
+#[cfg(test)]
+mod scoped_sudo_tests {
+    use super::*;
+    use spaceterm_client::pairing::bootstrap::{BootstrapRoute, BuildChannel};
+
+    #[test]
+    fn scoped_sudo_names_only_linger_for_the_retained_account() {
+        let route = BootstrapRoute::capture([1; 32], [2; 32], [3; 32], 1000, BuildChannel::Release)
+            .unwrap();
+        let request = AskPassRequest::scoped_sudo(route);
+        let presentation = request.secret_presentation().unwrap();
+        assert_eq!(presentation.title(), "Enable server after logout");
+        assert!(presentation.detail().starts_with("Operation: Enable account lingering\nAccount UID: 1000\nSSH host binding: 0101010101010101\n"));
+        assert_eq!(presentation.field_label(), "Sudo password");
+        assert!(presentation.requires_nonempty());
+        assert!(request.confirmation_presentation().is_none());
     }
 }

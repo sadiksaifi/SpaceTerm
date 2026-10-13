@@ -42,10 +42,6 @@ impl InstalledWorktrees {
 
     /// Server-backed consumers use canonical Worktree identities and exact
     /// server assessments. Native path-based listing/removal is legacy-only.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Workspace consumers compose this hook separately")
-    )]
     pub(crate) fn server_store(cx: &App) -> Option<Entity<ServerGitStore>> {
         InstalledServerGit::store(cx)
     }

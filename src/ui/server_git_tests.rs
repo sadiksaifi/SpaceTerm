@@ -646,9 +646,7 @@ fn forms_capture_the_server_and_never_use_native_paths(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
-fn server_status_runs_only_client_github_lookup_and_reuses_it_across_status_revisions(
-    cx: &mut TestAppContext,
-) {
+fn server_pane_pull_request_lookup_never_probes_client_git(cx: &mut TestAppContext) {
     use crate::repository_status::testing::{FakeRunner, exit};
     use std::path::{Path, PathBuf};
 
@@ -773,6 +771,7 @@ fn server_status_runs_only_client_github_lookup_and_reuses_it_across_status_revi
         );
     });
     assert_eq!(peer.submissions.load(Ordering::SeqCst), 0);
+    assert!(peer.lookups.lock().unwrap().is_empty());
 }
 
 #[gpui::test]
@@ -1016,4 +1015,101 @@ fn canonical_targets_share_receivers_until_the_last_local_subscriber_leaves(
     assert_eq!(peer.queries.load(Ordering::SeqCst), 1);
     store.update(cx, |store, cx| store.detach(workspace, cx));
     store.read_with(cx, |store, _| assert!(store.inventory(second).is_none()));
+}
+
+#[test]
+fn server_repository_status_uses_client_local_pull_request_facts() {
+    let server = ServerId::new([1; 16]);
+    let GitQueryResult::Status(facts) = status(server, 1, false).result else {
+        panic!()
+    };
+    let view = ServerStatusView {
+        scope: status(server, 1, false).scope,
+        facts: Some(facts),
+        freshness: GitFreshness::Current,
+        read_at: Instant::now(),
+        pull_request: Some(Ok(Some(PullRequest {
+            number: 520,
+            title: "Client-local result".into(),
+            draft: false,
+            url: "https://github.com/person/repository/pull/520".into(),
+            head: "main".into(),
+            base: "main".into(),
+        }))),
+    };
+    let directory = ServerDirectory::new(server, b"/server-only/repository".to_vec()).unwrap();
+    let crate::repository_status::RepositoryView::Repository(presented) =
+        view.repository_view(&directory)
+    else {
+        panic!("server status must reach the existing presentation");
+    };
+    assert_eq!(presented.pull_request.as_ref().unwrap().number, 520);
+    assert_eq!(
+        presented.head,
+        crate::repository_status::RepositoryHead::Branch("main".into())
+    );
+    assert!(matches!(
+        presented.key.root,
+        crate::repository_status::RepositoryRoot::Remote(_)
+    ));
+}
+
+#[gpui::test]
+fn server_pull_request_results_never_enter_organization_or_client_journal(cx: &mut TestAppContext) {
+    let server = ServerId::new([1; 16]);
+    let (peer, send) = peer(server);
+    let store = cx.new(ServerGitStore::new);
+    connect(&store, &peer, server, cx);
+    let id = store.update(cx, |store, cx| {
+        store
+            .register_status(
+                WorkspaceId::new(server, 1).unwrap(),
+                GitStatusTarget::Pane(PaneId::new(server, 1).unwrap()),
+                cx,
+            )
+            .unwrap()
+    });
+    let mut read = status(server, 1, false);
+    if let GitQueryResult::Status(facts) = &mut read.result {
+        facts.pull_request = Some(
+            GitPullRequestFacts::new(
+                "github.com".into(),
+                "person".into(),
+                "repository".into(),
+                facts.branch.clone().unwrap(),
+                None,
+            )
+            .unwrap(),
+        );
+    }
+    send.try_send(Ok(GitSubscriptionEvent::Status(Box::new(read.clone()))))
+        .unwrap();
+    cx.run_until_parked();
+    let ticket = store.read_with(cx, |store, _| store.pull_request_ticket(id).unwrap());
+    store.update(cx, |store, cx| {
+        assert!(store.apply_pull_request(
+            &ticket,
+            Ok(Some(PullRequest {
+                number: 520,
+                title: "Device-local title".into(),
+                draft: false,
+                url: "https://github.com/person/repository/pull/520".into(),
+                head: "main".into(),
+                base: "main".into(),
+            })),
+            cx
+        ))
+    });
+    let GitQueryResult::Status(expected) = read.result else {
+        panic!()
+    };
+    store.read_with(cx, |store, _| {
+        assert_eq!(store.status(id).unwrap().facts.as_ref(), Some(&expected))
+    });
+    assert_eq!(
+        peer.submissions.load(Ordering::SeqCst),
+        0,
+        "no organization command or journalled operation is submitted for a Pull Request result"
+    );
+    assert!(peer.lookups.lock().unwrap().is_empty());
 }

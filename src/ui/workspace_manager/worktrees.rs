@@ -35,9 +35,11 @@ use crate::worktrees::listing::{WorktreeHead, WorktreeRecord};
 
 mod cycle;
 mod removal;
+mod server;
 
 #[derive(Default)]
 pub(super) struct SidebarWorktrees {
+    server: server::ServerWorktreeConsumers,
     workspaces: BTreeMap<WorkspaceId, WorkspaceWorktrees>,
     form: Option<Entity<WorktreeForm>>,
     created: Option<CreatedWorktree>,
@@ -152,6 +154,7 @@ impl WorkspaceManager {
     }
 
     pub(super) fn release_sidebar_worktrees(&mut self, cx: &mut App) {
+        self.release_server_git(cx);
         for (_, worktrees) in std::mem::take(&mut self.sidebar_worktrees.workspaces) {
             worktrees
                 .store

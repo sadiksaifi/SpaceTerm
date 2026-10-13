@@ -846,6 +846,55 @@ mod account_installation {
     }
 
     #[test]
+    fn signed_staging_preserves_approved_code_resources_and_intent() {
+        use std::os::unix::fs::MetadataExt as _;
+        for desired in [DesiredServerState::Running, DesiredServerState::Stopped] {
+            let root = tempfile::tempdir().unwrap();
+            let account =
+                AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+            let registered = account.initialize(desired).unwrap();
+            let pin = registered.server_pin();
+            let (key, original) = fixture("1.2.3", 7, native_machine());
+            let store = test_support::store(&registered, key.clone()).unwrap();
+            let approved = store.stage(&original).unwrap();
+            store
+                .activate(approved, store.snapshot().unwrap().generation, 1)
+                .unwrap();
+            let executable = store.retain_compatible_approved(1).unwrap();
+            let before = std::fs::metadata(executable.path()).unwrap();
+            let original_status = executable.status();
+            let (_, candidate) = fixture("1.2.4", 7, native_machine());
+            let candidate_id = store.stage(&candidate).unwrap();
+            assert_ne!(candidate_id, approved);
+            let staged = store.staged_status().unwrap().unwrap();
+            assert_eq!(staged.installation, candidate_id);
+            assert_eq!(staged.version, BuildVersion::parse("1.2.4").unwrap());
+            assert_eq!(staged.artifact_sha256, candidate.artifact_sha256());
+            assert_ne!(staged.artifact_sha256, original_status.artifact_sha256);
+            drop(store);
+            let reopened = test_support::existing_store(&registered, key).unwrap();
+            let selected = reopened.retain_compatible_approved(1).unwrap();
+            assert_eq!(selected.status(), original_status);
+            assert_eq!(reopened.snapshot().unwrap().approved, Some(approved));
+            assert_eq!(reopened.snapshot().unwrap().staged, Some(candidate_id));
+            let after = std::fs::metadata(selected.path()).unwrap();
+            assert_eq!((after.dev(), after.ino()), (before.dev(), before.ino()));
+            let tree = registered
+                .data_directory()
+                .join("installations")
+                .join(format!("version-{}", approved.0.get()));
+            for file in &original.manifest().files {
+                let bytes = std::fs::read(tree.join(&file.name)).unwrap();
+                assert_eq!(bytes.len() as u64, file.size);
+                assert_eq!(<[u8; 32]>::from(Sha256::digest(bytes)), file.sha256);
+            }
+            let discovered = account.reopen().discover().unwrap().unwrap();
+            assert_eq!(discovered.server_pin(), pin);
+            assert_eq!(discovered.desired_state(), desired);
+        }
+    }
+
+    #[test]
     fn activation_and_rollback_select_exact_verified_versions_and_retain_the_previous() {
         let root = tempfile::tempdir().unwrap();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();

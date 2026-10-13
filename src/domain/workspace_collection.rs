@@ -101,7 +101,16 @@ pub(crate) enum PinnedDirectory {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum DirectoryAvailability {
     Available,
-    Unavailable { reason: String },
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "legacy fixtures retain unavailable directory presentation"
+        )
+    )]
+    Unavailable {
+        reason: String,
+    },
 }
 
 pub(crate) use spaceterm_terminal::directory::ValidatedLocalDirectory;
@@ -241,6 +250,7 @@ impl<T> WorkspaceCollection<T> {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn new_local(
         directory: ValidatedLocalDirectory,
         create_initial_payload: impl FnOnce(WorkspaceId, &Path) -> T,
@@ -540,6 +550,7 @@ impl<T> WorkspaceCollection<T> {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn set_directory_unavailable(
         &mut self,
         workspace_id: WorkspaceId,
