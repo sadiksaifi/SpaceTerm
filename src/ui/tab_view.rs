@@ -2141,6 +2141,7 @@ impl TabView {
                 axis,
                 current_offset,
                 offset_range,
+                !self.pane_frames.moving,
                 view,
             ));
         let (spacer, resize_target) = match axis {
@@ -3258,6 +3259,7 @@ fn render_split_resize_handle(
     axis: SplitAxis,
     current_offset: f32,
     offset_range: Option<RangeInclusive<f32>>,
+    pointer_input: bool,
     view: gpui::WeakEntity<TabView>,
 ) -> AnyElement {
     let handle = ResizeHandle::new(
@@ -3275,6 +3277,8 @@ fn render_split_resize_handle(
     }
     .tab_stop(true)
     .reset_on_double_click(true)
+    // Moving Panes cover the gap, so the pointer reaches them instead.
+    .pointer_input(pointer_input)
     .paint_divider(false)
     .debug_selector(format!("split-resize-{}", split_id.get()))
     .on_event_with_accepted_value(move |event, window, cx| {
@@ -4215,6 +4219,45 @@ mod tests {
             target.map(|(pane_id, _)| pane_id),
             Some(PaneId::new(1)),
             "the pointer is over the drawn Pane 1, inside the place Pane 2 opens toward"
+        );
+    }
+
+    #[gpui::test]
+    fn a_press_on_a_split_gap_that_moving_panes_cover_should_not_resize_the_split(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::ui::drag_and_drop::{AnimatePresence, finish_slides};
+
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
+        let session_factory = test_session_factory();
+        let (view, cx) = cx
+            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
+        cx.run_until_parked();
+
+        cx.update(|_, cx| cx.set_global(AnimatePresence));
+        split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(60));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        let gap = cx.debug_bounds("split-gap-1").unwrap().center();
+        assert!(
+            cx.debug_bounds("pane-surface-1").unwrap().contains(&gap),
+            "Pane 1 must still cover the gap it moves toward"
+        );
+        cx.simulate_mouse_down(gap, MouseButton::Left, Modifiers::none());
+        let while_moving = view.read_with(cx, |view, _| view.resizing_split_id);
+        cx.simulate_mouse_up(gap, MouseButton::Left, Modifiers::none());
+        finish_slides(cx);
+        cx.simulate_mouse_down(gap, MouseButton::Left, Modifiers::none());
+        let at_rest = view.read_with(cx, |view, _| view.resizing_split_id);
+        cx.simulate_mouse_up(gap, MouseButton::Left, Modifiers::none());
+
+        assert_eq!(
+            (while_moving, at_rest),
+            (None, Some(SplitId::new(1))),
+            "the split must take the press only once its gap shows"
         );
     }
 

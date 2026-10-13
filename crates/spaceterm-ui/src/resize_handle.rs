@@ -315,6 +315,7 @@ pub struct ResizeHandle {
     disabled: bool,
     tab_stop: bool,
     reset_on_double_click: bool,
+    pointer_input: bool,
     target: ResizeHandleTarget,
     paint_divider: bool,
     debug_selector: Option<String>,
@@ -348,6 +349,7 @@ impl ResizeHandle {
             disabled: false,
             tab_stop: false,
             reset_on_double_click: false,
+            pointer_input: true,
             target: ResizeHandleTarget::Regular,
             paint_divider: true,
             debug_selector: None,
@@ -387,6 +389,14 @@ impl ResizeHandle {
 
     pub fn reset_on_double_click(mut self, enabled: bool) -> Self {
         self.reset_on_double_click = enabled;
+        self
+    }
+
+    /// Controls whether the handle takes pointer input, for a divider that moving content covers
+    /// for a moment. Without it, the pointer reaches what lies under the handle, and keyboard and
+    /// assistive-technology input still work. A pointer drag under way continues until it ends.
+    pub fn pointer_input(mut self, enabled: bool) -> Self {
+        self.pointer_input = enabled;
         self
     }
 
@@ -485,6 +495,8 @@ impl RenderOnce for ResizeHandle {
             }
         }
         let focused = focus_handle.is_focused(window);
+        let pointer_input = self.pointer_input || active;
+        let hovered = hovered && pointer_input;
         #[cfg(feature = "control-preview")]
         let (hovered, active, focused) = self
             .preview_state
@@ -795,8 +807,10 @@ impl RenderOnce for ResizeHandle {
                 }
                 cx.stop_propagation();
             })
-            .child(regular_target)
-            .children(leading_targets.into_iter().flatten())
+            .when(pointer_input, |root| {
+                root.child(regular_target)
+                    .children(leading_targets.into_iter().flatten())
+            })
             .children(spacious_debug)
             .child(divider)
     }
@@ -1276,6 +1290,7 @@ mod tests {
         axis: ResizeAxis,
         value: f32,
         disabled: bool,
+        pointer_input: bool,
         show: bool,
         tab_stop: bool,
         clamp: Option<(f32, f32)>,
@@ -1296,6 +1311,7 @@ mod tests {
                     handle
                         .range(0.0..=200.0)
                         .disabled(self.disabled)
+                        .pointer_input(self.pointer_input)
                         .tab_stop(self.tab_stop)
                         .reset_on_double_click(true)
                         .debug_selector("test-resize")
@@ -1340,6 +1356,7 @@ mod tests {
             axis,
             value: 100.0,
             disabled: false,
+            pointer_input: true,
             show: true,
             tab_stop: true,
             clamp: None,
@@ -1608,6 +1625,40 @@ mod tests {
         cx.simulate_mouse_up(destination, MouseButton::Left, Modifiers::none());
 
         assert_eq!(*leaked_events.borrow(), 0);
+    }
+
+    #[gpui::test]
+    fn a_handle_without_pointer_input_should_let_presses_through_and_keep_keyboard_input(
+        cx: &mut TestAppContext,
+    ) {
+        let (root, events, cx) = resize_window(cx, ResizeAxis::Horizontal);
+        let start = hitbox(cx).center();
+        root.update(cx, |root, cx| {
+            root.pointer_input = false;
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(start, MouseButton::Left, Modifiers::none());
+        let pressed = events.borrow().len();
+        cx.update(|window, cx| window.focus_next(cx));
+        cx.simulate_keystrokes("right");
+
+        assert_eq!(
+            (
+                cx.debug_bounds("test-resize-hitbox"),
+                pressed,
+                events.borrow().iter().any(|event| matches!(
+                    event,
+                    ResizeHandleEvent::ResizeRequested {
+                        source: ResizeInputSource::Keyboard,
+                        ..
+                    }
+                )),
+            ),
+            (None, 0, true)
+        );
     }
 
     #[gpui::test]
