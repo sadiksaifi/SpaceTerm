@@ -2687,6 +2687,7 @@ fn rendered_control_selector(row: SettingsRowId) -> Option<String> {
             SettingsRowId::ServerPermissions => "settings-row-server-permissions-control",
             SettingsRowId::ServerRemoteAccess => "settings-server-remote-access",
             SettingsRowId::ServerRemoteAccessScope => "settings-server-remote-access-scope",
+            SettingsRowId::ServerPairedDevices => "settings-paired-devices",
             SettingsRowId::ServerUnpair => "settings-server-unpair",
             SettingsRowId::SettingsFile => "settings-file-frame",
             SettingsRowId::ExportSettings => "settings-document-export",
