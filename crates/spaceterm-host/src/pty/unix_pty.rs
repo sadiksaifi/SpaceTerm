@@ -7,7 +7,7 @@ use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -30,6 +30,36 @@ const CHILD_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
 const TERM_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
 const FORCED_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
+// Fence children from concurrent macOS proofs would invalidate each other's fork-free interval.
+// Retain this gate for the complete attempt, including foreground adapter cleanup.
+#[cfg(target_os = "macos")]
+static SETTLEMENT_ATTEMPT_LOCK: Mutex<()> = Mutex::new(());
+#[cfg(target_os = "macos")]
+const SETTLEMENT_ATTEMPT_TIMEOUT: Duration = GRACEFUL_SHUTDOWN_TIMEOUT
+    .saturating_add(TERM_SHUTDOWN_TIMEOUT)
+    .saturating_add(FORCED_SHUTDOWN_TIMEOUT);
+
+fn lock_for_settlement<T>(
+    lock: &Mutex<T>,
+    deadline: Option<Instant>,
+) -> Result<MutexGuard<'_, T>, io::ErrorKind> {
+    let Some(deadline) = deadline else {
+        return lock.lock().map_err(|_| io::ErrorKind::Other);
+    };
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::ErrorKind::TimedOut);
+        }
+        match lock.try_lock() {
+            Ok(guard) => return Ok(guard),
+            Err(TryLockError::Poisoned(_)) => return Err(io::ErrorKind::Other),
+            Err(TryLockError::WouldBlock) => {
+                thread::sleep(CHILD_EXIT_POLL_INTERVAL.min(remaining));
+            }
+        }
+    }
+}
 // Real PTY cases fork nested test executables and login shells while asserting subsecond process-
 // group cleanup. Serial execution keeps those OS-backed cases independent of runner scheduling.
 #[cfg(all(test, feature = "native-tests"))]
@@ -276,6 +306,8 @@ impl TerminationTarget {
 }
 
 struct ChildTermination {
+    // Select session settlement without waiting on authority held by an in-flight proof.
+    session_settlement: bool,
     target: Mutex<Option<TerminationTarget>>,
     requested: AtomicBool,
     forced: AtomicBool,
@@ -312,6 +344,7 @@ impl ChildTermination {
         child: Arc<Mutex<ChildState>>,
     ) -> Self {
         Self {
+            session_settlement: false,
             target: Mutex::new(Some(TerminationTarget {
                 host,
                 process_group,
@@ -333,6 +366,7 @@ impl ChildTermination {
         child: Arc<Mutex<ChildState>>,
     ) -> Self {
         Self {
+            session_settlement: true,
             target: Mutex::new(Some(TerminationTarget {
                 host,
                 process_group: Some(process_group),
@@ -350,7 +384,10 @@ impl ChildTermination {
         if self.requested.load(Ordering::Acquire) {
             return Ok(());
         }
-        let mut target = self.lock_target();
+        self.signal_locked(&mut self.lock_target())
+    }
+
+    fn signal_locked(&self, target: &mut Option<TerminationTarget>) -> io::Result<()> {
         if self.requested.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
@@ -431,29 +468,78 @@ impl ChildTermination {
     }
 
     fn settle(&self) -> NativePtySettlement {
-        let Ok(mut receipt) = self.settlement.lock() else {
+        #[cfg(target_os = "macos")]
+        let deadline = Some(Instant::now() + SETTLEMENT_ATTEMPT_TIMEOUT);
+        #[cfg(not(target_os = "macos"))]
+        let deadline = None;
+
+        #[cfg(target_os = "macos")]
+        {
+            // A positive receipt remains valid even while an unrelated Session is proving absence.
+            let Ok(receipt) = lock_for_settlement(&self.settlement, deadline) else {
+                return NativePtySettlement::Unavailable;
+            };
+            if let Some(receipt) = *receipt {
+                return receipt;
+            }
+        }
+        #[cfg(target_os = "macos")]
+        let Ok(_attempt) = lock_for_settlement(&SETTLEMENT_ATTEMPT_LOCK, deadline) else {
+            self.force_after_proof_contention();
+            return NativePtySettlement::Unavailable;
+        };
+        let Ok(mut receipt) = lock_for_settlement(&self.settlement, deadline) else {
             return NativePtySettlement::Unavailable;
         };
         if let Some(receipt) = *receipt {
             return receipt;
         }
-        let result = self.settle_once();
-
-        *receipt = Some(result);
+        let result = self.settle_once(deadline);
+        // Inconclusive observations keep the original Session authority for a fresh proof.
+        if result == NativePtySettlement::Settled {
+            *receipt = Some(result);
+        }
         result
     }
 
-    fn settle_once(&self) -> NativePtySettlement {
-        let mut unavailable = self.signal().is_err();
+    #[cfg(target_os = "macos")]
+    fn force_after_proof_contention(&self) {
+        // The foreground budget expired while another Session owned the proof gate. Escalation
+        // spawns no fence children and may still retire a HUP-resistant Session. Never wait on
+        // authority held by another caller, clear that authority, or claim an absence certificate.
+        let Ok(mut target_slot) = self.target.try_lock() else {
+            return;
+        };
+        let Some(target) = target_slot.as_mut() else {
+            return;
+        };
+        self.requested.store(true, Ordering::Release);
+        self.forced.store(true, Ordering::Release);
+        // Failure leaves the same unresolved authority available to the later re-proof service.
+        let _ = target.force();
+    }
+
+    fn settle_once(&self, attempt_deadline: Option<Instant>) -> NativePtySettlement {
+        let mut unavailable = if self.requested.load(Ordering::Acquire) {
+            false
+        } else {
+            let Ok(mut target) = lock_for_settlement(&self.target, attempt_deadline) else {
+                return NativePtySettlement::Unavailable;
+            };
+            self.signal_locked(&mut target).is_err()
+        };
         let mut retained_groups = BTreeMap::<i32, Vec<ProcessIdentity>>::new();
-        // One caller owns escalation. Other callers join the same retained result.
+        // One caller owns the complete attempt. A later caller may re-prove an inconclusive result.
         for (signal, timeout) in [
             (libc::SIGHUP, GRACEFUL_SHUTDOWN_TIMEOUT),
             (libc::SIGTERM, TERM_SHUTDOWN_TIMEOUT),
             (libc::SIGKILL, FORCED_SHUTDOWN_TIMEOUT),
         ] {
+            if attempt_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                return NativePtySettlement::Unavailable;
+            }
             if signal != libc::SIGHUP {
-                let Ok(mut target) = self.target.lock() else {
+                let Ok(mut target) = lock_for_settlement(&self.target, attempt_deadline) else {
                     return NativePtySettlement::Unavailable;
                 };
                 let Some(target) = target.as_mut() else {
@@ -462,9 +548,14 @@ impl ChildTermination {
                 unavailable |= target.signal_owned_process_groups(signal).is_err();
                 self.forced.store(true, Ordering::Release);
             }
-            let deadline = Instant::now() + timeout;
+            let phase_deadline = Instant::now() + timeout;
+            let deadline =
+                attempt_deadline.map_or(phase_deadline, |deadline| deadline.min(phase_deadline));
             loop {
-                let reaped = match self.child.lock() {
+                if attempt_deadline.is_some() && Instant::now() >= deadline {
+                    break;
+                }
+                let reaped = match lock_for_settlement(&self.child, attempt_deadline) {
                     Ok(mut child) => match child.try_wait() {
                         Ok(status) => status.is_some(),
                         Err(_) => {
@@ -474,7 +565,8 @@ impl ChildTermination {
                     },
                     Err(_) => return NativePtySettlement::Unavailable,
                 };
-                let Ok(mut target_slot) = self.target.lock() else {
+                let Ok(mut target_slot) = lock_for_settlement(&self.target, attempt_deadline)
+                else {
                     return NativePtySettlement::Unavailable;
                 };
                 let Some(target) = target_slot.as_ref() else {
@@ -511,11 +603,19 @@ impl ChildTermination {
                             }
                         }
                         if reaped && census_empty && groups_absent {
+                            if attempt_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                                return NativePtySettlement::Unavailable;
+                            }
                             match target.process_group.map(process_group_is_alive).transpose() {
                                 Ok(Some(false)) => {
                                     match confirmed_session_absence(target.host.as_ref(), &session)
                                     {
                                         Ok(true) => {
+                                            if attempt_deadline
+                                                .is_some_and(|deadline| Instant::now() >= deadline)
+                                            {
+                                                return NativePtySettlement::Unavailable;
+                                            }
                                             // Revoke authority only after the fork-fenced absence proof.
                                             target_slot.take();
                                             return NativePtySettlement::Settled;
@@ -798,12 +898,7 @@ impl SpawnedPty {
         let deadline = Instant::now() + timeout;
         loop {
             if let Some(status) = self.try_wait_for_child()? {
-                let shutdown = if self
-                    .termination
-                    .lock_target()
-                    .as_ref()
-                    .is_some_and(|target| target.session.is_some())
-                {
+                let shutdown = if self.termination.session_settlement {
                     if self.termination.requested() {
                         let _ = self.termination.settle();
                     }
@@ -835,6 +930,23 @@ impl SpawnedPty {
         }
     }
 
+    fn poll_child_exit(&self) -> io::Result<ShellExit> {
+        // Mechanical retries must not wait for a proof's child lock or start another proof.
+        let mut child = self.child.try_lock().map_err(|error| match error {
+            TryLockError::WouldBlock => io::ErrorKind::TimedOut,
+            TryLockError::Poisoned(_) => io::ErrorKind::Other,
+        })?;
+        let status = child.try_wait()?.ok_or(io::ErrorKind::TimedOut)?;
+        let shutdown = if !self.termination.requested() {
+            ShutdownDisposition::NotRequested
+        } else if self.termination.forced.load(Ordering::Acquire) {
+            ShutdownDisposition::Forced
+        } else {
+            ShutdownDisposition::Graceful
+        };
+        Ok(ShellExit { status, shutdown })
+    }
+
     fn try_wait_for_child(&mut self) -> io::Result<Option<ExitStatus>> {
         self.child
             .lock()
@@ -843,12 +955,7 @@ impl SpawnedPty {
     }
 
     fn cleanup_child(&mut self) {
-        if self
-            .termination
-            .lock_target()
-            .as_ref()
-            .is_some_and(|target| target.session.is_some())
-        {
+        if self.termination.session_settlement {
             let _ = self.termination.settle();
             return;
         }
@@ -1048,9 +1155,12 @@ impl NativePtyAdapter for SpawnedPty {
     }
 
     fn wait_for_exit(&mut self, timeout: Duration) -> Result<NativePtyExit, NativePtyWaitFailure> {
-        let exit = self
-            .wait_for_child(timeout)
-            .map_err(|error| NativePtyWaitFailure::new(error.kind()))?;
+        let exit = if timeout.is_zero() {
+            self.poll_child_exit()
+        } else {
+            self.wait_for_child(timeout)
+        }
+        .map_err(|error| NativePtyWaitFailure::new(error.kind()))?;
         Ok(native_exit(exit))
     }
 }
@@ -1951,6 +2061,7 @@ mod tests {
 
     #[test]
     fn settlement_rejects_empty_censuses_with_forks_or_unpublished_members() {
+        let _isolation = lock_real_pty_test();
         for (epochs, incomplete) in [
             (
                 [
@@ -2007,13 +2118,394 @@ mod tests {
         }
     }
 
+    struct ReprovableSettlementHost {
+        conclusive: AtomicBool,
+        inconclusive_members: bool,
+        censuses: AtomicUsize,
+        queries: AtomicUsize,
+        member_checks: Mutex<Vec<(ProcessIdentity, Option<u64>)>>,
+        blocked_census: Option<BlockingCallControl>,
+        census_entered: Option<mpsc::Sender<()>>,
+    }
+
+    impl ReprovableSettlementHost {
+        fn new(conclusive: bool) -> Self {
+            Self {
+                conclusive: AtomicBool::new(conclusive),
+                inconclusive_members: false,
+                censuses: AtomicUsize::new(0),
+                queries: AtomicUsize::new(0),
+                member_checks: Mutex::new(Vec::new()),
+                blocked_census: None,
+                census_entered: None,
+            }
+        }
+    }
+
+    impl UnixPtyHost for ReprovableSettlementHost {
+        fn observe_process(&self, _process: i32) -> Option<ProcessObservation> {
+            None
+        }
+        fn inspect_process(&self, _process: i32) -> io::Result<Option<ProcessObservation>> {
+            Ok(None)
+        }
+        fn inspect_session_member(
+            &self,
+            _process: i32,
+            leader: ProcessIdentity,
+            birth: Option<u64>,
+        ) -> io::Result<Option<ProcessObservation>> {
+            self.member_checks.lock().unwrap().push((leader, birth));
+            Ok(
+                (self.inconclusive_members && !self.conclusive.load(Ordering::Acquire)).then_some(
+                    ProcessObservation {
+                        identity: leader,
+                        process_group: leader.process,
+                        session: leader.process,
+                    },
+                ),
+            )
+        }
+        fn process_ids(&self) -> io::Result<Vec<i32>> {
+            self.censuses.fetch_add(1, Ordering::Relaxed);
+            if let Some(entered) = &self.census_entered {
+                entered.send(()).unwrap();
+            }
+            if let Some(blocked) = &self.blocked_census {
+                blocked.block();
+            }
+            Ok(vec![1])
+        }
+        fn settlement_process_ids(&self) -> io::Result<Vec<i32>> {
+            self.queries.fetch_add(1, Ordering::Relaxed);
+            if self.conclusive.load(Ordering::Acquire) {
+                Ok(vec![1])
+            } else {
+                Err(io::ErrorKind::WouldBlock.into())
+            }
+        }
+        fn process_creation_epoch(&self) -> io::Result<ProcessCreationEpoch> {
+            Ok(ProcessCreationEpoch::ForkCount(0))
+        }
+        fn master_read_error(&self, _error: &io::Error) -> MasterReadError {
+            MasterReadError::Failure
+        }
+    }
+
+    fn reprovable_pty(
+        host: Arc<dyn UnixPtyHost>,
+        process: i32,
+    ) -> (SpawnedPty, Arc<dyn NativePtyTermination>, CleanupCounts) {
+        let cleanup = CleanupCounts::default();
+        let child: Box<dyn Child + Send + Sync> = Box::new(ExitedChild {
+            cleanup: cleanup.clone(),
+        });
+        let fallback = child.clone_killer();
+        let child = Arc::new(Mutex::new(ChildState {
+            child: Some(child),
+            exit: None,
+        }));
+        let leader = ProcessIdentity {
+            process,
+            start: ProcessStart { coarse: 1, fine: 2 },
+        };
+        let termination = Arc::new(ChildTermination::new_with_session(
+            host,
+            process,
+            ProcessSessionIdentity {
+                session: process,
+                leader,
+                birth: Some(7),
+            },
+            fallback,
+            Arc::clone(&child),
+        ));
+        let pty = SpawnedPty {
+            master: Box::new(TestMasterPty),
+            reader: None,
+            writer: Box::new(io::sink()),
+            child,
+            termination: Arc::clone(&termination),
+        };
+        (pty, Arc::new(PtyTerminator::new(termination)), cleanup)
+    }
+
     #[test]
-    fn settlement_receipts_retain_each_outcome_and_reap_the_leader_once() {
+    fn zero_duration_native_wait_does_not_block_on_child_coordination() {
+        let _isolation = lock_real_pty_test();
+        let host = Arc::new(ReprovableSettlementHost::new(true));
+        let (mut pty, _termination, _) = reprovable_pty(host.clone(), i32::MAX);
+        let child = Arc::clone(&pty.child);
+        let guard = child.lock().unwrap();
+        let (started, starting) = mpsc::channel();
+        let (result, receipt) = mpsc::channel();
+        let poll = thread::spawn(move || {
+            started.send(()).unwrap();
+            result
+                .send(NativePtyAdapter::wait_for_exit(&mut pty, Duration::ZERO))
+                .unwrap();
+            pty
+        });
+        starting.recv_timeout(Duration::from_secs(1)).unwrap();
+        let bounded_result = receipt.recv_timeout(Duration::from_secs(1));
+        let censuses = host.censuses.load(Ordering::Relaxed);
+        drop(guard);
+        let pty = poll.join().unwrap();
+        drop(pty);
+
+        assert_eq!(
+            bounded_result
+                .expect("mechanical exit poll blocked on child coordination")
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::TimedOut
+        );
+        assert_eq!(censuses, 0);
+    }
+
+    #[test]
+    fn zero_duration_native_wait_reaps_without_attempting_session_settlement() {
+        let _isolation = lock_real_pty_test();
+        let host = Arc::new(ReprovableSettlementHost::new(true));
+        let (mut pty, termination, cleanup) = reprovable_pty(host.clone(), i32::MAX);
+        let original_session = pty.termination.lock_target().as_ref().unwrap().session;
+        termination.request_termination().unwrap();
+        let initial_censuses = host.censuses.load(Ordering::Relaxed);
+        let exit = NativePtyAdapter::wait_for_exit(&mut pty, Duration::ZERO);
+        let censuses_after_exit = host.censuses.load(Ordering::Relaxed);
+        let proofs_after_exit = host.queries.load(Ordering::Relaxed);
+        let retained_session = pty
+            .termination
+            .lock_target()
+            .as_ref()
+            .and_then(|target| target.session);
+        pty.termination.forced.store(true, Ordering::Release);
+        let retained_exit = NativePtyAdapter::wait_for_exit(&mut pty, Duration::ZERO);
+        let reaps = cleanup.try_wait.load(Ordering::Relaxed);
+        drop(pty);
+
+        assert_eq!(exit, Ok(NativePtyExit::GracefulShutdown));
+        assert_eq!(retained_exit, Ok(NativePtyExit::ForcedShutdown));
+        assert_eq!(censuses_after_exit, initial_censuses);
+        assert_eq!(proofs_after_exit, 0);
+        assert_eq!(retained_session, original_session);
+        assert_eq!(reaps, 1);
+    }
+
+    #[test]
+    fn settlement_reproves_inconclusive_cleanup_with_original_session_after_adapter_drop() {
+        let _isolation = lock_real_pty_test();
         for outcome in [
-            NativePtySettlement::Settled,
-            NativePtySettlement::StillRunning,
             NativePtySettlement::Unavailable,
+            NativePtySettlement::StillRunning,
         ] {
+            let mut host = ReprovableSettlementHost::new(false);
+            host.inconclusive_members = outcome == NativePtySettlement::StillRunning;
+            let host = Arc::new(host);
+            let (pty, termination, cleanup) = reprovable_pty(host.clone(), i32::MAX);
+            // Adapter cleanup makes the initial inconclusive attempt, then leaves only the Arc.
+            drop(pty);
+            assert_eq!(termination.settle(), outcome);
+            let inconclusive_queries = host.queries.load(Ordering::Relaxed);
+            host.conclusive.store(true, Ordering::Release);
+
+            assert_eq!(termination.settle(), NativePtySettlement::Settled);
+            let conclusive_queries = host.queries.load(Ordering::Relaxed);
+            assert!(conclusive_queries > inconclusive_queries);
+            assert!(host.member_checks.lock().unwrap().iter().all(|check| {
+                *check
+                    == (
+                        ProcessIdentity {
+                            process: i32::MAX,
+                            start: ProcessStart { coarse: 1, fine: 2 },
+                        },
+                        Some(7),
+                    )
+            }));
+            host.conclusive.store(false, Ordering::Release);
+            assert_eq!(termination.settle(), NativePtySettlement::Settled);
+            assert_eq!(host.queries.load(Ordering::Relaxed), conclusive_queries);
+            assert_eq!(cleanup.try_wait.load(Ordering::Relaxed), 1);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn settlement_serializes_foreground_cleanup_and_later_reproof_across_sessions() {
+        let _isolation = lock_real_pty_test();
+        let (entered, observed) = mpsc::channel();
+        let mut retry_host = ReprovableSettlementHost::new(false);
+        retry_host.census_entered = Some(entered.clone());
+        let retry_host = Arc::new(retry_host);
+        let (retry_pty, retry, _) = reprovable_pty(retry_host.clone(), i32::MAX - 2);
+        drop(retry_pty);
+        retry_host.conclusive.store(true, Ordering::Release);
+        while observed.try_recv().is_ok() {}
+        let control = BlockingCallControl::default();
+        let mut first_host = ReprovableSettlementHost::new(true);
+        first_host.blocked_census = Some(control.clone());
+        let (first_pty, first, _) = reprovable_pty(Arc::new(first_host), i32::MAX);
+        let first_cleanup = thread::spawn(move || drop(first_pty));
+        control.wait_until_entered("foreground cleanup census");
+        let mut second_host = ReprovableSettlementHost::new(true);
+        second_host.census_entered = Some(entered.clone());
+        let (second_pty, second, _) = reprovable_pty(Arc::new(second_host), i32::MAX - 1);
+        let (started, starting) = mpsc::channel();
+        let second_started = started.clone();
+        let second_cleanup = thread::spawn(move || {
+            second_started.send(()).unwrap();
+            drop(second_pty);
+        });
+        let retry = Arc::clone(&retry);
+        let retry_cleanup = thread::spawn(move || {
+            started.send(()).unwrap();
+            retry.settle()
+        });
+        starting.recv_timeout(Duration::from_secs(1)).unwrap();
+        starting.recv_timeout(Duration::from_secs(1)).unwrap();
+        let overlapped = observed.recv_timeout(Duration::from_millis(100)).is_ok();
+        control.release();
+        first_cleanup.join().unwrap();
+        second_cleanup.join().unwrap();
+        let retry_result = retry_cleanup.join().unwrap();
+
+        assert!(
+            !overlapped,
+            "another Session entered while foreground cleanup held its attempt"
+        );
+        assert_eq!(first.settle(), NativePtySettlement::Settled);
+        assert_eq!(second.settle(), NativePtySettlement::Settled);
+        assert_eq!(retry_result, NativePtySettlement::Settled);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn settlement_adapter_cleanup_does_not_wait_indefinitely_for_same_authority() {
+        let _isolation = lock_real_pty_test();
+        let control = BlockingCallControl::default();
+        let mut host = ReprovableSettlementHost::new(true);
+        host.blocked_census = Some(control.clone());
+        let (pty, termination, _) = reprovable_pty(Arc::new(host), i32::MAX);
+        let proving = Arc::clone(&termination);
+        let proof = thread::spawn(move || proving.settle());
+        control.wait_until_entered("same-authority proof census");
+        let (finished, completion) = mpsc::channel();
+        let cleanup = thread::spawn(move || {
+            drop(pty);
+            finished.send(()).unwrap();
+        });
+        let bounded_completion = completion.recv_timeout(Duration::from_secs(2));
+        control.release();
+        proof.join().unwrap();
+        cleanup.join().unwrap();
+
+        assert!(
+            bounded_completion.is_ok(),
+            "adapter cleanup waited outside the settlement deadline"
+        );
+        assert_eq!(termination.settle(), NativePtySettlement::Settled);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn settlement_gate_contention_still_forces_a_hup_resistant_live_session() {
+        const NAME: &str = "pty::unix_pty::tests::settlement_gate_contention_still_forces_a_hup_resistant_live_session";
+        if isolate_real_pty_test(NAME) {
+            return;
+        }
+        let _isolation = lock_real_pty_test();
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "trap '' HUP TERM; printf READY; exec sleep 30"]);
+        let (mut pty, terminator) =
+            spawn_command_in_pty(test_host(), PtySize::default(), command).unwrap();
+        let mut reader = pty.take_reader().unwrap();
+        read_output_marker(&mut reader, b"READY");
+        let original_session = pty.termination.lock_target().as_ref().unwrap().session;
+        terminator.terminate().unwrap();
+
+        let control = BlockingCallControl::default();
+        let mut gate_host = ReprovableSettlementHost::new(true);
+        gate_host.blocked_census = Some(control.clone());
+        let (gate_pty, gate_termination, _) = reprovable_pty(Arc::new(gate_host), i32::MAX);
+        let gate_holder = thread::spawn(move || gate_termination.settle());
+        control.wait_until_entered("cross-session proof gate");
+        let started = Instant::now();
+        let receipt = terminator.settle();
+        let elapsed = started.elapsed();
+        let retained_session = pty
+            .termination
+            .lock_target()
+            .as_ref()
+            .and_then(|target| target.session);
+        let forced = pty.termination.forced.load(Ordering::Acquire);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let exited_while_contended = loop {
+            if pty.try_wait_for_child().unwrap().is_some() {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            thread::sleep(CHILD_EXIT_POLL_INTERVAL);
+        };
+        control.release();
+        gate_holder.join().unwrap();
+        drop(gate_pty);
+        // Clean up the exact retained fixture even on RED, before asserting the observed exit.
+        if !exited_while_contended {
+            pty.termination
+                .lock_target()
+                .as_mut()
+                .unwrap()
+                .force()
+                .unwrap();
+        }
+        drop(reader);
+        drop(pty);
+
+        assert_eq!(receipt, NativePtySettlement::Unavailable);
+        assert_eq!(retained_session, original_session);
+        assert!(forced);
+        assert!(elapsed < Duration::from_secs(2));
+        assert!(
+            exited_while_contended,
+            "proof-gate contention prevented forced native retirement"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn settlement_contention_is_bounded_and_does_not_cache_unavailable() {
+        let _isolation = lock_real_pty_test();
+        let control = BlockingCallControl::default();
+        let mut first_host = ReprovableSettlementHost::new(true);
+        first_host.blocked_census = Some(control.clone());
+        let (first_pty, first, _) = reprovable_pty(Arc::new(first_host), i32::MAX);
+        let first_cleanup = thread::spawn(move || drop(first_pty));
+        control.wait_until_entered("held foreground cleanup attempt");
+        let second_host = Arc::new(ReprovableSettlementHost::new(true));
+        let (second_pty, second, _) = reprovable_pty(second_host.clone(), i32::MAX - 1);
+        let joining = Arc::clone(&second);
+        let (result, receipt) = mpsc::channel();
+        let started = Instant::now();
+        let second_cleanup = thread::spawn(move || result.send(joining.settle()).unwrap());
+        let bounded_result = receipt.recv_timeout(Duration::from_secs(2));
+        control.release();
+        first_cleanup.join().unwrap();
+        second_cleanup.join().unwrap();
+
+        assert_eq!(bounded_result.unwrap(), NativePtySettlement::Unavailable);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(second_host.queries.load(Ordering::Relaxed), 0);
+        assert_eq!(second.settle(), NativePtySettlement::Settled);
+        assert_eq!(first.settle(), NativePtySettlement::Settled);
+        drop(second_pty);
+    }
+
+    #[test]
+    fn settlement_receipts_cache_conclusive_outcomes_and_reap_the_leader_once() {
+        let _isolation = lock_real_pty_test();
+        for outcome in [NativePtySettlement::Settled] {
             let leader = ProcessIdentity {
                 process: i32::MAX,
                 start: ProcessStart { coarse: 1, fine: 0 },

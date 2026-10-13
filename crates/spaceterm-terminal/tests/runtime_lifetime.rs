@@ -564,3 +564,380 @@ fn panicking_launch_without_returned_ownership_never_proves_process_absence() {
     assert!(!admitted);
     assert_eq!(pty.inspect(|state| state.terminated), 0);
 }
+
+#[test]
+fn server_cleanup_reproof_releases_capacity_only_after_later_certificate() {
+    use spaceterm_core::observations::RuntimeObservationSource;
+    let factory = factory(RuntimeLimits {
+        owners: 1,
+        ..RuntimeLimits::default()
+    });
+    let request = request(1, grid(24, 80));
+    let pty = Pty::default();
+    pty.update(|state| state.termination_inconclusive = true);
+    let mut owner = running(&factory, request.clone(), &pty);
+    owner.retire(RetirementReason::Stop);
+    let first = owner.join().unwrap();
+    assert!(matches!(first.result(), CleanupResult::Failed(_)));
+    let finished = owner.lifecycle_snapshot();
+    assert!(
+        factory
+            .start(request.clone(), Pty::default().launch(), engine())
+            .is_err()
+    );
+    pty.until(|state| !state.cleanup_retries.is_empty());
+    assert!(matches!(
+        owner.cleanup_snapshot().unwrap().result(),
+        CleanupResult::Failed(_)
+    ));
+    pty.update(|state| state.cleanup_proven = true);
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while !matches!(
+        owner.cleanup_snapshot().unwrap().result(),
+        CleanupResult::Confirmed(_)
+    ) {
+        assert!(
+            std::time::Instant::now() < end,
+            "later cleanup proof was not observed"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    // Foreground completion is immutable; the separate cleanup observation can advance.
+    assert_eq!(owner.lifecycle_snapshot(), finished);
+    let mut next = running(&factory, request, &Pty::default());
+    next.retire(RetirementReason::Stop);
+    next.join().unwrap();
+    assert_eq!(pty.inspect(|state| state.terminated), 1);
+}
+
+#[test]
+fn server_unconfirmed_cleanup_retains_grid_as_well_as_pane_slot() {
+    let factory = factory(RuntimeLimits {
+        owners: 2,
+        active_grid_slots: 24 * 80 * 4,
+        ..RuntimeLimits::default()
+    });
+    let pty = Pty::default();
+    pty.update(|state| state.termination_inconclusive = true);
+    let mut owner = running(&factory, request(1, grid(24, 80)), &pty);
+    owner.retire(RetirementReason::Stop);
+    assert!(matches!(
+        owner.join().unwrap().result(),
+        CleanupResult::Failed(_)
+    ));
+    let replacement = factory.start(request(2, grid(24, 80)), Pty::default().launch(), engine());
+    assert!(
+        replacement.is_err(),
+        "quarantined grid capacity was reused by another Pane"
+    );
+}
+
+#[test]
+fn server_joined_reader_io_fault_does_not_prevent_later_cleanup_proof() {
+    use spaceterm_core::observations::RuntimeObservationSource;
+    let factory = factory(RuntimeLimits {
+        owners: 1,
+        ..RuntimeLimits::default()
+    });
+    let request = request(1, grid(24, 80));
+    let pty = Pty::default();
+    pty.update(|state| state.termination_inconclusive = true);
+    let mut owner = running(&factory, request.clone(), &pty);
+    pty.update(|state| state.read_io_failure = true);
+    assert!(matches!(
+        owner.join().unwrap().result(),
+        CleanupResult::Failed(_)
+    ));
+    let terminal = owner.lifecycle_snapshot().terminal_result().unwrap();
+    pty.update(|state| state.cleanup_proven = true);
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while !matches!(
+        owner.cleanup_snapshot().unwrap().result(),
+        CleanupResult::Confirmed(_)
+    ) {
+        assert!(
+            std::time::Instant::now() < end,
+            "joined reader fault blocked absence reproof"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(
+        owner.lifecycle_snapshot().terminal_result().unwrap(),
+        terminal
+    );
+    let mut next = running(&factory, request, &Pty::default());
+    next.retire(RetirementReason::Stop);
+    next.join().unwrap();
+}
+
+#[test]
+fn server_always_inconclusive_reproof_is_rate_limited_and_keeps_capacity() {
+    use spaceterm_core::observations::RuntimeObservationSource;
+    let factory = factory(RuntimeLimits {
+        owners: 1,
+        ..RuntimeLimits::default()
+    });
+    let request = request(1, grid(24, 80));
+    let pty = Pty::default();
+    pty.update(|state| state.termination_inconclusive = true);
+    let mut owner = running(&factory, request.clone(), &pty);
+    owner.retire(RetirementReason::Stop);
+    assert!(matches!(
+        owner.join().unwrap().result(),
+        CleanupResult::Failed(_)
+    ));
+    pty.until(|state| state.cleanup_retries.len() >= 2);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let times = pty.inspect(|state| state.cleanup_retries.clone());
+    assert_eq!(times.len(), 2, "inconclusive reproof became a hot loop");
+    assert!(times[1].duration_since(times[0]) >= std::time::Duration::from_millis(900));
+    assert!(
+        factory
+            .start(request, Pty::default().launch(), engine())
+            .is_err()
+    );
+    assert!(matches!(
+        owner.cleanup_snapshot().unwrap().result(),
+        CleanupResult::Failed(_)
+    ));
+    assert_eq!(pty.inspect(|state| state.terminated), 1);
+}
+
+#[test]
+fn server_factory_shutdown_does_not_wait_or_discharge_a_late_proof() {
+    use spaceterm_core::observations::RuntimeObservationSource;
+    let factory = factory(RuntimeLimits::default());
+    let pty = Pty::default();
+    pty.update(|state| {
+        state.termination_inconclusive = true;
+        state.cleanup_retry_blocked = true;
+    });
+    let mut owner = running(&factory, request(1, grid(24, 80)), &pty);
+    owner.retire(RetirementReason::Stop);
+    owner.join().unwrap();
+    pty.until(|state| !state.cleanup_retries.is_empty());
+    let started = std::time::Instant::now();
+    drop(factory);
+    assert!(started.elapsed() < std::time::Duration::from_millis(500));
+    pty.update(|state| {
+        state.cleanup_proven = true;
+        state.cleanup_retry_blocked = false;
+    });
+    pty.until(|state| state.termination_dropped);
+    assert!(matches!(
+        owner.cleanup_snapshot().unwrap().result(),
+        CleanupResult::Failed(_)
+    ));
+    assert_eq!(pty.inspect(|state| state.cleanup_retries.len()), 1);
+}
+
+#[test]
+fn server_cleanup_waits_for_child_exit_and_quarantines_mechanical_errors() {
+    use spaceterm_core::observations::RuntimeObservationSource;
+    let factory = factory(RuntimeLimits {
+        owners: 4,
+        ..RuntimeLimits::default()
+    });
+    let mut cases = Vec::new();
+    for number in 1..=4 {
+        let pty = Pty::default();
+        pty.update(|state| {
+            state.termination_inconclusive = true;
+            state.cleanup_proven = true;
+            state.wait_timeout = number == 1;
+            state.wait_failure = number == 4;
+            state.termination_panics = number == 3;
+        });
+        let mut owner = running(&factory, request(number, grid(24, 80)), &pty);
+        pty.update(|state| state.reader_panics = number == 2);
+        owner.retire(RetirementReason::Stop);
+        assert!(matches!(
+            owner.join().unwrap().result(),
+            CleanupResult::Failed(_)
+        ));
+        cases.push((owner, pty, number));
+    }
+    cases[0].1.until(|state| state.cleanup_retries.len() == 1);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    for (owner, pty, number) in cases {
+        assert!(matches!(
+            owner.cleanup_snapshot().unwrap().result(),
+            CleanupResult::Failed(_)
+        ));
+        assert_eq!(
+            pty.inspect(|state| state.cleanup_retries.len()),
+            usize::from(number == 1)
+        );
+        assert!(
+            factory
+                .start(
+                    request(number, grid(24, 80)),
+                    Pty::default().launch(),
+                    engine()
+                )
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn server_pending_mechanics_returns_foreground_and_releases_only_after_actual_joins() {
+    use spaceterm_core::observations::RuntimeObservationSource;
+    use std::sync::mpsc;
+    use std::time::Duration;
+    let factory = factory(RuntimeLimits {
+        owners: 1,
+        ..RuntimeLimits::default()
+    });
+    let request = request(1, grid(24, 80));
+    let pty = Pty::default();
+    pty.update(|state| {
+        state.termination_inconclusive = true;
+        state.termination_keeps_reader_open = true;
+        state.wait_timeout = true;
+    });
+    let mut owner = running(&factory, request.clone(), &pty);
+    owner.retire(RetirementReason::Stop);
+    let (returned, receive) = mpsc::channel();
+    std::thread::spawn(move || {
+        let result = owner.join();
+        returned.send((owner, result)).unwrap();
+    });
+    let foreground = receive.recv_timeout(Duration::from_secs(3));
+    if foreground.is_err() {
+        // Unblock the old implementation before reporting the intended red failure.
+        pty.update(|state| state.eof = true);
+        let _ = receive.recv_timeout(Duration::from_secs(3));
+        panic!("foreground cleanup indefinitely joined a blocked reader");
+    }
+    let (owner, result) = foreground.unwrap();
+    assert!(matches!(result.unwrap().result(), CleanupResult::Failed(_)));
+    assert!(!pty.inspect(|state| state.process_dropped || state.reader_dropped));
+    pty.update(|state| state.cleanup_proven = true);
+    pty.until(|state| !state.cleanup_retries.is_empty());
+    assert!(matches!(
+        owner.cleanup_snapshot().unwrap().result(),
+        CleanupResult::Failed(_)
+    ));
+    assert!(
+        factory
+            .start(request.clone(), Pty::default().launch(), engine())
+            .is_err()
+    );
+    // A positive certificate is insufficient until the actual child is reaped.
+    pty.update(|state| state.wait_timeout = false);
+    pty.until(|state| state.exit_observed);
+    assert!(!pty.inspect(|state| state.process_dropped));
+    assert!(matches!(
+        owner.cleanup_snapshot().unwrap().result(),
+        CleanupResult::Failed(_)
+    ));
+    assert!(!pty.inspect(|state| state.reader_dropped));
+    pty.update(|state| state.eof = true);
+    let end = std::time::Instant::now() + Duration::from_secs(3);
+    while !matches!(
+        owner.cleanup_snapshot().unwrap().result(),
+        CleanupResult::Confirmed(_)
+    ) {
+        assert!(
+            std::time::Instant::now() < end,
+            "completed mechanical cleanup was not observed"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    pty.until(|state| state.reader_dropped && state.process_dropped);
+    let mut replacement = running(&factory, request, &Pty::default());
+    replacement.retire(RetirementReason::Stop);
+    replacement.join().unwrap();
+    assert_eq!(pty.inspect(|state| state.terminated), 1);
+}
+
+#[test]
+fn server_pending_mechanics_shutdown_detaches_reader_without_capacity_release() {
+    use spaceterm_core::observations::RuntimeObservationSource;
+    use std::sync::mpsc;
+    use std::time::Duration;
+    let factory = factory(RuntimeLimits::default());
+    let pty = Pty::default();
+    pty.update(|state| {
+        state.termination_inconclusive = true;
+        state.termination_keeps_reader_open = true;
+        state.wait_timeout = true;
+    });
+    let mut owner = running(&factory, request(1, grid(24, 80)), &pty);
+    owner.retire(RetirementReason::Stop);
+    let (returned, receive) = mpsc::channel();
+    std::thread::spawn(move || {
+        let result = owner.join();
+        returned.send((owner, result)).unwrap();
+    });
+    let foreground = receive.recv_timeout(Duration::from_secs(3));
+    if foreground.is_err() {
+        pty.update(|state| state.eof = true);
+        let _ = receive.recv_timeout(Duration::from_secs(3));
+        panic!("blocked reader prevented foreground cleanup handoff");
+    }
+    let (owner, result) = foreground.unwrap();
+    assert!(matches!(result.unwrap().result(), CleanupResult::Failed(_)));
+    let started = std::time::Instant::now();
+    drop(factory);
+    assert!(started.elapsed() < Duration::from_millis(500));
+    pty.until(|state| state.termination_dropped && state.process_dropped);
+    assert!(!pty.inspect(|state| state.reader_dropped));
+    assert!(matches!(
+        owner.cleanup_snapshot().unwrap().result(),
+        CleanupResult::Failed(_)
+    ));
+    // Release the native test boundary after checking that shutdown did not join it.
+    pty.update(|state| state.eof = true);
+    pty.until(|state| state.reader_dropped);
+}
+
+#[test]
+fn server_pending_termination_returns_foreground_and_shutdown_detaches_original_call() {
+    use spaceterm_core::observations::RuntimeObservationSource;
+    use std::sync::mpsc;
+    use std::time::Duration;
+    let factory = factory(RuntimeLimits::default());
+    let pty = Pty::default();
+    pty.update(|state| {
+        state.termination_blocked = true;
+        state.termination_keeps_reader_open = true;
+        state.wait_timeout = true;
+    });
+    let mut owner = running(&factory, request(1, grid(24, 80)), &pty);
+    owner.retire(RetirementReason::Stop);
+    let (returned, receive) = mpsc::channel();
+    std::thread::spawn(move || {
+        let result = owner.join();
+        returned.send((owner, result)).unwrap();
+    });
+    pty.until(|state| state.terminated == 1);
+    let foreground = receive.recv_timeout(Duration::from_secs(3));
+    if foreground.is_err() {
+        pty.update(|state| {
+            state.termination_blocked = false;
+            state.eof = true;
+        });
+        let _ = receive.recv_timeout(Duration::from_secs(3));
+        panic!("unfinished termination callback blocked foreground cleanup");
+    }
+    let (owner, result) = foreground.unwrap();
+    assert!(matches!(result.unwrap().result(), CleanupResult::Failed(_)));
+    assert!(pty.inspect(|state| state.exit_waits.is_empty() && state.cleanup_retries.is_empty()));
+    let started = std::time::Instant::now();
+    drop(factory);
+    assert!(started.elapsed() < Duration::from_millis(500));
+    pty.until(|state| state.process_dropped);
+    assert!(!pty.inspect(|state| state.termination_dropped || state.reader_dropped));
+    pty.update(|state| {
+        state.termination_blocked = false;
+        state.eof = true;
+    });
+    pty.until(|state| state.termination_dropped && state.reader_dropped);
+    assert!(matches!(
+        owner.cleanup_snapshot().unwrap().result(),
+        CleanupResult::Failed(_)
+    ));
+    assert!(pty.inspect(|state| state.cleanup_retries.is_empty()));
+}

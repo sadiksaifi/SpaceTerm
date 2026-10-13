@@ -1,6 +1,7 @@
 //! Non-cloneable lifetime ownership. Handles, replies and subscriptions are inert on Drop.
 use super::authority::AuthorityCell;
 use super::budget::{Budget, BudgetLease, FactoryBudget, RuntimeLimits};
+use super::cleanup::CleanupRegistry;
 use super::ingress::{
     Envelope, Ingress, QueryRegistry, ReadCheck, ReplySender, Request, ResourceStream,
     RuntimeReply, StreamFailure, StreamSink, checked_reply, reply,
@@ -21,15 +22,18 @@ use std::thread::JoinHandle;
 pub struct RuntimeFactory {
     budget: Arc<FactoryBudget>,
     clock: Arc<dyn RuntimeClock>,
+    cleanup: CleanupRegistry,
 }
 impl RuntimeFactory {
     pub fn new(
         limits: RuntimeLimits,
         clock: Arc<dyn RuntimeClock>,
     ) -> Result<Self, RuntimeFailure> {
+        let limits = limits.validate()?;
         Ok(Self {
-            budget: FactoryBudget::new(limits.validate()?),
+            budget: FactoryBudget::new(limits),
             clock,
+            cleanup: CleanupRegistry::new(limits.owners)?,
         })
     }
     /// Composition supplies only an already admitted, durably published measured reservation.
@@ -95,10 +99,19 @@ impl RuntimeFactory {
         });
         let worker_shared = Arc::clone(&shared);
         let clock = Arc::clone(&self.clock);
+        let cleanup = self.cleanup.clone();
         let worker = std::thread::Builder::new()
             .name("terminal-runtime".into())
             .spawn(move || {
-                super::worker::run(worker_shared, registration, request, launch, engine, clock)
+                super::worker::run(
+                    worker_shared,
+                    registration,
+                    request,
+                    launch,
+                    engine,
+                    clock,
+                    cleanup,
+                )
             })
             .map_err(|_| {
                 RuntimeFailure::new(FailureClass::RuntimeUnavailable, RuntimeStage::Launch)

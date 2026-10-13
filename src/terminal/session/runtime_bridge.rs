@@ -68,7 +68,13 @@ impl PtyProcess for HostProcess {
                     .exit
                     .lock()
                     .map_err(|_| failure(RuntimeStage::Cleanup))? = Some(result.clone());
-                result.map_err(|_| failure(RuntimeStage::Cleanup))?
+                match result {
+                    Ok(exit) => exit,
+                    Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+                        return Ok(PtyExit::StillRunning);
+                    }
+                    Err(_) => return Err(failure(RuntimeStage::Cleanup)),
+                }
             }
         };
         let status = match exit {
@@ -82,18 +88,20 @@ impl PtyProcess for HostProcess {
 struct HostTermination(Arc<dyn crate::platform::native_pty::NativePtyTermination>);
 impl PtyTermination for HostTermination {
     fn request_termination(&self) -> Result<(), RuntimeFailure> {
-        use crate::platform::native_pty::NativePtySettlement;
         // Signalling and retained shell exit are not evidence that descendants settled.
         // Settlement can confirm cleanup even when an earlier signal attempt failed.
         let _ = self.0.request_termination();
+        self.retry_cleanup()
+    }
+
+    fn retry_cleanup(&self) -> Result<(), RuntimeFailure> {
+        use crate::platform::native_pty::NativePtySettlement;
+        // Re-proof retains this native Session identity without another termination request.
         match self.0.settle() {
             NativePtySettlement::Settled => Ok(()),
-            NativePtySettlement::StillRunning | NativePtySettlement::Unavailable => {
-                Err(RuntimeFailure::new(
-                    FailureClass::RuntimeUnavailable,
-                    RuntimeStage::Cleanup,
-                ))
-            }
+            NativePtySettlement::StillRunning | NativePtySettlement::Unavailable => Err(
+                RuntimeFailure::new(FailureClass::RuntimeUnavailable, RuntimeStage::Cleanup),
+            ),
         }
     }
 }
@@ -257,5 +265,121 @@ impl Write for CompatibilityPty {
 impl From<NativePtyOwner> for CompatibilityPty {
     fn from(pty: NativePtyOwner) -> Self {
         Self::Fixture(pty)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::platform::native_pty::{
+        NativePtyAdapter, NativePtyOperationFailure, NativePtySettlement, NativePtyTermination,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct PendingNativeProcess {
+        observations: Arc<AtomicUsize>,
+        initial_error: io::ErrorKind,
+    }
+    impl Write for PendingNativeProcess {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    impl NativePtyAdapter for PendingNativeProcess {
+        fn take_reader(&mut self) -> io::Result<Box<dyn Read + Send>> {
+            Ok(Box::new(io::empty()))
+        }
+        fn resize(&self, _: NativePtySize) -> Result<(), NativePtyOperationFailure> {
+            Ok(())
+        }
+        fn wait_for_exit(&mut self, _: Duration) -> Result<NativePtyExit, NativePtyWaitFailure> {
+            if self.observations.fetch_add(1, Ordering::SeqCst) == 0 {
+                Err(NativePtyWaitFailure::new(self.initial_error))
+            } else {
+                Ok(NativePtyExit::Success)
+            }
+        }
+    }
+
+    #[test]
+    fn zero_timeout_child_poll_is_pending_and_retains_the_native_receipt() {
+        let observations = Arc::new(AtomicUsize::new(0));
+        let exit = Arc::new(Mutex::new(None));
+        let mut process = HostProcess {
+            adapter: Box::new(PendingNativeProcess {
+                observations: Arc::clone(&observations),
+                initial_error: io::ErrorKind::TimedOut,
+            }),
+            exit: Arc::clone(&exit),
+        };
+        assert_eq!(
+            process.wait_for_exit(Duration::ZERO),
+            Ok(PtyExit::StillRunning)
+        );
+        assert_eq!(
+            *exit.lock().unwrap(),
+            Some(Err(NativePtyWaitFailure::new(io::ErrorKind::TimedOut)))
+        );
+        assert_eq!(
+            process.wait_for_exit(Duration::ZERO),
+            Ok(PtyExit::Exited { status: Some(0) })
+        );
+        assert_eq!(observations.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn zero_timeout_child_poll_keeps_unknown_wait_errors_failed() {
+        let mut process = HostProcess {
+            adapter: Box::new(PendingNativeProcess {
+                observations: Arc::new(AtomicUsize::new(0)),
+                initial_error: io::ErrorKind::Other,
+            }),
+            exit: Arc::new(Mutex::new(None)),
+        };
+        assert_eq!(
+            process.wait_for_exit(Duration::ZERO),
+            Err(failure(RuntimeStage::Cleanup))
+        );
+    }
+
+    struct InconclusiveNativeTermination {
+        signals: AtomicUsize,
+        observations: AtomicUsize,
+    }
+    impl NativePtyTermination for InconclusiveNativeTermination {
+        fn request_termination(&self) -> io::Result<()> {
+            self.signals.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn settle(&self) -> NativePtySettlement {
+            if self.observations.fetch_add(1, Ordering::SeqCst) == 0 {
+                NativePtySettlement::Unavailable
+            } else {
+                NativePtySettlement::Settled
+            }
+        }
+    }
+
+    #[test]
+    fn native_cleanup_reproof_preserves_identity_without_resignalling() {
+        let native = Arc::new(InconclusiveNativeTermination {
+            signals: AtomicUsize::new(0),
+            observations: AtomicUsize::new(0),
+        });
+        let termination = HostTermination(native.clone());
+        assert_eq!(
+            termination.request_termination(),
+            Err(RuntimeFailure::new(
+                FailureClass::RuntimeUnavailable,
+                RuntimeStage::Cleanup,
+            ))
+        );
+        assert_eq!(native.observations.load(Ordering::SeqCst), 1);
+        termination.retry_cleanup().unwrap();
+        assert_eq!(native.observations.load(Ordering::SeqCst), 2);
+        assert_eq!(native.signals.load(Ordering::SeqCst), 1);
     }
 }

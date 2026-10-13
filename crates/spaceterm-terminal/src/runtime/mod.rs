@@ -5,6 +5,8 @@ pub mod authority;
 
 pub mod budget;
 
+mod cleanup;
+
 pub mod ingress;
 
 pub mod input;

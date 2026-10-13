@@ -148,6 +148,13 @@ impl BudgetLease {
         self.claims.append(&mut other.claims);
         self
     }
+    /// Keep the usage charged while dropping the owning Arc and claim storage.
+    pub(crate) fn quarantine(mut self) {
+        for claim in &mut self.claims {
+            claim.count = 0;
+            claim.bytes = 0;
+        }
+    }
     pub(crate) fn shrink(&mut self, bytes: usize) {
         for claim in &mut self.claims {
             let released = claim.bytes.saturating_sub(bytes);
@@ -273,6 +280,8 @@ impl Drop for RuntimeRegistration {
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
                 .remove(&self.pane);
+        } else if let Some(lease) = self.lease.take() {
+            lease.quarantine();
         }
     }
 }

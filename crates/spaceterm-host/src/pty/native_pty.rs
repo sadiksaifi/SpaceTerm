@@ -80,6 +80,11 @@ impl NativePtyWaitFailure {
     pub fn new(kind: io::ErrorKind) -> Self {
         Self { kind }
     }
+
+    /// Return the recoverable native error category.
+    pub const fn kind(&self) -> io::ErrorKind {
+        self.kind
+    }
 }
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
@@ -171,6 +176,8 @@ pub trait NativePtyAdapter: Write + Send {
         Ok(false)
     }
     /// Wait up to the supplied timeout for the shell exit result.
+    /// A zero timeout polls without waiting for coordination locks or initiating session settlement.
+    /// Return a typed `TimedOut` failure when the child is running or its state is contended.
     fn wait_for_exit(&mut self, timeout: Duration) -> Result<NativePtyExit, NativePtyWaitFailure>;
 }
 
@@ -223,8 +230,14 @@ pub trait NativePtyTermination: Send + Sync {
     /// Request bounded native process shutdown. Success alone is not settlement evidence.
     fn request_termination(&self) -> io::Result<()>;
 
-    /// Complete cleanup on a blocking thread and join the retained settlement result.
+    /// Attempt cleanup on a blocking thread. Only `Settled` is permanent positive evidence.
     /// Providers without independent evidence must keep cleanup unconfirmed.
+    ///
+    /// Retain this same authority after adapter cleanup when a result is inconclusive. POSIX
+    /// providers keep the original process-session identity and perform a fresh attempt on a later
+    /// call. macOS serializes complete attempts process-wide because its proof spawns fence children.
+    /// macOS lock contention is bounded by the attempt deadline and returns `Unavailable`.
+    /// Dropping this authority is not settlement evidence and must not release quarantined capacity.
     fn settle(&self) -> NativePtySettlement {
         NativePtySettlement::Unavailable
     }

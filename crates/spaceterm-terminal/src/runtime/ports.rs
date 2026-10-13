@@ -2,7 +2,7 @@
 use std::io::{Read, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::runtime_contracts::{RuntimeAppearance, RuntimeCommand, RuntimeMetadataSnapshot};
 use spaceterm_core::authority::{ContentRevision, SessionKey};
@@ -74,11 +74,22 @@ pub trait PtyProcess: Write + Send {
     fn take_reader(&mut self) -> Result<Box<dyn Read + Send>, RuntimeFailure>;
     fn resize(&self, size: PtySize) -> Result<(), RuntimeFailure>;
     fn hidden_input(&self) -> Result<bool, RuntimeFailure>;
+    /// Respect the timeout. A zero timeout is a nonblocking poll, and an ordinary
+    /// timeout returns `StillRunning`, not a mechanical failure.
     fn wait_for_exit(&mut self, timeout: Duration) -> Result<PtyExit, RuntimeFailure>;
 }
-/// Request process-session cleanup, not just child exit. The worker joins this call.
+/// Request process-session cleanup, not just child exit. Cleanup retains and joins this call.
 pub trait PtyTermination: Send + Sync {
     fn request_termination(&self) -> Result<(), RuntimeFailure>;
+    /// Re-prove cleanup of the original process session without requesting termination again.
+    /// Implementations must bound each attempt and retain the original session identity.
+    /// Only `Ok(())` certifies absence. Unsupported or inconclusive proof fails closed.
+    fn retry_cleanup(&self) -> Result<(), RuntimeFailure> {
+        Err(RuntimeFailure::new(
+            FailureClass::RuntimeUnavailable,
+            RuntimeStage::Cleanup,
+        ))
+    }
 }
 pub struct PtyParts {
     pub process: Box<dyn PtyProcess>,
@@ -330,6 +341,11 @@ impl<T: Send + 'static> PtyReaderPump<T> {
     pub(crate) fn disconnect(&mut self) {
         self.output = None;
     }
+    fn is_finished(&self) -> bool {
+        self.thread
+            .as_ref()
+            .is_none_or(std::thread::JoinHandle::is_finished)
+    }
     /// The outer result proves the thread joined. A read failure is a terminal
     /// failure, not failed cleanup of an already joined reader.
     pub(crate) fn join(&mut self) -> Result<Result<(), RuntimeFailure>, RuntimeFailure> {
@@ -341,47 +357,187 @@ impl<T: Send + 'static> PtyReaderPump<T> {
         self.joined.unwrap_or(Ok(Ok(())))
     }
 }
-/// Shared mechanical cleanup. The caller disconnects presentation and clears
-/// engine content first. This function has no organization or server identity.
+/// Type erasure removes receipt payloads from retained reader ownership.
+trait PendingReader: Send {
+    fn try_join(&mut self) -> Option<Result<Result<(), RuntimeFailure>, RuntimeFailure>>;
+}
+impl<T: Send + 'static> PendingReader for PtyReaderPump<T> {
+    fn try_join(&mut self) -> Option<Result<Result<(), RuntimeFailure>, RuntimeFailure>> {
+        self.is_finished().then(|| self.join())
+    }
+}
+/// Original resources that could not mechanically finish within foreground cleanup.
+/// Dropping this value detaches an unfinished reader; it never joins that reader.
+pub(crate) struct PendingPtyCleanup {
+    process: Option<Box<dyn PtyProcess>>,
+    child_exited: bool,
+    termination: Option<Arc<dyn PtyTermination>>,
+    reader: Option<Box<dyn PendingReader>>,
+    request: Option<std::thread::JoinHandle<Result<(), RuntimeFailure>>>,
+    absence_confirmed: bool,
+    mechanical_failed: bool,
+}
+impl PendingPtyCleanup {
+    fn poll_request(&mut self) {
+        if self
+            .request
+            .as_ref()
+            .is_some_and(std::thread::JoinHandle::is_finished)
+        {
+            let Some(request) = self.request.take() else {
+                return;
+            };
+            match request.join() {
+                Ok(result) => self.absence_confirmed = result.is_ok(),
+                Err(_) => self.mechanical_failed = true,
+            }
+        }
+    }
+    fn poll_child(&mut self, timeout: Duration) {
+        if self.child_exited {
+            return;
+        }
+        let Some(process) = &mut self.process else {
+            return;
+        };
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            process.wait_for_exit(timeout)
+        })) {
+            // Retain the exited adapter: its destructor can run native proof.
+            // Disposal is safe only after a scheduled positive receipt and joins.
+            Ok(Ok(PtyExit::Exited { .. })) => self.child_exited = true,
+            Ok(Ok(PtyExit::StillRunning)) => {}
+            Ok(Err(_)) | Err(_) => self.mechanical_failed = true,
+        }
+    }
+    fn poll_reader(&mut self) {
+        let Some(reader) = &mut self.reader else {
+            return;
+        };
+        if let Some(result) = reader.try_join() {
+            // A joined reader I/O error is a terminal fault, not unconfirmed mechanics.
+            self.mechanical_failed |= result.is_err();
+            self.reader = None;
+        }
+    }
+    pub fn poll_mechanics(&mut self) {
+        self.poll_request();
+        if self.request.is_some() {
+            return;
+        }
+        if !self.mechanical_failed {
+            self.poll_child(Duration::ZERO);
+        }
+        self.poll_reader();
+    }
+    pub fn can_release(&self) -> bool {
+        self.absence_confirmed
+            && self.request.is_none()
+            && !self.mechanical_failed
+            && self.child_exited
+            && self.reader.is_none()
+    }
+    pub fn can_retry(&self) -> bool {
+        !self.absence_confirmed
+            && self.request.is_none()
+            && !self.mechanical_failed
+            && self.termination.is_some()
+    }
+    pub fn fail_mechanics(&mut self) {
+        self.mechanical_failed = true;
+    }
+    pub fn retry(&mut self) {
+        if !self.can_retry() {
+            return;
+        }
+        let Some(termination) = &self.termination else {
+            return;
+        };
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| termination.retry_cleanup()))
+        {
+            Ok(Ok(())) => self.absence_confirmed = true,
+            Ok(Err(_)) => {}
+            Err(_) => self.mechanical_failed = true,
+        }
+    }
+}
+/// Mechanical cleanup outcome plus explicit retained resources after incomplete cleanup.
+pub(crate) struct PtyCleanup {
+    pub result: spaceterm_core::retirement::CleanupResult,
+    pub pending: Option<PendingPtyCleanup>,
+}
+/// Shared bounded foreground cleanup. Neither a reader disconnection nor a
+/// native certificate substitutes for the actual child exit and reader join.
 pub(crate) fn cleanup_pty<T: Send + 'static>(
     process: &mut Option<Box<dyn PtyProcess>>,
     termination: &mut Option<Arc<dyn PtyTermination>>,
     reader: &mut Option<PtyReaderPump<T>>,
-) -> spaceterm_core::retirement::CleanupResult {
+) -> PtyCleanup {
     use spaceterm_core::retirement::{CleanupResult, ConfirmedCleanupClass};
+    let request_deadline = Instant::now() + Duration::from_secs(2);
     if let Some(reader) = reader {
         reader.disconnect();
     }
     let had_process = process.is_some();
-    let mut confirmed = true;
-    if let Some(termination) = termination.take() {
-        let request = Arc::clone(&termination);
+    let mut pending = PendingPtyCleanup {
+        process: process.take(),
+        child_exited: !had_process,
+        termination: termination.take(),
+        reader: reader
+            .take()
+            .map(|reader| Box::new(reader) as Box<dyn PendingReader>),
+        request: None,
+        absence_confirmed: true,
+        mechanical_failed: false,
+    };
+    if let Some(termination) = &pending.termination {
+        pending.absence_confirmed = false;
+        let request = Arc::clone(termination);
         match std::thread::Builder::new()
             .name("terminal-termination".into())
             .spawn(move || request.request_termination())
         {
-            Ok(thread) => confirmed &= matches!(thread.join(), Ok(Ok(()))),
-            Err(_) => confirmed &= termination.request_termination().is_ok(),
+            Ok(thread) => pending.request = Some(thread),
+            // Running the callback inline would remove the foreground bound.
+            Err(_) => pending.mechanical_failed = true,
+        }
+        while pending.request.is_some() && Instant::now() < request_deadline {
+            pending.poll_request();
+            if pending.request.is_some() {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        pending.poll_request();
+    }
+    if pending.request.is_none() && !pending.mechanical_failed {
+        let mechanical_deadline = Instant::now() + Duration::from_secs(2);
+        // Keep the adapter's established two-second foreground wait. Deferred
+        // child polls are zero-time only after the initial request has joined.
+        pending.poll_child(Duration::from_secs(2));
+        pending.poll_reader();
+        // A still-running child needs fresh native settlement, not a blocked reader join.
+        while pending.child_exited
+            && pending.reader.is_some()
+            && !pending.mechanical_failed
+            && Instant::now() < mechanical_deadline
+        {
+            std::thread::sleep(Duration::from_millis(1));
+            pending.poll_reader();
         }
     }
-    if let Some(process) = process.as_deref_mut() {
-        confirmed &= matches!(
-            process.wait_for_exit(Duration::from_secs(2)),
-            Ok(PtyExit::Exited { .. })
-        );
-    }
-    *process = None;
-    if let Some(reader) = reader {
-        confirmed &= reader.join().is_ok();
-    }
-    *reader = None;
-    if confirmed {
-        CleanupResult::Confirmed(if had_process {
-            ConfirmedCleanupClass::ReapedAndReleased
-        } else {
-            ConfirmedCleanupClass::AlreadyAbsentWithConfirmedOwnership
-        })
+    if pending.can_release() {
+        PtyCleanup {
+            result: CleanupResult::Confirmed(if had_process {
+                ConfirmedCleanupClass::ReapedAndReleased
+            } else {
+                ConfirmedCleanupClass::AlreadyAbsentWithConfirmedOwnership
+            }),
+            pending: None,
+        }
     } else {
-        CleanupResult::Failed(FailureClass::RuntimeUnavailable)
+        PtyCleanup {
+            result: CleanupResult::Failed(FailureClass::RuntimeUnavailable),
+            pending: Some(pending),
+        }
     }
 }
