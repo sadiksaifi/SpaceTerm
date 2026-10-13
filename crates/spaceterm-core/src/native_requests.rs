@@ -110,6 +110,16 @@ impl PermissionNotice {
     }
 }
 
+/// Content-free terminal attention facts. Native notification text is composed locally.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NotificationNotice {
+    Bell,
+    CommandFinished {
+        exit_status: Option<i32>,
+        duration_millis: u64,
+    },
+}
+
 /// No executable, server path, clipboard proof or operating-system permission is represented.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NativeRequestKind {
@@ -120,6 +130,7 @@ pub enum NativeRequestKind {
         text: NativeText,
     },
     Permission(PermissionNotice),
+    Notification(NotificationNotice),
 }
 
 /// Deadline ticks use the server's epoch clock, not the client's clock. The wire
@@ -164,7 +175,7 @@ impl NativeRequest {
                     return Err(NativeRequestError::InvalidDeadline);
                 }
             }
-            NativeRequestKind::ClipboardWrite(_) => {
+            NativeRequestKind::ClipboardWrite(_) | NativeRequestKind::Notification(_) => {
                 if deadline.is_none() {
                     return Err(NativeRequestError::InvalidDeadline);
                 }
@@ -225,6 +236,7 @@ pub enum NativeCompletionKind {
         decision: PasteDecision,
     },
     PermissionAcknowledged,
+    NotificationAcknowledged,
 }
 
 /// Shape-checked completion. Its captured fence is not retagged with new authority.
@@ -258,6 +270,10 @@ impl NativeCompletion {
             (NativeCompletionKind::PermissionAcknowledged, NativeRequestKind::Permission(_)) => {
                 true
             }
+            (
+                NativeCompletionKind::NotificationAcknowledged,
+                NativeRequestKind::Notification(_),
+            ) => true,
             _ => false,
         };
         if !valid {

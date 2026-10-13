@@ -337,9 +337,22 @@ impl Worker {
             }
             if let Some(effect) = self.effects.pop_front() {
                 match effect {
-                    OutputEffect::Terminal(bytes) => {
+                    OutputEffect::Terminal(bytes, captured) => {
                         let update = self.engine()?.feed(&bytes)?;
                         self.update(update)?;
+                        for attention in self.engine()?.take_attention() {
+                            let notice = match attention {
+                                crate::attention::AttentionEvent::Bell => spaceterm_core::native_requests::NotificationNotice::Bell,
+                                crate::attention::AttentionEvent::CommandFinished { exit_status, duration } => spaceterm_core::native_requests::NotificationNotice::CommandFinished {
+                                    exit_status, duration_millis: u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
+                                },
+                            };
+                            let now = self
+                                .clock
+                                .now()
+                                .map_err(|_| RuntimeFailure::internal(RuntimeStage::Counter))?;
+                            self.native.notify(notice, captured, now, &self.shared)?;
+                        }
                     }
                     OutputEffect::Clipboard(operation, captured) => {
                         let hidden = self

@@ -430,6 +430,22 @@ fn ordinary_field_capabilities(
     if terminal_fields && !capabilities.contains(&crate::negotiation::CAPABILITY_TERMINAL_STREAMS) {
         return Err(ProtocolError::Negotiation);
     }
+    macro_rules! notification_fields {
+        ($message:expr, $p:ident) => {{
+            use crate::wire::$p;
+            matches!(&$message.kind, Some($p::message::Kind::NativeRequest(request))
+                if matches!(request.action, Some($p::native_request::Action::Notification(_))))
+                || matches!(&$message.kind, Some($p::message::Kind::NativeCompletion(completion)) if completion.disposition == 8)
+        }};
+    }
+    let notifications = match payload {
+        Payload::Major1(message) => notification_fields!(message, v1),
+        Payload::Major2(message) => notification_fields!(message, v2),
+    };
+    if notifications && !capabilities.contains(&crate::negotiation::CAPABILITY_NATIVE_NOTIFICATIONS)
+    {
+        return Err(ProtocolError::Negotiation);
+    }
     macro_rules! canonical {
         ($message:expr, $p:ident) => {{
             use crate::wire::$p;

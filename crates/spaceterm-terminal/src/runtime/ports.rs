@@ -165,6 +165,9 @@ pub enum ResourceStep {
 /// never converted to a successful empty page or a completed partial transfer.
 pub trait RuntimeEngine {
     fn feed(&mut self, bytes: &[u8]) -> Result<EngineUpdate, RuntimeFailure>;
+    fn take_attention(&mut self) -> Vec<crate::attention::AttentionEvent> {
+        Vec::new()
+    }
     fn apply(&mut self, command: &RuntimeCommand) -> Result<EngineEffect, RuntimeFailure>;
     fn resize(&mut self, grid: MeasuredGrid) -> Result<(), RuntimeFailure>;
     fn release_input(&mut self) -> Result<Vec<u8>, RuntimeFailure>;

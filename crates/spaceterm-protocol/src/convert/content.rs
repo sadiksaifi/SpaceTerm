@@ -483,6 +483,91 @@ macro_rules! profile {
                     generation: value.generation,
                 })
             }
+            pub fn encode_graphics_request(request: GraphicsRequest) -> wire::ResourceRequest {
+                let resource = request.resource();
+                wire::ResourceRequest {
+                    fence: Some(encode_fence(request.stamp().fence())),
+                    resource: Some(encode_resource(resource.key)),
+                    transfer: request.transfer().get(),
+                    offset: u64::from(request.offset()),
+                    stamp: Some(Box::new(encode_stamp(request.stamp()))),
+                    width: resource.width,
+                    height: resource.height,
+                    rgba_bytes: resource.rgba_bytes,
+                    digest: resource.digest.to_vec(),
+                }
+            }
+            pub fn decode_graphics_request(
+                value: &wire::ResourceRequest,
+            ) -> Result<GraphicsRequest, ProtocolError> {
+                let stamp = decode_stamp(required(&value.stamp)?)?;
+                if decode_fence(required(&value.fence)?, stamp.fence().content())? != stamp.fence()
+                {
+                    return Err(ProtocolError::Malformed);
+                }
+                GraphicsRequest::new(
+                    stamp,
+                    ResourceTransferId::new(value.transfer)
+                        .map_err(|_| ProtocolError::Malformed)?,
+                    GraphicsResourceRef {
+                        key: decode_resource(required(&value.resource)?)?,
+                        width: value.width,
+                        height: value.height,
+                        rgba_bytes: value.rgba_bytes,
+                        digest: value
+                            .digest
+                            .as_slice()
+                            .try_into()
+                            .map_err(|_| ProtocolError::Malformed)?,
+                    },
+                    u32::try_from(value.offset).map_err(|_| ProtocolError::Malformed)?,
+                )
+                .map_err(|_| ProtocolError::Malformed)
+            }
+            pub fn encode_graphics_chunk(chunk: &GraphicsChunk) -> wire::ResourceChunk {
+                let request = chunk.request();
+                let resource = request.resource();
+                wire::ResourceChunk {
+                    fence: Some(encode_fence(request.stamp().fence())),
+                    resource: Some(encode_resource(resource.key)),
+                    transfer: request.transfer().get(),
+                    offset: u64::from(chunk.offset()),
+                    total_bytes: u64::from(resource.rgba_bytes),
+                    data: chunk.bytes().to_vec(),
+                    digest: resource.digest.to_vec(),
+                    complete: chunk.complete(),
+                    format: wire::ResourceFormat::Rgba8 as i32,
+                    width: resource.width,
+                    height: resource.height,
+                    stamp: Some(Box::new(encode_stamp(request.stamp()))),
+                }
+            }
+            pub fn decode_graphics_chunk(
+                value: &wire::ResourceChunk,
+                request: GraphicsRequest,
+            ) -> Result<GraphicsChunk, ProtocolError> {
+                let resource = request.resource();
+                if decode_stamp(required(&value.stamp)?)? != request.stamp()
+                    || decode_fence(required(&value.fence)?, request.stamp().fence().content())?
+                        != request.stamp().fence()
+                    || decode_resource(required(&value.resource)?)? != resource.key
+                    || value.transfer != request.transfer().get()
+                    || value.total_bytes != u64::from(resource.rgba_bytes)
+                    || value.digest.as_slice() != resource.digest
+                    || value.format != wire::ResourceFormat::Rgba8 as i32
+                    || value.width != resource.width
+                    || value.height != resource.height
+                {
+                    return Err(ProtocolError::Malformed);
+                }
+                GraphicsChunk::new(
+                    request,
+                    u32::try_from(value.offset).map_err(|_| ProtocolError::Malformed)?,
+                    value.data.clone(),
+                    value.complete,
+                )
+                .map_err(|_| ProtocolError::Malformed)
+            }
             pub fn encode_page(
                 value: &ContentPageReply,
             ) -> Result<wire::CanonicalSemanticPage, ProtocolError> {
