@@ -70,12 +70,14 @@ fn pane_fixtures() -> [(&'static str, PanePresentation); 10] {
             "Offline",
             PanePresentation::Offline {
                 prior: OfflinePrior::Frozen,
+                cause: super::super::pane_presentation::OfflineCause::Unreachable,
             },
         ),
         (
             "Offline over a Takeover Screen",
             PanePresentation::Offline {
                 prior: OfflinePrior::Takeover(device()),
+                cause: super::super::pane_presentation::OfflineCause::Unreachable,
             },
         ),
         (

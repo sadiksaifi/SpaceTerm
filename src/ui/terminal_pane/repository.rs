@@ -75,6 +75,9 @@ struct PaneRepositoryFacts {
 impl TerminalPane {
     /// The machine and Repository Source Directory this Pane reads, once it knows a directory.
     pub(crate) fn repository_source(&self) -> Option<(RepositoryMachine, SourceDirectory)> {
+        if self.server_session.is_some() {
+            return None;
+        }
         self.repository_facts()
             .map(|facts| (facts.machine, facts.directory))
     }
@@ -86,6 +89,12 @@ impl TerminalPane {
 
     /// Reports any changed fact to the store, registering on the first known directory.
     pub(super) fn sync_repository_status(&mut self, cx: &mut Context<Self>) {
+        // Server-qualified Git queries belong to the server adapter. Local display metadata
+        // never authorizes a local git process, including for a private-IPC route.
+        if self.server_session.is_some() {
+            self.release_repository_status(cx);
+            return;
+        }
         let Some(facts) = self.repository_facts() else {
             return;
         };

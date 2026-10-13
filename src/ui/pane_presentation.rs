@@ -2,7 +2,7 @@
 //! Terminal Session live.
 //!
 //! The Pane keeps measuring its cell grid in every presentation. Only a live presentation accepts
-//! input. Only a live or frozen screen may be painted, exposed to accessibility, copied, or given
+//! input. A frozen screen is paint-only. Only a live screen may be copied or given
 //! to an input method as context; every other presentation is content-free.
 //!
 //! The Pane hosts a [`PanePresentationLayer`] in every presentation, live included, with one
@@ -36,7 +36,8 @@ use gpui::{
     Window, accesskit, div, relative,
 };
 use spaceterm_ui::{
-    Button, ButtonSize, ButtonVariant, FloatingRole, FrameSpinner, Icon, IconName, ProgressSize,
+    Button, ButtonActivationSource, ButtonSize, ButtonVariant, ContextMenu, ContextMenuTarget,
+    FloatingRole, FrameSpinner, Icon, IconName, MenuEntry, ProgressSize,
 };
 
 use crate::appearance::{ChromeColors, Color};
@@ -88,6 +89,104 @@ impl DisplayName {
     }
 }
 
+/// Why this server cannot currently provide terminal access. C3 supplies the original cause.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) enum OfflineCause {
+    #[default]
+    Unreachable,
+    Stopped(DisplayName),
+    Blocked {
+        server: DisplayName,
+        location: BlockedLocation,
+        intended: IntendedAction,
+    },
+    UpdateRequired,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum BlockedLocation {
+    ThisComputer,
+    Ssh(DisplayName),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IntendedAction {
+    Connect,
+    Start,
+}
+
+impl OfflineCause {
+    fn actions(&self) -> &'static [PanePresentationAction] {
+        use PanePresentationAction::{OpenServerSettings, Retry, RetryConnection};
+        match self {
+            Self::Unreachable => &[Retry],
+            Self::Blocked {
+                intended: IntendedAction::Connect,
+                ..
+            } => &[RetryConnection, OpenServerSettings],
+            Self::Stopped(_)
+            | Self::UpdateRequired
+            | Self::Blocked {
+                intended: IntendedAction::Start,
+                ..
+            } => &[OpenServerSettings],
+        }
+    }
+    fn status(&self) -> &'static str {
+        match self {
+            Self::Unreachable => "Offline",
+            Self::Stopped(_) => "Stopped",
+            Self::Blocked { .. } => "Blocked",
+            Self::UpdateRequired => "Update required",
+        }
+    }
+    fn icon(&self) -> IconName {
+        match self {
+            Self::Unreachable => IconName::ServerOff,
+            Self::Stopped(_) => IconName::CircleStop,
+            Self::Blocked { .. } => IconName::ShieldAlert,
+            Self::UpdateRequired => IconName::TriangleAlert,
+        }
+    }
+    fn message(&self) -> SharedString {
+        match self {
+            Self::Unreachable => "Server offline. Reconnecting…".into(),
+            Self::Stopped(server) => format!("{} is stopped.", server.or("The server")).into(),
+            Self::Blocked {
+                server, location, ..
+            } => {
+                let location = match location {
+                    BlockedLocation::ThisComputer => "this computer".into(),
+                    BlockedLocation::Ssh(destination) => destination.or("the selected machine"),
+                };
+                format!("{} can't start on {location}.", server.or("The server")).into()
+            }
+            Self::UpdateRequired => "Update required to connect.".into(),
+        }
+    }
+    fn takeover_detail(&self) -> SharedString {
+        match self {
+            Self::Unreachable => {
+                "The server can't be reached. Take Over is available again after it reconnects."
+                    .into()
+            }
+            Self::Stopped(_) => format!(
+                "{} Take Over is available again after it starts.",
+                self.message()
+            )
+            .into(),
+            Self::Blocked { .. } => format!(
+                "{} Take Over is available again after it's fixed.",
+                self.message()
+            )
+            .into(),
+            Self::UpdateRequired => {
+                "Update required to connect. Take Over is available again after the update.".into()
+            }
+        }
+    }
+}
+
 /// Why a Pane's Terminal Session ended while the Pane stayed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SessionEndReason {
@@ -117,6 +216,8 @@ pub(crate) enum OfflinePrior {
     Frozen,
     /// The Takeover Screen that was showing. An older screen is never revealed.
     Takeover(DisplayName),
+    /// No client controls the running Session. An older screen is never revealed.
+    Unclaimed,
 }
 
 /// What a Pane presents in place of a live Terminal. The Pane owns one, and only
@@ -131,6 +232,10 @@ pub(crate) enum PanePresentation {
     Starting,
     /// Another device controls the Pane's session.
     Takeover(DisplayName),
+    /// Deliberate Pane selection compare-acquires control, never takes it from another client.
+    Unclaimed {
+        acquiring: bool,
+    },
     Ended {
         reason: SessionEndReason,
     },
@@ -142,6 +247,7 @@ pub(crate) enum PanePresentation {
     /// The Pane's server cannot be reached.
     Offline {
         prior: OfflinePrior,
+        cause: OfflineCause,
     },
     /// The server is reachable again and the Pane is catching up with it.
     Reconciling {
@@ -156,9 +262,85 @@ pub(crate) enum PanePresentationAction {
     StartSession,
     Retry,
     ChooseDirectory,
+    OpenServerSettings,
+    RetryConnection,
 }
 
 impl PanePresentation {
+    /// Converts the portable policy without another desktop startup or control reducer.
+    pub(crate) fn from_portable(
+        presentation: spaceterm_client::view::PanePresentation,
+        device: DisplayName,
+        cause: OfflineCause,
+    ) -> Self {
+        use spaceterm_client::view::{OfflinePrior as Prior, PanePresentation as Portable};
+        let prior = |prior| match prior {
+            Prior::Frozen => OfflinePrior::Frozen,
+            Prior::Takeover => OfflinePrior::Takeover(device.clone()),
+            Prior::Unclaimed => OfflinePrior::Unclaimed,
+        };
+        match presentation {
+            Portable::Live => Self::Live,
+            Portable::NotStarted => Self::Ended {
+                reason: SessionEndReason::Restored,
+            },
+            Portable::AwaitingMeasurement => Self::AwaitingMeasurement,
+            Portable::Starting => Self::Starting,
+            Portable::Takeover => Self::Takeover(device),
+            Portable::Unclaimed { acquiring } => Self::Unclaimed { acquiring },
+            Portable::Ended { reason } => Self::Ended {
+                reason: match reason {
+                    spaceterm_core::organization::EndReason::EndAllSessions => {
+                        SessionEndReason::EndAllSessions
+                    }
+                    spaceterm_core::organization::EndReason::OrdinaryExit
+                    | spaceterm_core::organization::EndReason::Stop
+                    | spaceterm_core::organization::EndReason::RuntimeFailure
+                    | spaceterm_core::organization::EndReason::ServerRestart
+                    | spaceterm_core::organization::EndReason::WorktreeRemoval
+                    | spaceterm_core::organization::EndReason::ServerUpdate => {
+                        SessionEndReason::Restored
+                    }
+                },
+            },
+            Portable::Failed { class } => Self::Failed {
+                class: match class {
+                    spaceterm_core::organization::FailureClass::LaunchUnavailable => {
+                        PaneFailureClass::Launch
+                    }
+                    spaceterm_core::organization::FailureClass::RuntimeFault
+                    | spaceterm_core::organization::FailureClass::RuntimeUnavailable => {
+                        PaneFailureClass::Interrupted
+                    }
+                    spaceterm_core::organization::FailureClass::ResourceLimit => {
+                        PaneFailureClass::ResourceLimit
+                    }
+                    spaceterm_core::organization::FailureClass::DirectoryUnavailable
+                    | spaceterm_core::organization::FailureClass::StorageUnavailable
+                    | spaceterm_core::organization::FailureClass::UnsafeStorage
+                    | spaceterm_core::organization::FailureClass::AuthorizationDenied
+                    | spaceterm_core::organization::FailureClass::InvalidRequest
+                    | spaceterm_core::organization::FailureClass::StaleAuthority
+                    | spaceterm_core::organization::FailureClass::Unsupported
+                    | spaceterm_core::organization::FailureClass::Internal => {
+                        PaneFailureClass::Unavailable
+                    }
+                },
+            },
+            Portable::DirectoryUnavailable => Self::DirectoryUnavailable,
+            Portable::Offline { prior: value } => Self::Offline {
+                prior: prior(value),
+                cause,
+            },
+            Portable::Reconciling { prior: value } => Self::Reconciling {
+                prior: prior(value),
+            },
+            Portable::Unavailable { reason: _ } => Self::Failed {
+                class: PaneFailureClass::Unavailable,
+            },
+        }
+    }
+
     /// Whether keys, text, pastes, and pointer reports may reach the Terminal Session.
     pub(crate) fn accepts_input(&self) -> bool {
         matches!(self, Self::Live)
@@ -172,7 +354,8 @@ impl PanePresentation {
             self,
             Self::Live
                 | Self::Offline {
-                    prior: OfflinePrior::Frozen
+                    prior: OfflinePrior::Frozen,
+                    ..
                 }
                 | Self::Reconciling {
                     prior: OfflinePrior::Frozen
@@ -198,7 +381,8 @@ impl PanePresentation {
             self,
             Self::Takeover(_)
                 | Self::Offline {
-                    prior: OfflinePrior::Takeover(_)
+                    prior: OfflinePrior::Takeover(_),
+                    ..
                 }
                 | Self::Reconciling {
                     prior: OfflinePrior::Takeover(_)
@@ -208,12 +392,17 @@ impl PanePresentation {
 
     /// The actions the presentation lets a person operate, in presentation order. `armed` says
     /// whether a Takeover Screen has been showing long enough to offer Take Over.
+    pub(crate) fn offers_action(&self, action: PanePresentationAction, armed: bool) -> bool {
+        self.operable_actions(armed).contains(&action)
+    }
+
     fn operable_actions(&self, armed: bool) -> Vec<PanePresentationAction> {
         if let Self::Offline {
             prior: OfflinePrior::Frozen,
+            cause,
         } = self
         {
-            return vec![PanePresentationAction::Retry];
+            return cause.actions().to_vec();
         }
         self.screen()
             .map(|screen| {
@@ -306,6 +495,7 @@ impl PanePresentation {
             | Self::Starting
             | Self::Offline {
                 prior: OfflinePrior::Frozen,
+                ..
             }
             | Self::Reconciling {
                 prior: OfflinePrior::Frozen,
@@ -328,21 +518,12 @@ impl PanePresentation {
             }
             Self::Offline {
                 prior: OfflinePrior::Takeover(device),
+                cause,
             } => {
                 let (icon, title) = takeover(device);
-                Screen::new(
-                    icon,
-                    Tone::Neutral,
-                    title,
-                    "The server can't be reached. Take Over is available again after it \
-                     reconnects.",
-                )
-                .action(PanePresentationAction::Retry, Prominence::Secondary, true)
-                .action(
-                    PanePresentationAction::TakeOver,
-                    Prominence::Primary,
-                    false,
-                )
+                Screen::new(icon, Tone::Neutral, title, cause.takeover_detail())
+                    .offline_actions(cause)
+                    .action(PanePresentationAction::TakeOver, Prominence::Primary, false)
             }
             Self::Reconciling {
                 prior: OfflinePrior::Takeover(device),
@@ -354,6 +535,34 @@ impl PanePresentation {
                     false,
                 )
             }
+            Self::Unclaimed { acquiring } => Screen::new(
+                IconName::SquareTerminal,
+                Tone::Neutral,
+                "Session available",
+                if *acquiring {
+                    "Acquiring control…"
+                } else {
+                    "Select this Pane to use it here."
+                },
+            ),
+            Self::Offline {
+                prior: OfflinePrior::Unclaimed,
+                cause,
+            } => Screen::new(
+                IconName::SquareTerminal,
+                Tone::Neutral,
+                "Session available",
+                cause.message(),
+            )
+            .offline_actions(cause),
+            Self::Reconciling {
+                prior: OfflinePrior::Unclaimed,
+            } => Screen::new(
+                IconName::SquareTerminal,
+                Tone::Neutral,
+                "Session available",
+                "Reconnecting to the server…",
+            ),
             Self::Ended { reason } => Screen::new(
                 IconName::SquareTerminal,
                 Tone::Neutral,
@@ -417,11 +626,13 @@ impl PanePresentation {
 }
 
 impl PanePresentationAction {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 6] = [
         Self::TakeOver,
         Self::StartSession,
         Self::Retry,
         Self::ChooseDirectory,
+        Self::OpenServerSettings,
+        Self::RetryConnection,
     ];
 
     const fn index(self) -> usize {
@@ -430,6 +641,8 @@ impl PanePresentationAction {
             Self::StartSession => 1,
             Self::Retry => 2,
             Self::ChooseDirectory => 3,
+            Self::OpenServerSettings => 4,
+            Self::RetryConnection => 5,
         }
     }
 
@@ -439,6 +652,8 @@ impl PanePresentationAction {
             Self::StartSession => "Start Session",
             Self::Retry => "Retry",
             Self::ChooseDirectory => "Choose Directory…",
+            Self::OpenServerSettings => "Server Settings…",
+            Self::RetryConnection => "Retry Connection",
         }
     }
 
@@ -448,6 +663,8 @@ impl PanePresentationAction {
             Self::StartSession => "pane-presentation-start-session",
             Self::Retry => "pane-presentation-retry",
             Self::ChooseDirectory => "pane-presentation-choose-directory",
+            Self::OpenServerSettings => "pane-presentation-server-settings",
+            Self::RetryConnection => "pane-presentation-retry-connection",
         }
     }
 }
@@ -498,6 +715,13 @@ impl Screen {
             detail: detail.into(),
             actions: Vec::new(),
         }
+    }
+
+    fn offline_actions(mut self, cause: &OfflineCause) -> Self {
+        for &action in cause.actions() {
+            self = self.action(action, Prominence::Secondary, true);
+        }
+        self
     }
 
     fn action(
@@ -623,7 +847,14 @@ impl PresentationFocus {
     }
 }
 
-type ActionHandler = Rc<dyn Fn(PanePresentationAction, &mut Window, &mut App)>;
+type ActionHandler = Rc<
+    dyn Fn(
+        PanePresentationAction,
+        super::server_desktop_contracts::SelectionSource,
+        &mut Window,
+        &mut App,
+    ),
+>;
 
 /// Draws a [`PanePresentation`] over the Pane's Terminal. A live presentation draws nothing. A
 /// frozen screen keeps the Terminal visible under a scrim and a connection notice. Every other
@@ -640,6 +871,8 @@ pub(crate) struct PanePresentationLayer {
     terminal_background: Color,
     focus: Option<PresentationFocus>,
     on_action: Option<ActionHandler>,
+    armed: Option<bool>,
+    focused: bool,
 }
 
 impl PanePresentationLayer {
@@ -654,6 +887,8 @@ impl PanePresentationLayer {
             terminal_background,
             focus: None,
             on_action: None,
+            armed: None,
+            focused: false,
         }
     }
 
@@ -664,9 +899,35 @@ impl PanePresentationLayer {
         self
     }
 
+    /// The Pane's transition clock, independent of whether its first frame has rendered.
+    pub(crate) fn armed(mut self, armed: bool) -> Self {
+        self.armed = Some(armed);
+        self
+    }
+
+    pub(crate) fn focused(mut self, focused: bool) -> Self {
+        self.focused = focused;
+        self
+    }
+
     pub(crate) fn on_action(
         mut self,
         handler: impl Fn(PanePresentationAction, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_action = Some(Rc::new(move |action, _, window, cx| {
+            handler(action, window, cx)
+        }));
+        self
+    }
+
+    pub(crate) fn on_action_with_source(
+        mut self,
+        handler: impl Fn(
+            PanePresentationAction,
+            super::server_desktop_contracts::SelectionSource,
+            &mut Window,
+            &mut App,
+        ) + 'static,
     ) -> Self {
         self.on_action = Some(Rc::new(handler));
         self
@@ -682,19 +943,25 @@ impl RenderOnce for PanePresentationLayer {
             presentation,
             focus,
             on_action,
+            armed,
+            focused,
             ..
         } = self;
         let child = |name: &'static str| ElementId::NamedChild(Arc::new(id.clone()), name.into());
-        let armed = match &presentation {
+        let armed = armed.unwrap_or_else(|| match &presentation {
             PanePresentation::Takeover(_) => {
                 elapsed(child("takeover-arming"), TAKEOVER_ARMING_DELAY, window, cx)
             }
             _ => true,
-        };
+        });
         if let Some(focus) = &focus {
             focus.reclaim(&presentation.operable_actions(armed), window, cx);
         }
-        let actions = Actions { focus, on_action };
+        let actions = Actions {
+            focus,
+            on_action,
+            focused,
+        };
         match &presentation {
             PanePresentation::Live => gpui::Empty.into_any_element(),
             PanePresentation::AwaitingMeasurement | PanePresentation::Starting => {
@@ -704,12 +971,16 @@ impl RenderOnce for PanePresentationLayer {
             }
             PanePresentation::Offline {
                 prior: OfflinePrior::Frozen,
+                ..
             }
             | PanePresentation::Reconciling {
                 prior: OfflinePrior::Frozen,
             } => render_frozen(
                 id.clone(),
-                matches!(presentation, PanePresentation::Offline { .. }),
+                match &presentation {
+                    PanePresentation::Offline { cause, .. } => Some(cause),
+                    _ => None,
+                },
                 &paint,
                 &appearance,
                 actions,
@@ -719,7 +990,90 @@ impl RenderOnce for PanePresentationLayer {
                 let Some(screen) = presentation.screen() else {
                     return gpui::Empty.into_any_element();
                 };
-                render_screen(id.clone(), screen, armed, &paint, &appearance, actions)
+                if presentation.guards_take_over() {
+                    use super::server_pane_actions::PanePresentationMenuCommand;
+                    let entries = screen
+                        .actions
+                        .iter()
+                        .filter_map(|action| {
+                            let command = match action.action {
+                                PanePresentationAction::TakeOver => {
+                                    PanePresentationMenuCommand::TakeOver
+                                }
+                                PanePresentationAction::Retry => PanePresentationMenuCommand::Retry,
+                                PanePresentationAction::RetryConnection => {
+                                    PanePresentationMenuCommand::RetryConnection
+                                }
+                                PanePresentationAction::OpenServerSettings => {
+                                    PanePresentationMenuCommand::ServerSettings
+                                }
+                                _ => return None,
+                            };
+                            Some(
+                                MenuEntry::action(action.action.label(), command)
+                                    .disabled(!action.available || !armed)
+                                    .debug_selector(match command {
+                                        PanePresentationMenuCommand::TakeOver => {
+                                            "pane-presentation-menu-take-over"
+                                        }
+                                        PanePresentationMenuCommand::Retry => {
+                                            "pane-presentation-menu-retry"
+                                        }
+                                        PanePresentationMenuCommand::RetryConnection => {
+                                            "pane-presentation-menu-retry-connection"
+                                        }
+                                        PanePresentationMenuCommand::ServerSettings => {
+                                            "pane-presentation-menu-server-settings"
+                                        }
+                                    }),
+                            )
+                        })
+                        .collect();
+                    let title = screen.title.clone();
+                    let detail = screen.detail.clone();
+                    let menu_actions = actions.clone();
+                    let menu = ContextMenu::new(
+                        child("menu"),
+                        "Pane",
+                        render_screen(id.clone(), screen, armed, &paint, &appearance, actions),
+                        entries,
+                    )
+                    .open_when_all_disabled()
+                    .target(
+                        ContextMenuTarget::new(accesskit::Role::Group, title).description(detail),
+                    )
+                    .on_activate(move |activation, window, cx| {
+                        if let Some(on_action) = &menu_actions.on_action {
+                            on_action(
+                                match activation.action() {
+                                    PanePresentationMenuCommand::TakeOver => {
+                                        PanePresentationAction::TakeOver
+                                    }
+                                    PanePresentationMenuCommand::Retry => {
+                                        PanePresentationAction::Retry
+                                    }
+                                    PanePresentationMenuCommand::RetryConnection => {
+                                        PanePresentationAction::RetryConnection
+                                    }
+                                    PanePresentationMenuCommand::ServerSettings => {
+                                        PanePresentationAction::OpenServerSettings
+                                    }
+                                },
+                                super::server_desktop_contracts::SelectionSource::Command,
+                                window,
+                                cx,
+                            );
+                        }
+                    });
+                    let menu = menu.fill_parent_width().fill_parent_height();
+                    let menu = match &menu_actions.focus {
+                        Some(focus) => menu.keyboard_trigger(&focus.pane).into_any_element(),
+                        None => menu.into_any_element(),
+                    };
+                    div().absolute().inset_0().child(menu).into_any_element()
+                } else {
+                    render_screen(id.clone(), screen, armed, &paint, &appearance, actions)
+                }
             }
         }
     }
@@ -730,6 +1084,7 @@ impl RenderOnce for PanePresentationLayer {
 struct Actions {
     focus: Option<PresentationFocus>,
     on_action: Option<ActionHandler>,
+    focused: bool,
 }
 
 impl Actions {
@@ -754,12 +1109,22 @@ impl Actions {
             // window, can put it under a following Return or Space.
             .tab_stop(action != PanePresentationAction::TakeOver)
             .debug_selector(action.selector())
-            .on_activate(move |_, window, cx| {
+            .on_activate(move |activation, window, cx| {
                 if let Some(focus) = &actions.focus {
                     focus.pane.focus(window, cx);
                 }
                 if let Some(on_action) = &actions.on_action {
-                    on_action(action, window, cx);
+                    use super::server_desktop_contracts::SelectionSource;
+                    let source = match activation.source() {
+                        ButtonActivationSource::Pointer => SelectionSource::Pointer,
+                        ButtonActivationSource::Accessibility => {
+                            SelectionSource::AccessibilityPress
+                        }
+                        ButtonActivationSource::Space | ButtonActivationSource::Return => {
+                            SelectionSource::Command
+                        }
+                    };
+                    on_action(action, source, window, cx);
                 }
             })
     }
@@ -823,7 +1188,7 @@ fn render_pending(
 /// selectable.
 fn render_frozen(
     id: ElementId,
-    offline: bool,
+    cause: Option<&OfflineCause>,
     paint: &PresentationPaint,
     appearance: &ChromeAppearance,
     actions: Actions,
@@ -832,30 +1197,33 @@ fn render_frozen(
     let child = |name: &'static str| ElementId::NamedChild(Arc::new(id.clone()), name.into());
     let shell = spaceterm_ui::floating_surface_theme(cx).shell(FloatingRole::Notice);
     let floating_colors = &appearance.floating_colors;
-    let message = if offline {
-        "Server offline. Reconnecting…"
-    } else {
-        "Reconnecting…"
-    };
+    let offline = cause.is_some();
+    let message = cause.map_or_else(
+        || SharedString::from("Reconnecting…"),
+        OfflineCause::message,
+    );
+    let status = cause.map_or("Reconnecting", OfflineCause::status);
+    let offered = cause.map_or(&[][..], OfflineCause::actions);
     let glyph_size = appearance.icons.metrics(IconRole::Status).glyph_size;
-    let glyph = if offline {
+    let glyph = if let Some(cause) = cause {
         div()
             .flex_none()
             .text_color(gpui_color(floating_colors.icon))
-            .child(Icon::inherited(IconName::ServerOff, glyph_size))
+            .child(Icon::inherited(cause.icon(), glyph_size))
             .into_any_element()
     } else {
         FrameSpinner::new(child("spinner"), "Reconnecting")
             .size(ProgressSize::Compact)
             .into_any_element()
     };
-    let notice = shell.mount(
-        actions.escape_returns_focus(
+    let notice = shell.mount(ConnectionNotice {
+        focused: actions.focused,
+        element: actions.escape_returns_focus(
             div()
                 .id(child("connection"))
                 .role(accesskit::Role::Status)
                 .aria_label("Connection status")
-                .aria_value(if offline { "Offline" } else { "Reconnecting" })
+                .aria_value(status)
                 .debug_selector(move || {
                     format!(
                         "pane-presentation-{}",
@@ -882,16 +1250,11 @@ fn render_frozen(
                         .min_w_0()
                         .child(message),
                 )
-                .when(offline, |notice| {
-                    notice.child(actions.button(
-                        PanePresentationAction::Retry,
-                        ButtonVariant::Link,
-                        ButtonSize::Compact,
-                        true,
-                    ))
-                }),
+                .children(offered.iter().map(|&action| {
+                    actions.button(action, ButtonVariant::Link, ButtonSize::Compact, true)
+                })),
         ),
-    );
+    });
     div()
         .id(id)
         .debug_selector(|| "pane-presentation-frozen".to_owned())
@@ -906,6 +1269,77 @@ fn render_frozen(
         )
         .child(notice)
         .into_any_element()
+}
+
+struct ConnectionNotice {
+    element: gpui::Stateful<gpui::Div>,
+    focused: bool,
+}
+impl gpui::Styled for ConnectionNotice {
+    fn style(&mut self) -> &mut gpui::StyleRefinement {
+        self.element.style()
+    }
+}
+impl IntoElement for ConnectionNotice {
+    type Element = Self;
+    fn into_element(self) -> Self {
+        self
+    }
+}
+impl gpui::Element for ConnectionNotice {
+    type RequestLayoutState = <gpui::Stateful<gpui::Div> as gpui::Element>::RequestLayoutState;
+    type PrepaintState = <gpui::Stateful<gpui::Div> as gpui::Element>::PrepaintState;
+    fn id(&self) -> Option<ElementId> {
+        gpui::Element::id(&self.element)
+    }
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        self.element.source_location()
+    }
+    fn a11y_role(&self) -> Option<accesskit::Role> {
+        self.element.a11y_role()
+    }
+    fn write_a11y_info(&self, node: &mut accesskit::Node) {
+        self.element.write_a11y_info(node);
+        node.set_live(if self.focused {
+            accesskit::Live::Polite
+        } else {
+            accesskit::Live::Off
+        });
+    }
+    fn request_layout(
+        &mut self,
+        id: Option<&gpui::GlobalElementId>,
+        inspector: Option<&gpui::InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (gpui::LayoutId, Self::RequestLayoutState) {
+        self.element.request_layout(id, inspector, window, cx)
+    }
+    fn prepaint(
+        &mut self,
+        id: Option<&gpui::GlobalElementId>,
+        inspector: Option<&gpui::InspectorElementId>,
+        bounds: gpui::Bounds<gpui::Pixels>,
+        layout: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        self.element
+            .prepaint(id, inspector, bounds, layout, window, cx)
+    }
+    fn paint(
+        &mut self,
+        id: Option<&gpui::GlobalElementId>,
+        inspector: Option<&gpui::InspectorElementId>,
+        bounds: gpui::Bounds<gpui::Pixels>,
+        layout: &mut Self::RequestLayoutState,
+        prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.element
+            .paint(id, inspector, bounds, layout, prepaint, window, cx);
+    }
 }
 
 /// A content-free screen covering the Pane. Its actions stay off until `armed`.
@@ -934,6 +1368,8 @@ fn render_screen(
                 .into_any_element()
         })
         .collect::<Vec<_>>();
+    let announcement = screen.title.clone();
+    let focused = actions.focused;
     let content = ContentUnavailable::new(
         ElementId::NamedChild(Arc::new(id.clone()), "content".into()),
         "pane-presentation-screen",
@@ -949,6 +1385,16 @@ fn render_screen(
             div()
                 .id(id)
                 .debug_selector(|| "pane-presentation-replacement".to_owned())
+                .role(accesskit::Role::Group)
+                .aria_label(announcement.clone())
+                .a11y_synthetic_children(move |builder| {
+                    let mut status = accesskit::Node::new(accesskit::Role::Status);
+                    status.set_label(announcement.as_ref());
+                    if focused {
+                        status.set_live(accesskit::Live::Polite);
+                    }
+                    builder.push_child(builder.synthetic_node_id("presentation-status"), status);
+                })
                 .absolute()
                 .inset_0()
                 .bg(gpui_color(paint.surface))

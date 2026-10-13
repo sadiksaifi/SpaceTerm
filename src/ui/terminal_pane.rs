@@ -235,7 +235,9 @@ pub(crate) enum TerminalPaneEvent {
     TitleChanged(SharedString),
     CaptionChanged,
     SurfaceBackgroundChanged,
-    AttentionChanged { unread_count: u32 },
+    AttentionChanged {
+        unread_count: u32,
+    },
     Exited,
     /// The Pane's admitted grid for one measurement request of a server-backed Pane.
     #[allow(
@@ -279,6 +281,7 @@ struct PasteRequestGuard {
     session_identity: u64,
     focus_epoch: u64,
     hierarchy_generation: u64,
+    server_fence: Option<spaceterm_core::authority::EffectFence>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -349,9 +352,9 @@ impl PaneTerminalSessionStartFailure {
     }
 }
 
-/// Owns a Pane's Terminal Session, launch authority and event task retirement.
+/// Retains legacy launch authority or a disposable server presentation handle.
 struct PaneTerminalSessionLifecycle {
-    session_factory: WorkspaceTerminalSessionFactory,
+    session_factory: Option<WorkspaceTerminalSessionFactory>,
     prepared_launch: Option<PreparedWorkspaceTerminalLaunch>,
     current_directory: Option<crate::terminal::metadata::CurrentDirectory>,
     local_file_capabilities: TerminalLocalFileCapabilities,
@@ -380,7 +383,7 @@ impl PaneTerminalSessionLifecycle {
                 .as_ref()
                 .map(PreparedWorkspaceTerminalLaunch::starting_directory),
             local_file_capabilities: session_factory.local_file_capabilities(),
-            session_factory,
+            session_factory: Some(session_factory),
             prepared_launch,
             session: None,
             session_start_attempted: false,
@@ -397,9 +400,33 @@ impl PaneTerminalSessionLifecycle {
         }
     }
 
+    fn server(session: Rc<super::server_pane_session::ServerPaneSession>) -> Self {
+        Self {
+            session_factory: None,
+            prepared_launch: None,
+            current_directory: None,
+            local_file_capabilities: TerminalLocalFileCapabilities::Disabled,
+            session: Some(Box::new(session)),
+            session_start_attempted: true,
+            session_epoch: 1,
+            accepted_screen_generation: None,
+            metadata: None,
+            remote_connection_generation: None,
+            remote_input_blocked: false,
+            remote_restart_start_pending: false,
+            native_service_session_identity: 1,
+            _event_task: None,
+            _accessibility_task: None,
+            _clipboard_task: None,
+        }
+    }
+
     fn remote_facts(&self) -> RemotePaneFacts {
         RemotePaneFacts {
-            remote: self.session_factory.is_remote(),
+            remote: self
+                .session_factory
+                .as_ref()
+                .is_some_and(WorkspaceTerminalSessionFactory::is_remote),
             generation: self.remote_connection_generation,
             disconnected: self.remote_input_blocked,
             epoch: self.session_epoch,
@@ -433,11 +460,14 @@ impl PaneTerminalSessionLifecycle {
         self.retire_events();
         self.session.take();
         self.native_service_session_identity = self.native_service_session_identity.wrapping_add(1);
-        self.session_factory = prepared.session_factory;
+        self.session_factory = Some(prepared.session_factory);
         self.current_directory = Some(prepared.prepared_launch.starting_directory());
         self.metadata = prepared.prepared_launch.initial_remote_metadata();
         self.prepared_launch = Some(prepared.prepared_launch);
-        self.local_file_capabilities = self.session_factory.local_file_capabilities();
+        self.local_file_capabilities = self.session_factory.as_ref().map_or(
+            TerminalLocalFileCapabilities::Disabled,
+            WorkspaceTerminalSessionFactory::local_file_capabilities,
+        );
         self.session_start_attempted = false;
         self.remote_connection_generation = Some(prepared.authority.generation());
         self.remote_input_blocked = false;
@@ -536,11 +566,15 @@ impl PaneTerminalSessionLifecycle {
         if self.session_start_attempted {
             return None;
         }
+        let factory = self.session_factory.as_ref()?;
         self.session_start_attempted = true;
         let prepared = self.prepared_launch.take().or_else(|| {
-            (!self.session_factory.is_remote())
-                .then(|| self.session_factory.prepare_child_launch().ok())
-                .flatten()
+            (!self
+                .session_factory
+                .as_ref()
+                .is_some_and(WorkspaceTerminalSessionFactory::is_remote))
+            .then(|| self.session_factory.as_ref()?.prepare_child_launch().ok())
+            .flatten()
         });
         let Some(prepared) = prepared else {
             return Some(Err(PaneTerminalSessionStartFailure::Preparation));
@@ -550,8 +584,7 @@ impl PaneTerminalSessionLifecycle {
         } else {
             PaneTerminalSessionStartFailure::Worker
         };
-        let result = self
-            .session_factory
+        let result = factory
             .start(geometry, prepared, appearance)
             .map_err(|_| operation);
         self.remote_restart_start_pending = false;
@@ -571,7 +604,34 @@ struct PasteConfirmationOwnership {
     focus_entered: bool,
 }
 
+#[derive(Clone)]
+struct PresentationActionGuard {
+    token: PaneViewToken,
+    state: spaceterm_client::pane_channel::PaneChannelState,
+    presentation: PanePresentation,
+}
+
 pub(crate) struct TerminalPane {
+    server_session: Option<Rc<super::server_pane_session::ServerPaneSession>>,
+    server_presentation: PanePresentation,
+    server_presentation_observation: Option<spaceterm_client::pane_channel::PaneChannelState>,
+    server_offline_cause: super::pane_presentation::OfflineCause,
+    server_takeover_armed: bool,
+    _server_takeover_task: Option<Task<()>>,
+    server_screen_session: Option<spaceterm_core::authority::SessionKey>,
+    server_screen_frame: Option<spaceterm_client::projection::FrameLease>,
+    server_last_valid_frame: Option<spaceterm_client::projection::FrameLease>,
+    server_layout_revision: super::server_desktop_contracts::LayoutRevision,
+    presentation_focus: super::pane_presentation::PresentationFocus,
+    measurement_request: Option<(
+        PaneViewToken,
+        super::server_desktop_contracts::UseTicket,
+        super::server_desktop_contracts::LayoutRevision,
+    )>,
+    _server_task: Option<Task<()>>,
+    _server_content_task: Option<Task<()>>,
+    _server_copy_task: Option<Task<()>>,
+    _server_native_task: Option<Task<()>>,
     terminal_session: PaneTerminalSessionLifecycle,
     window_handle: gpui::AnyWindowHandle,
     text_clipboard: Rc<dyn crate::terminal::native_services::clipboard::TextClipboard>,
@@ -751,6 +811,33 @@ impl TerminalPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let fallback_title = session_factory.fallback_title();
+        Self::new_with_lifecycle(
+            PaneTerminalSessionLifecycle::new(session_factory, prepared_launch),
+            fallback_title,
+            key_input_adapter,
+            accessibility_adapter_factory,
+            native_service_adapters,
+            lifecycle_dependencies,
+            window,
+            cx,
+        )
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Independent native capabilities are constructor-injected"
+    )]
+    fn new_with_lifecycle(
+        terminal_session: PaneTerminalSessionLifecycle,
+        fallback_title: String,
+        key_input_adapter: Box<dyn TerminalKeyInputAdapter>,
+        accessibility_adapter_factory: &dyn TerminalAccessibilityAdapterFactory,
+        native_service_adapters: NativeServiceAdapters,
+        lifecycle_dependencies: PaneLifecycleDependencies,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let (visibility_sender, visibility_receiver) = async_channel::bounded(1);
         let visibility_source = lifecycle_dependencies.visibility.capture(
             window,
@@ -780,8 +867,7 @@ impl TerminalPane {
         let line_height = appearance.terminal.typography.line_height;
         let cell_width = measure_prepared_cell_width(window, &terminal_fonts.regular, font_size);
         let backing_scale = BackingScale::new(window.scale_factor()).unwrap_or(BackingScale::ONE);
-        let fallback_title: SharedString =
-            normalized_pane_title("", &session_factory.fallback_title()).into();
+        let fallback_title: SharedString = normalized_pane_title("", &fallback_title).into();
         let scrollbar = cx.new(|_| {
             OverlayScrollbar::<u64>::new("terminal-scrollbar").accessibility_name("Scrollback")
         });
@@ -844,6 +930,10 @@ impl TerminalPane {
         )
         .detach();
         cx.observe_window_bounds(window, |pane, window, cx| {
+            if pane.server_session.is_some() {
+                pane.last_geometry = None;
+                pane.grid_bounds = None;
+            }
             pane.update_backing_scale(window.scale_factor(), window, cx);
         })
         .detach();
@@ -885,7 +975,26 @@ impl TerminalPane {
         .detach();
 
         Self {
-            terminal_session: PaneTerminalSessionLifecycle::new(session_factory, prepared_launch),
+            terminal_session,
+            server_session: None,
+            server_presentation: PanePresentation::Live,
+            server_presentation_observation: None,
+            server_offline_cause: super::pane_presentation::OfflineCause::Unreachable,
+            server_takeover_armed: false,
+            _server_takeover_task: None,
+            server_screen_session: None,
+            server_screen_frame: None,
+            server_last_valid_frame: None,
+            server_layout_revision: super::server_desktop_contracts::LayoutRevision::INITIAL,
+            presentation_focus: super::pane_presentation::PresentationFocus::new(
+                focus_handle.clone(),
+                cx,
+            ),
+            measurement_request: None,
+            _server_task: None,
+            _server_content_task: None,
+            _server_copy_task: None,
+            _server_native_task: None,
             window_handle: window.window_handle(),
             text_clipboard: native_service_adapters.text_clipboard,
             native_service_focus_epoch: Cell::new(0),
@@ -1055,7 +1164,31 @@ impl TerminalPane {
             self.context_menu = None;
         }
         let was_presentable = self.render_lifecycle.can_present();
+        if self.server_session.is_some()
+            && !(self.product_focus.active_workspace
+                && self.product_focus.active_tab
+                && self.product_focus.pane_visible)
+            && product_focus.active_workspace
+            && product_focus.active_tab
+            && product_focus.pane_visible
+        {
+            self.last_geometry = None;
+            self.grid_bounds = None;
+        }
         self.product_focus = product_focus;
+        if let Some(server) = &self.server_session {
+            let _ = server.update_context(spaceterm_client::pane_channel::PaneContextFacts {
+                focused_pane: product_focus.active_workspace
+                    && product_focus.active_tab
+                    && product_focus.focused_pane
+                    && product_focus.blocker.is_none(),
+                terminal_input_focus: false,
+                presentable: product_focus.active_workspace
+                    && product_focus.active_tab
+                    && product_focus.pane_visible,
+            });
+            self.measurement_request = None;
+        }
         let pane_visible = product_focus.active_tab && product_focus.pane_visible;
         let _ = self
             .render_lifecycle
@@ -1081,10 +1214,18 @@ impl TerminalPane {
     }
 
     pub(crate) fn set_accessibility_hierarchy(&mut self, presented: bool) {
-        self.accessibility_element.set_hierarchy(presented);
+        self.accessibility_element
+            .set_hierarchy(presented && self.server_session.is_none());
     }
 
     fn open_find(&mut self, _: &OpenTerminalFind, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .server_session
+            .as_ref()
+            .is_some_and(|server| server.native_permit().is_none())
+        {
+            return;
+        }
         if let Some(input) = &self.find_input {
             input.update(cx, |input, cx| input.select_all(cx));
         } else {
@@ -1276,6 +1417,10 @@ impl TerminalPane {
             window_modal_is_open(window, cx),
         )
         .is_some_and(TerminalFocusCoordinator::accepts_input_method_text)
+            && self
+                .server_session
+                .as_ref()
+                .is_none_or(|server| server.accepts_input())
     }
 
     /// The ownership facts the coordinator judges, or None while the Terminal Session takes no
@@ -1286,7 +1431,10 @@ impl TerminalPane {
         activity: SurfaceActivity,
         modal_open: bool,
     ) -> Option<TerminalFocusFacts> {
-        if self.terminal_session.remote_input_blocked || self.native_attention_pane.is_none() {
+        if self.terminal_session.remote_input_blocked
+            || self.native_attention_pane.is_none()
+            || (self.server_session.is_some() && !self.server_presentation.accepts_input())
+        {
             return None;
         }
         Some(TerminalFocusFacts {
@@ -1345,6 +1493,17 @@ impl TerminalPane {
         }
         let focused = self.terminal_input_focused_with_activity(window, activity, modal_open);
         let focus_gained = !self.terminal_input_focus && focused;
+        if let Some(server) = &self.server_session {
+            let facts = spaceterm_client::pane_channel::PaneContextFacts {
+                focused_pane: self.product_focus.active_workspace
+                    && self.product_focus.active_tab
+                    && self.product_focus.focused_pane
+                    && self.product_focus.blocker.is_none(),
+                terminal_input_focus: focused,
+                presentable: self.render_lifecycle.can_present(),
+            };
+            let _ = server.update_context(facts);
+        }
         self.apply_terminal_input_focus(focused);
         (focused, focus_gained)
     }
@@ -1593,6 +1752,14 @@ impl TerminalPane {
         if self.native_attention_pane.is_none() {
             return;
         }
+        if let Some(server) = &self.server_session {
+            server.close_presentation();
+        }
+        self._server_task.take();
+        self._server_content_task.take();
+        self._server_copy_task.take();
+        self._server_native_task.take();
+        self._server_takeover_task.take();
         self.end_find_state();
         self.paste_confirmation_owner.take();
         if let Some(confirmation) = self.pending_paste.take()
@@ -1671,7 +1838,8 @@ impl TerminalPane {
         if self
             .terminal_session
             .session_factory
-            .terminal_session_channel_is_ready()
+            .as_ref()
+            .and_then(WorkspaceTerminalSessionFactory::terminal_session_channel_is_ready)
             != Some(false)
         {
             return false;
@@ -1721,9 +1889,14 @@ impl TerminalPane {
         self.can_commit_remote_restart(&prepared)?;
         let restart_geometry = self.last_geometry;
         self.terminal_session.commit_restart(prepared);
-        self.fallback_title =
-            normalized_pane_title("", &self.terminal_session.session_factory.fallback_title())
-                .into();
+        self.fallback_title = normalized_pane_title(
+            "",
+            &self.terminal_session.session_factory.as_ref().map_or_else(
+                || "Terminal".to_owned(),
+                WorkspaceTerminalSessionFactory::fallback_title,
+            ),
+        )
+        .into();
         self.reset_hidden_input();
         self.render_lifecycle.reset_session_presentations();
         self.pending_accessibility_notifications
@@ -1974,6 +2147,7 @@ impl TerminalPane {
         if self.last_valid_screen_session_epoch != self.terminal_session.session_epoch
             || screen.generation >= self.last_valid_screen.generation
         {
+            self.server_last_valid_frame = self.server_screen_frame.clone();
             self.last_valid_screen = screen;
             self.last_valid_screen_session_epoch = self.terminal_session.session_epoch;
         }
@@ -2068,6 +2242,25 @@ impl TerminalPane {
             self.backing_scale,
         );
         self.grid_bounds = Some(bounds);
+        if self.server_session.is_some() {
+            if admitted_server_geometry(
+                bounds,
+                self.cell_width,
+                self.line_height,
+                self.backing_scale,
+            )
+            .is_err()
+            {
+                return;
+            }
+            let changed = self.last_geometry != Some(geometry);
+            self.last_geometry = Some(geometry);
+            self.emit_measurement(cx);
+            if changed && let Some(server) = &self.server_session {
+                server.resize(geometry);
+            }
+            return;
+        }
         if self.last_geometry == Some(geometry) {
             return;
         }
@@ -2083,6 +2276,9 @@ impl TerminalPane {
     }
 
     fn start_session(&mut self, geometry: TerminalGeometry, cx: &mut Context<Self>) {
+        if self.server_session.is_some() {
+            return;
+        }
         let update = crate::terminal::TerminalAppearanceUpdate::new(
             self.appearance.generation,
             Arc::clone(&self.appearance.terminal),
@@ -2115,7 +2311,12 @@ impl TerminalPane {
             Err(failure) => {
                 self.present_failure(
                     failure.terminal_failure(),
-                    failure.preserves_frame(self.terminal_session.session_factory.is_remote()),
+                    failure.preserves_frame(
+                        self.terminal_session
+                            .session_factory
+                            .as_ref()
+                            .is_some_and(WorkspaceTerminalSessionFactory::is_remote),
+                    ),
                     Some(RecoveryAction::StartSession),
                 );
                 cx.notify();
@@ -2172,6 +2373,15 @@ impl TerminalPane {
     }
 
     fn sync_native_accessibility(&mut self, window: &Window, focused: bool) {
+        // The legacy adapter retains its own text model and has no final-read authority fence.
+        // Never give it server content, even while Live. A retained native element outlives
+        // hierarchy removal; server AX needs a generation-bound adapter before publication.
+        if self.server_session.is_some() {
+            self.accessibility_element.set_hierarchy(false);
+            self.pending_accessibility_notifications.take();
+            self.accessibility_needs_presentation = false;
+            return;
+        }
         let notifications = self.pending_accessibility_notifications.take();
         let cell = self.presented_cell_size();
         let selection_sender = self
@@ -2455,6 +2665,17 @@ impl TerminalPane {
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.server_session.is_some()
+            && self.server_presentation.traverse_actions(
+                event,
+                &self.presentation_focus,
+                window,
+                cx,
+            )
+        {
+            cx.stop_propagation();
+            return;
+        }
         if !self.synchronize_terminal_input_focus(window, cx) {
             return;
         }
@@ -2756,6 +2977,15 @@ impl TerminalPane {
         cx.notify();
     }
 
+    fn server_accessibility_press(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.server_session.is_some() {
+            cx.emit(TerminalPaneEvent::SelectionRequested(
+                SelectionSource::AccessibilityPress,
+            ));
+            self.request_focus(window, cx);
+        }
+    }
+
     fn on_mouse_down(
         &mut self,
         event: &MouseDownEvent,
@@ -2767,6 +2997,11 @@ impl TerminalPane {
             return;
         }
         self.pointer_modifiers = input_modifiers(event.modifiers);
+        if self.server_session.is_some() && event.button == MouseButton::Left {
+            cx.emit(TerminalPaneEvent::SelectionRequested(
+                SelectionSource::Pointer,
+            ));
+        }
         self.focus(window, cx);
         self.clear_attention(cx);
         if !self.synchronize_terminal_input_focus(window, cx) {
@@ -2906,6 +3141,15 @@ impl TerminalPane {
     }
 
     fn on_mouse_up(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .server_session
+            .as_ref()
+            .is_some_and(|server| server.native_permit().is_none())
+        {
+            self.pressed_link = None;
+            self.pressed_button = None;
+            return;
+        }
         if self.context_menu.is_some() {
             cx.stop_propagation();
             return;
@@ -2948,6 +3192,14 @@ impl TerminalPane {
             modifiers: self.pointer_modifiers,
             shift_selection: self.shift_selection,
         };
+        if let Some(server) = self.server_session.clone() {
+            server.pointer(input);
+            if copy_selection {
+                self.prepare_server_selection_copy(server, None, true, cx);
+            }
+            cx.stop_propagation();
+            return;
+        }
         let copy = self.terminal_session.session.as_ref().and_then(|session| {
             if copy_selection {
                 Some(session.pointer_and_copy_selection(input))
@@ -3033,6 +3285,19 @@ impl TerminalPane {
     }
 
     fn edit_copy(&mut self, _: &EditCopy, window: &mut Window, cx: &mut Context<Self>) {
+        if self.server_session.as_ref().is_some_and(|server| {
+            server
+                .channel()
+                .projection()
+                .lock()
+                .ok()
+                .is_some_and(|projection| projection.selection().is_some())
+        }) {
+            if self.synchronize_terminal_input_focus(window, cx) {
+                self.copy_selection_with_recovery(None, window, cx);
+            }
+            return;
+        }
         if self.synchronize_terminal_input_focus(window, cx)
             && let Some(session) = self.terminal_session.session.as_ref()
         {
@@ -3050,10 +3315,65 @@ impl TerminalPane {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(server) = self.server_session.clone() {
+            self.prepare_server_selection_copy(server, recovery, false, cx);
+            return;
+        }
         let Some(session) = self.terminal_session.session.as_ref() else {
             return;
         };
         self.publish_selection_copy(session.copy_selection(), recovery, cx);
+    }
+
+    fn prepare_server_selection_copy(
+        &mut self,
+        server: Rc<super::server_pane_session::ServerPaneSession>,
+        recovery: Option<RecoveryToken>,
+        publish_primary: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self._server_copy_task.take();
+        let Some(permit) = server.native_permit() else {
+            return;
+        };
+        let token = server.token();
+        let Ok(Some(request)) = server.copy_request() else {
+            return;
+        };
+        let Ok(preparation) = server.prepare_copy(request) else {
+            return;
+        };
+        self._server_copy_task = Some(cx.spawn(async move |pane, cx| {
+            let Ok(lease) = preparation.await else {
+                return;
+            };
+            let _ = pane.update(cx, |pane, cx| {
+                if !lease.is_current()
+                    || !permit.is_current()
+                    || server.token() != token
+                    || !pane
+                        .server_session
+                        .as_ref()
+                        .is_some_and(|current| Rc::ptr_eq(current, &server))
+                    || server.native_permit().is_none()
+                {
+                    return;
+                }
+                let copy = super::server_pane_session::selection_copy_from_lease(&lease);
+                if !lease.is_current() || !permit.is_current() || server.native_permit().is_none() {
+                    return;
+                }
+                if publish_primary
+                    && let (Some(primary), Ok(Some(copy))) = (&pane.primary_selection, &copy)
+                {
+                    primary.publish(copy, cx);
+                }
+                // PRIMARY and the selection pasteboard are separate final native effects.
+                if lease.is_current() && permit.is_current() && server.native_permit().is_some() {
+                    pane.publish_selection_copy(copy, recovery, cx);
+                }
+            });
+        }));
     }
 
     fn publish_selection_copy(
@@ -3276,9 +3596,24 @@ impl TerminalPane {
     }
 
     fn native_context_actions(&self) -> NativeContextActions {
+        if self
+            .server_session
+            .as_ref()
+            .is_some_and(|server| server.native_permit().is_none())
+        {
+            return NativeContextActions::from_presence(
+                TerminalLocalFileCapabilities::Disabled,
+                false,
+                None,
+            );
+        }
         let mut actions = NativeContextActions::from_presence(
             self.terminal_session.local_file_capabilities,
-            self.screen.selection_present,
+            self.server_session
+                .as_ref()
+                .map_or(self.screen.selection_present, |server| {
+                    server.has_prepared_copy()
+                }),
             self.current_hovered_link(),
         );
         actions.file_preview &= self.file_preview_available;
@@ -3351,6 +3686,13 @@ impl TerminalPane {
     }
 
     fn context_menu_available(&self) -> bool {
+        if self
+            .server_session
+            .as_ref()
+            .is_some_and(|server| server.native_permit().is_none())
+        {
+            return false;
+        }
         matches!(self.pane_state, PaneTerminalState::Running)
             && self.product_focus.active_workspace
             && self.product_focus.active_tab
@@ -3367,6 +3709,13 @@ impl TerminalPane {
         cx: &mut Context<Self>,
     ) {
         self.context_menu = None;
+        if self
+            .server_session
+            .as_ref()
+            .is_some_and(|server| server.native_permit().is_none())
+        {
+            return;
+        }
         let current = menu.link.as_ref().and_then(|_| self.link_at(menu.position));
         let link = revalidated_context_link(
             menu.generation,
@@ -3468,8 +3817,17 @@ impl TerminalPane {
         window: &Window,
         cx: &App,
     ) -> NativeServiceStatus {
+        if self.server_session.is_some() {
+            // This legacy origin carries unqualified IDs. Server Services use a retained
+            // PaneChannel permit and complete prepared copy through server_session_handle.
+            return NativeServiceStatus::new(NativeServiceCapabilities::new(false, false), None);
+        }
         self.sync_terminal_input_focus(window, cx);
-        let session_available = self.terminal_session.session.is_some();
+        let session_available = self.terminal_session.session.is_some()
+            && self
+                .server_session
+                .as_ref()
+                .is_none_or(|server| server.native_permit().is_some());
         let capabilities = NativeServiceCapabilities::new(
             session_available && self.native_context_actions().copy,
             session_available && self.terminal_input_focus,
@@ -3539,10 +3897,23 @@ impl TerminalPane {
             session_identity: self.terminal_session.native_service_session_identity,
             focus_epoch: self.native_service_focus_epoch.get(),
             hierarchy_generation: self.native_service_hierarchy_generation,
+            server_fence: self
+                .server_session
+                .as_ref()
+                .and_then(|server| server.native_permit())
+                .map(|permit| permit.fence()),
         }
     }
 
     fn paste_request_guard_is_current(&self, guard: PasteRequestGuard) -> bool {
+        if let Some(server) = &self.server_session
+            && (guard.server_fence.is_none()
+                || server.native_permit().is_none_or(|permit| {
+                    Some(permit.fence()) != guard.server_fence || !permit.is_current()
+                }))
+        {
+            return false;
+        }
         self.terminal_session.session.is_some()
             && self.terminal_input_focus
             && self.terminal_session.native_service_session_identity == guard.session_identity
@@ -3558,6 +3929,9 @@ impl TerminalPane {
         )
     )]
     fn native_service_origin_matches(&self, origin: NativeServiceOrigin) -> bool {
+        if self.server_session.is_some() {
+            return false;
+        }
         self.terminal_session.session.is_some()
             && self.terminal_session.native_service_session_identity == origin.session_identity()
             && self.native_service_focus_epoch.get() == origin.focus_epoch()
@@ -3651,7 +4025,12 @@ impl TerminalPane {
         permissions: &[SystemPermission],
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.terminal_session.session_factory.is_remote() {
+        if self
+            .terminal_session
+            .session_factory
+            .as_ref()
+            .is_some_and(WorkspaceTerminalSessionFactory::is_remote)
+        {
             return false;
         }
         let Some(setup) = self.lifecycle_dependencies.permission_setup.clone() else {
@@ -4249,20 +4628,665 @@ impl EventEmitter<TerminalPaneEvent> for TerminalPane {}
     )
 )]
 impl TerminalPane {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Independent native capabilities are constructor-injected"
+    )]
+    pub(crate) fn new_server(
+        channel: spaceterm_client::pane_channel::PaneChannel,
+        token: PaneViewToken,
+        presentation: PanePresentation,
+        key_input_adapter: Box<dyn TerminalKeyInputAdapter>,
+        accessibility_adapter_factory: &dyn TerminalAccessibilityAdapterFactory,
+        native_service_adapters: NativeServiceAdapters,
+        lifecycle_dependencies: PaneLifecycleDependencies,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<Self, DesktopClientError> {
+        let server = super::server_pane_session::ServerPaneSession::bind(channel, token)?;
+        server.start_content_tasks(cx.background_executor().clone());
+        let mut pane = Self::new_with_lifecycle(
+            PaneTerminalSessionLifecycle::server(server.clone()),
+            "Terminal".to_owned(),
+            key_input_adapter,
+            accessibility_adapter_factory,
+            native_service_adapters,
+            lifecycle_dependencies,
+            window,
+            cx,
+        );
+        pane.server_session = Some(server.clone());
+        pane.set_presentation(presentation, cx)?;
+        let mut state = server.channel().state();
+        pane._server_task = Some(cx.spawn(async move |pane, cx| {
+            loop {
+                if pane
+                    .update(cx, |pane, cx| pane.sync_server_state(cx))
+                    .is_err()
+                {
+                    return;
+                }
+                if state.changed().await.is_err() {
+                    return;
+                }
+            }
+        }));
+        let updates = server.updates();
+        pane._server_content_task = Some(cx.spawn(async move |pane, cx| {
+            while updates.recv().await.is_ok() {
+                let _ = pane.update(cx, |pane, cx| pane.sync_server_state(cx));
+            }
+        }));
+        let mut events = server
+            .channel()
+            .events()
+            .map_err(DesktopClientError::from)?;
+        pane._server_native_task = Some(cx.spawn(async move |pane, cx| {
+            use crate::terminal::native_services::clipboard::TextClipboardTarget;
+            use spaceterm_client::pane_channel::{EffectKind, PaneEvent};
+            use spaceterm_core::native_requests::{
+                NativeCompletion, NativeCompletionKind, NativeRequestKind, NativeText,
+            };
+            while let Ok(Some(event)) = events.next().await {
+                let PaneEvent::Native { request, timing } = event else {
+                    continue;
+                };
+                if !timing.not_before.is_zero() {
+                    cx.background_executor().timer(timing.not_before).await;
+                }
+                let Ok(permit) = server.channel().permit(EffectKind::NativeCompletion) else {
+                    continue;
+                };
+                let work = pane.update(cx, |pane, cx| {
+                    if !request.is_current() || !permit.is_current() {
+                        return None;
+                    }
+                    if server.native_permit().is_none() {
+                        return Some(Ok(NativeCompletionKind::Denied));
+                    }
+                    let preferences = cx
+                        .try_global::<super::appearance_runtime::AppearanceRuntime>()
+                        .map(|runtime| runtime.settings.snapshot().candidate.clipboard)
+                        .unwrap_or_default();
+                    match request.kind() {
+                        NativeRequestKind::ClipboardWrite(text) if preferences.allow_write => {
+                            let result = pane.text_clipboard.write(
+                                TextClipboardTarget::Clipboard,
+                                text.as_str(),
+                                cx,
+                            );
+                            Some(Ok(if result.is_ok() {
+                                NativeCompletionKind::ClipboardWritten
+                            } else {
+                                NativeCompletionKind::Denied
+                            }))
+                        }
+                        NativeRequestKind::ClipboardRead
+                            if preferences.allow_read && !pane.hidden_input =>
+                        {
+                            Some(Err(pane
+                                .text_clipboard
+                                .read(TextClipboardTarget::Clipboard, cx)))
+                        }
+                        _ => Some(Ok(NativeCompletionKind::Denied)),
+                    }
+                });
+                let Ok(Some(work)) = work else {
+                    continue;
+                };
+                let completion = match work {
+                    Ok(completion) => completion,
+                    Err(mut read) => {
+                        let deadline = cx.background_executor().timer(
+                            timing
+                                .expires_after
+                                .unwrap_or(Duration::from_secs(1))
+                                .min(Duration::from_secs(1)),
+                        );
+                        let mut deadline = Box::pin(deadline);
+                        std::future::poll_fn(|cx| {
+                            if let std::task::Poll::Ready(result) = read.as_mut().poll(cx) {
+                                return std::task::Poll::Ready(match result {
+                                    Ok(Some(text)) => NativeText::new(text)
+                                        .map(NativeCompletionKind::ClipboardText)
+                                        .unwrap_or(NativeCompletionKind::Denied),
+                                    _ => NativeCompletionKind::Denied,
+                                });
+                            }
+                            if deadline.as_mut().poll(cx).is_ready() {
+                                return std::task::Poll::Ready(NativeCompletionKind::Expired);
+                            }
+                            std::task::Poll::Pending
+                        })
+                        .await
+                    }
+                };
+                let _ = pane.update(cx, |_, _| {
+                    let denial = matches!(
+                        completion,
+                        NativeCompletionKind::Denied
+                            | NativeCompletionKind::Expired
+                            | NativeCompletionKind::Cancelled
+                    );
+                    if request.is_current()
+                        && permit.is_current()
+                        && (denial || server.native_permit().is_some())
+                        && let Ok(completion) = NativeCompletion::new(&request, completion)
+                    {
+                        let _ = server.channel().complete_native(&permit, completion);
+                    }
+                });
+            }
+        }));
+        Ok(pane)
+    }
+
+    /// The nonblocking native facade. Callers retain its original permits across native work;
+    /// they never map a server Pane onto the legacy hierarchy's numeric identities.
+    pub(crate) fn server_session_handle(
+        &self,
+    ) -> Option<Rc<super::server_pane_session::ServerPaneSession>> {
+        self.server_session.clone()
+    }
+
+    pub(crate) fn server_pane_id(&self) -> Option<super::server_desktop_contracts::PaneId> {
+        self.server_session
+            .as_ref()
+            .map(|server| server.channel().pane())
+    }
+
     pub(crate) fn set_presentation(
         &mut self,
-        _presentation: PanePresentation,
-        _cx: &mut Context<Self>,
+        presentation: PanePresentation,
+        cx: &mut Context<Self>,
     ) -> Result<(), DesktopClientError> {
-        Err(DesktopClientError::WrongServer)
+        if self.server_session.is_none() {
+            return Err(DesktopClientError::WrongServer);
+        }
+        if let PanePresentation::Offline { cause, .. } = &presentation {
+            self.server_offline_cause = cause.clone();
+        } else if presentation.accepts_input() {
+            self.server_offline_cause = super::pane_presentation::OfflineCause::Unreachable;
+        }
+        if self.server_presentation == presentation {
+            return Ok(());
+        }
+        self.server_presentation_observation = None;
+        let reenabled = !self.server_presentation.accepts_input() && presentation.accepts_input();
+        self.server_presentation = presentation;
+        self._server_takeover_task.take();
+        self.server_takeover_armed = false;
+        if self.server_presentation.offers_take_over() {
+            // Start at the transition, even if this Pane is not drawn yet.
+            let timer = cx
+                .background_executor()
+                .timer(super::pane_presentation::TAKEOVER_ARMING_DELAY);
+            self._server_takeover_task = Some(cx.spawn(async move |pane, cx| {
+                timer.await;
+                let _ = pane.update(cx, |pane, cx| {
+                    if pane.server_presentation.offers_take_over() {
+                        pane.server_takeover_armed = true;
+                        cx.notify();
+                    }
+                });
+            }));
+        }
+        if reenabled {
+            self.last_geometry = None;
+        }
+        if let Some(server) = &self.server_session {
+            server.set_enabled(self.server_presentation.accepts_input());
+        }
+        self.invalidate_server_native_state(cx);
+        if !self.server_presentation.content_eligible() {
+            self.clear_server_screen(cx);
+        }
+        cx.notify();
+        Ok(())
+    }
+
+    /// C2 supplies the decision's original channel observation, Pane incarnation and context.
+    /// Control publication can change that observation without advancing the context.
+    /// Channel notifications revoke stale decisions; rendering never begins explicit use.
+    pub(crate) fn set_portable_presentation(
+        &mut self,
+        token: PaneViewToken,
+        observation: spaceterm_client::pane_channel::PaneChannelState,
+        decision: spaceterm_client::view::PresentationDecision,
+        device: super::pane_presentation::DisplayName,
+        cause: super::pane_presentation::OfflineCause,
+        cx: &mut Context<Self>,
+    ) -> Result<(), DesktopClientError> {
+        use spaceterm_client::view::ContentDisposition;
+        let server = self
+            .server_session
+            .as_ref()
+            .ok_or(DesktopClientError::WrongServer)?
+            .clone();
+        if observation != *server.channel().state().borrow() {
+            return Err(DesktopClientError::StaleContext);
+        }
+        self.set_server_context(token, cx)?;
+        if decision
+            .controller
+            .is_some_and(|client| client.server() != token.pane.server())
+            || decision.content.session().is_some_and(|session| {
+                session.pane != token.pane
+                    || observation
+                        .runtime
+                        .is_none_or(|runtime| runtime.session_generation != session.generation)
+                    || observation
+                        .connection
+                        .is_some_and(|info| info.epoch != session.epoch)
+                    || (matches!(decision.content, ContentDisposition::KeepFrozen { .. })
+                        && self.server_screen_session != Some(session))
+            })
+        {
+            return Err(DesktopClientError::StaleContext);
+        }
+        self.set_presentation(
+            PanePresentation::from_portable(decision.presentation, device, cause),
+            cx,
+        )?;
+        if decision.invalidate_native_context {
+            self.invalidate_server_native_state(cx);
+        }
+        if decision.clear_content || matches!(decision.content, ContentDisposition::Clear) {
+            self.clear_server_screen(cx);
+        }
+        server.set_enabled(decision.eligibility.input);
+        self.server_presentation_observation = Some(observation);
+        cx.notify();
+        Ok(())
     }
 
     pub(crate) fn set_server_context(
         &mut self,
-        _token: PaneViewToken,
-        _cx: &mut Context<Self>,
+        token: PaneViewToken,
+        cx: &mut Context<Self>,
     ) -> Result<(), DesktopClientError> {
-        Err(DesktopClientError::WrongServer)
+        let server = self
+            .server_session
+            .as_ref()
+            .ok_or(DesktopClientError::WrongServer)?;
+        let changed = server.token() != token;
+        server.set_context(token)?;
+        if !changed {
+            return Ok(());
+        }
+        self.invalidate_server_native_state(cx);
+        self.measurement_request = None;
+        cx.notify();
+        Ok(())
+    }
+
+    /// C2 supplies the arrangement's current layout revision before it renders the Pane.
+    /// A changed revision invalidates geometry, never authorizes startup.
+    pub(crate) fn set_server_layout_revision(
+        &mut self,
+        layout: super::server_desktop_contracts::LayoutRevision,
+        cx: &mut Context<Self>,
+    ) -> Result<(), DesktopClientError> {
+        if self.server_session.is_none() {
+            return Err(DesktopClientError::WrongServer);
+        }
+        if self.server_layout_revision != layout {
+            self.server_layout_revision = layout;
+            self.last_geometry = None;
+            self.grid_bounds = None;
+            self.measurement_request = None;
+            self.presented_input_geometry = None;
+            cx.notify();
+        }
+        Ok(())
+    }
+
+    pub(crate) fn request_measurement(
+        &mut self,
+        token: PaneViewToken,
+        ticket: super::server_desktop_contracts::UseTicket,
+        layout: super::server_desktop_contracts::LayoutRevision,
+        cx: &mut Context<Self>,
+    ) -> Result<(), DesktopClientError> {
+        self.server_session
+            .as_ref()
+            .ok_or(DesktopClientError::WrongServer)?
+            .set_context(token)?;
+        self.set_server_layout_revision(layout, cx)?;
+        self.measured_grid()?;
+        self.measurement_request = Some((token, ticket, layout));
+        self.emit_measurement(cx);
+        cx.notify();
+        Ok(())
+    }
+
+    fn emit_measurement(&mut self, cx: &mut Context<Self>) {
+        let Some(server) = &self.server_session else {
+            return;
+        };
+        let Some((token, ticket, layout)) = self.measurement_request else {
+            return;
+        };
+        if server.token() != token
+            || self.server_layout_revision != layout
+            || server.channel().state().borrow().readiness
+                != spaceterm_client::pane_channel::PaneReadiness::Live
+        {
+            self.measurement_request = None;
+            return;
+        }
+        if let Ok(Some(grid)) = self.measured_grid() {
+            self.measurement_request = None;
+            cx.emit(TerminalPaneEvent::Measured(PaneMeasurement {
+                token,
+                ticket,
+                layout,
+                grid,
+            }));
+        }
+    }
+
+    fn invalidate_server_native_state(&mut self, cx: &mut Context<Self>) {
+        self.state_revision = self.state_revision.wrapping_add(1);
+        self.latest_presentation_operation = None;
+        self.latest_export_operation = None;
+        self.native_service_hierarchy_generation =
+            self.native_service_hierarchy_generation.wrapping_add(1);
+        self.advance_native_service_focus_epoch();
+        self.apply_terminal_input_focus(false);
+        self.ime.cancel();
+        self.invalidate_preedit_layout();
+        self.reset_hidden_input();
+        self.pending_paste_read.take();
+        self.pending_file_insertion = None;
+        self.cancel_pending_paste();
+        self._server_copy_task.take();
+        self.context_menu = None;
+        self.file_preview.dismiss();
+        self._file_preview_task.take();
+        self.hovered_link = None;
+        self.pressed_link = None;
+        self.requested_permissions.clear();
+        self.permission_request.clear();
+        self.permission_request_showing = None;
+        self._permission_setup.take();
+        self.delivered_key_presses = DeliveredKeyPresses::default();
+        self.pending_accessibility = None;
+        self.accessibility = Arc::new(TerminalAccessibilityModel::from_screen(
+            &ScreenSnapshot::empty_with_appearance(
+                self.file_insertion.paths,
+                &crate::terminal::TerminalAppearanceUpdate::new(
+                    self.appearance.generation,
+                    Arc::clone(&self.appearance.terminal),
+                ),
+            ),
+        ));
+        self.accessibility_element.set_hierarchy(false);
+        self.presented_input_geometry = None;
+        self.end_find_state();
+        self.measurement_request = None;
+        self.render_cache
+            .update(cx, |cache, _| cache.invalidate_scale_dependent());
+        self.fallback_render_cache
+            .update(cx, |cache, _| cache.invalidate_scale_dependent());
+        self.graphics_cache.update(cx, |cache, cx| cache.clear(cx));
+    }
+
+    fn clear_server_screen(&mut self, cx: &mut Context<Self>) {
+        let empty = ScreenSnapshot::empty_with_appearance(
+            self.file_insertion.paths,
+            &crate::terminal::TerminalAppearanceUpdate::new(
+                self.appearance.generation,
+                Arc::clone(&self.appearance.terminal),
+            ),
+        );
+        self.screen = empty.clone();
+        self.last_valid_screen = empty;
+        self.server_screen_session = None;
+        self.server_screen_frame = None;
+        self.server_last_valid_frame = None;
+        self.terminal_session.accepted_screen_generation = None;
+        self.render_lifecycle.reset_session_presentations();
+        self.pending_accessibility = None;
+        cx.notify();
+    }
+
+    fn sync_server_presentation(&mut self, cx: &mut Context<Self>) {
+        use super::pane_presentation::{DisplayName, OfflinePrior, PaneFailureClass};
+        use spaceterm_client::pane_channel::PaneReadiness;
+        use spaceterm_core::organization::SessionPhase;
+        let Some(server) = self.server_session.clone() else {
+            return;
+        };
+        let state = *server.channel().state().borrow();
+        if self
+            .server_presentation_observation
+            .is_some_and(|observed| observed == state)
+        {
+            return;
+        }
+        self.server_presentation_observation = None;
+        if let (Some(old), Some(runtime), Some(info)) =
+            (self.server_screen_session, state.runtime, state.connection)
+            && (old.epoch != info.epoch || old.generation != runtime.session_generation)
+        {
+            self.invalidate_server_native_state(cx);
+            self.clear_server_screen(cx);
+        }
+        let held_elsewhere = state.runtime.is_some_and(|runtime| match runtime.control {
+            spaceterm_core::organization::ControlRecord::Held { client, .. } => {
+                server.own_client().is_some_and(|own| own != client)
+            }
+            spaceterm_core::organization::ControlRecord::Unclaimed => false,
+        });
+        let device = match &self.server_presentation {
+            PanePresentation::Takeover(device)
+            | PanePresentation::Offline {
+                prior: OfflinePrior::Takeover(device),
+                ..
+            }
+            | PanePresentation::Reconciling {
+                prior: OfflinePrior::Takeover(device),
+            } => device.clone(),
+            _ => DisplayName::unnamed(),
+        };
+        let prior = if held_elsewhere {
+            OfflinePrior::Takeover(device.clone())
+        } else {
+            match &self.server_presentation {
+                PanePresentation::Takeover(device) => OfflinePrior::Takeover(device.clone()),
+                PanePresentation::Unclaimed { .. } => OfflinePrior::Unclaimed,
+                PanePresentation::Offline { prior, .. }
+                | PanePresentation::Reconciling { prior } => prior.clone(),
+                _ => OfflinePrior::Frozen,
+            }
+        };
+        let presentation = match state.readiness {
+            PaneReadiness::Takeover if state.connection.is_none() => PanePresentation::Offline {
+                prior: OfflinePrior::Takeover(device),
+                cause: self.server_offline_cause.clone(),
+            },
+            PaneReadiness::Takeover => PanePresentation::Takeover(device),
+            PaneReadiness::Offline => PanePresentation::Offline {
+                prior,
+                cause: self.server_offline_cause.clone(),
+            },
+            PaneReadiness::Reconciling => PanePresentation::Reconciling { prior },
+            PaneReadiness::Detached | PaneReadiness::Missing => PanePresentation::Failed {
+                class: PaneFailureClass::Unavailable,
+            },
+            PaneReadiness::Live
+                if state.runtime.is_some_and(|runtime| {
+                    runtime.control == spaceterm_core::organization::ControlRecord::Unclaimed
+                        && matches!(
+                            runtime.phase,
+                            SessionPhase::Running { .. } | SessionPhase::Starting { .. }
+                        )
+                }) =>
+            {
+                PanePresentation::from_portable(
+                    spaceterm_client::view::PanePresentation::Unclaimed { acquiring: false },
+                    device,
+                    self.server_offline_cause.clone(),
+                )
+            }
+            PaneReadiness::Live => match state.runtime.map(|runtime| runtime.phase) {
+                Some(SessionPhase::Running { .. }) if state.content.is_some() => {
+                    PanePresentation::Live
+                }
+                Some(SessionPhase::Running { .. })
+                    if self.server_presentation.freezes_content() =>
+                {
+                    PanePresentation::Reconciling { prior }
+                }
+                Some(SessionPhase::Running { .. }) => return,
+                Some(SessionPhase::Starting { .. }) => PanePresentation::Starting,
+                Some(SessionPhase::NotStarted)
+                    if matches!(
+                        self.server_presentation,
+                        PanePresentation::AwaitingMeasurement | PanePresentation::Starting
+                    ) =>
+                {
+                    return;
+                }
+                Some(phase) => {
+                    use spaceterm_client::view::PanePresentation as Portable;
+                    let presentation = match phase {
+                        SessionPhase::NotStarted => Portable::NotStarted,
+                        SessionPhase::Ended { reason } => Portable::Ended { reason },
+                        SessionPhase::DirectoryUnavailable => Portable::DirectoryUnavailable,
+                        SessionPhase::Failed { class } => Portable::Failed { class },
+                        SessionPhase::Starting { .. } => Portable::Starting,
+                        SessionPhase::Running { .. } => Portable::Live,
+                    };
+                    PanePresentation::from_portable(
+                        presentation,
+                        device,
+                        self.server_offline_cause.clone(),
+                    )
+                }
+                None => PanePresentation::Failed {
+                    class: PaneFailureClass::Unavailable,
+                },
+            },
+        };
+        let _ = self.set_presentation(presentation, cx);
+    }
+
+    fn sync_server_state(&mut self, cx: &mut Context<Self>) {
+        self.sync_server_presentation(cx);
+        let Some(server) = self.server_session.clone() else {
+            return;
+        };
+        if self.server_presentation.accepts_input() {
+            let _ = server.request_frame();
+            self.sync_server_screen(cx);
+        }
+    }
+
+    fn sync_server_screen(&mut self, cx: &mut Context<Self>) {
+        if !self.server_presentation.accepts_input() {
+            return;
+        }
+        let Some(server) = &self.server_session else {
+            return;
+        };
+        let update = crate::terminal::TerminalAppearanceUpdate::new(
+            self.appearance.generation,
+            Arc::clone(&self.appearance.terminal),
+        );
+        let Some(screen) = server.snapshot(&update) else {
+            return;
+        };
+        self.accessibility = Arc::new(TerminalAccessibilityModel::from_screen(&screen));
+        self.accessibility_needs_presentation = false;
+        self.accessibility_element.set_hierarchy(false);
+        let _ = self.render_lifecycle.observe_snapshot(screen.generation);
+        self.server_screen_frame = server.channel().current_frame();
+        self.server_screen_session = self
+            .server_screen_frame
+            .as_ref()
+            .and_then(|frame| frame.frame().map(|frame| frame.base().session));
+        self.hidden_input = screen.cursor.password_input;
+        self.sync_secure_input();
+        self.screen = screen;
+        self.screen_session_epoch = self.terminal_session.session_epoch;
+        cx.notify();
+    }
+
+    fn presentation_action_guard(&self) -> Option<PresentationActionGuard> {
+        let server = self.server_session.as_ref()?;
+        Some(PresentationActionGuard {
+            token: server.token(),
+            state: *server.channel().state().borrow(),
+            presentation: self.server_presentation.clone(),
+        })
+    }
+
+    fn perform_presentation_action(
+        &mut self,
+        guard: &PresentationActionGuard,
+        action: super::pane_presentation::PanePresentationAction,
+        source: SelectionSource,
+        cx: &mut Context<Self>,
+    ) {
+        use super::pane_presentation::PanePresentationAction;
+        let Some(server) = &self.server_session else {
+            return;
+        };
+        let state = *server.channel().state().borrow();
+        if guard.token != server.token()
+            || guard.token.context_generation != state.context
+            || guard.state != state
+            || guard.presentation != self.server_presentation
+            || !self.server_presentation.offers_action(
+                action,
+                action != PanePresentationAction::TakeOver || self.server_takeover_armed,
+            )
+        {
+            return;
+        }
+        let action = match action {
+            PanePresentationAction::StartSession => PaneAction::StartSession(source),
+            PanePresentationAction::TakeOver => PaneAction::TakeOver(source),
+            PanePresentationAction::Retry
+                if matches!(self.server_presentation, PanePresentation::Offline { .. }) =>
+            {
+                PaneAction::RetryConnection
+            }
+            PanePresentationAction::Retry => PaneAction::Retry(source),
+            PanePresentationAction::ChooseDirectory => PaneAction::ChooseDirectory,
+            PanePresentationAction::OpenServerSettings => PaneAction::OpenServerSettings,
+            PanePresentationAction::RetryConnection => PaneAction::RetryConnection,
+        };
+        cx.emit(TerminalPaneEvent::ActionRequested(action));
+    }
+
+    fn presentation_layer(
+        &self,
+        cx: &Context<Self>,
+    ) -> super::pane_presentation::PanePresentationLayer {
+        let pane = cx.entity().downgrade();
+        let guard = self.presentation_action_guard();
+        super::pane_presentation::PanePresentationLayer::new(
+            "server-pane-presentation",
+            self.server_presentation.clone(),
+            self.surface_background,
+        )
+        .focus(self.presentation_focus.clone())
+        .armed(!self.server_presentation.offers_take_over() || self.server_takeover_armed)
+        .focused(
+            self.product_focus.active_workspace
+                && self.product_focus.active_tab
+                && self.product_focus.focused_pane,
+        )
+        .on_action_with_source(move |action, source, _, cx| {
+            if let Some(guard) = &guard {
+                let _ = pane.update(cx, |pane, cx| {
+                    pane.perform_presentation_action(guard, action, source, cx)
+                });
+            }
+        })
     }
 
     /// The laid-out cell grid with its device-pixel cell size. It is `Ok(None)` until the Pane has
@@ -4271,6 +5295,16 @@ impl TerminalPane {
     /// fails at once instead of waiting. The grid keeps its cells and metrics when a multiplied
     /// PTY pixel extent cannot fit u16.
     pub(crate) fn measured_grid(&self) -> Result<Option<MeasuredGrid>, DesktopClientError> {
+        if self.server_session.is_some()
+            && let Some(bounds) = self.grid_bounds
+        {
+            admitted_server_geometry(
+                bounds,
+                self.cell_width,
+                self.line_height,
+                self.backing_scale,
+            )?;
+        }
         let Some(geometry) = self.last_geometry else {
             return Ok(None);
         };
@@ -4300,6 +5334,13 @@ impl EntityInputHandler for TerminalPane {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<String> {
+        if self
+            .server_session
+            .as_ref()
+            .is_some_and(|server| server.native_permit().is_none())
+        {
+            return None;
+        }
         if self.ime.marked_text().is_some() {
             let (text, adjusted) = self.ime.text_for_utf16_range(range)?;
             *adjusted_range = Some(adjusted);
@@ -4321,6 +5362,13 @@ impl EntityInputHandler for TerminalPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
+        if self
+            .server_session
+            .as_ref()
+            .is_some_and(|server| server.native_permit().is_none())
+        {
+            return None;
+        }
         if !ignore_disabled_input && !self.accepts_input_method_text(window, cx) {
             return None;
         }
@@ -4342,6 +5390,13 @@ impl EntityInputHandler for TerminalPane {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Range<usize>> {
+        if self
+            .server_session
+            .as_ref()
+            .is_some_and(|server| server.native_permit().is_none())
+        {
+            return None;
+        }
         self.ime.marked_range()
     }
 
@@ -4370,6 +5425,10 @@ impl EntityInputHandler for TerminalPane {
         self.ime.commit(text);
         self.invalidate_preedit_layout();
         if let Some(text) = self.ime.take_commit() {
+            if let Some(server) = &self.server_session {
+                server.input_method_commit(&text);
+                return;
+            }
             let translation = self.key_input_adapter.input_method_commit(text);
             self.send_key_translation(translation, cx);
         }
@@ -4408,6 +5467,13 @@ impl EntityInputHandler for TerminalPane {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
+        if self
+            .server_session
+            .as_ref()
+            .is_some_and(|server| server.native_permit().is_none())
+        {
+            return None;
+        }
         if let Some(marked_text) = self.ime.marked_text() {
             let position = self.screen.cursor.position?;
             let columns = self.screen.rows.first()?.len();
@@ -4469,6 +5535,13 @@ impl EntityInputHandler for TerminalPane {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<usize> {
+        if self
+            .server_session
+            .as_ref()
+            .is_some_and(|server| server.native_permit().is_none())
+        {
+            return None;
+        }
         if self.ime.marked_text().is_some() {
             return Some(self.ime.selected_range().end);
         }
@@ -4493,10 +5566,19 @@ impl Drop for TerminalPane {
 
 impl Render for TerminalPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.server_session.is_some() {
+            self.sync_server_presentation(cx);
+            if self.server_presentation.accepts_input()
+                && let Some(server) = &self.server_session
+            {
+                let _ = server.request_frame();
+            }
+        }
         let appearance = super::appearance::shared_chrome(cx);
         let native_activity = self.current_activity(window, cx);
         self.update_application_activity(native_activity, cx);
         let pane = cx.entity().downgrade();
+        let layout_revision = self.server_layout_revision;
         let (terminal_input_focused, focus_gained) = self
             .sync_terminal_input_focus_with_activity_and_modal(
                 window,
@@ -4547,6 +5629,55 @@ impl Render for TerminalPane {
         if !self.render_lifecycle.can_present() {
             self.evict_presentation_resources(cx);
             return div().size_full().into_any_element();
+        }
+        if self.server_session.is_some() && !self.server_presentation.content_eligible() {
+            let pane = cx.entity().downgrade();
+            let guard = self.presentation_action_guard();
+            return div()
+                .id("terminal-pane")
+                .relative()
+                .size_full()
+                .track_focus(&self.focus_handle)
+                .when(self.server_presentation.offers_take_over() && self.server_takeover_armed, |root| {
+                    root.on_action({
+                        let pane = cx.entity().downgrade();
+                        move |_: &super::server_pane_actions::TakeOverPane, _, cx| {
+                            if let Some(guard) = &guard {
+                                let _ = pane.update(cx, |pane, cx| pane.perform_presentation_action(
+                                    guard, super::pane_presentation::PanePresentationAction::TakeOver, SelectionSource::Command, cx,
+                                ));
+                            }
+                        }
+                    })
+                })
+                .on_key_down(cx.listener(Self::on_key_down))
+                .on_any_mouse_down(cx.listener(Self::on_mouse_down))
+                .on_a11y_action(gpui::accesskit::Action::Click, {
+                    let pane = cx.entity().downgrade();
+                    move |_, window, cx| {
+                        let _ =
+                            pane.update(cx, |pane, cx| pane.server_accessibility_press(window, cx));
+                    }
+                })
+                .child(
+                    div()
+                        .size_full()
+                        .on_children_prepainted(move |children, _, cx| {
+                            if let Some(bounds) = children.first().copied() {
+                                let _ = pane.update(cx, |pane, cx| {
+                                    if pane.server_layout_revision != layout_revision {
+                                        return;
+                                    }
+                                    pane.update_grid_bounds(
+                                        TERMINAL_PADDING.grid_bounds(bounds),
+                                        cx,
+                                    );
+                                });
+                            }
+                        })
+                        .child(self.presentation_layer(cx)),
+                )
+                .into_any_element();
         }
         let recovery_holds_presentation = self.pending_recovery.is_some_and(|pending| {
             matches!(
@@ -4787,7 +5918,12 @@ impl Render for TerminalPane {
                     .as_ref()
                     .map(|hovered| (hovered.target.identity, hovered.cell)),
                 fallback: (presentation_operation.is_some()
-                    && !Arc::ptr_eq(&display_screen, &self.last_valid_screen))
+                    && !Arc::ptr_eq(&display_screen, &self.last_valid_screen)
+                    && (self.server_session.is_none()
+                        || self
+                            .server_last_valid_frame
+                            .as_ref()
+                            .is_some_and(spaceterm_client::projection::FrameLease::is_paintable)))
                 .then(|| {
                     (
                         Arc::clone(&self.last_valid_screen),
@@ -4799,6 +5935,31 @@ impl Render for TerminalPane {
             },
             cx,
         );
+        let terminal_grid = if self.server_session.is_some() {
+            let frame = if displaying_current {
+                self.server_screen_frame.clone()
+            } else {
+                self.server_last_valid_frame.clone()
+            };
+            let fallback = (presentation_operation.is_some()
+                && !Arc::ptr_eq(&display_screen, &self.last_valid_screen))
+            .then(|| self.server_last_valid_frame.clone())
+            .flatten()
+            .filter(spaceterm_client::projection::FrameLease::is_paintable);
+            let pane = cx.entity().downgrade();
+            super::server_pane_session::FencedPaneContent::new(
+                terminal_grid.into_element(),
+                frame,
+                fallback,
+                move |cx| {
+                    pane.read_with(cx, |pane, _| pane.server_presentation.content_eligible())
+                        .unwrap_or(false)
+                },
+            )
+            .into_any_element()
+        } else {
+            terminal_grid.into_any_element()
+        };
         let context_menu_target = self.context_menu.clone();
         let context_menu_actions = context_menu_target
             .as_ref()
@@ -4863,6 +6024,9 @@ impl Render for TerminalPane {
                     return;
                 };
                 let _ = pane.update(cx, |pane, cx| {
+                    if pane.server_layout_revision != layout_revision {
+                        return;
+                    }
                     pane.update_grid_bounds(TERMINAL_PADDING.grid_bounds(bounds), cx);
                     pane.sync_native_accessibility(window, terminal_input_focused);
                 });
@@ -4883,8 +6047,17 @@ impl Render for TerminalPane {
             .when(active_hovered_link.is_some(), |root| root.cursor_pointer())
             .key_context(key_context)
             .track_focus(&self.focus_handle);
-        self.accessibility_element
-            .decorate(pane_root)
+        let pane_root = if self.server_session.is_none() {
+            self.accessibility_element.decorate(pane_root)
+        } else {
+            pane_root
+        };
+        let terminal_text = if self.server_session.is_none() {
+            self.accessibility_element.decorate_text(terminal_text)
+        } else {
+            terminal_text
+        };
+        pane_root
             .on_action(cx.listener(Self::copy_selection))
             .on_action(cx.listener(Self::edit_copy))
             .on_action(cx.listener(Self::paste_clipboard))
@@ -4908,6 +6081,12 @@ impl Render for TerminalPane {
             .on_action(cx.listener(Self::find_previous))
             .on_action(cx.listener(Self::close_find))
             .on_action(cx.listener(Self::show_repository_status))
+            .when(self.server_session.is_some(), |root| {
+                root.on_a11y_action(gpui::accesskit::Action::Click, {
+                    let pane = cx.entity().downgrade();
+                    move |_, window, cx| { let _ = pane.update(cx, |pane, cx| pane.server_accessibility_press(window, cx)); }
+                })
+            })
             .on_key_down(cx.listener(Self::on_key_down))
             .on_key_up(cx.listener(Self::on_key_up))
             .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
@@ -4931,7 +6110,8 @@ impl Render for TerminalPane {
                     .bottom_0()
                     .child(context_menu),
             )
-            .child(self.accessibility_element.decorate_text(terminal_text))
+            .child(terminal_text)
+            .when(self.server_session.is_some(), |root| root.child(self.presentation_layer(cx)))
             .child(scrollbar)
             .when_some(find_bar, |root, find_bar| root.child(find_bar))
             .when_some(repository_popover, |root, popover| root.child(popover))
@@ -5247,6 +6427,44 @@ fn measure_prepared_cell_width(
         .text_system()
         .shape_line("M".into(), px(font_size), &[run], None)
         .width
+}
+
+fn admitted_server_geometry(
+    bounds: Bounds<Pixels>,
+    cell_width: Pixels,
+    line_height: f32,
+    scale: BackingScale,
+) -> Result<(), DesktopClientError> {
+    let width = f32::from(bounds.size.width);
+    let height = f32::from(bounds.size.height);
+    let cell = f32::from(cell_width);
+    if !width.is_finite()
+        || !height.is_finite()
+        || !cell.is_finite()
+        || !line_height.is_finite()
+        || width <= 0.0
+        || height <= 0.0
+        || cell <= 0.0
+        || line_height <= 0.0
+    {
+        return Err(DesktopClientError::InvalidGeometry);
+    }
+    let columns = (width / cell).floor().max(f32::from(MIN_COLS));
+    let rows = (height / line_height).floor().max(f32::from(MIN_ROWS));
+    if columns > SUPPORTED_GRID_LIMITS.max_columns() as f32
+        || rows > SUPPORTED_GRID_LIMITS.max_rows() as f32
+        || f64::from(columns) * f64::from(rows) > f64::from(SUPPORTED_GRID_LIMITS.max_cells())
+    {
+        return Err(DesktopClientError::InvalidGeometry);
+    }
+    let geometry = terminal_geometry(bounds, cell_width, line_height, scale);
+    let pixels = geometry.backing_cell_size();
+    CellPixels::new(
+        u16::try_from(pixels.width).map_err(|_| DesktopClientError::InvalidGeometry)?,
+        u16::try_from(pixels.height).map_err(|_| DesktopClientError::InvalidGeometry)?,
+    )
+    .map_err(|_| DesktopClientError::InvalidGeometry)?;
+    Ok(())
 }
 
 fn terminal_geometry(
