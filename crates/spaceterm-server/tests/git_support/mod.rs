@@ -352,19 +352,22 @@ impl Fixture {
         &self,
         request: CanonicalOperationRequest,
     ) -> OperationResponse {
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                match self.handle.submit(self.principal, request.clone()).await {
-                    Ok(response) => break response,
-                    Err(error) if error.class == ServerFailureClass::Capacity => {
-                        tokio::task::yield_now().await
-                    }
-                    Err(error) => panic!("request failed: {:?}", error.class),
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            // Bound Capacity retries without cancelling an admitted request's
+            // durable commit on a busy filesystem.
+            match self.handle.submit(self.principal, request.clone()).await {
+                Ok(response) => break response,
+                Err(error) if error.class == ServerFailureClass::Capacity => {
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "request capacity retry deadline elapsed"
+                    );
+                    tokio::task::yield_now().await;
                 }
+                Err(error) => panic!("request failed: {:?}", error.class),
             }
-        })
-        .await
-        .unwrap()
+        }
     }
     pub(super) fn operation(&self, sequence: u64) -> OperationId {
         OperationId::new(self.stream, OperationSequence::new(sequence).unwrap())
@@ -592,7 +595,7 @@ impl Fixture {
             &CanonicalCodec,
         )
         .unwrap();
-        self.handle.submit(self.principal, request).await.unwrap();
+        self.submit_when_available(request).await;
         let grid = GridSize::new(
             31,
             93,
@@ -613,7 +616,7 @@ impl Fixture {
         let OperationResponse::Completed {
             outcome: Outcome::SessionStarted(session),
             ..
-        } = self.handle.submit(self.principal, request).await.unwrap()
+        } = self.submit_when_available(request).await
         else {
             panic!("started")
         };
