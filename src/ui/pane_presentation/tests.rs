@@ -328,9 +328,11 @@ fn every_presentation() -> Vec<PanePresentation> {
         PanePresentation::DirectoryUnavailable,
         PanePresentation::Offline {
             prior: OfflinePrior::Frozen,
+            cause: OfflineCause::Unreachable,
         },
         PanePresentation::Offline {
             prior: OfflinePrior::Takeover(device.clone()),
+            cause: OfflineCause::Unreachable,
         },
         PanePresentation::Reconciling {
             prior: OfflinePrior::Frozen,
@@ -348,7 +350,8 @@ fn only_a_live_pane_accepts_input_and_only_a_live_or_frozen_screen_shows_content
         let frozen = matches!(
             presentation,
             PanePresentation::Offline {
-                prior: OfflinePrior::Frozen
+                prior: OfflinePrior::Frozen,
+                ..
             } | PanePresentation::Reconciling {
                 prior: OfflinePrior::Frozen
             }
@@ -432,6 +435,7 @@ fn takeover_copy_names_the_controlling_device_or_says_another_device() {
     for presentation in [
         PanePresentation::Offline {
             prior: OfflinePrior::Takeover(DisplayName::reported("Studio Mac")),
+            cause: OfflineCause::Unreachable,
         },
         PanePresentation::Reconciling {
             prior: OfflinePrior::Takeover(DisplayName::reported("Studio Mac")),
@@ -655,6 +659,7 @@ fn an_interrupted_takeover_screen_keeps_tab_and_return_from_take_over(cx: &mut T
 
     pane.present(PanePresentation::Offline {
         prior: OfflinePrior::Takeover(device),
+        cause: OfflineCause::Unreachable,
     });
     pane.advance(TAKEOVER_ARMING_DELAY);
     for keys in ["tab enter", "tab space", "shift-tab enter"] {
@@ -748,6 +753,7 @@ fn each_screen_offers_and_reports_its_own_actions(cx: &mut TestAppContext) {
         (
             PanePresentation::Offline {
                 prior: OfflinePrior::Takeover(DisplayName::reported("Studio Mac")),
+                cause: OfflineCause::Unreachable,
             },
             "In use on Studio Mac",
             vec![PanePresentationAction::Retry],
@@ -802,6 +808,7 @@ fn an_offline_pane_freezes_its_screen_under_a_non_modal_retry(cx: &mut TestAppCo
     let mut pane = pane(
         PanePresentation::Offline {
             prior: OfflinePrior::Frozen,
+            cause: OfflineCause::Unreachable,
         },
         cx,
     );
@@ -906,6 +913,7 @@ fn a_press_on_a_screen_selects_and_focuses_its_pane(cx: &mut TestAppContext) {
         PanePresentation::DirectoryUnavailable,
         PanePresentation::Offline {
             prior: OfflinePrior::Takeover(device.clone()),
+            cause: OfflineCause::Unreachable,
         },
         PanePresentation::Reconciling {
             prior: OfflinePrior::Takeover(device.clone()),
@@ -996,6 +1004,7 @@ fn the_pane_takes_focus_back_when_its_focused_action_goes_away(cx: &mut TestAppC
     let mut pane = pane(
         PanePresentation::Offline {
             prior: OfflinePrior::Frozen,
+            cause: OfflineCause::Unreachable,
         },
         cx,
     );
@@ -1044,7 +1053,164 @@ fn the_pane_takes_focus_back_when_its_focused_action_goes_away(cx: &mut TestAppC
     focus_take_over(&mut pane);
     pane.present(PanePresentation::Offline {
         prior: OfflinePrior::Takeover(DisplayName::unnamed()),
+        cause: OfflineCause::Unreachable,
     });
     assert!(pane.pane_focused());
     assert!(pane.take_actions().is_empty());
+}
+
+#[gpui::test]
+fn desktop_server_takeover_menu_opens_from_shift_f10_only_on_a_takeover_screen(
+    cx: &mut TestAppContext,
+) {
+    let mut pane = pane(PanePresentation::Takeover(DisplayName::unnamed()), cx);
+    pane.advance(TAKEOVER_ARMING_DELAY);
+    pane.press("shift-f10");
+    let tree = A11yTree::read(pane.cx);
+    let entries = tree.with_role("MenuItem");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["aria"]["label"], "Take Over");
+    perform(pane.cx, entries[0], accesskit::Action::Click);
+    pane.cx.run_until_parked();
+    assert_eq!(pane.take_actions(), [PanePresentationAction::TakeOver]);
+    pane.present(PanePresentation::Live);
+    pane.focus_pane();
+    pane.press("shift-f10");
+    assert_eq!(*pane.record().terminal_input.borrow(), ["f10"]);
+    assert!(A11yTree::read(pane.cx).with_role("MenuItem").is_empty());
+}
+
+#[gpui::test]
+fn desktop_server_takeover_menu_item_stays_disabled_until_armed(cx: &mut TestAppContext) {
+    let mut pane = pane(PanePresentation::Takeover(DisplayName::unnamed()), cx);
+    pane.press("shift-f10");
+    let tree = A11yTree::read(pane.cx);
+    assert_eq!(tree.with_role("MenuItem")[0]["aria"]["disabled"], true);
+    pane.advance(TAKEOVER_ARMING_DELAY);
+    assert_eq!(
+        A11yTree::read(pane.cx).with_role("MenuItem")[0]["aria"]["disabled"],
+        true,
+        "an early menu stays disabled until a new deliberate opening"
+    );
+    assert!(pane.take_actions().is_empty());
+    pane.press("escape");
+    pane.focus_pane();
+    pane.press("shift-f10");
+    assert_ne!(
+        A11yTree::read(pane.cx).with_role("MenuItem")[0]["aria"]["disabled"],
+        true
+    );
+}
+
+#[gpui::test]
+fn desktop_server_stopped_and_update_required_notices_offer_settings_not_retry(
+    cx: &mut TestAppContext,
+) {
+    let mut pane = panes(vec![PanePresentation::Live], px(400.0), cx);
+    for (cause, status) in [
+        (
+            OfflineCause::Stopped(DisplayName::reported("Studio Mac")),
+            "Stopped",
+        ),
+        (OfflineCause::UpdateRequired, "Update required"),
+    ] {
+        pane.present(PanePresentation::Offline {
+            prior: OfflinePrior::Frozen,
+            cause,
+        });
+        let tree = A11yTree::read(pane.cx);
+        assert_eq!(tree.node("Connection status")["aria"]["value"], status);
+        assert!(tree.find("Retry").is_none());
+        assert!(tree.find("Retry Connection").is_none());
+        assert!(tree.find("Server Settings…").is_some());
+        pane.click("pane-presentation-server-settings");
+        assert_eq!(
+            pane.take_actions(),
+            vec![PanePresentationAction::OpenServerSettings]
+        );
+    }
+}
+
+#[gpui::test]
+fn desktop_server_blocked_notice_and_takeover_menu_bind_the_original_action(
+    cx: &mut TestAppContext,
+) {
+    let mut pane = panes(vec![PanePresentation::Live], px(520.0), cx);
+    for intended in [IntendedAction::Start, IntendedAction::Connect] {
+        let cause = OfflineCause::Blocked {
+            server: DisplayName::reported("Studio Mac"),
+            location: BlockedLocation::Ssh(DisplayName::reported("studio")),
+            intended,
+        };
+        pane.present(PanePresentation::Offline {
+            prior: OfflinePrior::Frozen,
+            cause: cause.clone(),
+        });
+        let tree = A11yTree::read(pane.cx);
+        assert_eq!(tree.node("Connection status")["aria"]["value"], "Blocked");
+        assert!(
+            pane.cx
+                .debug_bounds("pane-presentation-connection-message")
+                .is_some()
+        );
+        assert!(tree.find("Retry").is_none());
+        assert_eq!(
+            tree.find("Retry Connection").is_some(),
+            intended == IntendedAction::Connect
+        );
+        pane.present(PanePresentation::Offline {
+            prior: OfflinePrior::Takeover(DisplayName::unnamed()),
+            cause,
+        });
+        pane.press("shift-f10");
+        let tree = A11yTree::read(pane.cx);
+        let entries = tree.with_role("MenuItem");
+        let labels = entries
+            .iter()
+            .map(|node| node["aria"]["label"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            if intended == IntendedAction::Connect {
+                vec!["Retry Connection", "Server Settings…", "Take Over"]
+            } else {
+                vec!["Server Settings…", "Take Over"]
+            }
+        );
+        assert_eq!(entries.last().unwrap()["aria"]["disabled"], true);
+        let settings = entries
+            .iter()
+            .find(|node| node["aria"]["label"] == "Server Settings…")
+            .unwrap();
+        perform(pane.cx, settings, accesskit::Action::Click);
+        assert_eq!(
+            pane.take_actions(),
+            vec![PanePresentationAction::OpenServerSettings]
+        );
+    }
+}
+
+#[test]
+fn desktop_server_only_the_focused_pane_announces_going_offline() {
+    use gpui::Element;
+    for focused in [false, true] {
+        let notice = ConnectionNotice {
+            element: div()
+                .id("offline-notice")
+                .role(accesskit::Role::Status)
+                .aria_label("Connection status"),
+            focused,
+        };
+        let mut node = accesskit::Node::new(notice.a11y_role().unwrap());
+        notice.write_a11y_info(&mut node);
+        assert_eq!(
+            node.live(),
+            Some(if focused {
+                accesskit::Live::Polite
+            } else {
+                accesskit::Live::Off
+            })
+        );
+        assert_eq!(node.label(), Some("Connection status"));
+    }
 }

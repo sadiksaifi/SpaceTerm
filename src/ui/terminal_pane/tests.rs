@@ -1030,7 +1030,9 @@ fn remote_restart_resets_caption_before_successor_output_and_preserves_screen(
         .unwrap();
     cx.run_until_parked();
 
-    let factory = pane.read_with(cx, |pane, _| pane.terminal_session.session_factory.clone());
+    let factory = pane.read_with(cx, |pane, _| {
+        pane.terminal_session.session_factory.clone().unwrap()
+    });
     pane.update(cx, |pane, cx| pane.disconnect_remote(7, cx).unwrap());
     assert_eq!(
         cx.foreground_executor().block_test(
@@ -1111,7 +1113,9 @@ fn remote_restart_ignores_prior_epoch_events_and_accepts_fresh_generation_one(
         pane.handle_session_accessibility(old_epoch, Arc::clone(&old_accessibility));
         (old_epoch, old_accessibility)
     });
-    let factory = pane.read_with(cx, |pane, _| pane.terminal_session.session_factory.clone());
+    let factory = pane.read_with(cx, |pane, _| {
+        pane.terminal_session.session_factory.clone().unwrap()
+    });
     pane.update(cx, |pane, cx| pane.disconnect_remote(7, cx).unwrap());
     assert_eq!(
         cx.foreground_executor().block_test(
@@ -1371,7 +1375,9 @@ fn disconnect_and_restart_clear_hidden_input_before_successor_focus(cx: &mut Tes
     });
     assert!(pane.read_with(cx, |pane, _| pane.hidden_input && pane.terminal_input_focus));
 
-    let factory = pane.read_with(cx, |pane, _| pane.terminal_session.session_factory.clone());
+    let factory = pane.read_with(cx, |pane, _| {
+        pane.terminal_session.session_factory.clone().unwrap()
+    });
     pane.update(cx, |pane, cx| pane.disconnect_remote(7, cx).unwrap());
     assert!(pane.read_with(cx, |pane, _| {
         !pane.hidden_input && !pane.terminal_input_focus
@@ -1774,7 +1780,9 @@ fn accessibility_selection_authority_follows_remote_restart_hierarchy_and_close(
     cx.update(|window, cx| pane.update(cx, |pane, _| pane.sync_native_accessibility(window, true)));
     assert!(record.borrow().selection_sender.is_some());
 
-    let factory = pane.read_with(cx, |pane, _| pane.terminal_session.session_factory.clone());
+    let factory = pane.read_with(cx, |pane, _| {
+        pane.terminal_session.session_factory.clone().unwrap()
+    });
     pane.update(cx, |pane, cx| pane.disconnect_remote(7, cx).unwrap());
     assert_eq!(
         cx.foreground_executor()
@@ -9889,9 +9897,7 @@ fn paste_confirmation_cancels_a_press_after_focus_moves_to_a_background_control(
 }
 
 #[gpui::test]
-fn desktop_server_measured_grid_reports_cells_with_device_pixel_cell_size(
-    cx: &mut TestAppContext,
-) {
+fn desktop_server_measured_grid_reports_cells_with_device_pixel_cell_size(cx: &mut TestAppContext) {
     let (pane, cx) = terminal_pane(cx);
     pane.update(cx, |pane, _| {
         pane.last_geometry = None;
@@ -9982,4 +9988,2341 @@ fn desktop_server_local_pane_refuses_server_presentation_and_context(cx: &mut Te
             Err(DesktopClientError::WrongServer)
         );
     });
+}
+
+fn server_pane(
+    cx: &mut TestAppContext,
+    running: bool,
+) -> (
+    super::super::server_pane_session::tests::Fixture,
+    Entity<TerminalPane>,
+    &mut VisualTestContext,
+) {
+    server_pane_with_accessibility(
+        cx,
+        running,
+        Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default()),
+    )
+}
+
+fn server_pane_with_accessibility(
+    cx: &mut TestAppContext,
+    running: bool,
+    accessibility: Rc<
+        dyn crate::platform::terminal_accessibility::TerminalAccessibilityAdapterFactory,
+    >,
+) -> (
+    super::super::server_pane_session::tests::Fixture,
+    Entity<TerminalPane>,
+    &mut VisualTestContext,
+) {
+    cx.update(crate::ui::init).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let mut fixture = runtime.block_on(super::super::server_pane_session::tests::Fixture::new(
+        running,
+    ));
+    fixture.runtime = Some(runtime);
+    mount_server_pane(cx, fixture, accessibility)
+}
+
+fn server_pane_with_content(
+    cx: &mut TestAppContext,
+) -> (
+    super::super::server_pane_session::tests::Fixture,
+    Arc<super::super::server_pane_session::tests::EchoContentConnection>,
+    Entity<TerminalPane>,
+    &mut VisualTestContext,
+) {
+    cx.update(crate::ui::init).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let fixture = runtime.block_on(super::super::server_pane_session::tests::Fixture::new(true));
+    let (mut fixture, content) = fixture.echo_content();
+    fixture.runtime = Some(runtime);
+    let (fixture, pane, cx) = mount_server_pane(cx, fixture, Rc::new(
+        crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default(),
+    ));
+    (fixture, content, pane, cx)
+}
+
+fn mount_server_pane(
+    cx: &mut TestAppContext,
+    fixture: super::super::server_pane_session::tests::Fixture,
+    accessibility: Rc<
+        dyn crate::platform::terminal_accessibility::TerminalAccessibilityAdapterFactory,
+    >,
+) -> (
+    super::super::server_pane_session::tests::Fixture,
+    Entity<TerminalPane>,
+    &mut VisualTestContext,
+) {
+    let channel = fixture.channel.clone();
+    let token = fixture.token;
+    let (pane, cx) = cx.add_window_view(|window, cx| {
+        super::super::pane_lifecycle::PaneConstruction::new(
+            Rc::new(crate::terminal::GpuiTerminalKeyInputAdapterFactory::default()),
+            accessibility,
+            crate::terminal::native_services::testing::adapters(),
+            super::super::pane_lifecycle::PaneLifecycleDependencies::testing(),
+        )
+        .create_server(channel, token, PanePresentation::Live, window, cx)
+        .unwrap()
+    });
+    cx.update(|window, cx| {
+        window.activate_window();
+        pane.update(cx, |pane, cx| pane.focus(window, cx));
+    });
+    cx.run_until_parked();
+    if matches!(
+        fixture.channel.state().borrow().runtime.unwrap().phase,
+        spaceterm_core::organization::SessionPhase::Running { .. }
+    ) {
+        fixture.frame();
+        pane.update(cx, |pane, cx| pane.sync_server_screen(cx));
+    }
+    (fixture, pane, cx)
+}
+
+#[gpui::test]
+fn desktop_server_measurement_without_explicit_use_starts_nothing(cx: &mut TestAppContext) {
+    let (fixture, pane, cx) = server_pane(cx, false);
+    pane.update(cx, |pane, cx| {
+        assert!(pane.measured_grid().unwrap().is_some());
+        assert!(pane.terminal_session.session_factory.is_none());
+        pane.start_session(pane.last_geometry.unwrap(), cx);
+        pane.set_product_focus(TerminalProductFocus::default(), cx);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(matches!(
+        fixture.server.snapshot().unwrap().runtime()[0].phase,
+        spaceterm_core::organization::SessionPhase::NotStarted
+    ));
+}
+
+#[gpui::test]
+fn desktop_server_takeover_disables_the_compatibility_input_and_native_handle(
+    cx: &mut TestAppContext,
+) {
+    let (fixture, pane, cx) = server_pane(cx, true);
+    assert!(pane.read_with(cx, |pane, _| {
+        pane.server_session
+            .as_ref()
+            .unwrap()
+            .native_permit()
+            .is_some()
+    }));
+    pane.update(cx, |pane, cx| {
+        pane.set_presentation(
+            PanePresentation::Takeover(super::super::pane_presentation::DisplayName::unnamed()),
+            cx,
+        )
+        .unwrap();
+        assert!(
+            pane.server_session
+                .as_ref()
+                .unwrap()
+                .native_permit()
+                .is_none()
+        );
+        pane.terminal_session
+            .session
+            .as_ref()
+            .unwrap()
+            .key(KeyInput::text_input("must not be sent"));
+    });
+    assert!(
+        fixture
+            .peer
+            .flush_effects()
+            .unwrap()
+            .iter()
+            .all(|effect| !matches!(
+                effect.command,
+                spaceterm_client::pane_channel::RuntimeEffect::Key(_)
+            ))
+    );
+}
+
+#[gpui::test]
+fn desktop_server_takeover_removes_paint_ax_copy_services_and_ime(cx: &mut TestAppContext) {
+    let (fixture, pane, cx) = server_pane(cx, true);
+    let binding = fixture.server.add_client(2).unwrap();
+    fixture
+        .server
+        .command(
+            fixture.server.next_operation(2).unwrap(),
+            spaceterm_core::operations::Command::TakeOver(
+                spaceterm_core::control::TakeOverRequest {
+                    epoch: spaceterm_core::authority::ServerEpoch::new(1),
+                    pane: fixture.channel.pane(),
+                    client: binding.target().client(),
+                },
+            ),
+        )
+        .unwrap();
+    fixture.peer.publish().unwrap();
+    pane.update(cx, |pane, cx| {
+        assert!(!pane.screen.rows.is_empty());
+        pane.ime.replace_and_mark(None, "private composition", None);
+        pane.set_presentation(
+            PanePresentation::Takeover(super::super::pane_presentation::DisplayName::unnamed()),
+            cx,
+        )
+        .unwrap();
+        assert!(pane.screen.rows.is_empty());
+        assert!(pane.last_valid_screen.rows.is_empty());
+        assert!(pane.accessibility.text().is_empty());
+        assert!(pane.ime.marked_text().is_none());
+        assert!(pane.ordered_selection_copy(cx).is_none());
+        assert!(!pane.native_context_actions().copy);
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("terminal-text").is_none());
+    assert!(cx.debug_bounds("pane-presentation-replacement").is_some());
+    cx.update(|window, cx| {
+        pane.update(cx, |pane, cx| {
+            let mut adjusted = None;
+            assert!(
+                pane.text_for_range(0..4, &mut adjusted, window, cx)
+                    .is_none()
+            );
+            assert!(pane.selected_text_range(true, window, cx).is_none());
+        });
+    });
+}
+
+#[gpui::test]
+fn desktop_server_offline_freezes_screen_and_never_replays_input(cx: &mut TestAppContext) {
+    let (fixture, pane, cx) = server_pane(cx, true);
+    let screen = pane.read_with(cx, |pane, _| pane.screen.clone());
+    let session = pane.read_with(cx, |pane, _| pane.server_session_handle().unwrap());
+    fixture
+        .channels
+        .invalidate(
+            fixture.server.server(),
+            spaceterm_client::ports::ConnectionInvalidation::ConnectionLost,
+        )
+        .unwrap();
+    cx.run_until_parked();
+    pane.update(cx, |pane, _| {
+        assert!(Arc::ptr_eq(&pane.screen, &screen));
+        assert!(pane.server_presentation.freezes_content());
+        assert!(session.native_permit().is_none());
+        session.key(KeyInput::text_input("discarded"));
+        session.input_method_commit("discarded IME");
+        session.resize(pane.last_geometry.unwrap());
+        session.focus(true);
+    });
+    fixture.peer.reconnect(2, 2).unwrap();
+    cx.run_until_parked();
+    assert!(
+        fixture
+            .peer
+            .flush_effects()
+            .unwrap()
+            .iter()
+            .all(|effect| !matches!(
+                effect.command,
+                spaceterm_client::pane_channel::RuntimeEffect::Key(_)
+                    | spaceterm_client::pane_channel::RuntimeEffect::InputMethodCommit(_)
+            ))
+    );
+    assert!(
+        session.native_permit().is_none(),
+        "reconnect alone cannot reenable native content"
+    );
+}
+
+#[gpui::test]
+fn desktop_server_offline_takeover_never_reveals_cached_content(cx: &mut TestAppContext) {
+    let (fixture, pane, cx) = server_pane(cx, true);
+    let binding = fixture.server.add_client(2).unwrap();
+    fixture
+        .server
+        .command(
+            fixture.server.next_operation(2).unwrap(),
+            spaceterm_core::operations::Command::TakeOver(
+                spaceterm_core::control::TakeOverRequest {
+                    epoch: spaceterm_core::authority::ServerEpoch::new(1),
+                    pane: fixture.channel.pane(),
+                    client: binding.target().client(),
+                },
+            ),
+        )
+        .unwrap();
+    fixture.peer.publish().unwrap();
+    fixture
+        .channels
+        .invalidate(
+            fixture.server.server(),
+            spaceterm_client::ports::ConnectionInvalidation::ConnectionLost,
+        )
+        .unwrap();
+    cx.run_until_parked();
+    pane.read_with(cx, |pane, _| {
+        assert!(pane.screen.rows.is_empty());
+        assert!(pane.last_valid_screen.rows.is_empty());
+        assert!(matches!(
+            pane.server_presentation,
+            PanePresentation::Offline {
+                prior: super::super::pane_presentation::OfflinePrior::Takeover(_),
+                ..
+            }
+        ));
+    });
+}
+
+#[gpui::test]
+fn desktop_server_drop_presentation_does_not_end_or_release_session(cx: &mut TestAppContext) {
+    let (fixture, pane, cx) = server_pane(cx, true);
+    let before = fixture.server.snapshot().unwrap();
+    let operations = fixture.server.received_operations().unwrap().len();
+    pane.update(cx, |pane, _| pane.close());
+    cx.run_until_parked();
+    let after = fixture.server.snapshot().unwrap();
+    assert_eq!(before.runtime(), after.runtime());
+    assert_eq!(
+        fixture.server.received_operations().unwrap().len(),
+        operations
+    );
+}
+
+#[gpui::test]
+fn desktop_server_remote_paths_grant_no_local_preview_authority(cx: &mut TestAppContext) {
+    let (_, pane, cx) = server_pane(cx, true);
+    pane.read_with(cx, |pane, _| {
+        assert!(!pane.terminal_session.local_file_capabilities.are_enabled());
+        assert!(!pane.native_context_actions().file_preview);
+        assert!(pane.repository_source().is_none());
+        assert!(pane.server_pane_id().is_some());
+    });
+}
+
+#[gpui::test]
+fn desktop_server_measurement_keeps_the_exact_ticket_and_reports_equal_geometry(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_client::view::{LayoutRevision, UseTicket};
+    let (fixture, pane, cx) = server_pane(cx, false);
+    let received = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let collected = received.clone();
+    pane.update(cx, |_, cx| {
+        cx.subscribe(&pane, move |_, _, event: &TerminalPaneEvent, _| {
+            if let TerminalPaneEvent::Measured(measurement) = event {
+                collected.borrow_mut().push(*measurement);
+            }
+        })
+        .detach()
+    });
+    pane.update(cx, |pane, cx| {
+        let token = pane.server_session.as_ref().unwrap().token();
+        pane.request_measurement(token, UseTicket::FIRST, LayoutRevision::INITIAL, cx)
+            .unwrap();
+        pane.request_measurement(
+            token,
+            UseTicket::new(2).unwrap(),
+            LayoutRevision::new(1),
+            cx,
+        )
+        .unwrap();
+    });
+    cx.run_until_parked();
+    let received = received.borrow();
+    assert_eq!(received.len(), 2);
+    assert_eq!(received[0].grid, received[1].grid);
+    assert_eq!(received[0].ticket, UseTicket::FIRST);
+    assert_eq!(received[1].ticket, UseTicket::new(2).unwrap());
+    assert_eq!(received[1].layout, LayoutRevision::new(1));
+    assert!(matches!(
+        fixture.server.snapshot().unwrap().runtime()[0].phase,
+        spaceterm_core::organization::SessionPhase::NotStarted
+    ));
+}
+
+#[gpui::test]
+fn desktop_server_geometry_rejects_nonfinite_and_oversized_measurements_without_resize(
+    cx: &mut TestAppContext,
+) {
+    let (fixture, pane, cx) = server_pane(cx, true);
+    fixture.peer.flush_effects().unwrap();
+    pane.update(cx, |pane, cx| {
+        pane.update_grid_bounds(
+            Bounds::new(point(px(0.0), px(0.0)), size(px(f32::INFINITY), px(100.0))),
+            cx,
+        );
+        assert_eq!(
+            pane.measured_grid(),
+            Err(DesktopClientError::InvalidGeometry)
+        );
+    });
+    assert!(fixture.peer.flush_effects().unwrap().is_empty());
+}
+
+#[gpui::test]
+fn desktop_server_explicit_use_starts_once_at_measured_geometry(cx: &mut TestAppContext) {
+    let (fixture, pane, cx) = server_pane(cx, false);
+    let grid = pane.read_with(cx, |pane, _| pane.measured_grid().unwrap().unwrap());
+    let intent = fixture
+        .runtime
+        .as_ref()
+        .unwrap()
+        .block_on(
+            fixture
+                .channel
+                .explicit_use(spaceterm_client::pane_channel::ExplicitUseSource::StartSession),
+        )
+        .unwrap()
+        .startup()
+        .unwrap();
+    fixture
+        .runtime
+        .as_ref()
+        .unwrap()
+        .block_on(fixture.channel.complete_intent(&intent, grid))
+        .unwrap();
+    assert!(
+        fixture
+            .runtime
+            .as_ref()
+            .unwrap()
+            .block_on(fixture.channel.complete_intent(&intent, grid))
+            .is_err()
+    );
+    let snapshot = fixture.server.snapshot().unwrap();
+    assert!(matches!(
+        snapshot.runtime()[0].phase,
+        spaceterm_core::organization::SessionPhase::Running { .. }
+    ));
+    let requests = fixture.server.received_operations().unwrap();
+    assert_eq!(
+        requests.len(),
+        3,
+        "creation, explicit use and one measured completion"
+    );
+}
+
+fn server_selection(
+    fixture: &super::super::server_pane_session::tests::Fixture,
+) -> spaceterm_core::content_queries::QueryStamp {
+    use spaceterm_core::content_queries::*;
+    let stamp = fixture.frame();
+    let cell = spaceterm_core::content::CellRef {
+        session: stamp.base().session,
+        row: spaceterm_core::content::RowId {
+            screen: stamp.base().screen,
+            screen_generation: stamp.base().screen_generation,
+            node_serial: 1,
+            page_row: 0,
+        },
+        row_revision: 1,
+        column: 0,
+    };
+    let selection = ContentSelection::new(
+        stamp,
+        cell,
+        spaceterm_core::content::CellRef { column: 4, ..cell },
+        false,
+    )
+    .unwrap();
+    fixture
+        .channel
+        .projection()
+        .lock()
+        .unwrap()
+        .set_selection(Some(selection))
+        .unwrap();
+    stamp
+}
+
+fn copy_items(
+    request: spaceterm_core::content_queries::CopyRequest,
+    complete: bool,
+) -> Vec<spaceterm_client::pane_channel::PaneReadItem> {
+    use sha2::{Digest, Sha256};
+    use spaceterm_core::content_queries::*;
+    let transfer = ResourceTransferId::new(1).unwrap();
+    let mut items = vec![spaceterm_client::pane_channel::PaneReadItem::Copy(
+        CopyStreamItem::Chunk(
+            CopyChunk::new(&request, transfer, CopyPart::Plain, 0, 5, b"priva".to_vec()).unwrap(),
+        ),
+    )];
+    if complete {
+        items.push(spaceterm_client::pane_channel::PaneReadItem::Copy(
+            CopyStreamItem::Complete(
+                CopyCompletion::new(
+                    &request,
+                    transfer,
+                    5,
+                    Sha256::digest(b"priva").into(),
+                    Some((0, Sha256::digest(b"").into())),
+                )
+                .unwrap(),
+            ),
+        ));
+    }
+    items
+}
+
+#[gpui::test]
+fn desktop_server_services_reads_only_complete_current_prepared_copy(cx: &mut TestAppContext) {
+    let (fixture, pane, cx) = server_pane(cx, true);
+    server_selection(&fixture);
+    pane.update(cx, |pane, cx| pane.sync_server_screen(cx));
+    let session = pane.read_with(cx, |pane, _| pane.server_session_handle().unwrap());
+    let request = session.copy_request().unwrap().unwrap();
+    fixture.peer.queue_read(copy_items(request, false)).unwrap();
+    let preparation = session.prepare_copy(request).unwrap();
+    assert_eq!(session.copy_selection().unwrap(), None);
+    assert!(cx.foreground_executor().block_test(preparation).is_err());
+    assert_eq!(session.copy_selection().unwrap(), None);
+    let request = session.copy_request().unwrap().unwrap();
+    fixture.peer.queue_read(copy_items(request, true)).unwrap();
+    let preparation = session.prepare_copy(request).unwrap();
+    let lease = cx.foreground_executor().block_test(preparation).unwrap();
+    assert_eq!(lease.plain(), Some("priva"));
+    let generation = pane.read_with(cx, |pane, _| pane.screen.generation);
+    assert_eq!(
+        session.prepared_copy(generation).unwrap().plain_text,
+        "priva"
+    );
+    assert_eq!(
+        session.copy_selection().unwrap().unwrap().plain_text,
+        "priva"
+    );
+    fixture.lease.invalidate().unwrap();
+    assert_eq!(session.copy_selection().unwrap(), None);
+}
+
+#[gpui::test]
+fn desktop_server_stale_prepared_copy_completion_has_no_clipboard_effect(cx: &mut TestAppContext) {
+    let (fixture, pane, cx) = server_pane(cx, true);
+    server_selection(&fixture);
+    pane.update(cx, |pane, cx| pane.sync_server_screen(cx));
+    let session = pane.read_with(cx, |pane, _| pane.server_session_handle().unwrap());
+    let request = session.copy_request().unwrap().unwrap();
+    fixture.peer.queue_read(copy_items(request, true)).unwrap();
+    let preparation = session.prepare_copy(request).unwrap();
+    fixture.lease.invalidate().unwrap();
+    assert!(cx.foreground_executor().block_test(preparation).is_err());
+    assert!(session.copy_selection().unwrap().is_none());
+}
+
+#[gpui::test]
+fn desktop_server_end_all_clears_inactive_and_frozen_content(cx: &mut TestAppContext) {
+    use spaceterm_client::replica::{OrganizationResidency, Replica};
+    use spaceterm_core::organization::{EndReason, OrganizationSnapshot, SessionPhase};
+    let (fixture, pane, cx) = server_pane(cx, true);
+    let old_stamp = server_selection(&fixture);
+    pane.update(cx, |pane, cx| {
+        pane.sync_server_screen(cx);
+        pane.set_product_focus(
+            TerminalProductFocus {
+                active_tab: false,
+                ..TerminalProductFocus::default()
+            },
+            cx,
+        );
+    });
+    fixture
+        .channels
+        .invalidate(
+            fixture.server.server(),
+            spaceterm_client::ports::ConnectionInvalidation::ConnectionLost,
+        )
+        .unwrap();
+    cx.run_until_parked();
+    let snapshot = fixture.server.snapshot().unwrap();
+    let mut runtime = snapshot.runtime().to_vec();
+    runtime[0].phase = SessionPhase::Ended {
+        reason: EndReason::EndAllSessions,
+    };
+    // The server publication is the uncontrolled boundary. The replica and channel validate the
+    // real DTO rather than the test inserting an ended screen into the desktop.
+    let ended =
+        OrganizationSnapshot::new(snapshot.epoch(), snapshot.state().clone(), runtime).unwrap();
+    let mut replica = Replica::new(
+        fixture.server.server(),
+        Arc::new(
+            OrganizationResidency::new(spaceterm_client::limits::ClientLimits::default()).unwrap(),
+        ),
+    );
+    let token = replica.begin_resync(ended.epoch()).unwrap();
+    replica.install_snapshot(token, ended).unwrap();
+    let info = fixture.server.connected_info(1, 2, 2, 2).unwrap();
+    let publication = replica.subscribe().borrow().retained().cloned().unwrap();
+    fixture.channels.publish(info, publication).unwrap();
+    cx.run_until_parked();
+    pane.read_with(cx, |pane, _| {
+        assert!(pane.screen.rows.is_empty());
+        assert!(pane.last_valid_screen.rows.is_empty());
+        assert!(pane.accessibility.text().is_empty());
+        assert!(matches!(
+            pane.server_presentation,
+            PanePresentation::Ended {
+                reason: super::super::pane_presentation::SessionEndReason::EndAllSessions
+            }
+        ));
+    });
+    assert!(
+        fixture
+            .channel
+            .projection()
+            .lock()
+            .unwrap()
+            .set_selection(Some(
+                spaceterm_core::content_queries::ContentSelection::new(
+                    old_stamp,
+                    spaceterm_core::content::CellRef {
+                        session: old_stamp.base().session,
+                        row: spaceterm_core::content::RowId {
+                            screen: old_stamp.base().screen,
+                            screen_generation: 1,
+                            node_serial: 1,
+                            page_row: 0
+                        },
+                        row_revision: 1,
+                        column: 0
+                    },
+                    spaceterm_core::content::CellRef {
+                        session: old_stamp.base().session,
+                        row: spaceterm_core::content::RowId {
+                            screen: old_stamp.base().screen,
+                            screen_generation: 1,
+                            node_serial: 1,
+                            page_row: 0
+                        },
+                        row_revision: 1,
+                        column: 1
+                    },
+                    false,
+                )
+                .unwrap()
+            ))
+            .is_err()
+    );
+}
+
+#[gpui::test]
+fn desktop_server_failed_session_keeps_pane_and_its_typed_recovery(cx: &mut TestAppContext) {
+    let (fixture, pane, cx) = server_pane(cx, true);
+    let session = fixture
+        .channel
+        .permit(spaceterm_client::pane_channel::EffectKind::Read)
+        .unwrap()
+        .fence()
+        .session();
+    fixture
+        .server
+        .event(spaceterm_core::reducer::OrganizationEvent::RuntimeFailed {
+            session,
+            class: spaceterm_core::organization::FailureClass::ResourceLimit,
+        })
+        .unwrap();
+    fixture.peer.publish().unwrap();
+    cx.run_until_parked();
+    assert_eq!(fixture.server.snapshot().unwrap().state().panes.len(), 1);
+    pane.read_with(cx, |pane, _| {
+        assert!(pane.screen.rows.is_empty());
+        assert_eq!(
+            pane.server_presentation,
+            PanePresentation::Failed {
+                class: super::super::pane_presentation::PaneFailureClass::ResourceLimit
+            }
+        );
+    });
+}
+
+#[gpui::test]
+fn desktop_server_clipboard_write_revalidates_before_the_native_effect(cx: &mut TestAppContext) {
+    use spaceterm_client::pane_channel::{EffectKind, NativeTiming};
+    use spaceterm_core::{native_requests::*, observations::MonotonicTick};
+    let (fixture, pane, cx) = server_pane(cx, true);
+    let fence = fixture.channel.permit(EffectKind::Read).unwrap().fence();
+    let request = NativeRequest::new(
+        fence,
+        NativeRequestId::new(1).unwrap(),
+        MonotonicTick::new(0),
+        MonotonicTick::new(0),
+        Some(MonotonicTick::new(1000)),
+        NativeRequestKind::ClipboardWrite(NativeText::new("native result".to_owned()).unwrap()),
+    )
+    .unwrap();
+    fixture
+        .channel
+        .receive_native(
+            request,
+            NativeTiming {
+                not_before: Duration::ZERO,
+                expires_after: Some(Duration::from_secs(1)),
+            },
+        )
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(
+        cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text())),
+        Some("native result".to_owned())
+    );
+    let request = NativeRequest::new(
+        fence,
+        NativeRequestId::new(2).unwrap(),
+        MonotonicTick::new(0),
+        MonotonicTick::new(0),
+        Some(MonotonicTick::new(1000)),
+        NativeRequestKind::ClipboardWrite(NativeText::new("stale result".to_owned()).unwrap()),
+    )
+    .unwrap();
+    fixture
+        .channel
+        .receive_native(
+            request,
+            NativeTiming {
+                not_before: Duration::ZERO,
+                expires_after: Some(Duration::from_secs(1)),
+            },
+        )
+        .unwrap();
+    fixture.lease.invalidate().unwrap();
+    cx.run_until_parked();
+    assert_eq!(
+        cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text())),
+        Some("native result".to_owned())
+    );
+    pane.read_with(cx, |pane, _| {
+        assert!(
+            pane.server_session
+                .as_ref()
+                .unwrap()
+                .native_permit()
+                .is_none()
+        )
+    });
+}
+
+#[gpui::test]
+fn desktop_server_cancelled_or_stale_measurement_cannot_start(cx: &mut TestAppContext) {
+    use spaceterm_client::view::{LayoutRevision, UseTicket};
+    let (fixture, pane, cx) = server_pane(cx, false);
+    let received = Rc::new(Cell::new(0));
+    let count = received.clone();
+    pane.update(cx, |_, cx| {
+        cx.subscribe(&pane, move |_, _, event: &TerminalPaneEvent, _| {
+            if matches!(event, TerminalPaneEvent::Measured(_)) {
+                count.set(count.get() + 1);
+            }
+        })
+        .detach()
+    });
+    pane.update(cx, |pane, cx| {
+        pane.last_geometry = None;
+        pane.grid_bounds = None;
+        let token = pane.server_session.as_ref().unwrap().token();
+        pane.request_measurement(token, UseTicket::FIRST, LayoutRevision::INITIAL, cx)
+            .unwrap();
+        let server = pane.server_session_handle().unwrap();
+        server
+            .update_context(spaceterm_client::pane_channel::PaneContextFacts::default())
+            .unwrap();
+        pane.update_grid_bounds(
+            Bounds::new(point(px(0.0), px(0.0)), size(px(400.0), px(200.0))),
+            cx,
+        );
+    });
+    assert_eq!(
+        received.get(),
+        0,
+        "a new context must not retag the old use ticket"
+    );
+    assert!(matches!(
+        fixture.server.snapshot().unwrap().runtime()[0].phase,
+        spaceterm_core::organization::SessionPhase::NotStarted
+    ));
+}
+
+#[gpui::test]
+fn desktop_server_find_keeps_query_and_navigation_personal(cx: &mut TestAppContext) {
+    use spaceterm_client::pane_channel::PaneReadItem;
+    use spaceterm_core::content_queries::*;
+    let (fixture, pane, cx) = server_pane(cx, true);
+    let session = pane.read_with(cx, |pane, _| pane.server_session_handle().unwrap());
+    let before = fixture.server.received_operations().unwrap().len();
+    let generation = FindQueryGeneration::test(1);
+    session.set_find_query(generation, "priva".to_owned());
+    let request = fixture
+        .channel
+        .projection()
+        .lock()
+        .unwrap()
+        .find()
+        .request()
+        .cloned()
+        .unwrap();
+    let row = spaceterm_core::content::RowId {
+        screen: request.stamp().base().screen,
+        screen_generation: 1,
+        node_serial: 1,
+        page_row: 0,
+    };
+    let start = spaceterm_core::content::CellRef {
+        session: request.stamp().base().session,
+        row,
+        row_revision: 1,
+        column: 0,
+    };
+    let found = FindMatch::new(
+        request.stamp(),
+        start,
+        spaceterm_core::content::CellRef { column: 4, ..start },
+    )
+    .unwrap();
+    fixture
+        .peer
+        .queue_read(vec![
+            PaneReadItem::Find(FindStreamItem::Chunk(Box::new(
+                FindChunk::new(&request, 0, vec![found], None).unwrap(),
+            ))),
+            PaneReadItem::Find(FindStreamItem::Complete {
+                stamp: request.stamp(),
+                chunks: 1,
+            }),
+        ])
+        .unwrap();
+    cx.run_until_parked();
+    session.navigate_find(generation, FindDirection::Next);
+    assert_eq!(
+        fixture
+            .channel
+            .projection()
+            .lock()
+            .unwrap()
+            .viewport()
+            .anchor,
+        Some(row)
+    );
+    assert_eq!(fixture.server.received_operations().unwrap().len(), before);
+    session.end_find(FindQueryGeneration::test(2));
+    assert!(
+        fixture
+            .channel
+            .projection()
+            .lock()
+            .unwrap()
+            .find()
+            .request()
+            .is_none()
+    );
+    session.navigate_find(generation, FindDirection::Previous);
+    assert_eq!(
+        fixture
+            .channel
+            .projection()
+            .lock()
+            .unwrap()
+            .viewport()
+            .anchor,
+        Some(row)
+    );
+}
+
+#[gpui::test]
+fn desktop_server_semantic_projection_keeps_styles_and_web_links_without_file_authority(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_client::pane_channel::EffectKind;
+    use spaceterm_core::{content::*, content_queries::RequestGeneration};
+    let (fixture, pane, cx) = server_pane(cx, true);
+    let permit = fixture.channel.permit(EffectKind::Read).unwrap();
+    let stamp = fixture
+        .channel
+        .query_stamp(&permit, RequestGeneration::new(2))
+        .unwrap();
+    let file = HyperlinkId::new(1).unwrap();
+    let web = HyperlinkId::new(2).unwrap();
+    let mut parts = ContentPageParts::new(stamp.base(), 2);
+    parts.hyperlinks = vec![
+        HyperlinkDescriptor::new(file, "file:///private/server-only".to_owned()).unwrap(),
+        HyperlinkDescriptor::new(web, "https://example.test/".to_owned()).unwrap(),
+    ];
+    let row = RowId {
+        screen: stamp.base().screen,
+        screen_generation: stamp.base().screen_generation,
+        node_serial: 1,
+        page_row: 0,
+    };
+    parts.rows.push(
+        ContentRow::new(
+            row,
+            1,
+            false,
+            vec![
+                StyledCell::new(
+                    CellContent::grapheme("a".to_owned(), CellWidth::Single).unwrap(),
+                    CellStyle {
+                        italic: true,
+                        ..CellStyle::default()
+                    },
+                    Some(file),
+                ),
+                StyledCell::new(
+                    CellContent::grapheme("b".to_owned(), CellWidth::Single).unwrap(),
+                    CellStyle {
+                        bold: true,
+                        foreground: TerminalColor::Rgb(Rgb { r: 1, g: 2, b: 3 }),
+                        ..CellStyle::default()
+                    },
+                    Some(web),
+                ),
+            ],
+        )
+        .unwrap(),
+    );
+    fixture
+        .channel
+        .projection()
+        .lock()
+        .unwrap()
+        .accept_page(stamp, ContentPage::new(parts).unwrap())
+        .unwrap();
+    pane.update(cx, |pane, cx| pane.sync_server_screen(cx));
+    pane.read_with(cx, |pane, _| {
+        assert!(pane.screen.rows[0][0].italic);
+        assert!(pane.screen.rows[0][0].hyperlink.is_none());
+        let link = pane.screen.rows[0][1].hyperlink.as_ref().unwrap();
+        assert_eq!(link.value, "https://example.test/");
+        assert!(link.local_file.is_none());
+        assert!(pane.screen.rows[0][1].bold);
+        assert_eq!(
+            pane.screen.rows[0][1].foreground_source,
+            crate::terminal::TerminalColor::Rgb(Color::rgb(0x010203))
+        );
+    });
+}
+
+#[gpui::test]
+fn desktop_server_reconciled_pane_remeasures_geometry_without_starting(cx: &mut TestAppContext) {
+    let (fixture, pane, cx) = server_pane(cx, true);
+    let operations = fixture.server.received_operations().unwrap().len();
+    pane.update(cx, |pane, cx| {
+        pane.set_presentation(
+            PanePresentation::Offline {
+                prior: super::super::pane_presentation::OfflinePrior::Frozen,
+                cause: super::super::pane_presentation::OfflineCause::Unreachable,
+            },
+            cx,
+        )
+        .unwrap();
+        pane.update_grid_bounds(
+            Bounds::new(point(px(0.0), px(0.0)), size(px(500.0), px(300.0))),
+            cx,
+        );
+        pane.set_presentation(PanePresentation::Live, cx).unwrap();
+        assert!(
+            pane.last_geometry.is_none(),
+            "the next layout, not an offline measurement, supplies the resize"
+        );
+    });
+    cx.run_until_parked();
+    assert!(pane.read_with(cx, |pane, _| pane.last_geometry.is_some()));
+    assert_eq!(
+        fixture.server.received_operations().unwrap().len(),
+        operations
+    );
+}
+
+#[gpui::test]
+fn desktop_server_context_rejects_a_stale_token_even_when_unchanged(cx: &mut TestAppContext) {
+    let (fixture, pane, cx) = server_pane(cx, true);
+    let token = pane.read_with(cx, |pane, _| pane.server_session_handle().unwrap().token());
+    fixture
+        .channel
+        .update_context(spaceterm_client::pane_channel::PaneContextFacts::default())
+        .unwrap();
+    pane.update(cx, |pane, cx| {
+        assert_eq!(
+            pane.set_server_context(token, cx),
+            Err(DesktopClientError::StaleContext)
+        )
+    });
+}
+
+#[gpui::test]
+fn desktop_server_new_layout_does_not_retag_cached_geometry(cx: &mut TestAppContext) {
+    use spaceterm_client::view::{LayoutRevision, UseTicket};
+    let (_, pane, cx) = server_pane(cx, false);
+    let received = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let collected = received.clone();
+    pane.update(cx, |_, cx| {
+        cx.subscribe(&pane, move |_, _, event: &TerminalPaneEvent, _| {
+            if let TerminalPaneEvent::Measured(measurement) = event {
+                collected.borrow_mut().push(*measurement);
+            }
+        })
+        .detach()
+    });
+    pane.update(cx, |pane, cx| {
+        let token = pane.server_session_handle().unwrap().token();
+        pane.request_measurement(token, UseTicket::FIRST, LayoutRevision::INITIAL, cx)
+            .unwrap();
+    });
+    cx.run_until_parked();
+    assert_eq!(received.borrow().len(), 1);
+    pane.update(cx, |pane, cx| {
+        let token = pane.server_session_handle().unwrap().token();
+        pane.request_measurement(
+            token,
+            UseTicket::new(2).unwrap(),
+            LayoutRevision::new(1),
+            cx,
+        )
+        .unwrap();
+        assert_eq!(
+            pane.measured_grid(),
+            Ok(None),
+            "the new layout cannot reuse older geometry"
+        );
+    });
+    cx.run_until_parked();
+    let received = received.borrow();
+    assert_eq!(received.len(), 2);
+    assert_eq!(received[1].layout, LayoutRevision::new(1));
+}
+
+#[gpui::test]
+fn desktop_server_reconciled_running_content_resumes_without_explicit_use(cx: &mut TestAppContext) {
+    let (fixture, pane, cx) = server_pane(cx, true);
+    let operations = fixture.server.received_operations().unwrap().len();
+    fixture
+        .channels
+        .invalidate(
+            fixture.server.server(),
+            spaceterm_client::ports::ConnectionInvalidation::ConnectionLost,
+        )
+        .unwrap();
+    cx.run_until_parked();
+    fixture.peer.reconnect(2, 2).unwrap();
+    cx.run_until_parked();
+    fixture.publish_base(2);
+    fixture.frame();
+    cx.run_until_parked();
+    pane.read_with(cx, |pane, _| {
+        assert_eq!(pane.server_presentation, PanePresentation::Live);
+        assert!(
+            pane.server_session_handle()
+                .unwrap()
+                .native_permit()
+                .is_some()
+        );
+    });
+    assert_eq!(
+        fixture.server.received_operations().unwrap().len(),
+        operations
+    );
+}
+
+#[gpui::test]
+fn desktop_server_take_over_reports_its_selection_source(cx: &mut TestAppContext) {
+    let (fixture, pane, cx) = server_pane(cx, true);
+    let binding = fixture.server.add_client(2).unwrap();
+    fixture
+        .server
+        .command(
+            fixture.server.next_operation(2).unwrap(),
+            spaceterm_core::operations::Command::TakeOver(
+                spaceterm_core::control::TakeOverRequest {
+                    epoch: spaceterm_core::authority::ServerEpoch::new(1),
+                    pane: fixture.channel.pane(),
+                    client: binding.target().client(),
+                },
+            ),
+        )
+        .unwrap();
+    fixture.peer.publish().unwrap();
+    let actions = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let received = actions.clone();
+    pane.update(cx, |_, cx| {
+        cx.subscribe(&pane, move |_, _, event: &TerminalPaneEvent, _| {
+            if let TerminalPaneEvent::ActionRequested(action) = event {
+                received.borrow_mut().push(*action);
+            }
+        })
+        .detach();
+    });
+    cx.run_until_parked();
+    cx.dispatch_action(super::super::server_pane_actions::TakeOverPane);
+    cx.run_until_parked();
+    assert!(actions.borrow().is_empty());
+    cx.executor()
+        .advance_clock(super::super::pane_presentation::TAKEOVER_ARMING_DELAY);
+    cx.run_until_parked();
+    cx.dispatch_action(super::super::server_pane_actions::TakeOverPane);
+    cx.run_until_parked();
+    let position = cx
+        .debug_bounds("pane-presentation-take-over")
+        .unwrap()
+        .center();
+    cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    let tree = spaceterm_ui::a11y_testing::A11yTree::read(cx);
+    spaceterm_ui::a11y_testing::perform(cx, tree.node("Take Over"), gpui::accesskit::Action::Click);
+    cx.run_until_parked();
+    assert_eq!(
+        *actions.borrow(),
+        [
+            PaneAction::TakeOver(SelectionSource::Command),
+            PaneAction::TakeOver(SelectionSource::Pointer),
+            PaneAction::TakeOver(SelectionSource::AccessibilityPress),
+        ]
+    );
+}
+
+#[gpui::test]
+fn desktop_server_retained_render_element_revalidates_at_final_paint(cx: &mut TestAppContext) {
+    struct RevokeAtPrepaint {
+        lease: spaceterm_client::pane_channel::WorkspaceLease,
+        paints: Rc<Cell<usize>>,
+    }
+    impl gpui::IntoElement for RevokeAtPrepaint {
+        type Element = Self;
+        fn into_element(self) -> Self {
+            self
+        }
+    }
+    impl gpui::Element for RevokeAtPrepaint {
+        type RequestLayoutState = ();
+        type PrepaintState = ();
+        fn id(&self) -> Option<gpui::ElementId> {
+            None
+        }
+        fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+            None
+        }
+        fn request_layout(
+            &mut self,
+            _: Option<&gpui::GlobalElementId>,
+            _: Option<&gpui::InspectorElementId>,
+            window: &mut Window,
+            cx: &mut App,
+        ) -> (gpui::LayoutId, ()) {
+            (window.request_layout(gpui::Style::default(), [], cx), ())
+        }
+        fn prepaint(
+            &mut self,
+            _: Option<&gpui::GlobalElementId>,
+            _: Option<&gpui::InspectorElementId>,
+            _: Bounds<Pixels>,
+            _: &mut (),
+            _: &mut Window,
+            _: &mut App,
+        ) {
+            self.lease.invalidate().unwrap();
+        }
+        fn paint(
+            &mut self,
+            _: Option<&gpui::GlobalElementId>,
+            _: Option<&gpui::InspectorElementId>,
+            _: Bounds<Pixels>,
+            _: &mut (),
+            _: &mut (),
+            _: &mut Window,
+            _: &mut App,
+        ) {
+            self.paints.set(self.paints.get() + 1);
+        }
+    }
+    let (fixture, _, cx) = server_pane(cx, true);
+    let frame = fixture.channel.current_frame().unwrap();
+    let paints = Rc::new(Cell::new(0));
+    let mut element = super::super::server_pane_session::FencedPaneContent::new(
+        RevokeAtPrepaint {
+            lease: fixture.lease.clone(),
+            paints: paints.clone(),
+        },
+        Some(frame),
+        None,
+        |_| true,
+    );
+    cx.update(|window, cx| {
+        use gpui::Element;
+        let mut layout = ();
+        let bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(100.0), px(100.0)));
+        let mut prepaint = element.prepaint(None, None, bounds, &mut layout, window, cx);
+        element.paint(None, None, bounds, &mut layout, &mut prepaint, window, cx);
+    });
+    assert_eq!(
+        paints.get(),
+        0,
+        "a retained frame cannot paint or register an IME handler after revocation"
+    );
+}
+
+#[gpui::test]
+fn desktop_server_takeover_typing_return_and_tab_never_request_take_over(cx: &mut TestAppContext) {
+    let (fixture, pane, cx) = server_pane(cx, true);
+    let binding = fixture.server.add_client(2).unwrap();
+    fixture
+        .server
+        .command(
+            fixture.server.next_operation(2).unwrap(),
+            spaceterm_core::operations::Command::TakeOver(
+                spaceterm_core::control::TakeOverRequest {
+                    epoch: spaceterm_core::authority::ServerEpoch::new(1),
+                    pane: fixture.channel.pane(),
+                    client: binding.target().client(),
+                },
+            ),
+        )
+        .unwrap();
+    fixture.peer.publish().unwrap();
+    let actions = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let received = actions.clone();
+    pane.update(cx, |_, cx| {
+        cx.subscribe(&pane, move |_, _, event: &TerminalPaneEvent, _| {
+            if let TerminalPaneEvent::ActionRequested(action) = event {
+                received.borrow_mut().push(*action);
+            }
+        })
+        .detach();
+    });
+    cx.run_until_parked();
+    cx.executor()
+        .advance_clock(super::super::pane_presentation::TAKEOVER_ARMING_DELAY);
+    cx.run_until_parked();
+    cx.simulate_keystrokes("a enter tab enter space");
+    cx.run_until_parked();
+    assert!(actions.borrow().is_empty());
+    assert!(fixture.peer.flush_effects().unwrap().is_empty());
+}
+
+#[gpui::test]
+fn desktop_server_stale_takeover_menu_token_cannot_request_control(cx: &mut TestAppContext) {
+    let (fixture, pane, cx) = server_pane(cx, true);
+    let binding = fixture.server.add_client(2).unwrap();
+    fixture
+        .server
+        .command(
+            fixture.server.next_operation(2).unwrap(),
+            spaceterm_core::operations::Command::TakeOver(
+                spaceterm_core::control::TakeOverRequest {
+                    epoch: spaceterm_core::authority::ServerEpoch::new(1),
+                    pane: fixture.channel.pane(),
+                    client: binding.target().client(),
+                },
+            ),
+        )
+        .unwrap();
+    fixture.peer.publish().unwrap();
+    cx.run_until_parked();
+    cx.executor()
+        .advance_clock(super::super::pane_presentation::TAKEOVER_ARMING_DELAY);
+    cx.run_until_parked();
+    cx.simulate_keystrokes("shift-f10");
+    cx.run_until_parked();
+    let menu = spaceterm_ui::a11y_testing::A11yTree::read(cx);
+    let items = menu.with_role("MenuItem");
+    assert_eq!(items.len(), 1);
+    let actions = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let received = actions.clone();
+    pane.update(cx, |_, cx| {
+        cx.subscribe(&pane, move |_, _, event: &TerminalPaneEvent, _| {
+            if let TerminalPaneEvent::ActionRequested(action) = event {
+                received.borrow_mut().push(*action);
+            }
+        })
+        .detach();
+    });
+    fixture
+        .channel
+        .update_context(spaceterm_client::pane_channel::PaneContextFacts::default())
+        .unwrap();
+    spaceterm_ui::a11y_testing::perform(cx, items[0], gpui::accesskit::Action::Click);
+    cx.run_until_parked();
+    assert!(actions.borrow().is_empty());
+}
+
+#[gpui::test]
+fn desktop_server_shift_f10_reaches_the_shell_while_live(cx: &mut TestAppContext) {
+    let (fixture, pane, cx) = server_pane(cx, true);
+    fixture.peer.flush_effects().unwrap();
+    cx.simulate_keystrokes("shift-f10");
+    cx.run_until_parked();
+    assert!(
+        spaceterm_ui::a11y_testing::A11yTree::read(cx)
+            .with_role("MenuItem")
+            .is_empty()
+    );
+    assert!(fixture.peer.flush_effects().unwrap().iter().any(|effect| {
+        matches!(&effect.command, spaceterm_client::pane_channel::RuntimeEffect::Key(input) if input.physical_key == PhysicalKey::F10 && input.modifiers.shift)
+    }), "Shift+F10 is terminal input, not a takeover shortcut while live");
+    assert!(pane.read_with(cx, |pane, _| pane.server_presentation.accepts_input()));
+}
+
+#[gpui::test]
+fn desktop_server_find_navigation_rescans_beyond_the_first_result_window(cx: &mut TestAppContext) {
+    use spaceterm_client::pane_channel::PaneReadItem;
+    use spaceterm_core::content_queries::*;
+    let (fixture, pane, cx) = server_pane(cx, true);
+    let session = pane.read_with(cx, |pane, _| pane.server_session_handle().unwrap());
+    let operations = fixture.server.received_operations().unwrap().len();
+    let generation = FindQueryGeneration::test(1);
+    session.set_find_query(generation, "match".to_owned());
+    let request = fixture
+        .channel
+        .projection()
+        .lock()
+        .unwrap()
+        .find()
+        .request()
+        .cloned()
+        .unwrap();
+    let make_match = |serial| {
+        let row = spaceterm_core::content::RowId {
+            screen: request.stamp().base().screen,
+            screen_generation: 1,
+            node_serial: serial,
+            page_row: 0,
+        };
+        let start = spaceterm_core::content::CellRef {
+            session: request.stamp().base().session,
+            row,
+            row_revision: 1,
+            column: 0,
+        };
+        FindMatch::new(
+            request.stamp(),
+            start,
+            spaceterm_core::content::CellRef { column: 4, ..start },
+        )
+        .unwrap()
+    };
+    let first = make_match(1);
+    let second = make_match(2);
+    let results = || {
+        vec![
+            PaneReadItem::Find(FindStreamItem::Chunk(Box::new(
+                FindChunk::new(&request, 0, vec![first], None).unwrap(),
+            ))),
+            PaneReadItem::Find(FindStreamItem::Chunk(Box::new(
+                FindChunk::new(&request, 1, vec![second], None).unwrap(),
+            ))),
+            PaneReadItem::Find(FindStreamItem::Complete {
+                stamp: request.stamp(),
+                chunks: 2,
+            }),
+        ]
+    };
+    fixture.peer.queue_read(results()).unwrap();
+    cx.run_until_parked();
+    session.navigate_find(generation, FindDirection::Next);
+    cx.run_until_parked();
+    fixture.peer.queue_read(results()).unwrap();
+    session.navigate_find(generation, FindDirection::Next);
+    cx.run_until_parked();
+    assert_eq!(
+        fixture
+            .channel
+            .projection()
+            .lock()
+            .unwrap()
+            .viewport()
+            .anchor,
+        Some(second.start().row)
+    );
+    assert_eq!(
+        fixture.server.received_operations().unwrap().len(),
+        operations
+    );
+}
+
+#[gpui::test]
+fn desktop_server_start_session_reports_explicit_use_once(cx: &mut TestAppContext) {
+    let (fixture, pane, cx) = server_pane(cx, false);
+    let actions = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let received = actions.clone();
+    pane.update(cx, |_, cx| {
+        cx.subscribe(&pane, move |_, _, event: &TerminalPaneEvent, _| {
+            if let TerminalPaneEvent::ActionRequested(action) = event {
+                received.borrow_mut().push(*action);
+            }
+        })
+        .detach();
+    });
+    let tree = spaceterm_ui::a11y_testing::A11yTree::read(cx);
+    assert_ne!(tree.node("Start Session")["aria"]["disabled"], true);
+    spaceterm_ui::a11y_testing::perform(
+        cx,
+        tree.node("Start Session"),
+        gpui::accesskit::Action::Click,
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        *actions.borrow(),
+        [PaneAction::StartSession(
+            SelectionSource::AccessibilityPress
+        )]
+    );
+    assert!(
+        matches!(
+            fixture.server.snapshot().unwrap().runtime()[0].phase,
+            spaceterm_core::organization::SessionPhase::NotStarted
+        ),
+        "the event's owner retains the startup intent; a button never bypasses it"
+    );
+}
+
+#[gpui::test]
+fn desktop_server_takeover_arms_before_the_first_draw(cx: &mut TestAppContext) {
+    let (fixture, pane, cx) = server_pane(cx, true);
+    pane.update(cx, |pane, cx| {
+        pane.set_product_focus(
+            TerminalProductFocus {
+                active_tab: false,
+                ..TerminalProductFocus::default()
+            },
+            cx,
+        );
+    });
+    let binding = fixture.server.add_client(2).unwrap();
+    fixture
+        .server
+        .command(
+            fixture.server.next_operation(2).unwrap(),
+            spaceterm_core::operations::Command::TakeOver(
+                spaceterm_core::control::TakeOverRequest {
+                    epoch: spaceterm_core::authority::ServerEpoch::new(1),
+                    pane: fixture.channel.pane(),
+                    client: binding.target().client(),
+                },
+            ),
+        )
+        .unwrap();
+    fixture.peer.publish().unwrap();
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("pane-presentation-replacement").is_none());
+    cx.executor()
+        .advance_clock(super::super::pane_presentation::TAKEOVER_ARMING_DELAY);
+    cx.run_until_parked();
+    pane.update(cx, |pane, cx| {
+        pane.set_product_focus(TerminalProductFocus::default(), cx);
+    });
+    cx.run_until_parked();
+    cx.simulate_keystrokes("shift-f10");
+    let tree = spaceterm_ui::a11y_testing::A11yTree::read(cx);
+    assert_ne!(tree.with_role("MenuItem")[0]["aria"]["disabled"], true);
+}
+
+#[gpui::test]
+fn desktop_server_losing_control_announces_once_in_the_focused_pane(cx: &mut TestAppContext) {
+    let (fixture, pane, cx) = server_pane(cx, true);
+    let binding = fixture.server.add_client(2).unwrap();
+    fixture
+        .server
+        .command(
+            fixture.server.next_operation(2).unwrap(),
+            spaceterm_core::operations::Command::TakeOver(
+                spaceterm_core::control::TakeOverRequest {
+                    epoch: spaceterm_core::authority::ServerEpoch::new(1),
+                    pane: fixture.channel.pane(),
+                    client: binding.target().client(),
+                },
+            ),
+        )
+        .unwrap();
+    fixture.peer.publish().unwrap();
+    let tree = spaceterm_ui::a11y_testing::A11yTree::read(cx);
+    let status = tree.with_role("Status");
+    assert_eq!(status.len(), 1);
+    assert_eq!(status[0]["aria"]["label"], "In use on another device");
+    let id = status[0]["accesskit_id"].clone();
+    pane.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+    let tree = spaceterm_ui::a11y_testing::A11yTree::read(cx);
+    let status = tree.with_role("Status");
+    assert_eq!(status.len(), 1);
+    assert_eq!(
+        status[0]["accesskit_id"], id,
+        "repaint retains the same announcement rather than inserting it again"
+    );
+}
+
+#[gpui::test]
+fn desktop_server_legacy_services_origin_cannot_authorize_a_server_pane(cx: &mut TestAppContext) {
+    let (_, pane, cx) = server_pane(cx, true);
+    cx.update(|window, cx| {
+        pane.update(cx, |pane, cx| {
+            assert!(
+                pane.server_session_handle()
+                    .unwrap()
+                    .native_permit()
+                    .is_some()
+            );
+            let origin = NativeServiceOrigin::new(
+                WorkspaceId::new(1),
+                TabId::new(1),
+                PaneId::new(1),
+                pane.terminal_session.native_service_session_identity,
+                pane.native_service_focus_epoch.get(),
+                pane.native_service_hierarchy_generation,
+            );
+            assert!(!pane.native_service_origin_matches(origin));
+            assert!(
+                pane.native_service_status(
+                    WorkspaceId::new(1),
+                    TabId::new(1),
+                    PaneId::new(1),
+                    pane.native_service_hierarchy_generation,
+                    window,
+                    cx
+                )
+                .origin
+                .is_none()
+            );
+        });
+    });
+}
+
+#[gpui::test]
+fn desktop_server_input_method_keeps_the_focused_pane_exception(cx: &mut TestAppContext) {
+    let (fixture, pane, cx) = server_pane(cx, true);
+    fixture.peer.flush_effects().unwrap();
+    cx.deactivate_window();
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        pane.update(cx, |pane, cx| {
+            assert!(!pane.terminal_input_focused(window, cx));
+            pane.replace_text_in_range(None, "界", window, cx);
+        });
+    });
+    assert!(fixture.peer.flush_effects().unwrap().iter().any(|effect| {
+        matches!(&effect.command, spaceterm_client::pane_channel::RuntimeEffect::InputMethodCommit(text) if text.as_str() == "界")
+    }));
+}
+
+#[gpui::test]
+fn desktop_server_take_over_waits_for_reconciled_content_without_restarting(
+    cx: &mut TestAppContext,
+) {
+    let (fixture, pane, cx) = server_pane(cx, true);
+    let binding = fixture.server.add_client(2).unwrap();
+    fixture
+        .server
+        .command(
+            fixture.server.next_operation(2).unwrap(),
+            spaceterm_core::operations::Command::TakeOver(
+                spaceterm_core::control::TakeOverRequest {
+                    epoch: spaceterm_core::authority::ServerEpoch::new(1),
+                    pane: fixture.channel.pane(),
+                    client: binding.target().client(),
+                },
+            ),
+        )
+        .unwrap();
+    fixture.peer.publish().unwrap();
+    cx.run_until_parked();
+    let session = fixture.server.snapshot().unwrap().runtime()[0].session_generation;
+    fixture
+        .runtime
+        .as_ref()
+        .unwrap()
+        .block_on(fixture.channel.take_over())
+        .unwrap();
+    cx.run_until_parked();
+    pane.read_with(cx, |pane, _| {
+        assert!(pane.screen.rows.is_empty());
+        assert!(!pane.server_presentation.accepts_input());
+        assert!(
+            pane.server_session_handle()
+                .unwrap()
+                .native_permit()
+                .is_none()
+        );
+    });
+    fixture.publish_base(2);
+    fixture.frame();
+    cx.run_until_parked();
+    pane.read_with(cx, |pane, _| {
+        assert_eq!(pane.server_presentation, PanePresentation::Live);
+        assert!(
+            pane.server_session_handle()
+                .unwrap()
+                .native_permit()
+                .is_some()
+        );
+    });
+    assert_eq!(
+        fixture.server.snapshot().unwrap().runtime()[0].session_generation,
+        session
+    );
+}
+
+#[gpui::test]
+fn desktop_server_unfenced_accessibility_adapter_never_retains_terminal_text(
+    cx: &mut TestAppContext,
+) {
+    use super::super::pane_presentation::{DisplayName, SessionEndReason};
+    let factory = Rc::new(
+        crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default(),
+    );
+    let (fixture, pane, cx) = server_pane_with_accessibility(cx, true, factory.clone());
+    cx.run_until_parked();
+    let retained = factory.records.borrow()[0].clone();
+    assert!(
+        retained.borrow().model.text().is_empty(),
+        "an adapter without final-use fences must never receive server terminal text"
+    );
+    for presentation in [
+        PanePresentation::Takeover(DisplayName::unnamed()),
+        PanePresentation::Ended {
+            reason: SessionEndReason::EndAllSessions,
+        },
+        PanePresentation::Live,
+    ] {
+        pane.update(cx, |pane, cx| {
+            pane.set_presentation(presentation, cx).unwrap()
+        });
+        cx.run_until_parked();
+        assert!(retained.borrow().model.text().is_empty());
+        assert!(!retained.borrow().presented);
+    }
+    let context = fixture
+        .channel
+        .update_context(spaceterm_client::pane_channel::PaneContextFacts::default())
+        .unwrap();
+    pane.update(cx, |pane, cx| {
+        pane.set_server_context(
+            PaneViewToken {
+                context_generation: context,
+                ..fixture.token
+            },
+            cx,
+        )
+        .unwrap();
+    });
+    cx.run_until_parked();
+    assert!(retained.borrow().model.text().is_empty());
+    assert!(!retained.borrow().presented);
+}
+
+#[gpui::test]
+fn desktop_server_hover_and_right_motion_preserve_selection_and_prepared_copy(
+    cx: &mut TestAppContext,
+) {
+    let (fixture, pane, cx) = server_pane(cx, true);
+    let session = pane.read_with(cx, |pane, _| pane.server_session_handle().unwrap());
+    let motion = |generation, button| PointerInput {
+        generation,
+        phase: PointerPhase::Motion,
+        button,
+        position: crate::terminal::SurfacePosition { x: 0.0, y: 0.0 },
+        modifiers: InputModifiers::default(),
+        shift_selection: ShiftSelectionPolicy::OverrideApplicationMouse,
+    };
+    let generation = pane.read_with(cx, |pane, _| pane.screen.generation);
+    for button in [None, Some(PointerButton::Right), Some(PointerButton::Left)] {
+        session.pointer(motion(generation, button));
+        assert!(
+            fixture
+                .channel
+                .projection()
+                .lock()
+                .unwrap()
+                .selection()
+                .is_none(),
+            "motion without an owned left press must not create a selection"
+        );
+    }
+    server_selection(&fixture);
+    pane.update(cx, |pane, cx| pane.sync_server_screen(cx));
+    let request = session.copy_request().unwrap().unwrap();
+    fixture.peer.queue_read(copy_items(request, true)).unwrap();
+    let preparation = session.prepare_copy(request).unwrap();
+    let retained = cx.foreground_executor().block_test(preparation).unwrap();
+    cx.run_until_parked();
+    let generation = pane.read_with(cx, |pane, _| pane.screen.generation);
+    let selection = fixture.channel.projection().lock().unwrap().selection();
+    for button in [None, Some(PointerButton::Right)] {
+        session.pointer(motion(generation, button));
+        assert_eq!(
+            fixture.channel.projection().lock().unwrap().selection(),
+            selection
+        );
+        assert!(retained.is_current());
+        assert_eq!(
+            session.copy_selection().unwrap().unwrap().plain_text,
+            "priva"
+        );
+    }
+}
+
+#[gpui::test]
+fn desktop_server_owned_left_drag_extends_personal_selection(cx: &mut TestAppContext) {
+    let (fixture, pane, cx) = server_pane(cx, true);
+    let session = pane.read_with(cx, |pane, _| pane.server_session_handle().unwrap());
+    let generation = pane.read_with(cx, |pane, _| pane.screen.generation);
+    let width = pane.read_with(cx, |pane, _| {
+        pane.last_geometry.unwrap().logical_cell_size().width
+    });
+    let input = |phase, column: f32| PointerInput {
+        generation,
+        phase,
+        button: Some(PointerButton::Left),
+        position: crate::terminal::SurfacePosition {
+            x: width * column,
+            y: 0.0,
+        },
+        modifiers: InputModifiers::default(),
+        shift_selection: ShiftSelectionPolicy::OverrideApplicationMouse,
+    };
+    session.pointer(input(PointerPhase::Press, 0.0));
+    session.pointer(input(PointerPhase::Motion, 3.0));
+    let selection = fixture
+        .channel
+        .projection()
+        .lock()
+        .unwrap()
+        .selection()
+        .unwrap();
+    assert_eq!(selection.start().column, 0);
+    assert_eq!(selection.end().column, 3);
+}
+
+#[gpui::test]
+fn desktop_server_frame_recovers_after_transfer_pressure_at_the_same_content_base(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_client::pane_channel::*;
+    use spaceterm_core::content_queries::*;
+    let (fixture, content, pane, cx) = server_pane_with_content(cx);
+    let session = pane.read_with(cx, |pane, _| pane.server_session_handle().unwrap());
+    let permit = fixture.channel.permit(EffectKind::Read).unwrap();
+    let stamp = fixture
+        .channel
+        .query_stamp(&permit, RequestGeneration::new(0))
+        .unwrap();
+    let limits = PageLimits::new(256, 16_384, 1024 * 1024).unwrap();
+    let request = TopologyPageRequest::new(stamp, None, limits).unwrap();
+    let mut held = Vec::new();
+    for _ in 0..4 {
+        fixture.peer.queue_read(Vec::new()).unwrap();
+        held.push(
+            cx.foreground_executor()
+                .block_test(
+                    fixture
+                        .channel
+                        .read(&permit, PaneReadRequest::Topology(request)),
+                )
+                .unwrap(),
+        );
+    }
+    fixture.publish_base(2);
+    let permit = fixture.channel.permit(EffectKind::Read).unwrap();
+    let stamp = fixture
+        .channel
+        .query_stamp(&permit, RequestGeneration::new(0))
+        .unwrap();
+    session.request_frame().unwrap();
+    cx.run_until_parked();
+    assert_ne!(
+        fixture
+            .channel
+            .current_frame()
+            .unwrap()
+            .frame()
+            .unwrap()
+            .base(),
+        stamp.base()
+    );
+    drop(held);
+    let base = stamp.base();
+    cx.executor().advance_clock(Duration::from_millis(100));
+    cx.run_until_parked();
+    session.request_frame().unwrap();
+    cx.run_until_parked();
+    let frame = fixture
+        .channel
+        .current_frame()
+        .expect("released transfer slots must recover the same base");
+    assert!(content.page_reads.load(std::sync::atomic::Ordering::SeqCst) >= 2);
+    assert_eq!(frame.frame().unwrap().base(), base);
+    assert_eq!(
+        pane.read_with(cx, |pane, _| pane.screen.rows[0][0].text.to_string()),
+        "R"
+    );
+}
+
+#[derive(Default)]
+struct RecordingServerSelection(std::cell::RefCell<Vec<SelectionCopy>>);
+impl SelectionClipboard for RecordingServerSelection {
+    fn publish(&self, copy: &SelectionCopy, _: &mut App) -> Result<(), ClipboardError> {
+        self.0.borrow_mut().push(copy.clone());
+        Ok(())
+    }
+}
+impl crate::terminal::native_services::clipboard::PrimarySelection for RecordingServerSelection {
+    fn publish(&self, copy: &SelectionCopy, _: &mut App) {
+        self.0.borrow_mut().push(copy.clone());
+    }
+    fn read(&self, _: &mut App) -> ClipboardRead<Option<String>> {
+        Box::pin(std::future::ready(Ok(self
+            .0
+            .borrow()
+            .last()
+            .map(|copy| copy.plain_text.clone()))))
+    }
+}
+fn record_server_selection(
+    pane: &Entity<TerminalPane>,
+    cx: &mut VisualTestContext,
+) -> (Rc<RecordingServerSelection>, Rc<RecordingServerSelection>) {
+    let pasteboard = Rc::new(RecordingServerSelection::default());
+    let primary = Rc::new(RecordingServerSelection::default());
+    pane.update(cx, |pane, _| {
+        pane.selection_pasteboard = SelectionPublication::new(pasteboard.clone());
+        pane.primary_selection = Some(primary.clone());
+    });
+    (pasteboard, primary)
+}
+fn release_server_selection(pane: &Entity<TerminalPane>, cx: &mut VisualTestContext) {
+    let (start, end) = pane.read_with(cx, |pane, _| {
+        let bounds = pane.grid_bounds.unwrap();
+        let width = pane.last_geometry.unwrap().logical_cell_size().width;
+        (
+            bounds.origin + point(px(width * 0.1), px(1.0)),
+            bounds.origin + point(px(width * 4.1), px(1.0)),
+        )
+    });
+    cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::none());
+    cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::none());
+}
+
+#[gpui::test]
+fn desktop_server_release_copy_publishes_complete_selection_and_primary(cx: &mut TestAppContext) {
+    let (_, _, pane, cx) = server_pane_with_content(cx);
+    let (pasteboard, primary) = record_server_selection(&pane, cx);
+    release_server_selection(&pane, cx);
+    cx.run_until_parked();
+    assert_eq!(
+        pasteboard.0.borrow().len(),
+        1,
+        "release must publish the asynchronous copy"
+    );
+    assert_eq!(primary.0.borrow().len(), 1);
+    assert_eq!(pasteboard.0.borrow()[0].plain_text, "priva");
+    assert_eq!(primary.0.borrow()[0], pasteboard.0.borrow()[0]);
+}
+
+#[gpui::test]
+fn desktop_server_release_copy_rejects_context_replacement_before_native_delivery(
+    cx: &mut TestAppContext,
+) {
+    let (fixture, content, pane, cx) = server_pane_with_content(cx);
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    *content.copy_gate.lock().unwrap() = Some(gate.clone());
+    let (pasteboard, primary) = record_server_selection(&pane, cx);
+    release_server_selection(&pane, cx);
+    cx.run_until_parked();
+    fixture
+        .channel
+        .update_context(spaceterm_client::pane_channel::PaneContextFacts::default())
+        .unwrap();
+    gate.add_permits(1);
+    cx.run_until_parked();
+    assert!(pasteboard.0.borrow().is_empty());
+    assert!(primary.0.borrow().is_empty());
+}
+
+#[gpui::test]
+fn desktop_server_controller_release_replaces_takeover_with_compare_acquire(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_core::{
+        authority::*, control::*, operations::Command, organization::ControlRecord,
+    };
+    let (fixture, pane, cx) = server_pane(cx, true);
+    let binding = fixture.server.add_client(2).unwrap();
+    fixture
+        .server
+        .command(
+            fixture.server.next_operation(2).unwrap(),
+            Command::TakeOver(TakeOverRequest {
+                epoch: ServerEpoch::new(1),
+                pane: fixture.channel.pane(),
+                client: binding.target().client(),
+            }),
+        )
+        .unwrap();
+    fixture.peer.publish().unwrap();
+    cx.run_until_parked();
+    assert!(pane.read_with(cx, |pane, _| pane.server_presentation.offers_take_over()));
+    let runtime = fixture.channel.state().borrow().runtime.unwrap();
+    let ControlRecord::Held { client, generation } = runtime.control else {
+        panic!("missing controller")
+    };
+    fixture
+        .server
+        .command(
+            fixture.server.next_operation(2).unwrap(),
+            Command::ReleaseControl(ReleaseControlRequest {
+                epoch: ServerEpoch::new(1),
+                grant: ControlGrant::new(fixture.channel.pane(), client, generation).unwrap(),
+            }),
+        )
+        .unwrap();
+    fixture.peer.publish().unwrap();
+    cx.run_until_parked();
+    assert!(
+        pane.read_with(cx, |pane, _| !pane.server_presentation.offers_take_over()),
+        "an unclaimed running Pane must not keep the impossible Take Over action"
+    );
+    assert!(pane.read_with(cx, |pane, _| pane.screen.rows.is_empty()));
+    let selections = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let seen = selections.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(&pane, move |_, event, _| {
+            if let TerminalPaneEvent::SelectionRequested(source) = event {
+                seen.borrow_mut().push(*source);
+            }
+            assert!(!matches!(
+                event,
+                TerminalPaneEvent::ActionRequested(PaneAction::TakeOver(_))
+            ));
+        })
+        .detach()
+    });
+    let position = cx
+        .debug_bounds("pane-presentation-replacement")
+        .unwrap()
+        .center();
+    cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::none());
+    assert_eq!(*selections.borrow(), vec![SelectionSource::Pointer]);
+    use spaceterm_client::view::{
+        ClientViewState, PresentationFacts, PresentationState, ReplicaFacts, ReplicaObservation,
+        ReplicaReadiness, SelectionTarget, ServerViewStatus, StartupIntents, UseFacts,
+    };
+    let snapshot = fixture.server.snapshot().unwrap();
+    let state = *fixture.channel.state().borrow();
+    let token = PaneViewToken {
+        context_generation: state.context,
+        ..fixture.token
+    };
+    let info = state.connection.unwrap();
+    let replica = ReplicaObservation::new(
+        &snapshot,
+        &[],
+        ReplicaFacts {
+            pairing: info.pairing,
+            client: info.client,
+            connection: Some(info.binding),
+            readiness: ReplicaReadiness::Ready,
+            status: ServerViewStatus::Connected,
+        },
+    )
+    .unwrap();
+    let mut view = ClientViewState::new();
+    view.attach(fixture.lease.workspace(), &replica).unwrap();
+    let target = SelectionTarget::focused(&view, fixture.lease.workspace()).unwrap();
+    let mut intents = StartupIntents::new();
+    intents
+        .begin(
+            UseFacts {
+                view: &view,
+                replica: &replica,
+                context: token.context_generation,
+            },
+            target,
+            spaceterm_client::view::ExplicitUseSource::PaneSelection(SelectionSource::Pointer),
+        )
+        .unwrap();
+    let facts = PresentationFacts::observe(
+        &view,
+        &replica,
+        fixture.lease.workspace(),
+        fixture.channel.pane(),
+        &intents,
+        None,
+    )
+    .unwrap();
+    let decision = PresentationState::new().reduce(&facts).unwrap();
+    assert_eq!(
+        decision.presentation,
+        spaceterm_client::view::PanePresentation::Unclaimed { acquiring: true }
+    );
+    pane.update(cx, |pane, cx| {
+        pane.set_portable_presentation(
+            token,
+            state,
+            decision,
+            super::super::pane_presentation::DisplayName::unnamed(),
+            super::super::pane_presentation::OfflineCause::Unreachable,
+            cx,
+        )
+        .unwrap()
+    });
+    cx.run_until_parked();
+    assert!(
+        pane.read_with(cx, |pane, _| matches!(
+            pane.server_presentation,
+            PanePresentation::Unclaimed { acquiring: true }
+        )),
+        "repaint must retain the real portable acquisition decision"
+    );
+    let outcome = fixture
+        .runtime
+        .as_ref()
+        .unwrap()
+        .block_on(
+            fixture
+                .channel
+                .explicit_use(spaceterm_client::pane_channel::ExplicitUseSource::ExplicitSelection),
+        )
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        spaceterm_client::pane_channel::ExplicitUseOutcome::ControlReady(_)
+    ));
+    let after = fixture.channel.state().borrow().runtime.unwrap();
+    assert_eq!(after.session_generation, runtime.session_generation);
+    assert_eq!(after.phase, runtime.phase);
+}
+
+#[gpui::test]
+fn desktop_server_stale_portable_takeover_after_controller_release_is_rejected(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_client::view::{
+        ClientViewState, ContentDisposition, PresentationFacts, PresentationState, ReplicaFacts,
+        ReplicaObservation, ReplicaReadiness, ServerViewStatus, StartupIntents,
+    };
+    use spaceterm_core::{
+        authority::*, control::*, operations::Command, organization::ControlRecord,
+    };
+    let (fixture, pane, cx) = server_pane(cx, true);
+    let binding = fixture.server.add_client(2).unwrap();
+    fixture
+        .server
+        .command(
+            fixture.server.next_operation(2).unwrap(),
+            Command::TakeOver(TakeOverRequest {
+                epoch: ServerEpoch::new(1),
+                pane: fixture.channel.pane(),
+                client: binding.target().client(),
+            }),
+        )
+        .unwrap();
+    fixture.peer.publish().unwrap();
+    cx.run_until_parked();
+
+    let observation = *fixture.channel.state().borrow();
+    let token = PaneViewToken {
+        context_generation: observation.context,
+        ..fixture.token
+    };
+    let snapshot = fixture.server.snapshot().unwrap();
+    let info = observation.connection.unwrap();
+    let replica = ReplicaObservation::new(
+        &snapshot,
+        &[],
+        ReplicaFacts {
+            pairing: info.pairing,
+            client: info.client,
+            connection: Some(info.binding),
+            readiness: ReplicaReadiness::Ready,
+            status: ServerViewStatus::Connected,
+        },
+    )
+    .unwrap();
+    let mut view = ClientViewState::new();
+    view.attach(fixture.lease.workspace(), &replica).unwrap();
+    let facts = PresentationFacts::observe(
+        &view,
+        &replica,
+        fixture.lease.workspace(),
+        fixture.channel.pane(),
+        &StartupIntents::new(),
+        None,
+    )
+    .unwrap();
+    let decision = PresentationState::new().reduce(&facts).unwrap();
+    assert_eq!(
+        decision.presentation,
+        spaceterm_client::view::PanePresentation::Takeover
+    );
+    assert_eq!(decision.content, ContentDisposition::Clear);
+
+    let runtime = observation.runtime.unwrap();
+    let ControlRecord::Held { client, generation } = runtime.control else {
+        panic!("missing controller")
+    };
+    fixture
+        .server
+        .command(
+            fixture.server.next_operation(2).unwrap(),
+            Command::ReleaseControl(ReleaseControlRequest {
+                epoch: ServerEpoch::new(1),
+                grant: ControlGrant::new(fixture.channel.pane(), client, generation).unwrap(),
+            }),
+        )
+        .unwrap();
+    fixture.peer.publish().unwrap();
+    cx.run_until_parked();
+    let released = *fixture.channel.state().borrow();
+    assert_eq!(released.context, observation.context);
+    assert_eq!(released.runtime.unwrap().control, ControlRecord::Unclaimed);
+    assert!(pane.read_with(cx, |pane, _| matches!(
+        pane.server_presentation,
+        PanePresentation::Unclaimed { acquiring: false }
+    )));
+
+    pane.update(cx, |pane, cx| {
+        assert_eq!(
+            pane.set_portable_presentation(
+                token,
+                observation,
+                decision,
+                super::super::pane_presentation::DisplayName::unnamed(),
+                super::super::pane_presentation::OfflineCause::Unreachable,
+                cx,
+            ),
+            Err(DesktopClientError::StaleContext),
+            "a valid context token cannot renew an old control observation"
+        );
+    });
+    cx.run_until_parked();
+    assert!(pane.read_with(cx, |pane, _| matches!(
+        pane.server_presentation,
+        PanePresentation::Unclaimed { acquiring: false }
+    )));
+    let selections = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let seen = selections.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(&pane, move |_, event, _| {
+            if let TerminalPaneEvent::SelectionRequested(source) = event {
+                seen.borrow_mut().push(*source);
+            }
+            assert!(!matches!(
+                event,
+                TerminalPaneEvent::ActionRequested(PaneAction::TakeOver(_))
+            ));
+        })
+        .detach()
+    });
+    let position = cx
+        .debug_bounds("pane-presentation-replacement")
+        .unwrap()
+        .center();
+    cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::none());
+    assert_eq!(*selections.borrow(), vec![SelectionSource::Pointer]);
+    let outcome = fixture
+        .runtime
+        .as_ref()
+        .unwrap()
+        .block_on(
+            fixture
+                .channel
+                .explicit_use(spaceterm_client::pane_channel::ExplicitUseSource::ExplicitSelection),
+        )
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        spaceterm_client::pane_channel::ExplicitUseOutcome::ControlReady(_)
+    ));
+    let acquired = fixture.channel.state().borrow().runtime.unwrap();
+    assert_eq!(acquired.session_generation, runtime.session_generation);
+    assert_eq!(acquired.phase, runtime.phase);
+}
+
+#[gpui::test]
+fn desktop_server_offline_cause_survives_reconciliation_and_routes_only_its_actions(
+    cx: &mut TestAppContext,
+) {
+    use super::super::pane_presentation::{
+        BlockedLocation, DisplayName, IntendedAction, OfflineCause, OfflinePrior,
+    };
+    use super::super::server_desktop_contracts::{DesktopRequest, PaneActionRoute};
+    let (fixture, pane, cx) = server_pane(cx, true);
+    fixture
+        .channels
+        .invalidate(
+            fixture.server.server(),
+            spaceterm_client::ports::ConnectionInvalidation::ConnectionLost,
+        )
+        .unwrap();
+    cx.run_until_parked();
+    let actions = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let seen = actions.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(&pane, move |_, event, _| {
+            if let TerminalPaneEvent::ActionRequested(action) = event {
+                seen.borrow_mut().push(*action);
+            }
+            assert!(
+                !matches!(event, TerminalPaneEvent::SelectionRequested(_)),
+                "an offline notice action supplies no explicit use"
+            );
+        })
+        .detach()
+    });
+    for (cause, retry) in [
+        (
+            OfflineCause::Stopped(DisplayName::reported("Studio Mac")),
+            false,
+        ),
+        (OfflineCause::UpdateRequired, false),
+        (
+            OfflineCause::Blocked {
+                server: DisplayName::reported("Studio Mac"),
+                location: BlockedLocation::ThisComputer,
+                intended: IntendedAction::Start,
+            },
+            false,
+        ),
+        (
+            OfflineCause::Blocked {
+                server: DisplayName::reported("Studio Mac"),
+                location: BlockedLocation::Ssh(DisplayName::reported("studio")),
+                intended: IntendedAction::Connect,
+            },
+            true,
+        ),
+    ] {
+        pane.update(cx, |pane, cx| {
+            pane.set_presentation(
+                PanePresentation::Offline {
+                    prior: OfflinePrior::Frozen,
+                    cause: cause.clone(),
+                },
+                cx,
+            )
+            .unwrap();
+            pane.sync_server_state(cx);
+        });
+        cx.run_until_parked();
+        assert!(pane.read_with(cx, |pane, _| matches!(&pane.server_presentation, PanePresentation::Offline { cause: kept, .. } if kept == &cause)));
+        let tree = spaceterm_ui::a11y_testing::A11yTree::read(cx);
+        assert!(tree.find("Retry").is_none());
+        assert_eq!(tree.find("Retry Connection").is_some(), retry);
+        spaceterm_ui::a11y_testing::perform(
+            cx,
+            tree.node("Server Settings…"),
+            gpui::accesskit::Action::Click,
+        );
+        let requested = actions.borrow_mut().pop().unwrap();
+        assert_eq!(
+            requested.route(fixture.channel.pane()),
+            PaneActionRoute::ServerSettings(fixture.server.server())
+        );
+        if retry {
+            spaceterm_ui::a11y_testing::perform(
+                cx,
+                tree.node("Retry Connection"),
+                gpui::accesskit::Action::Click,
+            );
+            let requested = actions.borrow_mut().pop().unwrap();
+            assert_eq!(
+                requested.route(fixture.channel.pane()),
+                PaneActionRoute::Request(DesktopRequest::RetryConnection(fixture.server.server()))
+            );
+        }
+        assert!(actions.borrow().is_empty());
+    }
+}
+
+#[gpui::test]
+fn desktop_server_exhausted_frame_retries_recover_on_repaint(cx: &mut TestAppContext) {
+    use spaceterm_client::pane_channel::*;
+    use spaceterm_core::content_queries::*;
+    let (fixture, content, pane, cx) = server_pane_with_content(cx);
+    let permit = fixture.channel.permit(EffectKind::Read).unwrap();
+    let stamp = fixture
+        .channel
+        .query_stamp(&permit, RequestGeneration::new(0))
+        .unwrap();
+    let request = TopologyPageRequest::new(
+        stamp,
+        None,
+        PageLimits::new(256, 16_384, 1024 * 1024).unwrap(),
+    )
+    .unwrap();
+    let mut held = Vec::new();
+    for _ in 0..4 {
+        fixture.peer.queue_read(Vec::new()).unwrap();
+        held.push(
+            cx.foreground_executor()
+                .block_test(
+                    fixture
+                        .channel
+                        .read(&permit, PaneReadRequest::Topology(request)),
+                )
+                .unwrap(),
+        );
+    }
+    fixture.publish_base(2);
+    cx.run_until_parked();
+    for delay in [100, 200, 10_000] {
+        cx.executor().advance_clock(Duration::from_millis(delay));
+        cx.run_until_parked();
+    }
+    let attempts = content.page_reads.load(Ordering::SeqCst);
+    cx.run_until_parked();
+    assert_eq!(
+        content.page_reads.load(Ordering::SeqCst),
+        attempts,
+        "persistent pressure must not spin"
+    );
+    drop(held);
+    cx.executor().advance_clock(Duration::from_secs(1));
+    pane.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+    assert_eq!(
+        fixture
+            .channel
+            .current_frame()
+            .unwrap()
+            .frame()
+            .unwrap()
+            .base()
+            .revision,
+        spaceterm_core::authority::ContentRevision::new(2)
+    );
+    assert_eq!(
+        pane.read_with(cx, |pane, _| pane.screen.rows[0][0].text.to_string()),
+        "R"
+    );
+}
+
+#[gpui::test]
+fn desktop_server_release_copy_cannot_replace_a_new_selection(cx: &mut TestAppContext) {
+    let (fixture, content, pane, cx) = server_pane_with_content(cx);
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    *content.copy_gate.lock().unwrap() = Some(gate.clone());
+    let (pasteboard, primary) = record_server_selection(&pane, cx);
+    release_server_selection(&pane, cx);
+    cx.run_until_parked();
+    let selection = fixture
+        .channel
+        .projection()
+        .lock()
+        .unwrap()
+        .selection()
+        .unwrap();
+    let position = pane.read_with(cx, |pane, _| {
+        pane.grid_bounds.unwrap().origin + point(px(1.0), px(1.0))
+    });
+    cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::none());
+    assert_ne!(
+        fixture.channel.projection().lock().unwrap().selection(),
+        Some(selection)
+    );
+    gate.add_permits(1);
+    cx.run_until_parked();
+    assert!(pasteboard.0.borrow().is_empty());
+    assert!(primary.0.borrow().is_empty());
 }

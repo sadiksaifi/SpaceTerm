@@ -96,6 +96,34 @@ impl PaneConstruction {
         )
     }
 
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "C2 consumes this frozen constructor at integration"
+        )
+    )]
+    pub(crate) fn create_server(
+        &self,
+        channel: spaceterm_client::pane_channel::PaneChannel,
+        token: super::server_desktop_contracts::PaneViewToken,
+        presentation: super::pane_presentation::PanePresentation,
+        window: &mut Window,
+        cx: &mut Context<super::TerminalPane>,
+    ) -> Result<super::TerminalPane, super::server_desktop_contracts::DesktopClientError> {
+        super::TerminalPane::new_server(
+            channel,
+            token,
+            presentation,
+            self.key_input.create(),
+            self.accessibility.as_ref(),
+            self.native_services.clone(),
+            self.lifecycle.clone(),
+            window,
+            cx,
+        )
+    }
+
     #[cfg(test)]
     pub(crate) fn testing() -> Self {
         Self::new(
