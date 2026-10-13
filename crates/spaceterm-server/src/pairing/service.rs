@@ -648,6 +648,9 @@ impl PairingService {
             )
             .map_err(|_| PairingFailure::ReceiptInvalid)
     }
+    pub(crate) fn pin(&self) -> ServerPin {
+        self.pin
+    }
     pub(crate) fn actor(&self) -> &dyn PairingActorPort {
         self.actor.as_ref()
     }
@@ -729,4 +732,40 @@ fn registration(client: &PairingClientStreams) -> Result<Vec<StreamRecord>, Pair
         )
         .map_err(|_| PairingFailure::InvalidDurableState)?,
     ])
+}
+
+pub(crate) fn server_failure(value: PairingFailure) -> crate::contracts::ServerFailure {
+    use crate::contracts::ServerFailureClass as Class;
+    crate::failure::failure(match value {
+        PairingFailure::LimitExceeded => Class::Capacity,
+        PairingFailure::StorageUnavailable => Class::StorageUnavailable,
+        PairingFailure::InvalidDurableState
+        | PairingFailure::RecoveryRequired
+        | PairingFailure::UnsafeStorage
+        | PairingFailure::UnknownSchema => Class::RecoveryRequired,
+        PairingFailure::InvalidRequest | PairingFailure::IdentityMismatch => Class::ScopeMismatch,
+        PairingFailure::StaleAssessment | PairingFailure::RequestIdentityReused => {
+            Class::StaleAuthority
+        }
+        PairingFailure::AuthorizationUnavailable
+        | PairingFailure::CredentialUnavailable
+        | PairingFailure::ServiceManagerUnavailable
+        | PairingFailure::UnsupportedTarget => Class::NativeUnavailable,
+        PairingFailure::Offline
+        | PairingFailure::RouteChanged
+        | PairingFailure::TimedOut
+        | PairingFailure::Cancelled => Class::RuntimeUnavailable,
+        PairingFailure::FingerprintMismatch
+        | PairingFailure::AuthorizationRequired
+        | PairingFailure::AuthorizationDenied
+        | PairingFailure::PairingRevoked
+        | PairingFailure::ClientNotBound
+        | PairingFailure::AuthorizationExpired
+        | PairingFailure::AuthorizationConsumed
+        | PairingFailure::Incompatible
+        | PairingFailure::ExplicitStartRequired
+        | PairingFailure::CredentialIntegrity
+        | PairingFailure::ReceiptInvalid
+        | PairingFailure::RevocationUnconfirmed => Class::Authentication,
+    })
 }

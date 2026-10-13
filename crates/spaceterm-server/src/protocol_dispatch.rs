@@ -48,6 +48,7 @@ pub struct ProtocolDispatcher {
     status: watch::Receiver<ServerStatus>,
     ordinary: Arc<dyn OrdinaryDispatchPort>,
     restricted: Arc<dyn RestrictedDispatchPort>,
+    pairing: Option<crate::pairing::service::PairingService>,
     messages: Arc<Semaphore>,
     bytes: Arc<Semaphore>,
 }
@@ -65,8 +66,28 @@ impl ProtocolDispatcher {
             status,
             ordinary,
             restricted,
+            pairing: None,
             messages: Arc::new(Semaphore::new(MAX_DECODED_DISPATCH_MESSAGES)),
             bytes: Arc::new(Semaphore::new(MAX_DECODED_DISPATCH_BYTES)),
+        }
+    }
+    /// Select pairing's additive restricted grammar before receiving any frame.
+    /// A failed decode never falls back to another grammar or ordinary dispatch.
+    pub fn with_pairing(mut self, service: crate::pairing::service::PairingService) -> Self {
+        self.pairing = Some(service);
+        self
+    }
+    async fn dispatch_restricted(
+        &self,
+        codec: &mut spaceterm_protocol::connection::RestrictedConnection,
+        bytes: &[u8],
+    ) -> Result<Vec<u8>, ServerFailure> {
+        if let Some(service) = &self.pairing {
+            crate::pairing::restricted::dispatch_frame(service, codec, bytes).await
+        } else {
+            let payload = codec.decode(bytes).map_err(protocol_failure)?;
+            let response = self.restricted.dispatch(codec.principal(), payload).await?;
+            codec.encode(&response).map_err(protocol_failure)
         }
     }
     async fn run_peer(
@@ -141,10 +162,7 @@ impl ProtocolDispatcher {
                         .map_err(|_| failure(ServerFailureClass::Capacity))?;
                     match &mut peer.connection {
                         PeerConnection::Restricted(codec) => {
-                            let payload = codec.decode(&bytes).map_err(protocol_failure)?;
-                            let response =
-                                self.restricted.dispatch(codec.principal(), payload).await?;
-                            let bytes = codec.encode(&response).map_err(protocol_failure)?;
+                            let bytes = self.dispatch_restricted(codec, &bytes).await?;
                             peer.transport
                                 .send(&bytes)
                                 .await
