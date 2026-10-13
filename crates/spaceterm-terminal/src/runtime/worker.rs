@@ -1,6 +1,7 @@
 //! OS-thread ownership and bounded scheduling. Only explicit ownership retires a PTY.
 use super::authority::AuthorityStamp;
 use super::budget::{BudgetLease, RuntimeRegistration};
+use super::cleanup::{CleanupObligation, CleanupRegistry, RetainedCapacity};
 use super::ingress::{Envelope, Request, StreamSink};
 use super::input::{InputCompletion, InputOrigin, PtyInput, eligibility};
 use super::native_requests::{NativeRequests, OutputEffect, OutputFilter};
@@ -28,6 +29,7 @@ struct ContentJob {
 struct Worker {
     shared: Arc<Shared>,
     registration: Option<RuntimeRegistration>,
+    cleanup_registry: CleanupRegistry,
     clock: Arc<dyn RuntimeClock>,
     appearance: Option<RuntimeAppearance>,
     engine: Option<Box<dyn RuntimeEngine>>,
@@ -51,10 +53,12 @@ pub(crate) fn run(
     launch: PreparedRuntimeLaunch,
     engine: EngineLaunchContext,
     clock: Arc<dyn RuntimeClock>,
+    cleanup_registry: CleanupRegistry,
 ) {
     let mut worker = Worker {
         shared,
         registration: Some(registration),
+        cleanup_registry,
         clock,
         appearance: None,
         engine: None,
@@ -872,16 +876,27 @@ impl Worker {
         {
             message.reply.complete(Err(RuntimeFailure::stale()));
         }
-        let mut result = cleanup_pty(&mut self.process, &mut self.termination, &mut self.reader);
+        let mut outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            cleanup_pty(&mut self.process, &mut self.termination, &mut self.reader)
+        }))
+        .unwrap_or(PtyCleanup {
+            result: CleanupResult::Failed(FailureClass::RuntimeUnavailable),
+            pending: None,
+        });
         if self.launch_unconfirmed {
-            result = CleanupResult::Failed(FailureClass::RuntimeUnavailable);
+            outcome.result = CleanupResult::Failed(FailureClass::RuntimeUnavailable);
+            outcome.pending = None;
         }
-        if matches!(result, CleanupResult::Confirmed(_))
-            && let Some(registration) = &mut self.registration
-        {
-            registration.confirm_cleanup();
-        }
-        self.registration = None;
+        let result = outcome.result;
+        let retained = self.registration.take().and_then(|registration| {
+            let capacity = RetainedCapacity::server(registration);
+            if matches!(result, CleanupResult::Confirmed(_)) {
+                capacity.release();
+                None
+            } else {
+                Some(capacity)
+            }
+        });
         let lifecycle = *self
             .shared
             .lifecycle
@@ -910,6 +925,25 @@ impl Worker {
                 self.shared
                     .set_lifecycle(RuntimeLifecycle::Finished(completion));
             }
+        }
+        if let Some(capacity) = retained {
+            let observer = Arc::downgrade(&self.shared);
+            self.cleanup_registry.retain(CleanupObligation::new(outcome.pending, capacity, move || {
+                let Some(shared) = observer.upgrade() else { return; };
+                let mut observations = shared.observations.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(previous) = observations.cleanup
+                    && let Ok(confirmed) = SessionCleanupObservation::new(
+                        shared.session,
+                        previous.first_reason(),
+                        CleanupResult::Confirmed(spaceterm_core::retirement::ConfirmedCleanupClass::ReapedAndReleased),
+                    )
+                {
+                    // Finished is the completed foreground lifecycle. Only the
+                    // independent cleanup observation advances after reproof.
+                    observations.cleanup = Some(confirmed);
+                    shared.lifecycle_changed.notify_all();
+                }
+            }));
         }
     }
 }

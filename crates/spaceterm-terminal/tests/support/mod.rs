@@ -38,6 +38,9 @@ pub struct State {
     pub eof: bool,
     pub terminated: usize,
     pub wait_timeout: bool,
+    pub wait_failure: bool,
+    pub exit_waits: Vec<Duration>,
+    pub exit_observed: bool,
     pub reader_dropped: bool,
     pub process_dropped: bool,
     pub sizes: Vec<PtySize>,
@@ -46,9 +49,17 @@ pub struct State {
     pub hidden: bool,
     pub reader_failure: bool,
     pub read_io_failure: bool,
+    pub reader_panics: bool,
+    pub termination_panics: bool,
     pub reply_bytes: Option<usize>,
     pub termination_blocked: bool,
     pub termination_completed: bool,
+    pub termination_inconclusive: bool,
+    pub termination_keeps_reader_open: bool,
+    pub cleanup_proven: bool,
+    pub cleanup_retries: Vec<Instant>,
+    pub cleanup_retry_blocked: bool,
+    pub termination_dropped: bool,
     pub engine_bytes: Vec<u8>,
     pub content_reads: usize,
     pub content_steps: usize,
@@ -157,10 +168,18 @@ impl PtyProcess for Process {
     fn hidden_input(&self) -> Result<bool, RuntimeFailure> {
         Ok(self.0.inspect(|state| state.hidden))
     }
-    fn wait_for_exit(&mut self, _: Duration) -> Result<PtyExit, RuntimeFailure> {
+    fn wait_for_exit(&mut self, timeout: Duration) -> Result<PtyExit, RuntimeFailure> {
+        self.0.update(|state| state.exit_waits.push(timeout));
+        if self.0.inspect(|state| state.wait_failure) {
+            return Err(RuntimeFailure::new(
+                FailureClass::RuntimeFault,
+                RuntimeStage::Cleanup,
+            ));
+        }
         Ok(if self.0.inspect(|state| state.wait_timeout) {
             PtyExit::StillRunning
         } else {
+            self.0.update(|state| state.exit_observed = true);
             PtyExit::Exited { status: Some(0) }
         })
     }
@@ -178,12 +197,17 @@ impl Read for Reader {
             && state.continuous_output.is_none()
             && !state.eof
             && !state.read_io_failure
+            && !state.reader_panics
         {
             state.reader_waiting = true;
             self.0.0.1.notify_all();
             state = self.0.0.1.wait(state).unwrap();
         }
         state.reader_waiting = false;
+        if state.reader_panics {
+            drop(state);
+            panic!("injected reader join failure");
+        }
         if state.read_io_failure {
             return Err(io::Error::other("native-error-sensitive-sentinel"));
         }
@@ -229,10 +253,44 @@ impl PtyTermination for Termination {
         while state.termination_blocked {
             state = self.0.0.1.wait(state).unwrap();
         }
-        state.eof = true;
+        if !state.termination_keeps_reader_open {
+            state.eof = true;
+        }
         state.termination_completed = true;
         self.0.0.1.notify_all();
-        Ok(())
+        if state.termination_panics {
+            drop(state);
+            panic!("injected termination join failure");
+        }
+        if state.termination_inconclusive {
+            Err(RuntimeFailure::new(
+                FailureClass::RuntimeUnavailable,
+                RuntimeStage::Cleanup,
+            ))
+        } else {
+            Ok(())
+        }
+    }
+    fn retry_cleanup(&self) -> Result<(), RuntimeFailure> {
+        let mut state = self.0.0.0.lock().unwrap();
+        state.cleanup_retries.push(Instant::now());
+        self.0.0.1.notify_all();
+        while state.cleanup_retry_blocked {
+            state = self.0.0.1.wait(state).unwrap();
+        }
+        if state.cleanup_proven {
+            Ok(())
+        } else {
+            Err(RuntimeFailure::new(
+                FailureClass::RuntimeUnavailable,
+                RuntimeStage::Cleanup,
+            ))
+        }
+    }
+}
+impl Drop for Termination {
+    fn drop(&mut self) {
+        self.0.update(|state| state.termination_dropped = true);
     }
 }
 struct Engine {

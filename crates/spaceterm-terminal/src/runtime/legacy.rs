@@ -1,15 +1,16 @@
 //! Local and SSH compatibility ownership without server identities or grants.
 use super::budget::{Budget, BudgetLease, REPLY_INPUT_RESERVE, RuntimeLimits};
+use super::cleanup::{CleanupObligation, CleanupRegistry, RetainedCapacity, WorkerRegistration};
 use super::ports::{
-    PtyExit, PtyParts, PtyProcess, PtyReadEvent, PtyReaderPump, PtySize, PtyTermination,
-    RuntimeFailure, RuntimeStage, cleanup_pty,
+    PendingPtyCleanup, PtyCleanup, PtyExit, PtyParts, PtyProcess, PtyReadEvent, PtyReaderPump,
+    PtySize, PtyTermination, RuntimeFailure, RuntimeStage, cleanup_pty,
 };
 use spaceterm_core::organization::FailureClass;
 use spaceterm_core::retirement::{CleanupResult, ConfirmedCleanupClass};
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
-use std::thread::{self, JoinHandle};
+use std::thread;
 use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -22,6 +23,11 @@ struct CompletionState {
     joined: bool,
     process_started: bool,
     cleanup: Option<CleanupResult>,
+    pending: Option<LegacyPendingCleanup>,
+}
+struct LegacyPendingCleanup {
+    mechanics: Option<PendingPtyCleanup>,
+    capacity: RetainedCapacity,
 }
 struct Shared {
     retiring: AtomicBool,
@@ -37,6 +43,7 @@ impl Shared {
                 joined: false,
                 process_started: false,
                 cleanup: None,
+                pending: None,
             }),
             changed: Condvar::new(),
         })
@@ -45,18 +52,10 @@ impl Shared {
 struct Factory {
     limits: RuntimeLimits,
     budget: Arc<Budget>,
-    registry: mpsc::SyncSender<Registration>,
+    registry: CleanupRegistry,
     ingress: Arc<Budget>,
     input: Arc<Budget>,
     client_input: Arc<Budget>,
-    // Unconfirmed native cleanup never makes its capacity available to another launch.
-    quarantine: Mutex<Vec<BudgetLease>>,
-}
-struct Registration {
-    thread: JoinHandle<()>,
-    shared: Arc<Shared>,
-    lease: BudgetLease,
-    factory: Arc<Factory>,
 }
 /// A bounded cleanup registry. It owns every worker join from startup, not just after close.
 #[derive(Clone)]
@@ -64,67 +63,7 @@ pub struct LegacyRuntimeFactory(Arc<Factory>);
 impl LegacyRuntimeFactory {
     pub fn new(limits: RuntimeLimits) -> Result<Self, RuntimeFailure> {
         let limits = limits.validate()?;
-        let (registry, receiver) = mpsc::sync_channel::<Registration>(limits.owners);
-        thread::Builder::new()
-            .name("terminal-legacy-cleanup".into())
-            .spawn(move || {
-                let mut pending = Vec::<Registration>::new();
-                let mut disconnected = false;
-                loop {
-                    if !disconnected {
-                        match receiver.recv_timeout(Duration::from_millis(10)) {
-                            Ok(registration) => pending.push(registration),
-                            Err(mpsc::RecvTimeoutError::Disconnected) => disconnected = true,
-                            Err(mpsc::RecvTimeoutError::Timeout) => {}
-                        }
-                    } else {
-                        thread::sleep(Duration::from_millis(10));
-                    }
-                    let mut index = 0;
-                    while index < pending.len() {
-                        if !pending[index].thread.is_finished() {
-                            index += 1;
-                            continue;
-                        }
-                        let registration = pending.swap_remove(index);
-                        let joined = registration.thread.join().is_ok();
-                        let mut state = registration
-                            .shared
-                            .state
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner());
-                        if !joined {
-                            state.value = Some(LegacyRuntimeCompletion {
-                                result: Err(RuntimeFailure::new(
-                                    FailureClass::RuntimeFault,
-                                    RuntimeStage::Cleanup,
-                                )),
-                                cleanup: CleanupResult::Failed(FailureClass::RuntimeUnavailable),
-                            });
-                        }
-                        if state.value.is_some_and(|completion| {
-                            !matches!(completion.cleanup, CleanupResult::Confirmed(_))
-                        }) {
-                            registration
-                                .factory
-                                .quarantine
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .push(registration.lease);
-                        } else {
-                            drop(registration.lease);
-                        }
-                        state.joined = true;
-                        registration.shared.changed.notify_all();
-                    }
-                    if disconnected && pending.is_empty() {
-                        break;
-                    }
-                }
-            })
-            .map_err(|_| {
-                RuntimeFailure::new(FailureClass::RuntimeUnavailable, RuntimeStage::Cleanup)
-            })?;
+        let registry = CleanupRegistry::new(limits.owners)?;
         Ok(Self(Arc::new(Factory {
             limits,
             budget: Budget::new(limits.owners, limits.active_grid_slots),
@@ -135,7 +74,6 @@ impl LegacyRuntimeFactory {
                 0,
                 limits.aggregate_pending_input_bytes - limits.owners * REPLY_INPUT_RESERVE,
             ),
-            quarantine: Mutex::new(Vec::new()),
         })))
     }
     /// The driver is the legacy projection only. Its process uses the same owning ports,
@@ -203,16 +141,14 @@ impl LegacyRuntimeFactory {
             })?;
         // At most owners workers can hold capacity. Registry capacity therefore always fits
         // all workers, including those whose owners close on the UI thread.
-        if let Err(error) = self.0.registry.send(Registration {
+        let registered_shared = Arc::clone(&shared);
+        let capacity = RetainedCapacity::legacy(lease);
+        self.0.registry.register_worker(WorkerRegistration {
             thread,
-            shared: Arc::clone(&shared),
-            lease,
-            factory: Arc::clone(&self.0),
-        }) {
-            shared.retiring.store(true, Ordering::Release);
-            let _ = error.0.thread.join();
-            return Err(RuntimeFailure::internal(RuntimeStage::Cleanup));
-        }
+            complete: Box::new(move |joined| {
+                complete_registration(registered_shared, capacity, joined)
+            }),
+        })?;
         Ok(LegacyRuntimeOwner {
             handle: LegacyRuntimeHandle(shared),
         })
@@ -236,6 +172,55 @@ fn cells(size: PtySize, limits: RuntimeLimits) -> Result<usize, RuntimeFailure> 
     Ok(count)
 }
 /// Non-cloneable legacy lifetime authority. Closing requests retirement, never joins the UI.
+fn complete_registration(
+    shared: Arc<Shared>,
+    mut capacity: RetainedCapacity,
+    joined: bool,
+) -> Option<CleanupObligation> {
+    let mut state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+    if !joined || state.value.is_none() {
+        state.value = Some(LegacyRuntimeCompletion {
+            result: Err(RuntimeFailure::new(
+                FailureClass::RuntimeFault,
+                RuntimeStage::Cleanup,
+            )),
+            cleanup: CleanupResult::Failed(FailureClass::RuntimeUnavailable),
+        });
+    }
+    let pending = state.pending.take();
+    let mut mechanics = None;
+    if let Some(pending) = pending {
+        capacity.combine_legacy(pending.capacity);
+        mechanics = pending.mechanics;
+        if !joined && let Some(mechanics) = &mut mechanics {
+            mechanics.fail_mechanics();
+        }
+    }
+    let failed = state
+        .value
+        .is_some_and(|completion| !matches!(completion.cleanup, CleanupResult::Confirmed(_)));
+    let obligation = if failed {
+        let observer = Arc::downgrade(&shared);
+        Some(CleanupObligation::new(mechanics, capacity, move || {
+            let Some(shared) = observer.upgrade() else {
+                return;
+            };
+            let mut state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+            let cleanup = CleanupResult::Confirmed(ConfirmedCleanupClass::ReapedAndReleased);
+            state.cleanup = Some(cleanup);
+            if let Some(completion) = &mut state.value {
+                completion.cleanup = cleanup;
+            }
+            shared.changed.notify_all();
+        }))
+    } else {
+        capacity.release();
+        None
+    };
+    state.joined = true;
+    shared.changed.notify_all();
+    obligation
+}
 pub struct LegacyRuntimeOwner {
     handle: LegacyRuntimeHandle,
 }
@@ -364,6 +349,24 @@ impl LegacyRuntimeContext {
         Ok(pty)
     }
 }
+impl Drop for LegacyRuntimeContext {
+    fn drop(&mut self) {
+        let Some(grid) = self.grid.get_mut().take() else {
+            return;
+        };
+        let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.process_started
+            && state
+                .cleanup
+                .is_none_or(|cleanup| !matches!(cleanup, CleanupResult::Confirmed(_)))
+        {
+            state.pending = Some(LegacyPendingCleanup {
+                mechanics: None,
+                capacity: RetainedCapacity::legacy(grid),
+            });
+        }
+    }
+}
 /// Owned process and ordered output, used only by the legacy worker thread.
 pub struct LegacyPty<T: Send + 'static> {
     process: Option<Box<dyn PtyProcess>>,
@@ -445,24 +448,22 @@ impl<T: Send + 'static> LegacyPty<T> {
         if let Some(cleaned) = self.cleaned {
             return cleaned;
         }
-        let cleaned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             cleanup_pty(&mut self.process, &mut self.termination, &mut self.reader)
         }))
-        .unwrap_or(CleanupResult::Failed(FailureClass::RuntimeUnavailable));
-        if !matches!(cleaned, CleanupResult::Confirmed(_))
-            && let Some(grid) = self.grid.take()
-        {
-            self.factory
-                .quarantine
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .push(grid);
+        .unwrap_or(PtyCleanup {
+            result: CleanupResult::Failed(FailureClass::RuntimeUnavailable),
+            pending: None,
+        });
+        let cleaned = outcome.result;
+        let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        if !matches!(cleaned, CleanupResult::Confirmed(_)) {
+            state.pending = Some(LegacyPendingCleanup {
+                mechanics: outcome.pending,
+                capacity: RetainedCapacity::legacy(self.grid.take().unwrap_or_default()),
+            });
         }
-        self.shared
-            .state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .cleanup = Some(cleaned);
+        state.cleanup = Some(cleaned);
         self.cleaned = Some(cleaned);
         cleaned
     }
@@ -933,10 +934,22 @@ mod tests {
     struct TestReader {
         steps: mpsc::Receiver<Vec<u8>>,
         drops: Arc<std::sync::atomic::AtomicUsize>,
+        records: Records,
     }
     impl std::io::Read for TestReader {
         fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
             let next = self.steps.recv().unwrap_or_default();
+            let mut hold = self.records.reader_hold.0.lock().unwrap();
+            while *hold {
+                hold = self.records.reader_hold.1.wait(hold).unwrap();
+            }
+            drop(hold);
+            if self.records.reader_panics.load(Ordering::Acquire) {
+                panic!("injected reader join failure");
+            }
+            if self.records.reader_io_fault.load(Ordering::Acquire) {
+                return Err(io::Error::other("injected reader I/O fault"));
+            }
             assert!(next.len() <= bytes.len());
             bytes[..next.len()].copy_from_slice(&next);
             Ok(next.len())
@@ -953,6 +966,7 @@ mod tests {
         exited: Arc<AtomicBool>,
         drops: Arc<std::sync::atomic::AtomicUsize>,
         resizes: Arc<std::sync::atomic::AtomicUsize>,
+        records: Records,
     }
     impl Write for TestProcess {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
@@ -982,15 +996,43 @@ mod tests {
             Ok(())
         }
         fn wait_for_exit(&mut self, _: Duration) -> Result<PtyExit, RuntimeFailure> {
-            Ok(if self.exited.load(Ordering::Acquire) {
-                PtyExit::Exited { status: Some(0) }
+            self.records.child_polls.fetch_add(1, Ordering::AcqRel);
+            if self.records.child_wait_failure.load(Ordering::Acquire) {
+                return Err(RuntimeFailure::new(
+                    FailureClass::RuntimeFault,
+                    RuntimeStage::Cleanup,
+                ));
+            }
+            if self.exited.load(Ordering::Acquire)
+                && !self.records.child_unconfirmed.load(Ordering::Acquire)
+            {
+                self.records.child_exits.fetch_add(1, Ordering::AcqRel);
+                Ok(PtyExit::Exited { status: Some(0) })
             } else {
-                PtyExit::StillRunning
-            })
+                Ok(PtyExit::StillRunning)
+            }
         }
     }
+
     impl Drop for TestProcess {
         fn drop(&mut self) {
+            self.records
+                .process_drop_started
+                .store(true, Ordering::Release);
+            if self.records.drop_attempts_proof.load(Ordering::Acquire)
+                && !self.records.proof.load(Ordering::Acquire)
+            {
+                self.records
+                    .unscheduled_proofs
+                    .fetch_add(1, Ordering::AcqRel);
+            }
+            let mut blocked = self.records.process_drop_gate.0.lock().unwrap();
+            while *blocked {
+                blocked = self.records.process_drop_gate.1.wait(blocked).unwrap();
+            }
+            if self.records.process_drop_panics.load(Ordering::Acquire) {
+                panic!("injected native process disposal unwind");
+            }
             self.drops.fetch_add(1, Ordering::AcqRel);
         }
     }
@@ -999,12 +1041,21 @@ mod tests {
         exited: Arc<AtomicBool>,
         calls: Arc<std::sync::atomic::AtomicUsize>,
         failure: bool,
+        records: Records,
     }
     impl PtyTermination for TestTermination {
         fn request_termination(&self) -> Result<(), RuntimeFailure> {
             self.calls.fetch_add(1, Ordering::AcqRel);
+            let mut blocked = self.records.request_gate.0.lock().unwrap();
+            while *blocked {
+                blocked = self.records.request_gate.1.wait(blocked).unwrap();
+            }
+            drop(blocked);
             self.exited.store(true, Ordering::Release);
             let _ = self.steps.send(Vec::new());
+            if self.records.request_panics.load(Ordering::Acquire) {
+                panic!("injected termination join failure");
+            }
             if self.failure {
                 Err(RuntimeFailure::new(
                     FailureClass::RuntimeFault,
@@ -1014,12 +1065,67 @@ mod tests {
                 Ok(())
             }
         }
+        fn retry_cleanup(&self) -> Result<(), RuntimeFailure> {
+            self.reproof()
+        }
+    }
+    impl TestTermination {
+        fn reproof(&self) -> Result<(), RuntimeFailure> {
+            self.records
+                .times
+                .lock()
+                .unwrap()
+                .push(std::time::Instant::now());
+            self.records.retries.fetch_add(1, Ordering::AcqRel);
+            if self.records.retry_panics.swap(false, Ordering::AcqRel) {
+                panic!("injected retry adapter unwind");
+            }
+            let mut blocked = self.records.proof_gate.0.lock().unwrap();
+            while *blocked {
+                blocked = self.records.proof_gate.1.wait(blocked).unwrap();
+            }
+            if self.records.proof.load(Ordering::Acquire) {
+                Ok(())
+            } else {
+                Err(RuntimeFailure::new(
+                    FailureClass::RuntimeUnavailable,
+                    RuntimeStage::Cleanup,
+                ))
+            }
+        }
+    }
+    impl Drop for TestTermination {
+        fn drop(&mut self) {
+            self.records
+                .termination_drops
+                .fetch_add(1, Ordering::AcqRel);
+        }
     }
     #[derive(Default, Clone)]
     struct Records {
         reader_drops: Arc<std::sync::atomic::AtomicUsize>,
         process_drops: Arc<std::sync::atomic::AtomicUsize>,
         terminations: Arc<std::sync::atomic::AtomicUsize>,
+        retries: Arc<std::sync::atomic::AtomicUsize>,
+        proof: Arc<AtomicBool>,
+        proof_gate: Arc<(Mutex<bool>, Condvar)>,
+        request_gate: Arc<(Mutex<bool>, Condvar)>,
+        child_polls: Arc<std::sync::atomic::AtomicUsize>,
+        reader_hold: Arc<(Mutex<bool>, Condvar)>,
+        process_drop_gate: Arc<(Mutex<bool>, Condvar)>,
+        process_drop_started: Arc<AtomicBool>,
+        process_drop_panics: Arc<AtomicBool>,
+        drop_attempts_proof: Arc<AtomicBool>,
+        unscheduled_proofs: Arc<std::sync::atomic::AtomicUsize>,
+        child_exits: Arc<std::sync::atomic::AtomicUsize>,
+        times: Arc<Mutex<Vec<std::time::Instant>>>,
+        termination_drops: Arc<std::sync::atomic::AtomicUsize>,
+        reader_io_fault: Arc<AtomicBool>,
+        reader_panics: Arc<AtomicBool>,
+        request_panics: Arc<AtomicBool>,
+        retry_panics: Arc<AtomicBool>,
+        child_unconfirmed: Arc<AtomicBool>,
+        child_wait_failure: Arc<AtomicBool>,
         resizes: Arc<std::sync::atomic::AtomicUsize>,
     }
     fn parts(records: &Records, reader_failure: bool, cleanup_failure: bool) -> PtyParts {
@@ -1030,17 +1136,20 @@ mod tests {
                 reader: Some(Box::new(TestReader {
                     steps: reader,
                     drops: Arc::clone(&records.reader_drops),
+                    records: records.clone(),
                 })),
                 reader_failure,
                 exited: Arc::clone(&exited),
                 drops: Arc::clone(&records.process_drops),
                 resizes: Arc::clone(&records.resizes),
+                records: records.clone(),
             }),
             termination: Arc::new(TestTermination {
                 steps,
                 exited,
                 calls: Arc::clone(&records.terminations),
                 failure: cleanup_failure,
+                records: records.clone(),
             }),
         }
     }
@@ -1111,6 +1220,681 @@ mod tests {
         completion.result.unwrap();
         assert!(matches!(completion.cleanup, CleanupResult::Failed(_)));
         assert!(factory.start(size(), |_| Ok(())).is_err());
+    }
+    #[test]
+    fn legacy_cleanup_reproof_releases_count_and_grid_together() {
+        let factory = LegacyRuntimeFactory::new(RuntimeLimits {
+            owners: 1,
+            active_grid_slots: 24 * 80 * 4,
+            ..RuntimeLimits::default()
+        })
+        .unwrap();
+        let records = Records::default();
+        let process = parts(&records, false, true);
+        let owner = factory
+            .start(size(), move |context| {
+                let _pty = context.launch(|_| Ok(process), || Ok(()), || {})?;
+                Ok(())
+            })
+            .unwrap();
+        let first = owner.join().unwrap();
+        assert!(matches!(first.cleanup, CleanupResult::Failed(_)));
+        assert!(factory.start(size(), |_| Ok(())).is_err());
+        let end = std::time::Instant::now() + Duration::from_secs(3);
+        while records.retries.load(Ordering::Acquire) == 0 {
+            assert!(std::time::Instant::now() < end, "cleanup was not re-proved");
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(matches!(
+            owner.handle().completion().unwrap().cleanup,
+            CleanupResult::Failed(_)
+        ));
+        records.proof.store(true, Ordering::Release);
+        let end = std::time::Instant::now() + Duration::from_secs(3);
+        while !matches!(
+            owner.handle().completion().unwrap().cleanup,
+            CleanupResult::Confirmed(_)
+        ) {
+            assert!(
+                std::time::Instant::now() < end,
+                "later certificate was not observed"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        factory.start(size(), |_| Ok(())).unwrap().join().unwrap();
+        assert_eq!(records.terminations.load(Ordering::Acquire), 1);
+    }
+    fn until(predicate: impl Fn() -> bool) {
+        let end = std::time::Instant::now() + Duration::from_secs(4);
+        while !predicate() {
+            assert!(std::time::Instant::now() < end, "cleanup barrier timed out");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+    #[test]
+    fn legacy_always_inconclusive_reproof_is_fair_bounded_and_rate_limited() {
+        let factory = LegacyRuntimeFactory::new(RuntimeLimits {
+            owners: 3,
+            ..RuntimeLimits::default()
+        })
+        .unwrap();
+        let mut workers = Vec::new();
+        for _ in 0..3 {
+            let records = Records::default();
+            let process = parts(&records, false, true);
+            let owner = factory
+                .start(size(), move |context| {
+                    let _pty = context.launch(|_| Ok(process), || Ok(()), || {})?;
+                    Ok(())
+                })
+                .unwrap();
+            assert!(matches!(
+                owner.join().unwrap().cleanup,
+                CleanupResult::Failed(_)
+            ));
+            workers.push((owner, records));
+        }
+        until(|| {
+            workers
+                .iter()
+                .all(|(_, records)| records.retries.load(Ordering::Acquire) >= 2)
+        });
+        let mut times = Vec::new();
+        for (owner, records) in &workers {
+            assert!(matches!(
+                owner.handle().completion().unwrap().cleanup,
+                CleanupResult::Failed(_)
+            ));
+            let attempts = records.times.lock().unwrap();
+            assert_eq!(attempts.len(), 2, "inconclusive cleanup became a hot loop");
+            assert!(attempts[1].duration_since(attempts[0]) >= Duration::from_millis(900));
+            times.extend(attempts.iter().copied());
+            assert_eq!(records.terminations.load(Ordering::Acquire), 1);
+        }
+        times.sort();
+        assert!(
+            times
+                .windows(2)
+                .all(|pair| pair[1].duration_since(pair[0]) >= Duration::from_millis(200))
+        );
+        assert!(factory.start(size(), |_| Ok(())).is_err());
+    }
+    #[test]
+    fn legacy_factory_shutdown_preserves_count_grid_and_ignores_late_certificate() {
+        let factory = LegacyRuntimeFactory::new(RuntimeLimits {
+            owners: 1,
+            active_grid_slots: 24 * 80 * 4,
+            ..RuntimeLimits::default()
+        })
+        .unwrap();
+        let budget = Arc::clone(&factory.0.budget);
+        let factory_weak = Arc::downgrade(&factory.0);
+        let records = Records::default();
+        *records.proof_gate.0.lock().unwrap() = true;
+        let process = parts(&records, false, true);
+        let owner = factory
+            .start(size(), move |context| {
+                let _pty = context.launch(|_| Ok(process), || Ok(()), || {})?;
+                Ok(())
+            })
+            .unwrap();
+        let handle = owner.handle();
+        owner.join().unwrap();
+        until(|| records.retries.load(Ordering::Acquire) == 1);
+        let started = std::time::Instant::now();
+        drop(factory);
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert!(
+            factory_weak.upgrade().is_none(),
+            "retained cleanup owns a sender/factory cycle"
+        );
+        records.proof.store(true, Ordering::Release);
+        *records.proof_gate.0.lock().unwrap() = false;
+        records.proof_gate.1.notify_all();
+        until(|| records.termination_drops.load(Ordering::Acquire) == 1);
+        assert!(matches!(
+            handle.completion().unwrap().cleanup,
+            CleanupResult::Failed(_)
+        ));
+        assert!(budget.reserve(1, 0, RuntimeStage::Admission).is_err());
+        assert!(
+            budget
+                .reserve(0, 24 * 80 * 4, RuntimeStage::Admission)
+                .is_err()
+        );
+        assert_eq!(records.retries.load(Ordering::Acquire), 1);
+    }
+    #[test]
+    fn legacy_joined_reader_io_fault_can_reprove_absence() {
+        let factory = LegacyRuntimeFactory::new(RuntimeLimits {
+            owners: 1,
+            ..RuntimeLimits::default()
+        })
+        .unwrap();
+        let records = Records::default();
+        records.reader_io_fault.store(true, Ordering::Release);
+        let process = parts(&records, false, true);
+        let owner = factory
+            .start(size(), move |context| {
+                let _pty = context.launch(|_| Ok(process), || Ok(()), || {})?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(matches!(
+            owner.join().unwrap().cleanup,
+            CleanupResult::Failed(_)
+        ));
+        records.proof.store(true, Ordering::Release);
+        until(|| {
+            matches!(
+                owner.handle().completion().unwrap().cleanup,
+                CleanupResult::Confirmed(_)
+            )
+        });
+        factory.start(size(), |_| Ok(())).unwrap().join().unwrap();
+    }
+    #[test]
+    fn legacy_cleanup_waits_for_child_exit_and_quarantines_mechanical_errors() {
+        let factory = LegacyRuntimeFactory::new(RuntimeLimits {
+            owners: 4,
+            ..RuntimeLimits::default()
+        })
+        .unwrap();
+        let mut workers = Vec::new();
+        for case in 0..4 {
+            let records = Records::default();
+            records.proof.store(true, Ordering::Release);
+            records
+                .child_unconfirmed
+                .store(case == 0, Ordering::Release);
+            records
+                .child_wait_failure
+                .store(case == 3, Ordering::Release);
+            records.reader_panics.store(case == 1, Ordering::Release);
+            records.request_panics.store(case == 2, Ordering::Release);
+            let process = parts(&records, false, true);
+            let owner = factory
+                .start(size(), move |context| {
+                    let _pty = context.launch(|_| Ok(process), || Ok(()), || {})?;
+                    Ok(())
+                })
+                .unwrap();
+            assert!(matches!(
+                owner.join().unwrap().cleanup,
+                CleanupResult::Failed(_)
+            ));
+            workers.push((owner, records, case));
+        }
+        until(|| workers[0].1.retries.load(Ordering::Acquire) == 1);
+        thread::sleep(Duration::from_millis(300));
+        for (owner, records, case) in workers {
+            assert!(matches!(
+                owner.handle().completion().unwrap().cleanup,
+                CleanupResult::Failed(_)
+            ));
+            assert_eq!(
+                records.retries.load(Ordering::Acquire),
+                usize::from(case == 0)
+            );
+        }
+        assert!(factory.start(size(), |_| Ok(())).is_err());
+    }
+    #[test]
+    fn legacy_cleanup_registry_shutdown_completes_queued_worker_observers() {
+        let factory = LegacyRuntimeFactory::new(RuntimeLimits {
+            owners: 2,
+            ..RuntimeLimits::default()
+        })
+        .unwrap();
+        let budget = Arc::clone(&factory.0.budget);
+        let first_records = Records::default();
+        *first_records.proof_gate.0.lock().unwrap() = true;
+        let first_process = parts(&first_records, false, true);
+        let first = factory
+            .start(size(), move |context| {
+                let _pty = context.launch(|_| Ok(first_process), || Ok(()), || {})?;
+                Ok(())
+            })
+            .unwrap();
+        first.join().unwrap();
+        until(|| first_records.retries.load(Ordering::Acquire) == 1);
+        // The service is inside the first callback, so this registration stays queued.
+        let second_records = Records::default();
+        let second_process = parts(&second_records, false, true);
+        let second = factory
+            .start(size(), move |context| {
+                let _pty = context.launch(|_| Ok(second_process), || Ok(()), || {})?;
+                Ok(())
+            })
+            .unwrap();
+        let handle = second.handle();
+        until(|| {
+            handle.0.state.lock().unwrap().value.is_some() && Arc::strong_count(&factory.0) == 1
+        });
+        assert!(handle.completion().is_none());
+        drop(factory);
+        first_records.proof.store(true, Ordering::Release);
+        *first_records.proof_gate.0.lock().unwrap() = false;
+        first_records.proof_gate.1.notify_all();
+        until(|| handle.completion().is_some());
+        assert!(matches!(
+            second.join().unwrap().cleanup,
+            CleanupResult::Failed(_)
+        ));
+        assert!(budget.reserve(1, 0, RuntimeStage::Admission).is_err());
+        assert_eq!(second_records.retries.load(Ordering::Acquire), 0);
+    }
+    #[test]
+    fn legacy_cleanup_registry_retry_adapter_unwind_permanently_quarantines() {
+        let factory = LegacyRuntimeFactory::new(RuntimeLimits {
+            owners: 1,
+            ..RuntimeLimits::default()
+        })
+        .unwrap();
+        let records = Records::default();
+        records.retry_panics.store(true, Ordering::Release);
+        records.proof.store(true, Ordering::Release);
+        let process = parts(&records, false, true);
+        let owner = factory
+            .start(size(), move |context| {
+                let _pty = context.launch(|_| Ok(process), || Ok(()), || {})?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(matches!(
+            owner.join().unwrap().cleanup,
+            CleanupResult::Failed(_)
+        ));
+        until(|| records.retries.load(Ordering::Acquire) == 1);
+        thread::sleep(Duration::from_millis(1250));
+        assert_eq!(
+            records.retries.load(Ordering::Acquire),
+            1,
+            "retried after adapter unwind"
+        );
+        assert_eq!(
+            records.termination_drops.load(Ordering::Acquire),
+            0,
+            "original Session identity was lost"
+        );
+        assert!(matches!(
+            owner.handle().completion().unwrap().cleanup,
+            CleanupResult::Failed(_)
+        ));
+        assert!(factory.start(size(), |_| Ok(())).is_err());
+        drop(factory);
+        until(|| records.termination_drops.load(Ordering::Acquire) == 1);
+    }
+    #[test]
+    fn legacy_pending_mechanics_returns_foreground_and_waits_for_actual_joins() {
+        let factory = LegacyRuntimeFactory::new(RuntimeLimits {
+            owners: 1,
+            ..RuntimeLimits::default()
+        })
+        .unwrap();
+        let records = Records::default();
+        records.child_unconfirmed.store(true, Ordering::Release);
+        *records.reader_hold.0.lock().unwrap() = true;
+        let process = parts(&records, false, true);
+        let owner = factory
+            .start(size(), move |context| {
+                let _pty = context.launch(|_| Ok(process), || Ok(()), || {})?;
+                Ok(())
+            })
+            .unwrap();
+        let handle = owner.handle();
+        let (returned, receive) = mpsc::channel();
+        thread::spawn(move || returned.send(owner.join()).unwrap());
+        let first = receive.recv_timeout(Duration::from_secs(3));
+        if first.is_err() {
+            *records.reader_hold.0.lock().unwrap() = false;
+            records.reader_hold.1.notify_all();
+            let _ = receive.recv_timeout(Duration::from_secs(3));
+            panic!("legacy foreground indefinitely joined a blocked reader");
+        }
+        assert!(matches!(
+            first.unwrap().unwrap().cleanup,
+            CleanupResult::Failed(_)
+        ));
+        assert_eq!(records.process_drops.load(Ordering::Acquire), 0);
+        records.proof.store(true, Ordering::Release);
+        until(|| records.retries.load(Ordering::Acquire) == 1);
+        assert!(factory.start(size(), |_| Ok(())).is_err());
+        records.child_unconfirmed.store(false, Ordering::Release);
+        until(|| records.child_exits.load(Ordering::Acquire) == 1);
+        assert_eq!(records.process_drops.load(Ordering::Acquire), 0);
+        assert!(factory.start(size(), |_| Ok(())).is_err());
+        assert_eq!(records.reader_drops.load(Ordering::Acquire), 0);
+        *records.reader_hold.0.lock().unwrap() = false;
+        records.reader_hold.1.notify_all();
+        until(|| {
+            matches!(
+                handle.completion().unwrap().cleanup,
+                CleanupResult::Confirmed(_)
+            )
+        });
+        factory.start(size(), |_| Ok(())).unwrap().join().unwrap();
+        until(|| {
+            records.process_drops.load(Ordering::Acquire) == 1
+                && records.reader_drops.load(Ordering::Acquire) == 1
+        });
+        assert_eq!(records.terminations.load(Ordering::Acquire), 1);
+    }
+    #[test]
+    fn legacy_pending_mechanics_shutdown_detaches_reader_and_preserves_budgets() {
+        let factory = LegacyRuntimeFactory::new(RuntimeLimits {
+            owners: 1,
+            active_grid_slots: 24 * 80 * 4,
+            ..RuntimeLimits::default()
+        })
+        .unwrap();
+        let budget = Arc::clone(&factory.0.budget);
+        let records = Records::default();
+        records.child_unconfirmed.store(true, Ordering::Release);
+        *records.reader_hold.0.lock().unwrap() = true;
+        let process = parts(&records, false, true);
+        let owner = factory
+            .start(size(), move |context| {
+                let _pty = context.launch(|_| Ok(process), || Ok(()), || {})?;
+                Ok(())
+            })
+            .unwrap();
+        let handle = owner.handle();
+        let (returned, receive) = mpsc::channel();
+        thread::spawn(move || returned.send(owner.join()).unwrap());
+        let first = receive.recv_timeout(Duration::from_secs(3));
+        if first.is_err() {
+            *records.reader_hold.0.lock().unwrap() = false;
+            records.reader_hold.1.notify_all();
+            let _ = receive.recv_timeout(Duration::from_secs(3));
+            panic!("legacy blocked reader prevented cleanup handoff");
+        }
+        assert!(matches!(
+            first.unwrap().unwrap().cleanup,
+            CleanupResult::Failed(_)
+        ));
+        let started = std::time::Instant::now();
+        drop(factory);
+        assert!(started.elapsed() < Duration::from_millis(500));
+        until(|| {
+            records.termination_drops.load(Ordering::Acquire) == 1
+                && records.process_drops.load(Ordering::Acquire) == 1
+        });
+        assert_eq!(records.reader_drops.load(Ordering::Acquire), 0);
+        assert!(matches!(
+            handle.completion().unwrap().cleanup,
+            CleanupResult::Failed(_)
+        ));
+        assert!(budget.reserve(1, 0, RuntimeStage::Admission).is_err());
+        assert!(
+            budget
+                .reserve(0, 24 * 80 * 4, RuntimeStage::Admission)
+                .is_err()
+        );
+        *records.reader_hold.0.lock().unwrap() = false;
+        records.reader_hold.1.notify_all();
+        until(|| records.reader_drops.load(Ordering::Acquire) == 1);
+    }
+    #[test]
+    fn legacy_shutdown_completes_queued_observers_before_native_resource_disposal() {
+        let factory = LegacyRuntimeFactory::new(RuntimeLimits {
+            owners: 2,
+            ..RuntimeLimits::default()
+        })
+        .unwrap();
+        let records = Records::default();
+        records.child_unconfirmed.store(true, Ordering::Release);
+        *records.proof_gate.0.lock().unwrap() = true;
+        *records.process_drop_gate.0.lock().unwrap() = true;
+        let process = parts(&records, false, true);
+        let first = factory
+            .start(size(), move |context| {
+                let _pty = context.launch(|_| Ok(process), || Ok(()), || {})?;
+                Ok(())
+            })
+            .unwrap();
+        first.join().unwrap();
+        until(|| records.retries.load(Ordering::Acquire) == 1);
+        let second_process = parts(&Records::default(), false, true);
+        let second = factory
+            .start(size(), move |context| {
+                let _pty = context.launch(|_| Ok(second_process), || Ok(()), || {})?;
+                Ok(())
+            })
+            .unwrap();
+        let handle = second.handle();
+        until(|| {
+            handle.0.state.lock().unwrap().value.is_some() && Arc::strong_count(&factory.0) == 1
+        });
+        assert!(handle.completion().is_none());
+        drop(factory);
+        *records.proof_gate.0.lock().unwrap() = false;
+        records.proof_gate.1.notify_all();
+        until(|| records.process_drop_started.load(Ordering::Acquire));
+        let completed_before_disposal = handle.completion();
+        // Release the uncontrolled destructor before asserting the red result.
+        *records.process_drop_gate.0.lock().unwrap() = false;
+        records.process_drop_gate.1.notify_all();
+        until(|| handle.completion().is_some());
+        assert!(
+            completed_before_disposal.is_some(),
+            "native disposal blocked queued completion observers"
+        );
+        assert!(matches!(
+            second.join().unwrap().cleanup,
+            CleanupResult::Failed(_)
+        ));
+    }
+    #[test]
+    fn legacy_pending_termination_returns_foreground_and_shutdown_detaches_original_call() {
+        let factory = LegacyRuntimeFactory::new(RuntimeLimits {
+            owners: 1,
+            ..RuntimeLimits::default()
+        })
+        .unwrap();
+        let budget = Arc::clone(&factory.0.budget);
+        let records = Records::default();
+        *records.request_gate.0.lock().unwrap() = true;
+        let process = parts(&records, false, false);
+        let owner = factory
+            .start(size(), move |context| {
+                let _pty = context.launch(|_| Ok(process), || Ok(()), || {})?;
+                Ok(())
+            })
+            .unwrap();
+        let handle = owner.handle();
+        let (returned, receive) = mpsc::channel();
+        thread::spawn(move || returned.send(owner.join()).unwrap());
+        until(|| records.terminations.load(Ordering::Acquire) == 1);
+        let first = receive.recv_timeout(Duration::from_secs(3));
+        if first.is_err() {
+            *records.request_gate.0.lock().unwrap() = false;
+            records.request_gate.1.notify_all();
+            let _ = receive.recv_timeout(Duration::from_secs(3));
+            panic!("unfinished legacy termination blocked foreground cleanup");
+        }
+        assert!(matches!(
+            first.unwrap().unwrap().cleanup,
+            CleanupResult::Failed(_)
+        ));
+        assert_eq!(records.child_polls.load(Ordering::Acquire), 0);
+        assert_eq!(records.retries.load(Ordering::Acquire), 0);
+        let started = std::time::Instant::now();
+        drop(factory);
+        assert!(started.elapsed() < Duration::from_millis(500));
+        until(|| records.process_drops.load(Ordering::Acquire) == 1);
+        assert_eq!(records.termination_drops.load(Ordering::Acquire), 0);
+        *records.request_gate.0.lock().unwrap() = false;
+        records.request_gate.1.notify_all();
+        until(|| {
+            records.termination_drops.load(Ordering::Acquire) == 1
+                && records.reader_drops.load(Ordering::Acquire) == 1
+        });
+        assert!(matches!(
+            handle.completion().unwrap().cleanup,
+            CleanupResult::Failed(_)
+        ));
+        assert!(budget.reserve(1, 0, RuntimeStage::Admission).is_err());
+        assert_eq!(records.retries.load(Ordering::Acquire), 0);
+    }
+    #[test]
+    fn legacy_exited_adapter_does_not_run_proof_outside_retry_scheduler() {
+        let factory = LegacyRuntimeFactory::new(RuntimeLimits {
+            owners: 1,
+            ..RuntimeLimits::default()
+        })
+        .unwrap();
+        let records = Records::default();
+        records.child_unconfirmed.store(true, Ordering::Release);
+        records.drop_attempts_proof.store(true, Ordering::Release);
+        let process = parts(&records, false, true);
+        let owner = factory
+            .start(size(), move |context| {
+                let _pty = context.launch(|_| Ok(process), || Ok(()), || {})?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(matches!(
+            owner.join().unwrap().cleanup,
+            CleanupResult::Failed(_)
+        ));
+        until(|| records.retries.load(Ordering::Acquire) == 1);
+        records.child_unconfirmed.store(false, Ordering::Release);
+        until(|| records.child_exits.load(Ordering::Acquire) == 1);
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(
+            records.unscheduled_proofs.load(Ordering::Acquire),
+            0,
+            "exited adapter disposal bypassed proof spacing"
+        );
+        assert_eq!(records.process_drops.load(Ordering::Acquire), 0);
+        assert_eq!(records.retries.load(Ordering::Acquire), 1);
+        assert!(matches!(
+            owner.handle().completion().unwrap().cleanup,
+            CleanupResult::Failed(_)
+        ));
+        records.proof.store(true, Ordering::Release);
+        until(|| {
+            matches!(
+                owner.handle().completion().unwrap().cleanup,
+                CleanupResult::Confirmed(_)
+            )
+        });
+        until(|| records.process_drops.load(Ordering::Acquire) == 1);
+        assert_eq!(records.unscheduled_proofs.load(Ordering::Acquire), 0);
+        assert_eq!(records.child_exits.load(Ordering::Acquire), 1);
+    }
+    #[test]
+    fn legacy_positive_cleanup_disposal_does_not_hold_shutdown_gate_or_release_capacity() {
+        let factory = LegacyRuntimeFactory::new(RuntimeLimits {
+            owners: 1,
+            active_grid_slots: 24 * 80 * 4,
+            ..RuntimeLimits::default()
+        })
+        .unwrap();
+        let budget = Arc::clone(&factory.0.budget);
+        let records = Records::default();
+        *records.process_drop_gate.0.lock().unwrap() = true;
+        let process = parts(&records, false, true);
+        let owner = factory
+            .start(size(), move |context| {
+                let _pty = context.launch(|_| Ok(process), || Ok(()), || {})?;
+                Ok(())
+            })
+            .unwrap();
+        let handle = owner.handle();
+        assert!(matches!(
+            owner.join().unwrap().cleanup,
+            CleanupResult::Failed(_)
+        ));
+        records.proof.store(true, Ordering::Release);
+        until(|| records.process_drop_started.load(Ordering::Acquire));
+        let observed_before_disposal = handle.completion().unwrap().cleanup;
+        let count_released = budget.reserve(1, 0, RuntimeStage::Admission).is_ok();
+        let grid_released = budget
+            .reserve(0, 24 * 80 * 4, RuntimeStage::Admission)
+            .is_ok();
+        let (stopped, receive) = mpsc::channel();
+        thread::spawn(move || {
+            drop(factory);
+            stopped.send(()).unwrap();
+        });
+        let stopped_before_disposal = receive.recv_timeout(Duration::from_millis(500)).is_ok();
+        // Unblock the uncontrolled boundary before asserting the intended red failures.
+        *records.process_drop_gate.0.lock().unwrap() = false;
+        records.process_drop_gate.1.notify_all();
+        if !stopped_before_disposal {
+            receive.recv_timeout(Duration::from_secs(3)).unwrap();
+        }
+        until(|| records.termination_drops.load(Ordering::Acquire) == 1);
+        assert!(
+            stopped_before_disposal,
+            "native disposal held the factory shutdown gate"
+        );
+        assert!(
+            !count_released && !grid_released,
+            "positive proof released capacity before disposal finished"
+        );
+        assert!(matches!(observed_before_disposal, CleanupResult::Failed(_)));
+        assert!(
+            matches!(
+                handle.completion().unwrap().cleanup,
+                CleanupResult::Failed(_)
+            ),
+            "late disposal confirmation advanced cleanup after shutdown"
+        );
+        assert!(budget.reserve(1, 0, RuntimeStage::Admission).is_err());
+        assert!(
+            budget
+                .reserve(0, 24 * 80 * 4, RuntimeStage::Admission)
+                .is_err()
+        );
+    }
+    #[test]
+    fn legacy_positive_cleanup_disposal_unwind_permanently_quarantines_capacity() {
+        let factory = LegacyRuntimeFactory::new(RuntimeLimits {
+            owners: 1,
+            active_grid_slots: 24 * 80 * 4,
+            ..RuntimeLimits::default()
+        })
+        .unwrap();
+        let budget = Arc::clone(&factory.0.budget);
+        let records = Records::default();
+        records.process_drop_panics.store(true, Ordering::Release);
+        let process = parts(&records, false, true);
+        let owner = factory
+            .start(size(), move |context| {
+                let _pty = context.launch(|_| Ok(process), || Ok(()), || {})?;
+                Ok(())
+            })
+            .unwrap();
+        let handle = owner.handle();
+        assert!(matches!(
+            owner.join().unwrap().cleanup,
+            CleanupResult::Failed(_)
+        ));
+        records.proof.store(true, Ordering::Release);
+        until(|| records.termination_drops.load(Ordering::Acquire) == 1);
+        thread::sleep(Duration::from_millis(200));
+        assert!(
+            matches!(
+                handle.completion().unwrap().cleanup,
+                CleanupResult::Failed(_)
+            ),
+            "disposal unwind became successful cleanup"
+        );
+        assert!(budget.reserve(1, 0, RuntimeStage::Admission).is_err());
+        assert!(
+            budget
+                .reserve(0, 24 * 80 * 4, RuntimeStage::Admission)
+                .is_err()
+        );
+        assert_eq!(records.retries.load(Ordering::Acquire), 1);
+        drop(factory);
+        assert!(matches!(
+            handle.completion().unwrap().cleanup,
+            CleanupResult::Failed(_)
+        ));
     }
     #[test]
     fn legacy_resize_reserves_grid_before_native_effect_and_allows_pixel_only_changes() {

@@ -1276,7 +1276,10 @@ fn reader_acquisition_failure_should_fail_startup_and_drop_the_pty_once() {
         Ok(_) => panic!("a missing PTY reader must fail startup"),
         Err(error) => error,
     };
-    let state = records.snapshot();
+    let state = records.wait_for(
+        "the failed test factory to drop retained cleanup authority",
+        |state| state.pty_drops == 1 && state.terminator_drops == 1,
+    );
 
     assert!(matches!(
         error,
@@ -1314,8 +1317,8 @@ fn scripted_output_should_reach_the_terminal_screen() {
 
     session.shutdown();
     let state = records.wait_for(
-        "the scripted Terminal Session owners to be released",
-        |state| state.pty_drops == 1 && state.reader_drops == 1,
+        "the scripted test factory to drop retained cleanup authority",
+        |state| state.pty_drops == 1 && state.reader_drops == 1 && state.terminator_drops == 1,
     );
     assert_eq!(
         (
@@ -3588,7 +3591,10 @@ fn write_failure_should_emit_a_runtime_failure_and_stop_the_worker() {
     assert_eq!((state.write_attempts, state.written.len()), (1, 0));
 
     session.shutdown();
-    let state = records.snapshot();
+    let state = records.wait_for(
+        "the failed test factory to drop retained cleanup authority",
+        |state| state.pty_drops == 1 && state.terminator_drops == 1,
+    );
     assert_eq!(
         (state.terminations, state.pty_drops, state.terminator_drops),
         (1, 1, 1)
@@ -3818,33 +3824,28 @@ fn repeated_shutdown_should_return_before_a_blocked_reader_finishes() {
         }
     };
     shutdown_thread.join().unwrap();
-    let state = records.wait_for("the detached worker to drop its PTY", |state| {
-        state.pty_drops == 1
+    let state = records.wait_for("the original termination request", |state| {
+        state.terminations == 1
     });
     assert_eq!(
         (
             state.terminations,
-            state.pty_drops,
             state.reader_drops,
-            state.terminator_drops,
             session.commands.is_none(),
             session.worker.is_none(),
             session.native_pty_close.is_none(),
         ),
-        (1, 1, 0, 1, true, true, true)
+        (1, 0, true, true, true)
     );
-    assert_eq!(
-        state.lifecycle,
-        vec![
-            LifecycleStep::TerminationRequested,
-            LifecycleStep::PtyDropped,
-        ]
-    );
+    // Unfinished reader mechanics may retain the adapter until cleanup completes
+    // or the isolated test factory shuts down. Neither case may join this caller.
+    assert!(state.pty_drops <= 1 && state.terminator_drops <= 1);
 
     reader_steps.send(ReaderStep::Eof).unwrap();
-    let state = records.wait_for("the released reader ownership", |state| {
-        state.reader_drops == 1
-    });
+    let state = records.wait_for(
+        "all reader and test factory ownership to be released",
+        |state| state.pty_drops == 1 && state.reader_drops == 1 && state.terminator_drops == 1,
+    );
     assert_eq!(
         (
             state.terminations,
@@ -3853,6 +3854,13 @@ fn repeated_shutdown_should_return_before_a_blocked_reader_finishes() {
             state.terminator_drops,
         ),
         (1, 1, 1, 1)
+    );
+    assert_eq!(
+        state.lifecycle,
+        vec![
+            LifecycleStep::TerminationRequested,
+            LifecycleStep::PtyDropped,
+        ]
     );
 }
 
@@ -3876,23 +3884,17 @@ fn drop_should_return_after_termination_fails_with_a_blocked_reader() {
         panic!("Drop waited after termination failed: {error}");
     }
     drop_thread.join().unwrap();
-    let state = records.wait_for("the detached worker to drop its PTY", |state| {
-        state.pty_drops == 1
+    let state = records.wait_for("the failed original termination request", |state| {
+        state.terminations == 1
     });
-    assert_eq!(
-        (
-            state.terminations,
-            state.pty_drops,
-            state.reader_drops,
-            state.terminator_drops,
-        ),
-        (1, 1, 0, 1)
-    );
+    assert_eq!((state.terminations, state.reader_drops), (1, 0));
+    assert!(state.pty_drops <= 1 && state.terminator_drops <= 1);
 
     reader_steps.send(ReaderStep::Eof).unwrap();
-    let state = records.wait_for("the reader to release after termination failure", |state| {
-        state.reader_drops == 1
-    });
+    let state = records.wait_for(
+        "all ownership to release after termination failure",
+        |state| state.pty_drops == 1 && state.reader_drops == 1 && state.terminator_drops == 1,
+    );
     assert_eq!(
         (
             state.terminations,
@@ -5294,7 +5296,11 @@ fn native_legacy_bridge_repeated_cleanup_releases_shared_factory_capacity() {
     ) {
         return;
     }
-    let factory = LegacyRuntimeFactory::new(RuntimeLimits::default()).unwrap();
+    let factory = LegacyRuntimeFactory::new(RuntimeLimits {
+        owners: 1,
+        ..Default::default()
+    })
+    .unwrap();
     let fixture = NativePtyFixture::new();
     let resources = crate::terminal::testing::ShellResourcesFixture::new();
     for _ in 0..70 {
@@ -5319,12 +5325,31 @@ fn native_legacy_bridge_repeated_cleanup_releases_shared_factory_capacity() {
             .unwrap();
         let completion = owner.join().unwrap();
         completion.result.unwrap();
-        assert_eq!(
-            completion.cleanup,
-            spaceterm_core::retirement::CleanupResult::Confirmed(
-                spaceterm_core::retirement::ConfirmedCleanupClass::ReapedAndReleased,
-            )
-        );
+        // A busy host may reject the first strict census. The same retained cleanup
+        // obligation must later prove absence before this single slot can be reused.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let cleanup = owner.handle().completion().unwrap().cleanup;
+            if matches!(
+                cleanup,
+                spaceterm_core::retirement::CleanupResult::Confirmed(
+                    spaceterm_core::retirement::ConfirmedCleanupClass::ReapedAndReleased,
+                )
+            ) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "retained native cleanup did not positively prove Session absence"
+            );
+            assert_eq!(
+                cleanup,
+                spaceterm_core::retirement::CleanupResult::Failed(
+                    spaceterm_core::organization::FailureClass::RuntimeUnavailable,
+                )
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }
 
