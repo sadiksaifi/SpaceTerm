@@ -8,6 +8,7 @@ default = []
 test-support = ["dep:prost", "dep:ring"]
 
 [dependencies]
+spaceterm-distribution = { path = "../spaceterm-distribution" }
 spaceterm-core = { path = "../spaceterm-core" }
 spaceterm-protocol = { path = "../spaceterm-protocol" }
 spaceterm-terminal = { path = "../spaceterm-terminal", default-features = false }
@@ -20,6 +21,9 @@ prost = { version = "=0.14.4", optional = true }
 ring = { version = "=0.17.14", optional = true }
 
 [dev-dependencies]
+serde_json = "=1.0.151"
+flate2 = "=1.1.10"
+tar = { version = "=0.4.46", default-features = false }
 tokio = { version = "=1.53.1", default-features = false, features = ["macros", "rt-multi-thread", "sync", "test-util", "time"] }
 prost = "=0.14.4"
 ring = "=0.17.14"

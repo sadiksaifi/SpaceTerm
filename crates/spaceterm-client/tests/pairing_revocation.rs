@@ -2433,3 +2433,143 @@ async fn real_pairing_driver_retries_failed_restricted_routes_from_one_second_to
         resumed.shutdown().await.unwrap();
     }
 }
+
+struct CancelBeforeEnrollmentPublication {
+    inner: JournalPairingStore<Journal>,
+    attempt: Arc<DirectEnrollmentAttempt>,
+    reads: std::sync::atomic::AtomicUsize,
+}
+impl LocalPairingStore for CancelBeforeEnrollmentPublication {
+    fn ordinary_authority<'a>(
+        &'a self,
+        key: &'a LocalPairingKey,
+    ) -> PairingFuture<'a, Result<OrdinaryCredentialAuthority, PairingFailure>> {
+        self.inner.ordinary_authority(key)
+    }
+    fn seal_ordinary(&self, key: &LocalPairingKey) {
+        self.inner.seal_ordinary(key);
+    }
+    fn recover(&self) -> PairingFuture<'_, Result<PairingJournalSnapshot, PairingFailure>> {
+        Box::pin(async move {
+            let snapshot = self.inner.recover().await?;
+            if self.reads.fetch_add(1, std::sync::atomic::Ordering::AcqRel) == 1 {
+                self.attempt.cancel();
+            }
+            Ok(snapshot)
+        })
+    }
+    fn commit<'a>(
+        &'a self,
+        transaction: &'a PairingJournalTransaction,
+    ) -> PairingFuture<'a, PairingCommitDisposition> {
+        self.inner.commit(transaction)
+    }
+}
+
+#[tokio::test]
+async fn foreground_cancellation_during_final_journal_read_prevents_pairing_activation() {
+    use spaceterm_protocol::pairing_adapter::{
+        EnrollmentAuthorization, PublicEnrollmentReservation, reservation_to_wire,
+    };
+    let f = Fixture::new(1, 1);
+    let journal = Journal::new(Vec::new());
+    let authorization = EnrollmentAuthorization::generate().unwrap();
+    let reservation = EnrollmentReservation::new(EnrollmentReservationParts {
+        ticket: EnrollmentTicketId::new(EnrollmentTicketParts {
+            server: f.prepared.local_pairing.parts().server,
+            nonce: [3; 16],
+        })
+        .unwrap(),
+        target: f.target(),
+        keys: f.prepared.keys.clone(),
+        initial_client: f.prepared.client,
+        enrollment_stream: f.prepared.enrollment.id.stream(),
+        claim_digest: RequestDigest::from_bytes([4; 32]),
+        authorization_digest: authorization.digest(),
+        enrollment_request_digest: f.prepared.enrollment.digest,
+        issuer: EnrollmentIssuer::AccountOwner {
+            native_request: [8; 16],
+            native_request_digest: RequestDigest::from_bytes([9; 32]),
+        },
+        issued_epoch: spaceterm_core::authority::ServerEpoch::new(1),
+        issued_revision: StoreRevision::new(1),
+        issued_at_millis: 0,
+        expires_at_millis: 1,
+        state: EnrollmentReservationState::Reserved,
+    })
+    .unwrap();
+    let public =
+        PublicEnrollmentReservation::from_wire(&reservation_to_wire(&reservation)).unwrap();
+    let endpoint = EnrollmentEndpoint {
+        server: f.server.clone(),
+        reservation: Arc::new(Mutex::new(reservation)),
+        receipt: f.saved.receipt().clone(),
+        major: 2,
+        submissions: Arc::new(Mutex::new(0)),
+        lookups: Arc::new(Mutex::new(0)),
+        acknowledgements: Arc::new(Mutex::new(0)),
+        journal: journal.clone(),
+        lose_ack_reply: Arc::new(Mutex::new(false)),
+    };
+    let attempt =
+        Arc::new(DirectEnrollmentAttempt::new(f.prepared.pin, f.prepared.route, 1).unwrap());
+    let verified = attempt
+        .confirm(f.prepared.pin, f.prepared.route, 1, &attempt.fingerprint())
+        .unwrap();
+    let device = PreparedCredential {
+        scope: CredentialScope::new(CredentialScopeParts {
+            namespace: f.prepared.credential.scope.parts().namespace.clone(),
+            purpose: CredentialPurpose::DeviceIdentity,
+            reference: CredentialReference::new([89; 16]),
+        })
+        .unwrap(),
+        public_key: f.device.public_key(),
+    };
+    let credentials = EnrollmentCredentials {
+        device: f.device.clone(),
+        auth: f.auth.clone(),
+    };
+    let original = EnrollmentDriver::new(
+        JournalPairingStore::new(journal.clone()),
+        credentials.clone(),
+        endpoint.clone(),
+    );
+    assert_eq!(
+        original
+            .enroll(EnrollmentAttemptRequest {
+                verified: &verified,
+                prepared: &f.prepared,
+                reservation: public.clone(),
+                device: &device,
+                authorization: Some(&authorization),
+                majors: vec![2],
+            })
+            .await,
+        Err(PairingFailure::Offline)
+    );
+    let driver = EnrollmentDriver::new(
+        CancelBeforeEnrollmentPublication {
+            inner: JournalPairingStore::new(journal.clone()),
+            attempt: attempt.clone(),
+            reads: std::sync::atomic::AtomicUsize::new(0),
+        },
+        credentials,
+        endpoint.clone(),
+    );
+    assert_eq!(
+        driver
+            .enroll(EnrollmentAttemptRequest {
+                verified: &verified,
+                prepared: &f.prepared,
+                reservation: public,
+                device: &device,
+                authorization: None,
+                majors: vec![2],
+            })
+            .await,
+        Err(PairingFailure::Cancelled)
+    );
+    assert!(journal.state.lock().unwrap().saved.is_empty());
+    assert_eq!(*endpoint.acknowledgements.lock().unwrap(), 0);
+    assert_eq!(*endpoint.submissions.lock().unwrap(), 1);
+}
