@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from spaceterm_tasks import TaskError, package_server
+from spaceterm_tasks import TaskError, main, package_server
 from spaceterm_tasks import packaged_headless_linux as acceptance
 
 from tests.test_package_server import metadata
@@ -37,6 +37,47 @@ class PackagedHeadlessAdmissionTests(unittest.TestCase):
         execute.assert_not_called()
         self.assertNotIn("/private/account/credential", diagnostics.getvalue())
         self.assertNotIn("/unused/archive.tar.gz", diagnostics.getvalue())
+
+    def test_boolean_flag_value_reports_only_the_argument_classification(self):
+        diagnostics = io.StringIO()
+        with (
+            contextlib.redirect_stderr(diagnostics),
+            patch.object(acceptance, "run") as execute,
+            self.assertRaises(SystemExit) as failure,
+        ):
+            main(
+                lambda: acceptance.cli(
+                    [
+                        "--archive",
+                        "/unused/archive.tar.gz",
+                        "--source-commit",
+                        "1" * 40,
+                        "--require-baseline-host=/private/account/credential",
+                    ]
+                )
+            )
+        execute.assert_not_called()
+        self.assertEqual(failure.exception.code, 1)
+        self.assertEqual(diagnostics.getvalue(), "error: invalid-headless-arguments\n")
+
+    def test_missing_required_arguments_report_only_the_argument_classification(self):
+        for arguments in (
+            [],
+            ["--archive", "/private/account/credential"],
+            ["--source-commit", "1" * 40],
+            ["--archive"],
+        ):
+            diagnostics = io.StringIO()
+            with (
+                self.subTest(arguments=arguments),
+                contextlib.redirect_stderr(diagnostics),
+                patch.object(acceptance, "run") as execute,
+                self.assertRaises(SystemExit) as failure,
+            ):
+                main(lambda: acceptance.cli(arguments))
+            execute.assert_not_called()
+            self.assertEqual(failure.exception.code, 1)
+            self.assertEqual(diagnostics.getvalue(), "error: invalid-headless-arguments\n")
 
     def test_root_and_unsupported_hosts_are_refused_before_reading_the_archive(self):
         for platform, uid in (("darwin", 501), ("linux", 0)):
