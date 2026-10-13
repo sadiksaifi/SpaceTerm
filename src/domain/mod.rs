@@ -12,6 +12,10 @@ pub(crate) use tab::{
     SplitId, Tab, TabId, ZoomState,
 };
 pub(crate) use tab_collection::{TabCollection, TabError, TabStep};
+pub(crate) use tab::server_view::ServerTab;
+pub(crate) use tab_collection::server_view::ServerTabCollection;
+#[cfg(test)]
+pub(crate) use tab_collection::server_view::testing as server_view_testing;
 #[cfg(test)]
 pub(crate) use workspace_collection::tests::set_next_workspace_id;
 pub(crate) use workspace_collection::{

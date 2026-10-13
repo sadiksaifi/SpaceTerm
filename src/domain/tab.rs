@@ -6,6 +6,8 @@ use std::ops::RangeInclusive;
 
 use thiserror::Error;
 
+pub(crate) mod server_view;
+
 macro_rules! typed_id {
     ($name:ident) => {
         #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -284,10 +286,6 @@ impl<T> Tab<T> {
         self.panes.get(&pane_id)
     }
 
-    pub(crate) fn panes(&self) -> impl ExactSizeIterator<Item = &T> {
-        self.panes.values()
-    }
-
     pub(crate) fn panes_with_ids(&self) -> impl ExactSizeIterator<Item = (PaneId, &T)> {
         self.panes.iter().map(|(pane_id, pane)| (*pane_id, pane))
     }
@@ -497,7 +495,8 @@ impl<T> Tab<T> {
         }
 
         let range = self.split_ratio_range(split_id, available_size, divider_size)?;
-        let ratio = requested_ratio.clamp(*range.start(), *range.end());
+        // `split_ratio_range` never returns a crossed range, and `max` then `min` cannot panic.
+        let ratio = requested_ratio.max(*range.start()).min(*range.end());
 
         let split = self
             .root
@@ -526,12 +525,25 @@ impl<T> Tab<T> {
             .second
             .minimum_size(self.minimum_pane_size, divider_size)?;
         let required = combined_minimum(first_minimum, second_minimum, split.axis, divider_size)?;
+        // This f32 check alone decides whether the children fit. Every size it accepts has a
+        // nonempty range. Client-view's arrangement applies the same rule.
         ensure_space(available_size, required)?;
 
-        let content_extent = available_size.extent(split.axis) - divider_size;
-        let minimum_ratio = first_minimum.extent(split.axis) / content_extent;
-        let maximum_ratio = 1.0 - second_minimum.extent(split.axis) / content_extent;
-        Ok(minimum_ratio..=maximum_ratio)
+        // Bounds are computed in f64 and each rounded to f32 once. Rounding is monotonic, so
+        // bounds ordered in f64 stay ordered, and exactly fitting children give one ratio.
+        let content = f64::from(available_size.extent(split.axis)) - f64::from(divider_size);
+        let first = f64::from(first_minimum.extent(split.axis));
+        let second = f64::from(second_minimum.extent(split.axis));
+        let (low, high) = (first / content, (content - second) / content);
+        // The f32 check can round an overfull sum down. Children that overlap in f64 share the
+        // content in proportion to their minima.
+        let (low, high) = if content > 0.0 && low <= high {
+            (low, high)
+        } else {
+            let share = first / (first + second);
+            (share, share)
+        };
+        Ok(rounded_ratio(low)..=rounded_ratio(high))
     }
 
     fn validate_split(
@@ -990,6 +1002,13 @@ fn combined_minimum(
         return Err(PaneError::LayoutSizeOverflow);
     }
     Ok(PaneSize { width, height })
+}
+
+/// The largest f32 below 1.0, so neither side of a Split collapses to nothing.
+const MAX_RATIO: f32 = 1.0 - f32::EPSILON / 2.0;
+
+fn rounded_ratio(ratio: f64) -> f32 {
+    (ratio as f32).clamp(f32::MIN_POSITIVE, MAX_RATIO)
 }
 
 fn ensure_space(available: PaneSize, required: PaneSize) -> Result<(), PaneError> {
@@ -1856,6 +1875,38 @@ mod tests {
             (result.is_err(), topology(tab.root())),
             (true, "1:Horizontal:0.50(1,2)".into())
         );
+    }
+
+    /// A chain of four 10-unit Panes fits exactly in 43 units. Its outer Split's bounds, rounded
+    /// to f32 separately, used to cross by one unit in the last place and panic the clamp.
+    #[test]
+    fn desktop_server_resize_split_at_an_exact_fit_uses_the_single_valid_ratio() {
+        let mut tab = Tab::new(TabId::new(7), size(10.0, 10.0), |_| ());
+        for pane in 1..=3 {
+            tab.split_pane(
+                PaneId::new(pane),
+                SplitAxis::Horizontal,
+                size(400.0, 100.0),
+                DIVIDER_SIZE,
+                |_| (),
+            )
+            .unwrap();
+        }
+        let fits = [(1, 43.0), (2, 32.0), (3, 21.0)];
+
+        let results = fits.map(|(split, width)| {
+            let available = size(width, 10.0);
+            let range = tab
+                .split_ratio_range(SplitId::new(split), available, DIVIDER_SIZE)
+                .unwrap();
+            let resized = [0.0, 0.5, 1.0].map(|request| {
+                tab.resize_split(SplitId::new(split), available, DIVIDER_SIZE, request)
+                    .unwrap()
+            });
+            (range.start() == range.end(), resized == [*range.start(); 3])
+        });
+
+        assert_eq!(results, [(true, true); 3]);
     }
 
     #[test]

@@ -9887,3 +9887,99 @@ fn paste_confirmation_cancels_a_press_after_focus_moves_to_a_background_control(
         )]
     );
 }
+
+#[gpui::test]
+fn desktop_server_measured_grid_reports_cells_with_device_pixel_cell_size(
+    cx: &mut TestAppContext,
+) {
+    let (pane, cx) = terminal_pane(cx);
+    pane.update(cx, |pane, _| {
+        pane.last_geometry = None;
+        assert_eq!(
+            pane.measured_grid(),
+            Ok(None),
+            "an unmeasured Pane waits for its first layout"
+        );
+
+        pane.last_geometry = Some(TerminalGeometry::from_grid(
+            CellGridSize::new(80, 24),
+            LogicalCellSize::new(9.0, 18.0),
+            BackingScale::new(2.0).unwrap(),
+        ));
+        let grid = pane
+            .measured_grid()
+            .expect("core geometry admits an 80 by 24 grid")
+            .expect("a laid-out Pane has a grid");
+        assert_eq!((grid.columns(), grid.rows()), (80, 24));
+        assert_eq!(
+            (grid.cell_pixels().width(), grid.cell_pixels().height()),
+            (18, 36)
+        );
+        assert_eq!(grid.pty_pixels(), (1440, 864));
+    });
+}
+
+#[gpui::test]
+fn desktop_server_measured_grid_keeps_cells_whose_pty_width_overflows(cx: &mut TestAppContext) {
+    let (pane, cx) = terminal_pane(cx);
+    pane.update(cx, |pane, _| {
+        // 1024 columns of 64 device pixels is 65,536 pixels, one past the PTY's u16 width.
+        pane.last_geometry = Some(TerminalGeometry::from_grid(
+            CellGridSize::new(1024, 24),
+            LogicalCellSize::new(32.0, 18.0),
+            BackingScale::new(2.0).unwrap(),
+        ));
+        let grid = pane
+            .measured_grid()
+            .expect("core geometry admits 1024 columns")
+            .expect("a laid-out Pane has a grid");
+        assert_eq!((grid.columns(), grid.rows()), (1024, 24));
+        assert_eq!(
+            (grid.cell_pixels().width(), grid.cell_pixels().height()),
+            (64, 36)
+        );
+        assert_eq!(grid.pty_pixels(), (0, 864));
+    });
+}
+
+#[gpui::test]
+fn desktop_server_measured_grid_refuses_a_grid_past_core_limits(cx: &mut TestAppContext) {
+    let (pane, cx) = terminal_pane(cx);
+    pane.update(cx, |pane, _| {
+        pane.last_geometry = Some(TerminalGeometry::from_grid(
+            CellGridSize::new(4096, 24),
+            LogicalCellSize::new(9.0, 18.0),
+            BackingScale::ONE,
+        ));
+        assert_eq!(
+            pane.measured_grid(),
+            Err(DesktopClientError::InvalidGeometry),
+            "a grid past the core column limit fails instead of waiting for another layout"
+        );
+    });
+}
+
+#[gpui::test]
+fn desktop_server_local_pane_refuses_server_presentation_and_context(cx: &mut TestAppContext) {
+    use crate::ui::server_desktop_contracts::{
+        AttachmentGeneration, ContextGeneration, PaneId as ServerPaneId, ServerId,
+    };
+
+    let (pane, cx) = terminal_pane(cx);
+    let token = PaneViewToken {
+        pane: ServerPaneId::new(ServerId::new([3; 16]), 1).unwrap(),
+        attachment_generation: AttachmentGeneration::FIRST,
+        context_generation: ContextGeneration::new(1),
+    };
+
+    pane.update(cx, |pane, cx| {
+        assert_eq!(
+            pane.set_presentation(PanePresentation::Starting, cx),
+            Err(DesktopClientError::WrongServer)
+        );
+        assert_eq!(
+            pane.set_server_context(token, cx),
+            Err(DesktopClientError::WrongServer)
+        );
+    });
+}
