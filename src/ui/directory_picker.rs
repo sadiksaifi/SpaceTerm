@@ -138,7 +138,6 @@ pub(crate) trait DirectorySource {
 
     /// Validates the directory's physical identity as a Pinned Directory.
     fn pin(&self, directory: PickerPath) -> SourceFuture<PinnedDirectory>;
-
 }
 
 /// A directory path as spelled in the Directory Picker: absolute, or relative to the home

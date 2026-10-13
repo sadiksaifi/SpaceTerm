@@ -116,6 +116,15 @@ pub struct InstallationStatus {
     /// Digest of the authenticated archive bytes.
     pub artifact_sha256: [u8; 32],
 }
+/// Exact signed selection observed from established installation storage.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifiedInstallationSelection {
+    /// Authenticated selected code, including its exact archive digest.
+    pub approved: InstallationStatus,
+    /// Authenticated staged code without startup authority.
+    pub staged: Option<InstallationStatus>,
+}
+
 /// Current native facts, not the historical result of a lifecycle request.
 pub struct ServiceStatus {
     /// Actual account and compiled identity.

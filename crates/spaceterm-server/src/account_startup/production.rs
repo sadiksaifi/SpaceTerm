@@ -239,7 +239,9 @@ impl RecoveredAccountServer {
         )
         .map_err(StartupFailure::Runtime)?;
         let management = Arc::new(NativeManagement(supervisor.clone()));
-        let ports = ProductionListenerPorts::new();
+        let ports = ProductionListenerPorts::with_native_status(
+            crate::listeners::AccountNativeStatusObserver::new(supervisor.clone()),
+        );
         let source = Arc::new(ActorPairing::default());
         let lookup = Arc::new(PairingProtocolLookup::new(source.clone()));
         let config = ServerConfig {
@@ -481,7 +483,9 @@ fn native_launch(
 pub async fn production_run() -> Result<ShutdownReport, StartupFailure> {
     let facts = TrustedAccountFacts::current().map_err(StartupFailure::Account)?;
     let supervisor = Arc::new(ServiceSupervisor::current(None).map_err(StartupFailure::Account)?);
-    let startup = AccountStartup::admit(&supervisor)?;
+    let startup =
+        AccountStartup::admit_with_storage_wait(&supervisor, Arc::new(super::NativeStartupStorage))
+            .await?;
     let launch = native_launch(&facts, facts.home().to_owned())?;
     let mut terminate =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())

@@ -140,6 +140,23 @@ impl StartupFailure {
 
 impl ServerCredentialPort for ServerIdentity {}
 
+/// Observes only the registered existing database. This boundary never receives
+/// initialization authority and must not create or replace storage.
+pub trait StartupStorageObserver: Send + Sync {
+    fn open_existing(&self, registration: &RegisteredServer) -> Result<Database, StorageFailure>;
+}
+
+pub struct NativeStartupStorage;
+impl StartupStorageObserver for NativeStartupStorage {
+    fn open_existing(&self, registration: &RegisteredServer) -> Result<Database, StorageFailure> {
+        Database::open_existing_for_application(
+            registration.organization_directory(),
+            migrations(),
+            schema::APPLICATION_ID,
+        )
+    }
+}
+
 /// Owns the established key and the one live SQLite authority. No endpoint has
 /// been bound and no runtime or protocol principal has been created at this stage.
 pub struct AccountStartup {
@@ -181,6 +198,72 @@ impl AccountStartup {
     /// Retains the host's instance lease and the already loaded identity. The
     /// organization database is opened once, after native admission succeeds.
     pub fn admit(supervisor: &ServiceSupervisor) -> Result<Self, StartupFailure> {
+        Self::admit_with_storage(supervisor, &NativeStartupStorage)
+    }
+
+    /// Waits in this process for retained storage. The delay grows to 30 seconds,
+    /// not a retry-count limit that would exhaust native restart supervision.
+    /// Every attempt checks durable Stop again and preserves the first observed
+    /// server identity and organization root. No attempt initializes storage.
+    pub async fn admit_with_storage_wait(
+        supervisor: &ServiceSupervisor,
+        storage: Arc<dyn StartupStorageObserver>,
+    ) -> Result<Self, StartupFailure> {
+        let mut delay = std::time::Duration::from_millis(250);
+        let mut expected = None;
+        loop {
+            let observed = supervisor.discover().map_err(StartupFailure::Account);
+            let result = match observed {
+                Ok(Some(registration)) => {
+                    if registration.desired_state() == DesiredServerState::Stopped {
+                        return Err(StartupFailure::DeliberatelyStopped);
+                    }
+                    let identity = (
+                        registration.server_pin(),
+                        registration.organization_directory().to_owned(),
+                    );
+                    if expected.as_ref().is_some_and(|old| old != &identity) {
+                        return Err(StartupFailure::Account(ServiceFailure::IdentityMismatch));
+                    }
+                    expected = Some(identity);
+                    Self::admit_with_storage(supervisor, storage.as_ref())
+                }
+                Ok(None) => return Err(StartupFailure::RegistrationMissing),
+                Err(error) => Err(error),
+            };
+            match result {
+                Ok(startup) => {
+                    if expected.as_ref().is_some_and(|(pin, organization)| {
+                        *pin != startup.registration().server_pin()
+                            || organization != startup.registration().organization_directory()
+                    }) {
+                        return Err(StartupFailure::Account(ServiceFailure::IdentityMismatch));
+                    }
+                    return Ok(startup);
+                }
+                Err(
+                    StartupFailure::Account(
+                        ServiceFailure::StorageLocked | ServiceFailure::StorageUnavailable,
+                    )
+                    | StartupFailure::Key(
+                        KeyStoreFailure::StorageLocked | KeyStoreFailure::StorageUnavailable,
+                    )
+                    | StartupFailure::Storage(StorageFailure::Unavailable),
+                ) => {
+                    tokio::time::sleep(delay).await;
+                    delay = delay
+                        .saturating_mul(2)
+                        .min(std::time::Duration::from_secs(30));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    fn admit_with_storage(
+        supervisor: &ServiceSupervisor,
+        storage: &dyn StartupStorageObserver,
+    ) -> Result<Self, StartupFailure> {
         use spaceterm_host::account_service::AccountStartupAdmission;
         let admission = match supervisor.admit_startup().map_err(|failure| {
             if failure == ServiceFailure::Missing {
@@ -203,12 +286,9 @@ impl AccountStartup {
         if registration.server_pin() != admission.registration().server_pin() {
             return Err(StartupFailure::Account(ServiceFailure::IdentityMismatch));
         }
-        let database = Database::open_existing_for_application(
-            registration.organization_directory(),
-            migrations(),
-            schema::APPLICATION_ID,
-        )
-        .map_err(StartupFailure::Storage)?;
+        let database = storage
+            .open_existing(&registration)
+            .map_err(StartupFailure::Storage)?;
         Ok(Self {
             credentials: admission.identity(),
             registration,

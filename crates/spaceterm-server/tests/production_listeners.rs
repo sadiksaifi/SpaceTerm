@@ -124,10 +124,18 @@ impl Fixture {
         Self::new_registered(false).await
     }
     async fn new_registered(approved: bool) -> Self {
+        Self::with_native_status(approved, None).await
+    }
+    async fn with_native_status(
+        approved: bool,
+        observer: Option<Arc<dyn spaceterm_server::listeners::NativeStatusObserver>>,
+    ) -> Self {
         #[cfg(target_os = "macos")]
         let parent = std::path::PathBuf::from("/private/tmp");
+        // /var/tmp is persistent temporary storage, separate from build output
+        // on the Linux test host. /tmp may be tmpfs and is not admitted by SQLite.
         #[cfg(target_os = "linux")]
-        let parent = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+        let parent = std::path::PathBuf::from("/var/tmp");
         let root = tempfile::tempdir_in(parent).unwrap();
         let native_account =
             AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
@@ -187,7 +195,10 @@ impl Fixture {
             .unwrap();
         let mut boundary = native::Fixture::new();
         let stop = boundary.host.clone();
-        let ports = ProductionListenerPorts::new();
+        let ports = observer.map_or_else(
+            ProductionListenerPorts::new,
+            ProductionListenerPorts::with_native_status,
+        );
         boundary.config.host.authority = Arc::new(Authority(pin));
         boundary.config.core =
             CorePorts::production(identity, home, boundary.dependencies.clock.clone()).unwrap();
@@ -1208,4 +1219,117 @@ async fn forwarded_private_ipc_authenticates_and_reconnects_without_network_enab
     })
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn native_status_observations_reach_both_majors_and_clear_after_provider_failure() {
+    use spaceterm_server::listeners::{NativeStatusObservation, NativeStatusObserver};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct Native(AtomicBool);
+    impl NativeStatusObserver for Native {
+        fn observe(
+            &self,
+            _: ServerId,
+        ) -> ServerFuture<'_, Result<NativeStatusObservation, ServerFailure>> {
+            Box::pin(async {
+                if self.0.load(Ordering::SeqCst) {
+                    return Err(spaceterm_server::failure::failure(
+                        ServerFailureClass::NativeUnavailable,
+                    ));
+                }
+                Ok(NativeStatusObservation {
+                    approved: Some(ServerVersion::new("1.2.3".into()).unwrap()),
+                    staged: Some(ServerVersion::new("1.2.4".into()).unwrap()),
+                    verification: NativeVerification::Verified,
+                    capabilities: vec![CapabilityStatus {
+                        capability: CAPABILITY_NATIVE_LIFECYCLE,
+                        availability: CapabilityAvailability::AuthorizationRequired,
+                    }],
+                    progress: vec![ManagementProgress {
+                        request: ManagementRequestReference::Native([7; 16]),
+                        state: ManagementProgressState::Draining,
+                        completed_units: 1,
+                        total_units: 2,
+                    }],
+                })
+            })
+        }
+    }
+    for major in [1, 2] {
+        let native = Arc::new(Native(AtomicBool::new(false)));
+        let fixture = Fixture::with_native_status(false, Some(native.clone())).await;
+        let (_, principal, device) = fixture.enroll(major).await;
+        let handle = fixture.server.handle();
+        let endpoint = fixture.registration.endpoint().unwrap();
+        let factories = production_listener_factories(
+            handle.clone(),
+            ProductionListenerConfig {
+                registration: &fixture.registration,
+                identity: fixture.identity.clone(),
+                running: spaceterm_distribution::BuildVersion::parse("1.2.3").unwrap(),
+                codec: Arc::new(CanonicalCodec),
+                pairing: fixture.service.clone(),
+                ports: fixture.ports.clone(),
+            },
+            Arc::new(PairingProtocolLookup::new(handle.clone())),
+        )
+        .unwrap();
+        let mut status = fixture.ports.subscribe_status().unwrap();
+        let running = tokio::spawn(fixture.server.run(factories));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while status.borrow().parts().native_verification != NativeVerification::Verified {
+                status.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        let ipc = IpcTransport::connect(&endpoint, MessageLimit::envelope())
+            .await
+            .unwrap();
+        let mut codec = handshake(&ipc, fixture.identity.pin(), principal, device, major).await;
+        let first = query_status(&ipc, &mut codec).await;
+        assert_eq!(first.parts().approved.as_ref().unwrap().as_str(), "1.2.3");
+        assert_eq!(first.parts().staged.as_ref().unwrap().as_str(), "1.2.4");
+        assert_eq!(
+            first.parts().capabilities[0].availability,
+            CapabilityAvailability::AuthorizationRequired
+        );
+        assert_eq!(
+            first.parts().progress[0].state,
+            ManagementProgressState::Draining
+        );
+        native.0.store(true, Ordering::SeqCst);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while status.borrow().parts().native_verification == NativeVerification::Verified {
+                status.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        let failed = query_status(&ipc, &mut codec).await;
+        assert_eq!(
+            failed.parts().native_verification,
+            NativeVerification::Unverified
+        );
+        assert!(failed.parts().approved.is_none());
+        assert!(failed.parts().staged.is_none());
+        assert_eq!(failed.parts().capabilities.len(), 2);
+        assert!(
+            failed
+                .parts()
+                .capabilities
+                .iter()
+                .all(|value| value.availability == CapabilityAvailability::Unavailable)
+        );
+        assert!(failed.parts().revision > first.parts().revision);
+        assert!(!failed.parts().remote_access.value.is_enabled());
+        ipc.close().await.unwrap();
+        handle
+            .shutdown(TrustedShutdownRequest {
+                authority: fixture.stop,
+            })
+            .await
+            .unwrap();
+        running.await.unwrap().unwrap();
+    }
 }

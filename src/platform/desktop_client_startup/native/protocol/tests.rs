@@ -131,6 +131,7 @@ async fn authenticated_case(major: u32, cx: &mut TestAppContext) {
             tracker: Some(tracker),
             local_server: Some(server.server()),
             registry_binding: Some(protocol.clone()),
+            settings: Default::default(),
         },
         crate::platform::desktop_client_startup::tests::MemoryView {
             bytes: None,

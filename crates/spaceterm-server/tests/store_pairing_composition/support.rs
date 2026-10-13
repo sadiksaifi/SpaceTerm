@@ -36,8 +36,10 @@ impl Directory {
     pub fn new() -> Self {
         #[cfg(target_os = "macos")]
         let root = PathBuf::from("/private/tmp");
+        // /var/tmp is persistent temporary storage, separate from build output
+        // on the Linux test host. /tmp may be tmpfs and is not admitted by SQLite.
         #[cfg(target_os = "linux")]
-        let root = PathBuf::from(std::env::var_os("HOME").unwrap());
+        let root = PathBuf::from("/var/tmp");
         let mut nonce = [0; 16];
         getrandom::fill(&mut nonce).unwrap();
         let path = root.join(format!(

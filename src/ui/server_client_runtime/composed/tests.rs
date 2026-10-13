@@ -253,8 +253,8 @@ impl Harness {
         let inner = Rc::new(Inner {
             git: cx.update(crate::ui::server_git::InstalledServerGit::install),
             git_publications: RefCell::new(BTreeMap::new()),
-            sources,
-            order,
+            sources: RefCell::new(sources),
+            order: RefCell::new(order),
             channels: fixture.channels.clone(),
             tracker: OperationTracker::new(journal.clone()),
             operations: fixture.server.clone(),
@@ -897,7 +897,13 @@ fn composed_directory_repair_recovers_the_canonical_journal_operation(cx: &mut T
         )
         .unwrap(),
     };
-    let binding = h.provider.inner.sources[&h.pane.server()].binding.clone();
+    let binding = h
+        .provider
+        .inner
+        .source(&h.pane.server())
+        .unwrap()
+        .binding
+        .clone();
     let original = h
         .tokio
         .block_on(h.provider.inner.tracker.submit(

@@ -431,22 +431,7 @@ impl Fixture {
         &self,
         request: CanonicalOperationRequest,
     ) -> OperationResponse {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            // Bound Capacity retries without cancelling an admitted request's
-            // durable commit on a busy filesystem.
-            match self.handle.submit(self.principal, request.clone()).await {
-                Ok(response) => break response,
-                Err(error) if error.class == ServerFailureClass::Capacity => {
-                    assert!(
-                        tokio::time::Instant::now() < deadline,
-                        "request capacity retry deadline elapsed"
-                    );
-                    tokio::task::yield_now().await;
-                }
-                Err(error) => panic!("request failed: {:?}", error.class),
-            }
-        }
+        self.handle.submit(self.principal, request).await.unwrap()
     }
     pub(super) fn operation(&self, sequence: u64) -> OperationId {
         OperationId::new(self.stream, OperationSequence::new(sequence).unwrap())

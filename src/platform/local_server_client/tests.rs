@@ -5,15 +5,15 @@ use spaceterm_host::{
 };
 use std::{path::PathBuf, sync::Arc};
 
-pub(super) struct Root(pub(super) PathBuf);
+pub(in crate::platform) struct Root(pub(in crate::platform) PathBuf);
 impl Root {
-    pub(super) fn new() -> Self {
+    pub(in crate::platform) fn new() -> Self {
         let mut suffix = [0; 16];
         getrandom::fill(&mut suffix).unwrap();
         #[cfg(target_os = "macos")]
         let parent = PathBuf::from("/private/tmp");
         #[cfg(not(target_os = "macos"))]
-        let parent = std::env::temp_dir();
+        let parent = PathBuf::from("/var/tmp");
         let path = parent.join(format!("st-local-{:x}", u128::from_be_bytes(suffix)));
         std::fs::create_dir(&path).unwrap();
         Self(path)
@@ -24,7 +24,7 @@ impl Drop for Root {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
-fn journal() -> (tokio::runtime::Runtime, Arc<JournalController>) {
+pub(super) fn journal() -> (tokio::runtime::Runtime, Arc<JournalController>) {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

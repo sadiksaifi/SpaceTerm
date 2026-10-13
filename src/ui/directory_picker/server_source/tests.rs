@@ -88,15 +88,12 @@ impl DirectoryConnectionPort for Connection {
     }
 }
 
-fn source(
-    connection: Arc<Connection>,
-    _runtime: &tokio::runtime::Runtime,
-) -> ServerDirectorySource {
+fn source(connection: Arc<Connection>, runtime: &tokio::runtime::Runtime) -> ServerDirectorySource {
     let server = connection.state().unwrap().context.server();
     ServerDirectorySource::new(
         server,
         "Build server",
-        connection,
+        on_executor(connection, runtime.handle().clone()),
         DirectoryPurpose::PaneRepair,
     )
     .unwrap()
@@ -174,7 +171,6 @@ fn desktop_server_directory_selection_does_not_repair_a_missing_target() {
         Err(DirectorySourceError::Missing)
     ));
 }
-
 struct NativeDeadline(Arc<Connection>);
 impl DirectoryConnectionPort for NativeDeadline {
     fn state(&self) -> Result<GitConnectionState, ClientDirectoryFailure> {
@@ -211,4 +207,81 @@ async fn desktop_server_directory_queries_keep_native_deadlines_off_the_gui_exec
         .foreground_executor()
         .spawn(async move { source.discover_home().await });
     assert_eq!(task.await.unwrap().as_str(), "/server/home");
+}
+
+struct PendingRead {
+    connection: Arc<Connection>,
+    started: async_channel::Sender<()>,
+    cancelled: async_channel::Sender<()>,
+}
+
+struct ReadCancelled(async_channel::Sender<()>);
+
+impl Drop for ReadCancelled {
+    fn drop(&mut self) {
+        self.0.try_send(()).unwrap();
+    }
+}
+
+impl DirectoryConnectionPort for PendingRead {
+    fn state(&self) -> Result<GitConnectionState, ClientDirectoryFailure> {
+        self.connection.state()
+    }
+
+    fn query(
+        &self,
+        _: DirectoryQuery,
+    ) -> GitClientFuture<'_, Result<DirectoryQueryResult, ClientDirectoryFailure>> {
+        Box::pin(async move {
+            let _cancelled = ReadCancelled(self.cancelled.clone());
+            self.started.send(()).await.unwrap();
+            std::future::pending().await
+        })
+    }
+}
+
+#[gpui::test]
+async fn desktop_server_directory_cancelled_gui_read_aborts_native_worker(
+    cx: &mut gpui::TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let (started, started_rx) = async_channel::bounded(1);
+    let (cancelled, cancelled_rx) = async_channel::bounded(1);
+    let source = ServerDirectorySource::new(
+        ServerId::new([1; 16]),
+        "Build server",
+        on_executor(
+            Arc::new(PendingRead {
+                connection: Connection::new(DirectoryValidationClass::AvailableDirectory),
+                started,
+                cancelled,
+            }),
+            runtime.handle().clone(),
+        ),
+        DirectoryPurpose::PaneRepair,
+    )
+    .unwrap();
+    let task = cx
+        .foreground_executor()
+        .spawn(async move { source.discover_home().await });
+    runtime
+        .spawn(async move {
+            tokio::time::timeout(std::time::Duration::from_secs(5), started_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        })
+        .await
+        .unwrap();
+    drop(task);
+    runtime
+        .spawn(async move {
+            tokio::time::timeout(std::time::Duration::from_secs(5), cancelled_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        })
+        .await
+        .unwrap();
 }

@@ -2,7 +2,9 @@
 
 use spaceterm_core::{
     management::{
-        NativeVerification, ServerRuntimeStatus, ServerStatus, ServerStatusParts, ServerVersion,
+        MAX_STATUS_PROGRESS, ManagementProgress, ManagementProgressState,
+        ManagementRequestReference, ServerRuntimeStatus, ServerStatus, ServerStatusParts,
+        ServerVersion,
     },
     operation_ledger_contracts::LedgerCodec,
     organization::OrganizationSnapshot,
@@ -22,7 +24,8 @@ use tokio::{sync::watch, task::JoinHandle};
 
 use super::{
     AuthenticationFactoryPort, ConnectionDispatchFactoryPort, ConnectionDispatchPort,
-    ListenerConfig, ServerListeners, outcomes::ConnectionOutcomes,
+    ListenerConfig, NativeStatusObservation, NativeStatusObserver, ServerListeners,
+    outcomes::ConnectionOutcomes,
 };
 use crate::{
     adapters::protocol::{OrdinaryConnectionRevocationPort, PairingConnectionObserver},
@@ -52,6 +55,7 @@ pub struct ProductionListenerPorts {
     revocations: Arc<ListenerRevocations>,
     status: Mutex<Option<watch::Receiver<ServerStatus>>>,
     account_runtime: Mutex<Option<Arc<crate::account_runtime::AccountRuntimeProcesses>>>,
+    native: Option<Arc<dyn NativeStatusObserver>>,
 }
 impl ProductionListenerPorts {
     pub fn new() -> Arc<Self> {
@@ -71,6 +75,12 @@ impl ProductionListenerPorts {
         }
         *slot = Some(runtime);
         Ok(())
+    }
+    pub fn with_native_status(native: Arc<dyn NativeStatusObserver>) -> Arc<Self> {
+        Arc::new(Self {
+            native: Some(native),
+            ..Self::default()
+        })
     }
     /// The same bounded feed used by authenticated clients, retained after close.
     /// Status is comparison data and grants no native-management authority.
@@ -154,6 +164,8 @@ pub fn production_listener_factories_with_dispatch<S: PairingSnapshotPort + 'sta
         &config.running,
         Vec::new(),
         handle.runtime_status(),
+        &NativeStatusObservation::default(),
+        handle.management_progress(),
     )?;
     let (status_sender, status_receiver) = watch::channel(initial);
     let account_runtime = config
@@ -212,6 +224,8 @@ pub fn production_listener_factories_with_dispatch<S: PairingSnapshotPort + 'sta
             handle,
             running: config.running,
             status: status_sender,
+            native: config.ports.native.clone(),
+            native_facts: Arc::new(Mutex::new(NativeStatusObservation::default())),
             monitor: Mutex::new(None),
             stop: watch::channel(false).0,
         }),
@@ -316,12 +330,26 @@ fn status(
     running: &spaceterm_distribution::BuildVersion,
     listeners: Vec<spaceterm_core::management::ListenerStatus>,
     runtime: ServerRuntimeStatus,
+    native: &NativeStatusObservation,
+    mut progress: Vec<ManagementProgress>,
 ) -> Result<ServerStatus, ServerFailure> {
     let retained = snapshot
         .state()
         .retained
         .as_ref()
         .ok_or_else(|| failure(ServerFailureClass::RecoveryRequired))?;
+    for observed in &native.progress {
+        if progress.len() == MAX_STATUS_PROGRESS {
+            break;
+        }
+        if !progress
+            .iter()
+            .any(|current| current.request == observed.request)
+        {
+            progress.push(*observed);
+        }
+    }
+    progress.truncate(MAX_STATUS_PROGRESS);
     ServerStatus::new(ServerStatusParts {
         runtime,
         server: snapshot.state().server,
@@ -331,23 +359,49 @@ fn status(
             ServerVersion::new(running.as_str().to_owned())
                 .map_err(|_| failure(ServerFailureClass::ScopeMismatch))?,
         ),
-        // No native live installation observation is implied by IPC or by the
-        // startup registration. An update may have changed it since recovery.
-        approved: None,
-        staged: None,
-        native_verification: NativeVerification::Unverified,
-        capabilities: Vec::new(),
+        approved: native.approved.clone(),
+        staged: native.staged.clone(),
+        native_verification: native.verification,
+        capabilities: native.capabilities.clone(),
         remote_access: retained.remote_access().clone(),
         listeners,
-        progress: Vec::new(),
+        progress,
     })
     .map_err(|_| failure(ServerFailureClass::RecoveryRequired))
 }
+pub(crate) fn retirement_progress(
+    request: ManagementRequestReference,
+    sessions: &[spaceterm_core::retirement::RetiredSession],
+) -> ManagementProgress {
+    use spaceterm_core::retirement::RetirementCleanupState;
+    let completed_units = sessions
+        .iter()
+        .filter(|session| matches!(session.cleanup(), RetirementCleanupState::Confirmed(_)))
+        .count() as u32;
+    let state = if sessions
+        .iter()
+        .any(|session| matches!(session.cleanup(), RetirementCleanupState::Failed(_)))
+    {
+        ManagementProgressState::RecoveryRequired
+    } else {
+        // Confirmed cleanup still awaits the owning operation's durable settlement.
+        ManagementProgressState::WaitingForCleanup
+    };
+    ManagementProgress {
+        request,
+        state,
+        completed_units,
+        total_units: sessions.len() as u32,
+    }
+}
+
 struct StatusListeners {
     listeners: Arc<ServerListeners>,
     handle: ServerHandle,
     running: spaceterm_distribution::BuildVersion,
     status: watch::Sender<ServerStatus>,
+    native: Option<Arc<dyn NativeStatusObserver>>,
+    native_facts: Arc<Mutex<NativeStatusObservation>>,
     monitor: Mutex<Option<JoinHandle<Result<(), ServerFailure>>>>,
     stop: watch::Sender<bool>,
 }
@@ -368,23 +422,39 @@ impl ListenerLifecyclePort for StatusListeners {
                 }
                 let mut organization = handle.subscribe_snapshot();
                 let mut runtime = handle.subscribe_runtime_status();
+                let mut progress = handle.subscribe_management_progress();
                 let mut listeners = self.listeners.subscribe_status();
                 let mut stop = self.stop.subscribe();
                 let sender = self.status.clone();
                 let running = self.running.clone();
                 let source = handle.clone();
+                let native = self.native.clone();
+                let native_facts = self.native_facts.clone();
                 *monitor = Some(tokio::spawn(async move {
+                    let mut poll = tokio::time::interval(std::time::Duration::from_secs(2));
+                    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                     loop {
-                        tokio::select! { biased;
-                            _ = stop.wait_for(|closed| *closed) => return Ok(()),
+                        tokio::select! {
+                            _ = async { let _ = stop.wait_for(|closed| *closed).await; } => return Ok(()),
                             changed = organization.changed() => { if changed.is_err() { return Ok(()); } },
                             changed = listeners.changed() => { if changed.is_err() { return Ok(()); } },
                             changed = runtime.changed() => { if changed.is_err() { return Ok(()); } },
+                            changed = progress.changed() => { if changed.is_err() { return Ok(()); } },
+                            _ = poll.tick(), if native.is_some() => {
+                                if let Some(provider) = &native {
+                                    let observation = tokio::select! {
+                                        _ = async { let _ = stop.wait_for(|closed| *closed).await; } => return Ok(()),
+                                        result = tokio::time::timeout(std::time::Duration::from_secs(5), provider.observe(source.snapshot().state().server)) => result.ok().and_then(Result::ok).unwrap_or_else(NativeStatusObservation::unavailable),
+                                    };
+                                    *native_facts.lock().map_err(|_| failure(ServerFailureClass::RecoveryRequired))? = observation;
+                                }
+                            },
                         }
                         organization.mark_unchanged();
                         listeners.mark_unchanged();
                         runtime.mark_unchanged();
-                        publish_status(&sender, &source, &running, &listeners)?;
+                        progress.mark_unchanged();
+                        publish_status(&sender, &source, &running, &listeners, &native_facts)?;
                     }
                 }));
             }
@@ -431,6 +501,7 @@ impl StatusListeners {
             &self.handle,
             &self.running,
             &self.listeners.subscribe_status(),
+            &self.native_facts,
         )
     }
 }
@@ -440,6 +511,7 @@ fn publish_status(
     handle: &ServerHandle,
     running: &spaceterm_distribution::BuildVersion,
     listeners: &watch::Receiver<Vec<spaceterm_core::management::ListenerStatus>>,
+    native: &Mutex<NativeStatusObservation>,
 ) -> Result<(), ServerFailure> {
     let mut result = Ok(());
     sender.send_if_modified(|current| {
@@ -450,6 +522,10 @@ fn publish_status(
                 running,
                 listeners.borrow().clone(),
                 handle.runtime_status(),
+                &*native
+                    .lock()
+                    .map_err(|_| failure(ServerFailureClass::RecoveryRequired))?,
+                handle.management_progress(),
             )?;
             if next == *current {
                 return Ok(None);

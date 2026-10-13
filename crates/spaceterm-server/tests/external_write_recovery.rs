@@ -81,13 +81,9 @@ fn directory(path: &Path) -> ServerDirectory {
 fn private_root() -> tempfile::TempDir {
     #[cfg(target_os = "macos")]
     let parent = PathBuf::from("/private/tmp");
+    // Keep real SQLite synchronization off the shared Linux build filesystem.
     #[cfg(target_os = "linux")]
-    let parent = {
-        let path =
-            PathBuf::from(std::env::var_os("HOME").unwrap()).join("spaceterm-build/extwrite");
-        fs::create_dir_all(&path).unwrap();
-        path
-    };
+    let parent = PathBuf::from("/var/tmp");
     let root = tempfile::tempdir_in(parent).unwrap();
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
     root

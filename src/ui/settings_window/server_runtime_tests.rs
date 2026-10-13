@@ -996,3 +996,26 @@ fn servers_settings_remote_completion_does_not_restore_an_old_draft_after_a_late
     assert_eq!(final_policy.version.get(), 4);
     assert!(final_policy.edit.is_none());
 }
+
+#[gpui::test]
+fn enrolled_settings_connection_replaces_only_an_inactive_original_source(cx: &mut TestAppContext) {
+    let h = Fixture::new(cx);
+    let runtime = cx.update(|cx| cx.global::<InstalledSettingsRuntime>().0.clone());
+    let active = runtime.connections.borrow()[0].clone();
+    let mut replacement = active.clone();
+    replacement.name.name = DisplayName::reported("New enrollment");
+    cx.update(|cx| add_connection(replacement.clone(), cx))
+        .unwrap();
+    assert_eq!(runtime.connections.borrow().len(), 1);
+    assert_eq!(runtime.connections.borrow()[0].name.name, active.name.name);
+
+    // An obsolete source cannot shadow the exact binding that the one journal admits.
+    runtime.connections.borrow_mut()[0].binding = h.server.binding(2).unwrap();
+    cx.update(|cx| add_connection(replacement, cx)).unwrap();
+    assert_eq!(runtime.connections.borrow().len(), 1);
+    assert_eq!(runtime.connections.borrow()[0].binding, active.binding);
+    assert_eq!(
+        runtime.connections.borrow()[0].name.name,
+        DisplayName::reported("New enrollment")
+    );
+}

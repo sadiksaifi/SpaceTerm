@@ -26,11 +26,12 @@ use spaceterm_host::{
 use spaceterm_server::{StartupFailure, account_startup::AccountStartup};
 
 fn fixture() -> (tempfile::TempDir, AccountServiceFixture) {
-    // Linux's /tmp may be tmpfs, which the production SQLite authority refuses.
+    // Linux /tmp may be tmpfs. Use persistent temporary storage instead of
+    // sharing the home filesystem with concurrent build output.
     #[cfg(target_os = "macos")]
     let parent = std::path::PathBuf::from("/private/tmp");
     #[cfg(target_os = "linux")]
-    let parent = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+    let parent = std::path::PathBuf::from("/var/tmp");
     let root = tempfile::tempdir_in(parent).unwrap();
     let fixture = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
     (root, fixture)
@@ -196,6 +197,71 @@ fn unsafe_database_mode_is_a_failure_not_initialization_permission() {
         StartupFailure::Storage(StorageFailure::UnsafeStorage)
     );
     assert_eq!(fs::read(database).unwrap(), before);
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test(start_paused = true)]
+async fn locked_storage_waits_in_process_and_resumes_after_unlock_without_reinitializing() {
+    use spaceterm_server::account_startup::StartupStorageObserver;
+    use spaceterm_server::account_startup::test_support;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    struct Storage(AtomicUsize);
+    impl StartupStorageObserver for Storage {
+        fn open_existing(
+            &self,
+            registration: &RegisteredServer,
+        ) -> Result<Database, StorageFailure> {
+            if self.0.fetch_add(1, Ordering::SeqCst) < 12 {
+                return Err(StorageFailure::Unavailable);
+            }
+            Database::open_existing_for_application(
+                registration.organization_directory(),
+                migrations(),
+                schema::APPLICATION_ID,
+            )
+        }
+    }
+    let (root, fixture) = fixture();
+    let registration = fixture
+        .initialize_with_installation(
+            DesiredServerState::Running,
+            Some(spaceterm_host::account_service::InstallationStatus {
+                installation: spaceterm_host::startup::InstallationId(std::num::NonZeroU64::MIN),
+                version: spaceterm_distribution::BuildVersion::parse("1.2.3").unwrap(),
+                artifact_sha256: [1; 32],
+            }),
+        )
+        .unwrap();
+    initialize_store(root.path(), &registration);
+    let identity_before = fs::read(fixture.data_directory().join("identity")).unwrap();
+    let database_path = registration
+        .organization_directory()
+        .join(spaceterm_host::storage::DATABASE_FILE_NAME);
+    let database_before = fs::read(&database_path).unwrap();
+    let supervisor =
+        test_support::supervisor(root.path(), Arc::new(test_support::StartupAbsence)).unwrap();
+    let storage = Arc::new(Storage(AtomicUsize::new(0)));
+    let started = tokio::time::Instant::now();
+    let startup = AccountStartup::admit_with_storage_wait(&supervisor, storage.clone())
+        .await
+        .unwrap();
+    assert_eq!(storage.0.load(Ordering::SeqCst), 13);
+    assert_eq!(
+        tokio::time::Instant::now() - started,
+        std::time::Duration::from_millis(181_750)
+    );
+    assert_eq!(
+        startup.registration().server_pin(),
+        registration.server_pin()
+    );
+    assert!(fs::read(fixture.data_directory().join("identity")).unwrap() == identity_before);
+    assert!(fs::read(&database_path).unwrap() == database_before);
+    assert!(!registration.endpoint().unwrap().path().exists());
+    drop(startup);
 }
 
 #[test]
