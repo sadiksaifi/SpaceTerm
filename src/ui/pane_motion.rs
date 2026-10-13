@@ -35,7 +35,20 @@ pub(crate) struct PaneMotion {
     /// The change the last frame started moving Panes toward.
     started: Option<Change>,
     /// The Pane moving above the others.
-    raised: Option<PaneId>,
+    raised: Option<Raise>,
+    /// The opacity of the Panes beneath the raised Pane in the last frame.
+    beneath_opacity: f32,
+}
+
+/// A Pane moving above the others, whose surface lets the Panes beneath it show through.
+#[derive(Clone, Copy, Debug)]
+struct Raise {
+    pane_id: PaneId,
+    /// Whether the Pane grows over the Panes beneath it, which then fade out, rather than shrinking
+    /// back into its place as they fade in.
+    covers: bool,
+    /// The opacity of the Panes beneath it when it started.
+    beneath_from: f32,
 }
 
 /// An announced change of the Pane Layout.
@@ -168,13 +181,18 @@ impl PaneMotion {
             }
             None => {}
         }
+        // Motion reduced during a change ends it.
+        if motion == spaceterm_ui::ControlMotion::Reduced {
+            self.moves.clear();
+            self.closing.clear();
+        }
         self.targets.clone_from(targets);
         self.moves
             .retain(|pane_id, motion| targets.contains_key(pane_id) && !motion.ease.finished(now));
         self.closing.retain(|closing| !closing.ease.finished(now));
         self.raised = self
             .raised
-            .filter(|pane_id| self.moves.contains_key(pane_id));
+            .filter(|raise| self.moves.contains_key(&raise.pane_id));
 
         let frames: BTreeMap<_, _> = targets
             .iter()
@@ -199,27 +217,26 @@ impl PaneMotion {
             moving: !self.moves.is_empty() || !self.closing.is_empty(),
             raised: self
                 .raised
-                .map(|pane_id| (pane_id, self.moves[&pane_id].ease.at(now))),
-            beneath_opacity: self
-                .raised
-                .map_or(1.0, |pane_id| self.beneath_opacity(pane_id, now)),
+                .map(|raise| (raise.pane_id, self.moves[&raise.pane_id].ease.at(now))),
+            beneath_opacity: self.beneath_opacity_at(now),
             ..PaneFrames::default()
         }
     }
 
-    /// How opaque the Panes beneath the raised Pane `pane_id` draw at `now`. The raised Pane's
-    /// surface lets them show through, so they fade out over the first half of its motion as it
-    /// grows over them, and fade in over the second half as it shrinks back into its place.
-    fn beneath_opacity(&self, pane_id: PaneId, now: Instant) -> f32 {
-        let motion = &self.moves[&pane_id];
-        let area =
-            |bounds: Bounds<Pixels>| f32::from(bounds.size.width) * f32::from(bounds.size.height);
-        let progress = motion.ease.at(now);
-        if area(self.targets[&pane_id]) > area(motion.from) {
-            (1.0 - 2.0 * progress).max(0.0)
+    /// How opaque the Panes beneath the raised Pane draw at `now`. The raised Pane's surface lets
+    /// them show through, so they fade out over the first half of its motion as it grows over
+    /// them, and fade in over the second half as it shrinks back into its place.
+    fn beneath_opacity_at(&mut self, now: Instant) -> f32 {
+        let Some(raise) = self.raised else {
+            return 1.0;
+        };
+        let progress = self.moves[&raise.pane_id].ease.at(now);
+        self.beneath_opacity = if raise.covers {
+            raise.beneath_from * (1.0 - 2.0 * progress).max(0.0)
         } else {
-            (2.0 * progress - 1.0).max(0.0)
-        }
+            raise.beneath_from + (1.0 - raise.beneath_from) * (2.0 * progress - 1.0).max(0.0)
+        };
+        self.beneath_opacity
     }
 
     /// Starts each Pane toward its place in `targets` from where it was last drawn.
@@ -284,7 +301,21 @@ impl PaneMotion {
             Some((from, target)) if from != target => {
                 let ease = Ease::new(PRESENCE_DURATION, now, motion);
                 self.moves.insert(pane_id, Move { from, ease });
-                self.raised = Some(pane_id);
+                let area = |bounds: Bounds<Pixels>| {
+                    f32::from(bounds.size.width) * f32::from(bounds.size.height)
+                };
+                let covers = area(target) > area(from);
+                // A raise that reverses another fades the Panes beneath from where they are.
+                let beneath_from = match self.raised {
+                    Some(_) => self.beneath_opacity,
+                    None if covers => 1.0,
+                    None => 0.0,
+                };
+                self.raised = Some(Raise {
+                    pane_id,
+                    covers,
+                    beneath_from,
+                });
             }
             _ => {
                 self.moves.remove(&pane_id);
@@ -490,6 +521,57 @@ mod tests {
     }
 
     #[test]
+    fn a_zoom_that_reverses_an_unzoom_should_fade_the_other_panes_from_where_they_are() {
+        let start = Instant::now();
+        let mut motion = PaneMotion::default();
+        let zoomed = layout(&[(1, rect(0., 0., 210., 50.))]);
+        motion.present_at(&zoomed, start, ControlMotion::Standard);
+        motion.expect_raise(PaneId::new(1));
+        let grid = layout(&[(1, rect(0., 0., 100., 50.)), (2, rect(110., 0., 210., 50.))]);
+        motion.present_at(&grid, start, ControlMotion::Standard);
+        let unzooming = motion.present_at(
+            &grid,
+            start + PRESENCE_DURATION / 8,
+            ControlMotion::Standard,
+        );
+        motion.expect_raise(PaneId::new(1));
+
+        let zooming = motion.present_at(
+            &zoomed,
+            start + PRESENCE_DURATION / 8,
+            ControlMotion::Standard,
+        );
+
+        assert!(
+            unzooming.beneath_opacity > 0.0,
+            "{}",
+            unzooming.beneath_opacity
+        );
+        assert_eq!(zooming.beneath_opacity, unzooming.beneath_opacity);
+    }
+
+    #[test]
+    fn reducing_motion_during_a_change_should_draw_every_pane_at_rest() {
+        let start = Instant::now();
+        let mut motion = PaneMotion::default();
+        motion.present_at(
+            &layout(&[(1, rect(0., 0., 210., 50.))]),
+            start,
+            ControlMotion::Standard,
+        );
+        motion.expect_change();
+        let split = layout(&[(1, rect(0., 0., 100., 50.)), (2, rect(110., 0., 210., 50.))]);
+        motion.present_at(&split, start, ControlMotion::Standard);
+
+        let frames = motion.present_at(&split, start + HALFWAY, ControlMotion::Reduced);
+
+        assert_eq!(
+            (frame(&frames, 1), frame(&frames, 2), frames.moving),
+            (split[&PaneId::new(1)], split[&PaneId::new(2)], false)
+        );
+    }
+
+    #[test]
     fn a_zoom_should_fade_out_the_other_panes_as_the_zoomed_pane_covers_them() {
         let start = Instant::now();
         let mut motion = PaneMotion::default();
@@ -580,9 +662,14 @@ mod tests {
         );
         motion.expect_change();
         let split = layout(&[(1, rect(0., 0., 100., 50.)), (2, rect(110., 0., 210., 50.))]);
+        motion.present_at(&split, start, ControlMotion::Standard);
         let drawn = frame(
             &motion.present_at(&split, start + HALFWAY, ControlMotion::Standard),
             1,
+        );
+        assert!(
+            drawn.right() > px(100.) && drawn.right() < px(210.),
+            "{drawn:?}"
         );
         motion.expect_change();
 
