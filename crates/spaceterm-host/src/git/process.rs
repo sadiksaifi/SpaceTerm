@@ -134,9 +134,11 @@ impl ProgramGroup {
         unsafe {
             command.pre_exec(reset_child_signals);
         }
-        let mut child = command.spawn().map_err(|error| match error.kind() {
-            io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied => ProgramError::NotFound,
-            _ => ProgramError::Failed,
+        let mut child = crate::process::spawn(&mut command).map_err(|error| match error {
+            crate::process::SpawnError::NotFound | crate::process::SpawnError::PermissionDenied => {
+                ProgramError::NotFound
+            }
+            crate::process::SpawnError::Unavailable => ProgramError::Failed,
         })?;
         match libc::pid_t::try_from(child.id()) {
             Ok(group) => Ok(Self {

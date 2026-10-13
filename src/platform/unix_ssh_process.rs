@@ -47,8 +47,8 @@ impl SshProcessAdapter for UnixSshProcessAdapter {
         unsafe {
             command.pre_exec(clear_child_signal_mask);
         }
-        let mut child = command.spawn().map_err(|error| {
-            if error.kind() == io::ErrorKind::NotFound {
+        let mut child = spaceterm_host::process::spawn(&mut command).map_err(|error| {
+            if error == spaceterm_host::process::SpawnError::NotFound {
                 SshProcessMechanismError::NotFound
             } else {
                 SshProcessMechanismError::LaunchFailed

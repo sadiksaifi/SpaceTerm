@@ -296,12 +296,14 @@ fn run_reset(
     permission: SystemPermission,
     bundle_identifier: &'static str,
 ) -> Result<(), PermissionAccessError> {
-    let status = Command::new(TCCUTIL)
-        .args(reset_arguments(permission, bundle_identifier))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
+    let status = spaceterm_host::process::spawn(
+        Command::new(TCCUTIL)
+            .args(reset_arguments(permission, bundle_identifier))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::Other))
         .and_then(|mut child| {
             // A reset holds the probing lock during a setup, so a stuck one must not hold it
             // for the rest of the session.

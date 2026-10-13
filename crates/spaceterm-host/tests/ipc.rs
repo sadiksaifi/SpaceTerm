@@ -123,6 +123,94 @@ async fn ipc_orderly_close_removes_only_its_registered_endpoint_and_allows_rebin
     assert!(!endpoint.path().exists());
 }
 
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn ipc_close_waits_for_a_concurrent_child_to_release_its_inherited_listener() {
+    use std::io::{Read, Write};
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+    use std::sync::mpsc;
+
+    const FIXTURE: &str = "SPACETERM_IPC_INHERITED_LISTENER_FIXTURE";
+    if std::env::var(FIXTURE).as_deref() != Ok("1") {
+        // The deliberate pre-exec pause must not consume other tests' admission deadlines.
+        let status = spaceterm_host::process::spawn(
+            Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "ipc_close_waits_for_a_concurrent_child_to_release_its_inherited_listener",
+                    "--nocapture",
+                ])
+                .env(FIXTURE, "1"),
+        )
+        .unwrap()
+        .wait()
+        .unwrap();
+        assert!(status.success());
+        return;
+    }
+
+    let (_temporary, directory) = directory();
+    let endpoint = directory.endpoint("s").unwrap();
+    let listener =
+        IpcListener::bind(endpoint.clone(), MessageLimit::envelope(), admission()).unwrap();
+    let (ready_read, ready_write) =
+        spaceterm_host::startup_exchange::unix::anonymous_pipe().unwrap();
+    let (release_read, release_write) =
+        spaceterm_host::startup_exchange::unix::anonymous_pipe().unwrap();
+    let spawn = std::thread::spawn(move || {
+        let mut command = Command::new("/bin/cat");
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        // SAFETY: the callback uses only live owned pipe descriptors, stack storage and
+        // async-signal-safe I/O. It pauses after fork, before CLOEXEC can close the listener.
+        unsafe {
+            command.pre_exec(move || {
+                let byte = [1u8];
+                if libc::write(ready_write.as_raw_fd(), byte.as_ptr().cast(), 1) != 1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let mut byte = [0u8];
+                if libc::read(release_read.as_raw_fd(), byte.as_mut_ptr().cast(), 1) != 1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        spaceterm_host::process::spawn(&mut command).unwrap()
+    });
+    std::fs::File::from(ready_read)
+        .read_exact(&mut [0u8])
+        .unwrap();
+    let (closed, result) = mpsc::channel();
+    let closing = std::thread::spawn(move || closed.send(listener.close()).unwrap());
+    let early = result.recv_timeout(Duration::from_millis(100));
+    std::fs::File::from(release_write).write_all(&[1]).unwrap();
+    let mut child = spawn.join().unwrap();
+    let close = early
+        .as_ref()
+        .ok()
+        .copied()
+        .unwrap_or_else(|| result.recv_timeout(Duration::from_secs(2)).unwrap());
+    closing.join().unwrap();
+    // Keep the exec'd child alive through close and rebind, then reap it even on a red run.
+    let rebind = IpcListener::bind(endpoint.clone(), MessageLimit::envelope(), admission())
+        .and_then(IpcListener::close);
+    drop(child.stdin.take());
+    assert!(child.wait().unwrap().success());
+
+    assert!(
+        matches!(early, Err(mpsc::RecvTimeoutError::Timeout)),
+        "close must wait for exec to release the inherited listener: {early:?}"
+    );
+    close.unwrap();
+    rebind.unwrap();
+    assert!(!endpoint.path().exists());
+}
+
 #[tokio::test]
 async fn ipc_bind_preserves_live_foreign_listeners_and_non_socket_entries() {
     for kind in 0..4 {
@@ -514,14 +602,17 @@ fn ipc_cross_process_second_instance_cannot_disturb_the_first() {
         IpcListener::bind(endpoint.clone(), MessageLimit::envelope(), admission()).unwrap()
     });
     let before = directory_entries(temporary.path());
-    let status = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "ipc_cross_process_second_instance_cannot_disturb_the_first",
-        ])
-        .env("SPACETERM_IPC_SECOND_INSTANCE_FIXTURE", temporary.path())
-        .status()
-        .unwrap();
+    let status = spaceterm_host::process::spawn(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "ipc_cross_process_second_instance_cannot_disturb_the_first",
+            ])
+            .env("SPACETERM_IPC_SECOND_INSTANCE_FIXTURE", temporary.path()),
+    )
+    .unwrap()
+    .wait()
+    .unwrap();
     assert!(status.success());
     assert_eq!(directory_entries(temporary.path()), before);
     runtime.block_on(async {
@@ -566,17 +657,18 @@ fn ipc_server_kill_then_restart_reclaims_the_same_endpoint() {
     }
     let (temporary, directory) = directory();
     let endpoint = directory.endpoint("s").unwrap();
-    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "ipc_server_kill_then_restart_reclaims_the_same_endpoint",
-            "--nocapture",
-        ])
-        .env("SPACETERM_IPC_KILLED_SERVER_FIXTURE", temporary.path())
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut child = spaceterm_host::process::spawn(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "ipc_server_kill_then_restart_reclaims_the_same_endpoint",
+                "--nocapture",
+            ])
+            .env("SPACETERM_IPC_KILLED_SERVER_FIXTURE", temporary.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped()),
+    )
+    .unwrap();
     let mut output = std::io::BufReader::new(child.stdout.take().unwrap());
     let mut line = String::new();
     loop {

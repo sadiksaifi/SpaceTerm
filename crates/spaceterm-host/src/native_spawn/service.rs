@@ -472,9 +472,11 @@ impl AccountChild {
                 Ok(())
             });
         }
-        let mut child = command.spawn().map_err(|error| match error.kind() {
-            io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied => Failure::NotFound,
-            _ => Failure::Unavailable,
+        let mut child = crate::process::spawn(&mut command).map_err(|error| match error {
+            crate::process::SpawnError::NotFound | crate::process::SpawnError::PermissionDenied => {
+                Failure::NotFound
+            }
+            crate::process::SpawnError::Unavailable => Failure::Unavailable,
         })?;
         let pid = match i32::try_from(child.id()) {
             Ok(pid) if pid > 0 => pid,

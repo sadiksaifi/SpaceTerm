@@ -96,6 +96,7 @@ impl WssListener {
         admission: AdmissionLimits,
     ) -> Result<Self, TransportError> {
         let enablement = enablement.ok_or(TransportError::RemoteAccessDisabled)?;
+        let _guard = crate::process::descriptor_guard().map_err(|_| TransportError::Unavailable)?;
         let mut listeners = Vec::with_capacity(enablement.addresses.len());
         for address in &enablement.addresses {
             let domain = if address.is_ipv4() {
@@ -164,7 +165,7 @@ impl WssListener {
                         .ok_or(TransportError::RemoteAccessDisabled)?;
                     let mut pending = listeners
                         .iter()
-                        .map(TcpListener::accept)
+                        .map(|listener| crate::process::descriptor_io(listener.accept()))
                         .collect::<FuturesUnordered<_>>();
                     let (tcp, _) = pending
                         .next()
@@ -202,7 +203,16 @@ impl WssListener {
     pub async fn disable(&self) {
         self.state.close(TransportError::RemoteAccessDisabled);
         self.slots.close();
-        self.listeners.lock().await.take();
+        let mut listeners = self.listeners.lock().await;
+        let _guard = crate::process::descriptor_guard();
+        listeners.take();
+    }
+}
+
+impl Drop for WssListener {
+    fn drop(&mut self) {
+        let _guard = crate::process::descriptor_guard();
+        self.listeners.get_mut().take();
     }
 }
 
@@ -287,7 +297,7 @@ impl WssTransport {
             .with_no_client_auth();
         let connector = TlsConnector::from(Arc::new(configuration));
         tokio::time::timeout(deadline, async {
-            let tcp = TcpStream::connect(address)
+            let tcp = crate::process::descriptor_io(TcpStream::connect(address))
                 .await
                 .map_err(|_| TransportError::Unavailable)?;
             let tls = connector

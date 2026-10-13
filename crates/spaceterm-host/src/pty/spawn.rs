@@ -64,7 +64,13 @@ pub(super) fn spawn(command: &mut Command, slave_path: &Path) -> io::Result<Chil
             descriptors.mark_close_on_exec()
         });
     }
-    command.spawn()
+    crate::process::spawn(command).map_err(|error| {
+        io::Error::from(match error {
+            crate::process::SpawnError::NotFound => io::ErrorKind::NotFound,
+            crate::process::SpawnError::PermissionDenied => io::ErrorKind::PermissionDenied,
+            crate::process::SpawnError::Unavailable => io::ErrorKind::Other,
+        })
+    })
 }
 
 fn account_home_directory() -> io::Result<std::path::PathBuf> {

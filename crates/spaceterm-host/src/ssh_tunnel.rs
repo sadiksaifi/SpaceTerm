@@ -531,7 +531,7 @@ fn spawn(
     unsafe {
         native.pre_exec(clear_child_signal_mask);
     }
-    let child = native.spawn().map_err(|_| TransportError::Unavailable)?;
+    let child = crate::process::spawn(&mut native).map_err(|_| TransportError::Unavailable)?;
     let pid = child.id();
     // Discard the spawn request immediately; the explicit capability owner is zeroized.
     drop(native);
@@ -575,8 +575,11 @@ fn inspect_forwarding_socket(
     if endpoint.socket_identity()?.is_none() {
         return Ok(None);
     }
-    let probe = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)
-        .map_err(|_| TransportError::Unavailable)?;
+    let probe = {
+        let _guard = crate::process::descriptor_guard().map_err(|_| TransportError::Unavailable)?;
+        socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)
+            .map_err(|_| TransportError::Unavailable)?
+    };
     probe
         .set_nonblocking(true)
         .map_err(|_| TransportError::Unavailable)?;
